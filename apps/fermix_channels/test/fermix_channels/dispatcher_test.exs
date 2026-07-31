@@ -255,8 +255,16 @@ defmodule FermixChannels.DispatcherTest do
         [:fermix, :dispatcher, :agent_delivery],
         [:fermix, :channel, :reply]
       ],
+      # A telemetry handler is process-global and runs IN the emitting process,
+      # so without this guard every concurrently-running async module's events
+      # land in this mailbox too — `CliTest` ingests `channel: "cli"` messages
+      # through the same `Gateway` emitter, and `assert_receive` below matches
+      # any `:normalize` event, so its event satisfied the assertion and failed
+      # it with "cli". Forward only what this test itself emitted.
       fn event, measurements, metadata, _config ->
-        send(test_pid, {:telemetry, event, measurements, metadata})
+        if self() == test_pid do
+          send(test_pid, {:telemetry, event, measurements, metadata})
+        end
       end,
       nil
     )
@@ -1075,7 +1083,23 @@ defmodule FermixChannels.DispatcherTest do
                agent_message.stream_spec
     end
 
-    test "no stream_spec when streaming config is off (the default)" do
+    test "attaches a block stream_spec by default (streaming on)" do
+      # The baseline telegram config (setup/0) sets no `streaming` key; the
+      # default is "block", so a configured channel streams without opting in.
+      assert :ok = dispatch_for_streaming(StreamingChannel)
+
+      assert_receive {:agent_message, agent_message}
+
+      assert %FermixChannels.Gateway.DraftStream.Spec{mode: :block, channel: "telegram"} =
+               agent_message.stream_spec
+    end
+
+    test "no stream_spec when streaming is explicitly off" do
+      Application.put_env(:fermix_channels, :telegram,
+        owner_user_id: "test-sender",
+        streaming: "off"
+      )
+
       assert :ok = dispatch_for_streaming(StreamingChannel)
 
       assert_receive {:agent_message, agent_message}

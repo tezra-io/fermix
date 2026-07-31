@@ -58,6 +58,8 @@ defmodule FermixWebWeb.SetupLiveTest do
     anthropic_login_impl = Application.get_env(:fermix_web, :anthropic_login_impl)
     doctor_probe_opts = Application.get_env(:fermix_web, :doctor_probe_opts)
     computer_use_grant_impl = Application.get_env(:fermix_web, :computer_use_grant_impl)
+    harness_detector = Application.get_env(:fermix_web, :harness_detector)
+    harness = Application.get_env(:fermix_core, :harness, [])
     fermix_home = System.get_env("FERMIX_HOME")
 
     tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-live")
@@ -79,6 +81,10 @@ defmodule FermixWebWeb.SetupLiveTest do
       max_file_mb: 20
     )
 
+    # Clean harness baseline (the card reads `approved`/`default_vendor` from the
+    # app-env snapshot): a persisted "approved = true" applies to app env, so reset
+    # it here regardless of any leaked env, mirroring the transcription baseline.
+    Application.put_env(:fermix_core, :harness, [])
     Application.put_env(:fermix_core, :plugins, [])
     Application.put_env(:fermix_core, :plugins_dist_opts, [])
     Application.put_env(:fermix_core, :oauth, %{})
@@ -89,6 +95,9 @@ defmodule FermixWebWeb.SetupLiveTest do
     Application.delete_env(:fermix_web, :anthropic_login_impl)
     Application.delete_env(:fermix_web, :doctor_probe_opts)
     Application.delete_env(:fermix_web, :computer_use_grant_impl)
+    # Hermetic harness detection: never spawn the real codex/claude `--version`
+    # subprocesses at mount. Tests that exercise the card override this seam.
+    Application.put_env(:fermix_web, :harness_detector, fn -> harness_detections(false, false) end)
 
     on_exit(fn ->
       restore_env(:fermix_core, :providers, providers)
@@ -107,6 +116,8 @@ defmodule FermixWebWeb.SetupLiveTest do
       restore_env(:fermix_web, :anthropic_login_impl, anthropic_login_impl)
       restore_env(:fermix_web, :doctor_probe_opts, doctor_probe_opts)
       restore_env(:fermix_web, :computer_use_grant_impl, computer_use_grant_impl)
+      restore_env(:fermix_web, :harness_detector, harness_detector)
+      Application.put_env(:fermix_core, :harness, harness)
 
       case fermix_home do
         nil -> System.delete_env("FERMIX_HOME")
@@ -133,7 +144,19 @@ defmodule FermixWebWeb.SetupLiveTest do
       {:ok, _view, html} = live(conn, "/setup")
 
       for label <-
-            ~w(Provider Realtime Channels Plugins Search Media Sandbox Memory Personalization Doctor) do
+            [
+              "Provider",
+              "Realtime",
+              "Channels",
+              "Plugins",
+              "Search",
+              "Media",
+              "Sandbox",
+              "Coding Agents",
+              "Memory",
+              "Personalization",
+              "Doctor"
+            ] do
         assert html =~ label
       end
 
@@ -161,6 +184,7 @@ defmodule FermixWebWeb.SetupLiveTest do
             {"search", "Search backend"},
             {"media", "Image generation"},
             {"sandbox", "Sandbox policy"},
+            {"coding", "Coding agents"},
             {"memory", "Memory tuning"},
             {"doctor", "Readiness doctor"}
           ] do
@@ -2260,6 +2284,139 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert contents =~ "Sujeeth"
       assert contents =~ "Asia/Singapore"
     end
+
+    test "the personalization pane no longer renders the harness card", %{conn: conn} do
+      Application.put_env(:fermix_web, :harness_detector, fn -> harness_detections(true, true) end)
+
+      {:ok, view, _html} = live(conn, "/setup")
+      html = view |> element("button[phx-value-tab=\"personalization\"]") |> render_click()
+
+      refute html =~ "Allow coding agents to run on this machine"
+      refute html =~ ~s(name="personalization_form[harness_default_vendor]")
+      refute html =~ ~s(name="coding_form[harness_approved]")
+    end
+  end
+
+  describe "Coding Agents form" do
+    test "coding pane renders detected vendor CLIs and their auth state", %{conn: conn} do
+      Application.put_env(:fermix_web, :harness_detector, fn ->
+        harness_detections(true, false)
+      end)
+
+      {:ok, view, _html} = live(conn, "/setup")
+      html = view |> element("button[phx-value-tab=\"coding\"]") |> render_click()
+
+      assert html =~ "Coding agents"
+      assert html =~ "codex 1.0.0"
+      assert html =~ "authenticated"
+      assert html =~ "not installed"
+      # The cloud rail is off this release — a static note, no cloud control.
+      assert html =~ "Cloud runs (Codex cloud) are off in this release"
+    end
+
+    test "coding pane shows the CLI dropdown when both CLIs are detected", %{
+      conn: conn
+    } do
+      Application.put_env(:fermix_web, :harness_detector, fn -> harness_detections(true, true) end)
+
+      {:ok, view, _html} = live(conn, "/setup")
+      html = view |> element("button[phx-value-tab=\"coding\"]") |> render_click()
+
+      assert html =~ ~s(name="coding_form[harness_default_vendor]")
+    end
+
+    test "coding pane still shows the CLI dropdown with a single detected CLI", %{
+      conn: conn
+    } do
+      Application.put_env(:fermix_web, :harness_detector, fn ->
+        harness_detections(true, false)
+      end)
+
+      {:ok, view, _html} = live(conn, "/setup")
+      html = view |> element("button[phx-value-tab=\"coding\"]") |> render_click()
+
+      # The dropdown doubles as the vendor/auth status display, so it renders
+      # whenever any CLI is installed; the uninstalled vendor is a disabled option.
+      assert html =~ ~s(name="coding_form[harness_default_vendor]")
+      assert html =~ "not installed"
+    end
+
+    test "coding pane disables the consent toggle and prompts to install when no CLI is detected",
+         %{conn: conn} do
+      Application.put_env(:fermix_web, :harness_detector, fn ->
+        harness_detections(false, false)
+      end)
+
+      {:ok, view, _html} = live(conn, "/setup")
+      html = view |> element("button[phx-value-tab=\"coding\"]") |> render_click()
+
+      refute html =~ ~s(name="coding_form[harness_default_vendor]")
+      refute html =~ ~s(name="coding_form[harness_approved]")
+      assert html =~ "No coding CLI detected"
+      assert html =~ "disabled"
+    end
+
+    test "selecting a harness default vendor persists it to config", %{
+      conn: conn,
+      tmp_home: tmp_home
+    } do
+      Application.put_env(:fermix_web, :harness_detector, fn -> harness_detections(true, true) end)
+
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element("button[phx-value-tab=\"coding\"]") |> render_click()
+
+      view
+      |> form("form[phx-submit=\"save_coding\"]",
+        coding_form: %{harness_default_vendor: "codex"}
+      )
+      |> render_submit()
+
+      assert render(view) =~ "Coding agents saved."
+
+      contents = File.read!(Path.join(tmp_home, "config.toml"))
+      assert contents =~ "default_vendor"
+      assert contents =~ "codex"
+    end
+
+    test "coding pane renders the first-use consent toggle and status", %{conn: conn} do
+      Application.put_env(:fermix_web, :harness_detector, fn ->
+        harness_detections(true, false)
+      end)
+
+      {:ok, view, _html} = live(conn, "/setup")
+      html = view |> element("button[phx-value-tab=\"coding\"]") |> render_click()
+
+      assert html =~ "Allow coding agents to run on this machine"
+      assert html =~ ~s(name="coding_form[harness_approved]")
+      assert html =~ "Off — approve before the first coding run."
+    end
+
+    test "toggling harness consent on persists approved=true to config", %{
+      conn: conn,
+      tmp_home: tmp_home
+    } do
+      Application.put_env(:fermix_web, :harness_detector, fn ->
+        harness_detections(true, false)
+      end)
+
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element("button[phx-value-tab=\"coding\"]") |> render_click()
+
+      view
+      |> form("form[phx-submit=\"save_coding\"]",
+        coding_form: %{harness_approved: "true"}
+      )
+      |> render_submit()
+
+      html = render(view)
+      assert html =~ "Coding agents saved."
+      # Consent gates whether the harness section renders in the (per-profile
+      # cached) runtime prompt, so granting it offers the restart (design §23.4).
+      assert html =~ "Apply &amp; restart"
+
+      contents = File.read!(Path.join(tmp_home, "config.toml"))
+      assert contents =~ "approved = true"
+    end
   end
 
   describe "doctor probes" do
@@ -2965,6 +3122,29 @@ defmodule FermixWebWeb.SetupLiveTest do
   defp restore_env(app, key, {:ok, value}), do: Application.put_env(app, key, value)
   defp restore_env(app, key, nil), do: Application.delete_env(app, key)
   defp restore_env(app, key, value), do: Application.put_env(app, key, value)
+
+  # Hermetic harness detection map (the `:harness_detector` seam shape) — no real
+  # `codex`/`claude --version` subprocess is ever spawned in these tests.
+  defp harness_detections(codex_available?, claude_available?) do
+    %{
+      "codex" => harness_detection("codex", codex_available?),
+      "claude" => harness_detection("claude", claude_available?)
+    }
+  end
+
+  defp harness_detection(vendor, false) do
+    %{vendor: vendor, binary: nil, available?: false, version: nil, auth: :absent}
+  end
+
+  defp harness_detection(vendor, true) do
+    %{
+      vendor: vendor,
+      binary: "/usr/bin/#{vendor}",
+      available?: true,
+      version: "#{vendor} 1.0.0",
+      auth: :authenticated
+    }
+  end
 
   defp render_until(view, expected, attempts \\ 20)
 

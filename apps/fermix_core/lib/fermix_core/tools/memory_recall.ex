@@ -8,11 +8,19 @@ defmodule FermixCore.Tools.MemoryRecall do
   they explicitly request owner/global scope or message history. This is
   narrower than `FermixCore.Memory.Search.query/2`, whose raw API defaults are
   broad for internal callers.
+
+  The `scope` argument is a *request*, not an authorization: `caller_scope/2`
+  resolves the effective scope from the caller and the model's argument can only
+  narrow within it. A scheduled job always reads its own job memory and a guest
+  always reads the conversation it is in, whatever `scope` the model names —
+  otherwise the isolation would be conditioned on the very input it is meant to
+  constrain. Operators and internal callers are unaffected.
   """
 
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.Capabilities.UntrustedContent
   alias FermixCore.Memory.Config
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Search
@@ -136,12 +144,23 @@ defmodule FermixCore.Tools.MemoryRecall do
   end
 
   defp lexical_search(search, args, context) do
-    if scheduled_job_current_scope?(args, context) do
-      scheduled_job_memory_search(search, args, context)
-    else
-      general_lexical_search(search, args, context)
+    case caller_scope(args, context) do
+      :job -> scheduled_job_memory_search(search, args, context)
+      scope -> general_lexical_search(search, Map.put(args, "scope", scope), context)
     end
   end
+
+  # The data scope of a read is a property of the CALLER, never of the model's
+  # arguments. A scheduled job is pinned to its own job memory and a guest to the
+  # conversation it is actually in, no matter what `scope` the model names.
+  #
+  # Matching `:guest` explicitly — rather than "anything that is not
+  # `:operator`" — is load-bearing: subagent workers have `:source_trust`
+  # stripped (`subagents.ex`), and internal callers may carry no trust at all.
+  # Those keep the model-chosen scope, exactly as before.
+  defp caller_scope(_args, %{conversation_key: {:scheduled_job, _job_id, _run_id}}), do: :job
+  defp caller_scope(_args, %{source_trust: :guest}), do: "current"
+  defp caller_scope(args, _context), do: Map.get(args, "scope", "current")
 
   defp general_lexical_search(search, args, context) do
     opts =
@@ -212,11 +231,6 @@ defmodule FermixCore.Tools.MemoryRecall do
     end
   end
 
-  defp scheduled_job_current_scope?(args, context) do
-    Map.get(args, "scope", "current") == "current" and
-      match?({:scheduled_job, _job_id, _run_id}, Map.get(context, :conversation_key))
-  end
-
   defp run_search(search, opts) do
     {:ok, Search.query(search, opts)}
   rescue
@@ -233,7 +247,8 @@ defmodule FermixCore.Tools.MemoryRecall do
 
   defp format_search_result(%{source: :memories} = result) do
     "[memories rank=#{format_rank(result.rank)}] scope=#{result.scope_type} " <>
-      "key=#{result.key} category=#{result.category} #{source_metadata(result)} value=#{result.value}"
+      "key=#{result.key} category=#{result.category} #{source_metadata(result)} " <>
+      "value=#{render_memory_value(result)}"
   end
 
   defp format_search_result(%{source: :messages} = result) do
@@ -245,6 +260,27 @@ defmodule FermixCore.Tools.MemoryRecall do
   defp format_rank(rank) when is_float(rank) do
     :erlang.float_to_binary(rank, decimals: 4)
   end
+
+  # A recalled memory whose provenance marks it as attacker-controllable content
+  # (a coding-harness run summary derives from untrusted repo/issue/web text,
+  # §10.3) renders its VALUE inside the untrusted-content frame instead of raw
+  # interpolation. Ordinary owner/agent facts are untouched (byte-identical).
+  defp render_memory_value(%{source_type: source_type} = result) do
+    if UntrustedContent.untrusted_source_type?(source_type) do
+      UntrustedContent.frame(memory_source_label(result), result.value)
+    else
+      result.value
+    end
+  end
+
+  defp render_memory_value(result), do: result.value
+
+  defp memory_source_label(%{source_name: name}) when is_binary(name) and name != "", do: name
+
+  defp memory_source_label(%{source_type: source_type}) when is_binary(source_type),
+    do: source_type
+
+  defp memory_source_label(_result), do: "untrusted"
 
   defp source_metadata(result) do
     [

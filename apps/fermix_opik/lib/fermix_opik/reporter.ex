@@ -25,6 +25,10 @@ defmodule FermixOpik.Reporter do
     [:fermix, :job, :run_start],
     [:fermix, :job, :run_complete],
     [:fermix, :job, :run_error],
+    [:fermix, :harness, :run_start],
+    [:fermix, :harness, :run_complete],
+    [:fermix, :harness, :run_error],
+    [:fermix, :harness, :progress],
     [:fermix, :soul_curation, :run_start],
     [:fermix, :soul_curation, :run_complete],
     [:fermix, :soul_curation, :run_error],
@@ -35,6 +39,8 @@ defmodule FermixOpik.Reporter do
     [:fermix, :realtime, :session_updated],
     [:fermix, :realtime, :provider_error],
     [:fermix, :realtime, :reconnect],
+    [:fermix, :realtime, :screen_feed_start],
+    [:fermix, :realtime, :screen_feed_stop],
     [:fermix, :realtime, :call_stop],
     [:fermix, :timeout, :expired]
   ]

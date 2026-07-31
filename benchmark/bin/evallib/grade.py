@@ -118,6 +118,16 @@ class TurnView:
         )
 
 
+_EMPHASIS_RX = re.compile(r"\*\*|__")
+
+
+def _strip_emphasis(text: str) -> str:
+    # Models bold their conclusions ("Recommendation: **No-go**"), splitting
+    # tokens mid-phrase and making every multi-token reply gate flaky. Strip
+    # only the paired markers; a single '*' (math, bullets) is left alone.
+    return _EMPHASIS_RX.sub("", text)
+
+
 def _float_metric(value) -> tuple[float, bool]:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return 0.0, False
@@ -307,11 +317,11 @@ def grade(trace: dict, spans: list[dict], expect: dict,
 
     if "reply_matches" in expect:
         rx = expect["reply_matches"]
-        ok = re.search(rx, v.reply) is not None
+        ok = re.search(rx, _strip_emphasis(v.reply)) is not None
         add("reply_matches", ok, f"/{rx}/ {'matched' if ok else 'NOT matched'}")
     if "reply_not_matches" in expect:
         rx = expect["reply_not_matches"]
-        ok = re.search(rx, v.reply) is None
+        ok = re.search(rx, _strip_emphasis(v.reply)) is None
         add("reply_not_matches", ok, f"/{rx}/ {'absent' if ok else 'PRESENT (forbidden)'}")
 
     if "status" in expect:

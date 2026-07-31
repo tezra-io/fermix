@@ -41,6 +41,29 @@ defmodule FermixCore.Sandbox do
     end
   end
 
+  @doc """
+  Classify a `shell_plan/3` error as typed proof that policy stopped the request
+  before it began, or `nil` when it is not a policy denial.
+
+  Named for the *phase*, not the reason: a caller may only stamp
+  `phase: "pre_execution"` where it can prove nothing has run yet. Error text is
+  not proof — a command that genuinely executed and exited non-zero also produces
+  error text — so consumers key off this marker and nothing else.
+
+  `nil` is the load-bearing negative answer, not a swallowed error: a missing
+  working directory, an `Env.build/1` failure, or a malformed request are real
+  failures that are *not* policy denials, and must stay untyped.
+  """
+  @spec pre_execution_denial(term()) :: map() | nil
+  def pre_execution_denial({:hardline, _reason}),
+    do: %{source: "sandbox", decision: "hardline", phase: "pre_execution"}
+
+  def pre_execution_denial({tag, _resource})
+      when tag in [:outside_root, :protected_path, :blocked_root],
+      do: %{source: "sandbox", decision: "deny", phase: "pre_execution"}
+
+  def pre_execution_denial(_other), do: nil
+
   @spec write_path(String.t(), atom(), map()) :: {:ok, String.t()} | {:error, term()}
   def write_path(path, operation, context)
       when is_binary(path) and is_atom(operation) and is_map(context) do

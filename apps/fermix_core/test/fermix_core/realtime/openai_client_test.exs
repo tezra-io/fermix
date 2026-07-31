@@ -142,6 +142,26 @@ defmodule FermixCore.Realtime.OpenAIClientTest do
     assert image_url == "data:image/png;base64," <> Base.encode64(<<137, 80, 78, 71>>)
   end
 
+  # This caption rides EVERY tool image — in an action sequence that is the freshest
+  # instruction before each forced `response.create`, so a "describe it" here is a
+  # standing order to narrate. The sibling frame caption had the same imperative
+  # removed; this copy was missed and outnumbered the prompt's silence rule.
+  test "the tool-image caption does not order the model to describe what it sees" do
+    [_output, %{item: %{content: [%{text: notice} | _]}}, _create] =
+      OpenAIClient.function_output_events(
+        %{
+          call_id: "call-1",
+          output: "screenshot text",
+          images: [%{type: :image, mime_type: "image/png", data: <<137, 80, 78, 71>>}]
+        },
+        Config.normalize([])
+      )
+
+    refute notice =~ "describe it"
+    assert notice =~ "act on what it shows"
+    assert notice =~ "untrusted data"
+  end
+
   test "decodes provider events into internal event tuples" do
     assert {:ok, {:audio_delta, "item-1", "abc"}} =
              OpenAIClient.decode_server_event(%{

@@ -16,7 +16,7 @@ help:
 	@echo "targets: tests check dry regression capability capability-auto capability-judged capability-readonly estimate rank baseline uplift gaia lmeval"
 
 tests:        ## developer tests for harness code; does not run behavioral/capability E2E
-	@for t in scoring aggregate leaderboard experiments uplift baseline lmeval gaia capability_runner checker grade eval_safety seed_home opik_client; do \
+	@for t in scoring aggregate leaderboard experiments uplift baseline lmeval gaia capability_runner checker grade judge eval_safety seed_home opik_client; do \
 	  echo "== $$t =="; $(UV) bin/test_$$t.py || exit 1; done
 
 check:        ## preconditions (Opik + daemon)
@@ -26,7 +26,7 @@ dry:          ## validate behavioral suites, no spend
 	$(UV) bin/run_eval.py --tag host-safe-core --judge --dry-run
 
 regression:   ## Tier 2 behavioral regression against the development daemon
-	EVAL_JUDGE_API_KEY="$(JUDGE_KEY)" $(UV) bin/run_eval.py --tag host-safe-core --judge
+	EVAL_JUDGE_API_KEY="$(JUDGE_KEY)" $(UV) bin/run_eval.py --tag host-safe-core --judge --fail-retries 2
 
 capability:   ## Tier 1 capability score of the current daemon model, ALL public suites (k=5)
 	$(UV) bin/run_capability.py --trials 5 $(DAEMON_ATTEST) $(ISOLATION_ATTEST) $(COST_CONFIRM)

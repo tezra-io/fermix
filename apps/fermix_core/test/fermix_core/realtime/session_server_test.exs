@@ -10,6 +10,8 @@ defmodule FermixCore.Realtime.SessionServerTest do
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.OpenAIClient
   alias FermixCore.Realtime.SessionServer
+  alias FermixCore.Sandbox.Config, as: SandboxConfig
+  alias FermixCore.Tools.ComputerUse
   alias FermixCore.Tools.ScheduleJob
 
   defmodule FakeOpenAIClient do
@@ -77,6 +79,17 @@ defmodule FermixCore.Realtime.SessionServerTest do
     end
   end
 
+  defmodule HiddenTool do
+    def advertise?(_context), do: false
+
+    def dynamic_parameters(_context),
+      do: raise("hidden tools must be filtered before schema refresh")
+
+    def execute(_args, context) do
+      {:ok, %{success: true, output: "#{context.agent_name}:hidden", error: nil}}
+    end
+  end
+
   defmodule FakeRecorder do
     def record_exchange(config, device_id, user_text, assistant_text, opts) do
       send(
@@ -132,6 +145,65 @@ defmodule FermixCore.Realtime.SessionServerTest do
     assert event.type == "session.update"
     assert event.session.instructions == "prompt"
     assert [%{name: "echo"}] = event.session.tools
+  end
+
+  test "call_start advertises live dynamic capability parameters" do
+    previous = Application.get_env(:fermix_core, :sandbox)
+    Application.put_env(:fermix_core, :sandbox, %{SandboxConfig.default() | mode: :strict})
+
+    on_exit(fn -> restore_app_env(:sandbox, previous) end)
+
+    {:ok, server} =
+      SessionServer.start_link(
+        companion: self(),
+        config: Config.normalize(enabled: true),
+        openai_client: FakeOpenAIClient,
+        api_key: "sk-test",
+        safety_identifier: "safe-id",
+        capabilities: [Builtin.from_tool_module(ComputerUse)],
+        prompt_loader: fn _opts ->
+          {:ok, %{messages: [%{role: "system", content: "prompt"}], parts: [], accounting: []}}
+        end
+      )
+
+    assert :ok = SessionServer.call_start(server)
+    openai = SessionServer.openai_pid(server)
+    [event] = FakeOpenAIClient.events(openai)
+    [tool] = event.session.tools
+
+    assert tool.name == "computer_use"
+    assert tool.parameters["properties"]["action"]["description"] =~ "ACCESS=strict"
+  end
+
+  test "call_start hides context-gated capabilities without removing dispatchability" do
+    task_supervisor = start_supervised!({Task.Supervisor, []}, id: :hidden_tool_task_sup)
+
+    {:ok, server} =
+      SessionServer.start_link(
+        companion: self(),
+        config: Config.normalize(enabled: true),
+        openai_client: FakeOpenAIClient,
+        api_key: "sk-test",
+        safety_identifier: "safe-id",
+        capabilities: [hidden_capability()],
+        task_supervisor: task_supervisor,
+        prompt_loader: fn _opts ->
+          {:ok, %{messages: [%{role: "system", content: "prompt"}], parts: [], accounting: []}}
+        end
+      )
+
+    assert :ok = SessionServer.call_start(server)
+    openai = SessionServer.openai_pid(server)
+    [event] = FakeOpenAIClient.events(openai)
+    assert event.session.tools == []
+
+    assert :ok =
+             SessionServer.handle_provider_event(server, {
+               :function_call,
+               %{"call_id" => "call-hidden", "name" => "hidden", "arguments" => "{}"}
+             })
+
+    assert_receive {:realtime, %{type: "tool_event", status: "completed", name: "hidden"}}
   end
 
   test "call_start waits for provider session_updated before listening", %{server: server} do
@@ -358,6 +430,40 @@ defmodule FermixCore.Realtime.SessionServerTest do
     refute "voice_skill" in tool_names
   end
 
+  # REALTIME.md is the ONLY place the voice rules live (speech length, pacing, and the
+  # act-in-silence rule). The production path builds its own RuntimeContext with no
+  # `prompt_loader`, and it omitted `realtime?: true` — so the loader dropped the file
+  # and every voice call ran without those rules from 2026-05-23 until this test.
+  # Deliberately uses the fixture WITHOUT a prompt_loader: the injected-loader tests
+  # above carry the flag themselves and are exactly why this shipped unnoticed.
+  test "the production voice prompt includes REALTIME.md" do
+    fixture = runtime_session_fixture([])
+
+    {:ok, server} =
+      SessionServer.start_link(
+        companion: self(),
+        config: Config.normalize(enabled: true),
+        openai_client: FakeOpenAIClient,
+        api_key: "sk-test",
+        safety_identifier: "safe-id",
+        capability_registry: fixture.capability_registry,
+        skill_registry: fixture.skill_registry
+      )
+
+    assert :ok = SessionServer.call_start(server)
+
+    openai = SessionServer.openai_pid(server)
+    [event] = FakeOpenAIClient.events(openai)
+
+    assert event.session.instructions =~ "REALTIME.md — Live Voice Rules"
+    assert event.session.instructions =~ "act in silence"
+
+    # A reconnect/reload rebuilds the context through the same clause; it must not
+    # silently drop the rules again.
+    assert {:ok, _summary} = SessionServer.reload_runtime(server)
+    assert :sys.get_state(server).session_update_event.session.instructions =~ "act in silence"
+  end
+
   test "skill reload does not mutate an active realtime session snapshot" do
     fixture = runtime_session_fixture(["voice_skill"])
 
@@ -460,6 +566,20 @@ defmodule FermixCore.Realtime.SessionServerTest do
     refute_receive {:realtime, %{type: "playback_stop"}}, 50
   end
 
+  # The barge-in gap: the Realtime API streams audio faster than realtime, so a long
+  # reply is often fully delivered — and therefore uncancellable — before the operator
+  # starts speaking. Nothing flushed the companion's buffer, so it talked over them to
+  # the end and only afterwards answered what was said. A COMMITTED turn is the
+  # provider's own decision that the conversation moved on.
+  test "a committed user turn flushes stale playback", %{server: server} do
+    assert :ok = SessionServer.call_start(server)
+    assert :ok = SessionServer.handle_provider_event(server, {:audio_delta, "item-9", "audio"})
+
+    assert :ok = SessionServer.handle_provider_event(server, {:input_audio_committed, %{}})
+
+    assert_receive {:realtime, %{type: "playback_stop"}}, 200
+  end
+
   test "active-response race from provider is nonfatal", %{server: server} do
     assert :ok = SessionServer.call_start(server)
     assert :ok = SessionServer.handle_provider_event(server, {:session_updated, %{}})
@@ -499,20 +619,91 @@ defmodule FermixCore.Realtime.SessionServerTest do
     assert is_pid(SessionServer.openai_pid(server))
   end
 
-  test "call_stop closes the provider session and rejects later audio", %{server: server} do
+  # A call that ends ENDS THE PROCESS. It used to return state instead, which left
+  # a session alive with no provider — and because both reconnect clauses are
+  # guarded on the fields that teardown nils, every later disconnect was swallowed
+  # and the call streamed audio into a void until the operator gave up.
+  # THE regression test for the live freeze (2026-07-25): the cost ceiling tore the
+  # provider connection down and RETURNED STATE, leaving the session alive with no
+  # provider. Both reconnect clauses are guarded on the fields that teardown nils,
+  # so every later signal was swallowed and the call streamed audio into a void for
+  # 43 seconds while the companion sat frozen. A terminal reason must END the call.
+  test "a cost-limit teardown ends the process, it does not leave a live session" do
+    {:ok, server} =
+      SessionServer.start_link(
+        companion: self(),
+        config: Config.normalize(enabled: true, max_estimated_cost_cents_per_session: 1),
+        openai_client: FakeOpenAIClient,
+        api_key: "sk-test",
+        safety_identifier: "safe-id",
+        capabilities: [],
+        prompt_loader: fn _opts -> {:ok, %{messages: [], parts: [], accounting: []}} end
+      )
+
+    Process.unlink(server)
+    ref = Process.monitor(server)
+    assert :ok = SessionServer.call_start(server)
+
+    # One response whose reported usage blows through the 1-cent ceiling.
+    :ok =
+      SessionServer.handle_provider_event(
+        server,
+        {:response_done,
+         %{
+           "id" => "resp_1",
+           "usage" => %{"output_token_details" => %{"audio_tokens" => 1_000_000}}
+         }}
+      )
+
+    # The next audio chunk is what notices; it must end the call, not be discarded.
+    SessionServer.audio_chunk(server, <<0, 0, 0, 0>>)
+
+    assert_receive {:realtime, %{type: "usage", status: "limit_reached"}}, 500
+    assert_receive {:DOWN, ^ref, :process, ^server, {:shutdown, :cost_limit}}, 500
+  end
+
+  # The invariant, not one bug: `openai_pid == nil` is legal ONLY inside the
+  # bounded reconnect window. Any other route to it must end the session.
+  test "audio with no provider and no reconnect pending stops the session", %{server: server} do
+    Process.unlink(server)
+    assert :ok = SessionServer.call_start(server)
+    ref = Process.monitor(server)
+
+    # The exact frozen shape: no socket, no timer, still being fed.
+    :sys.replace_state(server, &%{&1 | openai_pid: nil, reconnect_timer: nil})
+    SessionServer.audio_chunk(server, <<0, 0, 0, 0>>)
+
+    assert_receive {:DOWN, ^ref, :process, ^server, {:shutdown, :provider_session_missing}}, 500
+  end
+
+  # A failed send must not disarm the one connection owner. Before the fix it ran
+  # the full teardown, so the socket's own EXIT then fell through to the silent
+  # catch-all and no reconnect ever happened.
+  test "a failed provider send leaves the session able to reconnect", %{server: server} do
     assert :ok = SessionServer.call_start(server)
     openai = SessionServer.openai_pid(server)
 
+    # A send that fails: the socket agent is gone, so send_event exits.
+    Agent.stop(openai)
+    SessionServer.audio_chunk(server, <<0, 0, 0, 0>>)
+
+    assert Process.alive?(server), "one dropped event must not end a live call"
+
+    send(server, {:openai_realtime_disconnect, :network})
+    assert_receive {:realtime, %{type: "state", state: "reconnecting"}}, 500
+  end
+
+  test "call_stop ends the session process and releases the socket", %{server: server} do
+    Process.unlink(server)
+    assert :ok = SessionServer.call_start(server)
+    openai = SessionServer.openai_pid(server)
+    ref = Process.monitor(server)
+
     assert :ok = SessionServer.call_stop(server)
 
-    assert Agent.get(openai, & &1.closed?)
-    assert SessionServer.openai_pid(server) == nil
-    # audio_chunk is fire-and-forget now: after the session drops it is silently
-    # discarded (logged, not acked with an error). The barrier call confirms the
-    # cast did not revive the session.
-    assert :ok = SessionServer.audio_chunk(server, "after-stop")
-    assert SessionServer.openai_pid(server) == nil
     assert_receive {:realtime, %{type: "state", state: "idle"}}
+    assert_receive {:DOWN, ^ref, :process, ^server, {:shutdown, :call_stop}}, 500
+    refute Process.alive?(openai), "the provider socket is released with the call"
   end
 
   test "audio streaming has no local monotonic buffer cap during a live call" do
@@ -883,20 +1074,22 @@ defmodule FermixCore.Realtime.SessionServerTest do
           end
         )
 
+      Process.unlink(server)
+      ref = Process.monitor(server)
       assert :ok = SessionServer.call_start(server)
       send(server, {:openai_realtime_disconnect, :network})
 
       assert_receive {:realtime, %{type: "state", state: "reconnecting"}}, 100
       assert_receive {:realtime, %{type: "state", state: "reconnecting"}}, 500
-      assert_receive {:realtime, %{type: "error", reason: "reconnect_failed"}}, 500
+      # Exhausted reconnect is terminal: the session ENDS rather than lingering with
+      # no provider and no timer, which is unrecoverable by construction.
+      assert_receive {:realtime, %{type: "error", reason: "provider_disconnected"}}, 500
+      assert_receive {:DOWN, ^ref, :process, ^server, {:shutdown, :provider_disconnected}}, 500
 
       assert ProgrammableOpenAIClient.attempts() == 3
-      assert SessionServer.openai_pid(server) == nil
-
-      GenServer.stop(server)
     end
 
-    test "call_stop during reconnect cancels timer and drops session" do
+    test "call_stop during reconnect cancels the timer and ends the session" do
       {:ok, server} =
         SessionServer.start_link(
           companion: self(),
@@ -912,6 +1105,8 @@ defmodule FermixCore.Realtime.SessionServerTest do
           end
         )
 
+      Process.unlink(server)
+      ref = Process.monitor(server)
       assert :ok = SessionServer.call_start(server)
       assert_receive {:start_link_called, _opts}, 200
       send(server, {:openai_realtime_disconnect, :network})
@@ -920,11 +1115,10 @@ defmodule FermixCore.Realtime.SessionServerTest do
 
       assert :ok = SessionServer.call_stop(server)
       assert_receive {:realtime, %{type: "state", state: "idle"}}
+      assert_receive {:DOWN, ^ref, :process, ^server, {:shutdown, :call_stop}}, 500
 
+      # The pending reconnect died with the session — no attempt fires afterwards.
       refute_receive {:start_link_called, _opts}, 200
-      assert SessionServer.openai_pid(server) == nil
-
-      GenServer.stop(server)
     end
   end
 
@@ -979,6 +1173,20 @@ defmodule FermixCore.Realtime.SessionServerTest do
       metadata: %{category: category}
     })
   end
+
+  defp hidden_capability do
+    Capability.new(%{
+      name: "hidden",
+      description: "Hidden test tool.",
+      parameters: %{"type" => "object"},
+      kind: :builtin,
+      executor: {HiddenTool, :execute, []},
+      policy_class: :read_only
+    })
+  end
+
+  defp restore_app_env(key, nil), do: Application.delete_env(:fermix_core, key)
+  defp restore_app_env(key, value), do: Application.put_env(:fermix_core, key, value)
 
   defp sleepy_capability do
     Capability.new(%{

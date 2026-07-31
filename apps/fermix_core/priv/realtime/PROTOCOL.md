@@ -114,7 +114,7 @@ and `CompanionState.swift` (pet) together.
 | `type` | Fields | Notes |
 |---|---|---|
 | `server_hello` | `min_version`, `max_version` | Handshake reply; advertises the accepted range. |
-| `state` | `state` (`idle` \| `listening` \| `speaking` \| `muted`) | Turn/session state. |
+| `state` | `state` (`idle` \| `listening` \| `speaking` \| `muted` \| `thinking` \| `reconnecting`) | Turn/session state. The vocabulary is OPEN and additive: a client that does not recognise a value falls back to its idle presentation, so the daemon may add one without a version bump — but it must never invent a value it has not documented here, or older clients silently render the call as idle. |
 | `audio_delta` | `audio` (base64 PCM16) | A chunk of assistant voice output. |
 | `transcript_delta` | `text` | Incremental transcript of the assistant's speech. |
 | `assistant_text_delta` | `text` | Incremental assistant text. |

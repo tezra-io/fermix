@@ -71,7 +71,8 @@ defmodule Fermix.CLI.Doctor do
       Checks.image_generation(),
       Checks.transcription(),
       Checks.realtime(),
-      Checks.computer_use_permissions()
+      Checks.computer_use_permissions(),
+      Checks.harness()
     ]
 
     network =

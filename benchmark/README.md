@@ -312,6 +312,54 @@ Run `make help` for the full target list.
 
 ---
 
+## 5b. Running any of this on Linux (`scripts/vultr-box.sh`)
+
+macOS is the dev machine, so Linux-only regressions — writer-less secrets, no
+`~/.fermix`, process-group reaping, the strict sandbox — are otherwise only seen
+after a push. `scripts/vultr-box.sh` provisions a real Vultr VM (full root, the
+artifact you ship, no shim) and runs the same recipe there:
+
+```sh
+scripts/vultr-box.sh plans             # real plan ids/prices for your region
+scripts/vultr-box.sh snapshot          # once: pinned-toolchain base image
+scripts/vultr-box.sh run regression    # ephemeral: provision -> test -> ALWAYS destroy
+scripts/vultr-box.sh run dangerous     # the one place FERMIX_EVAL_DISPOSABLE=1 is honest
+scripts/vultr-box.sh up                # persistent box; ssh in, `fermix setup` for channels
+```
+
+**Full runbook: [`docs/VULTR_BOX.md`](../docs/VULTR_BOX.md)** — setup, every
+command, harness vendor-CLI logins, secrets, cost, limits, troubleshooting.
+
+Defaults are `atl` / `vc2-2c-4gb`; OTP 28 and Elixir 1.19.5 are pinned via
+`mise` and the pins are verified before the image is accepted, so a wrong version fails the snapshot
+instead of quietly testing a toolchain we do not ship.
+
+The image also carries a warmed `deps/` and `_build/` (dev + test), so a `run`
+reuses ~214 MB of compiled dependencies and the Rust NIF instead of rebuilding
+them. `--delete` never touches them: they are excluded from the rsync, which
+protects them on the receiver. Refresh the image when `mix.lock` moves.
+
+**Umbrella app code is always compiled with `--force`, deliberately.** `mix
+compile` skips a source whose mtime is not *newer* than its manifest, and rsync
+carries your macOS mtimes — so a file you edited before the image was built
+arrives "older" than the warm `_build` and is silently not recompiled, leaving
+the box testing code that is not on it (verified: a reverted module kept
+returning its old value). `--force` rebuilds only this project, so warm deps
+still pay off; it costs an app recompile per run and buys a box you can believe.
+
+Your **working tree is rsync'd, not cloned**, so uncommitted work is what gets
+tested. Secrets are forwarded per run and never baked into the snapshot. Needs
+`VULTR_API_KEY`; see the script header for the rest.
+
+Two limits worth knowing. It reproduces `linux-x64` only — there is no macOS
+guest anywhere, and Vultr ARM was not confirmed. And `mix test` parallelism is
+2x cores, so a 2-core box runs `max_cases 4` against CI's 8; to chase a CI
+concurrency failure (like the `CommandHostStreamTest` teardown race) use a
+4-core plan. `run` covers e2e, which **no push-triggered CI job does** — `ci.yml`
+is entirely hermetic and the eval tiers only run on schedules, after a push.
+
+---
+
 ## 6. Where results land / housekeeping
 
 - **Leaderboard:** `reports/capability/leaderboard.json` (+ per-run `reports/capability/<ts>/`).

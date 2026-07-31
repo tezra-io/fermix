@@ -257,8 +257,12 @@ defmodule FermixCore.Tools.RequestDirectoryAccess do
     private_button? and shared_chat?(chat_type)
   end
 
+  # Fails CLOSED on an unknown chat type: a turn whose origin metadata carries no
+  # label (a harness completion continuation is synthesized from a ledger row,
+  # design §23.2) may well be a group, so the token line is suppressed whenever a
+  # private button can carry the token instead. Only an explicit DM label prints it.
   defp shared_chat?(chat_type) do
-    is_binary(chat_type) and chat_type not in @dm_chat_types
+    not (is_binary(chat_type) and chat_type in @dm_chat_types)
   end
 
   defp canonicalize(path) do

@@ -9,6 +9,7 @@ defmodule FermixCore.Memory.Store do
 
   use GenServer
 
+  alias FermixCore.Capabilities.UntrustedContent
   alias FermixCore.Memory.Config
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Scope
@@ -141,8 +142,9 @@ defmodule FermixCore.Memory.Store do
   defp recall_repo_value(table, repo, scope_ref, key) do
     case repo_lookup(repo, scope_ref, key) do
       {:ok, memory} ->
-        put_cached_memory(table, scope_ref, key, memory.value)
-        {:ok, memory.value}
+        rendered = render_memory_value(memory)
+        put_cached_memory(table, scope_ref, key, rendered)
+        {:ok, rendered}
 
       {:error, :not_found} ->
         {:error, :not_found}
@@ -169,11 +171,33 @@ defmodule FermixCore.Memory.Store do
   defp sync_scope_from_repo(table, repo, scope_ref) do
     case repo_list(repo, scope_ref) do
       {:ok, memories} ->
-        replace_cached_scope(table, scope_ref, memories)
-        Enum.into(memories, %{}, fn memory -> {memory.key, memory.value} end)
+        rendered = Enum.map(memories, fn memory -> {memory.key, render_memory_value(memory)} end)
+        replace_cached_scope(table, scope_ref, rendered)
+        Map.new(rendered)
 
       {:error, reason} ->
         raise "memory repo recall_all failed: #{inspect(reason)}"
+    end
+  end
+
+  # A recalled memory whose provenance marks it as attacker-controllable content
+  # (a coding-harness run summary, §10.3) renders its value inside the
+  # untrusted-content frame so the injection boundary covers recalled records,
+  # not just live tool output. Ordinary facts are returned unchanged. The frame
+  # is applied on read only — SQLite keeps the raw value, so the lexical search
+  # path (which frames at render itself) never double-frames.
+  defp render_memory_value(memory) do
+    if UntrustedContent.untrusted_source_type?(Map.get(memory, :source_type)) do
+      UntrustedContent.frame(memory_source_label(memory), memory.value)
+    else
+      memory.value
+    end
+  end
+
+  defp memory_source_label(memory) do
+    case Map.get(memory, :source_name) do
+      name when is_binary(name) and name != "" -> name
+      _absent -> Map.get(memory, :source_type) || "untrusted"
     end
   end
 
@@ -185,11 +209,11 @@ defmodule FermixCore.Memory.Store do
     |> Enum.into(%{}, fn [key, value] -> {key, value} end)
   end
 
-  defp replace_cached_scope(table, scope_ref, memories) do
+  defp replace_cached_scope(table, scope_ref, key_values) do
     delete_cached_scope(table, scope_ref)
 
-    Enum.each(memories, fn memory ->
-      put_cached_memory(table, scope_ref, memory.key, memory.value)
+    Enum.each(key_values, fn {key, value} ->
+      put_cached_memory(table, scope_ref, key, value)
     end)
   end
 

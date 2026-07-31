@@ -143,7 +143,19 @@ defmodule FermixOpik.Mapper do
       end_time: iso(ended),
       metadata:
         drop_nil(
-          Map.take(metadata, [:plugin, :action, :kind, :profile, :url, :target_ref, :selector])
+          # `:policy_enforcement` is three fixed strings with no user content, so
+          # it rides outside the capture_content gate: a blocked-before-execution
+          # claim must stay provable in a content-free export.
+          Map.take(metadata, [
+            :plugin,
+            :action,
+            :kind,
+            :profile,
+            :url,
+            :target_ref,
+            :selector,
+            :policy_enforcement
+          ])
         )
     }
     |> put_io(Map.get(metadata, :input), Map.get(metadata, :output))

@@ -478,8 +478,16 @@ defmodule FermixCore.Browser.ProfileServer do
     end
   end
 
+  # The Accessibility domain is CYCLED (disable → enable) so getFullAXTree is
+  # built from the CURRENT document: Chrome otherwise serves the domain's cached
+  # tree, which lags a navigation or SPA swap. Observed live (2026-07-26): a
+  # snapshot 4s after lichess navigated to the created game returned the
+  # HOMEPAGE tree under the live game url — the model went element-blind at the
+  # exact moment its game began. Same family as `live_meta/2` below, which
+  # already distrusts the cached url/title.
   defp snapshot_tab(tab, opts, state) do
     with {:ok, tab, state} <- attach(tab, state),
+         {:ok, _} <- command(state, "Accessibility.disable", %{}, tab.session_id),
          {:ok, _} <- command(state, "Accessibility.enable", %{}, tab.session_id),
          {:ok, %{"nodes" => nodes}} <-
            command(state, "Accessibility.getFullAXTree", %{}, tab.session_id),
@@ -494,11 +502,15 @@ defmodule FermixCore.Browser.ProfileServer do
   # the cached Target.getTargets values lag a client-side/redirect navigation,
   # which is why a snapshot could show fresh content under a stale url/title.
   defp live_meta(tab, state) do
-    case evaluate(tab, "({url: document.location.href, title: document.title})", state) do
+    expression =
+      "({url: document.location.href, title: document.title, ready: document.readyState})"
+
+    case evaluate(tab, expression, state) do
       {:ok, result} ->
         case runtime_value(result) do
-          %{"url" => url, "title" => title} when is_binary(url) ->
+          %{"url" => url, "title" => title} = meta when is_binary(url) ->
             %{tab | url: url, title: title || tab.title}
+            |> Map.put(:ready_state, Map.get(meta, "ready"))
 
           _other ->
             tab
@@ -510,11 +522,21 @@ defmodule FermixCore.Browser.ProfileServer do
   end
 
   defp run_advanced("act", _args, %{dialogs: [_dialog | _rest]}) do
-    {:error, Error.new("dialog_blocked", "A JavaScript dialog is blocking browser actions")}
+    {:error,
+     Error.new(
+       "dialog_blocked",
+       "A JavaScript dialog is blocking browser actions. Clear it first with the " <>
+         "`dialog` action (`decision`: \"accept\" or \"dismiss\"), then retry this action."
+     )}
   end
 
   defp run_advanced("upload", _args, %{dialogs: [_dialog | _rest]}) do
-    {:error, Error.new("dialog_blocked", "A JavaScript dialog is blocking browser actions")}
+    {:error,
+     Error.new(
+       "dialog_blocked",
+       "A JavaScript dialog is blocking browser actions. Clear it first with the " <>
+         "`dialog` action (`decision`: \"accept\" or \"dismiss\"), then retry this action."
+     )}
   end
 
   defp run_advanced("focus", args, state) do
@@ -557,12 +579,17 @@ defmodule FermixCore.Browser.ProfileServer do
            command(state, "Page.captureScreenshot", params, tab.session_id),
          {:ok, bytes} <- decode_artifact(data),
          :ok <- within_size(bytes, state.config),
-         {:ok, path} <- write_artifact(state, "screenshots", extension, bytes) do
+         {:ok, path} <- write_artifact(state, "screenshots", extension, bytes),
+         {:ok, dpr_result} <- evaluate(tab, "window.devicePixelRatio", state) do
       result = %{
         "ok" => true,
         "target" => tab.id,
         "path" => path,
-        "mime_type" => "image/#{format}"
+        "mime_type" => "image/#{format}",
+        # The capture is DEVICE pixels (fromSurface); page coordinates
+        # (`click_coords`, `get field=rect`) are CSS pixels. This ratio converts:
+        # on a 2x display a point read off this image must be halved.
+        "device_pixel_ratio" => runtime_value(dpr_result)
       }
 
       {:ok, result, state}
@@ -717,11 +744,15 @@ defmodule FermixCore.Browser.ProfileServer do
     with {:ok, tab, state} <- resolve_tab(Map.get(args, "target"), state),
          {:ok, tab, state} <- attach(tab, state),
          :ok <- mouse_click(state, tab.session_id, args["x"], args["y"]),
-         {:ok, state} <- refresh_targets(state) do
+         {:ok, state} <- refresh_targets(state),
+         {:ok, url_result} <- evaluate(tab, "location.href", state) do
       result = %{
         "ok" => true,
         "target" => tab.id,
         "action" => "click_coords",
+        # The same receipt ref clicks carry: the model confirms a navigation (or
+        # its absence) from the result instead of taking another look.
+        "url" => runtime_value(url_result),
         "tabs" => tab_values(state)
       }
 
@@ -915,14 +946,55 @@ defmodule FermixCore.Browser.ProfileServer do
     end
   end
 
+  # The deterministic route onto a canvas-like surface: read the element's
+  # viewport box, then click positions inside it with `click_coords` — the two
+  # share the same CSS-viewport coordinate space, so no pixel guessing and no
+  # dependency on where the window sits on the desktop.
+  defp handle_get(%{"field" => "rect", "selector" => selector} = args, state)
+       when is_binary(selector) do
+    with {:ok, tab, state} <- resolve_tab(Map.get(args, "target"), state),
+         {:ok, tab, state} <- attach(tab, state),
+         {:ok, result} <- evaluate(tab, rect_expression(selector), state) do
+      case runtime_value(result) do
+        nil ->
+          {:error, Error.new("not_found", "No element matches selector: #{selector}")}
+
+        rect ->
+          {:ok, %{"ok" => true, "target" => tab.id, "value" => rect}, state}
+      end
+    end
+  end
+
   defp handle_get(args, state) do
     expression = get_expression(Map.get(args, "field", "text"))
 
     with {:ok, tab, state} <- resolve_tab(Map.get(args, "target"), state),
          {:ok, tab, state} <- attach(tab, state),
          {:ok, result} <- evaluate(tab, expression, state) do
-      {:ok, %{"ok" => true, "target" => tab.id, "value" => runtime_value(result)}, state}
+      {:ok,
+       %{"ok" => true, "target" => tab.id, "value" => capped_value(runtime_value(result), state)},
+       state}
     end
+  end
+
+  # `text`/`html` on a heavy page can be megabytes; a get result rides straight
+  # into model context, so it is capped like snapshots are (UTF-8 safe).
+  defp capped_value(value, state) when is_binary(value) do
+    max = state.config.snapshot_max_chars
+
+    case String.split_at(value, max) do
+      {head, ""} -> head
+      {head, _rest} -> head <> "\n[truncated at #{max} characters]"
+    end
+  end
+
+  defp capped_value(value, _state), do: value
+
+  defp rect_expression(selector) do
+    "(() => { const el = document.querySelector(#{Jason.encode!(selector)}); " <>
+      "if (!el) return null; const r = el.getBoundingClientRect(); " <>
+      "return {x: Math.round(r.x), y: Math.round(r.y), " <>
+      "width: Math.round(r.width), height: Math.round(r.height)}; })()"
   end
 
   defp wait_for(args, state) do
@@ -1061,7 +1133,13 @@ defmodule FermixCore.Browser.ProfileServer do
       targets = infos |> selectable_targets() |> Map.new(&target_entry/1)
       active = active_target(state.active_target, targets)
       order = reconcile_order(state.tab_order, targets)
-      {:ok, %{state | targets: targets, active_target: active, tab_order: order}}
+      # A gone tab's refs can never be clicked again; keeping its map only grows
+      # state for the life of the profile (closes, evictions, crashes all funnel
+      # through this refresh, so pruning here covers every removal path).
+      ref_maps = Map.take(state.ref_maps, Map.keys(targets))
+
+      {:ok,
+       %{state | targets: targets, active_target: active, tab_order: order, ref_maps: ref_maps}}
     end
   end
 
@@ -1218,14 +1296,27 @@ defmodule FermixCore.Browser.ProfileServer do
       "target" => tab.id,
       "url" => tab.url,
       "title" => tab.title,
+      # "loading"/"interactive" tells the model a thin snapshot is a page still
+      # building, not a page with nothing on it — wait, don't conclude.
+      "ready_state" => Map.get(tab, :ready_state),
       "snapshot" => rendered.text,
       "refs" => Enum.map(rendered.refs, &Map.drop(&1, [:backend_node_id])),
       "truncated" => rendered.truncated
     }
   end
 
+  # Scroll first (a no-op when already visible): a ref below the fold clicked at
+  # its box-model center dispatches into nothing and reports success — the box is
+  # read only AFTER the element is actually on screen.
   defp ref_box(tab, ref, state) do
     with {:ok, ref_data} <- ref_data(tab, ref, state),
+         {:ok, _} <-
+           command(
+             state,
+             "DOM.scrollIntoViewIfNeeded",
+             %{backendNodeId: ref_data.backend_node_id},
+             tab.session_id
+           ),
          {:ok, %{"model" => %{"content" => points}}} <-
            command(
              state,
@@ -1234,13 +1325,47 @@ defmodule FermixCore.Browser.ProfileServer do
              tab.session_id
            ) do
       {:ok, center(points)}
+    else
+      {:error, error} -> {:error, no_box_hint(ref, error)}
     end
   end
 
+  # CDP's "Could not compute box model" means the node has no rendered box —
+  # on real pages almost always a visually-hidden styled input (custom radio/
+  # checkbox, the lichess time-control pattern) whose visible, clickable thing
+  # is its LABEL. Name that recovery; the raw CDP text sends the model into a
+  # retry loop on the same unclickable ref (observed live, twice).
+  defp no_box_hint(ref, %Error{message: message} = error) do
+    if message =~ "box model" do
+      Error.new(
+        "no_rendered_box",
+        "#{ref} has no rendered box — it is likely a visually-hidden styled input " <>
+          "(custom radio/checkbox). Click its visible LABEL ref from the snapshot " <>
+          "instead, or use kind=click_coords with CSS-viewport x,y (from `get " <>
+          "field=rect` — NOT raw pixels off a screenshot, which are device pixels; " <>
+          "divide those by the screenshot's device_pixel_ratio).",
+        error.details
+      )
+    else
+      error
+    end
+  end
+
+  defp no_box_hint(_ref, error), do: error
+
   defp ref_data(tab, ref, state) do
     case get_in(state.ref_maps, [tab.id, ref]) do
-      nil -> {:error, Error.new("stale_ref", "Element ref is stale or unknown: #{ref}")}
-      data -> {:ok, data}
+      nil ->
+        {:error,
+         Error.new(
+           "stale_ref",
+           "Element ref is stale or unknown: #{ref}. Refs belong to the snapshot they " <>
+             "came from, and the page has changed since. Take a fresh `snapshot` and use " <>
+             "a ref from it."
+         )}
+
+      data ->
+        {:ok, data}
     end
   end
 

@@ -89,3 +89,6 @@ docs/design/
 # Python bytecode (release scripts)
 __pycache__/
 *.pyc
+
+#videos
+videos/

@@ -40,6 +40,7 @@ defmodule FermixCore.Realtime.Config do
           max_response_output_tokens: pos_integer(),
           max_session_minutes: pos_integer(),
           max_estimated_cost_cents_per_session: pos_integer(),
+          screen_share?: boolean(),
           persist_transcripts?: boolean(),
           persist_audio?: boolean()
         }
@@ -56,6 +57,13 @@ defmodule FermixCore.Realtime.Config do
             max_response_output_tokens: 4_096,
             max_session_minutes: 15,
             max_estimated_cost_cents_per_session: 100,
+            # Continuous screen perception during a call (M9.5). On by default but
+            # inert on its own: it needs computer-use enabled AND installed to
+            # capture anything, and only ever starts because the operator asked for
+            # it by voice. The flag exists as a hard off switch for a
+            # privacy-sensitive machine — the ONE knob this feature adds; every
+            # cadence/retention/budget bound is an internal constant.
+            screen_share?: true,
             persist_transcripts?: false,
             persist_audio?: false
 
@@ -117,6 +125,7 @@ defmodule FermixCore.Realtime.Config do
       max_session_minutes: positive_int(config, :max_session_minutes, 15),
       max_estimated_cost_cents_per_session:
         positive_int(config, :max_estimated_cost_cents_per_session, 100),
+      screen_share?: bool(config, :screen_share, true),
       persist_transcripts?: bool(config, :persist_transcripts, false),
       persist_audio?: bool(config, :persist_audio, false)
     }
@@ -134,6 +143,7 @@ defmodule FermixCore.Realtime.Config do
       voice: config.voice,
       max_session_minutes: config.max_session_minutes,
       max_estimated_cost_cents_per_session: config.max_estimated_cost_cents_per_session,
+      screen_share: config.screen_share?,
       persist_transcripts: config.persist_transcripts?
     ]
   end

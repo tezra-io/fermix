@@ -19,6 +19,13 @@ defmodule FermixCore.Capabilities.Capability do
     * `:failure_modes` — list of JSON-safe `%{tag: String.t(), description: String.t()}` maps.
     * `:requires_setup` — `nil` for keyless tools; reserved for future setup-gated built-ins.
     * `:category` — prompt grouping atom such as `:file`, `:web`, `:git`, or `:memory`.
+
+  `policy_class` and `owner_only?` are two different axes and both are load
+  bearing. `policy_class` bounds what a caller may *do* (read/write/exec/…);
+  `owner_only?` marks capabilities whose *return value* is the owner's own data
+  — their files, memories, or scheduled-job records. A read-only tool can be
+  perfectly safe to run and still be unacceptable to hand a guest, which is why
+  the class alone was never a privacy boundary.
   """
 
   @type kind :: :builtin | :skill | :mcp
@@ -33,6 +40,7 @@ defmodule FermixCore.Capabilities.Capability do
           kind: kind(),
           executor: executor(),
           hidden_from_agent?: boolean(),
+          owner_only?: boolean(),
           policy_class: policy_class(),
           metadata: map()
         }
@@ -45,6 +53,7 @@ defmodule FermixCore.Capabilities.Capability do
     :kind,
     :executor,
     hidden_from_agent?: false,
+    owner_only?: false,
     policy_class: :read_only,
     metadata: %{}
   ]
@@ -79,6 +88,7 @@ defmodule FermixCore.Capabilities.Capability do
       kind: kind,
       executor: executor,
       hidden_from_agent?: Map.get(attrs, :hidden_from_agent?, false),
+      owner_only?: Map.get(attrs, :owner_only?, false),
       policy_class: policy_class,
       metadata: Map.get(attrs, :metadata, %{})
     }

@@ -36,6 +36,10 @@ defmodule FermixCore.Agents.SkillRegistry do
           {:invalid_skill, String.t(), term()}
           | {:read_failed, String.t(), term()}
 
+  # Reference file names are confined to a strict lowercase alphabet: no dots,
+  # slashes, or `..`, so a name can never traverse out of `references/`.
+  @reference_name_pattern ~r/^[a-z0-9_]{1,64}$/
+
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
     {name, opts} = Keyword.pop(opts, :name, __MODULE__)
@@ -66,6 +70,32 @@ defmodule FermixCore.Agents.SkillRegistry do
   @spec reload(GenServer.server()) :: {:ok, map()} | {:error, reload_error()}
   def reload(server \\ __MODULE__) do
     GenServer.call(server, :reload)
+  end
+
+  @typedoc "Errors returned by `read_reference/3`."
+  @type reference_error ::
+          {:unknown_skill, String.t()}
+          | {:invalid_reference_name, String.t()}
+          | {:reference_not_found, term()}
+          | {:read_failed, term()}
+
+  @doc """
+  Read a bundled reference file for a loaded skill.
+
+  Reference files live in `<skill_dir>/references/<ref_name>.md`, seeded
+  alongside the skill by `File.cp_r`. `ref_name` is confined to
+  `^[a-z0-9_]{1,64}$` (no dots, slashes, or `..`) and the resolved path is
+  asserted to stay strictly under the skill's own `references/` directory; a
+  symlink at either the `references/` directory or the reference file is refused
+  so a read can never escape the skill tree. This is a server-side read so it is
+  independent of the sandbox (skills under `$FERMIX_HOME` are not a sandbox
+  root in strict/standard mode).
+  """
+  @spec read_reference(GenServer.server(), String.t(), String.t()) ::
+          {:ok, String.t()} | {:error, reference_error()}
+  def read_reference(server \\ __MODULE__, skill_name, ref_name)
+      when is_binary(skill_name) and is_binary(ref_name) do
+    GenServer.call(server, {:read_reference, skill_name, ref_name})
   end
 
   @impl true
@@ -125,6 +155,10 @@ defmodule FermixCore.Agents.SkillRegistry do
       end
 
     {:reply, reply, state}
+  end
+
+  def handle_call({:read_reference, skill_name, ref_name}, _from, state) do
+    {:reply, read_reference_from_state(state, skill_name, ref_name), state}
   end
 
   def handle_call(:reload, _from, state) do
@@ -246,6 +280,90 @@ defmodule FermixCore.Agents.SkillRegistry do
     case File.read(path) do
       {:ok, contents} -> {:ok, contents}
       {:error, reason} -> {:error, {:read_failed, path, reason}}
+    end
+  end
+
+  defp read_reference_from_state(state, skill_name, ref_name) do
+    with {:ok, definition} <- fetch_definition(state, skill_name),
+         {:ok, safe_name} <- validate_reference_name(ref_name),
+         {:ok, path} <- resolve_reference_path(definition.source_path, safe_name) do
+      read_reference_file(path)
+    end
+  end
+
+  defp fetch_definition(state, skill_name) do
+    case Map.fetch(state.definitions, skill_name) do
+      {:ok, definition} -> {:ok, definition}
+      :error -> {:error, {:unknown_skill, skill_name}}
+    end
+  end
+
+  defp validate_reference_name(ref_name) do
+    if String.match?(ref_name, @reference_name_pattern) do
+      {:ok, ref_name}
+    else
+      {:error, {:invalid_reference_name, ref_name}}
+    end
+  end
+
+  defp resolve_reference_path(source_path, safe_name) when is_binary(source_path) do
+    references_dir =
+      source_path
+      |> Path.dirname()
+      |> Path.join("references")
+      |> Path.expand()
+
+    candidate = references_dir |> Path.join(safe_name <> ".md") |> Path.expand()
+
+    with :ok <- assert_confined(candidate, references_dir, safe_name),
+         :ok <- assert_real_directory(references_dir) do
+      {:ok, candidate}
+    end
+  end
+
+  defp resolve_reference_path(_source_path, safe_name) do
+    {:error, {:reference_not_found, safe_name}}
+  end
+
+  defp assert_confined(candidate, references_dir, safe_name) do
+    if String.starts_with?(candidate, references_dir <> "/") do
+      :ok
+    else
+      {:error, {:invalid_reference_name, safe_name}}
+    end
+  end
+
+  # `references_dir` must be a real directory, not a symlink. `Path.expand`
+  # resolves `.`/`..` lexically but never symlinks, so a `references` symlink
+  # pointing outside the skill dir would pass the lexical prefix check above and
+  # let a read escape the skill tree — the final-component `File.lstat` in
+  # `read_reference_file` follows that intermediate symlink. `File.lstat` here
+  # does not follow the last component, so a symlinked references dir is refused
+  # before any file is read.
+  defp assert_real_directory(references_dir) do
+    case File.lstat(references_dir) do
+      {:ok, %File.Stat{type: :directory}} -> :ok
+      {:ok, _stat} -> {:error, {:reference_not_found, references_dir}}
+      {:error, :enoent} -> {:error, {:reference_not_found, references_dir}}
+      {:error, reason} -> {:error, {:read_failed, reason}}
+    end
+  end
+
+  # File.lstat does not follow symlinks, so a symlinked reference is rejected
+  # instead of read — it can never escape the references dir.
+  defp read_reference_file(path) do
+    case File.lstat(path) do
+      {:ok, %File.Stat{type: :regular}} -> read_regular_file(path)
+      {:ok, _stat} -> {:error, {:reference_not_found, path}}
+      {:error, :enoent} -> {:error, {:reference_not_found, path}}
+      {:error, reason} -> {:error, {:read_failed, reason}}
+    end
+  end
+
+  defp read_regular_file(path) do
+    case File.read(path) do
+      {:ok, contents} -> {:ok, contents}
+      {:error, reason} -> {:error, {:read_failed, reason}}
     end
   end
 

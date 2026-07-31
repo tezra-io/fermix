@@ -9,6 +9,7 @@ defmodule FermixCore.Setup.ConfigStore do
 
   alias FermixCore.Capabilities.MCP.Config, as: McpConfig
   alias FermixCore.ComputerUse.Config, as: ComputerUseConfig
+  alias FermixCore.Harness.Config, as: HarnessConfig
   alias FermixCore.MCP.Inbound.Config, as: InboundMcpConfig
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Providers.Descriptor
@@ -103,6 +104,7 @@ defmodule FermixCore.Setup.ConfigStore do
         jobs: Application.get_env(:fermix_core, :jobs, []),
         routing: Application.get_env(:fermix_core, :routing, []),
         compaction: Application.get_env(:fermix_core, :compaction, []),
+        harness: Application.get_env(:fermix_core, :harness, []),
         memory: Application.get_env(:fermix_core, :memory, []),
         realtime: Application.get_env(:fermix_core, :realtime, []),
         computer_use: Application.get_env(:fermix_core, :computer_use, []),
@@ -174,6 +176,7 @@ defmodule FermixCore.Setup.ConfigStore do
     apply_jobs_config(Keyword.get(persisted.fermix_core, :jobs, []))
     apply_routing_config(Keyword.get(persisted.fermix_core, :routing, []))
     apply_compaction_config(Keyword.get(persisted.fermix_core, :compaction, []))
+    apply_harness_config(Keyword.get(persisted.fermix_core, :harness, []))
     apply_memory_config(Keyword.get(persisted.fermix_core, :memory, []))
     apply_realtime_config(Keyword.get(persisted.fermix_core, :realtime, []))
     apply_computer_use_config(Keyword.get(persisted.fermix_core, :computer_use, []))
@@ -274,6 +277,11 @@ defmodule FermixCore.Setup.ConfigStore do
           |> Map.get(:fermix_core, [])
           |> Keyword.get(:compaction, [])
           |> normalize_compaction(),
+        harness:
+          snapshot
+          |> Map.get(:fermix_core, [])
+          |> Keyword.get(:harness, [])
+          |> normalize_harness(),
         memory:
           snapshot
           |> Map.get(:fermix_core, [])
@@ -377,6 +385,7 @@ defmodule FermixCore.Setup.ConfigStore do
         jobs: [],
         routing: [],
         compaction: [],
+        harness: [],
         memory: [],
         realtime: [],
         computer_use: [],
@@ -489,6 +498,14 @@ defmodule FermixCore.Setup.ConfigStore do
     :ok
   end
 
+  # Replace (not merge): the harness section has no compile-time baseline, so the
+  # persisted keyword — already fully normalized by persistable_snapshot — is the
+  # complete intended state (same rationale as routing/computer_use).
+  defp apply_harness_config(harness_config) do
+    Application.put_env(:fermix_core, :harness, harness_config)
+    :ok
+  end
+
   # Memory uses merge (not put) so other in-process keys (extraction_enabled,
   # agent_id, prompt_*_token_cap, loop_detection_*) survive partial TOML edits.
   defp apply_memory_config(memory_config) do
@@ -593,6 +610,7 @@ defmodule FermixCore.Setup.ConfigStore do
     jobs = Keyword.get(fermix_core, :jobs, [])
     routing = Keyword.get(fermix_core, :routing, [])
     compaction = Keyword.get(fermix_core, :compaction, [])
+    harness = Keyword.get(fermix_core, :harness, [])
     memory = Keyword.get(fermix_core, :memory, [])
     realtime = Keyword.get(fermix_core, :realtime, [])
     computer_use = Keyword.get(fermix_core, :computer_use, [])
@@ -625,6 +643,7 @@ defmodule FermixCore.Setup.ConfigStore do
       ),
       render_section(["fermix_core", "routing"], routing),
       render_section(["fermix_core", "compaction"], compaction),
+      render_section(["fermix_core", "harness"], harness),
       render_section(["fermix_core", "memory"], memory),
       render_section(["fermix_core", "realtime"], realtime),
       render_section(["fermix_core", "computer_use"], computer_use),
@@ -834,6 +853,7 @@ defmodule FermixCore.Setup.ConfigStore do
         jobs: normalize_jobs(get_in(document, ["fermix_core", "jobs"])),
         routing: normalize_routing(get_in(document, ["fermix_core", "routing"])),
         compaction: normalize_compaction(get_in(document, ["fermix_core", "compaction"])),
+        harness: normalize_harness(get_in(document, ["fermix_core", "harness"])),
         memory: normalize_memory(get_in(document, ["fermix_core", "memory"])),
         realtime: normalize_realtime(get_in(document, ["fermix_core", "realtime"])),
         computer_use: normalize_computer_use(get_in(document, ["fermix_core", "computer_use"])),
@@ -1468,6 +1488,39 @@ defmodule FermixCore.Setup.ConfigStore do
   end
 
   defp normalize_compaction(config), do: CompactionConfig.normalize(config)
+
+  # `[fermix_core.harness]` (coding-harness substrate). Value validation lives in
+  # HarnessConfig.normalize (fail-loud per key). Unknown keys are rejected here at
+  # the parse boundary — the harness has no keyless degrade path, so a typo'd key
+  # must refuse boot rather than silently drop (Rule #12), mirroring
+  # validate_provider_section_keys!/2.
+  defp normalize_harness(config) do
+    validate_harness_section_keys!(config)
+    HarnessConfig.normalize(config)
+  end
+
+  defp validate_harness_section_keys!(nil), do: :ok
+
+  defp validate_harness_section_keys!(config) when is_map(config) or is_list(config) do
+    allowed = MapSet.new(HarnessConfig.config_keys(), &Atom.to_string/1)
+
+    unknown =
+      config
+      |> section_keys()
+      |> Enum.reject(&MapSet.member?(allowed, &1))
+      |> Enum.sort()
+
+    if unknown == [] do
+      :ok
+    else
+      raise ArgumentError, """
+      config.toml [fermix_core.harness] has unknown key(s): #{Enum.join(unknown, ", ")}.
+
+      Allowed keys: #{Enum.map_join(HarnessConfig.config_keys(), ", ", &Atom.to_string/1)}.
+      Remove or fix the key(s); the daemon will not boot until this is fixed.
+      """
+    end
+  end
 
   defp normalize_memory(nil), do: []
 

@@ -250,7 +250,8 @@ defmodule FermixCore.Setup.Doctor do
           %{
             channel: key,
             name: name,
-            streaming: Keyword.get(config, :streaming, "off"),
+            # Mirrors the gateway default (a configured channel streams).
+            streaming: Keyword.get(config, :streaming, "block"),
             capability: adapter_stream_capability(adapter)
           }
         ]

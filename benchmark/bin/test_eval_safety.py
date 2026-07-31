@@ -141,6 +141,7 @@ def test_selected_judged_rubric_cannot_run_as_structural_only(tmp_path):
         ({"cases": 1, "cases_failed": 0, "cases_incomplete": 1}, 1, 0, "incomplete"),
         ({"cases": 1, "cases_failed": 0, "cases_incomplete": 0}, 2, 1, "incomplete"),
         ({"cases": 1, "cases_failed": 1, "cases_incomplete": 0}, 1, 0, "fail"),
+        ({"cases": 2, "cases_failed": 1, "cases_incomplete": 1}, 2, 0, "fail"),
         ({"cases": 1, "cases_failed": 0, "cases_incomplete": 0}, 1, 0, "pass"),
     ],
 )
@@ -483,6 +484,7 @@ def test_control_modes_are_mutually_exclusive():
     args = SimpleNamespace(
         max_cases=0,
         repeat=1,
+        fail_retries=0,
         confirm_purge=True,
         purge_run="20260715T151102Z",
         dry_run=True,
@@ -807,6 +809,115 @@ def test_new_run_ids_are_collision_resistant_even_with_the_same_timestamp(monkey
     assert opik.valid_run_id(first)
 
 
+def _scripted_run_case(monkeypatch, outcomes):
+    remaining = iter(outcomes)
+    seen_trials = []
+
+    def scripted(_cfg, _client, _suite, _scn, case, _run_id, trial, _judge_on):
+        seen_trials.append(trial)
+        outcome = next(remaining)
+        return {"id": case.id, "trial": trial, "outcome": outcome,
+                "passed": outcome == "pass", "incomplete": outcome == "incomplete",
+                "gate_passed": outcome == "pass", "turns": [], "rubric": None}
+
+    monkeypatch.setattr(run_eval, "run_case", scripted)
+    return seen_trials
+
+
+def _one_case_jobs(tmp_path):
+    suite = _write_suite(tmp_path, "host_readonly")
+    return run_eval.case_jobs([(suite, suite.scenarios)], repeat=1, max_cases=1)
+
+
+def test_fail_retries_unreproduced_failure_passes_and_is_marked_flaky(
+        tmp_path, monkeypatch):
+    seen_trials = _scripted_run_case(monkeypatch, ["fail", "pass", "pass"])
+    results, _skipped = run_eval._execute_jobs(
+        SimpleNamespace(), object(), _one_case_jobs(tmp_path),
+        "20260723T000000Z01234567", False, False, fail_retries=2)
+    case = results[0]["scenarios"][0]["cases"][0]
+    assert case["outcome"] == "pass"
+    assert case["attempt_outcomes"] == ["fail", "pass", "pass"]
+    assert case["flaky"] is True
+    assert seen_trials == [1, 2, 3]
+    reliability = run_eval.reliability_summary(results)
+    assert reliability[0]["status"] == "flaky"
+    assert reliability[0]["trials"] == 3
+
+
+def test_fail_retries_reproduced_failure_stays_fail_and_stops_early(
+        tmp_path, monkeypatch):
+    seen_trials = _scripted_run_case(monkeypatch, ["fail", "fail", "pass"])
+    results, _skipped = run_eval._execute_jobs(
+        SimpleNamespace(), object(), _one_case_jobs(tmp_path),
+        "20260723T000000Z01234567", False, False, fail_retries=2)
+    case = results[0]["scenarios"][0]["cases"][0]
+    assert case["outcome"] == "fail"
+    assert case["attempt_outcomes"] == ["fail", "fail"]
+    assert case["flaky"] is False
+    assert seen_trials == [1, 2]
+
+
+def test_fail_retries_second_fail_on_last_attempt_is_final(tmp_path, monkeypatch):
+    seen_trials = _scripted_run_case(monkeypatch, ["fail", "pass", "fail"])
+    results, _skipped = run_eval._execute_jobs(
+        SimpleNamespace(), object(), _one_case_jobs(tmp_path),
+        "20260723T000000Z01234567", False, False, fail_retries=2)
+    case = results[0]["scenarios"][0]["cases"][0]
+    assert case["outcome"] == "fail"
+    assert case["attempt_outcomes"] == ["fail", "pass", "fail"]
+    assert seen_trials == [1, 2, 3]
+
+
+def test_fail_retries_default_zero_keeps_single_trial_verdict(tmp_path, monkeypatch):
+    seen_trials = _scripted_run_case(monkeypatch, ["fail"])
+    results, _skipped = run_eval._execute_jobs(
+        SimpleNamespace(), object(), _one_case_jobs(tmp_path),
+        "20260723T000000Z01234567", False, False)
+    case = results[0]["scenarios"][0]["cases"][0]
+    assert case["outcome"] == "fail"
+    assert "attempt_outcomes" not in case
+    assert seen_trials == [1]
+
+
+def test_fail_retries_does_not_retry_a_pass_or_an_incomplete(tmp_path, monkeypatch):
+    seen_trials = _scripted_run_case(monkeypatch, ["pass"])
+    run_eval._execute_jobs(
+        SimpleNamespace(), object(), _one_case_jobs(tmp_path),
+        "20260723T000000Z01234567", False, False, fail_retries=2)
+    assert seen_trials == [1]
+
+    seen_trials = _scripted_run_case(monkeypatch, ["incomplete"])
+    results, _skipped = run_eval._execute_jobs(
+        SimpleNamespace(), object(), _one_case_jobs(tmp_path),
+        "20260723T000000Z01234567", False, False, fail_retries=2)
+    assert seen_trials == [1]
+    assert results[0]["scenarios"][0]["cases"][0]["outcome"] == "incomplete"
+
+
+def test_fail_retries_trial_numbers_stay_unique_under_repeat(tmp_path, monkeypatch):
+    suite = _write_suite(tmp_path, "host_readonly")
+    jobs = run_eval.case_jobs([(suite, suite.scenarios)], repeat=2, max_cases=2)
+    jobs = [job for job in jobs if job[2].id == "one"]
+    seen_trials = _scripted_run_case(
+        monkeypatch, ["fail", "pass", "pass", "fail", "fail"])
+    run_eval._execute_jobs(
+        SimpleNamespace(), object(), jobs,
+        "20260723T000000Z01234567", False, False, fail_retries=2, repeat=2)
+    assert seen_trials == [1, 3, 5, 2, 4]
+
+
+def test_fail_retries_argument_is_bounded():
+    common = {"repeat": 1, "max_cases": 0, "confirm_purge": False,
+              "purge_run": None, "dry_run": False, "check": False}
+    assert run_eval._argument_error(
+        SimpleNamespace(fail_retries=3, **common)) is not None
+    assert run_eval._argument_error(
+        SimpleNamespace(fail_retries=-1, **common)) is not None
+    assert run_eval._argument_error(
+        SimpleNamespace(fail_retries=2, **common)) is None
+
+
 def test_post_preflight_opik_failure_becomes_incomplete_report_evidence(
         tmp_path, monkeypatch):
     suite = _write_suite(tmp_path, "host_readonly")
@@ -823,6 +934,37 @@ def test_post_preflight_opik_failure_becomes_incomplete_report_evidence(
     assert skipped == 0
     assert case["outcome"] == "incomplete"
     assert "Opik evidence unavailable" in case["turns"][0]["drive_error"]
+
+
+def test_post_preflight_opik_failure_still_writes_all_reports(tmp_path, monkeypatch):
+    suite = _write_suite(tmp_path, "host_readonly")
+    chosen = [(suite, suite.scenarios)]
+
+    def fail_after_preflight(*_args, **_kwargs):
+        raise opik.OpikError("GET traces failed after 3 attempts")
+
+    monkeypatch.setattr(run_eval, "run_case", fail_after_preflight)
+    suite_results, skipped = run_eval._execute_jobs(
+        SimpleNamespace(), object(), run_eval.case_jobs(chosen, repeat=1, max_cases=1),
+        "20260715T151102Z01234567", False, False)
+    out_dir = tmp_path / "reports"
+    cfg = SimpleNamespace(
+        daemon=SimpleNamespace(fermix_home=str(tmp_path / "home")),
+        opik=SimpleNamespace(project="fermix-eval-test"),
+        judge=SimpleNamespace(backend="fermix", model=None, enabled=False),
+        skill_dir=str(tmp_path),
+    )
+    args = SimpleNamespace(
+        judge=False, include_content=False, repeat=1, max_cases=1, out=str(out_dir))
+
+    exit_code = run_eval._write_run_reports(
+        cfg, args, chosen, {"host_readonly"}, "20260715T151102Z01234567",
+        run_eval.now_utc(), suite_results, planned_cases=1, skipped_required=skipped)
+
+    assert exit_code == 4
+    assert json.loads((out_dir / "results.json").read_text())["outcome"] == "incomplete"
+    assert (out_dir / "report.md").is_file()
+    assert (out_dir / "report.html").is_file()
 
 
 def test_later_turn_opik_failure_preserves_already_graded_turn_evidence(
@@ -988,6 +1130,15 @@ def test_chief_of_staff_read_cases_require_every_fixture_path_in_tool_inputs():
         for case in scenario.cases:
             assert len(case.expect.get("tool_inputs_match_all", [])) == 4
             assert case.expect.get("max_tool_calls") == 6
+
+
+def test_dangerous_suites_load_and_validate():
+    """`load_all` excludes suites/dangerous/ by default, so no other test ever
+    parses them — a schema break there would surface only in the weekly run."""
+    suite_dir = os.path.join(os.path.dirname(HERE), "suites")
+    names = {s.name for s in suites.load_all(suite_dir, include_dangerous=True)}
+    assert "sandbox_verify" in names
+    assert "sandbox_verify" not in {s.name for s in suites.load_all(suite_dir)}
 
 
 def _suite_by_name(name: str) -> suites.Suite:

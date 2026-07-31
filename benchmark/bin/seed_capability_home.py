@@ -112,6 +112,17 @@ def render_config(
     roots = ", ".join(json.dumps(root) for root in allowed_roots)
     lines += ["", "[sandbox]", 'mode = "strict"',
               f'workspace_root = "{workspace}"', f"allowed_roots = [{roots}]", ""]
+    # Pre-approve coding agents in the disposable home. Consent is a setup decision
+    # (design §23.3) and defaults false, and an unapproved host advertises no run
+    # tool and renders no delegation steering at all (§23.4) — it does not stall,
+    # it silently makes the candidate model do the coding by hand, so the harness
+    # suite would grade main-agent coding instead of delegation and every
+    # delegating task would score zero. Approving here is scoped to this throwaway home
+    # whose sandbox is strict and rooted at the workspace above (the isolation the
+    # --confirm-daemon-isolated / --confirm-isolated-env flags attest to). Left
+    # unset: default_vendor (so both CLIs stay advertised for tasks that name
+    # either) and cloud_enabled (defaults off — the cloud rail is not evaluated).
+    lines += ["[fermix_core.harness]", "approved = true", ""]
     return "\n".join(lines)
 
 

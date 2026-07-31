@@ -250,6 +250,17 @@ defmodule FermixCore.Plugins.Http.Interpreter do
 
   defp max_bytes(opts), do: Keyword.get(opts, :max_response_bytes, @default_max_response_bytes)
 
+  @doc """
+  The response ceiling, in bytes, shared with the transport.
+
+  The transport enforces this while the body streams in; the check inside
+  `decode_json/2` re-asserts it on whatever arrived. One constant, two places
+  that must agree — so the transport reads it from here rather than keeping a
+  second copy that can drift.
+  """
+  @spec max_response_bytes() :: pos_integer()
+  def max_response_bytes, do: @default_max_response_bytes
+
   # --- error classification (§5.3) ---
 
   defp classify(%{status: 401}, opts) do

@@ -443,6 +443,110 @@ defmodule FermixCore.Setup.WizardTest do
     assert Keyword.get(routing, :subagent_model) == "gpt-5.4-mini"
   end
 
+  test "save_answers persists a harness default_vendor to [fermix_core.harness]" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-harness-vendor")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+    Application.put_env(:fermix_core, :providers, [])
+    Application.delete_env(:fermix_channels, :telegram)
+    start_memory_repo!()
+
+    assert {:ok, _report} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(
+               provider: "openai",
+               openai_api_key: "sk-x",
+               harness_default_vendor: "codex"
+             )
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    harness = Keyword.get(persisted.fermix_core, :harness, [])
+    assert Keyword.get(harness, :default_vendor) == "codex"
+  end
+
+  test "save_answers grants and revokes harness consent via [fermix_core.harness] approved" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-harness-approved")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+    Application.put_env(:fermix_core, :providers, [])
+    Application.delete_env(:fermix_channels, :telegram)
+    start_memory_repo!()
+
+    assert {:ok, _} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(
+               provider: "openai",
+               openai_api_key: "sk-x",
+               harness_approved: true
+             )
+
+    assert {:ok, granted} = ConfigStore.load_runtime_config()
+    assert granted.fermix_core |> Keyword.get(:harness, []) |> Keyword.get(:approved) == true
+
+    # `false` clears the key back to the default (never written explicitly).
+    assert {:ok, _} = Wizard.report().wizard |> Wizard.save_answers(harness_approved: false)
+
+    assert {:ok, revoked} = ConfigStore.load_runtime_config()
+    refute revoked.fermix_core |> Keyword.get(:harness, []) |> Keyword.has_key?(:approved)
+  end
+
+  test "save_answers clears the harness default_vendor when the answer is blank" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-harness-vendor-clear")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+    Application.put_env(:fermix_core, :providers, [])
+    Application.delete_env(:fermix_channels, :telegram)
+    start_memory_repo!()
+
+    assert {:ok, _} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(
+               provider: "openai",
+               openai_api_key: "sk-x",
+               harness_default_vendor: "claude"
+             )
+
+    # A blank answer ("no preference") must DELETE the key, never write "" —
+    # the config validator rejects an empty default_vendor.
+    assert {:ok, _} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(harness_default_vendor: "")
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    harness = Keyword.get(persisted.fermix_core, :harness, [])
+    refute Keyword.has_key?(harness, :default_vendor)
+  end
+
+  test "a save that carries no harness_default_vendor answer preserves the existing value" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-harness-vendor-preserve")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+    Application.put_env(:fermix_core, :providers, [])
+    Application.delete_env(:fermix_channels, :telegram)
+    start_memory_repo!()
+
+    assert {:ok, _} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(
+               provider: "openai",
+               openai_api_key: "sk-x",
+               harness_default_vendor: "codex"
+             )
+
+    # A later save with NO harness_default_vendor answer (another tab) must NOT wipe it.
+    assert {:ok, _} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(anthropic_api_key: "sk-ant")
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    harness = Keyword.get(persisted.fermix_core, :harness, [])
+    assert Keyword.get(harness, :default_vendor) == "codex"
+  end
+
   test "M12 provider fields persist: openrouter secret + ollama base_url (keyless)" do
     tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-m12-fields")
     on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)

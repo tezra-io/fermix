@@ -15,6 +15,7 @@ defmodule FermixCore.ComputerUse do
 
   alias FermixCore.ComputerUse.Config
   alias FermixCore.ComputerUse.Grant
+  alias FermixCore.ComputerUse.PortDriver
   alias FermixCore.ComputerUse.SessionManager
   alias FermixCore.ComputerUse.SidecarInstaller
 
@@ -141,5 +142,22 @@ defmodule FermixCore.ComputerUse do
   @spec ready?() :: boolean()
   def ready? do
     Config.current().enabled? and SidecarInstaller.installed?()
+  end
+
+  @doc """
+  The production OS-driver spec — `{PortDriver, binary_path: path}` — resolved
+  from the installed sidecar, or `{:error, {:sidecar_unavailable, reason}}`.
+
+  One resolver for every driver owner: the per-conversation `SessionManager` and
+  the realtime `ScreenFeed`'s dedicated capture port both start their OWN driver
+  instance (separate Ports, one purpose each) but must resolve the SAME installed
+  binary the same way, including the fail-closed shape when it is missing.
+  """
+  @spec driver_spec() :: {:ok, {module(), keyword()}} | {:error, term()}
+  def driver_spec do
+    case SidecarInstaller.binary_path() do
+      {:ok, path} -> {:ok, {PortDriver, [binary_path: path]}}
+      {:error, reason} -> {:error, {:sidecar_unavailable, reason}}
+    end
   end
 end

@@ -780,6 +780,10 @@ def _rubric_record(cfg, case, scn, run_id, trial, judge_on, transcript, evidence
         transcript=transcript, tool_evidence=evidence,
         candidate_routes=candidate_routes,
     )
+    if not result.evaluated:
+        # Without this the only record of a judge outage is `rubric.error`, which
+        # `redact_content` blanks — the run goes INCOMPLETE with no stated reason.
+        print(f"    judge unavailable: {result.error}", file=sys.stderr, flush=True)
     return {"text": case.rubric, "evaluated": result.evaluated, "passed": result.passed,
             "score": result.score, "rationale": result.rationale, "error": result.error,
             "backend": result.backend, "called": result.called,
@@ -967,7 +971,8 @@ def reliability_summary(suite_results) -> list[dict]:
         for scenario in suite["scenarios"]:
             for case in scenario["cases"]:
                 key = (suite["name"], scenario["id"], case["id"])
-                groups.setdefault(key, []).append(case["outcome"])
+                outcomes = case.get("attempt_outcomes") or [case["outcome"]]
+                groups.setdefault(key, []).extend(outcomes)
     summary = []
     for (suite, scenario, case), outcomes in sorted(groups.items()):
         if "incomplete" in outcomes:
@@ -1074,6 +1079,10 @@ def _build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--max-cases", type=int, default=0, help="cap number of cases driven (0 = no cap)")
     ap.add_argument("--repeat", type=int, default=1,
                     help="run each selected case 1–3 times to expose behavioral flakiness")
+    ap.add_argument("--fail-retries", type=int, default=0,
+                    help="re-drive a failed case up to N times (0–2); the case fails "
+                         "only if the failure reproduces, otherwise it passes and is "
+                         "reported as flaky")
     ap.add_argument("--operator", action="store_true",
                     help="include operator-assisted cases (you send a Telegram message when prompted); "
                          "without this flag such cases are skipped with a notice")
@@ -1106,6 +1115,8 @@ def _argument_error(args) -> str | None:
         return "--max-cases must be zero or a positive integer"
     if args.repeat < 1 or args.repeat > 3:
         return "--repeat must be between 1 and 3"
+    if args.fail_retries < 0 or args.fail_retries > 2:
+        return "--fail-retries must be between 0 and 2"
     if args.confirm_purge and not args.purge_run:
         return "--confirm-purge requires --purge-run RUN_ID"
     control_modes = sum(bool(mode) for mode in (args.dry_run, args.check, args.purge_run))
@@ -1193,7 +1204,35 @@ def _opik_incomplete_result(suite, scenario, case, run_id: str, trial: int,
             "incomplete": True, "gate_passed": False, "turns": [rec], "rubric": None}
 
 
-def _execute_jobs(cfg, client, jobs, run_id: str, judge_on: bool, operator: bool):
+def _drive_case(cfg, client, suite, scenario, case, run_id: str, trial: int,
+                judge_on: bool) -> dict:
+    try:
+        if case.drive == "telegram_operator":
+            return run_operator_case(
+                cfg, client, suite, scenario, case, run_id, trial, judge_on)
+        return run_case(cfg, client, suite, scenario, case, run_id, trial, judge_on)
+    except OpikError as exc:
+        return _opik_incomplete_result(suite, scenario, case, run_id, trial, exc)
+
+
+def _case_verdict(attempts: list[dict]) -> dict:
+    if len(attempts) == 1:
+        return attempts[0]
+    outcomes = [attempt["outcome"] for attempt in attempts]
+    if outcomes.count("fail") >= 2:
+        final = next(a for a in reversed(attempts) if a["outcome"] == "fail")
+    elif "pass" in outcomes:
+        final = next(a for a in reversed(attempts) if a["outcome"] == "pass")
+    else:
+        final = attempts[-1]
+    final = dict(final)
+    final["attempt_outcomes"] = outcomes
+    final["flaky"] = len(set(outcomes)) > 1
+    return final
+
+
+def _execute_jobs(cfg, client, jobs, run_id: str, judge_on: bool, operator: bool,
+                  fail_retries: int = 0, repeat: int = 1):
     tree: dict = {}
     skipped_required = 0
     for suite, scenario, case, trial in jobs:
@@ -1204,19 +1243,24 @@ def _execute_jobs(cfg, client, jobs, run_id: str, judge_on: bool, operator: bool
             skipped_required += 1
             continue
         print(f"  · {label} …", flush=True)
-        try:
-            if case.drive == "telegram_operator":
-                result = run_operator_case(
-                    cfg, client, suite, scenario, case, run_id, trial, judge_on)
-            else:
-                result = run_case(
-                    cfg, client, suite, scenario, case, run_id, trial, judge_on)
-        except OpikError as exc:
-            result = _opik_incomplete_result(
-                suite, scenario, case, run_id, trial, exc)
+        attempts = [_drive_case(cfg, client, suite, scenario, case,
+                                run_id, trial, judge_on)]
+        # A fail is final only if it reproduces: re-drive an unconfirmed single
+        # fail on a fresh session until a second fail or retries run out.
+        for retry in range(1, fail_retries + 1):
+            outcomes = [attempt["outcome"] for attempt in attempts]
+            if outcomes.count("fail") != 1 or outcomes[-1] == "incomplete":
+                break
+            retry_trial = trial + repeat * retry
+            print(f"    fail unconfirmed — retrying as #{retry_trial} …", flush=True)
+            attempts.append(_drive_case(cfg, client, suite, scenario, case,
+                                        run_id, retry_trial, judge_on))
+        result = _case_verdict(attempts)
         _record_case(tree, suite, scenario, result)
+        note = f" · attempts {'/'.join(result['attempt_outcomes'])}" \
+            if len(attempts) > 1 else ""
         print(f"    {result['outcome'].upper()} "
-              f"(gates {'ok' if result['gate_passed'] else 'FAILED'})")
+              f"(gates {'ok' if result['gate_passed'] else 'FAILED'}){note}")
     return [_suite_result(entry) for entry in tree.values()], skipped_required
 
 
@@ -1228,6 +1272,7 @@ def _write_run_reports(cfg, args, chosen, profiles, run_id: str, started,
     results["config"]["content_retained"] = args.include_content
     results["reproducibility"] = reproducibility_metadata(cfg, chosen, profiles)
     results["reproducibility"].update({"repeat": args.repeat,
+                                        "fail_retries": getattr(args, "fail_retries", 0),
                                         "max_cases": args.max_cases or None})
     results["reliability"] = reliability_summary(suite_results)
     out_dir = args.out or os.path.join(cfg.report_dir, run_id)
@@ -1235,9 +1280,11 @@ def _write_run_reports(cfg, args, chosen, profiles, run_id: str, started,
     paths = report.write(report_results, out_dir)
     totals = results["totals"]
     print(f"\n{'='*60}")
+    flaky = sum(1 for entry in results["reliability"] if entry["status"] == "flaky")
     print(f"outcome {results['outcome'].upper()} · "
           f"cases {totals['cases_passed']}/{totals['cases']} passed · "
-          f"failed {totals['cases_failed']} · incomplete {totals['cases_incomplete']} · "
+          f"failed {totals['cases_failed']} · flaky {flaky} · "
+          f"incomplete {totals['cases_incomplete']} · "
           f"critical fails {totals['critical_failed']} · "
           f"gates {totals['gates_passed']}/{totals['gates']} · "
           f"candidate trace cost ${totals['cost_usd']:.4f} · "
@@ -1279,7 +1326,8 @@ def _run_selected(cfg, args, chosen, profiles, judge_on: bool) -> int:
     run_id = new_run_id()
     started = now_utc()
     suite_results, skipped_required = _execute_jobs(
-        cfg, client, jobs, run_id, judge_on, args.operator)
+        cfg, client, jobs, run_id, judge_on, args.operator,
+        fail_retries=args.fail_retries, repeat=args.repeat)
     return _write_run_reports(
         cfg, args, chosen, profiles, run_id, started, suite_results, nc, skipped_required)
 

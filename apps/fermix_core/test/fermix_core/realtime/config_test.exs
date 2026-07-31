@@ -42,6 +42,7 @@ defmodule FermixCore.Realtime.ConfigTest do
              voice: "cedar",
              max_session_minutes: 20,
              max_estimated_cost_cents_per_session: 35,
+             screen_share: true,
              persist_transcripts: true
            ]
   end

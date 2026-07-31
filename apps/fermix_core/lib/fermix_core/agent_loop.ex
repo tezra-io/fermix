@@ -13,6 +13,7 @@ defmodule FermixCore.AgentLoop do
 
   require Logger
 
+  alias FermixCore.Capabilities.Advertisement
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Deferral
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
@@ -24,6 +25,7 @@ defmodule FermixCore.AgentLoop do
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.Transient
   alias FermixCore.Telemetry
+  alias FermixCore.Tools.Telemetry, as: ToolTelemetry
 
   @max_iterations 25
 
@@ -132,8 +134,7 @@ defmodule FermixCore.AgentLoop do
             excluded_categories: excluded_categories
           )
 
-        advertised = filter_advertised(advertised, context)
-        {refresh_dynamic_schemas(advertised, context), dispatchable}
+        {Advertisement.prepare(advertised, context), dispatchable}
       end)
 
     emit_capability_selection_telemetry(
@@ -187,46 +188,6 @@ defmodule FermixCore.AgentLoop do
     |> Map.put(:effective_policy, CapabilityRegistry.resolved_policy_classes(trust, policy))
     |> Map.put(:effective_allowed_tools, allowed_tools)
   end
-
-  # A tool whose backing module exports `dynamic_parameters/1` gets its
-  # LLM-visible schema regenerated from the live turn context (the arity-0
-  # schema baked at registration is context-blind). This is how `/ultra`
-  # advertises the wider `subagents` caps so the model can request wide fan-out
-  # through the tool. The hook name is deliberately distinct from `parameters/1`
-  # so it can't collide with a tool module that exports `parameters/1` for some
-  # other purpose (the plugin `ToolExecutor` exports a name→schema lookup).
-  defp refresh_dynamic_schemas(capabilities, context) when is_list(capabilities) do
-    Enum.map(capabilities, &refresh_schema(&1, context))
-  end
-
-  defp refresh_schema(%Capability{executor: {mod, _fun, _args}} = capability, context)
-       when is_atom(mod) do
-    if function_exported?(mod, :dynamic_parameters, 1) do
-      %{capability | parameters: mod.dynamic_parameters(context)}
-    else
-      capability
-    end
-  end
-
-  defp refresh_schema(capability, _context), do: capability
-
-  # Per-turn advertisement gate. A tool whose backing module exports
-  # `advertise?/1` is dropped from the LLM-visible surface when it opts out for
-  # this turn's context (e.g. `react` on a channel with no reaction capability —
-  # docs/design/EMOJI_REACTION_ACKS.md §6). Discovered via `function_exported?`,
-  # like `dynamic_parameters/1`: capabilities without the hook always advertise.
-  # This is the one context-keyed filter the trust-cached profile can't express
-  # (reaction capability varies per channel within a trust). Dispatch is
-  # unaffected — an un-advertised tool is simply never called.
-  defp filter_advertised(capabilities, context) when is_list(capabilities) do
-    Enum.filter(capabilities, &advertised?(&1, context))
-  end
-
-  defp advertised?(%Capability{executor: {mod, _fun, _args}}, context) when is_atom(mod) do
-    not function_exported?(mod, :advertise?, 1) or mod.advertise?(context)
-  end
-
-  defp advertised?(_capability, _context), do: true
 
   defp index_by_name(capabilities) do
     Map.new(capabilities, fn %Capability{name: name} = capability -> {name, capability} end)
@@ -704,7 +665,7 @@ defmodule FermixCore.AgentLoop do
 
       {:error, reason} ->
         emit_activity(state, {:tool_finish, name})
-        text_result(reason)
+        trace_unexecuted(name, arguments_raw, reason, state)
     end
   end
 
@@ -719,15 +680,36 @@ defmodule FermixCore.AgentLoop do
     if capability_allowed?(name, state.allowed_tools) do
       lookup_and_dispatch(name, arguments, state)
     else
-      text_result("Error: Tool '#{name}' not available")
+      trace_unexecuted(name, arguments, "Error: Tool '#{name}' not available", state)
     end
   end
 
   defp lookup_and_dispatch(name, arguments, state) do
     case Map.fetch(state.capabilities_by_name, name) do
       {:ok, capability} -> dispatch_capability(capability, arguments, state.context)
-      :error -> text_result("Error: Tool '#{name}' not found")
+      :error -> trace_unexecuted(name, arguments, "Error: Tool '#{name}' not found", state)
     end
+  end
+
+  # A tool call the model made that never reached a capability: an unregistered
+  # or policy-filtered name, a name outside this run's `allowed_tools`, or
+  # arguments that would not parse. Each returns its error to the model, and each
+  # used to emit nothing — so the turn's telemetry showed an iteration whose tool
+  # call left no tool row anywhere, in the JSONL trace or in Opik. The reader
+  # could see that the model had called *something* and not what, which is how
+  # two iterations spent calling a withdrawn harness by a guessed name went
+  # unexplained. Routed through the shared emitter (never a hand-rolled
+  # `:telemetry.execute`) so the invariant holds: one tool call by the model,
+  # one `[:fermix, :tool, :exec]` event, recorded under the name the MODEL used —
+  # the only name a reader has to search for. The three messages stay distinct so
+  # the miss kinds do not collapse into one indistinguishable failure.
+  defp trace_unexecuted(name, arguments, message, state) do
+    ToolTelemetry.exec(name, state.context, false, 0,
+      metadata: %{error: message},
+      input: arguments
+    )
+
+    text_result(message)
   end
 
   defp capability_allowed?(_name, nil), do: true

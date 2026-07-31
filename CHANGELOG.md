@@ -6,6 +6,160 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A brief provider hiccup no longer quietly moves your whole turn to a
+  different model.** When the provider you normally use hit a momentary failure
+  — a capacity blip, a dropped connection — Fermix moved straight to your next
+  configured provider on the very first error. That provider is a different
+  model, and whichever one answers keeps the rest of the turn, so a few seconds
+  of trouble could hand an entire conversation or scheduled job to a smaller
+  model for its whole run, still reported as a success, with nothing anywhere
+  saying the model had changed. The original provider is now tried again a few
+  times, with a short growing pause between attempts, before anything moves.
+  Moving on still happens once those retries are spent, so a real outage is
+  still covered, and errors that a retry cannot fix still move on immediately.
+  Scheduled jobs are unchanged for now: they deliberately opt out of this retry
+  and keep their own slower one, so they still move to the next provider on the
+  first hiccup.
+
+- **"I didn't get a response — please try again" is no longer the answer to a
+  request that actually worked.** When a reply from the primary provider was cut
+  off before it finished, Fermix read the silence as a complete answer that
+  happened to be empty: the turn ended with nothing to say, you got a canned retry
+  line, and nothing anywhere recorded a failure. It also lost work that had already
+  succeeded — a finished coding-agent run whose result was being written up came
+  back as that same line. A reply that arrives with nothing in it at all is now
+  treated as the failure it is, so it retries or moves to your next configured
+  provider, and when the provider says *why* it stopped, that reason is recorded
+  instead of discarded. A reply that was cut off partway still comes through:
+  a partial answer is more use than an error, and throwing it away would also
+  strand a turn that had already run tools.
+
+- **Asking a resumed Codex run for a sandbox level no longer fails.** Continuing a
+  thread and choosing a sandbox posture in the same call was refused outright,
+  because the resume command has no `-s` flag. It does accept the same setting as
+  a config override, so the posture is now honored on both kinds of run. A resumed
+  thread already keeps the posture it was started with, so this matters when you
+  want to *change* it partway through — which is exactly when the refusal used to
+  cost a wasted step. Two parameters are still refused on a resume, each for its
+  own reason, and the message now says which and what to do instead.
+- **Coding-harness parameter errors are readable.** A refused parameter came back
+  as raw internal syntax — `{:param_not_supported_with_resume, :sandbox}` was
+  delivered verbatim in a real run — which reads as a broken Fermix rather than a
+  request the coding CLI cannot serve. Every one of these now states the problem
+  and names the next move, for both Codex and Claude Code: a bad effort or
+  permission mode lists the levels that exist, combining `resume` with `continue`
+  explains why they conflict, and a directory outside the sandbox names the
+  directory and how to grant it instead of printing an internal tag.
+
+## [0.7.0] - 2026-07-28
+
+### Added
+
+- **Claude Opus 5 on the Anthropic provider.** `claude-opus-5` joins the model
+  catalog (1M context, 128k output ceiling) and is offered as the best-quality
+  Anthropic choice in the CLI wizard and web setup — set it with
+  `[fermix_core.providers.anthropic] default_model = "claude-opus-5"`. It rides
+  the same adaptive-thinking + `reasoning_effort` wire as Opus 4.8.
+
+- **Voice calls can watch your screen.** Ask a call to watch, look at, or follow
+  along with your screen and it watches that display for the rest of the call —
+  playing a game with you, working through a page you are both reading, helping
+  with an app. Changed frames join the conversation quietly: a still screen sends
+  nothing and a frame never makes the agent speak on its own, so it answers about
+  the screen when you ask instead of narrating it. It rides on computer use (same
+  helper, same macOS Screen Recording permission) and refuses to start rather than
+  streaming blank frames if that permission is missing. Consent is per call:
+  "stop watching" ends it, and hanging up always does. Withhold it entirely with
+  `[fermix_core.realtime] screen_share = false`.
+- **The browser can measure an element.** `act` with `kind: "get"` and
+  `field: "rect"` returns the viewport box of the first `selector` match, in the
+  same coordinate space `click_coords` clicks in — so a board, map, or chart that
+  exposes no clickable elements can still be driven exactly, instead of by
+  guessing pixels.
+- **Computer use can list open windows.** A `windows` action returns each window
+  with a ready-made zoom region, so on a large or ultrawide display the agent
+  crops to the app it is working in instead of spending its whole image budget on
+  desktop it does not care about.
+
+### Fixed
+
+- **Voice calls were running without their own rules.** The voice-only rules file
+  (`REALTIME.md` — speak briefly, lead with the answer, do not narrate tool use)
+  was never actually loaded into a live call: voice ran on the text agent's prompt
+  instead. That is why calls talked through every step. Editing the file now
+  changes how calls behave, as it was always documented to.
+- **Clicks and drags land where the agent aims.** Two separate defects in the
+  desktop helper: a click could be delivered at the position of the *previous*
+  click while reporting success, and a drag was performed as an instantaneous jump
+  that pages with drag-and-drop never registered as a drag at all. Drags are now
+  performed as real movement with the pointer placed before each event. A click
+  the operating system did not deliver is also reported as such instead of being
+  reported as done.
+- **A voice call is no longer torn down by someone else's cost.** Per-call spend
+  was over-counted several-fold — cached tokens were billed twice and each
+  response re-counted earlier ones — so a short call could hit its cost ceiling
+  and end mid-sentence. Screen-sharing spend is now counted separately from the
+  agent's own screenshots, so precision looks cannot close the eyes that are
+  watching for you.
+- **A hiccup no longer ends a live call.** Routine, recoverable provider errors
+  were being reported to the voice companion as fatal, which shut the microphone
+  down while the call itself was still running. Only genuinely terminal failures
+  end a call now.
+- **Browser errors say how to recover.** A blocked dialog, a stale element handle,
+  an element with no rendered box, and using an `act` kind as a top-level action
+  each ended in a dead end that named the mistake but not the fix. Each now names
+  the call that works. Clicking an element below the fold scrolls it into view
+  first, instead of silently clicking nothing and reporting success, and a page
+  snapshot can no longer return the previous page's contents after a navigation.
+
+
+- **Turning the coding harness off now hides all of it, not most of it.** With
+  coding agents not approved on a machine, the tools that launch a run were
+  correctly withheld, but the three that inspect run history stayed offered —
+  so the agent was handed harness tools while the prompt, which drops the whole
+  harness section when it is unusable, said nothing about the harness at all.
+  Fermix now withholds every harness tool in that state, exactly as it already
+  did for the run tools. They remain reachable by name, so a run recorded before
+  you withdrew approval can still be read or cancelled on request.
+- **A tool call that never runs is now visible in traces.** When the model called
+  a tool that does not exist, was not allowed for that run, or passed arguments
+  that would not parse, Fermix told the model and recorded nothing — the trace
+  showed a step that called *something*, with no way to see what. Each of these
+  now records a failed tool execution under the name the model used, so it shows
+  up in `~/.fermix/traces` and as a failed span in Opik alongside real calls.
+- **Coding agent runs no longer fail instantly with "Not logged in" on macOS.**
+  Fermix starts the vendor CLIs in a wiped environment, and that environment was
+  missing the account name. Claude Code looks its macOS Keychain login up by
+  account, so it found nothing and every run exited within a couple of seconds
+  asking you to sign in — while the same `claude -p` worked fine from your own
+  terminal. Codex was never affected, because it reads its login from a file.
+  The account name is now part of the environment Fermix reconstructs, and a
+  daemon that does not have one refuses the run up front, naming the cause,
+  instead of starting a CLI that cannot authenticate.
+- **A failed coding run now tells you what the tool actually said.** The vendor's
+  own error was captured and then discarded, so a failure came back as a bare
+  exit code with no explanation — and the agent, unable to tell an expired login
+  from a crash, would often relaunch straight into the same wall. That message
+  now leads the completion notice, the delivered message, and `get_coding_run`.
+  The notice also asks the agent to check the working tree before redoing
+  anything (a run killed by a timeout may have left changes behind) and to say
+  plainly what failed and what it needs.
+- **Anthropic requests no longer send a sampling parameter the 5-generation
+  models reject.** `temperature` was still going out for `claude-fable-5` (and
+  any Sonnet 5 / Mythos model), which the API answers with a 400; it is now
+  dropped for the whole 5 generation as it already was for Claude 4.7/4.8.
+
+### Changed
+
+- **Channel streaming is now on by default.** A configured channel streams its
+  reply as the model works (`streaming = "block"`) instead of staying silent until
+  the final message, so you see the intermediate "thinking" progress. Opt out per
+  channel with `[fermix_channels.<name>] streaming = "off"`, or use `"draft"` for a
+  single message edited in place. Streaming is a no-op for non-streaming providers,
+  so nothing changes unless your primary provider streams.
+
 ## [0.6.0] - 2026-07-19
 
 ### Added

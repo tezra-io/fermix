@@ -136,6 +136,25 @@ jobs:
           fi
           exit "$fail"
 
+  harness:
+    # The python eval harness under benchmark/ gates nothing today: ci.yml runs
+    # no python, and the only tracked hook is Elixir-only. Its ~420 hermetic
+    # specs and the suite validator therefore only ever ran by hand, so harness
+    # regressions surfaced first in a scheduled eval run against a live daemon.
+    # Both targets are offline: no secrets, no daemon, no network, no FERMIX_HOME.
+    # Deliberately no `paths:` filter — the aggregate gate treats a skipped leg
+    # as red, so a filtered-out run would wedge the required check.
+    name: benchmark harness tests + suite validation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Harness developer tests
+        run: make -C benchmark tests
+      - name: Validate behavioral suites (no spend)
+        run: make -C benchmark dry
+
   # Aggregate gate: the SINGLE stable check name that branch protection requires
   # (`compile · format · credo · test`), decoupled from the OS-matrix leg names.
   # Green iff every `check` leg passed; `if: always()` so a failed/skipped matrix
@@ -144,12 +163,15 @@ jobs:
   gate:
     name: compile · format · credo · test
     runs-on: ubuntu-24.04
-    needs: [check]
+    needs: [check, harness]
     if: always()
     steps:
       - name: Require every matrix leg to have passed
         env:
           CHECK_RESULT: ${{ needs.check.result }}
+          HARNESS_RESULT: ${{ needs.harness.result }}
         run: |
           echo "check (matrix) result: $CHECK_RESULT"
+          echo "harness result: $HARNESS_RESULT"
           [ "$CHECK_RESULT" = "success" ] || exit 1
+          [ "$HARNESS_RESULT" = "success" ] || exit 1

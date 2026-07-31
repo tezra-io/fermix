@@ -10,6 +10,7 @@ defmodule FermixCore.Trace.TelemetryHandler do
   """
 
   alias FermixCore.Agents.LifecycleTelemetry
+  alias FermixCore.Harness.Telemetry, as: HarnessTelemetry
   alias FermixCore.Jobs.Telemetry, as: JobTelemetry
   alias FermixCore.SoulCuration.Telemetry, as: SoulTelemetry
   alias FermixCore.Trace
@@ -154,6 +155,30 @@ defmodule FermixCore.Trace.TelemetryHandler do
       trace_type: :agent_event,
       agent_field: :agent,
       trace_event: "realtime_call_stop"
+    },
+    %{
+      event: [:fermix, :realtime, :screen_feed_start],
+      trace_type: :agent_event,
+      agent_field: :agent,
+      trace_event: "realtime_screen_feed_start"
+    },
+    %{
+      event: [:fermix, :realtime, :frame_sent],
+      trace_type: :agent_event,
+      agent_field: :agent,
+      trace_event: "realtime_screen_frame_sent"
+    },
+    %{
+      event: [:fermix, :realtime, :frame_dropped],
+      trace_type: :agent_event,
+      agent_field: :agent,
+      trace_event: "realtime_screen_frame_dropped"
+    },
+    %{
+      event: [:fermix, :realtime, :screen_feed_stop],
+      trace_type: :agent_event,
+      agent_field: :agent,
+      trace_event: "realtime_screen_feed_stop"
     }
   ]
 
@@ -205,6 +230,7 @@ defmodule FermixCore.Trace.TelemetryHandler do
       @realtime_events ++
       LifecycleTelemetry.trace_event_definitions() ++
       JobTelemetry.trace_event_definitions() ++
+      HarnessTelemetry.trace_event_definitions() ++
       SoulTelemetry.trace_event_definitions()
   end
 

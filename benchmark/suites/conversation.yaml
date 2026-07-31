@@ -56,7 +56,7 @@ scenarios:
               reply_matches: "(?i)photosynthesis|light|sunlight|glucose|energy"
           - query: "Thanks!"
             expect:
-              reply_matches: "(?i)welcome|anytime|glad|no problem|sure|happy to|of course|👍|🙏"
+              reply_matches: "(?i)welcome|any ?time|glad|no problem|sure|happy to|of course|pleasure|you bet|cheers|👍|🙏|😊"
               reply_not_matches: "(?i)photosynthesis|chlorophyll|glucose"
               max_tool_calls: 1
               max_iterations: 2

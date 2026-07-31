@@ -82,7 +82,10 @@ defmodule FermixCore.Providers.FailoverTest do
        [model: model]}
     end
 
-    defp attach_failover_handler do
+    # The handler is process-global, so every concurrently-running async test
+    # that fails over lands in this mailbox too. Forward only the events this
+    # test caused, keyed on a ref it plants in the emitted metadata.
+    defp attach_failover_handler(ref) do
       handler_id = "failover-test-#{System.unique_integer([:positive])}"
       test_pid = self()
 
@@ -90,7 +93,9 @@ defmodule FermixCore.Providers.FailoverTest do
         handler_id,
         [:fermix, :provider, :failover],
         fn event, measurements, metadata, _config ->
-          send(test_pid, {:telemetry, event, measurements, metadata})
+          if metadata[:test_ref] == ref do
+            send(test_pid, {:telemetry, event, measurements, metadata})
+          end
         end,
         nil
       )
@@ -114,7 +119,8 @@ defmodule FermixCore.Providers.FailoverTest do
     end
 
     test "fails over past an eligible error and emits one failover event" do
-      attach_failover_handler()
+      ref = make_ref()
+      attach_failover_handler(ref)
 
       attempt = fn {key, _opts} ->
         case key.provider do
@@ -127,7 +133,8 @@ defmodule FermixCore.Providers.FailoverTest do
                Failover.run_chain(
                  [route(:anthropic, "claude-x"), route(:openai, "gpt-x")],
                  attempt,
-                 telemetry: %{agent: "main"}
+                 telemetry: %{agent: "main", test_ref: ref},
+                 retry_delay_fn: fn _ms -> :ok end
                )
 
       assert_received {:telemetry, [:fermix, :provider, :failover], %{count: 1}, metadata}
@@ -239,19 +246,57 @@ defmodule FermixCore.Providers.FailoverTest do
       assert calls.() == %{openai_codex: 2}
     end
 
-    test "a retryable+eligible kind with more routes fails over instead of same-retry" do
+    test "a retryable+eligible kind retries the same route before failing over" do
       timeout = Error.transport(:openai_codex, Codex, :timeout)
 
       {attempt, calls} =
-        stub_attempt(%{openai_codex: [{:error, timeout}], openai: [{:ok, :done}]})
+        stub_attempt(%{openai_codex: [{:error, timeout}, {:ok, :done}], openai: [{:ok, :never}]})
 
       assert {:ok, :done} =
                Failover.run_chain([route(:openai_codex, "m1"), route(:openai, "m2")], attempt,
                  retry_delay_fn: fn _ms -> :ok end
                )
 
-      # no same-retry on route 1: one attempt each
-      assert calls.() == %{openai_codex: 1, openai: 1}
+      # the route recovered on its own retry; the fallback was never attempted
+      assert calls.() == %{openai_codex: 2}
+    end
+
+    # A capacity blip on the primary must not silently re-target the turn onto a
+    # weaker fallback model: the whole tool loop is pinned to the winning route,
+    # so one transient costs the entire run its model.
+    test "an overloaded primary retries itself rather than downgrading to the fallback" do
+      # The shape `Codex.undelivered_error/2` mints when the SSE stream ends in
+      # `response.failed` carrying "Our servers are currently overloaded".
+      overload = Error.transport(:openai_codex, Codex, :closed)
+
+      {attempt, calls} =
+        stub_attempt(%{
+          openai_codex: [{:error, overload}, {:error, overload}, {:ok, :done}],
+          openai: [{:ok, :never}]
+        })
+
+      assert {:ok, :done} =
+               Failover.run_chain([route(:openai_codex, "m1"), route(:openai, "m2")], attempt,
+                 retry_delay_fn: fn _ms -> :ok end
+               )
+
+      assert calls.() == %{openai_codex: 3}
+    end
+
+    test "failover still fires once the same-route retry budget is exhausted" do
+      overload = Error.transport(:openai_codex, Codex, :closed)
+
+      {attempt, calls} =
+        stub_attempt(%{openai_codex: [{:error, overload}], openai: [{:ok, :done}]})
+
+      assert {:ok, :done} =
+               Failover.run_chain([route(:openai_codex, "m1"), route(:openai, "m2")], attempt,
+                 max_retries: 2,
+                 retry_delay_fn: fn _ms -> :ok end
+               )
+
+      # 1 initial + 2 retries on the primary, then a single hop to the fallback
+      assert calls.() == %{openai_codex: 3, openai: 1}
     end
 
     test "a vetoing retryable? predicate (e.g. content already streamed) blocks retry" do

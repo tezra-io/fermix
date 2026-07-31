@@ -81,7 +81,7 @@ defmodule FermixCore.Tools.ToolSearch do
     with {:ok, query} <- Support.required_string(args, "query") do
       registry = Map.get(context, :capability_registry, Registry)
       limit = clamp_limit(Map.get(args, "limit"))
-      catalog = deferred_catalog(registry)
+      catalog = deferred_catalog(registry, context)
       matches = search(query, catalog, limit)
 
       emit_query_telemetry(query, matches, catalog, context)
@@ -104,10 +104,18 @@ defmodule FermixCore.Tools.ToolSearch do
 
   # The catalog is read from the registry at query time (stateless — M10
   # freshness guarantee): the search surface is always exactly the live
-  # deferred set.
-  defp deferred_catalog(registry) do
+  # deferred set the CALLER could dispatch. `Deferral` documents itself as
+  # splitting trust-filtered capabilities, so handing it the unfiltered storage
+  # primitive let discovery run ahead of execution — a guest could enumerate
+  # tools it can never call. The run's own ceiling is already stamped on every
+  # tool context by `AgentLoop`; both keys absent means an internal caller and
+  # keeps the unfiltered behaviour.
+  defp deferred_catalog(registry, context) do
     registry
-    |> Registry.list_for([])
+    |> Registry.list_for(
+      trust: Map.get(context, :source_trust),
+      policy_classes: Map.get(context, :effective_policy)
+    )
     |> Enum.filter(&Deferral.deferred?/1)
   end
 

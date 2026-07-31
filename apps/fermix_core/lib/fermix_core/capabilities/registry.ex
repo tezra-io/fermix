@@ -44,9 +44,13 @@ defmodule FermixCore.Capabilities.Registry do
   #               scheduled jobs, bundled/user-installed skills). Full
   #               capability surface.
   #
-  #   :guest    — non-operator humans (currently dormant until
-  #               multi-user/group-chat lands) and plugin-loaded skills
-  #               whose code the operator did not vet. Read-only only.
+  #   :guest    — non-operator humans (anyone the owner added to a channel's
+  #               ingress allow-list) and plugin-loaded skills whose code the
+  #               operator did not vet. Read-only classes only, and never a
+  #               capability flagged `owner_only?` — see `apply_owner_only/2`.
+  #               "Read-only" was never a privacy boundary on its own: the
+  #               owner's files, memories and scheduled jobs are all read-only
+  #               reads.
   #
   #   nil       — trust not set on this call path. Treated as `:guest`
   #               (least privilege). This is the forgiving safe default:
@@ -226,6 +230,7 @@ defmodule FermixCore.Capabilities.Registry do
     capabilities
     |> apply_kind(Keyword.get(opts, :kind, :all))
     |> apply_policy(policy)
+    |> apply_owner_only(Keyword.get(opts, :trust))
     |> apply_allowlist(Keyword.get(opts, :allowed_tools))
     |> apply_name_exclusion(Keyword.get(opts, :excluded_names))
     |> apply_category_exclusion(Keyword.get(opts, :excluded_categories, []))
@@ -338,6 +343,24 @@ defmodule FermixCore.Capabilities.Registry do
       end
     end)
   end
+
+  # The second axis of the guest boundary. `apply_policy/2` bounds what a caller
+  # may DO; this bounds whose data a read may RETURN. Both are needed: every
+  # owner-data tool below is `:read_only`, so the policy filter alone admits all
+  # of them.
+  #
+  # Only an EXPLICIT `:guest` filters. `nil` here means the caller narrowed by
+  # policy class (a subagent worker, a cron loop) or asked for the storage
+  # primitive, and neither should silently lose the owner's own tools — the
+  # trust-less call sites are internal, not untrusted. A turn whose trust is
+  # unknown never reaches this with `nil`: `TurnRunner.profile_for_trust/3`
+  # resolves an absent trust to `:guest` before asking, so least privilege is
+  # decided where the identity is known.
+  defp apply_owner_only(capabilities, :guest) do
+    Enum.reject(capabilities, & &1.owner_only?)
+  end
+
+  defp apply_owner_only(capabilities, _trust), do: capabilities
 
   defp apply_allowlist(_capabilities, []), do: []
   defp apply_allowlist(capabilities, nil), do: capabilities

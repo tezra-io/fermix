@@ -241,6 +241,21 @@ defmodule FermixCore.Tools.RequestDirectoryAccessTest do
       assert prompt =~ "`/confirm TOKEN123`"
     end
 
+    # An UNKNOWN chat label fails closed: a harness completion continuation (design
+    # §23.2) is synthesized from a ledger row and carries no `chat_type`, so it may
+    # be a group — the private button carries the token instead of the group text.
+    test "omits the tap-to-copy token when the chat type is unknown but a button exists",
+         %{grant_dir: grant_dir} do
+      context = attended_context(%{private_approval_button?: true})
+
+      assert {:ok, %{success: true}} =
+               Tool.execute(%{"path" => grant_dir, "reason" => "spans repo"}, context)
+
+      assert_received {:reply_called, {:approval_prompt, prompt, "TOKEN123"}}
+      refute prompt =~ "TOKEN123"
+      assert prompt =~ "button below"
+    end
+
     test "keeps the tap-to-copy token in a private DM/CLI prompt", %{grant_dir: grant_dir} do
       context = attended_context(%{chat_type: "private"})
 

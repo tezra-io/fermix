@@ -1123,8 +1123,11 @@ defmodule FermixCore.Agents.MainAgentTest do
     } do
       chat_id = "chat_#{System.unique_integer([:positive])}"
 
+      # An integer platform thread id (a Telegram forum topic) canonicalizes to its
+      # string form in the conversation key, so one conversation has ONE key however
+      # the message reached the agent (`ConversationKey.from/1`).
       ConversationStore.add_message(
-        {"telegram", chat_id, 456},
+        {"telegram", chat_id, "456"},
         "user",
         "Thread history",
         server: conv_store
@@ -1142,7 +1145,7 @@ defmodule FermixCore.Agents.MainAgentTest do
 
       assert Enum.any?(messages, &(&1.content == "Thread history"))
       assert ConversationStore.get_history({"telegram", chat_id, :root}, server: conv_store) == []
-      assert ConversationStore.get_history({"telegram", chat_id, 456}, server: conv_store) != []
+      assert ConversationStore.get_history({"telegram", chat_id, "456"}, server: conv_store) != []
     end
 
     test "skips background memory review when memory is disabled", %{

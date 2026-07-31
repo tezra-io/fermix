@@ -53,7 +53,9 @@ defmodule FermixCore.Tools.Browser do
         },
         selector: %{
           type: "string",
-          description: "Reserved selector field for future scoped reads."
+          description:
+            "CSS selector — for `act` `kind=get` `field=rect` (the element to measure) " <>
+              "and `kind=wait` `wait_until=element`."
         },
         kind: %{
           type: "string",
@@ -72,7 +74,10 @@ defmodule FermixCore.Tools.Browser do
         },
         field: %{
           type: "string",
-          description: "Field name for get/storage actions."
+          description:
+            "Field for get/storage: url | title | html | text | count | ready_state | " <>
+              "rect (the viewport box {x,y,width,height} of the first `selector` match, " <>
+              "in the same CSS space click_coords clicks in)."
         },
         value: %{
           type: "string",
@@ -85,11 +90,14 @@ defmodule FermixCore.Tools.Browser do
         },
         x: %{
           type: "number",
-          description: "X coordinate for coordinate actions."
+          description:
+            "X for click_coords, in CSS-pixel page-viewport space (what `get field=rect` " <>
+              "returns) — NOT screen pixels from computer_use, and NOT raw pixels off a " <>
+              "browser screenshot (those are device pixels; divide by its device_pixel_ratio)."
         },
         y: %{
           type: "number",
-          description: "Y coordinate for coordinate actions."
+          description: "Y for click_coords, in the same CSS-pixel page-viewport space as x."
         },
         button: %{
           type: "string",
@@ -151,7 +159,25 @@ defmodule FermixCore.Tools.Browser do
 
   @impl true
   def when_to_use do
-    "JavaScript/dynamic/interactive pages, forms, logins, or live data (e.g. flight prices) — not static text (use web_search/web_fetch), and not the page/app the user already has open on their screen (use computer_use for that; browser drives its own instance)."
+    "JavaScript/dynamic/interactive pages, forms, logins, or live data (e.g. flight prices) — " <>
+      "not static text (use web_search/web_fetch), and not the page/app the user already has " <>
+      "open on their screen (use computer_use for that; browser drives its own instance). " <>
+      "On a desktop OS this IS a real window on the user's screen (it only runs headless on a " <>
+      "display-less host, or if the operator configured that) — a separate profile from their " <>
+      "own Chrome, but one they can see and touch. That makes it the RIGHT tool for a page you " <>
+      "and the human share — a page you fill in or review together, a dashboard you both " <>
+      "watch, a game you play together. " <>
+      "It also acts on a page the user watches in THEIR OWN browser whenever the page state is " <>
+      "SERVER-synced under the same account (a live game, a shared doc): drive it here with " <>
+      "exact element rails instead of pixel-aiming at their window — but never for a page " <>
+      "that is not server-synced, where a second copy silently desyncs from what they see. " <>
+      "`state` reports `headless`; if it is ever true the human cannot see this window, so say " <>
+      "so instead of assuming they are looking at it. A `snapshot` lists only what the page " <>
+      "exposes as elements — a board/map/chart often exposes none, but it is still a DOM " <>
+      "element: read its box with `get field=rect` and click positions inside it with " <>
+      "`click_coords` (same CSS space, deterministic — no window position, no pixel " <>
+      "guessing). `computer_use` pixels are for content OUTSIDE this browser's own window; " <>
+      "using both on one page is normal."
   end
 
   @impl true
