@@ -147,17 +147,53 @@ defmodule Fermix.CLI.Doctor.Checks do
   defp render_opik(other),
     do: warn("opik export", "unexpected observability report: #{inspect(other)}")
 
-  @spec service_unit() :: result()
-  def service_unit do
+  # Predicates are injectable for the same reason `daemon_socket/1` injects its
+  # client: the real ones answer from THIS host, so neither branch below is
+  # reachable from a test otherwise.
+  @spec service_unit(keyword()) :: result()
+  def service_unit(opts \\ []) when is_list(opts) do
+    installed? = Keyword.get(opts, :installed?, &installed_safe?/1)
+    drifted? = Keyword.get(opts, :drifted?, &drifted_safe?/1)
+
     cond do
-      installed_safe?(:user) -> ok("service unit", "user-scope unit installed")
-      installed_safe?(:system) -> ok("service unit", "system-scope unit installed")
+      installed?.(:user) -> unit_result(:user, drifted?)
+      installed?.(:system) -> unit_result(:system, drifted?)
       true -> warn("service unit", "no unit installed (run `fermix service install`)")
+    end
+  end
+
+  # "Installed" was the whole check, so a unit written by an older version read
+  # green forever — including one whose daemon PATH predates a fix that only
+  # takes effect once the unit is rewritten. Nothing else reports this: `upgrade`
+  # never rewrites the unit (and refuses outright on a Homebrew install), and the
+  # Homebrew caveats already say to re-run `fermix setup` "if the service unit
+  # drifted" — an instruction no surface could answer until now.
+  defp unit_result(scope, drifted?) do
+    if drifted?.(scope) do
+      warn(
+        "service unit",
+        "#{scope}-scope unit is stale — it no longer matches what this version of fermix " <>
+          "writes, so the daemon may be running with outdated settings (e.g. an older PATH, " <>
+          "which is how coding-agent CLIs go undetected). Run `fermix setup` to rewrite and " <>
+          "reload it."
+      )
+    else
+      ok("service unit", "#{scope}-scope unit installed")
     end
   end
 
   defp installed_safe?(scope) do
     Service.installed?(scope)
+  rescue
+    _ -> false
+  end
+
+  # Same posture as `installed_safe?/1`, and the direction matters: `drifted?/2`
+  # renders a fresh spec to compare against, which raises when the fermix binary
+  # cannot be resolved. Unknown reports NOT stale, because a false "stale" would
+  # send the operator to rewrite a unit that is fine.
+  defp drifted_safe?(scope) do
+    Service.drifted?(scope)
   rescue
     _ -> false
   end

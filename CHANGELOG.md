@@ -15,6 +15,13 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   coding-harness disk-space probe tried to use machinery that only exists inside
   the running daemon. The one command meant to explain what is wrong with an
   install was the one command that could not run.
+- **`fermix doctor` now tells you when the service definition is out of date.**
+  It only ever checked that a service was *installed*, so one written by an older
+  version read as healthy forever — including one whose daemon is still running
+  with an outdated PATH, which is how coding agents go undetected. Upgrading
+  never rewrites that definition (and on a Homebrew install the upgrade command
+  declines to touch it at all), so there was no way to find out. Doctor now says
+  so plainly and names the command that fixes it, `fermix setup`.
 - **Coding agents are detected when the daemon runs as a service.** The service
   is started with a fixed list of directories to look in, and that list left out
   `~/.local/bin` — exactly where the official Codex and Claude Code installers
