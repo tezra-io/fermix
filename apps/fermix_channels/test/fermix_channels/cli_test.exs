@@ -273,7 +273,9 @@ defmodule FermixChannels.CLITest do
         handler_id,
         [:fermix, :channel, :message],
         fn event, measurements, metadata, pid ->
-          send(pid, {:telemetry, event, measurements, metadata})
+          if self() == pid do
+            send(pid, {:telemetry, event, measurements, metadata})
+          end
         end,
         test_pid
       )

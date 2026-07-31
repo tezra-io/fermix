@@ -83,7 +83,7 @@ defmodule FermixCore.Tools.MemoryStoreTest do
       handler_id,
       [:fermix, :tool, :exec],
       fn event, measurements, metadata, _config ->
-        if metadata.tool == "memory_store" do
+        if self() == test_pid and metadata.tool == "memory_store" do
           send(test_pid, {:telemetry, event, measurements, metadata})
         end
       end,

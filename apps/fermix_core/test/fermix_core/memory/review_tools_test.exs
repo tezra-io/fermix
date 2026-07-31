@@ -254,7 +254,9 @@ defmodule FermixCore.Memory.ReviewToolsTest do
       handler_id,
       [:fermix, :memory, :write],
       fn _event, measurements, metadata, _config ->
-        send(test_pid, {:memory_write, measurements, metadata})
+        if self() == test_pid do
+          send(test_pid, {:memory_write, measurements, metadata})
+        end
       end,
       nil
     )

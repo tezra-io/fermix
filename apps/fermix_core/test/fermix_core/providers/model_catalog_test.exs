@@ -88,7 +88,9 @@ defmodule FermixCore.Providers.ModelCatalogTest do
         telemetry_id,
         [:fermix, :model_catalog, :unknown_model],
         fn event, measurements, metadata, test_pid ->
-          send(test_pid, {:telemetry, event, measurements, metadata})
+          if self() == test_pid do
+            send(test_pid, {:telemetry, event, measurements, metadata})
+          end
         end,
         self()
       )
@@ -108,7 +110,9 @@ defmodule FermixCore.Providers.ModelCatalogTest do
         telemetry_id,
         [:fermix, :model_catalog, :unknown_model],
         fn event, measurements, metadata, test_pid ->
-          send(test_pid, {:telemetry, event, measurements, metadata})
+          if self() == test_pid do
+            send(test_pid, {:telemetry, event, measurements, metadata})
+          end
         end,
         self()
       )

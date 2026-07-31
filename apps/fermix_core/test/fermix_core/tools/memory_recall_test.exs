@@ -523,7 +523,7 @@ defmodule FermixCore.Tools.MemoryRecallTest do
       handler_id,
       [:fermix, :tool, :exec],
       fn event, measurements, metadata, _config ->
-        if metadata.tool == "memory_recall" do
+        if self() == test_pid and metadata.tool == "memory_recall" do
           send(test_pid, {:telemetry, event, measurements, metadata})
         end
       end,
