@@ -122,7 +122,9 @@ defmodule FermixCore.Tools.ToolSearchTest do
       "toolsearch-test-#{inspect(ref)}",
       [:fermix, :tool_search, :query],
       fn _event, measurements, metadata, _config ->
-        send(test_pid, {:tool_search_query, measurements, metadata})
+        if self() == test_pid do
+          send(test_pid, {:tool_search_query, measurements, metadata})
+        end
       end,
       nil
     )

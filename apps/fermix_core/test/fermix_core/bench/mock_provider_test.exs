@@ -33,7 +33,9 @@ defmodule FermixCore.Bench.MockProviderTest do
       handler_id,
       [[:fermix, :provider, :call], [:fermix, :provider, :tool_schema]],
       fn event, measurements, metadata, _config ->
-        send(test_pid, {:telemetry, event, measurements, metadata})
+        if self() == test_pid do
+          send(test_pid, {:telemetry, event, measurements, metadata})
+        end
       end,
       nil
     )
