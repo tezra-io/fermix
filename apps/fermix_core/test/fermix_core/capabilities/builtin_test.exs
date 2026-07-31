@@ -122,5 +122,40 @@ defmodule FermixCore.Capabilities.BuiltinTest do
              "built-ins missing an explicit @policy_defaults entry (would default to " <>
                ":read_only and silently join the subagent surface): #{inspect(unclassified)}"
     end
+
+    # Fail-closed at test time, declarative in one table: a new built-in must
+    # state whether it hands back owner data. Without this, `owner_only?`
+    # defaults to false and the tool silently joins the guest surface — the
+    # same fail-open shape the policy_class guard above exists to prevent.
+    test "every seeded built-in declares owner_only? explicitly" do
+      undeclared =
+        BuiltinSeeder.builtin_tool_modules()
+        |> Enum.map(& &1.name())
+        |> Enum.reject(&Builtin.owner_only_declared?/1)
+
+      assert undeclared == [],
+             "built-ins missing an explicit owner_only? decision (would default to " <>
+               "false and silently join the guest surface): #{inspect(undeclared)}"
+    end
+
+    test "the tools that return owner data are flagged owner_only?" do
+      flagged =
+        BuiltinSeeder.builtin_tool_modules()
+        |> Enum.map(&Builtin.from_tool_module/1)
+        |> Enum.filter(& &1.owner_only?)
+        |> Enum.map(& &1.name)
+        |> Enum.sort()
+
+      assert flagged == [
+               "content_search",
+               "file_read",
+               "get_job_run",
+               "git_read",
+               "glob_search",
+               "list_job_runs",
+               "list_jobs",
+               "memory_sources_list"
+             ]
+    end
   end
 end

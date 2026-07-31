@@ -6,6 +6,7 @@ defmodule FermixCore.Tools.ToolHelp do
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry
   alias FermixCore.Tools.Support
 
@@ -52,7 +53,7 @@ defmodule FermixCore.Tools.ToolHelp do
   defp do_execute(args, context) do
     with {:ok, cap_name} <- Support.required_string(args, "name"),
          registry = Map.get(context, :capability_registry, Registry),
-         {:ok, rendered} <- render(registry, cap_name) do
+         {:ok, rendered} <- render(registry, cap_name, context) do
       {:ok, Tool.success(rendered)}
     else
       {:error, reason} -> Support.error(reason)
@@ -63,20 +64,48 @@ defmodule FermixCore.Tools.ToolHelp do
   Render one capability's full docs (description, parameters, examples,
   failure modes) as markdown. Shared renderer for `tool_help` and the
   `tool_describe` bridge (M10) — one renderer, two agent-facing names.
+
+  Rendering is bounded by the caller's own ceiling: `Registry.find/2` is an
+  unfiltered ETS lookup, so discovery would otherwise expose the full schema of
+  capabilities the caller can never dispatch. A capability outside the ceiling
+  reports the same "Unknown capability" as one that does not exist — deliberately
+  identical, so the answer never confirms what the caller may not see.
   """
-  @spec render(GenServer.server(), String.t()) :: {:ok, String.t()} | {:error, String.t()}
-  def render(registry, cap_name) when is_binary(cap_name) do
-    with {:ok, capability} <- find_capability(registry, cap_name) do
+  @spec render(GenServer.server(), String.t(), map()) ::
+          {:ok, String.t()} | {:error, String.t()}
+  def render(registry, cap_name, context \\ %{}) when is_binary(cap_name) and is_map(context) do
+    with {:ok, capability} <- find_capability(registry, cap_name, context) do
       {:ok, format_capability(capability)}
     end
   end
 
-  defp find_capability(registry, cap_name) do
+  defp find_capability(registry, cap_name, context) do
     case Registry.find(registry, cap_name) do
-      {:ok, capability} -> {:ok, capability}
+      {:ok, capability} -> within_ceiling(capability, cap_name, context)
       :error -> {:error, "Unknown capability: #{cap_name}"}
     end
   end
+
+  defp within_ceiling(capability, cap_name, context) do
+    if visible?(capability, context) do
+      {:ok, capability}
+    else
+      {:error, "Unknown capability: #{cap_name}"}
+    end
+  end
+
+  # Both axes, mirroring `Capabilities.Registry.apply_filters/2`: `owner_only?`
+  # bounds whose data a capability returns, `policy_class` bounds what it does.
+  # An absent trust or policy is an internal caller (a unit test, a non-loop
+  # entry point) and stays unfiltered, matching the registry's storage-primitive
+  # semantics.
+  defp visible?(%Capability{owner_only?: true}, %{source_trust: :guest}), do: false
+
+  defp visible?(%Capability{policy_class: class}, %{effective_policy: classes})
+       when is_list(classes),
+       do: class in classes
+
+  defp visible?(%Capability{}, _context), do: true
 
   defp format_capability(capability) do
     [

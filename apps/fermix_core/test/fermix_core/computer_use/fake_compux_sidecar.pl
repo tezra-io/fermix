@@ -6,7 +6,7 @@ use strict;
 use warnings;
 $| = 1;
 
-my $proto = $ENV{FAKE_PROTO} // 4;
+my $proto = $ENV{FAKE_PROTO} // 5;
 
 while (my $line = <STDIN>) {
     if ($line =~ /hello/) {

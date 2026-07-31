@@ -53,7 +53,11 @@ defmodule FermixCore.ComputerUse.CaptureHealthTest do
 
     CaptureHealth.record_success()
     assert :ok = CaptureHealth.status()
-    assert open_breaker.() == first, "a healthy capture resets the escalation"
+    # `status` returns clock-derived REMAINING time (`until - now`), so equality
+    # with the first reading flakes on a millisecond tick under suite load. The
+    # property is the TIER: a post-reset open backs off at tier #1 again — far
+    # below the escalated second reading.
+    assert open_breaker.() < second, "a healthy capture resets the escalation to the first tier"
   end
 
   test "with no CU tree there is no history, so capture is not blocked by the breaker" do

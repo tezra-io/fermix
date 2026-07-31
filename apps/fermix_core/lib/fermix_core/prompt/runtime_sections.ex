@@ -86,6 +86,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
     """
     ## Runtime Contract
     #{deferred_tools_contract()}- Prefer direct Fermix built-ins over shell, curl, grep, computer-use, or external automation when a built-in owns the verb — but `computer_use` is the ONLY tool that acts on the user's OWN live screen; use it when the task is about a page/app/session they already have open (`browser`/`shell` run in their own context and won't touch their screen).
+    - Even on the user's own screen, an intent the OS can NAME is a script, not a pixel hunt: launch apps from `shell` (`open -a` on macOS), drive app menus/settings/Finder through the OS scripting surface where it names the object (AppleScript via `osascript` on macOS), and spend `computer_use` clicks only on state that exists solely as pixels.
     - Web routing — pick ONE and commit; switch only on a new reason, never rotate through tools for the same goal:
       - If a connected plugin owns the surface (e.g. `github_*` for GitHub, `notion_*` for Notion, `obsidian_*` for the vault, `x_*` for X/Twitter, the Google tools for mail/calendar/drive) use its tools — they hit the real API directly; do NOT open the browser or `web_search` for that surface. Any such plugin is listed under Plugins below.
       - `web_search` for static facts with no known URL (hours, prices, schedules, addresses, lookups).

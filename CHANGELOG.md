@@ -6,7 +6,7 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.7.0] - 2026-07-28
+## [0.7.0] - 2026-07-30
 
 ### Added
 
@@ -37,6 +37,51 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   desktop it does not care about.
 
 ### Fixed
+
+- **A brief provider hiccup no longer quietly moves your whole turn to a
+  different model.** When the provider you normally use hit a momentary failure
+  — a capacity blip, a dropped connection — Fermix moved straight to your next
+  configured provider on the very first error. That provider is a different
+  model, and whichever one answers keeps the rest of the turn, so a few seconds
+  of trouble could hand an entire conversation or scheduled job to a smaller
+  model for its whole run, still reported as a success, with nothing anywhere
+  saying the model had changed. The original provider is now tried again a few
+  times, with a short growing pause between attempts, before anything moves.
+  Moving on still happens once those retries are spent, so a real outage is
+  still covered, and errors that a retry cannot fix still move on immediately.
+  Scheduled jobs are unchanged for now: they deliberately opt out of this retry
+  and keep their own slower one, so they still move to the next provider on the
+  first hiccup.
+
+- **"I didn't get a response — please try again" is no longer the answer to a
+  request that actually worked.** When a reply from the primary provider was cut
+  off before it finished, Fermix read the silence as a complete answer that
+  happened to be empty: the turn ended with nothing to say, you got a canned retry
+  line, and nothing anywhere recorded a failure. It also lost work that had already
+  succeeded — a finished coding-agent run whose result was being written up came
+  back as that same line. A reply that arrives with nothing in it at all is now
+  treated as the failure it is, so it retries or moves to your next configured
+  provider, and when the provider says *why* it stopped, that reason is recorded
+  instead of discarded. A reply that was cut off partway still comes through:
+  a partial answer is more use than an error, and throwing it away would also
+  strand a turn that had already run tools.
+
+- **Asking a resumed Codex run for a sandbox level no longer fails.** Continuing a
+  thread and choosing a sandbox posture in the same call was refused outright,
+  because the resume command has no `-s` flag. It does accept the same setting as
+  a config override, so the posture is now honored on both kinds of run. A resumed
+  thread already keeps the posture it was started with, so this matters when you
+  want to *change* it partway through — which is exactly when the refusal used to
+  cost a wasted step. Two parameters are still refused on a resume, each for its
+  own reason, and the message now says which and what to do instead.
+- **Coding-harness parameter errors are readable.** A refused parameter came back
+  as raw internal syntax — `{:param_not_supported_with_resume, :sandbox}` was
+  delivered verbatim in a real run — which reads as a broken Fermix rather than a
+  request the coding CLI cannot serve. Every one of these now states the problem
+  and names the next move, for both Codex and Claude Code: a bad effort or
+  permission mode lists the levels that exist, combining `resume` with `continue`
+  explains why they conflict, and a directory outside the sandbox names the
+  directory and how to grant it instead of printing an internal tag.
 
 - **Voice calls were running without their own rules.** The voice-only rules file
   (`REALTIME.md` — speak briefly, lead with the answer, do not narrate tool use)

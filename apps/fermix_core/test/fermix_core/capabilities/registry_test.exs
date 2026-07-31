@@ -23,8 +23,48 @@ defmodule FermixCore.Capabilities.RegistryTest do
       executor: {FakeMod, :execute, []},
       policy_class: Keyword.get(opts, :policy_class, :read_only),
       hidden_from_agent?: Keyword.get(opts, :hidden_from_agent?, false),
+      owner_only?: Keyword.get(opts, :owner_only?, false),
       metadata: Keyword.get(opts, :metadata, %{})
     })
+  end
+
+  # `:read_only` bounds what a guest may DO; it says nothing about whose data a
+  # read returns. `owner_only?` is the second axis: capabilities that hand back
+  # the owner's files, memories or scheduled-job records are never in a guest's
+  # surface even though their policy class admits them.
+  describe "list/2 with :owner_only? capabilities" do
+    setup %{registry: reg} do
+      :ok = Registry.register(reg, cap("file_read", owner_only?: true))
+      :ok = Registry.register(reg, cap("list_jobs", owner_only?: true))
+      :ok = Registry.register(reg, cap("react"))
+      :ok
+    end
+
+    test "an explicit guest never sees them", %{registry: reg} do
+      names = reg |> Registry.list(trust: :guest) |> Enum.map(& &1.name)
+
+      assert names == ["react"]
+    end
+
+    test "an operator sees everything", %{registry: reg} do
+      names = reg |> Registry.list(trust: :operator) |> Enum.map(& &1.name)
+
+      assert names == ["file_read", "list_jobs", "react"]
+    end
+
+    # A worker/internal caller narrows by policy class and never names a trust;
+    # `list/2` with no `:trust` stays the storage primitive (registry.ex docs).
+    test "a caller that never asked for a trust gate is unaffected", %{registry: reg} do
+      assert reg |> Registry.list([]) |> length() == 3
+      assert reg |> Registry.list(policy_classes: [:read_only]) |> length() == 3
+    end
+
+    test "an explicit guest policy narrowing still drops them", %{registry: reg} do
+      names =
+        reg |> Registry.list(trust: :guest, policy: [:read_only]) |> Enum.map(& &1.name)
+
+      assert names == ["react"]
+    end
   end
 
   describe "register/2 + find/2" do

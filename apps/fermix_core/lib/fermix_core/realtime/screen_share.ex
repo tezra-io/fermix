@@ -27,17 +27,19 @@ defmodule FermixCore.Realtime.ScreenShare do
   @tool_name "screen_share"
 
   @description """
-  Watch the operator's screen continuously for the rest of this voice call. \
-  Start it when they ask you to look at, watch, or follow along with what is on \
-  their screen (for example to play a game with them, review something they are \
-  reading, or help with an app). They do not have to use those words: any \
-  activity you and the operator are doing TOGETHER on their screen — a game you \
-  play with them, something you read or work through together — is itself the \
-  request to watch, even when you could manage with one-off screenshots. Start \
-  it and tell them you have. While it \
-  runs you receive fresh frames as they change, so you can answer from what you \
-  see; use computer_use or browser when you need to ACT on it. Stop it when they \
-  ask you to stop watching.
+  Watch the operator's screen continuously for the rest of this voice call — \
+  this is HOW you look at anything ongoing on their screen. Start it whenever \
+  the task concerns their screen for more than one glance, and say you have \
+  started watching. Their task IS the request — helping with an app or form \
+  they have open, reviewing or reading something together, following a page \
+  that updates, playing something together — do not wait for the words "watch \
+  my screen", and do not substitute repeated one-off screenshots for a feed. \
+  If they describe something you cannot see, say so and start watching rather \
+  than guessing; never imply you can see their screen while no share is \
+  running. While it runs you receive fresh frames as the screen changes, so \
+  you answer from what you see; frames are awareness — use computer_use or \
+  browser when you need to ACT. Stop when they ask you to stop watching or \
+  the on-screen activity you were needed for is over.
   """
 
   @type action :: :start | :stop
