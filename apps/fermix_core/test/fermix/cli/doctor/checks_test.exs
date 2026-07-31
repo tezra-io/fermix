@@ -439,11 +439,38 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     end
   end
 
-  describe "service_unit/0" do
+  describe "service_unit/1" do
     test "warns when no unit is installed (test environment has none)" do
       result = Checks.service_unit()
       assert result.name == "service unit"
       assert result.status in [:ok, :warn]
+    end
+
+    test "an installed, current unit is ok" do
+      result = Checks.service_unit(installed?: &(&1 == :user), drifted?: fn _scope -> false end)
+
+      assert result.status == :ok
+      assert result.detail =~ "user-scope unit installed"
+    end
+
+    # "Installed" alone read green on a unit written by an older version — the
+    # exact state that leaves a daemon running an outdated PATH, which is how
+    # coding-agent CLIs go undetected. Nothing else reports it: `upgrade` never
+    # rewrites the unit and refuses outright on a Homebrew install, so this check
+    # is the only thing that can send the operator to `fermix setup`.
+    test "a stale unit warns and names the verb that rewrites it" do
+      result = Checks.service_unit(installed?: &(&1 == :user), drifted?: fn _scope -> true end)
+
+      assert result.status == :warn
+      assert result.detail =~ "stale"
+      assert result.detail =~ "fermix setup"
+    end
+
+    test "drift is reported for a system-scope unit too" do
+      result = Checks.service_unit(installed?: &(&1 == :system), drifted?: fn _scope -> true end)
+
+      assert result.status == :warn
+      assert result.detail =~ "system-scope"
     end
   end
 

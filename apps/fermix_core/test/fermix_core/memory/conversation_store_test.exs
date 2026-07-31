@@ -510,8 +510,15 @@ defmodule FermixCore.Memory.ConversationStoreTest do
       assert measurements.durable_write_us == 0
       assert metadata.durable? == true
 
+      # The sqlite persist is async by design — that separation is what this test
+      # exists to prove — so the wait needs a bound sized for a loaded runner, not
+      # the 100ms assert_receive default (observed timing out on linux-x64 CI while
+      # the same commit passed elsewhere). Same budget and same reason as the
+      # durable-write-retry assertion below. assert_receive still returns the
+      # instant the event arrives, and every field below is still asserted.
       assert_receive {[:fermix, :memory, :message_persist], ^ref, persist_measurements,
-                      persist_metadata}
+                      persist_metadata},
+                     2_000
 
       assert persist_measurements.count == 1
       assert is_integer(persist_measurements.duration_us)
