@@ -25,13 +25,28 @@ defmodule FermixCore.Tools.GitCommandTest do
     # pid then sleeps far longer than the (short) test timeout. GitCommand routes
     # through CommandRunner (supervised: true, global host), so the wall-clock
     # timeout must both surface the tool error and sweep the OS process group.
-    assert {:error, message} =
-             GitCommand.run(dir, "status", ["--short"], executable: stub, timeout_ms: 300)
-
-    assert message =~ "git status timed out"
+    #
+    # The run is driven from a Task so the pid can be read WHILE the stub is
+    # alive. Reading it after the call returned raced the sweep against the
+    # stub's own `echo $$ > pidfile`: the timeout fires whether or not /bin/sh
+    # has run that line yet, and on a loaded host the sweep won about 1 run in
+    # 8 — the group died before the pidfile existed, so the poll then waited 5 s
+    # for a file nothing would ever write. It also made the death assertion
+    # nearly vacuous, since the process was already gone before its pid was
+    # known. Registration now has the full timeout to happen in, and the sweep
+    # is observed on a process this test saw alive.
+    task =
+      Task.async(fn ->
+        GitCommand.run(dir, "status", ["--short"], executable: stub, timeout_ms: 3_000)
+      end)
 
     pid = await_pidfile(pidfile)
     on_exit(fn -> liveness_gated_kill(pid) end)
+    assert alive?(pid)
+
+    assert {:error, message} = Task.await(task, 10_000)
+    assert message =~ "git status timed out"
+
     assert await_death(pid) == :dead
   end
 
