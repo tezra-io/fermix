@@ -228,6 +228,13 @@ defmodule FermixCore.AgentLoopTest do
 
   # Forwards `[:fermix, :tool, :exec]` to the test process for the miss-path
   # assertions. Detached on exit so the handler cannot outlive its test.
+  #
+  # The handler is process-global and runs IN the emitting process, and
+  # `[:fermix, :tool, :exec]` is emitted by nineteen other test modules — so
+  # without the `self()` guard a concurrently-running async module's event lands
+  # in this mailbox and satisfies `assert_received` first. That is what failed
+  # on CI's linux-arm64 leg: this test read `tool: "memory_recall"` where it
+  # asserted `"echo"`. Forward only what this test itself emitted.
   defp attach_tool_exec do
     test_pid = self()
     handler_id = "test-tool-exec-#{System.unique_integer([:positive])}"
@@ -236,7 +243,9 @@ defmodule FermixCore.AgentLoopTest do
       handler_id,
       [:fermix, :tool, :exec],
       fn _event, measurements, metadata, _config ->
-        send(test_pid, {:tool_exec, measurements, metadata})
+        if self() == test_pid do
+          send(test_pid, {:tool_exec, measurements, metadata})
+        end
       end,
       nil
     )
@@ -272,7 +281,9 @@ defmodule FermixCore.AgentLoopTest do
         handler_id,
         [:fermix, :capabilities, :select],
         fn event, measurements, metadata, _config ->
-          send(test_pid, {:telemetry, event, measurements, metadata})
+          if self() == test_pid do
+            send(test_pid, {:telemetry, event, measurements, metadata})
+          end
         end,
         nil
       )
@@ -721,7 +732,9 @@ defmodule FermixCore.AgentLoopTest do
         "bridge-unwrap-#{inspect(ref)}",
         [:fermix, :tool, :exec],
         fn _event, _measurements, metadata, _config ->
-          send(test_pid, {:tool_span, metadata.tool})
+          if self() == test_pid do
+            send(test_pid, {:tool_span, metadata.tool})
+          end
         end,
         nil
       )
@@ -1310,7 +1323,9 @@ defmodule FermixCore.AgentLoopTest do
         handler_id,
         [:fermix, :agent, :iteration],
         fn event, measurements, metadata, _config ->
-          send(test_pid, {:telemetry, event, measurements, metadata})
+          if self() == test_pid do
+            send(test_pid, {:telemetry, event, measurements, metadata})
+          end
         end,
         nil
       )
