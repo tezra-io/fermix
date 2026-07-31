@@ -6,6 +6,26 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-07-31
+
+### Fixed
+
+- **`fermix doctor` runs again.** It aborted with a stacktrace and printed no
+  checks at all — on every machine, whatever your config — because its
+  coding-harness disk-space probe tried to use machinery that only exists inside
+  the running daemon. The one command meant to explain what is wrong with an
+  install was the one command that could not run.
+- **Coding agents are detected when the daemon runs as a service.** The service
+  is started with a fixed list of directories to look in, and that list left out
+  `~/.local/bin` — exactly where the official Codex and Claude Code installers
+  put their binaries. Setup therefore reported "no coding agent CLI is detected"
+  on a machine with both installed, while the same CLIs resolved fine from the
+  operator's own shell. That directory is now included on macOS and Linux, added
+  last so it cannot shadow anything already being found. **After upgrading, run
+  `fermix setup` once**: it rewrites the service definition and restarts the
+  daemon, which upgrading alone does not do. Coding agents then still need the
+  one-time approval in Setup → Coding Agents.
+
 ## [0.7.0] - 2026-07-30
 
 ### Added
