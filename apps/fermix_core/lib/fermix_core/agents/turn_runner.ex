@@ -267,6 +267,12 @@ defmodule FermixCore.Agents.TurnRunner do
       # shared-chat prompt — safe only because the button delivers the token
       # privately. Defaults false, so any surface without a button keeps the token.
       private_approval_button?: Map.get(msg, :private_approval_button?, false),
+      # Coding-harness continuation depth (CODING_HARNESS_ORCHESTRATION §23.2): a
+      # finished chat-origin run re-enters the conversation as a synthesized
+      # message carrying its chain depth. A run launched from that turn inherits
+      # depth+1 on its ledger row, which is what bounds the chain — so the depth
+      # must reach the run tools through the turn context. Zero on an ordinary turn.
+      harness_continuation_depth: harness_continuation_depth(msg),
       # Reaction capability resolved by the gateway (nil on no-reaction channels).
       # Plain data, never the channel module — the `react` tool reads it to gate
       # its own advertisement and build the emoji enum (EMOJI_REACTION_ACKS §5.4).
@@ -313,6 +319,16 @@ defmodule FermixCore.Agents.TurnRunner do
   defp chat_type_of(msg) do
     metadata = Map.get(msg, :metadata) || %{}
     Map.get(metadata, :chat_type) || Map.get(metadata, "chat_type")
+  end
+
+  defp harness_continuation_depth(msg) do
+    metadata = Map.get(msg, :metadata) || %{}
+
+    case Map.get(metadata, :harness_continuation_depth) ||
+           Map.get(metadata, "harness_continuation_depth") do
+      depth when is_integer(depth) and depth > 0 -> depth
+      _absent_or_invalid -> 0
+    end
   end
 
   defp request_cwd_for(:operator, msg), do: Map.get(msg, :request_cwd)

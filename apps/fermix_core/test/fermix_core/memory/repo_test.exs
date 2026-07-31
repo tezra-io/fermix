@@ -39,7 +39,9 @@ defmodule FermixCore.Memory.RepoTest do
 
   test "opens sqlite, enables wal mode, and runs the base migration", %{repo: repo} do
     assert {:ok, "wal"} = Repo.journal_mode(server: repo)
-    assert {:ok, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]} = Repo.migration_versions(server: repo)
+
+    assert {:ok, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]} =
+             Repo.migration_versions(server: repo)
   end
 
   test "enabled_server returns nil when a named repo exits during lookup" do
@@ -52,10 +54,14 @@ defmodule FermixCore.Memory.RepoTest do
 
   test "rerunning migrations is idempotent", %{repo: repo} do
     assert :ok = Repo.migrate(server: repo)
-    assert {:ok, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]} = Repo.migration_versions(server: repo)
+
+    assert {:ok, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]} =
+             Repo.migration_versions(server: repo)
 
     assert :ok = Repo.migrate(server: repo)
-    assert {:ok, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]} = Repo.migration_versions(server: repo)
+
+    assert {:ok, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]} =
+             Repo.migration_versions(server: repo)
   end
 
   test "fermix_md migration rewrites resource_path so rollback targets FERMIX.md", %{
@@ -205,6 +211,53 @@ defmodule FermixCore.Memory.RepoTest do
 
       assert {:ok, job_columns} = sqlite_column_names(conn, "scheduled_jobs")
       assert "expires_at" in job_columns
+    after
+      Sqlite3.close(conn)
+    end
+  end
+
+  test "harness-runs migration creates the ledger table and indexes", %{
+    db_path: db_path,
+    repo: repo
+  } do
+    assert :ok = Repo.migrate(server: repo)
+
+    assert {:ok, conn} = Sqlite3.open(db_path, mode: :readwrite)
+
+    try do
+      assert {:ok, tables} =
+               sqlite_values(
+                 conn,
+                 "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+                 ["harness_runs"]
+               )
+
+      assert tables == ["harness_runs"]
+
+      assert {:ok, columns} = sqlite_column_names(conn, "harness_runs")
+
+      for column <- [
+            "id",
+            "vendor",
+            "rail",
+            "status",
+            "lock_roots_json",
+            "worktree_root",
+            "origin_kind",
+            "origin_session_id",
+            "delivery_status",
+            "next_delivery_at",
+            "task_id",
+            "poll_deadline",
+            "created_at",
+            "completed_at"
+          ] do
+        assert column in columns
+      end
+
+      assert {:ok, indexes} = sqlite_index_names(conn, "harness_runs")
+      assert "idx_harness_runs_status" in indexes
+      assert "idx_harness_runs_delivery_status" in indexes
     after
       Sqlite3.close(conn)
     end

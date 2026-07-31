@@ -348,23 +348,37 @@ defmodule FermixCore.Providers.OpenAI.Codex do
      )}
   end
 
+  # A 200 is not by itself a delivered response. Without a check, a stream that
+  # ended before `response.completed` became a SUCCESSFUL EMPTY TURN —
+  # `build_turn/5` reads an absent usage map as zero tokens and an empty output
+  # list as empty text — so the loop had nothing to say, the channel sent its
+  # canned "I didn't get a response" line, and nothing was logged. 69 such turns
+  # sit in the operator's traces.
+  #
+  # The gate is "nothing was delivered", NOT "the stream did not finish tidily",
+  # and the difference matters. `items` fills from `response.output_item.added`
+  # and `.done`, which are independent of the terminal event, so a cut stream can
+  # still carry a finished message or a `function_call` — 3 of those 72 zero-usage
+  # turns did. Erroring on those would discard delivered content, and on a
+  # CONTINUATION it would also convert a recoverable turn into a dead one:
+  # `AgentLoop.continue_with_retry/3` runs with `eligible?: false` and
+  # `retryable?: &Transient.pre_response_timeout?/1`, which `:transport_closed`
+  # matches neither of, and `Jobs.Runner` refuses to retry once tools have
+  # started. So content is never thrown away — it is returned with a warning, and
+  # the error is reserved for the case with nothing to lose.
+  #
+  # That also makes the retry safe by construction rather than by veto: every
+  # streamed delta and every `{:text_done, _}` / `{:reasoning_done, _}` the user
+  # can already see rides an output item, so a turn whose content reached the
+  # channel is never the empty case and can never be re-issued.
   defp handle_response({:ok, %Req.Response{status: 200, body: body}}, turn_state) do
     parsed = parse_body_to_map(body)
+    status = Map.get(parsed, "status")
 
-    case ResponsesShared.build_turn(
-           parsed,
-           turn_state.model,
-           turn_state.input,
-           turn_state.tools,
-           turn_state.capabilities,
-           turn_state.invariant_metrics
-         ) do
-      {:ok, turn} ->
-        provider_state =
-          turn.provider_state
-          |> Map.put(:instructions, turn_state.instructions)
-
-        {:ok, %{turn | provider_state: provider_state}}
+    cond do
+      status == "completed" -> turn_from(parsed, turn_state)
+      Map.get(parsed, "output", []) == [] -> {:error, undelivered_error(status, parsed)}
+      true -> partial_turn(status, parsed, turn_state)
     end
   end
 
@@ -647,6 +661,68 @@ defmodule FermixCore.Providers.OpenAI.Codex do
   end
 
   defp decode_error_body(_body), do: %{}
+
+  defp turn_from(parsed, turn_state) do
+    case ResponsesShared.build_turn(
+           parsed,
+           turn_state.model,
+           turn_state.input,
+           turn_state.tools,
+           turn_state.capabilities,
+           turn_state.invariant_metrics
+         ) do
+      {:ok, turn} ->
+        provider_state =
+          turn.provider_state
+          |> Map.put(:instructions, turn_state.instructions)
+
+        {:ok, %{turn | provider_state: provider_state}}
+    end
+  end
+
+  # The stream carried output but never said it finished, so what arrived may be
+  # truncated (a half-built `function_call`'s arguments will not parse, and the
+  # model is told so on the next turn). Returning it preserves the behavior that
+  # actually recovers; the warning is what used to be missing entirely.
+  defp partial_turn(status, parsed, turn_state) do
+    Logger.warning(
+      "Codex stream ended #{status || "with no terminal event"} after delivering " <>
+        "#{length(Map.get(parsed, "output", []))} output item(s): #{failure_text(parsed)}. " <>
+        "Keeping what arrived; it may be truncated."
+    )
+
+    turn_from(parsed, turn_state)
+  end
+
+  # Both undelivered cases mint `:closed`. That is one kind, not two, on purpose:
+  # `:transport_closed` is the only transport kind with its own user-facing
+  # sentence in `Agents.TurnRunner.provider_error_reply/1` — a bespoke reason
+  # atom falls to the catch-all, which renders `inspect(reason)` and shows the
+  # operator a raw Elixir tuple while never reading `message`. The server's own
+  # words still reach the log and the trace, since `Error.telemetry_metadata/1`
+  # carries `message` as `error`.
+  defp undelivered_error(nil, _parsed) do
+    ProviderError.transport(:openai_codex, :codex, :closed,
+      message: "Codex response stream ended before any terminal event and delivered no output."
+    )
+  end
+
+  defp undelivered_error(status, parsed) do
+    ProviderError.transport(:openai_codex, :codex, :closed,
+      message:
+        "Codex reported the response #{status} with no output delivered: #{failure_text(parsed)}"
+    )
+  end
+
+  defp failure_text(parsed) do
+    case Map.get(parsed, "failure") do
+      %{"message" => message} when is_binary(message) and message != "" -> message
+      %{"reason" => reason} when is_binary(reason) and reason != "" -> reason
+      %{"code" => code} when is_binary(code) and code != "" -> code
+      nil -> "the stream gave no reason"
+      other -> inspect(other)
+    end
+  end
 
   defp unpersisted_item_error?(body) do
     body

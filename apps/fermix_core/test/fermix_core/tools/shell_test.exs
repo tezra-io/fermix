@@ -245,6 +245,82 @@ defmodule FermixCore.Tools.ShellTest do
 
       :telemetry.detach(handler_id)
     end
+
+    # Typed proof that policy stopped a command before it began. Free-form error
+    # text is not proof — a command that genuinely ran and exited non-zero also
+    # produces error text — so consumers key off this marker and nothing else.
+    test "a hardline block carries typed pre-execution policy evidence" do
+      handler_id = attach_telemetry()
+
+      # Inert even if both the classifier and the assertion regress.
+      Shell.execute(%{"command" => "dd if=/dev/zero of=/dev/null count=1"}, @context)
+
+      assert_receive {:telemetry, [:fermix, :tool, :exec], _measurements, metadata}
+      assert metadata.success == false
+
+      assert metadata.policy_enforcement == %{
+               source: "sandbox",
+               decision: "hardline",
+               phase: "pre_execution"
+             }
+
+      :telemetry.detach(handler_id)
+    end
+
+    test "a working directory outside the sandbox roots is typed as a deny" do
+      root = FermixTestSupport.SafeRm.make_tmp_dir!("shell-root")
+      outside = FermixTestSupport.SafeRm.make_tmp_dir!("shell-outside")
+      handler_id = attach_telemetry()
+
+      Shell.execute(
+        %{"command" => "echo hi", "working_dir" => outside},
+        sandbox_context(mode: :strict, workspace_root: root)
+      )
+
+      assert_receive {:telemetry, [:fermix, :tool, :exec], _measurements, metadata}
+
+      assert metadata.policy_enforcement == %{
+               source: "sandbox",
+               decision: "deny",
+               phase: "pre_execution"
+             }
+
+      :telemetry.detach(handler_id)
+      FermixTestSupport.SafeRm.rm_rf!(root)
+      FermixTestSupport.SafeRm.rm_rf!(outside)
+    end
+
+    # The negative case is what keeps the marker honest: a command that actually
+    # executed must never look like a blocked one.
+    test "a command that ran and failed carries no policy evidence" do
+      handler_id = attach_telemetry()
+
+      Shell.execute(%{"command" => "exit 1"}, @context)
+
+      assert_receive {:telemetry, [:fermix, :tool, :exec], _measurements, metadata}
+      assert metadata.success == false
+      refute Map.has_key?(metadata, :policy_enforcement)
+
+      :telemetry.detach(handler_id)
+    end
+
+    test "a missing working directory is not a policy denial" do
+      root = FermixTestSupport.SafeRm.make_tmp_dir!("shell-root")
+      handler_id = attach_telemetry()
+
+      Shell.execute(
+        %{"command" => "echo hi", "working_dir" => Path.join(root, "missing")},
+        sandbox_context(mode: :strict, workspace_root: root)
+      )
+
+      assert_receive {:telemetry, [:fermix, :tool, :exec], _measurements, metadata}
+      assert metadata.success == false
+      assert metadata.failure == "missing_working_dir"
+      refute Map.has_key?(metadata, :policy_enforcement)
+
+      :telemetry.detach(handler_id)
+      FermixTestSupport.SafeRm.rm_rf!(root)
+    end
   end
 
   defp attach_telemetry do

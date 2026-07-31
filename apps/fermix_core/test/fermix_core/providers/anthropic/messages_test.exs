@@ -434,7 +434,10 @@ defmodule FermixCore.Providers.Anthropic.MessagesTest do
         Req.Test.json(conn, text_response_body())
       end)
 
-      assert {:ok, _turn} = Messages.chat([%{role: "user", content: "."}], [], chat_opts())
+      for model <- ["claude-sonnet-4-6", "claude-opus-5", "claude-opus-4-8"] do
+        assert {:ok, _turn} =
+                 Messages.chat([%{role: "user", content: "."}], [], chat_opts(model: model))
+      end
     end
 
     test "omits thinking for models without adaptive support" do
@@ -467,19 +470,21 @@ defmodule FermixCore.Providers.Anthropic.MessagesTest do
                )
     end
 
-    test "drops temperature for Claude 4.7+ models that reject sampling params" do
+    test "drops temperature for the Claude 4.7+ and 5-generation models that reject it" do
       Req.Test.stub(__MODULE__, fn conn ->
         {:ok, body, conn} = Plug.Conn.read_body(conn)
         refute Map.has_key?(Jason.decode!(body), "temperature")
-        Req.Test.json(conn, Map.put(text_response_body(), "model", "claude-opus-4-8"))
+        Req.Test.json(conn, text_response_body())
       end)
 
-      assert {:ok, _turn} =
-               Messages.chat(
-                 [%{role: "user", content: "hi"}],
-                 [],
-                 chat_opts(model: "claude-opus-4-8", temperature: 0.2)
-               )
+      for model <- ["claude-opus-4-8", "claude-opus-5", "claude-fable-5"] do
+        assert {:ok, _turn} =
+                 Messages.chat(
+                   [%{role: "user", content: "hi"}],
+                   [],
+                   chat_opts(model: model, temperature: 0.2)
+                 )
+      end
     end
 
     test "returns an auth error without a credential" do

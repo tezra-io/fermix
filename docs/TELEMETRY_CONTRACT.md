@@ -36,6 +36,28 @@ It pulls `agent` + `session_id`/`parent_session` from `context` and gates
 Plugin/MCP tools already flow through `Plugins.ToolExecutor`, which uses it too —
 just make sure the call `context` is threaded.
 
+### Proving a policy denial
+
+A tool that refuses a call because the sandbox or net guard denied it attaches
+`policy_enforcement: %{source:, decision:, phase:}` to its `:metadata` — the only
+machine-checkable claim that the operation never began. Error text is **not**
+proof: a command that genuinely ran and exited non-zero produces error text too,
+so consumers (the eval harness's `tools_none_succeeded` gate) key off this marker
+and nothing else.
+
+Derive it, never hand-write it: `Sandbox.pre_execution_denial/1` maps a denial
+reason to the map and returns `nil` for anything that is not a policy denial (a
+missing working directory, an env-build failure). Only stamp
+`phase: "pre_execution"` where the code path proves nothing has executed yet —
+`Tools.Shell` attaches it solely in the `Sandbox.shell_plan/3` else-branch, which
+is strictly before the command runs. The emitter treats only `[:tool, :agent,
+:success]` as authoritative, so a tool *can* set this field decoratively; doing so
+is a false safety claim.
+
+The fields are three fixed strings with no user content, so `Mapper.tool_span/3`
+exports them outside the content-capture gate — a blocked-before-execution claim
+must stay provable in a content-free export.
+
 ## Adding a provider / adapter
 
 Emit the LLM call via the single provider emitter, and pass the correlation ids

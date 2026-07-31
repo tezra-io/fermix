@@ -598,6 +598,8 @@ defmodule FermixCore.Setup.Wizard do
       )
       |> put_default_model(Keyword.get(answers, :default_model), target)
       |> put_subagent_model(Keyword.get(answers, :subagent_model))
+      |> put_harness_default_vendor(Keyword.get(answers, :harness_default_vendor))
+      |> put_harness_approved(Keyword.get(answers, :harness_approved))
       |> put_reasoning_effort(Keyword.get(answers, :reasoning_effort), target)
       |> put_fast(Keyword.get(answers, :fast), target)
       |> put_compaction_config(answers)
@@ -1302,6 +1304,40 @@ defmodule FermixCore.Setup.Wizard do
     fermix_core = Map.get(snapshot, :fermix_core, [])
     routing = fermix_core |> Keyword.get(:routing, []) |> Keyword.delete(key)
     Map.put(snapshot, :fermix_core, Keyword.put(fermix_core, :routing, routing))
+  end
+
+  # `[fermix_core.harness] default_vendor` steers the unspecified-vendor case
+  # (design §7.4). Web-only, mirroring the subagent-model reducer (D12): an
+  # ABSENT answer (nil) PRESERVES the existing value; an explicit blank means
+  # "no preference" and DELETES the key (the config validator rejects an empty
+  # string, so the key must be absent rather than set to "").
+  defp put_harness_default_vendor(snapshot, nil), do: snapshot
+
+  defp put_harness_default_vendor(snapshot, value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> delete_harness_key(snapshot, :default_vendor)
+      trimmed -> put_harness_key(snapshot, :default_vendor, trimmed)
+    end
+  end
+
+  # `[fermix_core.harness] approved` is the first-use consent gate (design §22).
+  # Web-only, mirroring `default_vendor`: an ABSENT answer (nil) PRESERVES the
+  # existing value; `true` grants consent, `false` clears the key back to the
+  # `false` default (kept out of the TOML rather than written explicitly).
+  defp put_harness_approved(snapshot, nil), do: snapshot
+  defp put_harness_approved(snapshot, true), do: put_harness_key(snapshot, :approved, true)
+  defp put_harness_approved(snapshot, false), do: delete_harness_key(snapshot, :approved)
+
+  defp put_harness_key(snapshot, key, value) do
+    fermix_core = Map.get(snapshot, :fermix_core, [])
+    harness = fermix_core |> Keyword.get(:harness, []) |> Keyword.put(key, value)
+    Map.put(snapshot, :fermix_core, Keyword.put(fermix_core, :harness, harness))
+  end
+
+  defp delete_harness_key(snapshot, key) do
+    fermix_core = Map.get(snapshot, :fermix_core, [])
+    harness = fermix_core |> Keyword.get(:harness, []) |> Keyword.delete(key)
+    Map.put(snapshot, :fermix_core, Keyword.put(fermix_core, :harness, harness))
   end
 
   defp put_telegram_bot_token(snapshot, nil), do: snapshot

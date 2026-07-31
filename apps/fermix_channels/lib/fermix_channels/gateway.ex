@@ -23,6 +23,7 @@ defmodule FermixChannels.Gateway do
   alias FermixChannels.Gateway.ReplyContext
   alias FermixChannels.Gateway.Source
   alias FermixChannels.Gateway.Transcription
+  alias FermixCore.Agents.ConversationKey
   alias FermixCore.Memory.Config
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Telemetry
@@ -105,11 +106,15 @@ defmodule FermixChannels.Gateway do
       channel.stream_capability() == :draft_edit
   end
 
+  # A configured channel streams by default ("block" works on every channel and
+  # is a no-op for non-streaming providers); an unknown or unconfigured channel
+  # carries no live turns, so it stays off. Opt out per channel with
+  # `streaming = "off"`.
   defp streaming_config(nil), do: "off"
 
   defp streaming_config(config_key) when is_atom(config_key) do
     case FermixCore.Config.channel(config_key) do
-      {:ok, config} -> Keyword.get(config, :streaming, "off")
+      {:ok, config} -> Keyword.get(config, :streaming, "block")
       {:error, :not_configured} -> "off"
     end
   end
@@ -447,14 +452,10 @@ defmodule FermixChannels.Gateway do
   defp maybe_put_context_opt(context, _key, nil), do: context
   defp maybe_put_context_opt(context, key, value), do: Map.put(context, key, value)
 
-  defp conversation_key(%Message{channel: channel, chat_id: chat_id, thread_ts: thread_ts})
-       when not is_nil(thread_ts) do
-    {channel, chat_id, thread_ts}
-  end
-
-  defp conversation_key(%Message{channel: channel, chat_id: chat_id, thread_scope: thread_scope}) do
-    {channel, chat_id, thread_scope}
-  end
+  # The command surface must key the SAME conversation the queue and the turn key
+  # (`/compact`, `/clear` operate on that history), so this derives it from the one
+  # canonical helper instead of re-deriving the tuple here.
+  defp conversation_key(%Message{} = message), do: ConversationKey.from(message)
 
   defp bot_name_for(channel) when is_binary(channel) do
     channel

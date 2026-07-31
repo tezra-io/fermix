@@ -1,8 +1,10 @@
 defmodule FermixCore.ComputerUse.Supervisor do
   @moduledoc """
   Supervises the computer-use session infrastructure: a unique-key `Registry`
-  (conversation_key → session pid) and a `DynamicSupervisor` that owns the
-  per-conversation `ComputerUse.Session` processes.
+  (conversation_key → session pid), a `DynamicSupervisor` that owns the
+  per-conversation `ComputerUse.Session` processes, and the global
+  `CaptureHealth` breaker (which must outlive those `:temporary` sessions to be
+  worth anything).
 
   Started from the application tree only when computer-use is enabled AND ready
   (`maybe_computer_use_supervisor/0`), so nothing here boots — and no OS-driver
@@ -10,6 +12,8 @@ defmodule FermixCore.ComputerUse.Supervisor do
   """
 
   use Supervisor
+
+  alias FermixCore.ComputerUse.CaptureHealth
 
   @registry FermixCore.ComputerUse.SessionRegistry
   @session_supervisor FermixCore.ComputerUse.SessionSupervisor
@@ -28,6 +32,7 @@ defmodule FermixCore.ComputerUse.Supervisor do
   @impl true
   def init(_opts) do
     children = [
+      CaptureHealth,
       {Registry, keys: :unique, name: @registry},
       {DynamicSupervisor, name: @session_supervisor, strategy: :one_for_one}
     ]

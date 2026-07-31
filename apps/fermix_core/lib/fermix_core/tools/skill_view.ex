@@ -15,7 +15,9 @@ defmodule FermixCore.Tools.SkillView do
   def name, do: "skill_view"
 
   @impl true
-  def description, do: "Load the full instructions for an installed Fermix skill."
+  def description,
+    do:
+      "Load the full instructions for an installed Fermix skill, or one of its named reference files."
 
   @impl true
   def parameters do
@@ -26,6 +28,12 @@ defmodule FermixCore.Tools.SkillView do
         name: %{
           type: "string",
           description: "Installed skill name."
+        },
+        file: %{
+          type: "string",
+          description:
+            "Optional reference file name (no extension) to load instead of the SKILL.md body, " <>
+              "when the skill body points to one."
         }
       }
     }
@@ -33,7 +41,8 @@ defmodule FermixCore.Tools.SkillView do
 
   @impl true
   def when_to_use do
-    "Use after the Skill Catalog indicates a skill may apply; loads the full SKILL.md body."
+    "Use after the Skill Catalog indicates a skill may apply; loads the full SKILL.md body. " <>
+      "Pass `file` to load a named reference file the skill body points to."
   end
 
   @impl true
@@ -46,17 +55,32 @@ defmodule FermixCore.Tools.SkillView do
 
   defp do_execute(args, context) do
     with {:ok, skill_name} <- skill_name(args),
-         {:ok, definition} <- load_skill(skill_registry(context), skill_name),
-         :ok <- within_size_limit(definition.system_prompt) do
-      Support.success_json(%{
-        name: definition.name,
-        description: definition.description,
-        trust: definition.trust,
-        source_path: definition.source_path,
-        body: definition.system_prompt
-      })
+         {:ok, file} <- optional_file(args),
+         {:ok, payload} <- build_view(skill_registry(context), skill_name, file) do
+      Support.success_json(payload)
     else
       {:error, reason} -> Support.error(reason)
+    end
+  end
+
+  defp build_view(registry, skill_name, nil) do
+    with {:ok, definition} <- load_skill(registry, skill_name),
+         :ok <- within_size_limit(definition.system_prompt) do
+      {:ok,
+       %{
+         name: definition.name,
+         description: definition.description,
+         trust: definition.trust,
+         source_path: definition.source_path,
+         body: definition.system_prompt
+       }}
+    end
+  end
+
+  defp build_view(registry, skill_name, file) do
+    with {:ok, body} <- load_reference(registry, skill_name, file),
+         :ok <- within_size_limit(body) do
+      {:ok, %{name: skill_name, file: file, body: body}}
     end
   end
 
@@ -66,6 +90,23 @@ defmodule FermixCore.Tools.SkillView do
       {:ok, value}
     end
   end
+
+  defp optional_file(args) do
+    case Map.get(args, "file") do
+      nil -> {:ok, nil}
+      value -> validate_file(value)
+    end
+  end
+
+  defp validate_file(value) when is_binary(value) do
+    if String.match?(value, @name_pattern) do
+      {:ok, value}
+    else
+      {:error, "invalid_reference_file: use letters, digits, underscore, or hyphen, max 64 chars"}
+    end
+  end
+
+  defp validate_file(_value), do: {:error, "invalid_reference_file: must be a string"}
 
   defp validate_name(value) do
     if String.match?(value, @name_pattern) do
@@ -83,6 +124,26 @@ defmodule FermixCore.Tools.SkillView do
   catch
     :exit, reason -> {:error, "skill_registry_unavailable: #{inspect(reason)}"}
   end
+
+  defp load_reference(registry, skill_name, file) do
+    case SkillRegistry.read_reference(registry, skill_name, file) do
+      {:ok, body} -> {:ok, body}
+      {:error, reason} -> {:error, reference_error(reason, skill_name, file)}
+    end
+  catch
+    :exit, reason -> {:error, "skill_registry_unavailable: #{inspect(reason)}"}
+  end
+
+  defp reference_error({:unknown_skill, _}, skill_name, _file), do: "unknown_skill: #{skill_name}"
+
+  defp reference_error({:invalid_reference_name, _}, _skill_name, file),
+    do: "invalid_reference_file: #{file}"
+
+  defp reference_error({:reference_not_found, _}, skill_name, file),
+    do: "reference_not_found: #{skill_name}/#{file}"
+
+  defp reference_error({:read_failed, reason}, _skill_name, _file),
+    do: "reference_read_failed: #{inspect(reason)}"
 
   defp within_size_limit(body) do
     if byte_size(body) <= @view_max_bytes do

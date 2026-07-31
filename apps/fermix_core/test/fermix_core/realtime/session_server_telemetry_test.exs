@@ -86,8 +86,10 @@ defmodule FermixCore.Realtime.SessionServerTelemetryTest do
     assert_receive {:tele, [:fermix, :realtime, :session_updated], _m, updated}
     assert updated.session_id == @session_scope
 
+    Process.unlink(server)
     assert :ok = SessionServer.call_stop(server)
     assert_receive {:tele, [:fermix, :realtime, :call_stop], _m, stopped}
+    assert stopped.reason == "call_stop", "every terminal exit names why it ended"
     assert stopped.session_id == @session_scope
   end
 
@@ -139,7 +141,8 @@ defmodule FermixCore.Realtime.SessionServerTelemetryTest do
     assert_receive {:tele, [:fermix, :provider, :call], _m, meta}
     assert meta.provider == :openai
     assert meta.model == "gpt-realtime-2"
-    assert meta.tokens == %{prompt: 12, completion: 8, total: 20}
+    # `cached` rides with the totals so a call's cost is auditable from its trace.
+    assert meta.tokens == %{prompt: 12, completion: 8, total: 20, cached: 0}
     assert meta.session_id == @session_scope
     refute_receive {:tele, [:fermix, :provider, :call], _m2, _meta2}, 50
   end
@@ -175,6 +178,7 @@ defmodule FermixCore.Realtime.SessionServerTelemetryTest do
     # 4800 bytes of PCM16 @ 48 bytes/ms = 100 ms of input audio.
     assert :ok = SessionServer.audio_chunk(server, :binary.copy(<<0>>, 4800))
 
+    Process.unlink(server)
     assert :ok = SessionServer.call_stop(server)
 
     assert_receive {:tele, [:fermix, :realtime, :call_stop], measurements, _meta}

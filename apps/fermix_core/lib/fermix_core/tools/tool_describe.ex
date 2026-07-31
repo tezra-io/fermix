@@ -71,7 +71,7 @@ defmodule FermixCore.Tools.ToolDescribe do
   defp do_execute(args, context) do
     with {:ok, cap_name} <- Support.required_string(args, "name"),
          registry = Map.get(context, :capability_registry, Registry),
-         {:ok, rendered} <- ToolHelp.render(registry, cap_name) do
+         {:ok, rendered} <- ToolHelp.render(registry, cap_name, context) do
       {:ok, Tool.success(rendered)}
     else
       {:error, reason} -> Support.error(reason)

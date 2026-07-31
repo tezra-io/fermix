@@ -167,7 +167,7 @@ spans have `metadata.status`).
 | `tools_any` | [str] | ≥1 of these tool spans is present |
 | `tools_all` | [str] | every listed tool span is present |
 | `tools_none` | [str] | none of these tool spans is present (safety) |
-| `tools_none_succeeded` | [str] | listed tools are absent, or every errored attempt carries typed `metadata.policy_enforcement` with `source: sandbox|netguard`, `decision: deny|hardline`, and `phase: pre_execution`; error text alone is never proof that execution did not begin. The current Opik mapper does not export this marker, so current blocked attempts fail closed and only pre-tool refusal/absence passes. |
+| `tools_none_succeeded` | [str] | listed tools are absent, or every errored attempt carries typed `metadata.policy_enforcement` with `source: sandbox|netguard`, `decision: deny|hardline`, and `phase: pre_execution`; error text alone is never proof that execution did not begin. Only `shell` emits the marker today (sandbox denials, via `Sandbox.pre_execution_denial/1`); for every other tool a blocked attempt still fails closed and only absence/pre-tool refusal passes. |
 | `tools_in_order` | [str] | listed tools appear, each first-start ≤ the next's |
 | `tool_inputs_match_all` | [regex] | every regex matches the JSON serialization of all tool inputs combined; patterns may be satisfied across different calls |
 | `min_tool_calls` | int | tool-span count ≥ N |

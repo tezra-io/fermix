@@ -340,6 +340,146 @@ defmodule FermixCore.Tools.MemoryRecallTest do
     end
   end
 
+  # The data scope of a read is a property of the CALLER, never of the model's
+  # arguments. A guest is clamped to the conversation it is actually in; a
+  # scheduled job is pinned to its own job memory. Both were previously
+  # escapable by the model simply naming a wider `scope`.
+  describe "execute/2 - caller-bound scope" do
+    setup %{repo: repo} do
+      assert {:ok, _memory} =
+               Repo.upsert_memory(
+                 %{
+                   agent_id: "main",
+                   owner_id: "default",
+                   scope_type: "owner",
+                   scope_id: "default",
+                   category: "identity",
+                   key: "clinic",
+                   value: "The owner sees Dr Vance on Thursdays.",
+                   source_type: "main_agent"
+                 },
+                 server: repo
+               )
+
+      :ok
+    end
+
+    test "an operator keeps the widest scope", %{context: context} do
+      assert {:ok, result} =
+               MemoryRecall.execute(
+                 %{"search" => "Dr Vance", "scope" => "all"},
+                 Map.put(context, :source_trust, :operator)
+               )
+
+      assert result.success == true
+      assert result.output =~ "Thursdays"
+    end
+
+    test "a guest naming scope=all cannot read outside its own conversation", %{
+      context: context
+    } do
+      assert {:ok, result} =
+               MemoryRecall.execute(
+                 %{"search" => "Dr Vance", "scope" => "all"},
+                 Map.put(context, :source_trust, :guest)
+               )
+
+      assert result.success == true
+      assert result.output =~ "No lexical matches"
+      refute result.output =~ "Thursdays"
+    end
+
+    test "a guest naming scope=owner cannot read the owner's promoted facts", %{
+      context: context
+    } do
+      assert {:ok, result} =
+               MemoryRecall.execute(
+                 %{"search" => "Dr Vance", "scope" => "owner"},
+                 Map.put(context, :source_trust, :guest)
+               )
+
+      assert result.success == true
+      refute result.output =~ "Thursdays"
+    end
+
+    test "a guest keeps recall over the conversation it is in", %{
+      context: context,
+      conv_key: conv_key,
+      store: store
+    } do
+      Store.store(conv_key, "standup", "The team meets at 09:30.", server: store)
+
+      assert {:ok, result} =
+               MemoryRecall.execute(
+                 %{"search" => "standup", "scope" => "all"},
+                 Map.put(context, :source_trust, :guest)
+               )
+
+      assert result.success == true
+      assert result.output =~ "The team meets at 09:30."
+    end
+
+    test "a scheduled job naming scope=all stays pinned to its own job memory", %{
+      context: base_context,
+      repo: repo
+    } do
+      assert {:ok, _memory} =
+               Repo.upsert_memory(
+                 %{
+                   agent_id: "main",
+                   owner_id: "default",
+                   scope_type: "job",
+                   scope_id: "job:daily_digest",
+                   category: "job_run_summary",
+                   key: "latest",
+                   value: "The digest found a storage warning.",
+                   source_id: "job:daily_digest",
+                   source_type: "scheduled_job"
+                 },
+                 server: repo
+               )
+
+      context =
+        Map.merge(base_context, %{
+          conversation_key: {:scheduled_job, "daily_digest", "run_456"},
+          memory_source_id: "job:daily_digest",
+          memory_read_scopes: ["job:self"]
+        })
+
+      assert {:ok, widened} =
+               MemoryRecall.execute(%{"search" => "Dr Vance", "scope" => "all"}, context)
+
+      assert widened.success == true
+      refute widened.output =~ "Thursdays"
+
+      assert {:ok, own} =
+               MemoryRecall.execute(%{"search" => "storage warning", "scope" => "all"}, context)
+
+      assert own.success == true
+      assert own.output =~ "The digest found a storage warning."
+    end
+
+    test "a scheduled job naming scope=owner still cannot reach conversation history", %{
+      context: base_context
+    } do
+      context =
+        Map.merge(base_context, %{
+          conversation_key: {:scheduled_job, "daily_digest", "run_456"},
+          memory_source_id: "job:daily_digest",
+          memory_read_scopes: ["job:self"]
+        })
+
+      assert {:ok, result} =
+               MemoryRecall.execute(
+                 %{"search" => "timezone", "scope" => "owner", "source" => "history"},
+                 context
+               )
+
+      assert result.success == false
+      assert result.error =~ "Scheduled jobs cannot access conversation history"
+    end
+  end
+
   describe "telemetry" do
     test "emits [:fermix, :tool, :exec] on success", %{
       context: context,

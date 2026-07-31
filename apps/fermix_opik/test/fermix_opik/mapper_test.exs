@@ -137,6 +137,36 @@ defmodule FermixOpik.MapperTest do
            }
   end
 
+  # The eval harness proves "the dangerous command never ran" from this marker
+  # alone; dropping it here is indistinguishable from no enforcement at all.
+  test "tool_span exports typed pre-execution policy evidence" do
+    metadata = %{
+      tool: "shell",
+      success: false,
+      failure: "hardline",
+      policy_enforcement: %{
+        source: "sandbox",
+        decision: "hardline",
+        phase: "pre_execution"
+      }
+    }
+
+    span =
+      Mapper.tool_span(metadata, %{duration_ms: 1},
+        trace_id: "t",
+        project_name: "fermix",
+        ended: @ended
+      )
+
+    assert span.metadata == %{
+             policy_enforcement: %{
+               source: "sandbox",
+               decision: "hardline",
+               phase: "pre_execution"
+             }
+           }
+  end
+
   test "tool_span routes error_code/error_summary into error_info" do
     metadata = %{
       tool: "browser",

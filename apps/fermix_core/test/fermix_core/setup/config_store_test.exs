@@ -12,6 +12,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     agent = Application.get_env(:fermix_core, :agent, [])
     jobs = Application.get_env(:fermix_core, :jobs, [])
     compaction = Application.get_env(:fermix_core, :compaction, [])
+    harness = Application.get_env(:fermix_core, :harness, [])
     memory = Application.get_env(:fermix_core, :memory, [])
     realtime = Application.get_env(:fermix_core, :realtime, [])
     computer_use = Application.get_env(:fermix_core, :computer_use, [])
@@ -32,6 +33,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
       Application.put_env(:fermix_core, :agent, agent)
       Application.put_env(:fermix_core, :jobs, jobs)
       Application.put_env(:fermix_core, :compaction, compaction)
+      Application.put_env(:fermix_core, :harness, harness)
       Application.put_env(:fermix_core, :memory, memory)
       Application.put_env(:fermix_core, :realtime, realtime)
       Application.put_env(:fermix_core, :computer_use, computer_use)
@@ -981,6 +983,107 @@ defmodule FermixCore.Setup.ConfigStoreTest do
 
     assert Keyword.get(compaction, :enabled) == true
     assert Keyword.get(compaction, :threshold) == 0.85
+  end
+
+  test "save/load round-trips the harness config section" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    snapshot = %{
+      fermix_core: [
+        harness: [
+          enabled: true,
+          cloud_enabled: true,
+          default_vendor: "codex",
+          max_active: 3,
+          default_timeout_minutes: 20,
+          max_event_bytes: 2_097_152,
+          max_framing_errors: 0,
+          codex_home: "/home/op/.codex"
+        ]
+      ],
+      fermix_channels: [],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ "[fermix_core.harness]"
+    assert contents =~ "enabled = true"
+    assert contents =~ ~s(default_vendor = "codex")
+    assert contents =~ "max_active = 3"
+    assert contents =~ "max_event_bytes = 2097152"
+    assert contents =~ "max_framing_errors = 0"
+    assert contents =~ ~s(codex_home = "/home/op/.codex")
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config()
+    harness = Keyword.get(loaded.fermix_core, :harness, [])
+
+    assert Keyword.get(harness, :enabled) == true
+    assert Keyword.get(harness, :cloud_enabled) == true
+    assert Keyword.get(harness, :default_vendor) == "codex"
+    assert Keyword.get(harness, :max_active) == 3
+    assert Keyword.get(harness, :default_timeout_minutes) == 20
+    assert Keyword.get(harness, :max_event_bytes) == 2_097_152
+    assert Keyword.get(harness, :max_framing_errors) == 0
+    assert Keyword.get(harness, :codex_home) == "/home/op/.codex"
+  end
+
+  test "apply_snapshot replaces harness config in Application env" do
+    Application.put_env(:fermix_core, :harness, enabled: true, max_active: 9)
+
+    ConfigStore.apply_snapshot(%{
+      fermix_core: [harness: [enabled: false]],
+      fermix_channels: [],
+      fermix_web: []
+    })
+
+    harness = Application.get_env(:fermix_core, :harness, [])
+
+    # Replace (not merge): the stale max_active must not survive the edit.
+    assert Keyword.get(harness, :enabled) == false
+    refute Keyword.has_key?(harness, :max_active)
+  end
+
+  test "load refuses to boot on an unknown harness key" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.harness]
+    enabled = true
+    max_activ = 2
+    """)
+
+    assert_raise ArgumentError, ~r/\[fermix_core.harness\].*unknown key\(s\): max_activ/s, fn ->
+      ConfigStore.load_runtime_config()
+    end
+  end
+
+  test "load refuses to boot on an invalid harness value" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.harness]
+    max_active = 0
+    """)
+
+    assert_raise ArgumentError, ~r/harness\.max_active.*positive integer/s, fn ->
+      ConfigStore.load_runtime_config()
+    end
   end
 
   test "save/load round-trips memory.review_interval_hours" do

@@ -8,6 +8,13 @@ description: >
   its relative path in as {ws}; the checker runs over it afterward. These force the
   read→edit→run / write-a-correct-artifact loop that real coding use is.
 
+  SCOPE: this suite scores the CANDIDATE MODEL's own coding ability, so the bugfix
+  tasks explicitly tell it not to delegate. Fermix's normal steering routes repo
+  bugfixes to a coding-harness run (a real fix needs root-cause analysis), which
+  would score the external Codex/Claude CLI instead of the model under test and
+  break comparability with earlier leaderboard runs. Delegation itself is scored
+  separately by `cap_harness`.
+
   PRECONDITION: an eval daemon with shell enabled + a strict sandbox confined to its
   workspace (see docs/HARNESS.md "checker tier"). Checkers grade end-state only.
 defaults:
@@ -26,7 +33,8 @@ scenarios:
           `python -m pytest tests/` from {ws} to see it. business_days_between(start,
           end) should count Monday–Friday business days from start (inclusive) to end
           (exclusive). Fix the bug in {ws}/business_days.py so ALL tests pass. Do not
-          edit the tests.
+          edit the tests. Do this yourself with your own file and shell tools — do not
+          delegate it to a coding agent.
         checker:
           script: "suites/capability/checkers/pytest_business_days.sh"
           mode: exit
@@ -52,7 +60,8 @@ scenarios:
           failing test — run `python -m pytest tests/` from {ws} to see it.
           invoice_total(lines, tax_pct) is supposed to return the sum of the DISCOUNTED
           line totals with tax applied, but it's dropping the per-line discounts. Fix the
-          bug in {ws} so ALL tests pass. Do not edit the tests or the test file.
+          bug in {ws} so ALL tests pass. Do not edit the tests or the test file. Do this
+          yourself with your own file and shell tools — do not delegate it to a coding agent.
         checker:
           script: "suites/capability/checkers/pytest_invoice.sh"
           mode: exit
@@ -66,7 +75,8 @@ scenarios:
           order_total_dollars is returning the wrong total for a 50-unit order: it's applying
           the wrong volume-discount tier. Trace the bug to its ROOT cause and fix it in {ws}
           so ALL tests pass. Do not edit the tests or the test file, and don't just special-case
-          the failing input — fix the actual defect.
+          the failing input — fix the actual defect. Do this yourself with your own file and
+          shell tools — do not delegate it to a coding agent.
         # Root cause is a `>` vs `>=` off-by-one in catalog.bulk_tier (tier boundaries),
         # manifesting two modules away in report.order_total_dollars. Hidden tests exercise
         # the OTHER boundaries (10, 100) + tax, so a symptom-level patch in pricing/report

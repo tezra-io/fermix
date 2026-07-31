@@ -21,6 +21,7 @@ defmodule FermixCore.Application do
   alias FermixCore.ComputerUse
   alias FermixCore.ComputerUse.Supervisor, as: ComputerUseSupervisor
   alias FermixCore.Config, as: CoreConfig
+  alias FermixCore.Harness.Supervisor, as: HarnessSupervisor
   alias FermixCore.Jobs.RunnerSupervisor, as: JobRunnerSupervisor
   alias FermixCore.Jobs.Scheduler, as: JobScheduler
   alias FermixCore.Log.RedactingFormatter
@@ -152,6 +153,13 @@ defmodule FermixCore.Application do
         MainAgent,
         JobRunnerSupervisor,
         {JobScheduler, jobs_scheduler_opts()},
+        # Coding-harness local rail (design §6.4 / spec §5): one `:rest_for_one`
+        # supervisor (Manager → RunSupervisor → DeliveryWorker) so a Manager crash
+        # tears down and re-reconciles live runs instead of orphaning them. Always
+        # in the tree so boot reconciliation + the delivery drain run even when the
+        # feature is disabled; timers are gated by an init-time flag (the scheduler
+        # precedent), disabled in `config/test.exs`, never by omission.
+        {HarnessSupervisor, harness_worker_opts()},
         maybe_daemon_socket(),
         maybe_realtime_supervisor(),
         maybe_computer_use_supervisor()
@@ -321,6 +329,15 @@ defmodule FermixCore.Application do
 
   defp jobs_scheduler_opts do
     Application.get_env(:fermix_core, :jobs, [])
+  end
+
+  # The harness `Manager`/`DeliveryWorker` are permanent, but their timers + boot
+  # reconciliation + artifact GC must stay dark under `mix test` (the scheduler's
+  # `scheduler_enabled` precedent). One init-time flag, defaulting on, gates both
+  # workers; `config/test.exs` sets it false so the app tree touches neither the
+  # real `Memory.Repo` nor the real `FERMIX_HOME` on boot.
+  defp harness_worker_opts do
+    [timer_enabled: Application.get_env(:fermix_core, :harness_workers_enabled, true)]
   end
 
   defp setup_file_logger do

@@ -1,0 +1,6 @@
+{"type":"thread.started","thread_id":"019f7d3f-5eaf-7143-b594-4398a230aa52"}
+{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Model metadata for `nonexistent-model-xyz` not found. Defaulting to fallback metadata; this can degrade performance and cause issues."}}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_1","type":"error","message":"Skill descriptions were shortened to fit the 2% skills context budget. Codex can still see every skill, but some descriptions are shorter. Disable unused skills or plugins to leave more room for the rest."}}
+{"type":"error","message":"{\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The 'nonexistent-model-xyz' model is not supported when using Codex with a ChatGPT account.\"}}"}
+{"type":"turn.failed","error":{"message":"{\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The 'nonexistent-model-xyz' model is not supported when using Codex with a ChatGPT account.\"}}"}}
