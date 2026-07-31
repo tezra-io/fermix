@@ -15,7 +15,18 @@ jobs:
     env:
       MIX_ENV: prod
       ELIXIR_VERSION: "1.19.5"
-      OTP_VERSION: "28"
+      # Pinned to an EXACT patch, not a bare major. Burrito does not build the
+      # ERTS — it downloads a prebuilt one from beam-machine-universal, keyed on
+      # the string in the installed Erlang's `OTP_VERSION` file
+      # (`Burrito.Util.get_otp_version/0`). beam-machine only publishes upstream
+      # OTP releases (28.4, 28.4.1, 28.5), NOT every maintenance patch, so a
+      # floating major eventually resolves to a patch it has never built and the
+      # download 404s mid-release. That is what killed the first v0.7.0 attempt:
+      # `"28"` resolved to 28.5.0.4, which beam-machine does not carry.
+      # Before bumping this, confirm the artifact exists for EVERY target:
+      #   OTP-<v>/macos/universal/otp_<v>_macos_universal.tar.gz
+      #   OTP-<v>/linux/{x86_64,aarch64}/any/otp_<v>_linux_any_{arch}.tar.gz
+      OTP_VERSION: "28.4.1"
       ZIG_VERSION: "0.15.2"
     steps:
       - uses: actions/checkout@v4
