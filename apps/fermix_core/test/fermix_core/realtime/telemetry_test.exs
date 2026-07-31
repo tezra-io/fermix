@@ -22,7 +22,9 @@ defmodule FermixCore.Realtime.TelemetryTest do
       handler_id,
       Enum.map(events, &[:fermix, :realtime, &1]),
       fn event, measurements, metadata, _config ->
-        send(test_pid, {:rt, event, measurements, metadata})
+        if self() == test_pid do
+          send(test_pid, {:rt, event, measurements, metadata})
+        end
       end,
       nil
     )

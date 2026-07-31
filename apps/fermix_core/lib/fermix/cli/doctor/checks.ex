@@ -740,10 +740,12 @@ defmodule Fermix.CLI.Doctor.Checks do
     "#{active} active, #{pending} pending delivery, #{dead_letter} dead-letter"
   end
 
+  # Same rule as the vendor probe above: a tree-less CLI verb cannot spawn under
+  # the daemon's CommandHost. Omitting this raised out of the whole `doctor` run.
   defp harness_quota(opts) do
     case Keyword.fetch(opts, :quota) do
       {:ok, quota} -> quota
-      :error -> HarnessArtifacts.admission_check()
+      :error -> HarnessArtifacts.admission_check(supervised: false)
     end
   end
 

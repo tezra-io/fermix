@@ -620,7 +620,9 @@ defmodule FermixChannels.DispatcherTest do
         handler_id,
         [:fermix, :dispatcher, :ingress_failed],
         fn event, measurements, metadata, _config ->
-          send(test_pid, {:telemetry, event, measurements, metadata})
+          if self() == test_pid do
+            send(test_pid, {:telemetry, event, measurements, metadata})
+          end
         end,
         nil
       )

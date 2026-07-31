@@ -120,8 +120,10 @@ defmodule FermixCore.SandboxTest do
       handler,
       [:fermix, :sandbox, :decision],
       fn _event, _measurements, metadata, _config ->
-        if metadata[:conversation_key] == conversation_key do
-          send(test_pid, {ref, metadata.decision, Map.get(metadata, :reason)})
+        if self() == test_pid do
+          if metadata[:conversation_key] == conversation_key do
+            send(test_pid, {ref, metadata.decision, Map.get(metadata, :reason)})
+          end
         end
       end,
       nil

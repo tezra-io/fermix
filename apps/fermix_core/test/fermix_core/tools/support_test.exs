@@ -13,7 +13,9 @@ defmodule FermixCore.Tools.SupportTest do
         handler_id,
         [:fermix, :tool, :exec],
         fn _event, _measurements, metadata, _config ->
-          if metadata.tool == "real_tool", do: send(test_pid, {:trace, metadata})
+          if self() == test_pid do
+            if metadata.tool == "real_tool", do: send(test_pid, {:trace, metadata})
+          end
         end,
         nil
       )
@@ -49,7 +51,9 @@ defmodule FermixCore.Tools.SupportTest do
         handler_id,
         [:fermix, :tool, :exec],
         fn _event, _measurements, metadata, _config ->
-          if metadata.tool == "tool_a", do: send(test_pid, {:trace, metadata})
+          if self() == test_pid do
+            if metadata.tool == "tool_a", do: send(test_pid, {:trace, metadata})
+          end
         end,
         nil
       )

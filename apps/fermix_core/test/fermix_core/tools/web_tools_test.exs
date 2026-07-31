@@ -395,7 +395,7 @@ defmodule FermixCore.Tools.WebToolsTest do
       handler_id,
       [:fermix, :tool, :exec],
       fn event, measurements, metadata, _config ->
-        if metadata.tool == tool do
+        if self() == test_pid and metadata.tool == tool do
           send(test_pid, {:telemetry, event, measurements, metadata})
         end
       end,

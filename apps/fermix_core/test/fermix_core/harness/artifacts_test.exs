@@ -85,6 +85,25 @@ defmodule FermixCore.Harness.ArtifactsTest do
   end
 
   describe "admission_check/1 — free-space floor" do
+    # `mix test` boots the supervision tree, so a supervised `df` always finds its
+    # CommandHost here and the tree-LESS world a CLI verb runs in is unreachable
+    # by default. Pointing at a dead supervisor name reproduces it — and this is
+    # the abort that killed `fermix doctor` outright on every host, before it
+    # printed a single check line, because `enabled` defaults true so the probe
+    # always ran. Same shape as the header's warning: the injected `free_bytes`
+    # that keeps other tests hermetic is exactly what hid this.
+    test "a tree-less caller probes unsupervised instead of raising", %{runs_root: runs_root} do
+      dead = :"no_command_host_#{System.unique_integer([:positive])}"
+      opts = [runs_root: runs_root, quota_gb: 100, min_free_gb: 1, dynamic_supervisor: dead]
+
+      assert_raise RuntimeError, ~r/command host supervisor .* is not running/, fn ->
+        Artifacts.admission_check(opts)
+      end
+
+      result = Artifacts.admission_check(Keyword.put(opts, :supervised, false))
+      assert result == :ok or match?({:error, {:artifact_quota, _detail}}, result)
+    end
+
     test "refuses below the min-free floor", %{runs_root: runs_root} do
       free = fn _root -> {:ok, 500_000_000} end
 

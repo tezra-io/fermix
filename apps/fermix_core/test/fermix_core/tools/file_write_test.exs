@@ -220,7 +220,7 @@ defmodule FermixCore.Tools.FileWriteTest do
       handler_id,
       [:fermix, :tool, :exec],
       fn event, measurements, metadata, _config ->
-        if metadata.tool == "file_write" do
+        if self() == test_pid and metadata.tool == "file_write" do
           send(test_pid, {:telemetry, event, measurements, metadata})
         end
       end,
