@@ -512,8 +512,19 @@ defmodule FermixCore.Agents.TurnRunner do
         "billing, or model access, then retry."
   end
 
+  # When the server declared its failure in words (`provider_words`, set
+  # explicitly by the adapter — never parsed out of :message), quote them: the
+  # operator must be able to tell a provider-side outage from a Fermix defect.
   defp provider_error_reply({:provider_error, %{kind: :provider_unavailable} = error}) do
-    "#{provider_label(error)} is unavailable or overloaded right now. Retry later, or switch providers."
+    case Map.get(error, :provider_words) do
+      words when is_binary(words) and words != "" ->
+        "#{provider_label(error)} is unavailable or overloaded right now — the provider " <>
+          "reported: \"#{words}\" This is a provider-side failure, not something on this " <>
+          "machine. Retry shortly, or switch providers."
+
+      _absent ->
+        "#{provider_label(error)} is unavailable or overloaded right now. Retry later, or switch providers."
+    end
   end
 
   defp provider_error_reply({:provider_error, %{kind: :timeout} = error}) do

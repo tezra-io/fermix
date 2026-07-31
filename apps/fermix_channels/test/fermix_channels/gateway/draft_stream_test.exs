@@ -281,12 +281,20 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
     test "(o) stream events carry session_id, channel, ttfd, and dropped snapshots" do
       handler_id = "draft-stream-telemetry-#{System.unique_integer()}"
       test_pid = self()
+      session_id = "sess-42-#{System.unique_integer([:positive])}"
 
+      # A telemetry handler is process-global, so every concurrently-running
+      # async module's stream events reach this one too. `self() == test_pid`
+      # cannot discriminate here the way it does elsewhere — stream telemetry is
+      # emitted from the STREAM's process, never the test's — so key on this
+      # test's own session id, which the emitter carries in the metadata.
       :telemetry.attach(
         handler_id,
         [:fermix, :channel, :stream],
         fn _event, measurements, metadata, _config ->
-          send(test_pid, {:stream_telemetry, metadata.phase, measurements, metadata})
+          if metadata.session_id == session_id do
+            send(test_pid, {:stream_telemetry, metadata.phase, measurements, metadata})
+          end
         end,
         nil
       )
@@ -297,7 +305,7 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
       # everything after coalesces until seal.
       pid = DraftStream.start_link(spec(self()), edit_interval_ms: 60_000, min_draft_chars: 1)
 
-      DraftStream.push(pid, {:session_started, "sess-42"})
+      DraftStream.push(pid, {:session_started, session_id})
       DraftStream.push(pid, {:text_delta, "a"})
       assert_receive {:open, "a"}, 1_000
 
@@ -310,10 +318,10 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
       assert_receive {:stream_telemetry, :open, open_measurements, open_metadata}
       assert open_measurements.ttfd_ms >= 0
       assert open_metadata.channel == "fake"
-      assert open_metadata.session_id == "sess-42"
+      assert open_metadata.session_id == session_id
 
       assert_receive {:stream_telemetry, :seal, seal_measurements, seal_metadata}
-      assert seal_metadata.session_id == "sess-42"
+      assert seal_metadata.session_id == session_id
       assert seal_measurements.total_edits == 1
       # "ab" arrived on a dirty buffer? No — "a" was flushed. Then "abc",
       # "abcd", "abcde" each overwrote an unflushed snapshot: 3 dropped.
@@ -560,12 +568,18 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
     test "telemetry: first block opens the stream, later blocks are :block, seal carries totals" do
       handler_id = "draft-stream-block-telemetry-#{System.unique_integer()}"
       test_pid = self()
+      session_id = "sess-b-#{System.unique_integer([:positive])}"
 
+      # Keyed on this test's own session id for the same reason as the draft
+      # telemetry test above: the handler is process-global, and the events come
+      # from the stream's process, so a `self()` guard would match nothing.
       :telemetry.attach(
         handler_id,
         [:fermix, :channel, :stream],
         fn _event, measurements, metadata, _config ->
-          send(test_pid, {:stream_telemetry, metadata.phase, measurements})
+          if metadata.session_id == session_id do
+            send(test_pid, {:stream_telemetry, metadata.phase, measurements})
+          end
         end,
         nil
       )
@@ -574,7 +588,7 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
 
       pid = DraftStream.start_link(block_spec(self()), @block_fast)
 
-      DraftStream.push(pid, {:session_started, "sess-b"})
+      DraftStream.push(pid, {:session_started, session_id})
       two_paras = "Paragraph number one, padded.\n\nParagraph number two, padded!\n\ntrailing"
       DraftStream.push(pid, {:text_delta, two_paras})
 

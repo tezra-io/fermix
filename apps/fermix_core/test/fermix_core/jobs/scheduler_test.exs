@@ -209,11 +209,17 @@ defmodule FermixCore.Jobs.SchedulerTest do
     scheduler = start_scheduler(repo, runner_supervisor, runner_delay_ms: 200)
     job_id = job.id
 
-    started_at = System.monotonic_time(:millisecond)
     assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:15:00Z])
-    duration_ms = System.monotonic_time(:millisecond) - started_at
 
-    assert duration_ms < 100
+    # `tick` dispatches the run and returns; it never waits for the runner. The
+    # invariant is "tick returned while the run was still in flight", and the
+    # absence of the completion message proves exactly that — the runner is held
+    # for `runner_delay_ms`, so a `tick` that blocked on it could not get here
+    # first. This used to assert a wall-clock budget (`duration_ms < 100`), which
+    # only PROXIED for that invariant and made a loaded host indistinguishable
+    # from a `tick` that blocks.
+    refute_received {:job_runner, :completed, _run_id, _job_id}
+
     assert_receive {:job_runner, :started, run_id, ^job_id}, 1_000
 
     assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:15:00Z])

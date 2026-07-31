@@ -6,6 +6,28 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-07-31
+
+### Fixed
+
+- **A provider that says "our servers are overloaded" is now quoted, not
+  paraphrased as a dropped connection.** When Codex declared a failure on an
+  intact response stream and delivered nothing, the reply blamed a closed
+  connection and suggested reducing request size — wrong on both counts. The
+  server's own sentence now reaches the reply, marked plainly as a
+  provider-side failure rather than a problem on this machine.
+- **A transient provider failure mid-task no longer kills the whole turn.**
+  Fresh calls always retried these; the mid-task continuation call did not, so
+  one momentary provider overload could end a long turn one step short of
+  done. The continuation now retries the same bounded way — transport cuts and
+  provider-declared unavailability, never after visible streamed content, and
+  never a rate limit.
+- **A failed coding run's ledger row now carries the vendor's own words.**
+  Vendors that report errors as well-formed JSON left the row saying only
+  `exit_1` while the real diagnosis ("You've hit your session limit…") lived
+  in an artifact file only the run directory had; the durable row now carries
+  the same sentence.
+
 ## [0.7.1] - 2026-07-31
 
 ### Fixed

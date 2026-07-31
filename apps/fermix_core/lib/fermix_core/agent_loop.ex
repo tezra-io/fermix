@@ -29,17 +29,22 @@ defmodule FermixCore.AgentLoop do
 
   @max_iterations 25
 
-  # Bounded in-place recovery for a continuation call that failed before any
-  # response data arrived (`Transient.pre_response_timeout?/1` — a measured
-  # zero-chunk timeout: a connect/TLS stall, or a response that never started
-  # within the receive window). Unlike the route-level retry (first call only)
-  # or cron's whole-loop backoff (refuses once tools ran), this re-issues ONLY
-  # the failed LLM call: no tool replay, no provider switch, nothing emitted to
-  # re-emit. Two retries with 2s/4s backoff outlast the multi-second network
-  # blips of the connect-stall subclass; the first-byte-stall subclass costs a
-  # full receive window per attempt, so exhaustion is bounded at roughly three
-  # windows — accepted, since the alternative is failing a whole run (or turn)
-  # on one transient stall.
+  # Bounded in-place recovery for a continuation call that failed without
+  # emitting anything user-visible. Unlike the route-level retry (first call
+  # only) or cron's whole-loop backoff (refuses once tools ran), this
+  # re-issues ONLY the failed LLM call: no tool replay, no provider switch.
+  # Two classes retry (`continuation_retryable?/1`): the measured zero-chunk
+  # timeout (`Transient.pre_response_timeout?/1` — a connect/TLS stall, or a
+  # response that never started within the receive window), and the
+  # non-timeout transient kinds (transport cuts, provider-declared
+  # unavailability/overload — the 2026-07-31 incident class, where one
+  # transient Codex overload killed a 109-second turn one step short of its
+  # push). Unmeasured timeouts stay excluded on purpose: a slow model burning
+  # its receive window would be re-issued for nothing, a full window per
+  # attempt. Two retries with 2s/4s backoff outlast the multi-second blips;
+  # the first-byte-stall subclass costs a full receive window per attempt, so
+  # exhaustion is bounded at roughly three windows — accepted, since the
+  # alternative is failing a whole run (or turn) on one transient stall.
   @continuation_retry_attempts 2
   @continuation_retry_backoff_ms 2_000
 
@@ -298,8 +303,10 @@ defmodule FermixCore.AgentLoop do
 
   defp record_stream_content(_counter, _event), do: :ok
 
-  defp stream_content_emitted?(%{emitted: nil}), do: false
-  defp stream_content_emitted?(%{emitted: counter}), do: :counters.get(counter, 1) > 0
+  defp stream_content_emitted?(stream), do: stream_content_count(stream) > 0
+
+  defp stream_content_count(%{emitted: nil}), do: 0
+  defp stream_content_count(%{emitted: counter}), do: :counters.get(counter, 1)
 
   defp emit_capability_selection_telemetry(capabilities, duration_us, route_key, context, opts) do
     :telemetry.execute(
@@ -563,12 +570,17 @@ defmodule FermixCore.AgentLoop do
   # See @continuation_retry_attempts. Runs through Failover.run_chain — the
   # shared bounded-recovery executor — pinned to the single route that answered
   # the initial call, with failover disabled: a continuation never switches
-  # provider. Only the measured zero-data timeout class retries (buffered
-  # adapters mint stage :unknown and never match); every other error surfaces
-  # on the first failure exactly as before. `:provider_start` is emitted per
-  # attempt so a scheduled run's inactivity watchdog sees each retry as
-  # progress rather than one long silent window.
+  # provider. The emitted-content guard is a PER-CALL snapshot, not the
+  # turn-cumulative `stream_content_emitted?/1`: earlier iterations
+  # legitimately streamed into the draft, so the guard compares against the
+  # count taken just before this call — only an attempt that itself pushed a
+  # delta is barred from re-issuing (a retry would duplicate what the user
+  # already saw). `:provider_start` is emitted per attempt so a scheduled
+  # run's inactivity watchdog sees each retry as progress rather than one
+  # long silent window.
   defp continue_with_retry(provider_state, tool_results, state) do
+    emitted_before = stream_content_count(state.stream)
+
     Failover.run_chain(
       [{state.route_key, state.adapter_opts}],
       fn _route ->
@@ -576,13 +588,37 @@ defmodule FermixCore.AgentLoop do
         state.adapter.continue(provider_state, tool_results, state.adapter_opts)
       end,
       eligible?: fn _reason -> false end,
-      retryable?: &Transient.pre_response_timeout?/1,
+      retryable?: fn reason ->
+        stream_content_count(state.stream) == emitted_before and
+          continuation_retryable?(reason)
+      end,
       max_retries: @continuation_retry_attempts,
       retry_base_delay_ms: @continuation_retry_backoff_ms,
       retry_delay_fn: state.retry_delay_fn,
       telemetry: failover_telemetry_meta(state)
     )
   end
+
+  # The continuation's transient classes (rationale at
+  # @continuation_retry_attempts): measured zero-data timeouts, plus an
+  # explicit allowlist — transport cuts and provider-declared unavailability.
+  # A positive list, not `Transient.retryable?/1` minus exceptions: each
+  # kind's mid-loop policy is a deliberate decision. Unmeasured timeouts stay
+  # out (a slow model re-issued for nothing), and so does
+  # `:connection_unavailable` — pool-checkout exhaustion is designed to be
+  # recovered by the scheduled-job runner's own backoff (see
+  # `Providers.Error.transport_kind/1`), not re-spun here.
+  defp continuation_retryable?(reason) do
+    Transient.pre_response_timeout?(reason) or continuation_transient?(reason)
+  end
+
+  defp continuation_transient?({:provider_transport_error, %{kind: kind}}),
+    do: kind in [:transport_closed, :network]
+
+  defp continuation_transient?({:provider_error, %{kind: kind}}),
+    do: kind in [:provider_unavailable]
+
+  defp continuation_transient?(_reason), do: false
 
   defp execute_tool_calls(tool_calls, state) do
     with :ok <- enforce_channel_side_effect_bound(tool_calls, state) do
