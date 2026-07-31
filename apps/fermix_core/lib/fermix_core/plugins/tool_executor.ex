@@ -250,7 +250,8 @@ defmodule FermixCore.Plugins.ToolExecutor do
         url: request.url,
         params: request.query,
         headers: [auth_header(cred) | request.headers],
-        decode_body: false
+        decode_body: false,
+        into: &stream_body/2
       )
       |> maybe_merge(:json, request.body)
       |> Req.merge(req_options)
@@ -259,16 +260,53 @@ defmodule FermixCore.Plugins.ToolExecutor do
       {:ok, %{status: 401}} when attempt == 0 ->
         refresh_or_pass(request, cred, attempt, context, plugin_name, auth_profile, tool)
 
+      {:ok, %Req.Response{private: %{fermix_body_cap: :too_large}}} ->
+        {:error,
+         "response exceeds the #{Interpreter.max_response_bytes()}-byte size cap " <>
+           "(downloads belong on the mcp rail)"}
+
       {:ok, response} ->
-        {:ok,
-         %{
-           status: response.status,
-           headers: normalize_headers(response.headers),
-           body: to_string(response.body)
-         }}
+        with :ok <- reject_encoded(response) do
+          {:ok,
+           %{
+             status: response.status,
+             headers: normalize_headers(response.headers),
+             body: to_string(response.body)
+           }}
+        end
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  # Bounded streaming collector, mirroring `web_fetch` and
+  # `Tools.Media.Support.materialize_url/2`: stop before the chunk that would
+  # cross the ceiling, so the cap bounds the ALLOCATION rather than describing
+  # it afterwards. The old post-buffer check could not: Req's `decompress_body`
+  # is a separate default step from `decode_body`, so a compressed payload was
+  # already inflated — a compliant 5 MiB response could land as gigabytes before
+  # anything measured it.
+  defp stream_body({:data, data}, {req, %{body: body} = response})
+       when is_binary(data) and is_binary(body) do
+    if byte_size(body) + byte_size(data) > Interpreter.max_response_bytes() do
+      {:halt, {req, Req.Response.put_private(response, :fermix_body_cap, :too_large)}}
+    else
+      {:cont, {req, %{response | body: body <> data}}}
+    end
+  end
+
+  defp stream_body({:data, data}, {req, response}) when is_binary(data),
+    do: stream_body({:data, data}, {req, %{response | body: ""}})
+
+  # Streaming means Req never sends `accept-encoding`, so a compliant server
+  # replies identity and nothing here decompresses. A server that compresses
+  # unasked gets a named refusal — otherwise the interpreter would report a
+  # baffling JSON parse failure over gzip bytes.
+  defp reject_encoded(%Req.Response{} = response) do
+    case Req.Response.get_header(response, "content-encoding") do
+      [] -> :ok
+      [encoding | _] -> {:error, "response used content-encoding #{encoding}; expected identity"}
     end
   end
 

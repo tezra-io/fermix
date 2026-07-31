@@ -42,8 +42,11 @@ export OPENAI_API_KEY=...       # forwarded to the box at run time
 # 2. Build the base image. Once. Everything after restores from it.
 ./scripts/vultr-box.sh snapshot
 
-# 3. Prove it works end to end, then destroy itself.
-./scripts/vultr-box.sh run regression
+# 3. Confirm the image actually contains what it should (pennies, ~2 min).
+./scripts/vultr-box.sh verify
+
+# 4. Prove it works end to end, then destroy itself.
+./scripts/vultr-box.sh run dry
 ```
 
 `snapshot` provisions a box, installs the toolchain, warms the build, images it,
@@ -69,6 +72,7 @@ Vendor-CLI **logins are not in the image** — see §5.
 | Command | What it does |
 |---|---|
 | `snapshot` | Build/refresh the base image. Refresh when `mix.lock` moves. |
+| `verify` | Boot a throwaway box from the image, assert every pinned dependency and both warm build halves, then destroy it. Costs pennies; run it after any `snapshot`. |
 | `up` | Persistent box: restore, sync tree, compile, ready for `fermix setup`. |
 | `sync` | Re-push local edits to the persistent box and recompile. |
 | `run <tier>` | Ephemeral box: restore, sync, seed, boot, run a tier, **always destroy**. |

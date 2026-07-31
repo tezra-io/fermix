@@ -191,12 +191,47 @@ defmodule FermixCore.Harness.Adapters.CodexExecTest do
                CodexExec.plan(%{resume: "t1", ephemeral: true}, ctx)
     end
 
-    test "a resume-incompatible param fails loud rather than being dropped", %{ctx: ctx} do
-      assert {:error, {:param_not_supported_with_resume, :sandbox}} =
-               CodexExec.plan(%{resume: "t1", sandbox: "workspace-write"}, ctx)
+    # `codex exec resume` rejects `-s/--sandbox` outright (clap: "unexpected
+    # argument"), but the same policy is a typed config override there, and it
+    # beats the policy the resumed thread inherited. Verified live against
+    # codex-cli 0.145.0: a resume with no override kept the session's
+    # `workspace-write`, and `-c sandbox_mode=read-only` on that same thread
+    # landed `read-only`. So the caller's posture is honored on both heads.
+    test "sandbox on resume renders the config override, not the rejected flag", %{ctx: ctx} do
+      assert {:ok, plan} = CodexExec.plan(%{resume: "t1", sandbox: "workspace-write"}, ctx)
 
+      refute "-s" in plan.argv
+
+      assert slice_between(plan.argv, "--skip-git-repo-check", "-o") == [
+               "-c",
+               "sandbox_mode=workspace-write"
+             ]
+    end
+
+    test "sandbox off the resume path still renders the flag", %{ctx: ctx} do
+      assert {:ok, plan} = CodexExec.plan(%{sandbox: "workspace-write"}, ctx)
+
+      assert "-s" in plan.argv
+      refute "sandbox_mode=workspace-write" in plan.argv
+    end
+
+    test "an invalid sandbox mode fails loud on the resume path too", %{ctx: ctx} do
+      assert {:error, {:invalid_sandbox, "nope"}} =
+               CodexExec.plan(%{resume: "t1", sandbox: "nope"}, ctx)
+    end
+
+    # `add_dirs` and `profile` stay refused, for two different reasons that both
+    # survive the config route: `-c profile=` is rejected by codex outright
+    # ("legacy `profile` config is no longer supported"), and
+    # `sandbox_workspace_write.writable_roots` REPLACES the operator's configured
+    # list rather than adding to it the way `--add-dir` does — so honoring it that
+    # way could silently narrow a sandbox Fermix cannot read to merge.
+    test "a resume-incompatible param fails loud rather than being dropped", %{ctx: ctx} do
       assert {:error, {:param_not_supported_with_resume, :add_dirs}} =
                CodexExec.plan(%{resume: "t1", add_dirs: ["/tmp"]}, ctx)
+
+      assert {:error, {:param_not_supported_with_resume, :profile}} =
+               CodexExec.plan(%{resume: "t1", profile: "p1"}, ctx)
     end
   end
 

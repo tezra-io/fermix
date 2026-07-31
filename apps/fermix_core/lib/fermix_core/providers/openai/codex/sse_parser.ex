@@ -2,9 +2,17 @@ defmodule FermixCore.Providers.OpenAI.Codex.SSEParser do
   @moduledoc false
 
   # Parses a Codex Responses SSE body into a body-shaped map
-  # `%{"output" => [items], "usage" => map(), "model" => string | nil}`
+  # `%{"output" => [items], "usage" => map(), "model" => string | nil,
+  #    "status" => string | nil, "failure" => map() | nil}`
   # equivalent to what `OpenAI.Responses` receives synchronously, so the
   # downstream `ResponsesShared.build_turn/5` can be reused.
+  #
+  # `"status"` is nil until a TERMINAL event arrives, which is how the caller
+  # tells a stream that ended early from one that finished with nothing to say —
+  # `build_turn/5` cannot: it reads an absent usage map as zero tokens and an
+  # empty output list as empty text, so both shapes render as a valid empty turn.
+  # `"failure"` carries the terminal event's own account of why (`error` or
+  # `incomplete_details`), which used to be dropped by the catch-all.
   #
   # Two entry points:
   #
@@ -45,6 +53,10 @@ defmodule FermixCore.Providers.OpenAI.Codex.SSEParser do
   #   * `response.completed` / `response.done` — capture final usage and
   #     final model id; if `response.output` is present it is used for
   #     usage/model only — items still come from `output_item.done` events
+  #   * `response.failed` / `response.incomplete` / `error` — capture the
+  #     status and the reason payload; these are the stream's own account of a
+  #     response that will not complete, and ignoring them made a declared
+  #     failure indistinguishable from a truncated connection
   #
   # Items are returned in `output_index` order.
   #
@@ -58,6 +70,8 @@ defmodule FermixCore.Providers.OpenAI.Codex.SSEParser do
             text_buffers: %{},
             usage: %{},
             model: nil,
+            status: nil,
+            failure: nil,
             leftover: "",
             delta_callback: nil
 
@@ -176,9 +190,32 @@ defmodule FermixCore.Providers.OpenAI.Codex.SSEParser do
     %{
       state
       | usage: resp["usage"] || state.usage,
+        model: resp["model"] || state.model,
+        status: resp["status"] || "completed"
+    }
+  end
+
+  # A response the server has given up on. It is terminal like `completed`, so it
+  # sets `status` — but it carries no usage and no finished items, which is exactly
+  # the shape a cut connection leaves. Recording the reason is the only thing that
+  # tells them apart afterwards.
+  defp reduce_event(%{"type" => type, "response" => resp}, state)
+       when type in ["response.failed", "response.incomplete"] and is_map(resp) do
+    %{
+      state
+      | status: resp["status"] || String.replace_prefix(type, "response.", ""),
+        failure: resp["error"] || resp["incomplete_details"] || state.failure,
+        # An `incomplete` response is billed for what it did generate, and the
+        # caller now RETURNS that turn when output arrived — so its usage has to be
+        # real, not the zero an absent map renders as.
+        usage: resp["usage"] || state.usage,
         model: resp["model"] || state.model
     }
   end
+
+  # A stream-level error carries its payload inline rather than under "response".
+  defp reduce_event(%{"type" => "error"} = event, state),
+    do: %{state | status: "failed", failure: Map.delete(event, "type")}
 
   defp reduce_event(_event, state), do: state
 
@@ -256,7 +293,9 @@ defmodule FermixCore.Providers.OpenAI.Codex.SSEParser do
     %{
       "output" => output,
       "usage" => state.usage,
-      "model" => state.model
+      "model" => state.model,
+      "status" => state.status,
+      "failure" => state.failure
     }
   end
 

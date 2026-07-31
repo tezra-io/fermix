@@ -5,7 +5,9 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
 
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Prompt.ModelOverlays
+  alias FermixCore.Providers.Failover
   alias FermixCore.Providers.OpenAI.Codex
+  alias FermixCore.Providers.Transient
 
   defmodule StubTokenServer do
     @moduledoc false
@@ -723,6 +725,124 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
       assert turn.tool_calls == []
       assert turn.content == ""
       assert turn.usage.prompt_tokens == 1
+    end
+  end
+
+  # A 200 is not proof a response was delivered. Without a terminal-event check,
+  # a stream that ended early produced a SUCCESSFUL EMPTY TURN — zero tokens,
+  # empty content, `status: ok` — so the agent loop had nothing to say, the
+  # channel sent its canned "I didn't get a response" line, and nothing was
+  # logged. This daemon's own traces hold 66 such turns across main turns,
+  # subagents, cron jobs and the memory reviewer.
+  describe "chat/3 — a stream that delivered nothing" do
+    test "no terminal event and no output is a retryable transport close, not an empty success" do
+      assert {:error, {:provider_transport_error, error} = reason} = run_chat("")
+      assert error.kind == :transport_closed
+      assert error.message =~ "before any terminal event"
+
+      # Retry the same route on a blip, and move on if the route stays sick.
+      assert Transient.retryable?(reason)
+      assert Failover.eligible?(reason)
+    end
+
+    test "a declared failure with nothing delivered carries the server's own words" do
+      sse = """
+      data: {"type":"response.failed","response":{"status":"failed","error":{"code":"server_error","message":"model stream aborted"}}}
+
+      """
+
+      assert {:error, {:provider_transport_error, error}} = run_chat(sse)
+      assert error.message =~ "failed"
+      assert error.message =~ "model stream aborted"
+    end
+
+    test "an incomplete response with nothing delivered reports the reason it gave" do
+      sse = """
+      data: {"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}}
+
+      """
+
+      assert {:error, {:provider_transport_error, error}} = run_chat(sse)
+      assert error.message =~ "max_output_tokens"
+    end
+
+    test "a stream-level error event is surfaced, not swallowed" do
+      sse = """
+      data: {"type":"error","code":"rate_limit_exceeded","message":"slow down"}
+
+      """
+
+      assert {:error, {:provider_transport_error, error}} = run_chat(sse)
+      assert error.message =~ "slow down"
+    end
+
+    # `:transport_closed` is the only transport kind `TurnRunner` renders in its
+    # own words; a bespoke reason atom falls to the catch-all, which prints
+    # `inspect(reason)` at the operator. Both undelivered shapes must land on the
+    # kind that has a sentence.
+    test "every undelivered shape mints the kind the channel can render" do
+      bodies = [
+        "",
+        ~s(data: {"type":"response.failed","response":{"status":"failed","error":{"message":"x"}}}\n\n),
+        ~s(data: {"type":"response.incomplete","response":{"status":"incomplete"}}\n\n),
+        ~s(data: {"type":"error","message":"x"}\n\n)
+      ]
+
+      for body <- bodies do
+        assert {:error, {:provider_transport_error, error}} = run_chat(body)
+        assert error.kind == :transport_closed, "#{inspect(body)} minted #{error.kind}"
+      end
+    end
+  end
+
+  # The gate is "nothing was delivered", not "the stream did not finish tidily".
+  # `items` fills from output_item.added/.done independently of the terminal
+  # event, so a cut stream can still carry a message or a function_call — 3 of the
+  # 72 zero-usage turns in the operator's traces did. Erroring on those would
+  # discard delivered content AND kill the turn: a continuation runs under
+  # `eligible?: false` + `retryable?: &pre_response_timeout?/1`, which
+  # `:transport_closed` matches neither of, so there is no layer left to recover.
+  describe "chat/3 — a stream that delivered output but never completed" do
+    test "a finished message survives a missing terminal event" do
+      sse = """
+      data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"m","content":[]}}
+
+      data: {"type":"response.output_text.delta","output_index":0,"delta":"the answer"}
+
+      data: {"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"m","content":[{"type":"output_text","text":"the answer"}]}}
+
+      """
+
+      assert {:ok, turn} = run_chat(sse)
+      assert turn.content == "the answer"
+    end
+
+    test "a function_call survives a missing terminal event, so the loop can still recover" do
+      sse = """
+      data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"f","call_id":"c1","name":"shell","arguments":""}}
+
+      data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\\"command\\":\\"ls\\"}"}
+
+      data: {"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"f","call_id":"c1","name":"shell","arguments":"{\\"command\\":\\"ls\\"}"}}
+
+      """
+
+      assert {:ok, turn} = run_chat(sse)
+      assert [%{name: "shell"}] = turn.tool_calls
+    end
+
+    test "a server-declared failure AFTER output keeps the output rather than discarding it" do
+      sse = """
+      data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"m","content":[]}}
+
+      data: {"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"m","content":[{"type":"output_text","text":"partial answer"}]}}
+
+      data: {"type":"response.failed","response":{"status":"failed","error":{"message":"upstream died"}}}
+
+      """
+
+      assert {:ok, turn} = run_chat(sse)
+      assert turn.content == "partial answer"
     end
   end
 

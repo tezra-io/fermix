@@ -62,6 +62,11 @@ defmodule FermixCore.Realtime.ScreenCaptureTest do
     assert request["action"] == "screenshot"
     assert request["display"] == 0
     refute Map.has_key?(request, "screenshot_after")
+    # Feed frames are awareness-only: never ruler-gridded, never mark-badged —
+    # those grounding overlays belong to the tool path (M28), and drawing them
+    # on ambient frames would present a pseudo-aiming surface.
+    refute Map.has_key?(request, "rulers")
+    refute Map.has_key?(request, "marks")
   end
 
   test "a malformed frame fails loud rather than shipping garbage to the model" do
