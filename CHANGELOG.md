@@ -6,6 +6,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-07-31
+
 ### Fixed
 
 - **A provider that says "our servers are overloaded" is now quoted, not
