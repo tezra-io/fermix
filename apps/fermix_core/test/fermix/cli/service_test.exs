@@ -156,6 +156,26 @@ defmodule Fermix.CLI.ServiceTest do
       assert spec.service_env["PATH"] =~ "/opt/homebrew/bin"
     end
 
+    # Both official vendor-CLI installers put their binaries in ~/.local/bin, so a
+    # service PATH without it makes the daemon report "no coding agent CLI is
+    # detected" on a machine where the operator's own shell resolves both. It is
+    # LAST because PATH is first-match-wins: a tail entry can only make an
+    # unresolvable name resolvable, never shadow the cosign/node/python this list
+    # was widened to reach in the first place.
+    test "both platforms end with the user-scope bin dir, and nothing shadows the standard dirs" do
+      tmp = mkdir!()
+      user_bin = Path.join(System.user_home!(), ".local/bin")
+
+      for os <- [:darwin, :linux] do
+        {:ok, spec} = Service.spec(:user, fixture_opts(os, tmp))
+        dirs = String.split(spec.service_env["PATH"], ":")
+
+        assert user_bin in dirs, "#{os} PATH is missing #{user_bin}"
+        assert List.last(dirs) == user_bin, "#{os} must not let the user dir shadow system dirs"
+        assert dirs == Enum.uniq(dirs)
+      end
+    end
+
     test "linux omits the Homebrew prefix" do
       tmp = mkdir!()
       {:ok, spec} = Service.spec(:user, fixture_opts(:linux, tmp))
