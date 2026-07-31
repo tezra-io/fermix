@@ -459,8 +459,22 @@ defmodule FermixCore.Harness.Run do
     summary = EventStream.finalize(state.stream, finalize_exit(result))
     {status, reason, extra} = classify_terminal(state, result, summary)
     fields = terminal_fields(state, summary) |> Map.put(:reason, reason) |> Map.merge(extra)
-    persist_streamed_result(state, status, fields)
+    {status, fields} = persist_streamed_result(state, status, fields)
+    {status, backfill_diagnostics(status, fields)}
   end
+
+  # A vendor that reports its failure as well-formed JSON (claude's terminal
+  # `result` event) leaves the non-JSON diagnostics tail empty, so the ledger
+  # row said only `exit_1` while the only real diagnosis lived in result.txt
+  # (2026-07-31: "You've hit your session limit…"). Backfill the row so
+  # surfaces that read only the ledger carry the vendor's words too.
+  defp backfill_diagnostics("completed", fields), do: fields
+
+  defp backfill_diagnostics(_status, %{diagnostics_tail: [], result_text: text} = fields)
+       when is_binary(text) and text != "",
+       do: %{fields | diagnostics_tail: [String.slice(text, 0, 2_000)]}
+
+  defp backfill_diagnostics(_status, fields), do: fields
 
   # Codex writes its authoritative result to the `-o` artifact; claude carries it
   # on the terminal `result` event, so nothing has written `result.txt` yet. It is

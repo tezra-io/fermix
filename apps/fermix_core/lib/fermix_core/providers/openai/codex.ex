@@ -694,23 +694,40 @@ defmodule FermixCore.Providers.OpenAI.Codex do
     turn_from(parsed, turn_state)
   end
 
-  # Both undelivered cases mint `:closed`. That is one kind, not two, on purpose:
-  # `:transport_closed` is the only transport kind with its own user-facing
-  # sentence in `Agents.TurnRunner.provider_error_reply/1` — a bespoke reason
-  # atom falls to the catch-all, which renders `inspect(reason)` and shows the
-  # operator a raw Elixir tuple while never reading `message`. The server's own
-  # words still reach the log and the trace, since `Error.telemetry_metadata/1`
-  # carries `message` as `error`.
+  # Two undelivered facts, two kinds — not a fallback. A stream that DECLARED
+  # its failure (`response.failed`/`response.incomplete`/stream `error` on an
+  # intact HTTP 200) is an API-level verdict, not a transport cut: it is minted
+  # through `ProviderError.api/5` so `api_kind` classifies the server's own
+  # text ("overload"/"server_error" → :provider_unavailable — retryable and
+  # failover-eligible on fresh calls), and the server's sentence rides
+  # `:provider_words` for `Agents.TurnRunner.provider_error_reply/1` to quote
+  # at the operator (2026-07-31: "Our servers are currently overloaded"
+  # rendered as "closed the connection" without it). A stream CUT with no
+  # declared reason stays transport `:closed` — `:transport_closed` is the one
+  # transport kind with its own user-facing sentence; a bespoke reason atom
+  # falls to the catch-all, which renders `inspect(reason)` at the operator.
+  defp undelivered_error(_status, %{"failure" => failure} = parsed) when is_map(failure) do
+    words = failure_text(parsed)
+
+    ProviderError.api(
+      :openai_codex,
+      :codex,
+      200,
+      %{"error" => %{"code" => failure["code"] || failure["reason"], "message" => words}},
+      provider_words: String.slice(words, 0, 300)
+    )
+  end
+
   defp undelivered_error(nil, _parsed) do
     ProviderError.transport(:openai_codex, :codex, :closed,
       message: "Codex response stream ended before any terminal event and delivered no output."
     )
   end
 
-  defp undelivered_error(status, parsed) do
+  defp undelivered_error(status, _parsed) do
     ProviderError.transport(:openai_codex, :codex, :closed,
       message:
-        "Codex reported the response #{status} with no output delivered: #{failure_text(parsed)}"
+        "Codex reported the response #{status} with no output delivered and gave no reason."
     )
   end
 

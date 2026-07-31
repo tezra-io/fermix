@@ -148,7 +148,9 @@ defmodule FermixCore.Harness.RunTest do
     # `result` event with is_error, so `EventStream` counts it as an event and the
     # diagnostics tail stays empty — the ledger row carried only `exit_1`. The
     # vendor's text is the sole diagnosis, so a failed run must persist it to
-    # `result.txt` for the durable delivery retry, which sees only the row.
+    # `result.txt` for the durable delivery retry, which sees only the row —
+    # and (2026-07-31) backfill the row's own diagnostics tail with the same
+    # words, so surfaces that read only the ledger can explain the failure.
     #
     # The event below is the shape captured verbatim from that run's events.jsonl
     # (note `subtype: "success"` alongside `is_error: true` — the classification
@@ -171,6 +173,7 @@ defmodule FermixCore.Harness.RunTest do
 
       assert fields.reason == "exit_1"
       assert fields.result_text == "Not logged in · Please run /login"
+      assert fields.diagnostics_tail == ["Not logged in · Please run /login"]
       assert File.read!(result_path(ctx.runs_root, run_id)) =~ "Not logged in"
     end
 

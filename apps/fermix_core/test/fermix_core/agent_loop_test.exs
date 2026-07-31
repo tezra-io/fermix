@@ -20,13 +20,13 @@ defmodule FermixCore.AgentLoopTest do
     @impl true
     def chat(messages, capabilities, opts) do
       record_call(messages, capabilities, opts, :chat)
-      next_response()
+      next_response(opts)
     end
 
     @impl true
     def continue(provider_state, tool_results, opts) do
       record_continue(provider_state, tool_results, opts)
-      next_response()
+      next_response(opts)
     end
 
     @impl true
@@ -51,11 +51,13 @@ defmodule FermixCore.AgentLoopTest do
       Process.put(:mock_continues, cont ++ [{state, tool_results, opts}])
     end
 
-    defp next_response do
+    # A function entry is called with the adapter opts, so a scripted response
+    # can exercise the injected stream_callback before answering.
+    defp next_response(opts) do
       case Process.get(:mock_responses, []) do
         [next | rest] ->
           Process.put(:mock_responses, rest)
-          next
+          if is_function(next, 1), do: next.(opts), else: next
 
         [] ->
           {:error, "No mock responses left"}
@@ -1921,6 +1923,160 @@ defmodule FermixCore.AgentLoopTest do
                  run_loop(
                    capability_registry: registry,
                    trust: :operator,
+                   retry_delay_fn: delay_spy()
+                 )
+      end)
+
+      refute_received {:delay, _}
+      assert length(mock_continues()) == 1
+    end
+  end
+
+  describe "run/1 continuation transient-error retry" do
+    # The 2026-07-31 prod incident class: mid-loop, the provider declares
+    # failure on an intact 200 ("Our servers are currently overloaded") having
+    # delivered nothing. Fresh calls already retried these; the continuation
+    # was the one unprotected call site, so a single transient overload killed
+    # a 109-second turn one step short of its git push.
+
+    defp overload_error do
+      ProviderError.api(:openai_codex, :codex, 200, %{
+        "error" => %{
+          "code" => "server_error",
+          "message" => "Our servers are currently overloaded. Please try again later."
+        }
+      })
+    end
+
+    test "a provider-declared overload retries in place and succeeds", %{registry: registry} do
+      register_caps(registry, [SpyTool])
+
+      set_mock_responses([
+        turn("", tool_calls: [tool_call("c1", "spy_tool", %{})]),
+        {:error, overload_error()},
+        turn("recovered")
+      ])
+
+      capture_log(fn ->
+        assert {:ok, result} =
+                 run_loop(
+                   capability_registry: registry,
+                   trust: :operator,
+                   retry_delay_fn: delay_spy()
+                 )
+
+        assert result.response == "recovered"
+      end)
+
+      assert_received {:delay, 2_000}
+      refute_received {:delay, _}
+
+      # The tool ran exactly once — only the LLM call was re-issued.
+      assert_received :spy_tool_executed
+      refute_received :spy_tool_executed
+      assert length(mock_continues()) == 2
+    end
+
+    test "a transport cut with nothing emitted retries in place", %{registry: registry} do
+      register_caps(registry, [EchoTool])
+
+      cut = ProviderError.transport(:openai_codex, :codex, :closed)
+
+      set_mock_responses([
+        turn("", tool_calls: [tool_call("c1", "echo", %{"text" => "hi"})]),
+        {:error, cut},
+        turn("recovered")
+      ])
+
+      capture_log(fn ->
+        assert {:ok, %{response: "recovered"}} =
+                 run_loop(
+                   capability_registry: registry,
+                   trust: :operator,
+                   retry_delay_fn: delay_spy()
+                 )
+      end)
+
+      assert_received {:delay, 2_000}
+      assert length(mock_continues()) == 2
+    end
+
+    test "a rate limit is not retried mid-loop", %{registry: registry} do
+      register_caps(registry, [EchoTool])
+
+      rate_limited = ProviderError.api(:openai_codex, :codex, 429, %{})
+
+      set_mock_responses([
+        turn("", tool_calls: [tool_call("c1", "echo", %{"text" => "hi"})]),
+        {:error, rate_limited}
+      ])
+
+      capture_log(fn ->
+        assert {:error, {:provider_error, %{kind: :rate_limit}}} =
+                 run_loop(
+                   capability_registry: registry,
+                   trust: :operator,
+                   retry_delay_fn: delay_spy()
+                 )
+      end)
+
+      refute_received {:delay, _}
+      assert length(mock_continues()) == 1
+    end
+
+    # The emitted? gate, per call: the counter is turn-cumulative (earlier
+    # iterations legitimately streamed), so the guard snapshots it before each
+    # continuation attempt. Content from EARLIER iterations must not block the
+    # retry — that was exactly the incident turn, five draft edits in.
+    test "content streamed by earlier iterations does not block the retry", %{
+      registry: registry
+    } do
+      register_caps(registry, [EchoTool])
+      test_pid = self()
+
+      set_mock_responses([
+        fn opts ->
+          opts[:stream_callback].({:text_delta, "progress so far"})
+          turn("", tool_calls: [tool_call("c1", "echo", %{"text" => "hi"})])
+        end,
+        {:error, overload_error()},
+        turn("recovered")
+      ])
+
+      capture_log(fn ->
+        assert {:ok, %{response: "recovered"}} =
+                 run_loop(
+                   capability_registry: registry,
+                   trust: :operator,
+                   stream_callback: fn event -> send(test_pid, {:stream, event}) end,
+                   retry_delay_fn: delay_spy()
+                 )
+      end)
+
+      assert_received {:delay, 2_000}
+      assert length(mock_continues()) == 2
+    end
+
+    test "a continuation that streamed content before failing is not retried", %{
+      registry: registry
+    } do
+      register_caps(registry, [EchoTool])
+      test_pid = self()
+
+      set_mock_responses([
+        turn("", tool_calls: [tool_call("c1", "echo", %{"text" => "hi"})]),
+        fn opts ->
+          opts[:stream_callback].({:text_delta, "half a sentence"})
+          {:error, ProviderError.transport(:openai_codex, :codex, :closed, stage: :mid_stream)}
+        end
+      ])
+
+      capture_log(fn ->
+        assert {:error, {:provider_transport_error, %{kind: :transport_closed}}} =
+                 run_loop(
+                   capability_registry: registry,
+                   trust: :operator,
+                   stream_callback: fn event -> send(test_pid, {:stream, event}) end,
                    retry_delay_fn: delay_spy()
                  )
       end)
