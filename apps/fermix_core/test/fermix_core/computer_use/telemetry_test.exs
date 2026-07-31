@@ -15,7 +15,9 @@ defmodule FermixCore.ComputerUse.TelemetryTest do
         [:fermix, :computer_use, :session_error]
       ],
       fn event, measurements, metadata, _ ->
-        send(test_pid, {:cu, event, measurements, metadata})
+        if self() == test_pid do
+          send(test_pid, {:cu, event, measurements, metadata})
+        end
       end,
       nil
     )

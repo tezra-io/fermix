@@ -258,7 +258,7 @@ defmodule FermixCore.Tools.FileReadTest do
       handler_id,
       [:fermix, :tool, :exec],
       fn event, measurements, metadata, _config ->
-        if metadata.tool == "file_read" do
+        if self() == test_pid and metadata.tool == "file_read" do
           send(test_pid, {:telemetry, event, measurements, metadata})
         end
       end,

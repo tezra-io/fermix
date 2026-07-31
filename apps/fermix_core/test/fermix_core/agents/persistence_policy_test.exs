@@ -294,7 +294,9 @@ defmodule FermixCore.Agents.PersistencePolicyTest do
       handler_id,
       [:fermix, :skill, :journal_write],
       fn event, measurements, metadata, _config ->
-        send(test_pid, {:telemetry, event, measurements, metadata})
+        if self() == test_pid do
+          send(test_pid, {:telemetry, event, measurements, metadata})
+        end
       end,
       nil
     )

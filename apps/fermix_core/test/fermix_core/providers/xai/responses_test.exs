@@ -253,7 +253,9 @@ defmodule FermixCore.Providers.XAI.ResponsesTest do
         handler_id,
         [:fermix, :provider, :call],
         fn event, measurements, metadata, _config ->
-          send(test_pid, {:telemetry, event, measurements, metadata})
+          if self() == test_pid do
+            send(test_pid, {:telemetry, event, measurements, metadata})
+          end
         end,
         nil
       )
@@ -325,7 +327,9 @@ defmodule FermixCore.Providers.XAI.ResponsesTest do
         handler_id,
         [:fermix, :provider, :call],
         fn event, measurements, metadata, _config ->
-          send(test_pid, {:telemetry, event, measurements, metadata})
+          if self() == test_pid do
+            send(test_pid, {:telemetry, event, measurements, metadata})
+          end
         end,
         nil
       )
@@ -353,7 +357,9 @@ defmodule FermixCore.Providers.XAI.ResponsesTest do
         handler_id,
         [:fermix, :provider, :call],
         fn event, measurements, metadata, _config ->
-          send(test_pid, {:telemetry, event, measurements, metadata})
+          if self() == test_pid do
+            send(test_pid, {:telemetry, event, measurements, metadata})
+          end
         end,
         nil
       )

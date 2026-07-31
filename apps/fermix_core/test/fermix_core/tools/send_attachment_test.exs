@@ -101,7 +101,9 @@ defmodule FermixCore.Tools.SendAttachmentTest do
           handler_id,
           [:fermix, :tool, :exec],
           fn event, measurements, metadata, pid ->
-            send(pid, {:telemetry, event, measurements, metadata})
+            if self() == pid do
+              send(pid, {:telemetry, event, measurements, metadata})
+            end
           end,
           self()
         )
