@@ -745,15 +745,39 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
       assert Failover.eligible?(reason)
     end
 
-    test "a declared failure with nothing delivered carries the server's own words" do
+    test "a declared failure with nothing delivered is an API verdict carrying the server's words" do
       sse = """
       data: {"type":"response.failed","response":{"status":"failed","error":{"code":"server_error","message":"model stream aborted"}}}
 
       """
 
-      assert {:error, {:provider_transport_error, error}} = run_chat(sse)
-      assert error.message =~ "failed"
-      assert error.message =~ "model stream aborted"
+      assert {:error, {:provider_error, error} = reason} = run_chat(sse)
+      assert error.kind == :provider_unavailable
+      assert error.status == 200
+      assert error.message == "model stream aborted"
+      assert error.provider_words == "model stream aborted"
+
+      # The declared-failure class self-heals like any provider outage: retry
+      # the route on a fresh call, and move on if the provider stays sick.
+      assert Transient.retryable?(reason)
+      assert Failover.eligible?(reason)
+    end
+
+    # The 2026-07-31 prod incident, verbatim: an intact 200 whose SSE declared
+    # `response.failed` with the server's overload sentence and no output. The
+    # words must ride `provider_words` so the channel reply can quote them
+    # instead of misreporting a closed connection.
+    test "a server overload declaration classifies :provider_unavailable with the words preserved" do
+      sse = """
+      data: {"type":"response.failed","response":{"status":"failed","error":{"code":"server_error","message":"Our servers are currently overloaded. Please try again later."}}}
+
+      """
+
+      assert {:error, {:provider_error, error}} = run_chat(sse)
+      assert error.kind == :provider_unavailable
+
+      assert error.provider_words ==
+               "Our servers are currently overloaded. Please try again later."
     end
 
     test "an incomplete response with nothing delivered reports the reason it gave" do
@@ -762,35 +786,49 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
 
       """
 
-      assert {:error, {:provider_transport_error, error}} = run_chat(sse)
+      assert {:error, {:provider_error, error}} = run_chat(sse)
       assert error.message =~ "max_output_tokens"
     end
 
-    test "a stream-level error event is surfaced, not swallowed" do
+    test "a stream-level rate-limit error event classifies :rate_limit, not a transport cut" do
       sse = """
       data: {"type":"error","code":"rate_limit_exceeded","message":"slow down"}
 
       """
 
-      assert {:error, {:provider_transport_error, error}} = run_chat(sse)
+      assert {:error, {:provider_error, error}} = run_chat(sse)
+      assert error.kind == :rate_limit
       assert error.message =~ "slow down"
     end
 
-    # `:transport_closed` is the only transport kind `TurnRunner` renders in its
-    # own words; a bespoke reason atom falls to the catch-all, which prints
-    # `inspect(reason)` at the operator. Both undelivered shapes must land on the
-    # kind that has a sentence.
-    test "every undelivered shape mints the kind the channel can render" do
-      bodies = [
-        "",
-        ~s(data: {"type":"response.failed","response":{"status":"failed","error":{"message":"x"}}}\n\n),
-        ~s(data: {"type":"response.incomplete","response":{"status":"incomplete"}}\n\n),
-        ~s(data: {"type":"error","message":"x"}\n\n)
+    # Every undelivered shape must land somewhere `TurnRunner` renders in its
+    # own words: a declared failure becomes an API error (every api kind has a
+    # sentence — the `%{status: status}` clause is the floor), and an
+    # unexplained cut stays `:transport_closed`, the one transport kind with
+    # its own sentence. A bespoke transport reason would fall to the catch-all,
+    # which prints `inspect(reason)` at the operator.
+    test "every undelivered shape mints an error the channel can render" do
+      cases = [
+        {"", :transport, :transport_closed},
+        {~s(data: {"type":"response.failed","response":{"status":"failed","error":{"message":"x"}}}\n\n),
+         :api, :provider},
+        {~s(data: {"type":"response.incomplete","response":{"status":"incomplete"}}\n\n),
+         :transport, :transport_closed},
+        {~s(data: {"type":"error","message":"x"}\n\n), :api, :provider}
       ]
 
-      for body <- bodies do
-        assert {:error, {:provider_transport_error, error}} = run_chat(body)
-        assert error.kind == :transport_closed, "#{inspect(body)} minted #{error.kind}"
+      for {body, shape, kind} <- cases do
+        case {shape, run_chat(body)} do
+          {:transport, {:error, {:provider_transport_error, error}}} ->
+            assert error.kind == kind, "#{inspect(body)} minted #{error.kind}"
+
+          {:api, {:error, {:provider_error, error}}} ->
+            assert error.kind == kind, "#{inspect(body)} minted #{error.kind}"
+            assert error.status == 200
+
+          {expected, other} ->
+            flunk("#{inspect(body)} expected #{expected}, produced #{inspect(other)}")
+        end
       end
     end
   end
@@ -799,9 +837,7 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
   # `items` fills from output_item.added/.done independently of the terminal
   # event, so a cut stream can still carry a message or a function_call — 3 of the
   # 72 zero-usage turns in the operator's traces did. Erroring on those would
-  # discard delivered content AND kill the turn: a continuation runs under
-  # `eligible?: false` + `retryable?: &pre_response_timeout?/1`, which
-  # `:transport_closed` matches neither of, so there is no layer left to recover.
+  # discard content the user may already have seen; keep what arrived.
   describe "chat/3 — a stream that delivered output but never completed" do
     test "a finished message survives a missing terminal event" do
       sse = """

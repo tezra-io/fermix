@@ -34,7 +34,11 @@ defmodule FermixCore.Providers.Error do
           # Present on rate-limit/quota errors when the provider body carried
           # them (OpenAI/Codex usage limits); nil otherwise.
           optional(:resets_at) => non_neg_integer() | nil,
-          optional(:plan_type) => String.t() | nil
+          optional(:plan_type) => String.t() | nil,
+          # The server's own declared-failure sentence, set explicitly by the
+          # call site (never parsed out of :message) so channel replies can
+          # quote the provider verbatim; nil otherwise.
+          optional(:provider_words) => String.t() | nil
         }
   @type transport_error :: %{
           provider: provider(),
@@ -63,6 +67,7 @@ defmodule FermixCore.Providers.Error do
        message: message,
        resets_at: resets_at(decoded),
        plan_type: plan_type(decoded),
+       provider_words: Keyword.get(opts, :provider_words),
        stage: stage_opt(opts)
      }}
   end
@@ -152,15 +157,27 @@ defmodule FermixCore.Providers.Error do
 
   defp api_kind(status, code, message) do
     text = String.downcase("#{code || ""} #{message}")
+    account_kind(status, text) || availability_kind(status, text) || :provider
+  end
 
+  # Account-level verdicts take precedence: a 429 whose body says
+  # insufficient_quota is an exhausted account, not a transient rate limit.
+  defp account_kind(status, text) do
     cond do
       auth_status?(status) -> :auth
       status == 402 -> :quota
       quota_error?(text) -> :quota
+      true -> nil
+    end
+  end
+
+  defp availability_kind(status, text) do
+    cond do
       status == 429 -> :rate_limit
+      rate_limit_error?(text) -> :rate_limit
       status == 408 -> :timeout
       unavailable_error?(status, text) -> :provider_unavailable
-      true -> :provider
+      true -> nil
     end
   end
 
@@ -170,8 +187,15 @@ defmodule FermixCore.Providers.Error do
     String.contains?(text, "insufficient_quota") or String.contains?(text, "quota")
   end
 
+  # A server can declare a rate limit without a 429 wrapper — Codex reports it
+  # as a stream `error` event with code `rate_limit_exceeded` on an intact 200.
+  defp rate_limit_error?(text) do
+    String.contains?(text, "rate_limit") or String.contains?(text, "rate limit")
+  end
+
   defp unavailable_error?(status, text) do
-    status in 500..599 or String.contains?(text, "overload")
+    status in 500..599 or String.contains?(text, "overload") or
+      String.contains?(text, "server_error")
   end
 
   defp transport_kind(:timeout), do: :timeout
