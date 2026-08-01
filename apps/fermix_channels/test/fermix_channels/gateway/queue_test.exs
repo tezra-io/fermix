@@ -134,6 +134,33 @@ defmodule FermixChannels.Gateway.QueueTest do
     def error_reply(_reason), do: "error reply"
   end
 
+  # Reports which `run/N` arity the queue dispatched to (the byte-identical
+  # regression for messages that carry none of the optional closures), and
+  # drives the activity callback when it is given one.
+  defmodule ArityRunner do
+    def run(msg, turn_state, _deliver), do: finish(msg, turn_state, 3)
+
+    def run(msg, turn_state, _deliver, _stream_callback), do: finish(msg, turn_state, 4)
+
+    def run(msg, turn_state, _deliver, _stream_callback, activity_callback) do
+      activity_callback.({:tool_start, "shell"})
+      activity_callback.({:tool_finish, "shell", %{status: :error}})
+      finish(msg, turn_state, 5)
+    end
+
+    defp finish(msg, turn_state, arity) do
+      send(turn_state.test_pid, {:runner_arity, arity})
+      {:ok, "reply:" <> msg.content, 0}
+    end
+
+    def commit(_msg, turn_state, response, _context_tokens) do
+      send(turn_state.test_pid, {:committed, response})
+      :ok
+    end
+
+    def error_reply(_reason), do: "error reply"
+  end
+
   # Stands in for ConversationStore, capturing the marker the queue appends to
   # close an emoji-only / attachment-only empty turn (§7). Bypasses the real
   # last-message-user? guard, which is ConversationStore's own tested concern.
@@ -756,6 +783,373 @@ defmodule FermixChannels.Gateway.QueueTest do
         assert_receive {:reply, "Sorry, I encountered an error" <> _rest}, 5_000
         refute_received {:committed, _response}
       end)
+    end
+  end
+
+  # -- M29 Stage 2 seams (docs/design/MILESTONE_29_ACP_AGENT_SURFACE.md §6.3) --
+
+  defp with_turn_result(msg, test_pid) do
+    Map.put(msg, :turn_result_fn, fn outcome -> send(test_pid, {:turn_result, outcome}) end)
+  end
+
+  defp key(chat_id), do: {"telegram", chat_id, :root}
+
+  describe "stop_conversation/2" do
+    test "stops only the target conversation; a sibling turn keeps running", ctx do
+      queue = start_queue(ctx)
+
+      Queue.enqueue(queue, make_msg("a", "c1", ctx.test_pid))
+      assert_receive {:turn_started, "a", pid_a}, 5_000
+      Queue.enqueue(queue, make_msg("b", "c2", ctx.test_pid))
+      assert_receive {:turn_started, "b", pid_b}, 5_000
+      # A second c1 message waits behind the active turn and must be cleared.
+      Queue.enqueue(queue, make_msg("a2", "c1", ctx.test_pid))
+      assert eventually(fn -> Queue.status(queue).pending_requests == 1 end)
+
+      ref_a = Process.monitor(pid_a)
+
+      assert {:ok, %{active_stopped: 1, pending_cleared: 1}} =
+               Queue.stop_conversation(key("c1"), queue)
+
+      assert_receive {:DOWN, ^ref_a, :process, ^pid_a, _reason}, 5_000
+      refute_receive {:turn_started, "a2", _pid}, 300
+
+      # The sibling conversation was untouched and still completes normally.
+      assert Process.alive?(pid_b)
+      send(pid_b, {:proceed, :reply})
+      assert_receive {:reply, "reply:b"}, 5_000
+      assert_receive {:committed, "reply:b"}, 5_000
+      refute_received {:reply, "reply:a"}
+
+      # The sibling's slot clears on its task DOWN, which the queue processes
+      # asynchronously (same wait the stop_all/FIFO tests use).
+      assert eventually(fn -> Queue.status(queue).active_requests == 0 end)
+      assert Queue.status(queue).pending_requests == 0
+    end
+
+    test "appends the stopped marker to the target conversation only", ctx do
+      store =
+        start_supervised!(
+          {ConversationStore, name: :"queue_cs_#{System.unique_integer([:positive])}", repo: nil},
+          id: :stop_one_store
+        )
+
+      queue = start_queue(ctx, conversation_store: store)
+
+      # The real TurnRunner persists the user message at turn start; the fake
+      # runner does not, so stand in for both persisted-but-unanswered turns.
+      ConversationStore.add_message(key("c1"), "user", "stop me", server: store, sender: "user")
+      ConversationStore.add_message(key("c2"), "user", "leave me", server: store, sender: "user")
+
+      Queue.enqueue(queue, make_msg("stop me", "c1", ctx.test_pid))
+      assert_receive {:turn_started, "stop me", _pid}, 5_000
+      Queue.enqueue(queue, make_msg("leave me", "c2", ctx.test_pid))
+      assert_receive {:turn_started, "leave me", sibling_pid}, 5_000
+
+      assert {:ok, %{active_stopped: 1}} = Queue.stop_conversation(key("c1"), queue)
+
+      assert eventually(fn ->
+               match?(
+                 [%{role: "user"}, %{role: "assistant"}],
+                 ConversationStore.get_history(key("c1"), server: store)
+               )
+             end)
+
+      [_user, marker] = ConversationStore.get_history(key("c1"), server: store)
+      assert marker.content =~ "stopped"
+
+      assert [%{role: "user", content: "leave me"}] =
+               ConversationStore.get_history(key("c2"), server: store)
+
+      assert Process.alive?(sibling_pid)
+    end
+
+    test "returns :not_found for a conversation with nothing active or pending", ctx do
+      queue = start_queue(ctx)
+      assert {:ok, :not_found} = Queue.stop_conversation(key("never_seen"), queue)
+    end
+  end
+
+  describe "turn_result_fn" do
+    test "fires {:completed} exactly once on a normal turn", ctx do
+      queue = start_queue(ctx)
+      msg = with_turn_result(make_msg("hello", "c1", ctx.test_pid), ctx.test_pid)
+
+      Queue.enqueue(queue, msg)
+      assert_receive {:turn_started, "hello", turn_pid}, 5_000
+      send(turn_pid, {:proceed, :reply})
+
+      assert_receive {:reply, "reply:hello"}, 5_000
+      assert_receive {:turn_result, {:completed}}, 5_000
+      refute_receive {:turn_result, _outcome}, 300
+    end
+
+    test "fires {:completed} for a delivered canned empty completion", ctx do
+      queue = start_queue(ctx)
+      msg = with_turn_result(make_msg("anything", "ce", ctx.test_pid), ctx.test_pid)
+
+      Queue.enqueue(queue, msg)
+      assert_receive {:turn_started, "anything", turn_pid}, 5_000
+      send(turn_pid, {:proceed, :empty})
+
+      assert_receive {:reply, "I didn't get a response — please try again."}, 5_000
+      assert_receive {:turn_result, {:completed}}, 5_000
+      refute_receive {:turn_result, _outcome}, 300
+    end
+
+    test "fires {:failed, raw_reason} once on the error path, before stringification", ctx do
+      queue = start_queue(ctx, turn_runner: StreamingFakeRunner)
+      msg = with_turn_result(make_msg("boom", "c1", ctx.test_pid), ctx.test_pid)
+
+      Queue.enqueue(queue, msg)
+      assert_receive {:turn_started, "boom", turn_pid}, 5_000
+      send(turn_pid, {:proceed, :error})
+
+      # The channel still gets today's rendered text; the callback gets the raw
+      # reason the runner returned.
+      assert_receive {:reply, "error reply"}, 5_000
+      assert_receive {:turn_result, {:failed, :boom}}, 5_000
+      refute_receive {:turn_result, _outcome}, 300
+    end
+
+    test "fires {:failed, {:crashed, reason}} once when the turn task dies", ctx do
+      queue = start_queue(ctx)
+      msg = with_turn_result(make_msg("boom", "c1", ctx.test_pid), ctx.test_pid)
+
+      capture_log(fn ->
+        Queue.enqueue(queue, msg)
+        assert_receive {:turn_started, "boom", turn_pid}, 5_000
+        send(turn_pid, {:proceed, :crash})
+
+        assert_receive {:turn_result, {:failed, {:crashed, _reason}}}, 5_000
+        refute_receive {:turn_result, _outcome}, 300
+      end)
+    end
+
+    test "fires {:cancelled} once when the conversation is stopped", ctx do
+      queue = start_queue(ctx)
+      msg = with_turn_result(make_msg("hello", "c1", ctx.test_pid), ctx.test_pid)
+
+      Queue.enqueue(queue, msg)
+      assert_receive {:turn_started, "hello", _turn_pid}, 5_000
+
+      assert {:ok, %{active_stopped: 1}} = Queue.stop_conversation(key("c1"), queue)
+
+      assert_receive {:turn_result, {:cancelled}}, 5_000
+      refute_receive {:turn_result, _outcome}, 300
+      refute_received {:reply, _text}
+    end
+
+    test "stop_all fires {:cancelled} for every active turn it kills", ctx do
+      queue = start_queue(ctx)
+
+      Queue.enqueue(queue, with_turn_result(make_msg("a", "c1", ctx.test_pid), ctx.test_pid))
+      assert_receive {:turn_started, "a", _pid_a}, 5_000
+      Queue.enqueue(queue, with_turn_result(make_msg("b", "c2", ctx.test_pid), ctx.test_pid))
+      assert_receive {:turn_started, "b", _pid_b}, 5_000
+
+      assert %{active_stopped: 2} = Queue.stop_all(queue)
+
+      assert_receive {:turn_result, {:cancelled}}, 5_000
+      assert_receive {:turn_result, {:cancelled}}, 5_000
+      refute_receive {:turn_result, _outcome}, 300
+    end
+
+    # Race pin, direction 1: the turn reaches its own terminal invocation first
+    # (it is parked INSIDE the callback, so its conversation is still active),
+    # and a stop lands on top. Deterministic — the stop cannot run until the
+    # test issues it.
+    test "a stop landing after the turn already fired does not fire again", ctx do
+      queue = start_queue(ctx)
+      test_pid = ctx.test_pid
+
+      msg =
+        Map.put(make_msg("hello", "c1", test_pid), :turn_result_fn, fn outcome ->
+          send(test_pid, {:turn_result, outcome})
+
+          receive do
+            :release -> :ok
+          end
+        end)
+
+      Queue.enqueue(queue, msg)
+      assert_receive {:turn_started, "hello", turn_pid}, 5_000
+      send(turn_pid, {:proceed, :reply})
+
+      assert_receive {:reply, "reply:hello"}, 5_000
+      assert_receive {:turn_result, {:completed}}, 5_000
+
+      assert {:ok, %{active_stopped: 1}} = Queue.stop_conversation(key("c1"), queue)
+      refute_receive {:turn_result, _outcome}, 300
+    end
+
+    # Race pin, direction 2: the stop lands while the turn is parked in its
+    # delivery closure — before it can claim — so only the stop fires.
+    test "a stop landing before the turn's terminal claim fires only {:cancelled}", ctx do
+      queue = start_queue(ctx)
+      test_pid = ctx.test_pid
+
+      msg =
+        make_msg("hello", "c1", test_pid)
+        |> Map.put(:reply_fn, fn {:text, text} ->
+          send(test_pid, {:delivering, text})
+
+          receive do
+            :release -> :ok
+          end
+        end)
+        |> with_turn_result(test_pid)
+
+      Queue.enqueue(queue, msg)
+      assert_receive {:turn_started, "hello", turn_pid}, 5_000
+      send(turn_pid, {:proceed, :reply})
+      assert_receive {:delivering, "reply:hello"}, 5_000
+
+      assert {:ok, %{active_stopped: 1}} = Queue.stop_conversation(key("c1"), queue)
+
+      assert_receive {:turn_result, {:cancelled}}, 5_000
+      refute_receive {:turn_result, _outcome}, 300
+    end
+
+    test "a raising callback takes down neither the turn task nor the queue", ctx do
+      queue = start_queue(ctx)
+
+      msg =
+        Map.put(make_msg("hello", "c1", ctx.test_pid), :turn_result_fn, fn _outcome ->
+          raise "callback boom"
+        end)
+
+      log =
+        capture_log(fn ->
+          Queue.enqueue(queue, msg)
+          assert_receive {:turn_started, "hello", turn_pid}, 5_000
+          send(turn_pid, {:proceed, :reply})
+          assert_receive {:committed, "reply:hello"}, 5_000
+
+          # The queue keeps scheduling, and no crash fallback reply goes out.
+          Queue.enqueue(queue, make_msg("next", "c1", ctx.test_pid))
+          assert_receive {:turn_started, "next", next_pid}, 5_000
+          send(next_pid, {:proceed, :reply})
+          assert_receive {:reply, "reply:next"}, 5_000
+        end)
+
+      assert log =~ "Turn result callback raised"
+      assert log =~ "callback boom"
+    end
+
+    test "fires {:failed, reason} once when the turn-state checkout fails", ctx do
+      queue = start_queue(ctx, error: :build_failed)
+      msg = with_turn_result(make_msg("hello", "c1", ctx.test_pid), ctx.test_pid)
+
+      capture_log(fn ->
+        Queue.enqueue(queue, msg)
+        assert_receive {:reply, reply}, 5_000
+        assert reply =~ "error processing your message"
+        assert_receive {:turn_result, {:failed, :build_failed}}, 5_000
+        refute_receive {:turn_result, _outcome}, 300
+      end)
+    end
+
+    test "fires {:failed, reason} once when the turn task cannot start", ctx do
+      bad_supervisor =
+        start_supervised!({Task.Supervisor, [max_children: 0]}, id: :bad_supervisor_result)
+
+      queue = start_queue(ctx, task_supervisor: bad_supervisor)
+      msg = with_turn_result(make_msg("hello", "c1", ctx.test_pid), ctx.test_pid)
+
+      capture_log(fn ->
+        Queue.enqueue(queue, msg)
+        assert_receive {:reply, reply}, 5_000
+        assert reply =~ "error processing your message"
+        assert_receive {:turn_result, {:failed, _reason}}, 5_000
+        refute_receive {:turn_result, _outcome}, 300
+      end)
+    end
+
+    test "a message without turn_result_fn runs today's path with no callback", ctx do
+      queue = start_queue(ctx)
+
+      Queue.enqueue(queue, make_msg("hello", "c1", ctx.test_pid))
+      assert_receive {:turn_started, "hello", turn_pid}, 5_000
+      send(turn_pid, {:proceed, :reply})
+
+      assert_receive {:reply, "reply:hello"}, 5_000
+      assert_receive {:committed, "reply:hello"}, 5_000
+      refute_received {:turn_result, _outcome}
+    end
+  end
+
+  describe "raw stream tier" do
+    test "forwards loop stream events verbatim and spawns no draft engine", ctx do
+      queue = start_queue(ctx, turn_runner: StreamingFakeRunner)
+      test_pid = ctx.test_pid
+      spec = %{mode: :raw, callback: fn event -> send(test_pid, {:raw_event, event}) end}
+
+      Queue.enqueue(queue, make_stream_msg("stream me", "c1", test_pid, spec))
+      assert_receive {:turn_started, "stream me", turn_pid}, 5_000
+
+      # No DraftStream engine: the engine is spawn_linked by the turn task
+      # before the runner is called, so the task's only link is its supervisor.
+      assert {:links, [ctx.task_supervisor]} == Process.info(turn_pid, :links)
+
+      assert_receive {:raw_event, {:session_started, "sess-q"}}, 5_000
+      assert_receive {:raw_event, {:iteration_started, 1}}, 5_000
+      assert_receive {:raw_event, {:text_delta, delta}}, 5_000
+      assert delta =~ "thirty characters"
+
+      send(turn_pid, {:proceed, :reply})
+      # Final delivery is the ordinary reply path (nothing to seal).
+      assert_receive {:reply, "reply:stream me"}, 5_000
+      assert_receive {:committed, "reply:stream me"}, 5_000
+    end
+
+    test "a DraftStream spec still drives the engine (regression)", ctx do
+      queue = start_queue(ctx, turn_runner: StreamingFakeRunner)
+      spec = make_stream_spec(ctx.test_pid)
+
+      Queue.enqueue(queue, make_stream_msg("stream me", "c1", ctx.test_pid, spec))
+      assert_receive {:turn_started, "stream me", turn_pid}, 5_000
+      assert_receive {:draft_open, _text}, 5_000
+
+      send(turn_pid, {:proceed, :reply})
+      assert_receive {:draft_seal, 555, "reply:stream me"}, 5_000
+    end
+  end
+
+  describe "activity_callback threading" do
+    test "a message with an activity_callback reaches run/5 and gets its events", ctx do
+      queue = start_queue(ctx, turn_runner: ArityRunner)
+      test_pid = ctx.test_pid
+
+      msg =
+        make_msg("hello", "c1", test_pid)
+        |> Map.put(:activity_callback, fn event -> send(test_pid, {:activity, event}) end)
+
+      Queue.enqueue(queue, msg)
+
+      assert_receive {:runner_arity, 5}, 5_000
+      assert_receive {:activity, {:tool_start, "shell"}}, 5_000
+      assert_receive {:activity, {:tool_finish, "shell", %{status: :error}}}, 5_000
+      assert_receive {:reply, "reply:hello"}, 5_000
+    end
+
+    test "a message with neither callback still dispatches to run/3", ctx do
+      queue = start_queue(ctx, turn_runner: ArityRunner)
+
+      Queue.enqueue(queue, make_msg("hello", "c1", ctx.test_pid))
+
+      assert_receive {:runner_arity, 3}, 5_000
+      refute_received {:activity, _event}
+    end
+
+    test "a stream spec without an activity callback still dispatches to run/4", ctx do
+      queue = start_queue(ctx, turn_runner: ArityRunner)
+      test_pid = ctx.test_pid
+      spec = %{mode: :raw, callback: fn event -> send(test_pid, {:raw_event, event}) end}
+
+      Queue.enqueue(queue, make_stream_msg("hello", "c1", test_pid, spec))
+
+      assert_receive {:runner_arity, 4}, 5_000
     end
   end
 end

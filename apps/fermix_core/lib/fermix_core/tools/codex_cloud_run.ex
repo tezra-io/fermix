@@ -108,12 +108,14 @@ defmodule FermixCore.Tools.CodexCloudRun do
   Advertise only when the harness is enabled, the owner has approved coding agents
   on this machine (design §23.4 — no dead ends: an unusable harness offers
   nothing and Fermix codes with its own tools), and the authorization gate would
-  pass. The tool stays dispatchable by name, where the execute-time refusal tells
-  the caller to proceed directly.
+  pass, on a channel that can carry a coding run at all
+  (`HarnessSupport.advertisable_channel?/1`). The tool stays dispatchable by name,
+  where the execute-time refusal tells the caller to proceed directly.
   """
   @spec advertise?(map()) :: boolean()
   def advertise?(context) when is_map(context) do
     Config.enabled?() and Config.approved?() and
+      Support.advertisable_channel?(context) and
       Authorization.authorize(name(), context) == :ok
   end
 

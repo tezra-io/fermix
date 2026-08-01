@@ -88,6 +88,13 @@ config :fermix_channels,
   telegram: [
     enabled: false,
     bot_token: "test-token"
+  ],
+  # Hermetic default, same reason telegram is off above: the acp surface ships
+  # enabled, and a ready test tree would bind a real `<FERMIX_HOME>/acp.sock` —
+  # colliding with the operator's own daemon whenever FERMIX_HOME is unset.
+  # Tests that exercise the surface put their own value in app env.
+  acp: [
+    enabled: false
   ]
 
 config :phoenix, :plug_init_mode, :runtime

@@ -1,0 +1,2 @@
+{"jsonrpc":"2.0","id":2,"error":{"code":-32602,"message":"session-scoped MCP servers are not supported yet; configure MCP in Fermix's own config"}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"018f3b7e-3f1a-7c2d-9c1e-2f0b6a5d4e3c","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"The deploy failed at step 3.\n"}}}}

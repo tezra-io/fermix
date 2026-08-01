@@ -9,6 +9,22 @@ defmodule FermixCore.Jobs.DeliveryDefaults do
   @valid_modes ~w(none origin channel local)
   @destination_keys ~w(chat_id channel_id recipient target reply_target)
 
+  # Channels whose conversation belongs to an external client and dies with it:
+  # nothing can be delivered back to it minutes or days later, so "report to the
+  # origin" is refused when the job is created rather than failing silently at
+  # every run (MILESTONE_29_ACP_AGENT_SURFACE §4/§9).
+  @no_origin_channels ["acp"]
+
+  @doc """
+  Resolve delivery for a newly created job: an explicit `delivery_mode`, an
+  explicit `delivery_target` (implying `"channel"`), or the configured default.
+
+  `"origin"` is refused when the creating conversation lives on a channel that
+  cannot receive a later delivery — the single seam where a resolved mode is
+  known, so a configured `origin` default is caught alongside a model-supplied
+  one. `resolve/3` is the job-creation resolver (`schedule_job`); an in-place
+  edit goes through `resolve_update/3`.
+  """
   @spec resolve(map(), map(), keyword()) ::
           {:ok, {String.t(), map() | nil}} | {:error, term()}
   def resolve(args, context, opts \\ []) when is_map(args) and is_map(context) do
@@ -28,8 +44,28 @@ defmodule FermixCore.Jobs.DeliveryDefaults do
           configured_default(context, jobs_config)
       end
 
-    validate(raw_mode, raw_target)
+    with :ok <- deliverable_origin(raw_mode, context) do
+      validate(raw_mode, raw_target)
+    end
   end
+
+  defp deliverable_origin("origin", context) do
+    if origin_channel(context) in @no_origin_channels do
+      {:error,
+       {:invalid_delivery_target,
+        ~s(delivery_mode "origin" cannot be used from an ACP session — the session is ) <>
+          "owned by the client and ends with it, so a later run has nowhere to report " <>
+          ~s(back. Pass an explicit delivery_target on a configured channel instead, or ) <>
+          ~s(use delivery_mode "none" for a silent job.)}}
+    else
+      :ok
+    end
+  end
+
+  defp deliverable_origin(_mode, _context), do: :ok
+
+  defp origin_channel(%{conversation_key: {channel, _chat_id, _thread_scope}}), do: channel
+  defp origin_channel(_context), do: nil
 
   @doc """
   Resolve delivery for an in-place job update.

@@ -90,11 +90,39 @@ defmodule FermixChannels.Gateway.Channel do
   Streaming tier this channel supports (docs/design/CHANNEL_STREAMING.md §5.4).
 
   `:draft_edit` — the channel can create a message and edit it in place, so
-  it can render a live draft of the reply while the turn runs. Channels
-  without the callback (or returning `:none`) stay typing-only; the gateway
-  resolves this once per turn, never mid-run.
+  it can render a live draft of the reply while the turn runs.
+
+  `:raw` — a machine surface that appends exact deltas to its own wire
+  (M29 §8.4). The gateway hands the turn the channel-built callback directly:
+  no draft engine, no chunking, and the per-channel `streaming` config is never
+  consulted.
+
+  Channels without the callback (or returning `:none`) stay typing-only; the
+  gateway resolves this once per turn, never mid-run.
   """
-  @callback stream_capability() :: :draft_edit | :none
+  @callback stream_capability() :: :draft_edit | :raw | :none
+
+  @doc """
+  Build the `:raw` tier's stream callback for an inbound message. Receives each
+  `FermixCore.AgentLoop.stream_event()` as a plain map and appends the exact
+  suffix to the channel's wire. Only `:raw` channels implement it.
+  """
+  @callback build_raw_stream_callback(message()) :: (map() -> :ok)
+
+  @doc """
+  Build a tool-lifecycle callback for an inbound message (M29 §4). The turn
+  invokes it with each tool start/finish event so a machine surface can mirror
+  activity to its client. Channels without it run turns with no activity feed.
+  """
+  @callback build_activity_callback(message()) :: (term() -> any())
+
+  @doc """
+  Build the terminal turn-outcome callback for an inbound message (M29 §4).
+  Invoked exactly once per turn with `{:completed}`, `{:cancelled}`, or
+  `{:failed, reason}` — the raw reason, before any user-facing stringification.
+  Channels without it learn a turn's fate only through the reply itself.
+  """
+  @callback build_turn_result(message()) :: (term() -> any())
 
   @doc "Create the live draft message. Returns a handle for later edits."
   @callback open_draft(message(), String.t()) :: {:ok, stream_handle()} | {:error, term()}
@@ -171,6 +199,9 @@ defmodule FermixChannels.Gateway.Channel do
     download_attachment: 2,
     health_check: 1,
     stream_capability: 0,
+    build_raw_stream_callback: 1,
+    build_activity_callback: 1,
+    build_turn_result: 1,
     open_draft: 2,
     edit_draft: 3,
     seal_draft: 3,

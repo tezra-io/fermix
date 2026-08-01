@@ -232,6 +232,50 @@ defmodule FermixCore.Jobs.RunnerTest do
     def supports_streaming?, do: false
   end
 
+  defmodule ToolThenSilentAdapter do
+    @moduledoc false
+    # First LLM call requests a tool; the post-tool `continue/3` then goes
+    # silent well past the inactivity window. The watchdog suspends that window
+    # only while a tool is in flight, so this run must still time out — which is
+    # false unless the `{:tool_finish, name, outcome}` event decrements the
+    # in-flight count (a mismatched arity would fall through to the generic
+    # activity clause and pin `active_tools` at 1 forever).
+    @behaviour FermixCore.Providers.Adapter
+
+    @impl true
+    def chat(_messages, _capabilities, opts) do
+      send(Keyword.fetch!(opts, :test_pid), {:tool_then_silent, :chat})
+
+      {:ok,
+       %{
+         content: "",
+         tool_calls: [%{id: "fc_1", call_id: "call_1", name: "stage3_echo", arguments: "{}"}],
+         usage: %{prompt_tokens: 1, completion_tokens: 0, total_tokens: 1},
+         model: "mock",
+         provider_state: %{}
+       }}
+    end
+
+    @impl true
+    def continue(_provider_state, _tool_results, opts) do
+      send(Keyword.fetch!(opts, :test_pid), {:tool_then_silent, :continue})
+      Process.sleep(Keyword.fetch!(opts, :silence_ms))
+      {:error, "the watchdog should have killed this run"}
+    end
+
+    @impl true
+    def to_provider_tools(capabilities), do: capabilities
+
+    @impl true
+    def parse_tool_calls(_response), do: []
+
+    @impl true
+    def parse_response(response), do: response
+
+    @impl true
+    def supports_streaming?, do: false
+  end
+
   defmodule FanoutAdapter do
     @moduledoc false
     # Serves BOTH the main cron loop and its `subagents` workers off one module
@@ -555,6 +599,48 @@ defmodule FermixCore.Jobs.RunnerTest do
 
     assert {:ok, []} = Repo.list_job_runs(%{job_id: job.id, status: "running"}, server: repo)
     assert {:ok, []} = Repo.list_job_runs(%{job_id: job.id, status: "queued"}, server: repo)
+  end
+
+  test "a finished tool re-arms the inactivity watchdog", %{
+    repo: repo,
+    capability_registry: capability_registry,
+    output_base_dir: output_base_dir
+  } do
+    :ok = CapabilityRegistry.register(capability_registry, test_capability("stage3_echo"))
+
+    assert {:ok, {job, run}} =
+             create_claimed_job(repo,
+               name: "Post Tool Silence",
+               schedule: "every 15 minutes",
+               task_prompt: "Use one tool, then go quiet.",
+               allowed_tools: ["stage3_echo"]
+             )
+
+    parent = self()
+
+    {:ok, pid} =
+      Runner.start_link(
+        repo: repo,
+        job: job,
+        run: run,
+        notify: parent,
+        capability_registry: capability_registry,
+        adapter: ToolThenSilentAdapter,
+        adapter_opts: [test_pid: parent, silence_ms: 2_000],
+        output_base_dir: output_base_dir,
+        inactivity_timeout_ms: 20,
+        network_readiness_enabled: false
+      )
+
+    ref = Process.monitor(pid)
+
+    assert_receive {:tool_then_silent, :chat}, 1_000
+    assert_receive {:tool_then_silent, :continue}, 1_000
+    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+
+    assert {:ok, timed_out_run} = Repo.get_job_run(run.id, server: repo)
+    assert timed_out_run.status == "timeout"
+    assert timed_out_run.error =~ "inactivity timeout"
   end
 
   test "applies default wall-clock watchdog when no timeout is configured", %{

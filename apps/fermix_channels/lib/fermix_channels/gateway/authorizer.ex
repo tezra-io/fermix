@@ -11,8 +11,11 @@ defmodule FermixChannels.Gateway.Authorizer do
     friend to the allow-list lets them chat with the bot but does
     not silently grant them skills, MCP tools, exec, network, or
     external API capabilities.
-  - Local channels (`cli`, `daemon`) are operator-equivalent —
-    loopback paths the human owner is sitting at.
+  - Channels the registry marks `trust: :local_operator` (`cli`,
+    `daemon`) are operator-equivalent — same-user local paths the
+    human owner is sitting at. That check runs FIRST, so such a
+    channel authorizes whether or not it carries a config key or a
+    sender id.
   - Missing sender id, unknown sender, or unknown channel string:
     denied.
 
@@ -34,15 +37,16 @@ defmodule FermixChannels.Gateway.Authorizer do
 
   @spec resolve(Source.t()) ::
           {:ok, Authorization.t()} | {:error, :unauthorized | :unknown_channel}
-  def resolve(%Source{channel_key: nil, channel: channel}) do
-    if ChannelRegistry.local?(channel) do
-      {:ok, %Authorization{role: :operator, trust: :operator}}
-    else
-      {:error, :unknown_channel}
+  def resolve(%Source{channel: channel} = source) when is_binary(channel) do
+    case ChannelRegistry.trust(channel) do
+      :local_operator -> {:ok, %Authorization{role: :operator, trust: :operator}}
+      nil -> resolve_sender(source)
     end
   end
 
-  def resolve(%Source{channel_key: key, sender_id: sender_id}) when is_atom(key) do
+  defp resolve_sender(%Source{channel_key: nil}), do: {:error, :unknown_channel}
+
+  defp resolve_sender(%Source{channel_key: key, sender_id: sender_id}) when is_atom(key) do
     cond do
       is_nil(sender_id) ->
         {:error, :unauthorized}

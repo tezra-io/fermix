@@ -9,6 +9,7 @@ defmodule Fermix.CLI.Doctor.Checks do
   invocation stays fast and offline.
   """
 
+  alias Fermix.CLI.AcpCommand
   alias Fermix.CLI.Daemon.Client
   alias Fermix.CLI.Service
   alias Fermix.CLI.Upgrade.Manifest
@@ -466,6 +467,71 @@ defmodule Fermix.CLI.Doctor.Checks do
             "a Codex subscription/OAuth login does not authorize it. Set the OpenAI provider key via `fermix setup`."
         )
     end
+  end
+
+  @doc """
+  The ACP agent surface (M29 §9 item 5): whether it is enabled, where its socket
+  is, and whether the listener is actually up.
+
+  Liveness is answered BY THE DAEMON over the control socket — `fermix doctor`
+  runs in a tree-less VM where `Channels.Acp.Endpoint` never exists, so probing
+  locally would report "down" on a perfectly healthy host. The socket path is
+  resolved here because it is a pure `FERMIX_HOME` join (`Fermix.CLI.AcpCommand`
+  owns it for the bridge verb), and its presence is a local file check.
+  `:client` is injectable so each state is unit-testable.
+  """
+  @spec acp(keyword()) :: result()
+  def acp(opts \\ []) when is_list(opts) do
+    if Keyword.get(acp_config(), :enabled, true) == true do
+      acp_enabled_result(Keyword.get(opts, :client, &Client.request/1))
+    else
+      ok("acp surface", "disabled")
+    end
+  end
+
+  defp acp_config, do: Application.get_env(:fermix_channels, :acp, [])
+
+  defp acp_enabled_result(client) do
+    path = AcpCommand.socket_path()
+
+    case client.("health") do
+      {:ok, %{"status" => "ok", "health" => health}} ->
+        acp_listener_result(acp_channel(health), path)
+
+      {:error, :not_running} ->
+        warn("acp surface", "enabled; daemon not running (start with `fermix start`); #{path}")
+
+      {:error, reason} ->
+        fail("acp surface", "could not ask the daemon: #{inspect(reason)}")
+
+      {:ok, other} ->
+        warn("acp surface", "unexpected reply: #{inspect(other)}")
+    end
+  end
+
+  defp acp_channel(%{"channels" => channels}) when is_list(channels) do
+    Enum.find(channels, &(Map.get(&1, "name") == "acp"))
+  end
+
+  defp acp_channel(_health), do: nil
+
+  defp acp_listener_result(%{"process_alive" => true}, path) do
+    if File.exists?(path) do
+      ok("acp surface", "listening at #{path}")
+    else
+      warn("acp surface", "listener running but its socket is missing at #{path}")
+    end
+  end
+
+  defp acp_listener_result(%{"process_alive" => false}, path) do
+    fail(
+      "acp surface",
+      "enabled but its listener is not running — check daemon logs (socket: #{path})"
+    )
+  end
+
+  defp acp_listener_result(other, _path) do
+    warn("acp surface", "unexpected reply: #{inspect(other)}")
   end
 
   @spec transcription() :: result()

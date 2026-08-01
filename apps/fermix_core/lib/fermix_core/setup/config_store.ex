@@ -121,7 +121,8 @@ defmodule FermixCore.Setup.ConfigStore do
         whatsapp: Application.get_env(:fermix_channels, :whatsapp, []),
         discord: Application.get_env(:fermix_channels, :discord, []),
         slack: Application.get_env(:fermix_channels, :slack, []),
-        signal: Application.get_env(:fermix_channels, :signal, [])
+        signal: Application.get_env(:fermix_channels, :signal, []),
+        acp: Application.get_env(:fermix_channels, :acp, [])
       ],
       fermix_web: []
     }
@@ -193,6 +194,7 @@ defmodule FermixCore.Setup.ConfigStore do
     apply_channel_config(:discord, Keyword.get(persisted.fermix_channels, :discord, []))
     apply_channel_config(:slack, Keyword.get(persisted.fermix_channels, :slack, []))
     apply_channel_config(:signal, Keyword.get(persisted.fermix_channels, :signal, []))
+    apply_channel_config(:acp, Keyword.get(persisted.fermix_channels, :acp, []))
   end
 
   @doc """
@@ -357,7 +359,12 @@ defmodule FermixCore.Setup.ConfigStore do
           snapshot
           |> Map.get(:fermix_channels, [])
           |> Keyword.get(:signal, [])
-          |> normalize_signal()
+          |> normalize_signal(),
+        acp:
+          snapshot
+          |> Map.get(:fermix_channels, [])
+          |> Keyword.get(:acp, [])
+          |> normalize_acp()
       ],
       fermix_web: []
     }
@@ -397,7 +404,14 @@ defmodule FermixCore.Setup.ConfigStore do
         profile: "general"
       ],
       sandbox: SandboxConfig.default(),
-      fermix_channels: [telegram: [], whatsapp: [], discord: [], slack: [], signal: []],
+      fermix_channels: [
+        telegram: [],
+        whatsapp: [],
+        discord: [],
+        slack: [],
+        signal: [],
+        acp: []
+      ],
       fermix_web: []
     }
   end
@@ -665,7 +679,8 @@ defmodule FermixCore.Setup.ConfigStore do
       render_section(["fermix_channels", "whatsapp"], Keyword.get(channels, :whatsapp, [])),
       render_section(["fermix_channels", "discord"], Keyword.get(channels, :discord, [])),
       render_section(["fermix_channels", "slack"], Keyword.get(channels, :slack, [])),
-      render_section(["fermix_channels", "signal"], Keyword.get(channels, :signal, []))
+      render_section(["fermix_channels", "signal"], Keyword.get(channels, :signal, [])),
+      render_section(["fermix_channels", "acp"], Keyword.get(channels, :acp, []))
     ]
     |> List.flatten()
     |> Enum.reject(&(&1 in [nil, ""]))
@@ -872,7 +887,8 @@ defmodule FermixCore.Setup.ConfigStore do
         whatsapp: normalize_whatsapp(get_in(document, ["fermix_channels", "whatsapp"])),
         discord: normalize_discord(get_in(document, ["fermix_channels", "discord"])),
         slack: normalize_slack(get_in(document, ["fermix_channels", "slack"])),
-        signal: normalize_signal(get_in(document, ["fermix_channels", "signal"]))
+        signal: normalize_signal(get_in(document, ["fermix_channels", "signal"])),
+        acp: normalize_acp(get_in(document, ["fermix_channels", "acp"]))
       ],
       fermix_web: []
     }
@@ -1702,6 +1718,15 @@ defmodule FermixCore.Setup.ConfigStore do
       :allowed_sender_ids,
       lookup(config, "allowed_sender_ids", :allowed_sender_ids)
     )
+  end
+
+  # The ACP agent surface (M29 §4): `enabled` is the whole knob. It carries no
+  # credential, no ingress list, no owner and no streaming opt-in (its `:raw`
+  # tier is decided before the config consult), so nothing else is accepted.
+  defp normalize_acp(nil), do: []
+
+  defp normalize_acp(config) do
+    put_if_present([], :enabled, lookup(config, "enabled", :enabled))
   end
 
   defp normalize_auth_mode(:api_key), do: :api_key

@@ -567,6 +567,104 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     end
   end
 
+  describe "acp/1" do
+    setup do
+      acp = Application.get_env(:fermix_channels, :acp)
+      fermix_home = System.get_env("FERMIX_HOME")
+
+      tmp_home =
+        Path.join(System.tmp_dir!(), "fermix-checks-acp-#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(tmp_home)
+      System.put_env("FERMIX_HOME", tmp_home)
+
+      on_exit(fn ->
+        case acp do
+          nil -> Application.delete_env(:fermix_channels, :acp)
+          value -> Application.put_env(:fermix_channels, :acp, value)
+        end
+
+        case fermix_home do
+          nil -> System.delete_env("FERMIX_HOME")
+          value -> System.put_env("FERMIX_HOME", value)
+        end
+
+        FermixTestSupport.SafeRm.rm_rf!(tmp_home)
+      end)
+
+      %{home: tmp_home}
+    end
+
+    test "disabled is a quiet ok and never asks the daemon" do
+      Application.put_env(:fermix_channels, :acp, enabled: false)
+      client = fn _method -> flunk("the daemon must not be queried when acp is disabled") end
+
+      result = Checks.acp(client: client)
+
+      assert result.name == "acp surface"
+      assert result.status == :ok
+      assert result.detail =~ "disabled"
+    end
+
+    test "reports the listening socket when the daemon says the listener is up", %{home: home} do
+      Application.put_env(:fermix_channels, :acp, enabled: true)
+      socket = Path.join(home, "acp.sock")
+      File.write!(socket, "")
+
+      result = Checks.acp(client: health_client(%{"process_alive" => true}))
+
+      assert result.status == :ok
+      assert result.detail =~ socket
+    end
+
+    test "warns when the listener is up but the socket file is missing" do
+      Application.put_env(:fermix_channels, :acp, enabled: true)
+
+      result = Checks.acp(client: health_client(%{"process_alive" => true}))
+
+      assert result.status == :warn
+      assert result.detail =~ "missing"
+    end
+
+    test "fails when the daemon runs but the listener is absent" do
+      Application.put_env(:fermix_channels, :acp, enabled: true)
+
+      result = Checks.acp(client: health_client(%{"process_alive" => false}))
+
+      assert result.status == :fail
+      assert result.detail =~ "listener"
+    end
+
+    test "warns with the socket path when the daemon is not running" do
+      Application.put_env(:fermix_channels, :acp, enabled: true)
+      client = fn "health" -> {:error, :not_running} end
+
+      result = Checks.acp(client: client)
+
+      assert result.status == :warn
+      assert result.detail =~ "daemon not running"
+      assert result.detail =~ "acp.sock"
+    end
+
+    test "warns when the health reply carries no acp channel" do
+      Application.put_env(:fermix_channels, :acp, enabled: true)
+      client = fn "health" -> {:ok, %{"status" => "ok", "health" => %{"channels" => []}}} end
+
+      result = Checks.acp(client: client)
+
+      assert result.status == :warn
+      assert result.detail =~ "unexpected reply"
+    end
+
+    defp health_client(acp_channel) do
+      channel = Map.merge(%{"name" => "acp", "enabled" => true}, acp_channel)
+
+      fn "health" ->
+        {:ok, %{"status" => "ok", "health" => %{"channels" => [channel]}}}
+      end
+    end
+  end
+
   describe "recent_log_activity/0" do
     test "returns a result map regardless of log presence" do
       result = Checks.recent_log_activity()

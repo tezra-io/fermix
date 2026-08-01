@@ -531,6 +531,49 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       assert context.harness_continuation_depth == 0
     end
 
+    # MILESTONE_29_ACP_AGENT_SURFACE §8.3: the ACP session's spawn env reaches
+    # the sandbox command env through the turn context, and the two secret
+    # values ride alongside it as the telemetry redaction list.
+    test "an operator turn threads session_env and derives its redaction list" do
+      Process.put(:record_cwd_step, 0)
+
+      session_env = %{
+        "BUZZ_PRIVATE_KEY" => "nsec1fakebuzzkeyvalue",
+        "NOSTR_PRIVATE_KEY" => "nsec1fakenostrkeyvalue",
+        "BUZZ_RELAY_URL" => "wss://relay.example",
+        "PATH" => "/fake/bin"
+      }
+
+      %{context: context} =
+        run_record_cwd_turn(:operator, "/tmp/fermix-session-env", %{session_env: session_env})
+
+      assert context.session_env == session_env
+
+      assert Enum.sort(context.redact_values) ==
+               Enum.sort(["nsec1fakebuzzkeyvalue", "nsec1fakenostrkeyvalue"])
+    end
+
+    test "a guest turn drops session_env and its redaction list" do
+      Process.put(:record_cwd_step, 0)
+
+      %{context: context} =
+        run_record_cwd_turn(:guest, "/tmp/fermix-guest-session-env", %{
+          session_env: %{"BUZZ_PRIVATE_KEY" => "nsec1fakebuzzkeyvalue"}
+        })
+
+      assert context.session_env == nil
+      assert context.redact_values == []
+    end
+
+    test "a turn without a session env still carries both keys at their defaults" do
+      Process.put(:record_cwd_step, 0)
+      %{context: context} = run_record_cwd_turn(:operator, "/tmp/fermix-no-session-env")
+
+      assert Map.has_key?(context, :session_env)
+      assert context.session_env == nil
+      assert context.redact_values == []
+    end
+
     test "run/4 threads the stream callback into adapter_opts; run/3 stays callback-free" do
       registry_name = :"turn_runner_stream_registry_#{System.unique_integer([:positive])}"
       store_name = :"turn_runner_stream_store_#{System.unique_integer([:positive])}"
@@ -582,6 +625,56 @@ defmodule FermixCore.Agents.TurnRunnerTest do
 
       assert_receive {:summary_chat, _messages, plain_opts}
       refute Keyword.has_key?(plain_opts, :stream_callback)
+    end
+
+    test "run/5 threads the activity callback into the loop; run/3 threads none" do
+      registry_name = :"turn_runner_activity_registry_#{System.unique_integer([:positive])}"
+      store_name = :"turn_runner_activity_store_#{System.unique_integer([:positive])}"
+
+      start_supervised!({CapabilityRegistry, name: registry_name})
+
+      store =
+        start_supervised!(
+          {ConversationStore, name: store_name, max_messages: :infinity, repo: nil}
+        )
+
+      msg = %{
+        channel: "acp",
+        chat_id: "activity_turn",
+        sender: "user",
+        content: "use a tool",
+        source_trust: :operator
+      }
+
+      turn_state =
+        turn_state(
+          adapter: LoopingAdapter,
+          adapter_opts: [model: "mock-model", terminal_step: 2],
+          capability_registry: registry_name,
+          conversation_store: store
+        )
+
+      test_pid = self()
+      activity = fn event -> send(test_pid, {:activity, event}) end
+
+      # 3-arity path threads nothing (asserted first, so no event from the
+      # 5-arity run below can be mistaken for one it produced).
+      Process.put(:looping_adapter_step, 0)
+
+      assert {:ok, "finished at 2", _tokens} =
+               TurnRunner.run(msg, turn_state, fn _part -> :ok end)
+
+      refute_received {:activity, _event}
+
+      Process.put(:looping_adapter_step, 0)
+
+      assert {:ok, "finished at 2", _tokens} =
+               TurnRunner.run(msg, turn_state, fn _part -> :ok end, nil, activity)
+
+      # `missing_tool` never reaches a capability, so the loop reports the
+      # failed outcome on the finish event.
+      assert_received {:activity, {:tool_start, "missing_tool"}}
+      assert_received {:activity, {:tool_finish, "missing_tool", %{status: :error}}}
     end
 
     test "persists the accepted user message when the agent loop fails" do
@@ -1077,7 +1170,11 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       base_accounting: [],
       available_skills: [],
       operator_profile: operator_profile,
-      guest_profile: guest_profile
+      guest_profile: guest_profile,
+      # A client-owned channel (acp) runs on the harness-free variant; these
+      # fixtures carry no capabilities, so it is the same profile here. Selection
+      # by channel is pinned in `HarnessChannelProfileTest`.
+      harness_free_profiles: %{operator: operator_profile, guest: guest_profile}
     }
   end
 

@@ -119,6 +119,35 @@ defmodule Fermix.CLI.SetupTest do
     assert Keyword.get(opts, :openai_api_key) == "sk-test"
   end
 
+  test "--acp-enabled is a recognized answer that routes to the terminal runtime" do
+    parent = self()
+
+    assert 0 =
+             Setup.run(["--acp-enabled"],
+               standalone?: fn -> true end,
+               display?: fn -> true end,
+               setup_ready?: fn -> false end,
+               runtime: runtime(parent),
+               web_launcher: unexpected_web_launcher(parent)
+             )
+
+    assert_receive {:runtime, opts}
+    assert Keyword.get(opts, :acp_enabled) == true
+  end
+
+  test "rejects an unregistered flag next to the acp switch" do
+    stderr =
+      capture_io(:stderr, fn ->
+        assert 1 =
+                 Setup.run(["--acp-enable"],
+                   standalone?: fn -> true end,
+                   display?: fn -> true end
+                 )
+      end)
+
+    assert stderr =~ "invalid options"
+  end
+
   test "rejects contradictory web and terminal flags" do
     stderr =
       ExUnit.CaptureIO.capture_io(:stderr, fn ->
