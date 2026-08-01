@@ -1445,6 +1445,30 @@ defmodule FermixWebWeb.SetupLiveTest do
       refute html =~ ~s(name="channels_form[telegram_bot_token]")
     end
 
+    test "the acp channel renders a single enable toggle and saves it", %{conn: conn} do
+      acp = Application.fetch_env(:fermix_channels, :acp)
+      on_exit(fn -> restore_env(:fermix_channels, :acp, acp) end)
+      Application.put_env(:fermix_channels, :acp, enabled: false)
+
+      {:ok, view, _html} = live(conn, "/setup?tab=channels")
+
+      html =
+        view
+        |> element(~s(button[phx-click="select_channel"][phx-value-channel="acp"]))
+        |> render_click()
+
+      assert html =~ ~s(name="channels_form[acp_enabled]")
+      refute html =~ ~s(name="channels_form[telegram_bot_token]")
+
+      html =
+        view
+        |> form("form[phx-submit=\"save_channels\"]", channels_form: %{acp_enabled: "true"})
+        |> render_submit()
+
+      assert html =~ "Channels saved."
+      assert Keyword.get(Application.get_env(:fermix_channels, :acp, []), :enabled) == true
+    end
+
     test "saving a channel keeps that channel selected, not bounced to telegram", %{conn: conn} do
       {:ok, view, _html} = live(conn, "/setup?tab=channels")
 

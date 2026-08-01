@@ -33,7 +33,16 @@ defmodule FermixCore.Sandbox do
            resolve_working_dir(requested_dir, config, context, protected_roots, effective_roots),
          :allow <- enforce_exec(working_dir, context, config, protected_roots, effective_roots),
          {:ok, env} <- Env.build(config) do
-      {:ok, %{working_dir: working_dir, env: env}}
+      # The client-session env overlay (MILESTONE_29_ACP_AGENT_SURFACE §8.3).
+      # This plan IS the shell child's whole environment (`Tools.Shell` spawns
+      # `env -i <assignments> sh -c <command>`), so a Buzz session's PATH and
+      # relay credentials have to land here or the model can never run the `buzz`
+      # CLI it is instructed to answer with. Absent on every other surface.
+      {:ok,
+       %{
+         working_dir: working_dir,
+         env: Env.apply_session_env(env, Map.get(context, :session_env))
+       }}
     else
       {:hardline, reason} -> {:error, {:hardline, reason}}
       {:deny, reason} -> {:error, reason}

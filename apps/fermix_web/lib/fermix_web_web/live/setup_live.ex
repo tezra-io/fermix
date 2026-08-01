@@ -106,7 +106,10 @@ defmodule FermixWebWeb.SetupLive do
     :slack_signing_secret,
     :slack_owner_user_id,
     :signal_account,
-    :signal_owner_user_id
+    :signal_owner_user_id,
+    # The ACP listener is a supervised transport child started at boot, so
+    # flipping it needs a restart before the socket appears (or disappears).
+    :acp_enabled
   ]
   # `default_vendor` gates which run tool advertises AND feeds the runtime prompt
   # steer (rendered from the cached profile), so a change wants a daemon restart
@@ -302,6 +305,7 @@ defmodule FermixWebWeb.SetupLive do
       |> maybe_put_string(:slack_owner_user_id, params["slack_owner_user_id"])
       |> maybe_put_string(:signal_account, params["signal_account"])
       |> maybe_put_string(:signal_owner_user_id, params["signal_owner_user_id"])
+      |> maybe_put_string(:acp_enabled, params["acp_enabled"])
 
     socket =
       save_answers(socket, answers, "Channels saved.", Map.get(root, "__nav"),
@@ -1118,7 +1122,8 @@ defmodule FermixWebWeb.SetupLive do
       whatsapp: whatsapp_form(channels),
       discord: discord_form(channels),
       slack: slack_form(channels),
-      signal: signal_form(channels)
+      signal: signal_form(channels),
+      acp: acp_form(channels)
     }
   end
 
@@ -1175,6 +1180,14 @@ defmodule FermixWebWeb.SetupLive do
       account: safe_string(Keyword.get(config, :account)),
       owner_user_id: safe_string(Keyword.get(config, :owner_user_id))
     }
+  end
+
+  # ACP carries no credential and no owner id — the toggle is the whole form.
+  # The default mirrors config/config.exs: an install whose TOML predates the
+  # surface has no acp section, and the toggle must show the surface as it is
+  # actually running rather than offering to turn off something already on.
+  defp acp_form(channels) do
+    %{enabled: channel_enabled?(Keyword.get(channels, :acp, []), true)}
   end
 
   defp build_sandbox_form(snapshot) do
@@ -2411,6 +2424,7 @@ defmodule FermixWebWeb.SetupLive do
   defp parse_channel_field("discord", _default), do: :discord
   defp parse_channel_field("slack", _default), do: :slack
   defp parse_channel_field("signal", _default), do: :signal
+  defp parse_channel_field("acp", _default), do: :acp
   defp parse_channel_field(_, default), do: default
 
   defp parse_effort_field(field, default) do

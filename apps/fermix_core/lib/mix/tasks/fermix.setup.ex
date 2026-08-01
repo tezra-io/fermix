@@ -45,6 +45,7 @@ defmodule Mix.Tasks.Fermix.Setup do
     slack_owner_user_id: :string,
     signal_account: :string,
     signal_owner_user_id: :string,
+    acp_enabled: :boolean,
     print_state: :boolean,
     reconfigure: :boolean,
     migrate_secrets: :boolean,

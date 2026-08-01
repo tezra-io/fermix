@@ -4,6 +4,7 @@ defmodule FermixChannels.DispatcherTest do
   import ExUnit.CaptureLog
 
   alias FermixChannels.Dispatcher
+  alias FermixChannels.Gateway.ChannelRegistry
   alias FermixChannels.Gateway.Commands.Sandbox.Confirmations
   alias FermixChannels.Gateway.Message
   alias FermixCore.Memory.ConversationStore
@@ -240,6 +241,33 @@ defmodule FermixChannels.DispatcherTest do
 
     assert_receive {:agent_message, agent_message}
     assert agent_message.source_trust == :guest
+    refute Map.has_key?(agent_message, :approval_fn)
+  end
+
+  # A channel the registry marks `commands?: false` has no `/confirm` path, so a
+  # grant it could mint could never be answered (M29 §11). Operator trust alone
+  # is not enough — the approval seam requires the command pipeline too.
+  test "attaches no approval_fn on an operator turn from a command-less channel" do
+    message = %Message{
+      id: "ga-3",
+      content: "please read /Users/me/repos/acme/README",
+      sender: "acp-client",
+      channel: "acp",
+      chat_id: "acp-session-1",
+      reply_target: "acp-session-1",
+      metadata: %{source: :acp, user_id: "acp", chat_type: "private"}
+    }
+
+    assert :ok =
+             Dispatcher.dispatch([message],
+               channel: ReplyChannel,
+               agent: CapturingAgent,
+               agent_server: self()
+             )
+
+    assert_receive {:agent_message, agent_message}
+    assert agent_message.source_trust == :operator
+    refute ChannelRegistry.commands?("acp")
     refute Map.has_key?(agent_message, :approval_fn)
   end
 

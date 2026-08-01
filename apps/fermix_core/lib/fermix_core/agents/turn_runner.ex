@@ -41,8 +41,15 @@ defmodule FermixCore.Agents.TurnRunner do
   alias FermixCore.Providers.RouteResolver
   alias FermixCore.Reply
   alias FermixCore.Telemetry
+  alias FermixCore.Tools.HarnessSupport
 
   @auto_compaction_failure_backoff_ms 60_000
+
+  # The session-env keys whose VALUES are secrets (the Buzz/Nostr signing keys a
+  # BYOH harness spawns Fermix with). Everything else in a session env — relay
+  # URL, PATH, git config — is addressing, not credentials.
+  @redact_env_keys ~w(BUZZ_PRIVATE_KEY NOSTR_PRIVATE_KEY)
+
   @doc """
   Run one agent turn and return its response. Persists the USER message (the
   turn was accepted) but NOT the assistant message — the gateway commits that
@@ -55,11 +62,22 @@ defmodule FermixCore.Agents.TurnRunner do
   the gateway that receives `AgentLoop.stream_event()`s. `nil` (the 3-arity
   call) threads nothing — non-streaming surfaces (background runs, CLI sync,
   cron) keep calling `run/3` and are byte-identical to before.
+
+  `activity_callback` (optional 5th argument) is the same shape for
+  `AgentLoop.activity_event()`s — tool start/finish, which the ACP surface
+  renders as live tool cards (MILESTONE_29_ACP_AGENT_SURFACE.md §8.4). Also
+  `nil` by default, so every existing caller threads nothing.
   """
-  @spec run(map(), map(), Reply.reply_fn(), AgentLoop.stream_callback() | nil) ::
-          {:ok, String.t(), non_neg_integer()} | {:error, term()}
-  def run(msg, turn_state, deliver, stream_callback \\ nil) when is_function(deliver, 1) do
-    run_message_loop(msg, turn_state, deliver, stream_callback)
+  @spec run(
+          map(),
+          map(),
+          Reply.reply_fn(),
+          AgentLoop.stream_callback() | nil,
+          AgentLoop.activity_callback() | nil
+        ) :: {:ok, String.t(), non_neg_integer()} | {:error, term()}
+  def run(msg, turn_state, deliver, stream_callback \\ nil, activity_callback \\ nil)
+      when is_function(deliver, 1) do
+    run_message_loop(msg, turn_state, deliver, stream_callback, activity_callback)
   end
 
   @doc """
@@ -188,13 +206,13 @@ defmodule FermixCore.Agents.TurnRunner do
     end
   end
 
-  defp run_message_loop(msg, state, deliver, stream_callback) do
+  defp run_message_loop(msg, state, deliver, stream_callback, activity_callback) do
     start = System.monotonic_time(:millisecond)
     conversation_key = ConversationKey.from(msg)
     %RuntimeContext{} = ctx = state.runtime_context
     cache_status = Map.get(msg, :__runtime_context_cache_status, :hit)
     source_trust = Map.get(msg, :source_trust)
-    profile = profile_for_trust(ctx, source_trust, state.capability_registry)
+    profile = profile_for_trust(ctx, source_trust, state.capability_registry, msg.channel)
 
     emit_runtime_context_cache_telemetry(state, cache_status, profile)
 
@@ -214,6 +232,7 @@ defmodule FermixCore.Agents.TurnRunner do
     messages = RuntimeContext.messages_for(ctx, profile, history, user_message)
     accounting = RuntimeContext.accounting_for(ctx, profile)
     emit_prompt_context_telemetry(state.memory_agent_id, messages, accounting, cache_status)
+    session_env = session_env_for(source_trust, msg)
 
     context = %{
       agent_name: "main",
@@ -242,6 +261,18 @@ defmodule FermixCore.Agents.TurnRunner do
       # an attacker-influenced remote channel can never widen roots. PathPolicy
       # reads this same `:cwd` key as the relative-path resolution base.
       cwd: request_cwd_for(source_trust, msg),
+      # The client-session env overlay (MILESTONE_29_ACP_AGENT_SURFACE §8.3): an
+      # ACP session's spawn env, which `Sandbox.CommandTool` merges over the
+      # policy env so the model can run the client's own CLI (`buzz`) with the
+      # credentials and PATH the harness spawned Fermix with. Operator-gated for
+      # the same reason as `cwd`: only a trusted local origin may steer what a
+      # child process sees. `nil` on every other surface.
+      session_env: session_env,
+      # Values that must never reach a telemetry content preview, derived from
+      # `session_env` by `@redact_env_keys`. `Tools.Telemetry.maybe_put_content`
+      # is the single choke point that consumes them (§8.3 — the export boundary
+      # Fermix owns, given the credentials themselves are peer-parity visible).
+      redact_values: redact_values_for(session_env),
       # Attended-origin gate (COMPUTER_USE.md §7.6): only a turn with a live owner
       # surface who can abort may start a host session. Derived from the channel via
       # computer_use_origin/1 so a detached `/background` run fails closed instead of
@@ -302,7 +333,8 @@ defmodule FermixCore.Agents.TurnRunner do
           source_trust: source_trust,
           capabilities: profile.capabilities,
           dispatchable_capabilities: Map.get(profile, :dispatchable, profile.capabilities),
-          stream_callback: stream_callback
+          stream_callback: stream_callback,
+          activity_callback: activity_callback
         )
       end)
 
@@ -333,6 +365,20 @@ defmodule FermixCore.Agents.TurnRunner do
 
   defp request_cwd_for(:operator, msg), do: Map.get(msg, :request_cwd)
   defp request_cwd_for(_trust, _msg), do: nil
+
+  defp session_env_for(:operator, msg), do: Map.get(msg, :session_env)
+  defp session_env_for(_trust, _msg), do: nil
+
+  defp redact_values_for(session_env) when is_map(session_env) do
+    Enum.flat_map(@redact_env_keys, fn key ->
+      case Map.get(session_env, key) do
+        value when is_binary(value) and value != "" -> [value]
+        _absent_or_empty -> []
+      end
+    end)
+  end
+
+  defp redact_values_for(_absent), do: []
 
   defp apply_run_profile(:ultra, messages, context) do
     {inject_ultra_addendum(messages), Map.put(context, :subagent_mode, :ultra)}
@@ -610,6 +656,7 @@ defmodule FermixCore.Agents.TurnRunner do
       |> maybe_put_capabilities(Keyword.get(opts, :capabilities))
       |> maybe_put_dispatchable(Keyword.get(opts, :dispatchable_capabilities))
       |> maybe_put_stream_callback(Keyword.get(opts, :stream_callback))
+      |> maybe_put_activity_callback(Keyword.get(opts, :activity_callback))
 
     case resolve_loop_adapter(state) do
       {:adapter, mod, opts} ->
@@ -649,6 +696,11 @@ defmodule FermixCore.Agents.TurnRunner do
 
   defp maybe_put_stream_callback(opts, callback) when is_function(callback, 1),
     do: Keyword.put(opts, :stream_callback, callback)
+
+  defp maybe_put_activity_callback(opts, nil), do: opts
+
+  defp maybe_put_activity_callback(opts, callback) when is_function(callback, 1),
+    do: Keyword.put(opts, :activity_callback, callback)
 
   defp resolve_loop_adapter(state) do
     cond do
@@ -1027,15 +1079,21 @@ defmodule FermixCore.Agents.TurnRunner do
     :ok
   end
 
-  defp profile_for_trust(ctx, :operator, registry),
-    do: RuntimeContext.profile_for(ctx, :operator, registry, [])
+  # The prompt profile follows the turn's channel as well as its trust: a
+  # client-owned channel advertises no coding-harness tool, so it must not be
+  # handed a catalog section that steers repository work at one (M28 lesson —
+  # prose and wire move together). The channel half asks the SAME predicate the
+  # harness tools' `advertise?/1` asks, so the two can never drift.
+  defp profile_for_trust(ctx, trust, registry, channel) do
+    RuntimeContext.profile_for(ctx, profile_trust(trust), registry,
+      harness_tools?: HarnessSupport.advertisable_channel?(%{channel: channel})
+    )
+  end
 
-  defp profile_for_trust(ctx, :guest, registry),
-    do: RuntimeContext.profile_for(ctx, :guest, registry, [])
+  defp profile_trust(:operator), do: :operator
 
   # nil trust = least privilege (matches CapabilityRegistry.resolve_policy/2).
-  defp profile_for_trust(ctx, _trust, registry),
-    do: RuntimeContext.profile_for(ctx, :guest, registry, [])
+  defp profile_trust(_trust), do: :guest
 
   defp emit_prompt_context_telemetry(agent_id, messages, accounting, cache_status) do
     :telemetry.execute(

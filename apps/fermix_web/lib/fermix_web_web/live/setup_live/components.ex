@@ -10,7 +10,8 @@ defmodule FermixWebWeb.SetupLive.Components do
     {:whatsapp, "WhatsApp"},
     {:discord, "Discord"},
     {:slack, "Slack"},
-    {:signal, "Signal"}
+    {:signal, "Signal"},
+    {:acp, "ACP (editors & agent clients)"}
   ]
 
   attr :active_tab, :string, required: true
@@ -2545,6 +2546,37 @@ defmodule FermixWebWeb.SetupLive.Components do
       name={@field.name}
       value={@field.value}
     />
+    <.toggle_input
+      :if={@field.kind == :toggle}
+      label={@field.label}
+      name={@field.name}
+      checked={@field.checked}
+      hint={@field.hint}
+    />
+    """
+  end
+
+  attr :label, :string, required: true
+  attr :name, :string, required: true
+  attr :checked, :boolean, required: true
+  attr :hint, :string, required: true
+
+  defp toggle_input(assigns) do
+    ~H"""
+    <div class="form-control">
+      <label class="label cursor-pointer justify-start gap-3">
+        <input type="hidden" name={@name} value="false" />
+        <input
+          type="checkbox"
+          name={@name}
+          value="true"
+          checked={@checked}
+          class="toggle toggle-sm toggle-primary"
+        />
+        <span class="label-text text-sm font-medium">{@label}</span>
+      </label>
+      <span class="label pt-0 text-xs text-base-content/60">{@hint}</span>
+    </div>
     """
   end
 
@@ -2933,12 +2965,27 @@ defmodule FermixWebWeb.SetupLive.Components do
     ]
   end
 
+  defp channel_fields(:acp, form) do
+    [
+      toggle_field(
+        "Accept ACP clients",
+        "acp_enabled",
+        form.enabled,
+        "Lets clients like Zed or a Buzz harness drive this daemon over a local socket."
+      )
+    ]
+  end
+
   defp secret_field(label, key, set) do
     %{kind: :secret, label: label, name: "channels_form[#{key}]", set: set}
   end
 
   defp text_field(label, key, value) do
     %{kind: :text, label: label, name: "channels_form[#{key}]", value: value}
+  end
+
+  defp toggle_field(label, key, checked, hint) do
+    %{kind: :toggle, label: label, name: "channels_form[#{key}]", checked: checked, hint: hint}
   end
 
   defp current_step_number(tab_id, tabs) do

@@ -58,12 +58,14 @@ defmodule FermixCore.Tools.ListCodingRuns do
   @doc """
   Advertise only when the harness is usable — `enabled` + `approved`, the same
   gate the run tools carry (design §23.4), so an unusable harness advertises
-  nothing at all. Still dispatchable by name for reading history recorded before
-  consent was withdrawn.
+  nothing at all — as does a channel that cannot carry a run
+  (`HarnessSupport.advertisable_channel?/1`). Still dispatchable by name for reading
+  history recorded before consent was withdrawn.
   """
   @spec advertise?(map()) :: boolean()
   def advertise?(context) when is_map(context) do
     Config.enabled?() and Config.approved?() and
+      Support.advertisable_channel?(context) and
       Authorization.authorize(name(), context) == :ok
   end
 

@@ -10,6 +10,9 @@ defmodule FermixCore.Sandbox.CommandTool do
   alias FermixCore.Sandbox.Env
   alias FermixCore.Sandbox.Mode
 
+  # `Env.apply_session_env/2` below is the client-session overlay
+  # (MILESTONE_29_ACP_AGENT_SURFACE §8.3), shared with `Sandbox.shell_plan/3` —
+  # the two sandbox exec paths that run a command on behalf of a turn.
   @spec execute(map(), map(), Config.command_spec()) :: {:ok, Tool.tool_result()}
   def execute(args, context, spec) when is_map(args) and is_map(context) and is_map(spec) do
     config = config_from(context)
@@ -17,6 +20,7 @@ defmodule FermixCore.Sandbox.CommandTool do
     with {:ok, prompt} <- required_prompt(args),
          {:ok, extra_args} <- optional_args(args),
          {:ok, env} <- Env.build_command(config, spec.pass_env),
+         env = Env.apply_session_env(env, Map.get(context, :session_env)),
          {:ok, cwd} <- working_dir(config, context),
          {:ok, output} <- run_command(spec, prompt, extra_args, cwd, env) do
       {:ok, Tool.success(output)}

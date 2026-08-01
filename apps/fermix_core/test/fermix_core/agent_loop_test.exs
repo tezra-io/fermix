@@ -212,6 +212,11 @@ defmodule FermixCore.AgentLoopTest do
     }
   end
 
+  defp forward_activity do
+    test_pid = self()
+    fn event -> send(test_pid, {:activity, event}) end
+  end
+
   defp set_mock_responses(responses) do
     Process.put(:mock_responses, responses)
     Process.put(:mock_calls, [])
@@ -1088,6 +1093,64 @@ defmodule FermixCore.AgentLoopTest do
 
       assert reason =~ "Repeated tool call loop detected"
     end
+
+    test "interleaved identical observations between different calls never kill", %{
+      registry: registry
+    } do
+      register_caps(registry, [EchoTool])
+
+      # The tool contract itself mandates this shape: re-observe with identical
+      # args after every state-changing action (screenshot → click → screenshot,
+      # and NOT-delivered recovery re-sends the SAME coordinates). A kill here
+      # ends a healthy turn mid-work — the 2026-08-01 aim-harness batches died
+      # at the fifth interleaved screenshot exactly this way.
+      observe = tool_call("call_obs", "echo", %{"text" => "observe"})
+
+      responses =
+        Enum.flat_map(1..5, fn n ->
+          [
+            turn("", tool_calls: [observe]),
+            turn("", tool_calls: [tool_call("call_act#{n}", "echo", %{"text" => "act #{n}"})])
+          ]
+        end) ++ [turn("Recovered")]
+
+      set_mock_responses(responses)
+
+      assert {:ok, result} =
+               run_loop(
+                 capability_registry: registry,
+                 max_iterations: 15,
+                 loop_detection_warn_threshold: 3,
+                 loop_detection_kill_threshold: 5
+               )
+
+      assert result.response == "Recovered"
+    end
+
+    test "a different call resets the consecutive run the kill counts", %{registry: registry} do
+      register_caps(registry, [EchoTool])
+
+      repeated = tool_call("call_same", "echo", %{"text" => "loop"})
+      breaker = tool_call("call_other", "echo", %{"text" => "different"})
+
+      responses =
+        List.duplicate(turn("", tool_calls: [repeated]), 4) ++
+          [turn("", tool_calls: [breaker])] ++
+          List.duplicate(turn("", tool_calls: [repeated]), 4) ++
+          [turn("Recovered")]
+
+      set_mock_responses(responses)
+
+      assert {:ok, result} =
+               run_loop(
+                 capability_registry: registry,
+                 max_iterations: 15,
+                 loop_detection_warn_threshold: 3,
+                 loop_detection_kill_threshold: 5
+               )
+
+      assert result.response == "Recovered"
+    end
   end
 
   # -- Adapter error --
@@ -1117,6 +1180,45 @@ defmodule FermixCore.AgentLoopTest do
 
       assert log =~ "AgentLoop activity callback raised"
       assert log =~ "callback failed"
+    end
+
+    # `:tool_finish` carries the real execution outcome (M29 §8.4) — the ACP
+    # session renders it as a completed/failed tool card, so a status derived
+    # from anything but the tool's own result would mislabel the wire.
+    test "tool_finish reports :ok for a tool that succeeded", %{registry: registry} do
+      register_caps(registry, [EchoTool])
+      call = tool_call("call_ok", "echo", %{"text" => "hi"})
+      set_mock_responses([turn("", tool_calls: [call]), turn("done")])
+
+      assert {:ok, _result} =
+               run_loop(capability_registry: registry, activity_callback: forward_activity())
+
+      assert_received {:activity, {:tool_start, "echo"}}
+      assert_received {:activity, {:tool_finish, "echo", %{status: :ok}}}
+    end
+
+    test "tool_finish reports :error for a tool that failed", %{registry: registry} do
+      register_caps(registry, [FailTool])
+      call = tool_call("call_fail", "fail_tool", %{})
+      set_mock_responses([turn("", tool_calls: [call]), turn("done")])
+
+      assert {:ok, _result} =
+               run_loop(capability_registry: registry, activity_callback: forward_activity())
+
+      assert_received {:activity, {:tool_start, "fail_tool"}}
+      assert_received {:activity, {:tool_finish, "fail_tool", %{status: :error}}}
+    end
+
+    test "tool_finish reports :error for a tool call that never reached a capability",
+         %{registry: registry} do
+      call = tool_call("call_missing", "no_such_tool", %{})
+      set_mock_responses([turn("", tool_calls: [call]), turn("done")])
+
+      assert {:ok, _result} =
+               run_loop(capability_registry: registry, activity_callback: forward_activity())
+
+      assert_received {:activity, {:tool_start, "no_such_tool"}}
+      assert_received {:activity, {:tool_finish, "no_such_tool", %{status: :error}}}
     end
 
     test "passes agent name into adapter opts for provider telemetry", %{registry: registry} do

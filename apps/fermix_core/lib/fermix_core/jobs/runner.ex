@@ -1040,7 +1040,7 @@ defmodule FermixCore.Jobs.Runner do
     }
   end
 
-  defp update_watchdog_activity(watchdog, {:tool_finish, _name}) do
+  defp update_watchdog_activity(watchdog, {:tool_finish, _name, _outcome}) do
     %{
       watchdog
       | last_activity_at: monotonic_ms(),

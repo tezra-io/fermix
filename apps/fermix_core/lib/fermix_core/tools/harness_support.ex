@@ -67,6 +67,27 @@ defmodule FermixCore.Tools.HarnessSupport do
     result
   end
 
+  # Channels whose conversation is owned by an external client and ends with it.
+  # A coding run outlives the turn that launched it and reports back through a
+  # continuation into that conversation, so on these surfaces the whole harness
+  # family stays off the advertised schema (MILESTONE_29_ACP_AGENT_SURFACE §4,
+  # "Detached work"). Visibility only, exactly like the other advertise gates:
+  # a by-name dispatch still runs the execute-time `Harness.Authorization` gate.
+  @client_owned_channels ["acp"]
+
+  @doc """
+  Whether this turn's channel can carry a coding run at all — the harness half of
+  every harness tool's `advertise?/1`.
+
+  One definition for the whole family: the gate is a property of the FEATURE, not
+  of a tool, so a harness tool added later inherits it by calling this rather than
+  re-deriving the channel list.
+  """
+  @spec advertisable_channel?(map()) :: boolean()
+  def advertisable_channel?(context) when is_map(context) do
+    Map.get(context, :channel) not in @client_owned_channels
+  end
+
   @spec repo(map()) :: term()
   def repo(context), do: Map.get(context, :memory_repo, Repo)
 

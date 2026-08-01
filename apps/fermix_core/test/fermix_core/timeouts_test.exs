@@ -79,6 +79,15 @@ defmodule FermixCore.TimeoutsTest do
     end
   end
 
+  describe "ACP bridge handshake deadline" do
+    test "is one named value both ends of the handshake read" do
+      # The daemon's `Channels.Acp.Peer` refuses a connection that has not sent
+      # its hello line in time; `Fermix.CLI.AcpCommand` gives up waiting for the
+      # ack. Two ends, one deadline — a local constant on either side would drift.
+      assert Timeouts.acp_bridge_hello() == 5_000
+    end
+  end
+
   describe "ctx gating (FermixCore.Timeouts.Telemetry)" do
     test "correlation ids ride always-on; context is omitted when capture is off" do
       attach([:fermix, :timeout, :expired])

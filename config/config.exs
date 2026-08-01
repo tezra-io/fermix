@@ -160,6 +160,22 @@ config :fermix_channels,
   signal: [
     enabled: false,
     mode: :subprocess
+  ],
+  # The ACP agent surface (M29). `enabled` is the whole operator knob — the
+  # socket path is fixed and the caps are internal constants. `mode` is not a
+  # knob either: ACP has exactly one transport, so it is declared here rather
+  # than asked for or persisted.
+  #
+  # On by default. A user who never learns the surface exists adds Fermix to
+  # Zed or a Buzz harness, gets refused, and concludes Fermix has no ACP. It
+  # adds no privilege class: the socket is 0600 same-user, and `daemon.sock`
+  # is already always-on, unauthenticated, and strictly more capable (its
+  # `agent_message` path runs the slash-command pipeline; the acp entry carries
+  # `commands?: false`). An explicit `enabled = false` in config.toml still
+  # wins — the TOML is merged over this default at boot.
+  acp: [
+    enabled: true,
+    mode: :gateway
   ]
 
 config :fermix_core, :trace, base_dir: Path.expand("~/.fermix/traces")

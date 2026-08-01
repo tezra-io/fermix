@@ -31,6 +31,33 @@ defmodule FermixCore.Sandbox.Env do
     end
   end
 
+  @doc """
+  Overlay a client session's env onto an already-built child env
+  (MILESTONE_29_ACP_AGENT_SURFACE §8.3).
+
+  A caller-side merge on purpose: `build/3` and `build_command/3` keep deciding
+  what sandbox POLICY passes through, and this adds what the client session
+  brought, for the two sandbox exec paths that run a command on behalf of a turn
+  (the shell tool via `Sandbox.shell_plan/3`, operator-declared command
+  capabilities via `Sandbox.CommandTool`). Every other caller of those builders
+  is byte-identical.
+
+  The overlay wins on its own keys, PATH included: the ACP harness's PATH is what
+  makes its own CLI resolvable, and its credentials are what make that CLI able to
+  post. Everything the overlay does not name keeps the sandbox policy's value.
+  `TurnRunner` already restricted this to operator-trust turns, and the daemon
+  filtered the keys before it ever reached a context, so there is no second filter
+  here.
+  """
+  @spec apply_session_env([{String.t(), String.t()}], %{String.t() => String.t()} | nil) ::
+          [{String.t(), String.t()}]
+  def apply_session_env(env, session_env)
+      when is_list(env) and is_map(session_env) and map_size(session_env) > 0 do
+    env |> Map.new() |> Map.merge(session_env) |> Map.to_list()
+  end
+
+  def apply_session_env(env, _absent) when is_list(env), do: env
+
   # `supervised` is owned by the caller's world: the tree-less `fermix sandbox
   # env get` verb passes `supervised: false` (no `CommandHost.Supervisor`);
   # daemon callers (shell tool, MCP supervisor) omit it and CommandRunner

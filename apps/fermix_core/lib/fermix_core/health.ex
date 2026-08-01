@@ -48,6 +48,12 @@ defmodule FermixCore.Health do
       name: "signal",
       default_enabled: false,
       runtime_modes: %{subprocess: FermixChannels.Channels.Signal.Listener}
+    },
+    %{
+      key: :acp,
+      name: "acp",
+      default_enabled: true,
+      runtime_modes: %{gateway: FermixChannels.Channels.Acp.Endpoint}
     }
   ]
 

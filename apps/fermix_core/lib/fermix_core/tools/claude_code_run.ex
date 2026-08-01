@@ -26,6 +26,7 @@ defmodule FermixCore.Tools.ClaudeCodeRun do
   alias FermixCore.Harness.Config
   alias FermixCore.Harness.Vendors
   alias FermixCore.Tools.HarnessRun
+  alias FermixCore.Tools.HarnessSupport, as: Support
 
   @vendor "claude"
 
@@ -170,8 +171,10 @@ defmodule FermixCore.Tools.ClaudeCodeRun do
 
   @doc """
   Advertise only when the harness is enabled, the owner has approved coding agents
-  on this machine, this vendor is the selected one (or the sole installed option,
-  or no default is set), and the authorization gate would pass. `approved` joins
+  on this machine, the turn's channel can carry a coding run at all
+  (`HarnessSupport.advertisable_channel?/1`), this vendor is the selected one (or
+  the sole installed option, or no default is set), and the authorization gate
+  would pass. `approved` joins
   the gate per design §23.4 — an unusable harness advertises nothing and Fermix
   does the coding itself; `default_vendor` gates visibility so the setup selection
   routes. The un-advertised vendor's tool stays dispatchable by name.
@@ -179,6 +182,7 @@ defmodule FermixCore.Tools.ClaudeCodeRun do
   @spec advertise?(map()) :: boolean()
   def advertise?(context) when is_map(context) do
     Config.enabled?() and Config.approved?() and
+      Support.advertisable_channel?(context) and
       Authorization.authorize(name(), context) == :ok and
       Vendors.advertise_vendor?(@vendor)
   end

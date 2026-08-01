@@ -92,6 +92,9 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     def put(_key, _value, _opts \\ []), do: raise("resolution must never write")
 
     @impl true
+    def delete(_key, _opts \\ []), do: raise("resolution must never delete")
+
+    @impl true
     def command_source(key, _opts \\ []) do
       %{source: :command, command: "recording", args: [Atom.to_string(key)]}
     end
@@ -1304,6 +1307,54 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert_raise ArgumentError, ~r/review_interval_hours/, fn ->
       ConfigStore.load_runtime_config()
     end
+  end
+
+  # An absent section normalizes to `[]`, which merges over nothing — that is
+  # what leaves the compile-time default (on) intact across an upgrade. The
+  # boot-path consequence is pinned in
+  # FermixChannels.Channels.Acp.UpgradeDefaultTest.
+  test "acp normalizes an absent section to no override and round-trips when enabled" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    previous_acp = Application.fetch_env(:fermix_channels, :acp)
+
+    on_exit(fn ->
+      case previous_acp do
+        {:ok, value} -> Application.put_env(:fermix_channels, :acp, value)
+        :error -> Application.delete_env(:fermix_channels, :acp)
+      end
+
+      FermixTestSupport.SafeRm.rm_rf!(tmp_home)
+    end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.agent]
+    name = "fermix"
+    """)
+
+    assert {:ok, absent} = ConfigStore.load_runtime_config()
+    assert Keyword.fetch!(absent.fermix_channels, :acp) == []
+
+    :ok =
+      ConfigStore.save_snapshot(%{
+        fermix_core: [],
+        fermix_channels: [acp: [enabled: true]],
+        fermix_web: []
+      })
+
+    assert File.read!(Path.join(tmp_home, "config.toml")) =~ "[fermix_channels.acp]"
+
+    assert {:ok, reloaded} = ConfigStore.load_runtime_config()
+    assert Keyword.fetch!(reloaded.fermix_channels, :acp) == [enabled: true]
+
+    Application.put_env(:fermix_channels, :acp, enabled: false)
+
+    assert :ok = ConfigStore.apply_snapshot(reloaded)
+    assert Keyword.get(Application.get_env(:fermix_channels, :acp, []), :enabled) == true
   end
 
   test "channel streaming survives the load normalizers for every channel" do

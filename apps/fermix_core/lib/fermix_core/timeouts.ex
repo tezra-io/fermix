@@ -95,6 +95,18 @@ defmodule FermixCore.Timeouts do
   @spec harness_wall_clock() :: pos_integer()
   def harness_wall_clock, do: HarnessConfig.default_timeout_minutes() * 60_000
 
+  # --- ACP bridge -----------------------------------------------------------
+  # The `fermix acp` handshake deadline (MILESTONE_29 §6.2). Both ends of the
+  # same exchange read it: the daemon's `Channels.Acp.Peer` refuses a connection
+  # that has not sent its hello line in time (routing the firing through
+  # `expired/3`), and `Fermix.CLI.AcpCommand` gives up waiting for the ack. One
+  # name, one value — a local constant on either side would drift.
+  @acp_bridge_hello_ms 5_000
+
+  @doc "Deadline for the `fermix acp` bridge hello/ack exchange, read by both ends."
+  @spec acp_bridge_hello() :: pos_integer()
+  def acp_bridge_hello, do: @acp_bridge_hello_ms
+
   @doc """
   Record a fired failure timeout and return its firing-site error shape.
 

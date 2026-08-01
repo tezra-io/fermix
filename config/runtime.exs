@@ -1,5 +1,56 @@
 import Config
 
+# --- `fermix acp` stdout purity (must stay first) ---------------------------
+#
+# An ACP agent's stdout carries JSON-RPC and nothing else — one stray byte
+# desynchronizes the client's framing. `Fermix.CLI.AcpCommand` moves the VM's
+# default logger handler to stderr, but its `run/2` is far too late: this file
+# is the boot config-provider chain (release boot order is kernel → stdlib →
+# `Config.Provider.boot` → … → logger → … → fermix_core), so the config
+# hydration below logs — an unresolvable `@keyring` sentinel warns, a plaintext
+# secret warns — while the only handler alive is the one kernel installed on
+# `:standard_io`. Those bytes reach stdout before the verb ever runs.
+#
+# So make the move here, before anything can log, and scope it to the one verb
+# that needs it: nothing else about this process changes.
+acp_argv =
+  if Code.ensure_loaded?(Burrito.Util) and
+       function_exported?(Burrito.Util, :running_standalone?, 0) and
+       Burrito.Util.running_standalone?() do
+    # A Burrito binary's argv reaches the VM as plain arguments, not System.argv.
+    # Read it exactly as `FermixCore.Application.start/2` reads it to dispatch.
+    Burrito.Util.Args.argv()
+  else
+    System.argv()
+  end
+
+# The verb is the first argument, as `Fermix.CLI.main/1` reads it. A `--`
+# separator is a shell artifact of `mix run … -- acp`, never a verb, so drop it
+# before looking; anything else in argv is the verb's own business.
+acp_verb? =
+  case Enum.reject(acp_argv, &(&1 == "--")) do
+    ["acp" | _rest] -> true
+    _other -> false
+  end
+
+if acp_verb? and Code.ensure_loaded?(Fermix.CLI.AcpCommand) and
+     function_exported?(Fermix.CLI.AcpCommand, :route_logs_to_stderr, 0) do
+  case Fermix.CLI.AcpCommand.route_logs_to_stderr() do
+    :ok ->
+      :ok
+
+    {:error, reason} ->
+      # Not fatal here: the bridge re-checks and refuses to start for the same
+      # reason, which is the one refusal an operator should read. Say what boot
+      # could not do, on the channel that is not the protocol.
+      IO.puts(
+        :standard_error,
+        "fermix acp: boot logging stayed on stdout — " <>
+          Fermix.CLI.AcpCommand.log_route_message(reason)
+      )
+  end
+end
+
 # config/runtime.exs is executed for all environments, including
 # during releases. It is executed after compilation and before the
 # system starts, so it is typically used to load production configuration
@@ -443,6 +494,16 @@ signal_overrides =
 merged_signal = Keyword.merge(existing_signal, signal_overrides)
 
 config :fermix_channels, signal: merged_signal
+
+# The acp surface has no env-var overlay — `enabled` is a setting, and settings
+# live in config.toml. It still has to be re-declared like its five siblings
+# above: in a release the config provider merges what THIS file declares over
+# the compile-time config and then `Application.put_all_env/2`s the result, so a
+# `:fermix_channels` key that config/config.exs declares and runtime.exs does
+# not would be reset to its compile-time default — silently discarding the
+# operator's persisted `enabled = false`. Re-declaring the hydrated value is
+# what makes the TOML win.
+config :fermix_channels, acp: Application.get_env(:fermix_channels, :acp, [])
 
 if config_env() == :prod do
   # The secret key base signs Phoenix session cookies. The daemon restarts

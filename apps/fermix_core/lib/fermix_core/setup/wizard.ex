@@ -78,6 +78,7 @@ defmodule FermixCore.Setup.Wizard do
           | {:slack_owner_user_id, String.t()}
           | {:signal_account, String.t()}
           | {:signal_owner_user_id, String.t()}
+          | {:acp_enabled, boolean() | String.t()}
           | {:user_name, String.t()}
           | {:timezone, String.t()}
           | {:communication_style, String.t()}
@@ -614,6 +615,7 @@ defmodule FermixCore.Setup.Wizard do
       |> put_discord_config(answers)
       |> put_slack_config(answers)
       |> put_signal_config(answers)
+      |> put_acp_config(answers)
       |> put_channel_owner_user_ids(answers)
       |> put_personalization(answers)
       |> put_bot_name(answers)
@@ -918,6 +920,7 @@ defmodule FermixCore.Setup.Wizard do
     |> put_enabled_channel(:discord, Keyword.get(channels, :discord, []), false)
     |> put_enabled_channel(:slack, Keyword.get(channels, :slack, []), false)
     |> put_enabled_channel(:signal, Keyword.get(channels, :signal, []), false)
+    |> put_enabled_channel(:acp, Keyword.get(channels, :acp, []), true)
     |> Enum.reverse()
   end
 
@@ -1871,6 +1874,22 @@ defmodule FermixCore.Setup.Wizard do
       |> reject_blank_values()
 
     put_channel_config(snapshot, :signal, values, :subprocess)
+  end
+
+  # The ACP surface has no credential and no owner id, so its whole setup is the
+  # enable flag — unlike the other channels, an unanswered toggle must not flip
+  # it on, and answering `false` must turn it off (M29 §9 item 3).
+  defp put_acp_config(snapshot, answers) do
+    case normalize_realtime_bool(Keyword.get(answers, :acp_enabled), :acp_enabled) do
+      nil ->
+        snapshot
+
+      enabled? ->
+        channels = Map.get(snapshot, :fermix_channels, [])
+        config = channels |> Keyword.get(:acp, []) |> Keyword.put(:enabled, enabled?)
+
+        Map.put(snapshot, :fermix_channels, Keyword.put(channels, :acp, config))
+    end
   end
 
   defp put_channel_owner_user_ids(snapshot, answers) do
