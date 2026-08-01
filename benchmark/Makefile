@@ -9,14 +9,19 @@ JUDGE_KEY = $${EVAL_JUDGE_API_KEY:-$$(security find-generic-password -s fermix:O
 DAEMON_ATTEST := $(if $(filter 1 true yes,$(CONFIRM_DAEMON_ISOLATED)),--confirm-daemon-isolated,)
 ISOLATION_ATTEST := $(if $(filter 1 true yes,$(CONFIRM_ISOLATED_ENV)),--confirm-isolated-env,)
 COST_CONFIRM := $(if $(filter 1 true yes,$(CONFIRM_COST)),--confirm-cost,)
+# Aimed-click harness (M28 C1): real OS clicks on the LIVE display, so BOTH
+# attestations are required. See README §5c.
+AIM_DISPLAY_ATTEST := $(if $(filter 1 true yes,$(CONFIRM_AIM_LIVE_DISPLAY)),--confirm-live-display,)
+AIM_HANDS_ATTEST := $(if $(filter 1 true yes,$(CONFIRM_AIM_HANDS_OFF)),--confirm-hands-off,)
+AIM_ATTEST := $(AIM_DISPLAY_ATTEST) $(AIM_HANDS_ATTEST)
 
-.PHONY: help tests check dry regression capability capability-auto capability-judged capability-readonly estimate rank baseline uplift gaia lmeval
+.PHONY: help tests check dry regression capability capability-auto capability-judged capability-readonly estimate rank baseline uplift gaia lmeval aim aim-calibrate
 
 help:
-	@echo "targets: tests check dry regression capability capability-auto capability-judged capability-readonly estimate rank baseline uplift gaia lmeval"
+	@echo "targets: tests check dry regression capability capability-auto capability-judged capability-readonly estimate rank baseline uplift gaia lmeval aim aim-calibrate"
 
 tests:        ## developer tests for harness code; does not run behavioral/capability E2E
-	@for t in scoring aggregate leaderboard experiments uplift baseline lmeval gaia capability_runner checker grade judge eval_safety seed_home opik_client; do \
+	@for t in scoring aggregate leaderboard experiments uplift baseline lmeval gaia capability_runner checker grade judge eval_safety seed_home opik_client aim; do \
 	  echo "== $$t =="; $(UV) bin/test_$$t.py || exit 1; done
 
 check:        ## preconditions (Opik + daemon)
@@ -57,3 +62,9 @@ gaia:         ## GAIA (set GAIA_DATA=path to the gated JSONL; LIMIT optional)
 
 lmeval:       ## Tier 0 lm-eval command (dry-run; set EVAL_BASELINE_MODEL)
 	$(UV) bin/run_lmeval.py --dry-run
+
+aim:          ## aimed-click accuracy on the LIVE display (set CONFIRM_AIM_LIVE_DISPLAY=1 CONFIRM_AIM_HANDS_OFF=1)
+	$(UV) bin/run_aim.py $(AIM_ATTEST)
+
+aim-calibrate:  ## the aim run-start assertions only (one click); same two attestations
+	$(UV) bin/run_aim.py --calibrate-only $(AIM_ATTEST)
