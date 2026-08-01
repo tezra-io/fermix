@@ -6,6 +6,17 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A truncated model response can no longer end a turn in silence.** A Codex
+  stream that died after its first frame still counted as "delivered" — that
+  frame is the model's own reasoning, which carries no answer and no tool call —
+  so the turn completed successfully with nothing in it. Scheduled jobs were the
+  worst case: the run finished green and the delivered report was empty. A
+  response now has to carry actual text or a tool call to count as delivered,
+  and a terminal event that carried nothing is no longer an exemption. Whatever
+  did arrive is still kept and never discarded.
+
 ## [0.7.2] - 2026-07-31
 
 ### Fixed
