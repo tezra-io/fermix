@@ -1,8 +1,8 @@
 """Readers and parsers for the daemon's local JSONL traces.
 
 Runner contract: `read_jsonl(traces_root, "tool_exec")` returns every tool row the
-daemon wrote under `<FERMIX_HOME>/traces/YYYY-MM-DD/`, `rows_for_turn` narrows
-to one batch, and `classify_row` labels each row as a delivered click, another
+daemon wrote under `<FERMIX_HOME>/traces/YYYY-MM-DD/`, `rows_for_anchored_turn`
+narrows to one batch (anchored by the fixture URL its `open` row carries), and `classify_row` labels each row as a delivered click, another
 pointer action, a screenshot, or a typed refusal. `parse_cursor_echo`,
 `parse_not_delivered`, `parse_sent_dims` and `classify_refusal` read the exact
 strings the daemon renders (each anchor below carries its file:line), and
@@ -125,20 +125,31 @@ def rows_in_window(rows: list[dict], start_ms: float, end_ms: float,
             if r.get("agent") == agent and start_ms <= parse_ts(r.get("ts")) <= end_ms]
 
 
-def rows_for_turn(rows: list[dict], start_ms: float, end_ms: float) -> list[dict]:
-    """One batch turn's rows. The window runs from just before `fermix ask`
-    launched to after the reply settled, and the daemon's own per-turn
-    `main-<n>` id must be the ONLY one in it — a second id means another
-    conversation was driving the same daemon, and no click in the window can be
-    attributed to a probe any more."""
+def rows_for_anchored_turn(rows: list[dict], start_ms: float, end_ms: float,
+                           url_fragment: str) -> tuple[list[dict], str]:
+    """One batch turn's rows plus its daemon-stamped `main-<n>` id, identified by
+    ANCHOR: the browser `open` row whose input carries this batch's fixture URL.
+    The fixture port and batch id are fresh per run, so the fragment exists in
+    exactly one turn daemon-wide. A LIVE daemon interleaves other main-agent
+    turns into the same wall-clock window — channel traffic, crons, or a killed
+    run's orphaned turn (observed 2026-08-01: a TaskStopped harness left its
+    daemon-side turn running, and window-only correlation refused a clean batch
+    for it). Anchoring excludes foreign turns instead of dying to them."""
+    if not url_fragment:
+        raise TraceError("anchored correlation needs the batch's fixture URL fragment")
     window = rows_in_window(rows, start_ms, end_ms)
-    ids = sorted({r.get("session_id") or "" for r in window})
-    if len(ids) > 1:
+    anchor_ids = {r.get("session_id") or "" for r in window
+                  if r.get("tool") == "browser" and url_fragment in str(r.get("input") or "")}
+    if len(anchor_ids) != 1:
+        others = sorted({r.get("session_id") or "" for r in window})
         raise TraceError(
-            f"correlation_ambiguous: main-agent rows from {len(ids)} turns ({', '.join(ids)}) "
-            "fall inside this batch's window, so a delivered click cannot be attributed to a "
-            "probe. Quiesce this daemon's channels for the run (CONFIRM_AIM_HANDS_OFF) and rerun")
-    return window
+            f"correlation_anchor_missing: expected exactly one turn to have opened "
+            f"{url_fragment!r} inside this batch's window, found {len(anchor_ids)} "
+            f"(main-agent turns in window: {', '.join(others) or 'none'}). Either the model "
+            "never opened the page, or the trace rows are elsewhere (FERMIX_TRACE_DIR) or "
+            "content-stripped (FERMIX_TRACE_CONTENT)")
+    sid = next(iter(anchor_ids))
+    return [r for r in window if r.get("session_id") == sid], sid
 
 
 def parse_ts(value: str) -> float:
@@ -375,15 +386,15 @@ def check_capture_content(rows: list[dict], label: str) -> CheckResult:
 
 # --- config id --------------------------------------------------------------
 
-def detect_config_id(llm_rows: list[dict], windows: list[tuple[float, float]]) -> str | None:
-    """Most-common `provider/model/effort` across the run's own llm_call rows,
-    selected by the same turn windows the tool rows were (an llm_call row carries
-    the per-turn `main-<n>` id, not the CLI session name). Returns None when
-    nothing matched — the caller refuses rather than labelling a report with a
-    guessed model."""
+def detect_config_id(llm_rows: list[dict], session_ids: set[str]) -> str | None:
+    """Most-common `provider/model/effort` across the run's OWN llm_call rows —
+    selected by the anchored per-turn `main-<n>` ids, never by wall-clock windows:
+    a live daemon's concurrent turns land inside the same windows and would vote
+    a foreign model into the label. Returns None when nothing matched — the
+    caller refuses rather than labelling a report with a guessed model."""
     counts: dict[str, int] = {}
     for row in llm_rows:
-        if not _in_any_window(row, windows):
+        if row.get("agent") != MAIN_AGENT or row.get("session_id") not in session_ids:
             continue
         provider, model = row.get("provider"), row.get("model")
         if not provider or not model:

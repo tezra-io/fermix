@@ -28,7 +28,14 @@ import json
 import os
 import time
 import urllib.request
+from collections import deque
 from dataclasses import dataclass
+
+# The browser's own explanation for a dying tab/session — recorded so an abort
+# can say WHICH of these happened instead of only "-32001 session not found".
+TARGET_EVENTS = ("Target.targetDestroyed", "Target.detachedFromTarget",
+                 "Target.targetCrashed")
+EVENT_RING_CAP = 40
 
 POLL_INTERVAL_S = 0.5
 POLL_INTERVAL_MS = 500
@@ -248,8 +255,15 @@ def browser_version(port: int) -> str:
 
 def find_target(port: int, needle: str) -> dict | None:
     for target in http_json(port, "/json/list"):
-        if target.get("type") == "page" and needle in (target.get("url") or ""):
-            return target
+        if target.get("type") != "page" or needle not in (target.get("url") or ""):
+            continue
+        # The HTTP /json/list surface keys targets by "id"; "targetId" exists only
+        # on the CDP Target.getTargets method — a different surface. Attach needs
+        # the id, so a match without one is an endpoint-contract failure, not a miss.
+        if not isinstance(target.get("id"), str) or not target["id"]:
+            raise CdpError(f"page target matching {needle!r} has no usable 'id' "
+                           f"(keys: {sorted(target)}) — /json/list contract violated")
+        return target
     return None
 
 
@@ -274,6 +288,10 @@ class CdpClient:
         self._framer = Framer()
         self._conn = None
         self.closed_at_ms: float | None = None
+        # Target lifecycle events seen while awaiting replies — the browser's own
+        # words for WHY a session later stops existing (bounded ring; the live
+        # 2026-08-01 calibration death was undiagnosable without them).
+        self.events: deque[dict] = deque(maxlen=EVENT_RING_CAP)
 
     def __enter__(self) -> "CdpClient":
         from websockets.sync.client import connect  # imported here: only the live path needs it
@@ -314,16 +332,34 @@ class CdpClient:
             except Exception as exc:  # transport failures carry the library's words
                 self.closed_at_ms = time.time() * 1000.0
                 raise CdpError(f"CDP transport failed waiting for {method}: {exc}") from exc
+            if msg.get("method") in TARGET_EVENTS:
+                self.events.append({"t_ms": time.time() * 1000.0, "method": msg["method"],
+                                    "params": msg.get("params", {})})
             if is_response(msg, msg_id):
                 return msg
         raise CdpError(f"no reply to {method} after {MAX_INTERLEAVED_MESSAGES} intervening frames")
 
     def attach(self, target_id: str) -> str:
+        # Discovery on first: targetDestroyed/targetCrashed only reach clients
+        # that asked for them, and the event ring is this client's only witness
+        # when the tab dies mid-run.
+        self.send("Target.setDiscoverTargets", {"discover": True})
         result = self.send("Target.attachToTarget", {"targetId": target_id, "flatten": True})
         session_id = result.get("sessionId")
         if not session_id:
             raise CdpError(f"Target.attachToTarget returned no sessionId for {target_id}")
         return session_id
+
+    def event_tail(self) -> str:
+        """The recorded Target lifecycle events, compact, for abort messages."""
+        if not self.events:
+            return "no Target lifecycle events observed"
+        parts = []
+        for event in self.events:
+            params = event["params"]
+            subject = str(params.get("targetId") or params.get("sessionId") or "?")[:12]
+            parts.append(f"{event['method'].removeprefix('Target.')}({subject})")
+        return "Target events: " + ", ".join(parts)
 
     def evaluate(self, expression: str, session_id: str):
         return evaluate_value(self.send("Runtime.evaluate", evaluate_params(expression), session_id))

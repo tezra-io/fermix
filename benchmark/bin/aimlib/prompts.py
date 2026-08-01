@@ -49,11 +49,16 @@ _HEADER = ("This is an automated measurement of your computer_use screen-pixel a
            "Follow these steps exactly, in order, and do nothing else.\n")
 
 _STEP_OPEN = (
-    '1. Open {url} in the managed browser, profile "{profile}". Then use the browser '
-    "tool's act wait (kind=text) with timeout 60000 until the page shows the text READY. "
+    '1. Open {url} in the managed browser, profile "{profile}". Then wait for the page to '
+    "show the text READY using the browser tool with EXACTLY these arguments: action act, "
+    'kind wait, wait_until "text", text "READY", timeout_ms 60000, target = the tab id the '
+    "open returned. "
+    'Pass profile "{profile}" on EVERY browser call, the wait included — a browser call '
+    "without it targets a different browser and the task fails. "
     "These are the ONLY two browser-tool actions you may use in this task — never click, "
     "click_coords, get, or navigate with it. The page must stay open.\n"
-    "   If READY never appears, reply with exactly: {abort}.\n")
+    "   If the wait errors or times out, re-send it once with exactly those arguments; if "
+    "READY still has not appeared, reply with exactly: {abort}.\n")
 
 _AIM_FULL_SCREEN = (
     "2. For each target below, in order: take a fresh full-screen screenshot with "

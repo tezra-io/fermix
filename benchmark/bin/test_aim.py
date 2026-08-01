@@ -18,6 +18,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -56,12 +57,20 @@ def cu_row(*, at_ms: float, action: str = "left_click", success: bool = True,
 
 
 def browser_row(*, at_ms: float, action: str, kind: str | None = None,
-                session: str = TURN_ID) -> dict:
-    row = {"agent": "main", "tool": "browser", "action": action, "success": True,
+                session: str = TURN_ID, args: str | None = None,
+                success: bool = True) -> dict:
+    row = {"agent": "main", "tool": "browser", "action": action, "success": success,
            "duration_ms": 50, "session_id": session, "ts": iso(at_ms), "type": "tool_exec"}
     if kind:
         row["kind"] = kind
+    if args is not None:
+        row["input"] = args
     return row
+
+
+AIM_FRAGMENT = "127.0.0.1:50256/aim.html?batch=s1-full_screen-b1"
+OPEN_INPUT = ('%{"action" => "open", "profile" => "fermix_visible", '
+              '"url" => "http://' + AIM_FRAGMENT + '&mode=grid"}')
 
 
 def llm_row(*, at_ms: float, provider: str, model: str, effort: str | None = None,
@@ -361,6 +370,40 @@ def test_a_stale_port_file_from_an_earlier_conversation_is_not_this_run_s_browse
     assert cdp.discover_port(str(root), since_ms=2_000_000 * 1000) == 9444
 
 
+def test_find_target_uses_the_json_list_id_key(monkeypatch):
+    # Shape observed live 2026-08-01: the HTTP /json/list surface keys targets by
+    # "id" — "targetId" exists only on the CDP Target.getTargets method. The first
+    # live calibration crashed on exactly that difference, uncovered because this
+    # lookup had no test at all.
+    entry = {
+        "description": "",
+        "devtoolsFrontendUrl": "/devtools/inspector.html?ws=127.0.0.1:65226/devtools/page/8A1B",
+        "id": "8A1B33F0C2D14E5F9A7B6C5D4E3F2A1B",
+        "title": "aim",
+        "type": "page",
+        "url": "http://127.0.0.1:65226/aim.html?batch=cal-na-b1&mode=cal",
+        "webSocketDebuggerUrl": "ws://127.0.0.1:65226/devtools/page/8A1B33F0C2D14E5F9A7B6C5D4E3F2A1B",
+    }
+    other = {"type": "background_page", "id": "FFFF", "url": "chrome://extensions"}
+    monkeypatch.setattr(cdp, "http_json", lambda _port, _path: [other, entry])
+    got = cdp.find_target(9222, "batch=cal-na-b1")
+    assert got is entry
+    assert "targetId" not in got and got["id"]
+
+
+def test_a_matching_page_without_an_id_is_a_typed_contract_failure(monkeypatch):
+    monkeypatch.setattr(cdp, "http_json", lambda _port, _path: [
+        {"type": "page", "url": "http://127.0.0.1:1/aim.html?batch=b1&mode=cal"}])
+    with pytest.raises(cdp.CdpError, match="/json/list contract"):
+        cdp.find_target(9222, "batch=b1")
+
+
+def test_wait_for_target_timeout_names_the_never_opened_page(monkeypatch):
+    monkeypatch.setattr(cdp, "http_json", lambda _port, _path: [])
+    with pytest.raises(cdp.CdpError, match="never opened"):
+        cdp.wait_for_target(9222, "batch=b1", timeout_s=0.0, sleep=lambda _s: None)
+
+
 def test_closing_the_socket_keeps_the_first_observed_close_time():
     """`browser_lost` is decided by WHEN the socket went away; a tidy-up close
     must never overwrite the moment a transport failure already recorded."""
@@ -375,6 +418,69 @@ def test_a_readback_that_finds_no_page_state_is_typed_not_a_crash():
     watcher = cdp.PageWatcher(_FakeClient(None), "S1")
     with pytest.raises(cdp.CdpError, match="no window.__aim state"):
         watcher.poll_once()
+
+
+def test_a_poll_failing_after_the_turn_ended_is_the_reap_not_a_fault(monkeypatch):
+    # Raced live 2026-08-01 16:54: a PERFECT turn ended, the daemon reaped its
+    # Chrome, tabs died a beat before the socket closed, and the next 500 ms poll
+    # saw -32001 on a live socket — aborting the whole run for normal teardown.
+    monkeypatch.setattr(run_aim, "REAP_GRACE_S", 0.0)
+    client = cdp.CdpClient("ws://127.0.0.1:1/devtools/browser/x")
+    watcher = cdp.PageWatcher(_FakeClient(None), "S1")
+
+    class _DoneTurn:
+        finished = True
+
+    assert run_aim._poll_once(watcher, client, _DoneTurn()) is False
+    assert client.closed_at_ms is not None  # stamped so F9 browser_lost stays keyed
+
+
+def test_a_poll_failing_mid_turn_is_still_a_typed_abort(monkeypatch):
+    monkeypatch.setattr(run_aim, "REAP_GRACE_S", 0.0)
+    client = cdp.CdpClient("ws://127.0.0.1:1/devtools/browser/x")
+    watcher = cdp.PageWatcher(_FakeClient(None), "S1")
+
+    class _RunningTurn:
+        finished = False
+
+    with pytest.raises(run_aim.HarnessAbort) as err:
+        run_aim._poll_once(watcher, client, _RunningTurn())
+    assert err.value.kind == "page_readback_failed"
+
+
+def test_target_lifecycle_events_are_recorded_while_awaiting_a_reply():
+    # The live 2026-08-01 calibration died with a bare "-32001 session not found";
+    # the browser HAD explained itself (targetDestroyed) on frames the client was
+    # skipping past. Interleaved lifecycle events must land in the ring.
+    client = cdp.CdpClient("ws://127.0.0.1:1/devtools/browser/x")
+    frames = [
+        json.dumps({"method": "Target.targetDestroyed", "params": {"targetId": "T1" * 8}}),
+        json.dumps({"method": "Runtime.consoleAPICalled", "params": {}}),  # not lifecycle
+        json.dumps({"id": 1, "result": {"ok": True}}),
+    ]
+    client._conn = _ScriptedConn(frames)
+    assert client.send("Browser.getVersion") == {"ok": True}
+    assert [e["method"] for e in client.events] == ["Target.targetDestroyed"]
+    assert "targetDestroyed(T1T1T1T1T1T1)" in client.event_tail()
+
+
+def test_event_tail_names_the_no_event_case():
+    client = cdp.CdpClient("ws://127.0.0.1:1/devtools/browser/x")
+    assert client.event_tail() == "no Target lifecycle events observed"
+
+
+class _ScriptedConn:
+    def __init__(self, frames: list[str]) -> None:
+        self._frames = list(frames)
+
+    def send(self, _text: str) -> None:
+        return None
+
+    def recv(self, timeout: float = 0.0) -> str:
+        return self._frames.pop(0)
+
+    def close(self) -> None:
+        return None
 
 
 class _FakeConn:
@@ -509,28 +615,44 @@ def test_jsonl_reading_and_turn_window_selection(tmp_path):
             cu_row(at_ms=BASE_MS - 600_000, session="main-6"),      # an earlier turn
             cu_row(at_ms=BASE_MS + 200, agent="memory_reviewer",
                    session="memory_review:main:cli:e2e-aim")]       # not the main agent
+    rows.append(browser_row(at_ms=BASE_MS - 200, action="open", args=OPEN_INPUT))
     (day / "tool_exec.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n",
                                          encoding="utf-8")
     loaded = traces.read_jsonl(str(tmp_path), "tool_exec")
-    assert len(loaded) == 4
+    assert len(loaded) == 5
     assert not any(SESSION in json.dumps(row) for row in loaded)
-    picked = traces.rows_for_turn(loaded, BASE_MS - 1000, BASE_MS + 5000)
-    assert len(picked) == 2 and {r["session_id"] for r in picked} == {TURN_ID}
+    picked, sid = traces.rows_for_anchored_turn(loaded, BASE_MS - 1000, BASE_MS + 5000,
+                                                AIM_FRAGMENT)
+    assert sid == TURN_ID
+    assert len(picked) == 3 and {r["session_id"] for r in picked} == {TURN_ID}
     with pytest.raises(traces.TraceError):
         traces.read_jsonl(str(tmp_path / "nope"), "tool_exec")
 
 
-def test_two_turns_inside_one_window_refuse_to_correlate():
-    """An unquiesced daemon puts another conversation's clicks in the window; no
-    click in it can be attributed to a probe, so the batch aborts by name."""
+def test_foreign_turns_in_the_window_are_excluded_by_the_anchor():
+    """The live 2026-08-01 shape: a killed run's orphaned turn (main-11) kept
+    failing waits inside the next run's batch window. The anchor keeps only the
+    turn that opened THIS batch's URL; the ghost's rows simply drop out."""
+    rows = [browser_row(at_ms=BASE_MS - 200, action="open", args=OPEN_INPUT),
+            cu_row(at_ms=BASE_MS),
+            browser_row(at_ms=BASE_MS + 300, action="act", kind="wait",
+                        session="main-11", success=False),
+            cu_row(at_ms=BASE_MS + 700, session="main-11")]
+    picked, sid = traces.rows_for_anchored_turn(rows, BASE_MS - 1000, BASE_MS + 5000,
+                                                AIM_FRAGMENT)
+    assert sid == TURN_ID
+    assert {r["session_id"] for r in picked} == {TURN_ID} and len(picked) == 2
+
+
+def test_a_window_with_no_anchor_refuses_by_name():
     rows = [cu_row(at_ms=BASE_MS), cu_row(at_ms=BASE_MS + 100, session="main-8")]
-    with pytest.raises(traces.TraceError, match="correlation_ambiguous"):
-        traces.rows_for_turn(rows, BASE_MS - 1000, BASE_MS + 5000)
+    with pytest.raises(traces.TraceError, match="correlation_anchor_missing"):
+        traces.rows_for_anchored_turn(rows, BASE_MS - 1000, BASE_MS + 5000, AIM_FRAGMENT)
 
 
 def test_a_backwards_window_is_refused():
     with pytest.raises(traces.TraceError, match="before it starts"):
-        traces.rows_for_turn([], BASE_MS, BASE_MS - 1)
+        traces.rows_in_window([], BASE_MS, BASE_MS - 1)
 
 
 def test_corrupt_jsonl_names_the_line(tmp_path):
@@ -584,18 +706,17 @@ def test_capture_content_passes_when_input_is_present():
 
 
 def test_config_id_detection_takes_the_run_s_own_turns():
-    """Same selection as the tool rows: an llm_call row carries the per-turn
-    `main-<n>` id too, so a neighbouring turn must not label this run's report."""
-    window = (BASE_MS - 1000, BASE_MS + 5000)
+    """Selection is by the run's own anchored `main-<n>` ids: a concurrent turn
+    shares the wall clock but not the ids, so it can never vote on the label."""
     rows = [llm_row(at_ms=BASE_MS, provider="openai_codex", model="gpt-5.6-sol", effort="xhigh"),
             llm_row(at_ms=BASE_MS + 900, provider="openai_codex", model="gpt-5.6-sol",
                     effort="xhigh"),
-            llm_row(at_ms=BASE_MS + 3_600_000, provider="anthropic", model="claude-x",
+            llm_row(at_ms=BASE_MS + 100, provider="anthropic", model="claude-x",
                     session="main-9"),
             llm_row(at_ms=BASE_MS + 200, provider="anthropic", model="claude-y",
                     agent="memory_reviewer")]
-    assert traces.detect_config_id(rows, [window]) == "openai_codex/gpt-5.6-sol/xhigh"
-    assert traces.detect_config_id(rows, [(BASE_MS - 100_000, BASE_MS - 50_000)]) is None
+    assert traces.detect_config_id(rows, {TURN_ID}) == "openai_codex/gpt-5.6-sol/xhigh"
+    assert traces.detect_config_id(rows, {"main-99"}) is None
 
 
 # --- prompts ----------------------------------------------------------------
@@ -612,10 +733,25 @@ def test_every_template_pins_the_rail_and_the_reply_contract():
         text = prompts.batch_prompt(plan, "http://127.0.0.1:1/aim.html?batch=x")
         assert "ONLY two browser-tool actions" in text
         assert "never click, click_coords, get, or navigate with it" in text
-        assert "act wait (kind=text) with timeout 60000" in text
+        # The wait is spelled in the tool's REAL argument names: the 03:20 live run
+        # showed a paraphrase ("act wait (kind=text)") yields a wait without
+        # wait_until, a typed arg error, and a spurious ABORT.
+        assert 'kind wait, wait_until "text", text "READY", timeout_ms 60000' in text
+        assert "re-send it once with exactly those arguments" in text
         assert "reply with exactly: ABORT" in text
         assert "Exactly one click" in text
         assert "reply with ONLY a JSON array" in text
+
+
+def test_every_template_pins_the_profile_on_every_browser_call():
+    # Live 2026-08-01: the model passed profile only on `open`; the profile-less
+    # `wait` silently routed to the DEFAULT profile, which lazily launched a
+    # second Chrome with no such tab — target_not_found, three runs in a row.
+    # The browser tool routes by profile first, so the pin must cover every call.
+    for suite, condition, _batches, probes in prompts.BATCH_PLAN + (prompts.CAL_BATCH,):
+        plan = page.plan_batch(1, suite, condition, 1, probes)
+        text = prompts.batch_prompt(plan, "http://127.0.0.1:1/aim.html?batch=x")
+        assert 'Pass profile "fermix_visible" on EVERY browser call' in text
 
 
 def test_every_template_judges_fired_from_a_fresh_screenshot():
@@ -870,7 +1006,9 @@ def test_a_refusal_attaches_to_the_probe_it_recovers_into():
     rows.insert(1, cu_row(at_ms=BASE_MS + 500, action="left_click", success=False,
                           output=AMBIGUOUS_OUTPUT))
     result = score.score_batch(_batch(plan, rows, hits))
-    assert result["probes"][0]["refusals"] == [{"kind": "ambiguous_coordinates", "recovered": True}]
+    refusal = result["probes"][0]["refusals"][0]
+    assert (refusal["kind"], refusal["recovered"]) == ("ambiguous_coordinates", True)
+    assert "ambiguous coordinates" in refusal["message"]  # the tool's own words travel
     assert result["probes"][1]["refusals"] == []
     assert result["refusal_rows"] == 1
 
@@ -946,7 +1084,9 @@ def test_not_delivered_rows_are_refusals_and_do_not_consume_a_probe():
                           output=FULL_SHOT_OUTPUT + NOT_DELIVERED_OUTPUT, args=CLICK_INPUT))
     result = score.score_batch(_batch(plan, rows, hits))
     assert [p["outcome"] for p in result["probes"]] == ["hit"] * 4
-    assert result["probes"][0]["refusals"] == [{"kind": "other", "recovered": True}]
+    refusal = result["probes"][0]["refusals"][0]
+    assert (refusal["kind"], refusal["recovered"]) == ("other", True)
+    assert "NOT delivered" in refusal["message"]
 
 
 # --- fired columns ----------------------------------------------------------
@@ -1278,11 +1418,25 @@ def test_a_scoring_fault_becomes_a_typed_abort_not_a_traceback():
     assert caught.value.kind == "scoring_failed" and "no layout rect" in str(caught.value)
 
 
-def test_an_ambiguous_window_becomes_a_typed_abort():
+def test_a_missing_anchor_becomes_a_typed_abort():
     rows = [cu_row(at_ms=BASE_MS), cu_row(at_ms=BASE_MS + 100, session="main-8")]
     with pytest.raises(run_aim.HarnessAbort) as caught:
-        run_aim.select_turn_rows(rows, BASE_MS - 1000, BASE_MS + 5000)
-    assert caught.value.kind == "correlation_ambiguous"
+        run_aim.select_turn_rows(rows, BASE_MS - 1000, BASE_MS + 5000, AIM_FRAGMENT)
+    assert caught.value.kind == "correlation_anchor_missing"
+
+
+def test_quiet_gate_ignores_own_turns_and_aborts_on_foreign_activity(monkeypatch):
+    monkeypatch.setattr(run_aim, "QUIET_MAX_WAIT_S", 0.0)
+    monkeypatch.setattr(run_aim, "QUIET_POLL_S", 0.0)
+    now_ms = time.time() * 1000.0
+    own = cu_row(at_ms=now_ms - 1000)
+    foreign = cu_row(at_ms=now_ms - 1000, session="main-11")
+    monkeypatch.setattr(run_aim, "read_trace_rows", lambda cfg, kind, dates: [own])
+    run_aim.wait_for_daemon_quiet(None, ["2026-08-01"], {TURN_ID})  # own rows: passes
+    monkeypatch.setattr(run_aim, "read_trace_rows", lambda cfg, kind, dates: [own, foreign])
+    with pytest.raises(run_aim.HarnessAbort) as caught:
+        run_aim.wait_for_daemon_quiet(None, ["2026-08-01"], {TURN_ID})
+    assert caught.value.kind == "daemon_busy"
 
 
 def test_every_halt_outcome_has_its_own_message():
