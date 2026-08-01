@@ -1,6 +1,8 @@
 defmodule FermixChannels.Channels.WhatsAppTest do
   use ExUnit.Case, async: false
 
+  import Bitwise
+
   alias FermixChannels.Channels.WhatsApp
   alias FermixChannels.Dispatcher
   alias FermixChannels.Gateway.Message
@@ -481,8 +483,41 @@ defmodule FermixChannels.Channels.WhatsAppTest do
       assert {:ok, path} = WhatsApp.download_attachment(normalized_message, audio_attachment)
       assert File.read!(path) == "voice-bytes"
       assert String.ends_with?(path, ".ogg")
+      assert (File.stat!(path).mode &&& 0o777) == 0o600
 
       FermixTestSupport.SafeRm.rm!(path)
+    end
+
+    test "refuses a compressed media body by name" do
+      # Streaming the body turns off Req's decompression, so a lying CDN that
+      # compresses anyway must fail loud rather than hand back opaque bytes.
+      Req.Test.stub(:whatsapp, fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/v19.0/audio-media-id"} ->
+            conn
+            |> Plug.Conn.put_resp_content_type("application/json")
+            |> Plug.Conn.send_resp(
+              200,
+              Jason.encode!(%{"url" => "https://lookaside.fbsbx.com/media/audio-media-id"})
+            )
+
+          {"GET", "/media/audio-media-id"} ->
+            conn
+            |> Plug.Conn.put_resp_header("content-encoding", "gzip")
+            |> Plug.Conn.send_resp(200, :zlib.gzip("voice-bytes"))
+        end
+      end)
+
+      audio_attachment = %{
+        "kind" => "audio",
+        "file_id" => "audio-media-id",
+        "mime_type" => "audio/ogg",
+        "url" => nil,
+        "size_bytes" => nil
+      }
+
+      assert {:error, {:unexpected_content_encoding, "gzip"}} =
+               WhatsApp.download_attachment(%{}, audio_attachment)
     end
   end
 

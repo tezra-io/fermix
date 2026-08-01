@@ -241,6 +241,11 @@ defmodule FermixCore.Plugins.ToolExecutor do
     guard.(url)
   end
 
+  # `redirect: false` is load-bearing: `guard_url/2` screens the URL the manifest
+  # asked for, and Req's request steps do not re-run on a followed redirect, so
+  # a hop would carry the plugin's `Authorization` header to a host nothing
+  # screened. The 3xx flows to the interpreter, which names the status and the
+  # Location so the refusal is diagnosable.
   defp issue_declarative(request, cred, attempt, context, plugin_name, auth_profile, tool) do
     req_options = Map.get(context, :plugin_req_options, [])
 
@@ -251,6 +256,7 @@ defmodule FermixCore.Plugins.ToolExecutor do
         params: request.query,
         headers: [auth_header(cred) | request.headers],
         decode_body: false,
+        redirect: false,
         into: &stream_body/2
       )
       |> maybe_merge(:json, request.body)

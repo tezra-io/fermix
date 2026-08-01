@@ -210,6 +210,112 @@ defmodule FermixChannels.Gateway.IdempotencyTest do
     end
   end
 
+  describe "TTL sweep" do
+    # Enumerates every public writer rather than spelling out the two value
+    # shapes: a writer added later joins this list or the emptiness assert below
+    # fails. The sweep must reclaim ANY row the module can create, not the two a
+    # hand-written assert happened to name.
+    defp expiring_writers(server, media_part) do
+      [
+        fn ->
+          Idempotency.check_and_record(:telegram, "swept-inbound", ttl_ms: 1, server: server)
+        end,
+        fn ->
+          Idempotency.claim_outbound_media(:telegram, "swept-chat", media_part,
+            ttl_ms: 1,
+            server: server
+          )
+        end
+      ]
+    end
+
+    # Sends the sweep the timer would have sent, then syncs on a GenServer.call:
+    # messages are handled in order, so a returned call proves `:sweep` was
+    # already processed. If the `:sweep` clause sat below the catch-all it would
+    # be swallowed here and every assertion after this point would still see the
+    # expired rows.
+    defp sweep_now(server) do
+      send(Process.whereis(server), :sweep)
+      :ok = Idempotency.forget(:telegram, "sweep-sync-probe", server: server)
+    end
+
+    defp media_part_in(dir, contents) do
+      path = Path.join(dir, "report.txt")
+      File.write!(path, contents)
+      %{kind: :document, path: path, filename: "report.txt"}
+    end
+
+    test "deletes every expired row written by any public writer", %{
+      server: server,
+      table: table
+    } do
+      dir = FermixTestSupport.SafeRm.make_tmp_dir!("idempotency-sweep-expired")
+
+      try do
+        writers = expiring_writers(server, media_part_in(dir, "one"))
+        Enum.each(writers, & &1.())
+        assert length(:ets.tab2list(table)) == length(writers)
+
+        Process.sleep(5)
+        sweep_now(server)
+
+        assert :ets.tab2list(table) == []
+      after
+        FermixTestSupport.SafeRm.rm_rf!(dir)
+      end
+    end
+
+    test "keeps unexpired rows of both value shapes", %{server: server, table: table} do
+      dir = FermixTestSupport.SafeRm.make_tmp_dir!("idempotency-sweep-live")
+
+      try do
+        media_part = media_part_in(dir, "one")
+
+        assert :fresh = Idempotency.check_and_record(:telegram, "live-inbound", server: server)
+
+        assert {:ok, {:fresh, _claim}} =
+                 Idempotency.claim_outbound_media(:telegram, "live-chat", media_part,
+                   server: server
+                 )
+
+        sweep_now(server)
+
+        assert length(:ets.tab2list(table)) == 2
+
+        assert :duplicate =
+                 Idempotency.check_and_record(:telegram, "live-inbound", server: server)
+
+        assert {:ok, :duplicate} =
+                 Idempotency.claim_outbound_media(:telegram, "live-chat", media_part,
+                   server: server
+                 )
+      after
+        FermixTestSupport.SafeRm.rm_rf!(dir)
+      end
+    end
+
+    test "re-arms its timer so the TTL keeps being enforced", %{server: server} do
+      pid = Process.whereis(server)
+      %{sweep_timer: armed_at_init} = :sys.get_state(pid)
+      assert is_reference(armed_at_init)
+
+      sweep_now(server)
+
+      %{sweep_timer: re_armed} = :sys.get_state(pid)
+      assert is_reference(re_armed)
+      refute re_armed == armed_at_init
+      assert is_integer(Process.read_timer(re_armed))
+    end
+
+    test "an unrelated info message is still ignored", %{server: server} do
+      pid = Process.whereis(server)
+      send(pid, {:unexpected, :message})
+
+      assert :fresh = Idempotency.check_and_record(:telegram, "after-noise", server: server)
+      assert Process.alive?(pid)
+    end
+  end
+
   test "releasing an outbound media claim allows a later retry", %{server: server} do
     dir = FermixTestSupport.SafeRm.make_tmp_dir!("outbound-media-release")
 

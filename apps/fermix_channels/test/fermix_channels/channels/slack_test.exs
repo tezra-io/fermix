@@ -1,6 +1,8 @@
 defmodule FermixChannels.Channels.SlackTest do
   use ExUnit.Case, async: false
 
+  import Bitwise
+
   alias FermixChannels.Channels.Slack
   alias FermixChannels.Dispatcher
   alias FermixChannels.Gateway.Message
@@ -353,6 +355,58 @@ defmodule FermixChannels.Channels.SlackTest do
       after
         FermixTestSupport.SafeRm.rm_rf!(tmp_dir)
       end
+    end
+  end
+
+  describe "download_attachment/2" do
+    defp private_file_attachment do
+      %{
+        kind: :audio,
+        url: "https://files.slack.com/files-pri/T1-F1/clip.ogg",
+        mime_type: "audio/ogg",
+        file_id: "F1",
+        size_bytes: nil
+      }
+    end
+
+    test "downloads url_private to an owner-only temp file" do
+      Req.Test.stub(:slack, fn conn ->
+        assert Plug.Conn.get_req_header(conn, "authorization") == ["Bearer xoxb-test-token"]
+        Plug.Conn.send_resp(conn, 200, "clip-bytes")
+      end)
+
+      assert {:ok, path} = Slack.download_attachment(%{}, private_file_attachment())
+
+      try do
+        assert File.read!(path) == "clip-bytes"
+        assert String.ends_with?(path, ".ogg")
+        assert (File.stat!(path).mode &&& 0o777) == 0o600
+      after
+        FermixTestSupport.SafeRm.rm!(path)
+      end
+    end
+
+    test "halts a lying upstream's oversize body at the media cap" do
+      Req.Test.stub(:slack, fn conn ->
+        Plug.Conn.send_resp(conn, 200, :binary.copy("x", 100 * 1_024 * 1_024 + 1))
+      end)
+
+      assert {:error, {:byte_cap_exceeded, received, allowed}} =
+               Slack.download_attachment(%{}, private_file_attachment())
+
+      assert allowed == 100 * 1_024 * 1_024
+      assert received == allowed + 1
+    end
+
+    test "refuses a compressed media body by name" do
+      Req.Test.stub(:slack, fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("content-encoding", "gzip")
+        |> Plug.Conn.send_resp(200, :zlib.gzip("clip-bytes"))
+      end)
+
+      assert {:error, {:unexpected_content_encoding, "gzip"}} =
+               Slack.download_attachment(%{}, private_file_attachment())
     end
   end
 

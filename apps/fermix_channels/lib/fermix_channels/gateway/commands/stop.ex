@@ -15,9 +15,14 @@ defmodule FermixChannels.Gateway.Commands.Stop do
   @impl true
   def description, do: "Stop all running Fermix work and clear queued messages."
 
+  # Strict operator role: `/stop` is daemon-global, not conversation-scoped —
+  # `Stopper.stop_all/1` fans out to every queued conversation across every
+  # channel plus all background work and coding runs. The `command_allowlist`
+  # guest branch exists for conversation-scoped lifecycle commands (/new,
+  # /compact), so it must never reach a global fail-safe.
   @impl true
   def authorize(message, metadata, context),
-    do: Authorization.owner_only(message, metadata, context)
+    do: Authorization.operator_only(message, metadata, context)
 
   # Handled in the ingress path before the queue, so `/stop` runs immediately
   # instead of waiting behind the work it is trying to stop.

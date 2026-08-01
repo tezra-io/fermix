@@ -7,7 +7,9 @@ defmodule FermixChannels.Gateway.WorkRegistry do
   Stores only neutral metadata (work id, command, profile, source, a short prompt
   preview) — never the full prompt or the result body, so `/tasks` has nothing to
   leak by construction (§17.7). Completed/failed/cancelled entries are retained
-  under a small bounded cap; running entries are never evicted.
+  under a small bounded cap; running entries are never evicted, so concurrently
+  running work carries its own separate ceiling — a start past it is refused,
+  never queued.
 
   The runner is a 0-arity thunk supplied by the command layer: the registry owns
   spawn → monitor → status, not the work itself, so it stays independent of
@@ -22,6 +24,15 @@ defmodule FermixChannels.Gateway.WorkRegistry do
 
   @default_work_supervisor FermixChannels.Gateway.WorkSupervisor
   @max_terminal 50
+
+  # Ceiling on *concurrently running* work — a different quantity from
+  # @max_terminal, which only bounds how much finished history is retained.
+  # Running entries are never evicted and each one is a detached agent turn
+  # spending the owner's provider budget, so without this the registry grows
+  # unbounded under repeated `/background`. Over the cap `start/2` refuses
+  # loudly with the cap in the reason; it never queues and never evicts a
+  # running item to make room.
+  @max_running 8
 
   @type status :: :running | :completed | :failed | :cancelled
 
@@ -54,7 +65,11 @@ defmodule FermixChannels.Gateway.WorkRegistry do
     GenServer.start_link(__MODULE__, opts, name: name)
   end
 
-  @doc "Start a background work item; returns its work id."
+  @doc """
+  Start a background work item; returns its work id. Refuses with
+  `{:error, {:max_running_work, max}}` when `max` items are already running —
+  the caller is expected to surface the cap, not to retry.
+  """
   @spec start(GenServer.server(), request()) :: {:ok, String.t()} | {:error, term()}
   def start(server \\ __MODULE__, request) when is_map(request) do
     GenServer.call(server, {:start, request})
@@ -127,6 +142,20 @@ defmodule FermixChannels.Gateway.WorkRegistry do
   # --- internals ---
 
   defp do_start(state, request, run) do
+    case running_count(state) do
+      count when count >= @max_running ->
+        {:reply, {:error, {:max_running_work, @max_running}}, state}
+
+      _below_cap ->
+        spawn_work(state, request, run)
+    end
+  end
+
+  defp running_count(state) do
+    Enum.count(state.work, fn {_work_id, entry} -> entry.status == :running end)
+  end
+
+  defp spawn_work(state, request, run) do
     work_id = WorkId.generate()
     owner = self()
 

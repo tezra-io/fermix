@@ -1170,6 +1170,67 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
     end
   end
 
+  # The parser's leftover ceiling bounds memory; only the collector's `{:halt,
+  # _}` bounds the transfer. `receive_timeout` is an IDLE window a trickling
+  # peer never trips and nothing on this request carries a wall-clock deadline,
+  # so a collector that keeps saying `{:cont, _}` past the ceiling never returns
+  # at all — the conversation's single-flight slot and a pooled connection held
+  # for as long as the peer keeps sending.
+  describe "chat/3 — the SSE leftover ceiling ends the transfer" do
+    @leftover_cap 1_048_576
+
+    test "a peer that trickles bytes without ever closing an event is cut off" do
+      opener = ~s(data: {"type":"response.output_text.delta","output_index":0,"delta":")
+      trickle = String.duplicate("x", 4_096)
+
+      chunks =
+        [opener <> String.duplicate("x", @leftover_cap + 1)] ++ List.duplicate(trickle, 64)
+
+      result =
+        Codex.chat([%{role: "user", content: "x"}], [],
+          access_token: @jwt_with_sub,
+          model: "gpt-5",
+          base_url: "https://chatgpt.test/codex/responses",
+          req_options: [adapter: chunk_feeding_adapter(chunks, self())]
+        )
+
+      # Cut on the chunk that crossed the ceiling; the other 64 never read.
+      assert_received {:chunks_delivered, 1}
+
+      # And the latched failure still rides the accumulated state out, so the
+      # operator gets the parser's own words rather than a bare close.
+      assert {:error, {:provider_error, error}} = result
+      assert error.message =~ "no event boundary"
+    end
+
+    # The docstring's claim that the caller "renders loudly" holds only for the
+    # undelivered arm. Pinned here so the two arms cannot silently swap.
+    test "content delivered before the ceiling is kept, with the failure only logged" do
+      opener = ~s(data: {"type":"response.output_text.delta","output_index":1,"delta":")
+
+      chunks = [
+        ~s(data: {"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"m","content":[{"type":"output_text","text":"partial answer"}]}}\n\n),
+        opener <> String.duplicate("x", @leftover_cap + 1)
+      ]
+
+      {result, log} =
+        with_log(fn ->
+          Codex.chat([%{role: "user", content: "x"}], [],
+            access_token: @jwt_with_sub,
+            model: "gpt-5",
+            base_url: "https://chatgpt.test/codex/responses",
+            req_options: [adapter: chunk_feeding_adapter(chunks, self())]
+          )
+        end)
+
+      assert_received {:chunks_delivered, 2}
+      assert {:ok, turn} = result
+      assert turn.content == "partial answer"
+      assert log =~ "no event boundary"
+      assert log =~ "may be truncated"
+    end
+  end
+
   describe "chat/3 — transport errors" do
     test "emits transport error telemetry with the closed-stream reason" do
       test_pid = self()
@@ -1566,6 +1627,30 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
     {:ok, conn} = Plug.Conn.chunk(conn, data)
     conn
   end
+
+  # Req's plug adapter hands the whole body to `into:` in ONE `{:data, _}` call,
+  # so it can never tell `{:cont, _}` from `{:halt, _}`. This adapter feeds one
+  # chunk per call and stops on `{:halt, _}`, exactly as `Finch.stream_while/5`
+  # does against a real peer, and reports how many chunks it managed to deliver
+  # — the only observable proof that the transfer was cut short. Bounded by the
+  # caller's finite chunk list.
+  defp chunk_feeding_adapter(chunks, parent) when is_list(chunks) and is_pid(parent) do
+    fn request ->
+      response = Req.Response.new(status: 200, headers: [{"content-type", "text/event-stream"}])
+      {acc, delivered} = feed_chunks(request.into, chunks, {request, response})
+      send(parent, {:chunks_delivered, delivered})
+      acc
+    end
+  end
+
+  defp feed_chunks(into, chunks, seed) when is_function(into, 2) do
+    Enum.reduce_while(chunks, {seed, 0}, fn chunk, {acc, count} ->
+      feed_step(into.({:data, chunk}, acc), count)
+    end)
+  end
+
+  defp feed_step({:cont, acc}, count), do: {:cont, {acc, count + 1}}
+  defp feed_step({:halt, acc}, count), do: {:halt, {acc, count + 1}}
 
   defp terminal_message_sse(text) do
     """

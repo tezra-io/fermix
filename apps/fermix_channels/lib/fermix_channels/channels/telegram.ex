@@ -13,6 +13,7 @@ defmodule FermixChannels.Channels.Telegram do
 
   alias FermixChannels.Gateway.ApprovalButton
   alias FermixChannels.Gateway.Idempotency
+  alias FermixChannels.Gateway.MediaDownload
   alias FermixChannels.Gateway.Message
   alias FermixChannels.Gateway.RetryHint
   alias FermixChannels.Telemetry, as: ChannelTelemetry
@@ -1160,7 +1161,8 @@ defmodule FermixChannels.Channels.Telegram do
          {:ok, token} <- get_bot_token(),
          {:ok, file_path} <- resolve_file_path(attachment_value(attachment, :file_id), token),
          {:ok, body} <- download_file(token, file_path),
-         {:ok, path} <- write_temp_file(body, attachment, file_path) do
+         {:ok, path} <-
+           MediaDownload.write_temp_bytes(body, "telegram", temp_extension(attachment, file_path)) do
       {:ok, path}
     end
   end
@@ -1205,46 +1207,20 @@ defmodule FermixChannels.Channels.Telegram do
 
   # The download URL carries the bot token — never log it.
   defp download_file(token, file_path) do
-    result =
-      Req.new(url: "#{@bot_api_base}/file/bot#{token}/#{file_path}", method: :get)
-      |> Req.merge(req_options([]))
-      |> HttpClient.request("Telegram file download")
-
-    case result do
-      {:ok, %{status: 200, body: body}} when is_binary(body) ->
-        enforce_inbound_cap(body)
-
-      {:ok, %{status: 200, body: body}} ->
-        enforce_inbound_cap(IO.iodata_to_binary(body))
-
-      {:ok, %{status: status, body: body}} ->
-        Logger.error("Telegram file download failed: #{status} - #{inspect(body)}")
-        {:error, {:download_failed, status}}
-
-      {:error, reason} ->
-        {:error, reason}
-    end
+    Req.new(url: "#{@bot_api_base}/file/bot#{token}/#{file_path}", method: :get)
+    |> Req.merge(req_options([]))
+    |> MediaDownload.get_capped(@max_inbound_media_bytes, "Telegram file download")
+    |> handle_file_response()
   end
 
-  defp enforce_inbound_cap(body) when byte_size(body) > @max_inbound_media_bytes do
-    Logger.error("Telegram inbound media exceeded #{@max_inbound_media_bytes}-byte cap; refusing")
-    {:error, {:byte_cap_exceeded, byte_size(body), @max_inbound_media_bytes}}
+  defp handle_file_response({:ok, body}), do: {:ok, body}
+
+  defp handle_file_response({:error, {:http_status, status, body}}) do
+    Logger.error("Telegram file download failed: #{status} - #{inspect(body)}")
+    {:error, {:download_failed, status}}
   end
 
-  defp enforce_inbound_cap(body), do: {:ok, body}
-
-  defp write_temp_file(body, attachment, file_path) do
-    path =
-      Path.join(
-        System.tmp_dir!(),
-        "fermix-telegram-#{System.unique_integer([:positive])}#{temp_extension(attachment, file_path)}"
-      )
-
-    case File.write(path, body) do
-      :ok -> {:ok, path}
-      {:error, reason} -> {:error, reason}
-    end
-  end
+  defp handle_file_response({:error, reason}), do: {:error, reason}
 
   # Prefer the attachment's declared mime for the temp extension. Telegram makes
   # the Audio `mime_type` optional, so when it is absent, use the real extension

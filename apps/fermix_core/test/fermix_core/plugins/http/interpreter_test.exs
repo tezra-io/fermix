@@ -117,6 +117,38 @@ defmodule FermixCore.Plugins.Http.InterpreterTest do
       assert err =~ "non-JSON"
     end
 
+    # Both plugin transports set `redirect: false` (Req request steps, and so
+    # the URL guard, do not re-run on a followed hop), so a 3xx lands in the
+    # classifier. It must name the hop rather than read as a generic failure.
+    test "a 3xx is refused by name and carries the Location" do
+      t = tool(%{"method" => "GET", "url" => "https://api.example.com/items"})
+
+      http = fn _ ->
+        {:ok,
+         %{
+           status: 302,
+           headers: [{"Location", "https://169.254.169.254/latest/meta-data"}],
+           body: ""
+         }}
+      end
+
+      assert {:ok, %{success: false, error: err}} = Interpreter.run(t, %{}, http: http)
+      assert err =~ "redirect refused"
+      assert err =~ "302"
+      assert err =~ "https://169.254.169.254/latest/meta-data"
+    end
+
+    test "a 3xx with no Location still says what happened" do
+      t = tool(%{"method" => "GET", "url" => "https://api.example.com/items"})
+
+      http = fn _ -> {:ok, %{status: 301, headers: [], body: ""}} end
+
+      assert {:ok, %{success: false, error: err}} = Interpreter.run(t, %{}, http: http)
+      assert err =~ "redirect refused"
+      assert err =~ "301"
+      assert err =~ "no Location header"
+    end
+
     test "a response over the size cap is a tool error" do
       t = tool(%{"method" => "GET", "url" => "https://x/y"})
       big = String.duplicate("a", 200)
@@ -250,6 +282,44 @@ defmodule FermixCore.Plugins.Http.InterpreterTest do
       decoded = Jason.decode!(out)
       assert length(decoded["items"]) == 2
       assert decoded["truncated"] == true
+    end
+
+    # The page ceiling alone let a manifest stack `max_pages` × the per-page cap
+    # into one result. The cumulative ceiling stops the loop first, and reports
+    # it through the same `truncated` flag rather than a second shape.
+    test "stops at the cumulative byte ceiling, before the page ceiling" do
+      t =
+        tool(%{
+          "method" => "GET",
+          "url" => "https://api.example.com/items",
+          "paginate" => %{
+            "cursor_path" => "next",
+            "cursor_param" => "cursor",
+            "cursor_in" => "query",
+            "items_path" => "results",
+            "max_pages" => 10
+          }
+        })
+
+      # One tiny item per page plus ~4 MiB the extract drops: each page is under
+      # the per-page cap, and the cursor never runs out, so only the cumulative
+      # ceiling can end this loop before page 10.
+      body =
+        Jason.encode!(%{
+          "results" => [%{"id" => 1}],
+          "next" => "always",
+          "padding" => String.duplicate("x", 4 * 1024 * 1024)
+        })
+
+      http = fn _ ->
+        {:ok, %{status: 200, headers: [{"content-type", "application/json"}], body: body}}
+      end
+
+      assert {:ok, %{success: true, output: out}} = Interpreter.run(t, %{}, http: http)
+      decoded = Jason.decode!(out)
+      assert decoded["truncated"] == true
+      # 3 pages × ~4 MiB crosses the 10 MiB ceiling; page 10 is never reached.
+      assert length(decoded["items"]) == 3
     end
   end
 

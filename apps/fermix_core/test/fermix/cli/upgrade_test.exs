@@ -3,6 +3,13 @@ defmodule Fermix.CLI.UpgradeTest do
 
   alias Fermix.CLI.Upgrade
 
+  # The origin `Fermix.CLI.Upgrade.Manifest` pins artifact URLs to — the exact
+  # base `scripts/release/build_releases_json.sh` emits for tag v99.0.0, the
+  # version these plugs advertise. An off-origin fixture is refused at parse
+  # time, so nothing below would reach the download/verify/swap under test.
+  @release_base "https://github.com/tezra-io/fermix/releases/download/v99.0.0"
+  @off_origin_base "https://evil.example.invalid/releases"
+
   setup do
     tmp =
       Path.join(
@@ -132,6 +139,42 @@ defmodule Fermix.CLI.UpgradeTest do
       # restart that makes the RUNNING process the restored binary, not just the file.
       assert Agent.get(restarts, & &1) == 2
     end
+
+    test "an off-origin artifact URL is refused before anything is fetched", %{tmp: tmp} do
+      installed = Path.join(tmp, "fermix")
+      File.write!(installed, "old-bin")
+      staging = Path.join(tmp, "staging")
+
+      # A blob whose digest DOES match the manifest, so nothing downstream of the
+      # origin pin would object: if the pin ever stops refusing, this upgrade
+      # succeeds and the assertions below are what catch it.
+      blob = "attacker-controlled binary"
+      Process.put({__MODULE__, :stub_blob}, blob)
+
+      Process.put(
+        {__MODULE__, :stub_sha},
+        :sha256 |> :crypto.hash(blob) |> Base.encode16(case: :lower)
+      )
+
+      result =
+        Upgrade.run(
+          binary_path: installed,
+          req_options: [plug: &__MODULE__.off_origin_upgrade_plug/1],
+          staging_dir: staging,
+          previous_path: Path.join(tmp, ".previous"),
+          audit_path: Path.join(tmp, "upgrades.jsonl"),
+          skip_restart: true,
+          cosign_path: stub_cosign_path()
+        )
+
+      assert {:error, {:artifact_origin_rejected, url}} = result
+      assert String.starts_with?(url, @off_origin_base)
+      # `Swapper.stage_artifact/2` creates the staging directory before its first
+      # download, so an absent staging directory is proof the refusal landed
+      # ahead of every GET — not after the binary was already on disk.
+      refute File.exists?(staging)
+      assert File.read!(installed) == "old-bin"
+    end
   end
 
   def failing_manifest_plug(conn) do
@@ -170,7 +213,14 @@ defmodule Fermix.CLI.UpgradeTest do
     |> Plug.Conn.send_resp(200, Jason.encode!(body))
   end
 
-  def upgrade_plug(%Plug.Conn{request_path: path} = conn) do
+  def upgrade_plug(conn), do: release_plug(conn, @release_base)
+
+  # The same release, with its artifact URLs pointed off the release origin. The
+  # manifest pin must refuse it, so the download branches below are unreachable
+  # through this plug — which is exactly what the test asserts.
+  def off_origin_upgrade_plug(conn), do: release_plug(conn, @off_origin_base)
+
+  defp release_plug(%Plug.Conn{request_path: path} = conn, base) do
     blob = Process.get({__MODULE__, :stub_blob})
     sha = Process.get({__MODULE__, :stub_sha})
     {os, arch} = host_target()
@@ -188,10 +238,10 @@ defmodule Fermix.CLI.UpgradeTest do
               "artifacts" => [
                 %{
                   "target" => target_str,
-                  "url" => "https://example.com/fermix_#{target_str}",
+                  "url" => "#{base}/fermix_#{target_str}",
                   "sha256" => sha,
-                  "sig_url" => "https://example.com/fermix_#{target_str}.sig",
-                  "cert_url" => "https://example.com/fermix_#{target_str}.pem"
+                  "sig_url" => "#{base}/fermix_#{target_str}.sig",
+                  "cert_url" => "#{base}/fermix_#{target_str}.pem"
                 }
               ]
             }

@@ -16,6 +16,7 @@ defmodule FermixCore.Tools.ToolSearch do
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Deferral
   alias FermixCore.Capabilities.Registry
+  alias FermixCore.Telemetry
   alias FermixCore.Tools.Support
 
   @default_limit 5
@@ -215,6 +216,15 @@ defmodule FermixCore.Tools.ToolSearch do
     |> Enum.map(fn cap -> {cap, 0.1} end)
   end
 
+  # This event is the tool-schema deferral soak metric, so all three measurements
+  # are unconditional: the miss rate (`match_count == 0`) is what it exists to
+  # report and it needs no query text. The raw query is a body — the user's own
+  # words, written verbatim to `~/.fermix/traces/<date>/agent_event.jsonl` by
+  # `Trace.TelemetryHandler` — so it obeys the one rule every other emitter obeys
+  # (`docs/TELEMETRY_CONTRACT.md`): bodies attach only behind `capture_content?/0`,
+  # shaped by `preview/1`. The same query already reaches the `tool_exec` input
+  # preview via `Support.run/3`, and that path is gated; this keeps the two
+  # consistent instead of leaving one ungated copy.
   defp emit_query_telemetry(query, matches, catalog, context) do
     top_score =
       case matches do
@@ -225,7 +235,15 @@ defmodule FermixCore.Tools.ToolSearch do
     :telemetry.execute(
       [:fermix, :tool_search, :query],
       %{match_count: length(matches), catalog_size: length(catalog), top_score: top_score},
-      %{query: query, agent: Map.get(context, :agent_name, "unknown")}
+      maybe_put_query(%{agent: Map.get(context, :agent_name, "unknown")}, query)
     )
+  end
+
+  defp maybe_put_query(metadata, query) do
+    if Telemetry.capture_content?() do
+      Map.put(metadata, :query, Telemetry.preview(query))
+    else
+      metadata
+    end
   end
 end

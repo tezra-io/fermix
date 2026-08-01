@@ -36,7 +36,8 @@ Use `browser` for JavaScript-capable pages. Choose the right web tool once, read
 - Reuse one tab target per flow. If popups or retries create extras, use `tabs`, then `focus` or `close`.
 - On stale/missing refs: snapshot the same target, retry once with the new ref, then report the blocker.
 - Avoid snapshot churn; do not snapshot after every successful `fill`.
-- The `screenshot` action returns the page as an image the model actually sees — use it to inspect rendered/visual state. Treat PDFs and downloads as saved artifacts (a path, not seen); read them with `file_read`.
+- The `screenshot` action returns the page as an image the model actually sees — use it to inspect rendered/visual state. Treat PDFs and downloads as saved artifacts (a path, not seen); read them with `file_read`. A download past the size ceiling is canceled and its partial deleted (`download_too_large`); if the browser refuses the cancel you get `download_too_large_cancel_failed` instead, meaning the transfer may still be writing — close the tab rather than retrying.
+- Reads are checked against the same address policy as navigation, at the URL the page has actually committed to — so a page that redirects itself onto a private or link-local address refuses with `read_blocked` rather than handing back its content, and a page whose live URL cannot be read at all refuses with `read_url_unavailable` rather than trusting a stale one. Hosts ending `.internal`, `.local` or `.localhost` are refused outright unless the operator listed them in `allowed_hosts`, so an mDNS name like `printer.local` is not reachable by default. Loopback (`localhost`, `127.0.0.1`, `::1`) stays allowed — inspecting your own dev server is the point.
 
 ## Stop Conditions
 

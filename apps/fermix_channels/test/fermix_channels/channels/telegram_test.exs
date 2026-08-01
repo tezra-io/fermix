@@ -373,6 +373,53 @@ defmodule FermixChannels.Channels.TelegramTest do
         FermixTestSupport.SafeRm.rm!(path)
       end
     end
+
+    test "halts a lying upstream's oversize body at the inbound cap" do
+      # No declared size, so the preflight cannot help: the only guard left is
+      # the streaming cap on the body itself.
+      Req.Test.stub(:telegram, fn conn ->
+        if String.ends_with?(conn.request_path, "/getFile") do
+          conn
+          |> Plug.Conn.put_resp_content_type("application/json")
+          |> Plug.Conn.send_resp(
+            200,
+            Jason.encode!(%{"ok" => true, "result" => %{"file_path" => "photos/big.jpg"}})
+          )
+        else
+          Plug.Conn.send_resp(conn, 200, :binary.copy("x", 20 * 1_024 * 1_024 + 1))
+        end
+      end)
+
+      attachment = %{kind: :image, file_id: "big", mime_type: "image/jpeg", size_bytes: nil}
+
+      assert {:error, {:byte_cap_exceeded, received, allowed}} =
+               Telegram.download_attachment(%{}, attachment)
+
+      assert allowed == 20 * 1_024 * 1_024
+      assert received == allowed + 1
+    end
+
+    test "refuses a compressed body by name instead of writing bytes nobody can read" do
+      Req.Test.stub(:telegram, fn conn ->
+        if String.ends_with?(conn.request_path, "/getFile") do
+          conn
+          |> Plug.Conn.put_resp_content_type("application/json")
+          |> Plug.Conn.send_resp(
+            200,
+            Jason.encode!(%{"ok" => true, "result" => %{"file_path" => "photos/p.jpg"}})
+          )
+        else
+          conn
+          |> Plug.Conn.put_resp_header("content-encoding", "gzip")
+          |> Plug.Conn.send_resp(200, :zlib.gzip("PHOTOBYTES"))
+        end
+      end)
+
+      attachment = %{kind: :image, file_id: "gz", mime_type: "image/jpeg", size_bytes: nil}
+
+      assert {:error, {:unexpected_content_encoding, "gzip"}} =
+               Telegram.download_attachment(%{}, attachment)
+    end
   end
 
   # -- send_message/3 --

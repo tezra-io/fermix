@@ -44,9 +44,17 @@ defmodule FermixChannels.Gateway.Commands.Soul do
   @impl true
   def description, do: "Review, apply, revert, or reset the agent's persona (SOUL.md)."
 
+  # Strict operator role for the WHOLE command, not just `apply`. `/soul` is the
+  # only writer of SOUL.md outside setup seeding and its writes survive restart;
+  # the `command_allowlist` guest branch (which exists for /new, /compact) would
+  # otherwise let a trusted collaborator propose a persona edit and then, since
+  # `same_origin?` binds the token to their own conversation, self-approve it —
+  # the same hazard /sandbox grant|revoke|confirm is gated on. `status`,
+  # `history` and `diff` disclose the owner's persona and revision trail, and
+  # `review` spends a provider call, so no subcommand is guest-safe.
   @impl true
   def authorize(message, metadata, context),
-    do: Authorization.owner_only(message, metadata, context)
+    do: Authorization.operator_only(message, metadata, context)
 
   @impl true
   def execute(message, reply_fn, context) do

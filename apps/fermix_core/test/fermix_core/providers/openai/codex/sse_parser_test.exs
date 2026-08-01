@@ -458,6 +458,74 @@ defmodule FermixCore.Providers.OpenAI.Codex.SSEParserTest do
       assert events == []
     end
 
+    # Reimplements the pre-accumulator composition — a fresh index-ordered join
+    # after every delta — so the accumulated `composed` is PROVED byte-identical
+    # rather than assumed to be. The interleaved scripts matter: arrival order is
+    # not index order in general, which is exactly the assumption a naive
+    # append-only accumulator would have silently broken.
+    defp reference_cumulatives(deltas) do
+      deltas
+      |> Enum.reduce({%{}, []}, fn {idx, text}, {buffers, acc} ->
+        buffers = Map.update(buffers, idx, text, &(&1 <> text))
+
+        joined =
+          buffers
+          |> Enum.sort_by(fn {i, _text} -> i end)
+          |> Enum.map_join("", fn {_i, text} -> text end)
+
+        {buffers, [joined | acc]}
+      end)
+      |> elem(1)
+      |> Enum.reverse()
+    end
+
+    test "multi-delta composition is byte-identical to a fresh index-ordered join" do
+      scripts = [
+        [{0, "Hel"}, {0, "lo "}, {0, "world"}],
+        [{0, "First "}, {0, "part. "}, {1, "Second "}, {1, "part."}],
+        [{0, "a"}, {2, "b"}, {2, "c"}, {5, "d"}],
+        [{2, "Second part."}, {0, "First "}, {0, "part. "}],
+        [{1, "b"}, {0, "a"}, {2, "c"}, {0, "!"}],
+        [{0, "héllo "}, {0, "🚀"}, {1, " 世界"}, {0, " —"}]
+      ]
+
+      for deltas <- scripts do
+        chunks = Enum.map(deltas, fn {idx, text} -> text_delta_event(idx, text) end)
+        {_state, events} = collect_deltas(chunks)
+
+        assert Enum.map(events, fn {:text_delta, cumulative} -> cumulative end) ==
+                 reference_cumulatives(deltas),
+               "script: #{inspect(deltas)}"
+      end
+    end
+
+    test "the last streamed cumulative equals the finalized body's message text" do
+      added =
+        "data: " <>
+          Jason.encode!(%{
+            "type" => "response.output_item.added",
+            "output_index" => 0,
+            "item" => %{"type" => "message", "id" => "msg_1", "content" => []}
+          }) <> "\n\n"
+
+      done =
+        "data: " <>
+          Jason.encode!(%{
+            "type" => "response.output_item.done",
+            "output_index" => 0,
+            "item" => %{"type" => "message", "id" => "msg_1", "content" => []}
+          }) <> "\n\n"
+
+      chunks = [added, text_delta_event(0, "Hello "), text_delta_event(0, "world"), done]
+      {state, events} = collect_deltas(chunks)
+
+      assert {:text_delta, last_cumulative} =
+               events |> Enum.filter(&match?({:text_delta, _text}, &1)) |> List.last()
+
+      assert %{"output" => [msg]} = SSEParser.finalize(state)
+      assert msg["content"] == [%{"type" => "output_text", "text" => last_cumulative}]
+    end
+
     test "function_call item completion fires nothing" do
       fc_done =
         "data: " <>
@@ -474,6 +542,113 @@ defmodule FermixCore.Providers.OpenAI.Codex.SSEParserTest do
 
       {_state, events} = collect_deltas([fc_done])
       assert events == []
+    end
+  end
+
+  # The shipped ceiling, hardcoded on purpose: the only wall-clock bound on this
+  # stream is an IDLE window, so a peer that trickles bytes without ever closing
+  # an event is bounded by this constant alone.
+  describe "leftover ceiling" do
+    @cap 1_048_576
+
+    defp unterminated_event(payload_bytes) do
+      ~s(data: {"type":"response.output_text.delta","output_index":0,"delta":") <>
+        String.duplicate("x", payload_bytes)
+    end
+
+    defp message_done_event(text) do
+      "data: " <>
+        Jason.encode!(%{
+          "type" => "response.output_item.done",
+          "output_index" => 0,
+          "item" => %{
+            "type" => "message",
+            "id" => "msg_1",
+            "content" => [%{"type" => "output_text", "text" => text}]
+          }
+        }) <> "\n\n"
+    end
+
+    test "an event that never reaches its boundary is abandoned past the ceiling" do
+      state = SSEParser.new() |> SSEParser.feed(unterminated_event(@cap + 1))
+      body = SSEParser.finalize(state)
+
+      assert state.leftover == ""
+      assert body["status"] == "failed"
+      assert body["failure"]["code"] == "sse_event_too_large"
+      assert body["failure"]["message"] =~ "no event boundary"
+    end
+
+    test "the ceiling holds when the oversized event arrives across many chunks" do
+      opened = SSEParser.new() |> SSEParser.feed(~s(data: {"type":"x","d":"))
+      chunk = String.duplicate("y", 64 * 1024)
+
+      state =
+        Enum.reduce(1..32, opened, fn _i, acc ->
+          next = SSEParser.feed(acc, chunk)
+          assert byte_size(next.leftover) <= @cap
+          next
+        end)
+
+      assert SSEParser.finalize(state)["status"] == "failed"
+    end
+
+    test "content parsed before the ceiling is kept" do
+      body =
+        SSEParser.new()
+        |> SSEParser.feed(message_done_event("delivered"))
+        |> SSEParser.feed(unterminated_event(@cap + 1))
+        |> SSEParser.finalize()
+
+      assert body["status"] == "failed"
+      assert [%{"type" => "message", "content" => [%{"text" => "delivered"}]}] = body["output"]
+    end
+
+    # Clearing the buffer without latching would let the very next event rewrite
+    # `status` and turn an abandoned response back into a silent success.
+    test "a later terminal event cannot resurrect an abandoned stream" do
+      completed =
+        ~s(data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1}}}\n\n)
+
+      body =
+        SSEParser.new()
+        |> SSEParser.feed(unterminated_event(@cap + 1))
+        |> SSEParser.feed(completed)
+        |> SSEParser.finalize()
+
+      assert body["status"] == "failed"
+      assert body["usage"] == %{}
+    end
+
+    test "a large event that DOES reach its boundary under the ceiling parses normally" do
+      text = String.duplicate("z", 900 * 1024)
+
+      event =
+        "data: " <>
+          Jason.encode!(%{"type" => "response.created", "response" => %{"model" => text}})
+
+      state =
+        SSEParser.new()
+        |> SSEParser.feed(event)
+        |> SSEParser.feed("\n\n")
+
+      body = SSEParser.finalize(state)
+
+      assert body["status"] == nil
+      assert body["failure"] == nil
+      assert body["model"] == text
+    end
+
+    # `overflowed?` is the flag `Codex.collect_sse/3` reads to return
+    # `{:halt, acc}`. The cap bounds memory only; without a reader that stops
+    # the transfer the request never returns at all, so the flag has to survive
+    # into the state the collector inspects — not just clear the buffer.
+    test "the abandoned state is flagged, so the collector can stop the transfer" do
+      abandoned = SSEParser.new() |> SSEParser.feed(unterminated_event(@cap + 1))
+      healthy = SSEParser.new() |> SSEParser.feed(message_done_event("fine"))
+
+      assert abandoned.overflowed?
+      refute healthy.overflowed?
     end
   end
 end

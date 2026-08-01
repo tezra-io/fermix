@@ -12,6 +12,7 @@ defmodule FermixChannels.Channels.WhatsApp do
   require Logger
 
   alias FermixChannels.Gateway.Idempotency
+  alias FermixChannels.Gateway.MediaDownload
   alias FermixChannels.Gateway.Message
   alias FermixChannels.Gateway.RetryHint
   alias FermixChannels.Telemetry, as: ChannelTelemetry
@@ -219,7 +220,7 @@ defmodule FermixChannels.Channels.WhatsApp do
          {:ok, access_token} <- fetch_config_value(:access_token),
          {:ok, media_url} <- media_url(attachment, access_token),
          {:ok, body} <- download_media(media_url, access_token),
-         {:ok, path} <- write_temp_file(body, attachment) do
+         {:ok, path} <- MediaDownload.write_temp(body, "whatsapp", attachment) do
       {:ok, path}
     end
   end
@@ -599,79 +600,27 @@ defmodule FermixChannels.Channels.WhatsApp do
   defp resolve_media_url(_missing_file_id, _access_token),
     do: {:error, :missing_attachment_reference}
 
+  # Audit F-06: the cap is enforced while the body streams in, so a lying
+  # upstream cannot blow past the size_bytes preflight — the transfer is halted
+  # before the chunk that would cross it is buffered.
   defp download_media(url, access_token) do
-    result =
-      Req.new(url: url, method: :get)
-      |> Req.Request.put_header("authorization", "Bearer #{access_token}")
-      |> Req.merge(req_options([]))
-      |> Req.request()
-
-    case result do
-      {:ok, %{status: 200, body: body}} when is_binary(body) ->
-        enforce_size_cap(body)
-
-      {:ok, %{status: 200, body: body}} ->
-        enforce_size_cap(IO.iodata_to_binary(body))
-
-      {:ok, %{status: status, body: body}} ->
-        Logger.error("WhatsApp media download failed: #{status} - #{inspect(body)}")
-        {:error, "WhatsApp media download error: #{status}"}
-
-      {:error, reason} ->
-        Logger.error("WhatsApp media download request failed: #{inspect(reason)}")
-        {:error, reason}
-    end
+    Req.new(url: url, method: :get)
+    |> Req.Request.put_header("authorization", "Bearer #{access_token}")
+    |> Req.merge(req_options([]))
+    |> MediaDownload.get_capped(@max_media_bytes, "WhatsApp media download")
+    |> handle_media_response()
   end
 
-  # Audit F-06: cap the in-memory body so a lying upstream can't blow
-  # past the size_bytes preflight. Body streaming via Req's `:into`
-  # collector is the ideal path, but Req's option validation rejects
-  # unknown adapters in test plug mode — we keep the post-receive cap
-  # here and rely on `preflight_size_cap/1` to drop oversized payloads
-  # before the request even leaves Fermix.
-  defp enforce_size_cap(body) when byte_size(body) > @max_media_bytes do
-    Logger.error(
-      "WhatsApp media download exceeded #{@max_media_bytes}-byte cap; refusing payload"
-    )
+  defp handle_media_response({:ok, body}), do: {:ok, body}
 
-    {:error, "WhatsApp media download exceeded #{@max_media_bytes}-byte cap"}
+  defp handle_media_response({:error, {:http_status, status, body}}) do
+    Logger.error("WhatsApp media download failed: #{status} - #{inspect(body)}")
+    {:error, "WhatsApp media download error: #{status}"}
   end
 
-  defp enforce_size_cap(body), do: {:ok, body}
-
-  defp write_temp_file(body, attachment) do
-    path =
-      Path.join(
-        System.tmp_dir!(),
-        "fermix-whatsapp-#{System.unique_integer([:positive])}#{attachment_extension(attachment)}"
-      )
-
-    case File.write(path, body) do
-      :ok -> {:ok, path}
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
-  defp attachment_extension(attachment) do
-    attachment
-    |> attachment_value(:mime_type)
-    |> normalize_extension()
-  end
-
-  defp normalize_extension(nil), do: ".bin"
-
-  defp normalize_extension(mime_type) when is_binary(mime_type) do
-    mime_type
-    |> String.split(";", parts: 2)
-    |> hd()
-    |> String.split("/", parts: 2)
-    |> case do
-      [_type, subtype] when subtype != "" ->
-        "." <> String.replace(subtype, ~r/[^a-zA-Z0-9]+/, "_")
-
-      _ ->
-        ".bin"
-    end
+  defp handle_media_response({:error, reason}) do
+    Logger.error("WhatsApp media download request failed: #{inspect(reason)}")
+    {:error, reason}
   end
 
   defp attachment_value(attachment, key) when is_map(attachment) do

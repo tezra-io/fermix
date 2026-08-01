@@ -28,11 +28,17 @@ defmodule FermixCore.Harness.Continuation do
 
   require Logger
 
+  alias FermixCore.Capabilities.UntrustedContent
   alias FermixCore.Delivery.ChannelSend
 
   @max_depth 3
   @result_text_max 8_192
   @dispatch_timeout_ms 15_000
+  # The frame attribution for the run's own output. Names the classification
+  # Fermix already applies to this text on the memory-recall path
+  # (`UntrustedContent.untrusted_source_type?/1`) rather than the vendor, which
+  # the run tag and status line above the frame already state.
+  @untrusted_source "coding_harness"
   @closing "Continue the request this run was for; if it is already satisfied, just report the outcome."
 
   # A run that ends without a result leaves a decision, not an outcome — and the
@@ -132,7 +138,8 @@ defmodule FermixCore.Harness.Continuation do
 
   @doc """
   The system-voiced notice text (pure, golden-tested): the run tag, the
-  vendor/status/cwd line, the bounded outcome body, and the closing instruction.
+  vendor/status/cwd line, the bounded outcome body inside the untrusted-content
+  frame, and the closing instruction.
   """
   @spec notice_text(map(), String.t() | nil) :: String.t()
   def notice_text(row, result_text) when is_map(row) do
@@ -192,11 +199,31 @@ defmodule FermixCore.Harness.Continuation do
     |> Enum.join(" · ")
   end
 
+  # The outcome text is the run's own output, derived from the repo, issue and
+  # web content the vendor read — and the closing line directly beneath it tells
+  # the model to act. So every shape of outcome enters the loop inside the
+  # untrusted-content frame, the same boundary the memory-recall path already
+  # applies to this vendor text (§10.3). Funnelled through one clause so an
+  # outcome shape added later cannot enter unframed.
+  #
+  # The run tag, `status_line/1` and `closing/1` stay OUTSIDE the frame: they are
+  # Fermix-authored and must keep their instructional authority. `frame/2`
+  # neutralizes any frame delimiter the payload carries, so the outcome cannot
+  # close the boundary early.
+  defp body(row, result_text) do
+    row
+    |> outcome(result_text)
+    |> frame_outcome()
+  end
+
+  defp frame_outcome(""), do: ""
+  defp frame_outcome(text), do: UntrustedContent.frame(@untrusted_source, text)
+
   # A cloud run's outcome is a vendor task, not a local result file (its
   # `result_text` is always nil), so the notice carries what `Delivery` composes
   # for that rail: the vendor status/diff summary, the task URL, and the diff
   # hint — otherwise a completed cloud run would continue with an empty body.
-  defp body(%{vendor: "codex_cloud"} = row, _result_text) do
+  defp outcome(%{vendor: "codex_cloud"} = row, _result_text) do
     [reason_line(row), Map.get(row, :diagnostics_tail), task_url(row), diff_hint(row)]
     |> Enum.reject(&(&1 in [nil, ""]))
     |> Enum.join("\n")
@@ -206,17 +233,17 @@ defmodule FermixCore.Harness.Continuation do
   # A completed run speaks through its result text; anything else speaks through
   # its reason + diagnostics so the agent reacts to the real failure rather than a
   # bare status word.
-  defp body(%{status: "completed"}, result_text) when is_binary(result_text) do
+  defp outcome(%{status: "completed"}, result_text) when is_binary(result_text) do
     bound(result_text)
   end
 
-  defp body(%{status: "completed"}, _absent), do: ""
+  defp outcome(%{status: "completed"}, _absent), do: ""
 
   # A failed run's `result_text` is the vendor's own error message. Without it the
   # agent reads a bare `reason: exit_1`, cannot tell an auth failure from a crash,
   # and re-launches straight into the same wall — so it leads the body, ahead of
   # the reason word and the (stderr-only) diagnostics tail.
-  defp body(row, result_text) do
+  defp outcome(row, result_text) do
     [vendor_line(result_text), reason_line(row), Map.get(row, :diagnostics_tail)]
     |> Enum.reject(&(&1 in [nil, ""]))
     |> Enum.join("\n")
