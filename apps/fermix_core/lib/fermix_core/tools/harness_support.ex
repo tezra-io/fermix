@@ -8,6 +8,7 @@ defmodule FermixCore.Tools.HarnessSupport do
   # jobs family.
 
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.Capabilities.UntrustedContent
   alias FermixCore.Harness.Artifacts
   alias FermixCore.Harness.Consent
   alias FermixCore.Memory.Repo
@@ -19,6 +20,11 @@ defmodule FermixCore.Tools.HarnessSupport do
   # message bound size a chat message, this one sizes a JSON tool result. They are
   # not meant to agree.
   @result_tail_max 4_096
+
+  # Must match `Harness.Continuation`'s attribution and the memory-recall
+  # classification (`UntrustedContent.untrusted_source_type?/1`), so the same
+  # vendor text carries the same label whichever door it reaches the model by.
+  @untrusted_source "coding_harness"
 
   # Parameter values whose only effect is to remove the vendor child's own
   # confinement. Fermix admits the run's `cwd` and every `add_dirs` entry through
@@ -223,7 +229,7 @@ defmodule FermixCore.Tools.HarnessSupport do
   def run_payload(row, vendor_text \\ nil) when is_map(row) do
     row
     |> run_summary()
-    |> Map.put(:result_tail, bound_text(vendor_text))
+    |> Map.put(:result_tail, frame_result_tail(bound_text(vendor_text)))
     |> Map.merge(%{
       exit_code: Map.get(row, :exit_code),
       framing_errors: Map.get(row, :framing_errors),
@@ -252,6 +258,16 @@ defmodule FermixCore.Tools.HarnessSupport do
   defp bound_text(nil), do: nil
   defp bound_text(text) when byte_size(text) <= @result_tail_max, do: text
   defp bound_text(text), do: utf8_prefix(text, @result_tail_max) <> "\n… [truncated]"
+
+  # The same bytes the continuation notice frames: the vendor CLI's own text,
+  # derived from the repo, issue and web content the run read. `get_coding_run`
+  # is `:read_only` and plugin-less, so `UntrustedContent.wrap/2` passes its
+  # output through untouched — without this the identical stream reaches the
+  # model unframed simply because it was polled instead of awaited, which is the
+  # drift a single boundary exists to prevent.
+  defp frame_result_tail(nil), do: nil
+  defp frame_result_tail(""), do: ""
+  defp frame_result_tail(text), do: UntrustedContent.frame(@untrusted_source, text)
 
   # A byte-wise cut can land inside a multibyte codepoint, and unlike the chat-bound
   # siblings this value is `Jason.encode!`d — invalid UTF-8 would raise and take the

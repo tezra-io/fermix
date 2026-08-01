@@ -5,6 +5,14 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
   alias FermixCore.Auth.Store
   alias FermixCore.Capabilities.Builtin
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Setup.ConfigStore
+
+  # The origin `Fermix.CLI.Upgrade.Manifest` pins artifact URLs to — the exact
+  # base `scripts/release/build_releases_json.sh` emits. An off-origin fixture is
+  # refused at parse time, which downgrades every integrity verdict below to a
+  # "could not fetch manifest" warn: the checks would go green on a manifest
+  # nobody parsed instead of on the sha comparison they exist to make.
+  @release_base "https://github.com/tezra-io/fermix/releases/download/v1.0.0"
 
   defmodule HealthyChannel do
     def health_check(_opts), do: {:ok, %{detail: "healthy ok", latency_ms: 1}}
@@ -687,7 +695,9 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     end
 
     test "fails on sha mismatch against the manifest" do
-      tmp = make_tmp_binary("not the real binary content")
+      blob = "not the real binary content"
+      actual = :sha256 |> :crypto.hash(blob) |> Base.encode16(case: :lower)
+      tmp = make_tmp_binary(blob)
 
       result =
         Checks.binary_integrity(
@@ -697,7 +707,12 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
         )
 
       assert result.status == :fail
-      assert result.detail =~ "sha mismatch"
+      # The manifest version and BOTH digests are proof the mismatch branch ran:
+      # a manifest that never parsed reports a warn carrying none of them, so
+      # this cannot pass by failing to read the manifest at all.
+      assert result.detail =~ "sha mismatch vs manifest 1.0.0"
+      assert result.detail =~ String.slice(actual, 0, 12)
+      assert result.detail =~ "000000000000"
       FermixTestSupport.SafeRm.rm(tmp)
     end
 
@@ -716,7 +731,7 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
         )
 
       assert result.status == :ok
-      assert result.detail =~ "matches"
+      assert result.detail =~ "matches releases.json (v1.0.0)"
       FermixTestSupport.SafeRm.rm(tmp)
     end
   end
@@ -1090,10 +1105,10 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
           "artifacts" => [
             %{
               "target" => "linux-x86_64",
-              "url" => "https://example.com/bin",
+              "url" => "#{@release_base}/fermix_linux_x86_64",
               "sha256" => sha,
-              "sig_url" => "https://example.com/bin.sig",
-              "cert_url" => "https://example.com/bin.pem"
+              "sig_url" => "#{@release_base}/fermix_linux_x86_64.sig",
+              "cert_url" => "#{@release_base}/fermix_linux_x86_64.pem"
             }
           ]
         }
@@ -1437,5 +1452,79 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     name = :"harness_doctor_reg_#{System.unique_integer([:positive])}"
     start_supervised!({CapabilityRegistry, name: name})
     name
+  end
+
+  describe "home_permissions/0" do
+    setup do
+      previous = System.get_env("FERMIX_HOME")
+
+      tmp_home =
+        Path.join(System.tmp_dir!(), "fermix-checks-home-#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(tmp_home)
+      System.put_env("FERMIX_HOME", tmp_home)
+
+      on_exit(fn ->
+        case previous do
+          nil -> System.delete_env("FERMIX_HOME")
+          value -> System.put_env("FERMIX_HOME", value)
+        end
+
+        FermixTestSupport.SafeRm.rm_rf!(tmp_home)
+      end)
+
+      %{home: tmp_home}
+    end
+
+    test "ok when the home is 0700", %{home: home} do
+      File.chmod!(home, 0o700)
+
+      result = Checks.home_permissions()
+
+      assert result.name == "home perms"
+      assert result.status == :ok
+      assert result.detail =~ "0700"
+    end
+
+    test "fails with the octal mode and a literal fix when world-readable", %{home: home} do
+      File.chmod!(home, 0o755)
+
+      result = Checks.home_permissions()
+
+      assert result.status == :fail
+      assert result.detail =~ "755"
+      assert result.detail =~ "chmod 700 #{home}"
+    end
+
+    # The self-heal is the whole point: an install created before the mode was
+    # enforced must be repaired by an ordinary boot, not by the operator.
+    test "ensure_workspace/0 repairs a world-readable home", %{home: home} do
+      File.chmod!(home, 0o755)
+
+      assert :ok = ConfigStore.ensure_workspace()
+
+      assert Checks.home_permissions().status == :ok
+    end
+  end
+
+  describe "cosign/1" do
+    test "ok when cosign resolves" do
+      result = Checks.cosign(cosign_path: "/opt/homebrew/bin/cosign")
+
+      assert result.name == "cosign"
+      assert result.status == :ok
+      assert result.detail =~ "/opt/homebrew/bin/cosign"
+    end
+
+    # Both features fail closed without it, and the `curl | sh` install path
+    # never supplies it — so the message has to name both, or the operator
+    # learns about it from an unrelated-looking refusal much later.
+    test "warns naming both features that refuse without it" do
+      result = Checks.cosign(cosign_path: nil)
+
+      assert result.status == :warn
+      assert result.detail =~ "fermix upgrade"
+      assert result.detail =~ "fermix plugins install"
+    end
   end
 end

@@ -385,7 +385,6 @@ defmodule FermixChannels.Channels.Discord do
     with :ok <- MediaDownload.preflight_cap(attachment, @max_media_bytes),
          {:ok, url} <- attachment_url(attachment),
          {:ok, body} <- fetch_cdn_media(url),
-         {:ok, body} <- MediaDownload.enforce_cap(body, @max_media_bytes),
          {:ok, path} <- MediaDownload.write_temp(body, "discord", attachment) do
       {:ok, path}
     end
@@ -398,25 +397,25 @@ defmodule FermixChannels.Channels.Discord do
     end
   end
 
-  # Discord CDN attachment URLs are public — no bot token needed.
+  # Discord CDN attachment URLs are public — no bot token needed. The gateway's
+  # declared `size` is the sender's claim, not the CDN's: `get_capped/3` halts
+  # the transfer at the cap instead of buffering the whole body and measuring it
+  # afterwards, which also removes the gzip amplifier the buffered path had.
   defp fetch_cdn_media(url) do
-    case Req.new(url: url, method: :get)
-         |> Req.merge(req_options([]))
-         |> HttpClient.request("Discord media download") do
-      {:ok, %{status: 200, body: body}} when is_binary(body) ->
-        {:ok, body}
-
-      {:ok, %{status: 200, body: body}} ->
-        {:ok, IO.iodata_to_binary(body)}
-
-      {:ok, %{status: status}} ->
-        Logger.error("Discord media download failed: status=#{status}")
-        {:error, {:download_failed, status}}
-
-      {:error, reason} ->
-        {:error, reason}
-    end
+    Req.new(url: url, method: :get)
+    |> Req.merge(req_options([]))
+    |> MediaDownload.get_capped(@max_media_bytes, "Discord media download")
+    |> handle_media_response()
   end
+
+  defp handle_media_response({:ok, body}), do: {:ok, body}
+
+  defp handle_media_response({:error, {:http_status, status, _body}}) do
+    Logger.error("Discord media download failed: status=#{status}")
+    {:error, {:download_failed, status}}
+  end
+
+  defp handle_media_response({:error, reason}), do: {:error, reason}
 
   defp attachment_kind("audio/" <> _rest), do: :audio
   defp attachment_kind("image/" <> _rest), do: :image

@@ -1,6 +1,8 @@
 defmodule FermixChannels.Channels.DiscordTest do
   use ExUnit.Case, async: false
 
+  import Bitwise
+
   alias FermixChannels.Channels.Discord
   alias FermixChannels.Dispatcher
   alias FermixChannels.Gateway.Message
@@ -342,6 +344,83 @@ defmodule FermixChannels.Channels.DiscordTest do
       after
         FermixTestSupport.SafeRm.rm_rf!(tmp_dir)
       end
+    end
+  end
+
+  describe "download_attachment/2" do
+    @media_cap 10 * 1_024 * 1_024
+
+    defp cdn_attachment do
+      %{
+        kind: :image,
+        url: "https://cdn.discordapp.com/attachments/1/2/photo.png",
+        mime_type: "image/png",
+        file_id: "2",
+        size_bytes: nil
+      }
+    end
+
+    test "downloads a CDN attachment to an owner-only temp file" do
+      Req.Test.stub(:discord, fn conn ->
+        Plug.Conn.send_resp(conn, 200, "png-bytes")
+      end)
+
+      assert {:ok, path} = Discord.download_attachment(%{}, cdn_attachment())
+
+      try do
+        assert File.read!(path) == "png-bytes"
+        assert String.ends_with?(path, ".png")
+        assert (File.stat!(path).mode &&& 0o777) == 0o600
+      after
+        FermixTestSupport.SafeRm.rm!(path)
+      end
+    end
+
+    # The gateway's declared `size` is the sender's claim; the CDN response is
+    # the only fact. This has to halt mid-transfer, not measure a resident body.
+    test "halts a CDN body that outgrows the declared size at the media cap" do
+      Req.Test.stub(:discord, fn conn ->
+        Plug.Conn.send_resp(conn, 200, :binary.copy("x", @media_cap + 1))
+      end)
+
+      assert {:error, {:byte_cap_exceeded, received, allowed}} =
+               Discord.download_attachment(%{}, cdn_attachment())
+
+      assert allowed == @media_cap
+      assert received == allowed + 1
+    end
+
+    # Proof the fetch runs through the streaming collector: Req only advertises
+    # `accept-encoding` when `into:` is nil, and a buffered body is gunzipped by
+    # Req's `decompress_body` step before any cap can see it.
+    test "never advertises accept-encoding, so there is no decompression amplifier" do
+      Req.Test.stub(:discord, fn conn ->
+        assert Plug.Conn.get_req_header(conn, "accept-encoding") == []
+        Plug.Conn.send_resp(conn, 200, "png-bytes")
+      end)
+
+      assert {:ok, path} = Discord.download_attachment(%{}, cdn_attachment())
+      on_exit(fn -> FermixTestSupport.SafeRm.rm!(path) end)
+    end
+
+    test "refuses a compressed CDN body by name rather than inflating it" do
+      Req.Test.stub(:discord, fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("content-encoding", "gzip")
+        |> Plug.Conn.send_resp(200, :zlib.gzip("png-bytes"))
+      end)
+
+      assert {:error, {:unexpected_content_encoding, "gzip"}} =
+               Discord.download_attachment(%{}, cdn_attachment())
+    end
+
+    test "hands a CDN non-2xx back as a download failure" do
+      Req.Test.stub(:discord, fn conn ->
+        Plug.Conn.send_resp(conn, 403, "forbidden")
+      end)
+
+      assert {:error, {:download_failed, 403}} =
+               Discord.download_attachment(%{}, cdn_attachment())
     end
   end
 

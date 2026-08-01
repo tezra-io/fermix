@@ -15,6 +15,20 @@ defmodule FermixChannels.Gateway.Commands.BackgroundTest do
     def run(_request), do: {:error, :checkout_unavailable}
   end
 
+  # Stands in for a registry that is already at its running ceiling, so the
+  # command's rendering of that refusal can be pinned without spawning the cap.
+  defmodule StubRegistry do
+    use GenServer
+
+    def start_link(reply), do: GenServer.start_link(__MODULE__, reply)
+
+    @impl true
+    def init(reply), do: {:ok, reply}
+
+    @impl true
+    def handle_call({:start, _request}, _from, reply), do: {:reply, reply, reply}
+  end
+
   setup do
     work_sup = start_supervised!({Task.Supervisor, []})
 
@@ -87,6 +101,33 @@ defmodule FermixChannels.Gateway.Commands.BackgroundTest do
       assert Enum.any?(replies, &(&1 =~ "summary of: summarize the news"))
 
       assert eventually(fn -> match?([%{command: "background"}], WorkRegistry.list(registry)) end)
+    end
+
+    test "refusing at the running cap names the cap" do
+      {:ok, registry} = StubRegistry.start_link({:error, {:max_running_work, 8}})
+
+      assert :ok =
+               Background.execute(message("another one"), reply_fn(self()), %{
+                 authorization: %IngressAuthorization{role: :operator, trust: :operator},
+                 work_registry: registry
+               })
+
+      assert_receive {:reply, text}
+      assert text =~ "Too many background tasks already running (limit 8)"
+    end
+
+    # The running cap and every other start failure stay distinctly messaged.
+    test "any other start failure keeps its own message" do
+      {:ok, registry} = StubRegistry.start_link({:error, :missing_run})
+
+      assert :ok =
+               Background.execute(message("another one"), reply_fn(self()), %{
+                 authorization: %IngressAuthorization{role: :operator, trust: :operator},
+                 work_registry: registry
+               })
+
+      assert_receive {:reply, text}
+      assert text == "Couldn't start background work: :missing_run"
     end
 
     test "a failed background run is recorded as :failed", %{registry: registry} do

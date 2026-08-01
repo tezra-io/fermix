@@ -373,6 +373,11 @@ defmodule FermixCore.Tools.Media.SupportTest do
     # A minimal valid-magic PNG so the MIME is sniffed from the bytes.
     @png <<0x89, "PNG", 0x0D, 0x0A, 0x1A, 0x0A>> <> "pixels"
 
+    # `materialize_url/2` runs Net.Guard on the provider-supplied URL, and the
+    # guard resolves DNS names. A public IP literal is validated without any
+    # lookup, so these stay hermetic (same trick as the plugin transport tests).
+    @cdn "https://93.184.216.34"
+
     test "downloads the URL and sniffs the image MIME from the bytes" do
       test_id = :"materialize_ok_#{System.unique_integer([:positive])}"
 
@@ -384,7 +389,7 @@ defmodule FermixCore.Tools.Media.SupportTest do
       end)
 
       assert {:ok, %{bytes: @png, mime: "image/png"}} =
-               Support.materialize_url("https://cdn.example/i.png", plug: {Req.Test, test_id})
+               Support.materialize_url("#{@cdn}/i.png", plug: {Req.Test, test_id})
     end
 
     test "refuses a zero-byte body as parser drift" do
@@ -392,7 +397,7 @@ defmodule FermixCore.Tools.Media.SupportTest do
       Req.Test.stub(test_id, fn conn -> Plug.Conn.resp(conn, 200, "") end)
 
       assert {:error, message} =
-               Support.materialize_url("https://cdn.example/empty.png", plug: {Req.Test, test_id})
+               Support.materialize_url("#{@cdn}/empty.png", plug: {Req.Test, test_id})
 
       assert message =~ "parser_changed"
     end
@@ -402,9 +407,7 @@ defmodule FermixCore.Tools.Media.SupportTest do
       Req.Test.stub(not_found, fn conn -> Plug.Conn.resp(conn, 404, "gone") end)
 
       assert {:error, message} =
-               Support.materialize_url("https://cdn.example/gone.png",
-                 plug: {Req.Test, not_found}
-               )
+               Support.materialize_url("#{@cdn}/gone.png", plug: {Req.Test, not_found})
 
       assert message =~ "network"
       assert message =~ "404"
@@ -413,7 +416,7 @@ defmodule FermixCore.Tools.Media.SupportTest do
       Req.Test.stub(transport, fn conn -> Req.Test.transport_error(conn, :econnrefused) end)
 
       assert {:error, message} =
-               Support.materialize_url("https://cdn.example/x.png", plug: {Req.Test, transport})
+               Support.materialize_url("#{@cdn}/x.png", plug: {Req.Test, transport})
 
       assert message =~ "network"
     end
@@ -424,10 +427,41 @@ defmodule FermixCore.Tools.Media.SupportTest do
       Req.Test.stub(test_id, fn conn -> Plug.Conn.resp(conn, 200, oversized) end)
 
       assert {:error, message} =
-               Support.materialize_url("https://cdn.example/huge.png", plug: {Req.Test, test_id})
+               Support.materialize_url("#{@cdn}/huge.png", plug: {Req.Test, test_id})
 
       assert message =~ "exceeds"
       assert message =~ "cap"
+    end
+
+    # Finding 35: the URL comes from the provider's response body, so it is
+    # untrusted input. Every non-public target the guard knows about is refused
+    # before the transport runs — enumerated so a URL that slips past one class
+    # (loopback, link-local metadata, RFC1918, a private IPv4 folded into IPv6)
+    # cannot hide behind a single hand-picked example.
+    for {label, url} <- [
+          {"loopback", "http://127.0.0.1/i.png"},
+          {"cloud metadata", "http://169.254.169.254/latest/meta-data"},
+          {"rfc1918", "http://10.1.2.3/i.png"},
+          {"ipv4-mapped ipv6 loopback", "http://[::ffff:127.0.0.1]/i.png"},
+          {"localhost by name", "http://localhost/i.png"},
+          {"non-http scheme", "file:///etc/passwd"}
+        ] do
+      test "refuses a provider URL pointing at #{label}, before any transport" do
+        parent = self()
+
+        test_id = :"materialize_blocked_#{System.unique_integer([:positive])}"
+
+        Req.Test.stub(test_id, fn conn ->
+          send(parent, :transport_reached)
+          Plug.Conn.resp(conn, 200, "should never be reached")
+        end)
+
+        assert {:error, message} =
+                 Support.materialize_url(unquote(url), plug: {Req.Test, test_id})
+
+        assert message =~ "blocked_url"
+        refute_received :transport_reached
+      end
     end
   end
 

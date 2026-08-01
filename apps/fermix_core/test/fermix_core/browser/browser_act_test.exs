@@ -82,6 +82,21 @@ defmodule FermixCore.Browser.BrowserActTest do
 
     defp run(_pid, "Runtime.evaluate", %{expression: expr}) do
       cond do
+        # Every page read now resolves the tab's LIVE url before it releases any
+        # bytes, and an unreadable url is a refusal by design — so the double
+        # has to answer this one.
+        String.contains?(expr, "document.location.href") ->
+          {:ok,
+           %{
+             "result" => %{
+               "value" => %{
+                 "url" => "https://example.com/results",
+                 "title" => "Ex",
+                 "ready" => "complete"
+               }
+             }
+           }}
+
         String.contains?(expr, "getBoundingClientRect") and String.contains?(expr, "missing") ->
           {:ok, %{"result" => %{"value" => nil}}}
 

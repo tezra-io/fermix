@@ -372,15 +372,49 @@ defmodule FermixCore.Setup.ConfigStore do
 
   @spec ensure_workspace() :: :ok | {:error, term()}
   def ensure_workspace do
-    result =
-      Enum.reduce_while(Map.values(workspace_paths()), :ok, fn path, :ok ->
-        case File.mkdir_p(path) do
-          :ok -> {:cont, :ok}
-          {:error, reason} -> {:halt, {:error, reason}}
-        end
-      end)
+    with :ok <- File.mkdir_p(fermix_home()) do
+      _ = restrict_home_permissions()
+      mkdir_workspace_paths()
+    end
+  end
 
-    result
+  defp mkdir_workspace_paths do
+    Enum.reduce_while(Map.values(workspace_paths()), :ok, fn path, :ok ->
+      case File.mkdir_p(path) do
+        :ok -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  @doc """
+  Restrict `FERMIX_HOME` to `0700`, reporting rather than raising on failure.
+
+  The home holds `memory.db` (full conversation text), `config.toml` and every
+  trace file; only `auth.json` carries its own `0600`. Running from
+  `ensure_workspace/0` means this applies on every daemon boot and every
+  snapshot save, so it also self-heals an install created before the mode was
+  enforced.
+
+  Deliberately best-effort. `Application.start/2` matches `:ok =
+  ensure_workspace()`, so returning an error here would take down the
+  supervision tree, and `save_snapshot/1` would stop the setup wizard from
+  saving. Trading a world-readable directory for an unbootable daemon is a bad
+  trade — a failure is logged loudly and surfaced by `fermix doctor`, following
+  the precedent already set for `auth.json` permissions.
+  """
+  @spec restrict_home_permissions() :: :ok | {:error, File.posix()}
+  def restrict_home_permissions do
+    home = fermix_home()
+
+    case File.chmod(home, 0o700) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error("could not restrict #{home} to 0700: #{inspect(reason)}")
+        {:error, reason}
+    end
   end
 
   defp empty_runtime_config do

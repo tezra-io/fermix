@@ -1387,4 +1387,41 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
       assert result.error =~ "content-encoding"
     end
   end
+
+  # The URL guard screens the URL the manifest asked for, and Req's request
+  # steps do not re-run on a followed redirect — so a hop would carry the
+  # plugin's Authorization header to a host nothing screened. The transport sets
+  # `redirect: false` and the 3xx is reported by name.
+  describe "redirect refusal" do
+    test "does not follow a 3xx, and names the status and the Location" do
+      name = setup_scheme_fixture(nil)
+      parent = self()
+
+      plug = fn conn ->
+        send(parent, {:hop, conn.request_path})
+
+        conn
+        |> Plug.Conn.put_resp_header("location", "https://169.254.169.254/latest/meta-data")
+        |> Plug.Conn.send_resp(302, "")
+      end
+
+      context = %{
+        plugin_url_guard: fn _ -> :ok end,
+        plugin_req_options: [plug: plug],
+        plugin_secret_getter: fn _ -> {:ok, "k"} end
+      }
+
+      assert {:ok, result} =
+               ToolExecutor.execute(%{"id" => "42"}, context, name, scheme_fixture_tool(name))
+
+      assert result.success == false
+      assert result.error =~ "redirect refused"
+      assert result.error =~ "302"
+      assert result.error =~ "https://169.254.169.254/latest/meta-data"
+
+      # Exactly one request reached the transport: the hop was never taken.
+      assert_received {:hop, "/items/42"}
+      refute_received {:hop, _path}
+    end
+  end
 end

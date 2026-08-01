@@ -332,7 +332,6 @@ defmodule FermixChannels.Channels.Slack do
          {:ok, url} <- attachment_url(attachment),
          {:ok, token} <- bot_token(),
          {:ok, body} <- fetch_private_media(url, token),
-         {:ok, body} <- MediaDownload.enforce_cap(body, @max_media_bytes),
          {:ok, path} <- MediaDownload.write_temp(body, "slack", attachment) do
       {:ok, path}
     end
@@ -347,24 +346,21 @@ defmodule FermixChannels.Channels.Slack do
 
   # Slack `url_private` requires the bot token as a Bearer header.
   defp fetch_private_media(url, token) do
-    case Req.new(url: url, method: :get)
-         |> Req.Request.put_header("authorization", "Bearer #{token}")
-         |> Req.merge(req_options([]))
-         |> HttpClient.request("Slack media download") do
-      {:ok, %{status: 200, body: body}} when is_binary(body) ->
-        {:ok, body}
-
-      {:ok, %{status: 200, body: body}} ->
-        {:ok, IO.iodata_to_binary(body)}
-
-      {:ok, %{status: status}} ->
-        Logger.error("Slack media download failed: status=#{status}")
-        {:error, {:download_failed, status}}
-
-      {:error, reason} ->
-        {:error, reason}
-    end
+    Req.new(url: url, method: :get)
+    |> Req.Request.put_header("authorization", "Bearer #{token}")
+    |> Req.merge(req_options([]))
+    |> MediaDownload.get_capped(@max_media_bytes, "Slack media download")
+    |> handle_media_response()
   end
+
+  defp handle_media_response({:ok, body}), do: {:ok, body}
+
+  defp handle_media_response({:error, {:http_status, status, _body}}) do
+    Logger.error("Slack media download failed: status=#{status}")
+    {:error, {:download_failed, status}}
+  end
+
+  defp handle_media_response({:error, reason}), do: {:error, reason}
 
   defp attachment_kind("audio/" <> _rest), do: :audio
   defp attachment_kind("image/" <> _rest), do: :image

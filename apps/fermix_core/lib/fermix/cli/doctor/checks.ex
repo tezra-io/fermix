@@ -1019,6 +1019,68 @@ defmodule Fermix.CLI.Doctor.Checks do
     end
   end
 
+  @doc """
+  Reports whether `FERMIX_HOME` itself is `0700`.
+
+  The home holds `memory.db` — full conversation text — plus `config.toml` and
+  every trace file; only `auth.json` carries its own `0600`. `ConfigStore`
+  restricts the mode on every daemon boot, but deliberately only logs on
+  failure, because returning an error there would take the supervision tree
+  down. A home that could not be secured therefore has to surface here, which is
+  the same division of labour `auth perms` already uses.
+  """
+  @spec home_permissions() :: result()
+  def home_permissions do
+    home = ConfigStore.fermix_home()
+
+    case File.stat(home) do
+      {:ok, %File.Stat{mode: mode}} ->
+        home_permissions_result(home, Bitwise.band(mode, 0o777))
+
+      {:error, reason} ->
+        fail("home perms", "stat #{home}: #{inspect(reason)}")
+    end
+  end
+
+  defp home_permissions_result(home, 0o700), do: ok("home perms", "#{home} is 0700")
+
+  defp home_permissions_result(home, mode) do
+    fail(
+      "home perms",
+      "#{home} is #{Integer.to_string(mode, 8)} — it holds memory.db, config.toml " <>
+        "and traces. Fix with: chmod 700 #{home}"
+    )
+  end
+
+  @doc """
+  Reports whether `cosign` is on PATH.
+
+  Two shipped features shell out to it and fail closed without it: `fermix
+  upgrade` verifies the downloaded binary's keyless signature, and every plugin
+  install verifies the plugin's. A Homebrew install pulls cosign in as a formula
+  dependency; `curl | sh` does not, and Homebrew installs are the ones that
+  never reach `fermix upgrade` anyway. So on the install path that actually uses
+  the verifier, cosign is absent by default — and without this row the operator
+  discovers that only when an upgrade or a plugin install refuses.
+  """
+  @spec cosign(keyword()) :: result()
+  def cosign(opts \\ []) when is_list(opts) do
+    opts
+    |> Keyword.get_lazy(:cosign_path, fn -> System.find_executable("cosign") end)
+    |> cosign_result()
+  end
+
+  defp cosign_result(nil) do
+    warn(
+      "cosign",
+      "not on PATH — `fermix upgrade` and `fermix plugins install` both refuse " <>
+        "without it. Install it from https://github.com/sigstore/cosign " <>
+        "(`brew install cosign` on macOS)."
+    )
+  end
+
+  defp cosign_result(path) when is_binary(path), do: ok("cosign", "present at #{path}")
+
   @spec plaintext_secrets() :: result()
   def plaintext_secrets do
     with {:ok, snapshot} <- ConfigStore.load_runtime_config(resolve_secrets: false) do

@@ -274,12 +274,27 @@ defmodule FermixCore.Providers.OpenAI.Codex do
   defp collect_sse({:data, chunk}, {req, response}, stream_callback) when is_binary(chunk) do
     if response.status in 200..299 do
       state = current_sse_state(response, stream_callback) |> SSEParser.feed(chunk)
-      {:cont, {req, Req.Response.put_private(response, :codex_sse_state, state)}}
+      sse_step(state, req, response)
     else
       body = ensure_binary_body(response.body)
       {:cont, {req, %{response | body: body <> chunk}}}
     end
   end
+
+  # The parser's leftover ceiling bounds MEMORY; this halt bounds the TRANSFER,
+  # and neither is a bound without the other. `receive_timeout` is an idle
+  # window a peer that trickles bytes never trips, and no wall-clock deadline
+  # exists anywhere on this request, so returning `{:cont, ...}` past the
+  # ceiling leaves Req reading a stream the parser has already abandoned — the
+  # turn never returns, wedging the conversation's single-flight slot and
+  # holding a pooled connection open. `{:halt, acc}` aborts the real transfer
+  # (`Finch.stream_while/5`); the accumulated state, latched `status: "failed"`
+  # and all, still rides `:codex_sse_state` into `finalize_streamed_body/1`.
+  defp sse_step(%SSEParser{overflowed?: true} = state, req, response),
+    do: {:halt, {req, Req.Response.put_private(response, :codex_sse_state, state)}}
+
+  defp sse_step(%SSEParser{} = state, req, response),
+    do: {:cont, {req, Req.Response.put_private(response, :codex_sse_state, state)}}
 
   defp current_sse_state(%{private: %{codex_sse_state: %SSEParser{} = state}}, _callback),
     do: state
