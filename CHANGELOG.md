@@ -8,6 +8,15 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The stuck-loop guard no longer kills healthy computer-use turns.** The
+  repeated-tool-call detector counted identical calls across a sliding window,
+  so a turn that legitimately re-observes the screen — screenshot, click,
+  screenshot, click — reached the kill threshold at the fifth identical
+  screenshot and was ended mid-work with an override reply, even though every
+  repeat followed a state-changing action the contract itself demands. A kill
+  now requires an unbroken run of the same call with nothing in between;
+  interleaved repetition still gets the one-time warning and stays bounded by
+  the per-turn iteration cap.
 - **A truncated model response can no longer end a turn in silence.** A Codex
   stream that died after its first frame still counted as "delivered" — that
   frame is the model's own reasoning, which carries no answer and no tool call —

@@ -56,11 +56,24 @@ BROWSER_PROFILE = "fermix_visible"
 SUITES = ("s1", "s2", "s3")
 # Readback runs for the turn's own budget plus a grace, then fails loud.
 POLL_GRACE_S = 30.0
+# One beat for the sliver between the CLI receiving the reply and the daemon's
+# turn-end browser reap: a poll failing inside it must re-check `turn.finished`
+# after this pause before calling the death a mid-turn fault.
+REAP_GRACE_S = 1.0
 TURN_JOIN_S = TURN_TIMEOUT_MS / 1000.0 + 60.0
 # `Trace.record/4` is a cast, so a row can land just after the turn's reply.
 TRACE_SETTLE_S = 20.0
 TRACE_POLL_S = 1.0
 MAX_RUN_DAYS = 2
+# Pre-batch collision avoidance: wait for this much main-agent silence (foreign
+# turns only — the run's own anchored turns are expected neighbors) before
+# driving clicks, give up loudly at the cap. Best-effort by nature: a turn can
+# be silent between two 60 s waits. CORRECTNESS never depends on it — that is
+# the anchor's job; this keeps a busy daemon's clicks off the live display
+# while ours run.
+QUIET_WINDOW_S = 20.0
+QUIET_MAX_WAIT_S = 180.0
+QUIET_POLL_S = 5.0
 
 # Two halt causes, two messages (F9). An extra click that DID land on the page is
 # neither of these — it is a counted `extra_click` and the run continues.
@@ -244,15 +257,15 @@ def _observe(cfg, plan: page.BatchPlan, turn: TurnThread) -> Observed:
     chrome = cdp.browser_version(port)
     client = cdp.CdpClient(cdp.browser_websocket_url(port))
     with client:
-        session_id = client.attach(target["targetId"])
-        bounds = cdp.apply_window_bounds(client, target["targetId"], session_id)
+        session_id = client.attach(target["id"])
+        bounds = cdp.apply_window_bounds(client, target["id"], session_id)
         watcher = cdp.PageWatcher(client, session_id)
         watcher.poll_once()   # a completed readback IS the multi-client assertion
         watcher.set_ready()   # the token the model's `act wait` is blocked on
         readback_loop(watcher, client, turn)
     if watcher.latest is None:
         raise HarnessAbort("no_page_state", f"the fixture page for {plan.batch_id} never "
-                                            "reported its state over CDP")
+                                            f"reported its state over CDP — {client.event_tail()}")
     return Observed(aim=watcher.latest, samples=watcher.samples,
                     socket_closed_ms=client.closed_at_ms, bounds=bounds,
                     multi_client=True, chrome_version=chrome)
@@ -278,7 +291,7 @@ def readback_loop(watcher: cdp.PageWatcher, client: cdp.CdpClient, turn: TurnThr
     deadline = time.monotonic() + TURN_TIMEOUT_MS / 1000.0 + POLL_GRACE_S
     while time.monotonic() < deadline:
         finished = turn.finished          # read BEFORE the poll: that poll is the last one
-        if not _poll_once(watcher, client):
+        if not _poll_once(watcher, client, turn):
             return
         if finished:
             return
@@ -287,16 +300,26 @@ def readback_loop(watcher: cdp.PageWatcher, client: cdp.CdpClient, turn: TurnThr
                                            f"{TURN_TIMEOUT_MS // 1000}s + {POLL_GRACE_S:.0f}s")
 
 
-def _poll_once(watcher: cdp.PageWatcher, client: cdp.CdpClient) -> bool:
-    """False once the socket is gone. A readback failure with the socket still
-    open is a real fault and stays an abort — never a quiet skip."""
+def _poll_once(watcher: cdp.PageWatcher, client: cdp.CdpClient, turn: TurnThread) -> bool:
+    """False once the socket is gone — or once the browser dies AT TURN END, which
+    is the daemon reaping the conversation's Chrome: tabs are destroyed a beat
+    before the socket closes, so a poll in that window sees a dead session on a
+    live socket (raced live on 2026-08-01: a perfect turn was aborted for it).
+    A readback failure with the socket open and the turn still running is a real
+    fault and stays an abort — never a quiet skip."""
     try:
         watcher.poll_once()
         return True
     except cdp.CdpError as exc:
-        if client.closed_at_ms is None:
-            raise HarnessAbort("page_readback_failed", str(exc)) from exc
-        return False
+        if client.closed_at_ms is not None:
+            return False
+        if not turn.finished:             # reply-delivery vs reap sliver: one beat
+            time.sleep(REAP_GRACE_S)
+        if turn.finished:
+            client.closed_at_ms = time.time() * 1000.0
+            return False
+        raise HarnessAbort("page_readback_failed",
+                           f"{exc} — {client.event_tail()}") from exc
 
 
 # --- one batch, scored ------------------------------------------------------
@@ -306,19 +329,54 @@ class Batch:
     run: BatchRun
     rows: list[dict]
     window: tuple[float, float]
+    sid: str
     result: dict
 
 
 def run_batch(cfg, srv: server.AimServer, plan: page.BatchPlan, session: str,
-              started: datetime) -> Batch:
+              started: datetime, own_sids: set[str]) -> Batch:
     srv.publish(plan.batch_id, page.render_page(plan))
     print(f"[aim] {plan.batch_id}: {plan.probes} probe(s), session {session}")
-    run = drive_batch(cfg, plan, srv.url_for(plan.batch_id, plan.mode), session)
-    rows, window = turn_rows(cfg, run, trace_dates(started))
+    wait_for_daemon_quiet(cfg, trace_dates(started), own_sids)
+    url = srv.url_for(plan.batch_id, plan.mode)
+    run = drive_batch(cfg, plan, url, session)
+    rows, window, sid = turn_rows(cfg, run, trace_dates(started), anchor_fragment(url))
+    own_sids.add(sid)
     report, report_error = parse_report(run.reply)
     result = score_turn(plan, session, run, rows, report, report_error)
     print(f"       {_outcome_line(result)}")
-    return Batch(run=run, rows=rows, window=window, result=result)
+    return Batch(run=run, rows=rows, window=window, sid=sid, result=result)
+
+
+def anchor_fragment(url: str) -> str:
+    """The batch-unique part of the fixture URL (port + path + batch id): what the
+    turn's own `open` row must carry, and no other turn daemon-wide can."""
+    return url.split("://", 1)[-1].split("&", 1)[0]
+
+
+def wait_for_daemon_quiet(cfg, dates: list[str], own_sids: set[str]) -> None:
+    """Hold the batch until FOREIGN main-agent turns have been silent for
+    `QUIET_WINDOW_S` (observed live 2026-08-01: a killed run's orphaned daemon
+    turn was still failing waits inside the next run's first batch). The run's
+    own earlier turns are excluded — their trailing rows are expected. At the
+    cap this aborts typed rather than clicking into a busy display."""
+    deadline = time.monotonic() + QUIET_MAX_WAIT_S
+    while True:
+        rows = read_trace_rows(cfg, "tool_exec", dates)
+        last_foreign = max((traces.parse_ts(r.get("ts"))
+                            for r in rows
+                            if r.get("agent") == traces.MAIN_AGENT
+                            and r.get("session_id") not in own_sids), default=0.0)
+        quiet_s = time.time() - last_foreign / 1000.0
+        if quiet_s >= QUIET_WINDOW_S:
+            return
+        if time.monotonic() >= deadline:
+            raise HarnessAbort(
+                "daemon_busy",
+                f"another conversation was driving this daemon {quiet_s:.0f}s ago and stayed "
+                f"active for the whole {QUIET_MAX_WAIT_S:.0f}s wait — quiesce channels/crons "
+                "(and any orphaned turn from a killed run) and rerun")
+        time.sleep(QUIET_POLL_S)
 
 
 def score_turn(plan, session: str, run: BatchRun, rows, report, report_error) -> dict:
@@ -359,7 +417,8 @@ def read_trace_rows(cfg, kind: str, dates: list[str]) -> list[dict]:
         raise HarnessAbort("trace_unreadable", str(exc)) from exc
 
 
-def turn_rows(cfg, run: BatchRun, dates: list[str]) -> tuple[list[dict], tuple[float, float]]:
+def turn_rows(cfg, run: BatchRun, dates: list[str],
+              fragment: str) -> tuple[list[dict], tuple[float, float], str]:
     """The batch turn's tool rows plus the window they were selected by. The CLI
     `--session` name reaches no trace field — the daemon stamps its own per-turn
     `main-<n>` id (`turn_runner.ex:221`) — so the window from just before
@@ -370,19 +429,25 @@ def turn_rows(cfg, run: BatchRun, dates: list[str]) -> tuple[list[dict], tuple[f
     deadline = time.monotonic() + TRACE_SETTLE_S
     while True:
         end_ms = time.time() * 1000.0
-        rows = select_turn_rows(read_trace_rows(cfg, "tool_exec", dates), start_ms, end_ms)
-        if rows or time.monotonic() >= deadline:
-            return rows, (start_ms, end_ms)
-        time.sleep(TRACE_POLL_S)
+        all_rows = read_trace_rows(cfg, "tool_exec", dates)
+        if time.monotonic() >= deadline:
+            rows, sid = select_turn_rows(all_rows, start_ms, end_ms, fragment)
+            return rows, (start_ms, end_ms), sid
+        try:
+            rows, sid = traces.rows_for_anchored_turn(all_rows, start_ms, end_ms, fragment)
+            return rows, (start_ms, end_ms), sid
+        except traces.TraceError:
+            time.sleep(TRACE_POLL_S)  # rows may still be landing; the deadline decides
 
 
-def select_turn_rows(rows: list[dict], start_ms: float, end_ms: float) -> list[dict]:
-    """Two turns' rows inside one window is an unquiesced daemon, not a harness
-    bug: nothing in the window can be attributed, so the batch aborts by name."""
+def select_turn_rows(rows: list[dict], start_ms: float, end_ms: float,
+                     fragment: str) -> tuple[list[dict], str]:
+    """A missing anchor is an environment fault, not a harness bug: the batch
+    turn left no attributable trace, and the typed message names the causes."""
     try:
-        return traces.rows_for_turn(rows, start_ms, end_ms)
+        return traces.rows_for_anchored_turn(rows, start_ms, end_ms, fragment)
     except traces.TraceError as exc:
-        raise HarnessAbort("correlation_ambiguous", str(exc)) from exc
+        raise HarnessAbort("correlation_anchor_missing", str(exc)) from exc
 
 
 def trace_dates(started: datetime) -> list[str]:
@@ -426,13 +491,14 @@ class Calibration:
                            for c in self.checks}}
 
 
-def calibrate(cfg, args, run_id: str, srv: server.AimServer, started: datetime) -> Calibration:
+def calibrate(cfg, args, run_id: str, srv: server.AimServer, started: datetime,
+              own_sids: set[str]) -> Calibration:
     """The run-start assertion list, run as a real turn against the `cal` page.
     Calibration IS the spike: it probes the same world the run works in — a live
     click through the real driver onto the real page — instead of a stand-in."""
     suite, condition, _batches, probes = prompts.CAL_BATCH
     plan = page.plan_batch(args.seed, suite, condition, 1, probes)
-    batch = run_batch(cfg, srv, plan, batch_session(run_id, plan), started)
+    batch = run_batch(cfg, srv, plan, batch_session(run_id, plan), started, own_sids)
     # F10: two questions with two causes and two fixes — are the run's rows on
     # disk where the harness reads at all, and do they carry `input`.
     trace_checks = [traces.check_trace_visibility(batch.rows, plan.batch_id),
@@ -466,27 +532,25 @@ def selected_batches(args) -> list[tuple[str, str, int, int]]:
     return [entry for entry in prompts.BATCH_PLAN if entry[0] in wanted]
 
 
-def batch_loop(cfg, args, run_id: str, srv: server.AimServer,
-               started: datetime) -> tuple[list[dict], list[tuple[float, float]], dict | None]:
+def batch_loop(cfg, args, run_id: str, srv: server.AimServer, started: datetime,
+               own_sids: set[str]) -> tuple[list[dict], dict | None]:
     """Every selected batch, in order. A halt outcome (`off_page`, `browser_lost`)
     stops the run where it stands: both mean the clicks are landing somewhere the
     harness cannot account for, and the answer to that is fewer clicks, not more."""
     results: list[dict] = []
-    windows: list[tuple[float, float]] = []
     for plan in batch_plans(args):
         session = batch_session(run_id, plan)
         try:
-            batch = run_batch(cfg, srv, plan, session, started)
+            batch = run_batch(cfg, srv, plan, session, started, own_sids)
         except HarnessAbort as abort:
             # Recorded, not swallowed: the reason rides the partial report and the
             # run exits 4.
-            return results, windows, _incomplete(abort.kind, str(abort), plan, session)
+            return results, _incomplete(abort.kind, str(abort), plan, session)
         results.append(batch.result)
-        windows.append(batch.window)
         halt = batch.result["halt_reason"]
         if halt:
-            return results, windows, _incomplete(halt, HALT_DETAIL[halt], plan, session)
-    return results, windows, None
+            return results, _incomplete(halt, HALT_DETAIL[halt], plan, session)
+    return results, None
 
 
 def batch_plans(args) -> list[page.BatchPlan]:
@@ -499,16 +563,15 @@ def _incomplete(reason: str, detail: str, plan: page.BatchPlan, session: str) ->
     return {"reason": reason, "detail": detail, "batch": plan.batch_id, "session": session}
 
 
-def detect_config_id(cfg, args, windows: list[tuple[float, float]],
+def detect_config_id(cfg, args, own_sids: set[str],
                      started: datetime) -> tuple[str, str]:
-    """Auto-detection reads the same turn windows the tool rows were read by — an
-    `llm_call` row carries the daemon's per-turn `main-<n>` id, not the CLI
-    session name."""
+    """Auto-detection reads only the run's own anchored `main-<n>` turns — never
+    wall-clock windows, which a live daemon's concurrent turns share."""
     if args.config_id:
         return args.config_id, "flag"
     rows = read_trace_rows(cfg, "llm_call", trace_dates(started))
     try:
-        detected = traces.detect_config_id(rows, windows)
+        detected = traces.detect_config_id(rows, own_sids)
     except traces.TraceError as exc:
         raise HarnessAbort("trace_unreadable", str(exc)) from exc
     if not detected:
@@ -569,8 +632,9 @@ def run(cfg, args) -> int:
 
 def run_stages(cfg, args, run_id: str, out_dir: str, srv: server.AimServer,
                started: datetime, profiles_root: str, dirs_before: int) -> int:
+    own_sids: set[str] = set()
     try:
-        cal = calibrate(cfg, args, run_id, srv, started)
+        cal = calibrate(cfg, args, run_id, srv, started, own_sids)
     except HarnessAbort as abort:
         print(f"[aim] calibration aborted ({abort.kind}): {abort}", file=sys.stderr)
         return EXIT_PRECONDITION
@@ -581,22 +645,20 @@ def run_stages(cfg, args, run_id: str, out_dir: str, srv: server.AimServer,
         return EXIT_PRECONDITION
 
     batches: list[dict] = []
-    windows = [cal.batch.window]
     incomplete: dict | None = None
     if not args.calibrate_only:
-        batches, batch_windows, incomplete = batch_loop(cfg, args, run_id, srv, started)
-        windows += batch_windows
-    return _finish(cfg, args, run_id, out_dir, started, cal, batches, windows,
+        batches, incomplete = batch_loop(cfg, args, run_id, srv, started, own_sids)
+    return _finish(cfg, args, run_id, out_dir, started, cal, batches, own_sids,
                    incomplete, dirs_before, cdp.count_profile_dirs(profiles_root))
 
 
 def _finish(cfg, args, run_id: str, out_dir: str, started: datetime, cal: Calibration,
-            batches: list[dict], windows: list[tuple[float, float]], incomplete: dict | None,
+            batches: list[dict], own_sids: set[str], incomplete: dict | None,
             dirs_before: int, dirs_after: int) -> int:
     # One try over the whole document: a report the harness cannot label or
     # assemble is not written at all, and says which step refused.
     try:
-        config_id, source = detect_config_id(cfg, args, windows, started)
+        config_id, source = detect_config_id(cfg, args, own_sids, started)
         doc = score.build_results(run_id=run_id, seed=args.seed,
                                   started_at=started.isoformat(),
                                   finished_at=now_utc().isoformat(), config_id=config_id,

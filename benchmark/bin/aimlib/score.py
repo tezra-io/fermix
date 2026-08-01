@@ -139,7 +139,11 @@ def partition_rows(rows: list[dict]) -> tuple[list[Delivered], list[dict], int, 
         elif kind == "refusal":
             refusals.append({"row_index": index, "action": row.get("action"),
                              "kind": traces.classify_refusal(row.get("output") or "") or "other",
-                             "not_delivered": bool(traces.parse_not_delivered(row.get("output") or ""))})
+                             "not_delivered": bool(traces.parse_not_delivered(row.get("output") or "")),
+                             # The tool's own words — a bare outcome kind sent the
+                             # 2026-08-01 calibration debugging through the trace
+                             # files for what the row had said all along.
+                             "message": (row.get("output") or "")[:160]})
         elif kind == "screenshot":
             count = traces.parse_marks_count(row.get("output") or "")
             if count is not None:
@@ -276,7 +280,8 @@ def _unrun_probe(bi, index, target, delivered, refusals, aligned, ctx) -> dict:
             "outcome": outcome, "click_css": None, "click_trusted": None,
             "click_events": 0,
             "miss_vector_css": None, "miss_vector_cells": None,
-            "refusals": [{"kind": r["kind"], "recovered": False}
+            "refusals": [{"kind": r["kind"], "recovered": False,
+                          "message": r.get("message", "")}
                          for r in (trailing if outcome == "refused_unrecovered" else [])],
             # No click means no moment at which the model judged anything, so
             # there is no fired state to be right or wrong about.
@@ -346,7 +351,7 @@ def _refusals_for(refusals, delivered: list[Delivered], index: int) -> list[dict
     """Refusals attach to the probe of the NEXT delivered click — they are that
     probe's recovery chain, not a failure of the one before it."""
     lower = -1 if index == 0 else delivered[index - 1].index
-    return [{"kind": r["kind"], "recovered": True}
+    return [{"kind": r["kind"], "recovered": True, "message": r.get("message", "")}
             for r in refusals if lower < r["row_index"] < delivered[index].index]
 
 
@@ -555,9 +560,10 @@ def calibration_checks(*, aim: dict, batch: dict, bounds: dict, multi_client: bo
     probe = batch["probes"][0]
     meta = aim.get("meta") or {}
     hits = parse_hits(aim)
+    clearance_ok = (meta.get("min_clearance") or -1) >= page.MIN_EDGE_CLEARANCE_PX
     return [_check("cdp_multi_client", multi_client,
                    "a second concurrent CDP client attached alongside the daemon's own"),
-            _check("cu_ready", probe["outcome"] == "hit", f"probe outcome {probe['outcome']}"),
+            _check("cu_ready", probe["outcome"] == "hit", _cu_ready_detail(probe)),
             _check("trusted_click", probe["click_trusted"] is True,
                    f"click_trusted={probe['click_trusted']}"),
             _check("zoom_guard", meta.get("vv_scale") == 1,
@@ -567,12 +573,24 @@ def calibration_checks(*, aim: dict, batch: dict, bounds: dict, multi_client: bo
             _check("window_bounds_applied", _bounds_applied(meta, bounds),
                    f"bounds={bounds} avail=({meta.get('avail_w')},{meta.get('avail_h')}) "
                    f"screen=({meta.get('screen_w')},{meta.get('screen_h')})"),
-            _check("clearance", (meta.get("min_clearance") or -1) >= page.MIN_EDGE_CLEARANCE_PX,
+            _check("clearance", clearance_ok,
                    f"min_clearance={meta.get('min_clearance')}px, "
-                   f"need >= {page.MIN_EDGE_CLEARANCE_PX}px — the window is too small"),
+                   f"floor {page.MIN_EDGE_CLEARANCE_PX}px"
+                   + ("" if clearance_ok else " — the window is too small for safe aiming")),
             _check("echo_cross_check", _cross_check_ok(probe),
                    f"trace echo vs page hit = {probe['trace']['sent_cross_check_px']} sent px, "
                    f"tolerance {CROSS_CHECK_TOLERANCE_SENT_PX}")] + list(trace_checks)
+
+
+def _cu_ready_detail(probe: dict) -> str:
+    """The outcome plus the last refusal's own message: 'refused_unrecovered' alone
+    cannot tell an asleep display from a tripwire from a sandbox refusal."""
+    detail = f"probe outcome {probe['outcome']}"
+    refusals = probe.get("refusals") or []
+    if refusals:
+        last = refusals[-1]
+        detail += f" — {last['kind']}: {last.get('message') or '(no message recorded)'}"
+    return detail
 
 
 def _check(name: str, passed: bool, detail: str) -> traces.CheckResult:

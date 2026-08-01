@@ -431,14 +431,19 @@ Hazards, honestly:
   re-clicking a target the model wrongly judged un-fired is the behaviour being
   measured, so it is counted as `extra_click` (with `sequence_mismatch`) and the
   run continues.
-- **Quiesce your channels for the run.** Scoring correlates a batch by the turn's
-  own time window — the daemon stamps trace rows with its per-turn `main-<n>` id
-  and never with the CLI `--session` name — so a second conversation's main-agent
-  rows landing in that window make the batch unattributable and abort it as
-  `correlation_ambiguous`. Other conversations can also open their own headed
-  browser windows and steal focus mid-turn (those probes are named `occluded`
-  rather than scored). The cleanest run is one where nothing else talks to the
-  daemon.
+- **Quiesce your channels for the run.** Scoring correlates a batch by ANCHOR:
+  the turn whose browser `open` row carries this batch's fixture URL (port +
+  batch id, unique per run) owns the batch, and every other turn's rows in the
+  same time window are excluded — the daemon stamps trace rows with its per-turn
+  `main-<n>` id and never with the CLI `--session` name, so wall-clock windows
+  alone cannot attribute a click on a live daemon (a killed run's orphaned
+  daemon-side turn proved this on day one). A batch whose anchor is missing
+  aborts as `correlation_anchor_missing`. Before every batch the harness also
+  waits up to 3 minutes for foreign main-agent turns to go quiet (`daemon_busy`
+  if they never do): correctness comes from the anchor, but another
+  conversation's headed browser windows can still steal focus mid-turn (those
+  probes are named `occluded` rather than scored). The cleanest run is one where
+  nothing else talks to the daemon.
 - A mid-turn model cannot be stopped (no turn-cancellation surface is added), so
   exposure is bounded at one batch's clicks — 4 for the grid suite, 8 elsewhere.
 
