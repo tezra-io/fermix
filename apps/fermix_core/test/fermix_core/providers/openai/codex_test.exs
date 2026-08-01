@@ -185,10 +185,16 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
         assert Plug.Conn.get_req_header(conn, "originator") == ["pi"]
         assert Plug.Conn.get_req_header(conn, "chatgpt-account-id") == ["usr_1"]
 
+        # Text deltas ride an output item on the wire; a body without one is not
+        # a response the API can produce, and it renders no content.
         sse = """
-        data: {"type":"response.output_text.delta","delta":"hello "}
+        data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_1","content":[]}}
 
-        data: {"type":"response.output_text.delta","delta":"world"}
+        data: {"type":"response.output_text.delta","output_index":0,"delta":"hello "}
+
+        data: {"type":"response.output_text.delta","output_index":0,"delta":"world"}
+
+        data: {"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"msg_1","content":[{"type":"output_text","text":"hello world"}]}}
 
         data: {"type":"response.completed","response":{"model":"gpt-5","usage":{"input_tokens":3,"output_tokens":2}}}
 
@@ -214,6 +220,7 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
           req_options: [plug: {Req.Test, __MODULE__}]
         )
 
+      assert turn.content == "hello world"
       assert turn.usage.prompt_tokens == 3
       assert turn.usage.completion_tokens == 2
       assert turn.usage.total_tokens == 5
@@ -712,7 +719,7 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
   end
 
   describe "chat/3 — SSE fixture: completion-only (no items)" do
-    test "returns empty content and tool_calls when stream finishes without output items" do
+    test "a completed response that carried no items delivered nothing, so it is an error" do
       sse = """
       data: {"type":"response.completed","response":{"model":"gpt-5","usage":{"input_tokens":1,"output_tokens":0}}}
 
@@ -720,11 +727,9 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
 
       """
 
-      {:ok, turn} = run_chat(sse)
-
-      assert turn.tool_calls == []
-      assert turn.content == ""
-      assert turn.usage.prompt_tokens == 1
+      assert {:error, {:provider_transport_error, error}} = run_chat(sse)
+      assert error.kind == :transport_closed
+      assert error.message =~ "completed with no output delivered"
     end
   end
 
@@ -830,6 +835,62 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
             flunk("#{inspect(body)} expected #{expected}, produced #{inspect(other)}")
         end
       end
+    end
+
+    # Codex asks for reasoning on every call (`summary: "auto"` +
+    # `include: ["reasoning.encrypted_content"]`), so a reasoning item is the
+    # first thing on the wire. Keying the gate on "the output list is non-empty"
+    # let a stream that cut one frame in satisfy it while rendering nothing.
+    test "a cut stream whose only item is reasoning delivered nothing" do
+      sse = """
+      data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1","summary":[]}}
+
+      data: {"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_1","encrypted_content":"opaque","summary":[]}}
+
+      """
+
+      assert {:error, {:provider_transport_error, error} = reason} = run_chat(sse)
+      assert error.kind == :transport_closed
+      assert Transient.retryable?(reason)
+    end
+
+    test "a message item that renders no text is not a delivery" do
+      sse = """
+      data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"m","content":[]}}
+
+      data: {"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"m","content":[]}}
+
+      """
+
+      assert {:error, {:provider_transport_error, error}} = run_chat(sse)
+      assert error.kind == :transport_closed
+    end
+
+    test "a terminal event is no exemption when the items it carried render nothing" do
+      sse = """
+      data: {"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_1","encrypted_content":"opaque","summary":[]}}
+
+      data: {"type":"response.completed","response":{"model":"gpt-5","usage":{"input_tokens":12500,"output_tokens":4}}}
+
+      data: [DONE]
+
+      """
+
+      assert {:error, {:provider_transport_error, error}} = run_chat(sse)
+      assert error.message =~ "completed with no output delivered"
+    end
+
+    # The gate has to hold on the continuation too: that is the turn that
+    # renders tool results into an answer, and a silent empty one ends a
+    # scheduled run with `status: ok` and an empty delivered body.
+    test "continue/3 runs the same gate, so a truncated continuation cannot end a run in silence" do
+      sse = """
+      data: {"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_1","encrypted_content":"opaque","summary":[]}}
+
+      """
+
+      assert {:error, {:provider_transport_error, error}} = run_continue(sse)
+      assert error.kind == :transport_closed
     end
   end
 
@@ -1519,6 +1580,39 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
     data: [DONE]
 
     """
+  end
+
+  defp run_continue(sse) do
+    test_id = :"codex_continue_gate_#{System.unique_integer([:positive])}"
+
+    Req.Test.stub(test_id, fn conn ->
+      conn
+      |> Plug.Conn.put_resp_header("content-type", "text/event-stream")
+      |> Plug.Conn.send_resp(200, sse)
+    end)
+
+    provider_state = %{
+      input: [%{role: "user", content: [%{type: "input_text", text: "Hi"}]}],
+      output_items: [
+        %{
+          "type" => "function_call",
+          "id" => "fc_x",
+          "call_id" => "call_x",
+          "name" => "echo",
+          "arguments" => "{}"
+        }
+      ],
+      tools: [],
+      capabilities: [capability()],
+      instructions: "be terse"
+    }
+
+    Codex.continue(provider_state, [%{call_id: "call_x", output: "echoed"}],
+      access_token: @jwt_with_sub,
+      model: "gpt-5",
+      base_url: "https://chatgpt.test/codex/responses",
+      req_options: [plug: {Req.Test, test_id}]
+    )
   end
 
   defp run_chat(sse, extra_opts \\ []) do
