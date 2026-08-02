@@ -212,7 +212,14 @@ defmodule FermixCore.Agents.TurnRunner do
     %RuntimeContext{} = ctx = state.runtime_context
     cache_status = Map.get(msg, :__runtime_context_cache_status, :hit)
     source_trust = Map.get(msg, :source_trust)
-    profile = profile_for_trust(ctx, source_trust, state.capability_registry, msg.channel)
+    # Computed BEFORE the profile is selected (MILESTONE_29 §17.6(b)): the
+    # harness surface is decided by one input per turn, and both consumers of
+    # that decision — this selection and each tool's `advertise?/1`, which reads
+    # the same two keys off `context` below — are fed it. A predicate that saw a
+    # different map at each call site is how the prompt and the wire drift apart.
+    session_env = session_env_for(source_trust, msg)
+    advertise_context = %{channel: msg.channel, session_env: session_env}
+    profile = profile_for_trust(ctx, source_trust, state.capability_registry, advertise_context)
 
     emit_runtime_context_cache_telemetry(state, cache_status, profile)
 
@@ -232,7 +239,6 @@ defmodule FermixCore.Agents.TurnRunner do
     messages = RuntimeContext.messages_for(ctx, profile, history, user_message)
     accounting = RuntimeContext.accounting_for(ctx, profile)
     emit_prompt_context_telemetry(state.memory_agent_id, messages, accounting, cache_status)
-    session_env = session_env_for(source_trust, msg)
 
     context = %{
       agent_name: "main",
@@ -450,13 +456,7 @@ defmodule FermixCore.Agents.TurnRunner do
         :telemetry.execute(
           [:fermix, :agent, :message_error],
           %{count: 1},
-          %{
-            channel: msg.channel,
-            chat_id: msg.chat_id,
-            reason: reason,
-            session_id: context.session_id,
-            agent: context.agent_name
-          }
+          turn_error_metadata(context, msg, reason)
         )
 
         {:error, reason}
@@ -464,6 +464,23 @@ defmodule FermixCore.Agents.TurnRunner do
   end
 
   defp turn_message_metadata(context, msg, result) do
+    context
+    |> turn_metadata(msg)
+    |> maybe_put_turn_content(msg, Map.get(result, :response))
+  end
+
+  # A failed turn carries the same identity and the same content-gated input as a
+  # successful one: the failure is the trace a reader most needs, and dropping the
+  # message that produced it is what made the M29/Buzz duplicate-reply incident
+  # unreadable. No output — the turn produced none; `reason` carries the failure.
+  defp turn_error_metadata(context, msg, reason) do
+    context
+    |> turn_metadata(msg)
+    |> Map.put(:reason, reason)
+    |> maybe_put_turn_content(msg, nil)
+  end
+
+  defp turn_metadata(context, msg) do
     %{
       channel: msg.channel,
       chat_id: msg.chat_id,
@@ -471,18 +488,24 @@ defmodule FermixCore.Agents.TurnRunner do
       session_id: context.session_id,
       agent: context.agent_name
     }
-    |> maybe_put_turn_content(msg, result)
   end
 
-  defp maybe_put_turn_content(metadata, msg, result) do
+  # The one content path for both turn outcomes, so neither can drift out of the
+  # `capture_content?` gate.
+  defp maybe_put_turn_content(metadata, msg, response) do
     if Telemetry.capture_content?() do
       metadata
       |> Map.put(:input, Telemetry.preview(Map.get(msg, :content)))
-      |> Map.put(:output, Telemetry.preview(Map.get(result, :response)))
+      |> maybe_put_turn_output(response)
     else
       metadata
     end
   end
+
+  defp maybe_put_turn_output(metadata, nil), do: metadata
+
+  defp maybe_put_turn_output(metadata, response),
+    do: Map.put(metadata, :output, Telemetry.preview(response))
 
   # See `error_reply/1` for the auth-vs-generic mapping these patterns drive.
   # (The Codex `{:auth_invalidated, _}`/`{:refresh_failed, _}` tuples are gone —
@@ -579,6 +602,14 @@ defmodule FermixCore.Agents.TurnRunner do
 
   defp provider_error_reply({:provider_error, %{kind: :not_implemented} = error}) do
     "#{provider_label(error)} provider calls are not implemented yet. Switch providers in setup."
+  end
+
+  # A 200 the server itself declared terminal while delivering neither text nor a
+  # tool call (`Codex.undelivered_error/2`, `code: "empty_response"`). The status
+  # floor below would render it "returned HTTP 200", which reads as a transport
+  # fault that did not happen; the provider's own sentence is the diagnosis.
+  defp provider_error_reply({:provider_error, %{code: "empty_response"} = error}) do
+    "#{provider_label(error)} ended the turn without producing a reply. #{provider_message(error)}"
   end
 
   defp provider_error_reply({:provider_error, %{status: status} = error}) do
@@ -1079,14 +1110,14 @@ defmodule FermixCore.Agents.TurnRunner do
     :ok
   end
 
-  # The prompt profile follows the turn's channel as well as its trust: a
-  # client-owned channel advertises no coding-harness tool, so it must not be
-  # handed a catalog section that steers repository work at one (M28 lesson —
-  # prose and wire move together). The channel half asks the SAME predicate the
-  # harness tools' `advertise?/1` asks, so the two can never drift.
-  defp profile_for_trust(ctx, trust, registry, channel) do
+  # The prompt profile follows the turn's harness surface as well as its trust: a
+  # turn whose coding run could not report back advertises no harness tool, so it
+  # must not be handed a catalog section that steers repository work at one (M28
+  # lesson — prose and wire move together). `advertise_context` is the SAME input
+  # each harness tool's `advertise?/1` reads, so the two cannot drift.
+  defp profile_for_trust(ctx, trust, registry, advertise_context) do
     RuntimeContext.profile_for(ctx, profile_trust(trust), registry,
-      harness_tools?: HarnessSupport.advertisable_channel?(%{channel: channel})
+      harness_tools?: HarnessSupport.harness_deliverable?(advertise_context)
     )
   end
 

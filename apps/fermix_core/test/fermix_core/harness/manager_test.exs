@@ -13,6 +13,7 @@ defmodule FermixCore.Harness.ManagerTest do
   alias FermixCore.Harness.Manager
   alias FermixCore.Harness.RunSupervisor
   alias FermixCore.Memory.Repo
+  alias FermixCore.Tools.HarnessSupport
   alias FermixTestSupport.FakeVendorCli
 
   @fixtures Path.expand("../../fixtures/harness", __DIR__)
@@ -471,6 +472,105 @@ defmodule FermixCore.Harness.ManagerTest do
     end
   end
 
+  # --- Client-owned origins: every non-delivery branch (M29 §17.6(d)) -------
+  #
+  # There is no framework wire on this surface — `jobs.delivery_channels` has no
+  # "acp" entry — so a run that cannot continue must not be handed to a text path
+  # that can only re-fail with `{:unsupported_delivery_platform, "acp"}`. That word
+  # is true and useless: it collapses four causes into one, and one of them the
+  # operator fixes by reconnecting their client. Each branch dead-letters with its
+  # OWN name, on the row `list_coding_runs` renders.
+  describe "client-owned origin — named dead-letter reasons" do
+    test "a failed dispatch is terminal here, named, and never left pending", ctx do
+      Application.put_env(
+        :fermix_core,
+        :harness_test_continuation_reply,
+        {:error, :identity_gone}
+      )
+
+      manager = start_manager(ctx, continuation_dispatcher: RecordingDispatcher)
+
+      {:ok, run_id} = Manager.start_run(client_request(ctx, completing_stub(ctx)), manager)
+      assert await_status(ctx.repo, run_id, "completed")
+      assert_receive {:continued, _notice}, 5_000
+
+      row = await_delivery_status(ctx.repo, run_id, "dead_letter")
+      assert summary_error(row) =~ "identity_gone"
+      refute summary_error(row) =~ "unsupported_delivery_platform"
+      refute_receive {:delivered, _destination, _text}, 200
+
+      # `pending` would be retry theater: the worker has no acp path, so it could
+      # only overwrite the real reason with the platform term.
+      worker = start_delivery_worker(ctx)
+      _ = tick_worker(worker)
+      refute_receive {:delivered, _destination, _text}, 200
+
+      assert Ledger.get(run_id, server: ctx.repo) |> elem(1) |> Map.get(:last_delivery_error) =~
+               "identity_gone"
+    end
+
+    test "an owner cancel dead-letters as :owner_halt", ctx do
+      manager = start_manager(ctx, continuation_dispatcher: RecordingDispatcher)
+      {:ok, run_id} = Manager.start_run(client_request(ctx, hanging_stub(ctx)), manager)
+      assert await_active(ctx.repo, run_id)
+
+      assert :ok = Manager.cancel(run_id, :owner, manager)
+      assert await_status(ctx.repo, run_id, "cancelled")
+
+      row = await_delivery_status(ctx.repo, run_id, "dead_letter")
+      assert summary_error(row) =~ "owner_halt"
+      refute_receive {:continued, _notice}, 200
+      refute_receive {:delivered, _destination, _text}, 200
+    end
+
+    # The cap must bound something here: a "one last delivery turn" could launch
+    # another run whose outcome again needs a terminal turn. The operator gets the
+    # honest alternative — the reason by name on the row.
+    test "a depth-capped chain dead-letters as :depth_capped, not a false cap note", ctx do
+      manager = start_manager(ctx, continuation_dispatcher: RecordingDispatcher)
+
+      request =
+        ctx
+        |> client_request(completing_stub(ctx))
+        |> Map.put(:continuation_depth, Continuation.max_depth())
+
+      {:ok, run_id} = Manager.start_run(request, manager)
+      assert await_status(ctx.repo, run_id, "completed")
+
+      row = await_delivery_status(ctx.repo, run_id, "dead_letter")
+      assert summary_error(row) =~ "depth_capped"
+      refute_receive {:continued, _notice}, 200
+      refute_receive {:delivered, _destination, _text}, 200
+    end
+
+    test "a host with no continuation dispatcher dead-letters by its own name", ctx do
+      manager = start_manager(ctx, continuation_dispatcher: nil)
+
+      {:ok, run_id} = Manager.start_run(client_request(ctx, completing_stub(ctx)), manager)
+      assert await_status(ctx.repo, run_id, "completed")
+
+      row = await_delivery_status(ctx.repo, run_id, "dead_letter")
+      assert summary_error(row) =~ "continuation_disabled"
+      refute_receive {:delivered, _destination, _text}, 200
+    end
+
+    # The regression guard for all of the above: a framework-delivered origin
+    # still takes the plain durable text path, untouched.
+    test "a framework-delivered origin still delivers text at the cap", ctx do
+      manager = start_manager(ctx, continuation_dispatcher: RecordingDispatcher)
+
+      request =
+        ctx
+        |> chat_request(completing_stub(ctx))
+        |> Map.put(:continuation_depth, Continuation.max_depth())
+
+      {:ok, run_id} = Manager.start_run(request, manager)
+      assert await_status(ctx.repo, run_id, "completed")
+      assert_receive {:delivered, "123", _text}, 5_000
+      assert await_delivery(ctx.repo, run_id).delivery_status == "delivered"
+    end
+  end
+
   # --- cancel + stop_all --------------------------------------------------
 
   describe "cancel" do
@@ -669,6 +769,15 @@ defmodule FermixCore.Harness.ManagerTest do
     |> Map.put(:origin_session_id, "cron_job_x_20260720")
   end
 
+  # A run launched from an ACP turn: the row carries the client-origin snapshot
+  # (M29 §17.4), which is what tells the Manager there is no framework wire here.
+  defp client_request(ctx, stub, overrides \\ []) do
+    ctx
+    |> chat_request(stub, overrides)
+    |> Map.put(:snapshot, client_snapshot())
+    |> Map.put(:origin_session_id, "acp:sess-1:root")
+  end
+
   defp chat_snapshot do
     %{
       origin_kind: "chat",
@@ -677,12 +786,26 @@ defmodule FermixCore.Harness.ManagerTest do
       destination: "123",
       thread: nil,
       send_opts: nil,
-      parent_job_id: nil
+      parent_job_id: nil,
+      client_origin: nil
     }
   end
 
   defp scheduled_snapshot do
     %{chat_snapshot() | origin_kind: "scheduled", parent_job_id: "job_x"}
+  end
+
+  defp client_snapshot do
+    %{
+      chat_snapshot()
+      | platform: "acp",
+        destination: "sess-1",
+        client_origin: %{
+          "identity" => "7e7e9c42a91bfef19fa929e5fda1b72e0ebc1a4c1141673e2794234d86addf4e",
+          "cwd" => "/repo/apps/core",
+          "reply_context" => "[Context] channel=abc"
+        }
+    }
   end
 
   defp plan_ctx(cwd, stub) do
@@ -842,6 +965,23 @@ defmodule FermixCore.Harness.ManagerTest do
         _other -> :cont
       end
     end) || flunk("run #{run_id} was never marked delivered")
+  end
+
+  defp await_delivery_status(repo, run_id, status) do
+    poll(fn ->
+      case Ledger.get(run_id, server: repo) do
+        {:ok, %{delivery_status: ^status} = row} -> {:halt, row}
+        _other -> :cont
+      end
+    end) || flunk("run #{run_id} never reached delivery status #{status}")
+  end
+
+  # "As `list_coding_runs` renders it": the named reason must reach the operator
+  # on the rendered surface, not only in the ledger column.
+  defp summary_error(row) do
+    summary = HarnessSupport.run_summary(row)
+    assert summary.delivery_status == "dead_letter"
+    summary.last_delivery_error
   end
 
   defp run_child_pid(run_sup) do

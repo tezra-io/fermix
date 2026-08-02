@@ -488,11 +488,18 @@ defmodule FermixChannels.Gateway.Queue do
   # The channel still gets today's `error_reply/1` text; the turn-result callback
   # gets the RAW reason, which is the only form an adapter can classify (an ACP
   # session maps provider-auth failures to a re-authenticate error, M29 §4).
+  #
+  # A failed turn commits no assistant message, so the user message the runner
+  # persisted before the loop would be left dangling. Close it with the same
+  # marker (and the same guarded path) a stop uses: a legitimate retry — durable,
+  # or a client re-running the prompt — must not reach a model with no record of
+  # what the failed turn already did, or it repeats it.
   defp deliver_turn_error(%{runner: runner} = turn, reason) do
     discard_draft(turn)
 
     if fresh?(turn) do
       turn.deliver.({:text, runner.error_reply(reason)})
+      append_marker(turn, @stopped_turn_marker)
       {:failed, reason}
     else
       :stopped

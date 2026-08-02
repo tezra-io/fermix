@@ -35,6 +35,8 @@ defmodule FermixChannels.Channels.Acp do
   @channel "acp"
   @registry FermixChannels.Channels.Acp.Registry
   @turn_opt :acp_turn
+  # The fence value a detached (session-less) turn carries in place of a sequence.
+  @detached_turn :detached
 
   @doc "The channel string this adapter answers to."
   @spec channel() :: String.t()
@@ -47,6 +49,13 @@ defmodule FermixChannels.Channels.Acp do
   @doc "The send-opt key carrying a turn's fence sequence into `send_message/3`."
   @spec turn_opt() :: atom()
   def turn_opt, do: @turn_opt
+
+  @doc """
+  The fence value marking a turn whose ACP session is gone (a harness
+  continuation, M29 §17.6(c)). Every closure it builds is a quiet no-op.
+  """
+  @spec detached_turn() :: atom()
+  def detached_turn, do: @detached_turn
 
   @impl true
   def parse_webhook(_params), do: {:error, :unsupported_transport}
@@ -145,6 +154,17 @@ defmodule FermixChannels.Channels.Acp do
 
         {:error, :peer_gone}
     end
+  end
+
+  # A detached turn (M29 §17.6(c)): a harness continuation re-ingested minutes
+  # after its ACP session ended. Its deliverable is the model's own post with the
+  # client's credentials, and the wire reply is best-effort-if-alive — so this is
+  # a quiet, NAMED no-op rather than the `Logger.error` per stream delta the
+  # no-fence clause below would produce. `nil` still means bug.
+  defp notify({session_id, @detached_turn}, payload) do
+    Logger.debug("ACP adapter dropping #{elem(payload, 0)}: turn for #{session_id} is detached")
+
+    {:error, :detached_turn}
   end
 
   # A message with no fence sequence was not built by a Peer, so there is no

@@ -1,6 +1,8 @@
 defmodule Fermix.CLI.AcpCommand do
   @moduledoc """
-  `fermix acp` — the ACP stdio⇄UDS bridge (MILESTONE_29_ACP_AGENT_SURFACE.md §6.2).
+  `fermix acp` — the ACP stdio⇄UDS bridge (MILESTONE_29_ACP_AGENT_SURFACE.md
+  §6.2), plus the one management subcommand that operates on what the surface
+  remembers: `fermix acp forget` (§17.3).
 
   An ACP client (Buzz's `buzz-acp` harness, Zed, …) spawns `fermix acp` and talks
   newline-delimited JSON-RPC to its stdin/stdout. This verb is a **pipe, not a
@@ -32,8 +34,19 @@ defmodule Fermix.CLI.AcpCommand do
   message. Filtering the env is the daemon's job (one policy point, §6.2.3); the
   transport is a same-user 0600 socket, so a second filter here would add code,
   not security.
+
+  ## Bare verb vs subcommand
+
+  **Bare `fermix acp` is the bridge**; `fermix acp <word>` is management. An argv
+  the management table does not name is a usage error on stderr and never a
+  bridge — a client misconfigured with `args: acp,--foo` has to fail loud rather
+  than pump protocol. Both paths move logging off stdout first, so the §16.2b
+  purity guarantee is one property of the verb rather than one of its branches.
   """
 
+  alias FermixCore.Acp.Identity
+  alias FermixCore.Acp.IdentityStore
+  alias FermixCore.Nostr.Key
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Timeouts
 
@@ -54,14 +67,16 @@ defmodule Fermix.CLI.AcpCommand do
   @type log_route_error :: {:unmovable_handler, module()} | {:add_handler_failed, term()}
 
   @doc """
-  Run the bridge. `argv` must be empty — this verb takes no arguments.
+  Run the verb: the bridge on an empty `argv`, `forget` on the management argv,
+  a usage error on anything else.
 
-  Returns the process exit status: `0` when the ACP client closed its stdin,
-  `1` on any refusal or daemon-side loss, `2` for a usage error.
+  Returns the process exit status: `0` when the ACP client closed its stdin or a
+  subcommand succeeded, `1` on any refusal or daemon-side loss, `2` for a usage
+  error.
 
   The `opts` are test seams, not operator surface: `:socket_path`, `:stdin`,
-  `:stdout`, `:stderr` and `:ack_timeout_ms` all default to the production
-  values below.
+  `:stdout`, `:stderr`, `:ack_timeout_ms` and `:identity_dir` all default to the
+  production values below.
   """
   @spec run([String.t()], keyword()) :: non_neg_integer()
   def run(argv, opts \\ []) when is_list(argv) and is_list(opts) do
@@ -69,7 +84,8 @@ defmodule Fermix.CLI.AcpCommand do
 
     case argv do
       [] -> bridge(io, opts)
-      _other -> usage_error(io)
+      ["forget" | rest] -> forget(rest, io, opts)
+      _other -> usage_error(io, argv)
     end
   end
 
@@ -82,6 +98,49 @@ defmodule Fermix.CLI.AcpCommand do
   """
   @spec socket_path() :: String.t()
   def socket_path, do: Path.join(ConfigStore.fermix_home(), @socket_name)
+
+  @doc """
+  The operator-facing sentence for a `FermixCore.Acp.IdentityStore` failure.
+
+  One rendering, two readers — `fermix acp forget` and `fermix doctor`'s
+  `acp surface` row (`Fermix.CLI.Doctor.Checks.acp/1`) — so the same broken
+  record cannot be described two different ways. Every kind the store names
+  keeps its own sentence: "unreadable", "quarantined" and "wrong permissions"
+  are three different jobs for the operator (§17.3).
+  """
+  @spec identity_error_message(term()) :: String.t()
+  def identity_error_message({:identity_dir_unreadable, dir, reason}),
+    do: "the identity store #{dir} could not be read (#{inspect(reason)})"
+
+  def identity_error_message({:identity_dir_unwritable, dir, reason}),
+    do: "the identity store #{dir} could not be written (#{inspect(reason)})"
+
+  def identity_error_message({:identity_permissions, _id, path, mode}) do
+    "#{path} has perms 0o#{Integer.to_string(mode, 8)} (expected 0o600) — " <>
+      "run `chmod 600 #{path}`"
+  end
+
+  def identity_error_message({:identity_quarantined, _id, path, backup, _reason}) do
+    "#{path} did not parse and was preserved at #{backup} — " <>
+      "reconnect the client to re-present its credentials"
+  end
+
+  def identity_error_message({:identity_unsupported, _id, path, detail}),
+    do: "#{path} is a record this build does not support (#{inspect(detail)})"
+
+  def identity_error_message({:identity_unreadable, _id, path, reason}),
+    do: "#{path} could not be read (#{inspect(reason)})"
+
+  def identity_error_message({:identity_missing, _id, path}),
+    do: "there is no record at #{path}"
+
+  def identity_error_message({:identity_delete_failed, _id, path, reason}),
+    do: "#{path} could not be deleted (#{inspect(reason)})"
+
+  def identity_error_message({:invalid_identity_id, id}),
+    do: "#{inspect(id)} does not name a public key"
+
+  def identity_error_message(reason), do: "the identity store failed: #{inspect(reason)}"
 
   defp io_devices(opts) do
     %{
@@ -111,8 +170,15 @@ defmodule Fermix.CLI.AcpCommand do
     end
   end
 
-  defp usage_error(io) do
-    IO.puts(io.stderr, "fermix acp: usage: fermix acp — the ACP bridge takes no arguments")
+  defp usage_error(io, argv) do
+    IO.puts(io.stderr, "fermix acp: unrecognised arguments: #{Enum.join(argv, " ")}")
+
+    IO.puts(io.stderr, """
+    usage: fermix acp                  bridge an ACP client's stdio to the daemon (no arguments)
+           fermix acp forget <npub>    disconnect one remembered client identity
+           fermix acp forget --all     disconnect every remembered client identity\
+    """)
+
     2
   end
 
@@ -185,6 +251,100 @@ defmodule Fermix.CLI.AcpCommand do
       {:error, reason} -> {:error, {:add_handler_failed, reason}}
     end
   end
+
+  # --- forget ---------------------------------------------------------------
+
+  # Deleting the record IS the sever (§17.3). Every turn resolves its identity
+  # from the store at message-build time, so the next turn on a connection bound
+  # to a deleted record proceeds identity-less and advertises no harness tool —
+  # which is why this needs no control-socket method and no Peer scan. It runs
+  # in the tree-less CLI VM, where the store is the whole interface.
+  defp forget(argv, io, opts) do
+    with :ok <- ensure_pure_stdout(io) do
+      dispatch_forget(argv, io, Keyword.get(opts, :identity_dir, IdentityStore.dir()))
+    else
+      {:halt, status} -> status
+    end
+  end
+
+  defp dispatch_forget(["--all"], io, dir), do: forget_all(io, dir)
+
+  defp dispatch_forget([npub], io, dir) do
+    case String.starts_with?(npub, "-") do
+      true -> usage_error(io, ["forget", npub])
+      false -> forget_one(npub, io, dir)
+    end
+  end
+
+  defp dispatch_forget(argv, io, _dir), do: usage_error(io, ["forget" | argv])
+
+  defp forget_one(npub, io, dir) do
+    case resolve(npub, dir) do
+      {:ok, id} -> delete_identity(id, npub, io, dir)
+      {:error, reason} -> refuse_forget(io, reason, dir)
+    end
+  end
+
+  defp delete_identity(id, npub, io, dir) do
+    case IdentityStore.forget(id, dir) do
+      :ok -> announce(io, "forgot #{npub}; its next turn runs with no identity")
+      {:error, reason} -> refuse_forget(io, reason, dir)
+    end
+  end
+
+  defp forget_all(io, dir) do
+    case IdentityStore.forget_all(dir) do
+      {:ok, 0} -> announce(io, "no connected identities — nothing to forget")
+      {:ok, count} -> announce(io, "forgot #{count} connected #{identities(count)}")
+      {:error, reason} -> refuse_forget(io, reason, dir)
+    end
+  end
+
+  # The npub is the only form doctor prints and the only form this verb takes,
+  # so it is resolved against the store's own records rather than decoded here —
+  # one authority for what an npub names, never two that can disagree.
+  defp resolve(npub, dir) do
+    records = IdentityStore.list(dir)
+
+    case Enum.find(records, &record_npub?(&1, npub)) do
+      {:ok, %Identity{id: id}} -> {:ok, id}
+      nil -> unresolved(records, npub)
+    end
+  end
+
+  defp record_npub?({:ok, %Identity{id: id}}, npub), do: Key.npub(id) == {:ok, npub}
+  defp record_npub?({:error, _reason}, _npub), do: false
+
+  # Nothing matched. A record the store REFUSED cannot be ruled out, so its own
+  # failure is reported instead of a "not connected" that would be a guess.
+  defp unresolved(records, npub) do
+    case Enum.find(records, &match?({:error, _reason}, &1)) do
+      nil -> {:error, {:not_connected, npub}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp refuse_forget(io, {:not_connected, npub}, dir) do
+    fail(
+      io,
+      "fermix acp forget: no connected identity #{npub} — " <>
+        "`fermix doctor` lists what is in #{dir}"
+    )
+  end
+
+  defp refuse_forget(io, reason, _dir),
+    do: fail(io, "fermix acp forget: " <> identity_error_message(reason))
+
+  # Management output goes to stdout, where a CLI's answer belongs: this path
+  # never pumps a byte of protocol, and `ensure_pure_stdout/1` has already moved
+  # logging off stdout, so the store's own lines cannot interleave with it.
+  defp announce(io, line) do
+    IO.puts(io.stdout, "fermix acp forget: " <> line)
+    0
+  end
+
+  defp identities(1), do: "identity"
+  defp identities(_count), do: "identities"
 
   # --- connect + handshake --------------------------------------------------
 

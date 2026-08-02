@@ -26,8 +26,9 @@ defmodule FermixChannels.Channels.Acp.Session do
 
   @typedoc """
   In-flight turn state: the wire id of the `session/prompt` request it answers,
-  the fence `seq`, how many bytes of the reply have been written as chunks, and
-  the tool-card ids minted so far.
+  the fence `seq`, how many bytes of the reply have been written as chunks, the
+  tool cards minted so far (each an id and the ACP kind computed at its start),
+  and how many externally-visible effects the turn has already performed.
   """
   @type turn :: %{
           seq: pos_integer(),
@@ -35,7 +36,8 @@ defmodule FermixChannels.Channels.Acp.Session do
           sent_len: non_neg_integer(),
           final_seen?: boolean(),
           tool_seq: non_neg_integer(),
-          tools: %{String.t() => String.t()}
+          tools: %{String.t() => {String.t(), String.t()}},
+          effects: non_neg_integer()
         }
 
   @type t :: %__MODULE__{
@@ -98,7 +100,8 @@ defmodule FermixChannels.Channels.Acp.Session do
       sent_len: 0,
       final_seen?: false,
       tool_seq: 0,
-      tools: %{}
+      tools: %{},
+      effects: 0
     }
 
     {%{session | turn_seq: seq, turn: turn}, seq}
@@ -163,32 +166,59 @@ defmodule FermixChannels.Channels.Acp.Session do
 
   def reset_stream(%__MODULE__{turn: nil} = session), do: session
 
-  @doc "Mint the tool-card id for a starting tool, remembering it for the finish update."
-  @spec start_tool(t(), String.t()) :: {String.t(), t()}
-  def start_tool(%__MODULE__{turn: turn} = session, name) when is_map(turn) and is_binary(name) do
+  @doc """
+  Mint the tool-card id for a starting tool, remembering it — with the ACP
+  `kind` the caller computed for the card — for the finish update.
+
+  The kind is carried rather than recomputed at the finish: one lookup per tool
+  call, and the verdict the finish reads is the one the client was shown.
+  """
+  @spec start_tool(t(), String.t(), String.t()) :: {String.t(), t()}
+  def start_tool(%__MODULE__{turn: turn} = session, name, kind)
+      when is_map(turn) and is_binary(name) and is_binary(kind) do
     tool_seq = turn.tool_seq + 1
     tool_call_id = "t" <> Integer.to_string(tool_seq)
-    turn = %{turn | tool_seq: tool_seq, tools: Map.put(turn.tools, name, tool_call_id)}
+    turn = %{turn | tool_seq: tool_seq, tools: Map.put(turn.tools, name, {tool_call_id, kind})}
 
     {tool_call_id, %{session | turn: turn}}
   end
 
   @doc """
-  Take back the tool-card id a start minted. `:error` when no start was seen —
-  the update is dropped rather than invented, since a client cannot render an
-  update for a card it never received.
+  Take back the tool-card id and kind a start minted. `:error` when no start was
+  seen — the update is dropped rather than invented, since a client cannot
+  render an update for a card it never received.
 
   Keyed by tool name: the loop runs tool calls one at a time, so a repeat of the
   same name always follows its own finish.
   """
-  @spec finish_tool(t(), String.t()) :: {:ok, String.t(), t()} | :error
+  @spec finish_tool(t(), String.t()) :: {:ok, String.t(), String.t(), t()} | :error
   def finish_tool(%__MODULE__{turn: turn} = session, name)
       when is_map(turn) and is_binary(name) do
     case Map.pop(turn.tools, name) do
-      {nil, _tools} -> :error
-      {tool_call_id, tools} -> {:ok, tool_call_id, %{session | turn: %{turn | tools: tools}}}
+      {nil, _tools} ->
+        :error
+
+      {{tool_call_id, kind}, tools} ->
+        {:ok, tool_call_id, kind, %{session | turn: %{turn | tools: tools}}}
     end
   end
+
+  @doc """
+  Count one externally-visible effect against the open turn.
+
+  This is what makes a failed turn unsafe to re-run: something outside this
+  session has already changed (a message published, a file written), so the
+  prompt must not be answered a second time.
+  """
+  @spec record_effect(t()) :: t()
+  def record_effect(%__MODULE__{turn: turn} = session) when is_map(turn) do
+    %{session | turn: %{turn | effects: turn.effects + 1}}
+  end
+
+  @doc "How many effects the open turn has performed; 0 when no turn is in flight."
+  @spec effects(t()) :: non_neg_integer()
+  def effects(%__MODULE__{turn: %{effects: effects}}), do: effects
+  def effects(%__MODULE__{turn: nil}), do: 0
 
   defp fold_block(%{"type" => "text", "text" => text}) when is_binary(text), do: {:ok, text}
 

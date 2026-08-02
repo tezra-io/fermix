@@ -12,10 +12,21 @@ defmodule Fermix.CLI.AcpCommandTest do
   use ExUnit.Case, async: false
 
   alias Fermix.CLI.AcpCommand
+  alias FermixCore.Acp.Identity
+  alias FermixCore.Acp.IdentityStore
   alias FermixCore.Setup.ConfigStore
   alias FermixTestSupport.SafeRm
 
   @connect_refusal_prefix "Fermix daemon not running"
+
+  # Two real identities: the published NIP-19 vector (see nostr/key_test.exs)
+  # and a second key derived from a fixed hex secret, so `forget` can be proven
+  # to delete one record and leave the other.
+  @nsec "nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5"
+  @public_hex "7e7e9c42a91bfef19fa929e5fda1b72e0ebc1a4c1141673e2794234d86addf4e"
+  @npub "npub10elfcs4fr0l0r8af98jlmgdh9c8tcxjvz9qkw038js35mp4dma8qzvjptg"
+  @other_nsec String.duplicate("2b", 32)
+  @other_npub "npub1hdvttlk22pw8fmwqqrvzst792mj35ypylj886ljkcmug03wg6heqnyhhak"
 
   defmodule ScriptedIn do
     @moduledoc false
@@ -346,11 +357,112 @@ defmodule Fermix.CLI.AcpCommandTest do
   end
 
   describe "arguments" do
-    test "takes none: anything else is a usage error on stderr with exit 2", ctx do
+    test "the bridge takes none: an unknown subcommand is a usage error on stderr", ctx do
       assert AcpCommand.run(["--session", "x"], opts(ctx)) == 2
       assert stderr(ctx) =~ "usage"
       assert stdout(ctx) == ""
     end
+
+    # The §16.2b guarantee must not weaken now that the verb has subcommands: a
+    # client misconfigured with `args: acp,--bogus` has to fail loud, never pump.
+    test "an unknown subcommand exits non-zero, names itself, and writes no stdout", ctx do
+      assert AcpCommand.run(["--bogus"], opts(ctx)) == 2
+      assert stderr(ctx) =~ "--bogus"
+      assert stderr(ctx) =~ "forget"
+      assert stdout(ctx) == ""
+    end
+
+    test "`forget` with no operand is a usage error, not a bridge attempt", ctx do
+      assert AcpCommand.run(["forget"], opts(ctx)) == 2
+      assert stderr(ctx) =~ "usage"
+      # Proof it never fell through to the bridge: that path's only refusal names
+      # the daemon, and this socket has no listener.
+      refute stderr(ctx) =~ @connect_refusal_prefix
+      assert stdout(ctx) == ""
+    end
+  end
+
+  describe "forget" do
+    setup do
+      root = SafeRm.make_tmp_dir!("fermix-acp-forget")
+      on_exit(fn -> SafeRm.rm_rf!(root) end)
+      {:ok, dir: Path.join(root, "acp_identities")}
+    end
+
+    test "deletes the named record and leaves every other one alone", ctx do
+      connect(ctx.dir, @nsec)
+      other = connect(ctx.dir, @other_nsec)
+
+      assert AcpCommand.run(["forget", @npub], opts(ctx, identity_dir: ctx.dir)) == 0
+
+      refute File.exists?(record_path(ctx.dir, @public_hex))
+      assert File.exists?(other)
+      assert stdout(ctx) =~ @npub
+      refute stdout(ctx) =~ @nsec
+      assert stderr(ctx) == ""
+    end
+
+    test "--all clears every record", ctx do
+      connect(ctx.dir, @nsec)
+      connect(ctx.dir, @other_nsec)
+
+      assert AcpCommand.run(["forget", "--all"], opts(ctx, identity_dir: ctx.dir)) == 0
+
+      assert Path.wildcard(Path.join(ctx.dir, "*.json")) == []
+      assert stdout(ctx) =~ "2"
+      assert stderr(ctx) == ""
+    end
+
+    test "an npub nothing presented is a named refusal, not a silent success", ctx do
+      connect(ctx.dir, @nsec)
+
+      assert AcpCommand.run(["forget", @other_npub], opts(ctx, identity_dir: ctx.dir)) == 1
+
+      assert stderr(ctx) =~ @other_npub
+      assert stderr(ctx) =~ "no connected identity"
+      assert File.exists?(record_path(ctx.dir, @public_hex))
+      assert stdout(ctx) == ""
+    end
+
+    test "surfaces the store's own error rather than reporting success", ctx do
+      # A plain file where the store directory belongs: the store reports the
+      # directory unreadable, and that has to reach the operator verbatim.
+      File.mkdir_p!(Path.dirname(ctx.dir))
+      File.write!(ctx.dir, "")
+
+      assert AcpCommand.run(["forget", @npub], opts(ctx, identity_dir: ctx.dir)) == 1
+      assert stderr(ctx) =~ ctx.dir
+      assert stdout(ctx) == ""
+    end
+
+    test "--all on an empty store says so and exits 0", ctx do
+      assert AcpCommand.run(["forget", "--all"], opts(ctx, identity_dir: ctx.dir)) == 0
+      assert stdout(ctx) =~ "no connected identities"
+      assert stderr(ctx) == ""
+    end
+
+    test "extra operands are a usage error, never a partial delete", ctx do
+      connect(ctx.dir, @nsec)
+
+      assert AcpCommand.run(["forget", @npub, "--all"], opts(ctx, identity_dir: ctx.dir)) == 2
+      assert stderr(ctx) =~ "usage"
+      assert File.exists?(record_path(ctx.dir, @public_hex))
+      assert stdout(ctx) == ""
+    end
+
+    defp connect(dir, nsec) do
+      identity =
+        Identity.new(%{
+          "BUZZ_PRIVATE_KEY" => nsec,
+          "BUZZ_RELAY_URL" => "wss://relay.example.test",
+          "PATH" => "/opt/buzz/bin:/usr/bin"
+        })
+
+      {:ok, :created} = IdentityStore.upsert(identity, dir)
+      record_path(dir, identity.id)
+    end
+
+    defp record_path(dir, id), do: Path.join(dir, "#{id}.json")
   end
 
   # --- fixture helpers ------------------------------------------------------

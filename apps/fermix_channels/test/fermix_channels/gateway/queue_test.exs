@@ -449,6 +449,53 @@ defmodule FermixChannels.Gateway.QueueTest do
     end
   end
 
+  # A failed turn commits no assistant message, so the user message the runner
+  # persisted before the loop is left dangling. A retry — durable, or a client
+  # re-running the prompt — would then reach a model with no record of what the
+  # failed turn already did, and repeat it.
+  describe "a failed turn's orphaned user message" do
+    test "is closed with the stopped-turn marker", ctx do
+      store = start_supervised!({StubStore, %{test_pid: ctx.test_pid}}, id: :stub_store)
+      queue = start_queue(ctx, turn_runner: StreamingFakeRunner, conversation_store: store)
+
+      Queue.enqueue(queue, make_msg("boom", "cfail", ctx.test_pid))
+      assert_receive {:turn_started, "boom", turn_pid}, 5_000
+      send(turn_pid, {:proceed, :error})
+
+      assert_receive {:reply, "error reply"}, 5_000
+      assert_receive {:marker_appended, marker}, 5_000
+      assert marker =~ "stopped before I finished it"
+      refute_received {:committed, _response}
+    end
+
+    test "a successful turn commits and appends no marker", ctx do
+      store = start_supervised!({StubStore, %{test_pid: ctx.test_pid}}, id: :stub_store)
+      queue = start_queue(ctx, turn_runner: StreamingFakeRunner, conversation_store: store)
+
+      Queue.enqueue(queue, make_msg("fine", "cok", ctx.test_pid))
+      assert_receive {:turn_started, "fine", turn_pid}, 5_000
+      send(turn_pid, {:proceed, :reply})
+
+      assert_receive {:reply, "reply:fine"}, 5_000
+      assert_receive {:committed, "reply:fine"}, 5_000
+      refute_receive {:marker_appended, _marker}, 300
+    end
+
+    test "a turn stopped mid-run writes exactly one marker, from the stop path", ctx do
+      store = start_supervised!({StubStore, %{test_pid: ctx.test_pid}}, id: :stub_store)
+      queue = start_queue(ctx, turn_runner: StreamingFakeRunner, conversation_store: store)
+
+      Queue.enqueue(queue, make_msg("stop me", "cstop", ctx.test_pid))
+      assert_receive {:turn_started, "stop me", _turn_pid}, 5_000
+
+      assert {:ok, %{active_stopped: 1}} = Queue.stop_conversation(key("cstop"), queue)
+
+      assert_receive {:marker_appended, marker}, 5_000
+      assert marker =~ "stopped before I finished it"
+      refute_receive {:marker_appended, _second}, 300
+    end
+  end
+
   describe "failure handling" do
     test "delivers a generic error reply when checkout fails", ctx do
       queue = start_queue(ctx, error: :build_failed)

@@ -208,13 +208,25 @@ defmodule FermixOpik.Aggregation do
     })
   end
 
+  # A failed turn is the trace a reader most needs, so it carries everything its
+  # successful sibling carries — the prompt above all (the emitter attaches it
+  # under the same `capture_content` gate). `error_info` is what makes it
+  # filterable in Opik instead of findable only by reading the output text.
   def apply_event(state, [:fermix, :agent, :message_error], _meas, meta, at) do
+    reason = stringify(Map.get(meta, :reason))
+
     close_root(state, meta, at, %{
-      output: stringify(Map.get(meta, :reason)),
+      input: Map.get(meta, :input),
+      output: reason,
       status: "error",
+      error_info: error_info("TurnError", reason),
       thread_id: thread_id(meta),
       metadata:
-        compact(%{channel: stringify(Map.get(meta, :channel)), chat_id: Map.get(meta, :chat_id)})
+        compact(%{
+          channel: stringify(Map.get(meta, :channel)),
+          chat_id: Map.get(meta, :chat_id),
+          sender: Map.get(meta, :sender)
+        })
     })
   end
 
@@ -661,6 +673,7 @@ defmodule FermixOpik.Aggregation do
       input: nil,
       output: nil,
       status: nil,
+      error_info: nil,
       metadata: Map.get(ctx, :trace_metadata, %{}),
       tags: [Atom.to_string(kind)],
       spans: [],
@@ -726,6 +739,7 @@ defmodule FermixOpik.Aggregation do
             |> Map.put(:input, fields[:input] || acc.input)
             |> Map.put(:output, fields[:output] || acc.output)
             |> Map.put(:status, fields[:status] || acc.status)
+            |> Map.put(:error_info, fields[:error_info] || acc.error_info)
             # main turns learn their thread (channel:chat_id) only at close; a
             # thread_id set at creation (scheduled jobs → job_id) wins.
             |> Map.put(:thread_id, acc.thread_id || fields[:thread_id])
@@ -761,7 +775,8 @@ defmodule FermixOpik.Aggregation do
             end_time: Mapper.iso(end_time),
             input: io(acc.input),
             output: io(acc.output),
-            metadata: compact(acc.metadata),
+            metadata: compact(put_status(acc.metadata, acc.status)),
+            error_info: acc.error_info,
             tags: acc.tags
           })
 
@@ -891,6 +906,18 @@ defmodule FermixOpik.Aggregation do
   defp compact(map) do
     Map.reject(map, fn {_k, v} -> is_nil(v) end)
   end
+
+  # Opik's structured failure surface: a trace carrying `error_info` is
+  # filterable as failed. Never fabricated — a run that named no reason gets
+  # none, and `Mapper.drop_nil` leaves the field off entirely.
+  defp error_info(_type, nil), do: nil
+  defp error_info(type, message), do: %{exception_type: type, message: message}
+
+  # Surface the run status the accumulator already tracks (it was dropped at
+  # emit until now). "ok" is the absence of a status: exporting it would rewrite
+  # every successful trace's payload to say what the missing error_info says.
+  defp put_status(metadata, status) when status in [nil, "ok"], do: metadata
+  defp put_status(metadata, status), do: Map.put(metadata, :status, status)
 
   # Group a channel conversation into one Opik thread. Fermix's conversation
   # boundary is {channel, chat_id, sender}; channel:chat_id is the stable,

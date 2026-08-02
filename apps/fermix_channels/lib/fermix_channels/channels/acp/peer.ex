@@ -13,7 +13,7 @@ defmodule FermixChannels.Channels.Acp.Peer do
   1. **Bridge handshake** (§6.2). The first line must be
      `{"fermix_bridge": 1, "app_version": …, "env": {…}}`, within
      `Timeouts.acp_bridge_hello/0` and under `@max_hello_bytes`. The daemon filters the env
-     to the allowlist (`SessionEnv`), answers `{"fermix_bridge_ack": …}`, and
+     to the allowlist (`Acp.Identity`), answers `{"fermix_bridge_ack": …}`, and
      only then speaks ACP. A refusal is written as an ack, because that is the
      only line the bridge knows how to read before it becomes a byte pump.
   2. **ACP** (§7). Every line is decoded by `Channels.Acp.Wire`; requests are
@@ -23,6 +23,24 @@ defmodule FermixChannels.Channels.Acp.Peer do
 
   After the handshake **nothing but ACP frames** may be written — an ack line at
   that point would corrupt the client's protocol stream.
+
+  ## The connection's identity (§17)
+
+  A hello that presents a derivable `BUZZ_PRIVATE_KEY` is a **connected
+  provider**, not session state: the record is persisted and the connection binds
+  to its id. From then on every turn resolves the env **from the store**, so a
+  live turn and a continuation turn minutes later read the same bytes, and a
+  rotation another connection persisted lands on the next turn (§17.1).
+
+  A hello with no derivable identity holds an unpersisted, secret-less record and
+  calls the same `Identity.to_env/1` — one producer, two configurations, no
+  fallback. A bound connection whose record becomes unreadable **transitions** to
+  that identity-less state for the rest of its life (§17.3): it does not re-read,
+  so the state cannot flap, and the client reconnects to re-present.
+
+  Note what the Peer does NOT hold: after a successful bind its state carries the
+  id and the identity-less rebuild only — the signing key itself lives in the
+  store, and is read for the turn that needs it.
 
   ## The wire fence
 
@@ -40,14 +58,16 @@ defmodule FermixChannels.Channels.Acp.Peer do
 
   alias FermixChannels.Channels.Acp
   alias FermixChannels.Channels.Acp.Session
-  alias FermixChannels.Channels.Acp.SessionEnv
   alias FermixChannels.Channels.Acp.Wire
   alias FermixChannels.Gateway
   alias FermixChannels.Gateway.Message
   alias FermixChannels.Gateway.Queue
   alias FermixChannels.Telemetry, as: ChannelTelemetry
+  alias FermixCore.Acp.Identity
+  alias FermixCore.Acp.IdentityStore
   alias FermixCore.Agents.ConversationKey
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Nostr.Key
   alias FermixCore.Telemetry
   alias FermixCore.Timeouts
 
@@ -65,6 +85,10 @@ defmodule FermixChannels.Channels.Acp.Peer do
   # permission axis, so this map is an APPROXIMATION, deliberately coarse
   # (§15 open question 3): reads read, network fetches, everything that acts
   # executes. A client must never infer what a tool may do from it.
+  #
+  # The effect gate DOES read it, for one coarse question only — "was that a
+  # read?" — where every inaccuracy points the safe way: a misclassified read
+  # counts as an effect and costs a retry that was safe, never a repeated one.
   @tool_kinds %{
     read_only: "read",
     network: "fetch",
@@ -100,7 +124,9 @@ defmodule FermixChannels.Channels.Acp.Peer do
        hello_timer: Process.send_after(self(), :hello_deadline, hello_timeout_ms),
        buffer: "",
        handshake: :pending,
-       env: nil,
+       # `{:bound, id, identity_less}` or a `%Identity{id: nil}` — see the
+       # moduledoc. Set once at hello; only ever narrowed, never widened.
+       identity: nil,
        sessions: %{}
      }}
   end
@@ -249,19 +275,51 @@ defmodule FermixChannels.Channels.Acp.Peer do
   defp accept_hello(_hello, state),
     do: refuse_hello(state, "the fermix_bridge handshake env must be an object")
 
-  # The env is filtered HERE, once, before it is stored: everything outside the
-  # allowlist is gone before any session can see it (§4).
+  # The env is filtered HERE, once, before anything is stored: everything outside
+  # the allowlist is gone before any session — or the store — can see it (§4).
   defp complete_handshake(hello, env, state) do
-    session_env = SessionEnv.new(env)
+    presented = Identity.new(env)
+    identity = bind(presented)
 
     Logger.info(
       "ACP bridge connected (app_version=#{inspect(Map.get(hello, "app_version"))}); " <>
-        "session env keys: #{inspect(SessionEnv.keys(session_env))}"
+        "session env keys: #{inspect(Identity.env_keys(carried(identity, presented)))}"
     )
 
-    state = %{cancel_hello_timer(state) | handshake: :complete, env: session_env}
+    state = %{cancel_hello_timer(state) | handshake: :complete, identity: identity}
     {:cont, write(state, ack_line(%{"status" => "ok"}))}
   end
+
+  # An identity id is bound ONLY after the store said :ok (§17.2). A write that
+  # failed leaves a key whose record is not on disk, which would advertise the
+  # harness and then strand the continuation — so the connection is rebuilt
+  # identity-less here, before its first turn.
+  defp bind(%Identity{id: nil} = presented), do: presented
+
+  defp bind(%Identity{id: id} = presented) do
+    case IdentityStore.upsert(presented) do
+      {:ok, _outcome} -> {:bound, id, identity_less(presented)}
+      {:error, reason} -> refuse_binding(presented, id, reason)
+    end
+  end
+
+  defp refuse_binding(presented, id, reason) do
+    Logger.warning(
+      "Acp.Peer: could not persist the identity #{npub(id)} (#{inspect(reason)}); " <>
+        "this connection runs without one — it can neither sign nor post"
+    )
+
+    identity_less(presented)
+  end
+
+  # The §17.5 ambient record: the same allowlist without the id and without the
+  # signing secrets, so `to_env/1` regenerates exactly the ambient shape.
+  defp identity_less(%Identity{} = identity), do: %{identity | id: nil, secrets: %{}}
+
+  # What a turn on this connection will actually carry — the presented record
+  # while it is bound, the identity-less rebuild when it is not.
+  defp carried({:bound, _id, _identity_less}, presented), do: presented
+  defp carried(%Identity{} = identity, _presented), do: identity
 
   defp refuse_hello(state, message) do
     Logger.error("ACP bridge handshake refused: #{message}")
@@ -453,7 +511,8 @@ defmodule FermixChannels.Channels.Acp.Peer do
 
   defp start_prompt(session, request_id, content, state) do
     {session, seq} = Session.start_turn(session, request_id)
-    message = build_message(session, seq, content, state)
+    {session_env, state} = resolve_session_env(state)
+    message = build_message(session, seq, content, session_env)
     state = put_session(state, session)
 
     {result, duration_us} = Telemetry.timed_us(fn -> ingest(message, state) end)
@@ -482,7 +541,7 @@ defmodule FermixChannels.Channels.Acp.Peer do
     )
   end
 
-  defp build_message(session, seq, content, state) do
+  defp build_message(session, seq, content, session_env) do
     metadata =
       %{source: :acp, user_id: "acp", chat_type: "private"}
       |> Map.put(Acp.turn_opt(), seq)
@@ -495,10 +554,68 @@ defmodule FermixChannels.Channels.Acp.Peer do
       chat_id: session.id,
       reply_target: session.id,
       request_cwd: session.cwd,
-      session_env: SessionEnv.to_map(state.env),
+      session_env: session_env,
       metadata: metadata,
       media_parts: []
     })
+  end
+
+  # --- Turn env (§17.1) ---
+
+  # ONE producer, `Identity.to_env/1`, over one of two records: the durable one
+  # this connection is bound to, read at message-build time, or the identity-less
+  # one it holds. Never both — a bound connection does not consult its own state,
+  # and an identity-less one does not consult the store.
+  defp resolve_session_env(%{identity: {:bound, id, identity_less}} = state) do
+    case IdentityStore.fetch(id) do
+      {:ok, identity} -> {Identity.to_env(identity), state}
+      {:error, reason} -> drop_binding(state, id, identity_less, reason)
+    end
+  end
+
+  defp resolve_session_env(%{identity: %Identity{} = identity} = state) do
+    {Identity.to_env(identity), state}
+  end
+
+  # The transition of §17.3: the turn proceeds (the reply goes over the ACP wire
+  # and needs no credential), what is lost is posting and — from the next turn —
+  # the harness family. The binding is replaced rather than retried, so the next
+  # turn reads no file and the state cannot flap.
+  defp drop_binding(state, id, identity_less, reason) do
+    Logger.warning(warn_dropped(id, reason))
+    {Identity.to_env(identity_less), %{state | identity: identity_less}}
+  end
+
+  # Three kinds, three messages, never collapsed (§17.3): each is a different
+  # thing for the operator to do, and one word for all three sends them at the
+  # wrong one.
+  defp warn_dropped(id, {:identity_missing, _id, path}) do
+    "Acp.Peer: no record for the identity #{npub(id)} at #{path} — it was forgotten " <>
+      "or the home was reset; this connection now runs without one. Reconnect the client to restore it"
+  end
+
+  defp warn_dropped(id, {:identity_quarantined, _id, path, backup, _reason}) do
+    "Acp.Peer: the record for the identity #{npub(id)} at #{path} did not parse and was " <>
+      "quarantined at #{backup}; this connection now runs without one. Reconnect the client to restore it"
+  end
+
+  defp warn_dropped(id, {:identity_permissions, _id, path, mode}) do
+    "Acp.Peer: the record for the identity #{npub(id)} at #{path} has perms " <>
+      "0o#{Integer.to_string(mode, 8)}, so it was refused; this connection now runs without one. " <>
+      "Run `chmod 600 #{path}` and reconnect the client"
+  end
+
+  defp warn_dropped(id, reason) do
+    "Acp.Peer: the record for the identity #{npub(id)} could not be read " <>
+      "(#{inspect(reason)}); this connection now runs without one"
+  end
+
+  # A bound id was derived from a presented key and validated by the store before
+  # this connection could bind, so rendering it cannot fail — a match error here
+  # would be a bug in that chain, not client input.
+  defp npub(id) do
+    {:ok, npub} = Key.npub(id)
+    npub
   end
 
   # --- Cancellation (§8.5) ---
@@ -601,19 +718,20 @@ defmodule FermixChannels.Channels.Acp.Peer do
   defp apply_stream(_session, _event, state), do: state
 
   defp apply_activity(session, {:tool_start, name}, state) when is_binary(name) do
-    {tool_call_id, session} = Session.start_tool(session, name)
+    kind = tool_kind(name)
+    {tool_call_id, session} = Session.start_tool(session, name, kind)
 
     state
     |> put_session(session)
-    |> write(tool_call_frame(session.id, tool_call_id, name))
+    |> write(tool_call_frame(session.id, tool_call_id, name, kind))
   end
 
   defp apply_activity(session, {:tool_finish, name, %{status: status}}, state)
        when is_binary(name) and status in [:ok, :error] do
     case Session.finish_tool(session, name) do
-      {:ok, tool_call_id, session} ->
+      {:ok, tool_call_id, kind, session} ->
         state
-        |> put_session(session)
+        |> put_session(record_effect(session, status, kind))
         |> write(tool_update_frame(session.id, tool_call_id, status))
 
       :error ->
@@ -623,6 +741,15 @@ defmodule FermixChannels.Channels.Acp.Peer do
   end
 
   defp apply_activity(_session, _event, state), do: state
+
+  # A tool that SUCCEEDED and was not a read has changed something outside this
+  # session — published, written, executed. Fail closed on the coarse kind map:
+  # an unregistered capability renders as "other" and counts, because a tool
+  # nobody registered is not known to be harmless. A tool that FAILED performed
+  # nothing, so it leaves the ledger alone.
+  defp record_effect(session, :ok, "read"), do: session
+  defp record_effect(session, :ok, kind) when is_binary(kind), do: Session.record_effect(session)
+  defp record_effect(session, :error, kind) when is_binary(kind), do: session
 
   # The FIRST text of a turn is the authoritative final reply: emit whatever the
   # stream has not already written. Anything after it is housekeeping (the
@@ -662,27 +789,46 @@ defmodule FermixChannels.Channels.Acp.Peer do
 
     state
     |> put_session(Session.clear_turn(session))
-    |> write(terminal_frame(request_id, outcome))
+    |> write(terminal_frame(request_id, outcome, session))
   end
 
-  defp terminal_frame(request_id, {:completed}),
+  defp terminal_frame(request_id, {:completed}, _session),
     do: Wire.encode_response(request_id, %{"stopReason" => "end_turn"})
 
-  defp terminal_frame(request_id, {:cancelled}),
+  defp terminal_frame(request_id, {:cancelled}, _session),
     do: Wire.encode_response(request_id, %{"stopReason" => "cancelled"})
 
-  defp terminal_frame(request_id, {:failed, reason}),
-    do: Wire.encode_error(request_id, failure_error(reason))
+  # A prompt is answered with a JSON-RPC error only while re-running it is safe.
+  # An error invites the client to retry the whole turn — buzz-acp requeues the
+  # batch up to ten times — so a turn that ALREADY acted on the world outside
+  # this session must be reported terminal instead, or the same effect is
+  # performed once per retry. A turn that failed before any effect still errors:
+  # the user got nothing, so re-running it is exactly the right response.
+  defp terminal_frame(request_id, {:failed, reason}, session),
+    do: failed_frame(request_id, reason, Session.effects(session))
 
-  # The raw reason goes to the log; the wire gets a bounded public rendering.
+  defp failed_frame(request_id, reason, 0) do
+    Logger.error("ACP turn failed: #{inspect(reason)}")
+    Wire.encode_error(request_id, failure_error(reason))
+  end
+
+  defp failed_frame(request_id, reason, effects) when is_integer(effects) and effects > 0 do
+    Logger.error(
+      "ACP turn failed after #{effects} externally-visible effect(s); it is being reported " <>
+        "terminal (end_turn) so the client does not re-run it: #{inspect(reason)}"
+    )
+
+    Wire.encode_response(request_id, %{"stopReason" => "end_turn"})
+  end
+
+  # The raw reason goes to the log (in `failed_frame/3`, so an end_turn never
+  # hides a failure); the wire gets a bounded public rendering.
   # An auth-shaped failure is mapped to -32000 with a message starting
   # "Re-authenticate: " because Buzz dead-letters on exactly that word instead of
   # retrying a credential failure ten times (§2.2). Matching the inspected reason
   # is an APPROXIMATION: provider auth failures are not a typed family, so this
   # recognises how they read rather than what they are.
   defp failure_error(reason) do
-    Logger.error("ACP turn failed: #{inspect(reason)}")
-
     if auth_failure?(reason) do
       Wire.auth_required(
         "Re-authenticate: the model provider rejected Fermix's credentials. " <>
@@ -714,12 +860,12 @@ defmodule FermixChannels.Channels.Acp.Peer do
     )
   end
 
-  defp tool_call_frame(session_id, tool_call_id, name) do
+  defp tool_call_frame(session_id, tool_call_id, name, kind) do
     session_update(session_id, %{
       "sessionUpdate" => "tool_call",
       "toolCallId" => tool_call_id,
       "title" => name,
-      "kind" => tool_kind(name),
+      "kind" => kind,
       "status" => "in_progress"
     })
   end

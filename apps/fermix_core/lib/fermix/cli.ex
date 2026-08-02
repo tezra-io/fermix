@@ -111,6 +111,7 @@ defmodule Fermix.CLI do
       fermix health [--json]                      Show daemon-evaluated health
       fermix voice status [--json]                Show local voice companion status
       fermix acp                                  Bridge an ACP client's stdio to the daemon
+      fermix acp forget NPUB|--all                Disconnect a remembered ACP client identity
       fermix agents [--json]                      Show main-agent and worker status
       fermix capabilities [--kind KIND] [--json]  Show registered capabilities
       fermix skills [list|view NAME|reload] [--json]  Inspect and reload installed skills

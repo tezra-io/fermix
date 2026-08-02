@@ -218,6 +218,82 @@ defmodule FermixOpik.AggregationTest do
     assert llm.usage == %{prompt_tokens: 40, completion_tokens: 8, total_tokens: 48}
   end
 
+  # The M29/Buzz duplicate-reply incident: the one trace worth reading — the
+  # failed turn — carried no input, no status and nothing filterable, so a reader
+  # could only find it by eyeballing output text.
+  test "a failed turn carries the prompt, an error status and structured error_info" do
+    {_state, closed} =
+      run([
+        {[:fermix, :provider, :call], %{duration_ms: 400},
+         %{provider: :openai_codex, model: "gpt-5-codex", status: :error, session_id: "main-1"}},
+        {[:fermix, :agent, :message_error], %{count: 1},
+         %{
+           channel: :telegram,
+           chat_id: "c1",
+           sender: "u1",
+           session_id: "main-1",
+           agent: "main",
+           input: "why did that reply post five times?",
+           reason: {:provider_transport_error, %{kind: :transport_closed}}
+         }}
+      ])
+
+    assert [%{trace: trace}] = closed
+    assert trace.name == "agent:main"
+    assert trace.thread_id == "telegram:c1"
+    # The prompt a successful turn keeps, the failed one now keeps too.
+    assert trace.input == %{text: "why did that reply post five times?"}
+    assert trace.metadata.status == "error"
+    assert trace.metadata.sender == "u1"
+    # Filterable as failed, not findable only by reading the output text.
+    assert trace.error_info.exception_type == "TurnError"
+    assert trace.error_info.message =~ "transport_closed"
+    assert trace.output.text =~ "transport_closed"
+  end
+
+  # Regression: enriching the failure path must leave a successful turn's trace
+  # payload exactly as it was — no status key, no error_info.
+  test "a successful turn's trace payload is unchanged" do
+    {_state, closed} =
+      run([
+        {[:fermix, :agent, :message], %{iterations: 1, total_tokens: 10},
+         %{
+           channel: :telegram,
+           chat_id: "c1",
+           sender: "u1",
+           session_id: "main-1",
+           agent: "main",
+           input: "hello",
+           output: "hi"
+         }}
+      ])
+
+    assert [%{trace: trace}] = closed
+
+    assert trace.metadata == %{
+             channel: "telegram",
+             chat_id: "c1",
+             sender: "u1",
+             iterations: 1,
+             total_tokens: 10
+           }
+
+    refute Map.has_key?(trace, :error_info)
+
+    assert Enum.sort(Map.keys(trace)) == [
+             :end_time,
+             :id,
+             :input,
+             :metadata,
+             :name,
+             :output,
+             :project_name,
+             :start_time,
+             :tags,
+             :thread_id
+           ]
+  end
+
   test "a subagent's work nests under the delegating turn in the same trace" do
     {_state, closed} =
       run([

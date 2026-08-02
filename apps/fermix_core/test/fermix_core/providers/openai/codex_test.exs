@@ -3,6 +3,7 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
 
   import ExUnit.CaptureLog
 
+  alias FermixCore.Agents.TurnRunner
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Prompt.ModelOverlays
   alias FermixCore.Providers.Failover
@@ -719,6 +720,9 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
   end
 
   describe "chat/3 — SSE fixture: completion-only (no items)" do
+    # The cron regression, unchanged: a terminal event whose response produced NO
+    # output items at all. Zero items is the discriminator — not usage, which
+    # counts reasoning tokens and so is looser, not tighter.
     test "a completed response that carried no items delivered nothing, so it is an error" do
       sse = """
       data: {"type":"response.completed","response":{"model":"gpt-5","usage":{"input_tokens":1,"output_tokens":0}}}
@@ -727,9 +731,59 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
 
       """
 
-      assert {:error, {:provider_transport_error, error}} = run_chat(sse)
-      assert error.kind == :transport_closed
-      assert error.message =~ "completed with no output delivered"
+      assert {:error, {:provider_error, error}} = run_chat(sse)
+      assert error.status == 200
+      assert error.code == "empty_response"
+      assert error.message =~ "reported completed"
+      assert error.message =~ "0 output item"
+    end
+
+    # A terminal event is not a cut connection, and calling it one is what made
+    # the Buzz incident cost five duplicate posts: `:transport_closed` is on the
+    # agent loop's continuation-retry allowlist, so a turn that had already
+    # published its reply through a tool was re-issued twice more, and each ACP
+    # -32603 made the harness requeue the whole batch. The reason must be its
+    # own thing — not retryable, not failover-eligible, and rendered in words.
+    test "a terminal event that delivered nothing is not classified as a transport close" do
+      sse = """
+      data: {"type":"response.completed","response":{"model":"gpt-5","usage":{"input_tokens":1,"output_tokens":0}}}
+
+      """
+
+      # Nothing was cut, so nothing may claim it was: this is an API-level
+      # verdict on an intact 200, not a `{:provider_transport_error, ...}`.
+      assert {:error, {:provider_error, error} = reason} = run_chat(sse)
+      refute error.kind == :transport_closed
+
+      # Not a blip: re-issuing it only re-runs whatever the turn already did.
+      refute Transient.retryable?(reason)
+      refute Failover.eligible?(reason)
+
+      # `AgentLoop`'s continuation allowlist admits transport `:transport_closed`
+      # /`:network` and api `:provider_unavailable`; this kind is in neither, so
+      # the continuation cannot spin on it.
+      assert error.kind == :provider
+
+      # And it says what happened, in a sentence an operator can act on.
+      assert error.message =~ "no text and no tool call"
+    end
+
+    # The reason has to survive the trip to the operator. Every api kind reaches
+    # a `TurnRunner` clause that renders THIS message; a bespoke transport reason
+    # would have hit the transport catch-all, which prints `inspect(reason)`.
+    test "the empty-response error renders as its own sentence, not as a closed connection" do
+      sse = """
+      data: {"type":"response.completed","response":{"model":"gpt-5","usage":{"input_tokens":1,"output_tokens":0}}}
+
+      """
+
+      assert {:error, reason} = run_chat(sse)
+      reply = TurnRunner.error_reply(reason)
+
+      assert reply =~ "delivered no text and no tool call"
+      refute reply =~ "closed the connection"
+      refute reply =~ "empty_response"
+      refute reply =~ "Sorry, I encountered an error"
     end
   end
 
@@ -808,17 +862,18 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
 
     # Every undelivered shape must land somewhere `TurnRunner` renders in its
     # own words: a declared failure becomes an API error (every api kind has a
-    # sentence — the `%{status: status}` clause is the floor), and an
-    # unexplained cut stays `:transport_closed`, the one transport kind with
-    # its own sentence. A bespoke transport reason would fall to the catch-all,
-    # which prints `inspect(reason)` at the operator.
+    # sentence — the `%{status: status}` clause is the floor), a response the
+    # server declared TERMINAL is an API verdict too (an intact 200 that said
+    # it was done), and only an unexplained cut stays `:transport_closed`, the
+    # one transport kind with its own sentence. A bespoke transport reason would
+    # fall to the catch-all, which prints `inspect(reason)` at the operator.
     test "every undelivered shape mints an error the channel can render" do
       cases = [
         {"", :transport, :transport_closed},
         {~s(data: {"type":"response.failed","response":{"status":"failed","error":{"message":"x"}}}\n\n),
          :api, :provider},
-        {~s(data: {"type":"response.incomplete","response":{"status":"incomplete"}}\n\n),
-         :transport, :transport_closed},
+        {~s(data: {"type":"response.incomplete","response":{"status":"incomplete"}}\n\n), :api,
+         :provider},
         {~s(data: {"type":"error","message":"x"}\n\n), :api, :provider}
       ]
 
@@ -866,20 +921,6 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
       assert error.kind == :transport_closed
     end
 
-    test "a terminal event is no exemption when the items it carried render nothing" do
-      sse = """
-      data: {"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_1","encrypted_content":"opaque","summary":[]}}
-
-      data: {"type":"response.completed","response":{"model":"gpt-5","usage":{"input_tokens":12500,"output_tokens":4}}}
-
-      data: [DONE]
-
-      """
-
-      assert {:error, {:provider_transport_error, error}} = run_chat(sse)
-      assert error.message =~ "completed with no output delivered"
-    end
-
     # The gate has to hold on the continuation too: that is the turn that
     # renders tool results into an answer, and a silent empty one ends a
     # scheduled run with `status: ok` and an empty delivered body.
@@ -891,6 +932,148 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
 
       assert {:error, {:provider_transport_error, error}} = run_continue(sse)
       assert error.kind == :transport_closed
+    end
+  end
+
+  # The Buzz shape. The model publishes its reply by running the `buzz` CLI
+  # through the shell tool, so the deliverable is a TOOL SIDE EFFECT; the
+  # continuation carrying that tool result then completes with a reasoning item,
+  # no text and no tool call, because the prompt tells it that having published,
+  # it is done. The rest of the loop already models this (`AgentLoop`'s empty
+  # completion, the queue's `handle_empty_completion/1` and its side-effect
+  # ledger) — Buzz is just the first surface where it is the normal ending.
+  # Calling it a provider failure cost five duplicate posts.
+  describe "chat/3 — a completed response that renders nothing" do
+    test "a completed response whose only item is reasoning is a legitimate empty turn" do
+      sse = """
+      data: {"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_1","encrypted_content":"opaque","summary":[]}}
+
+      data: {"type":"response.completed","response":{"model":"gpt-5","usage":{"input_tokens":12500,"output_tokens":4}}}
+
+      data: [DONE]
+
+      """
+
+      assert {:ok, turn} = run_chat(sse)
+      assert turn.content == ""
+      assert turn.tool_calls == []
+
+      # A real turn, not a husk: the usage it burned rides out with it.
+      assert turn.usage.prompt_tokens == 12_500
+      assert turn.usage.completion_tokens == 4
+    end
+
+    # The incident turn itself: the empty one is the CONTINUATION, the call that
+    # carries the tool result back. An error here is what the ACP peer mapped to
+    # -32603 and what made the harness requeue and re-post.
+    test "continue/3 admits the same empty turn, so a published tool reply is not re-run" do
+      sse = """
+      data: {"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_1","encrypted_content":"opaque","summary":[]}}
+
+      data: {"type":"response.completed","response":{"model":"gpt-5","usage":{"input_tokens":900,"output_tokens":7}}}
+
+      data: [DONE]
+
+      """
+
+      assert {:ok, turn} = run_continue(sse)
+      assert turn.content == ""
+      assert turn.tool_calls == []
+    end
+
+    # Item count is the discriminator, and only a terminal event earns it. The
+    # identical item list without `response.completed` is still a cut stream.
+    test "the same lone reasoning item without a terminal event is still an error" do
+      sse = """
+      data: {"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_1","encrypted_content":"opaque","summary":[]}}
+
+      """
+
+      assert {:error, {:provider_transport_error, error}} = run_chat(sse)
+      assert error.kind == :transport_closed
+      assert error.message =~ "before any terminal event"
+    end
+  end
+
+  # This path was silent through a real incident — the daemon log held no Codex
+  # line at all for the window, and the trace's empty token map was read as
+  # evidence that nothing came back on the wire. Status, usage and item types
+  # are the three facts that separate an empty wire from a model that reasoned
+  # and then said nothing.
+  describe "chat/3 — diagnostics on the undelivered path" do
+    test "the undelivered path logs the terminal status, the usage and the item types" do
+      sse = """
+      data: {"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_1","encrypted_content":"opaque","summary":[]}}
+
+      data: {"type":"response.incomplete","response":{"status":"incomplete","usage":{"input_tokens":900,"output_tokens":64}}}
+
+      """
+
+      {result, log} = with_log(fn -> run_chat(sse) end)
+
+      assert {:error, {:provider_error, _}} = result
+      assert log =~ "incomplete"
+      assert log =~ "900"
+      assert log =~ "64"
+      assert log =~ "reasoning"
+    end
+
+    test "the error telemetry carries the usage the response reported, not an empty map" do
+      test_pid = self()
+      handler_id = "test-codex-undelivered-usage-#{System.unique_integer()}"
+
+      :telemetry.attach(
+        handler_id,
+        [:fermix, :provider, :call],
+        fn event, measurements, metadata, _config ->
+          send(test_pid, {:telemetry, event, measurements, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      sse = """
+      data: {"type":"response.completed","response":{"model":"gpt-5","usage":{"input_tokens":12500,"output_tokens":4}}}
+
+      """
+
+      assert {:error, _reason} = run_chat(sse)
+
+      assert_receive {:telemetry, [:fermix, :provider, :call], _measurements, metadata}
+      assert metadata.status == :error
+      assert metadata.tokens == %{prompt: 12_500, completion: 4}
+      assert metadata.error_code == "empty_response"
+    end
+
+    # A transport failure has no parsed body, so there is no usage to invent.
+    test "a transport failure still reports no tokens" do
+      test_pid = self()
+      handler_id = "test-codex-transport-usage-#{System.unique_integer()}"
+
+      :telemetry.attach(
+        handler_id,
+        [:fermix, :provider, :call],
+        fn event, measurements, metadata, _config ->
+          send(test_pid, {:telemetry, event, measurements, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      Req.Test.stub(__MODULE__, fn conn -> Req.Test.transport_error(conn, :closed) end)
+
+      assert {:error, _reason} =
+               Codex.chat([%{role: "user", content: "x"}], [],
+                 access_token: @jwt_with_sub,
+                 model: "gpt-5",
+                 base_url: "https://chatgpt.test/codex/responses",
+                 req_options: [plug: {Req.Test, __MODULE__}]
+               )
+
+      assert_receive {:telemetry, [:fermix, :provider, :call], _measurements, metadata}
+      assert metadata.tokens == %{}
     end
   end
 
