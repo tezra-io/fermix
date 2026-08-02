@@ -2,10 +2,18 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
   use ExUnit.Case, async: false
 
   alias Fermix.CLI.Doctor.Checks
+  alias FermixCore.Acp.Identity
+  alias FermixCore.Acp.IdentityStore
   alias FermixCore.Auth.Store
   alias FermixCore.Capabilities.Builtin
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Setup.ConfigStore
+
+  # Published NIP-19 vector (derived in nostr/key_test.exs). The nsec is here so
+  # the doctor assertions can prove key material never reaches an operator row.
+  @identity_nsec "nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5"
+  @identity_hex "7e7e9c42a91bfef19fa929e5fda1b72e0ebc1a4c1141673e2794234d86addf4e"
+  @identity_npub "npub10elfcs4fr0l0r8af98jlmgdh9c8tcxjvz9qkw038js35mp4dma8qzvjptg"
 
   # The origin `Fermix.CLI.Upgrade.Manifest` pins artifact URLs to — the exact
   # base `scripts/release/build_releases_json.sh` emits. An off-origin fixture is
@@ -664,12 +672,97 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.detail =~ "unexpected reply"
     end
 
+    # M29 §17.3 "Visibility": the identity list is data on disk, so it renders
+    # from the same row whatever the surface is doing.
+    test "lists a connected identity beside the live surface, npub only", %{home: home} do
+      Application.put_env(:fermix_channels, :acp, enabled: true)
+      File.write!(Path.join(home, "acp.sock"), "")
+      connect_identity(home)
+
+      result = Checks.acp(client: health_client(%{"process_alive" => true}))
+
+      assert result.status == :ok
+      assert result.detail =~ "1 connected"
+      assert result.detail =~ "buzz"
+      assert result.detail =~ @identity_npub
+      refute result.detail =~ @identity_nsec
+      refute result.detail =~ @identity_hex
+    end
+
+    test "renders the identity list with the surface DISABLED, and says so", %{home: home} do
+      Application.put_env(:fermix_channels, :acp, enabled: false)
+      connect_identity(home)
+      client = fn _method -> flunk("the daemon must not be queried when acp is disabled") end
+
+      result = Checks.acp(client: client)
+
+      assert result.detail =~ "disabled"
+      assert result.detail =~ @identity_npub
+      # The one place the consent-by-configuration story could leak: an operator
+      # who turns the surface off must be told the record is still there.
+      assert result.detail =~ "deletes nothing"
+      assert result.detail =~ "fermix acp forget"
+      refute result.detail =~ @identity_nsec
+    end
+
+    test "lists identities with the daemon DOWN — they are disk state, not liveness", %{
+      home: home
+    } do
+      Application.put_env(:fermix_channels, :acp, enabled: true)
+      connect_identity(home)
+
+      result = Checks.acp(client: fn "health" -> {:error, :not_running} end)
+
+      assert result.status == :warn
+      assert result.detail =~ "daemon not running"
+      assert result.detail =~ @identity_npub
+      refute result.detail =~ @identity_nsec
+    end
+
+    test "a store with no records leaves the row exactly as it was" do
+      Application.put_env(:fermix_channels, :acp, enabled: false)
+
+      result = Checks.acp(client: fn _method -> flunk("no daemon call") end)
+
+      assert result.detail == "disabled"
+    end
+
+    test "a record the store refuses fails the row with its own fix line", %{home: home} do
+      Application.put_env(:fermix_channels, :acp, enabled: true)
+      File.write!(Path.join(home, "acp.sock"), "")
+      path = connect_identity(home)
+      File.chmod!(path, 0o644)
+
+      result = Checks.acp(client: health_client(%{"process_alive" => true}))
+
+      assert result.status == :fail
+      assert result.detail =~ path
+      assert result.detail =~ "chmod 600"
+      refute result.detail =~ @identity_nsec
+    end
+
     defp health_client(acp_channel) do
       channel = Map.merge(%{"name" => "acp", "enabled" => true}, acp_channel)
 
       fn "health" ->
         {:ok, %{"status" => "ok", "health" => %{"channels" => [channel]}}}
       end
+    end
+
+    # Persist one identity exactly as a client hello does, and hand back its
+    # record path.
+    defp connect_identity(home) do
+      dir = Path.join(home, "acp_identities")
+
+      identity =
+        Identity.new(%{
+          "BUZZ_PRIVATE_KEY" => @identity_nsec,
+          "BUZZ_RELAY_URL" => "wss://relay.example.test",
+          "PATH" => "/opt/buzz/bin:/usr/bin"
+        })
+
+      {:ok, :created} = IdentityStore.upsert(identity, dir)
+      Path.join(dir, "#{@identity_hex}.json")
     end
   end
 

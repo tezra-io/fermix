@@ -158,8 +158,8 @@ defmodule FermixCore.Tools.CodexRun do
 
   @doc """
   Advertise only when the harness is enabled, the owner has approved coding agents
-  on this machine, the turn's channel can carry a coding run at all
-  (`HarnessSupport.advertisable_channel?/1`), this vendor is the selected one (or
+  on this machine, a run launched on this turn could report its outcome back
+  (`HarnessSupport.harness_deliverable?/1`), this vendor is the selected one (or
   the sole installed option, or no default is set), and the authorization gate
   would pass. `approved` joins
   the gate per design §23.4 — an unusable harness advertises nothing and Fermix
@@ -169,7 +169,7 @@ defmodule FermixCore.Tools.CodexRun do
   @spec advertise?(map()) :: boolean()
   def advertise?(context) when is_map(context) do
     Config.enabled?() and Config.approved?() and
-      Support.advertisable_channel?(context) and
+      Support.harness_deliverable?(context) and
       Authorization.authorize(name(), context) == :ok and
       Vendors.advertise_vendor?(@vendor)
   end

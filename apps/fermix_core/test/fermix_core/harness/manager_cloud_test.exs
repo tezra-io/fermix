@@ -289,6 +289,26 @@ defmodule FermixCore.Harness.ManagerCloudTest do
       manager = start_manager(ctx)
       assert {:error, :not_found} = Manager.stop_tracking("hr_000000000000", manager)
     end
+
+    # M29 §17.6(d) branch 3: a client-owned origin has no framework wire, so the
+    # abandoned run dead-letters by its OWN name rather than being handed to a text
+    # path that could only report `{:unsupported_delivery_platform, "acp"}`.
+    test "a client-owned origin dead-letters as :tracking_stopped instead of delivering", ctx do
+      manager = start_manager(ctx, cloud_poll_ms: 10_000)
+      stub = cloud_stub(ctx, submit_output: submit_ok(), statuses: [status(:pending)])
+
+      request = Map.put(cloud_request(stub), :snapshot, client_snapshot())
+      assert {:ok, run_id} = Manager.start_cloud_run(request, manager)
+      assert {:ok, @task_url} = Manager.stop_tracking(run_id, manager)
+
+      assert row = await_status(ctx.repo, run_id, "blocked")
+      assert row.reason == "tracking_stopped"
+
+      assert dead = await_delivery_status(ctx.repo, run_id, "dead_letter")
+      assert dead.last_delivery_error =~ "tracking_stopped"
+      refute dead.last_delivery_error =~ "unsupported_delivery_platform"
+      refute_receive {:delivered, _destination, _text}, 200
+    end
   end
 
   describe "cancel on a cloud run" do
@@ -421,7 +441,21 @@ defmodule FermixCore.Harness.ManagerCloudTest do
       destination: "123",
       thread: nil,
       send_opts: nil,
-      parent_job_id: nil
+      parent_job_id: nil,
+      client_origin: nil
+    }
+  end
+
+  defp client_snapshot do
+    %{
+      chat_snapshot()
+      | platform: "acp",
+        destination: "sess-1",
+        client_origin: %{
+          "identity" => "7e7e9c42a91bfef19fa929e5fda1b72e0ebc1a4c1141673e2794234d86addf4e",
+          "cwd" => "/repo",
+          "reply_context" => "[Context] channel=abc"
+        }
     }
   end
 
@@ -502,6 +536,15 @@ defmodule FermixCore.Harness.ManagerCloudTest do
         _other -> :cont
       end
     end) || flunk("cloud run #{run_id} did not reach status #{status}")
+  end
+
+  defp await_delivery_status(repo, run_id, status) do
+    poll(fn ->
+      case Ledger.get(run_id, server: repo) do
+        {:ok, %{delivery_status: ^status} = row} -> {:halt, row}
+        _other -> :cont
+      end
+    end) || flunk("cloud run #{run_id} never reached delivery status #{status}")
   end
 
   defp poll(fun) do

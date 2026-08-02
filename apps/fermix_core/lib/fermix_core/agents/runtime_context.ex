@@ -106,14 +106,14 @@ defmodule FermixCore.Agents.RuntimeContext do
     end
   end
 
-  # The profile a client-owned channel runs on (MILESTONE_29_ACP_AGENT_SURFACE
-  # §4, "Detached work"): an ACP session's conversation ends with the client, so
-  # a coding run has nowhere to report back and every harness tool self-hides
-  # there. The M28 lesson is that the PROSE must move with the wire — steering
-  # repository work to `codex_run` while no harness tool is advertised sends the
-  # model at a tool it cannot call — so this variant excludes the whole `:harness`
-  # category from the ONE list the profile is built from, dropping the catalog
-  # section and the advertised schemas together.
+  # The profile a turn runs on when a coding run launched there could not report
+  # its outcome back (MILESTONE_29_ACP_AGENT_SURFACE §17.6): on a client-owned
+  # channel that is an ACP session with no posting-capable identity, so every
+  # harness tool self-hides. The M28 lesson is that the PROSE must move with the
+  # wire — steering repository work to `codex_run` while no harness tool is
+  # advertised sends the model at a tool it cannot call — so this variant
+  # excludes the whole `:harness` category from the ONE list the profile is built
+  # from, dropping the catalog section and the advertised schemas together.
   #
   # Nothing to exclude ⇒ the base profile IS the variant, so a host without the
   # harness pays neither the second build nor a second copy of the prompt.
@@ -172,10 +172,11 @@ defmodule FermixCore.Agents.RuntimeContext do
   @doc """
   Return the cached profile for `trust`.
 
-  `harness_tools?: false` selects the client-owned-channel variant (see
-  `harness_free/3`) — the same trust surface with the `:harness` category
-  excluded from prompt and wire alike. Defaults to the base profile, so every
-  ordinary channel is unchanged.
+  `harness_tools?: false` selects the harness-free variant (see `harness_free/3`)
+  — the same trust surface with the `:harness` category excluded from prompt and
+  wire alike. The caller decides with `Tools.HarnessSupport.harness_deliverable?/1`,
+  which every harness tool's `advertise?/1` also asks. Defaults to the base
+  profile, so every framework-delivered channel is unchanged.
   """
   @spec profile_for(t(), :operator | :guest, GenServer.server(), keyword()) :: profile()
   def profile_for(%__MODULE__{} = ctx, trust, _registry, opts)

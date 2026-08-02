@@ -23,6 +23,7 @@ defmodule FermixCore.Memory.Repo do
   @trust_check_migration_version 11
   @harness_runs_migration_version 12
   @harness_continuation_migration_version 13
+  @harness_client_origin_migration_version 14
   @sqlite_open_intent :readwritecreate
 
   @base_schema_sql """
@@ -468,6 +469,17 @@ defmodule FermixCore.Memory.Repo do
   # freshly created database share one column order (`SELECT *` is positional).
   @harness_continuation_schema_sql """
   ALTER TABLE harness_runs ADD COLUMN continuation_depth INTEGER NOT NULL DEFAULT 0;
+  """
+
+  # The launching client's origin snapshot for a client-owned surface
+  # (MILESTONE_29_ACP_AGENT_SURFACE §17.4): `{identity, cwd, reply_context}`,
+  # frozen at launch so a continuation minutes later rebuilds the turn env from
+  # the durable identity record instead of a session that no longer exists.
+  # Appended by ALTER for the same reason `continuation_depth` was: a migrated and
+  # a freshly created database must share one column order (`SELECT *` is
+  # positional), and these are exactly the rows a continuation reads.
+  @harness_client_origin_schema_sql """
+  ALTER TABLE harness_runs ADD COLUMN client_origin_json TEXT;
   """
 
   # Active statuses hold workspace locks and count against `max_active`. The
@@ -1563,7 +1575,8 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_taxonomy_migration(conn, versions),
          :ok <- apply_trust_check_migration(conn, versions),
          :ok <- apply_harness_runs_migration(conn, versions),
-         :ok <- apply_harness_continuation_migration(conn, versions) do
+         :ok <- apply_harness_continuation_migration(conn, versions),
+         :ok <- apply_harness_client_origin_migration(conn, versions) do
       :ok
     end
   end
@@ -1803,6 +1816,22 @@ defmodule FermixCore.Memory.Repo do
         BEGIN;
         #{@harness_continuation_schema_sql}
         INSERT INTO schema_migrations(version) VALUES (#{@harness_continuation_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  defp apply_harness_client_origin_migration(conn, versions) do
+    if Enum.member?(versions, @harness_client_origin_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{@harness_client_origin_schema_sql}
+        INSERT INTO schema_migrations(version) VALUES (#{@harness_client_origin_migration_version});
         COMMIT;
         """
       )
@@ -3030,9 +3059,10 @@ defmodule FermixCore.Memory.Repo do
                last_event_at,
                completed_at,
                delivered_at,
-               continuation_depth
+               continuation_depth,
+               client_origin_json
              )
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              """,
              harness_run_insert_params(run)
            ),
@@ -3485,6 +3515,7 @@ defmodule FermixCore.Memory.Repo do
       origin_kind: fetch_string!(attrs, :origin_kind),
       origin_session_id: fetch_string!(attrs, :origin_session_id),
       continuation_depth: non_negative_integer_with_default!(attrs, :continuation_depth, 0),
+      client_origin: Map.get(attrs, :client_origin),
       parent_job_id: optional_string!(attrs, :parent_job_id),
       delivery_mode: fetch_string!(attrs, :delivery_mode),
       platform: optional_string!(attrs, :platform),
@@ -3783,7 +3814,8 @@ defmodule FermixCore.Memory.Repo do
       run.last_event_at,
       run.completed_at,
       run.delivered_at,
-      run.continuation_depth
+      run.continuation_depth,
+      encode_metadata(run.client_origin)
     ]
   end
 
@@ -4613,7 +4645,8 @@ defmodule FermixCore.Memory.Repo do
          last_event_at,
          completed_at,
          delivered_at,
-         continuation_depth
+         continuation_depth,
+         client_origin_json
        ]) do
     %{
       id: id,
@@ -4635,6 +4668,7 @@ defmodule FermixCore.Memory.Repo do
       origin_kind: origin_kind,
       origin_session_id: origin_session_id,
       continuation_depth: continuation_depth,
+      client_origin: decode_metadata(client_origin_json),
       parent_job_id: parent_job_id,
       delivery_mode: delivery_mode,
       platform: platform,

@@ -40,7 +40,7 @@ defmodule FermixCore.Memory.RepoTest do
   test "opens sqlite, enables wal mode, and runs the base migration", %{repo: repo} do
     assert {:ok, "wal"} = Repo.journal_mode(server: repo)
 
-    assert {:ok, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]} =
+    assert {:ok, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]} =
              Repo.migration_versions(server: repo)
   end
 
@@ -55,12 +55,12 @@ defmodule FermixCore.Memory.RepoTest do
   test "rerunning migrations is idempotent", %{repo: repo} do
     assert :ok = Repo.migrate(server: repo)
 
-    assert {:ok, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]} =
+    assert {:ok, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]} =
              Repo.migration_versions(server: repo)
 
     assert :ok = Repo.migrate(server: repo)
 
-    assert {:ok, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]} =
+    assert {:ok, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]} =
              Repo.migration_versions(server: repo)
   end
 
@@ -261,6 +261,49 @@ defmodule FermixCore.Memory.RepoTest do
     after
       Sqlite3.close(conn)
     end
+  end
+
+  # M29 §17.4: `client_origin_json` is APPENDED by its own ALTER, never inserted
+  # into the CREATE TABLE body. `harness_runs` is read positionally (`SELECT *`),
+  # so a mid-body column would give a freshly created database a different column
+  # order than a migrated one — a silent positional-read corruption on exactly the
+  # rows a continuation depends on.
+  test "client-origin migration appends its column after continuation_depth", %{
+    db_path: db_path,
+    repo: repo
+  } do
+    assert :ok = Repo.migrate(server: repo)
+
+    assert {:ok, conn} = Sqlite3.open(db_path, mode: :readwrite)
+
+    try do
+      assert {:ok, fresh} = sqlite_column_names(conn, "harness_runs")
+      assert Enum.take(fresh, -2) == ["continuation_depth", "client_origin_json"]
+    after
+      Sqlite3.close(conn)
+    end
+  end
+
+  # The property the ALTER exists for, asserted as a comparison rather than by
+  # inspection: a database that reached this column by migrating an older one must
+  # end up with byte-identical column ORDER to a database created today.
+  test "a migrated harness_runs has the same column order as a fresh one", %{
+    db_path: db_path,
+    repo: repo
+  } do
+    assert :ok = Repo.migrate(server: repo)
+    assert {:ok, fresh} = with_raw_conn(db_path, &sqlite_column_names(&1, "harness_runs"))
+
+    # Rewind to the pre-v14 shape and re-migrate: the column is re-added by the
+    # same ALTER an existing operator database takes.
+    assert :ok = with_raw_conn(db_path, &drop_client_origin_column/1)
+    drop_migration_version(db_path, 14)
+    assert {:ok, rewound} = with_raw_conn(db_path, &sqlite_column_names(&1, "harness_runs"))
+    refute "client_origin_json" in rewound
+
+    assert :ok = Repo.migrate(server: repo)
+    assert {:ok, migrated} = with_raw_conn(db_path, &sqlite_column_names(&1, "harness_runs"))
+    assert migrated == fresh
   end
 
   test "trust-check migration rewrites post-v7 core rows to operator", %{
@@ -823,6 +866,21 @@ defmodule FermixCore.Memory.RepoTest do
       Repo.upsert_resource(Map.merge(base, %{current_revision: 2, resource_path: legacy_path}),
         server: repo
       )
+  end
+
+  defp with_raw_conn(db_path, fun) do
+    {:ok, conn} = Sqlite3.open(db_path, mode: :readwrite)
+    :ok = Sqlite3.execute(conn, "PRAGMA busy_timeout = 2000;")
+
+    try do
+      fun.(conn)
+    after
+      Sqlite3.close(conn)
+    end
+  end
+
+  defp drop_client_origin_column(conn) do
+    Sqlite3.execute(conn, "ALTER TABLE harness_runs DROP COLUMN client_origin_json;")
   end
 
   defp drop_migration_version(db_path, version) do

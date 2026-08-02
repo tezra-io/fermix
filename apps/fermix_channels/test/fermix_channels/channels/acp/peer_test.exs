@@ -12,13 +12,24 @@ defmodule FermixChannels.Channels.Acp.PeerTest do
 
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog, only: [with_log: 1]
+
   alias FermixChannels.Channels.Acp
   alias FermixChannels.Channels.Acp.Wire
   alias FermixChannels.Gateway.Message
   alias FermixChannels.Gateway.Queue
+  alias FermixCore.Acp.Identity
+  alias FermixCore.Acp.IdentityStore
   alias FermixTestSupport.SafeRm
 
   @cwd "/tmp/fermix-acp-session"
+
+  # Published NIP-19 vectors (nostr/key_test.exs derives them) — test vectors,
+  # never live keys.
+  @nsec "nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5"
+  @public_hex "7e7e9c42a91bfef19fa929e5fda1b72e0ebc1a4c1141673e2794234d86addf4e"
+  @npub "npub10elfcs4fr0l0r8af98jlmgdh9c8tcxjvz9qkw038js35mp4dma8qzvjptg"
+  @other_nsec "nsec1n5kjpk2ulwe25uj4thrr8stmy0xe9hk7f0suw0sdeff34yfv2xkq2etz66"
 
   # Stands in for `MainAgent.checkout_turn_state/2`; the turn state only has to
   # carry the pid the scripted runner reports to.
@@ -66,6 +77,9 @@ defmodule FermixChannels.Channels.Acp.PeerTest do
 
         {:fail, reason} ->
           {:error, reason}
+
+        :crash ->
+          raise "scripted turn crash"
       after
         20_000 -> {:ok, "scripted runner timed out", 0}
       end
@@ -81,7 +95,18 @@ defmodule FermixChannels.Channels.Acp.PeerTest do
     socket_path =
       Path.join(System.tmp_dir!(), "fermix-acp-#{System.unique_integer([:positive])}.sock")
 
-    on_exit(fn -> SafeRm.rm(socket_path) end)
+    # A scratch FERMIX_HOME for every test in this module: a hello now writes a
+    # durable identity record, and the host's own ~/.fermix must never gain one
+    # because a test connected.
+    previous_home = System.get_env("FERMIX_HOME")
+    home = SafeRm.make_tmp_dir!("acp-peer-home")
+    System.put_env("FERMIX_HOME", home)
+
+    on_exit(fn ->
+      SafeRm.rm(socket_path)
+      restore_home(previous_home)
+      SafeRm.rm_rf!(home)
+    end)
 
     task_supervisor = start_supervised!({Task.Supervisor, []})
     agent = start_supervised!({StubAgent, test_pid: self()}, id: :stub_agent)
@@ -103,7 +128,7 @@ defmodule FermixChannels.Channels.Acp.PeerTest do
       id: :acp_supervisor
     )
 
-    {:ok, socket_path: socket_path, queue: queue}
+    {:ok, socket_path: socket_path, queue: queue, identity_dir: IdentityStore.dir()}
   end
 
   describe "bridge handshake (§6.2)" do
@@ -627,32 +652,284 @@ defmodule FermixChannels.Channels.Acp.PeerTest do
     end
   end
 
-  describe "the session env overlay (§8.3)" do
-    test "only allowlisted keys reach the turn's message", ctx do
+  # A prompt is answered with a JSON-RPC error only while re-running it is safe.
+  # An error invites the client to retry the whole turn (buzz-acp requeues a
+  # batch up to ten times), so a turn that has ALREADY acted on the world is
+  # reported terminal instead. The two tests above are the other half of this
+  # asymmetry — a failure with NO effect keeps its -32603 / -32000 mapping.
+  describe "the effect gate" do
+    test "a failure after a SUCCESSFUL effectful tool answers end_turn, not an error", ctx do
+      client = initialized(ctx)
+      session_id = new_session(client, 2)
+      prompt(client, 3, session_id, [%{"type" => "text", "text" => "post the reply"}])
+      assert_receive {:turn_started, _msg, runner}, 5_000
+
+      {{frames, response}, log} =
+        with_log(fn ->
+          activity(runner, {:tool_start, "shell"})
+          activity(runner, {:tool_finish, "shell", %{status: :ok}})
+          fail(runner, {:provider_error, :transport_closed})
+          recv_response(client, 3)
+        end)
+
+      assert response["result"] == %{"stopReason" => "end_turn"}
+      refute Map.has_key?(response, "error")
+      assert Enum.all?(frames, &(not Map.has_key?(&1, "error")))
+      # Exactly one terminal frame: nothing follows the end_turn.
+      assert {:error, :timeout} = :gen_tcp.recv(client, 0, 300)
+
+      # An end_turn must never hide the failure from the daemon log.
+      assert log =~ "transport_closed"
+      assert log =~ "effect"
+    end
+
+    test "a failure after a READ-ONLY tool still answers -32603 — the rule is 'acted'", ctx do
+      client = initialized(ctx)
+      session_id = new_session(client, 2)
+      prompt(client, 3, session_id, [%{"type" => "text", "text" => "read the log"}])
+      assert_receive {:turn_started, _msg, runner}, 5_000
+
+      {{frames, response}, log} =
+        with_log(fn ->
+          activity(runner, {:tool_start, "file_read"})
+          activity(runner, {:tool_finish, "file_read", %{status: :ok}})
+          fail(runner, {:provider_error, :transport_closed})
+          recv_response(client, 3)
+        end)
+
+      # Self-verifying: the card the client saw really was a read.
+      [call] = Enum.filter(frames, &(update_kind(&1) == "tool_call"))
+      assert update_payload(call)["kind"] == "read"
+
+      assert response["error"]["code"] == -32_603
+      assert log =~ "transport_closed"
+    end
+
+    test "a failure after a FAILED effectful tool answers -32603 — it performed nothing", ctx do
+      client = initialized(ctx)
+      session_id = new_session(client, 2)
+      prompt(client, 3, session_id, [%{"type" => "text", "text" => "post the reply"}])
+      assert_receive {:turn_started, _msg, runner}, 5_000
+
+      {{_frames, response}, log} =
+        with_log(fn ->
+          activity(runner, {:tool_start, "shell"})
+          activity(runner, {:tool_finish, "shell", %{status: :error}})
+          fail(runner, {:provider_error, :transport_closed})
+          recv_response(client, 3)
+        end)
+
+      assert response["error"]["code"] == -32_603
+      assert log =~ "transport_closed"
+    end
+
+    test "a CRASHED turn that already acted answers end_turn", ctx do
+      client = initialized(ctx)
+      session_id = new_session(client, 2)
+      prompt(client, 3, session_id, [%{"type" => "text", "text" => "post the reply"}])
+      assert_receive {:turn_started, _msg, runner}, 5_000
+
+      {{_frames, response}, log} =
+        with_log(fn ->
+          activity(runner, {:tool_start, "shell"})
+          activity(runner, {:tool_finish, "shell", %{status: :ok}})
+          send(runner, :crash)
+          recv_response(client, 3)
+        end)
+
+      assert response["result"] == %{"stopReason" => "end_turn"}
+      assert log =~ "crashed"
+      assert log =~ "effect"
+    end
+
+    test "an UNREGISTERED tool counts as an effect — an unknown capability fails closed", ctx do
+      client = initialized(ctx)
+      session_id = new_session(client, 2)
+      prompt(client, 3, session_id, [%{"type" => "text", "text" => "do the thing"}])
+      assert_receive {:turn_started, _msg, runner}, 5_000
+
+      {{frames, response}, _log} =
+        with_log(fn ->
+          activity(runner, {:tool_start, "not_a_registered_tool"})
+          activity(runner, {:tool_finish, "not_a_registered_tool", %{status: :ok}})
+          fail(runner, {:provider_error, :transport_closed})
+          recv_response(client, 3)
+        end)
+
+      [call] = Enum.filter(frames, &(update_kind(&1) == "tool_call"))
+      assert update_payload(call)["kind"] == "other"
+      assert response["result"] == %{"stopReason" => "end_turn"}
+    end
+
+    test "the ledger is per turn: a later clean turn still errors on its own failure", ctx do
+      client = initialized(ctx)
+      session_id = new_session(client, 2)
+
+      prompt(client, 3, session_id, [%{"type" => "text", "text" => "post the reply"}])
+      assert_receive {:turn_started, _msg, first}, 5_000
+
+      with_log(fn ->
+        activity(first, {:tool_start, "shell"})
+        activity(first, {:tool_finish, "shell", %{status: :ok}})
+        fail(first, {:provider_error, :transport_closed})
+        assert {_frames, %{"result" => %{"stopReason" => "end_turn"}}} = recv_response(client, 3)
+      end)
+
+      prompt(client, 4, session_id, [%{"type" => "text", "text" => "again"}])
+      assert_receive {:turn_started, _msg, second}, 5_000
+
+      with_log(fn ->
+        fail(second, {:provider_error, :transport_closed})
+        assert {_frames, %{"error" => %{"code" => -32_603}}} = recv_response(client, 4)
+      end)
+    end
+  end
+
+  # §17: the client's presented credentials are a CONNECTED PROVIDER, not session
+  # state. Hello persists them; every turn resolves them from the store at
+  # message-build time, so one source answers a live turn and a continuation
+  # alike (§17.1). The two halves of a sanitizer test are both kept (the
+  # 2026-07-26 lesson): what the env must NOT carry, and that what it does carry
+  # is sufficient to post.
+  describe "client identity (§17)" do
+    test "a valid nsec persists a record and the turn carries the identity keys", ctx do
+      client = connect(ctx) |> handshake(buzz_env()) |> initialize()
+
+      assert File.exists?(Path.join(ctx.identity_dir, "#{@public_hex}.json"))
+
+      env = session_env_of(client, 10)
+
+      assert env == %{
+               "BUZZ_PRIVATE_KEY" => @nsec,
+               "BUZZ_RELAY_URL" => "wss://relay.test",
+               "PATH" => "/fake/bin:/usr/bin"
+             }
+
+      # The fidelity half: this env can actually sign and post, which is what
+      # re-opens the harness family on this surface (§17.6(a)).
+      assert Identity.posting_capable?(env)
+    end
+
+    test "a malformed nsec persists nothing and strips both signing keys", ctx do
+      client =
+        connect(ctx)
+        |> handshake(buzz_env(%{"BUZZ_PRIVATE_KEY" => "nsec1thisisnotarealkey"}))
+        |> initialize()
+
+      assert records(ctx) == []
+
+      env = session_env_of(client, 10)
+
+      refute Map.has_key?(env, "BUZZ_PRIVATE_KEY")
+      refute Map.has_key?(env, "NOSTR_PRIVATE_KEY")
+      refute Identity.posting_capable?(env)
+      # The rest of the ambient allowlist survives, so ordinary work still runs.
+      assert env["PATH"] == "/fake/bin:/usr/bin"
+      assert env["BUZZ_RELAY_URL"] == "wss://relay.test"
+    end
+
+    test "a hello with no Buzz keys persists nothing and keeps today's ambient env", ctx do
       client =
         connect(ctx)
         |> handshake(%{
-          "BUZZ_PRIVATE_KEY" => "nsec1fixture",
-          "BUZZ_RELAY_URL" => "wss://relay.test",
           "PATH" => "/fake/bin:/usr/bin",
+          "GIT_TERMINAL_PROMPT" => "0",
           "OPENAI_API_KEY" => "sk-must-not-travel",
           "HOME" => "/Users/operator"
         })
         |> initialize()
 
-      session_id = new_session(client, 2)
-      prompt(client, 3, session_id, [%{"type" => "text", "text" => "post it"}])
+      assert records(ctx) == []
 
-      assert_receive {:turn_started, msg, runner}, 5_000
-
-      assert msg.session_env == %{
-               "BUZZ_PRIVATE_KEY" => "nsec1fixture",
-               "BUZZ_RELAY_URL" => "wss://relay.test",
-               "PATH" => "/fake/bin:/usr/bin"
+      assert session_env_of(client, 10) == %{
+               "PATH" => "/fake/bin:/usr/bin",
+               "GIT_TERMINAL_PROMPT" => "0"
              }
+    end
 
-      finish(runner, "posted")
-      assert {_frames, %{"result" => _result}} = recv_response(client, 3)
+    # §17.2: the Peer binds an id only after the store said :ok. A key whose
+    # record is not on disk would advertise the harness and then have nothing for
+    # the continuation to read — the exact outcome §16.1 rejected.
+    test "a store write failure downgrades the connection before its first turn", ctx do
+      File.write!(ctx.identity_dir, "not a directory")
+
+      {client, log} =
+        with_log(fn -> connect(ctx) |> handshake(buzz_env()) |> initialize() end)
+
+      assert log =~ "Acp.Peer"
+      assert log =~ "could not persist the identity"
+      assert log =~ @npub
+
+      env = session_env_of(client, 10)
+
+      refute Map.has_key?(env, "BUZZ_PRIVATE_KEY")
+      refute Identity.posting_capable?(env)
+      assert env["PATH"] == "/fake/bin:/usr/bin"
+    end
+
+    # §17.3: the connection TRANSITIONS to identity-less — it does not re-read,
+    # so the state cannot flap back when the record returns.
+    test "a record deleted mid-connection drops the connection to identity-less for good", ctx do
+      client = connect(ctx) |> handshake(buzz_env()) |> initialize()
+      assert Identity.posting_capable?(session_env_of(client, 10))
+
+      SafeRm.rm!(record_path(ctx))
+
+      {env, log} = with_log(fn -> session_env_of(client, 20) end)
+
+      refute Identity.posting_capable?(env)
+      assert log =~ @npub
+      assert log =~ record_path(ctx)
+
+      # The record comes back; the connection does not.
+      assert {:ok, :created} = IdentityStore.upsert(Identity.new(buzz_env()))
+      assert File.exists?(record_path(ctx))
+
+      {later, later_log} = with_log(fn -> session_env_of(client, 30) end)
+
+      refute Identity.posting_capable?(later)
+      refute later_log =~ @npub
+    end
+
+    # Three kinds, three messages, never collapsed (§17.3, the M28 lesson).
+    test "a missing, a quarantined and a refused record are named apart", ctx do
+      missing = drop_reason(ctx, fn path -> SafeRm.rm!(path) end)
+      quarantined = drop_reason(ctx, fn path -> File.write!(path, "{not json") end)
+      refused = drop_reason(ctx, fn path -> File.chmod!(path, 0o644) end)
+
+      assert length(Enum.uniq([missing, quarantined, refused])) == 3
+      assert missing =~ "no record"
+      assert quarantined =~ "quarantined"
+      assert refused =~ "chmod 600"
+    end
+
+    # The one-source property (§17.1), asserted directly: a rotation another
+    # connection persisted is visible to THIS connection's next turn, which can
+    # only be true if the turn reads the store rather than connection state.
+    test "a rotation persisted by a second connection reaches the first's next turn", ctx do
+      first = connect(ctx) |> handshake(buzz_env()) |> initialize()
+      assert session_env_of(first, 10)["BUZZ_RELAY_URL"] == "wss://relay.test"
+
+      second =
+        connect(ctx)
+        |> handshake(buzz_env(%{"BUZZ_RELAY_URL" => "wss://moved.test"}))
+        |> initialize()
+
+      assert session_env_of(second, 10)["BUZZ_RELAY_URL"] == "wss://moved.test"
+      assert session_env_of(first, 20)["BUZZ_RELAY_URL"] == "wss://moved.test"
+    end
+
+    test "two connections with different identities never see each other's env", ctx do
+      first = connect(ctx) |> handshake(buzz_env()) |> initialize()
+
+      second =
+        connect(ctx)
+        |> handshake(buzz_env(%{"BUZZ_PRIVATE_KEY" => @other_nsec}))
+        |> initialize()
+
+      assert session_env_of(first, 10)["BUZZ_PRIVATE_KEY"] == @nsec
+      assert session_env_of(second, 10)["BUZZ_PRIVATE_KEY"] == @other_nsec
+      assert length(records(ctx)) == 2
     end
   end
 
@@ -685,6 +962,61 @@ defmodule FermixChannels.Channels.Acp.PeerTest do
     %{"fermix_bridge_ack" => %{"status" => "ok"}} = recv_frame(client)
     client
   end
+
+  # A Buzz bridge's hello: the allowlisted credentials plus the operator's own
+  # world, which must never survive the filter.
+  defp buzz_env(overrides \\ %{}) do
+    Map.merge(
+      %{
+        "BUZZ_PRIVATE_KEY" => @nsec,
+        "BUZZ_RELAY_URL" => "wss://relay.test",
+        "PATH" => "/fake/bin:/usr/bin",
+        "OPENAI_API_KEY" => "sk-must-not-travel",
+        "HOME" => "/Users/operator"
+      },
+      overrides
+    )
+  end
+
+  # Drive one whole turn on `client` and hand back the env it carried. Each call
+  # opens its own session, so `id` only has to be unique within the connection.
+  defp session_env_of(client, id) do
+    session_id = new_session(client, id)
+    prompt(client, id + 1, session_id, [%{"type" => "text", "text" => "post it"}])
+
+    assert_receive {:turn_started, msg, runner}, 5_000
+    finish(runner, "posted")
+    assert {_frames, %{"result" => _result}} = recv_response(client, id + 1)
+
+    msg.session_env
+  end
+
+  # Break a bound connection's record with `damage`, then return the warning line
+  # its next turn logged — the message an operator has to read.
+  defp drop_reason(ctx, damage) do
+    client = connect(ctx) |> handshake(buzz_env()) |> initialize()
+    assert Identity.posting_capable?(session_env_of(client, 10))
+
+    damage.(record_path(ctx))
+    {_env, log} = with_log(fn -> session_env_of(client, 20) end)
+
+    log
+    |> String.split("\n")
+    |> Enum.filter(&(&1 =~ "Acp.Peer"))
+    |> Enum.join(" ")
+  end
+
+  defp record_path(ctx), do: Path.join(ctx.identity_dir, "#{@public_hex}.json")
+
+  defp records(ctx) do
+    case File.ls(ctx.identity_dir) do
+      {:ok, entries} -> Enum.filter(entries, &String.ends_with?(&1, ".json"))
+      {:error, :enoent} -> []
+    end
+  end
+
+  defp restore_home(nil), do: System.delete_env("FERMIX_HOME")
+  defp restore_home(value), do: System.put_env("FERMIX_HOME", value)
 
   defp initialize(client) do
     %{"result" => %{"protocolVersion" => 1}} =

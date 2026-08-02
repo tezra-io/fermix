@@ -14,12 +14,14 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias Fermix.CLI.Service
   alias Fermix.CLI.Upgrade.Manifest
   alias Fermix.CLI.VersionSkew
+  alias FermixCore.Acp.IdentityStore
   alias FermixCore.Auth.Store, as: AuthStore
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Harness.Artifacts, as: HarnessArtifacts
   alias FermixCore.Harness.Config, as: HarnessConfig
   alias FermixCore.Harness.Ledger, as: HarnessLedger
   alias FermixCore.Harness.Vendors, as: HarnessVendors
+  alias FermixCore.Nostr.Key, as: NostrKey
   alias FermixCore.Prompt.TemplateRenderer
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.RoutingOverrides
@@ -470,8 +472,9 @@ defmodule Fermix.CLI.Doctor.Checks do
   end
 
   @doc """
-  The ACP agent surface (M29 §9 item 5): whether it is enabled, where its socket
-  is, and whether the listener is actually up.
+  The ACP agent surface (M29 §9 item 5, §17.3): whether it is enabled, where its
+  socket is, whether the listener is actually up, and which client identities the
+  daemon is holding.
 
   Liveness is answered BY THE DAEMON over the control socket — `fermix doctor`
   runs in a tree-less VM where `Channels.Acp.Endpoint` never exists, so probing
@@ -479,9 +482,21 @@ defmodule Fermix.CLI.Doctor.Checks do
   resolved here because it is a pure `FERMIX_HOME` join (`Fermix.CLI.AcpCommand`
   owns it for the bridge verb), and its presence is a local file check.
   `:client` is injectable so each state is unit-testable.
+
+  The identity list is read straight off disk, and **ahead of the `enabled`
+  short-circuit**: identities are data, not a live surface. Turning ACP off is
+  the most natural "disconnect" gesture an operator will reach for, and if the
+  row went dark there, durable client credentials would sit under `FERMIX_HOME`
+  with nothing showing them — the one place the consent-by-configuration story
+  could leak. Disabling deletes nothing; `fermix acp forget` is the only
+  deletion, and the row says so. Only the npub is ever printed.
   """
   @spec acp(keyword()) :: result()
   def acp(opts \\ []) when is_list(opts) do
+    with_identities(acp_surface(opts), IdentityStore.list())
+  end
+
+  defp acp_surface(opts) do
     if Keyword.get(acp_config(), :enabled, true) == true do
       acp_enabled_result(Keyword.get(opts, :client, &Client.request/1))
     else
@@ -490,6 +505,61 @@ defmodule Fermix.CLI.Doctor.Checks do
   end
 
   defp acp_config, do: Application.get_env(:fermix_channels, :acp, [])
+
+  # A host that never connected a client reads exactly as it did before this
+  # existed: no records, no extra words.
+  defp with_identities(result, []), do: result
+
+  defp with_identities(result, records) do
+    {stored, failures} = Enum.split_with(records, &match?({:ok, _identity}, &1))
+
+    %{
+      result
+      | detail: identity_detail(result.detail, stored, failures),
+        status: escalate_identity_status(result.status, failures)
+    }
+  end
+
+  defp identity_detail(detail, stored, failures) do
+    [detail, connected_identities(stored), unusable_identities(failures)]
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.join("; ")
+  end
+
+  defp connected_identities([]), do: ""
+
+  defp connected_identities(stored) do
+    "#{length(stored)} connected (#{Enum.map_join(stored, ", ", &identity_summary/1)}) — " <>
+      "disabling ACP deletes nothing, `fermix acp forget <npub>` (or `--all`) is the only deletion"
+  end
+
+  defp identity_summary({:ok, identity}) do
+    "#{identity.kind} #{identity_npub(identity.id)}, " <>
+      "last seen #{DateTime.to_iso8601(identity.last_seen)}"
+  end
+
+  # Every listed record is named by a validated public key — the store refuses
+  # any other filename before it reaches this row — so the display form always
+  # exists, and a missing one is a bug worth crashing on rather than a hex id
+  # printed where the npub belongs.
+  defp identity_npub(id) do
+    {:ok, npub} = NostrKey.npub(id)
+    npub
+  end
+
+  defp unusable_identities([]), do: ""
+
+  defp unusable_identities(failures) do
+    "unusable identity records: " <>
+      Enum.map_join(failures, "; ", fn {:error, reason} ->
+        AcpCommand.identity_error_message(reason)
+      end)
+  end
+
+  # A record the daemon cannot read is a credential that will not work, which is
+  # the `auth perms` treatment: fail the row and carry the fix line.
+  defp escalate_identity_status(status, []), do: status
+  defp escalate_identity_status(_status, _failures), do: :fail
 
   defp acp_enabled_result(client) do
     path = AcpCommand.socket_path()

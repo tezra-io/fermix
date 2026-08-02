@@ -57,14 +57,14 @@ defmodule FermixCore.Tools.GetCodingRun do
   gate the run tools carry (design §23.4). An unusable harness advertises
   *nothing*: offering a run-inspection tool while the prompt drops the whole
   harness category leaves the model tools it has no framing for, and a run
-  history it has no way to add to. The same holds for a channel that cannot carry a
-  run at all (`HarnessSupport.advertisable_channel?/1`). Still dispatchable by name,
+  history it has no way to add to. The same holds for a turn whose run could not
+  report back (`HarnessSupport.harness_deliverable?/1`). Still dispatchable by name,
   so a run recorded before consent was withdrawn stays readable on request.
   """
   @spec advertise?(map()) :: boolean()
   def advertise?(context) when is_map(context) do
     Config.enabled?() and Config.approved?() and
-      Support.advertisable_channel?(context) and
+      Support.harness_deliverable?(context) and
       Authorization.authorize(name(), context) == :ok
   end
 

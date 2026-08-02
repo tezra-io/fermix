@@ -699,9 +699,30 @@ defmodule FermixCore.Providers.OpenAI.Codex do
 
   defp delivered_turn(turn, status, parsed) do
     cond do
-      not delivered?(turn) -> {:error, undelivered_error(status, parsed)}
-      status == "completed" -> {:ok, turn}
-      true -> warn_truncated(turn, status, parsed)
+      status == "completed" -> completed_turn(turn, status, parsed)
+      delivered?(turn) -> warn_truncated(turn, status, parsed)
+      true -> undelivered(status, parsed)
+    end
+  end
+
+  # A response the API itself reported `completed` that PRODUCED OUTPUT ITEMS is
+  # a real turn even when it renders neither text nor a tool call. The rest of
+  # the loop already models that ending — a tool was the deliverable and the
+  # model has nothing left to say (`AgentLoop`'s empty completion, the queue's
+  # `handle_empty_completion/1` and its side-effect ledger) — and under Buzz,
+  # where the model publishes its reply by running the `buzz` CLI through the
+  # shell tool, it is the NORMAL ending. Calling it a provider failure made the
+  # ACP peer answer `-32603`, which made the harness requeue the batch and the
+  # model post its reply five times.
+  #
+  # ITEM COUNT is the discriminator, not usage: `output_tokens` counts reasoning
+  # tokens, so it is non-zero for turns that produced nothing at all. Zero items
+  # under a terminal event is the cron regression 811d0ad3/c258142c closed — the
+  # response carried nothing to render and must stay an error.
+  defp completed_turn(turn, status, parsed) do
+    case Map.get(parsed, "output", []) do
+      [] -> undelivered(status, parsed)
+      [_item | _rest] -> {:ok, turn}
     end
   end
 
@@ -722,11 +743,33 @@ defmodule FermixCore.Providers.OpenAI.Codex do
     {:ok, turn}
   end
 
-  # Two undelivered facts, two kinds — not a fallback. A stream that DECLARED
-  # its failure (`response.failed`/`response.incomplete`/stream `error` on an
-  # intact HTTP 200) is an API-level verdict, not a transport cut: it is minted
-  # through `ProviderError.api/5` so `api_kind` classifies the server's own
-  # text ("overload"/"server_error" → :provider_unavailable — retryable and
+  # The undelivered path was SILENT through the 2026-08 Buzz incident: the
+  # daemon log carried no Codex line for the whole window, so the only evidence
+  # a turn had failed was the caller's error tuple. These three facts are what
+  # separate an empty wire (no usage, no items) from a model that reasoned and
+  # then said nothing (reasoning tokens, a reasoning item) — the distinction the
+  # gate above turns on.
+  defp undelivered(status, parsed) do
+    Logger.error(
+      "Codex delivered nothing: status=#{status || "no terminal event"} " <>
+        "usage=#{inspect(Map.get(parsed, "usage", %{}))} " <>
+        "items=#{inspect(output_item_types(parsed))} — #{failure_text(parsed)}"
+    )
+
+    {:error, undelivered_error(status, parsed)}
+  end
+
+  defp output_item_types(parsed) do
+    parsed
+    |> Map.get("output", [])
+    |> Enum.map(&Map.get(&1, "type"))
+  end
+
+  # Three undelivered facts, three errors — not a fallback. A stream that
+  # DECLARED its failure (`response.failed`/`response.incomplete`/stream `error`
+  # on an intact HTTP 200) is an API-level verdict, not a transport cut: it is
+  # minted through `ProviderError.api/5` so `api_kind` classifies the server's
+  # own text ("overload"/"server_error" → :provider_unavailable — retryable and
   # failover-eligible on fresh calls), and the server's sentence rides
   # `:provider_words` for `Agents.TurnRunner.provider_error_reply/1` to quote
   # at the operator (2026-07-31: "Our servers are currently overloaded"
@@ -752,11 +795,36 @@ defmodule FermixCore.Providers.OpenAI.Codex do
     )
   end
 
-  defp undelivered_error(status, _parsed) do
-    ProviderError.transport(:openai_codex, :codex, :closed,
-      message:
-        "Codex reported the response #{status} with no output delivered and gave no reason."
-    )
+  # And a response the server declared TERMINAL — it said `completed` (or any
+  # other terminal status) and delivered nothing — is a third fact, distinct
+  # from both. It is NOT `:transport_closed`: nothing was cut. Minting that lie
+  # is what put this on `AgentLoop`'s continuation-retry allowlist, so a turn
+  # that had already published its Buzz reply through a tool was re-issued twice
+  # more, and told the operator "the provider closed the connection… Retry".
+  #
+  # It is minted through `ProviderError.api/5` for the same reason the declared
+  # failure above is: an intact 200 that reported its own terminal state is an
+  # API-level verdict. `api_kind` reads it as `:provider` — retryable by no
+  # classifier (`Transient.@retryable_api_kinds`, `AgentLoop`'s continuation
+  # allowlist) and eligible for no failover (`Failover.@fallback_api_kinds`), so
+  # the turn fails once and stops. That is also why it is NOT a bespoke
+  # transport reason atom: those land on `TurnRunner.provider_error_reply/1`'s
+  # transport catch-all, which shows the operator `inspect(reason)`, while every
+  # api kind reaches the `%{status: status}` floor clause and is rendered with
+  # THIS message. `code: "empty_response"` is the distinct, greppable marker —
+  # it rides telemetry as `error_code`, and is the field a dedicated
+  # `provider_error_reply/1` sentence should key on.
+  defp undelivered_error(status, parsed) do
+    count = parsed |> Map.get("output", []) |> length()
+
+    ProviderError.api(:openai_codex, :codex, 200, %{
+      "error" => %{
+        "code" => "empty_response",
+        "message" =>
+          "The response was reported #{status} carrying #{count} output item(s), " <>
+            "and delivered no text and no tool call."
+      }
+    })
   end
 
   defp failure_text(parsed) do
@@ -796,7 +864,7 @@ defmodule FermixCore.Providers.OpenAI.Codex do
            Map.get(resp, :content), Map.get(resp, :tool_calls), %{}}
 
         {:error, reason} ->
-          {:error, %{}, nil, nil, error_metadata(reason, wire_result)}
+          {:error, error_tokens(wire_result), nil, nil, error_metadata(reason, wire_result)}
       end
 
     metadata =
@@ -820,6 +888,26 @@ defmodule FermixCore.Providers.OpenAI.Codex do
       tool_calls: tool_calls
     )
   end
+
+  # Usage is a MEASURED fact of the response, not a property of success. Hard-
+  # coding an empty map on every error is why the Buzz incident's trace read as
+  # "nothing came back on the wire" when the model had in fact spent 12.5k
+  # prompt tokens and reasoned. Only a streamed 200 has a parsed body to read;
+  # a transport failure or a non-200 has no usage, and inventing zeros there
+  # would be a second lie.
+  defp error_tokens({:ok, %Req.Response{status: 200, body: body}}) do
+    body
+    |> parse_body_to_map()
+    |> Map.get("usage", %{})
+    |> usage_tokens()
+  end
+
+  defp error_tokens(_wire_result), do: %{}
+
+  defp usage_tokens(%{"input_tokens" => prompt, "output_tokens" => completion}),
+    do: %{prompt: prompt, completion: completion}
+
+  defp usage_tokens(_usage), do: %{}
 
   defp error_metadata(:context_length_exceeded, _wire_result) do
     %{error_kind: :context_length, error: "context_length_exceeded"}

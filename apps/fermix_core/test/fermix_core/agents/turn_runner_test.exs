@@ -262,9 +262,11 @@ defmodule FermixCore.Agents.TurnRunnerTest do
 
   setup do
     compaction = Application.get_env(:fermix_core, :compaction, [])
+    telemetry = Application.get_env(:fermix_core, :telemetry, [])
 
     on_exit(fn ->
       Application.put_env(:fermix_core, :compaction, compaction)
+      Application.put_env(:fermix_core, :telemetry, telemetry)
     end)
 
     :ok
@@ -711,6 +713,37 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       assert List.first(history).content == "keep this failed request"
     end
 
+    # The M29/Buzz duplicate-reply incident was diagnosed blind: the FAILED turn
+    # dropped the very message that produced it while a successful turn kept it —
+    # exactly backwards. Both outcomes carry the same identity, and the same
+    # `capture_content?` gate decides whether the prompt rides along.
+    test "a failed turn's error event carries the input and sender when content capture is on" do
+      set_capture_content(true)
+
+      metadata = run_failing_turn("failed_turn_capture_on")
+
+      assert metadata.channel == "telegram"
+      assert metadata.chat_id == "failed_turn_capture_on"
+      assert metadata.sender == "user"
+      assert metadata.reason == "adapter failed"
+      assert metadata.input == "keep this failed request"
+      # The turn produced no reply, so it carries no output key at all.
+      refute Map.has_key?(metadata, :output)
+    end
+
+    test "a failed turn's error event carries no content when capture is off" do
+      set_capture_content(false)
+
+      metadata = run_failing_turn("failed_turn_capture_off")
+
+      # Identity and the reason are not content — they always ride.
+      assert metadata.channel == "telegram"
+      assert metadata.sender == "user"
+      assert metadata.reason == "adapter failed"
+      refute Map.has_key?(metadata, :input)
+      refute Map.has_key?(metadata, :output)
+    end
+
     test "auto-compacts oversized history before the main provider call" do
       Application.put_env(:fermix_core, :compaction,
         enabled: true,
@@ -1137,6 +1170,32 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       refute reply == "Sorry, I encountered an error processing your message."
     end
 
+    # MILESTONE_29 §17 phase 1 minted `code: "empty_response"` for a 200 the
+    # server declared terminal that carried nothing. Left on the `%{status: …}`
+    # floor clause it reads "returned HTTP 200", which sends the operator after a
+    # transport fault that did not happen — the vendor's own sentence is the
+    # diagnosis, so the clause keys on the code and keeps the words.
+    test "maps an undelivered Codex response to an empty-turn sentence, not an HTTP status" do
+      reply =
+        TurnRunner.error_reply(
+          ProviderError.api(:openai_codex, :codex, 200, %{
+            "error" => %{
+              "code" => "empty_response",
+              "message" =>
+                "The response was reported completed carrying 2 output item(s), " <>
+                  "and delivered no text and no tool call."
+            }
+          })
+        )
+
+      assert reply =~ "Codex"
+      assert reply =~ "without producing a reply"
+      assert reply =~ "delivered no text and no tool call"
+      refute reply =~ "HTTP 200"
+      refute reply =~ "empty_response"
+      refute reply == "Sorry, I encountered an error processing your message."
+    end
+
     test "maps an exhausted failover chain to a reply naming the attempted providers" do
       last = ProviderError.transport(:openai, :responses, :timeout)
 
@@ -1185,6 +1244,58 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       runtime_message: %{role: "system", content: "runtime contract"},
       runtime_accounting: %{part: :runtime}
     }
+  end
+
+  # Establish the content-capture precondition explicitly (never inherit it from
+  # whatever an earlier module leaked); the module setup restores it on exit.
+  defp set_capture_content(value) when is_boolean(value) do
+    Application.put_env(:fermix_core, :telemetry, capture_content: value)
+  end
+
+  # Drive one turn that fails inside the agent loop and return the metadata of
+  # the `[:fermix, :agent, :message_error]` event it emitted.
+  defp run_failing_turn(chat_id) do
+    registry_name = :"turn_runner_error_registry_#{System.unique_integer([:positive])}"
+    store_name = :"turn_runner_error_store_#{System.unique_integer([:positive])}"
+
+    start_supervised!({CapabilityRegistry, name: registry_name})
+
+    store =
+      start_supervised!({ConversationStore, name: store_name, max_messages: :infinity, repo: nil})
+
+    handler_id = "turn-runner-message-error-#{System.unique_integer([:positive])}"
+    test_pid = self()
+
+    :telemetry.attach(
+      handler_id,
+      [:fermix, :agent, :message_error],
+      fn _event, _measurements, metadata, _config ->
+        send(test_pid, {:message_error, metadata})
+      end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
+    msg = %{
+      channel: "telegram",
+      chat_id: chat_id,
+      sender: "user",
+      content: "keep this failed request",
+      source_trust: :operator
+    }
+
+    turn_state =
+      turn_state(
+        adapter: FailingAdapter,
+        adapter_opts: [model: "mock-model"],
+        capability_registry: registry_name,
+        conversation_store: store
+      )
+
+    assert {:error, "adapter failed"} = TurnRunner.run(msg, turn_state, fn _part -> :ok end)
+    assert_receive {:message_error, metadata}, 5_000
+    metadata
   end
 
   defp run_record_cwd_turn(trust, request_cwd, extra_msg \\ %{}) do

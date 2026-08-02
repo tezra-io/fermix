@@ -114,12 +114,47 @@ defmodule FermixChannels.Channels.Acp.SessionTest do
       session = Session.new("/tmp", nil)
       {session, _seq} = Session.start_turn(session, 1)
 
-      {"t1", session} = Session.start_tool(session, "shell")
-      {"t2", session} = Session.start_tool(session, "web_search")
+      {"t1", session} = Session.start_tool(session, "shell", "execute")
+      {"t2", session} = Session.start_tool(session, "web_search", "fetch")
 
-      assert {:ok, "t1", session} = Session.finish_tool(session, "shell")
-      assert {:ok, "t2", session} = Session.finish_tool(session, "web_search")
+      # The finish carries back the kind the START computed, so the effect
+      # verdict judges the same tool the card announced.
+      assert {:ok, "t1", "execute", session} = Session.finish_tool(session, "shell")
+      assert {:ok, "t2", "fetch", session} = Session.finish_tool(session, "web_search")
       assert :error = Session.finish_tool(session, "shell")
+    end
+  end
+
+  describe "the effect ledger" do
+    test "a fresh turn has performed nothing" do
+      session = Session.new("/tmp", nil)
+      {session, _seq} = Session.start_turn(session, 1)
+
+      assert Session.effects(session) == 0
+    end
+
+    test "record_effect counts each effect against the open turn" do
+      session = Session.new("/tmp", nil)
+      {session, _seq} = Session.start_turn(session, 1)
+
+      session = session |> Session.record_effect() |> Session.record_effect()
+
+      assert Session.effects(session) == 2
+    end
+
+    test "a session with no turn in flight has performed nothing" do
+      assert Session.effects(Session.new("/tmp", nil)) == 0
+    end
+
+    test "the ledger belongs to the turn, so the next turn starts clean" do
+      session = Session.new("/tmp", nil)
+      {session, _seq} = Session.start_turn(session, 1)
+      session = session |> Session.record_effect() |> Session.clear_turn()
+
+      assert Session.effects(session) == 0
+
+      {session, _seq} = Session.start_turn(session, 2)
+      assert Session.effects(session) == 0
     end
   end
 end
