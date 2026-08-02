@@ -230,4 +230,86 @@ defmodule FermixOpik.MapperTest do
     assert span.metadata.reason == "boom"
     assert span.metadata.model == "gpt-realtime-2"
   end
+
+  # The outbound MCP server identity is already stamped on every MCP tool exec by
+  # `MCP.Capability.invoke/6`; before this key was allowlisted it was dropped from
+  # every Opik tool span (each builder hard-codes its own key set — there is no
+  # global allowlist).
+  test "tool_span keeps the outbound MCP server identity" do
+    metadata = %{tool: "eden_get_note_markdown", success: true, mcp_server: "eden"}
+
+    span =
+      Mapper.tool_span(metadata, %{duration_ms: 30},
+        trace_id: "t",
+        project_name: "fermix",
+        ended: @ended
+      )
+
+    assert span.metadata.mcp_server == "eden"
+  end
+
+  describe "mcp_client_span/3" do
+    test "builds a general lifecycle point span from the emitter's allowlist" do
+      metadata = %{
+        source_id: "plugin:eden",
+        plugin: "eden",
+        phase: :security_block,
+        result: :error,
+        error_class: "tool_not_allowed",
+        attempt: 2,
+        session_id: "main-7"
+      }
+
+      span =
+        Mapper.mcp_client_span(metadata, %{duration_ms: 12},
+          trace_id: "trace-1",
+          parent_span_id: "wrap-1",
+          project_name: "fermix",
+          ended: @ended
+        )
+
+      assert span.name == "mcp_client:security_block"
+      assert span.type == "general"
+      assert span.trace_id == "trace-1"
+      assert span.parent_span_id == "wrap-1"
+      assert span.start_time == "2026-06-02T12:00:03.188Z"
+      assert span.end_time == "2026-06-02T12:00:03.200Z"
+
+      assert span.metadata == %{
+               source_id: "plugin:eden",
+               plugin: "eden",
+               phase: "security_block",
+               result: "error",
+               error_class: "tool_not_allowed",
+               attempt: 2
+             }
+    end
+
+    # The span builder is the last gate before export: a key it does not name is
+    # silently dropped, and that is what must stay true for anything sensitive.
+    test "an unlisted metadata key never exports" do
+      metadata = %{
+        source_id: "plugin:eden",
+        phase: :ready,
+        result: :ok,
+        authorization: "Bearer eden_pat_fakevalue",
+        mcp_session_id: "mcp-sess-01JFAKE",
+        workspace_id: "ws_fake_0123456789",
+        base_url: "https://mcp.eden.so/mcp"
+      }
+
+      span =
+        Mapper.mcp_client_span(metadata, %{duration_ms: 0},
+          trace_id: "t",
+          project_name: "fermix",
+          ended: @ended
+        )
+
+      assert span.metadata == %{source_id: "plugin:eden", phase: "ready", result: "ok"}
+      refute String.contains?(inspect(span), "eden_pat_fakevalue")
+      refute String.contains?(inspect(span), "mcp-sess")
+      refute String.contains?(inspect(span), "ws_fake")
+      refute String.contains?(inspect(span), "mcp.eden.so")
+    end
+  end
 end

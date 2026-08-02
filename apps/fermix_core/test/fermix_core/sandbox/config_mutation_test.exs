@@ -51,6 +51,9 @@ defmodule FermixCore.Sandbox.ConfigMutationTest do
     end
 
     @impl true
+    def delete(_key, _opts \\ []), do: raise("sandbox config mutation must never delete a secret")
+
+    @impl true
     def command_source(key, _opts \\ []) do
       %{source: :command, command: "recording", args: [Atom.to_string(key)]}
     end

@@ -960,4 +960,116 @@ defmodule FermixOpik.AggregationTest do
     assert "harness" in trace.tags
     assert trace.metadata.origin_session_id == "main-1"
   end
+
+  # Outbound MCP client lifecycle ([:fermix, :mcp_client, :lifecycle]).
+  #
+  # `@mcp_client_phases` mirrors `FermixCore.Capabilities.MCP.Telemetry.phases/0`
+  # by hand: `fermix_opik` deliberately declares no dependency on `fermix_core`
+  # (it must stay standalone-testable), so the emitter's list cannot be read here.
+  # Its counterpart test in
+  # `apps/fermix_core/test/fermix_core/capabilities/mcp/telemetry_test.exs` pins
+  # `phases/0` against the same literal list, so adding a phase there fails until
+  # both halves are updated.
+  @mcp_client_event [:fermix, :mcp_client, :lifecycle]
+  @mcp_client_boot_phases [:initialize, :discover, :ready, :owner_down, :teardown]
+  @mcp_client_turn_phases [:security_block, :drift, :reconnect]
+  @mcp_client_phases @mcp_client_boot_phases ++ @mcp_client_turn_phases
+
+  defp mcp_meta(phase, extra \\ %{}) do
+    Map.merge(%{source_id: "plugin:eden", plugin: "eden", phase: phase, result: :ok}, extra)
+  end
+
+  describe "outbound MCP client lifecycle" do
+    test "the reporter subscribes to the event" do
+      assert @mcp_client_event in FermixOpik.Reporter.events()
+    end
+
+    # Registry completeness: every phase must hit a real clause, never the
+    # catch-all (which returns `{state, []}` and leaves nothing behind). Looping
+    # the phase list is the gate — a phase added later either joins it or fails.
+    test "every phase is handled by a non-catch-all clause" do
+      for phase <- @mcp_client_phases do
+        {state, closed} = run([{@mcp_client_event, %{duration_ms: 4}, mcp_meta(phase)}])
+
+        assert [%{trace: trace, spans: []}] = closed,
+               "phase #{inspect(phase)} produced no trace — it fell to the catch-all"
+
+        assert trace.name == "mcp_client:#{phase}"
+        assert trace.tags == ["mcp_client"]
+        assert state.traces == %{}
+      end
+    end
+
+    test "a boot phase self-closes even when a session_id is somehow present" do
+      # initialize/discover/ready/teardown/owner_down run before any turn. Nesting
+      # one under a non-turn session id would mint a phantom root whose
+      # `infer_kind/1` falls through to :subagent — the orphan-span bug.
+      for phase <- @mcp_client_boot_phases do
+        {state, closed} =
+          run([
+            {@mcp_client_event, %{duration_ms: 4},
+             mcp_meta(phase, %{session_id: "mcp_client_boot"})}
+          ])
+
+        assert [%{trace: trace, spans: []}] = closed
+        assert trace.name == "mcp_client:#{phase}"
+        refute "subagent" in trace.tags
+        assert state.traces == %{}
+        assert state.sessions == %{}
+      end
+    end
+
+    test "a boot-phase trace carries the emitter's redacted metadata" do
+      {_state, closed} =
+        run([
+          {@mcp_client_event, %{duration_ms: 87},
+           mcp_meta(:initialize, %{result: :error, error_class: "remote_unreachable", attempt: 3})}
+        ])
+
+      assert [%{trace: trace, spans: []}] = closed
+      assert trace.metadata.source_id == "plugin:eden"
+      assert trace.metadata.plugin == "eden"
+      assert trace.metadata.phase == "initialize"
+      assert trace.metadata.result == "error"
+      assert trace.metadata.error_class == "remote_unreachable"
+      assert trace.metadata.attempt == 3
+      assert trace.metadata.duration_ms == 87
+    end
+
+    test "a turn phase nests under the turn that hit it" do
+      for phase <- @mcp_client_turn_phases do
+        {_state, closed} =
+          run([
+            {[:fermix, :provider, :call], %{duration_ms: 10},
+             %{provider: :openai, model: "gpt-5", status: :ok, session_id: "main-1"}},
+            {@mcp_client_event, %{duration_ms: 2},
+             mcp_meta(phase, %{
+               result: :error,
+               error_class: "tool_not_allowed",
+               session_id: "main-1"
+             })},
+            {[:fermix, :agent, :message], %{iterations: 1},
+             %{channel: :cli, chat_id: "c1", session_id: "main-1", agent: "main"}}
+          ])
+
+        assert [%{trace: trace, spans: spans}] = closed
+        assert trace.name == "agent:main"
+
+        span = span_named(spans, "mcp_client:#{phase}")
+        assert span, "phase #{inspect(phase)} produced no child span under the turn"
+        assert span.trace_id == trace.id
+        assert span.parent_span_id == span_named(spans, "agent:main").id
+        assert span.metadata.error_class == "tool_not_allowed"
+      end
+    end
+
+    test "a turn phase outside a turn self-closes rather than orphaning" do
+      {state, closed} =
+        run([{@mcp_client_event, %{duration_ms: 1}, mcp_meta(:reconnect, %{attempt: 2})}])
+
+      assert [%{trace: trace, spans: []}] = closed
+      assert trace.name == "mcp_client:reconnect"
+      assert state.traces == %{}
+    end
+  end
 end

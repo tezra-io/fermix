@@ -22,6 +22,10 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias FermixCore.Harness.Ledger, as: HarnessLedger
   alias FermixCore.Harness.Vendors, as: HarnessVendors
   alias FermixCore.Nostr.Key, as: NostrKey
+  alias FermixCore.Plugins.Config, as: PluginConfig
+  alias FermixCore.Plugins.Dist.McpSource
+  alias FermixCore.Plugins.Registry, as: PluginRegistry
+  alias FermixCore.Plugins.Status, as: PluginStatus
   alias FermixCore.Prompt.TemplateRenderer
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.RoutingOverrides
@@ -963,6 +967,197 @@ defmodule Fermix.CLI.Doctor.Checks do
   end
 
   defp format_channel_probe(probe), do: "#{probe.name}=#{probe.status} (#{probe.detail})"
+
+  @doc """
+  Enabled plugins (M27 §7.8): per plugin, the install/compat state and the
+  static `Plugins.Status` ladder, plus — for `remote_mcp` plugins — the live
+  runtime status.
+
+  Two facts shape this check:
+
+    * **The runtime status table lives in the daemon**, keyed by the
+      source-qualified `{:plugin, name}`. A one-shot CLI VM has no such table,
+      so it is asked for over the control socket (`plugins_runtime_status`). A
+      locally absent table is reported as unknown; it is NEVER read as `:ready`.
+    * **`fermix doctor` is a tree-less CLI verb.** The static ladder probes an
+      mcp-rail plugin's declared host runtime, which spawns a command — and
+      `CommandRunner.resolve_supervisor!/1` RAISES without the daemon's
+      `CommandHost.Supervisor`. The probe must therefore run unsupervised, the
+      same threading `PluginsCommand.plugin_row/1` and `harness/1` do.
+
+  `:client` and `:installed_root` are injectable so each state unit-tests
+  hermetically.
+  """
+  @spec plugins(keyword()) :: result()
+  def plugins(opts \\ []) when is_list(opts) do
+    case Enum.sort(PluginConfig.enabled_plugins()) do
+      [] -> ok("plugins", "none enabled")
+      names -> enabled_plugins_result(names, opts)
+    end
+  end
+
+  defp enabled_plugins_result(names, opts) do
+    root_opts = Keyword.take(opts, [:installed_root])
+
+    case PluginRegistry.list(root_opts) do
+      {:ok, plugins} ->
+        index = Map.new(plugins, &{&1.name, &1})
+        entries = Enum.map(names, &plugin_entry(&1, index, root_opts))
+        render_plugins(entries, plugin_runtime_statuses(entries, opts))
+
+      {:error, reason} ->
+        fail("plugins", "plugin catalog unreadable: #{inspect(reason)}")
+    end
+  end
+
+  # An enabled name with no loadable manifest is statusable too: `Status` reads
+  # the store and distinguishes `:not_installed` from `:incompatible`. Only a
+  # `%Plugin{}` can declare the remote runtime.
+  defp plugin_entry(name, index, root_opts) do
+    status_opts = [probe: [supervised: false]] ++ root_opts
+
+    case Map.fetch(index, name) do
+      {:ok, plugin} ->
+        %{
+          name: name,
+          status: PluginStatus.status(plugin, status_opts),
+          remote?: McpSource.remote?(plugin)
+        }
+
+      :error ->
+        %{name: name, status: PluginStatus.status(name, status_opts), remote?: false}
+    end
+  end
+
+  # Only a remote source registers an owner in the daemon's status table, so a
+  # host with no remote plugin never pays for the socket round trip — and an
+  # empty table is the truthful answer there, since no entry will consult it.
+  defp plugin_runtime_statuses(entries, opts) do
+    if Enum.any?(entries, & &1.remote?) do
+      fetch_runtime_statuses(Keyword.get(opts, :client, &Client.request/1))
+    else
+      {:ok, %{}}
+    end
+  end
+
+  defp fetch_runtime_statuses(client) do
+    case client.("plugins_runtime_status") do
+      {:ok, %{"status" => "ok", "runtime_status" => rows}} when is_list(rows) ->
+        index_runtime_rows(rows)
+
+      {:error, :not_running} ->
+        :daemon_down
+
+      {:error, reason} ->
+        {:error, inspect(reason)}
+
+      {:ok, other} ->
+        {:error, "unexpected reply: #{inspect(other)}"}
+    end
+  end
+
+  # Both fields come from the daemon's own serializer, so a row missing either is
+  # a broken or version-skewed build — reported as a failed query rather than
+  # rendered as a plugin whose runtime state is blank.
+  defp index_runtime_rows(rows) do
+    if Enum.all?(rows, &valid_runtime_row?/1) do
+      {:ok, Map.new(rows, &{&1["source"], &1["status"]})}
+    else
+      {:error, "malformed runtime_status rows"}
+    end
+  end
+
+  defp valid_runtime_row?(%{"source" => source, "status" => status}),
+    do: is_binary(source) and is_binary(status)
+
+  defp valid_runtime_row?(_row), do: false
+
+  defp render_plugins(entries, runtime) do
+    details = Enum.map(entries, &plugin_detail(&1, runtime))
+
+    %{
+      name: "plugins",
+      status: details |> Enum.map(& &1.status) |> worst_plugin_status(),
+      detail: Enum.map_join(details, "; ", & &1.text)
+    }
+  end
+
+  defp plugin_detail(%{remote?: false} = entry, _runtime) do
+    %{status: static_plugin_status(entry.status), text: "#{entry.name}: #{entry.status}"}
+  end
+
+  defp plugin_detail(%{remote?: true} = entry, {:ok, live}) do
+    case Map.fetch(live, "plugin:#{entry.name}") do
+      {:ok, status} -> remote_live_detail(entry, status)
+      :error -> remote_absent_detail(entry)
+    end
+  end
+
+  # The design's exact wording (§7.8). The static ladder alone drives severity
+  # here: a down daemon is the `daemon socket` check's finding, not this one's,
+  # and repeating it once per remote plugin would bury the plugin's own state.
+  defp plugin_detail(%{remote?: true} = entry, :daemon_down) do
+    %{
+      status: static_plugin_status(entry.status),
+      text:
+        "#{entry.name}: #{entry.status} (remote; runtime status unavailable — daemon not running)"
+    }
+  end
+
+  # A reachable daemon that cannot answer is a real fault (version skew, or a
+  # build without the op) — never silently treated as "no remote plugins".
+  defp plugin_detail(%{remote?: true} = entry, {:error, message}) do
+    %{
+      status: :fail,
+      text: "#{entry.name}: #{entry.status} (remote; runtime status query failed: #{message})"
+    }
+  end
+
+  defp remote_live_detail(entry, status) do
+    %{
+      status: worst_plugin_status([static_plugin_status(entry.status), runtime_status(status)]),
+      text: "#{entry.name}: #{entry.status} (remote; runtime #{status})"
+    }
+  end
+
+  # The daemon is up and holds no owner for this source. When the plugin is not
+  # startable the static ladder already says why; when it IS startable this is
+  # the "enabled and credentialed but never connected" state — one reload or
+  # restart away — which nothing else on the report would surface.
+  defp remote_absent_detail(entry) do
+    %{
+      status: worst_plugin_status([static_plugin_status(entry.status), :warn]),
+      text: "#{entry.name}: #{entry.status} (remote; no live client registered)"
+    }
+  end
+
+  # Enabled but structurally unusable: the operator's config names a plugin this
+  # build cannot run at all. Every other non-ready status is a setup step that
+  # has not been finished yet.
+  @plugin_broken_statuses [:not_installed, :incompatible, :error]
+
+  defp static_plugin_status(:ready), do: :ok
+  defp static_plugin_status(status) when status in @plugin_broken_statuses, do: :fail
+  defp static_plugin_status(_status), do: :warn
+
+  # The §7.8 terminal states that mean "do not call tools": a signed-contract,
+  # collision, or endpoint-policy refusal is a defect, not a pending step.
+  @remote_broken_statuses ~w(
+    invalid_remote_config upstream_contract_mismatch capability_conflict
+    remote_security_blocked remote_protocol_error
+  )
+
+  defp runtime_status("ready"), do: :ok
+  defp runtime_status(status) when status in @remote_broken_statuses, do: :fail
+  defp runtime_status(_status), do: :warn
+
+  defp worst_plugin_status(statuses) do
+    cond do
+      :fail in statuses -> :fail
+      :warn in statuses -> :warn
+      true -> :ok
+    end
+  end
 
   @spec command_owner_config() :: result()
   def command_owner_config do

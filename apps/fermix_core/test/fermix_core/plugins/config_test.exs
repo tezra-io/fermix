@@ -8,6 +8,35 @@ defmodule FermixCore.Plugins.ConfigTest do
   alias FermixCore.Plugins.Config
   alias FermixCore.Setup.ConfigStore
 
+  # Deletes fail, everything else behaves like the shared stub. It reports the
+  # persisted config it saw at delete time so the test can pin that the
+  # reference was still present when the keychain was asked to drop the item.
+  defmodule FailingDeleteWriter do
+    @moduledoc false
+
+    @behaviour FermixCore.Setup.SecretWriter
+
+    alias FermixTestSupport.SecretWriterStub
+
+    @impl true
+    def available?(opts \\ []), do: SecretWriterStub.available?(opts)
+
+    @impl true
+    def put(key, value, opts \\ []), do: SecretWriterStub.put(key, value, opts)
+
+    @impl true
+    def get(key, opts \\ []), do: SecretWriterStub.get(key, opts)
+
+    @impl true
+    def command_source(key, opts \\ []), do: SecretWriterStub.command_source(key, opts)
+
+    @impl true
+    def delete(_key, _opts \\ []) do
+      send(self(), {:delete_attempted, File.read(ConfigStore.path())})
+      {:error, {:helper_failed, "/usr/bin/security", 51, "keychain is locked"}}
+    end
+  end
+
   setup do
     home = FermixTestSupport.SafeRm.make_tmp_dir!("plugin-config")
     old_home = System.get_env("FERMIX_HOME")
@@ -140,10 +169,50 @@ defmodule FermixCore.Plugins.ConfigTest do
     assert contents =~ "@keyring"
     refute contents =~ "xoxb-secret"
 
-    # clearing it returns the plugin to the unset state
+    # forgetting it returns the plugin to the unset state
     Application.put_env(:fermix_core, :plugins, dev_local: checkout)
-    assert {:ok, _snapshot} = Config.clear_plugin_secret("discord")
+    assert {:ok, _snapshot} = Config.forget_plugin_secret("discord")
     assert Config.plugin_secret("discord") == nil
+  end
+
+  test "forget_plugin_secret deletes the keychain item, then drops the reference", %{home: home} do
+    checkout = write_api_key_plugin("discord")
+    Application.put_env(:fermix_core, :plugins, dev_local: checkout)
+    assert {:ok, _snapshot} = Config.set_plugin_secret("discord", "xoxb-secret")
+
+    Application.put_env(:fermix_core, :plugins, dev_local: checkout)
+    assert {:ok, _snapshot} = Config.forget_plugin_secret("discord")
+
+    # The credential is gone from the OS store, not merely unreferenced.
+    assert {:error, :missing_secret} =
+             FermixTestSupport.SecretWriterStub.get(:discord_plugin_secret)
+
+    assert Config.plugin_secret("discord") == nil
+    # No dangling `@keyring` sentinel pointing at an item that no longer exists.
+    refute File.read!(Path.join(home, "config.toml")) =~ "@keyring"
+  end
+
+  test "a failed keychain delete leaves the reference intact and reports the error" do
+    checkout = write_api_key_plugin("discord")
+    Application.put_env(:fermix_core, :plugins, dev_local: checkout)
+    assert {:ok, _snapshot} = Config.set_plugin_secret("discord", "xoxb-secret")
+
+    Application.put_env(:fermix_core, :plugins, dev_local: checkout)
+    Application.put_env(:fermix_core, :secret_writer, FailingDeleteWriter)
+
+    assert {:error, {:keychain_delete_failed, "FERMIX_PLUGIN_DISCORD", _reason}} =
+             Config.forget_plugin_secret("discord")
+
+    # The delete ran while the config still pointed at the credential — drop
+    # the reference first and a failed delete would orphan an unnameable secret.
+    assert_received {:delete_attempted, {:ok, persisted}}
+    assert persisted =~ "plugin_secrets"
+
+    # …and the reference is still there afterwards, for an explicit retry.
+    assert Config.plugin_secret("discord") == "xoxb-secret"
+
+    assert {:ok, "xoxb-secret"} =
+             FermixTestSupport.SecretWriterStub.get(:discord_plugin_secret)
   end
 
   test "set_plugin_secret refuses a non-api_key plugin" do
@@ -337,6 +406,106 @@ defmodule FermixCore.Plugins.ConfigTest do
 
       assert Config.plugin_settings("vaultdemo") == %{"DEMO_VAULT_PATH" => "/tmp/other-vault"}
     end
+  end
+
+  # The three lowercase plumbing keys the Connect selection persists (M27 §7.5).
+  # `set_workspace_selection/2`'s write path is exercised end to end in
+  # `remote_setup_test.exs`; these pin the rejections, which are the half that
+  # must never silently pass.
+  describe "workspace selection validation" do
+    test "absent profile resolves to the signed default" do
+      assert Config.validate_access_profile(profiled_plugin(), nil) == {:ok, "retrieval"}
+    end
+
+    test "a declared profile is taken exactly as given" do
+      assert Config.validate_access_profile(profiled_plugin(), "capture") == {:ok, "capture"}
+    end
+
+    test "any other profile value is invalid configuration, never defaulted" do
+      for value <- ["captur", "", "Retrieval", 1, ["retrieval"]] do
+        assert {:error, {:invalid_access_profile, "workspacedemo", _detail}} =
+                 Config.validate_access_profile(profiled_plugin(), value)
+      end
+    end
+
+    test "a manifest with no signed default has no profile to fall back to" do
+      assert Config.validate_access_profile(unprofiled_plugin(), nil) ==
+               {:error, {:no_default_access_profile, "workspacedemo"}}
+    end
+
+    test "a workspace id is opaque, bounded, visible ASCII with no whitespace" do
+      assert Config.validate_workspace_id("ws_alpha-1") == {:ok, "ws_alpha-1"}
+      assert Config.validate_workspace_id(String.duplicate("a", 256)) |> elem(0) == :ok
+
+      for invalid <- ["", "ws alpha", "ws\talpha", "ws\nalpha", "wsé", <<"ws", 0>>] do
+        assert {:error, {:invalid_workspace_id, _detail}} = Config.validate_workspace_id(invalid)
+      end
+
+      assert {:error, {:invalid_workspace_id, 257}} =
+               Config.validate_workspace_id(String.duplicate("a", 257))
+
+      assert Config.validate_workspace_id(nil) == {:error, {:invalid_workspace_id, :not_a_string}}
+    end
+
+    # The value itself must not appear in the rejection: it names the operator's
+    # own data and a rejection reason is read by logs and UIs.
+    test "a rejected workspace id is never echoed back" do
+      assert {:error, {:invalid_workspace_id, detail}} =
+               Config.validate_workspace_id("secret workspace")
+
+      refute inspect(detail) =~ "secret"
+    end
+
+    test "a workspace label is trimmed, control-free, bounded UTF-8" do
+      assert Config.validate_workspace_label("  Alpha  ") == {:ok, "Alpha"}
+      # Display-only: an unnamed workspace is a display problem, not a config error.
+      assert Config.validate_workspace_label("   ") == {:ok, ""}
+      assert Config.validate_workspace_label("Épée 🗡") == {:ok, "Épée 🗡"}
+
+      assert Config.validate_workspace_label("Alpha\a") ==
+               {:error, {:invalid_workspace_label, :control}}
+
+      # C1 controls too — what a naive `[[:cntrl:]]` check misses. Interior,
+      # because a trailing U+0085 is Unicode whitespace and is legitimately
+      # trimmed away before the check.
+      assert Config.validate_workspace_label("Al\u0085pha") ==
+               {:error, {:invalid_workspace_label, :control}}
+
+      assert Config.validate_workspace_label(<<0xFF, 0xFE>>) ==
+               {:error, {:invalid_workspace_label, :not_utf8}}
+
+      assert {:error, {:invalid_workspace_label, 129}} =
+               Config.validate_workspace_label(String.duplicate("a", 129))
+
+      assert Config.validate_workspace_label(nil) ==
+               {:error, {:invalid_workspace_label, :not_a_string}}
+    end
+  end
+
+  defp profiled_plugin do
+    %{
+      unprofiled_plugin()
+      | tool_profiles: [
+          %{"name" => "retrieval", "default" => true},
+          %{"name" => "capture", "default" => false}
+        ]
+    }
+  end
+
+  defp unprofiled_plugin do
+    %FermixCore.Plugins.Plugin{
+      schema_version: 2,
+      name: "workspacedemo",
+      display_name: "Workspace Demo",
+      description: "d",
+      category: "productivity",
+      version: "1.0.0",
+      default_enabled?: false,
+      auth: %{type: :api_key},
+      tools: [],
+      skills: [],
+      path: "/tmp/workspacedemo/plugin.json"
+    }
   end
 
   # A dev_local plugin with a manifest `config` block — the registry seam that

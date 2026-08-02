@@ -16,6 +16,9 @@ defmodule FermixCore.Setup.SecretWriterTest do
     def get(_key, _opts \\ []), do: {:error, :unavailable}
 
     @impl true
+    def delete(_key, _opts \\ []), do: {:error, :unavailable}
+
+    @impl true
     def command_source(_key, _opts \\ []),
       do: %{source: :command, command: "/bin/false", args: []}
   end
@@ -31,6 +34,9 @@ defmodule FermixCore.Setup.SecretWriterTest do
 
     @impl true
     def get(_key, _opts \\ []), do: {:ok, "from-auto"}
+
+    @impl true
+    def delete(_key, _opts \\ []), do: :ok
 
     @impl true
     def command_source(key, _opts \\ []) do
@@ -193,6 +199,90 @@ defmodule FermixCore.Setup.SecretWriterTest do
       assert "-A" in add and "-U" in add
       # and the delete carries no secret to redact
       refute "-w" in delete
+    end
+  end
+
+  describe "delete/2" do
+    # The coordinate assertions below read the active profile, so establish it
+    # here rather than inheriting whatever an earlier module left in app env.
+    setup do
+      previous_profile = Application.get_env(:fermix_core, :profile)
+      Application.delete_env(:fermix_core, :profile)
+
+      on_exit(fn ->
+        case previous_profile do
+          nil -> Application.delete_env(:fermix_core, :profile)
+          value -> Application.put_env(:fermix_core, :profile, value)
+        end
+      end)
+
+      :ok
+    end
+
+    test "the facade removes the stored value" do
+      assert :ok = SecretWriter.put(:openai_api_key, "sk-test")
+      assert :ok = SecretWriter.delete(:openai_api_key)
+      assert {:error, :missing_secret} = SecretWriter.get(:openai_api_key)
+    end
+
+    test "deleting an absent value succeeds — the postcondition already holds" do
+      assert :ok = SecretWriter.delete(:openai_api_key)
+    end
+
+    test "the auto writer routes to the selected candidate" do
+      Application.put_env(:fermix_core, :secret_writer, SecretWriter.Auto)
+
+      Application.put_env(:fermix_core, :secret_writer_candidates, [
+        UnavailableCandidate,
+        AvailableCandidate
+      ])
+
+      assert :ok = SecretWriter.delete(:openai_api_key)
+    end
+
+    test "the none writer refuses rather than reporting a delete it never made" do
+      assert {:error, :unavailable} = SecretWriter.None.delete(:openai_api_key)
+    end
+
+    test "macOS deletes exactly the item put/3 creates" do
+      [delete, _add] = SecretWriter.MacOS.put_commands(:openai_api_key, "sk-secret")
+      assert SecretWriter.MacOS.delete_command(:openai_api_key) == delete
+    end
+
+    test "macOS treats errSecItemNotFound as done and reports every other failure" do
+      assert SecretWriter.MacOS.delete_result({:ok, ""}) == :ok
+
+      assert SecretWriter.MacOS.delete_result(
+               {:error, {:helper_failed, "/usr/bin/security", 44, "could not be found"}}
+             ) == :ok
+
+      locked = {:helper_failed, "/usr/bin/security", 51, "keychain is locked"}
+      assert SecretWriter.MacOS.delete_result({:error, locked}) == {:error, locked}
+
+      timeout = {:helper_timeout, "/usr/bin/security", 3_000}
+      assert SecretWriter.MacOS.delete_result({:error, timeout}) == {:error, timeout}
+    end
+
+    test "secret-tool clears the same attribute coordinate it looks up" do
+      assert SecretWriter.SecretTool.clear_command(:openai_api_key) == [
+               "clear",
+               "service",
+               "fermix",
+               "account",
+               "fermix",
+               "env",
+               "OPENAI_API_KEY"
+             ]
+
+      assert SecretWriter.SecretTool.clear_command(:openai_api_key, profile: "work") == [
+               "clear",
+               "service",
+               "fermix:work",
+               "account",
+               "fermix",
+               "env",
+               "OPENAI_API_KEY"
+             ]
     end
   end
 

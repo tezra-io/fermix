@@ -97,11 +97,16 @@ defmodule FermixCore.Plugins.Auth do
     end
   end
 
-  @spec clear_secret(String.t()) :: :ok | {:error, term()}
-  def clear_secret(name) when is_binary(name) do
+  @doc """
+  Forget an `api_key` plugin's stored credential: the OS-keychain item is
+  deleted and only then is the config reference dropped. Local only — it does
+  not revoke the credential with the provider.
+  """
+  @spec forget_secret(String.t()) :: :ok | {:error, term()}
+  def forget_secret(name) when is_binary(name) do
     started_at = System.monotonic_time(:millisecond)
 
-    case Config.clear_plugin_secret(name) do
+    case Config.forget_plugin_secret(name) do
       {:ok, _snapshot} ->
         emit_auth_event(:clear, name, "logged_out", started_at)
         :ok

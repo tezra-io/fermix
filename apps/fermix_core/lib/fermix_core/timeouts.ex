@@ -95,6 +95,47 @@ defmodule FermixCore.Timeouts do
   @spec harness_wall_clock() :: pos_integer()
   def harness_wall_clock, do: HarnessConfig.default_timeout_minutes() * 60_000
 
+  # --- Remote MCP (M27 §7.4) ------------------------------------------------
+  # Every one of these is a failure deadline: expiry means the remote plugin is
+  # unusable, never "wait longer". They are fixed constants, not config knobs —
+  # a remote endpoint is a signed-manifest contract, and an operator who could
+  # stretch a deadline could hold a hostile server's connection open at will.
+  #
+  # INVARIANT: mcp_remote_startup() must exceed
+  # mcp_remote_connect() + mcp_remote_initialize() + mcp_remote_discover(), so
+  # the overall startup window can actually contain one full attempt and the
+  # inner deadline is what reports. Locked by a test in timeouts_test.exs.
+  @mcp_remote_startup_ms 60_000
+  @mcp_remote_connect_ms 10_000
+  @mcp_remote_initialize_ms 15_000
+  @mcp_remote_discover_ms 15_000
+  @mcp_remote_call_ms 60_000
+  @mcp_remote_teardown_ms 10_000
+
+  @doc "Overall window for one connect + initialize + discover attempt."
+  @spec mcp_remote_startup() :: pos_integer()
+  def mcp_remote_startup, do: @mcp_remote_startup_ms
+
+  @doc "One TCP/TLS connection to a validated remote MCP peer."
+  @spec mcp_remote_connect() :: pos_integer()
+  def mcp_remote_connect, do: @mcp_remote_connect_ms
+
+  @doc "The MCP `initialize` request/response."
+  @spec mcp_remote_initialize() :: pos_integer()
+  def mcp_remote_initialize, do: @mcp_remote_initialize_ms
+
+  @doc "One `tools/list` page."
+  @spec mcp_remote_discover() :: pos_integer()
+  def mcp_remote_discover, do: @mcp_remote_discover_ms
+
+  @doc "One remote tool call, INCLUDING its wait in the serialization queue."
+  @spec mcp_remote_call() :: pos_integer()
+  def mcp_remote_call, do: @mcp_remote_call_ms
+
+  @doc "Authenticated MCP session teardown (`DELETE`) before the socket closes."
+  @spec mcp_remote_teardown() :: pos_integer()
+  def mcp_remote_teardown, do: @mcp_remote_teardown_ms
+
   # --- ACP bridge -----------------------------------------------------------
   # The `fermix acp` handshake deadline (MILESTONE_29 §6.2). Both ends of the
   # same exchange read it: the daemon's `Channels.Acp.Peer` refuses a connection

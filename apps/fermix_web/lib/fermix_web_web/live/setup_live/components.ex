@@ -5,6 +5,8 @@ defmodule FermixWebWeb.SetupLive.Components do
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.ModelCatalog
 
+  @local_process_consent "Runs a local process with direct access to the folders you configure."
+
   @channels [
     {:telegram, "Telegram"},
     {:whatsapp, "WhatsApp"},
@@ -35,6 +37,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :plugin_auth_url, :map, default: nil
   attr :plugin_summary, :map, required: true
   attr :oauth_modal, :map, default: nil
+  attr :resource_picker, :map, default: nil
   attr :installing_plugins, :list, default: []
   attr :realtime_form, :map, required: true
   attr :report, :map, required: true
@@ -121,6 +124,7 @@ defmodule FermixWebWeb.SetupLive.Components do
               plugin_auth_url={@plugin_auth_url}
               plugin_summary={@plugin_summary}
               oauth_modal={@oauth_modal}
+              resource_picker={@resource_picker}
               installing_plugins={@installing_plugins}
               realtime_form={@realtime_form}
               report={@report}
@@ -246,6 +250,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :plugin_auth_url, :map, default: nil
   attr :plugin_summary, :map, required: true
   attr :oauth_modal, :map, default: nil
+  attr :resource_picker, :map, default: nil
   attr :installing_plugins, :list, default: []
   attr :realtime_form, :map, required: true
   attr :report, :map, required: true
@@ -1199,6 +1204,7 @@ defmodule FermixWebWeb.SetupLive.Components do
       </.info_panel>
 
       <.oauth_client_modal oauth_modal={@oauth_modal} plugin_summary={@plugin_summary} />
+      <.resource_picker_modal picker={@resource_picker} />
 
       <.step_actions active_tab={@active_tab} tabs={@tabs} />
     </div>
@@ -2055,6 +2061,170 @@ defmodule FermixWebWeb.SetupLive.Components do
     """
   end
 
+  # The M27 §7.5 step between "credential stored" and "ready": choose the access
+  # profile, then exactly one resource to scope every call to. Server-owned
+  # open/close via the :resource_picker assign — the same shape and overlay as
+  # the OAuth-client modal above, so there is one modal pattern in this pane.
+  #
+  # Nothing here names a plugin. The profiles, their display names, and which of
+  # them widens the credential come from the manifest, so a second plugin
+  # declaring a `resource_scope` renders this step unchanged.
+  attr :picker, :map, default: nil
+
+  defp resource_picker_modal(%{picker: nil} = assigns), do: ~H""
+
+  defp resource_picker_modal(assigns) do
+    ~H"""
+    <div
+      id="resource-picker"
+      class="fixed inset-0 z-50 grid place-items-center bg-base-300/70 p-4 backdrop-blur-sm"
+      phx-window-keydown="close_resource_picker"
+      phx-key="Escape"
+    >
+      <div
+        class="w-full max-w-md rounded-box border border-base-300 bg-base-100 p-5 shadow-lg"
+        role="dialog"
+        aria-modal="true"
+        aria-label={"Choose a workspace for #{@picker.display_name}"}
+        phx-click-away="close_resource_picker"
+        phx-mounted={JS.focus_first()}
+      >
+        <div class="flex items-center justify-between gap-3">
+          <h3 class="text-base font-semibold">Choose a {@picker.display_name} workspace</h3>
+          <button
+            type="button"
+            class="btn btn-ghost btn-xs btn-circle"
+            phx-click="close_resource_picker"
+            aria-label="Close"
+          >
+            <.icon name="hero-x-mark" class="size-4" />
+          </button>
+        </div>
+        <p class="mt-1 text-xs text-base-content/55">
+          {@picker.display_name} is scoped to the one workspace you pick here. Its tools can never
+          reach another one, and the assistant cannot list them.
+        </p>
+
+        <.access_profile_choice picker={@picker} />
+        <.resource_list picker={@picker} />
+      </div>
+    </div>
+    """
+  end
+
+  attr :picker, :map, required: true
+
+  defp access_profile_choice(assigns) do
+    assigns = assign(assigns, :selected, selected_profile(assigns.picker))
+
+    ~H"""
+    <div class="mt-4">
+      <p class="text-xs font-medium">Access profile</p>
+      <div class="mt-1.5 flex flex-col gap-1.5">
+        <button
+          :for={profile <- @picker.profiles}
+          type="button"
+          class={[
+            "flex w-full items-center justify-between gap-3 rounded-field border px-3 py-2 text-left",
+            profile.name == @picker.profile && "border-primary bg-primary/5",
+            profile.name != @picker.profile && "border-base-300 hover:bg-base-200/60"
+          ]}
+          phx-click="pick_access_profile"
+          phx-value-profile={profile.name}
+          aria-pressed={to_string(profile.name == @picker.profile)}
+        >
+          <span class="min-w-0">
+            <span class="block truncate text-sm font-medium">{profile.display_name}</span>
+            <span :if={profile.default?} class="text-xs text-base-content/55">
+              Recommended — read-only.
+            </span>
+            <span :if={profile.write?} class="text-xs text-base-content/55">
+              Needs a read/write token and exposes write tools.
+            </span>
+          </span>
+          <.icon
+            :if={profile.name == @picker.profile}
+            name="hero-check-circle"
+            class="size-4 shrink-0 text-primary"
+          />
+        </button>
+      </div>
+      <p :if={@selected && @selected.write?} class="mt-1.5 text-xs text-warning">
+        {@selected.display_name} lets the assistant write to this workspace. Your token must allow
+        it; Fermix exposes less than the token authorizes upstream.
+      </p>
+    </div>
+    """
+  end
+
+  attr :picker, :map, required: true
+
+  defp resource_list(assigns) do
+    ~H"""
+    <div class="mt-4">
+      <p class="text-xs font-medium">Workspace</p>
+
+      <p :if={@picker.step == :pending} class="mt-1.5 text-xs text-base-content/55">
+        <span class="loading loading-spinner loading-xs align-middle"></span>
+        Asking {@picker.display_name} which workspaces this token can reach…
+      </p>
+
+      <p :if={@picker.step == :error} class="mt-1.5 text-xs text-error">
+        Could not list workspaces: {@picker.error}
+      </p>
+
+      <p :if={@picker.step == :selecting} class="mt-1.5 text-xs text-base-content/55">
+        <span class="loading loading-spinner loading-xs align-middle"></span>
+        Connecting to {@picker.display_name} and checking the signed tool contract…
+      </p>
+
+      <p :if={@picker.step == :choose && @picker.error} class="mt-1.5 text-xs text-error">
+        Could not select that workspace: {@picker.error}
+      </p>
+
+      <p
+        :if={@picker.step == :choose && @picker.resources == []}
+        class="mt-1.5 text-xs text-base-content/55"
+      >
+        This token can reach no workspaces. Create one in {@picker.display_name}, then reopen this.
+      </p>
+
+      <div :if={@picker.resources != []} class="mt-1.5 flex flex-col gap-1.5">
+        <div
+          :for={resource <- @picker.resources}
+          class="flex items-center justify-between gap-3 rounded-field border border-base-300 px-3 py-2"
+        >
+          <span class="min-w-0 truncate text-sm">{resource_label(resource)}</span>
+          <button
+            type="button"
+            class="btn btn-primary btn-xs shrink-0"
+            phx-click="select_workspace"
+            phx-value-id={resource.id}
+            phx-value-label={resource.label}
+            disabled={@picker.step == :selecting}
+          >
+            Select
+          </button>
+        </div>
+      </div>
+
+      <div class="mt-4 flex justify-end">
+        <button type="button" class="btn btn-ghost btn-sm" phx-click="close_resource_picker">
+          Cancel
+        </button>
+      </div>
+    </div>
+    """
+  end
+
+  defp selected_profile(picker),
+    do: Enum.find(picker.profiles, &(&1.name == picker.profile))
+
+  # The label is display-only and may legitimately be empty (§7.5); the opaque
+  # ID is never shown in its place.
+  defp resource_label(%{label: ""}), do: "Unnamed workspace"
+  defp resource_label(%{label: label}), do: label
+
   # One shared modal (rendered once per pane, parameterized by the open
   # provider) holding the relocated client form. Server-owned open/close via the
   # :oauth_modal assign — same overlay pattern as the "Restarting…" scrim, so no
@@ -2315,6 +2485,17 @@ defmodule FermixWebWeb.SetupLive.Components do
           {plugin_action_label(@plugin.status)}
         </button>
         <button
+          :if={workspace_step?(@plugin) && !@oauth_unset?}
+          type="button"
+          class={workspace_button_class(@plugin.status)}
+          phx-click="open_resource_picker"
+          phx-value-name={@plugin.name}
+        >
+          <.icon name="hero-rectangle-stack" class="size-3.5" /> {workspace_action_label(
+            @plugin.status
+          )}
+        </button>
+        <button
           :if={!@oauth_unset? && @plugin.enabled? && @plugin.status == :ready && @plugin.checkable?}
           type="button"
           class="btn btn-ghost btn-xs"
@@ -2371,6 +2552,8 @@ defmodule FermixWebWeb.SetupLive.Components do
     assigns =
       assigns
       |> assign(:blocked_reason, catalog_blocked_reason(assigns.entry))
+      |> assign(:consent_line, runtime_consent_line(assigns.entry))
+      |> assign(:remote?, assigns.entry.runtime_kind == "remote_mcp")
       |> assign(
         :oauth_unset?,
         assigns.oauth != nil and not oauth_client_configured?(assigns.oauth)
@@ -2400,9 +2583,8 @@ defmodule FermixWebWeb.SetupLive.Components do
         <p :if={@entry.description} class="truncate text-xs text-base-content/55">
           {@entry.description}
         </p>
-        <p :if={@entry.mcp?} class="text-xs text-base-content/55">
-          Runs a local process with direct access to the folders you configure.
-        </p>
+        <p :if={@consent_line} class="text-xs text-base-content/55">{@consent_line}</p>
+        <.remote_runtime_disclosure :if={@remote?} display_name={@entry.display_name} />
         <p :if={@blocked_reason} class="text-xs text-warning">{@blocked_reason}</p>
       </div>
 
@@ -2448,6 +2630,39 @@ defmodule FermixWebWeb.SetupLive.Components do
         </button>
       </div>
     </section>
+    """
+  end
+
+  # M27 §10.3: everything a hosted-runtime entry must say BEFORE the operator
+  # hands it a credential. Rendered from the index's `runtime_kind`, never from
+  # a plugin name — any catalog entry that declares a remote runtime gets the
+  # same disclosure. Collapsed by default because the card is a dense row; the
+  # always-visible consent line above it already names the hosted execution.
+  attr :display_name, :string, required: true
+
+  defp remote_runtime_disclosure(assigns) do
+    ~H"""
+    <details class="mt-1">
+      <summary class="cursor-pointer text-xs font-medium text-primary marker:text-base-content/40">
+        Before you connect: what leaves this machine
+      </summary>
+      <ul class="mt-1.5 list-disc space-y-1 rounded-field border border-base-300 bg-base-100 py-2 pl-6 pr-2 text-xs text-base-content/55">
+        <li>
+          {@display_name} is a hosted service: the queries and content Fermix selects are sent to it.
+        </li>
+        <li>It may require a paid plan, and some operations spend the vendor's own credits.</li>
+        <li>
+          A read/write credential authorizes more upstream than Fermix exposes — prefer a read-only
+          one if you only need retrieval.
+        </li>
+        <li>The vendor's AI features may route that content on to third-party model providers.</li>
+        <li>
+          Results enter your configured model provider and this machine's conversation history; with
+          content capture on, they also enter local trace content and the configured Opik exporter.
+        </li>
+        <li>You are responsible for having the rights to the content you save there.</li>
+      </ul>
+    </details>
     """
   end
 
@@ -3061,42 +3276,106 @@ defmodule FermixWebWeb.SetupLive.Components do
     end
   end
 
-  defp status_pill_class(:ready), do: "badge badge-success badge-sm"
-  defp status_pill_class(:partial), do: "badge badge-warning badge-sm"
-  defp status_pill_class(:needs_auth), do: "badge badge-warning badge-sm"
-  defp status_pill_class(:needs_client_config), do: "badge badge-warning badge-sm"
-  defp status_pill_class(:needs_config), do: "badge badge-warning badge-sm"
-  defp status_pill_class(:needs_secret), do: "badge badge-warning badge-sm"
-  defp status_pill_class(:reauthorization_required), do: "badge badge-error badge-sm"
-  defp status_pill_class(:error), do: "badge badge-error badge-sm"
-  defp status_pill_class(:not_configured), do: "badge badge-ghost badge-sm"
-  defp status_pill_class(:available), do: "badge badge-ghost badge-sm"
-  defp status_pill_class(:installing), do: "badge badge-info badge-sm"
-  defp status_pill_class(:incompatible), do: "badge badge-ghost badge-sm"
-  defp status_pill_class(_), do: "badge badge-ghost badge-sm"
+  @doc """
+  Badge class for a plugin/integration status atom.
 
-  defp status_pill_label(:ready), do: "Ready"
-  defp status_pill_label(:partial), do: "Needs setup"
-  defp status_pill_label(:needs_auth), do: "Needs auth"
-  defp status_pill_label(:needs_client_config), do: "needs client config"
-  defp status_pill_label(:needs_config), do: "Needs config"
-  defp status_pill_label(:needs_secret), do: "Needs key"
-  defp status_pill_label(:reauthorization_required), do: "Reauthorize"
-  defp status_pill_label(:error), do: "Error"
-  defp status_pill_label(:not_configured), do: "Not configured"
-  defp status_pill_label(:available), do: "Available"
-  defp status_pill_label(:installing), do: "Installing"
-  defp status_pill_label(:incompatible), do: "Incompatible"
-  defp status_pill_label(_), do: "Unknown"
+  Public with `status_pill_label/1` and `plugin_action_label/1` because these
+  three are the *only* place a status atom becomes UI: the vocabulary is gated
+  as one surface (`setup_live_test.exs`, "status vocabulary"), so a status added
+  to `FermixCore.Plugins.Status` later either joins them or fails that test.
+  """
+  @spec status_pill_class(atom()) :: String.t()
+  def status_pill_class(:ready), do: "badge badge-success badge-sm"
+  def status_pill_class(:partial), do: "badge badge-warning badge-sm"
+  def status_pill_class(:needs_auth), do: "badge badge-warning badge-sm"
+  def status_pill_class(:needs_client_config), do: "badge badge-warning badge-sm"
+  def status_pill_class(:needs_config), do: "badge badge-warning badge-sm"
+  def status_pill_class(:needs_secret), do: "badge badge-warning badge-sm"
+  def status_pill_class(:reauthorization_required), do: "badge badge-error badge-sm"
+  def status_pill_class(:error), do: "badge badge-error badge-sm"
+  def status_pill_class(:not_configured), do: "badge badge-ghost badge-sm"
+  def status_pill_class(:available), do: "badge badge-ghost badge-sm"
+  def status_pill_class(:installing), do: "badge badge-info badge-sm"
+  def status_pill_class(:incompatible), do: "badge badge-ghost badge-sm"
+  # Install/runtime ladder: both are real `Plugins.Status` returns that were
+  # rendering as a grey "Unknown". Warning, not error — each has a fix.
+  def status_pill_class(:missing_host_runtime), do: "badge badge-warning badge-sm"
+  def status_pill_class(:not_installed), do: "badge badge-warning badge-sm"
+  # Remote MCP runtimes (M27 §12 Stage 3). Warning where the operator can act,
+  # error where the connection/contract is refused until something upstream or
+  # in the artifact changes.
+  def status_pill_class(:needs_workspace), do: "badge badge-warning badge-sm"
+  def status_pill_class(:insufficient_credential_scope), do: "badge badge-warning badge-sm"
+  def status_pill_class(:invalid_remote_config), do: "badge badge-error badge-sm"
+  def status_pill_class(:connecting), do: "badge badge-info badge-sm"
+  def status_pill_class(:remote_unreachable), do: "badge badge-error badge-sm"
+  def status_pill_class(:upstream_contract_mismatch), do: "badge badge-error badge-sm"
+  def status_pill_class(:capability_conflict), do: "badge badge-error badge-sm"
+  def status_pill_class(:remote_security_blocked), do: "badge badge-error badge-sm"
+  def status_pill_class(:remote_protocol_error), do: "badge badge-error badge-sm"
+  def status_pill_class(_), do: "badge badge-ghost badge-sm"
+
+  @doc "Sentence-cased pill text for a status atom. See `status_pill_class/1`."
+  @spec status_pill_label(atom()) :: String.t()
+  def status_pill_label(:ready), do: "Ready"
+  def status_pill_label(:partial), do: "Needs setup"
+  def status_pill_label(:needs_auth), do: "Needs auth"
+  def status_pill_label(:needs_client_config), do: "Needs client config"
+  def status_pill_label(:needs_config), do: "Needs config"
+  def status_pill_label(:needs_secret), do: "Needs key"
+  def status_pill_label(:reauthorization_required), do: "Reauthorize"
+  def status_pill_label(:error), do: "Error"
+  def status_pill_label(:not_configured), do: "Not configured"
+  def status_pill_label(:available), do: "Available"
+  def status_pill_label(:installing), do: "Installing"
+  def status_pill_label(:incompatible), do: "Incompatible"
+  def status_pill_label(:missing_host_runtime), do: "Needs runtime"
+  def status_pill_label(:not_installed), do: "Not installed"
+  def status_pill_label(:needs_workspace), do: "Needs workspace"
+  def status_pill_label(:insufficient_credential_scope), do: "Insufficient scope"
+  def status_pill_label(:invalid_remote_config), do: "Invalid config"
+  def status_pill_label(:connecting), do: "Connecting"
+  def status_pill_label(:remote_unreachable), do: "Unreachable"
+  def status_pill_label(:upstream_contract_mismatch), do: "Contract mismatch"
+  def status_pill_label(:capability_conflict), do: "Capability conflict"
+  def status_pill_label(:remote_security_blocked), do: "Blocked"
+  def status_pill_label(:remote_protocol_error), do: "Protocol error"
+  def status_pill_label(_), do: "Unknown"
 
   defp plugin_primary_action(%{auth_type: :oauth2}), do: "Connect"
   defp plugin_primary_action(_plugin), do: "Enable"
 
-  defp plugin_action_label(:needs_client_config), do: "Configure"
-  defp plugin_action_label(:needs_auth), do: "Connect"
-  defp plugin_action_label(:reauthorization_required), do: "Reauthorize"
-  defp plugin_action_label(:ready), do: "Check"
-  defp plugin_action_label(_status), do: "Enable"
+  # The workspace step exists only once the credential is stored: `:needs_workspace`
+  # sits *after* `:needs_secret` in the ladder, and `:ready` means one is already
+  # chosen and can be changed (an explicit reconnect, §7.5). Every earlier status
+  # is a different problem, and offering the picker there would misdirect.
+  defp workspace_step?(%{resource_scope?: true, enabled?: true, status: status}),
+    do: status in [:needs_workspace, :ready]
+
+  defp workspace_step?(_plugin), do: false
+
+  defp workspace_button_class(:needs_workspace), do: "btn btn-primary btn-xs"
+  defp workspace_button_class(_status), do: "btn btn-outline btn-xs"
+
+  defp workspace_action_label(:needs_workspace), do: "Choose workspace"
+  defp workspace_action_label(_status), do: "Change workspace"
+
+  @doc """
+  Verb for the card's fix-it button. Only statuses the operator can act on get a
+  clause; everything else keeps the "Enable" default. See `status_pill_class/1`.
+  """
+  @spec plugin_action_label(atom()) :: String.t()
+  def plugin_action_label(:needs_client_config), do: "Configure"
+  def plugin_action_label(:needs_auth), do: "Connect"
+  def plugin_action_label(:reauthorization_required), do: "Reauthorize"
+  def plugin_action_label(:ready), do: "Check"
+  def plugin_action_label(:not_installed), do: "Install"
+  def plugin_action_label(:missing_host_runtime), do: "Install runtime"
+  def plugin_action_label(:needs_workspace), do: "Choose workspace"
+  def plugin_action_label(:insufficient_credential_scope), do: "Replace token"
+  def plugin_action_label(:invalid_remote_config), do: "Configure"
+  def plugin_action_label(:remote_unreachable), do: "Retry"
+  def plugin_action_label(_status), do: "Enable"
 
   defp catalog_status(_entry, true), do: :installing
   # Computer use stays a catalog entry even when on; reflect its real state instead
@@ -3106,6 +3385,17 @@ defmodule FermixWebWeb.SetupLive.Components do
   defp catalog_status(%{enabled?: true, ready?: false}, _installing?), do: :partial
   defp catalog_status(%{compat: {:error, _reason}}, _installing?), do: :incompatible
   defp catalog_status(_entry, _installing?), do: :available
+
+  # Pre-install consent (M27 §12 Stage 2), one sentence per runtime kind. The
+  # index's `runtime_kind` decides it; entries published before that field exists
+  # carry `nil` and keep the mcp-rail local-process sentence they have always
+  # shown. A non-mcp entry with no runtime kind says nothing, as before.
+  defp runtime_consent_line(%{runtime_kind: "remote_mcp"}),
+    do: "Connects to a hosted MCP service and sends selected requests and content to it."
+
+  defp runtime_consent_line(%{runtime_kind: "local_stdio"}), do: @local_process_consent
+  defp runtime_consent_line(%{runtime_kind: nil, mcp?: true}), do: @local_process_consent
+  defp runtime_consent_line(_entry), do: nil
 
   # Pre-fetch blockers (§13): an incompatible/yanked/absent latest greys the
   # card before any artifact download.

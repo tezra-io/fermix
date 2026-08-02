@@ -3,6 +3,19 @@ defmodule FermixCore.Plugins.Plugin do
   Validated bundled plugin manifest.
   """
 
+  @typedoc """
+  Bounded declarative credential validation (plugin-api 3, M27 §7.5). A literal
+  prefix, byte bounds, a fixed charset enum, and a whitespace prohibition — no
+  regex, no executable validator.
+  """
+  @type auth_validation :: %{
+          prefix: String.t(),
+          min_bytes: pos_integer(),
+          max_bytes: pos_integer(),
+          charset: String.t(),
+          forbid_whitespace: boolean()
+        }
+
   @type auth :: %{
           type: :none | :oauth2 | :api_key,
           provider: String.t() | nil,
@@ -12,7 +25,8 @@ defmodule FermixCore.Plugins.Plugin do
           header: String.t() | nil,
           scheme: String.t() | nil,
           prompt: String.t() | nil,
-          help_url: String.t() | nil
+          help_url: String.t() | nil,
+          validation: auth_validation() | nil
         }
 
   @type config_entry :: %{key: String.t(), prompt: String.t(), required: boolean()}
@@ -33,6 +47,11 @@ defmodule FermixCore.Plugins.Plugin do
           config: [config_entry()],
           tools: [map()],
           skills: [map()],
+          tool_profiles: [map()],
+          setup_tools: [String.t()],
+          resource_scope: map() | nil,
+          budgets: map() | nil,
+          result_contract: map() | nil,
           health_check: map() | nil,
           path: String.t()
         }
@@ -61,12 +80,17 @@ defmodule FermixCore.Plugins.Plugin do
     :plugin_api,
     :runtime,
     :auth,
+    :resource_scope,
+    :budgets,
+    :result_contract,
     :health_check,
     :path,
     default_enabled?: false,
     interface: %{},
     config: [],
     tools: [],
-    skills: []
+    skills: [],
+    tool_profiles: [],
+    setup_tools: []
   ]
 end

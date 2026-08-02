@@ -131,19 +131,20 @@ defmodule FermixCore.Net.Guard do
 
         case resolver.(host) do
           {:ok, []} -> {:error, {:dns_resolution_failed, :nxdomain}}
-          {:ok, ips} -> first_validated_ip(ips)
+          {:ok, ips} -> validate_all_answers(ips)
           {:error, reason} -> {:error, {:dns_resolution_failed, reason}}
         end
     end
   end
 
-  defp first_validated_ip(ips) do
-    Enum.reduce_while(ips, {:error, {:dns_resolution_failed, :no_public_ip}}, fn ip, _acc ->
-      case validate_public_ip(ip, {:resolved_to_private_address, ip}) do
-        :ok -> {:halt, {:ok, ip}}
-        {:error, _reason} = err -> {:halt, err}
-      end
-    end)
+  # Every A and AAAA answer must be globally routable: a mixed set means the
+  # name can steer a later resolution at a non-global peer, so picking the
+  # convenient public answer would hand an attacker the rebind they wanted.
+  defp validate_all_answers([first | _rest] = ips) do
+    case Enum.find(ips, &private_ip?/1) do
+      nil -> {:ok, first}
+      ip -> {:error, {:resolved_to_private_address, ip}}
+    end
   end
 
   defp default_resolver(host) do
@@ -162,23 +163,14 @@ defmodule FermixCore.Net.Guard do
     if private_ip?(ip), do: {:error, reason}, else: :ok
   end
 
-  defp private_ip?({a, b, _c, _d}) do
-    private_ipv4_prefix?(a, b) or reserved_ipv4_prefix?(a)
-  end
+  defp private_ip?({a, b, c, d}), do: ipv4_non_global?(a, b, c, d)
 
-  defp private_ip?({0, 0, 0, 0, 0, 0, 0, 1}), do: true
+  defp private_ip?({_a, _b, _c, _d, _e, _f, _g, _h} = ip), do: ipv6_non_global?(ip)
 
-  defp private_ip?({0, 0, 0, 0, 0, 65_535, high, low}) do
-    private_ip?({high >>> 8, high &&& 255, low >>> 8, low &&& 255})
-  end
-
-  defp private_ip?({first, _b, _c, _d, _e, _f, _g, _h}) do
-    cond do
-      (first &&& 0xFE00) == 0xFC00 -> true
-      (first &&& 0xFFC0) == 0xFE80 -> true
-      (first &&& 0xFF00) == 0xFF00 -> true
-      true -> false
-    end
+  defp ipv4_non_global?(a, b, c, _d) do
+    private_ipv4_prefix?(a, b) or reserved_ipv4_prefix?(a) or shared_ipv4_prefix?(a, b) or
+      documentation_ipv4_prefix?(a, b, c) or benchmarking_ipv4_prefix?(a, b) or
+      relay_ipv4_prefix?(a, b, c)
   end
 
   defp private_ipv4_prefix?(a, b) do
@@ -189,4 +181,46 @@ defmodule FermixCore.Net.Guard do
   end
 
   defp reserved_ipv4_prefix?(a), do: a in 224..239 or a >= 240
+
+  # RFC 6598 carrier-grade NAT: 100.64.0.0/10 addresses a provider's inside
+  # network, not a global peer.
+  defp shared_ipv4_prefix?(a, b), do: a == 100 and b in 64..127
+
+  # RFC 5737 documentation ranges are routed nowhere, so a resolver handing
+  # one back is misconfigured or steering us at a local listener.
+  defp documentation_ipv4_prefix?(a, b, c) do
+    (a == 192 and b == 0 and c == 2) or
+      (a == 198 and b == 51 and c == 100) or
+      (a == 203 and b == 0 and c == 113)
+  end
+
+  # RFC 2544 benchmarking: 198.18.0.0/15.
+  defp benchmarking_ipv4_prefix?(a, b), do: a == 198 and b in 18..19
+
+  # RFC 7526 6to4 relay anycast: 192.88.99.0/24, deprecated and unroutable.
+  defp relay_ipv4_prefix?(a, b, c), do: a == 192 and b == 88 and c == 99
+
+  # ::/96 — the unspecified address, loopback, and the deprecated
+  # IPv4-compatible form, none of which name a global peer.
+  defp ipv6_non_global?({0, 0, 0, 0, 0, 0, _g, _h}), do: true
+
+  # ::ffff:0:0/96 — IPv4-mapped, so the embedded v4 address decides.
+  defp ipv6_non_global?({0, 0, 0, 0, 0, 65_535, high, low}) do
+    ipv4_non_global?(high >>> 8, high &&& 255, low >>> 8, low &&& 255)
+  end
+
+  # Transition ranges — NAT64 64:ff9b::/96, 6to4 2002::/16, Teredo
+  # 2001::/32 — carry a v4 destination we would not otherwise screen.
+  defp ipv6_non_global?({0x64, 0xFF9B, 0, 0, 0, 0, _g, _h}), do: true
+  defp ipv6_non_global?({0x2002, _b, _c, _d, _e, _f, _g, _h}), do: true
+  defp ipv6_non_global?({0x2001, 0, _c, _d, _e, _f, _g, _h}), do: true
+
+  defp ipv6_non_global?({first, _b, _c, _d, _e, _f, _g, _h}) do
+    cond do
+      (first &&& 0xFE00) == 0xFC00 -> true
+      (first &&& 0xFFC0) == 0xFE80 -> true
+      (first &&& 0xFF00) == 0xFF00 -> true
+      true -> false
+    end
+  end
 end

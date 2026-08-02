@@ -3,6 +3,7 @@ defmodule FermixCore.Plugins.Dist.InstallerTest do
 
   alias FermixCore.Plugins.Dist.Installer
   alias FermixCore.Plugins.Dist.Store
+  alias FermixCore.Plugins.Dist.TreeDigest
   alias FermixTestSupport.DistFetcherStub
   alias FermixTestSupport.DistFixtures
   alias FermixTestSupport.DistVerifierStub
@@ -73,6 +74,25 @@ defmodule FermixCore.Plugins.Dist.InstallerTest do
       assert entry["min_core_version"] == "0.1.0"
     end
 
+    test "records tree_digest_v2 for a local install, over the installed tree", ctx do
+      # One digest algorithm going forward (§9.3): every new install records
+      # `tree_digest_v2` regardless of runtime kind, and it must be the digest
+      # of the tree that actually landed.
+      {tgz, sha} = build_tarball(ctx.fixtures, "github", "1.2.0")
+      idx = wire(ctx, "github", "1.2.0", tgz, sha)
+      DistVerifierStub.allow("github", "1.2.0")
+
+      assert {:ok, :installed} = Installer.run_install("github", install_opts(ctx, idx))
+
+      entry = Map.fetch!(Store.installed(ctx.root), "github")
+
+      assert {:ok, digest} =
+               TreeDigest.digest_tree(Store.version_dir(ctx.root, "github", "1.2.0"))
+
+      assert entry["tree_digest_v2"] == digest
+      assert entry["tree_digest_v2"] != entry["h1"]
+    end
+
     test "a second install of the same version is a no-op (already_installed)", ctx do
       {tgz, sha} = build_tarball(ctx.fixtures, "github", "1.2.0")
       idx = wire(ctx, "github", "1.2.0", tgz, sha)
@@ -136,9 +156,9 @@ defmodule FermixCore.Plugins.Dist.InstallerTest do
 
     test "incompatible plugin_api refuses with a specific reason", ctx do
       {tgz, sha} = build_tarball(ctx.fixtures, "github", "1.2.0")
-      idx = wire(ctx, "github", "1.2.0", tgz, sha, plugin_api: 3)
+      idx = wire(ctx, "github", "1.2.0", tgz, sha, plugin_api: 4)
 
-      assert {:error, {:incompatible, {:needs_newer_core, :plugin_api, 3}}} =
+      assert {:error, {:incompatible, {:needs_newer_core, :plugin_api, 4}}} =
                Installer.run_install("github", install_opts(ctx, idx))
     end
 
@@ -236,6 +256,62 @@ defmodule FermixCore.Plugins.Dist.InstallerTest do
     end
   end
 
+  describe "run_install/2 data-only boundary for remote runtimes (§12 Stage 2)" do
+    @remote_manifest_extra %{
+      "plugin_api" => 3,
+      "runtime" => %{
+        "kind" => "remote_mcp",
+        "transport" => "streamable_http",
+        "protocol_version" => "2025-06-18",
+        "base_url" => "https://mcp.example.com",
+        "mcp_path" => "/mcp",
+        "tool_name_mode" => "prefix"
+      }
+    }
+
+    defp remote_install(ctx, members) do
+      {tgz, sha} =
+        build_tarball(ctx.fixtures, "eden", "1.0.0",
+          manifest_extra: @remote_manifest_extra,
+          extra_members: members
+        )
+
+      idx = wire(ctx, "eden", "1.0.0", tgz, sha, plugin_api: 3)
+      DistVerifierStub.allow("eden", "1.0.0")
+      Installer.run_install("eden", install_opts(ctx, idx))
+    end
+
+    test "refuses a remote artifact carrying src/", ctx do
+      assert {:error, {:remote_content_boundary_violation, "src"}} =
+               remote_install(ctx, [{~c"src/index.js", "console.log(1)"}])
+
+      refute File.exists?(Path.join(Store.paths(ctx.root).installed, "eden"))
+    end
+
+    test "refuses a remote artifact carrying bin/", ctx do
+      assert {:error, {:remote_content_boundary_violation, "bin"}} =
+               remote_install(ctx, [{~c"bin/macos-aarch64/server", "ELF"}])
+    end
+
+    test "refuses a remote artifact carrying an ecosystem manifest", ctx do
+      assert {:error, {:remote_content_boundary_violation, "package.json"}} =
+               remote_install(ctx, [{~c"package.json", "{}"}])
+    end
+
+    test "refuses a remote artifact whose data file carries an executable bit", ctx do
+      # The path is allowed content; the mode bit is not. A remote plugin has no
+      # local execution path, so nothing in its tree may be runnable.
+      script = Path.join(ctx.fixtures, "run.sh")
+      File.write!(script, "#!/bin/sh\necho hi\n")
+      File.chmod!(script, 0o755)
+
+      assert {:error, {:remote_executable_file, "assets/run.sh"}} =
+               remote_install(ctx, [{~c"assets/run.sh", String.to_charlist(script)}])
+
+      refute File.exists?(Path.join(Store.paths(ctx.root).installed, "eden"))
+    end
+  end
+
   describe "run_install/2 host-runtime probe (mcp plugins)" do
     @mcp_manifest_extra %{
       "runtime" => %{
@@ -283,6 +359,31 @@ defmodule FermixCore.Plugins.Dist.InstallerTest do
                Installer.run_install("vault", install_opts(ctx, idx, probe_opts: probe_opts))
 
       assert Store.active_version(ctx.root, "vault") == "1.0.0"
+    end
+
+    test "a local runtime may still carry src/ and its ecosystem manifest", ctx do
+      # Regression: the data-only rule is remote-only — tightening it must not
+      # start refusing the local-process artifacts that need vendored code.
+      {tgz, sha} =
+        build_tarball(ctx.fixtures, "vault", "1.0.0",
+          manifest_extra: @mcp_manifest_extra,
+          extra_members: [{~c"src/index.js", "run()"}, {~c"package.json", "{}"}]
+        )
+
+      idx = wire(ctx, "vault", "1.0.0", tgz, sha)
+      DistVerifierStub.allow("vault", "1.0.0")
+
+      probe_opts = [
+        find_executable: fn "node" -> "/usr/bin/node" end,
+        version_fetch: fn _cmd -> {:ok, "v20.11.1\n"} end
+      ]
+
+      assert {:ok, :installed} =
+               Installer.run_install("vault", install_opts(ctx, idx, probe_opts: probe_opts))
+
+      assert File.exists?(
+               Path.join(Store.version_dir(ctx.root, "vault", "1.0.0"), "src/index.js")
+             )
     end
   end
 

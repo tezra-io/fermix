@@ -16,6 +16,28 @@ defmodule FermixCore.Setup.SecretPathsTest do
     end
   end
 
+  test "registers the Eden plugin secret under the plugin-secret shape" do
+    secret = SecretPaths.fetch!(:eden_plugin_secret)
+
+    assert secret.env == "FERMIX_PLUGIN_EDEN"
+    assert secret.path == [:fermix_core, :plugin_secrets, "eden"]
+    assert secret.plugin == "eden"
+    assert secret.functionality == "Eden plugin"
+    assert secret.optional? == true
+    assert SecretPaths.fetch_plugin("eden") == secret
+  end
+
+  test "the Eden plugin secret has exactly one source: the keychain, not the env" do
+    # M27 §7.5: `env` is the keyring/account label SecretWriter stores under. A
+    # `sandbox_env` entry would publish it as [sandbox.env.FERMIX_PLUGIN_EDEN],
+    # creating a second credential source and making "forget local credential"
+    # a lie. Eden is BEAM-internal HTTP, like the other plugin secrets.
+    secret = SecretPaths.fetch!(:eden_plugin_secret)
+
+    refute Map.has_key?(secret, :sandbox_env)
+    refute :eden_plugin_secret in Enum.map(SecretPaths.sandbox_env_eligible(), & &1.key)
+  end
+
   test "oauth client secrets are not sandbox_env eligible" do
     eligible = SecretPaths.sandbox_env_eligible() |> Enum.map(& &1.key)
 

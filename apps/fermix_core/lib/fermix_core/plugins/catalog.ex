@@ -22,6 +22,7 @@ defmodule FermixCore.Plugins.Catalog do
           category: String.t() | nil,
           auth_type: :none | :oauth2 | :api_key | nil,
           provider: String.t() | nil,
+          runtime_kind: String.t() | nil,
           rails: [String.t()],
           logo: map() | nil,
           latest: String.t() | nil,
@@ -92,6 +93,10 @@ defmodule FermixCore.Plugins.Catalog do
       category: plugin.category,
       auth_type: Map.get(@auth_types, plugin.auth_type),
       provider: plugin.auth_provider,
+      # M27 §12 Stage 2: where this plugin's code runs, straight from the index.
+      # `nil` for every entry published before the field — the card keeps its
+      # neutral pre-install copy rather than guessing.
+      runtime_kind: plugin.runtime_kind,
       rails: plugin.rails,
       logo: plugin.logo,
       latest: plugin.latest,

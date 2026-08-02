@@ -79,6 +79,33 @@ defmodule FermixCore.TimeoutsTest do
     end
   end
 
+  describe "remote MCP startup invariant" do
+    test "the startup window can contain one full connect + initialize + discover" do
+      # Not a bare `>`: if the outer window were tighter than its three inner
+      # phases, startup would report a generic window expiry and hide which
+      # phase actually stalled — the inner deadline must be the one that fires.
+      assert Timeouts.mcp_remote_startup() >
+               Timeouts.mcp_remote_connect() + Timeouts.mcp_remote_initialize() +
+                 Timeouts.mcp_remote_discover()
+    end
+
+    test "every remote deadline is a fixed constant, not operator-tunable" do
+      # A remote endpoint is a signed-manifest contract. Config-driven values
+      # would let an operator hold a hostile server's connection open past what
+      # the signature was reviewed against.
+      prior = Application.get_env(:fermix_core, :mcp_remote)
+      Application.put_env(:fermix_core, :mcp_remote, call_ms: 1, startup_ms: 1)
+      on_exit(fn -> restore_env(:mcp_remote, prior) end)
+
+      assert Timeouts.mcp_remote_startup() == 60_000
+      assert Timeouts.mcp_remote_connect() == 10_000
+      assert Timeouts.mcp_remote_initialize() == 15_000
+      assert Timeouts.mcp_remote_discover() == 15_000
+      assert Timeouts.mcp_remote_call() == 60_000
+      assert Timeouts.mcp_remote_teardown() == 10_000
+    end
+  end
+
   describe "ACP bridge handshake deadline" do
     test "is one named value both ends of the handshake read" do
       # The daemon's `Channels.Acp.Peer` refuses a connection that has not sent
@@ -150,4 +177,7 @@ defmodule FermixCore.TimeoutsTest do
 
   defp restore_harness(nil), do: Application.delete_env(:fermix_core, :harness)
   defp restore_harness(value), do: Application.put_env(:fermix_core, :harness, value)
+
+  defp restore_env(key, nil), do: Application.delete_env(:fermix_core, key)
+  defp restore_env(key, value), do: Application.put_env(:fermix_core, key, value)
 end
