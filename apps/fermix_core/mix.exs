@@ -37,6 +37,12 @@ defmodule FermixCore.MixProject do
       # Explicit because FermixCore.Application supervises the shared
       # FermixCore.Finch pool directly (req would only pull it transitively).
       {:finch, "~> 0.21"},
+      # Explicit because the remote-MCP rail drives Mint directly
+      # (`Capabilities.MCP.Remote.Connection`): it pins the connection to a
+      # guard-validated peer and enforces response caps while streaming, neither
+      # of which a pooled request/response client can express. Finch would only
+      # pull it transitively.
+      {:mint, "~> 1.7"},
       {:req, "~> 0.5"},
       {:telemetry, "~> 1.0"},
       # Compile-time-embedded IANA tz database (no runtime network fetch, unlike

@@ -15,6 +15,7 @@ defmodule FermixCore.Application do
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Auth.TokenSupervisor
   alias FermixCore.Capabilities.BuiltinSeeder
+  alias FermixCore.Capabilities.MCP.RuntimeStatus, as: McpRuntimeStatus
   alias FermixCore.Capabilities.MCP.Supervisor, as: McpSupervisor
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.CommandHost.Supervisor, as: CommandHostSupervisor
@@ -144,6 +145,10 @@ defmodule FermixCore.Application do
         PluginInstaller,
         {PluginCapabilitySeeder, capability_registry: CapabilityRegistry},
         {SkillRegistry, capability_registry: CapabilityRegistry},
+        # Outside the MCP tree on purpose (M27 §7.8): a remote server's subtree
+        # is `:temporary`, so a status table living inside it would vanish
+        # exactly when it holds the only explanation of why the client is gone.
+        McpRuntimeStatus,
         {McpSupervisor, capability_registry: CapabilityRegistry},
         Repo,
         ConversationStore,

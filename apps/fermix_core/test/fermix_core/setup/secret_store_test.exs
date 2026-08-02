@@ -25,6 +25,9 @@ defmodule FermixCore.Setup.SecretStoreTest do
     end
 
     @impl true
+    def delete(_key, _opts \\ []), do: raise("secure-on-save must never delete")
+
+    @impl true
     def command_source(_key, _opts \\ []), do: %{source: :command, command: "", args: []}
   end
 
@@ -90,6 +93,9 @@ defmodule FermixCore.Setup.SecretStoreTest do
     def put(_key, _value, _opts \\ []), do: raise("resolution must never write")
 
     @impl true
+    def delete(_key, _opts \\ []), do: raise("resolution must never delete")
+
+    @impl true
     def command_source(key, _opts \\ []) do
       %{source: :command, command: "recording", args: [Atom.to_string(key)]}
     end
@@ -125,6 +131,9 @@ defmodule FermixCore.Setup.SecretStoreTest do
 
     @impl true
     def put(_key, _value, _opts \\ []), do: raise("resolution must never write")
+
+    @impl true
+    def delete(_key, _opts \\ []), do: raise("resolution must never delete")
 
     @impl true
     def command_source(key, _opts \\ []) do

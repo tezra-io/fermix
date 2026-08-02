@@ -5,19 +5,25 @@ defmodule FermixWebWeb.SetupLiveTest do
 
   alias Fermix.CLI.Upgrade.Manifest
   alias FermixCore.Auth.Store
+  alias FermixCore.Capabilities.MCP.RuntimeStatus
+  alias FermixCore.Plugins.CanonicalJson
   alias FermixCore.Plugins.Config, as: PluginConfig
   alias FermixCore.Plugins.Dist.Installer, as: DistInstaller
   alias FermixCore.Plugins.Registry, as: PluginRegistry
+  alias FermixCore.Plugins.Status, as: PluginStatus
   alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Setup.ConfigStore
   alias FermixTestSupport.DistFetcherStub
   alias FermixTestSupport.DistFixtures
   alias FermixTestSupport.DistVerifierStub
+  alias FermixWebWeb.SetupLive.Components
 
   # Hermetic Anthropic backend stub — writes the auth store (tmp FERMIX_HOME) but
   # never touches the real keychain / ~/.claude. Injected via :anthropic_login_impl.
   defmodule AnthropicLoginStub do
     alias FermixCore.Auth.Store
+    alias FermixCore.Capabilities.MCP.RuntimeStatus
+    alias FermixCore.Plugins.CanonicalJson
 
     @entry %{
       auth_mode: "setup_token",
@@ -39,6 +45,68 @@ defmodule FermixWebWeb.SetupLiveTest do
     end
 
     def claude_code_available?(_opts \\ []), do: true
+  end
+
+  # The transport module double `Remote.Session` exposes: canned responses in
+  # order. No socket, no TLS chain, no DNS answer.
+  defmodule FakeRemoteTransport do
+    def open(endpoint, opts),
+      do: {:ok, %{agent: Keyword.fetch!(opts, :agent), endpoint: endpoint}}
+
+    def request(conn, _method, _headers, _body, _timeout_ms) do
+      conn.agent
+      |> Agent.get_and_update(fn state ->
+        case state do
+          [next | rest] -> {next, rest}
+          [] -> {{:error, :no_canned_response}, []}
+        end
+      end)
+      |> case do
+        {:ok, response} -> {:ok, conn, response}
+        {:error, reason} -> {:error, conn, reason}
+      end
+    end
+
+    def close(_conn), do: :ok
+  end
+
+  # Stands in for the source-qualified MCP supervisor: the reconnect is only
+  # proven when the replacement generation reaches :ready.
+  defmodule ReadySupervisor do
+    alias FermixCore.Capabilities.MCP.RuntimeStatus
+
+    def stop_server(_source_id), do: :ok
+
+    def restart_server(source_id, _spec) do
+      owner = spawn(fn -> Process.sleep(:infinity) end)
+      {:ok, generation} = RuntimeStatus.register_owner(RuntimeStatus, source_id, owner)
+      :ok = RuntimeStatus.put(RuntimeStatus, source_id, generation, :ready, nil)
+      {:ok, owner}
+    end
+  end
+
+  # The replacement client comes up but lands on a terminal status instead of
+  # `:ready` — the shape of a real contract mismatch or a rejected credential.
+  defmodule MismatchSupervisor do
+    alias FermixCore.Capabilities.MCP.RuntimeStatus
+
+    def stop_server(_source_id), do: :ok
+
+    def restart_server(source_id, _spec) do
+      owner = spawn(fn -> Process.sleep(:infinity) end)
+      {:ok, generation} = RuntimeStatus.register_owner(RuntimeStatus, source_id, owner)
+
+      :ok =
+        RuntimeStatus.put(
+          RuntimeStatus,
+          source_id,
+          generation,
+          :upstream_contract_mismatch,
+          :descriptor_changed
+        )
+
+      {:ok, owner}
+    end
   end
 
   setup %{conn: conn} do
@@ -2944,11 +3012,100 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert html =~ ~s(data-catalog-name="obsidian")
       refute html =~ "MCP plugin support lands in a later Fermix"
       assert html =~ "Runs a local process with direct access to the folders you configure."
+      # `runtime_kind` is additive: an entry without it keeps exactly this copy
+      # and never grows the hosted-runtime disclosure.
+      refute html =~ "Before you connect"
 
       assert has_element?(
                view,
                ~s|button[phx-click="plugin_enable"][phx-value-name="obsidian"]|
              )
+    end
+
+    test "a local_stdio catalog entry keeps the local-process consent line", %{
+      conn: conn,
+      tmp_home: tmp_home,
+      fixtures: fixtures
+    } do
+      entry =
+        fixtures
+        |> wire_catalog_plugin("localnotes", "1.0.0")
+        |> Map.merge(%{"rails" => ["mcp"], "runtime_kind" => "local_stdio"})
+
+      seed_catalog(tmp_home, [entry])
+
+      {:ok, view, _html} = live(conn, "/setup")
+      html = view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+      assert html =~ ~s(data-catalog-name="localnotes")
+      assert html =~ "Runs a local process with direct access to the folders you configure."
+      refute html =~ "hosted MCP service"
+      refute html =~ "Before you connect"
+    end
+
+    test "a remote_mcp catalog entry discloses hosted execution before connect", %{
+      conn: conn,
+      tmp_home: tmp_home,
+      fixtures: fixtures
+    } do
+      entry =
+        fixtures
+        |> wire_catalog_plugin("hostednotes", "1.0.0")
+        |> Map.merge(%{"rails" => ["mcp"], "runtime_kind" => "remote_mcp"})
+
+      seed_catalog(tmp_home, [entry])
+
+      {:ok, view, _html} = live(conn, "/setup")
+      html = view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+      assert html =~ ~s(data-catalog-name="hostednotes")
+      # Consent splits on the index's runtime_kind, not on the rail: this entry
+      # is `rails: ["mcp"]` exactly like the local one above.
+      assert html =~
+               "Connects to a hosted MCP service and sends selected requests and content to it."
+
+      refute html =~ "Runs a local process with direct access to the folders you configure."
+
+      # M27 §10.3, every clause, and all of it before the operator hands over a
+      # credential — the card is still an uninstalled catalog card here.
+      assert html =~ "hostednotes is a hosted service"
+      assert html =~ "queries and content Fermix selects are sent to it"
+      assert html =~ "may require a paid plan"
+      assert html =~ "credits"
+      assert html =~ "authorizes more upstream than Fermix exposes"
+      assert html =~ "prefer a read-only"
+      assert html =~ "third-party model providers"
+      assert html =~ "configured model provider"
+      assert html =~ "conversation history"
+      assert html =~ "local trace content and the configured Opik exporter"
+      assert html =~ "rights to the content you save"
+
+      assert has_element?(
+               view,
+               ~s|button[phx-click="plugin_enable"][phx-value-name="hostednotes"]|
+             )
+    end
+
+    test "an unknown runtime_kind fails the index loud instead of degrading to neutral copy", %{
+      conn: conn,
+      tmp_home: tmp_home,
+      fixtures: fixtures
+    } do
+      entry =
+        fixtures
+        |> wire_catalog_plugin("hackerdemo", "1.0.0")
+        |> Map.put("runtime_kind", "remote_sse")
+
+      seed_catalog(tmp_home, [entry])
+
+      {:ok, view, _html} = live(conn, "/setup")
+      html = view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+      # The index ships inside the verified binary, so an unreadable runtime kind
+      # is a catalog bug: refuse the index rather than show a card whose consent
+      # copy we cannot honestly write.
+      assert html =~ "Catalog index unavailable"
+      refute html =~ ~s(data-catalog-name="hackerdemo")
     end
 
     test "a plugin needing config renders the config form and saving clears it", %{
@@ -3030,6 +3187,254 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert html =~ ~s(id="plugin-config-form-vaultdemo")
       assert PluginConfig.plugin_settings("vaultdemo") == %{}
     end
+  end
+
+  # M27 §7.5 steps 3–7: the per-plugin workspace step, the first custom setup
+  # step in this pane. Nothing here touches a socket — the remote calls run
+  # against `Plugins.RemoteSetup`'s transport and MCP-supervisor seams.
+  describe "remote plugin workspace picker" do
+    setup do
+      checkout = FermixTestSupport.SafeRm.make_tmp_dir!("setup-live-remote")
+      secrets = Application.get_env(:fermix_core, :plugin_secrets, %{})
+
+      on_exit(fn ->
+        Application.put_env(:fermix_core, :plugin_secrets, secrets)
+        Application.delete_env(:fermix_web, :remote_setup_opts)
+        RuntimeStatus.clear(RuntimeStatus, {:plugin, "eden"})
+        FermixTestSupport.SafeRm.rm_rf(checkout)
+      end)
+
+      Application.put_env(:fermix_core, :plugin_secrets, %{})
+      write_remote_plugin(checkout)
+      Application.put_env(:fermix_core, :plugins, enabled: ["eden"], dev_local: checkout)
+
+      %{checkout: checkout}
+    end
+
+    test "the picker only appears once the credential is stored", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup")
+      html = view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+      # Credential first: the workspace step is meaningless without a token to
+      # ask with, so the card offers the key form and nothing else.
+      assert html =~ ~s(data-plugin-name="eden")
+      assert html =~ "Needs key"
+      refute html =~ ~s(phx-click="open_resource_picker")
+
+      html =
+        view
+        |> form(~s|#plugin-secret-form-eden|, %{
+          "plugin_secret_form" => %{"value" => "eden_pat_0123456789abcdef"}
+        })
+        |> render_submit()
+
+      assert html =~ "Needs workspace"
+      assert html =~ ~s(phx-click="open_resource_picker")
+      assert html =~ "Choose workspace"
+    end
+
+    test "choosing a workspace persists the selection and reaches Ready", %{conn: conn} do
+      store_credential()
+      agent = canned_session(workspaces_result())
+
+      Application.put_env(:fermix_web, :remote_setup_opts,
+        transport: FakeRemoteTransport,
+        connect_opts: [agent: agent],
+        resolver: fn "eden" -> "eden_pat_0123456789abcdef" end,
+        mcp_supervisor: ReadySupervisor
+      )
+
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+      view
+      |> element(~s|button[phx-click="open_resource_picker"][phx-value-name="eden"]|)
+      |> render_click()
+
+      html = render_until(view, "Beta")
+      assert html =~ ~s(id="resource-picker")
+      assert html =~ "Alpha"
+      # The signed default profile is preselected; the write profile states what
+      # it widens before it can be chosen.
+      assert html =~ "Retrieval only"
+      assert html =~ "Needs a read/write token and exposes write tools."
+
+      # Selection is async (it stops, persists, restarts, and waits for the
+      # replacement client to reach `:ready`), so the click only starts it.
+      view
+      |> element(~s|button[phx-click="select_workspace"][phx-value-id="ws_alpha"]|)
+      |> render_click()
+
+      html = render_until(view, "Workspace selected.")
+      assert html =~ "Workspace selected."
+      refute html =~ ~s(id="resource-picker")
+      assert html =~ "Ready"
+
+      entry =
+        :fermix_core
+        |> Application.get_env(:plugins, [])
+        |> Keyword.get(:entries, %{})
+        |> Map.get("eden", [])
+
+      assert Keyword.get(entry, :workspace_id) == "ws_alpha"
+      assert Keyword.get(entry, :workspace_label) == "Alpha"
+      assert Keyword.get(entry, :access_profile) == "retrieval"
+    end
+
+    # The bug this pins: selection used to run inline in the event handler and
+    # report failure through a page flash, so the operator saw NOTHING — the
+    # LiveView could not re-render while it blocked, and the flash landed under
+    # the still-open modal.
+    test "a failing selection reports the reason inside the modal", %{conn: conn} do
+      store_credential()
+      agent = canned_session(workspaces_result())
+
+      Application.put_env(:fermix_web, :remote_setup_opts,
+        transport: FakeRemoteTransport,
+        connect_opts: [agent: agent],
+        resolver: fn "eden" -> "eden_pat_0123456789abcdef" end,
+        mcp_supervisor: MismatchSupervisor
+      )
+
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+      view
+      |> element(~s|button[phx-click="open_resource_picker"][phx-value-name="eden"]|)
+      |> render_click()
+
+      render_until(view, "Beta")
+
+      view
+      |> element(~s|button[phx-click="select_workspace"][phx-value-id="ws_alpha"]|)
+      |> render_click()
+
+      html = render_until(view, "Could not select that workspace")
+
+      # Visible, inside the modal, with the list still usable for a retry.
+      assert html =~ ~s(id="resource-picker")
+      assert html =~ "Could not select that workspace"
+      assert html =~ "upstream_contract_mismatch"
+      assert html =~ "Alpha"
+      refute html =~ "Workspace selected."
+    end
+
+    test "a discovery failure renders a redacted error and persists nothing", %{conn: conn} do
+      store_credential()
+      agent = canned_session({:error, :nxdomain})
+
+      Application.put_env(:fermix_web, :remote_setup_opts,
+        transport: FakeRemoteTransport,
+        connect_opts: [agent: agent],
+        resolver: fn "eden" -> "eden_pat_0123456789abcdef" end,
+        mcp_supervisor: ReadySupervisor
+      )
+
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+      view
+      |> element(~s|button[phx-click="open_resource_picker"][phx-value-name="eden"]|)
+      |> render_click()
+
+      # The classified transport failure, and nothing else: no credential, no
+      # endpoint, no process state.
+      html = render_until(view, "Could not list workspaces")
+      assert html =~ "Could not list workspaces: :nxdomain"
+      refute html =~ "eden_pat_"
+
+      entry =
+        :fermix_core
+        |> Application.get_env(:plugins, [])
+        |> Keyword.get(:entries, %{})
+        |> Map.get("eden", [])
+
+      assert Keyword.get(entry, :workspace_id) == nil
+      assert PluginStatus.status("eden") == :needs_workspace
+    end
+  end
+
+  # The remote-MCP half of the status vocabulary (M27 §12 Stage 3). It has no
+  # runtime source to read yet, so it is listed here — and this list is the
+  # contract the remote lifecycle work has to satisfy.
+  @remote_statuses [
+    :needs_workspace,
+    :insufficient_credential_scope,
+    :invalid_remote_config,
+    :connecting,
+    :remote_unreachable,
+    :upstream_contract_mismatch,
+    :capability_conflict,
+    :remote_security_blocked,
+    :remote_protocol_error,
+    :reauthorization_required
+  ]
+
+  # Statuses the operator can actually fix from the card, so the fix-it button
+  # must not fall back to the generic "Enable".
+  @actionable_statuses [
+    :not_installed,
+    :missing_host_runtime,
+    :needs_workspace,
+    :insufficient_credential_scope,
+    :invalid_remote_config,
+    :remote_unreachable
+  ]
+
+  # `status_pill_class/1` + `status_pill_label/1` are the only place a status atom
+  # becomes UI, and a missing clause is silent — the pill just reads "Unknown".
+  # Per the CLAUDE.md "gate on the whole feature surface" rule, the invariant is
+  # written over the WHOLE vocabulary, and its local half is read from
+  # `Plugins.Status`'s own source (via the module's compile-time path, so no repo
+  # layout is assumed) instead of being spelled out: a status added there later
+  # either joins this test or fails it.
+  describe "status vocabulary" do
+    test "no status Plugins.Status returns, and no remote status, renders as Unknown" do
+      statuses = plugins_status_returns()
+
+      # Anchors: a silently-broken extraction would otherwise pass an empty loop.
+      assert length(statuses) >= 11
+      assert :ready in statuses
+      assert :missing_host_runtime in statuses
+      assert :not_installed in statuses
+
+      for status <- statuses ++ @remote_statuses do
+        assert Components.status_pill_label(status) != "Unknown",
+               "#{inspect(status)} has no pill label and renders as a grey Unknown"
+
+        assert Components.status_pill_class(status) =~ "badge-",
+               "#{inspect(status)} has no pill class"
+      end
+    end
+
+    test "every pill label is sentence-cased" do
+      for status <- plugins_status_returns() ++ @remote_statuses do
+        label = Components.status_pill_label(status)
+        first = String.first(label)
+
+        assert first == String.upcase(first),
+               "#{inspect(status)} renders the lowercase label #{inspect(label)}"
+      end
+    end
+
+    test "a status the operator can fix carries its own action verb" do
+      for status <- @actionable_statuses do
+        assert Components.plugin_action_label(status) != "Enable",
+               "#{inspect(status)} falls back to the generic Enable verb"
+      end
+    end
+  end
+
+  # Every atom `Plugins.Status` can return: each of its clause/branch returns is
+  # written `-> :atom`, so the returns are exactly the atoms in that position.
+  defp plugins_status_returns do
+    source = to_string(PluginStatus.module_info(:compile)[:source])
+    assert File.exists?(source), "Plugins.Status source not found at #{source}"
+
+    ~r/->\s*:([a-z_]+)\b/
+    |> Regex.scan(File.read!(source))
+    |> Enum.map(fn [_match, name] -> String.to_existing_atom(name) end)
+    |> Enum.uniq()
   end
 
   # Build + wire a catalog plugin artifact behind the dist stubs; returns the
@@ -3182,6 +3587,205 @@ defmodule FermixWebWeb.SetupLiveTest do
     }
   end
 
+  # --- remote-plugin picker fixtures --------------------------------------
+
+  defp store_credential do
+    Application.put_env(:fermix_core, :plugin_secrets, %{"eden" => "eden_pat_0123456789abcdef"})
+  end
+
+  # initialize -> initialized -> tools/list -> tools/call -> teardown.
+  defp canned_session(call_response) do
+    responses = [
+      remote_json(
+        200,
+        remote_rpc(1, %{"protocolVersion" => "2025-06-18", "capabilities" => %{}}),
+        [
+          {"mcp-session-id", "sess-web-1"}
+        ]
+      ),
+      {:ok, %{status: 202, headers: [], body: {:empty, ""}}},
+      remote_json(200, remote_rpc(2, %{"tools" => [remote_live_descriptor()]})),
+      call_response,
+      {:ok, %{status: 200, headers: [], body: {:empty, ""}}}
+    ]
+
+    {:ok, agent} = Agent.start_link(fn -> responses end)
+    agent
+  end
+
+  defp workspaces_result do
+    body = %{
+      "ok" => true,
+      "workspaces" => [
+        %{"id" => "ws_alpha", "name" => "Alpha"},
+        %{"id" => "ws_beta", "name" => "Beta"}
+      ]
+    }
+
+    remote_json(
+      200,
+      remote_rpc(3, %{"content" => [%{"type" => "text", "text" => Jason.encode!(body)}]})
+    )
+  end
+
+  defp remote_json(status, body, headers \\ []) do
+    {:ok,
+     %{
+       status: status,
+       headers: [{"content-type", "application/json"}] ++ headers,
+       body: {:json, Jason.encode!(body)}
+     }}
+  end
+
+  defp remote_rpc(id, result), do: %{"jsonrpc" => "2.0", "id" => id, "result" => result}
+
+  defp remote_live_descriptor do
+    %{
+      "name" => "eden_list_workspaces",
+      "description" => "List workspaces.",
+      "inputSchema" => remote_workspaces_parameters()
+    }
+  end
+
+  defp remote_workspaces_parameters, do: %{"type" => "object", "properties" => %{}}
+
+  # A plugin-api-3 `remote_mcp` dev_local checkout named `eden`, the one plugin
+  # with a registered `SecretPaths` entry, so the credential form is the real
+  # one. Nothing in the picker keys on that name.
+  defp write_remote_plugin(checkout) do
+    File.mkdir_p!(Path.join(checkout, "eden"))
+
+    manifest = %{
+      "schema_version" => 2,
+      "plugin_api" => 3,
+      "min_core_version" => "0.1.0",
+      "name" => "eden",
+      "display_name" => "Eden",
+      "description" => "Remote MCP fixture with a single-workspace resource scope.",
+      "category" => "productivity",
+      "version" => "1.0.0",
+      "auth" => %{
+        "type" => "api_key",
+        "key_name" => "EDEN_PERSONAL_ACCESS_TOKEN",
+        "header" => "Authorization",
+        "scheme" => "Bearer",
+        "prompt" => "Paste an Eden personal access token"
+      },
+      "runtime" => %{
+        "kind" => "remote_mcp",
+        "transport" => "streamable_http",
+        "protocol_version" => "2025-06-18",
+        "base_url" => "https://mcp.eden.so",
+        "mcp_path" => "/mcp",
+        "tool_name_mode" => "preserve"
+      },
+      "tool_profiles" => [
+        %{
+          "name" => "retrieval",
+          "display_name" => "Retrieval only",
+          "default" => true,
+          "required_credential_scope" => "read",
+          "scope_visibility" => "none",
+          "tools" => ["eden_search"]
+        },
+        %{
+          "name" => "capture",
+          "display_name" => "Retrieval and capture",
+          "default" => false,
+          "required_credential_scope" => "write",
+          "scope_visibility" => "none",
+          "tools" => ["eden_search", "eden_append"]
+        }
+      ],
+      "setup_tools" => ["eden_list_workspaces"],
+      "resource_scope" => %{
+        "kind" => "single_workspace",
+        "discovery_tool" => "eden_list_workspaces",
+        "id_field" => "id",
+        "label_field" => "name",
+        "argument" => "workspaceId"
+      },
+      "budgets" => %{"agent_turn_calls" => 20, "agent_turn_paginated_calls" => 5},
+      "result_contract" => %{
+        "kind" => "json_boolean",
+        "success_field" => "ok",
+        "status_field" => "status",
+        "message_field" => "message"
+      },
+      "tools" => [
+        sign_remote_tool(%{
+          "name" => "eden_list_workspaces",
+          "description" => "List workspaces available to the connected token.",
+          "policy_class" => "external_api",
+          "read_only" => true,
+          "replay_safe" => false,
+          "required_credential_scope" => "read",
+          "rail" => "mcp",
+          "collection_policy" => nil,
+          "argument_guards" => [],
+          "parameters" => remote_workspaces_parameters(),
+          "output_schema" => nil,
+          "upstream_annotations" => nil
+        }),
+        sign_remote_tool(%{
+          "name" => "eden_search",
+          "description" => "Search a workspace.",
+          "policy_class" => "external_api",
+          "read_only" => true,
+          "replay_safe" => true,
+          "required_credential_scope" => "read",
+          "rail" => "mcp",
+          "collection_policy" => nil,
+          "argument_guards" => [],
+          "parameters" => %{
+            "type" => "object",
+            "properties" => %{
+              "workspaceId" => %{"type" => "string"},
+              "query" => %{"type" => "string"}
+            }
+          },
+          "output_schema" => nil,
+          "upstream_annotations" => nil
+        }),
+        sign_remote_tool(%{
+          "name" => "eden_append",
+          "description" => "Append to a note.",
+          "policy_class" => "external_api",
+          "read_only" => false,
+          "replay_safe" => false,
+          "required_credential_scope" => "write",
+          "rail" => "mcp",
+          "collection_policy" => nil,
+          "argument_guards" => [],
+          "parameters" => %{
+            "type" => "object",
+            "properties" => %{
+              "workspaceId" => %{"type" => "string"},
+              "text" => %{"type" => "string"}
+            }
+          },
+          "output_schema" => nil,
+          "upstream_annotations" => nil
+        })
+      ],
+      "skills" => []
+    }
+
+    File.write!(Path.join([checkout, "eden", "plugin.json"]), Jason.encode!(manifest))
+  end
+
+  defp sign_remote_tool(tool) do
+    {:ok, digest} =
+      CanonicalJson.descriptor_digest(
+        Map.fetch!(tool, "name"),
+        Map.fetch!(tool, "parameters"),
+        Map.get(tool, "output_schema"),
+        Map.get(tool, "upstream_annotations")
+      )
+
+    Map.put(tool, "descriptor_sha256", digest)
+  end
+
   defp render_until(view, expected, attempts \\ 20)
 
   defp render_until(view, expected, attempts) when attempts > 0 do
@@ -3193,6 +3797,11 @@ defmodule FermixWebWeb.SetupLiveTest do
       Process.sleep(25)
       render_until(view, expected, attempts - 1)
     end
+  end
+
+  defp render_until(view, expected, 0) do
+    render(view)
+    flunk("expected rendered LiveView to include #{inspect(expected)}")
   end
 
   # The inverse of `render_until/3`: poll until `expected` is GONE. Returns
@@ -3242,10 +3851,5 @@ defmodule FermixWebWeb.SetupLiveTest do
       # (apostrophe in "Couldn't" is HTML-escaped in the rendered flash)
       assert render_hook(view, "computer_use_grant", %{}) =~ "open the permission prompts"
     end
-  end
-
-  defp render_until(view, expected, 0) do
-    render(view)
-    flunk("expected rendered LiveView to include #{inspect(expected)}")
   end
 end

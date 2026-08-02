@@ -34,6 +34,7 @@ defmodule FermixOpik.Reporter do
     [:fermix, :soul_curation, :run_error],
     [:fermix, :channel, :stream],
     [:fermix, :plugin, :dist],
+    [:fermix, :mcp_client, :lifecycle],
     [:fermix, :realtime, :call_start],
     [:fermix, :realtime, :session_created],
     [:fermix, :realtime, :session_updated],

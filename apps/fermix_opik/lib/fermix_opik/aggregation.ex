@@ -30,6 +30,11 @@ defmodule FermixOpik.Aggregation do
   # cannot grow without bound — the sweep prunes past this age.
   @closed_session_ttl_ms 600_000
 
+  # The outbound-MCP lifecycle phases that can happen inside an agent turn. Every
+  # other phase is boot/teardown work with no turn to nest under (see the
+  # [:fermix, :mcp_client, :lifecycle] clause).
+  @mcp_client_turn_phases [:security_block, :drift, :reconnect]
+
   @enforce_keys [:project, :ttl_ms]
   defstruct project: nil,
             ttl_ms: 120_000,
@@ -486,6 +491,32 @@ defmodule FermixOpik.Aggregation do
     {state, [%{trace: trace, spans: []}]}
   end
 
+  # Outbound MCP client lifecycle ([:fermix, :mcp_client, :lifecycle]). Routing
+  # is decided by ONE classifier — "did this phase happen inside an agent turn?"
+  # — not by a fallback: the two shapes are two distinct situations, not two
+  # attempts at the same one.
+  #
+  # `initialize`/`discover`/`ready`/`teardown`/`owner_down` fire at client boot
+  # and teardown, where no turn exists. Routing them through `add_child_span`
+  # would drop them outright (nil session_id) or, given a non-turn id, mint a
+  # phantom root whose `infer_kind/1` falls through to `:subagent` — the
+  # orphan-span bug M27 §11.1 warns about. So they build a self-closing trace
+  # inline, exactly like `[:fermix, :plugin, :dist]`, and are never tracked in
+  # state.
+  #
+  # `security_block`/`drift`/`reconnect` CAN occur mid-turn (a call proxy
+  # rejection, a contract drift noticed on invoke), so they nest under the turn
+  # when it supplied its session_id, and self-close when it did not.
+  def apply_event(state, [:fermix, :mcp_client, :lifecycle], meas, meta, at) do
+    session_id = Map.get(meta, :session_id)
+
+    if Map.get(meta, :phase) in @mcp_client_turn_phases and is_binary(session_id) do
+      add_child_span(state, meta, at, &Mapper.mcp_client_span(meta, meas, &1))
+    else
+      {state, [%{trace: mcp_client_trace(state, meas, meta, at), spans: []}]}
+    end
+  end
+
   # A fired failure-deadline timeout ([:fermix, :timeout, :expired]): a point
   # span under the run's trace via the shared session_id, flagged errored so a
   # deadline that fired mid-run is visible rather than only inferable from a
@@ -901,6 +932,33 @@ defmodule FermixOpik.Aggregation do
         })
     }
     |> Mapper.drop_nil()
+  end
+
+  # A self-closing trace for one outbound-MCP lifecycle phase that had no turn to
+  # nest under. Built inline (like the plugin-dist trace) because it is a point
+  # event that ships immediately and is never tracked in state.
+  defp mcp_client_trace(state, measurements, metadata, at) do
+    duration_ms = Map.get(measurements, :duration_ms, 0)
+    started = Mapper.start_of(at.at, duration_ms)
+
+    Mapper.drop_nil(%{
+      id: Mapper.new_id(started),
+      project_name: state.project,
+      name: "mcp_client:#{stringify(Map.get(metadata, :phase))}",
+      start_time: Mapper.iso(started),
+      end_time: Mapper.iso(at.at),
+      metadata:
+        compact(%{
+          source_id: Map.get(metadata, :source_id),
+          plugin: Map.get(metadata, :plugin),
+          phase: stringify(Map.get(metadata, :phase)),
+          result: stringify(Map.get(metadata, :result)),
+          error_class: stringify(Map.get(metadata, :error_class)),
+          attempt: Map.get(metadata, :attempt),
+          duration_ms: duration_ms
+        }),
+      tags: ["mcp_client"]
+    })
   end
 
   defp compact(map) do

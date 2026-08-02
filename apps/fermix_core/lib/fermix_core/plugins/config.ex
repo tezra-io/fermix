@@ -10,6 +10,7 @@ defmodule FermixCore.Plugins.Config do
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.SecretPaths
   alias FermixCore.Setup.SecretStore
+  alias FermixCore.Setup.SecretWriter
 
   require Logger
 
@@ -62,6 +63,123 @@ defmodule FermixCore.Plugins.Config do
     end
   end
 
+  # The operator's Connect selection for a plugin that declares a
+  # `resource_scope` (M27 §7.5). Lowercase plumbing keys, exactly like
+  # `auth_profile` and `enabled` — deliberately NOT UPPER_SNAKE, because
+  # `plugin_settings/1` is the mcp env-injection seam and these must never
+  # reach a child process environment.
+  @selection_keys ~w(access_profile workspace_id workspace_label)
+  @max_workspace_id_bytes 256
+  @max_workspace_label_bytes 128
+
+  @doc """
+  Persist the operator's Connect selection: the access profile and the one
+  selected workspace's opaque ID plus its display-only label (M27 §7.5).
+
+  Written the way `enable/1` writes `auth_profile`, not through
+  `set_plugin_setting/3` — see `@selection_keys`.
+
+  It persists and applies but does **not** reload the runtime. A selection
+  change requires a *proven* source-qualified stop and reconnect, which
+  `Plugins.RemoteSetup.select_workspace/2` owns; `Runtime.reload/1`'s
+  best-effort fan-out proves nothing and would race that reconnect. Nothing is
+  lost by skipping it: the reconnect's own `:ready` transition is what
+  invalidates the agent's cached tool list (`MCP.Server`), and it fires after
+  discovery rather than before it.
+  """
+  @spec set_workspace_selection(String.t(), keyword()) :: snapshot_result()
+  def set_workspace_selection(name, opts) when is_binary(name) and is_list(opts) do
+    with {:ok, plugin} <- fetch_plugin(name),
+         {:ok, profile} <- validate_access_profile(plugin, Keyword.get(opts, :access_profile)),
+         {:ok, id} <- validate_workspace_id(Keyword.get(opts, :workspace_id)),
+         {:ok, label} <- validate_workspace_label(Keyword.get(opts, :workspace_label)) do
+      selection = [access_profile: profile, workspace_id: id, workspace_label: label]
+
+      ConfigStore.current_snapshot()
+      |> update_plugins(fn plugins -> put_selection(plugins, plugin, selection) end)
+      |> persist()
+    end
+  end
+
+  @doc """
+  The access profile to persist: a name the manifest declares, or — when the
+  operator supplied none — the manifest's signed `default: true` profile.
+
+  Any other value is invalid configuration and is refused. A profile name is an
+  enforcement boundary (§8.1), so a typo must never quietly resolve to the safe
+  default and leave the operator believing they selected the other one.
+  """
+  @spec validate_access_profile(Plugin.t(), term()) :: {:ok, String.t()} | {:error, term()}
+  def validate_access_profile(%Plugin{} = plugin, nil), do: signed_default_profile(plugin)
+
+  def validate_access_profile(%Plugin{tool_profiles: profiles, name: name}, profile)
+      when is_binary(profile) do
+    if Enum.any?(profiles, &(Map.get(&1, "name") == profile)),
+      do: {:ok, profile},
+      else: {:error, {:invalid_access_profile, name, profile}}
+  end
+
+  def validate_access_profile(%Plugin{name: name}, _profile),
+    do: {:error, {:invalid_access_profile, name, :not_a_string}}
+
+  @doc """
+  Validate a selected workspace ID: opaque, 1–#{@max_workspace_id_bytes} bytes,
+  visible ASCII, no whitespace or control characters (§7.5).
+
+  The value never appears in the error — it names the operator's own data, and
+  a rejection reason is read by logs and UIs that must not carry it.
+  """
+  @spec validate_workspace_id(term()) :: {:ok, String.t()} | {:error, term()}
+  def validate_workspace_id(id) when is_binary(id) do
+    if byte_size(id) in 1..@max_workspace_id_bytes and visible_ascii?(id),
+      do: {:ok, id},
+      else: {:error, {:invalid_workspace_id, byte_size(id)}}
+  end
+
+  def validate_workspace_id(_id), do: {:error, {:invalid_workspace_id, :not_a_string}}
+
+  @doc """
+  Validate a workspace label: display-only, valid UTF-8, control-free, trimmed,
+  at most #{@max_workspace_label_bytes} bytes (§7.5).
+
+  It is never sent in place of the ID and never trusted for authorization, so
+  the empty string is a legal label — an unnamed workspace is a display
+  problem, not a configuration error.
+  """
+  @spec validate_workspace_label(term()) :: {:ok, String.t()} | {:error, term()}
+  def validate_workspace_label(label) when is_binary(label) do
+    cond do
+      not String.valid?(label) -> {:error, {:invalid_workspace_label, :not_utf8}}
+      byte_size(String.trim(label)) > @max_workspace_label_bytes -> label_too_long(label)
+      control_characters?(String.trim(label)) -> {:error, {:invalid_workspace_label, :control}}
+      true -> {:ok, String.trim(label)}
+    end
+  end
+
+  def validate_workspace_label(_label), do: {:error, {:invalid_workspace_label, :not_a_string}}
+
+  defp label_too_long(label),
+    do: {:error, {:invalid_workspace_label, byte_size(String.trim(label))}}
+
+  defp signed_default_profile(%Plugin{tool_profiles: profiles, name: name}) do
+    case Enum.find(profiles, &(Map.get(&1, "default") == true)) do
+      %{"name" => profile} when is_binary(profile) -> {:ok, profile}
+      _none -> {:error, {:no_default_access_profile, name}}
+    end
+  end
+
+  defp visible_ascii?(value) do
+    value |> :binary.bin_to_list() |> Enum.all?(&(&1 >= 0x21 and &1 <= 0x7E))
+  end
+
+  # C0, DEL, and C1 — a label reaches an operator-facing surface, and the C1
+  # block is exactly what a naive `[[:cntrl:]]` check misses.
+  defp control_characters?(value) do
+    value
+    |> String.to_charlist()
+    |> Enum.any?(&(&1 < 0x20 or &1 == 0x7F or (&1 >= 0x80 and &1 <= 0x9F)))
+  end
+
   @doc """
   Persist the static credential an `auth: api_key` plugin authenticates with
   (M16). The plaintext lands at the plugin's registered `SecretPaths` path;
@@ -81,16 +199,38 @@ defmodule FermixCore.Plugins.Config do
   end
 
   @doc """
-  Remove a plugin's stored api_key from config (the keychain entry is left
-  orphaned but unreferenced). The plugin then resolves `:needs_secret`.
+  Forget a plugin's api_key: delete the OS-keychain item, then drop the config
+  reference to it. The plugin resolves `:needs_secret` afterwards.
+
+  The order is the point (M27 §7.5). The config sentinel is the only pointer to
+  the stored credential, so dropping it first and then failing the delete would
+  leave a live secret on the machine that nothing can name or remove. A failed
+  deletion returns `{:error, reason}` with the reference intact for an explicit
+  retry; it never reports success. Forgetting is local: it does not revoke the
+  credential with the provider.
   """
-  @spec clear_plugin_secret(String.t()) :: snapshot_result()
-  def clear_plugin_secret(name) when is_binary(name) do
+  @spec forget_plugin_secret(String.t()) :: snapshot_result()
+  def forget_plugin_secret(name) when is_binary(name) do
+    snapshot = ConfigStore.current_snapshot()
+
     with {:ok, _plugin} <- fetch_plugin(name),
-         {:ok, secret} <- fetch_plugin_secret(name) do
-      ConfigStore.current_snapshot()
+         {:ok, secret} <- fetch_plugin_secret(name),
+         :ok <- delete_keychain_item(secret, snapshot) do
+      snapshot
       |> SecretStore.delete_snapshot_value(secret.path)
       |> commit()
+    end
+  end
+
+  # The snapshot's own profile names the keychain namespace its secrets live
+  # in, exactly as the secure-on-save path derives it — reading app env here
+  # would delete from the wrong namespace on a profile switch.
+  defp delete_keychain_item(secret, snapshot) do
+    profile = SecretStore.get_snapshot_value(snapshot, [:fermix_core, :profile])
+
+    case SecretWriter.delete(secret.key, profile: profile) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:keychain_delete_failed, secret.env, reason}}
     end
   end
 
@@ -257,6 +397,20 @@ defmodule FermixCore.Plugins.Config do
     Keyword.put(plugins, :entries, entries)
   end
 
+  # Same string-identity replacement `put_plugin_setting/4` uses: a TOML reload
+  # brings these back as atoms while a fresh write uses atoms too, so replacing
+  # by name keeps one entry per key instead of a stale duplicate.
+  defp put_selection(plugins, plugin, selection) do
+    entry =
+      plugin
+      |> plugin_entry(plugins)
+      |> Enum.reject(fn {key, _value} -> to_string(key) in @selection_keys end)
+      |> Kernel.++(selection)
+
+    entries = plugins |> Keyword.get(:entries, %{}) |> Map.put(plugin.name, entry)
+    Keyword.put(plugins, :entries, entries)
+  end
+
   defp add_enabled(enabled, name) do
     enabled
     |> Enum.filter(&is_binary/1)
@@ -341,9 +495,17 @@ defmodule FermixCore.Plugins.Config do
   defp normalize_oauth_map(_oauth), do: %{}
 
   defp commit(snapshot) do
+    with {:ok, snapshot} <- persist(snapshot) do
+      reload_runtime()
+      {:ok, snapshot}
+    end
+  end
+
+  # Save + apply only. The caller that owns a stronger reconciliation than the
+  # generic fan-out (`set_workspace_selection/2`) uses this directly.
+  defp persist(snapshot) do
     with :ok <- ConfigStore.save_snapshot(snapshot),
          :ok <- ConfigStore.apply_snapshot(snapshot) do
-      reload_runtime()
       {:ok, ConfigStore.current_snapshot()}
     end
   end

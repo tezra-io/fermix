@@ -4,8 +4,9 @@ defmodule FermixCore.Plugins.Status do
 
   The ladder (M8 §8, checked in order): `:not_configured` (not enabled) →
   install/runtime states for `mcp`-rail plugins (`:missing_host_runtime`,
-  `:needs_config`) → the auth ladder (`:ready` for `auth: none`, else
-  `:needs_client_config` / `:needs_auth` / `:reauthorization_required`).
+  `:needs_config`) → the remote-plugin ladder (§7.8, below) → the auth ladder
+  (`:ready` for `auth: none`, else `:needs_client_config` / `:needs_auth` /
+  `:reauthorization_required`).
 
   An enabled *name* with no loadable manifest is statusable too (the input
   shape for manifest-less names): `:not_installed` when the store has no
@@ -15,10 +16,29 @@ defmodule FermixCore.Plugins.Status do
 
   Only `:ready` registers capabilities (`Plugins.Capabilities`) and
   materializes an MCP server spec (`Dist.McpSource`).
+
+  ## Remote plugins: startable, not callable (M27 §7.8)
+
+  A `runtime.kind: remote_mcp` plugin answers the *startable* question here —
+  credential present, access profile declared, one workspace selected — by
+  asking `Dist.McpSource.remote_spec/1`, the same predicate that materializes
+  the server spec. Deriving it twice is how the two drift, so the refusal
+  reason is mapped straight onto the status: `:needs_secret`, then
+  `:needs_workspace`, then `:invalid_remote_config`. A remote plugin holding a
+  credential but no selected workspace is `:needs_workspace` and therefore
+  registers **zero** agent tools.
+
+  The *callable* question — the live client initialized and the whole signed
+  contract matched — is `Capabilities.MCP.RuntimeStatus`'s, and it is layered
+  on top of this ladder by daemon-side readers (setup UI, the daemon's
+  `plugins_runtime_status` operation). It is deliberately not merged in here:
+  this function must answer identically in a tree-less one-shot CLI VM, where
+  that table does not exist and its absence must never be read as `:ready`.
   """
 
   alias FermixCore.Auth.Store
   alias FermixCore.Plugins.Config
+  alias FermixCore.Plugins.Dist.McpSource
   alias FermixCore.Plugins.Dist.RuntimeProbe
   alias FermixCore.Plugins.Dist.Store, as: DistStore
   alias FermixCore.Plugins.Plugin
@@ -46,6 +66,9 @@ defmodule FermixCore.Plugins.Status do
 
       missing_required_config?(plugin) ->
         :needs_config
+
+      McpSource.remote?(plugin) ->
+        remote_status(plugin)
 
       plugin.auth.type == :none ->
         :ready
@@ -137,6 +160,20 @@ defmodule FermixCore.Plugins.Status do
       @sentinel -> :needs_secret
       secret when is_binary(secret) and secret != "" -> :ready
       _missing -> :needs_secret
+    end
+  end
+
+  # The startable predicate, asked of the one module that owns it. Its `with`
+  # already runs in ladder order (runtime shape → credential → profile →
+  # workspace), so mapping the refusal keeps the precedence in one place rather
+  # than restating it here and letting the two versions drift.
+  defp remote_status(%Plugin{} = plugin) do
+    case McpSource.remote_spec(plugin) do
+      {:ok, _spec} -> :ready
+      {:error, {:needs_secret, _name}} -> :needs_secret
+      {:error, {:needs_workspace, _name}} -> :needs_workspace
+      {:error, {:invalid_remote_config, _detail}} -> :invalid_remote_config
+      {:error, _unclassified} -> :invalid_remote_config
     end
   end
 

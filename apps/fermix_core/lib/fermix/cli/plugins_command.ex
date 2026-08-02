@@ -4,6 +4,7 @@ defmodule Fermix.CLI.PluginsCommand do
   """
 
   alias Fermix.CLI.Daemon.Client, as: DaemonClient
+  alias Fermix.CLI.SecretInput
   alias FermixCore.Auth.Redaction
   alias FermixCore.Auth.Store
   alias FermixCore.Plugins.Auth
@@ -17,6 +18,7 @@ defmodule Fermix.CLI.PluginsCommand do
   alias FermixCore.Setup.ConfigStore
 
   @json_switches [json: :boolean]
+  @auth_set_switches [json: :boolean, stdin: :boolean]
   @login_switches [
     account: :string,
     no_browser: :boolean,
@@ -208,7 +210,7 @@ defmodule Fermix.CLI.PluginsCommand do
   defp auth(["reauthorize", name | rest]), do: auth_login(name, rest)
   defp auth(["refresh", name | rest]), do: auth_refresh(name, rest)
   defp auth(["logout", name | rest]), do: auth_logout(name, rest)
-  defp auth(["set", name, value | rest]), do: auth_set(name, value, rest)
+  defp auth(["set", name | rest]), do: auth_set(name, rest)
   defp auth(["clear", name | rest]), do: auth_clear(name, rest)
   defp auth(["status" | rest]), do: auth_status(rest)
   defp auth(_argv), do: usage()
@@ -251,23 +253,64 @@ defmodule Fermix.CLI.PluginsCommand do
     end
   end
 
-  defp auth_set(name, value, argv) do
-    with {:ok, opts} <- parse_opts(argv, @json_switches),
+  # The credential is read from the terminal or from stdin — never from argv,
+  # where `ps`, the shell history file, and process-listing telemetry would
+  # all see it (M27 §7.1).
+  defp auth_set(name, argv) do
+    with {:ok, opts} <- parse_auth_set_opts(argv),
+         {:ok, value} <- read_secret(name, opts),
          {:ok, _name} <- Auth.set_secret(name, value) do
       print(%{plugin: name, secret_set: true}, Keyword.get(opts, :json, false), fn _ ->
         IO.puts("stored api key for #{name}")
       end)
     else
       :error -> invalid_options("auth set")
+      {:error, :secret_in_argv} -> secret_in_argv()
       {:error, reason} -> error(reason)
     end
   end
 
+  # A leftover positional is the removed `auth set NAME VALUE` form. It gets
+  # its own migration message instead of the generic "invalid options",
+  # because the operator has to be told the value they just typed is now in
+  # their shell history.
+  defp parse_auth_set_opts(argv) do
+    case OptionParser.parse(argv, strict: @auth_set_switches) do
+      {opts, [], []} -> {:ok, opts}
+      {_opts, [_positional | _], []} -> {:error, :secret_in_argv}
+      {_opts, _args, _invalid} -> :error
+    end
+  end
+
+  defp read_secret(name, opts) do
+    if Keyword.get(opts, :stdin, false) do
+      SecretInput.read_stdin()
+    else
+      with {:ok, label} <- secret_prompt(name), do: SecretInput.read_masked(label)
+    end
+  end
+
+  # The manifest's `auth.prompt` is the plugin author's operator-facing wording
+  # ("Paste an Eden personal access token"); plugins that declare none get the
+  # generic label. Resolving the plugin first also means an unknown name fails
+  # before the operator is asked to type a secret at it.
+  defp secret_prompt(name) do
+    case Registry.find(name) do
+      {:ok, %{auth: %{prompt: prompt}}} when is_binary(prompt) and prompt != "" -> {:ok, prompt}
+      {:ok, _plugin} -> {:ok, "API key"}
+      :error -> {:error, {:unknown_plugin, name}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # "Forget local credential": deletes the OS-keychain item, then drops the
+  # config reference. It does not revoke the credential upstream — the
+  # operator must do that with the provider (M27 §7.5).
   defp auth_clear(name, argv) do
     with {:ok, opts} <- parse_opts(argv, @json_switches),
-         :ok <- Auth.clear_secret(name) do
+         :ok <- Auth.forget_secret(name) do
       print(%{plugin: name, cleared: true}, Keyword.get(opts, :json, false), fn _ ->
-        IO.puts("cleared api key for #{name}")
+        IO.puts("deleted the stored api key for #{name} — revoke it with the provider too")
       end)
     else
       :error -> invalid_options("auth clear")
@@ -602,6 +645,31 @@ defmodule Fermix.CLI.PluginsCommand do
     1
   end
 
+  defp error(:not_a_terminal) do
+    IO.puts(
+      :stderr,
+      "fermix plugins: auth set needs a terminal to read the secret without echoing it — " <>
+        "pipe it in with `fermix plugins auth set NAME --stdin` instead"
+    )
+
+    1
+  end
+
+  defp error(:stdin_is_a_terminal) do
+    IO.puts(
+      :stderr,
+      "fermix plugins: --stdin was passed but stdin is a terminal — pipe the secret in " <>
+        "(`... | fermix plugins auth set NAME --stdin`), or drop --stdin to be prompted"
+    )
+
+    1
+  end
+
+  defp error(:no_input) do
+    IO.puts(:stderr, "fermix plugins: no secret was read — nothing was stored")
+    1
+  end
+
   defp error({:unknown_config_key, key}) do
     IO.puts(:stderr, "fermix plugins: the plugin does not declare a #{key} config key")
     1
@@ -617,6 +685,19 @@ defmodule Fermix.CLI.PluginsCommand do
     1
   end
 
+  defp secret_in_argv do
+    IO.puts(:stderr, """
+    fermix plugins auth set: the secret is no longer taken as an argument — an argument is
+    visible in `ps` and lands in your shell history. Treat the value you just typed as
+    exposed and rotate it. Use one of:
+
+      fermix plugins auth set NAME             # prompts on this terminal, input is not echoed
+      ... | fermix plugins auth set NAME --stdin   # reads the secret from stdin
+    """)
+
+    2
+  end
+
   defp usage do
     IO.puts(:stderr, """
     usage: fermix plugins [list|catalog|installed|enable NAME|disable NAME|doctor [NAME]|reload|gc] [--json]
@@ -624,7 +705,7 @@ defmodule Fermix.CLI.PluginsCommand do
            fermix plugins config NAME [--json]
            fermix plugins config set NAME KEY VALUE [--json]
            fermix plugins auth [login|reauthorize|refresh|logout] NAME [--json]
-           fermix plugins auth set NAME VALUE [--json]
+           fermix plugins auth set NAME [--stdin] [--json]
            fermix plugins auth clear NAME [--json]
            fermix plugins auth status [NAME] [--json]
     """)

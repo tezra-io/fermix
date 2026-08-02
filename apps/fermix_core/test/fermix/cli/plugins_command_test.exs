@@ -144,6 +144,144 @@ defmodule Fermix.CLI.PluginsCommandTest do
     assert output =~ "missing"
   end
 
+  # M27 §7.1: the secret reaches `auth set` through a masked terminal read or
+  # `--stdin`, never through argv where `ps` and the shell history see it.
+  describe "auth set / auth clear" do
+    setup %{home: home} do
+      checkout = write_api_key_plugin(home, "discord", "Paste a Discord bot token")
+      FermixTestSupport.SecretWriterStub.reset()
+      Application.put_env(:fermix_core, :plugins, dev_local: checkout)
+
+      on_exit(fn ->
+        Application.delete_env(:fermix_core, :secret_terminal)
+        FermixTestSupport.SecretWriterStub.reset()
+      end)
+
+      %{checkout: checkout}
+    end
+
+    test "prompts with the manifest label, never echoes the value, and keychains it" do
+      use_terminal(FermixTestSupport.TtyTerminal)
+      parent = self()
+
+      prompt =
+        capture_io(:stderr, fn ->
+          output =
+            capture_io("bot-token-xyz\n", fn ->
+              assert PluginsCommand.run(["auth", "set", "discord"]) == 0
+            end)
+
+          send(parent, {:stdout, output})
+        end)
+
+      # The prompt is a notice on stderr; stdout carries only the result, so
+      # `--json` stays parseable.
+      assert prompt =~ "Paste a Discord bot token: "
+      refute prompt =~ "bot-token-xyz"
+
+      assert_received {:stdout, output}
+      assert output =~ "stored api key for discord"
+      refute output =~ "bot-token-xyz"
+
+      assert_received {:secret_input_echo, false}
+      assert_received {:secret_input_echo, true}
+
+      assert {:ok, "bot-token-xyz"} =
+               FermixTestSupport.SecretWriterStub.get(:discord_plugin_secret)
+    end
+
+    test "--stdin reads the secret from the pipe without prompting" do
+      use_terminal(FermixTestSupport.PipedTerminal)
+      parent = self()
+
+      prompt =
+        capture_io(:stderr, fn ->
+          output =
+            capture_io("bot-token-xyz\n", fn ->
+              assert PluginsCommand.run(["auth", "set", "discord", "--stdin"]) == 0
+            end)
+
+          send(parent, {:stdout, output})
+        end)
+
+      refute prompt =~ "Paste a Discord bot token"
+      assert_received {:stdout, output}
+      assert output =~ "stored api key for discord"
+
+      assert {:ok, "bot-token-xyz"} =
+               FermixTestSupport.SecretWriterStub.get(:discord_plugin_secret)
+    end
+
+    test "the removed positional form exits non-zero with migration guidance" do
+      use_terminal(FermixTestSupport.TtyTerminal)
+
+      stderr =
+        capture_io(:stderr, fn ->
+          assert PluginsCommand.run(["auth", "set", "discord", "bot-token-xyz"]) == 2
+        end)
+
+      assert stderr =~ "fermix plugins auth set NAME"
+      assert stderr =~ "--stdin"
+      assert stderr =~ "rotate"
+
+      # The refused value is never stored — the operator must rotate it.
+      assert {:error, :missing_secret} =
+               FermixTestSupport.SecretWriterStub.get(:discord_plugin_secret)
+    end
+
+    test "--stdin on a terminal refuses instead of waiting for an EOF that never comes" do
+      use_terminal(FermixTestSupport.TtyTerminal)
+
+      stderr =
+        capture_io(:stderr, fn ->
+          assert PluginsCommand.run(["auth", "set", "discord", "--stdin"]) == 1
+        end)
+
+      assert stderr =~ "stdin is a terminal"
+
+      assert {:error, :missing_secret} =
+               FermixTestSupport.SecretWriterStub.get(:discord_plugin_secret)
+    end
+
+    test "interactive entry off a terminal refuses instead of reading unmasked" do
+      use_terminal(FermixTestSupport.PipedTerminal)
+
+      stderr =
+        capture_io(:stderr, fn ->
+          assert PluginsCommand.run(["auth", "set", "discord"]) == 1
+        end)
+
+      assert stderr =~ "needs a terminal"
+      assert stderr =~ "--stdin"
+
+      assert {:error, :missing_secret} =
+               FermixTestSupport.SecretWriterStub.get(:discord_plugin_secret)
+    end
+
+    test "auth clear deletes the keychain item, not just the config reference", ctx do
+      use_terminal(FermixTestSupport.PipedTerminal)
+
+      capture_io("bot-token-xyz\n", fn ->
+        assert PluginsCommand.run(["auth", "set", "discord", "--stdin"]) == 0
+      end)
+
+      # The commit rewrote :plugins from the snapshot, so re-point the registry
+      # at the dev_local checkout before the second verb.
+      Application.put_env(:fermix_core, :plugins, dev_local: ctx.checkout)
+
+      output =
+        capture_io(fn ->
+          assert PluginsCommand.run(["auth", "clear", "discord"]) == 0
+        end)
+
+      assert output =~ "deleted the stored api key for discord"
+      assert output =~ "revoke it with the provider"
+
+      assert {:error, :missing_secret} =
+               FermixTestSupport.SecretWriterStub.get(:discord_plugin_secret)
+    end
+  end
+
   describe "dist verbs" do
     setup %{home: home} do
       fixtures = Path.join(home, "fixtures")
@@ -406,6 +544,42 @@ defmodule Fermix.CLI.PluginsCommandTest do
 
       assert stderr =~ "ghost"
     end
+  end
+
+  defp use_terminal(module) do
+    Application.put_env(:fermix_core, :secret_terminal, module)
+  end
+
+  # An api_key plugin carrying the manifest `auth.prompt` the masked prompt
+  # must use, seeded through the dev_local registry seam (no install pipeline).
+  # `discord` because SecretPaths registers a plugin secret under that name.
+  defp write_api_key_plugin(home, name, prompt) do
+    checkout = Path.join(home, "dev-plugins")
+    dir = Path.join(checkout, name)
+    File.mkdir_p!(dir)
+
+    manifest = %{
+      "schema_version" => 2,
+      "name" => name,
+      "display_name" => name,
+      "description" => "#{name} api_key fixture",
+      "category" => "communication",
+      "version" => "1.0.0",
+      "min_core_version" => "0.1.0",
+      "plugin_api" => 2,
+      "auth" => %{
+        "type" => "api_key",
+        "header" => "authorization",
+        "scheme" => "Bot",
+        "prompt" => prompt,
+        "scopes" => []
+      },
+      "tools" => [],
+      "skills" => []
+    }
+
+    File.write!(Path.join(dir, "plugin.json"), Jason.encode!(manifest))
+    checkout
   end
 
   # An mcp-ish plugin whose manifest declares a `config` block, installed

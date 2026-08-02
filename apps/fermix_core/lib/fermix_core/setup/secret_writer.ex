@@ -13,6 +13,7 @@ defmodule FermixCore.Setup.SecretWriter do
 
   @callback put(secret_key(), String.t(), keyword()) :: :ok | writer_error()
   @callback get(secret_key(), keyword()) :: {:ok, String.t()} | writer_error()
+  @callback delete(secret_key(), keyword()) :: :ok | writer_error()
   @callback available?(keyword()) :: boolean()
   @callback command_source(secret_key(), keyword()) :: map()
 
@@ -54,6 +55,15 @@ defmodule FermixCore.Setup.SecretWriter do
 
   @spec get(secret_key(), keyword()) :: {:ok, String.t()} | writer_error()
   def get(key, opts \\ []) when is_atom(key), do: impl(opts).get(key, opts)
+
+  @doc """
+  Removes the OS-keyring item for `key`. Succeeds when no item exists — the
+  postcondition ("this machine no longer stores that credential") already
+  holds — and reports every other helper failure, so a caller that must not
+  orphan a credential can refuse to drop its config reference.
+  """
+  @spec delete(secret_key(), keyword()) :: :ok | writer_error()
+  def delete(key, opts \\ []) when is_atom(key), do: impl(opts).delete(key, opts)
 
   @spec get!(secret_key(), keyword()) :: String.t()
   def get!(key, opts \\ []) when is_atom(key) do
@@ -137,6 +147,9 @@ defmodule FermixCore.Setup.SecretWriter.Auto do
   def get(key, opts \\ []) when is_atom(key), do: selected(opts).get(key, opts)
 
   @impl true
+  def delete(key, opts \\ []) when is_atom(key), do: selected(opts).delete(key, opts)
+
+  @impl true
   def command_source(key, opts \\ []) when is_atom(key) do
     selected(opts).command_source(key, opts)
   end
@@ -169,6 +182,9 @@ defmodule FermixCore.Setup.SecretWriter.None do
 
   @impl true
   def get(_key, _opts \\ []), do: {:error, :unavailable}
+
+  @impl true
+  def delete(_key, _opts \\ []), do: {:error, :unavailable}
 
   @impl true
   def command_source(_key, _opts \\ []), do: %{source: :command, command: "", args: []}
@@ -213,6 +229,23 @@ defmodule FermixCore.Setup.SecretWriter.SecretTool do
     end
   end
 
+  # `secret-tool clear` exits 0 whether or not an item matched, so a missing
+  # item needs no special case here (unlike macOS `security`, which exits 44).
+  @impl true
+  def delete(key, opts \\ []) when is_atom(key) do
+    with {:ok, binary} <- fetch_secret_tool_binary(),
+         {:ok, _output} <- run(binary, clear_args(key, opts), opts) do
+      :ok
+    end
+  end
+
+  @doc """
+  The `secret-tool` argument list `delete/2` runs. Exposed as data so the
+  attribute coordinate is unit-testable without a libsecret keyring present.
+  """
+  @spec clear_command(atom(), keyword()) :: [String.t()]
+  def clear_command(key, opts \\ []) when is_atom(key), do: clear_args(key, opts)
+
   @impl true
   def command_source(key, opts \\ []) when is_atom(key) do
     %{
@@ -228,6 +261,8 @@ defmodule FermixCore.Setup.SecretWriter.SecretTool do
   end
 
   defp lookup_args(key, opts), do: ["lookup" | attributes(key, opts)]
+
+  defp clear_args(key, opts), do: ["clear" | attributes(key, opts)]
 
   defp attributes(key, opts) do
     secret = SecretPaths.fetch!(key)
@@ -384,6 +419,40 @@ defmodule FermixCore.Setup.SecretWriter.MacOS do
       end
     end
   end
+
+  # `security` exits 44 (errSecItemNotFound) when there is nothing to delete.
+  # The postcondition — this machine no longer stores the credential — already
+  # holds, so that is success. Every other non-zero exit is REPORTED here,
+  # unlike the best-effort delete inside `put/3` whose result is discarded.
+  @item_not_found_exit 44
+
+  @impl true
+  def delete(key, opts \\ []) when is_atom(key) do
+    with {:ok, binary} <- fetch_security_binary() do
+      binary
+      |> run(delete_args(key, opts), opts)
+      |> delete_result()
+    end
+  end
+
+  @doc """
+  The `security` argument list `delete/2` runs — the same one `put/3` runs
+  before re-adding, so a forget targets exactly the item a save creates.
+  Exposed as data so the coordinate is unit-testable without a keychain.
+  """
+  @spec delete_command(atom(), keyword()) :: [String.t()]
+  def delete_command(key, opts \\ []) when is_atom(key), do: delete_args(key, opts)
+
+  @doc """
+  Classifies a `delete/2` helper result. Exposed as a pure function so the
+  "missing item is already forgotten" rule is testable without a keychain.
+  """
+  @spec delete_result({:ok, String.t()} | {:error, term()}) :: :ok | {:error, term()}
+  def delete_result({:ok, _output}), do: :ok
+
+  def delete_result({:error, {:helper_failed, _command, @item_not_found_exit, _output}}), do: :ok
+
+  def delete_result({:error, reason}), do: {:error, reason}
 
   @impl true
   @spec command_source(atom(), keyword()) :: map()
