@@ -40,7 +40,7 @@ defmodule FermixCore.Memory.RepoTest do
   test "opens sqlite, enables wal mode, and runs the base migration", %{repo: repo} do
     assert {:ok, "wal"} = Repo.journal_mode(server: repo)
 
-    assert {:ok, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]} =
+    assert {:ok, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]} =
              Repo.migration_versions(server: repo)
   end
 
@@ -55,12 +55,12 @@ defmodule FermixCore.Memory.RepoTest do
   test "rerunning migrations is idempotent", %{repo: repo} do
     assert :ok = Repo.migrate(server: repo)
 
-    assert {:ok, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]} =
+    assert {:ok, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]} =
              Repo.migration_versions(server: repo)
 
     assert :ok = Repo.migrate(server: repo)
 
-    assert {:ok, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]} =
+    assert {:ok, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]} =
              Repo.migration_versions(server: repo)
   end
 
@@ -587,6 +587,233 @@ defmodule FermixCore.Memory.RepoTest do
     assert completed.last_reviewed_message_id == 42
     assert completed.failure_count == 0
     assert completed.last_review_failed_at == nil
+  end
+
+  test "skill_usage upserts count views and runs per skill", %{repo: repo} do
+    assert {:error, :not_found} = Repo.get_skill_usage("invoice_chase", server: repo)
+
+    assert :ok =
+             Repo.record_skill_usage("invoice_chase", :view, ~U[2026-07-01 10:00:00Z],
+               server: repo
+             )
+
+    assert :ok =
+             Repo.record_skill_usage("invoice_chase", :run, ~U[2026-07-02 11:00:00Z],
+               server: repo
+             )
+
+    assert :ok =
+             Repo.record_skill_usage("invoice_chase", :run, ~U[2026-07-03 12:00:00Z],
+               server: repo
+             )
+
+    assert {:ok, usage} = Repo.get_skill_usage("invoice_chase", server: repo)
+    assert usage.skill_name == "invoice_chase"
+    assert usage.views == 1
+    assert usage.runs == 2
+    assert DateTime.compare(usage.last_used_at, ~U[2026-07-03 12:00:00Z]) == :eq
+  end
+
+  test "skill_usage lists one bounded row per skill, sorted by name", %{repo: repo} do
+    assert {:ok, []} = Repo.list_skill_usage(server: repo)
+
+    assert :ok = Repo.record_skill_usage("zeta", :run, ~U[2026-07-01 10:00:00Z], server: repo)
+    assert :ok = Repo.record_skill_usage("alpha", :view, ~U[2026-07-01 10:01:00Z], server: repo)
+    assert :ok = Repo.record_skill_usage("alpha", :view, ~U[2026-07-01 10:02:00Z], server: repo)
+
+    assert {:ok, [alpha, zeta]} = Repo.list_skill_usage(server: repo)
+    assert alpha.skill_name == "alpha"
+    assert alpha.views == 2
+    assert alpha.runs == 0
+    assert zeta.skill_name == "zeta"
+    assert zeta.runs == 1
+  end
+
+  test "skill_curation state initializes idle once and claims exclusively", %{repo: repo} do
+    now = ~U[2026-07-01 10:00:00Z]
+
+    assert {:ok, state} = Repo.ensure_skill_curation_state(now, server: repo)
+    assert state.status == "idle"
+    assert DateTime.compare(state.last_cycle_at, now) == :eq
+
+    # Re-ensuring never resets the cadence clock.
+    assert {:ok, state} =
+             Repo.ensure_skill_curation_state(~U[2026-07-02 10:00:00Z], server: repo)
+
+    assert DateTime.compare(state.last_cycle_at, now) == :eq
+
+    assert {:ok, claimed} =
+             Repo.claim_skill_curation_cycle(~U[2026-07-16 10:00:00Z], 3_600_000, server: repo)
+
+    assert claimed.status == "running"
+
+    assert {:error, :concurrent_run} =
+             Repo.claim_skill_curation_cycle(~U[2026-07-16 10:30:00Z], 3_600_000, server: repo)
+  end
+
+  test "skill_curation stale running claim is reclaimed and recorded", %{repo: repo} do
+    assert {:ok, _} = Repo.ensure_skill_curation_state(~U[2026-07-01 10:00:00Z], server: repo)
+
+    assert {:ok, _} =
+             Repo.claim_skill_curation_cycle(~U[2026-07-16 10:00:00Z], 3_600_000, server: repo)
+
+    # More than the stale window later (daemon was killed mid-cycle) the claim
+    # is taken over and the abandoned attempt shows up in last_status.
+    assert {:ok, reclaimed} =
+             Repo.claim_skill_curation_cycle(~U[2026-07-16 11:30:00Z], 3_600_000, server: repo)
+
+    assert reclaimed.status == "running"
+    assert reclaimed.last_status == "error:stale_claim"
+    assert DateTime.compare(reclaimed.claimed_at, ~U[2026-07-16 11:30:00Z]) == :eq
+  end
+
+  test "skill_curation state updates are allowlisted", %{repo: repo} do
+    assert {:ok, _} = Repo.ensure_skill_curation_state(~U[2026-07-01 10:00:00Z], server: repo)
+
+    assert {:ok, updated} =
+             Repo.update_skill_curation_state(
+               %{status: "idle", last_status: "ok", retry_at: nil},
+               ~U[2026-07-16 12:00:00Z],
+               server: repo
+             )
+
+    assert updated.status == "idle"
+    assert updated.last_status == "ok"
+    assert updated.retry_at == nil
+
+    assert_raise ArgumentError, ~r/unknown skill_curation_state column/, fn ->
+      Repo.update_skill_curation_state(%{nonsense: 1}, ~U[2026-07-16 12:00:00Z], server: repo)
+    end
+  end
+
+  test "skill_curation proposals round-trip with guarded transitions", %{repo: repo} do
+    attrs = %{
+      token: "TOK00001",
+      cycle_session_id: "skill_curation:abc",
+      kind: "new_skill",
+      skill_name: "invoice_chase",
+      task_signature: "chase unpaid invoices",
+      summary: "Proposal text",
+      outline_json: ~s(["step one"]),
+      evidence_json: ~s([{"ref":"m1"}]),
+      status: "pending",
+      created_at: ~U[2026-07-01 10:00:00Z]
+    }
+
+    assert {:ok, row} = Repo.insert_skill_curation_proposal(attrs, server: repo)
+    assert row.token == "TOK00001"
+    assert row.status == "pending"
+    assert row.deferred_cycles == 0
+
+    assert {:ok, approved} =
+             Repo.transition_skill_curation_proposal(
+               "TOK00001",
+               "pending",
+               "approved",
+               %{origin_channel: "telegram", origin_chat_id: "42"},
+               ~U[2026-07-02 10:00:00Z],
+               server: repo
+             )
+
+    assert approved.status == "approved"
+    assert approved.origin_channel == "telegram"
+    assert DateTime.compare(approved.actioned_at, ~U[2026-07-02 10:00:00Z]) == :eq
+
+    # Single-use: the second identical action refuses with the actual status.
+    assert {:error, {:invalid_status, "approved"}} =
+             Repo.transition_skill_curation_proposal(
+               "TOK00001",
+               "pending",
+               "approved",
+               %{},
+               ~U[2026-07-02 10:01:00Z],
+               server: repo
+             )
+
+    assert {:error, :not_found} =
+             Repo.transition_skill_curation_proposal(
+               "NOPE",
+               "pending",
+               "approved",
+               %{},
+               ~U[2026-07-02 10:01:00Z],
+               server: repo
+             )
+  end
+
+  test "skill_curation sweep expires aged pending and over-deferred rows", %{repo: repo} do
+    insert = fn token, status, created_at ->
+      {:ok, _} =
+        Repo.insert_skill_curation_proposal(
+          %{
+            token: token,
+            cycle_session_id: "skill_curation:abc",
+            kind: "new_skill",
+            skill_name: "skill_#{token}",
+            task_signature: "sig_#{token}",
+            summary: "text",
+            status: status,
+            created_at: created_at
+          },
+          server: repo
+        )
+    end
+
+    now = ~U[2026-07-20 10:00:00Z]
+    insert.("OLDPEND1", "pending", ~U[2026-07-01 10:00:00Z])
+    insert.("NEWPEND1", "pending", ~U[2026-07-19 10:00:00Z])
+    insert.("DEFER001", "deferred", ~U[2026-07-01 10:00:00Z])
+
+    assert {:ok, %{expired_pending: 1, expired_deferred: 0}} =
+             Repo.sweep_skill_curation_proposals(now, 15, 2, server: repo)
+
+    assert {:ok, old_pending} = Repo.get_skill_curation_proposal("OLDPEND1", server: repo)
+    assert old_pending.status == "expired"
+
+    assert {:ok, new_pending} = Repo.get_skill_curation_proposal("NEWPEND1", server: repo)
+    assert new_pending.status == "pending"
+
+    assert {:ok, deferred} = Repo.get_skill_curation_proposal("DEFER001", server: repo)
+    assert deferred.status == "deferred"
+    assert deferred.deferred_cycles == 1
+
+    # Two more sweeps: the deferred row ages past its delivery opportunities.
+    assert {:ok, _} = Repo.sweep_skill_curation_proposals(now, 15, 2, server: repo)
+
+    assert {:ok, %{expired_deferred: 1}} =
+             Repo.sweep_skill_curation_proposals(now, 15, 2, server: repo)
+
+    assert {:ok, aged_out} = Repo.get_skill_curation_proposal("DEFER001", server: repo)
+    assert aged_out.status == "expired"
+  end
+
+  test "skill_curation ledger enforces unique names and allowlisted updates", %{repo: repo} do
+    attrs = %{
+      skill_name: "invoice_chase",
+      task_signature: "chase unpaid invoices",
+      status: "creating",
+      created_proposal_id: 1,
+      created_at: ~U[2026-07-01 10:00:00Z]
+    }
+
+    assert {:ok, row} = Repo.insert_skill_curation_ledger(attrs, server: repo)
+    assert row.status == "creating"
+
+    assert {:error, _unique} = Repo.insert_skill_curation_ledger(attrs, server: repo)
+
+    assert {:ok, active} =
+             Repo.update_skill_curation_ledger("invoice_chase", %{status: "active"}, server: repo)
+
+    assert active.status == "active"
+
+    assert {:error, :not_found} =
+             Repo.update_skill_curation_ledger("ghost", %{status: "active"}, server: repo)
+
+    assert {:ok, [listed]} = Repo.list_skill_curation_ledger(%{status: "active"}, server: repo)
+    assert listed.skill_name == "invoice_chase"
+
+    assert :ok = Repo.delete_skill_curation_ledger("invoice_chase", server: repo)
+    assert {:error, :not_found} = Repo.get_skill_curation_ledger("invoice_chase", server: repo)
   end
 
   test "fetches new user messages by owner and monotonic id", %{repo: repo} do

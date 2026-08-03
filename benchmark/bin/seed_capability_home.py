@@ -123,6 +123,25 @@ def render_config(
     # unset: default_vendor (so both CLIs stay advertised for tasks that name
     # either) and cloud_enabled (defaults off — the cloud rail is not evaluated).
     lines += ["[fermix_core.harness]", "approved = true", ""]
+    # Skill curation stays OFF in eval homes (MILESTONE_26_SKILL_CURATION §11):
+    # the +15d first cycle already makes scheduled firing impossible during an
+    # eval window, but a disabled entry also keeps /skills inert if a candidate
+    # model wanders into it, and keeps suite behavior independent of daemon
+    # uptime.
+    lines += ["[fermix_core.skill_curation]", "enabled = false", ""]
+    # Temporal events (MILESTONE_30) hinge on two operator-setup decisions a
+    # fresh home lacks, and event_store fails loudly without both — an unseeded
+    # home would score every reminder task 0 with nothing wrong in the product
+    # (the eval-home pitfall: pre-grant every human-decision gate here). The
+    # delivery target names a platform this home holds no credentials for:
+    # event acceptance only checks that the adapter module resolves, and if an
+    # eval-window reminder ever came due, the unconfigured adapter terminates
+    # the attempt first-try as adapter_unavailable without touching the network.
+    lines += ["[fermix_core.jobs]", 'default_delivery_mode = "channel"', ""]
+    lines += ["[fermix_core.jobs.default_delivery_target]",
+              'platform = "telegram"', 'chat_id = "100001"', ""]
+    lines += ["[fermix_core.personalization]", 'user_name = "Eval Operator"',
+              'timezone = "America/New_York"', 'communication_style = "concise"', ""]
     return "\n".join(lines)
 
 

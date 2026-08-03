@@ -115,6 +115,27 @@ defmodule FermixCore.Capabilities.MCP.Remote.Owner do
       {:error, :remote_owner_down}
   end
 
+  @doc """
+  Issue one allowlisted `tools/call` on the owned session.
+
+  This is the dispatch target `Remote.Proxy` calls once a request has passed
+  every gate — profile membership, resource scope, budgets, argument guards.
+  The owner does no policy of its own; it owns the session and serializes
+  access to it, which is why the call lands here rather than on the session
+  directly.
+  """
+  @spec call_tool(GenServer.server(), String.t(), map(), pos_integer()) ::
+          {:ok, term()} | {:error, term()}
+  def call_tool(owner, tool, args, timeout_ms)
+      when is_binary(tool) and is_map(args) and is_integer(timeout_ms) and timeout_ms > 0 do
+    GenServer.call(owner, {:call_tool, tool, args, timeout_ms}, timeout_ms + 5_000)
+  catch
+    # Same contract as `list_tools/1`: a torn-down owner reports a classified
+    # error rather than dying with a raw `:noproc` inside the caller's task.
+    :exit, {reason, {GenServer, :call, _args}} when reason in [:noproc, :normal, :shutdown] ->
+      {:error, :remote_owner_down}
+  end
+
   @doc "Orderly authenticated session teardown, then close. Idempotent."
   @spec teardown(GenServer.server()) :: :ok | {:error, term()}
   def teardown(owner) do
@@ -170,6 +191,15 @@ defmodule FermixCore.Capabilities.MCP.Remote.Owner do
 
   def handle_call(:list_tools, _from, state) do
     {:reply, discover(state), state}
+  end
+
+  def handle_call({:call_tool, _tool, _args, _timeout}, _from, %{session: nil} = state) do
+    {:reply, {:error, :remote_not_connected}, state}
+  end
+
+  def handle_call({:call_tool, tool, args, timeout_ms}, _from, state) do
+    params = %{"name" => tool, "arguments" => args}
+    {:reply, state.session_module.request(state.session, "tools/call", params, timeout_ms), state}
   end
 
   def handle_call(:teardown, _from, state) do

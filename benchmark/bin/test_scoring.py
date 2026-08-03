@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["pyyaml>=6,<7", "pytest>=8"]
+# dependencies = ["pyyaml>=6,<7", "pytest>=8", "certifi"]
 # ///
 """Unit tests for the capability-scoring layer.
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["pytest>=8"]
+# dependencies = ["pytest>=8", "certifi"]
 # ///
 """Unit tests for the capability aggregation layer (evallib.aggregate).
 

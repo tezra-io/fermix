@@ -535,10 +535,13 @@ defmodule FermixChannels.Channels.WhatsAppTest do
       assert :ok = WhatsApp.verify_webhook(conn)
     end
 
-    test "rejects missing send configuration" do
+    # M30 §11.3: see the Slack counterpart — missing send configuration is
+    # `{:permanent, :adapter_unavailable}`, not a bare `:not_configured`.
+    test "rejects missing send configuration as an unavailable adapter" do
       Application.put_env(:fermix_channels, :whatsapp, enabled: true)
 
-      assert {:error, :not_configured} = WhatsApp.send_message("15551234567", "hello")
+      assert {:error, {:permanent, :adapter_unavailable}} =
+               WhatsApp.send_message("15551234567", "hello")
     end
 
     test "rejects text over the WhatsApp Cloud API body cap before send" do
@@ -555,6 +558,24 @@ defmodule FermixChannels.Channels.WhatsAppTest do
       end)
 
       assert {:error, {:rate_limited, 4_000}} =
+               WhatsApp.send_message("15551234567", "hello")
+    end
+
+    # M30 §11.3: a non-2xx becomes the structured status form.
+    test "returns a structured {:http_status, status} on a non-2xx status" do
+      Req.Test.stub(:whatsapp, fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(400, Jason.encode!(%{"error" => %{"message" => "re-engagement"}}))
+      end)
+
+      assert {:error, {:http_status, 400}} = WhatsApp.send_message("15551234567", "hello")
+    end
+
+    test "leaves a raw transport error untouched for the central normalizer" do
+      Req.Test.stub(:whatsapp, fn conn -> Req.Test.transport_error(conn, :econnreset) end)
+
+      assert {:error, %Req.TransportError{reason: :econnreset}} =
                WhatsApp.send_message("15551234567", "hello")
     end
   end

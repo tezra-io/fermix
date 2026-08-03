@@ -17,11 +17,14 @@ defmodule FermixCore.Tools.ScheduleJob do
 
   @impl true
   def description do
-    "Create a durable Fermix scheduled job for reminders, cron-style recurring work, " <>
-      "periodic checks, digests, watchers, temporary jobs, or tasks that should run " <>
-      "later. Use expires_at for jobs that should stop after a fixed time. Use this " <>
-      "instead of shell, browser, computer-use, or external automation when the user " <>
-      "asks Fermix to schedule work."
+    "Create a durable Fermix scheduled job for cron-style recurring work, periodic " <>
+      "checks, digests, watchers, temporary jobs, or later work that must reason, call " <>
+      "a provider, use tools, or inspect changing state when it runs. Use expires_at " <>
+      "for jobs that should stop after a fixed time. Use this instead of shell, " <>
+      "browser, computer-use, or external automation when the user asks Fermix to " <>
+      "schedule work. For a deterministic personal date whose only future action is " <>
+      "notifying the owner — an appointment, deadline, birthday, or plain \"remind me\" " <>
+      "— use event_store instead; it needs no model run when it fires."
   end
 
   @impl true
@@ -92,7 +95,9 @@ defmodule FermixCore.Tools.ScheduleJob do
 
   @impl true
   def when_to_use do
-    "Create a Fermix scheduled job for reminders, recurring checks, digests, watchers, or later work."
+    "Create a Fermix scheduled job for recurring checks, digests, watchers, or later " <>
+      "work that must reason or act when it runs. Deterministic personal dates that " <>
+      "only need to notify the owner belong in event_store."
   end
 
   @impl true

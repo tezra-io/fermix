@@ -101,6 +101,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.Session do
       state = %{
         endpoint: endpoint,
         transport: transport,
+        connect_opts: Keyword.get(opts, :connect_opts, []),
         credential: credential,
         connection: connection,
         client_info: Keyword.get(opts, :client_info, default_client_info()),
@@ -259,9 +260,36 @@ defmodule FermixCore.Capabilities.MCP.Remote.Session do
   end
 
   defp post(state, body, timeout_ms) do
+    case send_once(state, body, timeout_ms) do
+      {:error, state, {:not_sent, _class}} -> reconnect_and_send(state, body, timeout_ms)
+      result -> result
+    end
+  end
+
+  defp send_once(state, body, timeout_ms) do
     case state.transport.request(state.connection, "POST", headers(state), body, timeout_ms) do
       {:ok, connection, response} -> {:ok, %{state | connection: connection}, response}
       {:error, connection, reason} -> {:error, %{state | connection: connection}, reason}
+    end
+  end
+
+  # HTTP keep-alive is best-effort: an idle connection is closed by the peer or
+  # an intermediary whenever they like, and this session holds one for its whole
+  # life. Without this, the FIRST such close poisons every later call with
+  # `:closed` forever — which is exactly what a multi-turn eval produced.
+  #
+  # This is connection management, not a retry policy, and the distinction is
+  # load-bearing: only a `:not_sent` failure reconnects, meaning the send itself
+  # failed and the peer never saw the request. A close mid-response is left
+  # alone and surfaces as an error, because the server may already have acted on
+  # it and repeating it would be the ambiguous-write replay §7.8 forbids.
+  # Reopening also re-resolves and re-validates DNS, per §7.4.
+  defp reconnect_and_send(state, body, timeout_ms) do
+    state.transport.close(state.connection)
+
+    case state.transport.open(state.endpoint, state.connect_opts) do
+      {:ok, connection} -> send_once(%{state | connection: connection}, body, timeout_ms)
+      {:error, reason} -> {:error, state, reason}
     end
   end
 

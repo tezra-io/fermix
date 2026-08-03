@@ -13,6 +13,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     jobs = Application.get_env(:fermix_core, :jobs, [])
     compaction = Application.get_env(:fermix_core, :compaction, [])
     harness = Application.get_env(:fermix_core, :harness, [])
+    skill_curation = Application.get_env(:fermix_core, :skill_curation, [])
     memory = Application.get_env(:fermix_core, :memory, [])
     realtime = Application.get_env(:fermix_core, :realtime, [])
     computer_use = Application.get_env(:fermix_core, :computer_use, [])
@@ -34,6 +35,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
       Application.put_env(:fermix_core, :jobs, jobs)
       Application.put_env(:fermix_core, :compaction, compaction)
       Application.put_env(:fermix_core, :harness, harness)
+      Application.put_env(:fermix_core, :skill_curation, skill_curation)
       Application.put_env(:fermix_core, :memory, memory)
       Application.put_env(:fermix_core, :realtime, realtime)
       Application.put_env(:fermix_core, :computer_use, computer_use)
@@ -1085,6 +1087,96 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     """)
 
     assert_raise ArgumentError, ~r/harness\.max_active.*positive integer/s, fn ->
+      ConfigStore.load_runtime_config()
+    end
+  end
+
+  test "save/load round-trips the skill_curation config section" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    snapshot = %{
+      fermix_core: [skill_curation: [enabled: false]],
+      fermix_channels: [],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ "[fermix_core.skill_curation]"
+    assert contents =~ "enabled = false"
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config()
+    skill_curation = Keyword.get(loaded.fermix_core, :skill_curation, [])
+    assert Keyword.get(skill_curation, :enabled) == false
+  end
+
+  test "an empty skill_curation section is omitted from the TOML" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    assert :ok =
+             ConfigStore.save_snapshot(%{
+               fermix_core: [skill_curation: []],
+               fermix_channels: [],
+               fermix_web: []
+             })
+
+    refute File.read!(Path.join(tmp_home, "config.toml")) =~ "[fermix_core.skill_curation]"
+  end
+
+  test "apply_snapshot replaces skill_curation config in Application env" do
+    Application.put_env(:fermix_core, :skill_curation, enabled: true)
+
+    ConfigStore.apply_snapshot(%{
+      fermix_core: [skill_curation: [enabled: false]],
+      fermix_channels: [],
+      fermix_web: []
+    })
+
+    skill_curation = Application.get_env(:fermix_core, :skill_curation, [])
+    assert Keyword.get(skill_curation, :enabled) == false
+  end
+
+  test "load refuses to boot on an unknown skill_curation key" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.skill_curation]
+    enabld = true
+    """)
+
+    assert_raise ArgumentError,
+                 ~r/\[fermix_core.skill_curation\].*unknown key\(s\): enabld/s,
+                 fn -> ConfigStore.load_runtime_config() end
+  end
+
+  test "load refuses to boot on an invalid skill_curation value" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.skill_curation]
+    enabled = "yes"
+    """)
+
+    assert_raise ArgumentError, ~r/skill_curation\.enabled "yes"/s, fn ->
       ConfigStore.load_runtime_config()
     end
   end

@@ -134,6 +134,13 @@ defmodule FermixChannels.Channels.WhatsApp do
         end)
 
       handle_send_response(result, duration_us)
+    else
+      # M30 §11.3: missing send configuration means there is no client to send
+      # through, which is the `:adapter_unavailable` kind of the closed delivery
+      # vocabulary — not a bare atom the delivery normalizer would have to guess
+      # at, and then log as a contract violation.
+      {:error, :not_configured} -> {:error, {:permanent, :adapter_unavailable}}
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -691,10 +698,14 @@ defmodule FermixChannels.Channels.WhatsApp do
 
   defp maybe_emit_inbound_message(_result, _duration_us), do: :ok
 
+  # M30 §11.3: the adapter owns platform knowledge and returns the structured
+  # status/rate-limit forms of the closed delivery vocabulary. `RetryHint` stays
+  # authoritative whenever Meta supplies a retry-after hint; the response body
+  # reaches the local log above, never the returned reason.
   defp whatsapp_api_error(%{status: status} = response) do
     case RetryHint.retry_after_ms(response) do
       {:ok, retry_after_ms} -> {:error, {:rate_limited, retry_after_ms}}
-      :error -> {:error, "WhatsApp API error: #{status}"}
+      :error -> {:error, {:http_status, status}}
     end
   end
 

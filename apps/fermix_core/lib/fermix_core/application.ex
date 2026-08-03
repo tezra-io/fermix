@@ -41,6 +41,10 @@ defmodule FermixCore.Application do
   alias FermixCore.Sandbox.DecisionTelemetry
   alias FermixCore.Setup.BootReport
   alias FermixCore.Setup.ConfigStore
+  alias FermixCore.SkillCuration.Config, as: SkillCurationConfig
+  alias FermixCore.SkillCuration.Scheduler, as: SkillCurationScheduler
+  alias FermixCore.Temporal.DeliverySupervisor, as: TemporalDeliverySupervisor
+  alias FermixCore.Temporal.Scheduler, as: TemporalScheduler
   alias FermixCore.Trace
 
   # Compile-time env: the boot-time computer-use sidecar ensure is a network
@@ -158,6 +162,15 @@ defmodule FermixCore.Application do
         MainAgent,
         JobRunnerSupervisor,
         {JobScheduler, jobs_scheduler_opts()},
+        # Temporal reminder rail (M30 §6.3): the scheduler starts BEFORE its
+        # delivery supervisor, and that order is load-bearing — under
+        # `:rest_for_one` a scheduler crash tears down the supervisor and every
+        # in-flight worker first, so no delivery worker can outlive the
+        # scheduler. That invariant is what replaces lease tokens and fenced
+        # settlement. Timers are gated by an init-time flag (the jobs-scheduler
+        # precedent), disabled in `config/test.exs`, never by omission.
+        {TemporalScheduler, temporal_scheduler_opts()},
+        TemporalDeliverySupervisor,
         # Coding-harness local rail (design §6.4 / spec §5): one `:rest_for_one`
         # supervisor (Manager → RunSupervisor → DeliveryWorker) so a Manager crash
         # tears down and re-reconciles live runs instead of orphaning them. Always
@@ -167,7 +180,8 @@ defmodule FermixCore.Application do
         {HarnessSupervisor, harness_worker_opts()},
         maybe_daemon_socket(),
         maybe_realtime_supervisor(),
-        maybe_computer_use_supervisor()
+        maybe_computer_use_supervisor(),
+        maybe_skill_curation_scheduler()
       ]
       |> List.flatten()
 
@@ -298,6 +312,24 @@ defmodule FermixCore.Application do
     end
   end
 
+  # Skill-curation clock (MILESTONE_26_SKILL_CURATION §6.1): child-ABSENT when
+  # gated out. Three conditions, all required — the compile-time env gate (the
+  # env-flag-is-not-an-env-gate lesson), the config switch, and memory
+  # persistence (every curation surface lives in memory.db; with memory off
+  # the scheduler would only churn run_error every cycle). Public (@doc false)
+  # so tests can pin the gating without booting a second app tree; the env
+  # param exists only so tests can exercise the non-test branches — production
+  # callers always use the baked default.
+  @doc false
+  def maybe_skill_curation_scheduler(compiled_env \\ @compiled_env) do
+    if compiled_env != :test and SkillCurationConfig.enabled?() and
+         FermixCore.Memory.Config.enabled?() do
+      [SkillCurationScheduler]
+    else
+      []
+    end
+  end
+
   # Only in a real daemon boot: if computer-use is enabled but the sidecar for the
   # compiled-in compux version isn't installed — the state a fermix upgrade that
   # bumped the compux ref lands in — download it now, before the
@@ -343,6 +375,14 @@ defmodule FermixCore.Application do
   # real `Memory.Repo` nor the real `FERMIX_HOME` on boot.
   defp harness_worker_opts do
     [timer_enabled: Application.get_env(:fermix_core, :harness_workers_enabled, true)]
+  end
+
+  # The temporal scheduler has no operator TOML surface: reminder timing is
+  # internal constants (M30 §6.3). This key exists so `config/test.exs` can keep
+  # the app-tree instance dark the way `[:jobs] scheduler_enabled` does, so
+  # `mix test` never sweeps or claims against the real `Memory.Repo`.
+  defp temporal_scheduler_opts do
+    Application.get_env(:fermix_core, :temporal, [])
   end
 
   defp setup_file_logger do

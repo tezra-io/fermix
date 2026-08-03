@@ -37,6 +37,8 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.Doctor, as: ProviderProbe
   alias FermixCore.Setup.SecretMigration
+  alias FermixCore.SkillCuration.Config, as: SkillCurationConfig
+  alias FermixCore.SkillCuration.Delivery, as: SkillCurationDelivery
 
   @type status :: :ok | :warn | :fail
   @type result :: %{name: String.t(), status: status(), detail: String.t()}
@@ -729,6 +731,50 @@ defmodule Fermix.CLI.Doctor.Checks do
       not enabled? and not any_vendor_available?(detections) -> nil
       enabled? -> enabled_harness_result(detections, opts)
       true -> disabled_harness_result(detections)
+    end
+  end
+
+  @doc """
+  Skill-curation delivery health (MILESTONE_26_SKILL_CURATION §6.6 rung 3):
+  when the feature is on, name whether proposals have an owner-private
+  delivery target — a CLI-only install would otherwise mine forever and
+  deliver nothing, with the situation visible only here and in
+  `/skills proposals`. Pure config reads, safe for the tree-less CLI. Returns
+  `nil` to skip when curation is disabled.
+  """
+  @spec skill_curation(keyword()) :: result() | nil
+  def skill_curation(opts \\ []) when is_list(opts) do
+    enabled? = Keyword.get_lazy(opts, :skill_curation_enabled, &SkillCurationConfig.enabled?/0)
+    memory? = Keyword.get_lazy(opts, :memory_enabled, &FermixCore.Memory.Config.enabled?/0)
+
+    target =
+      Keyword.get_lazy(opts, :delivery_target, fn ->
+        SkillCurationDelivery.resolve_target()
+      end)
+
+    cond do
+      not enabled? ->
+        nil
+
+      not memory? ->
+        %{
+          name: "skill curation",
+          status: :warn,
+          detail: "enabled but memory persistence is off — the curation clock will not run"
+        }
+
+      target == :no_delivery_target ->
+        %{
+          name: "skill curation",
+          status: :warn,
+          detail:
+            "no owner-private delivery target; proposals will wait in /skills proposals — " <>
+              "set owner_user_id on a channel or [fermix_core.jobs] default_delivery_target"
+        }
+
+      true ->
+        {:ok, resolved} = target
+        ok("skill curation", "proposals deliver to #{resolved.platform}:#{resolved.destination}")
     end
   end
 

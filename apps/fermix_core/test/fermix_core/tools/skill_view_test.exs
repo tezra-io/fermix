@@ -2,7 +2,22 @@ defmodule FermixCore.Tools.SkillViewTest do
   use ExUnit.Case, async: false
 
   alias FermixCore.Agents.SkillRegistry
+  alias FermixCore.Memory.Repo
   alias FermixCore.Tools.SkillView
+
+  defp start_usage_repo!(suffix) do
+    db_path = Path.join(System.tmp_dir!(), "fermix-skill-view-usage-#{suffix}.db")
+    repo = :"skill_view_usage_repo_#{suffix}"
+    start_supervised!({Repo, name: repo, enabled: true, database_path: db_path})
+
+    on_exit(fn ->
+      Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], fn path ->
+        FermixTestSupport.SafeRm.rm(path)
+      end)
+    end)
+
+    repo
+  end
 
   defp write_skill(skills_dir, name, body, opts \\ []) do
     description = Keyword.get(opts, :description, "Use #{name}.")
@@ -59,6 +74,47 @@ defmodule FermixCore.Tools.SkillViewTest do
     assert decoded["description"] == "Use inspect_skill."
     assert decoded["body"] == "Read the repo carefully."
     assert decoded["source_path"] =~ "inspect_skill/SKILL.md"
+  end
+
+  test "a successful view upserts the skill_usage views counter", %{registry: registry} do
+    repo = start_usage_repo!(System.unique_integer([:positive]))
+
+    assert {:ok, result} =
+             SkillView.execute(
+               %{"name" => "inspect_skill"},
+               %{skill_registry: registry, usage_repo: repo}
+             )
+
+    assert result.success
+    assert {:ok, usage} = Repo.get_skill_usage("inspect_skill", server: repo)
+    assert usage.views == 1
+    assert usage.runs == 0
+    assert %DateTime{} = usage.last_used_at
+  end
+
+  test "a failed view records no usage row", %{registry: registry} do
+    repo = start_usage_repo!(System.unique_integer([:positive]))
+
+    assert {:ok, result} =
+             SkillView.execute(
+               %{"name" => "missing"},
+               %{skill_registry: registry, usage_repo: repo}
+             )
+
+    refute result.success
+    assert {:error, :not_found} = Repo.get_skill_usage("missing", server: repo)
+  end
+
+  test "a dead usage repo degrades to a no-op and the view still succeeds", %{
+    registry: registry
+  } do
+    assert {:ok, result} =
+             SkillView.execute(
+               %{"name" => "inspect_skill"},
+               %{skill_registry: registry, usage_repo: :skill_view_no_such_repo}
+             )
+
+    assert result.success
   end
 
   test "validates skill names", %{registry: registry} do

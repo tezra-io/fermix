@@ -34,6 +34,7 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.Setup.AccessToken
   alias FermixCore.Setup.Doctor
   alias FermixCore.Setup.Wizard
+  alias FermixCore.SkillCuration.Delivery, as: SkillCurationDelivery
   alias FermixCore.Tools.Media.Registry, as: MediaRegistry
   alias FermixCore.Transcription.Registry, as: TranscriptionRegistry
   alias FermixWebWeb.SetupLive.Components
@@ -118,6 +119,9 @@ defmodule FermixWebWeb.SetupLive do
   # now gates whether the harness section renders at all (design §23.4), so it is
   # restart-flagged for the same cached-profile reason.
   @harness_restart_keys [:harness_default_vendor, :harness_approved]
+  # Flipping skill curation adds/removes the Scheduler child (child-absent
+  # gating), so it only takes effect on a daemon restart.
+  @skill_curation_restart_keys [:skill_curation_enabled]
 
   @impl true
   def mount(params, session, socket) do
@@ -576,8 +580,12 @@ defmodule FermixWebWeb.SetupLive do
       |> maybe_put_string(:user_name, params["user_name"])
       |> maybe_put_string(:timezone, params["timezone"])
       |> maybe_put_string(:communication_style, params["communication_style"])
+      |> maybe_put_skill_curation_enabled(params)
 
-    {:noreply, save_answers(socket, answers, "Personalization saved.", Map.get(root, "__nav"))}
+    {:noreply,
+     save_answers(socket, answers, "Personalization saved.", Map.get(root, "__nav"),
+       restart_required?: runtime_restart_answers?(answers)
+     )}
   end
 
   # The Coding Agents tab: consent (`approved`) + the default-vendor selector,
@@ -891,7 +899,8 @@ defmodule FermixWebWeb.SetupLive do
       @provider_restart_keys ++
         @realtime_restart_keys ++
         @channel_restart_keys ++
-        @harness_restart_keys
+        @harness_restart_keys ++
+        @skill_curation_restart_keys
 
     Enum.any?(answers, fn {key, _value} -> key in restart_keys end)
   end
@@ -1419,8 +1428,20 @@ defmodule FermixWebWeb.SetupLive do
       # Default to New York so the form is never blank; the agent reads this
       # (via Application env) to stamp each turn with the current local date.
       timezone: Keyword.get(personalization, :timezone, "America/New_York"),
-      communication_style: Keyword.get(personalization, :communication_style, "")
+      communication_style: Keyword.get(personalization, :communication_style, ""),
+      skill_curation_enabled:
+        snapshot |> get_fermix_core(:skill_curation) |> Keyword.get(:enabled, true),
+      skill_curation_destination: skill_curation_destination()
     }
+  end
+
+  # Names where proposals will actually arrive (§6.1) — the same ladder the
+  # delivery pass uses, pure config reads.
+  defp skill_curation_destination do
+    case SkillCurationDelivery.resolve_target() do
+      {:ok, target} -> "Proposals arrive in #{target.platform}."
+      :no_delivery_target -> "Proposals wait in /skills proposals until a channel owner is set."
+    end
   end
 
   defp tool_summary do
@@ -2810,6 +2831,18 @@ defmodule FermixWebWeb.SetupLive do
   # checkbox so the param is present both ways — checked posts "true", unchecked
   # posts "false" — letting the operator both grant and revoke consent from the
   # card. Absent (card not rendered) preserves the existing value.
+  # The skill-curation personalization toggle (MILESTONE_26_SKILL_CURATION
+  # §6.1). Same hidden-false pairing as the harness consent checkbox; the
+  # wizard reducer writes `enabled = false` on decline and deletes the key on
+  # accept (default already true).
+  defp maybe_put_skill_curation_enabled(answers, params) do
+    case Map.fetch(params, "skill_curation_enabled") do
+      {:ok, "true"} -> [{:skill_curation_enabled, true} | answers]
+      {:ok, "false"} -> [{:skill_curation_enabled, false} | answers]
+      _absent -> answers
+    end
+  end
+
   defp maybe_put_harness_approved(answers, params) do
     case Map.fetch(params, "harness_approved") do
       {:ok, "true"} -> [{:harness_approved, true} | answers]

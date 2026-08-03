@@ -424,4 +424,24 @@ defmodule FermixCore.Capabilities.MCP.Remote.OwnerTest do
       true -> Process.sleep(10) && poll(fun, deadline)
     end
   end
+
+  describe "the proxy dispatch contract" do
+    # THE BUG THIS PINS: `Remote.Proxy` dispatches `dispatch.call_tool(target,
+    # tool, args, timeout)` and defaults `dispatch` to this module — but
+    # `call_tool/4` did not exist, so every allowlisted Eden call died `:undef`
+    # and surfaced as `:dispatch_failed`. Neither side's tests could see it: the
+    # proxy suite injects a fake dispatch module that DOES implement the
+    # function, and the owner suite never exercised the proxy's expectations.
+    # This asserts the two agree by exported signature, not by hope.
+    test "the owner exports exactly what the proxy dispatches to" do
+      Code.ensure_loaded!(FermixCore.Capabilities.MCP.Remote.Owner)
+
+      assert function_exported?(FermixCore.Capabilities.MCP.Remote.Owner, :call_tool, 4),
+             "Remote.Proxy calls dispatch.call_tool/4 and defaults dispatch to Remote.Owner"
+
+      # `list_tools/1` is the same shape of contract, with Discoverer.
+      assert function_exported?(FermixCore.Capabilities.MCP.Remote.Owner, :list_tools, 1)
+      assert function_exported?(FermixCore.Capabilities.MCP.Remote.Owner, :teardown, 1)
+    end
+  end
 end

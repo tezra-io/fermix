@@ -17,6 +17,7 @@ defmodule FermixCore.Setup.ConfigStore do
   alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Setup.SecretStore
+  alias FermixCore.SkillCuration.Config, as: SkillCurationConfig
 
   require Logger
 
@@ -105,6 +106,7 @@ defmodule FermixCore.Setup.ConfigStore do
         routing: Application.get_env(:fermix_core, :routing, []),
         compaction: Application.get_env(:fermix_core, :compaction, []),
         harness: Application.get_env(:fermix_core, :harness, []),
+        skill_curation: Application.get_env(:fermix_core, :skill_curation, []),
         memory: Application.get_env(:fermix_core, :memory, []),
         realtime: Application.get_env(:fermix_core, :realtime, []),
         computer_use: Application.get_env(:fermix_core, :computer_use, []),
@@ -178,6 +180,7 @@ defmodule FermixCore.Setup.ConfigStore do
     apply_routing_config(Keyword.get(persisted.fermix_core, :routing, []))
     apply_compaction_config(Keyword.get(persisted.fermix_core, :compaction, []))
     apply_harness_config(Keyword.get(persisted.fermix_core, :harness, []))
+    apply_skill_curation_config(Keyword.get(persisted.fermix_core, :skill_curation, []))
     apply_memory_config(Keyword.get(persisted.fermix_core, :memory, []))
     apply_realtime_config(Keyword.get(persisted.fermix_core, :realtime, []))
     apply_computer_use_config(Keyword.get(persisted.fermix_core, :computer_use, []))
@@ -284,6 +287,11 @@ defmodule FermixCore.Setup.ConfigStore do
           |> Map.get(:fermix_core, [])
           |> Keyword.get(:harness, [])
           |> normalize_harness(),
+        skill_curation:
+          snapshot
+          |> Map.get(:fermix_core, [])
+          |> Keyword.get(:skill_curation, [])
+          |> normalize_skill_curation(),
         memory:
           snapshot
           |> Map.get(:fermix_core, [])
@@ -427,6 +435,7 @@ defmodule FermixCore.Setup.ConfigStore do
         routing: [],
         compaction: [],
         harness: [],
+        skill_curation: [],
         memory: [],
         realtime: [],
         computer_use: [],
@@ -554,6 +563,12 @@ defmodule FermixCore.Setup.ConfigStore do
     :ok
   end
 
+  # Replace (not merge), same rationale as harness.
+  defp apply_skill_curation_config(skill_curation_config) do
+    Application.put_env(:fermix_core, :skill_curation, skill_curation_config)
+    :ok
+  end
+
   # Memory uses merge (not put) so other in-process keys (extraction_enabled,
   # agent_id, prompt_*_token_cap, loop_detection_*) survive partial TOML edits.
   defp apply_memory_config(memory_config) do
@@ -659,6 +674,7 @@ defmodule FermixCore.Setup.ConfigStore do
     routing = Keyword.get(fermix_core, :routing, [])
     compaction = Keyword.get(fermix_core, :compaction, [])
     harness = Keyword.get(fermix_core, :harness, [])
+    skill_curation = Keyword.get(fermix_core, :skill_curation, [])
     memory = Keyword.get(fermix_core, :memory, [])
     realtime = Keyword.get(fermix_core, :realtime, [])
     computer_use = Keyword.get(fermix_core, :computer_use, [])
@@ -692,6 +708,7 @@ defmodule FermixCore.Setup.ConfigStore do
       render_section(["fermix_core", "routing"], routing),
       render_section(["fermix_core", "compaction"], compaction),
       render_section(["fermix_core", "harness"], harness),
+      render_section(["fermix_core", "skill_curation"], skill_curation),
       render_section(["fermix_core", "memory"], memory),
       render_section(["fermix_core", "realtime"], realtime),
       render_section(["fermix_core", "computer_use"], computer_use),
@@ -903,6 +920,8 @@ defmodule FermixCore.Setup.ConfigStore do
         routing: normalize_routing(get_in(document, ["fermix_core", "routing"])),
         compaction: normalize_compaction(get_in(document, ["fermix_core", "compaction"])),
         harness: normalize_harness(get_in(document, ["fermix_core", "harness"])),
+        skill_curation:
+          normalize_skill_curation(get_in(document, ["fermix_core", "skill_curation"])),
         memory: normalize_memory(get_in(document, ["fermix_core", "memory"])),
         realtime: normalize_realtime(get_in(document, ["fermix_core", "realtime"])),
         computer_use: normalize_computer_use(get_in(document, ["fermix_core", "computer_use"])),
@@ -1567,6 +1586,38 @@ defmodule FermixCore.Setup.ConfigStore do
       config.toml [fermix_core.harness] has unknown key(s): #{Enum.join(unknown, ", ")}.
 
       Allowed keys: #{Enum.map_join(HarnessConfig.config_keys(), ", ", &Atom.to_string/1)}.
+      Remove or fix the key(s); the daemon will not boot until this is fixed.
+      """
+    end
+  end
+
+  # `[fermix_core.skill_curation]` (MILESTONE_26_SKILL_CURATION §6.1). Value
+  # validation lives in SkillCurationConfig.normalize (fail-loud per key);
+  # unknown keys are rejected here at the parse boundary, mirroring
+  # validate_harness_section_keys!/1.
+  defp normalize_skill_curation(config) do
+    validate_skill_curation_section_keys!(config)
+    SkillCurationConfig.normalize(config)
+  end
+
+  defp validate_skill_curation_section_keys!(nil), do: :ok
+
+  defp validate_skill_curation_section_keys!(config) when is_map(config) or is_list(config) do
+    allowed = MapSet.new(SkillCurationConfig.config_keys(), &Atom.to_string/1)
+
+    unknown =
+      config
+      |> section_keys()
+      |> Enum.reject(&MapSet.member?(allowed, &1))
+      |> Enum.sort()
+
+    if unknown == [] do
+      :ok
+    else
+      raise ArgumentError, """
+      config.toml [fermix_core.skill_curation] has unknown key(s): #{Enum.join(unknown, ", ")}.
+
+      Allowed keys: #{Enum.map_join(SkillCurationConfig.config_keys(), ", ", &Atom.to_string/1)}.
       Remove or fix the key(s); the daemon will not boot until this is fixed.
       """
     end

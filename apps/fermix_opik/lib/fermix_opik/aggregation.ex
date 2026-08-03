@@ -388,6 +388,97 @@ defmodule FermixOpik.Aggregation do
     })
   end
 
+  # A skill-curation cycle (MILESTONE_26_SKILL_CURATION §9) is a bounded
+  # background run minted with its own session_id before any turn exists —
+  # scheduled cycles are roots (no parent_session emitted), a manual
+  # `/skills review` and a creation task pass the originating command session
+  # through (the soul_curation shape).
+  def apply_event(state, [:fermix, :skill_curation, :run_start], _meas, meta, at) do
+    case Map.get(meta, :session_id) do
+      nil ->
+        {state, []}
+
+      session_id ->
+        ctx = %{
+          parent_session: Map.get(meta, :parent_session),
+          kind: :skill_curation,
+          name: stringify(Map.get(meta, :stage)),
+          input: nil,
+          trace_metadata:
+            compact(%{
+              stage: stringify(Map.get(meta, :stage)),
+              trigger: stringify(Map.get(meta, :trigger))
+            }),
+          at: at.at,
+          mono: at.mono
+        }
+
+        {state, _ref} = ensure_session(state, session_id, ctx)
+        {state, []}
+    end
+  end
+
+  # Counts only — this compact map is the metadata allowlist for the run
+  # bookends; a count field not named here never exports.
+  def apply_event(state, [:fermix, :skill_curation, run], _meas, meta, at)
+      when run in [:run_complete, :run_error] do
+    status = if run == :run_error, do: "error", else: Map.get(meta, :status, "ok")
+
+    close_root(state, meta, at, %{
+      output: Map.get(meta, :error),
+      status: status,
+      metadata:
+        compact(%{
+          stage: stringify(Map.get(meta, :stage)),
+          trigger: stringify(Map.get(meta, :trigger)),
+          reason_kind: stringify(Map.get(meta, :reason_kind)),
+          messages_scanned: Map.get(meta, :messages_scanned),
+          checkpoints_included: Map.get(meta, :checkpoints_included),
+          messages_dropped_caps: Map.get(meta, :messages_dropped_caps),
+          dropped_unattributed: Map.get(meta, :dropped_unattributed),
+          candidates: Map.get(meta, :candidates),
+          dropped_disposition: Map.get(meta, :dropped_disposition),
+          dropped_grounding: Map.get(meta, :dropped_grounding),
+          dropped_invalid_name: Map.get(meta, :dropped_invalid_name),
+          dropped_overflow: Map.get(meta, :dropped_overflow),
+          deferred: Map.get(meta, :deferred),
+          delivered_deferred: Map.get(meta, :delivered_deferred),
+          proposals_new: Map.get(meta, :proposals_new),
+          proposals_update: Map.get(meta, :proposals_update),
+          proposals_archive: Map.get(meta, :proposals_archive),
+          archive_overflow: Map.get(meta, :archive_overflow),
+          expired_pending: Map.get(meta, :expired_pending),
+          expired_deferred: Map.get(meta, :expired_deferred),
+          window_truncated: Map.get(meta, :window_truncated),
+          delivery_status: stringify(Map.get(meta, :delivery_status)),
+          skill: Map.get(meta, :skill)
+        })
+    })
+  end
+
+  # Owner proposal actions land days after the cycle trace shipped (the
+  # tombstone would drop a child span), so each action is a point event that
+  # becomes its own self-closing trace — the plugin-dist shape.
+  def apply_event(state, [:fermix, :skill_curation, :proposal_actioned], meas, meta, at) do
+    trace =
+      Mapper.drop_nil(%{
+        id: Mapper.new_id(at.at),
+        project_name: state.project,
+        name: "skillcur:#{stringify(Map.get(meta, :action))}",
+        start_time: Mapper.iso(at.at),
+        end_time: Mapper.iso(at.at),
+        metadata:
+          compact(%{
+            action: stringify(Map.get(meta, :action)),
+            kind: stringify(Map.get(meta, :kind)),
+            age_ms: Map.get(meas, :age_ms)
+          }),
+        tags: ["skill_curation"]
+      })
+
+    {state, [%{trace: trace, spans: []}]}
+  end
+
   # Realtime voice runs on its own WebSocket session. call_start opens the root
   # trace (carrying model/voice/device); the model turn and tool calls reuse the
   # provider/tool spans and nest via the shared session_id; call_stop closes it.
@@ -523,6 +614,16 @@ defmodule FermixOpik.Aggregation do
   # missing child span. session_id nil → place_under no-ops (nothing to nest).
   def apply_event(state, [:fermix, :timeout, :expired], meas, meta, at) do
     add_child_span(state, meta, at, &Mapper.timeout_span(meta, meas, &1))
+  end
+
+  # Proactive reminder lifecycle ([:fermix, :reminder, :lifecycle]). A reminder
+  # delivery is not an agent run — no provider call, no turn, and by design no
+  # session_id (M30 §6.4) — so every phase is a point event that becomes its own
+  # self-closing trace, built inline exactly like [:fermix, :plugin, :dist] and
+  # never tracked in state. Correlation is by event/reminder ids; nesting one
+  # under a session would mint the phantom root M27 §11.1 warns about.
+  def apply_event(state, [:fermix, :reminder, :lifecycle], meas, meta, at) do
+    {state, [%{trace: reminder_trace(state, meas, meta, at), spans: []}]}
   end
 
   def apply_event(state, _event, _meas, _meta, _at), do: {state, []}
@@ -895,6 +996,7 @@ defmodule FermixOpik.Aggregation do
   defp infer_kind("cron_" <> _), do: :scheduled
   defp infer_kind("harness_" <> _), do: :harness
   defp infer_kind("session:" <> _), do: :realtime
+  defp infer_kind("skill_curation:" <> _), do: :skill_curation
   defp infer_kind("soul_curation:" <> _), do: :soul_curation
   defp infer_kind("memory_review:" <> _), do: :memory_review
   defp infer_kind(_other), do: :subagent
@@ -959,6 +1061,42 @@ defmodule FermixOpik.Aggregation do
         }),
       tags: ["mcp_client"]
     })
+  end
+
+  # A self-closing trace for one reminder lifecycle phase. Built inline (like the
+  # plugin-dist trace) because it is a point event that ships immediately. The
+  # metadata is exactly the emitter's fixed allowlist — `content` only exists at
+  # all when the operator turned the shared content gate on.
+  defp reminder_trace(state, measurements, metadata, at) do
+    duration_ms = Map.get(measurements, :duration_ms, 0)
+    started = Mapper.start_of(at.at, duration_ms)
+
+    Mapper.drop_nil(%{
+      id: Mapper.new_id(started),
+      project_name: state.project,
+      name: "reminder:#{stringify(Map.get(metadata, :phase))}",
+      start_time: Mapper.iso(started),
+      end_time: Mapper.iso(at.at),
+      metadata: compact(reminder_metadata(metadata, duration_ms)),
+      tags: ["reminder"]
+    })
+  end
+
+  defp reminder_metadata(metadata, duration_ms) do
+    %{
+      component: Map.get(metadata, :component),
+      phase: stringify(Map.get(metadata, :phase)),
+      event_id: Map.get(metadata, :event_id),
+      reminder_id: Map.get(metadata, :reminder_id),
+      occurrence_key: Map.get(metadata, :occurrence_key),
+      rule_id: Map.get(metadata, :rule_id),
+      platform: Map.get(metadata, :platform),
+      attempt: Map.get(metadata, :attempt),
+      result: stringify(Map.get(metadata, :result)),
+      error_class: stringify(Map.get(metadata, :error_class)),
+      content: Map.get(metadata, :content),
+      duration_ms: duration_ms
+    }
   end
 
   defp compact(map) do

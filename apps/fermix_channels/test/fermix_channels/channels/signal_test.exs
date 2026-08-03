@@ -234,10 +234,66 @@ defmodule FermixChannels.Channels.SignalTest do
   end
 
   describe "send_message/3" do
-    test "rejects missing signal account configuration" do
+    # M30 §11.3: an unconfigured Signal account is an unavailable adapter, not a
+    # bare `:not_configured` the delivery normalizer would have to guess at.
+    test "rejects missing signal account configuration as an unavailable adapter" do
       Application.put_env(:fermix_channels, :signal, enabled: true)
 
-      assert {:error, :not_configured} = Signal.send_message("+15551234567", "hello")
+      assert {:error, {:permanent, :adapter_unavailable}} =
+               Signal.send_message("+15551234567", "hello")
+    end
+  end
+
+  # M30 §11.3: the CLI classifier is the Signal send path's whole platform
+  # knowledge. It is exercised directly with fabricated runner results so the
+  # test spawns no process and reads no host state; stdout must never reach the
+  # returned reason.
+  describe "Signal.CLI.classify_send_result/1" do
+    alias FermixChannels.Channels.Signal.CLI
+
+    test "a zero exit is a successful send" do
+      assert :ok = CLI.classify_send_result({:ok, %{exit: 0, stdout: ""}})
+    end
+
+    test "a non-zero CLI exit is a permanent remote rejection" do
+      assert {:error, {:permanent, :remote_rejected}} =
+               CLI.classify_send_result({:ok, %{exit: 1, stdout: "Failed to send message"}})
+    end
+
+    test "CLI stdout never reaches the returned reason" do
+      assert {:error, reason} =
+               CLI.classify_send_result(
+                 {:ok, %{exit: 2, stdout: "recipient +15551234567 unknown"}}
+               )
+
+      refute inspect(reason) =~ "15551234567"
+    end
+
+    test "a command watchdog expiry is a transport timeout" do
+      assert {:error, {:transport, :timeout}} =
+               CLI.classify_send_result({:error, {:timeout, 30_000}})
+    end
+
+    test "a missing executable is an unavailable adapter" do
+      assert {:error, {:permanent, :adapter_unavailable}} =
+               CLI.classify_send_result({:error, {:executable_not_found, "signal-cli"}})
+    end
+
+    # `CommandRunner.reason/0` also carries the supervised path's own failures.
+    # Left unhandled they raise three layers up, where the crash is normalized
+    # to the terminal `{:delivery_crashed, :worker_crash}` and the reminder
+    # fails on attempt one — so the classifier must close over them here.
+    test "a command host failure is a transport failure, not a raise" do
+      assert {:error, {:transport, :timeout}} =
+               CLI.classify_send_result({:error, {:command_host_crashed, :no_start_ack}})
+
+      assert {:error, {:transport, :timeout}} =
+               CLI.classify_send_result({:error, {:port_failed, :eagain}})
+    end
+
+    test "an unrecognized runner result is a classified contract violation" do
+      assert {:error, {:unexpected_delivery_result, :invalid_contract}} =
+               CLI.classify_send_result({:error, :something_new})
     end
   end
 

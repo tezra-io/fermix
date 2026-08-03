@@ -194,6 +194,19 @@ defmodule FermixChannels.Gateway.Channel do
   @callback send_approval(message(), text :: String.t(), token :: String.t()) ::
               :ok | {:error, term()}
 
+  @doc """
+  Deliver a skill-curation proposal with two-tap approve/deny affordances
+  (MILESTONE_26_SKILL_CURATION §6.6). Target-addressed — proposals are
+  proactive, there is no inbound message to reply to — with `target` carrying
+  at least `:chat_id`. The adapter builds its own button row from the bare
+  `token` via `ProposalButton.approve_payload/1` / `deny_payload/1`; a tap
+  funnels back through the typed `/skills approve|deny <token>` path.
+  `Delivery.ChannelSend` gates on `function_exported?`; channels without it
+  get the same text with the typed commands spelled out.
+  """
+  @callback send_proposal(target :: map(), text :: String.t(), token :: String.t()) ::
+              :ok | {:error, term()}
+
   @optional_callbacks [
     start_typing: 1,
     download_attachment: 2,
@@ -209,6 +222,7 @@ defmodule FermixChannels.Gateway.Channel do
     album_classify: 1,
     react: 2,
     reaction_capability: 0,
-    send_approval: 3
+    send_approval: 3,
+    send_proposal: 3
   ]
 end

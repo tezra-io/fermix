@@ -525,6 +525,65 @@ defmodule FermixCore.Setup.WizardTest do
     refute revoked.fermix_core |> Keyword.get(:harness, []) |> Keyword.has_key?(:approved)
   end
 
+  test "save_answers writes skill_curation enabled only on decline" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-skill-curation")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+    Application.put_env(:fermix_core, :providers, [])
+    Application.delete_env(:fermix_channels, :telegram)
+    start_memory_repo!()
+
+    # Declining writes the explicit disable.
+    assert {:ok, _} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(
+               provider: "openai",
+               openai_api_key: "sk-x",
+               skill_curation_enabled: "no"
+             )
+
+    assert {:ok, declined} = ConfigStore.load_runtime_config()
+
+    assert declined.fermix_core |> Keyword.get(:skill_curation, []) |> Keyword.get(:enabled) ==
+             false
+
+    # Accepting writes NOTHING — the default is already true.
+    assert {:ok, _} =
+             Wizard.report().wizard |> Wizard.save_answers(skill_curation_enabled: "yes")
+
+    assert {:ok, accepted} = ConfigStore.load_runtime_config()
+
+    refute accepted.fermix_core
+           |> Keyword.get(:skill_curation, [])
+           |> Keyword.has_key?(:enabled)
+  end
+
+  test "a save with no skill_curation answer preserves an explicit disable" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-skill-curation-preserve")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+    Application.put_env(:fermix_core, :providers, [])
+    Application.delete_env(:fermix_channels, :telegram)
+    start_memory_repo!()
+
+    assert {:ok, _} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(
+               provider: "openai",
+               openai_api_key: "sk-x",
+               skill_curation_enabled: false
+             )
+
+    assert {:ok, _} = Wizard.report().wizard |> Wizard.save_answers(anthropic_api_key: "sk-ant")
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+
+    assert persisted.fermix_core |> Keyword.get(:skill_curation, []) |> Keyword.get(:enabled) ==
+             false
+  end
+
   test "save_answers clears the harness default_vendor when the answer is blank" do
     tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-harness-vendor-clear")
     on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
