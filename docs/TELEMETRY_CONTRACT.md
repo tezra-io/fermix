@@ -140,6 +140,31 @@ as a `memory_review` `agent_event` row; `FermixOpik` consumes it
 before any provider call (`session_id: nil`), `close_root` no-ops — nothing was
 opened.
 
+## Skill curation
+
+The skill-curation pass (MILESTONE_26_SKILL_CURATION) is a run kind with two
+session shapes: a cycle mints `skill_curation:<rand>` (scheduled runs are
+roots; a manual `/skills review` passes
+`parent_session: "command:skills:<channel>:<chat>"` through, the soul-curation
+convention), and an approved creation/update task mints
+`skill_curation:create:<token>` with the approving command as parent. Bookends
+via `FermixCore.SkillCuration.Telemetry` — never hand-rolled:
+`[:fermix, :skill_curation, :run_start]` (`stage: :cycle | :create`,
+`trigger`), `run_complete` (counts only: `messages_scanned`,
+`checkpoints_included`, `messages_dropped_caps`, `candidates`, `dropped_*`,
+`deferred`, `proposals_new|update|archive`, `delivery_status`, …), and
+`run_error` (`reason_kind`). The miner/drafter provider calls ride
+`Providers.Telemetry.emit_call/3` with the run's session id.
+`Trace.TelemetryHandler` records all four events as `agent_event` rows;
+`FermixOpik.Aggregation` opens/closes the root (`infer_kind` tags
+`skill_curation:` prefixes `:skill_curation`) and its `run_complete` clause is
+the count-field allowlist. The fourth event,
+`[:fermix, :skill_curation, :proposal_actioned]` (`action:
+approve|deny|unpark|expire`, `kind`, `age_ms`), fires when the owner acts —
+typically days after the cycle trace shipped — so the exporter renders it as
+its own self-closing `skillcur:<action>` trace (the plugin-dist shape), never
+a child span.
+
 ## Outbound MCP client lifecycle
 
 A remote MCP **client** starts, discovers tools, drifts, reconnects, refuses a
@@ -180,6 +205,32 @@ The same module owns `[:fermix, :capability, :mcp_name_collision]`
 (`emit_collision/4`), fired when two `{server, tool}` pairs sanitize to one
 agent-facing name. It records as an `agent_event` row; it is not exported to
 Opik.
+
+## Reminder lifecycle (temporal events)
+
+A reminder delivery is deterministic — no `AgentLoop`, no provider call, no
+session — so its lifecycle cannot ride any agent-run family. Every transition
+emits the single stable name `[:fermix, :reminder, :lifecycle]` through
+`FermixCore.Temporal.Telemetry` — never hand-rolled, and never a
+`[:fermix, :reminder, <phase>]` tail (exact-name binding would drop it). The
+emitter enforces a fixed metadata allowlist: `phase` (`materialized | claimed |
+delivered | retry_scheduled | failed | expired | superseded | cancelled |
+event_completed | scheduler_error`), `component: "temporal_scheduler"` (the
+`agent_field`, so JSONL rows name their emitter instead of `"unknown"`),
+correlation ids (`event_id`, `reminder_id`, `occurrence_key`, `rule_id`),
+`platform`, `attempt`, `result`, and a **derived** `error_class` (atom, tagged
+tuple's head, else `"unclassified"` — raw reasons/bodies never pass through).
+Measurements: `duration_ms` only where work occurred (the channel attempt),
+`count: 1` otherwise. Reminder text is attached only behind the shared content
+gate. `Trace.TelemetryHandler` records it as a `reminder_lifecycle`
+`agent_event` row; `FermixOpik.Aggregation` renders each event as its own
+self-closing `reminder:<phase>` trace correlated by `event_id`/`reminder_id`
+(the plugin-dist shape — no session, so nesting would mint a phantom root).
+`TraceFile.normalize_agent_event/2` is deliberately not extended (the
+harness/plugin-dist/MCP-client precedent): `mix opik.replay` skips reminder
+rows. The event tools themselves (`event_store`, `event_list`, `event_update`,
+`event_remove`) are ordinary built-ins riding `[:fermix, :tool, :exec]` with
+`input:` passed explicitly.
 
 ## Content (prompts / responses / tool IO)
 

@@ -46,6 +46,8 @@ defmodule FermixCore.Capabilities.MCP.Remote.Contract do
 
   @max_schema_depth Limits.max_schema_depth()
   @max_status_class_bytes 48
+  # A vendor sentence, not a body: enough to diagnose, never a payload dump.
+  @max_vendor_message_bytes 200
 
   @type source_id :: {atom(), String.t()}
 
@@ -213,7 +215,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.Contract do
   """
   @spec classify_result(t(), term()) ::
           {:ok, String.t()}
-          | {:error, {:remote_tool_error, String.t()}}
+          | {:error, {:remote_tool_error, String.t(), String.t() | nil}}
           | {:error, {:invalid_remote_result, atom()}}
   def classify_result(contract, result) when is_map(contract) do
     with {:ok, text} <- reviewed_text(result) do
@@ -539,10 +541,12 @@ defmodule FermixCore.Capabilities.MCP.Remote.Contract do
 
     cond do
       Map.get(result, "isError") == true ->
-        {:error, {:remote_tool_error, status_class(contract, body)}}
+        {:error,
+         {:remote_tool_error, status_class(contract, body), vendor_message(contract, body)}}
 
       contract_failure?(contract, body) ->
-        {:error, {:remote_tool_error, status_class(contract, body)}}
+        {:error,
+         {:remote_tool_error, status_class(contract, body), vendor_message(contract, body)}}
 
       true ->
         {:ok, text}
@@ -568,6 +572,34 @@ defmodule FermixCore.Capabilities.MCP.Remote.Contract do
     case Map.get(body, rc.status_field) do
       status when is_binary(status) -> safe_class(status)
       _absent -> "unspecified"
+    end
+  end
+
+  # §7.9 asks for `Tool.error` with a redacted message AND status, and the repo
+  # has been bitten before by shipping a status word with no diagnosis: the agent
+  # sees a bare class, blind-retries into the same wall, and the operator learns
+  # nothing. A status alone cannot distinguish "out of credits" from "bad
+  # argument", and `unspecified` says less than nothing.
+  #
+  # So the vendor's own sentence rides the TOOL RESULT — which the agent reads
+  # and can act on — while logs and telemetry keep carrying the class only. It is
+  # bounded, stripped of control characters, and never interpolated anywhere it
+  # could be mistaken for Fermix's own words.
+  defp vendor_message(%{result_contract: rc}, body) do
+    case Map.get(body, rc.message_field) do
+      text when is_binary(text) -> redact_message(text)
+      _absent -> nil
+    end
+  end
+
+  defp redact_message(text) do
+    text
+    |> String.replace(~r/[[:cntrl:]]/u, " ")
+    |> String.trim()
+    |> String.slice(0, @max_vendor_message_bytes)
+    |> case do
+      "" -> nil
+      trimmed -> trimmed
     end
   end
 

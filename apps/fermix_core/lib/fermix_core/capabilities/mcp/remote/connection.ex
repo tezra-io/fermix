@@ -102,8 +102,16 @@ defmodule FermixCore.Capabilities.MCP.Remote.Connection do
     target = connection.endpoint.path
 
     case Mint.HTTP.request(connection.conn, method, target, headers, body) do
-      {:ok, conn, ref} -> read(%{connection | conn: conn}, ref, deadline, timeout_ms)
-      {:error, conn, reason} -> {:error, %{connection | conn: conn}, transport_class(reason)}
+      {:ok, conn, ref} ->
+        read(%{connection | conn: conn}, ref, deadline, timeout_ms)
+
+      # The send itself failed, so the peer never saw this request. That is a
+      # materially different fact from a close mid-response: resending is not a
+      # replay, because nothing was delivered. Tagging it is what lets the
+      # session reconnect safely without ever repeating a request the server
+      # may already have acted on (§7.8).
+      {:error, conn, reason} ->
+        {:error, %{connection | conn: conn}, {:not_sent, transport_class(reason)}}
     end
   end
 

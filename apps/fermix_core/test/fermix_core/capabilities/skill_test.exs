@@ -5,6 +5,7 @@ defmodule FermixCore.Capabilities.SkillTest do
   alias FermixCore.Agents.AgentSupervisor
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Skill
+  alias FermixCore.Memory.Repo, as: MemoryRepo
 
   defmodule MockProvider do
     @behaviour FermixCore.Providers.Provider
@@ -218,6 +219,45 @@ defmodule FermixCore.Capabilities.SkillTest do
 
       Process.sleep(50)
       assert AgentSupervisor.list_agents(agent_supervisor) == []
+    end
+
+    test "a finalized invocation upserts the skill_usage runs counter", %{
+      agent_supervisor: agent_supervisor,
+      task_supervisor: task_supervisor,
+      journal_dir: journal_dir
+    } do
+      suffix = System.unique_integer([:positive])
+      db_path = Path.join(System.tmp_dir!(), "fermix-skill-usage-#{suffix}.db")
+      usage_repo = :"skill_capability_usage_repo_#{suffix}"
+
+      start_supervised!({MemoryRepo, name: usage_repo, enabled: true, database_path: db_path})
+
+      on_exit(fn ->
+        Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], fn path ->
+          FermixTestSupport.SafeRm.rm(path)
+        end)
+      end)
+
+      definition = build_definition("alpha", "Alpha skill body.")
+      MockProvider.set_responses([mock_response("Did the work.")])
+
+      context = %{
+        agent_name: "main",
+        session_id: "main-session",
+        provider: MockProvider,
+        agent_supervisor: agent_supervisor,
+        task_supervisor: task_supervisor,
+        journal_base_dir: journal_dir,
+        skill_depth: 0,
+        usage_repo: usage_repo
+      }
+
+      assert {:ok, result} = Skill.invoke(%{"task" => "Do the thing"}, context, definition)
+      assert result.success
+
+      assert {:ok, usage} = MemoryRepo.get_skill_usage("alpha", server: usage_repo)
+      assert usage.runs == 1
+      assert usage.views == 0
     end
 
     test "caps recursion at max_skill_depth and emits telemetry", %{

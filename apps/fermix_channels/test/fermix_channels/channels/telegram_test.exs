@@ -425,6 +425,15 @@ defmodule FermixChannels.Channels.TelegramTest do
   # -- send_message/3 --
 
   describe "send_message/3" do
+    # M30 §11.3: an unconfigured bot token is an unavailable adapter, a reason
+    # the closed delivery vocabulary already owns — not a bare atom the reminder
+    # normalizer has to log as a contract violation.
+    test "rejects a missing bot token as an unavailable adapter" do
+      Application.put_env(:fermix_channels, :telegram, allowed_user_ids: ["111"])
+
+      assert {:error, {:permanent, :adapter_unavailable}} = send_msg("123", "hello")
+    end
+
     test "posts to Telegram sendMessage endpoint" do
       stub_telegram(self(), 200, %{"ok" => true})
 
@@ -638,11 +647,26 @@ defmodule FermixChannels.Channels.TelegramTest do
       refute_received {:telegram_request, _path, _body}
     end
 
-    test "returns error on non-200 status" do
+    # M30 §11.3: adapters own platform knowledge and return the structured
+    # status form; no interpolated "Telegram API error: 400" string survives.
+    test "returns a structured {:http_status, status} on a non-2xx status" do
       stub_telegram(self(), 400, %{"ok" => false, "description" => "Bad Request"})
 
-      assert {:error, msg} = send_msg("123", "hello")
-      assert msg =~ "400"
+      assert {:error, {:http_status, 400}} = send_msg("123", "hello")
+    end
+
+    test "returns a structured {:http_status, status} on a server error" do
+      stub_telegram(self(), 503, %{"ok" => false, "description" => "Service Unavailable"})
+
+      assert {:error, {:http_status, 503}} = send_msg("123", "hello")
+    end
+
+    test "leaves a raw transport error untouched for the central normalizer" do
+      Req.Test.stub(:telegram, fn conn ->
+        Req.Test.transport_error(conn, :econnreset)
+      end)
+
+      assert {:error, %Req.TransportError{reason: :econnreset}} = send_msg("123", "hello")
     end
 
     test "returns structured rate limit errors when Telegram provides retry_after" do
@@ -715,6 +739,59 @@ defmodule FermixChannels.Channels.TelegramTest do
 
       assert_received {:telegram_request, _path, body}
       assert body["message_thread_id"] == 77
+    end
+  end
+
+  describe "send_proposal/3" do
+    test "attaches a two-button row with skillcur-namespaced payloads" do
+      stub_telegram(self(), 200, %{"ok" => true})
+
+      assert :ok =
+               Telegram.send_proposal(%{chat_id: "123"}, "Skill proposal text", "TOK12345")
+
+      assert_received {:telegram_request, path, body}
+      assert path == "/bottest-bot-token/sendMessage"
+      assert body["chat_id"] == "123"
+
+      assert body["reply_markup"]["inline_keyboard"] == [
+               [
+                 %{"text" => "✅ Approve", "callback_data" => "skillcur:a:TOK12345"},
+                 %{"text" => "❌ Deny", "callback_data" => "skillcur:d:TOK12345"}
+               ]
+             ]
+    end
+  end
+
+  describe "skillcur callback taps" do
+    defp proposal_callback(data) do
+      %{
+        "callback_query" => %{
+          "id" => "cbq-9",
+          "data" => data,
+          "from" => %{"id" => 111, "username" => "alice"},
+          "message" => %{
+            "message_id" => 56,
+            "chat" => %{"id" => 123, "type" => "private"}
+          }
+        }
+      }
+    end
+
+    test "an approve tap synthesizes the typed /skills approve command" do
+      assert {:ok, [msg]} = Telegram.parse_update(proposal_callback("skillcur:a:TOK12345"))
+      assert msg.content == "/skills approve TOK12345"
+      assert msg.channel == "telegram"
+      assert msg.chat_id == "123"
+      assert msg.metadata.user_id == "111"
+    end
+
+    test "a deny tap synthesizes the typed /skills deny command" do
+      assert {:ok, [msg]} = Telegram.parse_update(proposal_callback("skillcur:d:TOK12345"))
+      assert msg.content == "/skills deny TOK12345"
+    end
+
+    test "an unknown namespace stays ignored" do
+      assert {:ok, []} = Telegram.parse_update(proposal_callback("mystery:TOK12345"))
     end
   end
 

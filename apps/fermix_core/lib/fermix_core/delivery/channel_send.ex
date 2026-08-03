@@ -40,7 +40,11 @@ defmodule FermixCore.Delivery.ChannelSend do
     * `:channels` — the channels map (defaults to the configured jobs map);
     * `:delivery_max_attempts` — retry ceiling (default 3; pass `1` for a single
       attempt owned by an outer retry loop);
-    * `:delivery_backoff_ms` — linear backoff base between transient retries.
+    * `:delivery_backoff_ms` — linear backoff base between transient retries;
+    * `:dispatch` — `{:send_proposal, token}` routes through the adapter's
+      optional `send_proposal/3` (skill-curation two-button proposals,
+      MILESTONE_26_SKILL_CURATION §6.6) instead of `send_message/3`; adapter
+      resolution then requires that callback. Default `:send_message`.
   """
   @spec send(String.t(), String.t(), String.t(), keyword(), keyword()) :: send_result()
   def send(platform, destination, text, send_opts \\ [], opts \\ [])
@@ -77,9 +81,11 @@ defmodule FermixCore.Delivery.ChannelSend do
   """
   @spec resolve_adapter(String.t(), keyword()) :: {:ok, module()} | {:error, term()}
   def resolve_adapter(platform, opts \\ []) when is_binary(platform) and is_list(opts) do
+    dispatch = Keyword.get(opts, :dispatch, :send_message)
+
     case Keyword.get(opts, :adapter) do
-      adapter when is_atom(adapter) and not is_nil(adapter) -> ensure_adapter(adapter)
-      _nil -> configured_adapter(platform, opts)
+      adapter when is_atom(adapter) and not is_nil(adapter) -> ensure_adapter(adapter, dispatch)
+      _nil -> configured_adapter(platform, opts, dispatch)
     end
   end
 
@@ -88,6 +94,7 @@ defmodule FermixCore.Delivery.ChannelSend do
   defp run_send(adapter, destination, text, send_opts, opts) do
     max_attempts = Keyword.get(opts, :delivery_max_attempts, @default_delivery_attempts)
     backoff_ms = Keyword.get(opts, :delivery_backoff_ms, @default_delivery_backoff_ms)
+    dispatch = Keyword.get(opts, :dispatch, :send_message)
 
     # Retry only the transient connection-unavailable error (the request never
     # obtained a connection, so a retry cannot duplicate a sent message). Every
@@ -95,7 +102,7 @@ defmodule FermixCore.Delivery.ChannelSend do
     # budget in `HttpClient`, so a small ceiling is a wide-enough floor.
     Enum.reduce_while(1..max_attempts, {:error, :not_attempted}, fn attempt, _acc ->
       adapter
-      |> send_with_rescue(destination, text, send_opts)
+      |> send_with_rescue(destination, text, send_opts, dispatch)
       |> decide_delivery_attempt(attempt, max_attempts, backoff_ms)
     end)
   end
@@ -108,8 +115,20 @@ defmodule FermixCore.Delivery.ChannelSend do
   # — a programming error (ArgumentError, …) still crashes loud. Log before
   # returning so a genuine non-transient RuntimeError leaves a trace instead of
   # being silently surfaced as a plain delivery failure.
-  defp send_with_rescue(adapter, destination, text, opts) do
+  defp send_with_rescue(adapter, destination, text, opts, :send_message) do
     adapter.send_message(destination, text, opts)
+  rescue
+    exception in [RuntimeError] ->
+      Logger.warning("Delivery send raised: #{Exception.message(exception)}")
+      {:error, exception}
+  end
+
+  # Proposal dispatch: the adapter builds its own two-button affordance from
+  # the bare token (the send_approval convention); resolution already proved
+  # `send_proposal/3` is exported.
+  defp send_with_rescue(adapter, destination, text, _opts, {:send_proposal, token})
+       when is_binary(token) do
+    adapter.send_proposal(%{chat_id: destination}, text, token)
   rescue
     exception in [RuntimeError] ->
       Logger.warning("Delivery send raised: #{Exception.message(exception)}")
@@ -177,14 +196,14 @@ defmodule FermixCore.Delivery.ChannelSend do
 
   # --- Adapter resolution -------------------------------------------------
 
-  defp configured_adapter(platform, opts) do
+  defp configured_adapter(platform, opts, dispatch) do
     channels = Keyword.get(opts, :channels, default_channels())
 
     channels
     |> fetch_channel(platform)
     |> case do
       nil -> {:error, {:unsupported_delivery_platform, platform}}
-      adapter -> ensure_adapter(adapter)
+      adapter -> ensure_adapter(adapter, dispatch)
     end
   end
 
@@ -206,15 +225,19 @@ defmodule FermixCore.Delivery.ChannelSend do
   defp platform_atom("cli"), do: :cli
   defp platform_atom(_platform), do: nil
 
-  defp ensure_adapter(adapter) when is_atom(adapter) do
-    if Code.ensure_loaded?(adapter) and function_exported?(adapter, :send_message, 3) do
+  defp ensure_adapter(adapter, dispatch) when is_atom(adapter) do
+    if Code.ensure_loaded?(adapter) and
+         function_exported?(adapter, dispatch_callback(dispatch), 3) do
       {:ok, adapter}
     else
       {:error, {:invalid_delivery_adapter, adapter}}
     end
   end
 
-  defp ensure_adapter(adapter), do: {:error, {:invalid_delivery_adapter, adapter}}
+  defp ensure_adapter(adapter, _dispatch), do: {:error, {:invalid_delivery_adapter, adapter}}
+
+  defp dispatch_callback(:send_message), do: :send_message
+  defp dispatch_callback({:send_proposal, _token}), do: :send_proposal
 
   defp default_channels do
     :fermix_core

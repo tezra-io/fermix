@@ -258,10 +258,13 @@ defmodule FermixChannels.Channels.DiscordTest do
   end
 
   describe "send_message/3" do
-    test "rejects missing send configuration" do
+    # M30 §11.3: see the Slack counterpart — a missing bot token is
+    # `{:permanent, :adapter_unavailable}`, not a bare `:not_configured`.
+    test "rejects missing send configuration as an unavailable adapter" do
       Application.put_env(:fermix_channels, :discord, enabled: true)
 
-      assert {:error, :not_configured} = Discord.send_message("dm-channel-1", "hello")
+      assert {:error, {:permanent, :adapter_unavailable}} =
+               Discord.send_message("dm-channel-1", "hello")
     end
 
     test "rejects text over the Discord content cap before send" do
@@ -277,6 +280,24 @@ defmodule FermixChannels.Channels.DiscordTest do
       end)
 
       assert {:error, {:rate_limited, 1_500}} =
+               Discord.send_message("dm-channel-1", "hello")
+    end
+
+    # M30 §11.3: a non-2xx becomes the structured status form.
+    test "returns a structured {:http_status, status} on a non-2xx status" do
+      Req.Test.stub(:discord, fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(403, Jason.encode!(%{"message" => "Missing Permissions"}))
+      end)
+
+      assert {:error, {:http_status, 403}} = Discord.send_message("dm-channel-1", "hello")
+    end
+
+    test "leaves a raw transport error untouched for the central normalizer" do
+      Req.Test.stub(:discord, fn conn -> Req.Test.transport_error(conn, :econnreset) end)
+
+      assert {:error, %Req.TransportError{reason: :econnreset}} =
                Discord.send_message("dm-channel-1", "hello")
     end
   end
@@ -588,6 +609,64 @@ defmodule FermixChannels.Channels.DiscordTest do
 
       assert_receive {:discord_request, _path, body}
       refute Map.has_key?(body, "components")
+    end
+  end
+
+  describe "send_proposal/3" do
+    test "attaches a two-button action row with skillcur-namespaced payloads" do
+      test_pid = self()
+
+      Req.Test.stub(:discord, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:discord_request, conn.request_path, Jason.decode!(body)})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(200, Jason.encode!(%{"id" => "reply-id"}))
+      end)
+
+      assert :ok = Discord.send_proposal(%{chat_id: "dm-channel-1"}, "Skill proposal", "TOK12345")
+
+      assert_receive {:discord_request, "/api/v10/channels/dm-channel-1/messages", body}
+
+      assert body["components"] == [
+               %{
+                 "type" => 1,
+                 "components" => [
+                   %{
+                     "type" => 2,
+                     "style" => 3,
+                     "label" => "Approve",
+                     "custom_id" => "skillcur:a:TOK12345"
+                   },
+                   %{
+                     "type" => 2,
+                     "style" => 4,
+                     "label" => "Deny",
+                     "custom_id" => "skillcur:d:TOK12345"
+                   }
+                 ]
+               }
+             ]
+    end
+  end
+
+  describe "skillcur interaction taps" do
+    test "an approve tap synthesizes the typed /skills approve command" do
+      assert {:ok, interaction} =
+               Discord.parse_interaction(interaction_event("skillcur:a:TOK12345", guild: true))
+
+      assert interaction.message.content == "/skills approve TOK12345"
+      assert interaction.message.channel == "discord"
+      assert interaction.message.metadata.user_id == "111"
+    end
+
+    test "a deny tap synthesizes the typed /skills deny command" do
+      assert {:ok, interaction} =
+               Discord.parse_interaction(interaction_event("skillcur:d:TOK12345", guild: false))
+
+      assert interaction.message.content == "/skills deny TOK12345"
+      assert interaction.message.chat_id == "dm-channel-1"
     end
   end
 

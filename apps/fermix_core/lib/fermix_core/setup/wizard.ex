@@ -20,6 +20,7 @@ defmodule FermixCore.Setup.Wizard do
   alias FermixCore.Setup.SecretStore
   alias FermixCore.Setup.SecretWriter
   alias FermixCore.Setup.WizardState
+  alias FermixCore.SkillCuration.Delivery, as: SkillCurationDelivery
   alias FermixCore.Transcription.Registry, as: TranscriptionRegistry
 
   require Logger
@@ -82,6 +83,7 @@ defmodule FermixCore.Setup.Wizard do
           | {:user_name, String.t()}
           | {:timezone, String.t()}
           | {:communication_style, String.t()}
+          | {:skill_curation_enabled, boolean() | String.t()}
 
   @setup_secret_paths SecretPaths.by_answer_key()
 
@@ -575,8 +577,31 @@ defmodule FermixCore.Setup.Wizard do
         key: :communication_style,
         label: "Preferred communication style (e.g. concise and direct)",
         required?: missing_component?(state, "personalization")
+      },
+      %{
+        key: :skill_curation_enabled,
+        label: skill_curation_label(),
+        # Optional: on by default; blank keeps the default (no TOML entry).
+        required?: false
       }
     ]
+  end
+
+  # MILESTONE_26_SKILL_CURATION §6.1: the personalization yes/no names where
+  # proposals will actually arrive, resolved from the same ladder delivery
+  # uses — pure config reads, safe at wizard time.
+  defp skill_curation_label do
+    destination =
+      case SkillCurationDelivery.resolve_target() do
+        {:ok, target} ->
+          "Proposals will arrive in #{target.platform}."
+
+        :no_delivery_target ->
+          "Proposals will wait in /skills proposals until a channel owner is configured."
+      end
+
+    "Every couple of weeks, Fermix can look for tasks you repeat and offer to learn " <>
+      "them as skills — with your approval each time. #{destination} Enable? (yes/no; blank = yes)"
   end
 
   @spec save_answers(WizardState.t(), [answer()]) :: {:ok, report()} | {:error, term()}
@@ -618,6 +643,7 @@ defmodule FermixCore.Setup.Wizard do
       |> put_acp_config(answers)
       |> put_channel_owner_user_ids(answers)
       |> put_personalization(answers)
+      |> put_skill_curation_enabled(Keyword.get(answers, :skill_curation_enabled))
       |> put_bot_name(answers)
       |> ensure_sandbox_env_sources(answers)
 
@@ -1879,6 +1905,33 @@ defmodule FermixCore.Setup.Wizard do
   # The ACP surface has no credential and no owner id, so its whole setup is the
   # enable flag — unlike the other channels, an unanswered toggle must not flip
   # it on, and answering `false` must turn it off (M29 §9 item 3).
+  # `[fermix_core.skill_curation] enabled` (MILESTONE_26_SKILL_CURATION §6.1):
+  # declining writes `enabled = false`; accepting writes NOTHING — the default
+  # is already true and tuning-free config stays out of the TOML. An absent
+  # answer preserves the existing state.
+  defp put_skill_curation_enabled(snapshot, answer) do
+    case normalize_realtime_bool(answer, :skill_curation_enabled) do
+      nil -> snapshot
+      true -> delete_skill_curation_key(snapshot, :enabled)
+      false -> put_skill_curation_key(snapshot, :enabled, false)
+    end
+  end
+
+  defp put_skill_curation_key(snapshot, key, value) do
+    fermix_core = Map.get(snapshot, :fermix_core, [])
+
+    skill_curation =
+      fermix_core |> Keyword.get(:skill_curation, []) |> Keyword.put(key, value)
+
+    Map.put(snapshot, :fermix_core, Keyword.put(fermix_core, :skill_curation, skill_curation))
+  end
+
+  defp delete_skill_curation_key(snapshot, key) do
+    fermix_core = Map.get(snapshot, :fermix_core, [])
+    skill_curation = fermix_core |> Keyword.get(:skill_curation, []) |> Keyword.delete(key)
+    Map.put(snapshot, :fermix_core, Keyword.put(fermix_core, :skill_curation, skill_curation))
+  end
+
   defp put_acp_config(snapshot, answers) do
     case normalize_realtime_bool(Keyword.get(answers, :acp_enabled), :acp_enabled) do
       nil ->

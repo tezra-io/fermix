@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["pytest>=8", "pyyaml>=6,<7"]
+# dependencies = ["pytest>=8", "pyyaml>=6,<7", "certifi"]
 # ///
 """Tests for the checker scoring tier — the SafeRm teardown guard, the
 `run_checker` mechanism (exit/json modes + recorded errors), and the suite

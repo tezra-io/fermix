@@ -322,7 +322,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.ProxyTest do
         {:ok, %{"isError" => true, "content" => [%{"type" => "text", "text" => ~s({"ok":true})}]}}
       )
 
-      assert {:error, {:remote_tool_error, "unspecified"}} =
+      assert {:error, {:remote_tool_error, "unspecified", _}} =
                Proxy.call(proxy, context(), "eden_get_note", %{})
     end
 
@@ -331,7 +331,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.ProxyTest do
       body = ~s({"ok":false,"status":"missing-workspace"})
       FakeDispatch.set_response({:ok, %{"content" => [%{"type" => "text", "text" => body}]}})
 
-      assert {:error, {:remote_tool_error, "missing-workspace"}} =
+      assert {:error, {:remote_tool_error, "missing-workspace", _}} =
                Proxy.call(proxy, context(), "eden_get_note", %{})
     end
 

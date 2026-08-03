@@ -2391,6 +2391,51 @@ defmodule FermixWebWeb.SetupLiveTest do
       refute html =~ ~s(name="personalization_form[harness_default_vendor]")
       refute html =~ ~s(name="coding_form[harness_approved]")
     end
+
+    test "the skill-curation toggle renders checked by default and names the destination", %{
+      conn: conn
+    } do
+      {:ok, view, _html} = live(conn, "/setup")
+      html = view |> element("button[phx-value-tab=\"personalization\"]") |> render_click()
+
+      assert html =~ "Suggest new skills from tasks you repeat"
+      assert html =~ ~s(name="personalization_form[skill_curation_enabled]")
+      assert html =~ ~s(data-skill-curation="true")
+      # No channel owner configured in the test home -> the honest fallback.
+      assert html =~ "/skills proposals"
+    end
+
+    test "declining skill curation persists enabled=false; re-accepting deletes the key", %{
+      conn: conn,
+      tmp_home: tmp_home
+    } do
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element("button[phx-value-tab=\"personalization\"]") |> render_click()
+
+      view
+      |> form("form[phx-submit=\"save_personalization\"]",
+        personalization_form: %{skill_curation_enabled: "false"}
+      )
+      |> render_submit()
+
+      html = render(view)
+      assert html =~ "Personalization saved."
+      # The Scheduler is a child-absent gate, so the change offers a restart.
+      assert html =~ "Apply &amp; restart"
+
+      contents = File.read!(Path.join(tmp_home, "config.toml"))
+      assert contents =~ "[fermix_core.skill_curation]"
+      assert contents =~ "enabled = false"
+
+      # Re-accepting writes NOTHING — the default is already true.
+      view
+      |> form("form[phx-submit=\"save_personalization\"]",
+        personalization_form: %{skill_curation_enabled: "true"}
+      )
+      |> render_submit()
+
+      refute File.read!(Path.join(tmp_home, "config.toml")) =~ "[fermix_core.skill_curation]"
+    end
   end
 
   describe "Coding Agents form" do

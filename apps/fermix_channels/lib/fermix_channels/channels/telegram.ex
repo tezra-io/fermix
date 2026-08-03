@@ -15,6 +15,7 @@ defmodule FermixChannels.Channels.Telegram do
   alias FermixChannels.Gateway.Idempotency
   alias FermixChannels.Gateway.MediaDownload
   alias FermixChannels.Gateway.Message
+  alias FermixChannels.Gateway.ProposalButton
   alias FermixChannels.Gateway.RetryHint
   alias FermixChannels.Telemetry, as: ChannelTelemetry
   alias FermixCore.Net.HttpClient
@@ -107,28 +108,49 @@ defmodule FermixChannels.Channels.Telegram do
   defp parse_callback_query(%{"data" => data} = callback) when is_binary(data) do
     case ApprovalButton.parse_payload(data) do
       {:ok, token} -> {:ok, [synthesize_confirm(callback, token)]}
-      :ignore -> {:ok, []}
+      :ignore -> parse_proposal_callback(callback, data)
     end
   end
 
   defp parse_callback_query(_callback), do: {:ok, []}
 
+  # A skill-curation proposal tap (`skillcur:a:`/`skillcur:d:`) synthesizes the
+  # typed `/skills approve|deny <token>` message the same way — the typed
+  # command stays the single code path (MILESTONE_26_SKILL_CURATION §6.6).
+  defp parse_proposal_callback(callback, data) do
+    case ProposalButton.parse_payload(data) do
+      {:ok, action, token} -> {:ok, [synthesize_skills_action(callback, action, token)]}
+      :ignore -> {:ok, []}
+    end
+  end
+
   defp synthesize_confirm(callback, token) do
+    ApprovalButton.confirm_message(Map.put(callback_origin(callback), :token, token))
+  end
+
+  defp synthesize_skills_action(callback, action, token) do
+    ProposalButton.action_message(
+      callback
+      |> callback_origin()
+      |> Map.merge(%{action: action, token: token})
+    )
+  end
+
+  defp callback_origin(callback) do
     source = Map.get(callback, "message", %{})
 
     sender =
       get_in(callback, ["from", "username"]) || get_in(callback, ["from", "first_name"]) ||
         "unknown"
 
-    ApprovalButton.confirm_message(%{
+    %{
       id: "callback-#{callback["id"]}",
       sender: sender,
       channel: "telegram",
       chat_id: source |> get_in(["chat", "id"]) |> to_string(),
       thread_ts: source["message_thread_id"],
-      user_id: get_in(callback, ["from", "id"]),
-      token: token
-    })
+      user_id: get_in(callback, ["from", "id"])
+    }
   end
 
   @impl true
@@ -211,6 +233,27 @@ defmodule FermixChannels.Channels.Telegram do
     opts = [reply_markup: markup]
     opts = if thread_ts, do: Keyword.put(opts, :message_thread_id, thread_ts), else: opts
     send_message(reply_target, text, opts)
+  end
+
+  # -- Skill-curation proposal buttons (MILESTONE_26_SKILL_CURATION §6.6) --
+
+  @impl true
+  @spec send_proposal(map(), String.t(), String.t()) :: :ok | {:error, term()}
+  def send_proposal(%{chat_id: chat_id}, text, token)
+      when is_binary(chat_id) and is_binary(text) and is_binary(token) do
+    # Target-addressed (proactive — no inbound message to reply to). One inline
+    # row of two buttons; a tap synthesizes the typed `/skills approve|deny`
+    # command, and the poller's callback ack strips both buttons.
+    markup = %{
+      inline_keyboard: [
+        [
+          %{text: "✅ Approve", callback_data: ProposalButton.approve_payload(token)},
+          %{text: "❌ Deny", callback_data: ProposalButton.deny_payload(token)}
+        ]
+      ]
+    }
+
+    send_message(chat_id, text, reply_markup: markup)
   end
 
   @doc """
@@ -476,6 +519,12 @@ defmodule FermixChannels.Channels.Telegram do
           Logger.error("Telegram request failed: #{inspect(reason)}")
           {:error, reason}
       end
+    else
+      # M30 §11.3: an unconfigured bot token means there is no Telegram client
+      # to send through, which is the `:adapter_unavailable` kind of the closed
+      # delivery vocabulary — not a bare atom the delivery normalizer would have
+      # to guess at, and then log as a contract violation.
+      {:error, :not_configured} -> {:error, {:permanent, :adapter_unavailable}}
     end
   end
 
@@ -705,10 +754,14 @@ defmodule FermixChannels.Channels.Telegram do
     {:error, {:byte_cap_exceeded, size, cap}}
   end
 
+  # M30 §11.3: the adapter owns platform knowledge and returns the structured
+  # status/rate-limit forms of the closed delivery vocabulary. `RetryHint` stays
+  # authoritative whenever Telegram supplies a retry-after hint; the response
+  # body reaches the local log above, never the returned reason.
   defp telegram_api_error(%{status: status} = response) do
     case RetryHint.retry_after_ms(response) do
       {:ok, retry_after_ms} -> {:error, {:rate_limited, retry_after_ms}}
-      :error -> {:error, "Telegram API error: #{status}"}
+      :error -> {:error, {:http_status, status}}
     end
   end
 

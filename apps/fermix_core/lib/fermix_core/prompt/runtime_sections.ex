@@ -94,7 +94,11 @@ defmodule FermixCore.Prompt.RuntimeSections do
       - `browser` for JavaScript/dynamic/interactive pages or live data (flight prices, seat maps, dashboards, login, forms) — in its OWN browser instance, not the page/app the user has open on screen (for that, `computer_use`).
       - Never shell-scrape a JS-rendered site (`curl`/`urllib`/`requests` return empty or partial markup — a dead end, not a retry). An empty `web_search`/`web_fetch` result on dynamic content is the signal to switch to `browser`, not to rerun the same tool.
     - Drive ONE surface per task: don't restart the same work in the other tool's separate session — wait for a change with the session you're already in (the browser's `act` wait for a page you drive, `computer_use`'s `wait_for_change` for the host screen). On a single shared page, structure goes through `browser` and pixels through `computer_use`: that split is one context, not a switch.
-    - For reminders, recurring work, cron-style requests, periodic checks, digests, watchers, and "run this later" tasks, use `schedule_job`.
+    - Use `event_store` for deterministic personal reminders, appointments, deadlines, birthdays, anniversaries, and other stored dates whose future action is only to notify the owner.
+    - Use `schedule_job` when the future run must reason, call a provider, use tools, inspect changing state, produce a digest, or perform work — recurring work, cron-style requests, periodic checks, digests, watchers, and "run this later" tasks.
+    - Defer a delivered reminder with `reminder_snooze` ("snooze that for two hours"); it never edits the event's stored plan — `event_update` does that.
+    - Store high-confidence owner-stated personal events even without the words "remember" or "remind me"; acknowledge the exact event and reminder plan.
+    - Ask before storing ambiguous, tentative, hypothetical, quoted, or third-party informational dates.
     - For channel-originated jobs that should report back to the same chat, set `delivery_mode` to `origin`; use `none` only for silent/local jobs.
     - Use `expires_at` for temporary scheduled jobs like "for 2 hours" or "until tomorrow"; keep lifecycle timing out of the job task text.
     - Use the Skill Catalog only to decide whether a skill is relevant.

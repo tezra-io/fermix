@@ -1,0 +1,186 @@
+suite: temporal_events
+risk: isolated_mutation
+title: "Temporal events — capture, boundary, clarification, management"
+description: >
+  Exercises the MILESTONE_30 temporal-event rail end to end through real turns:
+  capturing owner-stated personal dates as events, the event_store/schedule_job
+  routing boundary, the ask-don't-guess clarification contract, and the full
+  conversational lifecycle (list, update, remove). What this suite deliberately
+  does NOT cover, because an ask->grade loop cannot arrange it: reminder
+  DELIVERY (the scheduler fires detached from any turn), and the implicit
+  "snooze that"/"cancel that" resolutions (both resolve against a reminder
+  actually DELIVERED into the caller's conversation within 24h — no such row
+  can exist in a fresh eval home). Those paths are pinned by the hermetic
+  ExUnit tier (temporal/ + tools/ suites). Events created here carry far-future
+  dates and every management case ends by removing what it created, so nothing
+  comes due inside an eval window.
+defaults:
+  timeout_ms: 180000
+  judge: true
+  expect:
+    status: ok
+    no_tool_errors: true
+
+scenarios:
+  - id: capture_owner_dates
+    title: "Stores high-confidence owner-stated dates as events"
+    severity: critical
+    tags: [temporal, core]
+    cases:
+      - id: yearly_birthday
+        query: "My sister Amara's birthday is on September 14 — make sure I don't forget it."
+        expect:
+          tools_any: [event_store]
+          reply_matches: "(?i)september|sept\\b"
+          max_cost_usd: 1.0
+        rubric: >
+          Stores a yearly September 14 birthday via the event rail and the reply
+          acknowledges the stored plan: when it will remind (week before and/or
+          day of) and through which channel. It must not claim a scheduled
+          agent job was created.
+      - id: timed_appointment
+        query: "I've got a dental cleaning with Dr. Okafor on December 10 at 3pm."
+        expect:
+          tools_any: [event_store]
+          reply_matches: "(?i)december|dec\\b"
+          max_cost_usd: 1.0
+        rubric: >
+          Stores a timed appointment for December 10 at 3:00 PM and confirms the
+          absolute date and time plus the reminder plan.
+      - id: explicit_reminder
+        query: "Remind me on November 28 to renew my passport."
+        expect:
+          tools_any: [event_store]
+          reply_matches: "(?i)november|nov\\b"
+          max_cost_usd: 1.0
+        rubric: >
+          Stores exactly the requested reminder (November 28) and confirms the
+          absolute date; it does not invent additional reminders beyond the
+          request or route this to a scheduled job.
+
+  - id: job_vs_event_boundary
+    title: "Routes reminders to the event rail and future work to scheduled jobs"
+    severity: critical
+    tags: [temporal, routing]
+    cases:
+      - id: work_is_a_job
+        query: "Check flight prices to Lisbon tomorrow morning and tell me the cheapest option."
+        expect:
+          tools_any: [schedule_job]
+          tools_none: [event_store]
+          max_cost_usd: 1.0
+        rubric: >
+          Creates a scheduled job that will actually check prices and report
+          back — future WORK, not a passive reminder. The reply must describe a
+          job/check, not merely a notification.
+      - id: reminder_is_an_event
+        query: "Remind me about my visa appointment on November 3 at 9am."
+        expect:
+          tools_any: [event_store]
+          tools_none: [schedule_job]
+          max_cost_usd: 1.0
+        rubric: >
+          Stores this as a reminder-only event (no agent job): the reply
+          confirms the November 3, 9:00 AM appointment and its reminder plan.
+
+  - id: ambiguity_asks
+    title: "Does not store tentative, hypothetical, or third-party dates"
+    severity: normal
+    tags: [temporal, judgment]
+    cases:
+      - id: tentative_self
+        query: "I might see the doctor sometime next month, we'll see."
+        expect:
+          tools_none: [event_store]
+          max_cost_usd: 1.0
+        rubric: >
+          Does not create an event: acknowledges the tentativeness, optionally
+          offering to store it once it is confirmed. No reminder is promised.
+      - id: third_party_hearsay
+        query: "My friend mentioned her wedding is probably in June."
+        expect:
+          tools_none: [event_store]
+          max_cost_usd: 1.0
+        rubric: >
+          Treats this as third-party, tentative information and does not store
+          an event; it may ask whether the user wants it tracked once a real
+          date exists.
+
+  - id: clarify_dont_guess
+    title: "Asks one focused clarification instead of guessing"
+    severity: normal
+    tags: [temporal, judgment]
+    cases:
+      - id: leap_day_policy
+        query: "Add my grandfather's birthday: February 29."
+        expect:
+          no_tool_errors: false
+          max_cost_usd: 1.0
+        rubric: >
+          Asks the leap-day question — observe it on February 28 or March 1 in
+          non-leap years — rather than silently choosing, and stores only once
+          the policy is knowable. A reply that stores without addressing the
+          leap-day question fails.
+      - id: appointment_missing_time
+        query: "Set a reminder for my cardiology appointment on December 12."
+        expect:
+          no_tool_errors: false
+          max_cost_usd: 1.0
+        rubric: >
+          Recognizes an appointment usually needs a time to remind usefully:
+          either asks for the time, or stores a date-only reminder while
+          explicitly saying it is date-only and inviting a time. Silently
+          inventing a time fails.
+
+  - id: manage_roundtrip
+    title: "Lists, edits, and removes events through conversation"
+    severity: critical
+    tags: [temporal, lifecycle]
+    cases:
+      - id: car_service_lifecycle
+        turns:
+          - query: "My car service with AutoHaus is booked for October 22 at 10am."
+            expect:
+              tools_any: [event_store]
+          - query: "What do I have coming up?"
+            expect:
+              tools_any: [event_list]
+              reply_matches: "(?i)autohaus|car service"
+          - query: "Move the car service to 2pm the same day."
+            expect:
+              tools_any: [event_update]
+              reply_matches: "(?i)2(:00)?\\s?pm|14:00"
+          - query: "Actually, cancel the car service reminder entirely."
+            expect:
+              tools_any: [event_remove]
+              reply_matches: "(?i)cancel|remov"
+        expect:
+          max_cost_usd: 2.5
+        rubric: >
+          The full lifecycle works conversationally: the event is stored,
+          appears in the upcoming list, the edit is acknowledged with the new
+          absolute time (2:00 PM), and the removal is confirmed by name. Each
+          acknowledgment reflects stored state, not vague agreement.
+      - id: pickup_lifecycle
+        turns:
+          - query: "Theater ticket pickup is on November 5 at 6pm — set a reminder."
+            expect:
+              tools_any: [event_store]
+          - query: "List my reminders."
+            expect:
+              tools_any: [event_list]
+              reply_matches: "(?i)theater|ticket"
+          - query: "Push the ticket pickup to November 6, same time."
+            expect:
+              tools_any: [event_update]
+              reply_matches: "(?i)november 6|nov 6"
+          - query: "Remove the ticket pickup reminder, I no longer need it."
+            expect:
+              tools_any: [event_remove]
+              reply_matches: "(?i)cancel|remov"
+        expect:
+          max_cost_usd: 2.5
+        rubric: >
+          Same lifecycle under different phrasing: store, list (mentions the
+          pickup), move to November 6 with the change acknowledged, then a
+          confirmed removal.

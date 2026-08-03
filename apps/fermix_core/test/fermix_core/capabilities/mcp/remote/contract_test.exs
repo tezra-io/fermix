@@ -254,7 +254,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.ContractTest do
     test "maps protocol isError to an error even when the body reads fine" do
       result = %{"isError" => true, "content" => [%{"type" => "text", "text" => ~s({"ok":true})}]}
 
-      assert {:error, {:remote_tool_error, "unspecified"}} =
+      assert {:error, {:remote_tool_error, "unspecified", _}} =
                Contract.classify_result(compiled(), result)
     end
 
@@ -262,7 +262,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.ContractTest do
       body = ~s({"ok":false,"status":"auth-expired","message":"nope"})
       result = %{"content" => [%{"type" => "text", "text" => body}]}
 
-      assert {:error, {:remote_tool_error, "auth-expired"}} =
+      assert {:error, {:remote_tool_error, "auth-expired", "nope"}} =
                Contract.classify_result(compiled(), result)
     end
 
@@ -270,8 +270,31 @@ defmodule FermixCore.Capabilities.MCP.Remote.ContractTest do
       body = ~s({"ok":false,"status":"#{String.duplicate("x", 100)}"})
       result = %{"content" => [%{"type" => "text", "text" => body}]}
 
-      assert {:error, {:remote_tool_error, "unspecified"}} =
+      assert {:error, {:remote_tool_error, "unspecified", _}} =
                Contract.classify_result(compiled(), result)
+    end
+
+    # §7.9 wants a redacted MESSAGE and status. A status alone cannot tell an
+    # agent "out of credits" from "bad argument", and `unspecified` says less
+    # than nothing — that is how a blind retry into the same wall happens.
+    test "the vendor's own sentence reaches the tool result" do
+      body = ~s({"ok":false,"status":"quota-exceeded","message":"You have used all 100 credits."})
+      result = %{"content" => [%{"type" => "text", "text" => body}]}
+
+      assert {:error, {:remote_tool_error, "quota-exceeded", "You have used all 100 credits."}} =
+               Contract.classify_result(compiled(), result)
+    end
+
+    test "a vendor message is bounded and stripped of control characters" do
+      long = String.duplicate("a", 400)
+      body = ~s({"ok":false,"status":"error","message":"bad\nthing #{long}"})
+      result = %{"content" => [%{"type" => "text", "text" => body}]}
+
+      assert {:error, {:remote_tool_error, "error", message}} =
+               Contract.classify_result(compiled(), result)
+
+      assert byte_size(message) <= 200
+      refute message =~ "\n"
     end
 
     test "an ok body is a success" do

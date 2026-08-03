@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["pytest>=8"]
+# dependencies = ["pytest>=8", "certifi"]
 # ///
 """Integration tests for evallib.experiments against the LIVE local Opik.
 

@@ -50,6 +50,17 @@ config :fermix_core, :jobs,
 # and injected repo/runs_root seams.
 config :fermix_core, :harness_workers_enabled, false
 
+# Temporal reminder scheduler: the app-tree instance stays dark in tests (the
+# jobs `scheduler_enabled` precedent), so `mix test` never runs the boot sweep,
+# a due claim, or reconciliation against the real Memory.Repo. Scheduler tests
+# start their own instances with injected repo/supervisor/clock seams.
+config :fermix_core, :temporal, scheduler_enabled: false
+
+# Skill-curation scheduler: belt and braces alongside the @compiled_env child
+# gate in Application — disabled in config, never by omission. Curation tests
+# start their own Scheduler instances with injected seams.
+config :fermix_core, :skill_curation, enabled: false
+
 # Completion continuation is OFF in tests (config.exs wires the channels-side
 # dispatcher for dev/prod): `mix test` must never re-ingest a synthesized message
 # into the live gateway/agent queue. A terminal run then takes the plain durable

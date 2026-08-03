@@ -6,6 +6,7 @@ defmodule FermixChannels.Channels.SlackTest do
   alias FermixChannels.Channels.Slack
   alias FermixChannels.Dispatcher
   alias FermixChannels.Gateway.Message
+  alias FermixCore.Agents.ConversationKey
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Memory.ConversationStore
 
@@ -170,6 +171,16 @@ defmodule FermixChannels.Channels.SlackTest do
       assert message.thread_ts == "1714000000.000100"
       assert message.metadata.channel_type == "channel"
       assert message.metadata.chat_type == "channel"
+    end
+
+    # A channel-root mention carries no `thread_ts`, so the adapter falls back to
+    # the mention's own `ts` — fresh for every message. Anything downstream that
+    # compares a caller's conversation key against a stored `root` target must
+    # know that a root Slack mention NEVER presents itself as `:root`.
+    test "a channel-root mention keys the conversation by its own ts, never :root" do
+      assert {:ok, [message]} = Slack.parse_webhook(app_mention_payload("<@U999> hello"))
+
+      assert ConversationKey.from(message) == {"slack", "C12345", "1714000000.000100"}
     end
 
     test "drops bot-authored events" do
@@ -425,10 +436,13 @@ defmodule FermixChannels.Channels.SlackTest do
       assert :ok = Slack.verify_webhook(conn)
     end
 
-    test "rejects missing send configuration" do
+    # M30 §11.3: an unconfigured token is an unavailable adapter, a reason the
+    # closed delivery vocabulary already owns — not a bare atom the reminder
+    # normalizer has to log as a contract violation.
+    test "rejects missing send configuration as an unavailable adapter" do
       Application.put_env(:fermix_channels, :slack, enabled: true)
 
-      assert {:error, :not_configured} = Slack.send_message("D12345", "hello")
+      assert {:error, {:permanent, :adapter_unavailable}} = Slack.send_message("D12345", "hello")
     end
 
     test "rejects text over Slack's hard truncation bound before send" do
@@ -445,6 +459,65 @@ defmodule FermixChannels.Channels.SlackTest do
       end)
 
       assert {:error, {:rate_limited, 2_000}} = Slack.send_message("D12345", "hello")
+    end
+
+    # M30 §11.3: adapters own platform knowledge. A non-2xx becomes the
+    # structured status form; Slack's 200-with-`ok:false` becomes a bounded
+    # permanent kind, and the raw code is logged locally, never in the reason.
+    test "returns a structured {:http_status, status} on a non-2xx status" do
+      Req.Test.stub(:slack, fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(500, Jason.encode!(%{"ok" => false, "error" => "internal_error"}))
+      end)
+
+      assert {:error, {:http_status, 500}} = Slack.send_message("D12345", "hello")
+    end
+
+    test "maps known ok:false codes to bounded permanent kinds" do
+      mappings = [
+        {"channel_not_found", :invalid_destination},
+        {"is_archived", :invalid_destination},
+        {"invalid_auth", :authentication},
+        {"token_revoked", :authentication},
+        {"account_inactive", :authentication},
+        {"not_authed", :authentication},
+        {"missing_scope", :authorization},
+        {"not_in_channel", :authorization},
+        {"restricted_action", :authorization}
+      ]
+
+      for {code, kind} <- mappings do
+        Req.Test.stub(:slack, fn conn ->
+          Req.Test.json(conn, %{"ok" => false, "error" => code})
+        end)
+
+        assert {:error, {:permanent, ^kind}} = Slack.send_message("D12345", "hello"),
+               "expected Slack code #{code} to map to #{inspect(kind)}"
+      end
+    end
+
+    test "maps an unknown ok:false code to :remote_rejected without embedding it" do
+      Req.Test.stub(:slack, fn conn ->
+        Req.Test.json(conn, %{"ok" => false, "error" => "some_new_slack_code"})
+      end)
+
+      assert {:error, reason} = Slack.send_message("D12345", "hello")
+      assert reason == {:permanent, :remote_rejected}
+      refute inspect(reason) =~ "some_new_slack_code"
+    end
+
+    test "maps an ok:false body with no code at all to :remote_rejected" do
+      Req.Test.stub(:slack, fn conn -> Req.Test.json(conn, %{"ok" => false}) end)
+
+      assert {:error, {:permanent, :remote_rejected}} = Slack.send_message("D12345", "hello")
+    end
+
+    test "leaves a raw transport error untouched for the central normalizer" do
+      Req.Test.stub(:slack, fn conn -> Req.Test.transport_error(conn, :econnreset) end)
+
+      assert {:error, %Req.TransportError{reason: :econnreset}} =
+               Slack.send_message("D12345", "hello")
     end
   end
 

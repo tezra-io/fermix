@@ -246,6 +246,13 @@ defmodule FermixCore.Capabilities.MCP.Capability do
   defp format_result(result), do: inspect(result, pretty: true, limit: :infinity)
 
   defp format_reason(reason) when is_binary(reason), do: reason
+
+  # A remote vendor error carries a machine status AND the vendor's own
+  # sentence. Rendering it as a sentence rather than an inspected tuple is the
+  # difference between an agent that can act ("out of credits — stop asking")
+  # and one that blind-retries into the same wall.
+  defp format_reason({:remote_tool_error, status, nil}), do: status
+  defp format_reason({:remote_tool_error, status, message}), do: "#{status} — #{message}"
   defp format_reason(reason), do: inspect(reason)
 
   # A remote reason can embed an endpoint or a peer message; only its atom class

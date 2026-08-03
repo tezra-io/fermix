@@ -25,6 +25,16 @@ defmodule FermixChannels.Channels.Slack do
   @max_signature_age_seconds 300
   @max_media_bytes 100 * 1_024 * 1_024
 
+  # The bounded known set of `chat.postMessage` `ok: false` codes M30 §11.3
+  # classifies. Anything outside these three lists is `:remote_rejected` — a new
+  # Slack code must never widen the closed vocabulary on its own.
+  @invalid_destination_codes ~w(channel_not_found is_archived)
+  @authentication_codes ~w(invalid_auth token_revoked account_inactive not_authed)
+  @authorization_codes ~w(missing_scope not_in_channel restricted_action)
+
+  # Ceiling for the bounded local diagnostic of a rejection code.
+  @error_log_max 200
+
   @impl true
   @spec parse_webhook(map()) ::
           {:ok, [FermixChannels.Gateway.Channel.message()]} | {:error, term()}
@@ -65,6 +75,13 @@ defmodule FermixChannels.Channels.Slack do
         end)
 
       handle_send_response(result, duration_us)
+    else
+      # M30 §11.3: an unconfigured token means there is no Slack client to send
+      # through, which is the `:adapter_unavailable` kind of the closed delivery
+      # vocabulary — not a bare atom the delivery normalizer would have to guess
+      # at, and then log as a contract violation.
+      {:error, :not_configured} -> {:error, {:permanent, :adapter_unavailable}}
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -539,9 +556,19 @@ defmodule FermixChannels.Channels.Slack do
     :ok
   end
 
+  # Slack answers 200 for API-level rejections and puts the reason in `ok: false`
+  # plus an `error` code. M30 §11.3 maps a bounded known set to permanent kinds
+  # and everything else to `:remote_rejected`; the code itself is logged locally
+  # (bounded) and never embedded in the returned reason.
   defp handle_send_response({:ok, %{status: 200, body: %{"ok" => false} = body}}, _duration_us) do
-    Logger.error("Slack send failed: #{inspect(body)}")
-    {:error, Map.get(body, "error", "slack_api_error")}
+    code = Map.get(body, "error", "unknown")
+
+    Logger.warning(
+      "Slack send rejected: #{inspect(code)} — " <>
+        String.slice(inspect(body), 0, @error_log_max)
+    )
+
+    {:error, {:permanent, slack_rejection_kind(code)}}
   end
 
   defp handle_send_response({:ok, %{status: status, body: body} = response}, _duration_us) do
@@ -560,12 +587,23 @@ defmodule FermixChannels.Channels.Slack do
 
   defp maybe_emit_inbound_message(_result, _duration_us), do: :ok
 
+  # M30 §11.3: the adapter owns platform knowledge and returns the structured
+  # status/rate-limit forms of the closed delivery vocabulary. `RetryHint` stays
+  # authoritative whenever Slack supplies a retry-after hint; the response body
+  # reaches the local log above, never the returned reason.
   defp slack_api_error(%{status: status} = response) do
     case RetryHint.retry_after_ms(response) do
       {:ok, retry_after_ms} -> {:error, {:rate_limited, retry_after_ms}}
-      :error -> {:error, "Slack API error: #{status}"}
+      :error -> {:error, {:http_status, status}}
     end
   end
+
+  defp slack_rejection_kind(code) when code in @invalid_destination_codes,
+    do: :invalid_destination
+
+  defp slack_rejection_kind(code) when code in @authentication_codes, do: :authentication
+  defp slack_rejection_kind(code) when code in @authorization_codes, do: :authorization
+  defp slack_rejection_kind(_code), do: :remote_rejected
 
   defp raw_body(conn) do
     case conn.assigns[:raw_body] do

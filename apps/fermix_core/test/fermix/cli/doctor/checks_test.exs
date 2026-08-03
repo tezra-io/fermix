@@ -1297,6 +1297,50 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
   # the call site passes. The mechanism is pinned one level down, in
   # `Harness.ArtifactsTest`, where a dead supervisor name reproduces the CLI's
   # world for real.
+  describe "skill_curation/1" do
+    test "skips when curation is disabled" do
+      assert Checks.skill_curation(skill_curation_enabled: false) == nil
+    end
+
+    test "warns when memory persistence is off" do
+      result =
+        Checks.skill_curation(
+          skill_curation_enabled: true,
+          memory_enabled: false,
+          delivery_target: :no_delivery_target
+        )
+
+      assert result.name == "skill curation"
+      assert result.status == :warn
+      assert result.detail =~ "memory persistence is off"
+    end
+
+    test "warns with the fix when no owner-private delivery target resolves" do
+      result =
+        Checks.skill_curation(
+          skill_curation_enabled: true,
+          memory_enabled: true,
+          delivery_target: :no_delivery_target
+        )
+
+      assert result.status == :warn
+      assert result.detail =~ "/skills proposals"
+      assert result.detail =~ "owner_user_id"
+    end
+
+    test "reports the resolved target when delivery works" do
+      result =
+        Checks.skill_curation(
+          skill_curation_enabled: true,
+          memory_enabled: true,
+          delivery_target: {:ok, %{platform: "telegram", destination: "owner-1"}}
+        )
+
+      assert result.status == :ok
+      assert result.detail =~ "telegram:owner-1"
+    end
+  end
+
   describe "harness/1" do
     test "skips (nil) when disabled and no vendor CLI is present" do
       assert Checks.harness(

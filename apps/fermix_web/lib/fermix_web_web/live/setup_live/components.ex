@@ -1608,6 +1608,28 @@ defmodule FermixWebWeb.SetupLive.Components do
             value={@personalization_form.communication_style}
           />
         </div>
+        <div
+          class="form-control"
+          data-skill-curation={to_string(@personalization_form.skill_curation_enabled)}
+        >
+          <label class="label cursor-pointer justify-start gap-3">
+            <input type="hidden" name="personalization_form[skill_curation_enabled]" value="false" />
+            <input
+              type="checkbox"
+              name="personalization_form[skill_curation_enabled]"
+              value="true"
+              checked={@personalization_form.skill_curation_enabled}
+              class="toggle toggle-sm toggle-primary"
+            />
+            <span class="label-text text-sm font-medium">
+              Suggest new skills from tasks you repeat
+            </span>
+          </label>
+          <p class="max-w-prose pt-1 text-xs leading-relaxed text-base-content/60">
+            Repeated tasks become skill proposals every couple of weeks — each needs your
+            approval. {@personalization_form.skill_curation_destination} Applies after restart.
+          </p>
+        </div>
         <.form_actions active_tab={@active_tab} tabs={@tabs} save_label="Save personalization" />
       </form>
     </div>

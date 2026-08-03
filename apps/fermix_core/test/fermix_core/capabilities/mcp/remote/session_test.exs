@@ -31,16 +31,21 @@ defmodule FermixCore.Capabilities.MCP.Remote.SessionTest do
       end
     end
 
-    def close(_conn), do: :ok
+    def close(conn) do
+      if is_pid(conn[:agent]), do: Agent.update(conn.agent, &%{&1 | closes: &1.closes + 1})
+      :ok
+    end
 
     defp pop([next | rest]), do: {next, rest}
     defp pop([]), do: {{:error, :no_canned_response}, []}
   end
 
   defp start_agent(responses) do
-    {:ok, agent} = Agent.start_link(fn -> %{responses: responses, requests: []} end)
+    {:ok, agent} = Agent.start_link(fn -> %{responses: responses, requests: [], closes: 0} end)
     agent
   end
+
+  defp closes(agent), do: Agent.get(agent, & &1.closes)
 
   defp requests(agent), do: Agent.get(agent, & &1.requests)
 
@@ -303,4 +308,31 @@ defmodule FermixCore.Capabilities.MCP.Remote.SessionTest do
   defp unwrap_start_error({:error, {reason, _child_spec}}), do: {:error, reason}
   defp unwrap_start_error({:error, reason}), do: {:error, reason}
   defp unwrap_start_error(other), do: other
+
+  describe "keep-alive recovery" do
+    # THE BUG THIS PINS: the session holds ONE connection for its whole life.
+    # HTTP keep-alive is best-effort, so the peer closes an idle socket whenever
+    # it likes — and before this, the first such close poisoned every later call
+    # with `:closed` forever. A 17-case eval sweep reproduced it; a 3-case run
+    # inside the keep-alive window did not.
+    test "a send-phase close reconnects and delivers the request" do
+      closed = {:error, {:not_sent, {:transport, :closed}}}
+      {agent, session} = start_session([closed, json(200, rpc_result(2, %{"ok" => true}))])
+
+      assert {:ok, %{"ok" => true}} = Session.request(session, "tools/list", %{}, 5_000)
+      assert closes(agent) >= 1, "the dead connection must be closed before reopening"
+    end
+
+    # The other half, and the one that matters for correctness: a close AFTER
+    # the request went out is ambiguous — the server may already have acted on
+    # it. Resending would be the replayed write §7.8 forbids.
+    test "a mid-response close is surfaced, never resent" do
+      {agent, session} = start_session([{:error, {:transport, :closed}}])
+
+      assert {:error, {:transport, :closed}} = Session.request(session, "tools/list", %{}, 5_000)
+
+      # Two handshake requests only — the failed call was not repeated.
+      assert length(requests(agent)) == 3
+    end
+  end
 end

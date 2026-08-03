@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["pytest>=8"]
+# dependencies = ["pytest>=8", "certifi"]
 # ///
 """Unit tests for evallib.uplift — the paired agentic-uplift analysis (tools-ON
 Fermix vs a baseline arm on the SAME tasks): McNemar exact test + paired CI on the
