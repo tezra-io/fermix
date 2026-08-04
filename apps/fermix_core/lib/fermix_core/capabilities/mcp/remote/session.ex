@@ -201,13 +201,38 @@ defmodule FermixCore.Capabilities.MCP.Remote.Session do
   @impl true
   def handle_call({:request, method, params, timeout_ms, _opts}, _from, state) do
     case exchange(state, method, params, timeout_ms) do
-      {:ok, state, result, _headers} -> {:reply, {:ok, result}, state}
-      {:error, state, reason} -> {:reply, {:error, reason}, state}
+      {:error, state, :session_expired} -> renew_and_resend(state, method, params, timeout_ms)
+      result -> reply(result)
     end
   end
 
   def handle_call(:teardown, _from, state) do
     {:reply, delete_session(state), state}
+  end
+
+  defp reply({:ok, state, result, _headers}), do: {:reply, {:ok, result}, state}
+  defp reply({:error, state, reason}), do: {:reply, {:error, reason}, state}
+
+  # MCP 2025-06-18: a 404 answering a request that carried `Mcp-Session-Id` means
+  # the server has terminated that session, and the client MUST start a new one.
+  # Without this the first expiry poisons the session process for its whole life
+  # — every later call returns `:session_expired` and nothing ever re-initializes,
+  # which is what a long-lived daemon actually hits after idling overnight.
+  #
+  # Resending is safe here in a way a mid-response close is not: a 404 says the
+  # server had no session to run the request under, so it did not run it. That is
+  # a resend, not the ambiguous-write replay §7.8 forbids.
+  #
+  # Exactly one renewal per request. The resent exchange cannot renew again: a
+  # server that 404s a freshly initialized session is broken, and looping on it
+  # would spin against a wall.
+  defp renew_and_resend(state, method, params, timeout_ms) do
+    deadline = System.monotonic_time(:millisecond) + Timeouts.mcp_remote_startup()
+
+    case initialize(%{state | session_id: nil}, deadline) do
+      {:ok, state} -> reply(exchange(state, method, params, timeout_ms))
+      {:error, state, reason} -> {:reply, {:error, reason}, state}
+    end
   end
 
   @impl true
