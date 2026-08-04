@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-06-28T15:46:18Z",
+  "generated_at": "2026-08-04T02:49:35Z",
   "plugins": [
     {
       "name": "agentmail",
@@ -43,7 +43,7 @@
       "name": "computer_use_sidecar",
       "display_name": "Computer Use Sidecar",
       "category": "system",
-      "description": "Native host-control helper (screenshot + input) for Fermix computer use, delivered as a sha256-verified download. Supported platforms: Apple Silicon (M-series) macOS and Linux x86_64 \u2014 Intel Macs are not supported. Off by default; requires explicit enable and OS permission grants.",
+      "description": "Signed native host-control sidecar (screenshot + input) for Fermix computer-use. Supported platforms: Apple Silicon (M-series) macOS and Linux x86_64 \u2014 Intel Macs are not supported. Off by default; requires explicit enable and OS permission grants.",
       "short_description": null,
       "developer_name": null,
       "brand_color": null,
@@ -114,6 +114,44 @@
           ]
         }
       ]
+    },
+    {
+      "name": "eden",
+      "display_name": "Eden",
+      "category": "productivity",
+      "description": "Your Eden second brain: search, read, capture, and connect knowledge in an Eden workspace.",
+      "short_description": "Use your Eden second brain from Fermix",
+      "developer_name": "Fermix",
+      "brand_color": null,
+      "logo": {
+        "mime": "image/svg+xml",
+        "data_base64": "PHN2ZyB3aWR0aD0iNTAiIGhlaWdodD0iNTAiIHZpZXdCb3g9IjAgMCA1MCA1MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHJlY3QgeD0iMC4zNSIgeT0iMC4zNSIgd2lkdGg9IjQ5LjMiIGhlaWdodD0iNDkuMyIgcng9IjguNzI5NDgiIGZpbGw9InVybCgjcGFpbnQwX2xpbmVhcl81MDJfMTkwMikiIHN0cm9rZT0idXJsKCNwYWludDFfbGluZWFyXzUwMl8xOTAyKSIgc3Ryb2tlLXdpZHRoPSIwLjciLz4KPGcgZmlsdGVyPSJ1cmwoI2ZpbHRlcjBfaV81MDJfMTkwMikiPgo8cGF0aCBkPSJNMTAuMjgxNyAyMy4wMDY1QzIxLjAxOSAyMi45NjYgMjcuNTMxNiAyMS44MDY0IDMxLjUzNzMgMTAuODQ4MUMzMS42Nzk4IDEwLjQ1ODMgMzEuNDA2MiAxMC4wMzk3IDMwLjk5MjMgMTAuMDA5N0MyNC44ODcxIDkuNTY2MTYgMjAuMDgzOSA5LjEwNDYzIDE2LjI5MzQgMTAuNzc3N0MxMi40MzE2IDEyLjQ4MjMgOS44MjI2OSAxNi4yNzg4IDkuNjU0NTEgMjIuMzc0N0M5LjY0NDg3IDIyLjcyMzkgOS45MzIzNCAyMy4wMDc4IDEwLjI4MTcgMjMuMDA2NVoiIGZpbGw9IndoaXRlIi8+CjxwYXRoIGQ9Ik0xMC4yODE3IDI2LjcyOTlDMjEuMDE5IDI2Ljc3MDQgMjcuNTMxNiAyNy45Mjk5IDMxLjUzNzMgMzguODg4MkMzMS42Nzk4IDM5LjI3OCAzMS40MDYyIDM5LjY5NjYgMzAuOTkyMyAzOS43MjY3QzI0Ljg4NzEgNDAuMTcwMiAyMC4wODM5IDQwLjYzMTcgMTYuMjkzNCAzOC45NTg2QzEyLjQzMTYgMzcuMjU0IDkuODIyNjkgMzMuNDU3NSA5LjY1NDUxIDI3LjM2MTZDOS42NDQ4NyAyNy4wMTI0IDkuOTMyMzQgMjYuNzI4NSAxMC4yODE3IDI2LjcyOTlaIiBmaWxsPSJ3aGl0ZSIvPgo8cGF0aCBkPSJNMzMuMTUwOSAxNy43ODVDMzMuMzg0MSAxNy4zMTI3IDM0LjA1NjQgMTcuMzA5MyAzNC4yOTQzIDE3Ljc3OTJMMzUuODY4NCAyMC44ODhDMzYuMzA2NiAyMS43NTMzIDM3LjAxNDEgMjIuNDUyOSAzNy44ODQzIDIyLjg4MTJMNDAuNzYzOSAyNC4yOTg1QzQxLjI0NzEgMjQuNTM2NCA0MS4yMzc2IDI1LjIyODYgNDAuNzQ4IDI1LjQ1MzFMMzcuOTkzOCAyNi43MTU5QzM3LjA1NTkgMjcuMTQ2IDM2LjI5NTQgMjcuODg3IDM1Ljg0MTIgMjguODEzNEwzNC4yOTggMzEuOTYwOEMzNC4wNjI4IDMyLjQ0MDUgMzMuMzc3OCAzMi40MzcxIDMzLjE0NzQgMzEuOTU1MUwzMS42NjUyIDI4Ljg1NDJDMzEuMjEwNCAyNy45MDI3IDMwLjQzNCAyNy4xNDI0IDI5LjQ3MzIgMjYuNzA3NUwyNi43MDQzIDI1LjQ1NDNDMjYuMjEwOSAyNS4yMzEgMjYuMjAxNCAyNC41MzM3IDI2LjY4ODUgMjQuMjk3TDI5LjU4MjUgMjIuODkxQzMwLjQ3NiAyMi40NTY5IDMxLjE5OTYgMjEuNzM3OCAzMS42MzkzIDIwLjg0N0wzMy4xNTA5IDE3Ljc4NVoiIGZpbGw9IndoaXRlIi8+CjwvZz4KPGRlZnM+CjxmaWx0ZXIgaWQ9ImZpbHRlcjBfaV81MDJfMTkwMiIgeD0iOS42NTQzIiB5PSI5LjU5NTciIHdpZHRoPSIzMS40NjY4IiBoZWlnaHQ9IjMxLjU0NDkiIGZpbHRlclVuaXRzPSJ1c2VyU3BhY2VPblVzZSIgY29sb3ItaW50ZXJwb2xhdGlvbi1maWx0ZXJzPSJzUkdCIj4KPGZlRmxvb2QgZmxvb2Qtb3BhY2l0eT0iMCIgcmVzdWx0PSJCYWNrZ3JvdW5kSW1hZ2VGaXgiLz4KPGZlQmxlbmQgbW9kZT0ibm9ybWFsIiBpbj0iU291cmNlR3JhcGhpYyIgaW4yPSJCYWNrZ3JvdW5kSW1hZ2VGaXgiIHJlc3VsdD0ic2hhcGUiLz4KPGZlQ29sb3JNYXRyaXggaW49IlNvdXJjZUFscGhhIiB0eXBlPSJtYXRyaXgiIHZhbHVlcz0iMCAwIDAgMCAwIDAgMCAwIDAgMCAwIDAgMCAwIDAgMCAwIDAgMTI3IDAiIHJlc3VsdD0iaGFyZEFscGhhIi8+CjxmZU9mZnNldCBkeT0iMSIvPgo8ZmVHYXVzc2lhbkJsdXIgc3RkRGV2aWF0aW9uPSIxLjI1Ii8+CjxmZUNvbXBvc2l0ZSBpbjI9ImhhcmRBbHBoYSIgb3BlcmF0b3I9ImFyaXRobWV0aWMiIGsyPSItMSIgazM9IjEiLz4KPGZlQ29sb3JNYXRyaXggdHlwZT0ibWF0cml4IiB2YWx1ZXM9IjAgMCAwIDAgMCAwIDAgMCAwIDAgMCAwIDAgMCAwIDAgMCAwIDAuMTUgMCIvPgo8ZmVCbGVuZCBtb2RlPSJub3JtYWwiIGluMj0ic2hhcGUiIHJlc3VsdD0iZWZmZWN0MV9pbm5lclNoYWRvd181MDJfMTkwMiIvPgo8L2ZpbHRlcj4KPGxpbmVhckdyYWRpZW50IGlkPSJwYWludDBfbGluZWFyXzUwMl8xOTAyIiB4MT0iMTMiIHkxPSIyIiB4Mj0iMzMiIHkyPSI1MCIgZ3JhZGllbnRVbml0cz0idXNlclNwYWNlT25Vc2UiPgo8c3RvcCBzdG9wLWNvbG9yPSIjMkYyRjJGIi8+CjxzdG9wIG9mZnNldD0iMSIgc3RvcC1jb2xvcj0iIzExMTExMSIvPgo8L2xpbmVhckdyYWRpZW50Pgo8bGluZWFyR3JhZGllbnQgaWQ9InBhaW50MV9saW5lYXJfNTAyXzE5MDIiIHgxPSIzIiB5MT0iMi41IiB4Mj0iNDciIHkyPSI0OCIgZ3JhZGllbnRVbml0cz0idXNlclNwYWNlT25Vc2UiPgo8c3RvcCBzdG9wLWNvbG9yPSIjNjY2NjY2Ii8+CjxzdG9wIG9mZnNldD0iMC41IiBzdG9wLWNvbG9yPSIjMUMxQzFDIi8+CjxzdG9wIG9mZnNldD0iMSIgc3RvcC1jb2xvcj0iIzVDNUM1QyIvPgo8L2xpbmVhckdyYWRpZW50Pgo8L2RlZnM+Cjwvc3ZnPgo="
+      },
+      "auth_type": "api_key",
+      "auth_provider": null,
+      "rails": [
+        "mcp"
+      ],
+      "latest": "1.0.0",
+      "yanked": [],
+      "versions": [
+        {
+          "version": "1.0.0",
+          "published_at": "2026-08-04T02:46:04Z",
+          "min_core_version": "0.7.2",
+          "plugin_api": 3,
+          "artifacts": [
+            {
+              "target": "any",
+              "url": "https://github.com/tezra-io/fermix-plugins/releases/download/eden/v1.0.0/eden-1.0.0.tar.gz",
+              "sha256": "fc5a8e1367ae497fdc091a34d59aac68658fe8950f029f6055c9535aa9254b98",
+              "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/eden/v1.0.0/eden-1.0.0.tar.gz.sig",
+              "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/eden/v1.0.0/eden-1.0.0.tar.gz.pem"
+            }
+          ]
+        }
+      ],
+      "runtime_kind": "remote_mcp"
     },
     {
       "name": "github",
@@ -299,7 +337,8 @@
             }
           ]
         }
-      ]
+      ],
+      "runtime_kind": "local_stdio"
     },
     {
       "name": "slack",
