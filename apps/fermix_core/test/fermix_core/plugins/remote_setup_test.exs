@@ -14,8 +14,12 @@ defmodule FermixCore.Plugins.RemoteSetupTest do
   alias FermixCore.Capabilities.MCP.RuntimeStatus
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Plugins.CanonicalJson
+  alias FermixCore.Plugins.Dist.Store, as: DistStore
   alias FermixCore.Plugins.Registry
   alias FermixCore.Plugins.RemoteSetup
+  alias FermixCore.Setup.ConfigStore
+  alias FermixTestSupport.DistFixtures
+  alias FermixTestSupport.DistVerifierStub
 
   @credential "eden_pat_canary_do_not_leak"
   @session_id "sess-setup-1"
@@ -275,14 +279,28 @@ defmodule FermixCore.Plugins.RemoteSetupTest do
   end
 
   describe "select_workspace/2" do
-    # Persistence goes through `Registry.find/1`, so the manifest has to be
-    # discoverable — the dev_local checkout is the registry seam that needs no
-    # install pipeline.
+    # Persistence goes through `Registry.find/1`, which takes no options, so the
+    # plugin must be discoverable at the DEFAULT installed root. A dev_local
+    # checkout cannot serve here: a remote manifest with no publisher signature
+    # is refused by the provenance gate, which is the product's real behaviour.
     setup %{home: home} do
-      dir = Path.join([home, "dev-plugins", "workspacedemo"])
-      File.mkdir_p!(dir)
-      File.write!(Path.join(dir, "plugin.json"), Jason.encode!(remote_manifest()))
-      Application.put_env(:fermix_core, :plugins, dev_local: Path.join(home, "dev-plugins"))
+      store = ConfigStore.workspace_paths().plugins
+      fixtures = Path.join(home, "fixtures")
+      File.mkdir_p!(fixtures)
+      DistStore.ensure!(store)
+      DistVerifierStub.init()
+      on_exit(&DistVerifierStub.cleanup/0)
+
+      :ok =
+        DistFixtures.install_remote_plugin(
+          store,
+          fixtures,
+          "workspacedemo",
+          "1.0.0",
+          remote_manifest()
+        )
+
+      :ok = DistVerifierStub.allow("workspacedemo", "1.0.0")
       :ok
     end
 

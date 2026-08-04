@@ -122,6 +122,12 @@ config :phoenix,
 # test/support and is loaded by each app's test_helper.exs.
 config :fermix_core, :secret_writer, FermixTestSupport.SecretWriterStub
 
+# The remote_mcp provenance gate under test. DENY-BY-DEFAULT: a test that wants a
+# remote plugin to load must allow-list it explicitly (DistVerifierStub.allow/2),
+# so a gate that stopped verifying fails here instead of passing quietly. Never
+# replace this with a permissive stub.
+config :fermix_core, :plugin_provenance_verifier, FermixTestSupport.DistVerifierStub
+
 # Hermetic default: tests must never resolve host runtimes or spawn real
 # `--version` processes. The mcp host-runtime probe (RuntimeProbe) denies by
 # default; tests stub success per-call via :find_executable / :version_fetch.

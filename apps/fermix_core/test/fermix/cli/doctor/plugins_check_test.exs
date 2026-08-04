@@ -19,23 +19,32 @@ defmodule Fermix.CLI.Doctor.PluginsCheckTest do
   alias Fermix.CLI.Doctor.Checks
   alias FermixCore.CommandHost
   alias FermixCore.Plugins.CanonicalJson
+  alias FermixCore.Plugins.Dist.Provenance
   alias FermixCore.Plugins.Dist.RuntimeProbe
+  alias FermixCore.Plugins.Dist.Store, as: DistStore
   alias FermixCore.Plugins.Status, as: PluginStatus
+  alias FermixTestSupport.DistFixtures
+  alias FermixTestSupport.DistVerifierStub
 
   setup do
     previous_plugins = Application.get_env(:fermix_core, :plugins)
     previous_secrets = Application.get_env(:fermix_core, :plugin_secrets)
     dev_local = FermixTestSupport.SafeRm.make_tmp_dir!("doctor-plugins-dev")
     installed_root = FermixTestSupport.SafeRm.make_tmp_dir!("doctor-plugins-store")
+    fixtures = Path.join(installed_root, "fixtures")
+    File.mkdir_p!(fixtures)
+    DistStore.ensure!(installed_root)
+    DistVerifierStub.init()
 
     on_exit(fn ->
+      DistVerifierStub.cleanup()
       restore_env(:plugins, previous_plugins)
       restore_env(:plugin_secrets, previous_secrets)
       FermixTestSupport.SafeRm.rm_rf!(dev_local)
       FermixTestSupport.SafeRm.rm_rf!(installed_root)
     end)
 
-    %{dev_local: dev_local, installed_root: installed_root}
+    %{dev_local: dev_local, installed_root: installed_root, fixtures: fixtures}
   end
 
   describe "plugins/1 — the static ladder" do
@@ -284,10 +293,35 @@ defmodule Fermix.CLI.Doctor.PluginsCheckTest do
     Application.put_env(:fermix_core, :plugin_secrets, %{name => secret})
   end
 
+  # A `remote_mcp` manifest is loadable only from a verified artifact (M27 §9.3),
+  # so it is INSTALLED rather than dropped in dev_local — dev_local is refused by
+  # design, and a fixture that used it would be testing a plugin the product
+  # never loads. Local runtimes still use the cheaper dev_local path.
   defp write_plugin!(ctx, name, manifest) do
+    if Provenance.remote_runtime?(manifest["runtime"]),
+      do: install_remote!(ctx, name, manifest),
+      else: write_dev_local!(ctx, name, manifest)
+  end
+
+  defp write_dev_local!(ctx, name, manifest) do
     dir = Path.join(ctx.dev_local, name)
     File.mkdir_p!(dir)
     File.write!(Path.join(dir, "plugin.json"), Jason.encode!(manifest))
+  end
+
+  defp install_remote!(ctx, name, manifest) do
+    version = Map.get(manifest, "version", "1.0.0")
+
+    :ok =
+      DistFixtures.install_remote_plugin(
+        ctx.installed_root,
+        ctx.fixtures,
+        name,
+        version,
+        manifest
+      )
+
+    :ok = DistVerifierStub.allow(name, version)
   end
 
   defp restore_env(key, nil), do: Application.delete_env(:fermix_core, key)

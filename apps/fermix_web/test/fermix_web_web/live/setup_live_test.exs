@@ -9,6 +9,7 @@ defmodule FermixWebWeb.SetupLiveTest do
   alias FermixCore.Plugins.CanonicalJson
   alias FermixCore.Plugins.Config, as: PluginConfig
   alias FermixCore.Plugins.Dist.Installer, as: DistInstaller
+  alias FermixCore.Plugins.Dist.Store, as: DistStore
   alias FermixCore.Plugins.Registry, as: PluginRegistry
   alias FermixCore.Plugins.Status, as: PluginStatus
   alias FermixCore.Providers.PrimaryConfig
@@ -3246,12 +3247,15 @@ defmodule FermixWebWeb.SetupLiveTest do
         Application.put_env(:fermix_core, :plugin_secrets, secrets)
         Application.delete_env(:fermix_web, :remote_setup_opts)
         RuntimeStatus.clear(RuntimeStatus, {:plugin, "eden"})
+        DistVerifierStub.cleanup()
         FermixTestSupport.SafeRm.rm_rf(checkout)
       end)
 
       Application.put_env(:fermix_core, :plugin_secrets, %{})
-      write_remote_plugin(checkout)
-      Application.put_env(:fermix_core, :plugins, enabled: ["eden"], dev_local: checkout)
+      # `Registry.list()` inside the LiveView takes no options, so the artifact
+      # must land in the DEFAULT store under this test's tmp FERMIX_HOME.
+      write_remote_plugin(ConfigStore.workspace_paths().plugins)
+      Application.put_env(:fermix_core, :plugins, enabled: ["eden"])
 
       %{checkout: checkout}
     end
@@ -3694,12 +3698,14 @@ defmodule FermixWebWeb.SetupLiveTest do
 
   defp remote_workspaces_parameters, do: %{"type" => "object", "properties" => %{}}
 
-  # A plugin-api-3 `remote_mcp` dev_local checkout named `eden`, the one plugin
-  # with a registered `SecretPaths` entry, so the credential form is the real
-  # one. Nothing in the picker keys on that name.
-  defp write_remote_plugin(checkout) do
-    File.mkdir_p!(Path.join(checkout, "eden"))
-
+  # A plugin-api-3 `remote_mcp` plugin named `eden`, the one plugin with a
+  # registered `SecretPaths` entry, so the credential form is the real one.
+  # Nothing in the picker keys on that name.
+  #
+  # INSTALLED, not dev_local: a remote manifest with no publisher signature is
+  # refused by the provenance gate (M27 §9.3), so a dev_local fixture would
+  # exercise a path the product does not have.
+  defp write_remote_plugin(store) do
     manifest = %{
       "schema_version" => 2,
       "plugin_api" => 3,
@@ -3816,7 +3822,12 @@ defmodule FermixWebWeb.SetupLiveTest do
       "skills" => []
     }
 
-    File.write!(Path.join([checkout, "eden", "plugin.json"]), Jason.encode!(manifest))
+    fixtures = Path.join(store, "fixtures")
+    File.mkdir_p!(fixtures)
+    DistStore.ensure!(store)
+    DistVerifierStub.init()
+    :ok = DistFixtures.install_remote_plugin(store, fixtures, "eden", "1.0.0", manifest)
+    :ok = DistVerifierStub.allow("eden", "1.0.0")
   end
 
   defp sign_remote_tool(tool) do
