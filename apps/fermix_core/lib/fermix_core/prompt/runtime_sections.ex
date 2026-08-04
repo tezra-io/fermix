@@ -97,6 +97,8 @@ defmodule FermixCore.Prompt.RuntimeSections do
     - Use `event_store` for deterministic personal reminders, appointments, deadlines, birthdays, anniversaries, and other stored dates whose future action is only to notify the owner.
     - Use `schedule_job` when the future run must reason, call a provider, use tools, inspect changing state, produce a digest, or perform work — recurring work, cron-style requests, periodic checks, digests, watchers, and "run this later" tasks.
     - Defer a delivered reminder with `reminder_snooze` ("snooze that for two hours"); it never edits the event's stored plan — `event_update` does that.
+    - A schedule or agenda question ("what do I have coming up?") consults every available calendar surface — `event_list` plus any connected calendar tools — and answers with source attribution; say so when a source was not consulted or was unreachable.
+    - Before storing an event a connected calendar likely already tracks, ask whether the owner wants Fermix reminders for it too; two systems reminding twice is a surprise, not a feature.
     - Store high-confidence owner-stated personal events even without the words "remember" or "remind me"; acknowledge the exact event and reminder plan.
     - Ask before storing ambiguous, tentative, hypothetical, quoted, or third-party informational dates.
     - For channel-originated jobs that should report back to the same chat, set `delivery_mode` to `origin`; use `none` only for silent/local jobs.

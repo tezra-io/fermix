@@ -126,7 +126,7 @@ review or the scheduled-agent runner.
 |---|---|
 | Primary user interface | Existing Fermix conversations: Telegram, WhatsApp, Slack, Discord, Signal, CLI, daemon, voice, or another trusted main-agent surface. No calendar UI |
 | Notification medium | The one configured default Fermix channel target. No origin delivery, macOS notification, email side rail, or channel fallback |
-| Existing config source | Reuse `[fermix_core.jobs].default_delivery_target`; broaden its documented meaning from cron-specific target to default daemon background-delivery target. Do not add a second reminder target |
+| Existing config source | Reuse `[fermix_core.jobs].default_delivery_target`; broaden its documented meaning from cron-specific target to default daemon background-delivery target. Do not add a second reminder target. Owner decision 2026-08-03: when the key is absent, derive the owner's inbox at acceptance from the first owner-configured channel (`FermixCore.Delivery.OwnerInbox`, telegram → signal → whatsapp, explicit `owner_user_id` only) so a fresh install or `brew upgrade` works with zero new config; refuse loudly only when neither exists |
 | Target lifetime | Resolve and snapshot platform/destination/persistent thread scope when the event is accepted. Later edits to `default_delivery_target` do not retarget it; live adapter mappings and credentials are intentionally not copied into SQLite |
 | Timezone source | Use the existing `[fermix_core.personalization].timezone` unless the owner explicitly supplies another IANA zone for the event. Missing or invalid timezone fails creation; never assume UTC for a personal date |
 | Storage | Dedicated `temporal_events` and `reminder_occurrences` tables in `memory.db`; neither memory rows nor scheduled-job rows |
@@ -142,7 +142,7 @@ review or the scheduled-agent runner.
 | Host sleep/offline | Out of scope. No OS wake scheduling, sleep inhibition, or guarantee while Fermix is stopped/suspended |
 | External calendars | No Google Calendar sync/import/export in M30. Calendar plugins remain separate agent capabilities |
 | Supported recurrence in v1 | One-time and yearly only. Arbitrary RRULE, monthly, weekly, and cron-like recurrence are deferred |
-| Trust | Attended, top-level, non-synthesized operator turns only, gated at tool advertisement and execution. Guest, scheduled, background, delegated, and coding-continuation runs cannot create, inspect, update, snooze, or remove events |
+| Trust | Attended, top-level, non-synthesized operator turns only, gated at tool advertisement and execution — with one read carve-out (owner decision 2026-08-03): `event_list` is also readable from an operator-created scheduled run, so a cron brief can include stored events. Guest, background, delegated, and coding-continuation runs can touch nothing; scheduled runs cannot create, update, snooze, or remove |
 
 ---
 
@@ -971,10 +971,19 @@ Accepted configurations are the existing deterministic channel forms:
 - `default_delivery_mode = "channel"` plus a valid target; or
 - a valid `default_delivery_target`, which already implies channel mode.
 
-`none`, `origin`, and `local` are invalid for event creation. A missing platform,
-destination, or adapter causes the event tool to fail with an actionable message.
-Fermix never falls back to the originating conversation, CLI stdout, macOS, or a
-different channel.
+`none`, `origin`, and `local` are invalid for event creation and refuse before
+any derivation — an explicit "background delivery is off" is never overruled.
+When the target key itself is absent (the fresh-install and `brew upgrade`
+reality: neither path writes config), acceptance derives the owner's inbox via
+the shared `FermixCore.Delivery.OwnerInbox` ladder — the first channel with an
+explicit `owner_user_id`, in the fixed order telegram → signal → whatsapp
+(platforms where the owner id is itself a sendable destination; a candidate
+failing §11.1 validation is skipped deterministically for the next). The
+acknowledgment carries `delivery.source: configured | derived`, so a derived
+choice is always visible and rebindable. Only when neither an explicit target
+nor a derivable owner channel exists does the event tool fail, naming both
+remedies. Fermix never falls back to the originating conversation, CLI stdout,
+macOS, or a different channel, and never re-resolves at send time.
 
 At event acceptance, normalized platform, destination, and persistent thread
 scope are snapshotted into the event; the planner copies those three identity
@@ -1226,6 +1235,17 @@ continuation-depth check excludes synthesized coding-run output that re-enters
 an otherwise interactive owner channel. Trust alone is insufficient because
 operator-created cron and continuation runs can also carry operator trust.
 
+One deliberate read carve-out (owner decision 2026-08-03): `event_list` gates on
+`operator_read_turn?/1` — the attended predicate OR an operator-created
+scheduled run (operator trust, no origin marker at all, top-level, no
+continuation depth) — so a cron morning brief can list stored events alongside
+a connected calendar. The four mutating tools keep the strict attended gate;
+`:unattended` background runs, guests, delegated workers, and continuations
+remain fully excluded; and the whole-family invariant test pins the asymmetry
+explicitly (the scheduled context advertises exactly `["event_list"]`). The
+operator accepts the §14 corollary: a scheduled run's output delivers wherever
+that job is configured, which may differ from the owner's default channel.
+
 Every public function validates maps, types, timezones, recurrence constraints,
 rule caps, ownership, attended origin, and state transitions. Errors are
 returned as explicit `{:error, reason}` / tool errors and never swallowed.
@@ -1346,13 +1366,24 @@ in §8.4. The reminder outbox remains the sole authority.
 - Event tools require the attended top-level operator gate from §12.1 at both
   advertisement and execution. Missing origin/trust context fails closed rather
   than inventing owner authority.
-- Guest, scheduled-job, detached-background, delegated-worker, and synthesized
+- Guest, detached-background, delegated-worker, and synthesized
   coding-continuation capability catalogs, tool search, dispatch, and prompts
-  exclude the entire event family.
+  exclude the entire event family. Scheduled-job runs exclude the four mutating
+  tools and, when operator-created, may read via `event_list` (§12.1 carve-out).
 - Events are owner-scoped. A caller may narrow list queries but cannot widen
   beyond its authorization.
-- The configured default target is an explicit operator decision. M30 does not
-  derive another owner's ID, infer a DM, or try a second channel.
+- The delivery target is resolved once, at acceptance, with a closed ladder
+  (owner decision 2026-08-03): the explicitly configured
+  `default_delivery_target` wins; absent that, the owner's inbox is derived
+  from the first channel carrying an explicit `owner_user_id`
+  (telegram → signal → whatsapp — platforms where the owner id IS a sendable
+  destination; never Discord/Slack, never `allowed_user_ids`, never mere
+  channel presence, never another owner's ID). The acknowledgment names the
+  choice (`delivery.source: configured | derived`) so a derived target is
+  visible and rebindable, and a hostile `default_delivery_mode`
+  (`none`/`origin`/`local`) refuses before derivation — an explicit
+  "background delivery is off" is never overruled. Fermix still never infers
+  a DM on id-less platforms and never tries a second channel after failure.
 - Target snapshots prevent a later `default_delivery_target` edit from silently
   moving a personal birthday/deadline to another conversation; live channel
   credentials remain governed by channel configuration as described in §11.1.
@@ -1435,7 +1466,7 @@ reminder capability. No calendar dashboard is added either.
 
 | Failure | Required result |
 |---|---|
-| No configured default target | `event_store` fails with exact config guidance; no event row |
+| No configured default target | Derive the owner's inbox from the first owner-configured channel (§11.1 ladder); only when no channel carries an `owner_user_id` either does `event_store` fail, naming both remedies; no event row |
 | Invalid timezone/date/recurrence | Tool error; no partial write |
 | DST gap/ambiguous local time without offset | Focused clarification; no partial write or silent shift |
 | Event DB transaction fails | Tool error; no acknowledgement claiming success |
@@ -1743,7 +1774,13 @@ ever moves outside the daemon's process tree.
 
 - Lease/fenced settlement if delivery ever moves out of the daemon's process
   tree (§19.10).
-- External calendar adapters/import/export and conflict policy.
+- External calendar adapters/import/export and conflict policy. Owner
+  decision 2026-08-03: stays deferred — Google tokens expire often enough
+  that a sync would mostly serve stale events, and a stale mirror is worse
+  than a named separate source. Until then the runtime contract makes agenda
+  questions consult every available calendar surface with source
+  attribution, and capture asks before storing a date a connected calendar
+  likely already tracks (double-reminder surprise).
 - Mining existing memory for candidate events behind an explicit owner-reviewed
   migration command.
 - Monthly/weekly recurrence and a carefully bounded recurrence DSL.
@@ -1915,3 +1952,39 @@ ask→grade loop cannot arrange) and stay pinned by the hermetic ExUnit tier.
 adapter_unavailable without touching the network) and
 `[fermix_core.personalization]` — closing the fresh-eval-home
 zero-score trap before it ever fired.
+
+Same-day follow-up: the multi-source agenda posture (§20 deferred-sync bullet
+carries the owner's rationale). `event_list`'s description now scopes itself to
+Fermix-stored events; the google-calendar plugin skill points back the other
+way; two runtime-contract lines make agenda questions consult every available
+calendar surface with source attribution and make capture ask before storing a
+date a connected calendar likely already tracks. Instruction-level by design
+(no aggregator tool: it would wrap dynamically-registered plugin tools, mix
+policy classes in one call, and blur which source answered). The read
+carve-out was then taken the same day (owner decision, morning-brief cron
+architecture confirmed): `event_list` gates on the new
+`Access.operator_read_turn?/1` — attended OR operator-created scheduled run —
+with the four mutating tools unchanged, the invariant test pinning the exact
+asymmetry, and a positive scheduled-run execution test. The owner accepted the
+job-delivery-target corollary (§12.1).
+
+**2026-08-04 addendum — owner-inbox derivation (fresh-install/upgrade gap).**
+A live trace (owner said "My birthday is March 16th", model routed correctly
+to `event_store`, the tool refused on the absent target, the model salvaged to
+memory transparently) exposed that neither a fresh install nor `brew upgrade`
+ever writes `default_delivery_target` — and that M26 had already solved the
+same question by deriving the owner's inbox from channel config. Owner
+decision: unify. `FermixCore.Delivery.OwnerInbox` is now the one resolver
+(configured target → derived owner inbox → `:no_delivery_target`); M26
+proposals delegate to it; the temporal Registry keeps its §11.1 rung-one
+validation verbatim and borrows `derived_candidates/1` as rung two, refusing
+hostile modes before derivation and skipping candidates that fail validation.
+`delivery.source` (`configured`/`derived`) rides every acceptance/rebind
+payload — provenance is visible, never persisted (no schema change).
+Derivation reads only an explicit `owner_user_id`, only on
+telegram/signal/whatsapp. The read carve-out and this change together close
+the two decisions of 2026-08-03/04; a matching Known-Pitfalls entry in
+CLAUDE.md makes the install/upgrade zero-config test a standing requirement
+for every future feature. Also fixed in the same pass: the in-flight-send
+test's hardcoded claim instant (a date bomb armed the moment UTC rolled past
+its author's calendar) now derives the claim time from the created reminder.

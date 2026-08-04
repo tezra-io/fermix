@@ -21,10 +21,11 @@ All writes use the `calendar.events` scope. If it wasn't granted at sign-in, the
 ## Workflow
 
 1. Read before reasoning: search the relevant window before answering availability or "what's on my calendar" questions.
-2. Normalize relative time ("tomorrow afternoon", "next week") into explicit dates and an IANA timezone before searching or proposing slots. State the timezone you used.
-3. Confirm before creating, updating, moving, or deleting: restate the exact summary/start/end/timezone (or the target event and change) and get the user's OK. Deleting is permanent and, for an event you organize, cancels guests — always confirm, and set `send_updates` deliberately.
-4. Prefer `google_calendar_update_event` (partial) for edits so you don't clear fields you didn't mention. Use `google_calendar_respond_to_event` for invites you were sent.
-5. Never invent attendees, links, or times.
+2. Google Calendar is one of two sources: Fermix's own stored reminders (`event_list`) are separate. For "what's coming up" / agenda questions, consult both and say which events came from where. Creating a Google Calendar event does not make Fermix remind anyone — a date the user wants Fermix reminders for belongs in `event_store`; if the calendar likely already tracks it, ask before storing it in both (two systems reminding twice is a surprise).
+3. Normalize relative time ("tomorrow afternoon", "next week") into explicit dates and an IANA timezone before searching or proposing slots. State the timezone you used.
+4. Confirm before creating, updating, moving, or deleting: restate the exact summary/start/end/timezone (or the target event and change) and get the user's OK. Deleting is permanent and, for an event you organize, cancels guests — always confirm, and set `send_updates` deliberately.
+5. Prefer `google_calendar_update_event` (partial) for edits so you don't clear fields you didn't mention. Use `google_calendar_respond_to_event` for invites you were sent.
+6. Never invent attendees, links, or times.
 
 ## Output
 

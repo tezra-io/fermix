@@ -1,6 +1,7 @@
 defmodule FermixCore.Temporal.RegistryTest do
   # async: true — every seam (repo server, clock, jobs config, personalization,
-  # scheduler) is injected; nothing reads or mutates host/global state.
+  # configured channel owners, scheduler) is injected; nothing reads or mutates
+  # host/global state.
   use ExUnit.Case, async: true
 
   import ExUnit.CaptureLog, only: [capture_log: 1]
@@ -316,11 +317,16 @@ defmodule FermixCore.Temporal.RegistryTest do
   end
 
   describe "create_event/3 — default target snapshot (§11.1)" do
-    test "a missing default delivery target leaves no event row", %{repo: repo} do
+    test "no configured target and no owner-configured channel leaves no event row", %{repo: repo} do
       assert {:error, :no_default_delivery_target} =
-               create(repo, birthday_params(), jobs_config: [delivery_channels: @channels])
+               create(repo, birthday_params(),
+                 jobs_config: [delivery_channels: @channels],
+                 configured_owners: %{}
+               )
 
-      assert Registry.describe_error(:no_default_delivery_target) =~ "default_delivery_target"
+      message = Registry.describe_error(:no_default_delivery_target)
+      assert message =~ "default_delivery_target"
+      assert message =~ "owner id"
       assert {:ok, %{events: []}} = Registry.list_events(%{}, context(repo))
     end
 
@@ -366,6 +372,88 @@ defmodule FermixCore.Temporal.RegistryTest do
 
       assert {:error, {:unsupported_delivery_platform, "telegram"}} =
                create(repo, birthday_params(), jobs_config: config)
+    end
+  end
+
+  describe "create_event/3 — derived owner inbox" do
+    test "an absent default target derives the owner's inbox from a configured channel", %{
+      repo: repo
+    } do
+      assert {:ok, %{event: event, reminders: reminders}} =
+               create(repo, birthday_params(),
+                 jobs_config: [delivery_channels: @channels],
+                 configured_owners: %{"telegram" => "8217352118"}
+               )
+
+      assert event.delivery_platform == "telegram"
+      assert event.delivery_destination == "8217352118"
+      assert event.delivery_thread_scope == "root"
+      assert Enum.all?(reminders, &(&1.delivery_destination == "8217352118"))
+    end
+
+    test "an explicitly configured target beats the derived inbox", %{repo: repo} do
+      assert {:ok, %{event: event}} =
+               create(repo, birthday_params(), configured_owners: %{"telegram" => "owner-dm"})
+
+      assert event.delivery_destination == "8217352118"
+    end
+
+    test "a derived candidate failing §11.1 validation falls through to the next", %{repo: repo} do
+      # Telegram is the first candidate but has no resolvable adapter here, so
+      # resolution moves on rather than reporting an error that would hide the
+      # perfectly valid Signal inbox behind it.
+      assert {:ok, %{event: event}} =
+               create(repo, birthday_params(),
+                 jobs_config: [delivery_channels: %{"signal" => FakeAdapter}],
+                 configured_owners: %{"telegram" => "tg-owner", "signal" => "sig-owner"}
+               )
+
+      assert event.delivery_platform == "signal"
+      assert event.delivery_destination == "sig-owner"
+    end
+
+    test "an owner-configured channel outside the proactive allowlist is not a candidate", %{
+      repo: repo
+    } do
+      assert {:error, :no_default_delivery_target} =
+               create(repo, birthday_params(),
+                 jobs_config: [delivery_channels: @channels],
+                 configured_owners: %{"cli" => "local", "discord" => "owner-d"}
+               )
+    end
+
+    test "a hostile delivery mode refuses loudly instead of deriving around it", %{repo: repo} do
+      # `default_delivery_mode = "none"` is an explicit operator decision that
+      # background delivery is off; deriving an inbox would silently overrule it.
+      assert {:error, {:invalid_delivery_mode, "none"}} =
+               create(repo, birthday_params(),
+                 jobs_config: [default_delivery_mode: "none", delivery_channels: @channels],
+                 configured_owners: %{"telegram" => "8217352118"}
+               )
+    end
+
+    test "the event view names where the target came from", %{repo: repo} do
+      assert {:ok, %{event: configured}} = create(repo, birthday_params())
+      assert Registry.event_view(configured)["delivery"]["source"] == "configured"
+
+      assert {:ok, %{event: derived}} =
+               create(repo, birthday_params(%{title: "Ana's birthday"}),
+                 jobs_config: [delivery_channels: @channels],
+                 configured_owners: %{"telegram" => "tg-owner"}
+               )
+
+      assert Registry.event_view(derived)["delivery"]["source"] == "derived"
+      assert Registry.event_view(derived)["delivery"]["platform"] == "telegram"
+    end
+
+    test "a stored row read back carries no invented provenance", %{repo: repo} do
+      # Provenance is not persisted: a listing describes the snapshotted target
+      # and says nothing about how it was chosen, rather than re-resolving it
+      # against configuration that may have changed since.
+      assert {:ok, _created} = create(repo, birthday_params())
+      assert {:ok, %{events: [listed]}} = Registry.list_events(%{}, context(repo), opts())
+
+      refute Map.has_key?(Registry.event_view(listed)["delivery"], "source")
     end
   end
 
@@ -591,6 +679,29 @@ defmodule FermixCore.Temporal.RegistryTest do
       assert updated.delivery_platform == "slack"
       assert updated.delivery_destination == "C99"
       assert Enum.all?(reminders, &(&1.delivery_platform == "slack"))
+      assert Registry.event_view(updated)["delivery"]["source"] == "configured"
+    end
+
+    test "rebind_delivery_to_default derives the inbox when no target is configured", %{
+      repo: repo
+    } do
+      assert {:ok, %{event: event}} = create(repo, birthday_params())
+
+      assert {:ok, %{event: updated, reminders: reminders}} =
+               Registry.update_event(
+                 event.id,
+                 %{rebind_delivery_to_default: true},
+                 context(repo),
+                 opts(
+                   jobs_config: [delivery_channels: @channels],
+                   configured_owners: %{"signal" => "sig-owner"}
+                 )
+               )
+
+      assert updated.delivery_platform == "signal"
+      assert updated.delivery_destination == "sig-owner"
+      assert Enum.all?(reminders, &(&1.delivery_platform == "signal"))
+      assert Registry.event_view(updated)["delivery"]["source"] == "derived"
     end
 
     test "changing the configured default target does not rewrite a stored destination", %{
