@@ -42,6 +42,24 @@ def write(results: dict, out_dir: str) -> dict:
 
 # --- markdown ---------------------------------------------------------------
 
+def _abort_text(aborted: dict) -> str:
+    """One line saying the run stopped early and what the untouched cases mean.
+
+    Without it a truncated run reads as a complete one with fewer cases, which
+    is the reading that turns an external account condition into a hunt for a
+    product defect.
+    """
+    return (f"RUN STOPPED EARLY at {aborted['suite']}/{aborted['case']} — "
+            f"`{aborted['tool']}` reported `{aborted['fragment']}`. "
+            f"{aborted['unrun']} case(s) were not run: their status is UNKNOWN, "
+            "not failed. This is an external account condition, not a product "
+            "failure.")
+
+
+def _abort_markdown(aborted: dict | None) -> list[str]:
+    return ["", f"> ⚠️ **{_abort_text(aborted)}**"] if aborted else []
+
+
 def _markdown(r: dict) -> str:
     t = r["totals"]
     overall = {"pass": "✅ PASS", "fail": "❌ FAIL",
@@ -52,6 +70,7 @@ def _markdown(r: dict) -> str:
         f"- **Run:** `{r['run_id']}`  ·  {r['started_at']} → {r['finished_at']}",
         f"- **Daemon:** `{r['config']['daemon_home']}`  ·  **Opik project:** `{r['config']['opik_project']}`",
         f"- **Judge:** {r['config']['judge_backend']} ({'on' if r['config']['judge_enabled'] else 'off'})",
+        *_abort_markdown(r.get("aborted")),
         "",
         "## Summary",
         "",
@@ -175,6 +194,8 @@ def _html(r: dict) -> str:
                f"daemon <code>{_e(r['config']['daemon_home'])}</code> · project <code>{_e(r['config']['opik_project'])}</code> · "
                f"judge {_e(r['config']['judge_backend'])} ({'on' if r['config']['judge_enabled'] else 'off'})</div>")
     out.append(f"<div class='banner {banner_cls}'>{_e(banner)}</div>")
+    if r.get("aborted"):
+        out.append(f"<div class='banner skip'>{_e(_abort_text(r['aborted']))}</div>")
     out.append("<div class='cards'>")
     for n, l in [(f"{t['cases_passed']}/{t['cases']}", "cases passed"),
                  (t["cases_failed"], "cases failed"),
