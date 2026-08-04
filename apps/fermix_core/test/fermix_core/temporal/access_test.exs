@@ -11,6 +11,43 @@ defmodule FermixCore.Temporal.AccessTest do
     Map.merge(%{source_trust: :operator, computer_use_origin: :interactive}, overrides)
   end
 
+  describe "operator_read_turn?/1 (§12.1 read carve-out)" do
+    test "every attended operator turn passes" do
+      assert Access.operator_read_turn?(attended())
+      assert Access.operator_read_turn?(attended(%{computer_use_origin: :voice}))
+    end
+
+    test "an operator-created scheduled run passes: operator trust, no origin marker" do
+      assert Access.operator_read_turn?(%{source_trust: :operator})
+    end
+
+    test "an explicit nil origin is not a scheduled run" do
+      refute Access.operator_read_turn?(%{source_trust: :operator, computer_use_origin: nil})
+    end
+
+    test "a guest-created scheduled run is refused" do
+      refute Access.operator_read_turn?(%{source_trust: :guest})
+    end
+
+    test "a detached background run is refused" do
+      refute Access.operator_read_turn?(%{
+               source_trust: :operator,
+               computer_use_origin: :unattended
+             })
+    end
+
+    test "a delegated worker inside a scheduled run is refused" do
+      refute Access.operator_read_turn?(%{source_trust: :operator, subagent_depth: 1})
+    end
+
+    test "a coding continuation inside a scheduled run is refused" do
+      refute Access.operator_read_turn?(%{
+               source_trust: :operator,
+               harness_continuation_depth: 1
+             })
+    end
+  end
+
   describe "attended_operator_turn?/1" do
     test "an attended top-level operator turn passes" do
       assert Access.attended_operator_turn?(attended())

@@ -1,7 +1,8 @@
 defmodule FermixCore.Tools.EventToolsTest do
-  # async: false — the default delivery target and the delivery-channels map are
-  # global `Application` env. Each test's precondition is established in this
-  # module's own setup and restored on exit, never inherited.
+  # async: false — the default delivery target, the delivery-channels map, and
+  # the channel configuration the owner inbox is derived from are all global
+  # `Application` env. Each test's precondition is established in this module's
+  # own setup and restored on exit, never inherited.
   use ExUnit.Case, async: false
 
   alias FermixCore.Memory.Repo
@@ -16,6 +17,7 @@ defmodule FermixCore.Tools.EventToolsTest do
   end
 
   @channels %{"telegram" => FakeAdapter, "slack" => FakeAdapter}
+  @owner_channels [:telegram, :discord, :signal, :slack, :whatsapp]
 
   setup do
     unique = System.unique_integer([:positive])
@@ -26,6 +28,12 @@ defmodule FermixCore.Tools.EventToolsTest do
 
     previous_jobs = Application.get_env(:fermix_core, :jobs)
     previous_personalization = Application.get_env(:fermix_core, :personalization)
+    previous_channels = Map.new(@owner_channels, &{&1, Application.get_env(:fermix_channels, &1)})
+
+    # The tools resolve their delivery target through the real config, so the
+    # "no target anywhere" case must establish that no channel carries an owner
+    # id rather than inheriting a host or sibling-test answer.
+    Enum.each(@owner_channels, &Application.delete_env(:fermix_channels, &1))
 
     Application.put_env(
       :fermix_core,
@@ -42,6 +50,7 @@ defmodule FermixCore.Tools.EventToolsTest do
     on_exit(fn ->
       restore(:jobs, previous_jobs)
       restore(:personalization, previous_personalization)
+      Enum.each(previous_channels, fn {channel, value} -> restore_channel(channel, value) end)
 
       Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
     end)
@@ -51,6 +60,9 @@ defmodule FermixCore.Tools.EventToolsTest do
 
   defp restore(key, nil), do: Application.delete_env(:fermix_core, key)
   defp restore(key, value), do: Application.put_env(:fermix_core, key, value)
+
+  defp restore_channel(channel, nil), do: Application.delete_env(:fermix_channels, channel)
+  defp restore_channel(channel, value), do: Application.put_env(:fermix_channels, channel, value)
 
   # Second Sunday of March, next year: always inside the America/New_York
   # spring-forward gap at 02:30, and always in the future when the suite runs —
@@ -117,6 +129,27 @@ defmodule FermixCore.Tools.EventToolsTest do
       assert Enum.all?(planned, &(&1["rule_id"] in ["week_before", "day_of"]))
       assert Enum.all?(planned, &is_binary(&1["scheduled_for"]))
       assert Enum.all?(planned, &String.ends_with?(&1["occurrence_key"], "-09-14"))
+    end
+
+    test "a fresh install with a configured channel stores through its derived inbox", %{
+      repo: repo
+    } do
+      # The whole point of the derived rung: neither a fresh install nor an
+      # upgrade writes [fermix_core.jobs] default_delivery_target, so without
+      # derivation the default-on reminder rail refuses on first use. No seams
+      # here — this is the production path reading real configuration.
+      Application.put_env(:fermix_core, :jobs, delivery_channels: @channels)
+      Application.put_env(:fermix_channels, :telegram, owner_user_id: "8217352118")
+
+      stored = payload(store_birthday(repo))
+
+      assert stored["delivery"]["platform"] == "telegram"
+      assert stored["delivery"]["destination"] == "8217352118"
+      assert stored["delivery"]["source"] == "derived"
+    end
+
+    test "the acknowledgement can name a configured target as configured", %{repo: repo} do
+      assert payload(store_birthday(repo))["delivery"]["source"] == "configured"
     end
 
     test "an idempotent repeat reports the existing event rather than a second one", %{repo: repo} do
@@ -333,8 +366,16 @@ defmodule FermixCore.Tools.EventToolsTest do
 
       event_id = payload(created)["event_id"]
 
-      assert {:ok, [_claimed]} =
-               Repo.claim_due_reminders(~U[2027-08-03 13:30:00Z], 5, server: repo)
+      # Claim at the reminder's own scheduled instant — derived, never
+      # hardcoded: a fixed future timestamp paired with a relative event date
+      # becomes a time bomb the day the calendar catches up.
+      {:ok, due_at, 0} =
+        payload(created)["planned_reminders"]
+        |> List.first()
+        |> Map.fetch!("scheduled_for")
+        |> DateTime.from_iso8601()
+
+      assert {:ok, [_claimed]} = Repo.claim_due_reminders(due_at, 5, server: repo)
 
       {:ok, result} =
         EventUpdate.execute(

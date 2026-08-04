@@ -37,6 +37,27 @@ defmodule FermixCore.Temporal.Access do
   end
 
   @doc """
+  Whether `context` may READ stored events (§12.1 read carve-out, owner
+  decision 2026-08-03): every attended operator turn, plus an operator-created
+  scheduled run — a cron job carries its creator's trust and omits the origin
+  marker entirely, and a morning-brief job must be able to list events. Only
+  `event_list` gates on this; the four mutating tools stay attended-only. A
+  detached background run marks itself `:unattended` and is NOT a scheduled
+  run; delegated workers and coding continuations stay excluded at any depth.
+  """
+  @spec operator_read_turn?(map()) :: boolean()
+  def operator_read_turn?(context) when is_map(context) do
+    attended_operator_turn?(context) or operator_scheduled_turn?(context)
+  end
+
+  defp operator_scheduled_turn?(context) do
+    Map.get(context, :source_trust) == :operator and
+      not Map.has_key?(context, :computer_use_origin) and
+      top_level?(context, :subagent_depth) and
+      top_level?(context, :harness_continuation_depth)
+  end
+
+  @doc """
   The refusal a gated tool returns to the model, naming the refused tool so the
   trace shows which call was denied.
   """
@@ -45,6 +66,17 @@ defmodule FermixCore.Temporal.Access do
     "#{tool_name} is available only on an attended, top-level turn the owner is " <>
       "present for. Guest, scheduled, background, delegated, and coding-continuation " <>
       "runs cannot read or change stored events."
+  end
+
+  @doc """
+  The refusal for the read-gated `event_list`, whose gate also admits
+  operator-created scheduled runs.
+  """
+  @spec read_refusal(String.t()) :: String.t()
+  def read_refusal(tool_name) when is_binary(tool_name) and tool_name != "" do
+    "#{tool_name} is available only on an attended, top-level owner turn or in an " <>
+      "operator-created scheduled run. Guest, background, delegated, and " <>
+      "coding-continuation runs cannot read stored events."
   end
 
   # Absent means zero (an owner-typed turn carries no depth key at all); every

@@ -14,20 +14,10 @@ defmodule FermixCore.SkillCuration.Delivery do
   require Logger
 
   alias FermixCore.Delivery.ChannelSend
+  alias FermixCore.Delivery.OwnerInbox
   alias FermixCore.Prompt.InjectionScan
   alias FermixCore.SkillCuration.Proposals
 
-  # All owner-capable channels (for the configured-owners map + rung-1
-  # owner-privacy checks).
-  @owner_channel_order [:telegram, :discord, :signal, :slack, :whatsapp]
-  # Derived owner-inbox rung (§6.6): only channels where the DM destination IS
-  # the bare owner user id. Discord and Slack need a DM-channel derivation the
-  # adapters don't have yet (design open question 2) — they participate via an
-  # owner-private rung-1 jobs target only, never via a doomed derived send.
-  @derived_inbox_order [:telegram, :signal, :whatsapp]
-  @local_channels ["cli", "daemon"]
-  # Jobs-target destination keys, in DeliveryDefaults' own precedence.
-  @destination_keys ~w(chat_id channel_id recipient target reply_target)
   # At most this many verified quotes render into a proposal message (§10).
   @rendered_quotes 2
 
@@ -37,14 +27,16 @@ defmodule FermixCore.SkillCuration.Delivery do
   Resolve the delivery target: (1) the configured jobs
   `default_delivery_target` when owner-private, (2) the derived owner DM on
   the first owner-configured channel, (3) `:no_delivery_target`.
+
+  The ladder itself lives in `FermixCore.Delivery.OwnerInbox` — the one answer
+  temporal reminders resolve against too. Proposals send to an inbox, never
+  into a thread, so the resolved thread scope and provenance are dropped here.
   """
   @spec resolve_target(keyword()) :: {:ok, target()} | :no_delivery_target
-  def resolve_target(opts \\ []) do
-    owners = Keyword.get_lazy(opts, :configured_owners, &configured_owners/0)
-
-    case jobs_target(Keyword.get_lazy(opts, :jobs_config, &jobs_config/0), owners) do
-      {:ok, target} -> {:ok, target}
-      :skip -> derived_owner_inbox(owners)
+  def resolve_target(opts \\ []) when is_list(opts) do
+    case OwnerInbox.resolve(opts) do
+      {:ok, inbox} -> {:ok, Map.take(inbox, [:platform, :destination])}
+      :no_delivery_target -> :no_delivery_target
     end
   end
 
@@ -100,71 +92,6 @@ defmodule FermixCore.SkillCuration.Delivery do
     |> Enum.reject(&(&1 in [nil, ""]))
     |> Enum.join("\n")
   end
-
-  # -- target ladder -----------------------------------------------------
-
-  defp jobs_target(jobs_config, owners) do
-    jobs_config
-    |> Keyword.get(:default_delivery_target)
-    |> normalize_jobs_target()
-    |> validate_owner_private(owners)
-  end
-
-  defp normalize_jobs_target(nil), do: nil
-
-  defp normalize_jobs_target(target) when is_map(target) or is_list(target) do
-    normalized =
-      Map.new(target, fn {key, value} -> {to_string(key), value} end)
-
-    platform = normalized["channel"] || normalized["platform"]
-    destination = Enum.find_value(@destination_keys, &normalized[&1])
-
-    if is_binary(platform) and is_binary(destination) do
-      %{platform: platform, destination: destination}
-    end
-  end
-
-  defp normalize_jobs_target(_target), do: nil
-
-  defp validate_owner_private(nil, _owners), do: :skip
-
-  defp validate_owner_private(%{platform: platform} = target, _owners)
-       when platform in @local_channels do
-    {:ok, target}
-  end
-
-  defp validate_owner_private(%{platform: platform, destination: destination} = target, owners) do
-    if Map.get(owners, platform) == destination do
-      {:ok, target}
-    else
-      :skip
-    end
-  end
-
-  defp derived_owner_inbox(owners) do
-    @derived_inbox_order
-    |> Enum.find_value(fn channel ->
-      case Map.get(owners, Atom.to_string(channel)) do
-        nil -> nil
-        owner_id -> %{platform: Atom.to_string(channel), destination: owner_id}
-      end
-    end)
-    |> case do
-      nil -> :no_delivery_target
-      target -> {:ok, target}
-    end
-  end
-
-  defp configured_owners do
-    @owner_channel_order
-    |> Enum.map(fn channel ->
-      {Atom.to_string(channel), FermixCore.Config.channel_explicit_owner_user_id(channel)}
-    end)
-    |> Enum.reject(fn {_channel, owner} -> is_nil(owner) end)
-    |> Map.new()
-  end
-
-  defp jobs_config, do: Application.get_env(:fermix_core, :jobs, [])
 
   # -- sending -----------------------------------------------------------
 

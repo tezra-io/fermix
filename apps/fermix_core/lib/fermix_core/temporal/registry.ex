@@ -16,7 +16,11 @@ defmodule FermixCore.Temporal.Registry do
     * **the delivery-target snapshot** — the existing
       `[fermix_core.jobs] default_delivery_mode`/`default_delivery_target` pair
       read exactly as `Jobs.DeliveryDefaults` reads it, narrowed to the five
-      proactive platforms and normalized through the §11.1 thread table;
+      proactive platforms and normalized through the §11.1 thread table; with
+      no target configured, the owner's inbox is derived through the shared
+      `Delivery.OwnerInbox` ladder (the same one skill-curation proposals use)
+      and validated by those same §11.1 rules, so a fresh install with a
+      configured channel can store events without a second config step;
     * **the compound Repo calls** — `Memory.Repo` owns every transaction; this
       module never opens one;
     * **the post-commit scheduler signal** — a best-effort cast that can never
@@ -29,6 +33,7 @@ defmodule FermixCore.Temporal.Registry do
   require Logger
 
   alias FermixCore.Delivery.ChannelSend
+  alias FermixCore.Delivery.OwnerInbox
   alias FermixCore.Memory.Repo
   alias FermixCore.Temporal.Defaults
   alias FermixCore.Temporal.Planner
@@ -112,7 +117,7 @@ defmodule FermixCore.Temporal.Registry do
            Repo.create_temporal_event(attrs, plan, now, server: repo(context)) do
       emit_materialized(status, event)
       notify(context)
-      {:ok, %{status: status, event: event, reminders: reminders}}
+      {:ok, %{status: status, event: with_delivery_source(event, target), reminders: reminders}}
     end
   end
 
@@ -139,7 +144,7 @@ defmodule FermixCore.Temporal.Registry do
            Repo.update_temporal_event(id, column_map(spec, target), plan, now, server: server) do
       emit_materialized(event)
       notify(context)
-      {:ok, %{event: event, reminders: reminders}}
+      {:ok, %{event: with_delivery_source(event, target), reminders: reminders}}
     end
   end
 
@@ -272,11 +277,7 @@ defmodule FermixCore.Temporal.Registry do
       "occurrence_at" => iso(event.occurrence_at),
       "next_occurrence_on" => iso(event.next_occurrence_on),
       "reminder_plan" => event.reminder_plan,
-      "delivery" => %{
-        "platform" => event.delivery_platform,
-        "destination" => event.delivery_destination,
-        "thread_scope" => event.delivery_thread_scope
-      }
+      "delivery" => delivery_view(event)
     }
     |> Map.merge(delivery_state_view(event))
   end
@@ -357,6 +358,32 @@ defmodule FermixCore.Temporal.Registry do
     }
   end
 
+  # §5.2: the acknowledgement may say where the target came from, so the model
+  # can name a derived inbox ("through Telegram, derived from your configured
+  # channel") and the owner can correct it. Provenance is not a stored column:
+  # `"source"` appears only on the operation that RESOLVED the target — a
+  # listing, a removal, or an update that kept the stored target says nothing
+  # rather than re-resolving against configuration that may have moved since.
+  defp delivery_view(event) do
+    Map.merge(
+      %{
+        "platform" => event.delivery_platform,
+        "destination" => event.delivery_destination,
+        "thread_scope" => event.delivery_thread_scope
+      },
+      delivery_source_view(event)
+    )
+  end
+
+  # `:configured` or `:derived` — the two rungs `default_target/1` can answer
+  # from. Rendered as-is rather than matched against that pair, so an unexpected
+  # value would be visible in the payload instead of silently vanishing from it.
+  defp delivery_source_view(%{delivery_source: source}) when is_atom(source) do
+    %{"source" => Atom.to_string(source)}
+  end
+
+  defp delivery_source_view(_no_resolution), do: %{}
+
   # `event_list` rows carry the delivery summary the plain row does not.
   defp delivery_state_view(event) do
     [:last_delivery_status, :last_delivery_error, :last_delivery_at, :next_reminder_at]
@@ -401,9 +428,10 @@ defmodule FermixCore.Temporal.Registry do
   end
 
   def describe_error(:no_default_delivery_target) do
-    "No default delivery target is configured. Set [fermix_core.jobs] " <>
-      "default_delivery_target (platform plus a destination such as chat_id) before " <>
-      "storing events; Fermix never falls back to this conversation."
+    "No delivery target could be resolved. Either configure [fermix_core.jobs] " <>
+      "default_delivery_target (platform plus a destination such as chat_id), or " <>
+      "configure a channel with an owner id so Fermix can derive your inbox; " <>
+      "Fermix never falls back to this conversation."
   end
 
   def describe_error(:no_default_delivery_destination) do
@@ -1104,6 +1132,16 @@ defmodule FermixCore.Temporal.Registry do
     }
   end
 
+  # The stored row has no provenance column, so the resolved source rides back
+  # on the returned row for `event_view/1` alone. A target that was kept rather
+  # than resolved (an update without a rebind) carries no `:source` and stamps
+  # nothing.
+  defp with_delivery_source(event, %{source: source}) do
+    Map.put(event, :delivery_source, source)
+  end
+
+  defp with_delivery_source(event, _kept_target), do: event
+
   defp source_coordinates(%{conversation_key: {channel, chat_id, scope}}) do
     {to_string(channel), to_string(chat_id), thread_component(scope)}
   end
@@ -1156,17 +1194,55 @@ defmodule FermixCore.Temporal.Registry do
 
   # --- default delivery target (§11.1) -------------------------------------
 
+  # One precedence, resolved once at acceptance: the explicitly configured
+  # target, else the owner's inbox derived from a configured channel, else a
+  # loud refusal naming both remedies. A hostile delivery MODE is answered
+  # before either — `none`/`origin`/`local` is the operator saying background
+  # delivery is off, and deriving an inbox would silently overrule that.
   defp default_target(opts) do
     jobs = jobs_config(opts)
 
-    with {:ok, raw} <- configured_target(jobs),
-         :ok <- reject_ephemeral_fields(raw),
+    case configured_target(jobs) do
+      {:ok, raw} -> snapshot_configured(raw, jobs)
+      :absent -> derived_target(opts, jobs)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp snapshot_configured(raw, jobs) do
+    with :ok <- reject_ephemeral_fields(raw),
          {:ok, platform} <- target_platform(raw),
          {:ok, destination} <- target_destination(raw),
          {:ok, scope} <- thread_scope(platform, raw),
          {:ok, _adapter} <- resolve_adapter(platform, jobs) do
-      {:ok, %{platform: platform, destination: destination, thread_scope: scope}}
+      {:ok, target(platform, destination, scope, :configured)}
     end
+  end
+
+  # A derived candidate passes the same §11.1 validation the configured target
+  # passes — the five-platform allowlist (so `cli` and any other interaction
+  # surface is excluded here exactly as it is there) plus a resolvable adapter.
+  # A candidate that fails is not a candidate: resolution moves deterministically
+  # to the next one rather than reporting an error that would hide a valid later
+  # channel. Derived inboxes are root-scoped, so there is no thread to normalize.
+  defp derived_target(opts, jobs) do
+    opts
+    |> OwnerInbox.derived_candidates()
+    |> Enum.find_value(&derivable_target(&1, jobs))
+    |> case do
+      nil -> {:error, :no_default_delivery_target}
+      target -> {:ok, target}
+    end
+  end
+
+  defp derivable_target(%{platform: platform, destination: destination}, jobs) do
+    if platform in @platforms and match?({:ok, _adapter}, resolve_adapter(platform, jobs)) do
+      target(platform, destination, "root", :derived)
+    end
+  end
+
+  defp target(platform, destination, scope, source) do
+    %{platform: platform, destination: destination, thread_scope: scope, source: source}
   end
 
   defp jobs_config(opts) do
@@ -1183,7 +1259,7 @@ defmodule FermixCore.Temporal.Registry do
 
     cond do
       mode in @rejected_modes -> {:error, {:invalid_delivery_mode, mode}}
-      is_nil(target) or target == [] -> {:error, :no_default_delivery_target}
+      is_nil(target) or target == [] -> :absent
       is_nil(mode) or mode in @channel_modes -> {:ok, target}
       true -> {:error, {:invalid_delivery_mode, mode}}
     end

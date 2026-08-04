@@ -30,6 +30,8 @@ defmodule FermixCore.Prompt.RuntimeSectionsTest do
     assert content =~ "Use `schedule_job` when the future run must reason"
     assert content =~ "Use `event_store` for deterministic personal reminders"
     assert content =~ "Defer a delivered reminder with `reminder_snooze`"
+    assert content =~ "consults every available calendar surface"
+    assert content =~ "ask whether the owner wants Fermix reminders for it too"
     assert content =~ "For channel-originated jobs that should report back to the same chat"
     assert content =~ "Use `expires_at` for temporary"
     assert content =~ "Prefer direct Fermix built-ins over shell"

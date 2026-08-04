@@ -33,7 +33,9 @@ defmodule FermixCore.Tools.EventList do
   def description do
     "List or search the owner's stored events — what is coming up, when a birthday is, " <>
       "which reminders are planned, and whether any reminder failed to deliver. " <>
-      "Defaults to active events from today onward; pass from/to or status to see history."
+      "Defaults to active events from today onward; pass from/to or status to see history. " <>
+      "Covers only events stored in Fermix — a connected calendar (e.g. Google Calendar) " <>
+      "is a separate source with its own tools."
   end
 
   @impl true
@@ -86,7 +88,12 @@ defmodule FermixCore.Tools.EventList do
     [
       %{tag: "date_window_too_wide", description: "the from/to window exceeds two years"},
       %{tag: "invalid_cursor", description: "the cursor did not come from a prior call"},
-      %{tag: "not_attended", description: "the turn is not an attended top-level owner turn"}
+      %{
+        tag: "not_attended",
+        description:
+          "the turn is neither an attended top-level owner turn nor an " <>
+            "operator-created scheduled run"
+      }
     ]
   end
 
@@ -96,9 +103,12 @@ defmodule FermixCore.Tools.EventList do
   @impl true
   def category, do: :scheduling
 
-  @doc "Attended-owner-only (§12.1); the same predicate re-runs inside `execute/2`."
+  @doc """
+  Attended owner turns plus operator-created scheduled runs (§12.1 read
+  carve-out); the same predicate re-runs inside `execute/2`.
+  """
   @spec advertise?(map()) :: boolean()
-  def advertise?(context) when is_map(context), do: Access.attended_operator_turn?(context)
+  def advertise?(context) when is_map(context), do: Access.operator_read_turn?(context)
 
   @impl true
   @spec execute(map(), Tool.context()) :: {:ok, Tool.tool_result()}
@@ -113,10 +123,10 @@ defmodule FermixCore.Tools.EventList do
   end
 
   defp gated(args, context) do
-    if Access.attended_operator_turn?(context) do
+    if Access.operator_read_turn?(context) do
       list(args, context)
     else
-      {:ok, Tool.error(Access.refusal(name()))}
+      {:ok, Tool.error(Access.read_refusal(name()))}
     end
   end
 
