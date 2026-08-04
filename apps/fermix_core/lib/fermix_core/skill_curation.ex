@@ -216,15 +216,40 @@ defmodule FermixCore.SkillCuration do
   end
 
   @doc """
-  The `/skills list` view (design open question 3, answered): every
-  curation-managed skill with its lifecycle state and usage counters.
+  The `/skills list` view (design open question 3, answered): the skill
+  inventory grouped by origin — curation-managed (with lifecycle state),
+  the operator's own skills, and plugin skills — each joined with its usage
+  counters. Pre-bundled skills (seeded from priv/skills) are excluded: they
+  ship with Fermix, are not the operator's inventory, and nothing here can
+  act on them.
   """
-  @spec list_managed(keyword()) :: {:ok, [map()]} | {:error, term()}
-  def list_managed(opts \\ []) do
+  @spec list_skills(keyword()) ::
+          {:ok, %{managed: [map()], local: [map()], plugin: [map()]}} | {:error, term()}
+  def list_skills(opts \\ []) do
     repo = Keyword.get(opts, :repo, Repo)
+    registry = Keyword.get(opts, :skill_registry, SkillRegistry)
 
-    with {:ok, rows} <- Repo.list_skill_curation_ledger(%{}, server: repo) do
-      {:ok, Enum.map(rows, &managed_entry(&1, repo))}
+    with {:ok, ledger_rows} <- Repo.list_skill_curation_ledger(%{}, server: repo),
+         {:ok, usage_rows} <- Repo.list_skill_usage(server: repo) do
+      usage = Map.new(usage_rows, &{&1.skill_name, &1})
+      managed_names = MapSet.new(ledger_rows, & &1.skill_name)
+
+      bundled = bundled_skill_names()
+
+      {local, plugin} =
+        registry
+        |> SkillRegistry.list_detailed()
+        |> Enum.reject(
+          &(MapSet.member?(managed_names, &1.name) or MapSet.member?(bundled, &1.name))
+        )
+        |> Enum.split_with(&(&1.trust == :operator))
+
+      {:ok,
+       %{
+         managed: Enum.map(ledger_rows, &inventory_entry(&1.skill_name, usage, &1.status)),
+         local: Enum.map(local, &inventory_entry(&1.name, usage, nil)),
+         plugin: Enum.map(plugin, &inventory_entry(&1.name, usage, nil))
+       }}
     end
   end
 
@@ -246,22 +271,44 @@ defmodule FermixCore.SkillCuration do
     end
   end
 
-  defp managed_entry(row, repo) do
-    usage =
-      case Repo.get_skill_usage(row.skill_name, server: repo) do
-        {:ok, usage} -> usage
-        {:error, _reason} -> %{views: 0, runs: 0, last_used_at: nil}
-      end
+  # Bundled skills are seeded BY COPY into the local skills dir, so their
+  # runtime trust/source_path cannot tell them apart from hand-authored ones —
+  # the shipped priv/skills frontmatter names are the reliable identity (the
+  # dir basename differs: self_knowledge vs self-knowledge).
+  defp bundled_skill_names do
+    case :code.priv_dir(:fermix_core) do
+      {:error, _reason} ->
+        MapSet.new()
+
+      priv ->
+        priv
+        |> to_string()
+        |> Path.join("skills/*/SKILL.md")
+        |> Path.wildcard()
+        |> MapSet.new(&frontmatter_name/1)
+    end
+  end
+
+  defp frontmatter_name(skill_md) do
+    with {:ok, content} <- File.read(skill_md),
+         [_full, name] <- Regex.run(~r/^name:\s*(.+?)\s*$/m, content) do
+      name
+    else
+      # Unreadable/nameless shipped file: fall back to the dir basename so the
+      # listing filter still has an identity to match on.
+      _other -> skill_md |> Path.dirname() |> Path.basename()
+    end
+  end
+
+  defp inventory_entry(skill_name, usage, status) do
+    counters = Map.get(usage, skill_name, %{views: 0, runs: 0, last_used_at: nil})
 
     %{
-      skill_name: row.skill_name,
-      status: row.status,
-      created_at: row.created_at,
-      last_updated_at: row.last_updated_at,
-      archived_at: row.archived_at,
-      views: usage.views,
-      runs: usage.runs,
-      last_used_at: usage.last_used_at
+      skill_name: skill_name,
+      status: status,
+      views: counters.views,
+      runs: counters.runs,
+      last_used_at: counters.last_used_at
     }
   end
 

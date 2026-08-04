@@ -226,28 +226,42 @@ defmodule FermixChannels.Gateway.Commands.Skills do
   end
 
   defp list_managed(reply_fn, context) do
-    case SkillCuration.list_managed(core_opts(context)) do
-      {:ok, []} ->
-        reply(reply_fn, "Curation manages no skills yet.")
-
-      {:ok, entries} ->
-        reply(
-          reply_fn,
-          "Curation-managed skills:\n" <> Enum.map_join(entries, "\n", &managed_line/1)
-        )
-
-      {:error, reason} ->
-        reply(reply_fn, "Could not list skills: #{inspect(reason)}.")
+    case SkillCuration.list_skills(core_opts(context)) do
+      {:ok, groups} -> reply(reply_fn, inventory_text(groups))
+      {:error, reason} -> reply(reply_fn, "Could not list skills: #{inspect(reason)}.")
     end
   end
 
-  defp managed_line(entry) do
-    "- #{entry.skill_name} (#{entry.status}) — created #{date(entry.created_at)}, " <>
-      "runs #{entry.runs}, views #{entry.views}, last used #{last_used(entry.last_used_at)}"
+  # Tight, mobile-first lines: one usage fragment per skill, no prose.
+  defp inventory_text(%{managed: [], local: [], plugin: []}), do: "No skills installed."
+
+  defp inventory_text(groups) do
+    [
+      section("Curation-managed", groups.managed, &managed_line/1),
+      section("Skills", groups.local, &skill_line/1),
+      section("Plugin", groups.plugin, &skill_line/1)
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join("\n")
   end
 
-  defp last_used(nil), do: "never"
-  defp last_used(%DateTime{} = at), do: date(at)
+  defp managed_line(entry) do
+    "- #{entry.skill_name} (#{entry.status}) · #{usage_fragment(entry)}"
+  end
+
+  defp skill_line(entry) do
+    "- #{entry.skill_name} · #{usage_fragment(entry)}"
+  end
+
+  defp usage_fragment(%{runs: runs, last_used_at: at}) when runs > 0 do
+    "runs #{runs} · last #{date(at)}"
+  end
+
+  defp usage_fragment(%{views: views, last_used_at: at}) when views > 0 do
+    "viewed #{views} · last #{date(at)}"
+  end
+
+  defp usage_fragment(_entry), do: "unused"
 
   defp archive(skill_name, reply_fn, context) do
     case SkillCuration.archive_skill(skill_name, core_opts(context)) do

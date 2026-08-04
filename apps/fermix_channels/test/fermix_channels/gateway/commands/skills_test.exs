@@ -76,19 +76,29 @@ defmodule FermixChannels.Gateway.Commands.SkillsTest do
     context = %{
       conversation_key: {"telegram", "chat-1", :root},
       authorization: authorization(Keyword.get(opts, :role, :operator)),
-      skill_curation_opts: [
-        repo: ctx.repo,
-        skills_root: ctx.skills_root,
-        main_agent_server: nil,
-        adapter: Keyword.get(opts, :adapter, DraftStub),
-        configured_owners: %{"telegram" => "owner-1"},
-        jobs_config: []
-      ]
+      skill_curation_opts:
+        [
+          repo: ctx.repo,
+          skills_root: ctx.skills_root,
+          main_agent_server: nil,
+          adapter: Keyword.get(opts, :adapter, DraftStub),
+          configured_owners: %{"telegram" => "owner-1"},
+          jobs_config: []
+        ] ++ registry_opt(opts)
     }
 
     message = message(content, opts)
     reply_fn = fn {:text, text} -> send(test_pid, {:skills_reply, text}) end
     Commands.dispatch(Commands.parse(message), reply_fn, context)
+  end
+
+  # Present only when a test provides one: a `skill_registry: nil` entry would
+  # override the facade's module default.
+  defp registry_opt(opts) do
+    case Keyword.get(opts, :skill_registry) do
+      nil -> []
+      registry -> [skill_registry: registry]
+    end
   end
 
   defp authorization(:operator), do: %Authorization{role: :operator, trust: :operator}
@@ -285,7 +295,32 @@ defmodule FermixChannels.Gateway.Commands.SkillsTest do
     end
   end
 
-  test "list shows curation-managed skills with usage", ctx do
+  defp start_registry!(ctx, skills) do
+    registry_dir = Path.join(ctx.skills_root, "registry")
+
+    for {name, body} <- skills do
+      dir = Path.join(registry_dir, name)
+      File.mkdir_p!(dir)
+
+      File.write!(
+        Path.join(dir, "SKILL.md"),
+        "---\nname: #{name}\ndescription: d\n---\n\n#{body}\n"
+      )
+    end
+
+    start_supervised!(
+      {FermixCore.Agents.SkillRegistry,
+       name: :"skills_cmd_registry_#{System.unique_integer([:positive])}",
+       skills_dir: registry_dir,
+       core_dir: nil,
+       plugin_skill_dirs: [],
+       seed_defaults: false}
+    )
+  end
+
+  test "list groups managed and other skills with tight usage lines", ctx do
+    registry = start_registry!(ctx, [{"hand_made", "body"}])
+
     {:ok, _} =
       Repo.insert_skill_curation_ledger(
         %{
@@ -303,18 +338,33 @@ defmodule FermixChannels.Gateway.Commands.SkillsTest do
                server: ctx.repo
              )
 
-    assert :ok = dispatch("/skills list", ctx, chat_id: "owner-1")
+    assert :ok = dispatch("/skills list", ctx, chat_id: "owner-1", skill_registry: registry)
     assert_receive {:skills_reply, reply}
-    assert reply =~ "Curation-managed skills:"
-    assert reply =~ "rubric_reply_judge (active)"
-    assert reply =~ "runs 1"
-    assert reply =~ "created 2026-08-01"
+    assert reply =~ "Curation-managed:"
+    assert reply =~ "- rubric_reply_judge (active) · runs 1 · last 2026-08-02"
+    assert reply =~ "Skills:"
+    assert reply =~ "- hand_made · unused"
   end
 
-  test "list with no managed skills says so", ctx do
-    assert :ok = dispatch("/skills list", ctx, chat_id: "owner-1")
+  test "list excludes pre-bundled skills, even as seeded copies", ctx do
+    # Seeding copies bundled skills into the operator dir, where trust and
+    # source_path look hand-authored — the shipped frontmatter NAME is the
+    # identity that keeps them out of the listing.
+    registry =
+      start_registry!(ctx, [{"self-knowledge", "seeded copy"}, {"hand_made", "body"}])
+
+    assert :ok = dispatch("/skills list", ctx, chat_id: "owner-1", skill_registry: registry)
     assert_receive {:skills_reply, reply}
-    assert reply =~ "Curation manages no skills yet."
+    assert reply =~ "hand_made"
+    refute reply =~ "self-knowledge"
+  end
+
+  test "list with nothing installed says so", ctx do
+    registry = start_registry!(ctx, [])
+
+    assert :ok = dispatch("/skills list", ctx, chat_id: "owner-1", skill_registry: registry)
+    assert_receive {:skills_reply, reply}
+    assert reply =~ "No skills installed."
   end
 
   test "archive then restore round-trips a curation-made skill", ctx do
