@@ -224,10 +224,57 @@ defmodule FermixCore.Capabilities.MCP.Remote.SessionTest do
                Session.request(session, "tools/list", %{}, 5_000)
     end
 
-    test "404 during an established session is session expiry" do
-      {_agent, session} = start_session([json(404, %{})])
+    # MCP 2025-06-18 requires the client to start a NEW session on a 404 to a
+    # request carrying a session id. Returning `:session_expired` and stopping
+    # there left a long-lived session permanently poisoned.
+    test "404 renews the session and resends, transparently to the caller" do
+      renewed = "sess-renewed-999"
+
+      # Ids keep advancing across the renewal: the failed tools/list spent 2, the
+      # renewal's initialize is 3, and the resend is 4.
+      {agent, session} =
+        start_session([
+          json(404, %{}),
+          json(200, rpc_result(3, %{"protocolVersion" => "2025-06-18", "capabilities" => %{}}), [
+            {"mcp-session-id", renewed}
+          ]),
+          accepted(),
+          json(200, rpc_result(4, %{"tools" => []}))
+        ])
+
+      assert {:ok, %{"tools" => []}} = Session.request(session, "tools/list", %{}, 5_000)
+
+      [_init, _initialized, expired, reinit, reinitialized, resent] = requests(agent)
+      assert Jason.decode!(expired.body)["method"] == "tools/list"
+      # The dead id must not ride the renewal, or the server 404s it again.
+      assert Jason.decode!(reinit.body)["method"] == "initialize"
+      refute Enum.any?(reinit.headers, &(elem(&1, 0) == "mcp-session-id"))
+      assert Jason.decode!(reinitialized.body)["method"] == "notifications/initialized"
+      assert Jason.decode!(resent.body)["method"] == "tools/list"
+      assert {"mcp-session-id", renewed} in resent.headers
+    end
+
+    test "a 404 on the renewed session fails loud instead of looping" do
+      {agent, session} =
+        start_session([
+          json(404, %{}),
+          json(200, rpc_result(3, %{"protocolVersion" => "2025-06-18", "capabilities" => %{}}), [
+            {"mcp-session-id", "sess-renewed-999"}
+          ]),
+          accepted(),
+          json(404, %{})
+        ])
 
       assert {:error, :session_expired} = Session.request(session, "tools/list", %{}, 5_000)
+      # Two tools/list attempts and exactly one renewal — never a third round.
+      assert length(requests(agent)) == 6
+    end
+
+    test "a failed renewal surfaces the renewal's own error" do
+      {_agent, session} = start_session([json(404, %{}), json(401, %{})])
+
+      assert {:error, {:reauthorization_required, "mcp.eden.so"}} =
+               Session.request(session, "tools/list", %{}, 5_000)
     end
 
     test "429 honours an integer Retry-After" do

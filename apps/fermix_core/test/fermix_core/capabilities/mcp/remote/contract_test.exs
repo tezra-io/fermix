@@ -287,7 +287,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.ContractTest do
 
     test "a vendor message is bounded and stripped of control characters" do
       long = String.duplicate("a", 400)
-      body = ~s({"ok":false,"status":"error","message":"bad\nthing #{long}"})
+      body = ~s({"ok":false,"status":"error","message":"bad\\nthing #{long}"})
       result = %{"content" => [%{"type" => "text", "text" => body}]}
 
       assert {:error, {:remote_tool_error, "error", message}} =
