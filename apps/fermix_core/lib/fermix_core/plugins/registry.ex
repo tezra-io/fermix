@@ -7,9 +7,13 @@ defmodule FermixCore.Plugins.Registry do
   never exist in more than one set.
   """
 
+  require Logger
+
   alias FermixCore.Capabilities.MCP.Remote.AuthRef
   alias FermixCore.Capabilities.MCP.Remote.Endpoint
   alias FermixCore.Plugins.CanonicalJson
+  alias FermixCore.Plugins.Dist.Provenance
+  alias FermixCore.Plugins.Dist.Provenance.Cache, as: ProvenanceCache
   alias FermixCore.Plugins.Dist.Store, as: DistStore
   alias FermixCore.Plugins.Http.Template
   alias FermixCore.Plugins.Plugin
@@ -234,6 +238,7 @@ defmodule FermixCore.Plugins.Registry do
 
     with {:ok, raw} <- File.read(path),
          {:ok, manifest} <- Jason.decode(raw),
+         {:ok, manifest} <- authorize_remote(manifest, :bundled, name),
          {:ok, plugin} <- decode_manifest(manifest, path),
          :ok <- validate_catalog_name(name, plugin) do
       {:ok, plugin}
@@ -271,6 +276,7 @@ defmodule FermixCore.Plugins.Registry do
 
     with {:ok, raw} <- read_installed_manifest(path),
          {:ok, manifest} <- Jason.decode(raw),
+         {:ok, manifest} <- authorize_remote(manifest, {:installed, root}, name),
          {:ok, plugin} <- decode_manifest(manifest, path),
          :ok <- validate_installed_name(name, plugin) do
       {:ok, plugin}
@@ -278,6 +284,34 @@ defmodule FermixCore.Plugins.Registry do
       {:error, %Jason.DecodeError{} = error} -> {:error, {:invalid_json, path, error}}
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  # A `remote_mcp` manifest binds a live credential to a network endpoint and
+  # ships no code to read, so it is loadable only from an artifact whose
+  # publisher signature and tree digest re-verify (§9.3, §10.2). The on-disk
+  # manifest is read ONLY to answer "is this remote"; when it is, the manifest
+  # that gets decoded is the one from the verified bytes, so a manifest edited
+  # after install cannot redirect the credential.
+  #
+  # A verification failure on an installed plugin is a tamper signal and stays
+  # fatal, matching "a `:ready` entry whose manifest is missing or invalid IS
+  # fatal". `dev_local` and bundled sources have no evidence by construction and
+  # are refused by `Provenance.verify/3` itself.
+  defp authorize_remote(manifest, source, name) do
+    if Provenance.remote_runtime?(manifest["runtime"]),
+      do: verified_manifest(source, name),
+      else: {:ok, manifest}
+  end
+
+  defp verified_manifest({:installed, root}, name),
+    do: ProvenanceCache.verified_manifest(root, name)
+
+  # `Provenance.verify/3` stays the single authority on this refusal rather than
+  # the reason atom being restated here; these sources carry no evidence, so it
+  # can only refuse them, and the match says so out loud if that ever changes.
+  defp verified_manifest(source, name) when source in [:dev_local, :bundled] do
+    {:error, reason} = Provenance.verify(source, name)
+    {:error, reason}
   end
 
   defp read_installed_manifest(path) do
@@ -324,19 +358,38 @@ defmodule FermixCore.Plugins.Registry do
     |> Enum.reduce_while({:ok, []}, fn dir, {:ok, acc} ->
       case load_dev_local_plugin(dir) do
         {:ok, plugin} -> {:cont, {:ok, [plugin | acc]}}
+        {:error, :unverified_remote_runtime} -> {:cont, {:ok, refuse_dev_local(acc, dir)}}
         {:error, reason} -> {:halt, {:error, reason}}
       end
     end)
+  end
+
+  # A dev_local remote manifest is unverifiable by construction, so this is a
+  # standing policy refusal rather than the corrupt-manifest case dev_local
+  # otherwise fails loud on. It excludes the one plugin instead of taking the
+  # registry down with it: a remote checkout sitting in the author's dev_local
+  # directory must not cost them every OTHER plugin, including the ones they are
+  # actually working on. Loud in the log, and the plugin is simply absent.
+  defp refuse_dev_local(acc, dir) do
+    Logger.warning(
+      "refusing dev_local plugin at #{dir}: a remote_mcp manifest has no publisher " <>
+        "signature to verify, so it cannot be loaded from dev_local. Install it from " <>
+        "the catalog instead."
+    )
+
+    acc
   end
 
   defp load_dev_local_plugin(dir) do
     path = Path.join(dir, "plugin.json")
 
     with {:ok, raw} <- File.read(path),
-         {:ok, manifest} <- Jason.decode(raw) do
+         {:ok, manifest} <- Jason.decode(raw),
+         {:ok, manifest} <- authorize_remote(manifest, :dev_local, Path.basename(dir)) do
       decode_manifest(manifest, path)
     else
       {:error, %Jason.DecodeError{} = error} -> {:error, {:invalid_json, path, error}}
+      {:error, :unverified_remote_runtime} -> {:error, :unverified_remote_runtime}
       {:error, reason} -> {:error, {:dev_local_manifest_unreadable, path, reason}}
     end
   end

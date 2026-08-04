@@ -145,7 +145,10 @@ defmodule FermixCore.Plugins.Dist.Provenance do
   or a specific refusal — every refusal happens before any untrusted manifest,
   skill, or credential is touched.
 
-  `opts`: `:verifier` (the `Dist.Verifier` seam, default `Verifier.Cosign`).
+  `opts`: `:verifier` (the `Dist.Verifier` seam). Resolution follows the same
+  shape as `Setup.SecretWriter`: an explicit option wins, else the configured
+  `:plugin_provenance_verifier`, else cosign. `Registry.find/1` has no options to
+  thread, so the configured seam is the only way a test reaches this gate.
   """
   @spec verify(source(), String.t(), keyword()) :: {:ok, Snapshot.t()} | {:error, term()}
   def verify(source, name, opts \\ [])
@@ -180,6 +183,9 @@ defmodule FermixCore.Plugins.Dist.Provenance do
     end
   end
 
+  defp configured_verifier,
+    do: Application.get_env(:fermix_core, :plugin_provenance_verifier, VerifierCosign)
+
   # --- capture (step 1) ---
 
   defp capture_and_verify(root, name, version, opts) do
@@ -195,7 +201,7 @@ defmodule FermixCore.Plugins.Dist.Provenance do
         archive: archive,
         recorded_sha: String.trim(recorded_sha),
         sha256: sha256_hex(archive),
-        verifier: Keyword.get(opts, :verifier, VerifierCosign)
+        verifier: Keyword.get(opts, :verifier) || configured_verifier()
       }
 
       with_scratch(root, fn scratch -> gate(attempt, scratch) end)

@@ -7,6 +7,8 @@ defmodule FermixCore.Plugins.StatusTest do
   alias FermixCore.Plugins.Registry
   alias FermixCore.Plugins.Status
   alias FermixCore.Setup.ConfigStore
+  alias FermixTestSupport.DistFixtures
+  alias FermixTestSupport.DistVerifierStub
 
   defp probe_ok do
     [
@@ -44,7 +46,12 @@ defmodule FermixCore.Plugins.StatusTest do
       FermixTestSupport.SafeRm.rm_rf!(checkout)
     end)
 
-    %{checkout: checkout}
+    store = Path.join(home, "plugins")
+    fixtures = Path.join(home, "fixtures")
+    File.mkdir_p!(fixtures)
+    DistStore.ensure!(store)
+
+    %{checkout: checkout, store: store, fixtures: fixtures}
   end
 
   defp write_plugin(checkout, name, manifest_extra) do
@@ -203,6 +210,11 @@ defmodule FermixCore.Plugins.StatusTest do
     Enum.find(plugins, &(&1.name == name)) || raise "plugin #{name} not loaded"
   end
 
+  defp load_installed(store, name) do
+    {:ok, plugins} = Registry.list(installed_root: store)
+    Enum.find(plugins, &(&1.name == name)) || raise "plugin #{name} not loaded"
+  end
+
   defp put_plugin_secrets(secrets) do
     previous = Application.get_env(:fermix_core, :plugin_secrets, %{})
     Application.put_env(:fermix_core, :plugin_secrets, secrets)
@@ -286,63 +298,84 @@ defmodule FermixCore.Plugins.StatusTest do
     assert Status.status("ghost") == :not_configured
   end
 
+  # A remote manifest is loadable ONLY from a verified artifact (M27 §9.3), so
+  # these install one rather than dropping it in a dev_local checkout — that path
+  # is refused by design, and a test that used it would be asserting against a
+  # plugin the product will never load.
   describe "remote plugins (M27 §7.8)" do
-    setup %{checkout: checkout} do
-      write_plugin(checkout, "workspacedemo", remote_manifest())
+    setup %{store: store, fixtures: fixtures} do
+      DistVerifierStub.init()
+      on_exit(&DistVerifierStub.cleanup/0)
+
+      :ok =
+        DistFixtures.install_remote_plugin(
+          store,
+          fixtures,
+          "workspacedemo",
+          "1.0.0",
+          remote_manifest()
+        )
+
+      :ok = DistVerifierStub.allow("workspacedemo", "1.0.0")
       :ok
     end
 
-    test "a credential but no selected workspace is :needs_workspace", %{checkout: checkout} do
+    test "a credential but no selected workspace is :needs_workspace", %{store: store} do
       put_plugins_env(["workspacedemo"], %{"workspacedemo" => []})
       put_plugin_secrets(%{"workspacedemo" => "tok"})
 
-      assert Status.status(load_plugin(checkout, "workspacedemo")) == :needs_workspace
+      assert Status.status(load_installed(store, "workspacedemo")) == :needs_workspace
     end
 
     # `:needs_workspace` is not `:ready`, so no server spec materializes, so no
     # MCP child spawns, so no capability is ever discovered: zero agent tools.
-    test "…and it materializes no server spec, so it registers no tools", %{checkout: checkout} do
+    test "…and it materializes no server spec, so it registers no tools", %{store: store} do
       put_plugins_env(["workspacedemo"], %{"workspacedemo" => []})
       put_plugin_secrets(%{"workspacedemo" => "tok"})
 
-      assert {:ok, specs} = McpSource.server_specs(registry: [dev_local: checkout])
+      assert {:ok, specs} =
+               McpSource.server_specs(registry: [installed_root: store])
+
       assert specs == []
     end
 
-    test "the secret is asked for first: no credential is :needs_secret", %{checkout: checkout} do
+    test "the secret is asked for first: no credential is :needs_secret", %{store: store} do
       put_plugins_env(["workspacedemo"], %{"workspacedemo" => [{"workspace_id", "ws_alpha"}]})
       put_plugin_secrets(%{})
 
-      assert Status.status(load_plugin(checkout, "workspacedemo")) == :needs_secret
+      assert Status.status(load_installed(store, "workspacedemo")) == :needs_secret
     end
 
-    test "a credential and a selected workspace is :ready", %{checkout: checkout} do
+    test "a credential and a selected workspace is :ready", %{store: store} do
       put_plugins_env(["workspacedemo"], %{"workspacedemo" => [{"workspace_id", "ws_alpha"}]})
       put_plugin_secrets(%{"workspacedemo" => "tok"})
 
-      assert Status.status(load_plugin(checkout, "workspacedemo")) == :ready
-      assert {:ok, [spec]} = McpSource.server_specs(registry: [dev_local: checkout])
+      assert Status.status(load_installed(store, "workspacedemo")) == :ready
+
+      assert {:ok, [spec]} =
+               McpSource.server_specs(registry: [installed_root: store])
+
       assert spec.selected_profile == "retrieval"
     end
 
     test "an undeclared access profile is invalid config, never the safe default", %{
-      checkout: checkout
+      store: store
     } do
       entry = [{"workspace_id", "ws_alpha"}, {"access_profile", "captur"}]
       put_plugins_env(["workspacedemo"], %{"workspacedemo" => entry})
       put_plugin_secrets(%{"workspacedemo" => "tok"})
 
-      assert Status.status(load_plugin(checkout, "workspacedemo")) == :invalid_remote_config
+      assert Status.status(load_installed(store, "workspacedemo")) == :invalid_remote_config
     end
 
     test "a workspace id that is not opaque visible ASCII is invalid config", %{
-      checkout: checkout
+      store: store
     } do
       entry = [{"workspace_id", "ws alpha"}]
       put_plugins_env(["workspacedemo"], %{"workspacedemo" => entry})
       put_plugin_secrets(%{"workspacedemo" => "tok"})
 
-      assert Status.status(load_plugin(checkout, "workspacedemo")) == :invalid_remote_config
+      assert Status.status(load_installed(store, "workspacedemo")) == :invalid_remote_config
     end
   end
 

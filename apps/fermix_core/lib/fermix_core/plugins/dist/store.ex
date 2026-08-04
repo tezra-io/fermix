@@ -13,6 +13,7 @@ defmodule FermixCore.Plugins.Dist.Store do
   floor, §13) is checked here, at install and at every `list/2`.
   """
 
+  alias FermixCore.Plugins.Dist.Provenance.Cache, as: ProvenanceCache
   alias FermixCore.Plugins.Dist.SafeRm
 
   # The manifest/interpreter contract generation this core understands, with
@@ -361,7 +362,8 @@ defmodule FermixCore.Plugins.Dist.Store do
   def uninstall(root, name) when is_binary(name) do
     with :ok <- SafeRm.rm_rf(Path.join(paths(root).installed, name), root),
          :ok <- SafeRm.rm_rf(Path.join(paths(root).evidence, name), root),
-         :ok <- rm_legacy_skills(root, name) do
+         :ok <- rm_legacy_skills(root, name),
+         :ok <- ProvenanceCache.invalidate(root, name) do
       forget(root, name)
     end
   end
