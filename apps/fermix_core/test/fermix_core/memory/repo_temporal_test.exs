@@ -182,21 +182,31 @@ defmodule FermixCore.Memory.RepoTemporalTest do
                Repo.list_temporal_events(%{}, server: repo)
     end
 
-    test "an identity collision with a different date fails and directs to an update", %{
+    test "an identity collision returns the twin it collided with, not a bare atom", %{
       repo: repo
     } do
-      {attrs, _event, _occurrences} = create!(repo, birthday_spec())
+      {attrs, stored, _occurrences} = create!(repo, birthday_spec())
 
       moved = birthday_spec(%{recurrence_day: 15})
       {:ok, plan} = Planner.materialize(moved, @now)
 
-      assert {:error, :identity_conflict} =
+      # The transaction already re-read the twin to decide this was a collision;
+      # returning it is what lets the caller quote the date the owner must
+      # choose between instead of describing the conflict in the abstract.
+      assert {:error, {:identity_conflict, existing}} =
                Repo.create_temporal_event(
                  event_attrs(moved, %{dedupe_key: attrs.dedupe_key}),
                  plan_with_ids(plan),
                  @now,
                  server: repo
                )
+
+      assert existing.id == stored.id
+      assert existing.title == "Sarah's birthday"
+      assert existing.recurrence_kind == "yearly"
+      assert existing.recurrence_month == 9
+      assert existing.recurrence_day == 14
+      assert existing.status == "active"
     end
 
     test "a cancelled event does not block a new active event with the same identity", %{

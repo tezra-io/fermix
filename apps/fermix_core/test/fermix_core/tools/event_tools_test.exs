@@ -161,6 +161,44 @@ defmodule FermixCore.Tools.EventToolsTest do
       assert second["event_id"] == first["event_id"]
     end
 
+    test "the acknowledgement carries the same-kind events this one could be a twin of", %{
+      repo: repo
+    } do
+      assert payload(store_birthday(repo))["similar_events"] == []
+
+      second = payload(store_birthday(repo, %{"title" => "Sarah Chen's birthday"}))
+
+      assert [twin] = second["similar_events"]
+      assert twin["title"] == "Sarah's birthday"
+      assert is_binary(twin["event_id"])
+      assert String.ends_with?(twin["next_occurrence_on"], "-09-14")
+    end
+
+    # The whole point of the enriched conflict: the model can quote the stored
+    # date back to the owner and ask which of the two this is, instead of
+    # silently overwriting one person's birthday with another's.
+    test "a same-name event on another date refuses by naming the stored one and the question",
+         %{repo: repo} do
+      store_birthday(repo)
+
+      {:ok, result} =
+        EventStore.execute(
+          %{
+            "title" => "Sarah's birthday",
+            "kind" => "birthday",
+            "when" => %{"type" => "annual", "month" => 6, "day" => 10}
+          },
+          context(repo)
+        )
+
+      assert result.success == false
+      assert result.error =~ "Sarah's birthday"
+      assert result.error =~ "09-14"
+      assert result.error =~ "Ask the owner"
+
+      assert {:ok, %{events: [_only_one]}} = Repo.list_temporal_events(%{}, server: repo)
+    end
+
     test "a failed creation never reads like success", %{repo: repo} do
       Application.put_env(:fermix_core, :jobs, delivery_channels: @channels)
 
@@ -327,6 +365,29 @@ defmodule FermixCore.Tools.EventToolsTest do
       assert Enum.all?(updated["planned_reminders"], &(&1["rule_id"] == "days_before_0"))
     end
 
+    test "reports what each changed field was, so the reply can say was-X-now-Y", %{repo: repo} do
+      stored = payload(store_birthday(repo))
+
+      {:ok, result} =
+        EventUpdate.execute(
+          %{
+            "event_id" => stored["event_id"],
+            "when" => %{"type" => "annual", "month" => 6, "day" => 10},
+            "owner_direction" => "her birthday is June 10, change it"
+          },
+          context(repo)
+        )
+
+      assert result.success == true
+      updated = payload(result)
+
+      assert updated["previous"]["recurrence_month"] == 9
+      assert updated["previous"]["recurrence_day"] == 14
+      assert updated["recurrence"]["month"] == 6
+      assert updated["recurrence"]["day"] == 10
+      refute Map.has_key?(updated["previous"], "title")
+    end
+
     test "rebinds to the current default target on explicit request", %{repo: repo} do
       stored = payload(store_birthday(repo))
 
@@ -385,6 +446,66 @@ defmodule FermixCore.Tools.EventToolsTest do
 
       assert result.success == false
       assert result.error =~ "try again"
+    end
+
+    # Refuse, then ask, then land: the whole checkpoint in the order the model
+    # meets it. The refusal has to carry the stored date, because that is what
+    # the model quotes when it puts the question to the owner.
+    test "an undirected date change is refused, writes nothing, and lands on the retry", %{
+      repo: repo
+    } do
+      stored = payload(store_birthday(repo))
+
+      args = %{
+        "event_id" => stored["event_id"],
+        "when" => %{"type" => "annual", "month" => 6, "day" => 10}
+      }
+
+      {:ok, refused} = EventUpdate.execute(args, context(repo))
+
+      assert refused.success == false
+      assert refused.error =~ "Sarah's birthday"
+      assert refused.error =~ "09-14"
+      assert refused.error =~ "Ask the owner"
+      assert refused.error =~ "owner_direction"
+
+      assert {:ok, untouched} = Repo.get_temporal_event(stored["event_id"], server: repo)
+      assert untouched.recurrence_month == 9
+      assert untouched.recurrence_day == 14
+      assert untouched.revision == 1
+
+      direction = "no, move it, June 10 is the right date"
+
+      {:ok, directed} =
+        EventUpdate.execute(Map.put(args, "owner_direction", direction), context(repo))
+
+      assert directed.success == true
+      updated = payload(directed)
+
+      assert updated["recurrence"]["month"] == 6
+      assert updated["previous"]["recurrence_day"] == 14
+      refute Jason.encode!(updated) =~ direction
+    end
+
+    test "a direction past the byte cap is refused at the tool boundary", %{repo: repo} do
+      stored = payload(store_birthday(repo))
+
+      {:ok, result} =
+        EventUpdate.execute(
+          %{
+            "event_id" => stored["event_id"],
+            "when" => %{"type" => "annual", "month" => 6, "day" => 10},
+            "owner_direction" => String.duplicate("a", 241)
+          },
+          context(repo)
+        )
+
+      assert result.success == false
+      assert result.error =~ "clause"
+
+      assert {:ok, untouched} = Repo.get_temporal_event(stored["event_id"], server: repo)
+      assert untouched.recurrence_day == 14
+      assert untouched.revision == 1
     end
 
     test "a missing event_id is refused", %{repo: repo} do

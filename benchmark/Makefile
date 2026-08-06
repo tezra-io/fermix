@@ -15,10 +15,10 @@ AIM_DISPLAY_ATTEST := $(if $(filter 1 true yes,$(CONFIRM_AIM_LIVE_DISPLAY)),--co
 AIM_HANDS_ATTEST := $(if $(filter 1 true yes,$(CONFIRM_AIM_HANDS_OFF)),--confirm-hands-off,)
 AIM_ATTEST := $(AIM_DISPLAY_ATTEST) $(AIM_HANDS_ATTEST)
 
-.PHONY: help tests check dry regression capability capability-auto capability-judged capability-readonly estimate rank baseline uplift gaia lmeval aim aim-calibrate
+.PHONY: help tests check dry regression behavioral-isolated capability capability-auto capability-judged capability-readonly estimate rank baseline uplift gaia lmeval aim aim-calibrate
 
 help:
-	@echo "targets: tests check dry regression capability capability-auto capability-judged capability-readonly estimate rank baseline uplift gaia lmeval aim aim-calibrate"
+	@echo "targets: tests check dry regression behavioral-isolated capability capability-auto capability-judged capability-readonly estimate rank baseline uplift gaia lmeval aim aim-calibrate"
 
 tests:        ## developer tests for harness code; does not run behavioral/capability E2E
 	@for t in scoring aggregate leaderboard experiments uplift baseline lmeval gaia capability_runner checker grade judge eval_safety seed_home opik_client aim; do \
@@ -32,6 +32,9 @@ dry:          ## validate behavioral suites, no spend
 
 regression:   ## Tier 2 behavioral regression against the development daemon
 	EVAL_JUDGE_API_KEY="$(JUDGE_KEY)" $(UV) bin/run_eval.py --tag host-safe-core --judge --fail-retries 2
+
+behavioral-isolated:  ## isolated-mutation behavioral suites vs the disposable eval daemon
+	EVAL_JUDGE_API_KEY="$(JUDGE_KEY)" $(UV) bin/run_eval.py --profile isolated_mutation --all --judge --fail-retries 2 --confirm-daemon-isolated --confirm-isolated-env
 
 capability:   ## Tier 1 capability score of the current daemon model, ALL public suites (k=5)
 	$(UV) bin/run_capability.py --trials 5 $(DAEMON_ATTEST) $(ISOLATION_ATTEST) $(COST_CONFIRM)

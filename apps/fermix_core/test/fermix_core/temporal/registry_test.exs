@@ -173,12 +173,95 @@ defmodule FermixCore.Temporal.RegistryTest do
     end
 
     test "a same-identity create with a different date is an identity conflict", %{repo: repo} do
+      assert {:ok, %{event: stored}} = create(repo, birthday_params())
+
+      moved = birthday_params(%{when: %{"type" => "annual", "month" => 9, "day" => 15}})
+
+      assert {:error, {:identity_conflict, existing}} = create(repo, moved)
+      assert existing.id == stored.id
+      assert existing.title == "Sarah's birthday"
+    end
+
+    # Only the owner knows whether a restated date corrects the stored event or
+    # names a different person who shares the title, so the rendered failure has
+    # to hand the model both the stored date to quote and the question to ask.
+    test "the conflict message names the stored event, its date, and the question to ask", %{
+      repo: repo
+    } do
       assert {:ok, _created} = create(repo, birthday_params())
 
       moved = birthday_params(%{when: %{"type" => "annual", "month" => 9, "day" => 15}})
 
-      assert {:error, :identity_conflict} = create(repo, moved)
-      assert Registry.describe_error(:identity_conflict) =~ "event_update"
+      assert {:error, reason} = create(repo, moved)
+
+      message = Registry.describe_error(reason)
+
+      assert message =~ "Sarah's birthday"
+      assert message =~ "09-14"
+      assert message =~ "Ask the owner"
+      assert message =~ "event_update"
+      assert message =~ ~r/(?i)different/
+      refute message =~ "Event operation failed"
+    end
+
+    test "the conflict message quotes a one-time event's stored date", %{repo: repo} do
+      params = %{
+        title: "Board meeting",
+        kind: "appointment",
+        when: %{"type" => "datetime", "date" => "2026-08-16", "time" => "15:00:00"}
+      }
+
+      assert {:ok, %{event: event}} = create(repo, params)
+
+      # A one-time event's identity carries its date, so a same-title restatement
+      # only collides when the reminder PLAN differs on the same date.
+      moved = Map.put(params, :reminders, [%{"type" => "duration_before", "minutes" => 15}])
+
+      assert {:error, {:identity_conflict, existing}} = create(repo, moved)
+      assert existing.id == event.id
+
+      message = Registry.describe_error({:identity_conflict, existing})
+
+      assert message =~ "Board meeting"
+      assert message =~ "2026-08-16"
+    end
+
+    test "a created event carries the same-kind actives it might be a twin of", %{repo: repo} do
+      assert {:ok, %{similar_events: none}} = create(repo, birthday_params())
+      assert none == []
+
+      assert {:ok, %{status: :created, event: second, similar_events: similar}} =
+               create(repo, birthday_params(%{title: "Sarah Chen's birthday"}))
+
+      assert [%{"title" => "Sarah's birthday"} = twin] = similar
+      assert twin["event_id"] != second.id
+      assert twin["next_occurrence_on"] == "2026-09-14"
+    end
+
+    test "similar events are same-kind only and bounded to five", %{repo: repo} do
+      Enum.each(1..6, fn index ->
+        assert {:ok, _created} = create(repo, birthday_params(%{title: "Birthday #{index}"}))
+      end)
+
+      assert {:ok, _deadline} =
+               create(repo, %{
+                 title: "Submit the report",
+                 kind: "deadline",
+                 when: %{"type" => "date", "date" => "2026-08-14"}
+               })
+
+      assert {:ok, %{event: event, similar_events: similar}} = create(repo, birthday_params())
+
+      assert length(similar) == 5
+      refute Enum.any?(similar, &(&1["event_id"] == event.id))
+      refute Enum.any?(similar, &(&1["title"] == "Submit the report"))
+    end
+
+    test "an idempotent repeat lists no similar events — it created nothing", %{repo: repo} do
+      assert {:ok, _first} = create(repo, birthday_params(%{title: "Ana's birthday"}))
+      assert {:ok, %{status: :created}} = create(repo, birthday_params())
+
+      assert {:ok, %{status: :existing, similar_events: []}} = create(repo, birthday_params())
     end
 
     test "the dedupe key is tool-derived: the same title on another date is a new event", %{
@@ -652,7 +735,10 @@ defmodule FermixCore.Temporal.RegistryTest do
       assert {:ok, %{event: updated}} =
                Registry.update_event(
                  event.id,
-                 %{when: %{"type" => "datetime", "date" => "2026-08-16", "time" => "16:00:00"}},
+                 %{
+                   when: %{"type" => "datetime", "date" => "2026-08-16", "time" => "16:00:00"},
+                   owner_direction: "push my dentist appointment to 4pm"
+                 },
                  context(repo),
                  opts()
                )
@@ -759,6 +845,263 @@ defmodule FermixCore.Temporal.RegistryTest do
                )
 
       assert Registry.describe_error(:delivery_in_progress) =~ "try again"
+    end
+
+    # §5.2: an edit acknowledgement has to be able to say "was X, now Y" from
+    # stored values alone, so the changed fields' PRIOR values come back with
+    # the update rather than being reconstructed from conversation memory.
+    test "reports the previous values of exactly the user-facing fields it changed", %{repo: repo} do
+      params = %{
+        title: "Dentist appointment",
+        kind: "appointment",
+        when: %{"type" => "datetime", "date" => "2026-08-16", "time" => "15:00:00"}
+      }
+
+      assert {:ok, %{event: event}} = create(repo, params)
+
+      assert {:ok, %{previous: previous, event: updated}} =
+               Registry.update_event(
+                 event.id,
+                 %{
+                   title: "Dentist cleaning",
+                   when: %{"type" => "datetime", "date" => "2026-08-17", "time" => "16:00:00"},
+                   owner_direction: "move the dentist to the 17th at 4pm, it is a cleaning now"
+                 },
+                 context(repo),
+                 opts()
+               )
+
+      assert previous["title"] == "Dentist appointment"
+      assert previous["local_date"] == "2026-08-16"
+      assert previous["local_time"] == "15:00:00"
+      assert previous["occurrence_at"] == "2026-08-16T19:00:00.000000Z"
+
+      # Untouched fields say nothing: an unchanged value is not a "was".
+      refute Map.has_key?(previous, "kind")
+      refute Map.has_key?(previous, "timezone")
+      refute Map.has_key?(previous, "leap_day_policy")
+
+      assert updated.title == "Dentist cleaning"
+    end
+
+    test "reports the previous recurrence day when a yearly date moves", %{repo: repo} do
+      assert {:ok, %{event: event}} = create(repo, birthday_params())
+
+      assert {:ok, %{previous: previous}} =
+               Registry.update_event(
+                 event.id,
+                 %{
+                   when: %{"type" => "annual", "month" => 10, "day" => 2},
+                   owner_direction: "Sarah's birthday is actually October 2, fix it"
+                 },
+                 context(repo),
+                 opts()
+               )
+
+      assert previous["recurrence_month"] == 9
+      assert previous["recurrence_day"] == 14
+      refute Map.has_key?(previous, "title")
+    end
+
+    test "an edit that changes nothing user-facing reports no previous values", %{repo: repo} do
+      assert {:ok, %{event: event}} = create(repo, birthday_params())
+
+      rebound = jobs_config(default_delivery_target: [platform: "slack", channel_id: "C99"])
+
+      assert {:ok, %{previous: previous, event: updated}} =
+               Registry.update_event(
+                 event.id,
+                 %{rebind_delivery_to_default: true},
+                 context(repo),
+                 opts(jobs_config: rebound)
+               )
+
+      assert previous == %{}
+      assert updated.delivery_platform == "slack"
+    end
+
+    # The date checkpoint (§5.2): `when` is the one patch field whose write
+    # destroys what it replaces, so it cannot be reached without quoting the
+    # owner's own directing words. A boolean was fillable by reflex; a quote is
+    # not, because the model has to go find one. The refusal carries the row it
+    # is protecting, because the stored date is the prompt material the model
+    # has to quote when it asks.
+    test "a date patch without a direction is refused and carries the stored row", %{
+      repo: repo
+    } do
+      assert {:ok, %{event: event}} = create(repo, birthday_params())
+
+      assert {:error, {:overwrite_unconfirmed, existing}} =
+               Registry.update_event(
+                 event.id,
+                 %{when: %{"type" => "annual", "month" => 6, "day" => 10}},
+                 context(repo),
+                 opts()
+               )
+
+      assert existing.id == event.id
+      assert existing.title == "Sarah's birthday"
+
+      # The guard sits before every validation and write, so nothing moved.
+      assert {:ok, untouched} = Repo.get_temporal_event(event.id, server: repo)
+      assert untouched.recurrence_day == 14
+      assert untouched.revision == 1
+    end
+
+    # An empty string is what a model reaches for when it has no quote but wants
+    # the write: the guard must read it exactly as it reads an absent one,
+    # without ever looking at what the characters say.
+    test "an empty or whitespace-only direction refuses exactly as an absent one does", %{
+      repo: repo
+    } do
+      assert {:ok, %{event: event}} = create(repo, birthday_params())
+
+      for blank <- ["", "   ", "\t\n "] do
+        assert {:error, {:overwrite_unconfirmed, existing}} =
+                 Registry.update_event(
+                   event.id,
+                   %{
+                     when: %{"type" => "annual", "month" => 6, "day" => 10},
+                     owner_direction: blank
+                   },
+                   context(repo),
+                   opts()
+                 )
+
+        assert existing.id == event.id
+      end
+
+      assert {:ok, untouched} = Repo.get_temporal_event(event.id, server: repo)
+      assert untouched.recurrence_day == 14
+      assert untouched.revision == 1
+    end
+
+    # The cap is the only thing the guard may say about the content: pasting the
+    # whole conversation is not an excerpt, and a silent truncation would hide
+    # that from the trace it exists to serve.
+    test "a direction past the byte cap is refused, says to quote the clause, writes nothing", %{
+      repo: repo
+    } do
+      assert {:ok, %{event: event}} = create(repo, birthday_params())
+      overlong = String.duplicate("a", 241)
+
+      assert {:error, {:owner_direction_too_long, 241} = reason} =
+               Registry.update_event(
+                 event.id,
+                 %{
+                   when: %{"type" => "annual", "month" => 6, "day" => 10},
+                   owner_direction: overlong
+                 },
+                 context(repo),
+                 opts()
+               )
+
+      message = Registry.describe_error(reason)
+
+      assert message =~ "240"
+      assert message =~ "clause"
+      refute message =~ "Event operation failed"
+
+      assert {:ok, untouched} = Repo.get_temporal_event(event.id, server: repo)
+      assert untouched.recurrence_day == 14
+      assert untouched.revision == 1
+    end
+
+    # A control argument steers the write and is never part of it: the quote
+    # exists for the trace and the owner's question, so it must not reach the
+    # merge, the columns, or the was-and-now reply.
+    test "the direction is trace-only: it never reaches the stored row or previous", %{repo: repo} do
+      assert {:ok, %{event: event}} = create(repo, birthday_params())
+      direction = "actually move it to June 10, I had the wrong month"
+
+      assert {:ok, %{event: updated, previous: previous}} =
+               Registry.update_event(
+                 event.id,
+                 %{
+                   when: %{"type" => "annual", "month" => 6, "day" => 10},
+                   owner_direction: direction
+                 },
+                 context(repo),
+                 opts()
+               )
+
+      refute Map.has_key?(updated, :owner_direction)
+      refute Map.has_key?(previous, "owner_direction")
+      refute inspect(updated) =~ direction
+      refute inspect(previous) =~ direction
+
+      assert {:ok, stored} = Repo.get_temporal_event(event.id, server: repo)
+      refute Map.has_key?(stored, :owner_direction)
+      refute inspect(stored) =~ direction
+      refute inspect(Registry.event_view(stored)) =~ direction
+    end
+
+    test "a patch that does not touch the date needs no direction", %{repo: repo} do
+      assert {:ok, %{event: event}} = create(repo, birthday_params())
+
+      assert {:ok, %{event: retitled}} =
+               Registry.update_event(
+                 event.id,
+                 %{title: "Sarah's birthday party"},
+                 context(repo),
+                 opts()
+               )
+
+      assert retitled.title == "Sarah's birthday party"
+
+      rebound = jobs_config(default_delivery_target: [platform: "slack", channel_id: "C99"])
+
+      assert {:ok, %{event: rebounded}} =
+               Registry.update_event(
+                 event.id,
+                 %{rebind_delivery_to_default: true},
+                 context(repo),
+                 opts(jobs_config: rebound)
+               )
+
+      assert rebounded.delivery_platform == "slack"
+    end
+
+    test "a directed date patch lands and still reports what the date was", %{repo: repo} do
+      assert {:ok, %{event: event}} = create(repo, birthday_params())
+
+      assert {:ok, %{event: updated, previous: previous}} =
+               Registry.update_event(
+                 event.id,
+                 %{
+                   when: %{"type" => "annual", "month" => 6, "day" => 10},
+                   owner_direction: "yes, overwrite it, her birthday is June 10"
+                 },
+                 context(repo),
+                 opts()
+               )
+
+      assert updated.recurrence_month == 6
+      assert updated.recurrence_day == 10
+      assert previous["recurrence_month"] == 9
+      assert previous["recurrence_day"] == 14
+    end
+
+    test "the refusal names the event, its stored date, and the question to ask", %{repo: repo} do
+      assert {:ok, %{event: event}} = create(repo, birthday_params())
+
+      assert {:error, reason} =
+               Registry.update_event(
+                 event.id,
+                 %{when: %{"type" => "annual", "month" => 6, "day" => 10}},
+                 context(repo),
+                 opts()
+               )
+
+      message = Registry.describe_error(reason)
+
+      assert message =~ "Sarah's birthday"
+      assert message =~ "09-14"
+      assert message =~ "Ask the owner"
+      assert message =~ "separate events"
+      assert message =~ "owner_direction"
+      assert message =~ "own words"
+      refute message =~ "Event operation failed"
     end
 
     test "an unknown event id is not found", %{repo: repo} do

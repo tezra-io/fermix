@@ -1622,14 +1622,17 @@ defmodule FermixCore.Memory.Repo do
 
   An identical repeat create resolves to the existing active event
   (`{:existing, ...}`) instead of a duplicate; a same-identity create with a
-  different date, plan, or target is `{:error, :identity_conflict}` and belongs
-  in `update_temporal_event/5`. Cancelled and completed rows never block a new
-  active event. Byte caps and the fixed-width UTC timestamp form are enforced
-  here, in the caller, so invalid input never reaches the single writer.
+  different date, plan, or target is
+  `{:error, {:identity_conflict, existing_event_row}}` — the twin it collided
+  with comes back so the caller can quote the stored date rather than describe
+  the collision in the abstract — and belongs in `update_temporal_event/5`.
+  Cancelled and completed rows never block a new active event. Byte caps and
+  the fixed-width UTC timestamp form are enforced here, in the caller, so
+  invalid input never reaches the single writer.
   """
   @spec create_temporal_event(map(), map(), DateTime.t(), keyword()) ::
           {:ok, {:created | :existing, temporal_event_row(), [reminder_occurrence_row()]}}
-          | {:error, :identity_conflict | term()}
+          | {:error, {:identity_conflict, temporal_event_row()} | term()}
   def create_temporal_event(attrs, plan, %DateTime{} = now, opts \\ [])
       when is_map(attrs) and is_map(plan) do
     with {:ok, event} <- TemporalSql.normalize_event_attrs(attrs, now),

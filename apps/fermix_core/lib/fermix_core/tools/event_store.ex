@@ -32,7 +32,11 @@ defmodule FermixCore.Tools.EventStore do
     "Store a personal event — a birthday, anniversary, appointment, deadline, or an " <>
       "explicit 'remind me' — with a finite reminder plan Fermix delivers proactively " <>
       "through the configured default channel. Use this whenever the only future action " <>
-      "is to notify the owner; use schedule_job when the future run must do work."
+      "is to notify the owner; use schedule_job when the future run must do work. " <>
+      "A stored event sharing a name with this one but carrying a different date may " <>
+      "belong to a different person or occasion, so ask the owner which it is before " <>
+      "changing or duplicating it — unless they are correcting a date they themselves " <>
+      "gave you, which needs no question."
   end
 
   @impl true
@@ -115,7 +119,12 @@ defmodule FermixCore.Tools.EventStore do
       %{tag: "missing_parameters", description: "title, kind, or when is absent"},
       %{tag: "no_default_target", description: "no configured default delivery target"},
       %{tag: "ambiguous_local_time", description: "a DST gap or fold needs a clarification"},
-      %{tag: "identity_conflict", description: "the same event exists with other details"},
+      %{
+        tag: "identity_conflict",
+        description:
+          "an active event of this identity is stored on a different date; the refusal " <>
+            "names it so the owner can say whether it is the same one"
+      },
       %{tag: "not_attended", description: "the turn is not an attended top-level owner turn"}
     ]
   end
@@ -170,7 +179,11 @@ defmodule FermixCore.Tools.EventStore do
     }
   end
 
-  defp view(%{status: status, event: event, reminders: reminders}) do
+  # `similar_events` is the owner's other active events of this kind: a twin
+  # stored under a different title is invisible to the dedupe key, so the
+  # acknowledgement carries it and the model can raise it before two people's
+  # dates drift apart under one name.
+  defp view(%{status: status, event: event, reminders: reminders, similar_events: similar}) do
     planned = Enum.map(reminders, &Registry.reminder_view/1)
 
     event
@@ -178,6 +191,7 @@ defmodule FermixCore.Tools.EventStore do
     |> Map.merge(%{
       "status" => Atom.to_string(status),
       "planned_reminders" => planned,
+      "similar_events" => similar,
       "note" => note(status, planned)
     })
   end

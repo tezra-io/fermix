@@ -60,8 +60,25 @@ defmodule FermixCore.Temporal.Registry do
   @max_snooze_days 90
   @snooze_validity_seconds 7_200
 
+  # Duplicate visibility (§5.2): how many same-kind neighbours one create
+  # acknowledgement carries, and the user-facing fields an edit reports the
+  # prior value of.
+  @max_similar_events 5
+  @previous_fields [
+    :title,
+    :kind,
+    :timezone,
+    :local_date,
+    :local_time,
+    :occurrence_at,
+    :recurrence_month,
+    :recurrence_day,
+    :leap_day_policy
+  ]
+
   @title_max 240
   @description_max 2_000
+  @owner_direction_max 240
   @max_rule_days 3_650
   @max_rule_minutes 525_600
   @morning ~T[09:00:00]
@@ -97,12 +114,23 @@ defmodule FermixCore.Temporal.Registry do
   @doc """
   Validates and creates one event with its materialized reminder plan.
 
-  Returns `{:ok, %{status: :created | :existing, event: row, reminders: rows}}`;
-  `:existing` means an identical active event was already stored, so the caller
-  must not claim a second set of reminders was created (§5.2).
+  Returns `{:ok, %{status: :created | :existing, event: row, reminders: rows,
+  similar_events: rows}}`; `:existing` means an identical active event was
+  already stored, so the caller must not claim a second set of reminders was
+  created (§5.2).
+
+  `:similar_events` is the other active events of the same kind this one could
+  be a duplicate of, so a differently-titled twin is visible in the very
+  acknowledgement that created it.
   """
   @spec create_event(map(), map(), keyword()) ::
-          {:ok, %{status: :created | :existing, event: map(), reminders: [map()]}}
+          {:ok,
+           %{
+             status: :created | :existing,
+             event: map(),
+             reminders: [map()],
+             similar_events: [map()]
+           }}
           | {:error, term()}
   def create_event(params, context, opts \\ [])
       when is_map(params) and is_map(context) and is_list(opts) do
@@ -117,7 +145,14 @@ defmodule FermixCore.Temporal.Registry do
            Repo.create_temporal_event(attrs, plan, now, server: repo(context)) do
       emit_materialized(status, event)
       notify(context)
-      {:ok, %{status: status, event: with_delivery_source(event, target), reminders: reminders}}
+
+      {:ok,
+       %{
+         status: status,
+         event: with_delivery_source(event, target),
+         reminders: reminders,
+         similar_events: similar_events(status, event, context)
+       }}
     end
   end
 
@@ -126,9 +161,18 @@ defmodule FermixCore.Temporal.Registry do
   re-resolves its time, and re-materializes the bounded plan under a new
   revision. `rebind_delivery_to_default: true` snapshots the current configured
   default target instead of keeping the stored one.
+
+  `:previous` carries the prior value of every user-facing field this edit
+  actually changed, so the acknowledgement can state was-and-now from stored
+  values alone (§5.2); it is empty when nothing user-facing moved.
+
+  A patch carrying `:when` also requires `owner_direction`, a bounded excerpt of
+  the owner's own directing words — the stored date is the one value an edit
+  destroys rather than adds to. It is a control argument: never merged, never
+  persisted, never read for content.
   """
   @spec update_event(String.t(), map(), map(), keyword()) ::
-          {:ok, %{event: map(), reminders: [map()]}} | {:error, term()}
+          {:ok, %{event: map(), reminders: [map()], previous: map()}} | {:error, term()}
   def update_event(id, patch, context, opts \\ [])
       when is_binary(id) and is_map(patch) and is_map(context) and is_list(opts) do
     now = now(opts)
@@ -136,15 +180,22 @@ defmodule FermixCore.Temporal.Registry do
 
     with {:ok, existing} <- Repo.get_temporal_event(id, server: server),
          :ok <- ensure_active(existing),
-         {:ok, params} <- merge_params(existing, patch),
+         {:ok, fields} <- confirmed_patch(patch, existing),
+         {:ok, params} <- merge_params(existing, fields),
          {:ok, spec} <- build_spec(params, now, opts),
-         {:ok, target} <- patched_target(existing, patch, opts),
+         {:ok, target} <- patched_target(existing, fields, opts),
          {:ok, plan} <- materialize(spec, now),
          {:ok, {event, reminders}} <-
            Repo.update_temporal_event(id, column_map(spec, target), plan, now, server: server) do
       emit_materialized(event)
       notify(context)
-      {:ok, %{event: with_delivery_source(event, target), reminders: reminders}}
+
+      {:ok,
+       %{
+         event: with_delivery_source(event, target),
+         reminders: reminders,
+         previous: previous_values(existing, event)
+       }}
     end
   end
 
@@ -250,6 +301,71 @@ defmodule FermixCore.Temporal.Registry do
       {:ok, %{events: events, cursor: encode_cursor(cursor)}}
     end
   end
+
+  # --- duplicate and edit visibility (§5.2) --------------------------------
+
+  # One bounded post-commit read: the owner's other ACTIVE events of the same
+  # kind. A twin stored under a different title is the one duplicate the dedupe
+  # key cannot catch, and this puts it in front of the model inside the very
+  # acknowledgement that created its neighbour. An `:existing` result created
+  # nothing, so it has nothing to be a twin of and reads nothing.
+  defp similar_events(:existing, _event, _context), do: []
+
+  defp similar_events(:created, event, context) do
+    filter = %{
+      owner_id: owner_id(context),
+      kind: event.kind,
+      status: "active",
+      limit: @max_similar_events + 1
+    }
+
+    case Repo.list_temporal_events(filter, server: repo(context)) do
+      {:ok, %{events: events}} -> compact_events(events, event.id)
+      {:error, reason} -> log_similar_failure(event, reason)
+    end
+  end
+
+  # One page over-read so excluding the new event still leaves a full cap.
+  defp compact_events(events, created_id) do
+    events
+    |> Enum.reject(&(&1.id == created_id))
+    |> Enum.take(@max_similar_events)
+    |> Enum.map(
+      &%{
+        "event_id" => &1.id,
+        "title" => &1.title,
+        "next_occurrence_on" => iso(&1.next_occurrence_on)
+      }
+    )
+  end
+
+  # Best effort by contract, exactly like the scheduler signal below: the event
+  # is already committed, so a failed neighbour read is logged loudly and the
+  # acknowledgement simply lists none. It must never turn a stored event into a
+  # tool error that tells the owner nothing was written.
+  defp log_similar_failure(event, reason) do
+    Logger.error(
+      "Temporal.Registry: same-kind neighbour read failed for event #{event.id}: " <>
+        inspect(reason)
+    )
+
+    []
+  end
+
+  # §5.2 for edits: the reply must be able to say what a field WAS from stored
+  # values alone. Only fields this write actually moved appear, each rendered
+  # exactly as `event_view/1` renders it, so a "was" and a "now" are the same
+  # shape. Provenance, revision, and delivery columns are the Repo's, not the
+  # owner's, and are deliberately absent.
+  defp previous_values(existing, updated) do
+    @previous_fields
+    |> Enum.filter(&(Map.fetch!(existing, &1) != Map.fetch!(updated, &1)))
+    |> Map.new(&{Atom.to_string(&1), previous_value(&1, Map.fetch!(existing, &1))})
+  end
+
+  defp previous_value(:recurrence_month, value), do: value
+  defp previous_value(:recurrence_day, value), do: value
+  defp previous_value(_field, value), do: iso(value)
 
   # --- canonical views -----------------------------------------------------
 
@@ -480,9 +596,41 @@ defmodule FermixCore.Temporal.Registry do
       "snapshotted onto an event. Remove it from the configured default delivery target."
   end
 
-  def describe_error(:identity_conflict) do
-    "An event with this identity already exists with a different date, plan, or target. " <>
-      "Use event_update to change it instead of storing a second one."
+  # The one failure only the OWNER can resolve: a stored event with this name
+  # and a different date is either the same thing being corrected or a second
+  # person who happens to share the name, and nothing in the request says which.
+  # So the sentence hands the model the stored date to quote and the question to
+  # ask, and names both remedies — never a rule for picking one unasked.
+  def describe_error({:identity_conflict, existing}) when is_map(existing) do
+    "An active event titled #{inspect(existing.title)} is already stored, dated " <>
+      "#{conflict_date(existing)}, and this request gives a different one. Only the owner " <>
+      "knows whether that is a correction to the same event or a different one that shares " <>
+      "the name. Ask the owner which it is before writing: if it is the same event, change " <>
+      "it with event_update; if it is a different one, store it under a title that tells " <>
+      "the two apart. Do not choose for them."
+  end
+
+  # The same ambiguity as an identity conflict, met from the other side: here
+  # the model has already decided this is the same event. The refusal carries
+  # its own prompt material — the stored date to quote — so the question can be
+  # put to the owner in the owner's own terms, and it names both outcomes
+  # rather than a rule for choosing between them. What it asks for on the retry
+  # is the owner's words, not an assertion about them: there is nothing to quote
+  # until the owner has actually spoken.
+  def describe_error({:overwrite_unconfirmed, existing}) when is_map(existing) do
+    "The stored event titled #{inspect(existing.title)} is dated #{conflict_date(existing)}, " <>
+      "and this patch changes that date; an overwritten date leaves nothing behind. Ask the " <>
+      "owner whether to overwrite that date or keep both as separate events, and retry with " <>
+      "owner_direction set to the owner's own words directing this change — only once they " <>
+      "have directed it or answered the question."
+  end
+
+  # The one thing the checkpoint may say about the content, and it is a size,
+  # not a judgement: a whole pasted message is not an excerpt, and the reader of
+  # the trace needs the clause, not the transcript around it.
+  def describe_error({:owner_direction_too_long, size}) when is_integer(size) do
+    "owner_direction is #{size} bytes; at most #{@owner_direction_max} are accepted. Quote " <>
+      "just the clause in which the owner directed this date change, not the whole message."
   end
 
   def describe_error(:delivery_in_progress) do
@@ -613,6 +761,20 @@ defmodule FermixCore.Temporal.Registry do
   def describe_error({:invalid_event, field}), do: "The event's #{field} is not valid."
   def describe_error({:invalid, field, problem}), do: "#{field} is #{problem}."
   def describe_error(reason), do: "Event operation failed: #{inspect(reason)}."
+
+  # A yearly event's stored date is a calendar month and day with no year; a
+  # one-time event's is its stored local date. A row carrying neither says so
+  # and names itself, rather than rendering a date nobody stored.
+  defp conflict_date(%{recurrence_kind: "yearly", recurrence_month: month, recurrence_day: day})
+       when is_integer(month) and is_integer(day) do
+    "every #{two_digits(month)}-#{two_digits(day)}"
+  end
+
+  defp conflict_date(%{local_date: %Date{} = date}), do: Date.to_iso8601(date)
+
+  defp conflict_date(event), do: "a date event #{event.id} does not carry"
+
+  defp two_digits(value), do: value |> Integer.to_string() |> String.pad_leading(2, "0")
 
   # --- specification building ----------------------------------------------
 
@@ -1351,6 +1513,50 @@ defmodule FermixCore.Temporal.Registry do
 
   defp ensure_active(%{status: "active"}), do: :ok
   defp ensure_active(_event), do: {:error, :not_active}
+
+  # The date checkpoint (§5.2). Every other field an edit touches replaces one
+  # value the owner just restated; `when` replaces the one value a same-named
+  # event may not share, and an overwritten date leaves nothing to notice it by.
+  # So the model has to carry the owner's own directing words through to the
+  # write. A boolean was fillable by reflex — a trace showed one set on the very
+  # first call for a bare restatement — while a quote has to be found, and if
+  # there is nothing to quote there was nothing to overwrite.
+  #
+  # PRESENCE of `:when` is the trigger, never a comparison against the stored
+  # date: a rule that fires the same way every time is a rule the model can
+  # follow, and a resend that happens to change nothing costs one excerpt. The
+  # refusal carries the row already fetched, so the sentence can quote the
+  # stored date the owner has to be asked about.
+  #
+  # The guard is mechanical and never reads what the words SAY: presence, a
+  # trim for emptiness, and a byte bound, nothing else. Judging the content
+  # would be a lexical filter the model could learn to satisfy, and the reader
+  # of the trace is the one who can actually tell a quote from an invention.
+  # `owner_direction` is that evidence, not a stored field — it is stripped here
+  # and never reaches the merge, the target, or the Repo.
+  defp confirmed_patch(patch, existing) do
+    fields = Map.delete(patch, :owner_direction)
+
+    if Map.has_key?(fields, :when) do
+      directed_patch(present(Map.get(patch, :owner_direction)), fields, existing)
+    else
+      {:ok, fields}
+    end
+  end
+
+  defp directed_patch(nil, _fields, existing), do: {:error, {:overwrite_unconfirmed, existing}}
+
+  defp directed_patch(direction, fields, _existing)
+       when byte_size(direction) <= @owner_direction_max do
+    {:ok, fields}
+  end
+
+  # No silent truncation: an excerpt the caller did not choose is not the
+  # owner's words, and a trace that shows a clipped quote is worse than one that
+  # shows the refusal.
+  defp directed_patch(direction, _fields, _existing) do
+    {:error, {:owner_direction_too_long, byte_size(direction)}}
+  end
 
   defp merge_params(existing, patch) do
     with {:ok, rules} <- Defaults.decode_plan(existing.reminder_plan),
