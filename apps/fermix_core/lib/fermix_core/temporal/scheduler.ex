@@ -434,6 +434,7 @@ defmodule FermixCore.Temporal.Scheduler do
   defp materialize_horizon(event, now, state) do
     with {:ok, rules} <- Defaults.decode_plan(event.reminder_plan),
          {:ok, plan} <- Planner.materialize(%{event | reminder_plan: rules}, now),
+         :advances <- horizon_progress(event, plan),
          {:ok, _result} <- store_horizon(event, plan, now, state) do
       TemporalTelemetry.emit(:materialized,
         event_id: event.id,
@@ -441,6 +442,9 @@ defmodule FermixCore.Temporal.Scheduler do
         result: :ok
       )
     else
+      :unchanged ->
+        :ok
+
       {:error, :stale_event_revision} ->
         Logger.info("Reminder horizon for event #{event.id} skipped: an edit won the race")
 
@@ -448,6 +452,30 @@ defmodule FermixCore.Temporal.Scheduler do
         Logger.error("Reminder horizon for event #{event.id} failed: #{inspect(reason)}")
         emit_scheduler_error(reason, event_id: event.id)
     end
+  end
+
+  # The horizon page selects on `materialized_through_on < today + @annual_horizon_days`,
+  # but the planner materializes the next `Planner.annual_horizon/0` occurrences
+  # by LOCAL CALENDAR — never by adding days — so a yearly event can only reach
+  # `next_occurrence + 1 year`. On the occurrence day itself that lands one day
+  # short of the threshold, the row stays in the page, and every pass recomputes
+  # the identical plan.
+  #
+  # The threshold is not the bug: it is what walks an annual event forward as
+  # *today* advances, and narrowing it would eventually stop re-materializing
+  # them altogether. The bug is re-writing and re-announcing a plan that changed
+  # nothing. A pass that cannot advance the horizon does nothing and says
+  # nothing — `materialized` means something was materialized.
+  #
+  # Left in production this is self-limiting (it clears when the date rolls) and
+  # harmless to the data (`insert_occurrences` is ON CONFLICT DO NOTHING), but it
+  # cost one birthday 118 no-op transactions and 118 lifecycle events in two
+  # hours, once per minute, per event, per year.
+  defp horizon_progress(event, plan) do
+    if plan.materialized_through_on == event.materialized_through_on and
+         plan.next_occurrence_on == event.next_occurrence_on,
+       do: :unchanged,
+       else: :advances
   end
 
   defp store_horizon(event, plan, now, state) do
