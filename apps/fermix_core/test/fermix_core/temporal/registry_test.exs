@@ -1821,16 +1821,25 @@ defmodule FermixCore.Temporal.RegistryTest do
       :ok
     end
 
-    defp lifecycle_phases do
+    # Scoped to ONE event id. `:telemetry.attach` is process-global while this
+    # suite is async, so an unfiltered drain collects every OTHER test's
+    # lifecycle events too — which is how linux-x64 CI saw `[:delivered,
+    # :cancelled]` for a cancel that emitted only `:cancelled`, while arm64 and
+    # macOS happened not to interleave.
+    defp lifecycle_phases(event_id) do
       receive do
-        {:reminder_lifecycle, metadata} -> [metadata | lifecycle_phases()]
+        {:reminder_lifecycle, %{event_id: ^event_id} = metadata} ->
+          [metadata | lifecycle_phases(event_id)]
+
+        {:reminder_lifecycle, _other_test} ->
+          lifecycle_phases(event_id)
       after
         0 -> []
       end
     end
 
     test "a created snooze emits materialized, and a replaced one emits superseded", %{repo: repo} do
-      {_event, row} = delivered_reminder!(repo)
+      {event, row} = delivered_reminder!(repo)
       now = ~U[2026-08-16 19:30:00Z]
 
       assert {:ok, first} =
@@ -1839,14 +1848,14 @@ defmodule FermixCore.Temporal.RegistryTest do
                )
 
       # Drop the create-time materialized events the fixture produced.
-      _fixture = lifecycle_phases()
+      _fixture = lifecycle_phases(event.id)
 
       assert {:ok, second} =
                snooze(repo, %{reminder_id: row.id, snooze: hours(2), confirm_past_boundary: true},
                  now: now
                )
 
-      events = lifecycle_phases()
+      events = lifecycle_phases(event.id)
       phases = events |> Enum.map(& &1.phase) |> Enum.sort()
 
       assert phases == [:materialized, :superseded]
@@ -1863,15 +1872,15 @@ defmodule FermixCore.Temporal.RegistryTest do
     # Retiring the pending source is a real supersession the trace must show,
     # but it is NOT a replaced snooze and the acknowledgement must not say it was.
     test "retiring the pending source is traced without being called a replacement", %{repo: repo} do
-      {_event, row} = pending_reminder!(repo)
-      _fixture = lifecycle_phases()
+      {event, row} = pending_reminder!(repo)
+      _fixture = lifecycle_phases(event.id)
 
       assert {:ok, result} =
                snooze(repo, %{reminder_id: row.id, snooze: hours(1)},
                  now: ~U[2026-08-16 12:00:00Z]
                )
 
-      events = lifecycle_phases()
+      events = lifecycle_phases(event.id)
       assert events |> Enum.map(& &1.phase) |> Enum.sort() == [:materialized, :superseded]
       assert Enum.find(events, &(&1.phase == :superseded)).reminder_id == row.id
 
@@ -1881,15 +1890,15 @@ defmodule FermixCore.Temporal.RegistryTest do
     end
 
     test "an idempotent repeat emits nothing", %{repo: repo} do
-      {_event, row} = delivered_reminder!(repo)
+      {event, row} = delivered_reminder!(repo)
       now = ~U[2026-08-16 19:30:00Z]
       args = %{reminder_id: row.id, snooze: hours(1), confirm_past_boundary: true}
 
       assert {:ok, _first} = snooze(repo, args, now: now)
-      _drain = lifecycle_phases()
+      _drain = lifecycle_phases(event.id)
 
       assert {:ok, %{status: :existing}} = snooze(repo, args, now: now)
-      assert lifecycle_phases() == []
+      assert lifecycle_phases(event.id) == []
     end
 
     test "the committed snooze notifies the scheduler", %{repo: repo} do
@@ -1960,7 +1969,7 @@ defmodule FermixCore.Temporal.RegistryTest do
 
     test "cancels the parent and its unsent rows, keeping delivered history", %{repo: repo} do
       {event, delivered, pending} = delivered_and_pending!(repo, ~U[2026-08-15 13:00:00Z])
-      _fixture = lifecycle_phases()
+      _fixture = lifecycle_phases(event.id)
 
       assert {:ok, result} = cancel_referent(repo, now: ~U[2026-08-15 14:00:00Z])
 
@@ -1979,7 +1988,7 @@ defmodule FermixCore.Temporal.RegistryTest do
       assert {:ok, unsent} = Repo.get_temporal_reminder(pending.id, server: repo)
       assert unsent.status == "cancelled"
 
-      events = lifecycle_phases()
+      events = lifecycle_phases(event.id)
       assert Enum.map(events, & &1.phase) == [:cancelled]
       assert hd(events).event_id == event.id
       assert hd(events).platform == "telegram"
