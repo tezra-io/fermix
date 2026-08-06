@@ -546,6 +546,9 @@ defmodule FermixCore.Memory.Repo.TemporalSql do
     end
   end
 
+  # The twin rides back on the refusal. This transaction is the only place that
+  # re-read it, and a caller told merely that "something collided" can neither
+  # quote the stored date nor ask the owner which of the two events this is.
   defp resolve_existing_event(conn, existing, event) do
     if identical_event?(existing, event) do
       with {:ok, occurrences} <-
@@ -553,7 +556,7 @@ defmodule FermixCore.Memory.Repo.TemporalSql do
         {:ok, {:existing, event_row(existing), occurrences}}
       end
     else
-      {:error, :identity_conflict}
+      {:error, {:identity_conflict, event_row(existing)}}
     end
   end
 

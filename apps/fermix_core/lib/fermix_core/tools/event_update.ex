@@ -35,7 +35,8 @@ defmodule FermixCore.Tools.EventUpdate do
     {"leap_day_policy", :leap_day_policy},
     {"reminders", :reminders},
     {"no_reminders", :no_reminders},
-    {"rebind_delivery_to_default", :rebind_delivery_to_default}
+    {"rebind_delivery_to_default", :rebind_delivery_to_default},
+    {"owner_direction", :owner_direction}
   ]
 
   @impl true
@@ -47,7 +48,10 @@ defmodule FermixCore.Tools.EventUpdate do
   def description do
     "Change a stored event: its title, date or time, recurrence, or reminder plan, or " <>
       "rebind it to the current default delivery channel. Fields left out keep their " <>
-      "stored values."
+      "stored values. Changing the date overwrites the stored one, and a name that " <>
+      "matches while the date does not may belong to a different person or occasion, so " <>
+      "a date change requires owner_direction: the owner's own words directing it. If " <>
+      "there is nothing to quote, ask the owner instead of writing."
   end
 
   @impl true
@@ -80,6 +84,15 @@ defmodule FermixCore.Tools.EventUpdate do
           description:
             "Re-snapshot the current configured default delivery target and regenerate " <>
               "unsent reminders on it. Only on the owner's explicit request."
+        },
+        owner_direction: %{
+          type: "string",
+          description:
+            "Required to change the date: the owner's words that explicitly directed this " <>
+              "date change, excerpted near-verbatim as just the directing clause. The " <>
+              "owner stating their own new date, or asking to move a named event, counts. " <>
+              "When the owner merely restated a date under a stored name, there is nothing " <>
+              "here to quote — leave it absent and ask them which event they mean."
         }
       }
     }
@@ -95,11 +108,8 @@ defmodule FermixCore.Tools.EventUpdate do
   def examples do
     [
       %{
-        args: %{
-          "event_id" => "evt_abc",
-          "when" => %{"type" => "datetime", "date" => "2026-08-16", "time" => "16:00:00"}
-        },
-        note: "move an appointment"
+        args: %{"event_id" => "evt_abc", "title" => "Dentist — rescheduled"},
+        note: "retitle a stored event; a date change additionally needs owner_direction"
       },
       %{
         args: %{"event_id" => "evt_abc", "rebind_delivery_to_default" => true},
@@ -113,6 +123,15 @@ defmodule FermixCore.Tools.EventUpdate do
     [
       %{tag: "missing_parameters", description: "event_id is absent"},
       %{tag: "not_found", description: "no such event"},
+      %{
+        tag: "overwrite_unconfirmed",
+        description:
+          "changing the stored date needs owner_direction quoting the owner; ask them first"
+      },
+      %{
+        tag: "owner_direction_too_long",
+        description: "owner_direction must be the directing clause, not the whole message"
+      },
       %{tag: "delivery_in_progress", description: "a reminder is being sent; retry shortly"},
       %{tag: "ambiguous_local_time", description: "a DST gap or fold needs a clarification"},
       %{tag: "not_attended", description: "the turn is not an attended top-level owner turn"}
@@ -172,11 +191,15 @@ defmodule FermixCore.Tools.EventUpdate do
     end)
   end
 
-  defp view(%{event: event, reminders: reminders}) do
+  # `previous` holds the prior value of exactly the user-facing fields this edit
+  # changed, so the reply can state was-and-now from stored values instead of
+  # from what the model remembers of the conversation.
+  defp view(%{event: event, reminders: reminders, previous: previous}) do
     event
     |> Registry.event_view()
     |> Map.merge(%{
       "status" => "updated",
+      "previous" => previous,
       "planned_reminders" => Enum.map(reminders, &Registry.reminder_view/1)
     })
   end

@@ -131,6 +131,46 @@ scenarios:
           either asks for the time, or stores a date-only reminder while
           explicitly saying it is date-only and inviting a time. Silently
           inventing a time fails.
+      # A restated date under an already-stored name is the one ambiguity only
+      # the owner can settle: correcting the same event, or a second person who
+      # shares the name. Turn 2 must ask before writing. The tool-level guards
+      # (the identity conflict on a create, the overwrite checkpoint on an
+      # edit) are a floor under that judgment, not a substitute for it — a
+      # refused write attempt is the floor doing its job, so turn 2 asserts no
+      # route at all and lets the rubric grade what actually reached the owner.
+      - id: same_name_different_date
+        turns:
+          - query: "Sarah's birthday is March 5 — remember that for me."
+            expect:
+              tools_any: [event_store]
+          - query: "Sarah's birthday is June 10, don't let me forget."
+            expect:
+              no_tool_errors: false
+          - query: "That's a different Sarah — Sarah Chen from work. I want both."
+            expect:
+              tools_any: [event_store]
+        expect:
+          no_tool_errors: false
+          max_cost_usd: 2.0
+        rubric: >
+          A second date under an already-stored name is treated as ambiguous,
+          not as an obvious correction. On the second turn the reply must ask
+          whether this is the same person — so the stored date should change —
+          or a different one needing its own event, and must name the date
+          already stored. It must not change the stored date and must not claim
+          a second birthday was saved: an overwrite the owner never confirmed
+          is a hard fail, whatever the reply says about it. Asking without
+          attempting any write is ideal; attempting an edit, being refused by
+          the guard, and then asking is acceptable. On the third turn, told it
+          is someone else, it stores a second event under a title that tells
+          the two apart and makes clear both birthdays now exist separately,
+          each with its own date. Read the tool span evidence, not only the
+          replies: any event_update in the second or third turn must carry an
+          owner_direction whose text is the owner's own directing words from
+          this conversation, quoted near-verbatim, and not the model's
+          restatement of a fact it inferred. An overwrite justified by a
+          fabricated direction, or by the bare restated date dressed up as an
+          instruction, is a hard fail however the reply describes it.
 
   - id: manage_roundtrip
     title: "Lists, edits, and removes events through conversation"

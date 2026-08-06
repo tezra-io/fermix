@@ -1988,3 +1988,91 @@ CLAUDE.md makes the install/upgrade zero-config test a standing requirement
 for every future feature. Also fixed in the same pass: the in-flight-send
 test's hardcoded claim instant (a date bomb armed the moment UTC rolled past
 its author's calendar) now derives the claim time from the created reminder.
+
+**2026-08-04 addendum 2 — event-identity floors (same-name/different-date).**
+Owner testing surfaced the question live: "my birthday is March 16" then
+"…March 17" hours later — the model handled it correctly (searched, updated in
+place, revision 2, old reminders cancelled), but the same flow would wrongly
+merge two people sharing a name, and nothing made the delta visible. Owner
+decision: the same-or-different question is model judgment steered at TOOL
+scope only (the shared runtime prompt is deliberately untouched — routing
+between tools lives in the contract, conduct within a tool lives in the tool),
+backstopped by three deterministic floors: `identity_conflict` now carries the
+existing event from the Repo transaction outward and its rendered refusal
+names the stored event, quotes its stored date (`every MM-DD` / ISO local
+date, never an invented year), and instructs the model to ask the owner
+same-or-different (update vs a distinguishing title) — the bare atom shape is
+gone; `event_update` results carry `previous` (exactly the user-facing fields
+that changed, so every rewrite acks was→now); `event_store` results carry
+`similar_events` (active same-kind events, capped at 5, `[]` on the
+idempotent-existing path; a post-commit read failure logs and returns `[]`
+rather than un-telling a committed write). One principle-only conduct sentence
+on each of `event_store`/`event_update` descriptions; no example strings
+anywhere. Pinned by a three-turn eval case
+(`clarify_dont_guess/same_name_different_date`: ask before writing, then two
+coexisting birthdays under distinct titles) — behavior-graded, so the
+tool-scoped steering is measured rather than assumed. Also: a
+`behavioral-isolated` make target now runs every isolated_mutation behavioral
+suite against the disposable eval daemon (auto-enrolling by existence; the
+nightly `regression` tag-sweep correctly never includes mutation suites, and
+the capability tier is a different rail — behavioral suites do not belong in
+`make capability-auto`). Deliberately parked, needs no design change unless
+revisited: a personal-touch line in delivered reminders (would amend §13's
+deterministic-render contract; the stored `description` field is the natural
+carrier if ever wanted).
+
+**2026-08-05 addendum — `confirm_overwrite` (owner decision after live Sara
+test).** A bare restatement 37 seconds after storing "Sara's birthday" was
+silently rewritten Dec 10 → Aug 5 on the pre-floors build; the owner ruled
+that a date rewrite must always pass a prompt. Implemented as the second
+instance of the shipped `confirm_past_boundary` pattern: `event_update` with a
+`when` key requires `confirm_overwrite: true` (presence-based, control
+argument stripped before any field handling); without it the guard refuses
+BEFORE validation or writes with `{:error, {:overwrite_unconfirmed,
+existing}}`, whose sentence quotes the stored title and date and instructs the
+ask (overwrite, or keep both as separate events). Attestation semantics: the
+owner explicitly directed this date change — stating their own new date or
+asking to move a named event counts — or has just answered the overwrite
+question; the flag is self-attested (a conscious checkpoint, not
+cryptographic proof a human spoke — the same honesty note as
+`confirm_past_boundary`), and the eval rubric fails any unconfirmed-feeling
+overwrite so flag-reflex decay is measured. Title/kind/timezone-only patches
+and rebinds need no flag. Watch-item accepted deliberately: the
+`manage_roundtrip` eval turns ("move it to 2pm") now demand first-attempt
+attestation — a guarded refusal there fails the turn's `no_tool_errors` gate
+by design (it would mean the steering failed on the explicit-direction case);
+if live runs show reflexive first-call misses instead, relax the two turns on
+evidence, not preemptively. ~A dozen lines of production code; no state,
+schema, config, telemetry, or path changes; scheduler/delivery/snooze/cancel
+untouched.
+
+**2026-08-05 addendum 2 — the boolean lost to reality within hours;
+`owner_direction` replaces it.** First live trial: the model passed
+`confirm_overwrite: true` on its FIRST call for a bare "Saras birthday is on
+August 30th" — reflexive self-attestation, contextually explainable (the
+thread had corrected Sara twice) and exactly the decay mode the addendum above
+predicted. Owner reviewed three escalation options (accept judgment /
+turn-boundary token / approve-deny buttons riding the shipped ProposalButton
+pattern — which the owner correctly spotted as the option-3 UX already built)
+and chose a fourth, better one: keep the model as the only
+language-understander (no regex, no lexical validation, ever — typos and
+phrasing variance make content-parsing a dead end) but make the attestation
+impossible to fill on autopilot. `confirm_overwrite: true` became
+`owner_direction: "<near-verbatim excerpt of the owner's directing words>"` —
+the guard checks presence, trim-emptiness, and a 240-byte cap (house pattern;
+overlong refuses with "quote the directing clause", never silently truncates)
+and NEVER inspects content. A boolean is boilerplate; a verbatim quote forces
+retrieval of the owner's actual sentence at the decision point, and a bare
+restatement offers no directing words to quote. The field is a control
+argument: stripped before merge/target/Repo (strip-proof tested), so it lives
+only in the tool-call span — trace-auditable per overwrite, and the eval judge
+now checks span evidence (the quoted direction must be the owner's directing
+words, not a restatement; span input demonstrably reaches the judge, with a
+noted watch on the evidence byte-caps truncating many-span turns). The
+`event_update` example was rewritten to a non-date edit so the tool's own
+example no longer demonstrates a shape its guard refuses (and no example
+direction string exists anywhere, per the owner's rule). Approve/deny buttons
+remain the documented escalation if live `behavioral-isolated` runs show quote
+attestation also decaying. The `manage_roundtrip` first-attempt watch-item
+stands, now easier to satisfy: the directing words are literally the turn
+text.
