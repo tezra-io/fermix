@@ -635,6 +635,34 @@ defmodule FermixCore.Temporal.SchedulerTest do
 
       assert "2028-09-14" in keys
     end
+
+    # The scan's threshold is `today + 366`, but a yearly event can only ever be
+    # materialized to `next_occurrence + 1 CALENDAR year`. On the occurrence day
+    # those are one day apart, so the row stays in the horizon page and every
+    # pass recomputes an identical plan. Observed in production: 118 no-op
+    # writes and 118 `reminder:materialized` events for one birthday in two
+    # hours, at exactly 60-second intervals, until the date rolled.
+    test "a pass that cannot advance the horizon writes nothing and emits nothing", ctx do
+      {event, _rows} = create!(ctx, birthday_spec())
+      assert event.materialized_through_on == ~D[2027-09-14]
+
+      # Stand on the occurrence day: through(2027-09-14) < threshold(2027-09-15).
+      occurrence_day = ~U[2026-09-14 09:00:00Z]
+      set_now(ctx, occurrence_day)
+      scheduler = start_scheduler(ctx, [])
+
+      :ok = attach_materialized_telemetry(event.id)
+      {:ok, before} = Repo.get_temporal_event(event.id, server: ctx.repo)
+      :ok = Scheduler.reconcile(scheduler, now: occurrence_day)
+      :ok = Scheduler.reconcile(scheduler, now: occurrence_day)
+      {:ok, unchanged} = Repo.get_temporal_event(event.id, server: ctx.repo)
+
+      assert unchanged.materialized_through_on == before.materialized_through_on
+      assert unchanged.next_occurrence_on == before.next_occurrence_on
+      # `updated_at` is the tell: a no-op pass must not touch the row at all.
+      assert unchanged.updated_at == before.updated_at
+      refute_receive {:temporal_materialized, _meta}, 200
+    end
   end
 
   describe "faults" do
@@ -689,5 +717,26 @@ defmodule FermixCore.Temporal.SchedulerTest do
         end
       end
     end
+  end
+
+  # Scoped to ONE event id: the handler is process-global and this suite is
+  # async, so an unfiltered one receives every other test's materializations too.
+  defp attach_materialized_telemetry(event_id) do
+    test = self()
+    handler = "materialized-#{System.unique_integer([:positive])}"
+
+    :ok =
+      :telemetry.attach(
+        handler,
+        [:fermix, :reminder, :lifecycle],
+        fn _event, _measure, meta, _cfg ->
+          if meta[:phase] == :materialized and meta[:event_id] == event_id do
+            send(test, {:temporal_materialized, meta})
+          end
+        end,
+        nil
+      )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
   end
 end
