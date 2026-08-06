@@ -181,13 +181,18 @@ defmodule FermixCore.Temporal.Renderer do
     end
   end
 
+  # Round half-down to the displayed unit: seconds of scheduler latency must
+  # never shave the number (23:59:59 left reads "in 24 hours", 59:30 reads
+  # "in 1 hour"), while exactly half a unit still rounds down, so a retry at
+  # 30 minutes keeps dropping the clause rather than promising an hour.
   defp relative(_date, %Time{}, %DateTime{} = occurrence_at, local_now) do
     seconds = DateTime.diff(occurrence_at, local_now, :second)
+    hours = div(seconds + 1_799, 3_600)
 
     cond do
-      seconds >= 86_400 -> " (in " <> plural(div(seconds, 86_400), "day") <> ")"
-      seconds >= 3_600 -> " (in " <> plural(div(seconds, 3_600), "hour") <> ")"
-      true -> ""
+      hours < 1 -> ""
+      hours < 48 -> " (in " <> plural(hours, "hour") <> ")"
+      true -> " (in " <> plural(div(seconds + 43_199, 86_400), "day") <> ")"
     end
   end
 
