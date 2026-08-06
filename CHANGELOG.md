@@ -6,8 +6,81 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-05
+
+### Added
+
+- **Drive Fermix from any ACP client — Buzz, Zed, and anything else that speaks
+  the Agent Client Protocol.** `fermix acp` bridges stdio to the running daemon,
+  which answers ACP v1 on `<FERMIX_HOME>/acp.sock`. Each session becomes an
+  ordinary gateway conversation, so it gets the real system prompt, tools,
+  sandbox, memory, and telemetry rather than a second agent loop bolted on the
+  side.
+- **Reminders that understand time the way you say it.** Ask for a birthday, a
+  deadline, or "remind me in twenty minutes" and Fermix materializes the actual
+  occurrences — leads, annual roll-forward, DST-correct local times — then
+  delivers them to your configured default channel, or, with nothing
+  configured, to the inbox derived from a channel you own — a fresh install or
+  upgrade needs no new config, and a reminder never quietly falls back to the
+  chat you happened to ask in. Snooze and "cancel that" work on the reminder
+  you just received, and a reminder you slept through expires rather than
+  firing late.
+- **A stored date never changes silently.** Restating a date under an
+  already-stored name gets a question first — the same event to correct, or a
+  different person who shares the name and needs their own entry. A change you
+  did ask for is applied in one step and confirmed with what the date was
+  before as well as what it is now, and a newly stored date's confirmation
+  lists your other entries of the same kind, so a near-duplicate under a
+  similar name is visible the moment it exists.
+- **Digest jobs can see your reminders.** A scheduled job you create can read
+  your stored dates (listing only), so a morning digest folds upcoming
+  reminders in alongside a connected calendar — and when you ask what is coming
+  up, the answer draws on every calendar surface you have and says which events
+  came from where. Storing, changing, snoozing, and cancelling stay
+  attended-owner-only; jobs and guests can never touch them.
+- **Skill curation.** Every couple of weeks Fermix mines your own recent
+  requests for tasks you keep repeating that nothing covers, and proposes each
+  as a skill — delivered to your private chat with approve/deny buttons, and
+  nothing is ever written without your approval. Approved skills are drafted
+  into `~/.fermix/skills/` where they load like hand-made ones; skills that sit
+  unused earn a reversible archive proposal rather than deletion. `/skills`
+  drives it all — review on demand, approve, deny, archive, restore — and
+  `/skills list` shows the whole inventory grouped by origin (curation-managed
+  with lifecycle state, your own skills, plugin skills), each line carrying how
+  often it ran and when it was last used.
+- **Hosted (remote) MCP plugins, and Eden as the first one.** A remote plugin
+  ships no code: its artifact is a signed manifest plus a skill, and the tools
+  run on the vendor's servers. The endpoint, the exact set of agent-visible tool
+  names, and every tool's input/output descriptor are signed, so an upstream
+  change registers none of that plugin's tools rather than silently widening
+  what the agent can do. **Eden** connects with a personal access token and one
+  chosen workspace, read-only by default.
+- **An aimed-click accuracy harness for computer use** (`make aim`), measuring
+  the model's click grounding on the live display now that delivery is proven
+  exact.
+
 ### Fixed
 
+- **A hosted plugin now says it is hosted, before you connect.** The catalog
+  carried no runtime kind, so a remote plugin fell back to the local-process
+  consent line — telling you it runs on your machine while it sends your content
+  to a vendor's service. The disclosure is now derived from the plugin's own
+  manifest.
+- **An expired remote MCP session recovers instead of dying quietly.** The first
+  time a hosted server retired a session, every later call to that plugin failed
+  for the life of the daemon and nothing ever reconnected. A daemon left running
+  overnight would wake up unable to reach the plugin at all.
+- **An unsigned hosted plugin can no longer be loaded.** A remote manifest binds
+  a live credential to a network endpoint, so it is now runnable only from an
+  artifact whose publisher signature and file tree re-verify; a manifest edited
+  after install cannot redirect that credential somewhere else.
+- **Annual reminders stopped rewriting themselves once a minute.** On the day an
+  annual event came due, the horizon pass recomputed an identical plan every 60
+  seconds — thousands of no-op writes and lifecycle events per event, per year.
+  No reminders were lost or duplicated; the noise is simply gone.
+- **A Buzz mention no longer produces five identical replies**, ACP clients are
+  remembered between sessions, and delegated harness runs are delivered back to
+  the client that asked for them.
 - **The stuck-loop guard no longer kills healthy computer-use turns.** The
   repeated-tool-call detector counted identical calls across a sliding window,
   so a turn that legitimately re-observes the screen — screenshot, click,
@@ -17,6 +90,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   now requires an unbroken run of the same call with nothing in between;
   interleaved repetition still gets the one-time warning and stays bounded by
   the per-turn iteration cap.
+- **A daemon restart mid-run no longer wedges a scheduled job forever.** A run
+  orphaned by a restart left its job permanently blocked from ever being
+  claimed again; orphaned runs are now detected and failed on the next
+  scheduler pass, the job returns to its schedule, and a runner that survived a
+  scheduler-only restart is re-adopted rather than double-run.
 - **A truncated model response can no longer end a turn in silence.** A Codex
   stream that died after its first frame still counted as "delivered" — that
   frame is the model's own reasoning, which carries no answer and no tool call —
@@ -25,6 +103,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   response now has to carry actual text or a tool call to count as delivered,
   and a terminal event that carried nothing is no longer an exemption. Whatever
   did arrive is still kept and never discarded.
+
+### Security
+
+- Closes the remaining accepted findings from the 2026-07 review, and
+  `SECURITY.md` now states the local-account trust boundary explicitly.
 
 ## [0.7.2] - 2026-07-31
 
