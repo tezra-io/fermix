@@ -8,6 +8,14 @@ defmodule FermixCore.Plugins.Dist.Index do
 
   @schema_version 1
 
+  # M27 §12 Stage 2: additive per-entry runtime disclosure. `local_stdio` runs
+  # the plugin's own process on this machine; `remote_mcp` calls a hosted MCP
+  # service. Every entry published before the field exists omits it (`nil`) and
+  # keeps the neutral pre-install copy. Unknown values are refused rather than
+  # collapsed to neutral: the index ships inside the cosign-verified binary, so
+  # a value this core does not understand is a catalog bug, not version skew.
+  @runtime_kinds ~w(local_stdio remote_mcp)
+
   @type artifact :: %{
           target: String.t(),
           url: String.t(),
@@ -30,6 +38,7 @@ defmodule FermixCore.Plugins.Dist.Index do
           logo: map() | nil,
           auth_type: String.t() | nil,
           auth_provider: String.t() | nil,
+          runtime_kind: String.t() | nil,
           rails: [String.t()],
           latest: String.t() | nil,
           yanked: [String.t()],
@@ -93,6 +102,7 @@ defmodule FermixCore.Plugins.Dist.Index do
       logo: Map.get(p, "logo"),
       auth_type: Map.get(p, "auth_type"),
       auth_provider: Map.get(p, "auth_provider"),
+      runtime_kind: runtime_kind(p),
       rails: Map.get(p, "rails", []),
       latest: Map.get(p, "latest"),
       yanked: Map.get(p, "yanked", []),
@@ -101,6 +111,10 @@ defmodule FermixCore.Plugins.Dist.Index do
   end
 
   defp plugin(other), do: throw({:invalid_plugin_entry, other})
+
+  defp runtime_kind(%{"runtime_kind" => kind}) when kind in @runtime_kinds, do: kind
+  defp runtime_kind(%{"runtime_kind" => other}), do: throw({:invalid_plugin_entry, other})
+  defp runtime_kind(_entry), do: nil
 
   defp version_entry(%{"version" => version} = v) when is_binary(version) do
     %{

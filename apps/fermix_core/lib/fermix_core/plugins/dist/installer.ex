@@ -2,8 +2,8 @@ defmodule FermixCore.Plugins.Dist.Installer do
   @moduledoc """
   Installs plugins from the catalog index: the ordered, fail-loud pipeline
   (resolve → compat gate → download → sha256 → cosign → extract+guard →
-  validate tree → h1 → atomic activate → record lockfile), plus uninstall and
-  gc.
+  validate tree → tree_digest_v2 → retain remote evidence → atomic activate →
+  record lockfile), plus uninstall and gc.
 
   Serialization (§7): every mutating op (`run_install`/`run_uninstall`/`run_gc`)
   runs under the cross-VM `Dist.Lock`, so a CLI VM and the daemon VM sharing
@@ -17,6 +17,8 @@ defmodule FermixCore.Plugins.Dist.Installer do
 
   use GenServer
 
+  import Bitwise, only: [&&&: 2]
+
   require Logger
 
   alias Fermix.CLI.Upgrade.Manifest
@@ -25,16 +27,23 @@ defmodule FermixCore.Plugins.Dist.Installer do
   alias FermixCore.Plugins.Dist.Fetcher.Http, as: FetcherHttp
   alias FermixCore.Plugins.Dist.Index
   alias FermixCore.Plugins.Dist.Lock
+  alias FermixCore.Plugins.Dist.Provenance
   alias FermixCore.Plugins.Dist.RuntimeProbe
   alias FermixCore.Plugins.Dist.SafeRm
   alias FermixCore.Plugins.Dist.Store
   alias FermixCore.Plugins.Dist.Telemetry
+  alias FermixCore.Plugins.Dist.TreeDigest
   alias FermixCore.Plugins.Dist.Verifier.Cosign, as: VerifierCosign
   alias FermixCore.Plugins.Registry
   alias FermixCore.Setup.ConfigStore
 
   @allowed_top ~w(plugin.json skills assets bin src CHANGELOG.md README.md LICENSE yanked.json)
   @runtime_ecosystem ~w(package.json package-lock.json pyproject.toml uv.lock requirements.txt mix.exs mix.lock)
+
+  # A `remote_mcp` artifact is data: a manifest, docs, skills, and assets. The
+  # runtime is a hosted endpoint, so there is nothing local to execute — no
+  # `src/`, no `bin/`, no ecosystem/lock file (§12 Stage 2).
+  @remote_allowed_top ~w(plugin.json skills assets CHANGELOG.md README.md LICENSE yanked.json)
 
   # --- GenServer (daemon boot hygiene: sweep) ---
 
@@ -179,18 +188,33 @@ defmodule FermixCore.Plugins.Dist.Installer do
     cert = Path.join(work, "artifact.pem")
     tree = Path.join(work, "tree")
 
+    material = %{
+      root: root,
+      name: name,
+      version: version,
+      artifact: artifact,
+      archive: tgz,
+      sig: sig,
+      cert: cert
+    }
+
     with :ok <- download_all(artifact, tgz, sig, cert, opts),
          :ok <- check_sha(tgz, artifact),
          :ok <- verify_sig(tgz, sig, cert, name, version, opts),
          :ok <- Archive.extract(tgz, tree),
          {:ok, manifest} <- read_manifest(tree),
          :ok <- check_identity(manifest, name, version),
-         :ok <- check_boundary(tree, runtime?(manifest)),
+         rule = content_rule(manifest),
+         :ok <- check_boundary(tree, rule),
          {:ok, plugin} <- decode_staged_manifest(manifest, tree),
          :ok <- probe_runtime(plugin, tree, opts),
-         h1 = Store.h1(tree),
+         {:ok, tree_digest} <- TreeDigest.digest_tree(tree),
+         # Both digests are read off the staged tree: `install_tree/4` renames
+         # it away, so nothing below can hash it.
+         digests = %{h1: Store.h1(tree), tree_digest_v2: tree_digest},
+         :ok <- retain_evidence(rule, material),
          :ok <- Store.install_tree(root, name, version, tree) do
-      record(root, name, version, artifact, version_entry, h1)
+      record(root, name, version, artifact, version_entry, digests)
     end
   end
 
@@ -301,14 +325,58 @@ defmodule FermixCore.Plugins.Dist.Installer do
     end
   end
 
-  defp runtime?(manifest), do: is_map(manifest["runtime"])
+  # Which content rule the artifact is judged by. `:remote` is data-only;
+  # `:local_runtime` additionally allows the ecosystem/lock files a local
+  # server needs; `:declarative` is the plain HTTP-rail plugin.
+  defp content_rule(manifest) do
+    runtime = manifest["runtime"]
 
-  defp check_boundary(tree, has_runtime?) do
-    allowed = MapSet.new(@allowed_top ++ if(has_runtime?, do: @runtime_ecosystem, else: []))
+    cond do
+      Provenance.remote_runtime?(runtime) -> :remote
+      is_map(runtime) -> :local_runtime
+      true -> :declarative
+    end
+  end
+
+  defp check_boundary(tree, :remote) do
+    with :ok <- check_top_level(tree, @remote_allowed_top, :remote_content_boundary_violation) do
+      refuse_executables(tree)
+    end
+  end
+
+  defp check_boundary(tree, :local_runtime),
+    do: check_top_level(tree, @allowed_top ++ @runtime_ecosystem, :content_boundary_violation)
+
+  defp check_boundary(tree, :declarative),
+    do: check_top_level(tree, @allowed_top, :content_boundary_violation)
+
+  defp check_top_level(tree, allowed, tag) do
+    allowed = MapSet.new(allowed)
 
     case Enum.reject(File.ls!(tree), &(&1 in allowed)) do
       [] -> :ok
-      [bad | _] -> {:error, {:content_boundary_violation, bad}}
+      [bad | _] -> {:error, {tag, bad}}
+    end
+  end
+
+  # A remote artifact has no local execution path, so an executable mode bit
+  # anywhere in it is content that does not belong to its runtime kind — refuse
+  # the install rather than store something a later code path could spawn.
+  defp refuse_executables(tree) do
+    tree
+    |> Path.join("**")
+    |> Path.wildcard(match_dot: true)
+    |> Enum.find(&executable_file?/1)
+    |> case do
+      nil -> :ok
+      path -> {:error, {:remote_executable_file, Path.relative_to(path, tree)}}
+    end
+  end
+
+  defp executable_file?(path) do
+    case File.lstat(path) do
+      {:ok, %File.Stat{type: :regular, mode: mode}} -> (mode &&& 0o111) != 0
+      _other -> false
     end
   end
 
@@ -325,16 +393,41 @@ defmodule FermixCore.Plugins.Dist.Installer do
   # a machine without Node/Python refuses loudly instead of enabling a
   # plugin whose child can never spawn. `:probe_opts` is the test seam.
   defp probe_runtime(%{runtime: runtime}, tree, opts) when is_map(runtime) do
-    RuntimeProbe.probe(runtime, tree, Keyword.get(opts, :probe_opts, []))
+    # A remote runtime's executable is the hosted endpoint — there is no host
+    # command to resolve, so `RuntimeProbe` (the stdio/vendored contract) does
+    # not apply to it.
+    if Provenance.remote_runtime?(runtime),
+      do: :ok,
+      else: RuntimeProbe.probe(runtime, tree, Keyword.get(opts, :probe_opts, []))
   end
 
   defp probe_runtime(_plugin, _tree, _opts), do: :ok
 
-  defp record(root, name, version, artifact, version_entry, h1) do
+  # Remote runtimes retain provenance evidence (§9.3): the material the startup
+  # gate re-verifies — the archive, its published checksum, and the publisher
+  # signature/certificate. Local runtimes retain nothing; the gate is
+  # remote-only.
+  defp retain_evidence(:remote, material) do
+    Provenance.retain(material.root, material.name, material.version, %{
+      archive: material.archive,
+      sig: material.sig,
+      cert: material.cert,
+      sha256: material.artifact.sha256
+    })
+  end
+
+  defp retain_evidence(_rule, _material), do: :ok
+
+  defp record(root, name, version, artifact, version_entry, digests) do
     Store.record(root, name, %{
       "version" => version,
       "sha256" => artifact.sha256,
-      "h1" => h1,
+      # `h1` is the legacy digest, written for continuity with entries this
+      # core already reads; `tree_digest_v2` is the one every new install is
+      # judged by (§9.3). Pre-M27 entries carry only `h1` and are never
+      # migrated in place — they retire by attrition.
+      "h1" => digests.h1,
+      "tree_digest_v2" => digests.tree_digest_v2,
       "plugin_api" => Map.get(version_entry, :plugin_api) || Map.get(version_entry, "plugin_api"),
       "min_core_version" =>
         Map.get(version_entry, :min_core_version) ||

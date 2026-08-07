@@ -12,8 +12,15 @@ defmodule FermixCore.Harness.EventStream do
     * Lines are spliced on the `\\n` byte. Splitting is byte-level, so a chunk that
       cuts a multi-byte UTF-8 sequence simply leaves an incomplete line in the
       buffer that the next chunk completes.
-    * A completed line larger than `max_event_bytes` (default 1 MiB) is the ONLY
-      framing violation. Once `framing_errors` exceeds `max_framing_errors`
+    * A line larger than `max_event_bytes` (default 1 MiB) is the ONLY framing
+      violation, and it costs exactly ONE error however many chunks it spans. It
+      is charged the moment the size is known — on a completed line, or on the
+      trailing partial the first time the buffer holding it crosses the cap (an
+      unterminated line would otherwise never be measured, and re-scanning the
+      growing buffer on every chunk is quadratic). The rest of a charged line is
+      then dropped up to and including its next `\\n`: the buffer never exceeds
+      `max_event_bytes`, the same line is never charged twice, and its remainder
+      is never emitted. Once `framing_errors` exceeds `max_framing_errors`
       (default 20), `push/2` returns `{:error, {:protocol, _}, t}` and the caller
       kills the run.
     * A completed line that is a JSON object is an `{:event, map}`; any other
@@ -21,7 +28,9 @@ defmodule FermixCore.Harness.EventStream do
       is a `{:diagnostic, line}` — never a framing error. Empty lines are ignored.
     * At `finalize/2` a non-empty trailing partial line is parsed once: a JSON
       object becomes an event (checked for terminal), anything else a diagnostic.
-      A truncated final line is never a framing error.
+      A truncated final line within the cap is never a framing error; one over it
+      was already charged and dropped while it was still being buffered, so it
+      leaves nothing to flush.
 
   Outcome matrix (design §12.1, exact): a non-zero exit is always
   `{:failed, {:exit, code}}` regardless of events; exit 0 with the vendor terminal
@@ -53,6 +62,7 @@ defmodule FermixCore.Harness.EventStream do
           | {:terminal?, terminal_fun()}
 
   defstruct buffer: "",
+            discarding_line?: false,
             max_event_bytes: @default_max_event_bytes,
             max_framing_errors: @default_max_framing_errors,
             terminal_fun: nil,
@@ -63,6 +73,7 @@ defmodule FermixCore.Harness.EventStream do
 
   @opaque t :: %__MODULE__{
             buffer: binary(),
+            discarding_line?: boolean(),
             max_event_bytes: pos_integer(),
             max_framing_errors: non_neg_integer(),
             terminal_fun: terminal_fun(),
@@ -103,7 +114,11 @@ defmodule FermixCore.Harness.EventStream do
     combined = state.buffer <> chunk
     parts = :binary.split(combined, @newline, [:global])
     {lines, buffer} = split_trailing(parts)
-    consume_lines(lines, %{state | buffer: buffer})
+    {kept, buffer, state} = drop_charged_remainder(lines, buffer, state)
+
+    kept
+    |> consume_lines(%{state | buffer: buffer})
+    |> bound_buffer()
   end
 
   @doc """
@@ -128,6 +143,45 @@ defmodule FermixCore.Harness.EventStream do
   defp split_trailing(parts) do
     {lines, [buffer]} = Enum.split(parts, length(parts) - 1)
     {lines, buffer}
+  end
+
+  # The bytes after a charged oversized line's cap are still THAT line: they are
+  # dropped up to and including its next `\n`, never re-charged (the budget
+  # counts lines, not megabytes) and never emitted (the remainder is a mid-JSON
+  # fragment that would otherwise parse as a fresh diagnostic — or worse, as a
+  # forged terminal event — and evict the vendor's real error from the ring).
+  defp drop_charged_remainder(lines, buffer, %__MODULE__{discarding_line?: false} = state) do
+    {lines, buffer, state}
+  end
+
+  # No newline in this chunk: the whole thing is still the discarded line.
+  defp drop_charged_remainder([], _buffer, state), do: {[], "", state}
+
+  defp drop_charged_remainder([_tail_of_discarded | rest], buffer, state) do
+    {rest, buffer, %{state | discarding_line?: false}}
+  end
+
+  # The trailing partial never reaches `classify_line/2` — it is re-appended to
+  # the next chunk instead — so a line the vendor never terminates was measured
+  # by nothing here and grew until the host's own output cap fired, re-scanning
+  # and re-copying the whole buffer on every chunk. Charging it to the SAME
+  # framing budget an oversized COMPLETED line pays keeps one failure kind and
+  # one ceiling, and clearing the buffer keeps the scan linear.
+  defp bound_buffer({:ok, emitted, state}) do
+    if byte_size(state.buffer) > state.max_event_bytes do
+      charge_oversized_buffer(state, emitted)
+    else
+      {:ok, emitted, state}
+    end
+  end
+
+  defp bound_buffer({:error, _detail, _state} = breach), do: breach
+
+  defp charge_oversized_buffer(state, emitted) do
+    case over_budget(%{state | buffer: "", discarding_line?: true}) do
+      {:ok, counted, nil} -> {:ok, emitted, counted}
+      {:breach, counted} -> finish_consume({:breach, counted})
+    end
   end
 
   defp consume_lines(lines, state) do

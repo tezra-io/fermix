@@ -439,4 +439,52 @@ defmodule FermixCore.ReadinessTest do
              end)
     end
   end
+
+  # The ACP surface has no credential and no external dependency: the whole
+  # config is one boolean, so enabling it can never make setup incomplete
+  # (M29 §9 item 6). Pinned so a future credential-bearing check on this
+  # channel has to be a deliberate change, not a silent one.
+  describe "acp channel" do
+    setup do
+      acp = Application.get_env(:fermix_channels, :acp, [])
+      on_exit(fn -> Application.put_env(:fermix_channels, :acp, acp) end)
+
+      tmp_home =
+        Path.join(System.tmp_dir!(), "fermix-readiness-#{System.unique_integer([:positive])}")
+
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+      System.put_env("FERMIX_HOME", tmp_home)
+
+      Application.put_env(:fermix_core, :providers, openai: [api_key: "sk-x", primary: true])
+      Application.put_env(:fermix_core, :agent, name: "fermix")
+      Application.put_env(:fermix_core, :realtime, enabled: false)
+      Application.put_env(:fermix_channels, :telegram, enabled: false)
+
+      Application.put_env(:fermix_core, :personalization,
+        user_name: "Sujeeth",
+        timezone: "America/New_York",
+        communication_style: "direct"
+      )
+
+      :ok
+    end
+
+    test "an enabled acp channel reports ready and contributes no failure" do
+      Application.put_env(:fermix_channels, :acp, enabled: true, mode: :gateway)
+
+      report = Readiness.report()
+
+      assert report.status == :ready
+      refute Enum.any?(report.failures, &(&1.component == "channel:acp"))
+    end
+
+    test "a disabled acp channel contributes no failure either" do
+      Application.put_env(:fermix_channels, :acp, enabled: false, mode: :gateway)
+
+      report = Readiness.report()
+
+      assert report.status == :ready
+      refute Enum.any?(report.failures, &(&1.component == "channel:acp"))
+    end
+  end
 end

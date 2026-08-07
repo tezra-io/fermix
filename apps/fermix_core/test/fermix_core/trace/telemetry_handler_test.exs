@@ -2,6 +2,7 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
   use ExUnit.Case, async: false
 
   alias FermixCore.Agents.LifecycleTelemetry
+  alias FermixCore.Capabilities.MCP.Telemetry, as: MCPClientTelemetry
   alias FermixCore.Trace
   alias FermixCore.Trace.TelemetryHandler
 
@@ -171,6 +172,78 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
     assert entry["agent"] == "Cursor"
     assert entry["count"] == 3
     assert entry["session_id"] == "mcp-session"
+  end
+
+  # Registry-completeness invariant (CLAUDE.md "gate on the whole feature
+  # surface"): the assertion is "NO phase this emitter can emit is missing from
+  # the JSONL stream", written as a loop over `phases/0` so a phase added later
+  # either joins the invariant or fails here.
+  test "every outbound-MCP lifecycle phase reaches the JSONL trace stream", %{
+    dir: dir,
+    server: server
+  } do
+    phases = MCPClientTelemetry.phases()
+    assert :telemetry.list_handlers(MCPClientTelemetry.lifecycle_event()) != []
+
+    for phase <- phases do
+      MCPClientTelemetry.emit_lifecycle(
+        phase,
+        %{source_id: {:plugin, "eden"}, plugin: "eden"},
+        :ok,
+        7
+      )
+    end
+
+    sync(server)
+
+    entries = read_entries(dir, :agent_event)
+    lifecycle = Enum.filter(entries, &(&1["event"] == "mcp_client_lifecycle"))
+
+    assert Enum.map(lifecycle, & &1["phase"]) == Enum.map(phases, &to_string/1)
+    assert Enum.all?(lifecycle, &(&1["agent"] == "plugin:eden"))
+    assert Enum.all?(lifecycle, &(&1["source_id"] == "plugin:eden"))
+    assert Enum.all?(lifecycle, &(&1["duration_ms"] == 7))
+  end
+
+  test "mcp_client lifecycle rows carry the redacted error class", %{dir: dir, server: server} do
+    MCPClientTelemetry.emit_lifecycle(
+      :security_block,
+      %{source_id: {:operator, "fs"}},
+      {:error, {:tool_not_allowed, "eden_delete_note"}},
+      3,
+      session_id: "main-9",
+      attempt: 2
+    )
+
+    sync(server)
+
+    entry = find_entry!(read_entries(dir, :agent_event), &(&1["event"] == "mcp_client_lifecycle"))
+    assert entry["agent"] == "operator:fs"
+    assert entry["result"] == "error"
+    assert entry["error_class"] == "tool_not_allowed"
+    assert entry["session_id"] == "main-9"
+    assert entry["attempt"] == 2
+  end
+
+  test "capability:mcp_name_collision event creates an agent_event trace", %{
+    dir: dir,
+    server: server
+  } do
+    MCPClientTelemetry.emit_collision(
+      "fs-local",
+      "read_file",
+      "mcp_fs_local_read_file",
+      {"fs.local", "read_file"}
+    )
+
+    sync(server)
+
+    entry = find_entry!(read_entries(dir, :agent_event), &(&1["event"] == "mcp_name_collision"))
+    assert entry["agent"] == "fs-local"
+    assert entry["original"] == "read_file"
+    assert entry["sanitized"] == "mcp_fs_local_read_file"
+    assert entry["collided_with"] == %{"server" => "fs.local", "original" => "read_file"}
+    assert entry["count"] == 1
   end
 
   test "plugin:dist event creates a plugin_dist agent_event trace", %{dir: dir, server: server} do

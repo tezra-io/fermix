@@ -64,15 +64,45 @@ defmodule FermixCore.Providers.OpenAI.Codex.SSEParser do
   # (last-write-wins for items, append-only for buffers). A truncated
   # stream returns whatever was finalized — no exception. Callers should
   # detect this by checking transport-level errors before calling parse/1.
+  #
+  # `leftover` is capped at `@max_leftover_bytes`. The only wall-clock bound on
+  # this stream is an IDLE window (`Codex.receive_timeout_for/1`), which a peer
+  # that trickles bytes never trips, so an event body that never reaches its
+  # `\n\n` boundary would grow the binary for as long as the peer kept sending.
+  #
+  # Passing the cap latches `status: "failed"` + `failure` AND sets
+  # `overflowed?`, which `Codex.collect_sse/3` reads to return `{:halt, acc}`.
+  # The two halves are one fix: the cap bounds the MEMORY, the halt ends the
+  # TRANSFER. Bounding memory alone leaves the request hanging forever on a
+  # trickling peer — the conversation's single-flight slot and a pooled
+  # connection held indefinitely, which is the denial the cap exists to close.
+  # Anything parsed before the cap is still returned.
+  #
+  # What the caller does with the latched failure depends on what the turn
+  # DELIVERED, and the two arms differ in how loud they are:
+  #
+  #   * nothing delivered — `Codex.undelivered_error/2` mints a `ProviderError`
+  #     carrying this message, which `Agents.TurnRunner` quotes to the operator.
+  #   * text or a tool call already delivered — `Codex.warn_truncated/3` logs a
+  #     warning and RETURNS the turn, so the operator sees a possibly-truncated
+  #     answer explained only in the log. That is deliberate, not an oversight:
+  #     erroring would discard delivered content and dead-end a continuation,
+  #     and no layer recovers it — `AgentLoop.continue_with_retry/3` runs
+  #     `eligible?: fn _ -> false end`, and `Jobs.Runner` refuses the whole-loop
+  #     replay once tools have started.
+
+  @max_leftover_bytes 1_048_576
 
   defstruct items: %{},
             arg_buffers: %{},
             text_buffers: %{},
+            composed: "",
             usage: %{},
             model: nil,
             status: nil,
             failure: nil,
             leftover: "",
+            overflowed?: false,
             delta_callback: nil
 
   @type t :: %__MODULE__{}
@@ -92,13 +122,38 @@ defmodule FermixCore.Providers.OpenAI.Codex.SSEParser do
   end
 
   @spec feed(t(), binary()) :: t()
+  def feed(%__MODULE__{overflowed?: true} = state, chunk) when is_binary(chunk), do: state
+
   def feed(%__MODULE__{} = state, chunk) when is_binary(chunk) do
     buffer = state.leftover <> chunk
     {complete, leftover} = split_complete_events(buffer)
 
     events = Enum.flat_map(complete, &decode_chunk/1)
     state = Enum.reduce(events, state, &reduce_event/2)
-    %{state | leftover: leftover}
+    bound_leftover(%{state | leftover: leftover})
+  end
+
+  defp bound_leftover(%__MODULE__{leftover: leftover} = state)
+       when byte_size(leftover) <= @max_leftover_bytes,
+       do: state
+
+  # Latched, not merely cleared: a later `response.completed` arriving on the
+  # same corrupt stream would otherwise overwrite `status` and turn an abandoned
+  # response back into a silent success.
+  defp bound_leftover(%__MODULE__{leftover: leftover} = state) do
+    %{
+      state
+      | leftover: "",
+        overflowed?: true,
+        status: "failed",
+        failure: %{
+          "code" => "sse_event_too_large",
+          "message" =>
+            "Codex sent #{byte_size(leftover)} bytes of a single SSE event with no event " <>
+              "boundary, past the #{@max_leftover_bytes}-byte parser ceiling. The rest of the " <>
+              "stream was abandoned; whatever parsed before it is kept."
+        }
+    }
   end
 
   @spec finalize(t()) :: %{required(String.t()) => term()}
@@ -170,7 +225,14 @@ defmodule FermixCore.Providers.OpenAI.Codex.SSEParser do
          state
        )
        when is_binary(delta) do
-    state = %{state | text_buffers: append_buffer(state.text_buffers, idx, delta)}
+    buffers = append_buffer(state.text_buffers, idx, delta)
+
+    state = %{
+      state
+      | text_buffers: buffers,
+        composed: recompose(state.composed, buffers, idx, delta)
+    }
+
     emit_text_delta(state)
     state
   end
@@ -240,7 +302,7 @@ defmodule FermixCore.Providers.OpenAI.Codex.SSEParser do
   defp emit_text_delta(%__MODULE__{delta_callback: nil}), do: :ok
 
   defp emit_text_delta(%__MODULE__{delta_callback: cb} = state) when is_function(cb, 1) do
-    cb.({:text_delta, composed_text(state)})
+    cb.({:text_delta, state.composed})
     :ok
   end
 
@@ -248,7 +310,7 @@ defmodule FermixCore.Providers.OpenAI.Codex.SSEParser do
 
   defp emit_item_done(%__MODULE__{delta_callback: cb} = state, %{"type" => "message"})
        when is_function(cb, 1) do
-    cb.({:text_done, composed_text(state)})
+    cb.({:text_done, state.composed})
     :ok
   end
 
@@ -276,9 +338,27 @@ defmodule FermixCore.Providers.OpenAI.Codex.SSEParser do
 
   defp reasoning_summary_text(_item), do: ""
 
-  # Joined across all output indices in index order — the same composition
-  # ResponsesShared.extract_text/1 applies to the finalized body.
-  defp composed_text(%__MODULE__{text_buffers: buffers}) do
+  # `composed` is the text buffers joined in output-index order — the same
+  # composition ResponsesShared.extract_text/1 applies to the finalized body.
+  # Recomputing that join on EVERY delta re-copied the whole answer each time
+  # (O(N x L) for an N-delta response) on the main agent's streaming path.
+  #
+  # A delta for the highest index so far only extends the tail, so it appends in
+  # place; the Responses protocol produces output items sequentially, so that is
+  # every delta of a real stream. A delta for an EARLIER index changes the middle
+  # of the string, so the join is redone — the assumption that arrival order
+  # equals index order does not hold universally and is pinned by test. Both arms
+  # are the same function of `text_buffers`: the append is a cache of the join,
+  # never a second answer.
+  defp recompose(composed, buffers, idx, delta) do
+    if idx == buffers |> Map.keys() |> Enum.max() do
+      composed <> delta
+    else
+      join_in_index_order(buffers)
+    end
+  end
+
+  defp join_in_index_order(buffers) do
     buffers
     |> Enum.sort_by(fn {idx, _text} -> idx end)
     |> Enum.map_join("", fn {_idx, text} -> text end)

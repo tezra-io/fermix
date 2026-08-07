@@ -63,7 +63,8 @@ defmodule FermixCore.Setup.Runtime do
                    :slack_signing_secret,
                    :slack_owner_user_id,
                    :signal_account,
-                   :signal_owner_user_id
+                   :signal_owner_user_id,
+                   :acp_enabled
                  ]
 
   @type puts_fun :: (String.t() -> any())

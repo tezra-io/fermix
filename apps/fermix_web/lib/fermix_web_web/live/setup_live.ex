@@ -21,6 +21,7 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.Plugins.Dist.Installer, as: DistInstaller
   alias FermixCore.Plugins.Health, as: PluginHealth
   alias FermixCore.Plugins.Registry, as: PluginRegistry
+  alias FermixCore.Plugins.RemoteSetup
   alias FermixCore.Plugins.Status, as: PluginStatus
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.ModelCatalog
@@ -33,6 +34,7 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.Setup.AccessToken
   alias FermixCore.Setup.Doctor
   alias FermixCore.Setup.Wizard
+  alias FermixCore.SkillCuration.Delivery, as: SkillCurationDelivery
   alias FermixCore.Tools.Media.Registry, as: MediaRegistry
   alias FermixCore.Transcription.Registry, as: TranscriptionRegistry
   alias FermixWebWeb.SetupLive.Components
@@ -106,7 +108,10 @@ defmodule FermixWebWeb.SetupLive do
     :slack_signing_secret,
     :slack_owner_user_id,
     :signal_account,
-    :signal_owner_user_id
+    :signal_owner_user_id,
+    # The ACP listener is a supervised transport child started at boot, so
+    # flipping it needs a restart before the socket appears (or disappears).
+    :acp_enabled
   ]
   # `default_vendor` gates which run tool advertises AND feeds the runtime prompt
   # steer (rendered from the cached profile), so a change wants a daemon restart
@@ -114,6 +119,9 @@ defmodule FermixWebWeb.SetupLive do
   # now gates whether the harness section renders at all (design §23.4), so it is
   # restart-flagged for the same cached-profile reason.
   @harness_restart_keys [:harness_default_vendor, :harness_approved]
+  # Flipping skill curation adds/removes the Scheduler child (child-absent
+  # gating), so it only takes effect on a daemon restart.
+  @skill_curation_restart_keys [:skill_curation_enabled]
 
   @impl true
   def mount(params, session, socket) do
@@ -149,6 +157,7 @@ defmodule FermixWebWeb.SetupLive do
       |> assign(:plugin_auth_url, nil)
       |> assign(:plugin_install_tasks, %{})
       |> assign(:oauth_modal, nil)
+      |> assign(:resource_picker, nil)
       |> assign_report(report)
 
     {:ok, socket}
@@ -302,6 +311,7 @@ defmodule FermixWebWeb.SetupLive do
       |> maybe_put_string(:slack_owner_user_id, params["slack_owner_user_id"])
       |> maybe_put_string(:signal_account, params["signal_account"])
       |> maybe_put_string(:signal_owner_user_id, params["signal_owner_user_id"])
+      |> maybe_put_string(:acp_enabled, params["acp_enabled"])
 
     socket =
       save_answers(socket, answers, "Channels saved.", Map.get(root, "__nav"),
@@ -513,6 +523,33 @@ defmodule FermixWebWeb.SetupLive do
     {:noreply, assign(socket, :oauth_modal, nil)}
   end
 
+  # The M27 §7.5 step between "credential stored" and "ready": the operator picks
+  # the access profile and the ONE resource the plugin will be scoped to.
+  # Discovery is a network round trip, so it runs async and the picker opens on
+  # its pending step — the pane never blocks on a hosted service.
+  def handle_event("open_resource_picker", %{"name" => name}, socket) do
+    case PluginRegistry.find(name) do
+      {:ok, plugin} -> {:noreply, open_resource_picker(socket, plugin)}
+      :error -> {:noreply, flash_error(socket, "Plugin not found: #{name}")}
+      {:error, reason} -> {:noreply, flash_error(socket, Redaction.format(reason))}
+    end
+  end
+
+  def handle_event("close_resource_picker", _params, socket) do
+    {:noreply, assign(socket, :resource_picker, nil)}
+  end
+
+  # Selecting a non-default profile is a deliberate act, never a side effect of
+  # picking a workspace: the card states what the profile widens before the
+  # operator can commit it (§8.1).
+  def handle_event("pick_access_profile", %{"profile" => profile}, socket) do
+    {:noreply, put_picker_profile(socket, profile)}
+  end
+
+  def handle_event("select_workspace", %{"id" => id, "label" => label}, socket) do
+    {:noreply, commit_workspace(socket, id, label)}
+  end
+
   def handle_event("save_memory", %{"memory_form" => params} = root, socket) do
     answers =
       []
@@ -543,8 +580,12 @@ defmodule FermixWebWeb.SetupLive do
       |> maybe_put_string(:user_name, params["user_name"])
       |> maybe_put_string(:timezone, params["timezone"])
       |> maybe_put_string(:communication_style, params["communication_style"])
+      |> maybe_put_skill_curation_enabled(params)
 
-    {:noreply, save_answers(socket, answers, "Personalization saved.", Map.get(root, "__nav"))}
+    {:noreply,
+     save_answers(socket, answers, "Personalization saved.", Map.get(root, "__nav"),
+       restart_required?: runtime_restart_answers?(answers)
+     )}
   end
 
   # The Coding Agents tab: consent (`approved`) + the default-vendor selector,
@@ -669,6 +710,22 @@ defmodule FermixWebWeb.SetupLive do
     {:noreply, finish_doctor_channel_probe(socket, channel, result)}
   end
 
+  def handle_async({:resource_discovery, name}, {:ok, result}, socket) do
+    {:noreply, finish_resource_discovery(socket, name, result)}
+  end
+
+  def handle_async({:resource_discovery, name}, {:exit, reason}, socket) do
+    {:noreply, finish_resource_discovery(socket, name, {:error, reason})}
+  end
+
+  def handle_async({:resource_selection, name}, {:ok, result}, socket) do
+    {:noreply, finish_workspace_selection(socket, name, result)}
+  end
+
+  def handle_async({:resource_selection, name}, {:exit, reason}, socket) do
+    {:noreply, finish_workspace_selection(socket, name, {:error, reason})}
+  end
+
   @impl true
   def render(assigns) do
     ~H"""
@@ -695,6 +752,7 @@ defmodule FermixWebWeb.SetupLive do
       plugin_auth_url={@plugin_auth_url}
       plugin_summary={@plugin_summary}
       oauth_modal={@oauth_modal}
+      resource_picker={@resource_picker}
       installing_plugins={plugin_install_names(@plugin_install_tasks)}
       realtime_form={@realtime_form}
       report={@report}
@@ -841,7 +899,8 @@ defmodule FermixWebWeb.SetupLive do
       @provider_restart_keys ++
         @realtime_restart_keys ++
         @channel_restart_keys ++
-        @harness_restart_keys
+        @harness_restart_keys ++
+        @skill_curation_restart_keys
 
     Enum.any?(answers, fn {key, _value} -> key in restart_keys end)
   end
@@ -1118,7 +1177,8 @@ defmodule FermixWebWeb.SetupLive do
       whatsapp: whatsapp_form(channels),
       discord: discord_form(channels),
       slack: slack_form(channels),
-      signal: signal_form(channels)
+      signal: signal_form(channels),
+      acp: acp_form(channels)
     }
   end
 
@@ -1175,6 +1235,14 @@ defmodule FermixWebWeb.SetupLive do
       account: safe_string(Keyword.get(config, :account)),
       owner_user_id: safe_string(Keyword.get(config, :owner_user_id))
     }
+  end
+
+  # ACP carries no credential and no owner id — the toggle is the whole form.
+  # The default mirrors config/config.exs: an install whose TOML predates the
+  # surface has no acp section, and the toggle must show the surface as it is
+  # actually running rather than offering to turn off something already on.
+  defp acp_form(channels) do
+    %{enabled: channel_enabled?(Keyword.get(channels, :acp, []), true)}
   end
 
   defp build_sandbox_form(snapshot) do
@@ -1360,8 +1428,20 @@ defmodule FermixWebWeb.SetupLive do
       # Default to New York so the form is never blank; the agent reads this
       # (via Application env) to stamp each turn with the current local date.
       timezone: Keyword.get(personalization, :timezone, "America/New_York"),
-      communication_style: Keyword.get(personalization, :communication_style, "")
+      communication_style: Keyword.get(personalization, :communication_style, ""),
+      skill_curation_enabled:
+        snapshot |> get_fermix_core(:skill_curation) |> Keyword.get(:enabled, true),
+      skill_curation_destination: skill_curation_destination()
     }
+  end
+
+  # Names where proposals will actually arrive (§6.1) — the same ladder the
+  # delivery pass uses, pure config reads.
+  defp skill_curation_destination do
+    case SkillCurationDelivery.resolve_target() do
+      {:ok, target} -> "Proposals arrive in #{target.platform}."
+      :no_delivery_target -> "Proposals wait in /skills proposals until a channel owner is set."
+    end
   end
 
   defp tool_summary do
@@ -1455,6 +1535,9 @@ defmodule FermixWebWeb.SetupLive do
       enabled?: enabled?,
       status: status,
       checkable?: not computer_use_plugin?(plugin.name),
+      # Manifest data, not a plugin name: a `resource_scope` is what earns the
+      # card its workspace step (M27 §8.1).
+      resource_scope?: plugin.resource_scope != nil,
       missing_config: missing_config_entries(plugin),
       yanked_version: Map.get(yanked_installed, plugin.name)
     }
@@ -1505,6 +1588,9 @@ defmodule FermixWebWeb.SetupLive do
       logo: catalog_card_logo(entry),
       latest: card_latest(entry),
       mcp?: "mcp" in entry.rails,
+      # M27 §12 Stage 2: the index's additive runtime disclosure drives the
+      # card's pre-install consent copy. `nil` on every pre-M27 entry.
+      runtime_kind: entry.runtime_kind,
       compat: entry.compat,
       # Until its sidecar installs, computer use shows here as a catalog entry; the
       # config flag can already be on (enabled, then the binary removed), so reflect
@@ -1633,18 +1719,173 @@ defmodule FermixWebWeb.SetupLive do
 
   defp oauth_provider(_oauth, _provider), do: []
 
-  # OAuth plugins log out (clear the token store); api_key plugins clear their
-  # keychained credential, returning to `:needs_secret`.
+  # OAuth plugins log out (clear the token store); api_key plugins forget their
+  # credential — the OS-keychain item is deleted and only then is the config
+  # reference dropped — returning to `:needs_secret`. Neither revokes anything
+  # upstream; the operator must do that with the provider.
   defp disconnect_plugin(name) do
     case PluginRegistry.find(name) do
-      {:ok, %{auth: %{type: :api_key}}} -> clear_plugin_secret(name)
+      {:ok, %{auth: %{type: :api_key}}} -> forget_plugin_secret(name)
       _other -> PluginAuth.logout(name)
     end
   end
 
-  defp clear_plugin_secret(name) do
-    case PluginConfig.clear_plugin_secret(name) do
+  defp forget_plugin_secret(name) do
+    case PluginConfig.forget_plugin_secret(name) do
       {:ok, _snapshot} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # --- resource picker (M27 §7.5 steps 3–7) -------------------------------
+
+  # Discovery is a network round trip to a hosted service, so it runs async and
+  # the picker opens on its pending step: the pane must stay live even when the
+  # remote is slow or unreachable.
+  defp open_resource_picker(socket, plugin) do
+    socket
+    |> assign(:resource_picker, new_picker(plugin))
+    |> start_async({:resource_discovery, plugin.name}, fn ->
+      RemoteSetup.discover_workspaces(plugin, remote_setup_opts())
+    end)
+  end
+
+  # `Plugins.RemoteSetup`'s own seams (transport, MCP supervisor), forwarded
+  # verbatim so this flow is exercisable without a socket or a live MCP tree.
+  # Empty in production, exactly like `:computer_use_grant_impl`.
+  defp remote_setup_opts, do: Application.get_env(:fermix_web, :remote_setup_opts, [])
+
+  # Every word the picker renders comes from the manifest — profile names, their
+  # display names, and which of them widens the credential's scope. No plugin
+  # name appears in any conditional here or in the component, so a second plugin
+  # declaring a `resource_scope` gets this step for free.
+  defp new_picker(plugin) do
+    %{
+      plugin: plugin.name,
+      display_name: plugin.display_name,
+      step: :pending,
+      profile: default_profile_name(plugin),
+      profiles: profile_options(plugin),
+      resources: [],
+      error: nil
+    }
+  end
+
+  defp profile_options(plugin) do
+    Enum.map(plugin.tool_profiles, fn profile ->
+      %{
+        name: Map.get(profile, "name"),
+        display_name: Map.get(profile, "display_name"),
+        default?: Map.get(profile, "default") == true,
+        write?: Map.get(profile, "required_credential_scope") == "write"
+      }
+    end)
+  end
+
+  defp default_profile_name(plugin) do
+    plugin.tool_profiles
+    |> Enum.find(%{}, &(Map.get(&1, "default") == true))
+    |> Map.get("name")
+  end
+
+  # A late answer for a picker the operator already closed, or for a different
+  # plugin, is dropped rather than rendered over the current one.
+  defp finish_resource_discovery(socket, name, result) do
+    case socket.assigns.resource_picker do
+      %{plugin: ^name} = picker -> assign(socket, :resource_picker, settle_picker(picker, result))
+      _closed_or_replaced -> socket
+    end
+  end
+
+  defp settle_picker(picker, {:ok, resources}),
+    do: %{picker | step: :choose, resources: resources, error: nil}
+
+  defp settle_picker(picker, {:error, reason}),
+    do: %{picker | step: :error, resources: [], error: setup_error(reason)}
+
+  # Redacted like every other reason in this pane, and then bounded: a crashed
+  # discovery task exits with a term that can carry a whole stacktrace, and a
+  # modal is not a log viewer. The classified prefix is the part that names the
+  # failure; the daemon log keeps the rest.
+  defp setup_error(reason) do
+    reason
+    |> Redaction.format()
+    |> String.slice(0, 200)
+  end
+
+  defp put_picker_profile(socket, profile) do
+    case socket.assigns.resource_picker do
+      %{profiles: profiles} = picker -> pick_profile(socket, picker, profiles, profile)
+      nil -> socket
+    end
+  end
+
+  defp pick_profile(socket, picker, profiles, profile) do
+    if Enum.any?(profiles, &(&1.name == profile)),
+      do: assign(socket, :resource_picker, %{picker | profile: profile}),
+      else: flash_error(socket, "Unknown access profile: #{profile}")
+  end
+
+  defp commit_workspace(socket, id, label) do
+    case socket.assigns.resource_picker do
+      nil -> socket
+      picker -> start_workspace_selection(socket, picker, id, label)
+    end
+  end
+
+  # Selection is ASYNC for the same reason discovery is: it stops the old
+  # client, persists, restarts, and then waits for the replacement to reach
+  # `:ready` — up to the 60s remote startup budget. Run inline in the event
+  # handler it blocks the LiveView process, so the operator sees no spinner, no
+  # error, and no re-render until it returns: a click that appears to do
+  # nothing. The in-flight step is what makes the wait legible.
+  defp start_workspace_selection(socket, picker, id, label) do
+    case fetch_plugin(picker.plugin) do
+      {:ok, plugin} ->
+        opts = selection_opts(picker, id, label)
+
+        socket
+        |> assign(:resource_picker, %{picker | step: :selecting, error: nil})
+        |> start_async({:resource_selection, picker.plugin}, fn ->
+          RemoteSetup.select_workspace(plugin, opts)
+        end)
+
+      {:error, reason} ->
+        assign(socket, :resource_picker, %{picker | step: :error, error: setup_error(reason)})
+    end
+  end
+
+  # Success means the replacement client reached `:ready` — authenticated and
+  # contract-checked — not that a config value was written.
+  defp finish_workspace_selection(socket, name, result) do
+    case socket.assigns.resource_picker do
+      %{plugin: ^name} = picker -> settle_selection(socket, picker, result)
+      _closed_or_replaced -> socket
+    end
+  end
+
+  defp settle_selection(socket, _picker, :ok) do
+    socket
+    |> assign(:resource_picker, nil)
+    |> refresh_report("Workspace selected.")
+  end
+
+  # Back to `:choose`, not `:error`: the workspace list is still valid and the
+  # operator's next move is to retry or pick another one. `:error` is for a
+  # discovery that produced no list at all.
+  defp settle_selection(socket, picker, {:error, reason}) do
+    assign(socket, :resource_picker, %{picker | step: :choose, error: setup_error(reason)})
+  end
+
+  defp selection_opts(picker, id, label) do
+    [access_profile: picker.profile, workspace_id: id, workspace_label: label] ++
+      remote_setup_opts()
+  end
+
+  defp fetch_plugin(name) do
+    case PluginRegistry.find(name) do
+      {:ok, plugin} -> {:ok, plugin}
+      :error -> {:error, {:unknown_plugin, name}}
       {:error, reason} -> {:error, reason}
     end
   end
@@ -2411,6 +2652,7 @@ defmodule FermixWebWeb.SetupLive do
   defp parse_channel_field("discord", _default), do: :discord
   defp parse_channel_field("slack", _default), do: :slack
   defp parse_channel_field("signal", _default), do: :signal
+  defp parse_channel_field("acp", _default), do: :acp
   defp parse_channel_field(_, default), do: default
 
   defp parse_effort_field(field, default) do
@@ -2589,6 +2831,18 @@ defmodule FermixWebWeb.SetupLive do
   # checkbox so the param is present both ways — checked posts "true", unchecked
   # posts "false" — letting the operator both grant and revoke consent from the
   # card. Absent (card not rendered) preserves the existing value.
+  # The skill-curation personalization toggle (MILESTONE_26_SKILL_CURATION
+  # §6.1). Same hidden-false pairing as the harness consent checkbox; the
+  # wizard reducer writes `enabled = false` on decline and deletes the key on
+  # accept (default already true).
+  defp maybe_put_skill_curation_enabled(answers, params) do
+    case Map.fetch(params, "skill_curation_enabled") do
+      {:ok, "true"} -> [{:skill_curation_enabled, true} | answers]
+      {:ok, "false"} -> [{:skill_curation_enabled, false} | answers]
+      _absent -> answers
+    end
+  end
+
   defp maybe_put_harness_approved(answers, params) do
     case Map.fetch(params, "harness_approved") do
       {:ok, "true"} -> [{:harness_approved, true} | answers]

@@ -6,6 +6,9 @@ defmodule FermixTestSupport.DistFixtures do
   exercise identical artifacts.
   """
 
+  alias FermixCore.Plugins.Dist.Archive
+  alias FermixCore.Plugins.Dist.Provenance
+  alias FermixCore.Plugins.Dist.Store
   alias FermixTestSupport.DistFetcherStub
 
   @doc """
@@ -108,6 +111,53 @@ defmodule FermixTestSupport.DistFixtures do
       })
     )
 
+    path
+  end
+
+  @doc """
+  Install a `remote_mcp` plugin the provenance gate will accept.
+
+  A remote manifest is loadable only from an artifact whose publisher signature
+  and tree digest re-verify (M27 §9.3), so a test that wants one in the registry
+  cannot just drop a `plugin.json` in a dev_local directory — that is refused by
+  design. This builds the artifact, installs the tree, retains the evidence, and
+  and retains the evidence.
+
+  Deliberately does NOT allow-list the artifact: `DistVerifierStub` denies by
+  default, and a caller that wants the plugin to load says so with
+  `DistVerifierStub.allow(name, version)`. Allow-listing here would make it
+  impossible to test the refusal.
+  """
+  def install_remote_plugin(root, fixtures, name, version, manifest_extra) do
+    {tgz, sha} = build_tarball(fixtures, name, version, manifest_extra: manifest_extra)
+
+    staged = Path.join(Store.paths(root).staging, "#{name}-#{version}")
+    :ok = Archive.extract(tgz, staged)
+    :ok = Store.install_tree(root, name, version, staged)
+
+    :ok =
+      Provenance.retain(root, name, version, %{
+        archive: tgz,
+        sig: write_fixture(fixtures, "#{name}.sig", "signature"),
+        cert: write_fixture(fixtures, "#{name}.pem", "certificate"),
+        sha256: sha
+      })
+
+    :ok =
+      Store.record(root, name, %{
+        "version" => version,
+        "sha256" => sha,
+        "plugin_api" => Map.get(manifest_extra, "plugin_api", 2),
+        "min_core_version" => "0.1.0"
+      })
+
+    :ok
+  end
+
+  defp write_fixture(fixtures, basename, contents) do
+    path = Path.join(fixtures, basename)
+    File.mkdir_p!(Path.dirname(path))
+    File.write!(path, contents)
     path
   end
 end

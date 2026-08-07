@@ -65,6 +65,21 @@ defmodule FermixCore.AgentLoop do
   @type stream_callback :: (stream_event() -> any())
 
   @typedoc """
+  Turn-activity events emitted through `activity_callback`. Consumers use them
+  to observe turn progress: the cron watchdog treats any event as liveness and
+  brackets a running tool, and the ACP session renders the tool pair as
+  `tool_call` / `tool_call_update` frames
+  (docs/design/MILESTONE_29_ACP_AGENT_SURFACE.md §8.4) — which is why
+  `:tool_finish` carries the execution outcome.
+  """
+  @type activity_event ::
+          :provider_start
+          | :provider_response
+          | {:tool_start, String.t()}
+          | {:tool_finish, String.t(), %{status: :ok | :error}}
+  @type activity_callback :: (activity_event() -> any())
+
+  @typedoc """
   Route input is ONE shape: `routes` — an ordered `[{route_key, adapter_opts}]`
   list. A one-element list means no failover (the pre-failover behavior); the
   initial `chat/3` fails over across the list for eligible errors
@@ -92,7 +107,7 @@ defmodule FermixCore.AgentLoop do
           loop_detection_window: pos_integer(),
           loop_detection_warn_threshold: pos_integer(),
           loop_detection_kill_threshold: pos_integer(),
-          activity_callback: (term() -> any()) | nil,
+          activity_callback: activity_callback() | nil,
           stream_callback: stream_callback() | nil,
           context: map(),
           capability_registry: GenServer.server(),
@@ -693,24 +708,24 @@ defmodule FermixCore.AgentLoop do
   defp run_tool_call(%{name: name, arguments: arguments_raw}, state) do
     emit_activity(state, {:tool_start, name})
 
-    case parse_arguments(arguments_raw) do
-      {:ok, arguments} ->
-        result = invoke_capability(name, arguments, state)
-        emit_activity(state, {:tool_finish, name})
-        result
+    result =
+      case parse_arguments(arguments_raw) do
+        {:ok, arguments} -> invoke_capability(name, arguments, state)
+        {:error, reason} -> trace_unexecuted(name, arguments_raw, reason, state)
+      end
 
-      {:error, reason} ->
-        emit_activity(state, {:tool_finish, name})
-        trace_unexecuted(name, arguments_raw, reason, state)
-    end
+    emit_activity(state, {:tool_finish, name, %{status: result.status}})
+    result
   end
 
   # The dispatch chain returns a uniform `%{output, images}` so an image-producing
   # tool (e.g. a screenshot) can surface its image content parts to the provider;
   # every text-only path — errors, missing/disallowed tools — wraps its string
-  # with no images via `text_result/1`.
-  defp text_result(output) when is_binary(output),
-    do: %{output: output, images: [], terminal: false}
+  # with no images via `text_result/2`. `status` is loop metadata (never sent to
+  # the provider), carried so the `:tool_finish` activity event reports the real
+  # outcome instead of a caller re-deriving it from the output text.
+  defp text_result(output, status) when is_binary(output) and status in [:ok, :error],
+    do: %{output: output, images: [], terminal: false, status: status}
 
   defp invoke_capability(name, arguments, state) do
     if capability_allowed?(name, state.allowed_tools) do
@@ -745,7 +760,7 @@ defmodule FermixCore.AgentLoop do
       input: arguments
     )
 
-    text_result(message)
+    text_result(message, :error)
   end
 
   defp capability_allowed?(_name, nil), do: true
@@ -759,22 +774,23 @@ defmodule FermixCore.AgentLoop do
           images: Map.get(result, :images, []),
           # `terminal` is loop metadata (never sent to the provider): true only
           # when the tool succeeded AND declares itself terminal (react). Every
-          # other branch flows through `text_result/1` (terminal: false), so a
+          # other branch flows through `text_result/2` (terminal: false), so a
           # failed reaction is never terminal and the loop continues.
-          terminal: terminal_capability?(capability)
+          terminal: terminal_capability?(capability),
+          status: :ok
         }
 
       {:ok, %{success: false, error: error}} ->
-        text_result("Error: #{error}")
+        text_result("Error: #{error}", :error)
 
       {:ok, other} when is_binary(other) ->
-        text_result(wrap_untrusted_content(other, capability))
+        text_result(wrap_untrusted_content(other, capability), :ok)
 
       {:ok, other} ->
-        text_result(wrap_untrusted_content(inspect(other), capability))
+        text_result(wrap_untrusted_content(inspect(other), capability), :ok)
 
       {:error, reason} ->
-        text_result("Error executing tool: #{inspect(reason)}")
+        text_result("Error executing tool: #{inspect(reason)}", :error)
     end
   rescue
     e ->
@@ -783,7 +799,7 @@ defmodule FermixCore.AgentLoop do
           Exception.format_stacktrace(__STACKTRACE__)
       )
 
-      text_result("Error: tool raised #{Exception.message(e)}")
+      text_result("Error: tool raised #{Exception.message(e)}", :error)
   end
 
   # Provenance as architecture (M10 P2): successful results from tools that
@@ -835,14 +851,21 @@ defmodule FermixCore.AgentLoop do
 
     Enum.reduce(signatures, detector, fn signature, current ->
       recent = Enum.take([signature | current.recent], current.window)
-      count = Enum.count(recent, &(&1 == signature))
+      windowed = Enum.count(recent, &(&1 == signature))
+      consecutive = recent |> Enum.take_while(&(&1 == signature)) |> length()
       warned = MapSet.member?(current.warned, signature)
 
       cond do
-        count >= current.kill_threshold ->
+        # Kill only on an unbroken run: any different call in between means the
+        # model is alternating work with re-observation, which the tool contract
+        # itself mandates (fresh screenshot after every state-changing action;
+        # NOT-delivered recovery re-sends identical coordinates). Interleaved
+        # repetition gets the one-time warning below and stays bounded by the
+        # iteration cap — a windowed kill ends healthy turns mid-work.
+        consecutive >= current.kill_threshold ->
           %{current | recent: recent, kill_signature: signature}
 
-        count >= current.warn_threshold and not warned ->
+        windowed >= current.warn_threshold and not warned ->
           %{
             current
             | recent: recent,

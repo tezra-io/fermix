@@ -26,6 +26,7 @@ defmodule FermixCore.Browser.ProfileServer do
   alias FermixCore.Browser.Error
   alias FermixCore.Browser.Policy
   alias FermixCore.Browser.Snapshot
+  alias FermixCore.Sandbox.PathPolicy
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Telemetry
   alias FermixCore.Trace
@@ -197,6 +198,10 @@ defmodule FermixCore.Browser.ProfileServer do
   end
 
   defp finish({:ok, result, state}, _fallback), do: {{:ok, result}, state}
+  # An error that carries state has already consumed something the caller must
+  # not see twice — the download waiter marks a capped download reported, so
+  # discarding its state would replay the same refusal on every later wait.
+  defp finish({:error, %Error{} = error, state}, _fallback), do: {{:error, error}, state}
   defp finish({:error, %Error{} = error}, fallback), do: {{:error, error}, fallback}
 
   defp ensure_running(%{runtime: %{connection: pid}} = state, _context) when is_pid(pid) do
@@ -472,10 +477,135 @@ defmodule FermixCore.Browser.ProfileServer do
   end
 
   defp snapshot_chain(opts, args, state) do
+    read_page(args, state, &snapshot_tab(opts, &1, &2))
+  end
+
+  # THE read gate — the single preamble every verb that returns bytes read from
+  # a page goes through. `navigate` refuses a private final URL, but the read
+  # verbs consulted no policy at all, so a page that redirected or scripted
+  # itself onto a private host handed the model everything it found there. The
+  # first version of this gate lived inside `snapshot` alone, which left `act
+  # get`, `screenshot`, `pdf`, `cookies` and `storage` returning the very
+  # document snapshot had just refused: the gate was bypassed by choosing a
+  # different verb, at zero cost. Gating in the shared preamble makes a bypass
+  # require deleting this call, not picking another verb —
+  # `profile_server_guards_test.exs` walks the whole advertised action surface
+  # to keep it that way.
+  #
+  # The gate runs BEFORE the read, not after: `screenshot` and `pdf` persist
+  # their bytes as a workspace artifact, so a post-read refusal would still
+  # leave the private page sitting on disk for any file tool to open.
+  defp read_page(args, state, read_fun) when is_map(args) and is_function(read_fun, 2) do
     with {:ok, tab, state} <- resolve_tab(Map.get(args, "target"), state),
-         {:ok, result, state} <- snapshot_tab(tab, opts, state) do
-      {:ok, result, state}
+         {:ok, tab, state} <- attach(tab, state),
+         {:ok, tab} <- live_page(tab, state) do
+      read_fun.(tab, state)
     end
+  end
+
+  defp live_page(tab, state) do
+    with {:ok, tab} <- live_meta(tab, state),
+         :ok <- read_url_allowed(tab.url, state.config) do
+      {:ok, tab}
+    end
+  end
+
+  @live_meta_js "({url: document.location.href, title: document.title, ready: document.readyState})"
+
+  # The url/title a read reports must be LIVE — the cached Target.getTargets
+  # values lag a client-side or redirect navigation, which is why fresh content
+  # could appear under a stale url/title.
+  #
+  # When the live url cannot be read the answer is a REFUSAL, never the cached
+  # url. "Execution context was destroyed" is routine in the moments right after
+  # a commit (an action-timeout expiry produces the same `{:error, _}`), so
+  # falling back would hand the gate the exact value the commit invalidated and
+  # the gate would pass the page it exists to refuse. A hostile page can force
+  # the shape-mismatch branch on purpose: `document.title` is a configurable
+  # accessor on `Document.prototype`, so `Object.defineProperty(document,
+  # 'title', {get(){throw 0}})` makes the whole expression throw and the result
+  # carries no "url" key. `document.location` itself is unforgeable, which is
+  # why the gate reads it and not a page-supplied value.
+  defp live_meta(tab, state) do
+    case evaluate(tab, @live_meta_js, state) do
+      {:ok, result} -> live_tab(tab, runtime_value(result))
+      {:error, %Error{} = error} -> {:error, live_url_unavailable(error.message)}
+    end
+  end
+
+  defp live_tab(tab, %{"url" => url} = meta) when is_binary(url) do
+    tab = %{tab | url: url, title: Map.get(meta, "title") || tab.title}
+    {:ok, Map.put(tab, :ready_state, Map.get(meta, "ready"))}
+  end
+
+  defp live_tab(_tab, other), do: {:error, live_url_unavailable(bounded_inspect(other))}
+
+  # Kept distinct from `read_blocked`: the page's address could not be READ, so
+  # the policy could not be applied at all. Different cause, different fix — the
+  # model retries the action instead of concluding the host is forbidden.
+  defp live_url_unavailable(detail) do
+    Error.new(
+      "read_url_unavailable",
+      "Could not read the page's live URL, so the browser read policy could not be " <>
+        "applied and the read was refused. Usually a page that navigated a moment " <>
+        "ago; take the action again.",
+      %{"reason" => detail}
+    )
+  end
+
+  defp bounded_inspect(value), do: inspect(value, limit: 5, printable_limit: 120)
+
+  # The read gate asks ONE question — did this content come from a host the
+  # policy refuses — so it validates the document's HOST, not the document's
+  # URL. `Policy.validate_url/2` whole is a NAVIGATION policy: its scheme rules
+  # would refuse a page that legitimately committed to a `blob:` URL (the
+  # in-page PDF/print-preview pattern) with "Unsupported URL scheme: blob",
+  # naming a navigation the model never made. Re-validating the host on its own
+  # runs exactly the host rules — `allowed_hosts`, localhost, the `.internal`
+  # suffixes, IPv4-in-IPv6 folding, the private ranges — and nothing else.
+  defp read_url_allowed(url, %Config{} = config) when is_binary(url) do
+    case read_host(url) do
+      nil -> :ok
+      host -> read_host_allowed(host, config)
+    end
+  end
+
+  # A blob URL carries its creator's origin immediately after the scheme, so it
+  # is unwrapped once (the URL spec nests exactly one): `blob:http://169.254.
+  # 169.254/<uuid>` is still the metadata host and is still refused. A document
+  # with no host at all — `about:blank`, `data:` — was not fetched from a
+  # network origin and has no host to judge.
+  defp read_host("blob:" <> inner), do: parse_host(inner)
+  defp read_host(url), do: parse_host(url)
+
+  defp parse_host(url) do
+    case URI.parse(url) do
+      %URI{host: host} when is_binary(host) and host != "" -> host
+      _other -> nil
+    end
+  end
+
+  defp read_host_allowed(host, config) do
+    case Policy.validate_url(host_probe_url(host), config) do
+      {:ok, _uri} -> :ok
+      {:error, %Error{} = error} -> {:error, read_blocked(host, error)}
+    end
+  end
+
+  # `URI.parse/1` strips the brackets off an IPv6 authority, so they have to go
+  # back on: `URI.parse("https://::1")` yields host `nil`, which would fail the
+  # gate OPEN on every IPv6 private address.
+  defp host_probe_url(host) do
+    if String.contains?(host, ":"), do: "https://[#{host}]", else: "https://#{host}"
+  end
+
+  defp read_blocked(host, %Error{} = error) do
+    Error.new(
+      "read_blocked",
+      "Refused to return page content: the page is on #{host}, which the browser " <>
+        "policy blocks (#{error.message}). Navigate somewhere allowed and read again.",
+      error.details
+    )
   end
 
   # The Accessibility domain is CYCLED (disable → enable) so getFullAXTree is
@@ -483,41 +613,17 @@ defmodule FermixCore.Browser.ProfileServer do
   # tree, which lags a navigation or SPA swap. Observed live (2026-07-26): a
   # snapshot 4s after lichess navigated to the created game returned the
   # HOMEPAGE tree under the live game url — the model went element-blind at the
-  # exact moment its game began. Same family as `live_meta/2` below, which
+  # exact moment its game began. Same family as `live_meta/2` above, which
   # already distrusts the cached url/title.
-  defp snapshot_tab(tab, opts, state) do
-    with {:ok, tab, state} <- attach(tab, state),
-         {:ok, _} <- command(state, "Accessibility.disable", %{}, tab.session_id),
+  defp snapshot_tab(opts, tab, state) do
+    with {:ok, _} <- command(state, "Accessibility.disable", %{}, tab.session_id),
          {:ok, _} <- command(state, "Accessibility.enable", %{}, tab.session_id),
          {:ok, %{"nodes" => nodes}} <-
            command(state, "Accessibility.getFullAXTree", %{}, tab.session_id),
          {:ok, rendered} <- Snapshot.render(nodes, opts) do
       refs = Map.new(rendered.refs, &{&1.ref, &1})
       state = put_in(state.ref_maps[tab.id], refs)
-      {:ok, snapshot_result(live_meta(tab, state), rendered), state}
-    end
-  end
-
-  # The snapshot's AX content is read live, so its url/title must be live too —
-  # the cached Target.getTargets values lag a client-side/redirect navigation,
-  # which is why a snapshot could show fresh content under a stale url/title.
-  defp live_meta(tab, state) do
-    expression =
-      "({url: document.location.href, title: document.title, ready: document.readyState})"
-
-    case evaluate(tab, expression, state) do
-      {:ok, result} ->
-        case runtime_value(result) do
-          %{"url" => url, "title" => title} = meta when is_binary(url) ->
-            %{tab | url: url, title: title || tab.title}
-            |> Map.put(:ready_state, Map.get(meta, "ready"))
-
-          _other ->
-            tab
-        end
-
-      {:error, _reason} ->
-        tab
+      {:ok, snapshot_result(tab, rendered), state}
     end
   end
 
@@ -567,39 +673,41 @@ defmodule FermixCore.Browser.ProfileServer do
   defp run_advanced("download", args, state), do: wait_download(args, state)
   defp run_advanced("act", args, state), do: handle_act(args, state)
 
-  defp capture_screenshot(args, state) do
+  defp capture_screenshot(args, state), do: read_page(args, state, &screenshot_page(args, &1, &2))
+
+  defp screenshot_page(args, tab, state) do
     format = screenshot_format(Map.get(args, "format", "png"))
     params = screenshot_params(args, format)
     extension = if format == "jpeg", do: "jpg", else: "png"
 
-    with {:ok, tab, state} <- resolve_tab(Map.get(args, "target"), state),
-         {:ok, tab, state} <- attach(tab, state),
-         {:ok, params} <- full_page_params(args, params, tab, state),
+    with {:ok, params} <- full_page_params(args, params, tab, state),
          {:ok, %{"data" => data}} <-
            command(state, "Page.captureScreenshot", params, tab.session_id),
          {:ok, bytes} <- decode_artifact(data),
          :ok <- within_size(bytes, state.config),
          {:ok, path} <- write_artifact(state, "screenshots", extension, bytes),
          {:ok, dpr_result} <- evaluate(tab, "window.devicePixelRatio", state) do
-      result = %{
-        "ok" => true,
-        "target" => tab.id,
-        "path" => path,
-        "mime_type" => "image/#{format}",
-        # The capture is DEVICE pixels (fromSurface); page coordinates
-        # (`click_coords`, `get field=rect`) are CSS pixels. This ratio converts:
-        # on a 2x display a point read off this image must be halved.
-        "device_pixel_ratio" => runtime_value(dpr_result)
-      }
-
-      {:ok, result, state}
+      {:ok, screenshot_result(tab, path, format, runtime_value(dpr_result)), state}
     end
   end
 
-  defp print_pdf(args, state) do
-    with {:ok, tab, state} <- resolve_tab(Map.get(args, "target"), state),
-         {:ok, tab, state} <- attach(tab, state),
-         {:ok, %{"data" => data}} <- command(state, "Page.printToPDF", %{}, tab.session_id),
+  defp screenshot_result(tab, path, format, device_pixel_ratio) do
+    %{
+      "ok" => true,
+      "target" => tab.id,
+      "path" => path,
+      "mime_type" => "image/#{format}",
+      # The capture is DEVICE pixels (fromSurface); page coordinates
+      # (`click_coords`, `get field=rect`) are CSS pixels. This ratio converts:
+      # on a 2x display a point read off this image must be halved.
+      "device_pixel_ratio" => device_pixel_ratio
+    }
+  end
+
+  defp print_pdf(args, state), do: read_page(args, state, &pdf_page/2)
+
+  defp pdf_page(tab, state) do
+    with {:ok, %{"data" => data}} <- command(state, "Page.printToPDF", %{}, tab.session_id),
          {:ok, bytes} <- decode_artifact(data),
          {:ok, path} <- write_artifact(state, "pdf", "pdf", bytes) do
       {:ok, %{"ok" => true, "target" => tab.id, "path" => path, "mime_type" => "application/pdf"},
@@ -686,7 +794,14 @@ defmodule FermixCore.Browser.ProfileServer do
     end
   end
 
-  defp handle_cookies(_args, state) do
+  defp handle_cookies(args, state), do: read_page(args, state, &cookie_list/2)
+
+  # Browser-scoped rather than tab-scoped, but it is still a read served while
+  # the model sits on a page, so it joins the invariant with every other read
+  # verb instead of being argued about one verb at a time. `clear` above is a
+  # write and stays reachable — the model must be able to clean up from a page
+  # this gate refuses to read.
+  defp cookie_list(_tab, state) do
     with {:ok, %{"cookies" => cookies}} <- command(state, "Network.getAllCookies", %{}) do
       {:ok, %{"ok" => true, "cookies" => Enum.map(cookies, &redact_cookie/1)}, state}
     end
@@ -708,13 +823,13 @@ defmodule FermixCore.Browser.ProfileServer do
     ])
   end
 
-  defp handle_storage(args, state) do
+  defp handle_storage(args, state), do: read_page(args, state, &storage_page(args, &1, &2))
+
+  defp storage_page(args, tab, state) do
     store = Map.get(args, "kind", "local")
     expression = storage_expression(store, Map.get(args, "key"), Map.get(args, "value"))
 
-    with {:ok, tab, state} <- resolve_tab(Map.get(args, "target"), state),
-         {:ok, tab, state} <- attach(tab, state),
-         {:ok, result} <- evaluate(tab, expression, state) do
+    with {:ok, result} <- evaluate(tab, expression, state) do
       {:ok, %{"ok" => true, "result" => runtime_value(result)}, state}
     end
   end
@@ -946,15 +1061,15 @@ defmodule FermixCore.Browser.ProfileServer do
     end
   end
 
+  defp handle_get(args, state), do: read_page(args, state, &get_page(args, &1, &2))
+
   # The deterministic route onto a canvas-like surface: read the element's
   # viewport box, then click positions inside it with `click_coords` — the two
   # share the same CSS-viewport coordinate space, so no pixel guessing and no
   # dependency on where the window sits on the desktop.
-  defp handle_get(%{"field" => "rect", "selector" => selector} = args, state)
+  defp get_page(%{"field" => "rect", "selector" => selector}, tab, state)
        when is_binary(selector) do
-    with {:ok, tab, state} <- resolve_tab(Map.get(args, "target"), state),
-         {:ok, tab, state} <- attach(tab, state),
-         {:ok, result} <- evaluate(tab, rect_expression(selector), state) do
+    with {:ok, result} <- evaluate(tab, rect_expression(selector), state) do
       case runtime_value(result) do
         nil ->
           {:error, Error.new("not_found", "No element matches selector: #{selector}")}
@@ -965,12 +1080,10 @@ defmodule FermixCore.Browser.ProfileServer do
     end
   end
 
-  defp handle_get(args, state) do
+  defp get_page(args, tab, state) do
     expression = get_expression(Map.get(args, "field", "text"))
 
-    with {:ok, tab, state} <- resolve_tab(Map.get(args, "target"), state),
-         {:ok, tab, state} <- attach(tab, state),
-         {:ok, result} <- evaluate(tab, expression, state) do
+    with {:ok, result} <- evaluate(tab, expression, state) do
       {:ok,
        %{"ok" => true, "target" => tab.id, "value" => capped_value(runtime_value(result), state)},
        state}
@@ -1035,22 +1148,28 @@ defmodule FermixCore.Browser.ProfileServer do
     end
   end
 
+  # `wait` re-gates on EVERY poll rather than once at entry: the loop runs for up
+  # to `wait_max_ms`, and a boolean "did the text appear yet" served against a
+  # page that drifted onto a private host mid-wait is a one-bit-per-poll read of
+  # that page. The `text`/`url`/`load` modes inherit the gate through
+  # `handle_get/2`; these two carry it themselves.
   defp wait_matched?("element", %{"ref" => ref} = args, state) when is_binary(ref) do
-    with {:ok, tab, state} <- resolve_tab(Map.get(args, "target"), state),
-         {:ok, _ref_data} <- ref_data(tab, ref, state) do
-      {:ok, true, state}
-    end
+    read_page(args, state, fn tab, state ->
+      with {:ok, _ref_data} <- ref_data(tab, ref, state) do
+        {:ok, true, state}
+      end
+    end)
   end
 
   defp wait_matched?("element", %{"selector" => selector} = args, state)
        when is_binary(selector) do
     script = "Boolean(document.querySelector(#{Jason.encode!(selector)}))"
 
-    with {:ok, tab, state} <- resolve_tab(Map.get(args, "target"), state),
-         {:ok, tab, state} <- attach(tab, state),
-         {:ok, result} <- evaluate(tab, script, state) do
-      {:ok, runtime_value(result) == true, state}
-    end
+    read_page(args, state, fn tab, state ->
+      with {:ok, result} <- evaluate(tab, script, state) do
+        {:ok, runtime_value(result) == true, state}
+      end
+    end)
   end
 
   defp wait_matched?("load", args, state) do
@@ -1067,6 +1186,7 @@ defmodule FermixCore.Browser.ProfileServer do
   defp do_wait_download(state, deadline) do
     case next_download(state) do
       {:ok, result, state} -> {:ok, result, state}
+      {:error, error, state} -> {:error, error, state}
       :none -> receive_download_event(state, deadline)
     end
   end
@@ -1099,17 +1219,67 @@ defmodule FermixCore.Browser.ProfileServer do
   defp next_download(state) do
     state.downloads
     |> Map.values()
-    |> Enum.filter(&completed_download?(&1, state.reported_downloads))
+    |> Enum.filter(&reportable_download?(&1, state.reported_downloads))
     |> Enum.sort_by(&Map.get(&1, "completed_at", 0), :desc)
     |> List.first()
     |> case do
       nil -> :none
-      download -> {:ok, download_result(download), mark_download_reported(state, download)}
+      download -> download_reply(download, mark_download_reported(state, download))
     end
   end
 
-  defp completed_download?(download, reported) do
-    download["state"] == "completed" and not MapSet.member?(reported, download["guid"])
+  defp reportable_download?(download, reported) do
+    terminal_download?(download) and not MapSet.member?(reported, download["guid"])
+  end
+
+  # A download is reportable once it reaches a state the waiter has a verdict
+  # for: Chrome said "completed", or the byte cap canceled it. A cancellation
+  # from anywhere else stays invisible to the waiter, exactly as before.
+  defp terminal_download?(%{"state" => "completed"}), do: true
+  defp terminal_download?(%{"reason" => "download_too_large"}), do: true
+  defp terminal_download?(%{"reason" => "download_too_large_cancel_failed"}), do: true
+  defp terminal_download?(_download), do: false
+
+  defp download_reply(%{"reason" => "download_too_large"} = download, state) do
+    {:error, download_too_large_error(download, state.config), state}
+  end
+
+  defp download_reply(%{"reason" => "download_too_large_cancel_failed"} = download, state) do
+    {:error, cancel_failed_error(download, state.config), state}
+  end
+
+  defp download_reply(download, state), do: {:ok, download_result(download), state}
+
+  # Distinct from the clean refusal on purpose: here the ceiling did NOT hold.
+  # Chrome rejected the cancel (or there was no live connection), so the
+  # transfer may still be running and re-creating the file that was just
+  # deleted. Collapsing this into the same sentence would send an operator
+  # looking for a deleted partial that keeps reappearing.
+  defp cancel_failed_error(download, %Config{download_max_bytes: max}) do
+    Error.new(
+      "download_too_large_cancel_failed",
+      "Download exceeded the #{max} byte ceiling but the browser refused to cancel it; " <>
+        "it may still be writing to disk. Close the tab or restart the browser profile",
+      download_error_details(download)
+    )
+  end
+
+  defp download_too_large_error(download, %Config{download_max_bytes: max}) do
+    Error.new(
+      "download_too_large",
+      "Download exceeded the #{max} byte ceiling and was canceled; the partial file was deleted",
+      download_error_details(download)
+    )
+  end
+
+  defp download_error_details(download) do
+    %{
+      "guid" => download["guid"],
+      "url" => download["url"],
+      "suggested_filename" => download["suggested_filename"],
+      "received_bytes" => download["received_bytes"],
+      "total_bytes" => download["total_bytes"]
+    }
   end
 
   defp mark_download_reported(state, download) do
@@ -1469,13 +1639,26 @@ defmodule FermixCore.Browser.ProfileServer do
   defp get_expression("ready_state"), do: "document.readyState"
   defp get_expression(_field), do: "document.body ? document.body.innerText : ''"
 
+  # Containment is decided on RESOLVED paths, both sides. `Path.expand/1` is
+  # purely lexical, so a symlinked final component — or any symlinked
+  # intermediate directory — used to satisfy the prefix test while pointing the
+  # upload at a file outside the workspace. `PathPolicy.canonical_path/1` walks
+  # every component and follows the links, so the string compare below is a
+  # compare of real locations.
+  #
+  # Deliberately NOT routed through `Sandbox.read_path/3`: that helper confines
+  # to `Mode.effective_roots/2` (workspace + launch cwd + request cwd + grants),
+  # which would WIDEN the upload surface past workspace-only, and it needs a tool
+  # context `run_advanced/3` does not thread.
   defp confined_upload_path(path) when is_binary(path) do
-    expanded = Path.expand(path)
-    workspace_root = ConfigStore.workspace_paths() |> Map.fetch!(:workspace) |> Path.expand()
+    canonical = PathPolicy.canonical_path(path)
 
-    with :ok <- under_root(expanded, workspace_root),
-         true <- File.regular?(expanded) do
-      {:ok, expanded}
+    workspace_root =
+      ConfigStore.workspace_paths() |> Map.fetch!(:workspace) |> PathPolicy.canonical_path()
+
+    with :ok <- under_root(canonical, workspace_root),
+         true <- File.regular?(canonical) do
+      {:ok, canonical}
     else
       false -> {:error, Error.new("upload_not_found", "Upload file was not found")}
       {:error, %Error{} = error} -> {:error, error}
@@ -1603,7 +1786,11 @@ defmodule FermixCore.Browser.ProfileServer do
         "path" => Path.join(download_dir(state), guid)
       })
 
-    download = merge_download_progress(download, params)
+    download =
+      download
+      |> merge_download_progress(params)
+      |> enforce_download_cap(state)
+
     %{state | downloads: Map.put(state.downloads, guid, download)}
   end
 
@@ -1622,6 +1809,100 @@ defmodule FermixCore.Browser.ProfileServer do
   end
 
   defp maybe_completed_at(download, _state), do: download
+
+  # This handler is the ONLY place a download's byte count is observed: Chrome
+  # streams straight to disk, so without a ceiling here the transfer is bounded
+  # only by the volume. The declared size counts as well as the received one, so
+  # an honest Content-Length is refused before the bytes land; a lying or absent
+  # one is caught by the received count on the next progress tick.
+  #
+  # Idempotence keys on "reason", NOT on "state": `merge_download_progress/2`
+  # runs first in this pipeline and unconditionally rewrites "state" from the
+  # CDP params, so a `"canceled"` guard could never match while Chrome kept
+  # emitting inProgress ticks for an already-canceled download. Every tick
+  # re-entered the cancel path, re-issuing a BLOCKING CDP command (up to
+  # `action_timeout_ms` + grace) from inside `handle_info/2` and re-running
+  # `File.rm`. Nothing in the progress params carries "reason".
+  defp enforce_download_cap(%{"reason" => "download_too_large"} = download, _state), do: download
+
+  defp enforce_download_cap(download, state) do
+    if over_download_cap?(download, state.config) do
+      cancel_oversized_download(download, state)
+    else
+      download
+    end
+  end
+
+  defp over_download_cap?(download, %Config{download_max_bytes: max}) do
+    byte_count(Map.get(download, "received_bytes")) > max or
+      byte_count(Map.get(download, "total_bytes")) > max
+  end
+
+  defp byte_count(value) when is_number(value), do: value
+  defp byte_count(_value), do: 0
+
+  # Cancel, delete the partial, and rewrite the record so the waiter reports the
+  # cap hit instead of blocking until its timeout on a download that will never
+  # complete. `completed_at` is the terminal-state stamp the waiter sorts on.
+  defp cancel_oversized_download(download, state) do
+    outcome = send_cancel_download(Map.get(download, "guid"), state)
+    delete_partial_download(Map.get(download, "path"))
+
+    download
+    |> Map.merge(cancel_outcome(outcome))
+    |> Map.put("completed_at", System.monotonic_time(:millisecond))
+  end
+
+  # A refused cancel is not a cancel: Chrome keeps streaming to disk, so
+  # reporting the ceiling as enforced would be a lie about the one thing this
+  # path exists to guarantee. Both outcomes still set `reason`, because `reason`
+  # is also the sticky one-shot flag `enforce_download_cap/2` matches on — an
+  # outcome that left it unset would re-enter this path on every later progress
+  # tick, re-issuing a blocking CDP command from inside `handle_info/2`.
+  defp cancel_outcome(:ok) do
+    %{"state" => "canceled", "reason" => "download_too_large"}
+  end
+
+  defp cancel_outcome({:error, _reason}) do
+    %{"state" => "canceled", "reason" => "download_too_large_cancel_failed"}
+  end
+
+  defp send_cancel_download(guid, %{runtime: %{connection: pid}} = state)
+       when is_binary(guid) and is_pid(pid) do
+    case command(state, "Browser.cancelDownload", %{guid: guid}) do
+      {:ok, _result} ->
+        :ok
+
+      {:error, %Error{} = error} ->
+        Logger.warning("browser: cancelDownload failed for #{guid}: #{inspect(error)}")
+        {:error, error}
+    end
+  end
+
+  defp send_cancel_download(guid, _state) do
+    Logger.warning(
+      "browser: cannot cancel oversized download #{inspect(guid)} — no live CDP connection"
+    )
+
+    {:error, :no_connection}
+  end
+
+  defp delete_partial_download(path) when is_binary(path) do
+    case File.rm(path) do
+      :ok ->
+        :ok
+
+      # Chrome may not have created the file under this name yet; a missing
+      # partial is the outcome the delete was after. Anything else is reported.
+      {:error, :enoent} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("browser: could not delete oversized download #{path}: #{inspect(reason)}")
+    end
+  end
+
+  defp delete_partial_download(_path), do: :ok
 
   defp emit(context, event, state, data) do
     data =

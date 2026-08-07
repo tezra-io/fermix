@@ -61,9 +61,19 @@ defmodule FermixChannels.Channels.Signal do
   @spec send_message(String.t(), String.t(), FermixChannels.Gateway.Channel.send_opts()) ::
           :ok | {:error, term()}
   def send_message(recipient, text, opts \\ []) when is_binary(recipient) and is_binary(text) do
-    with {:ok, account} <- account(),
-         {:ok, :ok, duration_us} <- timed_signal_send(account, recipient, text, opts) do
-      emit_outbound_telemetry(duration_us)
+    # M30 §11.3: an unconfigured account means there is no Signal client to send
+    # through, which is the `:adapter_unavailable` kind of the closed delivery
+    # vocabulary — not a bare atom the delivery normalizer would have to guess at.
+    case account() do
+      {:ok, account} -> send_text(account, recipient, text, opts)
+      {:error, :not_configured} -> {:error, {:permanent, :adapter_unavailable}}
+    end
+  end
+
+  defp send_text(account, recipient, text, opts) do
+    case timed_signal_send(account, recipient, text, opts) do
+      {:ok, :ok, duration_us} -> emit_outbound_telemetry(duration_us)
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -438,10 +448,15 @@ end
 defmodule FermixChannels.Channels.Signal.CLI do
   @moduledoc false
 
+  require Logger
+
   alias FermixCore.CommandRunner
 
   @receive_timeout_ms 60_000
   @send_timeout_ms 30_000
+
+  # Ceiling for the bounded local diagnostic of CLI output (M30 §11.3).
+  @diagnostic_max 500
 
   def receive_messages(opts) do
     cli_path = resolve_cli(opts)
@@ -469,21 +484,65 @@ defmodule FermixChannels.Channels.Signal.CLI do
     cli_path = resolve_cli(opts)
     timeout_ms = Keyword.get(opts, :timeout_ms, @send_timeout_ms)
 
-    case CommandRunner.run(cli_path, ["-a", account, "send", "-m", text, recipient],
-           timeout_ms: timeout_ms
-         ) do
-      {:ok, %{exit: 0}} ->
-        :ok
+    cli_path
+    |> CommandRunner.run(["-a", account, "send", "-m", text, recipient], timeout_ms: timeout_ms)
+    |> classify_send_result()
+  end
 
-      {:ok, %{exit: status, stdout: output}} ->
-        {:error, "signal-cli send failed: #{status}: #{String.trim(output)}"}
+  @doc """
+  Classifies one `signal-cli send` run into the closed delivery-error vocabulary
+  (M30 §11.3): a non-zero exit is a permanent remote rejection, a watchdog
+  expiry or a command-host/port failure is a transport failure, and a missing
+  executable is an unavailable adapter. `CommandRunner.reason/0` is open, so the
+  last clause classifies anything else as a terminal contract violation instead
+  of raising — this function is where that openness is closed.
 
-      {:error, {:timeout, ms}} ->
-        {:error, "signal-cli send timed out after #{ms}ms"}
+  Free-form CLI output is a local diagnostic only — it is logged bounded and
+  never reaches the returned reason, which is why this classifier takes the raw
+  runner result and is exercised directly.
+  """
+  @spec classify_send_result(term()) :: :ok | {:error, term()}
+  def classify_send_result({:ok, %{exit: 0}}), do: :ok
 
-      {:error, {:executable_not_found, path}} ->
-        {:error, "signal-cli executable not found at #{path}"}
-    end
+  def classify_send_result({:ok, %{exit: status, stdout: output}}) when is_integer(status) do
+    Logger.warning(
+      "signal-cli send failed: exit #{status}: #{String.slice(String.trim(output), 0, @diagnostic_max)}"
+    )
+
+    {:error, {:permanent, :remote_rejected}}
+  end
+
+  def classify_send_result({:error, {:timeout, ms}}) do
+    Logger.warning("signal-cli send timed out after #{ms}ms")
+    {:error, {:transport, :timeout}}
+  end
+
+  def classify_send_result({:error, {:executable_not_found, path}}) do
+    Logger.warning("signal-cli executable not found at #{path}")
+    {:error, {:permanent, :adapter_unavailable}}
+  end
+
+  # The supervised runner path (the daemon's normal route) also reports its own
+  # failures: a `CommandHost` that refused to start or died, and a port that
+  # never opened. Those are the local transport for a CLI channel, and they are
+  # worth another claim cycle. Unhandled they would raise here and surface three
+  # layers up as a terminal worker crash on attempt one.
+  def classify_send_result({:error, {kind, reason}})
+      when kind in [:command_host_crashed, :port_failed] do
+    Logger.warning("signal-cli send transport failed (#{kind}): #{inspect(reason)}")
+    {:error, {:transport, :timeout}}
+  end
+
+  # `CommandRunner.reason/0` is open by type. This function is the boundary that
+  # closes it, so an unrecognized shape is classified here — loudly and
+  # terminally — rather than crashing the caller.
+  def classify_send_result(result) do
+    Logger.error(
+      "signal-cli send returned an unrecognized runner result: " <>
+        String.slice(inspect(result), 0, @diagnostic_max)
+    )
+
+    {:error, {:unexpected_delivery_result, :invalid_contract}}
   end
 
   def send_attachment(account, recipient, caption, path, opts) do

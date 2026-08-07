@@ -7,7 +7,9 @@ defmodule FermixCore.Tools.HarnessSupport do
   # separate so harness error vocabulary and run payloads never drift into the
   # jobs family.
 
+  alias FermixCore.Acp.Identity
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.Capabilities.UntrustedContent
   alias FermixCore.Harness.Artifacts
   alias FermixCore.Harness.Consent
   alias FermixCore.Memory.Repo
@@ -19,6 +21,11 @@ defmodule FermixCore.Tools.HarnessSupport do
   # message bound size a chat message, this one sizes a JSON tool result. They are
   # not meant to agree.
   @result_tail_max 4_096
+
+  # Must match `Harness.Continuation`'s attribution and the memory-recall
+  # classification (`UntrustedContent.untrusted_source_type?/1`), so the same
+  # vendor text carries the same label whichever door it reaches the model by.
+  @untrusted_source "coding_harness"
 
   # Parameter values whose only effect is to remove the vendor child's own
   # confinement. Fermix admits the run's `cwd` and every `add_dirs` entry through
@@ -66,6 +73,41 @@ defmodule FermixCore.Tools.HarnessSupport do
 
     result
   end
+
+  # Channels whose conversation is owned by an external client. A coding run
+  # outlives the turn that launched it and reports back through a continuation
+  # turn, which on these surfaces has no framework wire to send on — it posts
+  # with the CLIENT's own credentials (MILESTONE_29_ACP_AGENT_SURFACE §17.6).
+  @client_owned_channels ["acp"]
+
+  @doc """
+  Whether a coding run launched on this turn could report its outcome back — the
+  harness half of every harness tool's `advertise?/1`.
+
+  One definition for the whole family: the gate is a property of the FEATURE, not
+  of a tool, so a harness tool added later inherits it by calling this rather than
+  re-deriving the rule.
+
+  On an ordinary channel the framework delivers, so the answer is yes. On a
+  client-owned channel it is exactly "is this session bound to a posting-capable
+  identity" — the durable record the client presented at hello, regenerated into
+  the turn's `session_env` by `Acp.Identity.to_env/1` (§17.1). The sniff is cheap
+  and still equivalent to asking the store, because a record carries a signing
+  key *iff* it has an id (§17.2's drop rule) and a failed persist downgrades the
+  connection before its first turn.
+
+  Visibility only, exactly like the other advertise gates: a by-name dispatch
+  still runs the execute-time `Harness.Authorization` gate.
+  """
+  @spec harness_deliverable?(map()) :: boolean()
+  def harness_deliverable?(context) when is_map(context) do
+    case Map.get(context, :channel) do
+      channel when channel in @client_owned_channels -> posting_capable?(context)
+      _framework_delivered -> true
+    end
+  end
+
+  defp posting_capable?(context), do: Identity.posting_capable?(Map.get(context, :session_env))
 
   @spec repo(map()) :: term()
   def repo(context), do: Map.get(context, :memory_repo, Repo)
@@ -181,6 +223,12 @@ defmodule FermixCore.Tools.HarnessSupport do
       vendor_session_id: Map.get(row, :vendor_session_id),
       task_url: Map.get(row, :task_url),
       delivery_status: Map.get(row, :delivery_status),
+      # The reason a delivery failed rides the SUMMARY, not just the detail view:
+      # a dead-lettered row whose cause is only one `get_coding_run` away is a
+      # cause nobody reads. On a client-owned surface it is the whole diagnosis
+      # (M29 §17.6(d)) — `:identity_forgotten` is fixed by reconnecting a client,
+      # `:depth_capped` is not fixed at all.
+      last_delivery_error: Map.get(row, :last_delivery_error),
       created_at: iso(Map.get(row, :created_at)),
       started_at: iso(Map.get(row, :started_at)),
       completed_at: iso(Map.get(row, :completed_at))
@@ -202,7 +250,7 @@ defmodule FermixCore.Tools.HarnessSupport do
   def run_payload(row, vendor_text \\ nil) when is_map(row) do
     row
     |> run_summary()
-    |> Map.put(:result_tail, bound_text(vendor_text))
+    |> Map.put(:result_tail, frame_result_tail(bound_text(vendor_text)))
     |> Map.merge(%{
       exit_code: Map.get(row, :exit_code),
       framing_errors: Map.get(row, :framing_errors),
@@ -215,7 +263,6 @@ defmodule FermixCore.Tools.HarnessSupport do
       next_poll_at: iso(Map.get(row, :next_poll_at)),
       poll_deadline: iso(Map.get(row, :poll_deadline)),
       delivery_attempts: Map.get(row, :delivery_attempts),
-      last_delivery_error: Map.get(row, :last_delivery_error),
       delivered_at: iso(Map.get(row, :delivered_at))
     })
   end
@@ -231,6 +278,16 @@ defmodule FermixCore.Tools.HarnessSupport do
   defp bound_text(nil), do: nil
   defp bound_text(text) when byte_size(text) <= @result_tail_max, do: text
   defp bound_text(text), do: utf8_prefix(text, @result_tail_max) <> "\n… [truncated]"
+
+  # The same bytes the continuation notice frames: the vendor CLI's own text,
+  # derived from the repo, issue and web content the run read. `get_coding_run`
+  # is `:read_only` and plugin-less, so `UntrustedContent.wrap/2` passes its
+  # output through untouched — without this the identical stream reaches the
+  # model unframed simply because it was polled instead of awaited, which is the
+  # drift a single boundary exists to prevent.
+  defp frame_result_tail(nil), do: nil
+  defp frame_result_tail(""), do: ""
+  defp frame_result_tail(text), do: UntrustedContent.frame(@untrusted_source, text)
 
   # A byte-wise cut can land inside a multibyte codepoint, and unlike the chat-bound
   # siblings this value is `Jason.encode!`d — invalid UTF-8 would raise and take the

@@ -31,8 +31,8 @@ defmodule FermixCore.Capabilities.MCP.ServerTest do
     end
 
     @impl true
-    def call_tool(server, tool, _args) do
-      case :ets.lookup(@table, {server, tool}) do
+    def call_tool(source_id, tool, _args, _context) do
+      case :ets.lookup(@table, {source_id, tool}) do
         [{_, response}] -> response
         [] -> {:error, :no_stub_response}
       end
@@ -357,6 +357,86 @@ defmodule FermixCore.Capabilities.MCP.ServerTest do
       ref = Process.monitor(pid)
       assert :ok = GenServer.stop(pid, :normal)
       assert_receive {:DOWN, ^ref, :process, ^pid, :normal}
+    end
+  end
+
+  # The staleness window the hook exists to close: a config reload invalidates
+  # BEFORE discovery finishes, so without this the agent caches a pre-discovery
+  # tool list indefinitely. It lands at the shared registration-completion
+  # point, so a local stdio server closes the same window as a remote one.
+  describe "runtime-context refresh" do
+    defmodule StubMainAgent do
+      @moduledoc false
+      use GenServer
+
+      def start_link(parent), do: GenServer.start_link(__MODULE__, parent)
+
+      @impl true
+      def init(parent), do: {:ok, parent}
+
+      @impl true
+      def handle_call({:invalidate_runtime_context, reason}, _from, parent) do
+        send(parent, {:invalidated, reason})
+        {:reply, :ok, parent}
+      end
+    end
+
+    test "completing registration invalidates the agent's cached context", %{
+      cap_registry: cap_registry,
+      mcp_registry: mcp_registry
+    } do
+      {:ok, main_agent} = StubMainAgent.start_link(self())
+
+      StubDiscoverer.set_tools([
+        %{name: "create_issue", description: "Create issue.", input_schema: %{}}
+      ])
+
+      start_supervised!(
+        {McpServer,
+         [
+           server_name: "github",
+           discoverer: StubDiscoverer,
+           caller: StubCaller,
+           capability_registry: cap_registry,
+           mcp_registry: mcp_registry,
+           skill_registry: nil,
+           main_agent: main_agent,
+           realtime_supervisor: nil
+         ]},
+        id: :mcp_server_refresh_test
+      )
+
+      assert_receive {:invalidated, :plugins_changed}, 1_000
+    end
+
+    test "unregistering on shutdown invalidates it again", %{
+      cap_registry: cap_registry,
+      mcp_registry: mcp_registry
+    } do
+      {:ok, main_agent} = StubMainAgent.start_link(self())
+
+      StubDiscoverer.set_tools([
+        %{name: "create_issue", description: "Create issue.", input_schema: %{}}
+      ])
+
+      {:ok, pid} =
+        McpServer.start_link(
+          server_name: "github",
+          discoverer: StubDiscoverer,
+          caller: StubCaller,
+          capability_registry: cap_registry,
+          mcp_registry: mcp_registry,
+          skill_registry: nil,
+          main_agent: main_agent,
+          realtime_supervisor: nil
+        )
+
+      assert_receive {:invalidated, :plugins_changed}, 1_000
+      assert eventually(fn -> CapabilityRegistry.list(cap_registry, kind: :mcp) != [] end)
+
+      :ok = GenServer.stop(pid, :normal)
+
+      assert_receive {:invalidated, :plugins_changed}, 1_000
     end
   end
 

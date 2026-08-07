@@ -13,6 +13,8 @@ description: >                 # optional, what this suite covers
   ...
 risk: host_readonly             # required default execution profile
 confirm_cost: false             # optional additive --confirm-cost requirement
+abort_on_tool_error:            # optional; vendor error fragments that END the run
+  - out_of_credits
 defaults:                      # optional, merged into every case
   timeout_ms: 180000           # per-turn fermix-ask timeout
   judge: true                  # a rubric on these cases makes --judge mandatory
@@ -22,6 +24,27 @@ defaults:                      # optional, merged into every case
 scenarios:                     # required, >= 1
   - ...
 ```
+
+### `abort_on_tool_error`
+
+Substrings matched against the text of any failed tool span. On a match the
+runner stops: the case that hit it is reported INCOMPLETE rather than failed,
+remaining cases are not driven, and both the console and the report say how many
+were skipped and that their status is unknown.
+
+Use it only for conditions that make every *later* result meaningless — an
+exhausted metered account is the motivating one. It is not a way to hide a flaky
+vendor: a transient error that the next case would survive must stay a failure.
+The full vendor text goes to the console only; the report persists the fragment
+(the operator's own literal) because error strings can quote user content.
+
+### Merge semantics for `defaults.expect`
+
+Case-level keys replace suite defaults, with one exception: the prohibition keys
+`tools_none` and `tools_none_succeeded` **accumulate**. A case naming one extra
+forbidden tool adds to the suite's list instead of replacing it — replacing was
+a silent hole, since narrowing one case dropped every ban the suite had set for
+all of them.
 
 ## Scenario
 

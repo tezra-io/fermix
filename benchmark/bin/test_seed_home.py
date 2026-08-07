@@ -73,6 +73,8 @@ def test_render_config_explicit_mode_has_no_secret_and_parses():
     assert sandbox["mode"] == "strict"
     assert sandbox["workspace_root"] == "/tmp/x-eval/workspace"
     assert sandbox["allowed_roots"] == ["/tmp/x-eval/extra"]
+    # M26 §11: skill curation stays off in eval homes.
+    assert doc["fermix_core"]["skill_curation"]["enabled"] is False
 
 
 def test_render_config_keyring_mode_unchanged():

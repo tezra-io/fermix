@@ -109,7 +109,13 @@ defmodule FermixCore.Tools.CodingRunManageTest do
 
       payload = HarnessSupport.run_payload(row, HarnessSupport.read_run_text(row))
 
-      assert payload.result_tail == "Not logged in · Please run /login"
+      # The vendor's own words still have to survive to the polling path — that is
+      # what this test exists for — but they arrive inside the untrusted-content
+      # frame, the same boundary `Harness.Continuation` applies to the identical
+      # bytes on the await path. Framed on one door and raw on the other is the
+      # drift that made the two worth pinning together.
+      assert payload.result_tail =~ "Not logged in · Please run /login"
+      assert payload.result_tail =~ ~s(source="coding_harness")
     end
 
     test "is nil when the run left no text" do

@@ -5,6 +5,34 @@ defmodule FermixChannels.Gateway.ChannelRegistryTest do
   alias FermixChannels.Gateway.ChannelRegistry
   alias FermixChannels.Gateway.Source
 
+  defmodule FakeChild do
+    @moduledoc false
+  end
+
+  # A `trust: :local_operator` entry shaped like the acp channel M29 adds: a
+  # remote?-true lifecycle with a same-user local transport and no ingress list.
+  defp registry_entry(overrides) do
+    Enum.into(overrides, %{
+      name: "fake_local",
+      config_key: :fake_local,
+      adapter: nil,
+      remote?: true,
+      transport: :gateway,
+      child: nil,
+      trust: :local_operator
+    })
+  end
+
+  defp register(entries) do
+    Application.put_env(:fermix_channels, :channel_registry, entries)
+
+    on_exit(fn ->
+      Application.delete_env(:fermix_channels, :channel_registry)
+      Application.delete_env(:fermix_channels, :fake_local)
+      Application.delete_env(:fermix_channels, :fake_remote)
+    end)
+  end
+
   describe "channel_key/1" do
     test "maps remote channel strings to their config key" do
       assert ChannelRegistry.channel_key("telegram") == :telegram
@@ -30,10 +58,73 @@ defmodule FermixChannels.Gateway.ChannelRegistryTest do
     end
   end
 
+  describe "trust/1" do
+    test "the loopback channels carry :local_operator; remote and unknown carry none" do
+      assert ChannelRegistry.trust("cli") == :local_operator
+      assert ChannelRegistry.trust("daemon") == :local_operator
+      assert ChannelRegistry.trust("telegram") == nil
+      assert ChannelRegistry.trust("matrix") == nil
+    end
+  end
+
+  describe "commands?/1" do
+    test "defaults to true for every shipped channel that does not opt out" do
+      for %{name: name} = channel <- ChannelRegistry.channels(),
+          not Map.has_key?(channel, :commands?) do
+        assert ChannelRegistry.commands?(name), "#{name} must default to commands enabled"
+      end
+
+      assert ChannelRegistry.commands?("matrix")
+    end
+
+    test "the shipped opt-outs are exactly the machine surfaces" do
+      opted_out =
+        ChannelRegistry.channels()
+        |> Enum.reject(&ChannelRegistry.commands?(&1.name))
+        |> Enum.map(& &1.name)
+
+      assert opted_out == ["acp"]
+    end
+
+    test "false only when the entry opts out" do
+      register([registry_entry(commands?: false)])
+      refute ChannelRegistry.commands?("fake_local")
+    end
+  end
+
+  describe "ingress gating vs trust" do
+    test "a :local_operator entry needs no ingress list to start" do
+      register([registry_entry(child: FakeChild)])
+      Application.put_env(:fermix_channels, :fake_local, enabled: true)
+
+      assert {FakeChild, []} in ChannelRegistry.transport_children(%{status: :ready})
+      assert ChannelRegistry.missing_ingress_authorizations() == []
+    end
+
+    test "a remote gateway channel with empty ingress still refuses to start" do
+      remote = %{
+        name: "fake_remote",
+        config_key: :fake_remote,
+        adapter: nil,
+        remote?: true,
+        transport: :gateway,
+        child: FakeChild
+      }
+
+      register([remote])
+      Application.put_env(:fermix_channels, :fake_remote, enabled: true, mode: :gateway)
+
+      assert ChannelRegistry.transport_children(%{status: :ready}) == []
+      assert ChannelRegistry.missing_ingress_authorizations() == [:fake_remote]
+    end
+  end
+
   describe "remote_channels/0" do
-    test "lists the five remote config keys, excluding local channels" do
+    test "lists the remote config keys, excluding local channels" do
       remote = ChannelRegistry.remote_channels()
-      assert Enum.sort(remote) == [:discord, :signal, :slack, :telegram, :whatsapp]
+      # `acp` is `remote?: true` for its lifecycle meanings (§4) even though its
+      # transport is a same-user socket, so it belongs to this list.
+      assert Enum.sort(remote) == [:acp, :discord, :signal, :slack, :telegram, :whatsapp]
       refute nil in remote
     end
   end

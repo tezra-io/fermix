@@ -9,6 +9,7 @@ defmodule Fermix.CLI do
   rather than a silent stub.
   """
 
+  alias Fermix.CLI.AcpCommand
   alias Fermix.CLI.AgentsCommand
   alias Fermix.CLI.AuthCommand
   alias Fermix.CLI.CapabilitiesCommand
@@ -67,6 +68,7 @@ defmodule Fermix.CLI do
   defp dispatch("status", rest), do: StatusCommand.run(rest)
   defp dispatch("health", rest), do: HealthCommand.run(rest)
   defp dispatch("voice", rest), do: VoiceCommand.run(rest)
+  defp dispatch("acp", rest), do: AcpCommand.run(rest)
   defp dispatch("agents", rest), do: AgentsCommand.run(rest)
   defp dispatch("capabilities", rest), do: CapabilitiesCommand.run(rest)
   defp dispatch("skills", rest), do: SkillsCommand.run(rest)
@@ -92,6 +94,7 @@ defmodule Fermix.CLI do
                    [--default-model VALUE] [--reasoning-effort none|low|medium|high|xhigh|max]
                    [--fast|--no-fast]
                    [--realtime-enabled] [--realtime-model VALUE] [--realtime-voice VALUE]
+                   [--acp-enabled|--no-acp-enabled]
                    [--telegram-bot-token VALUE] ...
       fermix auth   login   [--no-browser] [--port N] [--timeout SECONDS]
       fermix auth   status
@@ -107,6 +110,8 @@ defmodule Fermix.CLI do
       fermix status [--full] [--json]             Show daemon and overview status
       fermix health [--json]                      Show daemon-evaluated health
       fermix voice status [--json]                Show local voice companion status
+      fermix acp                                  Bridge an ACP client's stdio to the daemon
+      fermix acp forget NPUB|--all                Disconnect a remembered ACP client identity
       fermix agents [--json]                      Show main-agent and worker status
       fermix capabilities [--kind KIND] [--json]  Show registered capabilities
       fermix skills [list|view NAME|reload] [--json]  Inspect and reload installed skills

@@ -3,6 +3,10 @@ defmodule Fermix.CLI.Upgrade.ManifestTest do
 
   alias Fermix.CLI.Upgrade.Manifest
 
+  # The exact base `scripts/release/build_releases_json.sh` emits.
+  @release_base "https://github.com/tezra-io/fermix/releases/download/v0.2.0"
+  @off_origin "https://evil.example.invalid/fermix_macos_aarch64"
+
   @valid_manifest %{
     "schema_version" => 1,
     "latest" => "0.2.0",
@@ -13,22 +17,36 @@ defmodule Fermix.CLI.Upgrade.ManifestTest do
         "artifacts" => [
           %{
             "target" => "macos-aarch64",
-            "url" => "https://example.com/fermix_macos_aarch64",
+            "url" => "#{@release_base}/fermix_macos_aarch64",
             "sha256" => "deadbeef",
-            "sig_url" => "https://example.com/fermix_macos_aarch64.sig",
-            "cert_url" => "https://example.com/fermix_macos_aarch64.pem"
+            "sig_url" => "#{@release_base}/fermix_macos_aarch64.sig",
+            "cert_url" => "#{@release_base}/fermix_macos_aarch64.pem"
           },
           %{
             "target" => "linux-x86_64",
-            "url" => "https://example.com/fermix_linux_x86_64",
+            "url" => "#{@release_base}/fermix_linux_x86_64",
             "sha256" => "cafef00d",
-            "sig_url" => "https://example.com/fermix_linux_x86_64.sig",
-            "cert_url" => "https://example.com/fermix_linux_x86_64.pem"
+            "sig_url" => "#{@release_base}/fermix_linux_x86_64.sig",
+            "cert_url" => "#{@release_base}/fermix_linux_x86_64.pem"
           }
         ]
       }
     ]
   }
+
+  @sample_artifact @valid_manifest
+                   |> Map.fetch!("releases")
+                   |> hd()
+                   |> Map.fetch!("artifacts")
+                   |> hd()
+
+  # Enumerated from the fixture rather than hand-listed, so a URL-bearing field
+  # added to the artifact shape later joins the origin-pin invariant instead of
+  # escaping it — the fixture must carry every key `normalize_artifact/1`
+  # destructures or nothing in this file parses.
+  @url_fields for {key, value} <- @sample_artifact,
+                  is_binary(value) and String.starts_with?(value, "http"),
+                  do: key
 
   describe "fetch/1" do
     test "parses a valid manifest" do
@@ -48,6 +66,26 @@ defmodule Fermix.CLI.Upgrade.ManifestTest do
     test "surfaces non-200 statuses verbatim" do
       assert {:error, {:manifest_http_status, 404}} =
                Manifest.fetch(req_options: [plug: &__MODULE__.not_found_plug/1])
+    end
+  end
+
+  describe "artifact origin pin" do
+    test "the pinned surface covers every URL field the artifact shape carries" do
+      assert Enum.sort(@url_fields) == ["cert_url", "sig_url", "url"]
+    end
+
+    for field <- @url_fields do
+      test "refuses a manifest whose artifact #{field} is off-origin, before any download" do
+        body = poison(unquote(field), @off_origin)
+
+        assert {:error, {:artifact_origin_rejected, @off_origin}} =
+                 Manifest.fetch(req_options: [plug: recording_plug(body)])
+
+        # Exactly one request was issued — the manifest itself. The off-origin
+        # URL never reached a caller, so nothing could fetch it.
+        assert_received {:manifest_request, _path}
+        refute_received {:manifest_request, _path}
+      end
     end
   end
 
@@ -119,5 +157,26 @@ defmodule Fermix.CLI.Upgrade.ManifestTest do
     {:ok, manifest} = Manifest.fetch(req_options: [plug: &__MODULE__.valid_plug/1])
     {:ok, release} = Manifest.latest_release(manifest)
     release
+  end
+
+  # Replaces `field` on the first artifact only — the second artifact stays
+  # on-origin, so the rejection cannot be attributed to a wholesale bad fixture.
+  defp poison(field, value) do
+    [release | rest] = @valid_manifest["releases"]
+    [artifact | others] = release["artifacts"]
+    release = Map.put(release, "artifacts", [Map.put(artifact, field, value) | others])
+    Map.put(@valid_manifest, "releases", [release | rest])
+  end
+
+  defp recording_plug(body) do
+    test_pid = self()
+
+    fn conn ->
+      send(test_pid, {:manifest_request, conn.request_path})
+
+      conn
+      |> Plug.Conn.put_resp_content_type("application/json")
+      |> Plug.Conn.send_resp(200, Jason.encode!(body))
+    end
   end
 end

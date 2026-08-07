@@ -25,6 +25,15 @@ defmodule FermixTestSupport.SecretWriterStub do
     end
   end
 
+  # Mirrors the real writers: deleting an absent item succeeds, because the
+  # postcondition (no stored value under this key) already holds.
+  @impl true
+  def delete(key, opts \\ []) when is_atom(key) do
+    ensure_table()
+    :ets.delete(@table, {profile(opts), key})
+    :ok
+  end
+
   @impl true
   def command_source(key, _opts \\ []) when is_atom(key) do
     %{source: :command, command: "stub-keyring", args: [Atom.to_string(key)]}
@@ -68,6 +77,9 @@ defmodule FermixTestSupport.UnavailableSecretWriter do
 
   @impl true
   def get(_key, _opts \\ []), do: {:error, :unavailable}
+
+  @impl true
+  def delete(_key, _opts \\ []), do: {:error, :unavailable}
 
   @impl true
   def command_source(_key, _opts \\ []), do: %{source: :command, command: "", args: []}

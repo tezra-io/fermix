@@ -65,10 +65,7 @@ defmodule FermixCore.Tools.SkillCreate do
   defp do_execute(args) do
     with {:ok, skill_name} <- Support.required_string(args, "name"),
          {:ok, description} <- Support.required_string(args, "description"),
-         :ok <- validate_name(skill_name),
-         {:ok, skill_dir} <- prepare_skill_dir(skill_name),
-         :ok <- write_skill(skill_dir, skill_name, description),
-         :ok <- write_evals(skill_dir, skill_name) do
+         {:ok, skill_dir} <- scaffold(%{name: skill_name, description: description}) do
       Support.success_json(%{created: true, path: skill_dir})
     else
       {:error, reason} when is_binary(reason) -> Support.error(reason)
@@ -76,16 +73,60 @@ defmodule FermixCore.Tools.SkillCreate do
     end
   end
 
+  @doc """
+  Shared scaffold writer (MILESTONE_26_SKILL_CURATION §6.8): one writer, two
+  callers — this tool passes no `:body` and gets the placeholder; the curation
+  Creator passes the drafted body. All validation (name regex, the
+  leading-underscore reservation, existing-dir refusal) lives here so the two
+  paths can never drift. `attrs` takes `:name`, `:description`, optional
+  `:body` (markdown below the frontmatter) and optional `:home` (skills root
+  override for tests).
+  """
+  @spec scaffold(map()) :: {:ok, String.t()} | {:error, String.t() | term()}
+  def scaffold(%{name: skill_name, description: description} = attrs)
+      when is_binary(skill_name) and is_binary(description) do
+    with :ok <- validate_name(skill_name),
+         {:ok, skill_dir} <- prepare_skill_dir(skill_name, Map.get(attrs, :home)),
+         :ok <-
+           write_skill(
+             skill_dir,
+             skill_name,
+             frontmatter_line(description),
+             Map.get(attrs, :body)
+           ),
+         :ok <- write_evals(skill_dir, skill_name) do
+      {:ok, skill_dir}
+    end
+  end
+
+  # The description is interpolated into YAML frontmatter and may be
+  # model-authored: collapse it to one bounded line so an embedded newline or
+  # `---` can never terminate the frontmatter early and drop `allowed_tools`.
+  defp frontmatter_line(description) do
+    description
+    |> String.replace(~r/\s+/, " ")
+    |> String.trim()
+    |> String.slice(0, 300)
+  end
+
+  # Leading-underscore names are reserved for non-skill directories under the
+  # skills root (`_archive/` holds archived skills the discovery glob must never
+  # see — MILESTONE_26_SKILL_CURATION §6.4/§6.9), so they can never become live
+  # skills.
+  defp validate_name("_" <> _rest) do
+    {:error, "invalid_name: names starting with underscore are reserved"}
+  end
+
   defp validate_name(name) do
-    if String.match?(name, ~r/^[a-zA-Z0-9_-]{1,64}$/) do
+    if String.match?(name, ~r/^[a-zA-Z0-9_-]{1,64}\z/) do
       :ok
     else
       {:error, "invalid_name: use letters, digits, underscore, or hyphen, max 64 chars"}
     end
   end
 
-  defp prepare_skill_dir(name) do
-    skill_dir = Path.join(ConfigStore.workspace_paths().skills, name)
+  defp prepare_skill_dir(name, home) do
+    skill_dir = Path.join(home || ConfigStore.workspace_paths().skills, name)
 
     if File.exists?(skill_dir) do
       {:error, "already exists: #{skill_dir}"}
@@ -97,7 +138,7 @@ defmodule FermixCore.Tools.SkillCreate do
     end
   end
 
-  defp write_skill(skill_dir, name, description) do
+  defp write_skill(skill_dir, name, description, body) do
     content = """
     ---
     name: #{name}
@@ -105,14 +146,20 @@ defmodule FermixCore.Tools.SkillCreate do
     allowed_tools: []
     ---
 
+    #{body || placeholder_body(name, description)}\
+    """
+
+    File.write(Path.join(skill_dir, "SKILL.md"), content)
+  end
+
+  defp placeholder_body(name, description) do
+    """
     # #{name}
 
     #{description}
 
     Replace this body with the operating instructions for the skill.
     """
-
-    File.write(Path.join(skill_dir, "SKILL.md"), content)
   end
 
   defp write_evals(skill_dir, name) do

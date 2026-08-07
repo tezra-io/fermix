@@ -38,8 +38,16 @@ defmodule FermixChannels.Gateway.Commands.StopTest do
       assert :ok = Stop.authorize(message(), %{}, ctx)
     end
 
-    test "missing authorization fails closed (owner-only)" do
+    test "missing authorization fails closed (operator-only)" do
       assert {:error, :unauthorized} = Stop.authorize(message(), %{}, %{})
+    end
+
+    # A guest allowlisted for /new and /compact must not reach this daemon-global
+    # fail-safe; the allowlisted-guest case is pinned in CommandGateTest, which
+    # owns the app-env fixture.
+    test "a guest is refused" do
+      ctx = %{authorization: %IngressAuthorization{role: :guest, trust: :guest}}
+      assert {:error, :unauthorized} = Stop.authorize(message(), %{user_id: "guest-2"}, ctx)
     end
   end
 

@@ -274,12 +274,27 @@ defmodule FermixCore.Providers.OpenAI.Codex do
   defp collect_sse({:data, chunk}, {req, response}, stream_callback) when is_binary(chunk) do
     if response.status in 200..299 do
       state = current_sse_state(response, stream_callback) |> SSEParser.feed(chunk)
-      {:cont, {req, Req.Response.put_private(response, :codex_sse_state, state)}}
+      sse_step(state, req, response)
     else
       body = ensure_binary_body(response.body)
       {:cont, {req, %{response | body: body <> chunk}}}
     end
   end
+
+  # The parser's leftover ceiling bounds MEMORY; this halt bounds the TRANSFER,
+  # and neither is a bound without the other. `receive_timeout` is an idle
+  # window a peer that trickles bytes never trips, and no wall-clock deadline
+  # exists anywhere on this request, so returning `{:cont, ...}` past the
+  # ceiling leaves Req reading a stream the parser has already abandoned — the
+  # turn never returns, wedging the conversation's single-flight slot and
+  # holding a pooled connection open. `{:halt, acc}` aborts the real transfer
+  # (`Finch.stream_while/5`); the accumulated state, latched `status: "failed"`
+  # and all, still rides `:codex_sse_state` into `finalize_streamed_body/1`.
+  defp sse_step(%SSEParser{overflowed?: true} = state, req, response),
+    do: {:halt, {req, Req.Response.put_private(response, :codex_sse_state, state)}}
+
+  defp sse_step(%SSEParser{} = state, req, response),
+    do: {:cont, {req, Req.Response.put_private(response, :codex_sse_state, state)}}
 
   defp current_sse_state(%{private: %{codex_sse_state: %SSEParser{} = state}}, _callback),
     do: state
@@ -348,38 +363,40 @@ defmodule FermixCore.Providers.OpenAI.Codex do
      )}
   end
 
-  # A 200 is not by itself a delivered response. Without a check, a stream that
-  # ended before `response.completed` became a SUCCESSFUL EMPTY TURN —
-  # `build_turn/5` reads an absent usage map as zero tokens and an empty output
-  # list as empty text — so the loop had nothing to say, the channel sent its
-  # canned "I didn't get a response" line, and nothing was logged. 69 such turns
-  # sit in the operator's traces.
+  # A 200 is not by itself a delivered response, and neither is a non-empty
+  # output list. `build_turn/5` reads an absent usage map as zero tokens and an
+  # output list carrying no message text as empty content, so a stream that
+  # ended early became a SUCCESSFUL EMPTY TURN — the loop had nothing to say,
+  # the channel sent its canned "I didn't get a response" line, and nothing was
+  # logged.
   #
-  # The gate is "nothing was delivered", NOT "the stream did not finish tidily",
-  # and the difference matters. `items` fills from `response.output_item.added`
-  # and `.done`, which are independent of the terminal event, so a cut stream can
-  # still carry a finished message or a `function_call` — 3 of those 72 zero-usage
-  # turns did. Erroring on those would discard delivered content, and on a
-  # CONTINUATION it would also convert a recoverable turn into a dead one:
-  # `AgentLoop.continue_with_retry/3` runs with `eligible?: false` and
-  # `retryable?: &Transient.pre_response_timeout?/1`, which `:transport_closed`
-  # matches neither of, and `Jobs.Runner` refuses to retry once tools have
-  # started. So content is never thrown away — it is returned with a warning, and
-  # the error is reserved for the case with nothing to lose.
+  # The gate is therefore what the turn DELIVERED — text or a tool call — not
+  # how the stream ended and not how many output items arrived. Keying it on
+  # `output != []` still let the empty turn through: this adapter asks for
+  # reasoning on every call (`summary: "auto"` + `include:
+  # ["reasoning.encrypted_content"]`), so a `reasoning` item is the first frame
+  # on the wire and renders neither text nor a tool call. `completed` is no
+  # exemption either — a terminal event that carried nothing delivered nothing.
+  #
+  # Content that arrived is never discarded. `items` fills from
+  # `response.output_item.added` and `.done`, independently of the terminal
+  # event, so a cut stream can still carry a finished message or a
+  # `function_call`; that turn is returned with a warning (a half-built
+  # `function_call`'s arguments will not parse, which the model is already told
+  # about and recovers from). Erroring on it would discard delivered content and,
+  # on a CONTINUATION, convert a recoverable turn into a dead one:
+  # `AgentLoop.continue_with_retry/3` runs with `eligible?: false`, and
+  # `Jobs.Runner` refuses the whole-loop replay once tools have started.
   #
   # That also makes the retry safe by construction rather than by veto: every
-  # streamed delta and every `{:text_done, _}` / `{:reasoning_done, _}` the user
-  # can already see rides an output item, so a turn whose content reached the
-  # channel is never the empty case and can never be re-issued.
+  # streamed text delta the user can already see rides a message item, so a turn
+  # whose text reached the channel is never the empty case and can never be
+  # re-issued.
   defp handle_response({:ok, %Req.Response{status: 200, body: body}}, turn_state) do
     parsed = parse_body_to_map(body)
-    status = Map.get(parsed, "status")
+    {:ok, turn} = turn_from(parsed, turn_state)
 
-    cond do
-      status == "completed" -> turn_from(parsed, turn_state)
-      Map.get(parsed, "output", []) == [] -> {:error, undelivered_error(status, parsed)}
-      true -> partial_turn(status, parsed, turn_state)
-    end
+    delivered_turn(turn, Map.get(parsed, "status"), parsed)
   end
 
   defp handle_response({:ok, %Req.Response{status: 404, body: body}}, _turn_state) do
@@ -680,25 +697,79 @@ defmodule FermixCore.Providers.OpenAI.Codex do
     end
   end
 
-  # The stream carried output but never said it finished, so what arrived may be
-  # truncated (a half-built `function_call`'s arguments will not parse, and the
-  # model is told so on the next turn). Returning it preserves the behavior that
-  # actually recovers; the warning is what used to be missing entirely.
-  defp partial_turn(status, parsed, turn_state) do
+  defp delivered_turn(turn, status, parsed) do
+    cond do
+      status == "completed" -> completed_turn(turn, status, parsed)
+      delivered?(turn) -> warn_truncated(turn, status, parsed)
+      true -> undelivered(status, parsed)
+    end
+  end
+
+  # A response the API itself reported `completed` that PRODUCED OUTPUT ITEMS is
+  # a real turn even when it renders neither text nor a tool call. The rest of
+  # the loop already models that ending — a tool was the deliverable and the
+  # model has nothing left to say (`AgentLoop`'s empty completion, the queue's
+  # `handle_empty_completion/1` and its side-effect ledger) — and under Buzz,
+  # where the model publishes its reply by running the `buzz` CLI through the
+  # shell tool, it is the NORMAL ending. Calling it a provider failure made the
+  # ACP peer answer `-32603`, which made the harness requeue the batch and the
+  # model post its reply five times.
+  #
+  # ITEM COUNT is the discriminator, not usage: `output_tokens` counts reasoning
+  # tokens, so it is non-zero for turns that produced nothing at all. Zero items
+  # under a terminal event is the cron regression 811d0ad3/c258142c closed — the
+  # response carried nothing to render and must stay an error.
+  defp completed_turn(turn, status, parsed) do
+    case Map.get(parsed, "output", []) do
+      [] -> undelivered(status, parsed)
+      [_item | _rest] -> {:ok, turn}
+    end
+  end
+
+  defp delivered?(%{content: content, tool_calls: tool_calls}) do
+    content != "" or tool_calls != []
+  end
+
+  # The stream carried something usable but never said it finished, so what
+  # arrived may be truncated. Returning it preserves the behavior that actually
+  # recovers; the warning is what used to be missing entirely.
+  defp warn_truncated(turn, status, parsed) do
     Logger.warning(
       "Codex stream ended #{status || "with no terminal event"} after delivering " <>
         "#{length(Map.get(parsed, "output", []))} output item(s): #{failure_text(parsed)}. " <>
         "Keeping what arrived; it may be truncated."
     )
 
-    turn_from(parsed, turn_state)
+    {:ok, turn}
   end
 
-  # Two undelivered facts, two kinds — not a fallback. A stream that DECLARED
-  # its failure (`response.failed`/`response.incomplete`/stream `error` on an
-  # intact HTTP 200) is an API-level verdict, not a transport cut: it is minted
-  # through `ProviderError.api/5` so `api_kind` classifies the server's own
-  # text ("overload"/"server_error" → :provider_unavailable — retryable and
+  # The undelivered path was SILENT through the 2026-08 Buzz incident: the
+  # daemon log carried no Codex line for the whole window, so the only evidence
+  # a turn had failed was the caller's error tuple. These three facts are what
+  # separate an empty wire (no usage, no items) from a model that reasoned and
+  # then said nothing (reasoning tokens, a reasoning item) — the distinction the
+  # gate above turns on.
+  defp undelivered(status, parsed) do
+    Logger.error(
+      "Codex delivered nothing: status=#{status || "no terminal event"} " <>
+        "usage=#{inspect(Map.get(parsed, "usage", %{}))} " <>
+        "items=#{inspect(output_item_types(parsed))} — #{failure_text(parsed)}"
+    )
+
+    {:error, undelivered_error(status, parsed)}
+  end
+
+  defp output_item_types(parsed) do
+    parsed
+    |> Map.get("output", [])
+    |> Enum.map(&Map.get(&1, "type"))
+  end
+
+  # Three undelivered facts, three errors — not a fallback. A stream that
+  # DECLARED its failure (`response.failed`/`response.incomplete`/stream `error`
+  # on an intact HTTP 200) is an API-level verdict, not a transport cut: it is
+  # minted through `ProviderError.api/5` so `api_kind` classifies the server's
+  # own text ("overload"/"server_error" → :provider_unavailable — retryable and
   # failover-eligible on fresh calls), and the server's sentence rides
   # `:provider_words` for `Agents.TurnRunner.provider_error_reply/1` to quote
   # at the operator (2026-07-31: "Our servers are currently overloaded"
@@ -724,11 +795,36 @@ defmodule FermixCore.Providers.OpenAI.Codex do
     )
   end
 
-  defp undelivered_error(status, _parsed) do
-    ProviderError.transport(:openai_codex, :codex, :closed,
-      message:
-        "Codex reported the response #{status} with no output delivered and gave no reason."
-    )
+  # And a response the server declared TERMINAL — it said `completed` (or any
+  # other terminal status) and delivered nothing — is a third fact, distinct
+  # from both. It is NOT `:transport_closed`: nothing was cut. Minting that lie
+  # is what put this on `AgentLoop`'s continuation-retry allowlist, so a turn
+  # that had already published its Buzz reply through a tool was re-issued twice
+  # more, and told the operator "the provider closed the connection… Retry".
+  #
+  # It is minted through `ProviderError.api/5` for the same reason the declared
+  # failure above is: an intact 200 that reported its own terminal state is an
+  # API-level verdict. `api_kind` reads it as `:provider` — retryable by no
+  # classifier (`Transient.@retryable_api_kinds`, `AgentLoop`'s continuation
+  # allowlist) and eligible for no failover (`Failover.@fallback_api_kinds`), so
+  # the turn fails once and stops. That is also why it is NOT a bespoke
+  # transport reason atom: those land on `TurnRunner.provider_error_reply/1`'s
+  # transport catch-all, which shows the operator `inspect(reason)`, while every
+  # api kind reaches the `%{status: status}` floor clause and is rendered with
+  # THIS message. `code: "empty_response"` is the distinct, greppable marker —
+  # it rides telemetry as `error_code`, and is the field a dedicated
+  # `provider_error_reply/1` sentence should key on.
+  defp undelivered_error(status, parsed) do
+    count = parsed |> Map.get("output", []) |> length()
+
+    ProviderError.api(:openai_codex, :codex, 200, %{
+      "error" => %{
+        "code" => "empty_response",
+        "message" =>
+          "The response was reported #{status} carrying #{count} output item(s), " <>
+            "and delivered no text and no tool call."
+      }
+    })
   end
 
   defp failure_text(parsed) do
@@ -768,7 +864,7 @@ defmodule FermixCore.Providers.OpenAI.Codex do
            Map.get(resp, :content), Map.get(resp, :tool_calls), %{}}
 
         {:error, reason} ->
-          {:error, %{}, nil, nil, error_metadata(reason, wire_result)}
+          {:error, error_tokens(wire_result), nil, nil, error_metadata(reason, wire_result)}
       end
 
     metadata =
@@ -792,6 +888,26 @@ defmodule FermixCore.Providers.OpenAI.Codex do
       tool_calls: tool_calls
     )
   end
+
+  # Usage is a MEASURED fact of the response, not a property of success. Hard-
+  # coding an empty map on every error is why the Buzz incident's trace read as
+  # "nothing came back on the wire" when the model had in fact spent 12.5k
+  # prompt tokens and reasoned. Only a streamed 200 has a parsed body to read;
+  # a transport failure or a non-200 has no usage, and inventing zeros there
+  # would be a second lie.
+  defp error_tokens({:ok, %Req.Response{status: 200, body: body}}) do
+    body
+    |> parse_body_to_map()
+    |> Map.get("usage", %{})
+    |> usage_tokens()
+  end
+
+  defp error_tokens(_wire_result), do: %{}
+
+  defp usage_tokens(%{"input_tokens" => prompt, "output_tokens" => completion}),
+    do: %{prompt: prompt, completion: completion}
+
+  defp usage_tokens(_usage), do: %{}
 
   defp error_metadata(:context_length_exceeded, _wire_result) do
     %{error_kind: :context_length, error: "context_length_exceeded"}

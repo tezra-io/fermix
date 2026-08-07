@@ -18,6 +18,7 @@ from .scoring import MATCH_METHODS, _parse_number
 _SCORE_KEYS = {"match", "expected", "tolerance"}
 _TOP_KEYS = {
     "suite", "title", "description", "risk", "confirm_cost", "defaults", "scenarios", "soft",
+    "abort_on_tool_error",
 }
 _DEFAULT_KEYS = {"timeout_ms", "judge", "expect"}
 _SCENARIO_KEYS = {"id", "title", "severity", "risk", "confirm_cost", "tags", "cases"}
@@ -121,6 +122,10 @@ class Suite:
     description: str
     path: str
     scenarios: list[Scenario]
+    # Vendor error fragments that mean an external metered account is exhausted.
+    # Matching one voids the rest of the run rather than failing it — see
+    # `run_eval._abort_signal`.
+    abort_on_tool_error: list[str] = field(default_factory=list)
     soft: bool = False               # judge/taste axis: EXCLUDED from the correctness
     #   composite unless named explicitly with --suite (a noisy 0..1 taste score must not
     #   be averaged into task-success or share its tasks_hash — see run_capability).
@@ -165,9 +170,24 @@ def _validate_expect(expect, where: str, problems: list[str]) -> None:
             problems.append(f"{where}: expect `status` must be 'ok' or 'error', got {val!r}")
 
 
+# Prohibition keys accumulate instead of being replaced. Every other expect key
+# is a single assertion a case may legitimately restate, but a `tools_none` is a
+# ban the SUITE placed on every case: letting a case-level list overwrite it
+# means adding one narrow prohibition silently un-forbids all the others. That is
+# not hypothetical — four cases in the eden suite each declared one extra
+# forbidden tool and thereby dropped the eight-tool write guard the defaults set,
+# so the profile-boundary assertion those cases appeared to make was not running.
+_PROHIBITION_KEYS = ("tools_none", "tools_none_succeeded")
+
+
 def _merge_expect(base: dict, override: dict) -> dict:
     out = dict(base or {})
     out.update(override or {})
+    for key in _PROHIBITION_KEYS:
+        merged = list(dict.fromkeys([*(base or {}).get(key, []),
+                                     *(override or {}).get(key, [])]))
+        if merged:
+            out[key] = merged
     return out
 
 
@@ -500,8 +520,24 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
         problems.append(f"{fname}: `description` must be a string")
         description = ""
     soft = _boolean(raw.get("soft", False), f"{fname}: top level soft", problems, False)
+    aborts = _abort_fragments(raw.get("abort_on_tool_error", []), fname, problems)
     return Suite(name=name, title=title, description=description,
-                 path=path, scenarios=scenarios, soft=soft)
+                 path=path, scenarios=scenarios, soft=soft,
+                 abort_on_tool_error=aborts)
+
+
+def _abort_fragments(value, fname: str, problems: list[str]) -> list[str]:
+    where = f"{fname}: `abort_on_tool_error`"
+    if not isinstance(value, list):
+        problems.append(f"{where} must be a list of strings")
+        return []
+    fragments = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            problems.append(f"{where} entries must be non-empty strings, got {item!r}")
+            continue
+        fragments.append(item)
+    return fragments
 
 
 def load_all(suites_dir: str, include_dangerous: bool = False,

@@ -12,6 +12,7 @@ defmodule FermixCore.HealthTest do
     discord = Application.get_env(:fermix_channels, :discord)
     slack = Application.get_env(:fermix_channels, :slack)
     signal = Application.get_env(:fermix_channels, :signal)
+    acp = Application.get_env(:fermix_channels, :acp)
     fermix_home = System.get_env("FERMIX_HOME")
 
     on_exit(fn ->
@@ -22,6 +23,7 @@ defmodule FermixCore.HealthTest do
       restore_env(:fermix_channels, :discord, discord)
       restore_env(:fermix_channels, :slack, slack)
       restore_env(:fermix_channels, :signal, signal)
+      restore_env(:fermix_channels, :acp, acp)
 
       case fermix_home do
         nil -> System.delete_env("FERMIX_HOME")
@@ -142,6 +144,47 @@ defmodule FermixCore.HealthTest do
     assert report.realtime.socket_path == Path.join(tmp_home, "realtime.sock")
     assert report.realtime.socket_alive == false
   end
+
+  # The ACP surface is a transport like any other channel, so /health lists it
+  # (M29 §9 item 7): disabled when off, degraded when enabled with no listener.
+  test "lists the acp transport and marks it degraded when its listener is absent" do
+    tmp_home = Path.join(System.tmp_dir!(), "fermix-health-#{System.unique_integer([:positive])}")
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    Application.put_env(:fermix_core, :realtime, enabled: false)
+    Application.put_env(:fermix_channels, :acp, enabled: false, mode: :gateway)
+
+    disabled = health_report(fn _name -> nil end)
+
+    assert %{name: "acp", status: :disabled, enabled: false, process_alive: nil} =
+             channel(disabled, "acp")
+
+    Application.put_env(:fermix_channels, :acp, enabled: true, mode: :gateway)
+
+    degraded = health_report(fn _name -> nil end)
+
+    assert %{name: "acp", status: :degraded, enabled: true, process_alive: false} =
+             channel(degraded, "acp")
+
+    ready = health_report(fn _name -> self() end)
+
+    assert %{name: "acp", status: :ready, enabled: true, process_alive: true} =
+             channel(ready, "acp")
+  end
+
+  defp health_report(process_resolver) do
+    Health.report(
+      boot_report: %{
+        status: :ready,
+        failures: [],
+        config_path: ConfigStore.path(),
+        restart_required?: false
+      },
+      process_resolver: process_resolver
+    )
+  end
+
+  defp channel(report, name), do: Enum.find(report.channels, &(&1.name == name))
 
   defp restore_env(app, key, nil), do: Application.delete_env(app, key)
   defp restore_env(app, key, value), do: Application.put_env(app, key, value)

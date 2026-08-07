@@ -65,9 +65,39 @@ defmodule FermixCore.Jobs.Runner do
           readiness_opts: keyword()
         }
 
+  # A runner spends its whole run inside `handle_continue/2`, so it cannot answer
+  # a message until the run is over. The scheduler's crash reconciliation still
+  # has to map a live child pid back to the run it is executing, so the run id is
+  # published under a process-dictionary key (not OTP's `Process.set_label/1` —
+  # this predates a hard OTP 27 floor) during `init/1` — before the pid ever
+  # reaches the supervisor's caller — and read out-of-band with `Process.info/2`.
+  # Any module used as a runner must publish it the same way or its run is
+  # treated as orphaned.
+  @run_id_key :fermix_job_run_id
+
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) when is_list(opts) do
     GenServer.start_link(__MODULE__, opts)
+  end
+
+  @doc """
+  Publish the run id this process is executing, for out-of-band liveness lookup.
+  """
+  @spec put_run_id(String.t()) :: :ok
+  def put_run_id(run_id) when is_binary(run_id) do
+    Process.put(@run_id_key, run_id)
+    :ok
+  end
+
+  @doc """
+  The run id a runner process published, or `nil` when it is dead or unlabelled.
+  """
+  @spec run_id(pid()) :: String.t() | nil
+  def run_id(pid) when is_pid(pid) do
+    case Process.info(pid, :dictionary) do
+      {:dictionary, dictionary} -> Keyword.get(dictionary, @run_id_key)
+      nil -> nil
+    end
   end
 
   @spec child_spec(keyword()) :: Supervisor.child_spec()
@@ -122,6 +152,8 @@ defmodule FermixCore.Jobs.Runner do
       readiness_port: Keyword.get(opts, :readiness_port),
       readiness_opts: Keyword.get(opts, :readiness_opts, [])
     }
+
+    :ok = put_run_id(state.run.id)
 
     {:ok, state, {:continue, :run}}
   end
@@ -1040,7 +1072,7 @@ defmodule FermixCore.Jobs.Runner do
     }
   end
 
-  defp update_watchdog_activity(watchdog, {:tool_finish, _name}) do
+  defp update_watchdog_activity(watchdog, {:tool_finish, _name, _outcome}) do
     %{
       watchdog
       | last_activity_at: monotonic_ms(),

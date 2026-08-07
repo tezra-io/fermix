@@ -252,15 +252,28 @@ def _finish_reason_error(value, backend: str = "openai") -> str | None:
 
 
 def _ssl_context() -> ssl.SSLContext:
-    """TLS context with a real CA bundle. Some interpreters ship no system trust
-    store, so load certifi's bundle (a declared runner dependency) when present."""
+    """TLS context with a real CA bundle.
+
+    certifi is a DECLARED runner dependency (see this script's PEP 723 header),
+    so its absence never means "this interpreter happens to lack it" — it means
+    the runner was started outside uv, e.g. `python3 bin/run_eval.py` instead of
+    `./bin/run_eval.py` or `uv run bin/run_eval.py`. Swallowing that produced a
+    bare context and surfaced, hundreds of lines later, as an inscrutable
+    CERTIFICATE_VERIFY_FAILED against the judge provider. Fail here, naming the
+    cause and the fix.
+    """
     ctx = ssl.create_default_context()
     try:
         import certifi
+    except ImportError as exc:  # pragma: no cover - depends on how the runner was launched
+        raise RuntimeError(
+            "certifi is missing, so the judge has no CA bundle. This runner "
+            "declares certifi in its PEP 723 header and must be launched through "
+            "uv: `./bin/run_eval.py ...` or `uv run bin/run_eval.py ...` "
+            "(not `python3 bin/run_eval.py`)."
+        ) from exc
 
-        ctx.load_verify_locations(certifi.where())
-    except Exception:
-        pass
+    ctx.load_verify_locations(certifi.where())
     return ctx
 
 

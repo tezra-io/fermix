@@ -13,6 +13,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     jobs = Application.get_env(:fermix_core, :jobs, [])
     compaction = Application.get_env(:fermix_core, :compaction, [])
     harness = Application.get_env(:fermix_core, :harness, [])
+    skill_curation = Application.get_env(:fermix_core, :skill_curation, [])
     memory = Application.get_env(:fermix_core, :memory, [])
     realtime = Application.get_env(:fermix_core, :realtime, [])
     computer_use = Application.get_env(:fermix_core, :computer_use, [])
@@ -34,6 +35,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
       Application.put_env(:fermix_core, :jobs, jobs)
       Application.put_env(:fermix_core, :compaction, compaction)
       Application.put_env(:fermix_core, :harness, harness)
+      Application.put_env(:fermix_core, :skill_curation, skill_curation)
       Application.put_env(:fermix_core, :memory, memory)
       Application.put_env(:fermix_core, :realtime, realtime)
       Application.put_env(:fermix_core, :computer_use, computer_use)
@@ -90,6 +92,9 @@ defmodule FermixCore.Setup.ConfigStoreTest do
 
     @impl true
     def put(_key, _value, _opts \\ []), do: raise("resolution must never write")
+
+    @impl true
+    def delete(_key, _opts \\ []), do: raise("resolution must never delete")
 
     @impl true
     def command_source(key, _opts \\ []) do
@@ -1086,6 +1091,96 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     end
   end
 
+  test "save/load round-trips the skill_curation config section" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    snapshot = %{
+      fermix_core: [skill_curation: [enabled: false]],
+      fermix_channels: [],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ "[fermix_core.skill_curation]"
+    assert contents =~ "enabled = false"
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config()
+    skill_curation = Keyword.get(loaded.fermix_core, :skill_curation, [])
+    assert Keyword.get(skill_curation, :enabled) == false
+  end
+
+  test "an empty skill_curation section is omitted from the TOML" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    assert :ok =
+             ConfigStore.save_snapshot(%{
+               fermix_core: [skill_curation: []],
+               fermix_channels: [],
+               fermix_web: []
+             })
+
+    refute File.read!(Path.join(tmp_home, "config.toml")) =~ "[fermix_core.skill_curation]"
+  end
+
+  test "apply_snapshot replaces skill_curation config in Application env" do
+    Application.put_env(:fermix_core, :skill_curation, enabled: true)
+
+    ConfigStore.apply_snapshot(%{
+      fermix_core: [skill_curation: [enabled: false]],
+      fermix_channels: [],
+      fermix_web: []
+    })
+
+    skill_curation = Application.get_env(:fermix_core, :skill_curation, [])
+    assert Keyword.get(skill_curation, :enabled) == false
+  end
+
+  test "load refuses to boot on an unknown skill_curation key" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.skill_curation]
+    enabld = true
+    """)
+
+    assert_raise ArgumentError,
+                 ~r/\[fermix_core.skill_curation\].*unknown key\(s\): enabld/s,
+                 fn -> ConfigStore.load_runtime_config() end
+  end
+
+  test "load refuses to boot on an invalid skill_curation value" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.skill_curation]
+    enabled = "yes"
+    """)
+
+    assert_raise ArgumentError, ~r/skill_curation\.enabled "yes"/s, fn ->
+      ConfigStore.load_runtime_config()
+    end
+  end
+
   test "save/load round-trips memory.review_interval_hours" do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
@@ -1304,6 +1399,54 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert_raise ArgumentError, ~r/review_interval_hours/, fn ->
       ConfigStore.load_runtime_config()
     end
+  end
+
+  # An absent section normalizes to `[]`, which merges over nothing — that is
+  # what leaves the compile-time default (on) intact across an upgrade. The
+  # boot-path consequence is pinned in
+  # FermixChannels.Channels.Acp.UpgradeDefaultTest.
+  test "acp normalizes an absent section to no override and round-trips when enabled" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    previous_acp = Application.fetch_env(:fermix_channels, :acp)
+
+    on_exit(fn ->
+      case previous_acp do
+        {:ok, value} -> Application.put_env(:fermix_channels, :acp, value)
+        :error -> Application.delete_env(:fermix_channels, :acp)
+      end
+
+      FermixTestSupport.SafeRm.rm_rf!(tmp_home)
+    end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.agent]
+    name = "fermix"
+    """)
+
+    assert {:ok, absent} = ConfigStore.load_runtime_config()
+    assert Keyword.fetch!(absent.fermix_channels, :acp) == []
+
+    :ok =
+      ConfigStore.save_snapshot(%{
+        fermix_core: [],
+        fermix_channels: [acp: [enabled: true]],
+        fermix_web: []
+      })
+
+    assert File.read!(Path.join(tmp_home, "config.toml")) =~ "[fermix_channels.acp]"
+
+    assert {:ok, reloaded} = ConfigStore.load_runtime_config()
+    assert Keyword.fetch!(reloaded.fermix_channels, :acp) == [enabled: true]
+
+    Application.put_env(:fermix_channels, :acp, enabled: false)
+
+    assert :ok = ConfigStore.apply_snapshot(reloaded)
+    assert Keyword.get(Application.get_env(:fermix_channels, :acp, []), :enabled) == true
   end
 
   test "channel streaming survives the load normalizers for every channel" do

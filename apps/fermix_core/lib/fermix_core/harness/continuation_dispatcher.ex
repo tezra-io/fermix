@@ -20,11 +20,22 @@ defmodule FermixCore.Harness.ContinuationDispatcher do
   The plain-data continuation notice. `platform`/`destination`/`thread` are the
   ledger row's frozen delivery snapshot; `metadata` marks the message a
   continuation and carries the chain depth.
+
+  `client_origin` is the launch-time origin snapshot for a client-owned surface
+  (`MILESTONE_29_ACP_AGENT_SURFACE.md` §17.4): `identity`, `cwd` and an opaque
+  `reply_context`. Core passes it through untouched — resolving the identity into
+  a turn env needs the `Message` struct, which only `fermix_channels` owns. `nil`
+  on every framework-delivered origin.
+
+  The implementation reads `identity` and `cwd` only: `reply_context` is for the
+  continuation turn's model, and `content` already carries it rendered inside its
+  untrusted frame (§17.6(c)). Nothing on this path parses it.
   """
   @type notice :: %{
           platform: String.t(),
           destination: String.t(),
           thread: String.t() | nil,
+          client_origin: map() | nil,
           content: String.t(),
           metadata: map()
         }

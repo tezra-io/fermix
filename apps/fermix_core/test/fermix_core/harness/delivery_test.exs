@@ -3,12 +3,21 @@ defmodule FermixCore.Harness.DeliveryTest do
   # the module's tests must not run concurrently with each other.
   use ExUnit.Case, async: false
 
+  alias FermixCore.Acp.Identity
   alias FermixCore.Harness.Continuation
   alias FermixCore.Harness.Delivery
   alias FermixCore.Jobs.Registry, as: JobsRegistry
+  alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Repo
 
   @recorder :harness_delivery_recorder
+
+  # Published NIP-19 test vector (see `nostr/key_test.exs`) — never a live key.
+  @nsec "nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5"
+
+  defp buzz_env do
+    %{"BUZZ_PRIVATE_KEY" => @nsec, "PATH" => "/fake/bin:/usr/bin"}
+  end
 
   defmodule RecordingAdapter do
     def send_message(destination, text, opts) do
@@ -115,6 +124,104 @@ defmodule FermixCore.Harness.DeliveryTest do
     test "rejects an unresolvable origin" do
       assert {:error, {:unresolvable_delivery_origin, _}} =
                Delivery.resolve_snapshot(%{conversation_key: :nonsense})
+    end
+
+    # A framework-delivered channel has no `session_env`, so it must freeze no
+    # client origin at all — the regression half of every assertion below.
+    test "freezes no client origin for a framework-delivered channel" do
+      ctx = %{conversation_key: {"telegram", "chat-9", :root}, cwd: "/repo"}
+
+      assert {:ok, snapshot} = Delivery.resolve_snapshot(ctx)
+      assert snapshot.client_origin == nil
+    end
+  end
+
+  # M29 §17.4 — the ACP session that launched a run is gone by the time it
+  # finishes, so the row freezes who it belonged to, where it ran, and an opaque
+  # excerpt of the launching turn.
+  describe "resolve_snapshot/2 — client-owned origin" do
+    setup do
+      unique = System.unique_integer([:positive])
+      store = :"harness_delivery_convo_#{unique}"
+      start_supervised!({ConversationStore, name: store})
+      %{store: store}
+    end
+
+    test "freezes the identity, the launch cwd and an opaque reply excerpt", %{store: store} do
+      key = {"acp", "sess-1", :root}
+
+      ConversationStore.add_message(key, "user", "[Context] channel=abc\nfix the flake",
+        server: store
+      )
+
+      ctx = %{
+        conversation_key: key,
+        cwd: "/repo/apps/core",
+        session_env: buzz_env(),
+        conversation_store: store
+      }
+
+      assert {:ok, snapshot} = Delivery.resolve_snapshot(ctx)
+      assert snapshot.platform == "acp"
+
+      # The SAME derivation the Peer used at hello, so launch and hello can never
+      # disagree about who a run belongs to.
+      assert {:ok, id} = Identity.id_from_env(buzz_env())
+      assert snapshot.client_origin["identity"] == id
+      assert snapshot.client_origin["cwd"] == "/repo/apps/core"
+      assert snapshot.client_origin["reply_context"] == "[Context] channel=abc\nfix the flake"
+    end
+
+    test "bounds the reply excerpt and never stores invalid UTF-8", %{store: store} do
+      key = {"acp", "sess-2", :root}
+      long = String.duplicate("é", 8_000)
+      ConversationStore.add_message(key, "user", long, server: store)
+
+      ctx = %{conversation_key: key, session_env: buzz_env(), conversation_store: store}
+
+      assert {:ok, snapshot} = Delivery.resolve_snapshot(ctx)
+      excerpt = snapshot.client_origin["reply_context"]
+
+      assert byte_size(excerpt) <= 4_096
+      assert String.valid?(excerpt)
+      # It has to survive the ledger encode, which is where invalid UTF-8 would raise.
+      assert is_binary(Jason.encode!(snapshot.client_origin))
+    end
+
+    # A two-element key is normalized to a root conversation on BOTH the snapshot
+    # and the excerpt read, so the store is never addressed with a key shape it
+    # cannot resolve.
+    test "reads the excerpt through the normalized root key for a two-element key", %{
+      store: store
+    } do
+      ConversationStore.add_message({"acp", "sess-4", :root}, "user", "fix the flake",
+        server: store
+      )
+
+      ctx = %{
+        conversation_key: {"acp", "sess-4"},
+        session_env: buzz_env(),
+        conversation_store: store
+      }
+
+      assert {:ok, snapshot} = Delivery.resolve_snapshot(ctx)
+      assert snapshot.client_origin["reply_context"] == "fix the flake"
+    end
+
+    # The drop rule (§17.2): a key that will not derive is not an identity, so the
+    # row must freeze no client origin rather than one nothing can resolve.
+    test "an underivable signing key freezes no client origin", %{store: store} do
+      key = {"acp", "sess-3", :root}
+      ConversationStore.add_message(key, "user", "do the work", server: store)
+
+      ctx = %{
+        conversation_key: key,
+        session_env: %{"BUZZ_PRIVATE_KEY" => "nsec1thisisnotarealkey", "PATH" => "/bin"},
+        conversation_store: store
+      }
+
+      assert {:ok, snapshot} = Delivery.resolve_snapshot(ctx)
+      assert snapshot.client_origin == nil
     end
   end
 

@@ -24,16 +24,51 @@ defmodule FermixCore.Harness.Continuation do
       flag. On success the caller marks the row delivered (the agent's turn *is*
       the notification); on failure the row stays `pending` and the existing
       `DeliveryWorker` delivers the text.
+
+  ## Client-owned origins (M29 §17.4, §17.6(c))
+
+  On a surface owned by an ACP client, returning text is not delivery: the reply
+  reaches the client's own session viewer and nothing else, and the session that
+  launched the run is gone by the time it finishes. Two things follow, and the
+  ledger row's frozen `client_origin` decides both:
+
+    * the notice re-presents the origin's `reply_context` — the launching turn's
+      own text, frozen at launch so pre-flight auto-compaction cannot summarize
+      the reply anchor away in the minutes this feature exists to span. Fermix
+      never parses it; it renders the bytes inside their own untrusted frame;
+    * the closing gains the publishing obligation, appended to (never in place
+      of) the origin's own closing, on the completed and the failed path alike.
   """
 
   require Logger
 
+  alias FermixCore.Capabilities.UntrustedContent
   alias FermixCore.Delivery.ChannelSend
 
   @max_depth 3
   @result_text_max 8_192
+  # The excerpt is bounded at freeze time (`Harness.Delivery`, ≤4 KiB on the
+  # row). This is the render-side ceiling for the same value, so a row carrying
+  # more than the writer ever stores still cannot grow the prompt.
+  @reply_context_max 4_096
   @dispatch_timeout_ms 15_000
+  # The frame attribution for the run's own output. Names the classification
+  # Fermix already applies to this text on the memory-recall path
+  # (`UntrustedContent.untrusted_source_type?/1`) rather than the vendor, which
+  # the run tag and status line above the frame already state.
+  @untrusted_source "coding_harness"
+  # A SECOND attribution for a second source: the request the run was launched
+  # from is a third party's words, not the run's output, and the model has to be
+  # able to tell them apart.
+  @request_source "launching_request"
+  @request_label "The request this run was launched from, quoted verbatim — read it for where the outcome belongs:"
   @closing "Continue the request this run was for; if it is already satisfied, just report the outcome."
+  # Appended on a CLIENT-OWNED origin (M29 §17.6(c)), where the reply Fermix
+  # returns reaches only the client's own session viewer. Stated as the principle
+  # and nothing else: no surface, no tool, no command. The concrete tooling comes
+  # from the client's injected prompt and the conversation's own history, and the
+  # next client-owned surface will not be this one.
+  @publish_closing "Returning text is not delivery on this surface — nothing you say in reply reaches anyone. Publishing the outcome back where the request came from is part of the work: do it with the tooling this surface gives you before you finish."
 
   # A run that ends without a result leaves a decision, not an outcome — and the
   # failure text above is the evidence for it. State the decision and let the agent
@@ -132,7 +167,9 @@ defmodule FermixCore.Harness.Continuation do
 
   @doc """
   The system-voiced notice text (pure, golden-tested): the run tag, the
-  vendor/status/cwd line, the bounded outcome body, and the closing instruction.
+  vendor/status/cwd line, the bounded outcome body inside the untrusted-content
+  frame, the launching request (client-owned origins only, in a frame of its
+  own), and the closing instruction.
   """
   @spec notice_text(map(), String.t() | nil) :: String.t()
   def notice_text(row, result_text) when is_map(row) do
@@ -140,8 +177,19 @@ defmodule FermixCore.Harness.Continuation do
       "[coding run #{Map.get(row, :id)} finished]",
       status_line(row),
       body(row, result_text),
+      launching_request(row),
       closing(row)
     ]
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.join("\n")
+  end
+
+  # The origin's own closing, plus — on a client-owned origin — the publishing
+  # obligation. Appended rather than substituted so a failed run keeps every word
+  # of its inspect-then-decide guidance: an outcome nobody can see is not
+  # reported, and a failure is exactly as invisible as a success here.
+  defp closing(row) do
+    [outcome_closing(row), publish_closing(row)]
     |> Enum.reject(&(&1 == ""))
     |> Enum.join("\n")
   end
@@ -149,7 +197,7 @@ defmodule FermixCore.Harness.Continuation do
   # An owner halt never reaches here (`continuable?/1` excludes cancelled and
   # tracking_stopped), so every non-completed status that does is a run that tried
   # and failed.
-  defp closing(%{status: "completed"}), do: @closing
+  defp outcome_closing(%{status: "completed"}), do: @closing
 
   # A cloud terminal usually means "we stopped knowing", not "nothing happened":
   # `poll_deadline` and `submission_outcome_unknown` leave the vendor task RUNNING,
@@ -159,9 +207,15 @@ defmodule FermixCore.Harness.Continuation do
   # the vendor deliberately sweeps in the cloud failures where nothing IS running
   # (a submit that never landed) — erring toward "go look" is the safe direction,
   # and the alternative is the per-reason classification this design rejects.
-  defp closing(%{vendor: "codex_cloud"}), do: @closing
+  defp outcome_closing(%{vendor: "codex_cloud"}), do: @closing
 
-  defp closing(_failed), do: @failed_closing
+  defp outcome_closing(_failed), do: @failed_closing
+
+  # The frozen client origin is the single fact that decides this (M29 §17.4) —
+  # never a channel-name list, which would go stale the first time a second
+  # client-owned surface exists.
+  defp publish_closing(%{client_origin: origin}) when is_map(origin), do: @publish_closing
+  defp publish_closing(_framework_delivered), do: ""
 
   # --- Notice construction ------------------------------------------------
 
@@ -170,6 +224,12 @@ defmodule FermixCore.Harness.Continuation do
       platform: platform,
       destination: destination,
       thread: Map.get(row, :thread),
+      # The launch-time client origin (M29 §17.4), passed through untouched:
+      # `fermix_core` holds no `Message` struct and no identity resolution for a
+      # channel, so the dispatcher is the single point that turns this into the
+      # continuation turn's env and cwd (§17.6(c)). `nil` on every framework-
+      # delivered origin.
+      client_origin: Map.get(row, :client_origin),
       content: notice_text(row, result_text),
       metadata: %{
         harness_continuation: true,
@@ -192,11 +252,60 @@ defmodule FermixCore.Harness.Continuation do
     |> Enum.join(" · ")
   end
 
+  # The outcome text is the run's own output, derived from the repo, issue and
+  # web content the vendor read — and the closing line directly beneath it tells
+  # the model to act. So every shape of outcome enters the loop inside the
+  # untrusted-content frame, the same boundary the memory-recall path already
+  # applies to this vendor text (§10.3). Funnelled through one clause so an
+  # outcome shape added later cannot enter unframed.
+  #
+  # The run tag, `status_line/1` and `closing/1` stay OUTSIDE the frame: they are
+  # Fermix-authored and must keep their instructional authority. `frame/2`
+  # neutralizes any frame delimiter the payload carries, so the outcome cannot
+  # close the boundary early.
+  defp body(row, result_text) do
+    row
+    |> outcome(result_text)
+    |> frame_outcome()
+  end
+
+  defp frame_outcome(""), do: ""
+  defp frame_outcome(text), do: UntrustedContent.frame(@untrusted_source, text)
+
+  # The turn that launched this run, frozen at launch (M29 §17.4) because the
+  # minutes between launch and completion are exactly the window in which
+  # pre-flight auto-compaction can summarize the channel and the reply anchor
+  # away — the one failure mode carrying this excerpt exists to remove.
+  #
+  # Fermix stores bytes and re-presents bytes: it never parses this, so no
+  # Fermix-side parser of a client's prompt format is created (§13 stands). The
+  # model reads it; we only carry it. Which is also why it enters under its OWN
+  # untrusted attribution rather than the run's — third-party words, sitting
+  # directly above a closing that tells the model to act, so the same "DATA, not
+  # instructions" boundary the outcome gets applies here too. `frame/2`
+  # neutralizes any delimiter the excerpt carries, so it cannot close the
+  # boundary early and have the closing read as its own.
+  defp launching_request(row) do
+    case reply_context(row) do
+      "" -> ""
+      excerpt -> @request_label <> "\n" <> UntrustedContent.frame(@request_source, excerpt)
+    end
+  end
+
+  defp reply_context(%{client_origin: origin}) when is_map(origin) do
+    origin |> Map.get("reply_context") |> excerpt()
+  end
+
+  defp reply_context(_framework_delivered), do: ""
+
+  defp excerpt(text) when is_binary(text), do: text |> String.trim() |> bound(@reply_context_max)
+  defp excerpt(_absent), do: ""
+
   # A cloud run's outcome is a vendor task, not a local result file (its
   # `result_text` is always nil), so the notice carries what `Delivery` composes
   # for that rail: the vendor status/diff summary, the task URL, and the diff
   # hint — otherwise a completed cloud run would continue with an empty body.
-  defp body(%{vendor: "codex_cloud"} = row, _result_text) do
+  defp outcome(%{vendor: "codex_cloud"} = row, _result_text) do
     [reason_line(row), Map.get(row, :diagnostics_tail), task_url(row), diff_hint(row)]
     |> Enum.reject(&(&1 in [nil, ""]))
     |> Enum.join("\n")
@@ -206,17 +315,17 @@ defmodule FermixCore.Harness.Continuation do
   # A completed run speaks through its result text; anything else speaks through
   # its reason + diagnostics so the agent reacts to the real failure rather than a
   # bare status word.
-  defp body(%{status: "completed"}, result_text) when is_binary(result_text) do
+  defp outcome(%{status: "completed"}, result_text) when is_binary(result_text) do
     bound(result_text)
   end
 
-  defp body(%{status: "completed"}, _absent), do: ""
+  defp outcome(%{status: "completed"}, _absent), do: ""
 
   # A failed run's `result_text` is the vendor's own error message. Without it the
   # agent reads a bare `reason: exit_1`, cannot tell an auth failure from a crash,
   # and re-launches straight into the same wall — so it leads the body, ahead of
   # the reason word and the (stderr-only) diagnostics tail.
-  defp body(row, result_text) do
+  defp outcome(row, result_text) do
     [vendor_line(result_text), reason_line(row), Map.get(row, :diagnostics_tail)]
     |> Enum.reject(&(&1 in [nil, ""]))
     |> Enum.join("\n")
@@ -239,8 +348,10 @@ defmodule FermixCore.Harness.Continuation do
 
   defp diff_hint(_row), do: ""
 
-  defp bound(text) when byte_size(text) <= @result_text_max, do: text
-  defp bound(text), do: binary_part(text, 0, @result_text_max) <> "\n… [truncated]"
+  defp bound(text), do: bound(text, @result_text_max)
+
+  defp bound(text, max) when byte_size(text) <= max, do: text
+  defp bound(text, max), do: binary_part(text, 0, max) <> "\n… [truncated]"
 
   # --- Dispatcher resolution ----------------------------------------------
 

@@ -391,6 +391,13 @@ defmodule FermixCore.Setup.Doctor do
 
   defp enabled_probe_channel?(%{config_key: nil}), do: false
 
+  # A `trust: :local_operator` transport (the ACP agent surface) reaches no
+  # remote service — there is nothing for a live probe to call. Its health is
+  # the daemon-side listener, which `fermix doctor`'s acp check reads over the
+  # control socket; probing here would only add a "no live health probe" warning
+  # next to that answer.
+  defp enabled_probe_channel?(%{trust: :local_operator}), do: false
+
   defp enabled_probe_channel?(%{config_key: key} = channel) when is_atom(key) do
     case FermixCore.Config.channel(key) do
       {:ok, config} -> Keyword.get(config, :enabled, channel_default_enabled(channel)) == true

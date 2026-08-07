@@ -10,6 +10,7 @@ defmodule FermixWebWeb.HealthControllerTest do
     discord = Application.get_env(:fermix_channels, :discord)
     slack = Application.get_env(:fermix_channels, :slack)
     signal = Application.get_env(:fermix_channels, :signal)
+    acp = Application.get_env(:fermix_channels, :acp)
     personalization = Application.get_env(:fermix_core, :personalization, [])
     agent = Application.get_env(:fermix_core, :agent, [])
 
@@ -28,6 +29,7 @@ defmodule FermixWebWeb.HealthControllerTest do
       restore_env(:fermix_channels, :discord, discord)
       restore_env(:fermix_channels, :slack, slack)
       restore_env(:fermix_channels, :signal, signal)
+      restore_env(:fermix_channels, :acp, acp)
       Application.put_env(:fermix_core, :personalization, personalization)
       Application.put_env(:fermix_core, :agent, agent)
       BootReport.refresh()
@@ -151,6 +153,29 @@ defmodule FermixWebWeb.HealthControllerTest do
 
       assert Enum.any?(body["channels"], fn channel ->
                channel["name"] == "signal" and channel["status"] == "degraded" and
+                 channel["process_alive"] == false
+             end)
+    end
+
+    test "lists the acp transport with its listener state", %{conn: conn} do
+      Application.put_env(:fermix_core, :providers,
+        openai: [auth_mode: :api_key, api_key: "sk-test-123"]
+      )
+
+      Application.put_env(:fermix_channels, :telegram, enabled: false)
+      Application.put_env(:fermix_channels, :whatsapp, enabled: false)
+      Application.put_env(:fermix_channels, :discord, enabled: false)
+      Application.put_env(:fermix_channels, :slack, enabled: false)
+      Application.put_env(:fermix_channels, :signal, enabled: false)
+      Application.put_env(:fermix_channels, :acp, enabled: true, mode: :gateway)
+      BootReport.refresh()
+
+      # Status-agnostic on purpose: the assertion is that the transport is
+      # listed, not what the rest of this host's readiness happens to be.
+      body = conn |> get(~p"/health/ready") |> Map.fetch!(:resp_body) |> Jason.decode!()
+
+      assert Enum.any?(body["channels"], fn channel ->
+               channel["name"] == "acp" and channel["enabled"] == true and
                  channel["process_alive"] == false
              end)
     end

@@ -2,9 +2,25 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
   use ExUnit.Case, async: false
 
   alias Fermix.CLI.Doctor.Checks
+  alias FermixCore.Acp.Identity
+  alias FermixCore.Acp.IdentityStore
   alias FermixCore.Auth.Store
   alias FermixCore.Capabilities.Builtin
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Setup.ConfigStore
+
+  # Published NIP-19 vector (derived in nostr/key_test.exs). The nsec is here so
+  # the doctor assertions can prove key material never reaches an operator row.
+  @identity_nsec "nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5"
+  @identity_hex "7e7e9c42a91bfef19fa929e5fda1b72e0ebc1a4c1141673e2794234d86addf4e"
+  @identity_npub "npub10elfcs4fr0l0r8af98jlmgdh9c8tcxjvz9qkw038js35mp4dma8qzvjptg"
+
+  # The origin `Fermix.CLI.Upgrade.Manifest` pins artifact URLs to — the exact
+  # base `scripts/release/build_releases_json.sh` emits. An off-origin fixture is
+  # refused at parse time, which downgrades every integrity verdict below to a
+  # "could not fetch manifest" warn: the checks would go green on a manifest
+  # nobody parsed instead of on the sha comparison they exist to make.
+  @release_base "https://github.com/tezra-io/fermix/releases/download/v1.0.0"
 
   defmodule HealthyChannel do
     def health_check(_opts), do: {:ok, %{detail: "healthy ok", latency_ms: 1}}
@@ -567,6 +583,189 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     end
   end
 
+  describe "acp/1" do
+    setup do
+      acp = Application.get_env(:fermix_channels, :acp)
+      fermix_home = System.get_env("FERMIX_HOME")
+
+      tmp_home =
+        Path.join(System.tmp_dir!(), "fermix-checks-acp-#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(tmp_home)
+      System.put_env("FERMIX_HOME", tmp_home)
+
+      on_exit(fn ->
+        case acp do
+          nil -> Application.delete_env(:fermix_channels, :acp)
+          value -> Application.put_env(:fermix_channels, :acp, value)
+        end
+
+        case fermix_home do
+          nil -> System.delete_env("FERMIX_HOME")
+          value -> System.put_env("FERMIX_HOME", value)
+        end
+
+        FermixTestSupport.SafeRm.rm_rf!(tmp_home)
+      end)
+
+      %{home: tmp_home}
+    end
+
+    test "disabled is a quiet ok and never asks the daemon" do
+      Application.put_env(:fermix_channels, :acp, enabled: false)
+      client = fn _method -> flunk("the daemon must not be queried when acp is disabled") end
+
+      result = Checks.acp(client: client)
+
+      assert result.name == "acp surface"
+      assert result.status == :ok
+      assert result.detail =~ "disabled"
+    end
+
+    test "reports the listening socket when the daemon says the listener is up", %{home: home} do
+      Application.put_env(:fermix_channels, :acp, enabled: true)
+      socket = Path.join(home, "acp.sock")
+      File.write!(socket, "")
+
+      result = Checks.acp(client: health_client(%{"process_alive" => true}))
+
+      assert result.status == :ok
+      assert result.detail =~ socket
+    end
+
+    test "warns when the listener is up but the socket file is missing" do
+      Application.put_env(:fermix_channels, :acp, enabled: true)
+
+      result = Checks.acp(client: health_client(%{"process_alive" => true}))
+
+      assert result.status == :warn
+      assert result.detail =~ "missing"
+    end
+
+    test "fails when the daemon runs but the listener is absent" do
+      Application.put_env(:fermix_channels, :acp, enabled: true)
+
+      result = Checks.acp(client: health_client(%{"process_alive" => false}))
+
+      assert result.status == :fail
+      assert result.detail =~ "listener"
+    end
+
+    test "warns with the socket path when the daemon is not running" do
+      Application.put_env(:fermix_channels, :acp, enabled: true)
+      client = fn "health" -> {:error, :not_running} end
+
+      result = Checks.acp(client: client)
+
+      assert result.status == :warn
+      assert result.detail =~ "daemon not running"
+      assert result.detail =~ "acp.sock"
+    end
+
+    test "warns when the health reply carries no acp channel" do
+      Application.put_env(:fermix_channels, :acp, enabled: true)
+      client = fn "health" -> {:ok, %{"status" => "ok", "health" => %{"channels" => []}}} end
+
+      result = Checks.acp(client: client)
+
+      assert result.status == :warn
+      assert result.detail =~ "unexpected reply"
+    end
+
+    # M29 §17.3 "Visibility": the identity list is data on disk, so it renders
+    # from the same row whatever the surface is doing.
+    test "lists a connected identity beside the live surface, npub only", %{home: home} do
+      Application.put_env(:fermix_channels, :acp, enabled: true)
+      File.write!(Path.join(home, "acp.sock"), "")
+      connect_identity(home)
+
+      result = Checks.acp(client: health_client(%{"process_alive" => true}))
+
+      assert result.status == :ok
+      assert result.detail =~ "1 connected"
+      assert result.detail =~ "buzz"
+      assert result.detail =~ @identity_npub
+      refute result.detail =~ @identity_nsec
+      refute result.detail =~ @identity_hex
+    end
+
+    test "renders the identity list with the surface DISABLED, and says so", %{home: home} do
+      Application.put_env(:fermix_channels, :acp, enabled: false)
+      connect_identity(home)
+      client = fn _method -> flunk("the daemon must not be queried when acp is disabled") end
+
+      result = Checks.acp(client: client)
+
+      assert result.detail =~ "disabled"
+      assert result.detail =~ @identity_npub
+      # The one place the consent-by-configuration story could leak: an operator
+      # who turns the surface off must be told the record is still there.
+      assert result.detail =~ "deletes nothing"
+      assert result.detail =~ "fermix acp forget"
+      refute result.detail =~ @identity_nsec
+    end
+
+    test "lists identities with the daemon DOWN — they are disk state, not liveness", %{
+      home: home
+    } do
+      Application.put_env(:fermix_channels, :acp, enabled: true)
+      connect_identity(home)
+
+      result = Checks.acp(client: fn "health" -> {:error, :not_running} end)
+
+      assert result.status == :warn
+      assert result.detail =~ "daemon not running"
+      assert result.detail =~ @identity_npub
+      refute result.detail =~ @identity_nsec
+    end
+
+    test "a store with no records leaves the row exactly as it was" do
+      Application.put_env(:fermix_channels, :acp, enabled: false)
+
+      result = Checks.acp(client: fn _method -> flunk("no daemon call") end)
+
+      assert result.detail == "disabled"
+    end
+
+    test "a record the store refuses fails the row with its own fix line", %{home: home} do
+      Application.put_env(:fermix_channels, :acp, enabled: true)
+      File.write!(Path.join(home, "acp.sock"), "")
+      path = connect_identity(home)
+      File.chmod!(path, 0o644)
+
+      result = Checks.acp(client: health_client(%{"process_alive" => true}))
+
+      assert result.status == :fail
+      assert result.detail =~ path
+      assert result.detail =~ "chmod 600"
+      refute result.detail =~ @identity_nsec
+    end
+
+    defp health_client(acp_channel) do
+      channel = Map.merge(%{"name" => "acp", "enabled" => true}, acp_channel)
+
+      fn "health" ->
+        {:ok, %{"status" => "ok", "health" => %{"channels" => [channel]}}}
+      end
+    end
+
+    # Persist one identity exactly as a client hello does, and hand back its
+    # record path.
+    defp connect_identity(home) do
+      dir = Path.join(home, "acp_identities")
+
+      identity =
+        Identity.new(%{
+          "BUZZ_PRIVATE_KEY" => @identity_nsec,
+          "BUZZ_RELAY_URL" => "wss://relay.example.test",
+          "PATH" => "/opt/buzz/bin:/usr/bin"
+        })
+
+      {:ok, :created} = IdentityStore.upsert(identity, dir)
+      Path.join(dir, "#{@identity_hex}.json")
+    end
+  end
+
   describe "recent_log_activity/0" do
     test "returns a result map regardless of log presence" do
       result = Checks.recent_log_activity()
@@ -589,7 +788,9 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     end
 
     test "fails on sha mismatch against the manifest" do
-      tmp = make_tmp_binary("not the real binary content")
+      blob = "not the real binary content"
+      actual = :sha256 |> :crypto.hash(blob) |> Base.encode16(case: :lower)
+      tmp = make_tmp_binary(blob)
 
       result =
         Checks.binary_integrity(
@@ -599,7 +800,12 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
         )
 
       assert result.status == :fail
-      assert result.detail =~ "sha mismatch"
+      # The manifest version and BOTH digests are proof the mismatch branch ran:
+      # a manifest that never parsed reports a warn carrying none of them, so
+      # this cannot pass by failing to read the manifest at all.
+      assert result.detail =~ "sha mismatch vs manifest 1.0.0"
+      assert result.detail =~ String.slice(actual, 0, 12)
+      assert result.detail =~ "000000000000"
       FermixTestSupport.SafeRm.rm(tmp)
     end
 
@@ -618,7 +824,7 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
         )
 
       assert result.status == :ok
-      assert result.detail =~ "matches"
+      assert result.detail =~ "matches releases.json (v1.0.0)"
       FermixTestSupport.SafeRm.rm(tmp)
     end
   end
@@ -992,10 +1198,10 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
           "artifacts" => [
             %{
               "target" => "linux-x86_64",
-              "url" => "https://example.com/bin",
+              "url" => "#{@release_base}/fermix_linux_x86_64",
               "sha256" => sha,
-              "sig_url" => "https://example.com/bin.sig",
-              "cert_url" => "https://example.com/bin.pem"
+              "sig_url" => "#{@release_base}/fermix_linux_x86_64.sig",
+              "cert_url" => "#{@release_base}/fermix_linux_x86_64.pem"
             }
           ]
         }
@@ -1091,6 +1297,50 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
   # the call site passes. The mechanism is pinned one level down, in
   # `Harness.ArtifactsTest`, where a dead supervisor name reproduces the CLI's
   # world for real.
+  describe "skill_curation/1" do
+    test "skips when curation is disabled" do
+      assert Checks.skill_curation(skill_curation_enabled: false) == nil
+    end
+
+    test "warns when memory persistence is off" do
+      result =
+        Checks.skill_curation(
+          skill_curation_enabled: true,
+          memory_enabled: false,
+          delivery_target: :no_delivery_target
+        )
+
+      assert result.name == "skill curation"
+      assert result.status == :warn
+      assert result.detail =~ "memory persistence is off"
+    end
+
+    test "warns with the fix when no owner-private delivery target resolves" do
+      result =
+        Checks.skill_curation(
+          skill_curation_enabled: true,
+          memory_enabled: true,
+          delivery_target: :no_delivery_target
+        )
+
+      assert result.status == :warn
+      assert result.detail =~ "/skills proposals"
+      assert result.detail =~ "owner_user_id"
+    end
+
+    test "reports the resolved target when delivery works" do
+      result =
+        Checks.skill_curation(
+          skill_curation_enabled: true,
+          memory_enabled: true,
+          delivery_target: {:ok, %{platform: "telegram", destination: "owner-1"}}
+        )
+
+      assert result.status == :ok
+      assert result.detail =~ "telegram:owner-1"
+    end
+  end
+
   describe "harness/1" do
     test "skips (nil) when disabled and no vendor CLI is present" do
       assert Checks.harness(
@@ -1339,5 +1589,79 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     name = :"harness_doctor_reg_#{System.unique_integer([:positive])}"
     start_supervised!({CapabilityRegistry, name: name})
     name
+  end
+
+  describe "home_permissions/0" do
+    setup do
+      previous = System.get_env("FERMIX_HOME")
+
+      tmp_home =
+        Path.join(System.tmp_dir!(), "fermix-checks-home-#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(tmp_home)
+      System.put_env("FERMIX_HOME", tmp_home)
+
+      on_exit(fn ->
+        case previous do
+          nil -> System.delete_env("FERMIX_HOME")
+          value -> System.put_env("FERMIX_HOME", value)
+        end
+
+        FermixTestSupport.SafeRm.rm_rf!(tmp_home)
+      end)
+
+      %{home: tmp_home}
+    end
+
+    test "ok when the home is 0700", %{home: home} do
+      File.chmod!(home, 0o700)
+
+      result = Checks.home_permissions()
+
+      assert result.name == "home perms"
+      assert result.status == :ok
+      assert result.detail =~ "0700"
+    end
+
+    test "fails with the octal mode and a literal fix when world-readable", %{home: home} do
+      File.chmod!(home, 0o755)
+
+      result = Checks.home_permissions()
+
+      assert result.status == :fail
+      assert result.detail =~ "755"
+      assert result.detail =~ "chmod 700 #{home}"
+    end
+
+    # The self-heal is the whole point: an install created before the mode was
+    # enforced must be repaired by an ordinary boot, not by the operator.
+    test "ensure_workspace/0 repairs a world-readable home", %{home: home} do
+      File.chmod!(home, 0o755)
+
+      assert :ok = ConfigStore.ensure_workspace()
+
+      assert Checks.home_permissions().status == :ok
+    end
+  end
+
+  describe "cosign/1" do
+    test "ok when cosign resolves" do
+      result = Checks.cosign(cosign_path: "/opt/homebrew/bin/cosign")
+
+      assert result.name == "cosign"
+      assert result.status == :ok
+      assert result.detail =~ "/opt/homebrew/bin/cosign"
+    end
+
+    # Both features fail closed without it, and the `curl | sh` install path
+    # never supplies it — so the message has to name both, or the operator
+    # learns about it from an unrelated-looking refusal much later.
+    test "warns naming both features that refuse without it" do
+      result = Checks.cosign(cosign_path: nil)
+
+      assert result.status == :warn
+      assert result.detail =~ "fermix upgrade"
+      assert result.detail =~ "fermix plugins install"
+    end
   end
 end

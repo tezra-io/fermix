@@ -3,6 +3,7 @@ defmodule Fermix.CLI.DaemonTest do
 
   alias Fermix.CLI.Daemon
   alias Fermix.CLI.Daemon.Client
+  alias FermixCore.Capabilities.MCP.RuntimeStatus
 
   defmodule TestPluginsRuntime do
     def apply_persisted do
@@ -304,6 +305,88 @@ defmodule Fermix.CLI.DaemonTest do
     assert error =~ "invalid_skill"
     assert error =~ "broken"
     assert_receive :plugins_apply_called
+  end
+
+  # M27 §7.8: the remote-MCP status table lives in the daemon's memory, so a
+  # one-shot CLI VM (`fermix doctor`) can only read it over this socket op.
+  test "plugins_runtime_status serializes the daemon's remote MCP status table" do
+    socket_dir = mkdir!()
+    socket_path = Path.join(socket_dir, "runtime_status.sock")
+    {:ok, _sup} = Task.Supervisor.start_link(name: __MODULE__.RuntimeStatusSup)
+
+    {:ok, status_server} =
+      RuntimeStatus.start_link(
+        name: :"runtime_status_#{System.unique_integer([:positive, :monotonic])}"
+      )
+
+    owner = spawn(fn -> Process.sleep(:infinity) end)
+    source_id = {:plugin, "eden"}
+
+    {:ok, generation} =
+      RuntimeStatus.register_owner(status_server, source_id, owner, plugin: "eden")
+
+    :ok =
+      RuntimeStatus.put(
+        status_server,
+        source_id,
+        generation,
+        :upstream_contract_mismatch,
+        :tool_missing
+      )
+
+    {:ok, daemon} =
+      Daemon.start_link(
+        name: :"runtime_status_daemon_#{System.unique_integer([:positive, :monotonic])}",
+        socket_path: socket_path,
+        task_supervisor: __MODULE__.RuntimeStatusSup,
+        runtime_status: status_server
+      )
+
+    on_exit(fn ->
+      if Process.alive?(daemon), do: GenServer.stop(daemon, :normal, 1_000)
+      Process.exit(owner, :kill)
+      FermixTestSupport.SafeRm.rm_rf(socket_dir)
+    end)
+
+    assert {:ok, reply} =
+             Client.request("plugins_runtime_status", socket_path: socket_path, timeout: 1_000)
+
+    assert reply["status"] == "ok"
+    assert [row] = reply["runtime_status"]
+    assert row["source"] == "plugin:eden"
+    assert row["plugin"] == "eden"
+    assert row["status"] == "upstream_contract_mismatch"
+    assert row["detail"] == "tool_missing"
+    assert is_integer(row["updated_at"])
+    # The generation ref and owner pid are runtime bookkeeping, not operator
+    # facts — §11.1 forbids exporting generation references at all.
+    refute Map.has_key?(row, "generation")
+    refute Map.has_key?(row, "owner")
+  end
+
+  test "plugins_runtime_status reports an error when the status table is unavailable" do
+    socket_dir = mkdir!()
+    socket_path = Path.join(socket_dir, "runtime_status_down.sock")
+    {:ok, _sup} = Task.Supervisor.start_link(name: __MODULE__.RuntimeStatusDownSup)
+
+    {:ok, daemon} =
+      Daemon.start_link(
+        name: :"runtime_status_down_daemon_#{System.unique_integer([:positive, :monotonic])}",
+        socket_path: socket_path,
+        task_supervisor: __MODULE__.RuntimeStatusDownSup,
+        runtime_status: :"never_started_#{System.unique_integer([:positive, :monotonic])}"
+      )
+
+    on_exit(fn ->
+      if Process.alive?(daemon), do: GenServer.stop(daemon, :normal, 1_000)
+      FermixTestSupport.SafeRm.rm_rf(socket_dir)
+    end)
+
+    assert {:ok, reply} =
+             Client.request("plugins_runtime_status", socket_path: socket_path, timeout: 1_000)
+
+    assert reply["status"] == "error"
+    assert reply["reason"] =~ "noproc"
   end
 
   test "skills_list returns JSON-safe skill summaries", %{socket_path: socket_path} do

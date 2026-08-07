@@ -8,6 +8,7 @@ defmodule FermixCore.Memory.Repo do
   alias Exqlite.Sqlite3
   alias FermixCore.Agents.IterationLimits
   alias FermixCore.Memory.Config
+  alias FermixCore.Memory.Repo.TemporalSql
   alias FermixCore.Memory.Scope
 
   @base_migration_version 1
@@ -23,6 +24,11 @@ defmodule FermixCore.Memory.Repo do
   @trust_check_migration_version 11
   @harness_runs_migration_version 12
   @harness_continuation_migration_version 13
+  @harness_client_origin_migration_version 14
+  @skill_usage_migration_version 15
+  @skill_curation_migration_version 16
+  @temporal_events_migration_version 17
+  @reminder_snooze_migration_version 18
   @sqlite_open_intent :readwritecreate
 
   @base_schema_sql """
@@ -470,6 +476,90 @@ defmodule FermixCore.Memory.Repo do
   ALTER TABLE harness_runs ADD COLUMN continuation_depth INTEGER NOT NULL DEFAULT 0;
   """
 
+  # The launching client's origin snapshot for a client-owned surface
+  # (MILESTONE_29_ACP_AGENT_SURFACE §17.4): `{identity, cwd, reply_context}`,
+  # frozen at launch so a continuation minutes later rebuilds the turn env from
+  # the durable identity record instead of a session that no longer exists.
+  # Appended by ALTER for the same reason `continuation_depth` was: a migrated and
+  # a freshly created database must share one column order (`SELECT *` is
+  # positional), and these are exactly the rows a continuation reads.
+  @harness_client_origin_schema_sql """
+  ALTER TABLE harness_runs ADD COLUMN client_origin_json TEXT;
+  """
+
+  # Durable counts-only skill-usage counters (MILESTONE_26_SKILL_CURATION §6.9):
+  # one row per skill, upserted on skill_view/skill_run, bounded by the skill
+  # inventory by construction. No content is stored — staleness is a counter
+  # question, never a content question.
+  @skill_usage_schema_sql """
+  CREATE TABLE IF NOT EXISTS skill_usage (
+    skill_name TEXT PRIMARY KEY,
+    views INTEGER NOT NULL DEFAULT 0,
+    runs INTEGER NOT NULL DEFAULT 0,
+    last_used_at TEXT
+  );
+  """
+
+  # Skill-curation durable state (MILESTONE_26_SKILL_CURATION §7): a singleton
+  # scheduler-state row, tokenized proposals whose rows are the only signature
+  # state (dispositions are derived, never stored twice), and the authoritative
+  # ledger of curation-created skills. Status vocabularies are enforced in the
+  # schema (harness_runs precedent).
+  @skill_curation_schema_sql """
+  CREATE TABLE IF NOT EXISTS skill_curation_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    last_cycle_at TEXT,
+    retry_at TEXT,
+    claimed_at TEXT,
+    status TEXT NOT NULL DEFAULT 'idle' CHECK (status IN ('idle', 'running')),
+    last_status TEXT,
+    updated_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS skill_curation_proposals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    token TEXT NOT NULL UNIQUE,
+    cycle_session_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('new_skill', 'update_skill', 'archive_skill')),
+    skill_name TEXT NOT NULL,
+    task_signature TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    outline_json TEXT,
+    evidence_json TEXT,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN (
+      'pending', 'deferred', 'approved', 'declined', 'expired', 'failed'
+    )),
+    deferred_cycles INTEGER NOT NULL DEFAULT 0,
+    disposition_cleared_at TEXT,
+    origin_channel TEXT,
+    origin_chat_id TEXT,
+    created_at TEXT NOT NULL,
+    actioned_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_scp_signature ON skill_curation_proposals(task_signature);
+  CREATE INDEX IF NOT EXISTS idx_scp_status ON skill_curation_proposals(status);
+
+  CREATE TABLE IF NOT EXISTS skill_curation_ledger (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    skill_name TEXT NOT NULL UNIQUE,
+    task_signature TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('creating', 'active', 'archived')),
+    created_proposal_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    last_updated_at TEXT,
+    archived_at TEXT,
+    archive_path TEXT
+  );
+  """
+
+  # Settable-column allowlists for the skill-curation partial updates; an
+  # unknown key raises in the CALLER (public function), never inside the
+  # single-writer server.
+  @skill_curation_state_timestamp_cols [:last_cycle_at, :retry_at, :claimed_at]
+  @skill_curation_state_plain_cols [:status, :last_status]
+  @skill_curation_ledger_timestamp_cols [:last_updated_at, :archived_at, :created_at]
+  @skill_curation_ledger_plain_cols [:status, :archive_path, :task_signature]
+
   # Active statuses hold workspace locks and count against `max_active`. The
   # literal is inlined into WHERE clauses only (never interpolated with data),
   # so it is safe as a SQL fragment.
@@ -603,6 +693,66 @@ defmodule FermixCore.Memory.Repo do
           required(:key) => String.t()
         }
 
+  @type skill_usage_row :: %{
+          skill_name: String.t(),
+          views: non_neg_integer(),
+          runs: non_neg_integer(),
+          last_used_at: DateTime.t() | nil
+        }
+
+  @type skill_curation_state_row :: %{
+          last_cycle_at: DateTime.t() | nil,
+          retry_at: DateTime.t() | nil,
+          claimed_at: DateTime.t() | nil,
+          status: String.t(),
+          last_status: String.t() | nil,
+          updated_at: DateTime.t()
+        }
+
+  @type skill_curation_proposal_attrs :: %{
+          required(:token) => String.t(),
+          required(:cycle_session_id) => String.t(),
+          required(:kind) => String.t(),
+          required(:skill_name) => String.t(),
+          required(:task_signature) => String.t(),
+          required(:summary) => String.t(),
+          optional(:outline_json) => String.t() | nil,
+          optional(:evidence_json) => String.t() | nil,
+          required(:status) => String.t(),
+          required(:created_at) => DateTime.t()
+        }
+
+  @type skill_curation_proposal_row :: %{
+          id: integer(),
+          token: String.t(),
+          cycle_session_id: String.t(),
+          kind: String.t(),
+          skill_name: String.t(),
+          task_signature: String.t(),
+          summary: String.t(),
+          outline_json: String.t() | nil,
+          evidence_json: String.t() | nil,
+          status: String.t(),
+          deferred_cycles: non_neg_integer(),
+          disposition_cleared_at: DateTime.t() | nil,
+          origin_channel: String.t() | nil,
+          origin_chat_id: String.t() | nil,
+          created_at: DateTime.t(),
+          actioned_at: DateTime.t() | nil
+        }
+
+  @type skill_curation_ledger_row :: %{
+          id: integer(),
+          skill_name: String.t(),
+          task_signature: String.t(),
+          status: String.t(),
+          created_proposal_id: integer(),
+          created_at: DateTime.t(),
+          last_updated_at: DateTime.t() | nil,
+          archived_at: DateTime.t() | nil,
+          archive_path: String.t() | nil
+        }
+
   @type resource_attrs :: %{
           required(:agent_id) => String.t(),
           required(:resource_type) => String.t(),
@@ -610,6 +760,67 @@ defmodule FermixCore.Memory.Repo do
           required(:current_revision) => non_neg_integer(),
           optional(:resource_path) => String.t() | nil
         }
+
+  @type temporal_event_row :: %{
+          id: String.t(),
+          agent_id: String.t(),
+          owner_id: String.t(),
+          dedupe_key: String.t(),
+          title: String.t(),
+          description: String.t() | nil,
+          kind: String.t(),
+          time_kind: String.t(),
+          local_date: Date.t() | nil,
+          local_time: Time.t() | nil,
+          timezone: String.t(),
+          occurrence_at: DateTime.t() | nil,
+          recurrence_kind: String.t(),
+          recurrence_month: pos_integer() | nil,
+          recurrence_day: pos_integer() | nil,
+          leap_day_policy: String.t() | nil,
+          reminder_plan: [map()],
+          next_occurrence_on: Date.t() | nil,
+          materialized_through_on: Date.t() | nil,
+          delivery_platform: String.t(),
+          delivery_destination: String.t(),
+          delivery_thread_scope: String.t(),
+          revision: pos_integer(),
+          status: String.t(),
+          source_channel: String.t(),
+          source_chat_id: String.t(),
+          source_thread_scope: String.t(),
+          source_session_id: String.t() | nil,
+          created_by_trust: String.t(),
+          created_by_origin: String.t(),
+          created_at: DateTime.t(),
+          updated_at: DateTime.t()
+        }
+
+  @type reminder_occurrence_row :: %{
+          id: String.t(),
+          event_id: String.t(),
+          event_revision: pos_integer(),
+          occurrence_key: String.t(),
+          reminder_rule_id: String.t(),
+          event_occurrence_at: DateTime.t(),
+          scheduled_for: DateTime.t(),
+          ready_at: DateTime.t(),
+          valid_until: DateTime.t(),
+          payload: map(),
+          delivery_platform: String.t(),
+          delivery_destination: String.t(),
+          delivery_thread_scope: String.t(),
+          status: String.t(),
+          attempt_count: non_neg_integer(),
+          sent_at: DateTime.t() | nil,
+          failed_at: DateTime.t() | nil,
+          last_error: String.t() | nil,
+          created_at: DateTime.t(),
+          updated_at: DateTime.t(),
+          source_reminder_id: String.t() | nil
+        }
+
+  @type temporal_cursor :: {String.t(), String.t()}
 
   @type resource_selector :: %{
           required(:agent_id) => String.t(),
@@ -944,6 +1155,220 @@ defmodule FermixCore.Memory.Repo do
     call({:fail_memory_review, selector, now}, opts)
   end
 
+  @doc """
+  Created_at-range read across ALL conversations of one agent/owner
+  (MILESTONE_26_SKILL_CURATION §6.3). Selector requires `:agent_id`,
+  `:owner_id`, and `:kind`; `:role` is optional. Rows come back in
+  chronological order; the newest `limit` rows win when the window holds more
+  (the limit is a bounded-read backstop, not a paging cursor).
+  """
+  @spec get_messages_in_range(map(), DateTime.t(), DateTime.t(), pos_integer(), keyword()) ::
+          {:ok, [message_row()]} | {:error, term()}
+  def get_messages_in_range(selector, %DateTime{} = from, %DateTime{} = until, limit, opts \\ [])
+      when is_map(selector) and is_map_key(selector, :agent_id) and
+             is_map_key(selector, :owner_id) and is_map_key(selector, :kind) and
+             is_integer(limit) and limit > 0 do
+    call({:get_messages_in_range, selector, from, until, limit}, opts)
+  end
+
+  @spec record_skill_usage(String.t(), :view | :run, DateTime.t(), keyword()) ::
+          :ok | {:error, term()}
+  def record_skill_usage(skill_name, kind, %DateTime{} = now, opts \\ [])
+      when is_binary(skill_name) and skill_name != "" and kind in [:view, :run] do
+    call({:record_skill_usage, skill_name, kind, now}, opts)
+  end
+
+  @spec get_skill_usage(String.t(), keyword()) ::
+          {:ok, skill_usage_row()} | {:error, :not_found | term()}
+  def get_skill_usage(skill_name, opts \\ []) when is_binary(skill_name) and skill_name != "" do
+    call({:get_skill_usage, skill_name}, opts)
+  end
+
+  @spec list_skill_usage(keyword()) :: {:ok, [skill_usage_row()]} | {:error, term()}
+  def list_skill_usage(opts \\ []) do
+    call(:list_skill_usage, opts)
+  end
+
+  @doc """
+  Fetch the singleton skill-curation state row, creating it (idle, cadence
+  clock initialized to `now`) when absent — the first cycle fires one full
+  cadence period after first boot, never at install (§6.2).
+  """
+  @spec ensure_skill_curation_state(DateTime.t(), keyword()) ::
+          {:ok, skill_curation_state_row()} | {:error, term()}
+  def ensure_skill_curation_state(%DateTime{} = now, opts \\ []) do
+    call({:ensure_skill_curation_state, now}, opts)
+  end
+
+  @doc """
+  Claim the curation cycle: `idle -> running`. A `running` claim older than
+  `stale_after_ms` (daemon killed mid-cycle) is reclaimed, recording
+  `last_status: "error:stale_claim"` for the abandoned attempt.
+  """
+  @spec claim_skill_curation_cycle(DateTime.t(), non_neg_integer(), keyword()) ::
+          {:ok, skill_curation_state_row()} | {:error, :concurrent_run | term()}
+  def claim_skill_curation_cycle(%DateTime{} = now, stale_after_ms, opts \\ [])
+      when is_integer(stale_after_ms) and stale_after_ms >= 0 do
+    call({:claim_skill_curation_cycle, now, stale_after_ms}, opts)
+  end
+
+  @doc """
+  Allowlisted partial update of the singleton state row. Keys present in
+  `attrs` are written (nil writes NULL); unknown keys raise. The retry/cadence
+  policy lives in the Scheduler — this is storage only.
+  """
+  @spec update_skill_curation_state(map(), DateTime.t(), keyword()) ::
+          {:ok, skill_curation_state_row()} | {:error, term()}
+  def update_skill_curation_state(attrs, %DateTime{} = now, opts \\ [])
+      when is_map(attrs) and map_size(attrs) > 0 do
+    validate_settable_keys!(
+      attrs,
+      @skill_curation_state_timestamp_cols ++ @skill_curation_state_plain_cols,
+      "skill_curation_state"
+    )
+
+    call({:update_skill_curation_state, attrs, now}, opts)
+  end
+
+  @spec insert_skill_curation_proposal(skill_curation_proposal_attrs(), keyword()) ::
+          {:ok, skill_curation_proposal_row()} | {:error, term()}
+  def insert_skill_curation_proposal(attrs, opts \\ []) when is_map(attrs) do
+    call({:insert_skill_curation_proposal, attrs}, opts)
+  end
+
+  @spec get_skill_curation_proposal(String.t(), keyword()) ::
+          {:ok, skill_curation_proposal_row()} | {:error, :not_found | term()}
+  def get_skill_curation_proposal(token, opts \\ []) when is_binary(token) and token != "" do
+    call({:get_skill_curation_proposal, token}, opts)
+  end
+
+  @doc """
+  List proposal rows, optionally filtered by `:statuses` (list of status
+  strings), `:kind`, `:skill_name`, or `:task_signature`. Rows cleared by
+  unpark (`disposition_cleared_at` set) are excluded unless
+  `include_cleared: true` — cleared rows keep their status for audit but leave
+  the disposition derivation.
+  """
+  @spec list_skill_curation_proposals(map(), keyword()) ::
+          {:ok, [skill_curation_proposal_row()]} | {:error, term()}
+  def list_skill_curation_proposals(filter \\ %{}, opts \\ []) when is_map(filter) do
+    call({:list_skill_curation_proposals, filter}, opts)
+  end
+
+  @doc """
+  Single-use guarded transition: the row moves to `to_status` only while it
+  still holds one of `expected_statuses` (peek/validate/take in the single
+  writer, atomic per call). `attrs` may set `origin_channel`/`origin_chat_id`.
+  """
+  @spec transition_skill_curation_proposal(
+          String.t(),
+          String.t() | [String.t()],
+          String.t(),
+          map(),
+          DateTime.t(),
+          keyword()
+        ) ::
+          {:ok, skill_curation_proposal_row()}
+          | {:error, :not_found | {:invalid_status, String.t()} | term()}
+  def transition_skill_curation_proposal(
+        token,
+        expected_statuses,
+        to_status,
+        attrs,
+        now,
+        opts \\ []
+      )
+      when is_binary(token) and (is_binary(expected_statuses) or is_list(expected_statuses)) and
+             is_binary(to_status) and is_map(attrs) do
+    call(
+      {:transition_skill_curation_proposal, token, List.wrap(expected_statuses), to_status, attrs,
+       now},
+      opts
+    )
+  end
+
+  @doc """
+  Cycle-start proposal sweep (§6.5), three bounded UPDATEs in one call:
+  pending rows older than `supersession_days` expire (superseded — an age
+  gate, so a manual re-review minutes later never nukes a fresh batch);
+  deferred rows age by one cycle; deferred rows aged past
+  `deferred_max_cycles` expire. Returns counts per action.
+  """
+  @spec sweep_skill_curation_proposals(DateTime.t(), pos_integer(), pos_integer(), keyword()) ::
+          {:ok, %{expired_pending: non_neg_integer(), expired_deferred: non_neg_integer()}}
+          | {:error, term()}
+  def sweep_skill_curation_proposals(
+        %DateTime{} = now,
+        supersession_days,
+        deferred_max_cycles,
+        opts \\ []
+      )
+      when is_integer(supersession_days) and supersession_days > 0 and
+             is_integer(deferred_max_cycles) and deferred_max_cycles > 0 do
+    call({:sweep_skill_curation_proposals, now, supersession_days, deferred_max_cycles}, opts)
+  end
+
+  @doc """
+  Unpark (§6.5/§6.7): stamp `disposition_cleared_at` on the declined/expired
+  rows selected by token or exact task signature, removing them from the
+  disposition derivation while preserving their status for audit. Returns the
+  number of rows cleared.
+  """
+  @spec clear_skill_curation_dispositions(
+          %{token: String.t()} | %{task_signature: String.t()},
+          DateTime.t(),
+          keyword()
+        ) :: {:ok, non_neg_integer()} | {:error, term()}
+  def clear_skill_curation_dispositions(selector, %DateTime{} = now, opts \\ [])
+      when is_map(selector) do
+    call({:clear_skill_curation_dispositions, selector, now}, opts)
+  end
+
+  @spec insert_skill_curation_ledger(map(), keyword()) ::
+          {:ok, skill_curation_ledger_row()} | {:error, term()}
+  def insert_skill_curation_ledger(attrs, opts \\ []) when is_map(attrs) do
+    call({:insert_skill_curation_ledger, attrs}, opts)
+  end
+
+  @spec get_skill_curation_ledger(String.t(), keyword()) ::
+          {:ok, skill_curation_ledger_row()} | {:error, :not_found | term()}
+  def get_skill_curation_ledger(skill_name, opts \\ [])
+      when is_binary(skill_name) and skill_name != "" do
+    call({:get_skill_curation_ledger, skill_name}, opts)
+  end
+
+  @spec list_skill_curation_ledger(map(), keyword()) ::
+          {:ok, [skill_curation_ledger_row()]} | {:error, term()}
+  def list_skill_curation_ledger(filter \\ %{}, opts \\ []) when is_map(filter) do
+    call({:list_skill_curation_ledger, filter}, opts)
+  end
+
+  @spec update_skill_curation_ledger(String.t(), map(), keyword()) ::
+          {:ok, skill_curation_ledger_row()} | {:error, :not_found | term()}
+  def update_skill_curation_ledger(skill_name, attrs, opts \\ [])
+      when is_binary(skill_name) and is_map(attrs) and map_size(attrs) > 0 do
+    validate_settable_keys!(
+      attrs,
+      @skill_curation_ledger_timestamp_cols ++ @skill_curation_ledger_plain_cols,
+      "skill_curation_ledger"
+    )
+
+    call({:update_skill_curation_ledger, skill_name, attrs}, opts)
+  end
+
+  defp validate_settable_keys!(attrs, allowed, table) do
+    case Enum.reject(Map.keys(attrs), &(&1 in allowed)) do
+      [] -> :ok
+      unknown -> raise ArgumentError, "unknown #{table} column(s) #{inspect(unknown)}"
+    end
+  end
+
+  @spec delete_skill_curation_ledger(String.t(), keyword()) :: :ok | {:error, term()}
+  def delete_skill_curation_ledger(skill_name, opts \\ [])
+      when is_binary(skill_name) and skill_name != "" do
+    call({:delete_skill_curation_ledger, skill_name}, opts)
+  end
+
   @spec upsert_resource(resource_attrs(), keyword()) :: {:ok, resource_row()} | {:error, term()}
   def upsert_resource(attrs, opts \\ []) when is_map(attrs) do
     call({:upsert_resource, attrs}, opts)
@@ -1074,6 +1499,19 @@ defmodule FermixCore.Memory.Repo do
   end
 
   @doc """
+  Job runs across every job that still hold an active slot, oldest first.
+
+  "Active" is the same `queued`/`running` set `ensure_no_active_job_run` refuses
+  a claim on, so this is the exact set that can wedge a job when its runner is
+  gone. The scheduler's crash reconciliation reads it to decide which rows still
+  have a live process behind them.
+  """
+  @spec active_job_runs(keyword()) :: {:ok, [job_run_row()]} | {:error, term()}
+  def active_job_runs(opts \\ []) when is_list(opts) do
+    call({:active_job_runs, Keyword.get(opts, :limit, 50)}, opts)
+  end
+
+  @doc """
   Atomically admits a coding-harness run.
 
   Runs inside a single `BEGIN IMMEDIATE` transaction: it refuses when
@@ -1178,6 +1616,339 @@ defmodule FermixCore.Memory.Repo do
     call({:list_memory_sources, selector}, opts)
   end
 
+  @doc """
+  Creates a temporal event and its planner-produced reminder occurrences in one
+  transaction (MILESTONE_30 §7.1).
+
+  An identical repeat create resolves to the existing active event
+  (`{:existing, ...}`) instead of a duplicate; a same-identity create with a
+  different date, plan, or target is
+  `{:error, {:identity_conflict, existing_event_row}}` — the twin it collided
+  with comes back so the caller can quote the stored date rather than describe
+  the collision in the abstract — and belongs in `update_temporal_event/5`.
+  Cancelled and completed rows never block a new active event. Byte caps and
+  the fixed-width UTC timestamp form are enforced here, in the caller, so
+  invalid input never reaches the single writer.
+  """
+  @spec create_temporal_event(map(), map(), DateTime.t(), keyword()) ::
+          {:ok, {:created | :existing, temporal_event_row(), [reminder_occurrence_row()]}}
+          | {:error, {:identity_conflict, temporal_event_row()} | term()}
+  def create_temporal_event(attrs, plan, %DateTime{} = now, opts \\ [])
+      when is_map(attrs) and is_map(plan) do
+    with {:ok, event} <- TemporalSql.normalize_event_attrs(attrs, now),
+         {:ok, rows} <- TemporalSql.normalize_plan(plan, now) do
+      call({:create_temporal_event, event, rows}, opts)
+    end
+  end
+
+  @doc """
+  Applies an event edit in one transaction (§7.3): refuse while a reminder of
+  this event is `delivering`, validate the merged event, bump `revision`,
+  cancel pending rows of older revisions, keep delivered/failed history
+  immutable, and materialize the new plan.
+  """
+  @spec update_temporal_event(String.t(), map(), map(), DateTime.t(), keyword()) ::
+          {:ok, {temporal_event_row(), [reminder_occurrence_row()]}}
+          | {:error, :not_found | :not_active | :delivery_in_progress | term()}
+  def update_temporal_event(id, fields, plan, %DateTime{} = now, opts \\ [])
+      when is_binary(id) and is_map(fields) and is_map(plan) do
+    {:ok, stamp} = TemporalSql.timestamp(now)
+
+    with {:ok, columns} <- TemporalSql.normalize_event_fields(fields),
+         {:ok, rows} <- TemporalSql.normalize_plan(plan, now) do
+      call({:update_temporal_event, id, columns, rows, stamp}, opts)
+    end
+  end
+
+  @doc "Soft-cancels an event and its unsent reminders; sent history stays queryable."
+  @spec cancel_temporal_event(String.t(), DateTime.t(), keyword()) ::
+          {:ok, temporal_event_row()}
+          | {:error, :not_found | :delivery_in_progress | term()}
+  def cancel_temporal_event(id, %DateTime{} = now, opts \\ []) when is_binary(id) do
+    {:ok, stamp} = TemporalSql.timestamp(now)
+    call({:cancel_temporal_event, id, stamp}, opts)
+  end
+
+  @doc """
+  Idempotent materialization for the annual horizon (§9.2): re-reads the event
+  under `expected_revision`, inserts the plan's rows with conflict-ignore
+  semantics, and advances `next_occurrence_on`/`materialized_through_on`.
+  Returns `{:error, :stale_event_revision}` without writes when an edit won the
+  race.
+  """
+  @spec materialize_temporal_occurrences(
+          String.t(),
+          pos_integer(),
+          map(),
+          DateTime.t(),
+          keyword()
+        ) ::
+          {:ok, %{inserted: non_neg_integer(), event: temporal_event_row()}}
+          | {:error, :not_found | :stale_event_revision | term()}
+  def materialize_temporal_occurrences(id, expected_revision, plan, %DateTime{} = now, opts \\ [])
+      when is_binary(id) and is_integer(expected_revision) and expected_revision > 0 and
+             is_map(plan) do
+    {:ok, stamp} = TemporalSql.timestamp(now)
+
+    with {:ok, rows} <- TemporalSql.normalize_plan(plan, now) do
+      call({:materialize_temporal_occurrences, id, expected_revision, rows, stamp}, opts)
+    end
+  end
+
+  @doc """
+  Defers one reminder into a source-linked ad-hoc row, in one transaction (§20).
+
+  `attrs` carries the caller-assigned `:id`, the `:source_reminder_id`, the new
+  `:scheduled_for`, the `:valid_until` the Registry computed, the `:owner_id`
+  asking, and `:selection` — `:explicit` when the owner named the reminder,
+  `:resolved` when it came from the outbox lookup.
+
+  Returns `{:existing, row}` when a LIVE row (pending or mid-send) already holds
+  that instant — no writes at all — otherwise `{:created, row,
+  superseded_ids}` where the ids are the other active snoozes of the same source
+  this call retired. A terminal row at that instant is revived in place rather
+  than duplicated, because the source/instant pair is unique regardless of
+  status. A completed one-time parent is reactivated in the same transaction; if
+  its identity is already held by a live event the whole call fails
+  `:dedupe_conflict` and no snooze row exists. While any sibling snooze of the
+  same source is mid-send the whole call fails `:snooze_delivery_in_progress`.
+  """
+  @spec snooze_temporal_reminder(map(), DateTime.t(), keyword()) ::
+          {:ok, {:created, reminder_occurrence_row(), [String.t()]}}
+          | {:ok, {:existing, reminder_occurrence_row()}}
+          | {:error,
+             :not_found
+             | :parent_cancelled
+             | :source_terminal
+             | :source_delivering
+             | :snooze_delivery_in_progress
+             | :dedupe_conflict
+             | term()}
+  def snooze_temporal_reminder(attrs, %DateTime{} = now, opts \\ []) when is_map(attrs) do
+    with {:ok, normalized} <- TemporalSql.normalize_snooze_attrs(attrs, now) do
+      call({:snooze_temporal_reminder, normalized}, opts)
+    end
+  end
+
+  @doc """
+  The most recently delivered reminder in one exact delivery target, or `nil`.
+
+  `target` needs `:platform`, `:destination`, `:thread_scope`, `:owner_id`, and
+  a `:since` lookback floor. This is the only lookup behind "snooze that"; it
+  never widens any of those predicates.
+  """
+  @spec latest_delivered_reminder(map(), keyword()) ::
+          {:ok, reminder_occurrence_row() | nil} | {:error, term()}
+  def latest_delivered_reminder(target, opts \\ []) when is_map(target) do
+    with {:ok, normalized} <- TemporalSql.normalize_snooze_target(target) do
+      call({:latest_delivered_reminder, normalized}, opts)
+    end
+  end
+
+  @doc """
+  Claims at most `limit` due reminders (§10.2). Each row is re-read inside its
+  own `BEGIN IMMEDIATE` and must still be pending, under the attempt cap, due,
+  unexpired, and matching its event's active revision; the claim consumes one
+  logical attempt before any external I/O.
+  """
+  @spec claim_due_reminders(DateTime.t(), pos_integer(), keyword()) ::
+          {:ok, [reminder_occurrence_row()]} | {:error, term()}
+  def claim_due_reminders(%DateTime{} = now, limit, opts \\ [])
+      when is_integer(limit) and limit > 0 do
+    {:ok, stamp} = TemporalSql.timestamp(now)
+    call({:claim_due_reminders, stamp, limit}, opts)
+  end
+
+  @doc "Settles a claimed reminder as delivered. Guarded on `delivering`."
+  @spec temporal_reminder_delivered(String.t(), DateTime.t(), keyword()) ::
+          {:ok, reminder_occurrence_row()}
+          | {:error, :not_found | :not_delivering | term()}
+  def temporal_reminder_delivered(id, %DateTime{} = sent_at, opts \\ []) when is_binary(id) do
+    {:ok, stamp} = TemporalSql.timestamp(sent_at)
+    call({:temporal_reminder_delivered, id, stamp}, opts)
+  end
+
+  @doc """
+  Settles a failed attempt (§11.4): `pending` at `next_ready_at`, `expired`
+  when that time is not strictly inside the validity boundary, or `failed` at
+  the attempt cap. Guarded on `delivering`.
+  """
+  @spec temporal_reminder_retry(
+          String.t(),
+          DateTime.t(),
+          String.t() | nil,
+          DateTime.t(),
+          keyword()
+        ) ::
+          {:ok, {:pending | :expired | :failed, reminder_occurrence_row()}}
+          | {:error, :not_found | :not_delivering | term()}
+  def temporal_reminder_retry(
+        id,
+        %DateTime{} = next_ready_at,
+        last_error,
+        %DateTime{} = now,
+        opts \\ []
+      )
+      when is_binary(id) do
+    {:ok, ready_stamp} = TemporalSql.timestamp(next_ready_at)
+    {:ok, stamp} = TemporalSql.timestamp(now)
+
+    with {:ok, reason} <- TemporalSql.normalize_error_text(last_error) do
+      call({:temporal_reminder_retry, id, ready_stamp, reason, stamp}, opts)
+    end
+  end
+
+  @doc "Terminally fails a claimed reminder. Guarded on `delivering`."
+  @spec temporal_reminder_failed(String.t(), String.t() | nil, DateTime.t(), keyword()) ::
+          {:ok, reminder_occurrence_row()}
+          | {:error, :not_found | :not_delivering | term()}
+  def temporal_reminder_failed(id, last_error, %DateTime{} = now, opts \\ [])
+      when is_binary(id) do
+    {:ok, stamp} = TemporalSql.timestamp(now)
+
+    with {:ok, reason} <- TemporalSql.normalize_error_text(last_error) do
+      call({:temporal_reminder_failed, id, reason, stamp}, opts)
+    end
+  end
+
+  @doc """
+  Settles a row whose delivery worker died — or never started — without
+  settling it (§10.2). A row that is no longer `delivering` is left untouched
+  and reported `:settled`, because a `:DOWN` after settlement changes nothing.
+  """
+  @spec recover_delivering_reminder(
+          String.t(),
+          DateTime.t(),
+          String.t() | nil,
+          DateTime.t(),
+          keyword()
+        ) ::
+          {:ok, {:pending | :expired | :failed | :settled, reminder_occurrence_row()}}
+          | {:error, :not_found | term()}
+  def recover_delivering_reminder(
+        id,
+        %DateTime{} = next_ready_at,
+        last_error,
+        %DateTime{} = now,
+        opts \\ []
+      )
+      when is_binary(id) do
+    {:ok, ready_stamp} = TemporalSql.timestamp(next_ready_at)
+    {:ok, stamp} = TemporalSql.timestamp(now)
+
+    with {:ok, reason} <- TemporalSql.normalize_error_text(last_error) do
+      call({:recover_delivering_reminder, id, ready_stamp, reason, stamp}, opts)
+    end
+  end
+
+  @doc """
+  Boot sweep (§10.2). Every row still `delivering` at scheduler init is
+  stranded: it returns to `pending` while valid and under the attempt cap,
+  becomes `failed` at the cap, or `expired` past its validity boundary.
+  Returns the row ids per outcome.
+  """
+  @spec sweep_delivering_reminders(DateTime.t(), keyword()) ::
+          {:ok, %{pending: [String.t()], failed: [String.t()], expired: [String.t()]}}
+          | {:error, term()}
+  def sweep_delivering_reminders(%DateTime{} = now, opts \\ []) do
+    {:ok, stamp} = TemporalSql.timestamp(now)
+    call({:sweep_delivering_reminders, stamp}, opts)
+  end
+
+  @doc """
+  One bounded validity-boundary page (§8.3, §9.4): passed pending rows become
+  `superseded` when a later rule of the same occurrence is due and `expired`
+  otherwise, then passed one-time events whose reminders are all terminal are
+  completed and lose `next_occurrence_on`. The keyset cursor is `nil` when the
+  page wrapped.
+  """
+  @spec reconcile_temporal_boundaries(
+          DateTime.t(),
+          temporal_cursor() | nil,
+          pos_integer(),
+          keyword()
+        ) ::
+          {:ok,
+           %{
+             expired: [String.t()],
+             superseded: [String.t()],
+             completed_events: [String.t()],
+             cursor: temporal_cursor() | nil
+           }}
+          | {:error, term()}
+  def reconcile_temporal_boundaries(%DateTime{} = now, cursor, limit, opts \\ [])
+      when is_integer(limit) and limit > 0 do
+    {:ok, stamp} = TemporalSql.timestamp(now)
+
+    with {:ok, keyset} <- TemporalSql.normalize_cursor(cursor) do
+      call({:reconcile_temporal_boundaries, stamp, keyset, limit}, opts)
+    end
+  end
+
+  @doc """
+  One bounded annual-horizon page (§9.1): active yearly events materialized
+  only through a date before `threshold_on`, ordered by
+  `(materialized_through_on, id)`.
+  """
+  @spec annual_horizon_events(Date.t(), temporal_cursor() | nil, pos_integer(), keyword()) ::
+          {:ok, %{events: [temporal_event_row()], cursor: temporal_cursor() | nil}}
+          | {:error, term()}
+  def annual_horizon_events(%Date{} = threshold_on, cursor, limit, opts \\ [])
+      when is_integer(limit) and limit > 0 do
+    with {:ok, keyset} <- TemporalSql.normalize_cursor(cursor) do
+      call({:annual_horizon_events, Date.to_iso8601(threshold_on), keyset, limit}, opts)
+    end
+  end
+
+  @doc """
+  The earliest claimable reminder `ready_at`, or `nil` when none is claimable.
+
+  `now` is required because claimability includes the validity boundary: a
+  pending row past `valid_until` is never claimable, so returning it would arm a
+  due timer that can only spin.
+  """
+  @spec next_pending_reminder_ready_at(DateTime.t(), keyword()) ::
+          {:ok, DateTime.t() | nil} | {:error, term()}
+  def next_pending_reminder_ready_at(%DateTime{} = now, opts \\ []) do
+    {:ok, stamp} = TemporalSql.timestamp(now)
+    call({:next_pending_reminder_ready_at, stamp}, opts)
+  end
+
+  @spec get_temporal_event(String.t(), keyword()) ::
+          {:ok, temporal_event_row()} | {:error, :not_found | term()}
+  def get_temporal_event(id, opts \\ []) when is_binary(id) do
+    call({:get_temporal_event, id}, opts)
+  end
+
+  @spec get_temporal_reminder(String.t(), keyword()) ::
+          {:ok, reminder_occurrence_row()} | {:error, :not_found | term()}
+  def get_temporal_reminder(id, opts \\ []) when is_binary(id) do
+    call({:get_temporal_reminder, id}, opts)
+  end
+
+  @doc """
+  Lists events for `event_list` (§12.1): filters by text, kind, status, and a
+  date window of at most two years; defaults to 25 rows and caps at 100; pages
+  by an opaque `(next_occurrence_on, id)` keyset. Each row carries the last
+  delivery state/error and the next due reminder time.
+  """
+  @spec list_temporal_events(map(), keyword()) ::
+          {:ok, %{events: [map()], cursor: temporal_cursor() | nil}} | {:error, term()}
+  def list_temporal_events(filter \\ %{}, opts \\ []) when is_map(filter) do
+    with {:ok, normalized} <- TemporalSql.normalize_list_filter(filter) do
+      call({:list_temporal_events, normalized}, opts)
+    end
+  end
+
+  @doc "Lists reminder rows by event, occurrence, and/or status."
+  @spec list_temporal_reminders(map(), keyword()) ::
+          {:ok, [reminder_occurrence_row()]} | {:error, term()}
+  def list_temporal_reminders(filter \\ %{}, opts \\ []) when is_map(filter) do
+    with {:ok, normalized} <- TemporalSql.normalize_reminder_filter(filter) do
+      call({:list_temporal_reminders, normalized}, opts)
+    end
+  end
+
   @spec migrate(keyword()) :: :ok | {:error, term()}
   def migrate(opts \\ []) do
     call(:migrate, opts)
@@ -1223,6 +1994,103 @@ defmodule FermixCore.Memory.Repo do
   @impl true
   def handle_call(:enabled?, _from, state) do
     {:reply, state.enabled, state}
+  end
+
+  def handle_call({:create_temporal_event, event, plan}, _from, state) do
+    reply = with_connection(state, &TemporalSql.create_event(&1, event, plan))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:update_temporal_event, id, fields, plan, now}, _from, state) do
+    reply = with_connection(state, &TemporalSql.update_event(&1, id, fields, plan, now))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:cancel_temporal_event, id, now}, _from, state) do
+    reply = with_connection(state, &TemporalSql.cancel_event(&1, id, now))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:materialize_temporal_occurrences, id, revision, plan, now}, _from, state) do
+    reply = with_connection(state, &TemporalSql.materialize(&1, id, revision, plan, now))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:snooze_temporal_reminder, attrs}, _from, state) do
+    reply = with_connection(state, &TemporalSql.snooze_reminder(&1, attrs))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:latest_delivered_reminder, target}, _from, state) do
+    reply = with_connection(state, &TemporalSql.latest_delivered(&1, target))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:claim_due_reminders, now, limit}, _from, state) do
+    reply = with_connection(state, &TemporalSql.claim_due(&1, now, limit))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:temporal_reminder_delivered, id, sent_at}, _from, state) do
+    reply = with_connection(state, &TemporalSql.settle_delivered(&1, id, sent_at))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:temporal_reminder_retry, id, ready_at, last_error, now}, _from, state) do
+    reply = with_connection(state, &TemporalSql.settle_retry(&1, id, ready_at, last_error, now))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:temporal_reminder_failed, id, last_error, now}, _from, state) do
+    reply = with_connection(state, &TemporalSql.settle_failed(&1, id, last_error, now))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:recover_delivering_reminder, id, ready_at, last_error, now}, _from, state) do
+    reply =
+      with_connection(state, &TemporalSql.recover_delivering(&1, id, ready_at, last_error, now))
+
+    {:reply, reply, state}
+  end
+
+  def handle_call({:sweep_delivering_reminders, now}, _from, state) do
+    reply = with_connection(state, &TemporalSql.sweep_delivering(&1, now))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:reconcile_temporal_boundaries, now, cursor, limit}, _from, state) do
+    reply = with_connection(state, &TemporalSql.reconcile_boundaries(&1, now, cursor, limit))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:annual_horizon_events, threshold_on, cursor, limit}, _from, state) do
+    reply = with_connection(state, &TemporalSql.annual_horizon(&1, threshold_on, cursor, limit))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:next_pending_reminder_ready_at, now}, _from, state) do
+    reply = with_connection(state, &TemporalSql.next_pending_ready_at(&1, now))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:get_temporal_event, id}, _from, state) do
+    reply = with_connection(state, &TemporalSql.fetch_event(&1, id))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:get_temporal_reminder, id}, _from, state) do
+    reply = with_connection(state, &TemporalSql.fetch_reminder(&1, id))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:list_temporal_events, filter}, _from, state) do
+    reply = with_connection(state, &TemporalSql.list_events(&1, filter))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:list_temporal_reminders, filter}, _from, state) do
+    reply = with_connection(state, &TemporalSql.list_reminders(&1, filter))
+    {:reply, reply, state}
   end
 
   def handle_call(:migrate, _from, state) do
@@ -1339,6 +2207,114 @@ defmodule FermixCore.Memory.Repo do
     {:reply, reply, state}
   end
 
+  def handle_call({:get_messages_in_range, selector, from, until, limit}, _from, state) do
+    reply = with_connection(state, &fetch_messages_in_range(&1, selector, from, until, limit))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:record_skill_usage, skill_name, kind, now}, _from, state) do
+    reply = with_connection(state, &record_skill_usage_row(&1, skill_name, kind, now))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:get_skill_usage, skill_name}, _from, state) do
+    reply = with_connection(state, &fetch_skill_usage(&1, skill_name))
+    {:reply, reply, state}
+  end
+
+  def handle_call(:list_skill_usage, _from, state) do
+    reply = with_connection(state, &fetch_all_skill_usage/1)
+    {:reply, reply, state}
+  end
+
+  def handle_call({:ensure_skill_curation_state, now}, _from, state) do
+    reply = with_connection(state, &ensure_skill_curation_state_row(&1, now))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:claim_skill_curation_cycle, now, stale_after_ms}, _from, state) do
+    reply = with_connection(state, &claim_skill_curation_cycle_row(&1, now, stale_after_ms))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:update_skill_curation_state, attrs, now}, _from, state) do
+    reply = with_connection(state, &update_skill_curation_state_row(&1, attrs, now))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:insert_skill_curation_proposal, attrs}, _from, state) do
+    reply = with_connection(state, &insert_skill_curation_proposal_row(&1, attrs))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:get_skill_curation_proposal, token}, _from, state) do
+    reply = with_connection(state, &fetch_skill_curation_proposal(&1, token))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:list_skill_curation_proposals, filter}, _from, state) do
+    reply = with_connection(state, &fetch_skill_curation_proposals(&1, filter))
+    {:reply, reply, state}
+  end
+
+  def handle_call(
+        {:transition_skill_curation_proposal, token, expected, to_status, attrs, now},
+        _from,
+        state
+      ) do
+    reply =
+      with_connection(
+        state,
+        &transition_skill_curation_proposal_row(&1, token, expected, to_status, attrs, now)
+      )
+
+    {:reply, reply, state}
+  end
+
+  def handle_call(
+        {:sweep_skill_curation_proposals, now, supersession_days, max_cycles},
+        _from,
+        state
+      ) do
+    reply =
+      with_connection(
+        state,
+        &sweep_skill_curation_proposal_rows(&1, now, supersession_days, max_cycles)
+      )
+
+    {:reply, reply, state}
+  end
+
+  def handle_call({:clear_skill_curation_dispositions, selector, now}, _from, state) do
+    reply = with_connection(state, &clear_skill_curation_disposition_rows(&1, selector, now))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:insert_skill_curation_ledger, attrs}, _from, state) do
+    reply = with_connection(state, &insert_skill_curation_ledger_row(&1, attrs))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:get_skill_curation_ledger, skill_name}, _from, state) do
+    reply = with_connection(state, &fetch_skill_curation_ledger(&1, skill_name))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:list_skill_curation_ledger, filter}, _from, state) do
+    reply = with_connection(state, &fetch_skill_curation_ledger_rows(&1, filter))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:update_skill_curation_ledger, skill_name, attrs}, _from, state) do
+    reply = with_connection(state, &update_skill_curation_ledger_row(&1, skill_name, attrs))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:delete_skill_curation_ledger, skill_name}, _from, state) do
+    reply = with_connection(state, &delete_skill_curation_ledger_row(&1, skill_name))
+    {:reply, reply, state}
+  end
+
   def handle_call({:upsert_resource, attrs}, _from, state) do
     reply = with_connection(state, &upsert_resource_row(&1, attrs))
     {:reply, reply, state}
@@ -1446,6 +2422,11 @@ defmodule FermixCore.Memory.Repo do
 
   def handle_call({:list_job_runs, selector, limit}, _from, state) do
     reply = with_connection(state, &fetch_job_runs(&1, selector, limit))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:active_job_runs, limit}, _from, state) do
+    reply = with_connection(state, &fetch_active_job_runs(&1, limit))
     {:reply, reply, state}
   end
 
@@ -1563,7 +2544,12 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_taxonomy_migration(conn, versions),
          :ok <- apply_trust_check_migration(conn, versions),
          :ok <- apply_harness_runs_migration(conn, versions),
-         :ok <- apply_harness_continuation_migration(conn, versions) do
+         :ok <- apply_harness_continuation_migration(conn, versions),
+         :ok <- apply_harness_client_origin_migration(conn, versions),
+         :ok <- apply_skill_usage_migration(conn, versions),
+         :ok <- apply_skill_curation_migration(conn, versions),
+         :ok <- apply_temporal_events_migration(conn, versions),
+         :ok <- apply_reminder_snooze_migration(conn, versions) do
       :ok
     end
   end
@@ -1803,6 +2789,92 @@ defmodule FermixCore.Memory.Repo do
         BEGIN;
         #{@harness_continuation_schema_sql}
         INSERT INTO schema_migrations(version) VALUES (#{@harness_continuation_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  defp apply_harness_client_origin_migration(conn, versions) do
+    if Enum.member?(versions, @harness_client_origin_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{@harness_client_origin_schema_sql}
+        INSERT INTO schema_migrations(version) VALUES (#{@harness_client_origin_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  defp apply_skill_usage_migration(conn, versions) do
+    if Enum.member?(versions, @skill_usage_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{@skill_usage_schema_sql}
+        INSERT INTO schema_migrations(version) VALUES (#{@skill_usage_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  defp apply_skill_curation_migration(conn, versions) do
+    if Enum.member?(versions, @skill_curation_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{@skill_curation_schema_sql}
+        INSERT INTO schema_migrations(version) VALUES (#{@skill_curation_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  # Temporal events and their reminder outbox (MILESTONE_30 §7). The schema
+  # lives beside the temporal SQL so repo.ex stays bounded.
+  defp apply_temporal_events_migration(conn, versions) do
+    if Enum.member?(versions, @temporal_events_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{TemporalSql.schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@temporal_events_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  # Snooze (MILESTONE_30 §20). Schema-additive: `source_reminder_id` is APPENDED
+  # by its own ALTER so a migrated database and a fresh one share column order,
+  # and the three indexes serve idempotent re-snooze, the one-active-snooze rule,
+  # and the target-scoped "snooze that" resolution.
+  defp apply_reminder_snooze_migration(conn, versions) do
+    if Enum.member?(versions, @reminder_snooze_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{TemporalSql.snooze_schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@reminder_snooze_migration_version});
         COMMIT;
         """
       )
@@ -2191,6 +3263,569 @@ defmodule FermixCore.Memory.Repo do
            ) do
       fetch_memory_review_state(conn, review_selector)
     end
+  end
+
+  defp fetch_messages_in_range(conn, selector, from, until, limit) do
+    {role_sql, role_params} =
+      case Map.get(selector, :role) do
+        nil -> {"", []}
+        role -> {" AND role = ?", [role]}
+      end
+
+    with {:ok, rows} <-
+           query_all(
+             conn,
+             """
+             SELECT * FROM messages
+             WHERE agent_id = ? AND owner_id = ? AND kind = ?#{role_sql}
+               AND created_at >= ? AND created_at < ?
+             ORDER BY created_at DESC, id DESC
+             LIMIT ?
+             """,
+             [
+               Map.fetch!(selector, :agent_id),
+               Map.fetch!(selector, :owner_id),
+               Map.fetch!(selector, :kind)
+             ] ++
+               role_params ++ [timestamp_string(from), timestamp_string(until), limit]
+           ) do
+      {:ok, rows |> Enum.map(&message_row/1) |> Enum.reverse()}
+    end
+  end
+
+  defp record_skill_usage_row(conn, skill_name, kind, now) do
+    {views, runs} = skill_usage_increments(kind)
+
+    execute(
+      conn,
+      """
+      INSERT INTO skill_usage (skill_name, views, runs, last_used_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(skill_name)
+      DO UPDATE SET
+        views = views + excluded.views,
+        runs = runs + excluded.runs,
+        last_used_at = excluded.last_used_at
+      """,
+      [skill_name, views, runs, timestamp_string(now)]
+    )
+  end
+
+  defp skill_usage_increments(:view), do: {1, 0}
+  defp skill_usage_increments(:run), do: {0, 1}
+
+  defp fetch_skill_usage(conn, skill_name) do
+    with {:ok, rows} <-
+           query_all(
+             conn,
+             "SELECT * FROM skill_usage WHERE skill_name = ?",
+             [skill_name]
+           ) do
+      case rows do
+        [row] -> {:ok, skill_usage_row(row)}
+        [] -> {:error, :not_found}
+      end
+    end
+  end
+
+  defp fetch_all_skill_usage(conn) do
+    with {:ok, rows} <-
+           query_all(conn, "SELECT * FROM skill_usage ORDER BY skill_name ASC", []) do
+      {:ok, Enum.map(rows, &skill_usage_row/1)}
+    end
+  end
+
+  defp skill_usage_row([skill_name, views, runs, last_used_at]) do
+    %{
+      skill_name: skill_name,
+      views: views,
+      runs: runs,
+      last_used_at: parse_optional_timestamp(last_used_at)
+    }
+  end
+
+  defp ensure_skill_curation_state_row(conn, now) do
+    now_string = timestamp_string(now)
+
+    with :ok <-
+           execute(
+             conn,
+             """
+             INSERT INTO skill_curation_state (id, last_cycle_at, status, updated_at)
+             VALUES (1, ?, 'idle', ?)
+             ON CONFLICT(id) DO NOTHING
+             """,
+             [now_string, now_string]
+           ) do
+      fetch_skill_curation_state(conn)
+    end
+  end
+
+  defp fetch_skill_curation_state(conn) do
+    with {:ok, rows} <-
+           query_all(conn, "SELECT * FROM skill_curation_state WHERE id = 1", []) do
+      case rows do
+        [row] -> {:ok, skill_curation_state_row(row)}
+        [] -> {:error, :not_found}
+      end
+    end
+  end
+
+  # Fetch -> staleness predicate -> write, serialized by the single-writer
+  # GenServer (the claim_memory_review mechanism). A `running` claim younger
+  # than `stale_after_ms` refuses; an older one belonged to a killed daemon and
+  # is reclaimed, recording the abandoned attempt.
+  defp claim_skill_curation_cycle_row(conn, now, stale_after_ms) do
+    with {:ok, row} <- fetch_skill_curation_state(conn) do
+      case skill_curation_claim_kind(row, now, stale_after_ms) do
+        :active -> {:error, :concurrent_run}
+        :fresh -> write_skill_curation_claim(conn, now, nil)
+        :stale -> write_skill_curation_claim(conn, now, "error:stale_claim")
+      end
+    end
+  end
+
+  defp skill_curation_claim_kind(
+         %{status: "running", claimed_at: %DateTime{} = claimed},
+         now,
+         stale_after_ms
+       ) do
+    if DateTime.diff(now, claimed, :millisecond) < stale_after_ms do
+      :active
+    else
+      :stale
+    end
+  end
+
+  defp skill_curation_claim_kind(_row, _now, _stale_after_ms), do: :fresh
+
+  defp write_skill_curation_claim(conn, now, last_status) do
+    now_string = timestamp_string(now)
+
+    {set_sql, params} =
+      case last_status do
+        nil -> {"", []}
+        value -> {", last_status = ?", [value]}
+      end
+
+    with :ok <-
+           execute(
+             conn,
+             """
+             UPDATE skill_curation_state
+             SET status = 'running', claimed_at = ?, updated_at = ?#{set_sql}
+             WHERE id = 1
+             """,
+             [now_string, now_string] ++ params
+           ) do
+      fetch_skill_curation_state(conn)
+    end
+  end
+
+  defp update_skill_curation_state_row(conn, attrs, now) do
+    {set_clauses, params} =
+      Enum.reduce(attrs, {[], []}, fn {key, value}, {clauses, acc} ->
+        {clause, param} = skill_curation_state_set(key, value)
+        {[clause | clauses], [param | acc]}
+      end)
+
+    with :ok <-
+           execute(
+             conn,
+             """
+             UPDATE skill_curation_state
+             SET #{Enum.map_join(Enum.reverse(set_clauses), ", ", & &1)}, updated_at = ?
+             WHERE id = 1
+             """,
+             Enum.reverse(params) ++ [timestamp_string(now)]
+           ) do
+      fetch_skill_curation_state(conn)
+    end
+  end
+
+  defp skill_curation_state_set(key, value) when key in @skill_curation_state_timestamp_cols do
+    {"#{key} = ?", optional_timestamp_string(value)}
+  end
+
+  defp skill_curation_state_set(key, value) when key in @skill_curation_state_plain_cols do
+    {"#{key} = ?", value}
+  end
+
+  defp insert_skill_curation_proposal_row(conn, attrs) do
+    with :ok <-
+           execute(
+             conn,
+             """
+             INSERT INTO skill_curation_proposals (
+               token, cycle_session_id, kind, skill_name, task_signature,
+               summary, outline_json, evidence_json, status, created_at
+             )
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             """,
+             [
+               Map.fetch!(attrs, :token),
+               Map.fetch!(attrs, :cycle_session_id),
+               Map.fetch!(attrs, :kind),
+               Map.fetch!(attrs, :skill_name),
+               Map.fetch!(attrs, :task_signature),
+               Map.fetch!(attrs, :summary),
+               Map.get(attrs, :outline_json),
+               Map.get(attrs, :evidence_json),
+               Map.fetch!(attrs, :status),
+               timestamp_string(Map.fetch!(attrs, :created_at))
+             ]
+           ),
+         {:ok, rows} <-
+           query_all(
+             conn,
+             "SELECT * FROM skill_curation_proposals WHERE id = last_insert_rowid()",
+             []
+           ) do
+      case rows do
+        [row] -> {:ok, skill_curation_proposal_row(row)}
+        _other -> {:error, :insert_readback_failed}
+      end
+    end
+  end
+
+  defp fetch_skill_curation_proposal(conn, token) do
+    with {:ok, rows} <-
+           query_all(conn, "SELECT * FROM skill_curation_proposals WHERE token = ?", [token]) do
+      case rows do
+        [row] -> {:ok, skill_curation_proposal_row(row)}
+        [] -> {:error, :not_found}
+      end
+    end
+  end
+
+  defp fetch_skill_curation_proposals(conn, filter) do
+    {where_sql, params} = skill_curation_proposal_where(filter)
+
+    with {:ok, rows} <-
+           query_all(
+             conn,
+             """
+             SELECT * FROM skill_curation_proposals
+             WHERE #{where_sql}
+             ORDER BY created_at ASC, id ASC
+             """,
+             params
+           ) do
+      {:ok, Enum.map(rows, &skill_curation_proposal_row/1)}
+    end
+  end
+
+  defp skill_curation_proposal_where(filter) do
+    base =
+      if Map.get(filter, :include_cleared, false) do
+        {["1 = 1"], []}
+      else
+        {["disposition_cleared_at IS NULL"], []}
+      end
+
+    base
+    |> skill_curation_where_statuses(Map.get(filter, :statuses))
+    |> skill_curation_where_eq("kind", Map.get(filter, :kind))
+    |> skill_curation_where_eq("skill_name", Map.get(filter, :skill_name))
+    |> skill_curation_where_eq("task_signature", Map.get(filter, :task_signature))
+    |> then(fn {clauses, params} -> {Enum.join(clauses, " AND "), params} end)
+  end
+
+  defp skill_curation_where_statuses(acc, nil), do: acc
+  defp skill_curation_where_statuses(acc, []), do: acc
+
+  defp skill_curation_where_statuses({clauses, params}, statuses) when is_list(statuses) do
+    placeholders = Enum.map_join(statuses, ", ", fn _ -> "?" end)
+    {clauses ++ ["status IN (#{placeholders})"], params ++ statuses}
+  end
+
+  defp skill_curation_where_eq(acc, _column, nil), do: acc
+
+  defp skill_curation_where_eq({clauses, params}, column, value) do
+    {clauses ++ ["#{column} = ?"], params ++ [value]}
+  end
+
+  @skill_curation_terminal_statuses ["approved", "declined", "expired", "failed"]
+
+  defp transition_skill_curation_proposal_row(conn, token, expected, to_status, attrs, now) do
+    with {:ok, row} <- fetch_skill_curation_proposal(conn, token) do
+      if row.status in expected do
+        write_skill_curation_transition(conn, token, to_status, attrs, now)
+      else
+        {:error, {:invalid_status, row.status}}
+      end
+    end
+  end
+
+  defp write_skill_curation_transition(conn, token, to_status, attrs, now) do
+    actioned_sql =
+      if to_status in @skill_curation_terminal_statuses, do: ", actioned_at = ?", else: ""
+
+    {origin_sql, origin_params} = skill_curation_origin_set(attrs)
+
+    params =
+      [to_status] ++
+        if(to_status in @skill_curation_terminal_statuses, do: [timestamp_string(now)], else: []) ++
+        origin_params ++ [token]
+
+    with :ok <-
+           execute(
+             conn,
+             """
+             UPDATE skill_curation_proposals
+             SET status = ?#{actioned_sql}#{origin_sql}
+             WHERE token = ?
+             """,
+             params
+           ) do
+      fetch_skill_curation_proposal(conn, token)
+    end
+  end
+
+  defp skill_curation_origin_set(attrs) do
+    Enum.reduce([:origin_channel, :origin_chat_id], {"", []}, fn key, {sql, params} ->
+      case Map.get(attrs, key) do
+        nil -> {sql, params}
+        value -> {sql <> ", #{key} = ?", params ++ [value]}
+      end
+    end)
+  end
+
+  defp sweep_skill_curation_proposal_rows(conn, now, supersession_days, max_cycles) do
+    now_string = timestamp_string(now)
+    cutoff = timestamp_string(DateTime.add(now, -supersession_days * 86_400, :second))
+
+    with {:ok, expired_pending} <-
+           sweep_expire(
+             conn,
+             """
+             UPDATE skill_curation_proposals
+             SET status = 'expired', actioned_at = ?
+             WHERE status = 'pending' AND created_at < ?
+             """,
+             [now_string, cutoff]
+           ),
+         :ok <-
+           execute(
+             conn,
+             "UPDATE skill_curation_proposals SET deferred_cycles = deferred_cycles + 1 " <>
+               "WHERE status = 'deferred'",
+             []
+           ),
+         {:ok, expired_deferred} <-
+           sweep_expire(
+             conn,
+             """
+             UPDATE skill_curation_proposals
+             SET status = 'expired', actioned_at = ?
+             WHERE status = 'deferred' AND deferred_cycles > ?
+             """,
+             [now_string, max_cycles]
+           ) do
+      {:ok, %{expired_pending: expired_pending, expired_deferred: expired_deferred}}
+    end
+  end
+
+  defp sweep_expire(conn, sql, params) do
+    with :ok <- execute(conn, sql, params) do
+      Sqlite3.changes(conn)
+    end
+  end
+
+  defp clear_skill_curation_disposition_rows(conn, selector, now) do
+    {where_sql, params} = skill_curation_clear_where(selector)
+
+    with :ok <-
+           execute(
+             conn,
+             """
+             UPDATE skill_curation_proposals
+             SET disposition_cleared_at = ?
+             WHERE status IN ('declined', 'expired') AND disposition_cleared_at IS NULL
+               AND #{where_sql}
+             """,
+             [timestamp_string(now)] ++ params
+           ) do
+      Sqlite3.changes(conn)
+    end
+  end
+
+  defp skill_curation_clear_where(%{token: token}) when is_binary(token) do
+    {"token = ?", [token]}
+  end
+
+  defp skill_curation_clear_where(%{task_signature: signature}) when is_binary(signature) do
+    {"task_signature = ?", [signature]}
+  end
+
+  defp insert_skill_curation_ledger_row(conn, attrs) do
+    with :ok <-
+           execute(
+             conn,
+             """
+             INSERT INTO skill_curation_ledger (
+               skill_name, task_signature, status, created_proposal_id, created_at
+             )
+             VALUES (?, ?, ?, ?, ?)
+             """,
+             [
+               Map.fetch!(attrs, :skill_name),
+               Map.fetch!(attrs, :task_signature),
+               Map.fetch!(attrs, :status),
+               Map.fetch!(attrs, :created_proposal_id),
+               timestamp_string(Map.fetch!(attrs, :created_at))
+             ]
+           ) do
+      fetch_skill_curation_ledger(conn, Map.fetch!(attrs, :skill_name))
+    end
+  end
+
+  defp fetch_skill_curation_ledger(conn, skill_name) do
+    with {:ok, rows} <-
+           query_all(conn, "SELECT * FROM skill_curation_ledger WHERE skill_name = ?", [
+             skill_name
+           ]) do
+      case rows do
+        [row] -> {:ok, skill_curation_ledger_row(row)}
+        [] -> {:error, :not_found}
+      end
+    end
+  end
+
+  defp fetch_skill_curation_ledger_rows(conn, filter) do
+    {where_sql, params} =
+      case Map.get(filter, :status) do
+        nil -> {"1 = 1", []}
+        status -> {"status = ?", [status]}
+      end
+
+    with {:ok, rows} <-
+           query_all(
+             conn,
+             """
+             SELECT * FROM skill_curation_ledger
+             WHERE #{where_sql}
+             ORDER BY created_at ASC, id ASC
+             """,
+             params
+           ) do
+      {:ok, Enum.map(rows, &skill_curation_ledger_row/1)}
+    end
+  end
+
+  defp update_skill_curation_ledger_row(conn, skill_name, attrs) do
+    {set_clauses, params} =
+      Enum.reduce(attrs, {[], []}, fn {key, value}, {clauses, acc} ->
+        {clause, param} = skill_curation_ledger_set(key, value)
+        {[clause | clauses], [param | acc]}
+      end)
+
+    with {:ok, _row} <- fetch_skill_curation_ledger(conn, skill_name),
+         :ok <-
+           execute(
+             conn,
+             """
+             UPDATE skill_curation_ledger
+             SET #{Enum.map_join(Enum.reverse(set_clauses), ", ", & &1)}
+             WHERE skill_name = ?
+             """,
+             Enum.reverse(params) ++ [skill_name]
+           ) do
+      fetch_skill_curation_ledger(conn, skill_name)
+    end
+  end
+
+  defp skill_curation_ledger_set(key, value) when key in @skill_curation_ledger_timestamp_cols do
+    {"#{key} = ?", optional_timestamp_string(value)}
+  end
+
+  defp skill_curation_ledger_set(key, value) when key in @skill_curation_ledger_plain_cols do
+    {"#{key} = ?", value}
+  end
+
+  defp delete_skill_curation_ledger_row(conn, skill_name) do
+    execute(conn, "DELETE FROM skill_curation_ledger WHERE skill_name = ?", [skill_name])
+  end
+
+  defp skill_curation_state_row([
+         _id,
+         last_cycle_at,
+         retry_at,
+         claimed_at,
+         status,
+         last_status,
+         updated_at
+       ]) do
+    %{
+      last_cycle_at: parse_optional_timestamp(last_cycle_at),
+      retry_at: parse_optional_timestamp(retry_at),
+      claimed_at: parse_optional_timestamp(claimed_at),
+      status: status,
+      last_status: last_status,
+      updated_at: parse_timestamp!(updated_at)
+    }
+  end
+
+  defp skill_curation_proposal_row([
+         id,
+         token,
+         cycle_session_id,
+         kind,
+         skill_name,
+         task_signature,
+         summary,
+         outline_json,
+         evidence_json,
+         status,
+         deferred_cycles,
+         disposition_cleared_at,
+         origin_channel,
+         origin_chat_id,
+         created_at,
+         actioned_at
+       ]) do
+    %{
+      id: id,
+      token: token,
+      cycle_session_id: cycle_session_id,
+      kind: kind,
+      skill_name: skill_name,
+      task_signature: task_signature,
+      summary: summary,
+      outline_json: outline_json,
+      evidence_json: evidence_json,
+      status: status,
+      deferred_cycles: deferred_cycles,
+      disposition_cleared_at: parse_optional_timestamp(disposition_cleared_at),
+      origin_channel: origin_channel,
+      origin_chat_id: origin_chat_id,
+      created_at: parse_timestamp!(created_at),
+      actioned_at: parse_optional_timestamp(actioned_at)
+    }
+  end
+
+  defp skill_curation_ledger_row([
+         id,
+         skill_name,
+         task_signature,
+         status,
+         created_proposal_id,
+         created_at,
+         last_updated_at,
+         archived_at,
+         archive_path
+       ]) do
+    %{
+      id: id,
+      skill_name: skill_name,
+      task_signature: task_signature,
+      status: status,
+      created_proposal_id: created_proposal_id,
+      created_at: parse_timestamp!(created_at),
+      last_updated_at: parse_optional_timestamp(last_updated_at),
+      archived_at: parse_optional_timestamp(archived_at),
+      archive_path: archive_path
+    }
   end
 
   defp search_memory_rows(conn, query, selector, limit) do
@@ -2925,6 +4560,25 @@ defmodule FermixCore.Memory.Repo do
     end
   end
 
+  # Oldest first: the longest-abandoned run is the one blocking its job, so a
+  # backlog larger than the caller's bound drains in the order it wedged.
+  defp fetch_active_job_runs(conn, limit) do
+    with {:ok, rows} <-
+           query_all(
+             conn,
+             """
+             SELECT *
+             FROM job_runs
+             WHERE status IN ('queued', 'running')
+             ORDER BY created_at ASC, id ASC
+             LIMIT ?
+             """,
+             [limit]
+           ) do
+      {:ok, Enum.map(rows, &job_run_row/1)}
+    end
+  end
+
   # Atomic admission: BEGIN IMMEDIATE -> capacity gate -> lock gate -> INSERT ->
   # COMMIT. Mirrors `transact_claim/2`; a `:busy` on BEGIN never opened the tx so
   # it passes through without a ROLLBACK, every other error rolls back.
@@ -3030,9 +4684,10 @@ defmodule FermixCore.Memory.Repo do
                last_event_at,
                completed_at,
                delivered_at,
-               continuation_depth
+               continuation_depth,
+               client_origin_json
              )
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              """,
              harness_run_insert_params(run)
            ),
@@ -3485,6 +5140,7 @@ defmodule FermixCore.Memory.Repo do
       origin_kind: fetch_string!(attrs, :origin_kind),
       origin_session_id: fetch_string!(attrs, :origin_session_id),
       continuation_depth: non_negative_integer_with_default!(attrs, :continuation_depth, 0),
+      client_origin: Map.get(attrs, :client_origin),
       parent_job_id: optional_string!(attrs, :parent_job_id),
       delivery_mode: fetch_string!(attrs, :delivery_mode),
       platform: optional_string!(attrs, :platform),
@@ -3783,7 +5439,8 @@ defmodule FermixCore.Memory.Repo do
       run.last_event_at,
       run.completed_at,
       run.delivered_at,
-      run.continuation_depth
+      run.continuation_depth,
+      encode_metadata(run.client_origin)
     ]
   end
 
@@ -4613,7 +6270,8 @@ defmodule FermixCore.Memory.Repo do
          last_event_at,
          completed_at,
          delivered_at,
-         continuation_depth
+         continuation_depth,
+         client_origin_json
        ]) do
     %{
       id: id,
@@ -4635,6 +6293,7 @@ defmodule FermixCore.Memory.Repo do
       origin_kind: origin_kind,
       origin_session_id: origin_session_id,
       continuation_depth: continuation_depth,
+      client_origin: decode_metadata(client_origin_json),
       parent_job_id: parent_job_id,
       delivery_mode: delivery_mode,
       platform: platform,

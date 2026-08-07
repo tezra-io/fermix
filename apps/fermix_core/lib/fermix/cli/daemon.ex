@@ -19,6 +19,7 @@ defmodule Fermix.CLI.Daemon do
 
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Agents.SkillRegistry
+  alias FermixCore.Capabilities.MCP.RuntimeStatus, as: McpRuntimeStatus
   alias FermixCore.Health
   alias FermixCore.Introspection.Agents
   alias FermixCore.Introspection.Capabilities
@@ -49,16 +50,17 @@ defmodule Fermix.CLI.Daemon do
     socket_path = Keyword.get(opts, :socket_path, default_socket_path())
     task_supervisor = Keyword.get(opts, :task_supervisor, FermixCore.TaskSupervisor)
     plugins_runtime = Keyword.get(opts, :plugins_runtime, PluginsRuntime)
+    runtime_status = Keyword.get(opts, :runtime_status, McpRuntimeStatus)
 
     File.mkdir_p!(Path.dirname(socket_path))
 
     case clear_stale_socket(socket_path) do
-      :ok -> do_listen(socket_path, task_supervisor, plugins_runtime)
+      :ok -> do_listen(socket_path, task_supervisor, plugins_runtime, runtime_status)
       {:error, reason} -> {:stop, reason}
     end
   end
 
-  defp do_listen(socket_path, task_supervisor, plugins_runtime) do
+  defp do_listen(socket_path, task_supervisor, plugins_runtime, runtime_status) do
     listen_opts = [
       :binary,
       {:active, false},
@@ -80,6 +82,7 @@ defmodule Fermix.CLI.Daemon do
            socket_path: socket_path,
            task_supervisor: task_supervisor,
            plugins_runtime: plugins_runtime,
+           runtime_status: runtime_status,
            started_at_ms: System.monotonic_time(:millisecond)
          }}
 
@@ -193,6 +196,10 @@ defmodule Fermix.CLI.Daemon do
   defp handle_method("skills_view", request, _state), do: skills_view_reply(request)
   defp handle_method("skills_reload", _request, _state), do: skills_reload_reply()
   defp handle_method("plugins_apply", _request, state), do: plugins_apply_reply(state)
+
+  defp handle_method("plugins_runtime_status", _request, state),
+    do: plugins_runtime_status_reply(state)
+
   defp handle_method("agent_message", request, _state), do: agent_message_reply(request)
   defp handle_method("observability", _request, _state), do: observability_reply()
 
@@ -324,6 +331,36 @@ defmodule Fermix.CLI.Daemon do
 
   defp skill_surface(summary) when is_map(summary), do: reload_summary(summary)
   defp skill_surface(other), do: Wire.json_safe(other)
+
+  # The live remote-MCP status table (M27 §7.8) lives in THIS process's memory.
+  # A one-shot CLI VM (`fermix doctor`, `fermix plugins status`) has no such
+  # table, so this op is the only honest way for it to learn a remote plugin's
+  # runtime state — the alternative, reading a locally absent table, would
+  # report every remote plugin as never-connected or, worse, infer `:ready`.
+  defp plugins_runtime_status_reply(state) do
+    case safe_daemon_call(fn -> McpRuntimeStatus.list(state.runtime_status) end) do
+      {:ok, entries} -> %{status: "ok", runtime_status: runtime_status_rows(entries)}
+      {:error, reason} -> %{status: "error", reason: inspect(reason)}
+    end
+  end
+
+  # Entries are keyed by the source-qualified `{:plugin, "eden"}` id and carry a
+  # `generation_ref`, an owner pid, and a monitor ref — `Wire.json_safe/1` RAISES
+  # on the tuple key and on both refs. Flatten to a list, render the id as the
+  # same stable string the lifecycle telemetry uses ("plugin:eden"), and drop the
+  # generation/owner: neither is an operator-facing fact, and §11.1 forbids
+  # exporting generation references at all.
+  defp runtime_status_rows(entries) do
+    Enum.map(entries, fn {{kind, name}, entry} ->
+      %{
+        source: "#{kind}:#{name}",
+        plugin: Wire.json_safe(Map.get(entry, :plugin)),
+        status: Wire.json_safe(Map.get(entry, :status)),
+        detail: Wire.json_safe(Map.get(entry, :detail)),
+        updated_at: Wire.json_safe(Map.get(entry, :updated_at))
+      }
+    end)
+  end
 
   defp agent_message_reply(request) do
     params = Map.get(request, "params", %{})

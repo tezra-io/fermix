@@ -8,9 +8,25 @@ defmodule Fermix.CLI.Upgrade.Manifest do
   defensive about missing keys but does **not** silently degrade —
   unrecognized shapes return `{:error, _}` so the caller surfaces
   the failure.
+
+  Every artifact URL is pinned to `@artifact_origin` at parse time, so
+  no caller is ever handed a URL to fetch from somewhere else.
   """
 
   @manifest_url "https://github.com/tezra-io/fermix/releases/latest/download/releases.json"
+
+  # Every artifact URL the release pipeline emits is rooted here — the exact base
+  # `scripts/release/build_releases_json.sh` builds — so a manifest carrying
+  # anything else is not describing our releases.
+  #
+  # Honest accounting of what this buys: the manifest and the artifacts come from
+  # the same host, under the same TLS, and fall in the same compromise event, so
+  # this is **not** a defence against a compromised GitHub. Cosign is, and already
+  # runs (`Fermix.CLI.Upgrade.Cosign`, before the swap). What the pin removes is
+  # the blind-fetch-anywhere primitive: whoever can edit `releases.json` can no
+  # longer make this machine issue arbitrary pre-verification GETs to a host of
+  # their choosing.
+  @artifact_origin "https://github.com/tezra-io/fermix/releases/download/"
 
   @type artifact :: %{
           target: String.t(),
@@ -116,15 +132,31 @@ defmodule Fermix.CLI.Upgrade.Manifest do
 
   defp normalize(%{"schema_version" => schema, "latest" => latest, "releases" => releases})
        when is_integer(schema) and is_binary(latest) and is_list(releases) do
-    {:ok,
-     %{
-       schema_version: schema,
-       latest: latest,
-       releases: Enum.map(releases, &normalize_release/1)
-     }}
+    manifest = %{
+      schema_version: schema,
+      latest: latest,
+      releases: Enum.map(releases, &normalize_release/1)
+    }
+
+    case off_origin_url(manifest.releases) do
+      nil -> {:ok, manifest}
+      url -> {:error, {:artifact_origin_rejected, url}}
+    end
   end
 
   defp normalize(_other), do: {:error, :manifest_schema_mismatch}
+
+  # Rejects the whole manifest, not just the offending artifact: the caller would
+  # otherwise still be handed a document we have already decided is not ours.
+  defp off_origin_url(releases) do
+    releases
+    |> Enum.flat_map(& &1.artifacts)
+    |> Enum.flat_map(&[&1.url, &1.sig_url, &1.cert_url])
+    |> Enum.find(&off_origin?/1)
+  end
+
+  defp off_origin?(url) when is_binary(url), do: not String.starts_with?(url, @artifact_origin)
+  defp off_origin?(_url), do: true
 
   defp normalize_release(%{"version" => version, "artifacts" => artifacts} = release)
        when is_binary(version) and is_list(artifacts) do

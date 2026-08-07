@@ -22,6 +22,12 @@ defmodule FermixCore.Plugins.Http.Interpreter do
   @default_max_pages 10
   @default_max_response_bytes 5 * 1024 * 1024
 
+  # Cumulative response ceiling for one paginated call. The per-page cap bounds
+  # a single response; without this a manifest declaring `max_pages: 10` could
+  # stack ten of them (50 MiB) into one tool result. Internal constant, not a
+  # knob: it is the same class of limit as `@max_pages_cap`.
+  @max_paginated_bytes 10 * 1024 * 1024
+
   @type http_response :: %{status: integer(), headers: [{String.t(), String.t()}], body: binary()}
   @type http_fun :: (map() -> {:ok, http_response()} | {:error, term()})
 
@@ -111,23 +117,34 @@ defmodule FermixCore.Plugins.Http.Interpreter do
   defp paginated(request, config, opts) do
     max = config |> Map.get("max_pages", @default_max_pages) |> min(@max_pages_cap)
     items_path = Map.get(config, "items_path")
+    state = %{items: [], page: 0, bytes: 0}
 
-    case collect_pages(request, config, opts, max, items_path, [], 0) do
+    case collect_pages(request, config, opts, max, items_path, state) do
       {:ok, items, truncated?} -> {:ok, paginated_result(items, config, truncated?)}
       {:error, message} -> {:ok, Tool.error(message)}
     end
   end
 
-  defp collect_pages(_request, _config, _opts, max, _items_path, acc, page) when page >= max do
-    {:ok, Enum.reverse(acc) |> List.flatten(), true}
+  # Two ceilings, one stop condition, one result shape: the loop ends truncated
+  # when it has fetched `max` pages OR when the pages it already decoded total
+  # `@max_paginated_bytes`. The byte ceiling is checked between pages, so the
+  # peak is bounded by the cumulative cap plus one per-page cap.
+  defp collect_pages(_request, _config, _opts, max, _items_path, %{page: page} = state)
+       when page >= max do
+    {:ok, collected(state), true}
   end
 
-  defp collect_pages(request, config, opts, max, items_path, acc, page) do
+  defp collect_pages(_request, _config, _opts, _max, _items_path, %{bytes: bytes} = state)
+       when bytes >= @max_paginated_bytes do
+    {:ok, collected(state), true}
+  end
+
+  defp collect_pages(request, config, opts, max, items_path, state) do
     case call(request, opts) do
       {:ok, %{status: status} = resp} when status in [200, 201] ->
         with {:ok, decoded} <- decode_json(resp, opts) do
-          acc = [navigate_items(decoded, items_path) | acc]
-          continue_pages(request, config, opts, max, items_path, acc, page, decoded)
+          state = accumulate(state, resp, decoded, items_path)
+          continue_pages(request, config, opts, max, items_path, state, decoded)
         else
           {:error, message} -> {:error, message}
         end
@@ -140,10 +157,20 @@ defmodule FermixCore.Plugins.Http.Interpreter do
     end
   end
 
-  defp continue_pages(request, config, opts, max, items_path, acc, page, decoded) do
+  defp accumulate(state, resp, decoded, items_path) do
+    %{
+      state
+      | items: [navigate_items(decoded, items_path) | state.items],
+        bytes: state.bytes + byte_size(resp.body)
+    }
+  end
+
+  defp collected(%{items: items}), do: items |> Enum.reverse() |> List.flatten()
+
+  defp continue_pages(request, config, opts, max, items_path, state, decoded) do
     case next_cursor(config, decoded, items_path) do
       nil ->
-        {:ok, Enum.reverse(acc) |> List.flatten(), false}
+        {:ok, collected(state), false}
 
       cursor ->
         collect_pages(
@@ -152,8 +179,7 @@ defmodule FermixCore.Plugins.Http.Interpreter do
           opts,
           max,
           items_path,
-          acc,
-          page + 1
+          %{state | page: state.page + 1}
         )
     end
   end
@@ -263,6 +289,19 @@ defmodule FermixCore.Plugins.Http.Interpreter do
 
   # --- error classification (§5.3) ---
 
+  # Both plugin transports set `redirect: false`, so a 3xx arrives here instead
+  # of being followed. That is deliberate: `Net.Guard` screens the URL the
+  # manifest asked for, and Req's request steps do not re-run on a followed hop,
+  # so the second host would reach the network unscreened. Name the status and
+  # the Location — a bare "request failed (302)" tells an operator nothing about
+  # where the API tried to send us.
+  defp classify(%{status: status} = resp, _opts) when status in 300..399 do
+    Tool.error(
+      "redirect refused: HTTP #{status} to #{redirect_location(resp)}. Plugin requests do not " <>
+        "follow redirects — point the manifest at the final URL."
+    )
+  end
+
   defp classify(%{status: 401}, opts) do
     case Keyword.get(opts, :auth_type, :none) do
       :oauth2 ->
@@ -300,6 +339,13 @@ defmodule FermixCore.Plugins.Http.Interpreter do
     Tool.error("request failed (#{status}). #{redacted_body(resp)}")
   end
 
+  defp redirect_location(%{headers: headers}) do
+    case find_ci(headers, "location") do
+      {_name, value} -> value
+      nil -> "an unstated location (no Location header)"
+    end
+  end
+
   # Error bodies bypass the success-path decode, so cap them here too — a huge
   # provider error page must not be copied wholesale into the model's view.
   @error_body_cap 2_048
@@ -334,7 +380,9 @@ defmodule FermixCore.Plugins.Http.Interpreter do
   # Production caller: the shared `Net.HttpClient` (Finch pool + stale-socket
   # retry). `decode_body: false` keeps the raw body so this module owns the
   # content-type / size-cap / JSON decoding decisions (§5.3). Net.Guard is the
-  # SSRF floor: template URLs never reach loopback/private/metadata hosts.
+  # SSRF floor: template URLs never reach loopback/private/metadata hosts, and
+  # `redirect: false` keeps that floor meaningful — Req would follow a hop
+  # without re-running the guard, landing on a host nothing screened.
   defp default_http(request) do
     case Guard.validate(request.url) do
       :ok -> issue_default(request)
@@ -349,7 +397,8 @@ defmodule FermixCore.Plugins.Http.Interpreter do
         url: request.url,
         params: request.query,
         headers: request.headers,
-        decode_body: false
+        decode_body: false,
+        redirect: false
       )
       |> with_json_body(request.body)
 

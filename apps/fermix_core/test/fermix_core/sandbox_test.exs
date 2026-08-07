@@ -3,6 +3,7 @@ defmodule FermixCore.SandboxTest do
 
   alias FermixCore.Sandbox
   alias FermixCore.Sandbox.Config
+  alias FermixCore.Sandbox.Env
   alias FermixCore.Sandbox.PathPolicy
 
   test "standard mode admits the request cwd for an operator context and denies it without" do
@@ -79,6 +80,73 @@ defmodule FermixCore.SandboxTest do
 
     FermixTestSupport.SafeRm.rm_rf!(root)
     FermixTestSupport.SafeRm.rm_rf!(outside)
+  end
+
+  # MILESTONE_29_ACP_AGENT_SURFACE §4/§8.3: the model answers in a Buzz channel by
+  # running the `buzz` CLI through the SHELL tool, so the client session's env has
+  # to reach the shell plan — the plan's env is the child's whole environment
+  # (`shell.ex` spawns `env -i <assignments> sh -c …`). Both halves of the
+  # 2026-07-26 env-sanitizer lesson: fidelity (the child can actually resolve and
+  # authenticate the CLI) and isolation (a turn without an overlay is unchanged).
+  describe "shell_plan session_env overlay" do
+    setup do
+      root = FermixTestSupport.SafeRm.make_tmp_dir!("sandbox-shell-plan-overlay")
+      bin = Path.join(root, "bin")
+      File.mkdir_p!(bin)
+      # A stand-in for the `buzz` CLI, resolvable only through the overlay PATH.
+      File.write!(Path.join(bin, "buzz"), "#!/bin/sh\nexec /usr/bin/env\n")
+      File.chmod!(Path.join(bin, "buzz"), 0o755)
+
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(root) end)
+
+      %{root: root, bin: bin, config: Config.normalize(mode: :strict, workspace_root: root)}
+    end
+
+    test "fidelity: the plan's env carries the overlay credentials and its PATH", ctx do
+      context = %{
+        sandbox_config: ctx.config,
+        session_env: %{"PATH" => ctx.bin, "BUZZ_PRIVATE_KEY" => "nsec1fakebuzzkeyvalue"}
+      }
+
+      assert {:ok, %{env: env}} =
+               Sandbox.shell_plan("buzz messages send hi", ctx.root, context)
+
+      assert List.keyfind(env, "BUZZ_PRIVATE_KEY", 0) ==
+               {"BUZZ_PRIVATE_KEY", "nsec1fakebuzzkeyvalue"}
+
+      # Not just "PATH is the overlay's" — the PATH the child receives must
+      # actually resolve the CLI it is expected to run.
+      assert {"PATH", path} = List.keyfind(env, "PATH", 0)
+      assert path == ctx.bin
+      assert Enum.any?(String.split(path, ":"), &File.regular?(Path.join(&1, "buzz")))
+
+      # The overlay wins on ITS keys only; everything else stays policy env.
+      assert {:ok, policy_env} = Env.build(ctx.config)
+      assert List.keyfind(env, "HOME", 0) == List.keyfind(policy_env, "HOME", 0)
+    end
+
+    test "isolation: without a session_env the plan's env is exactly Env.build/1's", ctx do
+      assert {:ok, %{env: env}} =
+               Sandbox.shell_plan("echo hi", ctx.root, %{sandbox_config: ctx.config})
+
+      assert {:ok, expected} = Env.build(ctx.config)
+      assert Enum.sort(env) == Enum.sort(expected)
+    end
+
+    test "isolation: one plan's overlay never leaks into the next plan", ctx do
+      overlay = %{
+        sandbox_config: ctx.config,
+        session_env: %{"PATH" => ctx.bin, "BUZZ_PRIVATE_KEY" => "nsec1fakebuzzkeyvalue"}
+      }
+
+      assert {:ok, %{env: _overlaid}} = Sandbox.shell_plan("buzz whoami", ctx.root, overlay)
+
+      assert {:ok, %{env: env}} =
+               Sandbox.shell_plan("echo hi", ctx.root, %{sandbox_config: ctx.config})
+
+      assert List.keyfind(env, "BUZZ_PRIVATE_KEY", 0) == nil
+      refute List.keyfind(env, "PATH", 0) == {"PATH", ctx.bin}
+    end
   end
 
   # L-2b: the batch gate must yield the byte-identical allow/deny set as filtering

@@ -646,6 +646,7 @@ def run_operator_case(cfg, client, suite, scn, case, run_id, trial, judge_on):
         "correlation": "ok",
         "gates": [{"key": g.key, "passed": g.passed, "detail": g.detail} for g in gates],
         "tools": view.tool_names,
+        "tool_failures": _tool_failures(view),
         "reply": view.reply,
         "cost_usd": view.cost,
         "duration_ms": view.duration_ms,
@@ -701,6 +702,25 @@ def _bounded_text(value, max_bytes: int) -> str:
     return kept + marker.decode()
 
 
+def _tool_failures(view) -> list[dict]:
+    """Vendor text for each errored tool span, bounded.
+
+    The `no_tool_errors` gate reports only tool NAMES, which is enough to fail a
+    case and not enough to explain it: a run where every metered tool refused for
+    one external reason looks identical to a run with a real product defect. The
+    text is what tells those apart, so it is carried on the record.
+    """
+    failures = []
+    for span in view.tool_spans:
+        info = span.get("error_info")
+        if not info:
+            continue
+        text = info if isinstance(info, str) else json.dumps(info, ensure_ascii=False)
+        failures.append({"name": _bounded_text(span.get("name"), 128),
+                         "error_text": _bounded_text(text, 512)})
+    return failures
+
+
 def _tool_evidence(view, turn_index: int) -> dict:
     tools = []
     for span in view.tool_spans[:_EVIDENCE_TOOL_LIMIT]:
@@ -734,7 +754,8 @@ def _record_graded_turn(rec, cfg, trace, gates, view, note) -> None:
         "status": "ok", "note": note, "correlation": "ok",
         "gates": [{"key": gate.key, "passed": gate.passed, "detail": gate.detail}
                   for gate in gates],
-        "tools": view.tool_names, "reply": view.reply, "cost_usd": view.cost,
+        "tools": view.tool_names, "tool_failures": _tool_failures(view),
+        "reply": view.reply, "cost_usd": view.cost,
         "duration_ms": view.duration_ms, "tokens": view.tokens,
         "iterations": view.iterations, "subagent_spawns": view.subagent_spawns,
         "trace_id": trace["id"],
@@ -1231,11 +1252,60 @@ def _case_verdict(attempts: list[dict]) -> dict:
     return final
 
 
+def _abort_signal(suite, result: dict) -> dict | None:
+    """The first tool failure matching a fragment the suite declared terminal.
+
+    An exhausted external account is not a product signal. Every case driven
+    after the balance hits zero fails `no_tool_errors` for a reason the daemon
+    did not cause, so those results are void, not red — an observed eden run
+    spent its EdenAI credits mid-suite and banked nine meaningless failures that
+    cost more to diagnose than the run was worth.
+    """
+    for turn in result.get("turns", []):
+        for failure in turn.get("tool_failures", []):
+            message = failure.get("error_text") or ""
+            fragment = next((f for f in suite.abort_on_tool_error if f in message), None)
+            if fragment:
+                return {"suite": suite.name, "case": result["id"],
+                        "tool": failure.get("name"), "fragment": fragment,
+                        "message": message}
+    return None
+
+
+def _voided(result: dict) -> dict:
+    """Demote a case whose result the abort condition invalidates."""
+    voided = dict(result)
+    voided.update({"outcome": "incomplete", "passed": False, "incomplete": True})
+    return voided
+
+
+def _drive_with_retries(cfg, client, suite, scenario, case, run_id, trial,
+                        judge_on, fail_retries: int, repeat: int):
+    """Drive one case, re-driving an unconfirmed fail. Stops early on abort.
+
+    A retry after the abort condition would spend more of the exhausted resource
+    to reproduce a failure already explained, so the signal short-circuits it.
+    """
+    attempts = [_drive_case(cfg, client, suite, scenario, case, run_id, trial, judge_on)]
+    abort = _abort_signal(suite, attempts[-1]) if suite.abort_on_tool_error else None
+    for retry in range(1, fail_retries + 1):
+        outcomes = [attempt["outcome"] for attempt in attempts]
+        if abort or outcomes.count("fail") != 1 or outcomes[-1] == "incomplete":
+            break
+        retry_trial = trial + repeat * retry
+        print(f"    fail unconfirmed — retrying as #{retry_trial} …", flush=True)
+        attempts.append(_drive_case(cfg, client, suite, scenario, case,
+                                    run_id, retry_trial, judge_on))
+        abort = _abort_signal(suite, attempts[-1]) if suite.abort_on_tool_error else None
+    return attempts, abort
+
+
 def _execute_jobs(cfg, client, jobs, run_id: str, judge_on: bool, operator: bool,
                   fail_retries: int = 0, repeat: int = 1):
     tree: dict = {}
     skipped_required = 0
-    for suite, scenario, case, trial in jobs:
+    aborted = None
+    for index, (suite, scenario, case, trial) in enumerate(jobs):
         label = f"{suite.name}/{scenario.id}/{case.id}#{trial}"
         if case.drive != "ask" and not operator:
             print(f"  · {label} — SKIPPED "
@@ -1243,31 +1313,51 @@ def _execute_jobs(cfg, client, jobs, run_id: str, judge_on: bool, operator: bool
             skipped_required += 1
             continue
         print(f"  · {label} …", flush=True)
-        attempts = [_drive_case(cfg, client, suite, scenario, case,
-                                run_id, trial, judge_on)]
-        # A fail is final only if it reproduces: re-drive an unconfirmed single
-        # fail on a fresh session until a second fail or retries run out.
-        for retry in range(1, fail_retries + 1):
-            outcomes = [attempt["outcome"] for attempt in attempts]
-            if outcomes.count("fail") != 1 or outcomes[-1] == "incomplete":
-                break
-            retry_trial = trial + repeat * retry
-            print(f"    fail unconfirmed — retrying as #{retry_trial} …", flush=True)
-            attempts.append(_drive_case(cfg, client, suite, scenario, case,
-                                        run_id, retry_trial, judge_on))
+        attempts, abort = _drive_with_retries(
+            cfg, client, suite, scenario, case, run_id, trial, judge_on,
+            fail_retries, repeat)
         result = _case_verdict(attempts)
+        result = _voided(result) if abort else result
         _record_case(tree, suite, scenario, result)
         note = f" · attempts {'/'.join(result['attempt_outcomes'])}" \
             if len(attempts) > 1 else ""
         print(f"    {result['outcome'].upper()} "
               f"(gates {'ok' if result['gate_passed'] else 'FAILED'}){note}")
-    return [_suite_result(entry) for entry in tree.values()], skipped_required
+        if abort:
+            aborted = dict(abort, unrun=len(jobs) - index - 1)
+            _print_abort(aborted)
+            break
+    return [_suite_result(entry) for entry in tree.values()], skipped_required, aborted
+
+
+def _persistable_abort(aborted: dict) -> dict:
+    """The abort record minus the vendor's raw text.
+
+    `fragment` is the operator's own literal from the suite YAML, so it is safe
+    to persist unredacted; the full vendor message can quote user content and
+    stays on the console, under the same policy `_redact_error_strings` applies
+    to every other error string.
+    """
+    return {key: value for key, value in aborted.items() if key != "message"}
+
+
+def _print_abort(aborted: dict) -> None:
+    print(f"\n  RUN ABORTED — {aborted['suite']}/{aborted['case']} hit a terminal "
+          f"condition on `{aborted['tool']}`:")
+    print(f"    {aborted['message']}")
+    print(f"  {aborted['unrun']} remaining case(s) were NOT run. This is an external "
+          "account condition,\n  not a product failure: results already banked in this "
+          "run stand, and the case that\n  hit it is reported INCOMPLETE rather than "
+          "failed.", flush=True)
 
 
 def _write_run_reports(cfg, args, chosen, profiles, run_id: str, started,
-                       suite_results, planned_cases: int, skipped_required: int) -> int:
+                       suite_results, planned_cases: int, skipped_required: int,
+                       aborted: dict | None = None) -> int:
     results = aggregate(cfg, run_id, started, now_utc(), suite_results,
                         planned_cases, skipped_required)
+    if aborted:
+        results["aborted"] = _persistable_abort(aborted)
     results["config"]["judge_enabled"] = args.judge or cfg.judge.enabled
     results["config"]["content_retained"] = args.include_content
     results["reproducibility"] = reproducibility_metadata(cfg, chosen, profiles)
@@ -1291,6 +1381,9 @@ def _write_run_reports(cfg, args, chosen, profiles, run_id: str, started,
           f"judge calls {totals['judge_calls']} "
           f"({totals['judge_tokens_reported']} reported tok across "
           f"{totals['judge_usage_reported_calls']} call(s))")
+    if aborted:
+        print(f"ABORTED at {aborted['suite']}/{aborted['case']} on `{aborted['fragment']}` · "
+              f"{aborted['unrun']} case(s) not run — remaining results are unknown, not failed")
     print(f"report: {paths['md']}")
     print(f"        {paths['html']}")
     return {"pass": 0, "fail": 1, "incomplete": 4}[results["outcome"]]
@@ -1325,11 +1418,12 @@ def _run_selected(cfg, args, chosen, profiles, judge_on: bool) -> int:
                         api_key=cfg.opik.api_key, workspace=cfg.opik.workspace)
     run_id = new_run_id()
     started = now_utc()
-    suite_results, skipped_required = _execute_jobs(
+    suite_results, skipped_required, aborted = _execute_jobs(
         cfg, client, jobs, run_id, judge_on, args.operator,
         fail_retries=args.fail_retries, repeat=args.repeat)
     return _write_run_reports(
-        cfg, args, chosen, profiles, run_id, started, suite_results, nc, skipped_required)
+        cfg, args, chosen, profiles, run_id, started, suite_results, nc,
+        skipped_required, aborted)
 
 
 def main(argv=None) -> int:

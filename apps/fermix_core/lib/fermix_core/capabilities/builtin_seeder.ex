@@ -23,6 +23,21 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
 
   @compiled_env Mix.env()
 
+  # The temporal-event family (MILESTONE_30 §12.1, §20). Named as its own list so
+  # the whole-feature attended-owner invariant loops over the authoritative source
+  # rather than a list rewritten inside the test. Its members are also seeded
+  # from `@builtin_tool_modules` below; `event_tools_trust_invariant_test.exs`
+  # asserts both directions of that membership for every `event_*`/`reminder_*`
+  # built-in, so a sixth member added to either list alone fails rather than
+  # slipping past the gate.
+  @event_tool_modules [
+    FermixCore.Tools.EventStore,
+    FermixCore.Tools.EventList,
+    FermixCore.Tools.EventUpdate,
+    FermixCore.Tools.EventRemove,
+    FermixCore.Tools.ReminderSnooze
+  ]
+
   @builtin_tool_modules [
     FermixCore.Tools.Shell,
     FermixCore.Tools.FileRead,
@@ -58,7 +73,13 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
     FermixCore.Tools.SendAttachment,
     FermixCore.Tools.React,
     FermixCore.Tools.GenerateImage,
-    FermixCore.Tools.RequestDirectoryAccess
+    FermixCore.Tools.RequestDirectoryAccess,
+    # The temporal-event family; keep `@event_tool_modules` in step.
+    FermixCore.Tools.EventStore,
+    FermixCore.Tools.EventList,
+    FermixCore.Tools.EventUpdate,
+    FermixCore.Tools.EventRemove,
+    FermixCore.Tools.ReminderSnooze
   ]
 
   def child_spec(opts) do
@@ -153,6 +174,14 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
     do:
       @builtin_tool_modules ++
         @bridge_tool_modules ++ @computer_use_tool_modules ++ @harness_tool_modules
+
+  @doc """
+  The temporal-event tool family (MILESTONE_30 §12.1). Exposed so the
+  attended-owner invariant test gates the WHOLE feature surface rather than a
+  hand-written list of today's four tools.
+  """
+  @spec event_tool_modules() :: [module()]
+  def event_tool_modules, do: @event_tool_modules
 
   defp builtin_modules(opts) do
     case Keyword.fetch(opts, :tool_modules) do

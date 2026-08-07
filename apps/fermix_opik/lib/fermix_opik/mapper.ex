@@ -154,7 +154,20 @@ defmodule FermixOpik.Mapper do
             :url,
             :target_ref,
             :selector,
-            :policy_enforcement
+            :policy_enforcement,
+            # `MCP.Capability.invoke/3` stamps the outbound server on every MCP
+            # tool exec; without it here the server identity was dropped from
+            # every Opik tool span (this map is the only allowlist there is).
+            :mcp_server,
+            # The signed remote-MCP subset (M27 §11.1): source-qualified server
+            # identity, the operator-selected scope KIND (never the workspace
+            # id), the signed policy flags, and the network attempt number. The
+            # MCP session id and the resource id are never emitted at all.
+            :mcp_source,
+            :workspace_scope,
+            :read_only,
+            :replay_safe,
+            :attempt
           ])
         )
     }
@@ -220,6 +233,44 @@ defmodule FermixOpik.Mapper do
           model: Map.get(metadata, :model),
           voice: Map.get(metadata, :voice),
           reason: Map.get(metadata, :reason),
+          attempt: Map.get(metadata, :attempt)
+        })
+    }
+    |> drop_nil()
+  end
+
+  @doc """
+  Build a point span from a `[:fermix, :mcp_client, :lifecycle]` event — one
+  outbound MCP client lifecycle phase that happened *inside* a turn
+  (`security_block`/`drift`/`reconnect`); the boot-time phases become their own
+  self-closing traces in `Aggregation` instead.
+
+  The key list mirrors the emitter's allowlist exactly
+  (`FermixCore.Capabilities.MCP.Telemetry`): there is no global allowlist here,
+  every builder hard-codes its own, so a key not named below never exports.
+  """
+  @spec mcp_client_span(map(), map(), keyword()) :: map()
+  def mcp_client_span(metadata, measurements, opts) do
+    ended = Keyword.fetch!(opts, :ended)
+    duration_ms = Map.get(measurements, :duration_ms, 0)
+    started = start_of(ended, duration_ms)
+
+    %{
+      id: new_id(started),
+      trace_id: Keyword.fetch!(opts, :trace_id),
+      parent_span_id: Keyword.get(opts, :parent_span_id),
+      project_name: Keyword.fetch!(opts, :project_name),
+      name: "mcp_client:#{stringify(Map.get(metadata, :phase)) || "lifecycle"}",
+      type: "general",
+      start_time: iso(started),
+      end_time: iso(ended),
+      metadata:
+        drop_nil(%{
+          source_id: Map.get(metadata, :source_id),
+          plugin: Map.get(metadata, :plugin),
+          phase: stringify(Map.get(metadata, :phase)),
+          result: stringify(Map.get(metadata, :result)),
+          error_class: stringify(Map.get(metadata, :error_class)),
           attempt: Map.get(metadata, :attempt)
         })
     }

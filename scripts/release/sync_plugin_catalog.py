@@ -89,6 +89,29 @@ def parse_yanked(text):
     return yanked
 
 
+
+# The pre-install consent sentence the setup page shows is chosen by this field
+# (M27 §12 Stage 2). Deriving it is not cosmetic: with it absent an `mcp`-rail
+# entry falls back to the LOCAL-process sentence, so a hosted plugin would tell
+# the operator it runs on their machine while it sends their content to a remote
+# service. A runtime kind this core does not map is an error rather than a
+# silent `None`, because `None` is indistinguishable from "published before the
+# field existed" and would reintroduce exactly that misstatement.
+LOCAL_RUNTIME_KINDS = ("node", "python", "binary", "escript")
+
+
+def runtime_kind(manifest):
+    """`local_stdio` | `remote_mcp` | None (no runtime block: an HTTP-rail plugin)."""
+    runtime = manifest.get("runtime") or {}
+    kind = runtime.get("kind")
+    if kind is None:
+        return None
+    if kind == "remote_mcp":
+        return "remote_mcp"
+    if kind in LOCAL_RUNTIME_KINDS:
+        return "local_stdio"
+    raise SyncError(f"unknown runtime kind {kind!r}: cannot derive the catalog runtime_kind")
+
 def plugin_entry(name, releases, yanked, logo):
     """Catalog entry in exactly the shape FermixCore.Plugins.Dist.Index.parse/1 reads.
 
@@ -108,7 +131,7 @@ def plugin_entry(name, releases, yanked, logo):
     latest_version, _, latest_manifest, _ = ordered[0]
     interface = latest_manifest.get("interface") or {}
     auth = latest_manifest.get("auth") or {}
-    return {
+    entry = {
         "name": name,
         "display_name": latest_manifest["display_name"],
         "category": latest_manifest["category"],
@@ -133,6 +156,15 @@ def plugin_entry(name, releases, yanked, logo):
             for version, published_at, manifest, artifacts in ordered
         ],
     }
+
+    # OMITTED, never `null`, when there is no runtime block. `Index.parse/1`
+    # tolerates an ABSENT key (entries published before the field existed) but
+    # throws on a present-and-null one, so writing the key unconditionally makes
+    # the whole catalog unparseable — which is how this was caught.
+    kind = runtime_kind(latest_manifest)
+    if kind is not None:
+        entry["runtime_kind"] = kind
+    return entry
 
 
 def validate(index):

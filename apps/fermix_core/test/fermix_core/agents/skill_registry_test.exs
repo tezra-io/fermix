@@ -134,6 +134,24 @@ defmodule FermixCore.Agents.SkillRegistryTest do
       assert SkillRegistry.list(registry) == ["coding-skill"]
       assert {:error, {:unknown_skill, "ops-skill"}} = SkillRegistry.load(registry, "ops-skill")
     end
+
+    # MILESTONE_26_SKILL_CURATION §6.9: archived skills live under
+    # `skills/_archive/<name>/` — one level deeper than the `*/SKILL.md`
+    # discovery glob reaches. Curation's archive flow relies on that invisibility
+    # with zero loader changes, so a glob change that starts descending must fail
+    # here loudly.
+    test "skills under _archive/<name>/ are invisible to discovery", %{
+      registry: registry,
+      skills_dir: skills_dir
+    } do
+      write_skill(skills_dir, "live-skill", "You are live.")
+      write_skill(Path.join(skills_dir, "_archive"), "buried-skill", "You are archived.")
+
+      assert ["live-skill"] = reload_names(registry)
+
+      assert {:error, {:unknown_skill, "buried-skill"}} =
+               SkillRegistry.load(registry, "buried-skill")
+    end
   end
 
   describe "seeded defaults" do

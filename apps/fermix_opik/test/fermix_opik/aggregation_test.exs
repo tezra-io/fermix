@@ -218,6 +218,82 @@ defmodule FermixOpik.AggregationTest do
     assert llm.usage == %{prompt_tokens: 40, completion_tokens: 8, total_tokens: 48}
   end
 
+  # The M29/Buzz duplicate-reply incident: the one trace worth reading — the
+  # failed turn — carried no input, no status and nothing filterable, so a reader
+  # could only find it by eyeballing output text.
+  test "a failed turn carries the prompt, an error status and structured error_info" do
+    {_state, closed} =
+      run([
+        {[:fermix, :provider, :call], %{duration_ms: 400},
+         %{provider: :openai_codex, model: "gpt-5-codex", status: :error, session_id: "main-1"}},
+        {[:fermix, :agent, :message_error], %{count: 1},
+         %{
+           channel: :telegram,
+           chat_id: "c1",
+           sender: "u1",
+           session_id: "main-1",
+           agent: "main",
+           input: "why did that reply post five times?",
+           reason: {:provider_transport_error, %{kind: :transport_closed}}
+         }}
+      ])
+
+    assert [%{trace: trace}] = closed
+    assert trace.name == "agent:main"
+    assert trace.thread_id == "telegram:c1"
+    # The prompt a successful turn keeps, the failed one now keeps too.
+    assert trace.input == %{text: "why did that reply post five times?"}
+    assert trace.metadata.status == "error"
+    assert trace.metadata.sender == "u1"
+    # Filterable as failed, not findable only by reading the output text.
+    assert trace.error_info.exception_type == "TurnError"
+    assert trace.error_info.message =~ "transport_closed"
+    assert trace.output.text =~ "transport_closed"
+  end
+
+  # Regression: enriching the failure path must leave a successful turn's trace
+  # payload exactly as it was — no status key, no error_info.
+  test "a successful turn's trace payload is unchanged" do
+    {_state, closed} =
+      run([
+        {[:fermix, :agent, :message], %{iterations: 1, total_tokens: 10},
+         %{
+           channel: :telegram,
+           chat_id: "c1",
+           sender: "u1",
+           session_id: "main-1",
+           agent: "main",
+           input: "hello",
+           output: "hi"
+         }}
+      ])
+
+    assert [%{trace: trace}] = closed
+
+    assert trace.metadata == %{
+             channel: "telegram",
+             chat_id: "c1",
+             sender: "u1",
+             iterations: 1,
+             total_tokens: 10
+           }
+
+    refute Map.has_key?(trace, :error_info)
+
+    assert Enum.sort(Map.keys(trace)) == [
+             :end_time,
+             :id,
+             :input,
+             :metadata,
+             :name,
+             :output,
+             :project_name,
+             :start_time,
+             :tags,
+             :thread_id
+           ]
+  end
+
   test "a subagent's work nests under the delegating turn in the same trace" do
     {_state, closed} =
       run([
@@ -404,6 +480,102 @@ defmodule FermixOpik.AggregationTest do
     assert trace.metadata.with_context == true
     assert [llm] = spans_of_type(spans, "llm")
     assert llm.provider == "anthropic"
+  end
+
+  test "a skill-curation cycle is its own trace nesting the miner call, counts exported" do
+    {_state, closed} =
+      run([
+        {[:fermix, :skill_curation, :run_start], %{},
+         %{
+           agent: "skill_curation",
+           session_id: "skill_curation:abc",
+           stage: :cycle,
+           trigger: :scheduled
+         }},
+        {[:fermix, :provider, :call], %{duration_ms: 900},
+         %{
+           provider: :anthropic,
+           model: "claude-opus-4-8",
+           status: :ok,
+           session_id: "skill_curation:abc",
+           tokens: %{prompt: 120, completion: 40}
+         }},
+        {[:fermix, :skill_curation, :run_complete], %{count: 1},
+         %{
+           agent: "skill_curation",
+           session_id: "skill_curation:abc",
+           stage: :cycle,
+           trigger: :scheduled,
+           status: "ok",
+           messages_scanned: 240,
+           candidates: 2,
+           dropped_grounding: 1,
+           deferred: 0,
+           proposals_new: 2,
+           proposals_archive: 1,
+           delivery_status: :delivered
+         }}
+      ])
+
+    assert [%{trace: trace, spans: spans}] = closed
+    assert trace.name == "skill_curation:cycle"
+    assert "skill_curation" in trace.tags
+    assert trace.metadata.trigger == "scheduled"
+    assert trace.metadata.messages_scanned == 240
+    assert trace.metadata.candidates == 2
+    assert trace.metadata.dropped_grounding == 1
+    assert trace.metadata.proposals_new == 2
+    assert trace.metadata.proposals_archive == 1
+    assert trace.metadata.delivery_status == "delivered"
+    assert [llm] = spans_of_type(spans, "llm")
+    assert llm.provider == "anthropic"
+  end
+
+  test "a manual skill-curation cycle with a synthetic command parent stays a standalone root" do
+    {_state, closed} =
+      run([
+        {[:fermix, :skill_curation, :run_start], %{},
+         %{
+           agent: "skill_curation",
+           session_id: "skill_curation:xyz",
+           stage: :cycle,
+           trigger: :manual,
+           parent_session: "command:skills:telegram:c1"
+         }},
+        {[:fermix, :skill_curation, :run_error], %{count: 1},
+         %{
+           agent: "skill_curation",
+           session_id: "skill_curation:xyz",
+           stage: :cycle,
+           trigger: :manual,
+           status: "error",
+           reason_kind: :provider,
+           error: "boom"
+         }}
+      ])
+
+    assert [%{trace: trace}] = closed
+    assert trace.name == "skill_curation:cycle"
+    assert trace.metadata.reason_kind == "provider"
+    assert trace.metadata.trigger == "manual"
+  end
+
+  test "a proposal action is a self-closing point trace, never a phantom root" do
+    {state, closed} =
+      run([
+        {[:fermix, :skill_curation, :proposal_actioned], %{count: 1, age_ms: 86_400_000},
+         %{agent: "skill_curation", action: "approve", kind: "new_skill"}}
+      ])
+
+    assert [%{trace: trace, spans: []}] = closed
+    assert trace.name == "skillcur:approve"
+    assert trace.metadata.action == "approve"
+    assert trace.metadata.kind == "new_skill"
+    assert trace.metadata.age_ms == 86_400_000
+    assert "skill_curation" in trace.tags
+
+    # Point events are emitted immediately, never tracked as open sessions.
+    assert map_size(state.sessions) == 0
   end
 
   test "a background memory review is its own memory_review trace closed by the :review event" do
@@ -883,5 +1055,223 @@ defmodule FermixOpik.AggregationTest do
     assert trace.name == "harness:codex"
     assert "harness" in trace.tags
     assert trace.metadata.origin_session_id == "main-1"
+  end
+
+  # Outbound MCP client lifecycle ([:fermix, :mcp_client, :lifecycle]).
+  #
+  # `@mcp_client_phases` mirrors `FermixCore.Capabilities.MCP.Telemetry.phases/0`
+  # by hand: `fermix_opik` deliberately declares no dependency on `fermix_core`
+  # (it must stay standalone-testable), so the emitter's list cannot be read here.
+  # Its counterpart test in
+  # `apps/fermix_core/test/fermix_core/capabilities/mcp/telemetry_test.exs` pins
+  # `phases/0` against the same literal list, so adding a phase there fails until
+  # both halves are updated.
+  @mcp_client_event [:fermix, :mcp_client, :lifecycle]
+  @mcp_client_boot_phases [:initialize, :discover, :ready, :owner_down, :teardown]
+  @mcp_client_turn_phases [:security_block, :drift, :reconnect]
+  @mcp_client_phases @mcp_client_boot_phases ++ @mcp_client_turn_phases
+
+  defp mcp_meta(phase, extra \\ %{}) do
+    Map.merge(%{source_id: "plugin:eden", plugin: "eden", phase: phase, result: :ok}, extra)
+  end
+
+  describe "outbound MCP client lifecycle" do
+    test "the reporter subscribes to the event" do
+      assert @mcp_client_event in FermixOpik.Reporter.events()
+    end
+
+    # Registry completeness: every phase must hit a real clause, never the
+    # catch-all (which returns `{state, []}` and leaves nothing behind). Looping
+    # the phase list is the gate — a phase added later either joins it or fails.
+    test "every phase is handled by a non-catch-all clause" do
+      for phase <- @mcp_client_phases do
+        {state, closed} = run([{@mcp_client_event, %{duration_ms: 4}, mcp_meta(phase)}])
+
+        assert [%{trace: trace, spans: []}] = closed,
+               "phase #{inspect(phase)} produced no trace — it fell to the catch-all"
+
+        assert trace.name == "mcp_client:#{phase}"
+        assert trace.tags == ["mcp_client"]
+        assert state.traces == %{}
+      end
+    end
+
+    test "a boot phase self-closes even when a session_id is somehow present" do
+      # initialize/discover/ready/teardown/owner_down run before any turn. Nesting
+      # one under a non-turn session id would mint a phantom root whose
+      # `infer_kind/1` falls through to :subagent — the orphan-span bug.
+      for phase <- @mcp_client_boot_phases do
+        {state, closed} =
+          run([
+            {@mcp_client_event, %{duration_ms: 4},
+             mcp_meta(phase, %{session_id: "mcp_client_boot"})}
+          ])
+
+        assert [%{trace: trace, spans: []}] = closed
+        assert trace.name == "mcp_client:#{phase}"
+        refute "subagent" in trace.tags
+        assert state.traces == %{}
+        assert state.sessions == %{}
+      end
+    end
+
+    test "a boot-phase trace carries the emitter's redacted metadata" do
+      {_state, closed} =
+        run([
+          {@mcp_client_event, %{duration_ms: 87},
+           mcp_meta(:initialize, %{result: :error, error_class: "remote_unreachable", attempt: 3})}
+        ])
+
+      assert [%{trace: trace, spans: []}] = closed
+      assert trace.metadata.source_id == "plugin:eden"
+      assert trace.metadata.plugin == "eden"
+      assert trace.metadata.phase == "initialize"
+      assert trace.metadata.result == "error"
+      assert trace.metadata.error_class == "remote_unreachable"
+      assert trace.metadata.attempt == 3
+      assert trace.metadata.duration_ms == 87
+    end
+
+    test "a turn phase nests under the turn that hit it" do
+      for phase <- @mcp_client_turn_phases do
+        {_state, closed} =
+          run([
+            {[:fermix, :provider, :call], %{duration_ms: 10},
+             %{provider: :openai, model: "gpt-5", status: :ok, session_id: "main-1"}},
+            {@mcp_client_event, %{duration_ms: 2},
+             mcp_meta(phase, %{
+               result: :error,
+               error_class: "tool_not_allowed",
+               session_id: "main-1"
+             })},
+            {[:fermix, :agent, :message], %{iterations: 1},
+             %{channel: :cli, chat_id: "c1", session_id: "main-1", agent: "main"}}
+          ])
+
+        assert [%{trace: trace, spans: spans}] = closed
+        assert trace.name == "agent:main"
+
+        span = span_named(spans, "mcp_client:#{phase}")
+        assert span, "phase #{inspect(phase)} produced no child span under the turn"
+        assert span.trace_id == trace.id
+        assert span.parent_span_id == span_named(spans, "agent:main").id
+        assert span.metadata.error_class == "tool_not_allowed"
+      end
+    end
+
+    test "a turn phase outside a turn self-closes rather than orphaning" do
+      {state, closed} =
+        run([{@mcp_client_event, %{duration_ms: 1}, mcp_meta(:reconnect, %{attempt: 2})}])
+
+      assert [%{trace: trace, spans: []}] = closed
+      assert trace.name == "mcp_client:reconnect"
+      assert state.traces == %{}
+    end
+  end
+
+  # Proactive reminder lifecycle ([:fermix, :reminder, :lifecycle], M30 §15.2).
+  #
+  # `@reminder_phases` mirrors `FermixCore.Temporal.Telemetry.phases/0` by hand:
+  # `fermix_opik` deliberately declares no dependency on `fermix_core` (it must
+  # stay standalone-testable), so the emitter's list cannot be read here. Its
+  # counterpart test in
+  # `apps/fermix_core/test/fermix_core/temporal/telemetry_test.exs` pins
+  # `phases/0` against the same literal list, so adding a phase there fails until
+  # both halves are updated.
+  @reminder_event [:fermix, :reminder, :lifecycle]
+  @reminder_phases [
+    :materialized,
+    :claimed,
+    :delivered,
+    :retry_scheduled,
+    :failed,
+    :expired,
+    :superseded,
+    :cancelled,
+    :event_completed,
+    :scheduler_error
+  ]
+
+  defp reminder_meta(phase, extra \\ %{}) do
+    Map.merge(
+      %{
+        component: "temporal_scheduler",
+        phase: phase,
+        event_id: "evt_1",
+        reminder_id: "rem_1",
+        occurrence_key: "2026-09-14",
+        rule_id: "day_of",
+        platform: "telegram",
+        result: :ok
+      },
+      extra
+    )
+  end
+
+  describe "proactive reminder lifecycle" do
+    test "the reporter subscribes to the event" do
+      assert @reminder_event in FermixOpik.Reporter.events()
+    end
+
+    # Registry completeness: every phase must hit a real clause, never the
+    # catch-all (which returns `{state, []}` and leaves nothing behind).
+    test "every phase is handled by a non-catch-all clause" do
+      for phase <- @reminder_phases do
+        {state, closed} = run([{@reminder_event, %{count: 1}, reminder_meta(phase)}])
+
+        assert [%{trace: trace, spans: []}] = closed,
+               "phase #{inspect(phase)} produced no trace — it fell to the catch-all"
+
+        assert trace.name == "reminder:#{phase}"
+        assert trace.tags == ["reminder"]
+        assert state.traces == %{}
+      end
+    end
+
+    # A reminder delivery is not an agent run (§6.4): it has no session, so it
+    # must never nest under one or mint a phantom root to hang itself on.
+    test "a lifecycle event never nests under a turn or opens a session" do
+      {state, closed} =
+        run([
+          {[:fermix, :provider, :call], %{duration_ms: 10},
+           %{provider: :openai, model: "gpt-5", status: :ok, session_id: "main-1"}},
+          {@reminder_event, %{duration_ms: 12}, reminder_meta(:delivered)},
+          {[:fermix, :agent, :message], %{iterations: 1},
+           %{channel: :cli, chat_id: "c1", session_id: "main-1", agent: "main"}}
+        ])
+
+      names = Enum.map(closed, & &1.trace.name)
+      assert "reminder:delivered" in names
+      assert "agent:main" in names
+
+      turn = Enum.find(closed, &(&1.trace.name == "agent:main"))
+      refute span_named(turn.spans, "reminder:delivered")
+      assert state.traces == %{}
+    end
+
+    test "the trace carries the emitter's correlation fields" do
+      {_state, closed} =
+        run([
+          {@reminder_event, %{duration_ms: 87},
+           reminder_meta(:failed, %{
+             result: :error,
+             error_class: "permanent",
+             attempt: 5
+           })}
+        ])
+
+      assert [%{trace: trace, spans: []}] = closed
+      assert trace.metadata.component == "temporal_scheduler"
+      assert trace.metadata.phase == "failed"
+      assert trace.metadata.event_id == "evt_1"
+      assert trace.metadata.reminder_id == "rem_1"
+      assert trace.metadata.occurrence_key == "2026-09-14"
+      assert trace.metadata.rule_id == "day_of"
+      assert trace.metadata.platform == "telegram"
+      assert trace.metadata.result == "error"
+      assert trace.metadata.error_class == "permanent"
+      assert trace.metadata.attempt == 5
+      assert trace.metadata.duration_ms == 87
+    end
   end
 end

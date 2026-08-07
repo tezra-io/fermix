@@ -88,7 +88,20 @@ defmodule FermixChannels.Gateway do
   #
   # "draft" needs a draft-capable channel (in-place edits); "block" sends
   # completed chunks as ordinary replies, so every channel qualifies.
+  #
+  # The `:raw` tier (M29 §8.4) is decided BEFORE the config consult: a machine
+  # surface appends exact deltas to its own wire, so the chat-shaped streaming
+  # knob does not apply to it. Its spec is a deliberately plain map — the queue
+  # matches on it and drives the callback with no DraftStream engine.
   defp build_stream_spec(channel, %Message{} = message, reply_fn) do
+    if raw_stream?(channel) do
+      %{mode: :raw, callback: channel.build_raw_stream_callback(message)}
+    else
+      configured_stream_spec(channel, message, reply_fn)
+    end
+  end
+
+  defp configured_stream_spec(channel, %Message{} = message, reply_fn) do
     case streaming_config(ChannelRegistry.channel_key(message.channel)) do
       "draft" ->
         if draft_capable?(channel), do: DraftStream.build_spec(channel, message)
@@ -101,9 +114,30 @@ defmodule FermixChannels.Gateway do
     end
   end
 
+  defp raw_stream?(channel) do
+    function_exported?(channel, :stream_capability, 0) and
+      channel.stream_capability() == :raw
+  end
+
   defp draft_capable?(channel) do
     function_exported?(channel, :stream_capability, 0) and
       channel.stream_capability() == :draft_edit
+  end
+
+  # Optional per-turn callbacks (M29 §4), built here for the same reason as
+  # typing/reaction/stream: the gateway is the only layer holding the channel
+  # module. An unimplemented callback yields nil and the key never appears on
+  # the agent message, so core's checks stay one-sided.
+  defp build_activity_callback(channel, %Message{} = message) do
+    if function_exported?(channel, :build_activity_callback, 1) do
+      channel.build_activity_callback(message)
+    end
+  end
+
+  defp build_turn_result_fn(channel, %Message{} = message) do
+    if function_exported?(channel, :build_turn_result, 1) do
+      channel.build_turn_result(message)
+    end
   end
 
   # A configured channel streams by default ("block" works on every channel and
@@ -256,12 +290,32 @@ defmodule FermixChannels.Gateway do
     end
   end
 
+  # Channels the registry marks `commands?: false` never see the slash-command
+  # pipeline: no parse, no dispatch, content reaches the model as ordinary text
+  # (M29 §4). Every other channel keeps today's exact path.
   defp run_commands_or_deliver(channel, reply_message, authorization, reply_fn, deps) do
-    typing_fn = build_typing_fn(channel, reply_message)
-    stream_spec = build_stream_spec(channel, reply_message, reply_fn)
-    reaction_spec = build_reaction_spec(channel)
-    approval_button? = function_exported?(channel, :send_approval, 3)
+    closures = build_closures(channel, reply_message, reply_fn)
 
+    if ChannelRegistry.commands?(reply_message.channel) do
+      run_commands(reply_message, authorization, reply_fn, closures, deps)
+    else
+      deliver_to_agent(reply_message, authorization, deps.agent, deps.agent_server, closures)
+    end
+  end
+
+  defp build_closures(channel, %Message{} = message, reply_fn) do
+    %{
+      reply_fn: reply_fn,
+      typing_fn: build_typing_fn(channel, message),
+      stream_spec: build_stream_spec(channel, message, reply_fn),
+      reaction_spec: build_reaction_spec(channel),
+      approval_button?: function_exported?(channel, :send_approval, 3),
+      activity_callback: build_activity_callback(channel, message),
+      turn_result_fn: build_turn_result_fn(channel, message)
+    }
+  end
+
+  defp run_commands(reply_message, authorization, reply_fn, closures, deps) do
     context =
       command_context(
         reply_message,
@@ -289,22 +343,10 @@ defmodule FermixChannels.Gateway do
       # A command (e.g. /ultra) handled parsing/auth but wants the agent to run
       # a turn on a modified message (prefix stripped, run_profile tagged).
       {:enqueue, agent_message} ->
-        deliver_to_agent(
-          agent_message,
-          authorization,
-          deps.agent,
-          deps.agent_server,
-          {reply_fn, typing_fn, stream_spec, reaction_spec, approval_button?}
-        )
+        deliver_to_agent(agent_message, authorization, deps.agent, deps.agent_server, closures)
 
       :passthrough ->
-        deliver_to_agent(
-          reply_message,
-          authorization,
-          deps.agent,
-          deps.agent_server,
-          {reply_fn, typing_fn, stream_spec, reaction_spec, approval_button?}
-        )
+        deliver_to_agent(reply_message, authorization, deps.agent, deps.agent_server, closures)
     end
   end
 
@@ -369,25 +411,9 @@ defmodule FermixChannels.Gateway do
     result
   end
 
-  defp do_deliver_to_agent(
-         message,
-         authorization,
-         agent,
-         agent_server,
-         {reply_fn, typing_fn, stream_spec, reaction_spec, approval_button?}
-       ) do
+  defp do_deliver_to_agent(message, authorization, agent, agent_server, closures) do
     if agent_alive?(agent_server) do
-      agent_message =
-        message
-        |> to_agent_message()
-        |> Map.put(:reply_fn, reply_fn)
-        |> Map.put(:source_trust, authorization.trust)
-        |> maybe_put_approval_fn(message, authorization)
-        |> maybe_put_approval_button(authorization, approval_button?)
-        |> maybe_put_typing_fn(typing_fn)
-        |> maybe_put_stream_spec(stream_spec)
-        |> maybe_put_reaction_spec(reaction_spec)
-
+      agent_message = build_agent_message(message, authorization, closures)
       handle_agent_delivery(agent.handle_message(agent_message, agent_server))
     else
       # `MainAgent.handle_message/2` is a `GenServer.cast`, which silently
@@ -405,9 +431,27 @@ defmodule FermixChannels.Gateway do
         %{channel: message.channel}
       )
 
-      _ = reply_fn.({:text, "I'm restarting — please send your message again in a moment."})
+      _ =
+        closures.reply_fn.(
+          {:text, "I'm restarting — please send your message again in a moment."}
+        )
+
       :ok
     end
+  end
+
+  defp build_agent_message(message, authorization, closures) do
+    message
+    |> to_agent_message()
+    |> Map.put(:reply_fn, closures.reply_fn)
+    |> Map.put(:source_trust, authorization.trust)
+    |> maybe_put_approval_fn(message, authorization)
+    |> maybe_put_approval_button(authorization, closures.approval_button?)
+    |> maybe_put_typing_fn(closures.typing_fn)
+    |> maybe_put_stream_spec(closures.stream_spec)
+    |> maybe_put_reaction_spec(closures.reaction_spec)
+    |> maybe_put_callback(:activity_callback, closures.activity_callback)
+    |> maybe_put_callback(:turn_result_fn, closures.turn_result_fn)
   end
 
   defp agent_alive?(pid) when is_pid(pid), do: Process.alive?(pid)
@@ -476,8 +520,19 @@ defmodule FermixChannels.Gateway do
   # additionally gates on it, so a guest/unattended turn has no approval path.
   # Calling it binds a pending grant to THIS owner conversation's origin and, on a
   # re-ingestable channel, captures the verbatim request for auto-resume.
-  defp maybe_put_approval_fn(agent_message, %Message{} = message, %{trust: :operator}) do
-    Map.put(agent_message, :approval_fn, build_approval_fn(message))
+  #
+  # Operator trust is necessary but not sufficient: a grant is answered with
+  # `/confirm <token>`, so a channel the registry marks `commands?: false` has no
+  # path back and the approval could never be completed (M29 §11). Withholding
+  # the closure is what makes `request_directory_access` self-hide there.
+  defp maybe_put_approval_fn(agent_message, %Message{channel: channel} = message, %{
+         trust: :operator
+       }) do
+    if ChannelRegistry.commands?(channel) do
+      Map.put(agent_message, :approval_fn, build_approval_fn(message))
+    else
+      agent_message
+    end
   end
 
   defp maybe_put_approval_fn(agent_message, _message, _authorization), do: agent_message
@@ -545,7 +600,21 @@ defmodule FermixChannels.Gateway do
     Map.put(message, :stream_spec, stream_spec)
   end
 
+  # The `:raw` tier's spec is a plain map by design (M29 §8.4): the queue
+  # matches it and drives the callback directly, with no DraftStream engine.
+  defp maybe_put_stream_spec(message, %{mode: :raw, callback: callback} = stream_spec)
+       when is_function(callback, 1) do
+    Map.put(message, :stream_spec, stream_spec)
+  end
+
   defp maybe_put_stream_spec(message, _stream_spec), do: message
+
+  # Optional channel-built turn callbacks: absent callback ⇒ absent key.
+  defp maybe_put_callback(message, _key, nil), do: message
+
+  defp maybe_put_callback(message, key, callback) when is_function(callback, 1) do
+    Map.put(message, key, callback)
+  end
 
   defp handle_agent_delivery(:ok), do: :ok
 

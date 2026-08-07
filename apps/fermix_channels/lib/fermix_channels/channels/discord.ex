@@ -16,6 +16,7 @@ defmodule FermixChannels.Channels.Discord do
   alias FermixChannels.Gateway.Idempotency
   alias FermixChannels.Gateway.MediaDownload
   alias FermixChannels.Gateway.Message
+  alias FermixChannels.Gateway.ProposalButton
   alias FermixChannels.Gateway.RetryHint
   alias FermixChannels.Telemetry, as: ChannelTelemetry
   alias FermixCore.Net.HttpClient
@@ -69,6 +70,13 @@ defmodule FermixChannels.Channels.Discord do
         end)
 
       handle_send_response(result, duration_us)
+    else
+      # M30 §11.3: an unconfigured bot token means there is no client to send
+      # through, which is the `:adapter_unavailable` kind of the closed delivery
+      # vocabulary — not a bare atom the delivery normalizer would have to guess
+      # at, and then log as a contract violation.
+      {:error, :not_configured} -> {:error, {:permanent, :adapter_unavailable}}
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -128,6 +136,35 @@ defmodule FermixChannels.Channels.Discord do
     ]
   end
 
+  # -- Skill-curation proposal buttons (MILESTONE_26_SKILL_CURATION §6.6) --
+
+  @impl true
+  @spec send_proposal(map(), String.t(), String.t()) :: :ok | {:error, term()}
+  def send_proposal(%{chat_id: channel_id}, text, token)
+      when is_binary(channel_id) and is_binary(text) and is_binary(token) do
+    # Target-addressed (proactive — no inbound message to reply to). One action
+    # row with approve (style 3, success) and deny (style 4, danger); a tap
+    # synthesizes the typed `/skills approve|deny <token>` command.
+    send_message(channel_id, text, components: proposal_components(token))
+  end
+
+  defp proposal_components(token) do
+    [
+      %{
+        type: 1,
+        components: [
+          %{
+            type: 2,
+            style: 3,
+            label: "Approve",
+            custom_id: ProposalButton.approve_payload(token)
+          },
+          %{type: 2, style: 4, label: "Deny", custom_id: ProposalButton.deny_payload(token)}
+        ]
+      }
+    ]
+  end
+
   @doc """
   Parse a component-button INTERACTION_CREATE dispatch into the synthesized
   `/confirm` message + the per-interaction id/token the caller acks with. Returns
@@ -150,29 +187,50 @@ defmodule FermixChannels.Channels.Discord do
   defp component_interaction?(data), do: Map.get(data, "type") == 3
 
   defp parse_component_interaction(data) do
-    case ApprovalButton.parse_payload(get_in(data, ["data", "custom_id"])) do
-      {:ok, token} -> build_interaction(data, token)
-      :ignore -> :ignore
+    custom_id = get_in(data, ["data", "custom_id"])
+
+    case ApprovalButton.parse_payload(custom_id) do
+      {:ok, token} -> build_interaction(data, &confirm_tap_message(&1, token))
+      :ignore -> parse_proposal_interaction(data, custom_id)
     end
   end
 
-  defp build_interaction(data, token) do
+  # A skill-curation proposal tap synthesizes the typed `/skills approve|deny`
+  # command (MILESTONE_26_SKILL_CURATION §6.6) — same origin discipline as the
+  # `grant:` confirm path.
+  defp parse_proposal_interaction(data, custom_id) do
+    case ProposalButton.parse_payload(custom_id) do
+      {:ok, action, token} ->
+        build_interaction(
+          data,
+          &ProposalButton.action_message(Map.merge(&1, %{action: action, token: token}))
+        )
+
+      :ignore ->
+        :ignore
+    end
+  end
+
+  defp confirm_tap_message(origin, token) do
+    ApprovalButton.confirm_message(Map.put(origin, :token, token))
+  end
+
+  defp build_interaction(data, build_message) do
     with id when is_binary(id) <- Map.get(data, "id"),
          interaction_token when is_binary(interaction_token) <- Map.get(data, "token"),
          user_id when is_binary(user_id) <- interaction_user_id(data),
          channel_id when is_binary(channel_id) <- Map.get(data, "channel_id") do
       message =
-        ApprovalButton.confirm_message(%{
+        build_message.(%{
           id: "interaction-#{id}",
           sender: interaction_sender(data),
           channel: "discord",
           chat_id: channel_id,
-          # Discord threads are their own channels (channel_id), so the confirm
+          # Discord threads are their own channels (channel_id), so the tap
           # rides at :root exactly like the message the button was posted on —
-          # keeping same-origin with the pending grant record.
+          # keeping same-origin with the pending record.
           thread_ts: nil,
-          user_id: user_id,
-          token: token
+          user_id: user_id
         })
 
       {:ok, %{id: id, token: interaction_token, message: message}}
@@ -385,7 +443,6 @@ defmodule FermixChannels.Channels.Discord do
     with :ok <- MediaDownload.preflight_cap(attachment, @max_media_bytes),
          {:ok, url} <- attachment_url(attachment),
          {:ok, body} <- fetch_cdn_media(url),
-         {:ok, body} <- MediaDownload.enforce_cap(body, @max_media_bytes),
          {:ok, path} <- MediaDownload.write_temp(body, "discord", attachment) do
       {:ok, path}
     end
@@ -398,25 +455,25 @@ defmodule FermixChannels.Channels.Discord do
     end
   end
 
-  # Discord CDN attachment URLs are public — no bot token needed.
+  # Discord CDN attachment URLs are public — no bot token needed. The gateway's
+  # declared `size` is the sender's claim, not the CDN's: `get_capped/3` halts
+  # the transfer at the cap instead of buffering the whole body and measuring it
+  # afterwards, which also removes the gzip amplifier the buffered path had.
   defp fetch_cdn_media(url) do
-    case Req.new(url: url, method: :get)
-         |> Req.merge(req_options([]))
-         |> HttpClient.request("Discord media download") do
-      {:ok, %{status: 200, body: body}} when is_binary(body) ->
-        {:ok, body}
-
-      {:ok, %{status: 200, body: body}} ->
-        {:ok, IO.iodata_to_binary(body)}
-
-      {:ok, %{status: status}} ->
-        Logger.error("Discord media download failed: status=#{status}")
-        {:error, {:download_failed, status}}
-
-      {:error, reason} ->
-        {:error, reason}
-    end
+    Req.new(url: url, method: :get)
+    |> Req.merge(req_options([]))
+    |> MediaDownload.get_capped(@max_media_bytes, "Discord media download")
+    |> handle_media_response()
   end
+
+  defp handle_media_response({:ok, body}), do: {:ok, body}
+
+  defp handle_media_response({:error, {:http_status, status, _body}}) do
+    Logger.error("Discord media download failed: status=#{status}")
+    {:error, {:download_failed, status}}
+  end
+
+  defp handle_media_response({:error, reason}), do: {:error, reason}
 
   defp attachment_kind("audio/" <> _rest), do: :audio
   defp attachment_kind("image/" <> _rest), do: :image
@@ -649,10 +706,14 @@ defmodule FermixChannels.Channels.Discord do
 
   defp maybe_emit_inbound_message(_result, _duration_us), do: :ok
 
+  # M30 §11.3: the adapter owns platform knowledge and returns the structured
+  # status/rate-limit forms of the closed delivery vocabulary. `RetryHint` stays
+  # authoritative whenever Discord supplies a retry-after hint; the response
+  # body reaches the local log above, never the returned reason.
   defp discord_api_error(%{status: status} = response) do
     case RetryHint.retry_after_ms(response) do
       {:ok, retry_after_ms} -> {:error, {:rate_limited, retry_after_ms}}
-      :error -> {:error, "Discord API error: #{status}"}
+      :error -> {:error, {:http_status, status}}
     end
   end
 
