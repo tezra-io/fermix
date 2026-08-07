@@ -2046,6 +2046,17 @@ evidence, not preemptively. ~A dozen lines of production code; no state,
 schema, config, telemetry, or path changes; scheduler/delivery/snooze/cancel
 untouched.
 
+**2026-08-06 addendum — the relative clause floored away an hour.** First
+organic 24h-before delivery (13ms of scheduler latency) rendered "(in 23
+hours)"; the same floor would have OMITTED tomorrow's "(in 1 hour)" clause
+entirely (3599.987s < the 3600 branch). §13's renderer now rounds half-down to
+the displayed unit — latency can never shave the number, "in 24 hours" and
+"in 1 hour" render as humans expect, a retry at exactly 30 minutes still drops
+the clause (the pinned mislead rule), and timed events under 48 hours display
+in hours rather than collapsing to "in 1 day" at the 24h boundary. Found by
+the owner reading their own reminder — the demo-week observation loop doing
+its job.
+
 **2026-08-05 addendum 2 — the boolean lost to reality within hours;
 `owner_direction` replaces it.** First live trial: the model passed
 `confirm_overwrite: true` on its FIRST call for a bare "Saras birthday is on

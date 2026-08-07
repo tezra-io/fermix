@@ -64,6 +64,19 @@ defmodule FermixCore.Temporal.RendererTest do
       assert text == "Reminder: Dentist appointment — August 16 at 3:00 PM EDT (in 1 hour)."
     end
 
+    # The live defect: delivered 13ms after the scheduled instant, the 24h-before
+    # reminder read "(in 23 hours)" — a floor shaved the hour. Seconds of
+    # scheduler latency must never change the displayed number.
+    test "scheduler latency does not shave the displayed hour" do
+      assert {:ok, text} = Renderer.render(appointment_row(), ~U[2026-08-15 19:00:13Z])
+      assert text == "Reminder: Dentist appointment — August 16 at 3:00 PM EDT (in 24 hours)."
+    end
+
+    test "the one-hour clause survives sub-minute latency instead of vanishing" do
+      assert {:ok, text} = Renderer.render(appointment_row(), ~U[2026-08-16 18:00:30Z])
+      assert text == "Reminder: Dentist appointment — August 16 at 3:00 PM EDT (in 1 hour)."
+    end
+
     test "the relative clause is dropped when a retry lands under an hour before a timed event" do
       assert {:ok, text} = Renderer.render(appointment_row(), ~U[2026-08-16 18:30:00Z])
       assert text == "Reminder: Dentist appointment — August 16 at 3:00 PM EDT."

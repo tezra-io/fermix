@@ -497,7 +497,6 @@ defmodule FermixChannels.DispatcherTest do
   end
 
   test "threads memory context into manual compact commands" do
-    Req.Test.set_req_test_to_shared()
     previous_telegram = Application.get_env(:fermix_channels, :telegram, [])
     Application.put_env(:fermix_channels, :telegram, owner_user_id: "owner-1")
 
