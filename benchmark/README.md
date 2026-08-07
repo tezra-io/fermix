@@ -147,8 +147,13 @@ Under the hood (`bin/capability-daemon.sh` + `bin/seed_capability_home.py`) it:
 
    The `[sandbox]` block is always regenerated strict and home-scoped
    (`mode = "strict"`, `workspace_root = $FERMIX_HOME/workspace`, `allowed_roots =
-   []`) — never copied from the dev config, whose `allowed_roots` escape the home and
-   would fail the runner's precondition.
+   ["$FERMIX_HOME/skills"]`) — never copied from the dev config, whose
+   `allowed_roots` escape the home and would fail the runner's precondition. The
+   skills root is pre-granted because skill tasks verify their created SKILL.md
+   with raw file reads, and the owner-approval detour a sandbox denial triggers
+   can never be answered in an eval. The seed also resets `$FERMIX_HOME/skills`
+   (the daemon re-seeds the bundled skills at boot), so a skill created by a
+   prior sweep can't make a later fresh `skill_create` fail "already exists".
 2. **Starts it in the background** — `mix fermix.dev --no-web --no-realtime` with
    `FERMIX_OPIK_PROJECT=fermix-capability-eval` and a headless browser. Channels stay
    *on* (no `--no-channels`) because the CLI-ask turn queue is
