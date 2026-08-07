@@ -299,6 +299,15 @@ Notes:
   the limit clears. Tune per run with `EVAL_USAGE_RETRY_BACKOFF_MIN="30,60,120,180"`,
   or set it empty (`[]` / `""`) for immediate fail-fast. (Subscription paths like
   `openai_codex` hit limits; the pay-per-token `openai` API-key path usually won't.)
+- **Invalidated auth aborts immediately (exit 4).** If the provider credential dies
+  mid-sweep (e.g. a Codex OAuth session expires and the token refresh 401s), Fermix
+  answers every turn with a canned "authentication failed" reply before any model
+  call — a sweep that kept going would bank zero-token failures into a bogus row
+  (a 2026-08-06 sweep scored 70 of them into a 0.38 composite). The runner aborts on
+  the **first** such reply — the condition is permanent, so unlike a usage limit no
+  backoff can help — stops at the pointer, writes **no** leaderboard row, and exits 4.
+  Recover with `fermix auth login`, then re-run (`capability-daemon.sh up` re-copies
+  the token for the disposable home).
 
 ---
 
