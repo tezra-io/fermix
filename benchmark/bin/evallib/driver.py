@@ -34,10 +34,29 @@ _USAGE_LIMIT_RE = re.compile(
 )
 _RESET_HINT_RE = re.compile(r"try again in ~\s*(\d+)\s*min", re.IGNORECASE)
 
+# Fermix's auth-failure replies are likewise purpose-built stable wordings
+# (`auth_reply/1` in fermix_core `agents/turn_runner.ex`): OAuth, api-key, and
+# the generic fallback. All three anchor on "authentication failed —" PLUS the
+# remedy clause, so a task answer that merely discusses auth can't match. An
+# auth failure that reaches the reply is PERMANENT — TokenManager emits it only
+# after a refresh permanently failed — so every later trial refuses before any
+# model call (update here if the wordings change).
+_AUTH_INVALIDATED_RE = re.compile(
+    r"authentication failed — (?:reconnect with `fermix auth login"
+    r"|check the .{0,80}API key in `fermix setup`"
+    r"|run `fermix auth login`)",
+    re.IGNORECASE | re.DOTALL,
+)
+
 
 def is_usage_limit_reply(text: str | None) -> bool:
     """True iff `text` is a Fermix usage-limit / rate-limit / quota reply."""
     return bool(text) and _USAGE_LIMIT_RE.search(text) is not None
+
+
+def is_auth_invalidated_reply(text: str | None) -> bool:
+    """True iff `text` is a Fermix authentication-failure reply (permanent)."""
+    return bool(text) and _AUTH_INVALIDATED_RE.search(text) is not None
 
 
 def usage_limit_reset_hint(text: str | None) -> str | None:
@@ -70,6 +89,30 @@ class UsageLimitHit(Exception):
         return (collapsed[:n] + "…") if len(collapsed) > n else collapsed
 
 
+class AuthInvalidated(Exception):
+    """A driven turn's reply was a Fermix authentication-failure message. The
+    condition is permanent (TokenManager emits it only after a refresh
+    permanently failed), so unlike a usage limit there is nothing to wait out:
+    every remaining trial would refuse at zero tokens. The capability runner
+    catches this to STOP the sweep at a known pointer instead of banking
+    meaningless failures into a leaderboard row (the 2026-08-06 sweep scored
+    70 such trials into a bogus 0.38 composite)."""
+
+    def __init__(self, reply: str | None):
+        self.reply = reply or ""
+        self.suite: str | None = None
+        self.case_id: str | None = None
+        self.trial: int | None = None
+        super().__init__(self.reply_excerpt())
+
+    def locate(self, suite: str, case_id: str, trial: int) -> None:
+        self.suite, self.case_id, self.trial = suite, case_id, trial
+
+    def reply_excerpt(self, n: int = 160) -> str:
+        collapsed = " ".join(self.reply.split())
+        return (collapsed[:n] + "…") if len(collapsed) > n else collapsed
+
+
 @dataclass
 class DriveResult:
     ok: bool
@@ -88,6 +131,9 @@ class DriveResult:
     # True when `response` is a usage-limit/rate-limit/quota reply — the turn ran
     # but Fermix declined the work, so callers should abort rather than score it.
     usage_limited: bool = False
+    # True when `response` is a Fermix auth-failure reply — permanently
+    # invalidated credentials; callers must abort, retrying can never help.
+    auth_invalidated: bool = False
 
 
 def settled_elapsed_ms(result: DriveResult, settle_started: float,
@@ -151,7 +197,8 @@ def drive_query(cfg, session: str, query: str, timeout_ms: int | None = None,
                            error=None, session_id=env.get("session_id") or session,
                            exit_code=proc.returncode, sent_at=sent_at,
                            stdout=proc.stdout, stderr=proc.stderr, elapsed_ms=elapsed_ms,
-                           usage_limited=is_usage_limit_reply(response))
+                           usage_limited=is_usage_limit_reply(response),
+                           auth_invalidated=is_auth_invalidated_reply(response))
     err = env.get("error") or (proc.stderr.strip() or "unknown_error")
     norm = "not_running" if (err == "not_running" or proc.returncode == 3) else "error"
     return DriveResult(ok=False, status=norm, response=None, error=err,
@@ -173,6 +220,8 @@ def drive_with_usage_retry(cfg, session: str, query: str, timeout_ms: int | None
     while True:
         used = session if attempt == 0 else f"{session}-r{attempt}"
         res = drive_query(cfg, used, query, timeout_ms)
+        if res.auth_invalidated:
+            raise AuthInvalidated(res.response)   # permanent — backoff can't help
         if not res.usage_limited:
             return res, used
         if attempt >= len(waits_s):

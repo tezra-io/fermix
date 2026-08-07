@@ -65,7 +65,7 @@ def test_checker_exit_mode_pass(tmp_path):
     os.makedirs(os.path.join(str(tmp_path), "checkers"), exist_ok=True)
     _script(tmp_path, "checkers/ok.sh", "#!/bin/sh\nexit 0\n")
     r = checker.run_checker(str(tmp_path), {"script": "checkers/ok.sh", "mode": "exit"},
-                            scoped_dir=str(tmp_path), reply="")
+                            scoped_dir=str(tmp_path), fermix_home=str(tmp_path), reply="")
     assert r.score == 1.0 and r.error is None
 
 
@@ -73,7 +73,7 @@ def test_checker_exit_mode_fail(tmp_path):
     os.makedirs(os.path.join(str(tmp_path), "checkers"), exist_ok=True)
     _script(tmp_path, "checkers/no.sh", "#!/bin/sh\nexit 3\n")
     r = checker.run_checker(str(tmp_path), {"script": "checkers/no.sh", "mode": "exit"},
-                            scoped_dir=str(tmp_path), reply="")
+                            scoped_dir=str(tmp_path), fermix_home=str(tmp_path), reply="")
     assert r.score == 0.0 and r.error is None
 
 
@@ -81,7 +81,7 @@ def test_checker_json_mode_parses_score(tmp_path):
     os.makedirs(os.path.join(str(tmp_path), "checkers"), exist_ok=True)
     _script(tmp_path, "checkers/j.sh", '#!/bin/sh\necho \'{"score": 0.5, "detail": "half"}\'\n')
     r = checker.run_checker(str(tmp_path), {"script": "checkers/j.sh", "mode": "json"},
-                            scoped_dir=str(tmp_path), reply="")
+                            scoped_dir=str(tmp_path), fermix_home=str(tmp_path), reply="")
     assert r.score == 0.5 and "half" in r.detail
 
 
@@ -91,7 +91,7 @@ def test_checker_sees_workspace_and_reply_env(tmp_path):
     _script(tmp_path, "checkers/env.sh",
             '#!/bin/sh\n[ -n "$FERMIX_EVAL_WORKSPACE" ] && [ "$FERMIX_EVAL_REPLY" = "hi" ] && exit 0 || exit 1\n')
     r = checker.run_checker(str(tmp_path), {"script": "checkers/env.sh", "mode": "exit"},
-                            scoped_dir=str(tmp_path), reply="hi")
+                            scoped_dir=str(tmp_path), fermix_home=str(tmp_path), reply="hi")
     assert r.score == 1.0
 
 
@@ -102,7 +102,7 @@ def test_checker_subprocess_env_does_not_inherit_secrets(tmp_path, monkeypatch):
             '#!/bin/sh\n[ -n "$PATH" ] && [ -z "$FERMIX_EVAL_SHOULD_NOT_LEAK" ]\n')
     r = checker.run_checker(str(tmp_path),
                             {"script": "checkers/env-clean.sh", "mode": "exit"},
-                            scoped_dir=str(tmp_path), reply="")
+                            scoped_dir=str(tmp_path), fermix_home=str(tmp_path), reply="")
     assert r.score == 1.0 and r.error is None
 
 
@@ -111,7 +111,7 @@ def test_checker_subprocess_env_does_not_inherit_secrets(tmp_path, monkeypatch):
 ])
 def test_checker_rejects_absolute_and_traversal_script_paths(tmp_path, script_path):
     r = checker.run_checker(str(tmp_path), {"script": script_path, "mode": "exit"},
-                            scoped_dir=str(tmp_path), reply="")
+                            scoped_dir=str(tmp_path), fermix_home=str(tmp_path), reply="")
     assert r.score == 0.0 and r.error and "path" in r.error.lower()
 
 
@@ -123,7 +123,7 @@ def test_checker_rejects_script_symlink_escape(tmp_path):
     os.symlink(outside, checkers / "escape.sh")
     r = checker.run_checker(str(harness),
                             {"script": "checkers/escape.sh", "mode": "exit"},
-                            scoped_dir=str(tmp_path), reply="")
+                            scoped_dir=str(tmp_path), fermix_home=str(tmp_path), reply="")
     assert r.score == 0.0 and r.error and "outside" in r.error.lower()
 
 
@@ -131,7 +131,7 @@ def test_checker_rejects_unknown_mode_before_execution(tmp_path):
     os.makedirs(os.path.join(str(tmp_path), "checkers"), exist_ok=True)
     _script(tmp_path, "checkers/ok.sh", "#!/bin/sh\nexit 0\n")
     r = checker.run_checker(str(tmp_path), {"script": "checkers/ok.sh", "mode": "yaml"},
-                            scoped_dir=str(tmp_path), reply="")
+                            scoped_dir=str(tmp_path), fermix_home=str(tmp_path), reply="")
     assert r.score == 0.0 and r.error and "mode" in r.error.lower()
 
 
@@ -140,7 +140,7 @@ def test_checker_rejects_invalid_timeout_override(tmp_path, timeout_s):
     os.makedirs(os.path.join(str(tmp_path), "checkers"), exist_ok=True)
     _script(tmp_path, "checkers/ok.sh", "#!/bin/sh\nexit 0\n")
     r = checker.run_checker(str(tmp_path), {"script": "checkers/ok.sh", "mode": "exit"},
-                            scoped_dir=str(tmp_path), reply="", timeout_s=timeout_s)
+                            scoped_dir=str(tmp_path), fermix_home=str(tmp_path), reply="", timeout_s=timeout_s)
     assert r.score == 0.0 and r.error and "timeout" in r.error.lower()
 
 
@@ -149,13 +149,13 @@ def test_checker_rejects_invalid_spec_timeout(tmp_path, timeout_ms):
     os.makedirs(os.path.join(str(tmp_path), "checkers"), exist_ok=True)
     _script(tmp_path, "checkers/ok.sh", "#!/bin/sh\nexit 0\n")
     spec = {"script": "checkers/ok.sh", "mode": "exit", "timeout_ms": timeout_ms}
-    r = checker.run_checker(str(tmp_path), spec, scoped_dir=str(tmp_path), reply="")
+    r = checker.run_checker(str(tmp_path), spec, scoped_dir=str(tmp_path), fermix_home=str(tmp_path), reply="")
     assert r.score == 0.0 and r.error and "timeout" in r.error.lower()
 
 
 def test_checker_missing_script_records_error(tmp_path):
     r = checker.run_checker(str(tmp_path), {"script": "checkers/nope.sh", "mode": "exit"},
-                            scoped_dir=str(tmp_path), reply="")
+                            scoped_dir=str(tmp_path), fermix_home=str(tmp_path), reply="")
     assert r.score == 0.0 and r.error and "not found" in r.error.lower()
 
 
@@ -163,7 +163,7 @@ def test_checker_bad_json_records_error(tmp_path):
     os.makedirs(os.path.join(str(tmp_path), "checkers"), exist_ok=True)
     _script(tmp_path, "checkers/garbage.sh", "#!/bin/sh\necho not-json\n")
     r = checker.run_checker(str(tmp_path), {"script": "checkers/garbage.sh", "mode": "json"},
-                            scoped_dir=str(tmp_path), reply="")
+                            scoped_dir=str(tmp_path), fermix_home=str(tmp_path), reply="")
     assert r.score == 0.0 and r.error
 
 
@@ -175,7 +175,7 @@ def test_checker_rejects_non_finite_out_of_range_or_non_numeric_score(tmp_path, 
     _script(tmp_path, "checkers/bad-score.sh", body)
     r = checker.run_checker(str(tmp_path),
                             {"script": "checkers/bad-score.sh", "mode": "json"},
-                            scoped_dir=str(tmp_path), reply="")
+                            scoped_dir=str(tmp_path), fermix_home=str(tmp_path), reply="")
     assert r.score == 0.0 and r.error
 
 
@@ -187,8 +187,75 @@ def test_checker_non_object_json_records_error_not_crash(tmp_path, line):
     os.makedirs(os.path.join(str(tmp_path), "checkers"), exist_ok=True)
     _script(tmp_path, "checkers/bare.sh", f"#!/bin/sh\necho '{line}'\n")
     r = checker.run_checker(str(tmp_path), {"script": "checkers/bare.sh", "mode": "json"},
-                            scoped_dir=str(tmp_path), reply="")
+                            scoped_dir=str(tmp_path), fermix_home=str(tmp_path), reply="")
     assert r.score == 0.0 and r.error and "parse failed" in r.error
+
+
+def test_checker_sees_the_fermix_home_env(tmp_path):
+    os.makedirs(os.path.join(str(tmp_path), "checkers"), exist_ok=True)
+    # ground-truth checkers read daemon state under the home; the env var must
+    # carry the caller's fermix_home, not be derived or absent
+    _script(tmp_path, "checkers/home.sh",
+            '#!/bin/sh\n[ -d "$FERMIX_EVAL_HOME" ] && [ "$FERMIX_EVAL_HOME" != "$FERMIX_EVAL_WORKSPACE" ] && exit 0 || exit 1\n')
+    scoped = os.path.join(str(tmp_path), "ws")
+    os.makedirs(scoped)
+    r = checker.run_checker(str(tmp_path), {"script": "checkers/home.sh", "mode": "exit"},
+                            scoped_dir=scoped, fermix_home=str(tmp_path), reply="")
+    assert r.score == 1.0 and r.error is None
+
+
+# --- the real skill_created checker: ground truth, not the model's claim -----
+
+SKILL_CREATED = {"script": "suites/capability/checkers/skill_created.py", "mode": "json"}
+
+
+def _skill_home(tmp_path, listing, skill_md):
+    """A fake capability home: a scoped trial workspace plus (optionally) the
+    skill the task under test is supposed to create."""
+    home = tmp_path / "cap-eval-home"
+    ws = home / "workspace" / "eval" / "cap_agentic-create_and_confirm_skill" / "t0"
+    ws.mkdir(parents=True)
+    if listing is not None:
+        (ws / "skills.txt").write_text(listing)
+    if skill_md:
+        d = home / "skills" / "eval-echo"
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text("# eval-echo\n\nAlways reply with the single word ECHO.\n")
+    return home, ws
+
+
+def test_skill_created_passes_on_listing_plus_skill_on_disk(tmp_path):
+    home, ws = _skill_home(
+        tmp_path, "browser-guidance\neval-echo\nself-knowledge\n", skill_md=True)
+    r = checker.run_checker(BENCH, SKILL_CREATED,
+                            scoped_dir=str(ws), fermix_home=str(home), reply="done")
+    assert r.error is None and r.score == 1.0
+
+
+def test_skill_created_rejects_listing_without_skill_on_disk(tmp_path):
+    # A model could write the expected listing without creating anything; the
+    # checker must verify the skill exists on disk, not trust the claim.
+    home, ws = _skill_home(
+        tmp_path, "browser-guidance\neval-echo\nself-knowledge\n", skill_md=False)
+    r = checker.run_checker(BENCH, SKILL_CREATED,
+                            scoped_dir=str(ws), fermix_home=str(home), reply="done")
+    assert r.score == 0.0 and "disk" in r.detail
+
+
+def test_skill_created_rejects_skill_on_disk_that_is_not_listed(tmp_path):
+    # The listing proves the model observed the skill LIVE (post-reload); disk
+    # alone isn't enough.
+    home, ws = _skill_home(tmp_path, "browser-guidance\nself-knowledge\n", skill_md=True)
+    r = checker.run_checker(BENCH, SKILL_CREATED,
+                            scoped_dir=str(ws), fermix_home=str(home), reply="done")
+    assert r.score == 0.0 and "listing" in r.detail
+
+
+def test_skill_created_scores_zero_without_a_listing_file(tmp_path):
+    home, ws = _skill_home(tmp_path, None, skill_md=True)
+    r = checker.run_checker(BENCH, SKILL_CREATED,
+                            scoped_dir=str(ws), fermix_home=str(home), reply="done")
+    assert r.score == 0.0 and "no skills.txt" in r.detail
 
 
 # --- suite `checker:` validation --------------------------------------------
@@ -294,14 +361,14 @@ def test_anchor_pytest_bugfix_oracle_accepts_bug_rejects(tmp_path):
     spec = {"script": "suites/capability/checkers/pytest_business_days.sh", "mode": "exit"}
     scoped = _seed(tmp_path, "suites/capability/fixtures/code/business_days")
     # negative: the seeded module still has the planted bug -> tests fail
-    assert checker.run_checker(BENCH, spec, scoped, "").score == 0.0
+    assert checker.run_checker(BENCH, spec, scoped, "", str(tmp_path)).score == 0.0
     # oracle: apply the correct fix -> all tests pass
     mod = os.path.join(scoped, "business_days.py")
     with open(mod) as fh:
         fixed = fh.read().replace("cur.weekday() <= 5", "cur.weekday() <= 4")
     with open(mod, "w") as fh:
         fh.write(fixed)
-    assert checker.run_checker(BENCH, spec, scoped, "").score == 1.0
+    assert checker.run_checker(BENCH, spec, scoped, "", str(tmp_path)).score == 1.0
 
 
 def test_anchor_csv_to_json_oracle_accepts_wrong_rejects(tmp_path):
@@ -310,10 +377,10 @@ def test_anchor_csv_to_json_oracle_accepts_wrong_rejects(tmp_path):
     out = os.path.join(scoped, "sales_by_region.json")
     with open(out, "w") as fh:                       # oracle: correct values, descending
         _json.dump({"South": 89.96, "North": 67.47, "West": 47.50, "East": 0.0}, fh)
-    assert checker.run_checker(BENCH, spec, scoped, "").score == 1.0
+    assert checker.run_checker(BENCH, spec, scoped, "", str(tmp_path)).score == 1.0
     with open(out, "w") as fh:                       # negative: drops East + wrong order
         _json.dump({"North": 67.47, "South": 89.96, "West": 47.50}, fh)
-    assert checker.run_checker(BENCH, spec, scoped, "").score < 1.0
+    assert checker.run_checker(BENCH, spec, scoped, "", str(tmp_path)).score < 1.0
 
 
 def test_anchor_landlord_email_oracle_accepts_sparse_rejects(tmp_path):
@@ -324,10 +391,10 @@ def test_anchor_landlord_email_oracle_accepts_sparse_rejects(tmp_path):
             "14 days.\n\nSincerely,\nSam")
     with open(os.path.join(scoped, "email.txt"), "w") as fh:
         fh.write(good)
-    assert checker.run_checker(BENCH, spec, scoped, "").score == 1.0
+    assert checker.run_checker(BENCH, spec, scoped, "", str(tmp_path)).score == 1.0
     with open(os.path.join(scoped, "email.txt"), "w") as fh:
         fh.write("fix the heat")                     # negative: misses ~all constraints
-    assert checker.run_checker(BENCH, spec, scoped, "").score < 1.0
+    assert checker.run_checker(BENCH, spec, scoped, "", str(tmp_path)).score < 1.0
 
 
 def test_landlord_keyword_stuffing_is_gated(tmp_path):
@@ -337,7 +404,7 @@ def test_landlord_keyword_stuffing_is_gated(tmp_path):
     scoped = _seed(tmp_path, None)
     with open(os.path.join(scoped, "email.txt"), "w") as fh:
         fh.write("heating november 3 clause 14.2 dear mr adeyemi 14 days sincerely please")
-    assert checker.run_checker(BENCH, spec, scoped, "").score < 0.5
+    assert checker.run_checker(BENCH, spec, scoped, "", str(tmp_path)).score < 0.5
 
 
 def test_landlord_accepts_idiomatic_phrasing(tmp_path):
@@ -351,7 +418,7 @@ def test_landlord_accepts_idiomatic_phrasing(tmp_path):
             "attention.\n\nSincerely,\nSam")
     with open(os.path.join(scoped, "email.txt"), "w") as fh:
         fh.write(good)
-    assert checker.run_checker(BENCH, spec, scoped, "").score == 1.0
+    assert checker.run_checker(BENCH, spec, scoped, "", str(tmp_path)).score == 1.0
 
 
 def test_expense_total_checker_oracle_and_negative(tmp_path):
@@ -359,10 +426,10 @@ def test_expense_total_checker_oracle_and_negative(tmp_path):
     scoped = _seed(tmp_path, None)
     with open(os.path.join(scoped, "answer.txt"), "w") as fh:
         fh.write("1419.35")
-    assert checker.run_checker(BENCH, spec, scoped, "").score == 1.0
+    assert checker.run_checker(BENCH, spec, scoped, "", str(tmp_path)).score == 1.0
     with open(os.path.join(scoped, "answer.txt"), "w") as fh:
         fh.write("1438.10")                          # forgot the refund is negative
-    assert checker.run_checker(BENCH, spec, scoped, "").score == 0.0
+    assert checker.run_checker(BENCH, spec, scoped, "", str(tmp_path)).score == 0.0
 
 
 def test_order_extract_checker_oracle_and_negative(tmp_path):
@@ -370,17 +437,17 @@ def test_order_extract_checker_oracle_and_negative(tmp_path):
     scoped = _seed(tmp_path, None)
     with open(os.path.join(scoped, "answer.txt"), "w") as fh:
         fh.write("NW-48213|94.74|6|2026-03-03")
-    assert checker.run_checker(BENCH, spec, scoped, "").score == 1.0
+    assert checker.run_checker(BENCH, spec, scoped, "", str(tmp_path)).score == 1.0
     with open(os.path.join(scoped, "answer.txt"), "w") as fh:
         fh.write("NW-48213|80.50|3|2026-03-03")      # subtotal + line-count traps
-    assert checker.run_checker(BENCH, spec, scoped, "").score == 0.0
+    assert checker.run_checker(BENCH, spec, scoped, "", str(tmp_path)).score == 0.0
 
 
 def test_anchor_invoice_bug_oracle_accepts_bug_rejects(tmp_path):
     spec = {"script": "suites/capability/checkers/pytest_invoice.sh", "mode": "exit"}
     scoped = _seed(tmp_path, "suites/capability/fixtures/code/invoice")
     # negative: the planted discount-dropping bug -> visible + hidden tests fail
-    assert checker.run_checker(BENCH, spec, scoped, "").score == 0.0
+    assert checker.run_checker(BENCH, spec, scoped, "", str(tmp_path)).score == 0.0
     # oracle: route the subtotal through line_total (applies the discount) -> all pass
     mod = os.path.join(scoped, "invoice.py")
     with open(mod) as fh:
@@ -389,14 +456,14 @@ def test_anchor_invoice_bug_oracle_accepts_bug_rejects(tmp_path):
             'subtotal = sum(line_total(ln["qty"], ln["unit_price"], ln["discount_pct"]) for ln in lines)')
     with open(mod, "w") as fh:
         fh.write(fixed)
-    assert checker.run_checker(BENCH, spec, scoped, "").score == 1.0
+    assert checker.run_checker(BENCH, spec, scoped, "", str(tmp_path)).score == 1.0
 
 
 def test_anchor_order_pipeline_oracle_accepts_bug_rejects(tmp_path):
     spec = {"script": "suites/capability/checkers/pytest_order.sh", "mode": "exit"}
     scoped = _seed(tmp_path, "suites/capability/fixtures/code/order_pipeline")
     # negative: the `>` boundary bug -> visible + hidden boundary tests fail
-    assert checker.run_checker(BENCH, spec, scoped, "").score == 0.0
+    assert checker.run_checker(BENCH, spec, scoped, "", str(tmp_path)).score == 0.0
     # oracle: fix the tier boundaries in catalog (> -> >=) -> all pass, incl. hidden
     cat = os.path.join(scoped, "catalog.py")
     with open(cat) as fh:
@@ -405,7 +472,7 @@ def test_anchor_order_pipeline_oracle_accepts_bug_rejects(tmp_path):
                  .replace("elif qty > 10:", "elif qty >= 10:"))
     with open(cat, "w") as fh:
         fh.write(fixed)
-    assert checker.run_checker(BENCH, spec, scoped, "").score == 1.0
+    assert checker.run_checker(BENCH, spec, scoped, "", str(tmp_path)).score == 1.0
 
 
 def test_order_pipeline_symptom_patch_still_fails_hidden(tmp_path):
@@ -422,7 +489,7 @@ def test_order_pipeline_symptom_patch_still_fails_hidden(tmp_path):
         "    subtotal_cents = sum(line_total_cents(sku, qty) for sku, qty in lines)")
     with open(rep, "w") as fh:
         fh.write(hack)
-    assert checker.run_checker(BENCH, spec, scoped, "").score == 0.0   # hidden tests still fail
+    assert checker.run_checker(BENCH, spec, scoped, "", str(tmp_path)).score == 0.0   # hidden tests still fail
 
 
 def test_subagent_synthesis_checker_grades_coverage(tmp_path):
@@ -431,10 +498,10 @@ def test_subagent_synthesis_checker_grades_coverage(tmp_path):
     sp = os.path.join(scoped, "summary.txt")
     with open(sp, "w") as fh:
         fh.write("FALCON-G7 OTTER-M3 HERON-S9 BADGER-X2 — all four covered")
-    assert checker.run_checker(BENCH, spec, scoped, "").score == 1.0
+    assert checker.run_checker(BENCH, spec, scoped, "", str(tmp_path)).score == 1.0
     with open(sp, "w") as fh:
         fh.write("FALCON-G7 OTTER-M3 HERON-S9")   # dropped one branch
-    assert checker.run_checker(BENCH, spec, scoped, "").score == 0.75
+    assert checker.run_checker(BENCH, spec, scoped, "", str(tmp_path)).score == 0.75
 
 
 def test_cron_job_output_checker(tmp_path):
@@ -443,21 +510,9 @@ def test_cron_job_output_checker(tmp_path):
     fp = os.path.join(scoped, "job_out.txt")
     with open(fp, "w") as fh:
         fh.write("CRON-OK-7731\n")
-    assert checker.run_checker(BENCH, spec, scoped, "").score == 1.0
+    assert checker.run_checker(BENCH, spec, scoped, "", str(tmp_path)).score == 1.0
     os.remove(fp)                                  # job didn't run / agent didn't wait
-    assert checker.run_checker(BENCH, spec, scoped, "").score == 0.0
-
-
-def test_skill_created_checker(tmp_path):
-    spec = {"script": "suites/capability/checkers/skill_created.py", "mode": "json"}
-    scoped = _seed(tmp_path, None)
-    sp = os.path.join(scoped, "skills.txt")
-    with open(sp, "w") as fh:
-        fh.write("self-knowledge\nbrowser-guidance\neval-echo\n")
-    assert checker.run_checker(BENCH, spec, scoped, "").score == 1.0
-    with open(sp, "w") as fh:
-        fh.write("self-knowledge\nbrowser-guidance\n")   # skill not created
-    assert checker.run_checker(BENCH, spec, scoped, "").score == 0.0
+    assert checker.run_checker(BENCH, spec, scoped, "", str(tmp_path)).score == 0.0
 
 
 if __name__ == "__main__":

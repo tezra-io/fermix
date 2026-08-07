@@ -17,7 +17,8 @@ Each run auto-detects the served model from the trace and adds a row; the
 leaderboard re-ranks. See SKILL.md.
 
 Exit: 0 ok · 2 usage/selection · 3 preconditions (Opik or daemon down) ·
-4 incomplete sweep (usage limit or judge failure; no leaderboard row written).
+4 incomplete sweep (usage limit, invalidated auth, or judge failure; no
+leaderboard row written).
 """
 from __future__ import annotations
 
@@ -257,6 +258,10 @@ def _capture_turn(cfg, opik, session, query, timeout_ms, label) -> _Captured:
         trace, spans = opik.await_complete(hit)
         elapsed_ms = driver.settled_elapsed_ms(res, settle_started)
         view = grade.TurnView.build(trace, spans, elapsed_ms=elapsed_ms)
+        if driver.is_auth_invalidated_reply(view.reply):
+            # The CLI-side check missed it (e.g. an ask timeout graded from the
+            # server trace): same permanent condition, same abort — never score it.
+            raise driver.AuthInvalidated(view.reply)
         incomplete = not _gradeable(view) or driver.is_usage_limit_reply(view.reply)
         if incomplete:
             return _Captured("incomplete", view, trace, spans, elapsed_ms)
@@ -335,7 +340,8 @@ def _standard_trial(cfg, opik, s, case, run_id, i, is_checker, task_key, fixture
         if cap.status != "graded" or cap.view is None:
             return _fail_trial(case, cap)
         if is_checker:
-            cr = checker.run_checker(SKILL_DIR, case.checker_spec, scoped, cap.view.reply)
+            cr = checker.run_checker(SKILL_DIR, case.checker_spec, scoped, cap.view.reply,
+                                     cfg.daemon.fermix_home)
             if cr.error:
                 print(f"    ! checker error {case.id} t{i}: {cr.error}", file=sys.stderr)
             succ = cr.score
@@ -404,6 +410,9 @@ def run_task(cfg, opik, s, case, trials, k, threshold, run_id, want_judge) -> Ta
                     cleanup_root, want_judge)
         except driver.UsageLimitHit as hit:
             hit.locate(s.name, case.id, i)   # stamp the resume pointer, then abort the sweep
+            raise
+        except driver.AuthInvalidated as hit:
+            hit.locate(s.name, case.id, i)
             raise
         except JudgeUnavailable as unavailable:
             unavailable.locate(s.name, case.id, i)
@@ -524,6 +533,23 @@ def _abort_usage_limit(hit, done: int, total: int) -> int:
     print("   Resume: wait for the limit to reset, then re-run the same command. "
           "Completed turns, traces, memory, or tool effects may remain; unique run/trial "
           "ids prevent them from being mistaken for the rerun.", file=sys.stderr)
+    return 4
+
+
+def _abort_auth_invalidated(hit, done: int, total: int) -> int:
+    """Stop the sweep on permanently invalidated provider auth. Unlike a usage
+    limit there is nothing to wait out — Fermix sends this reply only after a
+    token refresh permanently failed — so every remaining trial would refuse
+    before any model call and bank a meaningless 0 (the 2026-08-06 sweep scored
+    70 such trials into a bogus 0.38 leaderboard row). No row is written."""
+    where = f"{hit.suite}/{hit.case_id} (trial {hit.trial})" if hit.suite else "a task"
+    print(f"\n⛔ provider auth invalidated at {where}.", file=sys.stderr)
+    print(f"   Fermix reply: {hit.reply_excerpt()!r}", file=sys.stderr)
+    print(f"   {done}/{total} task(s) scored before auth died. Leaderboard NOT written — "
+          f"a partial row would overwrite the model's real score.", file=sys.stderr)
+    print("   Recover: re-authenticate (`fermix auth login`), then restart the daemon. "
+          "For the disposable capability home, re-run `capability-daemon.sh up` — the "
+          "seed copies a fresh token from the dev store.", file=sys.stderr)
     return 4
 
 
@@ -835,6 +861,8 @@ def main(argv=None) -> int:
                   f"{'⚠️safety' if st.safety_violations else ''}")
     except driver.UsageLimitHit as hit:
         return _abort_usage_limit(hit, len(outcomes), len(cases))
+    except driver.AuthInvalidated as hit:
+        return _abort_auth_invalidated(hit, len(outcomes), len(cases))
     except JudgeUnavailable as unavailable:
         return _abort_judge_unavailable(unavailable, len(outcomes), len(cases))
 

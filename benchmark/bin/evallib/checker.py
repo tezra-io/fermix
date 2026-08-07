@@ -154,23 +154,30 @@ def _timeout_seconds(spec: dict, override: float | None) -> float:
     return seconds
 
 
-def _checker_env(scoped: str, reply: str) -> dict[str, str]:
+def _checker_env(scoped: str, reply: str, fermix_home: str) -> dict[str, str]:
     env = {key: os.environ[key] for key in _ENV_ALLOWLIST if key in os.environ}
     env["FERMIX_EVAL_WORKSPACE"] = scoped
     env["FERMIX_EVAL_REPLY"] = (reply or "")[:8000]
+    # Ground-truth checkers verify daemon end-state under the home (e.g. a
+    # created skill's SKILL.md), not just files the model wrote in the
+    # workspace — a workspace listing alone is the model's CLAIM.
+    env["FERMIX_EVAL_HOME"] = fermix_home
     return env
 
 
 # --- run the checker --------------------------------------------------------
 
 def run_checker(skill_dir: str, spec: dict, scoped_dir: str, reply: str,
-                timeout_s: float | None = None) -> CheckerResult:
+                fermix_home: str, timeout_s: float | None = None) -> CheckerResult:
     """Run the task's checker over the post-turn end-state. `spec.script` is
     relative to `skill_dir`; the checker reads the scoped dir via
-    FERMIX_EVAL_WORKSPACE (also its cwd) and the final reply via FERMIX_EVAL_REPLY.
-    Errors are recorded as a 0-score, never swallowed (Code Rule #7)."""
+    FERMIX_EVAL_WORKSPACE (also its cwd), the final reply via FERMIX_EVAL_REPLY,
+    and the daemon home via FERMIX_EVAL_HOME (for ground truth outside the
+    workspace). Errors are recorded as a 0-score, never swallowed (Code Rule #7)."""
     if not isinstance(spec, dict):
         return CheckerResult(0.0, "", "checker spec must be a map")
+    if not isinstance(fermix_home, str) or not fermix_home:
+        return CheckerResult(0.0, "", "checker fermix_home must be a non-empty path")
     mode = spec.get("mode")
     if mode not in ("exit", "json"):
         return CheckerResult(0.0, "", f"checker mode must be exit or json, got {mode!r}")
@@ -182,7 +189,8 @@ def run_checker(skill_dir: str, spec: dict, scoped_dir: str, reply: str,
     scoped = os.path.realpath(os.path.expanduser(scoped_dir))
     if not os.path.isdir(scoped):
         return CheckerResult(0.0, "", f"checker workspace not found: {scoped}")
-    env = _checker_env(scoped, reply)
+    env = _checker_env(scoped, reply,
+                       os.path.realpath(os.path.expanduser(fermix_home)))
     try:
         proc = subprocess.run([script], env=env, cwd=scoped, capture_output=True,
                               text=True, timeout=timeout_s)
