@@ -403,8 +403,15 @@ defmodule FermixCore.Temporal.DeliveryWorkerTest do
 
       {{_reason, settled}, log} = with_log(fn -> deliver!(ctx, row, almost) end)
 
+      # Only the unclaimable path is forbidden, and these two assertions are what
+      # identify it: its log line and its `expired_before_send` marker. The
+      # STATUS is deliberately not asserted — both paths can legitimately end at
+      # `expired`. With 500µs left the watchdog is 1ms, and a send that exceeds
+      # it is an ordinary retry whose `ready_at` cannot fit inside the validity
+      # window, so the Repo expires it. Asserting the status contradicted the
+      # comment above and made the test fail on any runner where a stubbed send
+      # took longer than a millisecond (observed on macos-arm64 CI).
       refute log =~ "claimed at or past its validity boundary"
-      refute settled.status == "expired"
       refute settled.last_error == "expired_before_send"
     end
   end
