@@ -218,6 +218,19 @@ defmodule FermixCore.Setup.SecretPaths do
       plugin: "slack",
       functionality: "Slack plugin",
       optional?: true
+    },
+    # M27 §7.5: the Eden personal access token. `env` is only the keyring
+    # account label SecretWriter stores under — there is deliberately no
+    # `System.get_env("FERMIX_PLUGIN_EDEN")` overlay and no `sandbox_env`
+    # export, so the keychain is the single credential source and "forget
+    # local credential" can be truthful.
+    %{
+      key: :eden_plugin_secret,
+      env: "FERMIX_PLUGIN_EDEN",
+      path: [:fermix_core, :plugin_secrets, "eden"],
+      plugin: "eden",
+      functionality: "Eden plugin",
+      optional?: true
     }
   ]
 

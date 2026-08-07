@@ -62,6 +62,19 @@ defmodule FermixCore.Tools.AdminToolsTest do
     assert result.error =~ "max 64 chars"
   end
 
+  test "skill_create rejects reserved leading-underscore names" do
+    for name <- ["_archive", "_anything"] do
+      assert {:ok, result} =
+               SkillCreate.execute(
+                 %{"name" => name, "description" => "Use for reservation tests."},
+                 @context
+               )
+
+      assert result.success == false
+      assert result.error =~ "reserved"
+    end
+  end
+
   test "model_routing_config reads and updates the routing TOML section" do
     assert {:ok, set_result} =
              ModelRoutingConfig.execute(

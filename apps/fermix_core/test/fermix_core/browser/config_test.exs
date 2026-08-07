@@ -65,42 +65,32 @@ defmodule FermixCore.Browser.ConfigTest do
     assert defaults.max_chars > 0
   end
 
-  test "centralizes every browser timeout and bound with positive defaults" do
+  # Whole-surface invariant, ENUMERATED FROM THE STRUCT rather than hand-spelled:
+  # every integer tunable must both default positive and be rejected when set
+  # non-positive. The previous hand-written field list meant a bound added later
+  # (e.g. download_max_bytes) could skip validation with nothing failing.
+  test "every integer tunable defaults positive and is validated" do
     Application.delete_env(:fermix_core, :browser)
-    assert {:ok, config} = Config.current()
+    assert {:ok, defaults} = Config.current()
 
-    timeouts = [
-      :action_timeout_ms,
-      :navigation_timeout_ms,
-      :cdp_keepalive_ms,
-      :cdp_response_grace_ms,
-      :launch_timeout_ms,
-      :cdp_ready_poll_interval_ms,
-      :cdp_version_probe_timeout_ms,
-      :stop_grace_ms,
-      :kill_grace_ms,
-      :start_failure_threshold,
-      :start_cooldown_ms,
-      :start_cooldown_max_ms,
-      :start_retries,
-      :shutdown_slack_ms,
-      :wait_default_ms,
-      :wait_max_ms,
-      :wait_poll_interval_ms,
-      :download_default_ms,
-      :download_max_ms,
-      :console_buffer_limit,
-      :dialog_buffer_limit,
-      :idle_profile_ttl_ms,
-      :idle_sweep_interval_ms,
-      :snapshot_max_chars,
-      :screenshot_max_bytes,
-      :screenshot_max_side_px
-    ]
+    fields =
+      defaults
+      |> Map.from_struct()
+      |> Enum.filter(fn {_field, value} -> is_integer(value) end)
+      |> Enum.map(fn {field, _value} -> field end)
 
-    for field <- timeouts do
-      assert is_integer(Map.fetch!(config, field)) and Map.fetch!(config, field) > 0,
-             "expected #{field} to be a positive integer default"
+    # Floor so a broken enumeration cannot pass vacuously.
+    assert length(fields) > 20
+
+    for field <- fields do
+      assert Map.fetch!(defaults, field) > 0,
+             "expected #{field} to default to a positive integer"
+
+      Application.put_env(:fermix_core, :browser, [{field, 0}])
+
+      assert {:error, error} = Config.current(), "expected #{field}: 0 to be rejected"
+      assert error.code == "invalid_config"
+      assert error.message =~ to_string(field)
     end
   end
 

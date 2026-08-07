@@ -67,13 +67,15 @@ defmodule FermixCore.Tools.StopTrackingCodingRun do
 
   @doc """
   Advertise only when the harness is usable — `enabled` + `approved`, matching
-  `codex_cloud_run`, whose runs this tool stops tracking (design §23.4). Still
+  `codex_cloud_run`, whose runs this tool stops tracking (design §23.4), and only on
+  a turn whose run could report back (`HarnessSupport.harness_deliverable?/1`). Still
   dispatchable by name, so a cloud task left tracking when consent was withdrawn
   can be released on request.
   """
   @spec advertise?(map()) :: boolean()
   def advertise?(context) when is_map(context) do
     Config.enabled?() and Config.approved?() and
+      Support.harness_deliverable?(context) and
       Authorization.authorize(name(), context) == :ok
   end
 

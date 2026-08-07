@@ -27,6 +27,9 @@ defmodule FermixCore.Setup.WizardTest do
     def put(_key, _value, _opts \\ []), do: :ok
 
     @impl true
+    def delete(_key, _opts \\ []), do: raise("the wizard must never delete a secret")
+
+    @impl true
     def command_source(key, _opts \\ []) do
       %{source: :command, command: "recording", args: [to_string(key)]}
     end
@@ -39,6 +42,7 @@ defmodule FermixCore.Setup.WizardTest do
     discord = Application.fetch_env(:fermix_channels, :discord)
     slack = Application.fetch_env(:fermix_channels, :slack)
     signal = Application.fetch_env(:fermix_channels, :signal)
+    acp = Application.fetch_env(:fermix_channels, :acp)
     personalization = Application.get_env(:fermix_core, :personalization, [])
     agent = Application.get_env(:fermix_core, :agent, [])
     realtime = Application.get_env(:fermix_core, :realtime, [])
@@ -55,6 +59,10 @@ defmodule FermixCore.Setup.WizardTest do
     Application.put_env(:fermix_channels, :discord, [])
     Application.put_env(:fermix_channels, :slack, [])
     Application.put_env(:fermix_channels, :signal, [])
+    # These tests assert which channels come back enabled, so every channel must
+    # start from its production baseline rather than whatever an earlier module
+    # left in the global app env.
+    Application.put_env(:fermix_channels, :acp, enabled: false, mode: :gateway)
 
     Application.put_env(:fermix_core, :personalization,
       user_name: "Test User",
@@ -71,6 +79,7 @@ defmodule FermixCore.Setup.WizardTest do
       restore_env(:fermix_channels, :discord, discord)
       restore_env(:fermix_channels, :slack, slack)
       restore_env(:fermix_channels, :signal, signal)
+      restore_env(:fermix_channels, :acp, acp)
       Application.put_env(:fermix_core, :personalization, personalization)
       Application.put_env(:fermix_core, :agent, agent)
       Application.put_env(:fermix_core, :realtime, realtime)
@@ -246,6 +255,30 @@ defmodule FermixCore.Setup.WizardTest do
     assert Enum.any?(report.failures, &(&1.component == "channel:discord"))
     assert Enum.any?(report.failures, &(&1.component == "channel:slack"))
     assert Enum.any?(report.failures, &(&1.component == "channel:signal"))
+  end
+
+  # The ACP surface is one boolean with no secret and no interactive step, so the
+  # whole wizard contract is: the answer flips `enabled`, and it shows up as an
+  # enabled channel (M29 §9 item 3).
+  test "save_answers persists the acp toggle both ways and lists it as enabled" do
+    acp = Application.fetch_env(:fermix_channels, :acp)
+    on_exit(fn -> restore_env(:fermix_channels, :acp, acp) end)
+    Application.put_env(:fermix_channels, :acp, enabled: false)
+    start_memory_repo!()
+
+    assert {:ok, report} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(openai_api_key: "sk-test-123", acp_enabled: "true")
+
+    assert :acp in report.wizard.enabled_channels
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    assert Keyword.fetch!(persisted.fermix_channels, :acp) == [enabled: true]
+
+    assert {:ok, report} = Wizard.save_answers(report.wizard, acp_enabled: false)
+
+    refute :acp in report.wizard.enabled_channels
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    assert Keyword.fetch!(persisted.fermix_channels, :acp) == [enabled: false]
   end
 
   test "save_answers persists config, creates workspace directories, and updates readiness" do
@@ -490,6 +523,65 @@ defmodule FermixCore.Setup.WizardTest do
 
     assert {:ok, revoked} = ConfigStore.load_runtime_config()
     refute revoked.fermix_core |> Keyword.get(:harness, []) |> Keyword.has_key?(:approved)
+  end
+
+  test "save_answers writes skill_curation enabled only on decline" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-skill-curation")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+    Application.put_env(:fermix_core, :providers, [])
+    Application.delete_env(:fermix_channels, :telegram)
+    start_memory_repo!()
+
+    # Declining writes the explicit disable.
+    assert {:ok, _} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(
+               provider: "openai",
+               openai_api_key: "sk-x",
+               skill_curation_enabled: "no"
+             )
+
+    assert {:ok, declined} = ConfigStore.load_runtime_config()
+
+    assert declined.fermix_core |> Keyword.get(:skill_curation, []) |> Keyword.get(:enabled) ==
+             false
+
+    # Accepting writes NOTHING — the default is already true.
+    assert {:ok, _} =
+             Wizard.report().wizard |> Wizard.save_answers(skill_curation_enabled: "yes")
+
+    assert {:ok, accepted} = ConfigStore.load_runtime_config()
+
+    refute accepted.fermix_core
+           |> Keyword.get(:skill_curation, [])
+           |> Keyword.has_key?(:enabled)
+  end
+
+  test "a save with no skill_curation answer preserves an explicit disable" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-skill-curation-preserve")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+    Application.put_env(:fermix_core, :providers, [])
+    Application.delete_env(:fermix_channels, :telegram)
+    start_memory_repo!()
+
+    assert {:ok, _} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(
+               provider: "openai",
+               openai_api_key: "sk-x",
+               skill_curation_enabled: false
+             )
+
+    assert {:ok, _} = Wizard.report().wizard |> Wizard.save_answers(anthropic_api_key: "sk-ant")
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+
+    assert persisted.fermix_core |> Keyword.get(:skill_curation, []) |> Keyword.get(:enabled) ==
+             false
   end
 
   test "save_answers clears the harness default_vendor when the answer is blank" do

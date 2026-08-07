@@ -24,6 +24,13 @@ defmodule FermixChannels.Gateway.Message do
     # trusted operator turn threads it into the sandbox's standard-mode roots so
     # the agent can work where the owner ran the command.
     :request_cwd,
+    # Environment overlay for the client session this request arrived on, set
+    # ONLY by the local ACP transport (never populated from remote channel user
+    # input), already filtered to the daemon's allowlist. A trusted operator turn
+    # merges it over the sandbox's shell-command env so the agent can run the
+    # client's own CLI with the credentials and PATH it was spawned with
+    # (MILESTONE_29_ACP_AGENT_SURFACE.md §8.3).
+    :session_env,
     thread_scope: :root,
     metadata: %{},
     attachments: [],
@@ -44,6 +51,7 @@ defmodule FermixChannels.Gateway.Message do
           reply_target: String.t(),
           thread_ts: thread_id() | nil,
           request_cwd: String.t() | nil,
+          session_env: %{String.t() => String.t()} | nil,
           thread_scope: thread_scope(),
           metadata: map(),
           attachments: [map()],

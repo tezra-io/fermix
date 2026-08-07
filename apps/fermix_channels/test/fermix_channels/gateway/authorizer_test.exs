@@ -20,6 +20,41 @@ defmodule FermixChannels.Gateway.AuthorizerTest do
     :ok
   end
 
+  # A `trust: :local_operator` entry carries a config_key, so `Source` derives
+  # `channel_key: :fake_local` and the sender-id clauses would reject it — the
+  # trust check has to run first.
+  defp register_trusted_channel do
+    register([
+      %{
+        name: "fake_local",
+        config_key: :fake_local,
+        adapter: nil,
+        remote?: true,
+        transport: :gateway,
+        child: nil,
+        trust: :local_operator
+      }
+    ])
+  end
+
+  defp register_untrusted_channel do
+    register([
+      %{
+        name: "fake_remote",
+        config_key: :fake_remote,
+        adapter: nil,
+        remote?: true,
+        transport: :gateway,
+        child: nil
+      }
+    ])
+  end
+
+  defp register(entries) do
+    Application.put_env(:fermix_channels, :channel_registry, entries)
+    on_exit(fn -> Application.delete_env(:fermix_channels, :channel_registry) end)
+  end
+
   describe "resolve/1" do
     test "configured owner of a remote channel resolves to :operator" do
       source = %Source{channel: "telegram", channel_key: :telegram, sender_id: "owner-1"}
@@ -65,6 +100,27 @@ defmodule FermixChannels.Gateway.AuthorizerTest do
       source = %Source{channel: "matrix", channel_key: nil}
 
       assert {:error, :unknown_channel} = Authorizer.resolve(source)
+    end
+
+    test "a registry trust of :local_operator authorizes before any sender lookup" do
+      register_trusted_channel()
+
+      for sender_id <- [nil, "", "anyone-at-all"] do
+        source = %Source{channel: "fake_local", channel_key: :fake_local, sender_id: sender_id}
+
+        assert {:ok, %Authorization{role: :operator, trust: :operator}} =
+                 Authorizer.resolve(source)
+      end
+    end
+
+    test "a registry entry without trust still requires a known sender" do
+      register_untrusted_channel()
+
+      source = %Source{channel: "fake_remote", channel_key: :fake_remote, sender_id: nil}
+      assert {:error, :unauthorized} = Authorizer.resolve(source)
+
+      stranger = %Source{channel: "fake_remote", channel_key: :fake_remote, sender_id: "nope"}
+      assert {:error, :unauthorized} = Authorizer.resolve(stranger)
     end
 
     test "a sole allowed user without explicit owner_user_id stays :guest (P1)" do

@@ -216,3 +216,32 @@ class YankedHandlingTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RuntimeKindTest(unittest.TestCase):
+    """The catalog's runtime disclosure is derived, never hand-set."""
+
+    def test_remote_mcp_manifest_discloses_hosted_execution(self):
+        release = release_fixture(
+            name="eden", runtime={"kind": "remote_mcp", "base_url": "https://mcp.eden.so"}
+        )
+        entry = sync.plugin_entry("eden", [release], [], None)
+        self.assertEqual(entry["runtime_kind"], "remote_mcp")
+
+    def test_local_runtimes_collapse_to_local_stdio(self):
+        for kind in ("node", "python", "binary", "escript"):
+            release = release_fixture(runtime={"kind": kind, "command": "run"})
+            entry = sync.plugin_entry("github", [release], [], None)
+            self.assertEqual(entry["runtime_kind"], "local_stdio", kind)
+
+    # Absent, not null: Index.parse/1 accepts a missing key (entries published
+    # before the field existed) and throws on an explicit null.
+    def test_no_runtime_block_omits_the_key_entirely(self):
+        entry = sync.plugin_entry("github", [release_fixture()], [], None)
+        self.assertNotIn("runtime_kind", entry)
+
+    # A None here is indistinguishable from "published before the field existed",
+    # which renders the local-process sentence — the wrong one for a hosted plugin.
+    def test_an_unmapped_runtime_kind_fails_the_sync(self):
+        with self.assertRaises(sync.SyncError):
+            sync.plugin_entry("github", [release_fixture(runtime={"kind": "wasm"})], [], None)

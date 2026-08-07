@@ -64,6 +64,8 @@ defmodule Fermix.CLI.Doctor do
       Checks.sandbox_config(),
       Checks.sandbox_trace_suggestions(),
       Checks.auth_file_permissions(),
+      Checks.home_permissions(),
+      Checks.cosign(),
       Checks.auth_token_expiry(),
       Checks.plaintext_secrets(),
       Checks.linger(),
@@ -71,8 +73,11 @@ defmodule Fermix.CLI.Doctor do
       Checks.image_generation(),
       Checks.transcription(),
       Checks.realtime(),
+      Checks.acp(),
       Checks.computer_use_permissions(),
-      Checks.harness()
+      Checks.harness(),
+      Checks.skill_curation(),
+      Checks.plugins()
     ]
 
     network =

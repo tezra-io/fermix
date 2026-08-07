@@ -102,6 +102,65 @@ defmodule FermixCore.Jobs.SchedulerTest do
     end
   end
 
+  defmodule LiveRunner do
+    @moduledoc false
+    # A runner that is still executing: it publishes its run id the way the real
+    # Runner does (in the start call, before the pid reaches the supervisor's
+    # caller) and then parks. Used to prove a surviving run is adopted, not
+    # reaped, when the scheduler alone restarts.
+    alias FermixCore.Jobs.Runner
+
+    def child_spec(opts) do
+      %{
+        id: {__MODULE__, Keyword.fetch!(opts, :run).id},
+        start: {__MODULE__, :start_link, [opts]},
+        restart: :temporary
+      }
+    end
+
+    def start_link(opts) do
+      run = Keyword.fetch!(opts, :run)
+      notify = Keyword.fetch!(opts, :notify)
+      parent = self()
+
+      pid =
+        spawn_link(fn ->
+          :ok = Runner.put_run_id(run.id)
+          send(parent, {:labelled, self()})
+          send(notify, {:job_runner, :started, run.id, run.job_id})
+          Process.sleep(:infinity)
+        end)
+
+      receive do
+        {:labelled, ^pid} -> {:ok, pid}
+      after
+        1_000 -> {:error, :label_timeout}
+      end
+    end
+  end
+
+  defmodule RecordingRepo do
+    @moduledoc false
+    # A transparent proxy in front of the real Repo GenServer that reports every
+    # request to the test process before forwarding it. Lets a test assert on the
+    # arguments the scheduler passes (here: the reconciliation scan's bound)
+    # without reaching into scheduler internals.
+    use GenServer
+
+    def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
+
+    @impl true
+    def init(opts) do
+      {:ok, %{real: Keyword.fetch!(opts, :real), notify: Keyword.fetch!(opts, :notify)}}
+    end
+
+    @impl true
+    def handle_call(request, _from, %{real: real, notify: notify} = state) do
+      send(notify, {:repo_request, request})
+      {:reply, GenServer.call(real, request), state}
+    end
+  end
+
   defmodule FaultRepo do
     @moduledoc false
     # A transparent proxy in front of the real Repo GenServer that injects a
@@ -921,6 +980,115 @@ defmodule FermixCore.Jobs.SchedulerTest do
     end
   end
 
+  describe "far-future due timers" do
+    test "a wakeup beyond the OTP timer ceiling arms a clamped timer instead of crashing", %{
+      repo: repo,
+      runner_supervisor: runner_supervisor
+    } do
+      # 60 days out — what `every 60 days` or a distant cron match produces. The
+      # armed delay must be the scheduler's own ceiling, not the raw distance:
+      # unclamped it hands `Process.send_after/3` a months-long delay and the
+      # scheduler goes dark on a single timer until it fires.
+      far_future = DateTime.add(DateTime.utc_now(), 60 * 24 * 3600, :second)
+      seed_due_job(repo, name: "Far Future", due_at: far_future)
+
+      scheduler = start_scheduler(repo, runner_supervisor, timer_enabled: true)
+
+      assert scheduler |> Process.whereis() |> Process.alive?()
+
+      state = :sys.get_state(scheduler)
+      assert is_reference(state.due_timer)
+      remaining = Process.read_timer(state.due_timer)
+      assert is_integer(remaining)
+      assert remaining <= 86_400_000
+      assert remaining > 86_000_000
+    end
+  end
+
+  describe "active-run reconciliation" do
+    test "a run orphaned by a daemon restart is reaped and its job becomes claimable", %{
+      repo: repo,
+      runner_supervisor: runner_supervisor
+    } do
+      {:ok, job} = seed_recurring_job(repo, "Wedged Check")
+      stuck = seed_stuck_run(repo, job)
+
+      # A daemon restart leaves no runner behind, only the active row.
+      assert DynamicSupervisor.which_children(runner_supervisor) == []
+
+      scheduler = start_scheduler(repo, runner_supervisor, runner_delay_ms: 1)
+
+      assert {:ok, reaped} = Repo.get_job_run(stuck.id, server: repo)
+      assert reaped.status == "error"
+      assert reaped.error =~ "no live runner"
+
+      assert {:ok, recovered} = Registry.get_job(job.id, repo: repo)
+      assert recovered.state == "scheduled"
+      assert recovered.last_status == "error"
+
+      job_id = job.id
+      assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:15:00Z])
+      assert_receive {:job_runner, :started, run_id, ^job_id}, 1_000
+      assert run_id != stuck.id
+      assert_receive {:job_runner, :completed, ^run_id, ^job_id}, 1_000
+    end
+
+    test "a run with a surviving runner is adopted, and its later crash is still marked", %{
+      repo: repo,
+      runner_supervisor: runner_supervisor
+    } do
+      {:ok, job} = seed_recurring_job(repo, "Surviving Check")
+      job_id = job.id
+
+      first = start_scheduler(repo, runner_supervisor, runner_module: LiveRunner)
+      assert :ok = Scheduler.tick(first, now: ~U[2026-05-02 14:15:00Z])
+      assert_receive {:job_runner, :started, run_id, ^job_id}, 1_000
+
+      # Scheduler-only restart: :rest_for_one starts the runner supervisor first,
+      # so the runner subtree outlives the scheduler.
+      stop_supervised!(Scheduler)
+      _second = start_scheduler(repo, runner_supervisor, runner_module: LiveRunner)
+
+      assert {:ok, live} = Repo.get_job_run(run_id, server: repo)
+      assert live.status == "queued"
+
+      assert [{_id, pid, _type, _modules}] = DynamicSupervisor.which_children(runner_supervisor)
+      Process.exit(pid, :kill)
+
+      assert eventually(fn ->
+               {:ok, run} = Repo.get_job_run(run_id, server: repo)
+               run.status == "error"
+             end)
+
+      assert {:ok, crashed} = Repo.get_job_run(run_id, server: repo)
+      assert crashed.error =~ "runner crashed"
+
+      assert eventually(fn ->
+               {:ok, current} = Registry.get_job(job_id, repo: repo)
+               current.state == "scheduled"
+             end)
+    end
+
+    test "every reconciliation pass scans active runs under a bounded limit", %{
+      repo: repo,
+      runner_supervisor: runner_supervisor
+    } do
+      {:ok, job} = seed_recurring_job(repo, "Bounded Check")
+      _stuck = seed_stuck_run(repo, job)
+
+      recording = start_recording_repo(repo, self())
+      scheduler = start_scheduler(recording, runner_supervisor, runner_delay_ms: 1)
+
+      assert_receive {:repo_request, {:active_job_runs, limit}}, 1_000
+      assert is_integer(limit)
+      assert limit > 0 and limit <= 50
+
+      # The periodic pass is bounded the same way, not just the init pass.
+      send(scheduler, :reconcile_tick)
+      assert_receive {:repo_request, {:active_job_runs, ^limit}}, 1_000
+    end
+  end
+
   defp seed_broken_schedule_job(repo, opts) do
     {:ok, job} =
       Registry.create_job(
@@ -996,8 +1164,42 @@ defmodule FermixCore.Jobs.SchedulerTest do
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
+  # A job left mid-run by a daemon that died: the job row still says "running"
+  # and its run row is still active — exactly the pair that makes
+  # `ensure_no_active_job_run` refuse every future claim for that job.
+  defp seed_stuck_run(repo, job, opts \\ []) do
+    now = Keyword.get(opts, :now, ~U[2026-05-02 14:15:00Z])
+
+    {:ok, _running_job} =
+      Repo.upsert_scheduled_job(%{job | state: "running", updated_at: now}, server: repo)
+
+    {:ok, run} =
+      Repo.upsert_job_run(
+        %{
+          id: "run_stuck_#{System.unique_integer([:positive])}",
+          job_id: job.id,
+          session_id: "cron_#{job.id}_stuck",
+          trigger: "schedule",
+          status: "running",
+          claimed_at: now,
+          started_at: now,
+          delivery_status: "none",
+          created_at: now,
+          updated_at: now
+        },
+        server: repo
+      )
+
+    run
+  end
+
   defp start_fault_repo(real, fail) do
     {:ok, pid} = start_supervised({FaultRepo, real: real, fail: fail})
+    pid
+  end
+
+  defp start_recording_repo(real, notify) do
+    {:ok, pid} = start_supervised({RecordingRepo, real: real, notify: notify})
     pid
   end
 

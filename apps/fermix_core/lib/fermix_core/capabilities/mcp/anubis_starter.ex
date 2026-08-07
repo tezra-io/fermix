@@ -1,11 +1,15 @@
 defmodule FermixCore.Capabilities.MCP.AnubisStarter do
   @moduledoc """
-  Behaviour for "build the Anubis client child spec for one MCP server."
+  Behaviour for "build the client child spec for one MCP server."
 
-  Production uses `Default`, which spawns an `Anubis.Client` configured with
-  a stdio transport started from the server's `command/args/env`. Tests
-  substitute a stub that returns no children (and records the parsed config)
-  so they don't have to spawn real subprocesses.
+  Production uses `Default`, which spawns either an `Anubis.Client` over a
+  stdio transport (`command`/`args`/`env`) or, for a `remote_mcp` spec, a
+  `Remote.Owner` holding one authenticated Streamable HTTP session (M27 §7.3).
+  Tests substitute a stub that returns no children (and records the parsed
+  config) so they don't have to spawn real subprocesses or open sockets.
+
+  `config` carries the supervisor's collaborators; a remote owner needs the
+  `RuntimeStatus` sink to publish `:connecting` and its terminal states into.
 
   Returning `nil` for `:client_name` tells `MCP.Supervisor` not to override
   the `:client` opt passed to `MCP.Server` — the test path that pre-supplies
@@ -17,24 +21,68 @@ defmodule FermixCore.Capabilities.MCP.AnubisStarter do
           required(:client_name) => GenServer.name() | nil
         }
 
-  @callback child_specs_for(server :: map()) :: result()
+  @callback child_specs_for(server :: map(), config :: map()) :: result()
 end
 
 defmodule FermixCore.Capabilities.MCP.AnubisStarter.Default do
   @moduledoc """
-  Production starter. Builds an `Anubis.Client` child for any server whose
-  config provides a `:command`. Servers without `:command` get an empty child
-  list — useful in tests and as a safety default until stdio config is supplied.
+  Production starter.
+
+  A spec is either local or remote, never both (`McpSource` refuses the blend):
+  `transport: :streamable_http` builds a `Remote.Owner`, a `:command` builds an
+  `Anubis.Client` over stdio, and a spec with neither gets an empty child list
+  — the test/discoverer-only path.
+
+  The remote owner is `:transient` + `significant: true`: when it exhausts its
+  bounded startup attempts it exits `:normal`, which is terminal for the
+  subtree (`auto_shutdown: :any_significant`) rather than a respawn loop
+  against an endpoint that is rejecting the credential.
   """
 
   @behaviour FermixCore.Capabilities.MCP.AnubisStarter
 
+  alias FermixCore.Capabilities.MCP.Remote.Owner, as: RemoteOwner
+  alias FermixCore.Timeouts
+
   @impl true
-  def child_specs_for(%{name: name} = server) when is_binary(name) do
+  def child_specs_for(%{name: name} = server, config) when is_binary(name) and is_map(config) do
+    case Map.get(server, :transport) do
+      :streamable_http -> remote_specs(server, config)
+      _local_or_absent -> stdio_specs(server)
+    end
+  end
+
+  defp stdio_specs(server) do
     case Map.get(server, :command) do
       cmd when is_binary(cmd) and cmd != "" -> build_specs(server, cmd)
-      _ -> %{children: [], client_name: nil}
+      _no_command -> %{children: [], client_name: nil}
     end
+  end
+
+  # The child spec carries the opaque `auth_ref` and nothing else about the
+  # credential: an OTP child spec is retained for the child's lifetime and is
+  # printed verbatim in a `failed_to_start_child` report.
+  defp remote_specs(server, config) do
+    source_id = Map.fetch!(server, :source_id)
+    client_name = RemoteOwner.name_for(source_id)
+
+    owner_spec =
+      Supervisor.child_spec(
+        {RemoteOwner,
+         [
+           name: client_name,
+           spec: server,
+           runtime_status: Map.get(config, :runtime_status)
+         ]},
+        id: {:remote_owner, source_id},
+        restart: :transient,
+        significant: true,
+        # Long enough for `terminate/2` to run the authenticated session
+        # teardown before the socket closes.
+        shutdown: Timeouts.mcp_remote_teardown() + 2_000
+      )
+
+    %{children: [owner_spec], client_name: client_name}
   end
 
   defp build_specs(server, command) do

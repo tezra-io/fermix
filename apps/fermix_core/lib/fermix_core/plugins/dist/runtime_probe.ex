@@ -91,6 +91,14 @@ defmodule FermixCore.Plugins.Dist.RuntimeProbe do
   @spec probe(runtime(), Path.t(), keyword()) :: :ok | probe_error()
   def probe(runtime, plugin_dir, opts \\ [])
 
+  # A `remote_mcp` runtime is an HTTPS endpoint, not a process: there is no host
+  # executable to find and no `--version` to compare (M27 §7.3). Its readiness
+  # is the live connection's answer, not a probe's. `Registry` has already
+  # validated the block, so nothing is left to check here.
+  def probe(%{"kind" => "remote_mcp"}, plugin_dir, opts)
+      when is_binary(plugin_dir) and is_list(opts),
+      do: :ok
+
   def probe(%{"kind" => kind, "command" => command} = runtime, plugin_dir, opts)
       when is_binary(kind) and is_binary(command) and is_binary(plugin_dir) and is_list(opts) do
     if vendored?(runtime),

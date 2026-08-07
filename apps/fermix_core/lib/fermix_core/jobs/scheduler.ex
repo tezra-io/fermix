@@ -32,6 +32,25 @@ defmodule FermixCore.Jobs.Scheduler do
   # spin the scheduler at 0ms (Rule #2). One constant, no escalation ladder.
   @due_error_backoff_ms 5_000
 
+  # Armed-delay ceiling. `Process.send_after/3` takes a bounded delay (it raises
+  # ArgumentError past the OTP timer range), and a schedule is unbounded: "every
+  # 3650 days" or a distant cron match name a wakeup months or years out. Cap the
+  # armed delay at a day so the scheduler never depends on that range and never
+  # sleeps on one months-long timer across suspends and clock changes. Firing
+  # early is free: the due tick scans, finds nothing due, and re-arms with a
+  # fresh (smaller) delay.
+  @max_due_delay_ms 86_400_000
+
+  # Crash-recovery scan bound: the most active job_runs rows one reconciliation
+  # pass inspects. Anything beyond this is picked up by the next pass, so a large
+  # backlog can never make a single tick unbounded.
+  @reconcile_run_limit 50
+
+  # Error text for a run reaped by reconciliation. It names the cause in the run
+  # row itself, so an operator reading the run sees why it ended with no process
+  # behind it rather than a bare terminal status.
+  @reap_error "reaped: no live runner (daemon or scheduler restart)"
+
   # Concurrent scheduled-run ceiling. When this many runs are already active the
   # tick claims nothing; due jobs stay "scheduled" and later ticks (armed at the
   # backoff floor above) or reconciliation claim them as slots free. The bounded
@@ -143,6 +162,7 @@ defmodule FermixCore.Jobs.Scheduler do
 
     state =
       state
+      |> reconcile_active_runs()
       |> schedule_due_timer()
       |> schedule_reconciliation_timer()
 
@@ -169,9 +189,12 @@ defmodule FermixCore.Jobs.Scheduler do
     {:noreply, run_due_and_rearm(state, DateTime.utc_now())}
   end
 
+  # Reconcile before scanning: a run freed here puts its job back to "scheduled",
+  # so the same tick can claim it instead of waiting a further interval.
   def handle_info(:reconcile_tick, state) do
     state =
       state
+      |> reconcile_active_runs()
       |> run_due_and_rearm(DateTime.utc_now())
       |> schedule_reconciliation_timer()
 
@@ -191,6 +214,80 @@ defmodule FermixCore.Jobs.Scheduler do
         {:noreply, mark_run_crashed(run_id, job_id, reason, state)}
     end
   end
+
+  # Crash recovery beyond the in-process monitor above. A daemon restart (or a
+  # scheduler-subtree restart) drops every monitor while job_runs rows stay
+  # "queued"/"running", and `ensure_no_active_job_run` then refuses every future
+  # claim for those jobs — wedged forever, with no timer that ever reclaims them.
+  # Liveness is the signal, never age: the runner supervisor is the authority on
+  # which runs still exist. Runs it still holds are adopted; the rest are failed
+  # through the same path a monitored crash takes.
+  defp reconcile_active_runs(%{enabled?: false} = state), do: state
+
+  defp reconcile_active_runs(state) do
+    case Repo.active_job_runs(server: state.repo, limit: @reconcile_run_limit) do
+      {:ok, runs} ->
+        live = live_runner_pids(state)
+        Enum.reduce(runs, state, &reconcile_active_run(&1, live, &2))
+
+      {:error, reason} ->
+        Logger.error("Scheduled job run reconciliation scan failed: #{inspect(reason)}")
+        state
+    end
+  end
+
+  defp reconcile_active_run(run, live, state) do
+    case Map.fetch(live, run.id) do
+      {:ok, pid} -> adopt_live_run(run, pid, state)
+      :error -> reap_orphaned_run(run, state)
+    end
+  end
+
+  # The run's process is alive but unmonitored: the scheduler restarted alone
+  # (:rest_for_one starts the runner supervisor first, so runners survive it).
+  # Monitor it now so its eventual exit is still marked. Monitoring an already
+  # dead pid delivers :DOWN immediately, which the handler above treats as a
+  # crash — the same outcome as reaping it here.
+  defp adopt_live_run(run, pid, state) do
+    if monitored_run?(state.run_monitors, run.id) do
+      state
+    else
+      Logger.info("Scheduled job run #{run.id} adopted from a surviving runner")
+      ref = Process.monitor(pid)
+      put_in(state.run_monitors[ref], %{job_id: run.job_id, run_id: run.id})
+    end
+  end
+
+  defp monitored_run?(run_monitors, run_id) do
+    Enum.any?(run_monitors, fn {_ref, %{run_id: id}} -> id == run_id end)
+  end
+
+  defp reap_orphaned_run(run, state) do
+    Logger.warning("Scheduled job #{run.job_id} run #{run.id} #{@reap_error}")
+    mark_run_failed(run.id, run.job_id, @reap_error, state)
+  end
+
+  # Run ids of every process the runner supervisor still holds. The id is read
+  # from the process-dictionary key the runner publishes in its own init
+  # (`Runner.run_id/1`, a `Process.info/2` read), never by calling the runner: a
+  # runner spends its whole run inside `handle_continue/2`, so a GenServer.call
+  # would block the scheduler for the length of the run and time out into "not
+  # alive" — reaping runs that are healthily executing.
+  defp live_runner_pids(state) do
+    state.runner_supervisor
+    |> DynamicSupervisor.which_children()
+    |> Enum.reduce(%{}, &put_live_runner/2)
+  end
+
+  defp put_live_runner({_id, pid, _type, _modules}, live) when is_pid(pid) do
+    case Runner.run_id(pid) do
+      nil -> live
+      run_id -> Map.put(live, run_id, pid)
+    end
+  end
+
+  # A child mid-restart has no pid to ask; the next pass sees it settled.
+  defp put_live_runner({_id, _no_pid, _type, _modules}, live), do: live
 
   # One due tick, run then re-armed. The tick outcome — `:ok` (drained),
   # `:busy` (admission backpressure), or `:error` (a fault on any path) — decides
@@ -556,8 +653,14 @@ defmodule FermixCore.Jobs.Scheduler do
   end
 
   defp mark_run_crashed(run_id, job_id, reason, state) do
+    mark_run_failed(run_id, job_id, "runner crashed: #{inspect(reason)}", state)
+  end
+
+  # Shared terminal write for a run that ended without finalizing itself, whether
+  # the scheduler watched it die (monitor) or found it abandoned (reconciliation).
+  # The caller supplies the operator-facing cause; everything after is identical.
+  defp mark_run_failed(run_id, job_id, error, state) when is_binary(error) do
     now = DateTime.utc_now()
-    error = "runner crashed: #{inspect(reason)}"
 
     case mark_run_error(run_id, error, now, state.repo) do
       {:active_run_marked, _run} ->
@@ -813,12 +916,14 @@ defmodule FermixCore.Jobs.Scheduler do
   # A clean tick fires at the next wakeup (0ms floor for a past-due job). A tick
   # that errored or hit admission backpressure re-arms no sooner than the backoff
   # floor, so a persistently past-due-but-unclaimable job cannot spin at 0ms.
+  # The floor applies first, then the ceiling: the two never overlap (5s vs 24h),
+  # so the order is only there to make the intent readable.
   defp due_delay_ms(next_run_at, outcome) do
     delay = max(DateTime.diff(next_run_at, DateTime.utc_now(), :millisecond), 0)
 
     case outcome do
-      :ok -> delay
-      _backoff -> max(delay, @due_error_backoff_ms)
+      :ok -> min(delay, @max_due_delay_ms)
+      _backoff -> delay |> max(@due_error_backoff_ms) |> min(@max_due_delay_ms)
     end
   end
 

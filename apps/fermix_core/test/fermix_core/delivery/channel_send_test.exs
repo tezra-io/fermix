@@ -13,6 +13,15 @@ defmodule FermixCore.Delivery.ChannelSendTest do
     def send_message(_destination, _text, _opts), do: {:error, :permanent}
   end
 
+  defmodule ProposalAdapter do
+    def send_message(_destination, _text, _opts), do: {:error, :wrong_path}
+
+    def send_proposal(target, text, token) do
+      send(self(), {:proposal_sent, target, text, token})
+      :ok
+    end
+  end
+
   describe "send/5" do
     test "resolves an injected adapter and passes send_opts through" do
       assert :ok = ChannelSend.send("telegram", "c1", "hi", [thread_ts: "9"], adapter: OkAdapter)
@@ -29,6 +38,24 @@ defmodule FermixCore.Delivery.ChannelSendTest do
     test "reports an unsupported platform when no adapter is configured" do
       assert {:error, {:unsupported_delivery_platform, "telegram"}} =
                ChannelSend.send("telegram", "c1", "hi", [], channels: %{})
+    end
+
+    test "the proposal dispatch routes through send_proposal/3 with the target map" do
+      assert :ok =
+               ChannelSend.send("telegram", "c1", "proposal text", [],
+                 adapter: ProposalAdapter,
+                 dispatch: {:send_proposal, "TOK12345"}
+               )
+
+      assert_received {:proposal_sent, %{chat_id: "c1"}, "proposal text", "TOK12345"}
+    end
+
+    test "the proposal dispatch refuses an adapter without send_proposal/3" do
+      assert {:error, {:invalid_delivery_adapter, OkAdapter}} =
+               ChannelSend.send("telegram", "c1", "proposal text", [],
+                 adapter: OkAdapter,
+                 dispatch: {:send_proposal, "TOK12345"}
+               )
     end
   end
 

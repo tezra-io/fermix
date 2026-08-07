@@ -33,7 +33,8 @@ defmodule FermixCore.Reply do
   Human-readable rendering of a `{:error, reason}` returned by a channel's
   media/text delivery. Shared by `send_attachment` and `Tools.Media.Output`
   so both surface the same wording for the channel egress error tuples
-  (byte/text caps, rate limits).
+  (byte/text caps, rate limits) and by every reason in the closed delivery
+  vocabulary `FermixCore.Delivery.Error.t/0` (M30 §11.3).
   """
   @spec format_delivery_error(term()) :: String.t()
   def format_delivery_error({:byte_cap_exceeded, actual, allowed}) do
@@ -48,7 +49,82 @@ defmodule FermixCore.Reply do
     "reply text is #{actual} characters; limit is #{allowed} characters"
   end
 
+  def format_delivery_error({:http_status, status}) do
+    "channel rejected the message with HTTP #{status}"
+  end
+
+  def format_delivery_error({:permanent, :authentication}) do
+    "channel credentials were rejected; re-check that channel's token in your Fermix config"
+  end
+
+  def format_delivery_error({:permanent, :authorization}) do
+    "channel refused the destination; the bot needs access to that conversation"
+  end
+
+  def format_delivery_error({:permanent, :invalid_destination}) do
+    "destination no longer exists on that channel; re-check the configured chat or channel id"
+  end
+
+  def format_delivery_error({:permanent, :malformed_request}) do
+    "channel rejected the request as malformed"
+  end
+
+  def format_delivery_error({:permanent, :remote_rejected}) do
+    "channel rejected the message; the platform's own words are in the daemon log"
+  end
+
+  def format_delivery_error({:permanent, :adapter_unavailable}) do
+    "channel client is unavailable; check that this channel is configured and installed"
+  end
+
+  def format_delivery_error({:transport, :pool_unavailable}) do
+    "no outbound connection was available before the checkout budget ran out"
+  end
+
+  def format_delivery_error({:transport, :closed}) do
+    "connection closed before the channel answered"
+  end
+
+  def format_delivery_error({:transport, :connection_refused}) do
+    "channel host refused the connection"
+  end
+
+  def format_delivery_error({:transport, :connection_reset}) do
+    "channel host reset the connection mid-request"
+  end
+
+  def format_delivery_error({:transport, :network_unreachable}) do
+    "channel host was unreachable from this network"
+  end
+
+  def format_delivery_error({:transport, :timeout}) do
+    "channel did not answer before the request timed out"
+  end
+
+  def format_delivery_error(:delivery_timeout) do
+    "delivery timed out and was cancelled by its watchdog"
+  end
+
+  def format_delivery_error({:delivery_crashed, :worker_crash}) do
+    "delivery crashed before the channel answered; see the daemon log"
+  end
+
+  def format_delivery_error({:unsupported_delivery_platform, platform}) do
+    "no channel is configured for the #{format_value(platform)} platform"
+  end
+
+  def format_delivery_error({:invalid_delivery_adapter, adapter}) do
+    "channel adapter #{format_value(adapter)} is missing or cannot send messages"
+  end
+
+  def format_delivery_error({:unexpected_delivery_result, :invalid_contract}) do
+    "channel returned an unrecognized result; the raw shape is in the daemon log"
+  end
+
   def format_delivery_error(reason), do: inspect(reason)
+
+  defp format_value(value) when is_binary(value), do: value
+  defp format_value(value), do: inspect(value)
 
   defp format_bytes(bytes) when is_integer(bytes) and bytes >= 1_048_576 do
     "#{Float.round(bytes / 1_048_576, 1)} MiB"

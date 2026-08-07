@@ -14,6 +14,7 @@ defmodule FermixCore.Tools.Media.Support do
   require Logger
 
   alias FermixCore.Config
+  alias FermixCore.Net.Guard
   alias FermixCore.Net.HttpClient
   alias FermixCore.Net.TimeoutPolicy
   alias FermixCore.Providers.Telemetry, as: ProviderTelemetry
@@ -324,10 +325,28 @@ defmodule FermixCore.Tools.Media.Support do
   hostile or compromised CDN can never buffer 25 MB+ into the daemon), refuses a
   zero-byte body, and sniffs the image MIME from the bytes rather than trusting
   the response header. `req_options` carries the test plug seam.
+
+  The URL is provider-supplied, not operator-supplied, so `Net.Guard` screens it
+  before any transport — the guard lives here rather than at a backend's call
+  site so every backend that returns a URL inherits it. Redirects are
+  deliberately still followed: provider blob URLs legitimately hand off to a CDN
+  edge, and only the first hop is a value the provider chose for us.
   """
   @spec materialize_url(String.t(), keyword()) ::
           {:ok, %{bytes: binary(), mime: String.t()}} | {:error, String.t()}
   def materialize_url(url, req_options \\ []) when is_binary(url) and is_list(req_options) do
+    case Guard.validate(url) do
+      :ok -> download_url(url, req_options)
+      {:error, reason} -> {:error, blocked_url_message(url, reason)}
+    end
+  end
+
+  defp blocked_url_message(url, reason) do
+    "blocked_url: the provider returned an image URL the network guard refused " <>
+      "(#{URI.parse(url).host}: #{inspect(reason)})"
+  end
+
+  defp download_url(url, req_options) do
     [
       url: url,
       method: :get,

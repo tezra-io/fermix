@@ -6,6 +6,7 @@ defmodule FermixCore.Tools.SkillView do
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
   alias FermixCore.Agents.SkillRegistry
+  alias FermixCore.SkillCuration.Usage
   alias FermixCore.Tools.Support
 
   @view_max_bytes 65_536
@@ -57,6 +58,7 @@ defmodule FermixCore.Tools.SkillView do
     with {:ok, skill_name} <- skill_name(args),
          {:ok, file} <- optional_file(args),
          {:ok, payload} <- build_view(skill_registry(context), skill_name, file) do
+      Usage.record_view(skill_name, usage_opts(context))
       Support.success_json(payload)
     else
       {:error, reason} -> Support.error(reason)
@@ -157,5 +159,12 @@ defmodule FermixCore.Tools.SkillView do
 
   defp skill_registry(context) do
     Map.get(context, :skill_registry, SkillRegistry)
+  end
+
+  defp usage_opts(context) do
+    case Map.get(context, :usage_repo) do
+      nil -> []
+      repo -> [repo: repo]
+    end
   end
 end

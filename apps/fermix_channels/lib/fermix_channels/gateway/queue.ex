@@ -17,6 +17,13 @@ defmodule FermixChannels.Gateway.Queue do
   via `FermixCore.Agents.TurnRunner`. Reply delivery happens inside the turn via
   the message's `reply_fn` closure.
 
+  Optional per-message closures the gateway may attach, all absent on channels
+  that do not want them: `stream_spec` (a `DraftStream.Spec` for the draft/block
+  tiers, or `%{mode: :raw, callback: fun}` for a channel that takes the loop's
+  stream events verbatim), `activity_callback` (tool start/finish events), and
+  `turn_result_fn` (invoked exactly once per turn with `{:completed}`,
+  `{:failed, raw_reason}` or `{:cancelled}`).
+
   Started :permanent by `FermixChannels.Application`.
   """
 
@@ -104,6 +111,25 @@ defmodule FermixChannels.Gateway.Queue do
     GenServer.call(server, :stop_all)
   end
 
+  @doc """
+  Stop ONE conversation: terminate its active turn, hand that turn's channel a
+  `{:cancelled}` outcome, append the stopped-turn marker, and clear its pending
+  FIFO. Every other conversation keeps running.
+
+  The per-key half of `stop_all/1` (same helpers, same suppression rule — the
+  killed turn's pid is no longer the conversation's active pid, so its freshness
+  check fails and it neither delivers nor commits). Built for the ACP surface's
+  `session/cancel` (MILESTONE_29_ACP_AGENT_SURFACE.md §8.5).
+
+  `{:ok, :not_found}` when the conversation has nothing active or pending.
+  """
+  @spec stop_conversation(ConversationKey.t(), GenServer.server()) ::
+          {:ok, %{active_stopped: 0 | 1, pending_cleared: non_neg_integer()}} | {:ok, :not_found}
+  def stop_conversation(conversation_key, server \\ __MODULE__)
+      when is_tuple(conversation_key) do
+    GenServer.call(server, {:stop_conversation, conversation_key})
+  end
+
   # --- GenServer Callbacks ---
 
   @impl true
@@ -144,6 +170,26 @@ defmodule FermixChannels.Gateway.Queue do
   def handle_call(:stop_all, _from, state) do
     {state, counts} = stop_all_conversations(state)
     {:reply, counts, state}
+  end
+
+  def handle_call({:stop_conversation, conversation_key}, _from, state) do
+    {state, result} = stop_one_conversation(state, conversation_key)
+    {:reply, result, state}
+  end
+
+  # The single claim point that makes `turn_result_fn` fire exactly once: the
+  # queue process serializes a turn task's terminal claim against a concurrent
+  # stop (which takes the closure with the whole conversation) and against the
+  # task's own abnormal `:DOWN`. The first claimant gets the closure; every
+  # later one gets nil and invokes nothing.
+  def handle_call({:claim_turn_result, conversation_key, pid}, _from, state) do
+    case Map.get(state.conversations, conversation_key) do
+      %{active: %{pid: ^pid, turn_result_fn: fun}} when is_function(fun, 1) ->
+        {:reply, fun, clear_turn_result_fn(state, conversation_key, pid)}
+
+      _conversation ->
+        {:reply, nil, state}
+    end
   end
 
   # Freshness authority: a turn is fresh iff its task pid is still the active
@@ -261,6 +307,9 @@ defmodule FermixChannels.Gateway.Queue do
         )
 
         send_error_reply_async(msg, "Sorry, I encountered an error processing your message.")
+        # No task ever existed to claim it, so this is the only outcome site for
+        # this message — a turn-result consumer must never be left waiting.
+        invoke_turn_result_async(Map.get(msg, :turn_result_fn), {:failed, reason})
 
         state
         |> put_conversation_runtime(conversation_key, conversation)
@@ -293,6 +342,7 @@ defmodule FermixChannels.Gateway.Queue do
       conversation_key: conversation_key,
       request_id: request_id,
       deliver: wrap_deliver(Map.fetch!(msg, :reply_fn), side_effect_ledger),
+      activity_callback: Map.get(msg, :activity_callback),
       side_effect_ledger: side_effect_ledger,
       conversation_store: conversation_store,
       msg: msg
@@ -329,7 +379,9 @@ defmodule FermixChannels.Gateway.Queue do
             :typing_fn,
             :typing_interval_ms,
             :typing_timeout_ms,
-            :stream_spec
+            :stream_spec,
+            :activity_callback,
+            :turn_result_fn
           ])
           |> Map.put(:__runtime_context_cache_status, cache_status)
 
@@ -340,6 +392,9 @@ defmodule FermixChannels.Gateway.Queue do
 
       {:error, reason} ->
         deliver_checkout_error(turn, reason)
+        # A turn that never reached the runner still ended — and failed. Its
+        # channel gets the raw checkout reason, same as any other error path.
+        finish_turn(turn, {:failed, reason})
     end
   end
 
@@ -352,6 +407,15 @@ defmodule FermixChannels.Gateway.Queue do
         pid = DraftStream.start_link(spec)
         callback = fn event -> DraftStream.push(pid, event) end
         Map.merge(turn, %{draft_pid: pid, stream_callback: callback})
+
+      # The `:raw` tier (MILESTONE_29_ACP_AGENT_SURFACE.md §8.4): the adapter's
+      # own callback takes the loop's stream events verbatim — no draft engine,
+      # so no throttled edits, no reasoning side-blocks, and nothing the
+      # adapter did not ask for. `deliver_final`/`discard_draft` already no-op
+      # on a nil draft pid, so the rest of the turn path is unchanged.
+      %{mode: :raw, callback: callback} = spec
+      when not is_struct(spec) and is_function(callback, 1) ->
+        Map.merge(turn, %{draft_pid: nil, stream_callback: callback})
 
       nil ->
         Map.merge(turn, %{draft_pid: nil, stream_callback: nil})
@@ -368,42 +432,98 @@ defmodule FermixChannels.Gateway.Queue do
   end
 
   defp run_and_deliver(%{runner: runner, core_msg: core_msg, turn_state: turn_state} = turn) do
-    result =
-      case run_turn(runner, core_msg, turn_state, turn.deliver, turn.stream_callback) do
-        {:ok, response, context_tokens} ->
-          cond do
-            # A turn stopped by `/stop` mid-run must neither deliver nor commit.
-            not fresh?(turn) ->
-              discard_draft(turn)
-              :stopped
-
-            # An empty final completion. Two cases the side-effect ledger tells
-            # apart (EMOJI_REACTION_ACKS §7): if the turn already delivered a
-            # channel side-effect (a reaction ack, or an attachment), THAT was the
-            # reply — suppress the canned retry and close the turn with a compact
-            # marker. Otherwise the provider genuinely returned nothing — surface
-            # it honestly and let the user retry. Neither commits `response`.
-            String.trim(response) == "" ->
-              discard_draft(turn)
-              handle_empty_completion(turn)
-
-            true ->
-              deliver_final(turn, response)
-              mark_final_reply_delivered(turn)
-
-              core_msg
-              |> runner.commit(turn_state, response, context_tokens)
-              |> maybe_notify_compacted(turn.deliver)
-          end
-
-        {:error, reason} ->
-          discard_draft(turn)
-
-          if fresh?(turn), do: turn.deliver.({:text, runner.error_reply(reason)}), else: :stopped
+    outcome =
+      case run_turn(
+             runner,
+             core_msg,
+             turn_state,
+             turn.deliver,
+             turn.stream_callback,
+             turn.activity_callback
+           ) do
+        {:ok, response, context_tokens} -> deliver_response(turn, response, context_tokens)
+        {:error, reason} -> deliver_turn_error(turn, reason)
       end
 
     reap_one_shot_browser(turn)
-    result
+    finish_turn(turn, outcome)
+  end
+
+  defp deliver_response(
+         %{runner: runner, core_msg: core_msg, turn_state: turn_state} = turn,
+         response,
+         context_tokens
+       ) do
+    cond do
+      # A turn stopped by `/stop` mid-run must neither deliver nor commit.
+      not fresh?(turn) ->
+        discard_draft(turn)
+        :stopped
+
+      # An empty final completion. Two cases the side-effect ledger tells
+      # apart (EMOJI_REACTION_ACKS §7): if the turn already delivered a
+      # channel side-effect (a reaction ack, or an attachment), THAT was the
+      # reply — suppress the canned retry and close the turn with a compact
+      # marker. Otherwise the provider genuinely returned nothing — surface
+      # it honestly and let the user retry. Neither commits `response`.
+      # Either way the turn ran to completion: a delivered canned outcome is
+      # still `{:completed}` for the channel's turn-result callback.
+      String.trim(response) == "" ->
+        discard_draft(turn)
+        handle_empty_completion(turn)
+        {:completed}
+
+      true ->
+        deliver_final(turn, response)
+        mark_final_reply_delivered(turn)
+
+        core_msg
+        |> runner.commit(turn_state, response, context_tokens)
+        |> maybe_notify_compacted(turn.deliver)
+
+        {:completed}
+    end
+  end
+
+  # The channel still gets today's `error_reply/1` text; the turn-result callback
+  # gets the RAW reason, which is the only form an adapter can classify (an ACP
+  # session maps provider-auth failures to a re-authenticate error, M29 §4).
+  #
+  # A failed turn commits no assistant message, so the user message the runner
+  # persisted before the loop would be left dangling. Close it with the same
+  # marker (and the same guarded path) a stop uses: a legitimate retry — durable,
+  # or a client re-running the prompt — must not reach a model with no record of
+  # what the failed turn already did, or it repeats it.
+  defp deliver_turn_error(%{runner: runner} = turn, reason) do
+    discard_draft(turn)
+
+    if fresh?(turn) do
+      turn.deliver.({:text, runner.error_reply(reason)})
+      append_marker(turn, @stopped_turn_marker)
+      {:failed, reason}
+    else
+      :stopped
+    end
+  end
+
+  # The turn's own terminal invocation of `turn_result_fn`, claimed from the
+  # queue so it can never race a concurrent stop into a second invocation.
+  # `:stopped` means a stop already owns this turn's outcome and fires
+  # `{:cancelled}` itself — this task claims nothing.
+  defp finish_turn(_turn, :stopped), do: :stopped
+
+  defp finish_turn(turn, outcome) do
+    turn
+    |> claim_turn_result()
+    |> invoke_turn_result(outcome)
+
+    outcome
+  end
+
+  defp claim_turn_result(%{owner: owner, conversation_key: conversation_key}) do
+    GenServer.call(owner, {:claim_turn_result, conversation_key, self()})
+  catch
+    :exit, _reason -> nil
   end
 
   # A one-shot (loopback) conversation — CLI `ask`, daemon — will not send a
@@ -425,14 +545,19 @@ defmodule FermixChannels.Gateway.Queue do
 
   defp reap_one_shot_browser(_turn), do: :ok
 
-  # Streaming turns thread the engine callback via run/4; everything else keeps
-  # the 3-arity call so non-streaming surfaces (and runner stubs) are untouched.
-  defp run_turn(runner, core_msg, turn_state, deliver, nil),
+  # Streaming turns thread the engine callback via run/4 and tool-activity
+  # surfaces add run/5; everything else keeps the 3-arity call so non-streaming
+  # surfaces (and runner stubs) are untouched.
+  defp run_turn(runner, core_msg, turn_state, deliver, nil, nil),
     do: runner.run(core_msg, turn_state, deliver)
 
-  defp run_turn(runner, core_msg, turn_state, deliver, stream_callback)
+  defp run_turn(runner, core_msg, turn_state, deliver, stream_callback, nil)
        when is_function(stream_callback, 1),
        do: runner.run(core_msg, turn_state, deliver, stream_callback)
+
+  defp run_turn(runner, core_msg, turn_state, deliver, stream_callback, activity_callback)
+       when is_function(activity_callback, 1),
+       do: runner.run(core_msg, turn_state, deliver, stream_callback, activity_callback)
 
   # Final delivery for a streamed turn: seal the draft with the authoritative
   # response. `:no_draft` (no deltas ever arrived) and seal failure both fall
@@ -592,6 +717,10 @@ defmodule FermixChannels.Gateway.Queue do
           monitor_ref: monitor_ref,
           started_at_us: System.monotonic_time(:microsecond),
           final_reply_delivered?: false,
+          # The channel's optional per-turn outcome callback, held HERE rather
+          # than in the task so the queue is the one place that decides who
+          # invokes it — see the claim handler.
+          turn_result_fn: Map.get(msg, :turn_result_fn),
           # Kept so a crashed turn (which dies before its own reply_fn runs) can
           # still deliver the generic error reply from `clear_active_request`.
           message: msg
@@ -619,6 +748,7 @@ defmodule FermixChannels.Gateway.Queue do
         )
 
         maybe_reply_on_crash(active, reason)
+        maybe_fail_turn_result(active, reason)
         put_conversation_runtime(state, conversation_key, %{conversation | active: nil})
 
       _conversation ->
@@ -641,8 +771,46 @@ defmodule FermixChannels.Gateway.Queue do
     :ok
   end
 
+  # A turn that died before reaching its own terminal claim (a raise, a
+  # shutdown) still owes its channel an outcome. Nothing can double-fire: a task
+  # that already claimed the closure left `turn_result_fn` nil, and clearing the
+  # active slot drops it for good.
+  defp maybe_fail_turn_result(active, reason) do
+    case completion_reason(reason) do
+      :crashed ->
+        invoke_turn_result_async(Map.get(active, :turn_result_fn), {:failed, {:crashed, reason}})
+
+      :normal ->
+        :ok
+    end
+  end
+
   defp completion_reason(:normal), do: :normal
   defp completion_reason(_other), do: :crashed
+
+  # Crash-isolated, nil-safe: a raising channel callback must take down neither
+  # the turn task nor the queue (same posture as the loop's stream/activity
+  # callbacks).
+  defp invoke_turn_result(nil, _outcome), do: :ok
+
+  defp invoke_turn_result(fun, outcome) when is_function(fun, 1) do
+    fun.(outcome)
+    :ok
+  rescue
+    error ->
+      Logger.warning("Turn result callback raised: #{Exception.message(error)}")
+      :ok
+  end
+
+  # The queue's own invocations (stop, crashed DOWN) run off-process, so a slow
+  # channel closure cannot stall the scheduler for every other conversation —
+  # the same reason `send_error_reply_async/2` spawns.
+  defp invoke_turn_result_async(nil, _outcome), do: :ok
+
+  defp invoke_turn_result_async(fun, outcome) when is_function(fun, 1) do
+    spawn(fn -> invoke_turn_result(fun, outcome) end)
+    :ok
+  end
 
   defp update_active_request(state, conversation_key, pid, fun) do
     case Map.get(state.conversations, conversation_key) do
@@ -690,12 +858,54 @@ defmodule FermixChannels.Gateway.Queue do
     counts =
       Enum.reduce(state.conversations, %{active_stopped: 0, pending_cleared: 0}, fn
         {key, runtime}, counts ->
-          terminate_active(state.task_supervisor, runtime)
-          mark_stopped_turn(state, key, runtime)
+          stop_conversation_runtime(state, key, runtime)
           tally_stopped(runtime, counts)
       end)
 
     {%{state | conversations: %{}, task_refs: %{}}, counts}
+  end
+
+  # The per-key half of the same stop: one conversation's runtime is dropped
+  # (with its monitor ref, so the killed task's `:DOWN` is a no-op exactly as in
+  # `stop_all`), every other conversation is untouched.
+  defp stop_one_conversation(state, conversation_key) do
+    case Map.get(state.conversations, conversation_key) do
+      nil ->
+        {state, {:ok, :not_found}}
+
+      runtime ->
+        stop_conversation_runtime(state, conversation_key, runtime)
+        counts = tally_stopped(runtime, %{active_stopped: 0, pending_cleared: 0})
+        {drop_conversation(state, conversation_key, runtime), {:ok, counts}}
+    end
+  end
+
+  # Kill the active turn task, hand its channel the `{:cancelled}` outcome (the
+  # killed task can never claim its own), then close the orphaned user message.
+  # `terminate_child` is synchronous, so the task is already dead when the
+  # callback fires and when the marker is written.
+  defp stop_conversation_runtime(state, key, runtime) do
+    terminate_active(state.task_supervisor, runtime)
+    invoke_turn_result_async(active_turn_result_fn(runtime), {:cancelled})
+    mark_stopped_turn(state, key, runtime)
+  end
+
+  defp active_turn_result_fn(%{active: %{turn_result_fn: fun}}) when is_function(fun, 1), do: fun
+  defp active_turn_result_fn(_runtime), do: nil
+
+  defp drop_conversation(state, conversation_key, runtime) do
+    %{
+      state
+      | conversations: Map.delete(state.conversations, conversation_key),
+        task_refs: drop_monitor_ref(state.task_refs, runtime)
+    }
+  end
+
+  defp drop_monitor_ref(task_refs, %{active: %{monitor_ref: ref}}), do: Map.delete(task_refs, ref)
+  defp drop_monitor_ref(task_refs, _runtime), do: task_refs
+
+  defp clear_turn_result_fn(state, conversation_key, pid) do
+    update_active_request(state, conversation_key, pid, &Map.put(&1, :turn_result_fn, nil))
   end
 
   defp terminate_active(task_supervisor, %{active: %{pid: pid}}) when is_pid(pid) do

@@ -27,7 +27,7 @@ defmodule FermixCore.Setup.DoctorTest do
     original_registry = Application.get_env(:fermix_channels, :channel_registry)
 
     original_channels =
-      for channel <- [:telegram, :whatsapp, :discord, :slack, :signal], into: %{} do
+      for channel <- [:telegram, :whatsapp, :discord, :slack, :signal, :acp], into: %{} do
         {channel, Application.get_env(:fermix_channels, channel, [])}
       end
 
@@ -704,6 +704,29 @@ defmodule FermixCore.Setup.DoctorTest do
 
       assert_received {:channel_health_checked, :healthy}
       refute_received {:channel_health_checked, :disabled}
+    end
+
+    # A local-operator transport (ACP) has no remote service to call, so it is
+    # not a live-probe target at all — its liveness is the daemon-side listener,
+    # which `fermix doctor`'s own acp check reads over the control socket.
+    test "skips an enabled local-operator transport instead of warning about it" do
+      Application.put_env(:fermix_channels, :channel_registry, [
+        %{
+          name: "local",
+          config_key: :local_channel,
+          adapter: HealthyChannel,
+          remote?: true,
+          trust: :local_operator,
+          transport: :gateway,
+          child: nil
+        }
+      ])
+
+      Application.put_env(:fermix_channels, :local_channel, enabled: true)
+      on_exit(fn -> Application.delete_env(:fermix_channels, :local_channel) end)
+
+      assert Doctor.probe_channels(test_pid: self()) == []
+      refute_received {:channel_health_checked, :healthy}
     end
   end
 

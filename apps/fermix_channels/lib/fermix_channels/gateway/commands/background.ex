@@ -20,9 +20,13 @@ defmodule FermixChannels.Gateway.Commands.Background do
   def description,
     do: "Run a task in the background without blocking this chat. Usage: /background <prompt>"
 
+  # Strict operator role: `/background` bypasses the single-flight queue and
+  # spends the owner's provider budget on a detached run. The
+  # `command_allowlist` guest branch exists for conversation-scoped lifecycle
+  # commands (/new, /compact), not for starting owner-funded work.
   @impl true
   def authorize(message, metadata, context),
-    do: Authorization.owner_only(message, metadata, context)
+    do: Authorization.operator_only(message, metadata, context)
 
   @impl true
   def execute(message, reply_fn, context) do
@@ -50,6 +54,13 @@ defmodule FermixChannels.Gateway.Commands.Background do
           {:text,
            "Started background work #{work_id}. I'll post the result here when it's done — " <>
              "/tasks to check, /stop to cancel."}
+        )
+
+      {:error, {:max_running_work, max}} ->
+        reply_fn.(
+          {:text,
+           "Too many background tasks already running (limit #{max}). " <>
+             "Wait for one to finish, or /stop to cancel them, then try again."}
         )
 
       {:error, reason} ->

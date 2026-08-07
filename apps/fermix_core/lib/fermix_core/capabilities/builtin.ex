@@ -101,6 +101,19 @@ defmodule FermixCore.Capabilities.Builtin do
       policy_class: :read_write,
       hidden_from_agent?: false,
       owner_only?: false
+    },
+    # Temporal events (MILESTONE_30 §12.1). Owner-only because every row is the
+    # owner's own calendar data; the attended-origin advertise?/execute gate in
+    # `Temporal.Access` is the hard barrier, and these registry fields do not
+    # replace it.
+    "event_store" => %{policy_class: :read_write, hidden_from_agent?: false, owner_only?: true},
+    "event_list" => %{policy_class: :read_only, hidden_from_agent?: false, owner_only?: true},
+    "event_update" => %{policy_class: :read_write, hidden_from_agent?: false, owner_only?: true},
+    "event_remove" => %{policy_class: :read_write, hidden_from_agent?: false, owner_only?: true},
+    "reminder_snooze" => %{
+      policy_class: :read_write,
+      hidden_from_agent?: false,
+      owner_only?: true
     }
   }
 

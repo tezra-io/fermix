@@ -18,17 +18,29 @@ defmodule FermixChannels.Gateway.ChannelRegistry do
     supervised child started by `FermixChannels.Application`.
   - `:webhook` (WhatsApp, Slack) is web-triggered — no child.
   - `:loopback` (CLI, daemon) is local/operator — no child, no config key.
+
+  Two optional entry keys:
+  - `trust: :local_operator` — the transport is a same-user local surface the
+    human owner is sitting at (CLI, daemon). `Gateway.Authorizer` resolves it to
+    an operator authorization before any sender lookup, and the ingress gates
+    below exempt it: such a channel has no inbox and therefore no allow-list.
+  - `commands?: false` — the gateway skips the slash-command pipeline for the
+    channel entirely; message content is always model input. Absent means `true`.
   """
 
   alias FermixCore.Config
 
+  @type trust :: :local_operator
+
   @type channel :: %{
-          name: String.t(),
-          config_key: atom() | nil,
-          adapter: module() | nil,
-          remote?: boolean(),
-          transport: :polling | :gateway | :subprocess | :webhook | :loopback,
-          child: module() | nil
+          :name => String.t(),
+          :config_key => atom() | nil,
+          :adapter => module() | nil,
+          :remote? => boolean(),
+          :transport => :polling | :gateway | :subprocess | :webhook | :loopback,
+          :child => module() | nil,
+          optional(:trust) => trust(),
+          optional(:commands?) => boolean()
         }
 
   @default_channels [
@@ -72,13 +84,29 @@ defmodule FermixChannels.Gateway.ChannelRegistry do
       transport: :subprocess,
       child: FermixChannels.Channels.Signal.Listener
     },
+    # The ACP agent surface (M29). `remote?: true` is deliberate: sessions are
+    # persistent, so browsers stay warm across turns and detached continuation
+    # delivery refuses loudly. Trust comes from the transport — a 0600 socket
+    # under FERMIX_HOME — not from a sender id, and the slash-command pipeline is
+    # off, so channel members cannot reach daemon administration.
+    %{
+      name: "acp",
+      config_key: :acp,
+      adapter: FermixChannels.Channels.Acp,
+      remote?: true,
+      trust: :local_operator,
+      commands?: false,
+      transport: :gateway,
+      child: FermixChannels.Channels.Acp.Supervisor
+    },
     %{
       name: "cli",
       config_key: nil,
       adapter: FermixChannels.CLI,
       remote?: false,
       transport: :loopback,
-      child: nil
+      child: nil,
+      trust: :local_operator
     },
     %{
       name: "daemon",
@@ -86,7 +114,8 @@ defmodule FermixChannels.Gateway.ChannelRegistry do
       adapter: nil,
       remote?: false,
       transport: :loopback,
-      child: nil
+      child: nil,
+      trust: :local_operator
     }
   ]
 
@@ -120,6 +149,32 @@ defmodule FermixChannels.Gateway.ChannelRegistry do
     end
   end
 
+  @doc """
+  Trust the transport itself carries, independent of any sender identity.
+  `:local_operator` for same-user local surfaces; `nil` for everything else
+  (including unknown channels), which then authorize by sender id.
+  """
+  @spec trust(String.t()) :: trust() | nil
+  def trust(name) when is_binary(name) do
+    case find(name) do
+      nil -> nil
+      channel -> trust_of(channel)
+    end
+  end
+
+  @doc """
+  Whether the gateway runs the slash-command pipeline for this channel.
+  Unknown channels and entries without the key answer `true` — opting out is
+  always explicit.
+  """
+  @spec commands?(String.t()) :: boolean()
+  def commands?(name) when is_binary(name) do
+    case find(name) do
+      nil -> true
+      channel -> Map.get(channel, :commands?, true)
+    end
+  end
+
   @doc "Config keys of the remote channels (for ingress-authorization checks)."
   @spec remote_channels() :: [atom()]
   def remote_channels do
@@ -144,7 +199,7 @@ defmodule FermixChannels.Gateway.ChannelRegistry do
   @spec missing_ingress_authorizations() :: [atom()]
   def missing_ingress_authorizations do
     channels()
-    |> Enum.filter(& &1.remote?)
+    |> Enum.filter(&(&1.remote? and needs_ingress?(&1)))
     |> Enum.filter(fn %{config_key: key} ->
       config = channel_config(key)
       enabled?(config) and not ingress_authorized?(key)
@@ -154,12 +209,20 @@ defmodule FermixChannels.Gateway.ChannelRegistry do
 
   defp find(name), do: Enum.find(channels(), fn channel -> channel.name == name end)
 
+  defp trust_of(channel) when is_map(channel), do: Map.get(channel, :trust)
+
+  # A `:local_operator` transport has no inbox — nobody can address it but the
+  # operator running it — so an ingress allow-list is not a thing it can have.
+  defp needs_ingress?(channel), do: trust_of(channel) != :local_operator
+
   defp startable?(%{child: nil}), do: false
 
-  defp startable?(%{config_key: key, transport: transport, child: child})
+  defp startable?(%{config_key: key, transport: transport, child: child} = channel)
        when not is_nil(child) do
     config = channel_config(key)
-    enabled?(config) and mode_ok?(key, config, transport) and ingress_authorized?(key)
+
+    enabled?(config) and mode_ok?(key, config, transport) and
+      (not needs_ingress?(channel) or ingress_authorized?(key))
   end
 
   defp channel_config(key), do: Application.get_env(:fermix_channels, key, [])

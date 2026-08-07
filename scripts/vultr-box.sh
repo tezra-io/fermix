@@ -22,7 +22,9 @@
 #   vultr-box.sh verify     boot a throwaway box from the image and assert every
 #                           pinned dependency is present, then destroy it
 #   vultr-box.sh ssh        shell into the persistent box
-#   vultr-box.sh status     show the tracked snapshot + boxes
+#   vultr-box.sh status     show the tracked snapshot + boxes + leaked ids
+#   vultr-box.sh reap       delete instances a previous run could not (they bill
+#                           until they are gone); needs no box of its own
 #   vultr-box.sh down       destroy the persistent box
 #
 # The tree is rsync'd, never git-cloned, so uncommitted work is what gets tested.
@@ -59,7 +61,22 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STATE_DIR="${FERMIX_VULTR_STATE:-$HOME/.fermix-vultr}"
 KEY_FILE="$STATE_DIR/id_ed25519"
+KNOWN_HOSTS="$STATE_DIR/known_hosts"
 API="https://api.vultr.com/v2"
+
+# ONE definition, four call sites: remote(), cmd_ssh, and both rsync transports.
+# `accept-new` pins a box's key on FIRST contact and refuses a CHANGED one after
+# that; the old `StrictHostKeyChecking=no` + `UserKnownHostsFile=/dev/null` pair
+# accepted any key on every connection, so nothing ever noticed a substitution.
+# First contact is `wait_ssh`, minutes before forwarded_env ships provider keys
+# and a Telegram token — the pin lands before there is anything to steal.
+# Expanded as "${SSH_OPTS[@]}" for ssh and "${SSH_OPTS[*]}" inside rsync's -e
+# string, which rsync re-splits on whitespace (so state paths must be unspaced,
+# as they already had to be).
+SSH_OPTS=(-i "$KEY_FILE"
+          -o StrictHostKeyChecking=accept-new
+          -o "UserKnownHostsFile=$KNOWN_HOSTS"
+          -o LogLevel=ERROR)
 
 REGION="${VULTR_REGION:-atl}"
 # Eval turns wait on model APIs rather than CPU, so 2c/4GB carries the tiers.
@@ -165,6 +182,19 @@ $(api GET '/plans?per_page=500' \
     | sort -n | cut -f2-)"
 }
 
+# Vultr recycles IPs. `accept-new` refuses an address whose key changed, which is
+# the point — but a recycled address legitimately presents a new key, so the pin
+# is dropped explicitly at both ends of an instance's life rather than by turning
+# verification off. Called on create (as soon as an IP exists, before first
+# contact) and on destroy.
+forget_host() {
+  local host="$1"
+  [ -n "$host" ] || die "forget_host called without a host"
+  [ -f "$KNOWN_HOSTS" ] || return 0
+  ssh-keygen -R "$host" -f "$KNOWN_HOSTS" >/dev/null 2>&1 \
+    || die "could not drop '$host' from $KNOWN_HOSTS — fix or delete that file"
+}
+
 ensure_ssh_key() {
   mkdir -p "$STATE_DIR"; chmod 700 "$STATE_DIR"
   [ -f "$KEY_FILE" ] || {
@@ -191,24 +221,52 @@ note_pending() { mkdir -p "$STATE_DIR"; printf '%s\n' "$1" >> "$STATE_DIR/pendin
 
 clear_pending() { rm -f "$STATE_DIR/pending.ids"; }
 
+# Bounded retry for the one code that means "not yet". Vultr answers 409 while an
+# instance is still locked — mid-provision, and for a while after — which is
+# EXACTLY when a reap runs: it fires from the EXIT trap of a boot that just timed
+# out, i.e. at the moment the instance is least deletable. Treating 409 as
+# terminal meant the single DELETE was guaranteed to fail and the instance kept
+# billing. Cap: REAP_ATTEMPTS tries per instance, REAP_BACKOFF apart (~105s);
+# at the cap the id stays on disk and the caller reports it, so `reap` can try
+# again later. Every other non-2xx/404 is terminal on the first answer.
+REAP_ATTEMPTS=8
+REAP_BACKOFF=15
+
 # Deletes directly rather than through `api`: `api` calls `die` on a non-2xx, and
 # `|| true` cannot swallow that — die signals TOP_PID, so one undeletable id would
-# abort the reap and leak every remaining instance, billing. A failed delete here
-# must be reported loudly and the loop must continue.
-reap_pending() {
-  [ -f "$STATE_DIR/pending.ids" ] || return 0
-  local id code leaked=0
-  while read -r id; do
-    [ -n "$id" ] || continue
-    log "reaping half-provisioned instance $id"
+# abort the reap and leak every remaining instance, billing. Publishes the last
+# HTTP code via OUT; returns non-zero when the instance was not deleted.
+delete_instance_id() {
+  local id="$1" attempt code
+  for ((attempt = 1; attempt <= REAP_ATTEMPTS; attempt++)); do
     code="$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE \
       -H "Authorization: Bearer ${VULTR_API_KEY:-}" "$API/instances/$id" 2>/dev/null || echo 000)"
     case "$code" in
-      2*|404) ;;
-      *) leaked=1
-         printf '\033[31m[vultr-box] COULD NOT DELETE %s (HTTP %s) — it is STILL BILLING. Delete it in the Vultr console.\033[0m\n' \
-            "$id" "$code" >&2 ;;
+      2*|404) OUT="$code"; return 0 ;;
+      409)    ;;
+      *)      OUT="$code"; return 1 ;;
     esac
+    [ "$attempt" -lt "$REAP_ATTEMPTS" ] || break
+    log "instance $id is still locked (HTTP 409) — attempt $attempt/$REAP_ATTEMPTS, retrying in ${REAP_BACKOFF}s"
+    sleep "$REAP_BACKOFF"
+  done
+  OUT=409
+  return 1
+}
+
+# A failed delete must be reported loudly and the loop must continue.
+reap_pending() {
+  [ -f "$STATE_DIR/pending.ids" ] || return 0
+  local id leaked=0
+  while read -r id; do
+    [ -n "$id" ] || continue
+    log "reaping half-provisioned instance $id"
+    if delete_instance_id "$id"; then
+      continue
+    fi
+    leaked=1
+    printf '\033[31m[vultr-box] COULD NOT DELETE %s (HTTP %s) — it is STILL BILLING. Retry with: %s reap, or delete it in the Vultr console.\033[0m\n' \
+      "$id" "$OUT" "$(basename "$0")" >&2
   done < "$STATE_DIR/pending.ids"
   [ "$leaked" -eq 0 ] && clear_pending
   return 0
@@ -243,6 +301,11 @@ wait_active() {
       ip="$(api GET "/instances/$id" | jq -r '.instance.main_ip')"
       [ -n "$ip" ] && [ "$ip" != "null" ] && [ "$ip" != "0.0.0.0" ] \
         || die "instance $id is up but reports no usable IP ('$ip')"
+      # Before first contact: this address may still be pinned to a previous
+      # tenant's key, which accept-new would refuse outright. Doing it here
+      # covers the ephemeral boxes too — they are reaped by id, with no IP in
+      # the EXIT trap's scope to un-pin.
+      forget_host "$ip"
       OUT="$ip"
       return 0
     fi
@@ -295,8 +358,7 @@ destroy_instance() { log "destroying instance $1"; api DELETE "/instances/$1" >/
 
 remote() {
   local ip="$1"; shift
-  ssh -i "$KEY_FILE" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-      -o LogLevel=ERROR -o ConnectTimeout=10 \
+  ssh "${SSH_OPTS[@]}" -o ConnectTimeout=10 \
       -o ServerAliveInterval=30 -o ServerAliveCountMax=20 "root@$ip" "$@"
 }
 
@@ -393,20 +455,70 @@ touch /var/lib/fermix-base-ready
 CLOUDINIT
 }
 
+# `docs/design/` is gitignored wholesale, but a couple of docs under it are
+# force-added and therefore TRACKED. Dropping the whole directory left those
+# missing on the box, where `git status --porcelain` then reported them deleted
+# forever — and the eval harness folds that status into git_dirty /
+# workspace_git_dirty on EVERY run's reproducibility_metadata, so the field could
+# no longer distinguish "the operator left edits" from "vultr-box excluded
+# tracked docs". rsync takes the FIRST matching rule, so the tracked files are
+# included ahead of the exclude that drops the rest of the directory. Asked of
+# git rather than hand-listed: a doc force-added later joins by itself.
+#
+# Publishes the rule list via DESIGN_RULES — a function cannot return an array —
+# the same shape as OUT elsewhere in this script.
+design_doc_rules() {
+  local tracked doc
+  tracked="$(git -C "$REPO_ROOT" ls-files -- docs/design)" \
+    || die "could not list tracked files under docs/design — is $REPO_ROOT a git checkout?"
+
+  DESIGN_RULES=()
+  while IFS= read -r doc; do
+    [ -n "$doc" ] || continue
+    # The exclude below prunes any subdirectory before rsync descends into it, so
+    # a nested tracked doc would silently not sync — the very thing this exists to
+    # prevent. Refuse instead of shipping the phantom-dirty tree again.
+    case "$doc" in
+      docs/design/*/*) die "tracked design doc in a subdirectory is not covered by these rsync rules: $doc" ;;
+    esac
+    DESIGN_RULES+=(--include "/$doc")
+  done <<< "$tracked"
+  # Last, and unconditional: the array is never empty, which an unset-variable
+  # expansion of it under `set -u` would be on bash 3.2.
+  DESIGN_RULES+=(--exclude '/docs/design/*')
+}
+
 sync_tree() {
   local ip="$1"
   log "syncing the working tree to $ip:$REMOTE_REPO (uncommitted work included)"
   remote "$ip" "mkdir -p $REMOTE_REPO"
+  design_doc_rules
   # .git ships: the dangerous tier's strict preflight requires the eval workspace
   # to be a git snapshot at the same HEAD as the harness checkout.
   # `.claude/` alone is hundreds of MB of agent worktrees, and heap dumps can carry
   # process memory. None of it belongs in a snapshot that persists remotely.
+  #
+  # The second block is the SENSITIVE half of .gitignore. A snapshot outlives the
+  # box in the Vultr account, so what is deliberately never committed must not be
+  # baked into one either: env/secret files, a stray FERMIX_HOME (config.toml and
+  # auth.json hold provider keys), SQLite databases (memory.db is the full
+  # conversation text), logs, `.playwright-mcp/` session captures, the private
+  # design docs, and the machine-specific keychain helper. Note that --delete does
+  # not remove already excluded paths: recreate a box provisioned before this
+  # landed.
   rsync -az --delete \
     --exclude '_build' --exclude 'deps' --exclude 'burrito_out' \
     --exclude 'artifacts' --exclude 'videos' --exclude '.elixir_ls' \
     --exclude '.claude' --exclude '.agents' --exclude '.pytest_cache' \
     --exclude '.DS_Store' --exclude 'erl_crash.dump' --exclude '*.dump' \
-    -e "ssh -i $KEY_FILE -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR" \
+    --exclude '.env' --exclude '*.secret.exs' \
+    --exclude 'config.toml' --exclude 'auth.json' \
+    --exclude '.fermix' --exclude '.fermix-dev' \
+    --exclude '*.db' --exclude '*.sqlite' --exclude '*.sqlite3' --exclude '*.log' \
+    --exclude '.playwright-mcp' --exclude 'cover' \
+    "${DESIGN_RULES[@]}" --exclude 'docs/release-film' \
+    --exclude 'scripts/migrate-keychain-scope.sh' \
+    -e "ssh ${SSH_OPTS[*]}" \
     "$REPO_ROOT/" "root@$ip:$REMOTE_REPO/"
 }
 
@@ -491,7 +603,7 @@ cmd_snapshot() {
   # plan_disk_gb publishes via OUT and prints nothing; redirecting it wrote an
   # empty file, and an empty `have` defaulted to 0, so the guard always passed.
   plan_disk_gb "$PLAN"; printf '%s' "$OUT" > "$STATE_DIR/snapshot.disk"
-  destroy_instance "$id"; clear_pending
+  destroy_instance "$id"; forget_host "$ip"; clear_pending
   log "base snapshot ready: $snap — 'up' and 'run' now restore from it"
 }
 
@@ -619,7 +731,7 @@ cmd_run() {
   # Unconditionally, and BEFORE the failure is raised: the EXIT trap destroys the
   # box, so a report left behind on a failing tier is gone for good.
   log "pulling reports back"
-  rsync -az -e "ssh -i $KEY_FILE -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR" \
+  rsync -az -e "ssh ${SSH_OPTS[*]}" \
     "root@$ip:$REMOTE_REPO/benchmark/reports/" "$REPO_ROOT/benchmark/reports/" \
     || log "WARNING: could not pull reports from the box"
 
@@ -678,15 +790,15 @@ VERIFY
 
 cmd_ssh() {
   local ip; ip="$(cat "$STATE_DIR/persistent.ip" 2>/dev/null)" || die "no persistent box — run: $(basename "$0") up"
-  exec ssh -i "$KEY_FILE" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-       -o LogLevel=ERROR "root@$ip"
+  exec ssh "${SSH_OPTS[@]}" "root@$ip"
 }
 
 cmd_down() {
   require_key
-  local id code
+  local id code ip
   id="$(cat "$STATE_DIR/persistent.id" 2>/dev/null)" || die "no persistent box tracked"
   [ -n "$id" ] || die "no persistent box tracked"
+  ip="$(cat "$STATE_DIR/persistent.ip" 2>/dev/null || true)"
   # Tolerate an already-gone instance and clear state either way. Dying here left
   # the id on disk, so `up` refused forever while `ssh`/`sync` chased an IP Vultr
   # had since recycled to someone else.
@@ -694,6 +806,9 @@ cmd_down() {
   code="$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE \
     -H "Authorization: Bearer $VULTR_API_KEY" "$API/instances/$id" 2>/dev/null || echo 000)"
   rm -f "$STATE_DIR/persistent.id" "$STATE_DIR/persistent.ip"
+  # Vultr hands this address to someone else. Leaving it pinned would make the
+  # next box on it fail host-key verification for a reason nobody would guess.
+  if [ -n "$ip" ]; then forget_host "$ip"; fi
   case "$code" in
     2*)  log "persistent box destroyed" ;;
     404) log "instance $id was already gone; local state cleared" ;;
@@ -738,12 +853,36 @@ cmd_images() {
     | awk -F'\t' '{printf "%-8s %-42s %s\n", $1, $2, $3}'
 }
 
+# The id of a box that could not be deleted is preserved in pending.ids precisely
+# so it can be retried — but reap_pending only ever ran from the EXIT trap of
+# up/run/snapshot/verify, so the only way to trigger that retry was to provision
+# ANOTHER box. This is the retry, without paying for one.
+cmd_reap() {
+  require_key
+  if [ ! -f "$STATE_DIR/pending.ids" ]; then
+    log "nothing pending — no leaked instance ids recorded"
+    return 0
+  fi
+  reap_pending
+  if [ -f "$STATE_DIR/pending.ids" ]; then
+    die "some instances are still undeleted and STILL BILLING — see above"
+  fi
+  log "all pending instances reaped"
+}
+
 cmd_status() {
   require_key
   printf 'snapshot: %s\n' "$(cat "$STATE_DIR/snapshot.id" 2>/dev/null || echo '<none — run: snapshot>')"
   printf 'persistent: %s %s\n' \
     "$(cat "$STATE_DIR/persistent.id" 2>/dev/null || echo '<none>')" \
     "$(cat "$STATE_DIR/persistent.ip" 2>/dev/null || echo '')"
+  # A leak nobody can see is a leak nobody reaps.
+  if [ -f "$STATE_DIR/pending.ids" ]; then
+    printf 'pending: %s (retry with: %s reap)\n' \
+      "$(tr '\n' ' ' < "$STATE_DIR/pending.ids")" "$(basename "$0")"
+  else
+    printf 'pending: <none>\n'
+  fi
   printf '\nlive instances tagged %s:\n' "$TAG"
   api GET "/instances?tag=$TAG&per_page=100" \
     | jq -r '.instances[] | "  \(.id)  \(.label)  \(.main_ip)  \(.server_status)"'
@@ -757,9 +896,10 @@ case "${1:-}" in
   verify)   cmd_verify ;;
   ssh)      cmd_ssh ;;
   status)   cmd_status ;;
+  reap)     cmd_reap ;;
   plans)    cmd_plans ;;
   regions)  cmd_regions ;;
   images)   cmd_images ;;
   down)     cmd_down ;;
-  *) echo "usage: $(basename "$0") [snapshot|verify|up|sync|run <tier>|ssh|status|plans|regions|images|down]" >&2; exit 2 ;;
+  *) echo "usage: $(basename "$0") [snapshot|verify|up|sync|run <tier>|ssh|status|reap|plans|regions|images|down]" >&2; exit 2 ;;
 esac

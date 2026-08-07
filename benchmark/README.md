@@ -360,6 +360,110 @@ is entirely hermetic and the eval tiers only run on schedules, after a push.
 
 ---
 
+## 5c. Aimed-click accuracy (`make aim`) — real clicks on your live display
+
+`bin/run_aim.py` measures the **model's** screen-pixel aiming, not the click
+pipeline (delivery is already proven exact by compux unit tests and the dual-space
+cursor echo). Two things:
+
+- **Coordinate arithmetic inside a known rect** — a labelled 12×6 chess-style grid
+  with no in-cell labels, so the target's centre has to be *computed* from the edge
+  labels. Reports hit rate, miss vectors in page CSS px, and miss vectors in **cell
+  units** (off-by-N-cells is what separates a shaky aim from a row/column confusion
+  or an origin flip).
+- **Click-effect blindness** — a fired target turns solid orange and says `FIRED`,
+  with no HUD text naming the state, and every probe asks the model to report
+  whether its target fired. That report is graded against the page's own record.
+
+Suites: `s1` grid arithmetic (6 batches × 4 probes per condition, full-screen and
+magnified-crop), `s2` singleton locate (the pure-locate floor), `s3` marks
+comparator (the deterministic rail — reported as rail capability, never as model
+grounding). One batch is one `fermix ask` turn; a full run is ~16 turns.
+
+**Run it:**
+
+```sh
+CONFIRM_AIM_LIVE_DISPLAY=1 CONFIRM_AIM_HANDS_OFF=1 make aim-calibrate   # first, on any machine
+CONFIRM_AIM_LIVE_DISPLAY=1 CONFIRM_AIM_HANDS_OFF=1 make aim
+bin/run_aim.py --check          # preconditions only; drives nothing, clicks nothing
+```
+
+`--seed N` makes reruns probe-for-probe identical (the seed is recorded in the
+report); `--suite s1` (repeatable) narrows the run; `--config-id` labels the
+measured config when auto-detection from the run's own `llm_call` rows is wrong.
+Probe counts, timeouts, and page geometry are constants, not flags — a run that
+can silently shrink its own sample is not comparable to the one before it.
+Exit codes: `0` complete · `2` usage/attestation · `3` preconditions or
+calibration failed · `4` started but incomplete (a partial report is still
+written, and `results.json` says why it stopped).
+
+**`make aim-calibrate` is the run-start spike, and it is not optional on a new
+machine.** It drives one real click and asserts, typed, each with its observed
+value: a second CDP client can attach beside the daemon's own, the OS click
+arrives as a trusted DOM event at the right coordinates, page zoom is 1, the page
+does not scroll, the window fills the available workarea (macOS clamps the window
+below the menu bar, so the applied `top` is the workarea origin, not 0), targets
+clear the window edges, the turn's trace rows are visible where the harness reads
+them, and those rows carry `input` (content capture). Any failure exits 3 naming
+the assertion.
+
+**This deviates from the VM-only `desktop_input` guidance, deliberately.** There
+is no macOS VM here, and the thing being measured is aiming at a real screen, so
+the run injects real OS clicks into your live display and both attestations are
+mandatory (`--calibrate-only` included):
+
+- `CONFIRM_AIM_LIVE_DISPLAY=1` — you accept that deviation.
+- `CONFIRM_AIM_HANDS_OFF=1` — for the whole run: **hands off the keyboard and
+  mouse**, macOS **Focus / Do-Not-Disturb ON**, and no channel traffic expected on
+  this daemon. Hands-on input also trips computer-use's `:user_active` courtesy
+  deferral mid-suite.
+
+Hazards, honestly:
+
+- The harness owns the window geometry (it fills the available screen at the
+  origin over its own CDP client), so nearly every deliverable miss lands on the
+  fixture page. Targets keep ≥160 px of clearance from the window edges, so the
+  measured failure class — an off-by-one-cell arithmetic miss — stays in-page.
+- A click that leaves the page anyway **halts the run** (partial report, exit 4).
+  A click after the browser died is named `browser_lost`, not a stray click, and a
+  click inside a window that lost focus or visibility is named `occluded` — three
+  causes, three names. An *extra* click that did land on the page is none of them:
+  re-clicking a target the model wrongly judged un-fired is the behaviour being
+  measured, so it is counted as `extra_click` (with `sequence_mismatch`) and the
+  run continues.
+- **Quiesce your channels for the run.** Scoring correlates a batch by ANCHOR:
+  the turn whose browser `open` row carries this batch's fixture URL (port +
+  batch id, unique per run) owns the batch, and every other turn's rows in the
+  same time window are excluded — the daemon stamps trace rows with its per-turn
+  `main-<n>` id and never with the CLI `--session` name, so wall-clock windows
+  alone cannot attribute a click on a live daemon (a killed run's orphaned
+  daemon-side turn proved this on day one). A batch whose anchor is missing
+  aborts as `correlation_anchor_missing`. Before every batch the harness also
+  waits up to 3 minutes for foreign main-agent turns to go quiet (`daemon_busy`
+  if they never do): correctness comes from the anchor, but another
+  conversation's headed browser windows can still steal focus mid-turn (those
+  probes are named `occluded` rather than scored). The cleanest run is one where
+  nothing else talks to the daemon.
+- A mid-turn model cannot be stopped (no turn-cancellation surface is added), so
+  exposure is bounded at one batch's clicks — 4 for the grid suite, 8 elsewhere.
+
+**Browser-profile litter:** every batch is a fresh conversation, and every
+conversation gets its own profile directory under
+`~/.fermix-dev/browser/profiles/`. Nothing cleans them and **the harness deletes
+nothing in your home** — it counts the directories before and after and records
+the growth in `results.json` instead. Clean them yourself if the count bothers
+you.
+
+Results land in `reports/aim/<run_id>/` (`results.json` + `report.md`) — counts
+and vectors only, no page content, no screenshots, no model prose beyond the
+parsed JSON self-report. The headline grid number is the **probe-1 hit rate**:
+`FIRED` markers persist within a batch, so only a batch's first probe is
+uncoached, and the per-probe-index trajectory beside it shows how much the model
+exploits that feedback. Opik is not used at all: scoring reads the daemon's local
+`traces/*/tool_exec.jsonl` and is closed-form arithmetic, no judge.
+
+---
+
 ## 6. Where results land / housekeeping
 
 - **Leaderboard:** `reports/capability/leaderboard.json` (+ per-run `reports/capability/<ts>/`).

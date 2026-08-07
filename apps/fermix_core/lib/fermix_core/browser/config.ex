@@ -59,6 +59,11 @@ defmodule FermixCore.Browser.Config do
     * `wait_default_ms` / `wait_max_ms` — default and capped `act:wait` timeout.
     * `wait_poll_interval_ms` — poll cadence for wait/download conditions.
     * `download_default_ms` / `download_max_ms` — default and capped download wait.
+    * `download_max_bytes` — byte ceiling for a single download. Chrome streams
+      straight to disk, so this is the only bound on a runaway transfer: past it
+      the download is canceled, the partial deleted, and the waiter told why.
+      Same family as `screenshot_max_bytes` — a cap on bytes the browser
+      produces, set high enough that real downloads survive.
 
   ## Buffers
 
@@ -121,6 +126,7 @@ defmodule FermixCore.Browser.Config do
           wait_poll_interval_ms: pos_integer(),
           download_default_ms: pos_integer(),
           download_max_ms: pos_integer(),
+          download_max_bytes: pos_integer(),
           console_buffer_limit: pos_integer(),
           dialog_buffer_limit: pos_integer(),
           snapshot_default_depth: pos_integer(),
@@ -158,6 +164,7 @@ defmodule FermixCore.Browser.Config do
             wait_poll_interval_ms: 100,
             download_default_ms: 30_000,
             download_max_ms: 120_000,
+            download_max_bytes: 500_000_000,
             console_buffer_limit: 100,
             dialog_buffer_limit: 10,
             snapshot_default_depth: 5,
@@ -174,7 +181,7 @@ defmodule FermixCore.Browser.Config do
     cdp_ready_poll_interval_ms cdp_version_probe_timeout_ms stop_grace_ms kill_grace_ms
     start_failure_threshold start_cooldown_ms start_cooldown_max_ms start_retries
     shutdown_slack_ms wait_default_ms
-    wait_max_ms wait_poll_interval_ms download_default_ms download_max_ms
+    wait_max_ms wait_poll_interval_ms download_default_ms download_max_ms download_max_bytes
     console_buffer_limit dialog_buffer_limit snapshot_default_depth snapshot_max_depth
     snapshot_max_children snapshot_max_chars screenshot_max_side_px screenshot_max_bytes
   )a

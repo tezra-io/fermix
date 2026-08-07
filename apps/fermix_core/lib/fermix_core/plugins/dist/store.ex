@@ -2,8 +2,10 @@ defmodule FermixCore.Plugins.Dist.Store do
   @moduledoc """
   The on-disk plugin store under `$FERMIX_HOME/plugins`: the versioned
   `installed/<name>/<version>` trees, the `current` symlink that is the only
-  pointer the runtime reads through, and the `installed.json` lockfile
-  (`name -> {version, sha256, h1, plugin_api, verified_at}`).
+  pointer the runtime reads through, the `evidence/<name>/<version>` provenance
+  material that never enters a loadable tree (M27 §9.3), and the
+  `installed.json` lockfile
+  (`name -> {version, sha256, h1, tree_digest_v2, plugin_api, verified_at}`).
 
   All paths take an explicit `root` so the store is testable against a tmp dir.
   Activation is atomic (rename the staged tree into place, then flip the symlink
@@ -11,12 +13,19 @@ defmodule FermixCore.Plugins.Dist.Store do
   floor, §13) is checked here, at install and at every `list/2`.
   """
 
+  alias FermixCore.Plugins.Dist.Provenance.Cache, as: ProvenanceCache
   alias FermixCore.Plugins.Dist.SafeRm
 
   # The manifest/interpreter contract generation this core understands, with
-  # exactly one generation of back-compat (§13).
-  @supported_plugin_api 2
+  # exactly one generation of back-compat (§13). M27 §12 Stage 2 moves the
+  # window to 2..3 for the remote-MCP runtime grammar.
+  @supported_plugin_api 3
   @min_supported_plugin_api @supported_plugin_api - 1
+
+  # Per-attempt scratch for the provenance gate lives under `run/` with this
+  # prefix, so a crash mid-verify is collected by the same boot sweep that
+  # collects run tokens rather than leaking a copy of an artifact forever.
+  @transient_run_prefix ".verify-"
 
   @type entry :: %{
           optional(String.t()) => term()
@@ -26,6 +35,7 @@ defmodule FermixCore.Plugins.Dist.Store do
   @spec paths(Path.t()) :: %{
           root: Path.t(),
           installed: Path.t(),
+          evidence: Path.t(),
           staging: Path.t(),
           run: Path.t(),
           lock: Path.t(),
@@ -35,6 +45,7 @@ defmodule FermixCore.Plugins.Dist.Store do
     %{
       root: root,
       installed: Path.join(root, "installed"),
+      evidence: Path.join(root, "evidence"),
       staging: Path.join(root, ".staging"),
       run: Path.join(root, "run"),
       lock: Path.join(root, ".lock"),
@@ -47,23 +58,41 @@ defmodule FermixCore.Plugins.Dist.Store do
   def ensure!(root) do
     p = paths(root)
     File.mkdir_p!(p.installed)
+    File.mkdir_p!(p.evidence)
     File.mkdir_p!(p.staging)
     File.mkdir_p!(p.run)
     _ = File.chmod(p.run, 0o700)
     :ok
   end
 
-  @doc "GC `.staging/*` and `run/*.token` on boot — a crashed run must not leak."
+  @doc """
+  GC `.staging/*`, `run/*.token`, and `run/#{@transient_run_prefix}*` on boot —
+  a crashed run (download or provenance verify) must not leak.
+  """
   @spec sweep_transient!(Path.t()) :: :ok
   def sweep_transient!(root) do
     p = paths(root)
     each_child(p.staging, fn child -> SafeRm.rm_rf(child, root) end)
 
     each_child(p.run, fn child ->
-      if String.ends_with?(child, ".token"), do: SafeRm.rm_rf(child, root)
+      if transient_run_child?(child), do: SafeRm.rm_rf(child, root)
     end)
 
     :ok
+  end
+
+  @doc """
+  Path for a per-attempt scratch directory under `run/`, named so
+  `sweep_transient!/1` collects it if the VM dies mid-attempt. The caller
+  creates and removes it.
+  """
+  @spec transient_run_dir(Path.t(), String.t()) :: Path.t()
+  def transient_run_dir(root, tag) when is_binary(tag) and tag != "",
+    do: Path.join(paths(root).run, @transient_run_prefix <> tag)
+
+  defp transient_run_child?(child) do
+    String.ends_with?(child, ".token") or
+      String.starts_with?(Path.basename(child), @transient_run_prefix)
   end
 
   # --- installed.json lockfile ---
@@ -116,6 +145,18 @@ defmodule FermixCore.Plugins.Dist.Store do
 
   @spec current_link(Path.t(), String.t()) :: Path.t()
   def current_link(root, name), do: Path.join([paths(root).installed, name, "current"])
+
+  @doc """
+  Provenance evidence for one installed version (M27 §9.3): the retained
+  archive, its published checksum, and the publisher signature material. It
+  lives outside `installed/` so it is never part of a loadable plugin tree, and
+  it is keyed by version so an upgrade cannot overwrite the evidence of the
+  version still active.
+  """
+  @spec evidence_dir(Path.t(), String.t(), String.t()) :: Path.t()
+  def evidence_dir(root, name, version)
+      when is_binary(name) and is_binary(version),
+      do: Path.join([paths(root).evidence, name, version])
 
   @doc "The version the `current` symlink points at, or nil."
   @spec active_version(Path.t(), String.t()) :: String.t() | nil
@@ -311,11 +352,18 @@ defmodule FermixCore.Plugins.Dist.Store do
 
   # --- uninstall + gc (via SafeRm) ---
 
-  @doc "Remove a plugin's whole tree, its lockfile entry, and any legacy seeded skills."
+  @doc """
+  Remove a plugin's whole tree, its provenance evidence, its lockfile entry, and
+  any legacy seeded skills. Tree and evidence go together (§9.3) — leaving
+  evidence behind for a name that is no longer installed would let a later
+  install of the same version inherit proof it never fetched.
+  """
   @spec uninstall(Path.t(), String.t()) :: :ok | {:error, term()}
   def uninstall(root, name) when is_binary(name) do
     with :ok <- SafeRm.rm_rf(Path.join(paths(root).installed, name), root),
-         :ok <- rm_legacy_skills(root, name) do
+         :ok <- SafeRm.rm_rf(Path.join(paths(root).evidence, name), root),
+         :ok <- rm_legacy_skills(root, name),
+         :ok <- ProvenanceCache.invalidate(root, name) do
       forget(root, name)
     end
   end
@@ -328,6 +376,8 @@ defmodule FermixCore.Plugins.Dist.Store do
   @doc """
   GC: remove `.staging/*` and, per plugin, every version dir that is neither the
   active version nor the single most-recent non-active (the one-deep rollback).
+  Each version's provenance evidence is collected with it, and evidence for a
+  name that is no longer installed at all is collected too.
   """
   @spec gc(Path.t()) :: :ok
   def gc(root) do
@@ -336,6 +386,10 @@ defmodule FermixCore.Plugins.Dist.Store do
 
     each_child(p.installed, fn name_dir ->
       gc_plugin_versions(root, Path.basename(name_dir))
+    end)
+
+    each_child(p.evidence, fn name_dir ->
+      gc_orphan_evidence(root, Path.basename(name_dir))
     end)
 
     :ok
@@ -349,6 +403,23 @@ defmodule FermixCore.Plugins.Dist.Store do
     Enum.each(versions, fn v ->
       unless v in keep, do: SafeRm.rm_rf(version_dir(root, name, v), root)
     end)
+
+    gc_plugin_evidence(root, name, keep)
+  end
+
+  # Evidence follows the version it proves (§9.3): the active version and the
+  # one-deep rollback keep theirs (rollback re-verifies), everything else loses
+  # tree and evidence in the same pass. GC can never separate the two.
+  defp gc_plugin_evidence(root, name, keep) do
+    each_child(Path.join(paths(root).evidence, name), fn dir ->
+      unless Path.basename(dir) in keep, do: SafeRm.rm_rf(dir, root)
+    end)
+  end
+
+  defp gc_orphan_evidence(root, name) do
+    unless File.dir?(Path.join(paths(root).installed, name)) do
+      SafeRm.rm_rf(Path.join(paths(root).evidence, name), root)
+    end
   end
 
   defp version_dirs(root, name) do

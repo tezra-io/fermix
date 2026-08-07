@@ -113,31 +113,9 @@ defmodule FermixCore.Tools.ToolSearchTest do
     assert names == ["x_create_post"]
   end
 
-  test "emits [:fermix, :tool_search, :query] telemetry", %{registry: registry} do
-    seed_catalog(registry)
-    ref = make_ref()
-    test_pid = self()
-
-    :telemetry.attach(
-      "toolsearch-test-#{inspect(ref)}",
-      [:fermix, :tool_search, :query],
-      fn _event, measurements, metadata, _config ->
-        if self() == test_pid do
-          send(test_pid, {:tool_search_query, measurements, metadata})
-        end
-      end,
-      nil
-    )
-
-    on_exit(fn -> :telemetry.detach("toolsearch-test-#{inspect(ref)}") end)
-
-    search(registry, %{"query" => "post to X"})
-
-    assert_received {:tool_search_query, measurements, metadata}
-    assert measurements.match_count >= 1
-    assert measurements.catalog_size == 5
-    assert metadata.query == "post to X"
-  end
+  # `[:fermix, :tool_search, :query]` coverage lives in
+  # `tool_search_telemetry_test.exs`: the content gate is read from application
+  # env, so those tests must set it and cannot be async.
 
   test "missing query is a tool error", %{registry: registry} do
     assert {:ok, %{success: false, error: error}} =

@@ -68,6 +68,8 @@ defmodule FermixCore.Harness.Manager do
   # command can never wedge the manager past the deadline.
   @cloud_submit_timeout_ms 45_000
   @cloud_status_timeout_ms 30_000
+  # Matches `DeliveryWorker`'s ceiling for the same column.
+  @delivery_error_max 500
   @cloud_prompt_file "prompt.md"
 
   @type run_id :: String.t()
@@ -375,7 +377,11 @@ defmodule FermixCore.Harness.Manager do
       platform: Map.get(snapshot, :platform),
       destination: Map.get(snapshot, :destination),
       thread: Map.get(snapshot, :thread),
-      send_opts: Map.get(snapshot, :send_opts)
+      send_opts: Map.get(snapshot, :send_opts),
+      # The launching client's frozen origin (M29 §17.4) — present only for a
+      # client-owned surface, where it is also what tells this module there is no
+      # framework wire to fall back to.
+      client_origin: Map.get(snapshot, :client_origin)
     }
   end
 
@@ -586,7 +592,8 @@ defmodule FermixCore.Harness.Manager do
       platform: Map.get(snapshot, :platform),
       destination: Map.get(snapshot, :destination),
       thread: Map.get(snapshot, :thread),
-      send_opts: Map.get(snapshot, :send_opts)
+      send_opts: Map.get(snapshot, :send_opts),
+      client_origin: Map.get(snapshot, :client_origin)
     }
   end
 
@@ -1017,25 +1024,47 @@ defmodule FermixCore.Harness.Manager do
   # DeliveryWorker delivers the text. Everything else — scheduled/cron origins, a
   # depth-capped chain, a host with no dispatcher configured — takes the plain
   # inline delivery attempt of §9.1.
+  #
+  # A CLIENT-OWNED origin (M29 §17.6(d)) has no text path at all, so both "else"
+  # arms above become a named dead-letter instead of a delivery the platform
+  # cannot make.
   defp hand_off_outcome(row, outcome, state) do
     case continuation_dispatcher(row, state) do
       {:ok, dispatcher} -> continue_or_pend(row, outcome, dispatcher, state)
-      :none -> deliver_and_mark(row, state)
+      {:none, reason} -> no_continuation(row, reason, state)
     end
   end
 
   defp continuation_dispatcher(row, state) do
     if Continuation.continuable?(row) do
-      Continuation.dispatcher(state.continuation_opts)
+      dispatcher_or_disabled(state)
     else
-      :none
+      {:none, not_continuable_reason(row)}
     end
+  end
+
+  defp dispatcher_or_disabled(state) do
+    case Continuation.dispatcher(state.continuation_opts) do
+      {:ok, dispatcher} -> {:ok, dispatcher}
+      :none -> {:none, :continuation_disabled}
+    end
+  end
+
+  # The non-continuation causes, named apart (M29 §17.6(d)) because the operator's
+  # next move differs for each: an owner halt and a stopped tracking are already
+  # known to whoever issued them, a depth cap is the chain's designed stop, and a
+  # scheduled origin never had a conversation to re-enter.
+  defp not_continuable_reason(%{status: "cancelled"}), do: :owner_halt
+  defp not_continuable_reason(%{reason: "tracking_stopped"}), do: :tracking_stopped
+
+  defp not_continuable_reason(row) do
+    if Continuation.depth_capped?(row), do: :depth_capped, else: :not_continuable
   end
 
   defp continue_or_pend(row, outcome, dispatcher, state) do
     case Continuation.dispatch(dispatcher, row, outcome.result_text) do
       :ok -> mark_continued(row, state)
-      {:error, reason} -> log_continuation_failed(row, reason)
+      {:error, reason} -> continuation_failed(row, reason, state)
     end
   end
 
@@ -1048,6 +1077,19 @@ defmodule FermixCore.Harness.Manager do
     mark_delivered(row, state)
   end
 
+  # A dispatch failure on a client-owned surface is TERMINAL here (M29 §17.6(d)
+  # branch 1). Leaving the row `pending` would be retry theater: the worker has no
+  # wire for this platform, so its only possible act is to overwrite the real
+  # reason — a forgotten credential the operator fixes by reconnecting — with the
+  # useless `unsupported_delivery_platform` word.
+  defp continuation_failed(row, reason, state) do
+    if client_owned?(row) do
+      dead_letter(row, reason, state)
+    else
+      log_continuation_failed(row, reason)
+    end
+  end
+
   # Left `pending` on purpose: the durable outbox is the at-least-once path, so
   # the DeliveryWorker's next tick delivers the outcome as text.
   defp log_continuation_failed(row, reason) do
@@ -1058,6 +1100,46 @@ defmodule FermixCore.Harness.Manager do
 
     :ok
   end
+
+  # Everything `continuable?/1` rejects. On a framework-delivered channel that is
+  # the plain durable text push of §9.1. On a client-owned one there is no text
+  # path to take (§17.6(d)), so the row dead-letters with the cause NAMED — four
+  # causes, four names, because one of them is fixed by reconnecting a client and
+  # the operator cannot act on a word that covers all four.
+  defp no_continuation(row, reason, state) do
+    if client_owned?(row) do
+      dead_letter(row, reason, state)
+    else
+      deliver_and_mark(row, state)
+    end
+  end
+
+  # The operator reads `list_coding_runs`, not the log, so the name goes on the
+  # row (`last_delivery_error`) as well as into the warning.
+  defp dead_letter(row, reason, state) do
+    Logger.warning(
+      "harness run #{row.id} dead-lettered: #{inspect(reason)}; " <>
+        "this origin is owned by a client and has no framework delivery path"
+    )
+
+    fields = %{delivery_status: "dead_letter", last_delivery_error: bounded_error(reason)}
+
+    case Ledger.mark_delivery(row.id, fields, server: state.repo) do
+      {:ok, _row} ->
+        :ok
+
+      {:error, mark_error} ->
+        Logger.warning("harness dead-letter write failed for #{row.id}: #{inspect(mark_error)}")
+    end
+  end
+
+  # Same ceiling the DeliveryWorker applies to its own `last_delivery_error`, so a
+  # dispatch reason carrying a large term cannot bloat the ledger row.
+  defp bounded_error(reason), do: reason |> inspect() |> String.slice(0, @delivery_error_max)
+
+  # One source for "is this origin owned by a client": the frozen origin snapshot
+  # the launch wrote (§17.4). Never a channel-name list in this module.
+  defp client_owned?(row), do: is_map(Map.get(row, :client_origin))
 
   defp deliver_and_mark(row, state) do
     case Delivery.deliver(row, state.delivery_opts) do

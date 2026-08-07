@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["pytest>=8", "pyyaml>=6,<7"]
+# dependencies = ["pytest>=8", "pyyaml>=6,<7", "certifi"]
 # ///
 """Pure regression specifications for behavioral-eval safety and outcomes.
 
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import pathlib
 import re
 import runpy
 import sys
@@ -24,7 +25,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import run_eval
-from evallib import config, driver, grade, judge, opik, suites
+from evallib import config, driver, grade, judge, opik, report, suites
 
 
 def _write_suite(tmp_path, risk: str | None, scenario_risk: str | None = None):
@@ -832,7 +833,7 @@ def _one_case_jobs(tmp_path):
 def test_fail_retries_unreproduced_failure_passes_and_is_marked_flaky(
         tmp_path, monkeypatch):
     seen_trials = _scripted_run_case(monkeypatch, ["fail", "pass", "pass"])
-    results, _skipped = run_eval._execute_jobs(
+    results, _skipped, _aborted = run_eval._execute_jobs(
         SimpleNamespace(), object(), _one_case_jobs(tmp_path),
         "20260723T000000Z01234567", False, False, fail_retries=2)
     case = results[0]["scenarios"][0]["cases"][0]
@@ -848,7 +849,7 @@ def test_fail_retries_unreproduced_failure_passes_and_is_marked_flaky(
 def test_fail_retries_reproduced_failure_stays_fail_and_stops_early(
         tmp_path, monkeypatch):
     seen_trials = _scripted_run_case(monkeypatch, ["fail", "fail", "pass"])
-    results, _skipped = run_eval._execute_jobs(
+    results, _skipped, _aborted = run_eval._execute_jobs(
         SimpleNamespace(), object(), _one_case_jobs(tmp_path),
         "20260723T000000Z01234567", False, False, fail_retries=2)
     case = results[0]["scenarios"][0]["cases"][0]
@@ -860,7 +861,7 @@ def test_fail_retries_reproduced_failure_stays_fail_and_stops_early(
 
 def test_fail_retries_second_fail_on_last_attempt_is_final(tmp_path, monkeypatch):
     seen_trials = _scripted_run_case(monkeypatch, ["fail", "pass", "fail"])
-    results, _skipped = run_eval._execute_jobs(
+    results, _skipped, _aborted = run_eval._execute_jobs(
         SimpleNamespace(), object(), _one_case_jobs(tmp_path),
         "20260723T000000Z01234567", False, False, fail_retries=2)
     case = results[0]["scenarios"][0]["cases"][0]
@@ -869,9 +870,149 @@ def test_fail_retries_second_fail_on_last_attempt_is_final(tmp_path, monkeypatch
     assert seen_trials == [1, 2, 3]
 
 
+def test_case_tools_none_accumulates_onto_suite_defaults(tmp_path):
+    """A case adding one prohibition must not drop the suite's.
+
+    `dict.update` merge semantics made a case-level `tools_none` replace the
+    defaults wholesale, so a case naming one extra forbidden tool silently
+    un-forbade every tool the suite banned for all cases.
+    """
+    path = tmp_path / "prohibitions.yaml"
+    path.write_text("""suite: prohibitions
+title: Prohibitions
+risk: host_readonly
+defaults:
+  expect:
+    tools_none: [write_tool, delete_tool]
+scenarios:
+  - id: example
+    title: Example
+    tags: [example]
+    cases:
+      - id: narrows
+        query: one
+        expect:
+          tools_none: [paid_tool]
+      - id: inherits
+        query: two
+""")
+    suite = suites.load_all(str(tmp_path))[0]
+    narrows, inherits = suite.scenarios[0].cases
+    assert narrows.expect["tools_none"] == ["write_tool", "delete_tool", "paid_tool"]
+    assert inherits.expect["tools_none"] == ["write_tool", "delete_tool"]
+
+
+def test_abort_on_tool_error_must_be_a_list_of_non_empty_strings(tmp_path):
+    path = tmp_path / "bad_abort.yaml"
+    path.write_text("""suite: bad_abort
+title: Bad abort
+risk: host_readonly
+abort_on_tool_error: [""]
+scenarios:
+  - id: example
+    title: Example
+    tags: [example]
+    cases:
+      - id: one
+        query: one
+""")
+    with pytest.raises(suites.SuiteError):
+        suites.load_all(str(tmp_path))
+
+
+def _write_abort_suite(tmp_path):
+    """Two-case suite that treats `out_of_credits` as a terminal condition."""
+    path = tmp_path / "abortable.yaml"
+    path.write_text("""suite: abortable
+title: Abortable
+risk: host_readonly
+abort_on_tool_error: ["out_of_credits"]
+scenarios:
+  - id: example
+    title: Example
+    tags: [example]
+    cases:
+      - id: one
+        query: one
+      - id: two
+        query: two
+""")
+    return suites.load_all(str(tmp_path))[0]
+
+
+def _scripted_with_tool_errors(monkeypatch, script):
+    """Script (outcome, [tool error messages]) per attempt."""
+    remaining = iter(script)
+    seen_trials = []
+
+    def scripted(_cfg, _client, _suite, _scn, case, _run_id, trial, _judge_on):
+        seen_trials.append(trial)
+        outcome, messages = next(remaining)
+        turns = [{"tool_failures": [{"name": "eden_read_board", "error_text": m}
+                                    for m in messages],
+                  "cost_usd": 0.0, "duration_ms": 0.0, "gates": []}]
+        return {"id": case.id, "trial": trial, "outcome": outcome,
+                "passed": outcome == "pass", "incomplete": outcome == "incomplete",
+                "gate_passed": outcome == "pass", "turns": turns, "rubric": None}
+
+    monkeypatch.setattr(run_eval, "run_case", scripted)
+    return seen_trials
+
+
+def test_declared_tool_error_aborts_run_and_voids_the_hitting_case(
+        tmp_path, monkeypatch):
+    suite = _write_abort_suite(tmp_path)
+    jobs = run_eval.case_jobs([(suite, suite.scenarios)], repeat=1)
+    _scripted_with_tool_errors(monkeypatch, [
+        ("fail", ["out_of_credits — You're out of credits. Top up or upgrade."]),
+        ("pass", []),
+    ])
+    results, _skipped, aborted = run_eval._execute_jobs(
+        SimpleNamespace(), object(), jobs, "20260723T000000Z01234567", False, False)
+    cases = results[0]["scenarios"][0]["cases"]
+    assert [c["id"] for c in cases] == ["one"], "second case must not be driven"
+    # Void, not failed: the gate tripped for a reason the daemon did not cause.
+    assert cases[0]["outcome"] == "incomplete"
+    assert aborted["fragment"] == "out_of_credits"
+    assert aborted["case"] == "one"
+    assert aborted["unrun"] == 1
+
+
+def test_abort_short_circuits_fail_retries(tmp_path, monkeypatch):
+    suite = _write_abort_suite(tmp_path)
+    jobs = run_eval.case_jobs([(suite, suite.scenarios)], repeat=1, max_cases=1)
+    seen_trials = _scripted_with_tool_errors(monkeypatch, [
+        ("fail", ["out_of_credits"]), ("fail", []), ("fail", []),
+    ])
+    run_eval._execute_jobs(SimpleNamespace(), object(), jobs,
+                           "20260723T000000Z01234567", False, False, fail_retries=2)
+    assert seen_trials == [1], "a retry would spend more of the exhausted resource"
+
+
+def test_unmatched_tool_error_does_not_abort(tmp_path, monkeypatch):
+    suite = _write_abort_suite(tmp_path)
+    jobs = run_eval.case_jobs([(suite, suite.scenarios)], repeat=1)
+    _scripted_with_tool_errors(monkeypatch, [
+        ("fail", ["upstream timed out"]), ("pass", []),
+    ])
+    results, _skipped, aborted = run_eval._execute_jobs(
+        SimpleNamespace(), object(), jobs, "20260723T000000Z01234567", False, False)
+    assert aborted is None
+    assert len(results[0]["scenarios"][0]["cases"]) == 2
+    assert results[0]["scenarios"][0]["cases"][0]["outcome"] == "fail"
+
+
+def test_abort_record_persisted_to_report_omits_vendor_text():
+    aborted = {"suite": "eden", "case": "one", "tool": "eden_read_board",
+               "fragment": "out_of_credits", "message": "quota text", "unrun": 3}
+    persisted = run_eval._persistable_abort(aborted)
+    assert "message" not in persisted
+    assert persisted["fragment"] == "out_of_credits"
+
+
 def test_fail_retries_default_zero_keeps_single_trial_verdict(tmp_path, monkeypatch):
     seen_trials = _scripted_run_case(monkeypatch, ["fail"])
-    results, _skipped = run_eval._execute_jobs(
+    results, _skipped, _aborted = run_eval._execute_jobs(
         SimpleNamespace(), object(), _one_case_jobs(tmp_path),
         "20260723T000000Z01234567", False, False)
     case = results[0]["scenarios"][0]["cases"][0]
@@ -888,7 +1029,7 @@ def test_fail_retries_does_not_retry_a_pass_or_an_incomplete(tmp_path, monkeypat
     assert seen_trials == [1]
 
     seen_trials = _scripted_run_case(monkeypatch, ["incomplete"])
-    results, _skipped = run_eval._execute_jobs(
+    results, _skipped, _aborted = run_eval._execute_jobs(
         SimpleNamespace(), object(), _one_case_jobs(tmp_path),
         "20260723T000000Z01234567", False, False, fail_retries=2)
     assert seen_trials == [1]
@@ -927,7 +1068,7 @@ def test_post_preflight_opik_failure_becomes_incomplete_report_evidence(
         raise opik.OpikError("trace store dropped after private prompt")
 
     monkeypatch.setattr(run_eval, "run_case", fail_after_preflight)
-    results, skipped = run_eval._execute_jobs(
+    results, skipped, _aborted = run_eval._execute_jobs(
         SimpleNamespace(), object(), run_eval.case_jobs(chosen, repeat=1, max_cases=1),
         "20260715T151102Z01234567", False, False)
     case = results[0]["scenarios"][0]["cases"][0]
@@ -944,7 +1085,7 @@ def test_post_preflight_opik_failure_still_writes_all_reports(tmp_path, monkeypa
         raise opik.OpikError("GET traces failed after 3 attempts")
 
     monkeypatch.setattr(run_eval, "run_case", fail_after_preflight)
-    suite_results, skipped = run_eval._execute_jobs(
+    suite_results, skipped, _aborted = run_eval._execute_jobs(
         SimpleNamespace(), object(), run_eval.case_jobs(chosen, repeat=1, max_cases=1),
         "20260715T151102Z01234567", False, False)
     out_dir = tmp_path / "reports"
@@ -1543,3 +1684,41 @@ def test_unpriced_or_iterationless_trace_is_still_gradable():
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
+
+
+def test_report_states_an_aborted_run_stopped_early(tmp_path):
+    """A truncated run must not read as a complete one with fewer cases."""
+    results = {
+        "run_id": "20260803T000000Z01234567", "outcome": "incomplete",
+        "started_at": "t0", "finished_at": "t1",
+        "config": {"daemon_home": "/h", "opik_project": "p",
+                   "judge_backend": "b", "judge_enabled": False},
+        "accounting": {},
+        "totals": {k: 0 for k in (
+            "scenarios", "cases", "turns", "cases_passed", "cases_failed",
+            "cases_incomplete", "critical_failed", "gates", "gates_passed",
+            "rubrics", "rubrics_passed", "cost_usd", "duration_ms_total",
+            "judge_calls", "judge_usage_reported_calls", "judge_tokens_reported")},
+        "suites": [], "reliability": [],
+        "aborted": {"suite": "eden", "case": "one", "tool": "eden_read_board",
+                    "fragment": "out_of_credits", "unrun": 9},
+    }
+    paths = report.write(results, str(tmp_path / "out"))
+    md = pathlib.Path(paths["md"]).read_text()
+    html = pathlib.Path(paths["html"]).read_text()
+    for text in (md, html):
+        assert "RUN STOPPED EARLY" in text
+        assert "9 case(s) were not run" in text
+        assert "UNKNOWN, not failed" in text
+
+
+def test_vendor_error_text_is_redacted_but_the_tool_name_survives():
+    """The name is already public in `tools`; the vendor text may quote content."""
+    results = {"suites": [{"scenarios": [{"cases": [{"turns": [{
+        "query": "q", "reply": "r",
+        "tool_failures": [{"name": "eden_read_board", "error_text": "quota + note title"}],
+    }], "rubric": None}]}]}], "config": {}}
+    redacted = run_eval.redact_content(results)
+    failure = redacted["suites"][0]["scenarios"][0]["cases"][0]["turns"][0]["tool_failures"][0]
+    assert failure["name"] == "eden_read_board"
+    assert failure["error_text"] == "[redacted by default]"

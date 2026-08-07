@@ -3,6 +3,10 @@ defmodule FermixChannels.Gateway.WorkRegistryTest do
 
   alias FermixChannels.Gateway.WorkRegistry
 
+  # Upper bound on the probe below, so a regression that stops refusing fails
+  # this test instead of spawning forever.
+  @start_attempt_cap 64
+
   setup do
     work_sup = start_supervised!({Task.Supervisor, []})
 
@@ -57,6 +61,26 @@ defmodule FermixChannels.Gateway.WorkRegistryTest do
     else
       Process.sleep(20)
       eventually(fun, attempts - 1)
+    end
+  end
+
+  # Drive the real (module-constant) running ceiling rather than an injected
+  # one: start items until the registry refuses, and report how many were
+  # accepted alongside the cap it reported.
+  defp fill_to_running_cap(_registry, _test_pid, started) when started >= @start_attempt_cap do
+    flunk("WorkRegistry accepted #{started} concurrent items without refusing")
+  end
+
+  defp fill_to_running_cap(registry, test_pid, started) do
+    request = %{run: controllable_run(test_pid), command: "background"}
+
+    case WorkRegistry.start(registry, request) do
+      {:ok, _work_id} ->
+        assert_receive {:running, _pid}, 2_000
+        fill_to_running_cap(registry, test_pid, started + 1)
+
+      {:error, {:max_running_work, cap}} ->
+        {started, cap}
     end
   end
 
@@ -138,6 +162,30 @@ defmodule FermixChannels.Gateway.WorkRegistryTest do
 
   test "missing run thunk is rejected", %{registry: registry} do
     assert {:error, :missing_run} = WorkRegistry.start(registry, %{command: "background"})
+  end
+
+  test "refuses a start past the running cap and names the cap in the reason", %{
+    registry: registry
+  } do
+    {started, cap} = fill_to_running_cap(registry, self(), 0)
+
+    assert started == cap
+    assert length(WorkRegistry.list(registry)) == cap
+
+    assert {:error, {:max_running_work, ^cap}} =
+             WorkRegistry.start(registry, %{run: controllable_run(self()), command: "background"})
+  end
+
+  # The running cap and the terminal cap are separate bounds: cancelling frees
+  # running slots even though the cancelled entries are still retained.
+  test "cancelling running work frees running slots", %{registry: registry} do
+    {started, _cap} = fill_to_running_cap(registry, self(), 0)
+
+    assert %{cancelled: ^started} = WorkRegistry.stop_all(registry)
+    assert length(WorkRegistry.list(registry)) == started
+
+    assert {:ok, _work_id} =
+             WorkRegistry.start(registry, %{run: controllable_run(self()), command: "background"})
   end
 
   test "stop_all evicts cancelled entries beyond the bounded cap" do

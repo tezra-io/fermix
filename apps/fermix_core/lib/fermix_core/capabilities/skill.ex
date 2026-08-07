@@ -14,6 +14,7 @@ defmodule FermixCore.Capabilities.Skill do
   alias FermixCore.Agents.WorkerRun
   alias FermixCore.Capabilities.Builtin.Tool
   alias FermixCore.Capabilities.Capability
+  alias FermixCore.SkillCuration.Usage
 
   require Logger
 
@@ -130,6 +131,8 @@ defmodule FermixCore.Capabilities.Skill do
       parent: parent_name
     )
 
+    Usage.record_run(definition.name, usage_opts(context))
+
     case write_journal(
            definition.name,
            session_id,
@@ -155,6 +158,13 @@ defmodule FermixCore.Capabilities.Skill do
          Tool.error(
            "Skill '#{definition.name}' produced an invalid journal entry: #{inspect(reason)}"
          )}
+    end
+  end
+
+  defp usage_opts(context) do
+    case Map.get(context, :usage_repo) do
+      nil -> []
+      repo -> [repo: repo]
     end
   end
 

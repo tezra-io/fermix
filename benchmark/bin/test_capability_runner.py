@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["pytest>=8", "pyyaml>=6,<7"]
+# dependencies = ["pytest>=8", "pyyaml>=6,<7", "certifi"]
 # ///
 """Tests for the capability runner's pure pieces: the tool-provenance gate and the
 `requires_tools` suite validation. No daemon / no Opik. Run: `uv run bin/test_capability_runner.py`."""

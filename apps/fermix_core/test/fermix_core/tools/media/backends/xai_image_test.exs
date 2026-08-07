@@ -7,6 +7,11 @@ defmodule FermixCore.Tools.Media.Backends.XAIImageTest do
   # A minimal valid-magic PNG so `materialize_url` sniffs `image/png`.
   @png <<0x89, "PNG", 0x0D, 0x0A, 0x1A, 0x0A>> <> "pixels"
 
+  # `materialize_url/2` screens the provider-returned URL with Net.Guard, which
+  # resolves DNS names. A public IP literal is validated without a lookup, so
+  # the temporary-URL tests below stay hermetic.
+  @image_cdn "https://93.184.216.34/tmp"
+
   setup do
     providers = Application.get_env(:fermix_core, :providers)
     on_exit(fn -> restore(:providers, providers) end)
@@ -84,7 +89,7 @@ defmodule FermixCore.Tools.Media.Backends.XAIImageTest do
       Req.Test.stub(test_id, fn conn ->
         if String.contains?(conn.request_path, "/images/generations") do
           {:ok, _body, conn} = Plug.Conn.read_body(conn, length: 10_000_000)
-          json_response(conn, %{"data" => [%{"url" => "https://imgcdn.x.ai/tmp/abc.png"}]})
+          json_response(conn, %{"data" => [%{"url" => "#{@image_cdn}/abc.png"}]})
         else
           conn
           |> Plug.Conn.put_resp_content_type("image/png")
@@ -102,7 +107,7 @@ defmodule FermixCore.Tools.Media.Backends.XAIImageTest do
       Req.Test.stub(test_id, fn conn ->
         if String.contains?(conn.request_path, "/images/generations") do
           {:ok, _body, conn} = Plug.Conn.read_body(conn, length: 10_000_000)
-          json_response(conn, %{"data" => [%{"url" => "https://imgcdn.x.ai/tmp/empty.png"}]})
+          json_response(conn, %{"data" => [%{"url" => "#{@image_cdn}/empty.png"}]})
         else
           Plug.Conn.resp(conn, 200, "")
         end

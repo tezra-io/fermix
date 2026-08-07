@@ -31,6 +31,44 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     assert definition.system_prompt =~ "Built-in capabilities"
   end
 
+  test "documents the ACP agent surface: how to add it and what is absent on it" do
+    acp_text = acp_paragraph()
+
+    assert acp_text != "", "self-knowledge never mentions the ACP surface"
+    assert acp_text =~ "[fermix_channels.acp]"
+    assert acp_text =~ "fermix acp"
+
+    # The absences ARE the surface's posture (M29 §11), so each is named in the
+    # same place rather than left to be inferred from the rest of the doc.
+    # Coding-harness delegation left this list when identities became durable
+    # (§17.6) — it is asserted as PRESENT by the test below instead.
+    for absent <- ["slash-command", "approval", "origin-mode"] do
+      assert acp_text =~ absent, "self-knowledge does not say #{absent} is absent on ACP"
+    end
+  end
+
+  test "documents durable client identities and the harness delegation they unlock" do
+    acp_text = acp_paragraph()
+
+    # Custody and its one disconnect verb (M29 §17.3): an operator reading this
+    # must learn that credentials outlive the connection and how to sever them.
+    assert acp_text =~ "fermix acp forget"
+    assert acp_text =~ "npub"
+
+    # The harness half, which the absence list above used to claim was missing.
+    for present <- ["codex_run", "claude_code_run"] do
+      assert acp_text =~ present, "self-knowledge does not offer #{present} on ACP"
+    end
+  end
+
+  defp acp_paragraph do
+    Path.expand("../../../priv/skills/self_knowledge/SKILL.md", __DIR__)
+    |> File.read!()
+    |> String.split("\n\n")
+    |> Enum.filter(&String.contains?(&1, "ACP"))
+    |> Enum.join("\n\n")
+  end
+
   test "stays decomposed: main body has headroom, references are bounded, pointers resolve" do
     core = Path.expand("../../../priv/skills", __DIR__)
     refs_dir = Path.join([core, "self_knowledge", "references"])

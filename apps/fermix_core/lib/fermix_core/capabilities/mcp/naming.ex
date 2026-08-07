@@ -12,11 +12,25 @@ defmodule FermixCore.Capabilities.MCP.Naming do
 
   Empty-after-sanitize raises `ArgumentError` — refusing to register
   a meaningless name is louder than silently dropping the tool.
+
+  ## `mode: :preserve` (M27 §7.7)
+
+  A signed remote plugin whose upstream names already carry its namespace
+  (`eden_get_note`) uses `mode: :preserve`: the final capability name is the
+  **exact** upstream name, never `eden_eden_get_note`. Preserved names still
+  pass the same character and 64-byte validation — `validate_name/1` is the one
+  gate both modes go through — and they never hash-rename on collision. That is
+  what `reserve/3` is for: a preserved name that is already taken fails the whole
+  registration rather than quietly becoming a different tool the manifest never
+  signed. Existing stdio plugins keep `register/3`'s prefixing and renaming.
   """
+
+  alias FermixCore.Capabilities.MCP.Telemetry
 
   @table __MODULE__
 
   @max_length 64
+  @name_regex ~r/^[A-Za-z0-9_-]+$/
 
   @spec init() :: :ok
   def init do
@@ -38,11 +52,32 @@ defmodule FermixCore.Capabilities.MCP.Naming do
   plugin-owned servers pass `prefix: "<plugin>_"` so their discovered tools
   stay continuous with the `http` rail's namespace (M8 §8.2). `prefix: nil`
   means the default.
+
+  `mode: :preserve` returns the exact upstream name (M27 §7.7); an upstream name
+  that would not pass validation raises rather than being silently repaired into
+  a name the manifest never signed.
   """
   @spec candidate(String.t(), String.t(), keyword()) :: String.t()
   def candidate(server, original, opts \\ [])
       when is_binary(server) and is_binary(original) and is_list(opts) do
-    prefix = prefix_for(server, Keyword.get(opts, :prefix))
+    case Keyword.get(opts, :mode, :prefix) do
+      :preserve -> preserved!(server, original)
+      :prefix -> prefixed(server, original, Keyword.get(opts, :prefix))
+    end
+  end
+
+  defp preserved!(server, original) do
+    case validate_name(original) do
+      :ok ->
+        original
+
+      {:error, reason} ->
+        raise ArgumentError, "#{inspect(reason)} for #{inspect({server, original})}"
+    end
+  end
+
+  defp prefixed(server, original, prefix_opt) do
+    prefix = prefix_for(server, prefix_opt)
     tool_part = sanitize_segment(original)
 
     if tool_part == "" do
@@ -50,6 +85,22 @@ defmodule FermixCore.Capabilities.MCP.Naming do
     end
 
     cap_length(prefix, tool_part, original)
+  end
+
+  @doc """
+  The one name gate both modes go through: `[A-Za-z0-9_-]`, 1–64 bytes.
+
+  Returns a tuple rather than raising so the transactional registration path can
+  preflight every final name before it registers any of them.
+  """
+  @spec validate_name(String.t()) :: :ok | {:error, {atom(), String.t()}}
+  def validate_name(name) when is_binary(name) do
+    cond do
+      name == "" -> {:error, {:empty_capability_name, name}}
+      byte_size(name) > @max_length -> {:error, {:capability_name_too_long, name}}
+      not Regex.match?(@name_regex, name) -> {:error, {:invalid_capability_name, name}}
+      true -> :ok
+    end
   end
 
   defp prefix_for(server, nil), do: "mcp_" <> sanitize_segment(server) <> "_"
@@ -68,6 +119,31 @@ defmodule FermixCore.Capabilities.MCP.Naming do
     final = resolve_collision(sanitized, server, original)
     :ets.insert(@table, {final, {server, original}})
     final
+  end
+
+  @doc """
+  Reserve an exact name, refusing rather than renaming on collision.
+
+  The signed-contract path cannot hash-rename: a renamed tool is a tool the
+  manifest never signed, and a partially renamed profile is exactly the
+  half-honoured contract §7.7 forbids. A conflict fails the whole registration.
+  """
+  @spec reserve(String.t(), String.t(), String.t()) ::
+          {:ok, String.t()} | {:error, {:capability_conflict, String.t()}}
+  def reserve(server, original, name)
+      when is_binary(server) and is_binary(original) and is_binary(name) do
+    init()
+
+    case lookup(name) do
+      :error -> insert(server, original, name)
+      {:ok, {^server, ^original}} -> {:ok, name}
+      {:ok, _other} -> {:error, {:capability_conflict, name}}
+    end
+  end
+
+  defp insert(server, original, name) do
+    :ets.insert(@table, {name, {server, original}})
+    {:ok, name}
   end
 
   @spec lookup(String.t()) :: {:ok, {String.t(), String.t()}} | :error
@@ -140,7 +216,13 @@ defmodule FermixCore.Capabilities.MCP.Naming do
         candidate
 
       {:ok, {existing_server, existing_original}} ->
-        emit_collision(server, original, candidate, {existing_server, existing_original})
+        Telemetry.emit_collision(
+          server,
+          original,
+          candidate,
+          {existing_server, existing_original}
+        )
+
         suffix = "_" <> short_hash(server <> "::" <> original)
         keep = @max_length - byte_size(suffix)
         truncated = binary_part(candidate, 0, min(byte_size(candidate), keep))
@@ -152,18 +234,5 @@ defmodule FermixCore.Capabilities.MCP.Naming do
     :crypto.hash(:sha256, payload)
     |> Base.encode16(case: :lower)
     |> binary_part(0, 8)
-  end
-
-  defp emit_collision(server, original, sanitized, {existing_server, existing_original}) do
-    :telemetry.execute(
-      [:fermix, :capability, :mcp_name_collision],
-      %{count: 1},
-      %{
-        server: server,
-        original: original,
-        sanitized: sanitized,
-        collided_with: %{server: existing_server, original: existing_original}
-      }
-    )
   end
 end

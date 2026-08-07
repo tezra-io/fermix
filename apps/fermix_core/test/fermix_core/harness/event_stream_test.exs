@@ -6,6 +6,13 @@ defmodule FermixCore.Harness.EventStreamTest do
 
   @fixtures Path.join([__DIR__, "..", "..", "fixtures", "harness"])
 
+  # Shipped defaults, not injected toy values: the numbers below only mean
+  # something against the ceiling a real run is bounded by, and a tiny cap cannot
+  # tell "one error per oversized LINE" from "one error per cap-worth of bytes".
+  @default_cap 1_048_576
+  @default_budget 20
+  @port_chunk 65_536
+
   # Vendor terminal predicates live in the tests for P0 (the P1 adapters own them).
   defp codex_terminal, do: fn event -> event["type"] in ["turn.completed", "turn.failed"] end
   defp claude_terminal, do: fn event -> event["type"] == "result" end
@@ -202,6 +209,152 @@ defmodule FermixCore.Harness.EventStreamTest do
       assert summary.outcome == {:failed, :protocol}
     end
 
+    # The trailing partial is the half the size check used to miss: it is peeled
+    # off by split_trailing/1 and re-appended to the next chunk, so a vendor that
+    # never emits a newline was bounded by nothing here.
+    test "an unterminated line over the cap is charged and the buffer is cleared" do
+      stream = new(claude_terminal(), max_event_bytes: 8)
+
+      assert {:ok, [], state} = EventStream.push(stream, "no newline in this chunk")
+      assert state.framing_errors == 1
+      assert state.buffer == ""
+    end
+
+    test "completed lines in the same chunk are emitted before the partial is charged" do
+      stream = new(claude_terminal(), max_event_bytes: 8)
+
+      assert {:ok, emitted, state} =
+               EventStream.push(stream, ~s({"a":1}\n) <> "an unterminated oversized tail")
+
+      assert emitted == [{:event, %{"a" => 1}}]
+      assert state.framing_errors == 1
+      assert state.buffer == ""
+    end
+
+    # At the SHIPPED default cap, not an injected one: the ceiling that bounds a
+    # real run is the module constant, and this is what makes the scan-and-copy
+    # per chunk linear rather than quadratic. 5 MiB of newline-free output is ONE
+    # unterminated line, so it is one error — not one per MiB. Memory is bounded
+    # by clearing the buffer; a child that never stops is bounded by CommandHost's
+    # total output cap, not by inflating this budget.
+    test "a newline-free stream is charged once and the buffer stops growing" do
+      chunk = String.duplicate("x", 256 * 1024)
+
+      final =
+        Enum.reduce(1..20, EventStream.new(terminal?: claude_terminal()), fn _i, st ->
+          assert {:ok, [], next} = EventStream.push(st, chunk)
+          assert byte_size(next.buffer) <= @default_cap
+          next
+        end)
+
+      assert final.framing_errors == 1
+      assert final.buffer == ""
+    end
+
+    # Regression, defect 1: charging the BUFFER every time it crossed the cap
+    # re-denominated the budget from "one error per oversized line" to "one error
+    # per max_event_bytes of oversized data". At 64 KiB port chunks a single
+    # 5 MiB event cost 4 errors, so six ordinary large events (a tool result
+    # echoing a multi-MiB file, a wide grep, a minified bundle) spent 21 of a
+    # 20-error budget and the healthy run was killed as {:failed, :protocol}.
+    test "one oversized event costs exactly one framing error however many chunks it spans" do
+      line = oversized_event_line(5 * 1024 * 1024)
+      assert byte_size(line) > 4 * @default_cap, "the line must span several cap-widths"
+
+      assert {:ok, emitted, state} =
+               feed(EventStream.new(terminal?: claude_terminal()), line, @port_chunk)
+
+      assert state.framing_errors == 1
+      assert emitted == []
+      assert state.buffer == ""
+    end
+
+    test "six oversized events stay inside the default budget and the run still completes" do
+      line = oversized_event_line(5 * 1024 * 1024)
+      stream = EventStream.new(terminal?: claude_terminal())
+
+      {emitted, state} =
+        Enum.reduce(1..6, {[], stream}, fn n, {acc, st} ->
+          assert {:ok, out, next} = feed(st, line, @port_chunk)
+          assert next.framing_errors == n, "event #{n}"
+          {acc ++ out, next}
+        end)
+
+      assert {:ok, tail, state} = feed(state, ~s({"type":"result"}\n), @port_chunk)
+      summary = EventStream.finalize(state, 0)
+
+      assert summary.framing_errors == 6
+      assert summary.framing_errors < @default_budget
+      assert summary.outcome == :completed
+      assert summary.events == 1
+      assert emitted == []
+      assert tail == [{:event, %{"type" => "result"}}]
+    end
+
+    # Regression, defect 2: clearing the buffer mid-line let the REMAINDER parse
+    # as a fresh completed line — a 3 MiB event yielded a ~917 KB JSON fragment
+    # in the diagnostics tail. Two such events fill 10 of the 20 slots Run keeps
+    # and push the vendor's real auth error out of the ring.
+    test "a discarded oversized line emits nothing and leaves the vendor's error in the tail" do
+      data =
+        oversized_event_line(3 * 1024 * 1024) <>
+          "Error: Not logged in.\n" <> ~s({"type":"result"}\n)
+
+      assert {:ok, emitted, state} =
+               feed(EventStream.new(terminal?: claude_terminal()), data, @port_chunk)
+
+      summary = EventStream.finalize(state, 0)
+
+      assert summary.framing_errors == 1
+      assert emitted == [{:diagnostic, "Error: Not logged in."}, {:event, %{"type" => "result"}}]
+      assert summary.diagnostics_tail == ["Error: Not logged in."]
+      assert summary.events == 1
+      assert summary.outcome == :completed
+    end
+
+    test "a fragment of a discarded line can neither be emitted nor forge the terminal event" do
+      stream = EventStream.new(terminal?: claude_terminal())
+
+      # The cap is crossed with no newline in sight, so the line is charged and
+      # the buffer cleared. What follows is still that same line: replaying it as
+      # a fresh completed line would let mid-event bytes stand in for the vendor's
+      # terminal event and report a truncated run as :completed.
+      assert {:ok, [], charged} =
+               EventStream.push(stream, String.duplicate("x", @default_cap + 1))
+
+      assert charged.framing_errors == 1
+
+      assert {:ok, [], state} = EventStream.push(charged, ~s({"type":"result"}\n))
+      summary = EventStream.finalize(state, 0)
+
+      assert summary.events == 0
+      refute summary.terminal_seen?
+      assert summary.diagnostics_tail == []
+      assert summary.framing_errors == 1
+      assert summary.outcome == {:failed, :protocol}
+    end
+
+    # The budget still bites — it is just denominated in lines. Each multi-chunk
+    # oversized line adds exactly one, so the 21st trips a budget of 20.
+    test "the 21st oversized multi-chunk line breaches the default budget" do
+      line = oversized_event_line(3 * 1024 * 1024)
+      stream = EventStream.new(terminal?: claude_terminal())
+
+      result =
+        Enum.reduce_while(1..(@default_budget + 1), {:ok, stream}, fn n, {:ok, st} ->
+          case feed(st, line, @port_chunk) do
+            {:ok, [], next} ->
+              assert next.framing_errors == n, "line #{n}"
+              {:cont, {:ok, next}}
+
+            {:error, detail, next} ->
+              {:halt, {:breach, n, detail, next}}
+          end
+        end)
+
+      assert {:breach, 21, {:protocol, {:framing_budget_exceeded, 21}}, _state} = result
+    end
+
     test "exceeding the framing budget surfaces {:error, {:protocol, _}} from push" do
       stream = new(claude_terminal(), max_event_bytes: 5, max_framing_errors: 2)
       chunk = "aaaaaaaa\nbbbbbbbb\ncccccccc\n"
@@ -290,6 +443,25 @@ defmodule FermixCore.Harness.EventStreamTest do
       assert {:ok, out, next} = EventStream.push(st, chunk)
       {acc ++ out, next}
     end)
+  end
+
+  # Feeds `data` into an existing accumulator in `chunk_size`-byte chunks, as the
+  # port delivers it, halting on a framing breach.
+  defp feed(stream, data, chunk_size) do
+    data
+    |> chunk_binary(chunk_size)
+    |> Enum.reduce_while({:ok, [], stream}, fn chunk, {:ok, acc, st} ->
+      case EventStream.push(st, chunk) do
+        {:ok, out, next} -> {:cont, {:ok, acc ++ out, next}}
+        {:error, detail, next} -> {:halt, {:error, detail, next}}
+      end
+    end)
+  end
+
+  # A single well-formed, newline-terminated JSONL event whose payload is `bytes`
+  # long — what a vendor emits when a tool result echoes a large file.
+  defp oversized_event_line(bytes) when bytes > @default_cap do
+    ~s({"type":"user","content":"#{String.duplicate("x", bytes)}"}\n)
   end
 
   defp chunk_binary(bin, 0), do: [bin]

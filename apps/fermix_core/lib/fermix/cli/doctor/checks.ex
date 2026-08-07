@@ -9,16 +9,23 @@ defmodule Fermix.CLI.Doctor.Checks do
   invocation stays fast and offline.
   """
 
+  alias Fermix.CLI.AcpCommand
   alias Fermix.CLI.Daemon.Client
   alias Fermix.CLI.Service
   alias Fermix.CLI.Upgrade.Manifest
   alias Fermix.CLI.VersionSkew
+  alias FermixCore.Acp.IdentityStore
   alias FermixCore.Auth.Store, as: AuthStore
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Harness.Artifacts, as: HarnessArtifacts
   alias FermixCore.Harness.Config, as: HarnessConfig
   alias FermixCore.Harness.Ledger, as: HarnessLedger
   alias FermixCore.Harness.Vendors, as: HarnessVendors
+  alias FermixCore.Nostr.Key, as: NostrKey
+  alias FermixCore.Plugins.Config, as: PluginConfig
+  alias FermixCore.Plugins.Dist.McpSource
+  alias FermixCore.Plugins.Registry, as: PluginRegistry
+  alias FermixCore.Plugins.Status, as: PluginStatus
   alias FermixCore.Prompt.TemplateRenderer
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.RoutingOverrides
@@ -30,6 +37,8 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.Doctor, as: ProviderProbe
   alias FermixCore.Setup.SecretMigration
+  alias FermixCore.SkillCuration.Config, as: SkillCurationConfig
+  alias FermixCore.SkillCuration.Delivery, as: SkillCurationDelivery
 
   @type status :: :ok | :warn | :fail
   @type result :: %{name: String.t(), status: status(), detail: String.t()}
@@ -468,6 +477,139 @@ defmodule Fermix.CLI.Doctor.Checks do
     end
   end
 
+  @doc """
+  The ACP agent surface (M29 §9 item 5, §17.3): whether it is enabled, where its
+  socket is, whether the listener is actually up, and which client identities the
+  daemon is holding.
+
+  Liveness is answered BY THE DAEMON over the control socket — `fermix doctor`
+  runs in a tree-less VM where `Channels.Acp.Endpoint` never exists, so probing
+  locally would report "down" on a perfectly healthy host. The socket path is
+  resolved here because it is a pure `FERMIX_HOME` join (`Fermix.CLI.AcpCommand`
+  owns it for the bridge verb), and its presence is a local file check.
+  `:client` is injectable so each state is unit-testable.
+
+  The identity list is read straight off disk, and **ahead of the `enabled`
+  short-circuit**: identities are data, not a live surface. Turning ACP off is
+  the most natural "disconnect" gesture an operator will reach for, and if the
+  row went dark there, durable client credentials would sit under `FERMIX_HOME`
+  with nothing showing them — the one place the consent-by-configuration story
+  could leak. Disabling deletes nothing; `fermix acp forget` is the only
+  deletion, and the row says so. Only the npub is ever printed.
+  """
+  @spec acp(keyword()) :: result()
+  def acp(opts \\ []) when is_list(opts) do
+    with_identities(acp_surface(opts), IdentityStore.list())
+  end
+
+  defp acp_surface(opts) do
+    if Keyword.get(acp_config(), :enabled, true) == true do
+      acp_enabled_result(Keyword.get(opts, :client, &Client.request/1))
+    else
+      ok("acp surface", "disabled")
+    end
+  end
+
+  defp acp_config, do: Application.get_env(:fermix_channels, :acp, [])
+
+  # A host that never connected a client reads exactly as it did before this
+  # existed: no records, no extra words.
+  defp with_identities(result, []), do: result
+
+  defp with_identities(result, records) do
+    {stored, failures} = Enum.split_with(records, &match?({:ok, _identity}, &1))
+
+    %{
+      result
+      | detail: identity_detail(result.detail, stored, failures),
+        status: escalate_identity_status(result.status, failures)
+    }
+  end
+
+  defp identity_detail(detail, stored, failures) do
+    [detail, connected_identities(stored), unusable_identities(failures)]
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.join("; ")
+  end
+
+  defp connected_identities([]), do: ""
+
+  defp connected_identities(stored) do
+    "#{length(stored)} connected (#{Enum.map_join(stored, ", ", &identity_summary/1)}) — " <>
+      "disabling ACP deletes nothing, `fermix acp forget <npub>` (or `--all`) is the only deletion"
+  end
+
+  defp identity_summary({:ok, identity}) do
+    "#{identity.kind} #{identity_npub(identity.id)}, " <>
+      "last seen #{DateTime.to_iso8601(identity.last_seen)}"
+  end
+
+  # Every listed record is named by a validated public key — the store refuses
+  # any other filename before it reaches this row — so the display form always
+  # exists, and a missing one is a bug worth crashing on rather than a hex id
+  # printed where the npub belongs.
+  defp identity_npub(id) do
+    {:ok, npub} = NostrKey.npub(id)
+    npub
+  end
+
+  defp unusable_identities([]), do: ""
+
+  defp unusable_identities(failures) do
+    "unusable identity records: " <>
+      Enum.map_join(failures, "; ", fn {:error, reason} ->
+        AcpCommand.identity_error_message(reason)
+      end)
+  end
+
+  # A record the daemon cannot read is a credential that will not work, which is
+  # the `auth perms` treatment: fail the row and carry the fix line.
+  defp escalate_identity_status(status, []), do: status
+  defp escalate_identity_status(_status, _failures), do: :fail
+
+  defp acp_enabled_result(client) do
+    path = AcpCommand.socket_path()
+
+    case client.("health") do
+      {:ok, %{"status" => "ok", "health" => health}} ->
+        acp_listener_result(acp_channel(health), path)
+
+      {:error, :not_running} ->
+        warn("acp surface", "enabled; daemon not running (start with `fermix start`); #{path}")
+
+      {:error, reason} ->
+        fail("acp surface", "could not ask the daemon: #{inspect(reason)}")
+
+      {:ok, other} ->
+        warn("acp surface", "unexpected reply: #{inspect(other)}")
+    end
+  end
+
+  defp acp_channel(%{"channels" => channels}) when is_list(channels) do
+    Enum.find(channels, &(Map.get(&1, "name") == "acp"))
+  end
+
+  defp acp_channel(_health), do: nil
+
+  defp acp_listener_result(%{"process_alive" => true}, path) do
+    if File.exists?(path) do
+      ok("acp surface", "listening at #{path}")
+    else
+      warn("acp surface", "listener running but its socket is missing at #{path}")
+    end
+  end
+
+  defp acp_listener_result(%{"process_alive" => false}, path) do
+    fail(
+      "acp surface",
+      "enabled but its listener is not running — check daemon logs (socket: #{path})"
+    )
+  end
+
+  defp acp_listener_result(other, _path) do
+    warn("acp surface", "unexpected reply: #{inspect(other)}")
+  end
+
   @spec transcription() :: result()
   def transcription do
     ProviderProbe.transcription_report()
@@ -589,6 +731,50 @@ defmodule Fermix.CLI.Doctor.Checks do
       not enabled? and not any_vendor_available?(detections) -> nil
       enabled? -> enabled_harness_result(detections, opts)
       true -> disabled_harness_result(detections)
+    end
+  end
+
+  @doc """
+  Skill-curation delivery health (MILESTONE_26_SKILL_CURATION §6.6 rung 3):
+  when the feature is on, name whether proposals have an owner-private
+  delivery target — a CLI-only install would otherwise mine forever and
+  deliver nothing, with the situation visible only here and in
+  `/skills proposals`. Pure config reads, safe for the tree-less CLI. Returns
+  `nil` to skip when curation is disabled.
+  """
+  @spec skill_curation(keyword()) :: result() | nil
+  def skill_curation(opts \\ []) when is_list(opts) do
+    enabled? = Keyword.get_lazy(opts, :skill_curation_enabled, &SkillCurationConfig.enabled?/0)
+    memory? = Keyword.get_lazy(opts, :memory_enabled, &FermixCore.Memory.Config.enabled?/0)
+
+    target =
+      Keyword.get_lazy(opts, :delivery_target, fn ->
+        SkillCurationDelivery.resolve_target()
+      end)
+
+    cond do
+      not enabled? ->
+        nil
+
+      not memory? ->
+        %{
+          name: "skill curation",
+          status: :warn,
+          detail: "enabled but memory persistence is off — the curation clock will not run"
+        }
+
+      target == :no_delivery_target ->
+        %{
+          name: "skill curation",
+          status: :warn,
+          detail:
+            "no owner-private delivery target; proposals will wait in /skills proposals — " <>
+              "set owner_user_id on a channel or [fermix_core.jobs] default_delivery_target"
+        }
+
+      true ->
+        {:ok, resolved} = target
+        ok("skill curation", "proposals deliver to #{resolved.platform}:#{resolved.destination}")
     end
   end
 
@@ -828,6 +1014,197 @@ defmodule Fermix.CLI.Doctor.Checks do
 
   defp format_channel_probe(probe), do: "#{probe.name}=#{probe.status} (#{probe.detail})"
 
+  @doc """
+  Enabled plugins (M27 §7.8): per plugin, the install/compat state and the
+  static `Plugins.Status` ladder, plus — for `remote_mcp` plugins — the live
+  runtime status.
+
+  Two facts shape this check:
+
+    * **The runtime status table lives in the daemon**, keyed by the
+      source-qualified `{:plugin, name}`. A one-shot CLI VM has no such table,
+      so it is asked for over the control socket (`plugins_runtime_status`). A
+      locally absent table is reported as unknown; it is NEVER read as `:ready`.
+    * **`fermix doctor` is a tree-less CLI verb.** The static ladder probes an
+      mcp-rail plugin's declared host runtime, which spawns a command — and
+      `CommandRunner.resolve_supervisor!/1` RAISES without the daemon's
+      `CommandHost.Supervisor`. The probe must therefore run unsupervised, the
+      same threading `PluginsCommand.plugin_row/1` and `harness/1` do.
+
+  `:client` and `:installed_root` are injectable so each state unit-tests
+  hermetically.
+  """
+  @spec plugins(keyword()) :: result()
+  def plugins(opts \\ []) when is_list(opts) do
+    case Enum.sort(PluginConfig.enabled_plugins()) do
+      [] -> ok("plugins", "none enabled")
+      names -> enabled_plugins_result(names, opts)
+    end
+  end
+
+  defp enabled_plugins_result(names, opts) do
+    root_opts = Keyword.take(opts, [:installed_root])
+
+    case PluginRegistry.list(root_opts) do
+      {:ok, plugins} ->
+        index = Map.new(plugins, &{&1.name, &1})
+        entries = Enum.map(names, &plugin_entry(&1, index, root_opts))
+        render_plugins(entries, plugin_runtime_statuses(entries, opts))
+
+      {:error, reason} ->
+        fail("plugins", "plugin catalog unreadable: #{inspect(reason)}")
+    end
+  end
+
+  # An enabled name with no loadable manifest is statusable too: `Status` reads
+  # the store and distinguishes `:not_installed` from `:incompatible`. Only a
+  # `%Plugin{}` can declare the remote runtime.
+  defp plugin_entry(name, index, root_opts) do
+    status_opts = [probe: [supervised: false]] ++ root_opts
+
+    case Map.fetch(index, name) do
+      {:ok, plugin} ->
+        %{
+          name: name,
+          status: PluginStatus.status(plugin, status_opts),
+          remote?: McpSource.remote?(plugin)
+        }
+
+      :error ->
+        %{name: name, status: PluginStatus.status(name, status_opts), remote?: false}
+    end
+  end
+
+  # Only a remote source registers an owner in the daemon's status table, so a
+  # host with no remote plugin never pays for the socket round trip — and an
+  # empty table is the truthful answer there, since no entry will consult it.
+  defp plugin_runtime_statuses(entries, opts) do
+    if Enum.any?(entries, & &1.remote?) do
+      fetch_runtime_statuses(Keyword.get(opts, :client, &Client.request/1))
+    else
+      {:ok, %{}}
+    end
+  end
+
+  defp fetch_runtime_statuses(client) do
+    case client.("plugins_runtime_status") do
+      {:ok, %{"status" => "ok", "runtime_status" => rows}} when is_list(rows) ->
+        index_runtime_rows(rows)
+
+      {:error, :not_running} ->
+        :daemon_down
+
+      {:error, reason} ->
+        {:error, inspect(reason)}
+
+      {:ok, other} ->
+        {:error, "unexpected reply: #{inspect(other)}"}
+    end
+  end
+
+  # Both fields come from the daemon's own serializer, so a row missing either is
+  # a broken or version-skewed build — reported as a failed query rather than
+  # rendered as a plugin whose runtime state is blank.
+  defp index_runtime_rows(rows) do
+    if Enum.all?(rows, &valid_runtime_row?/1) do
+      {:ok, Map.new(rows, &{&1["source"], &1["status"]})}
+    else
+      {:error, "malformed runtime_status rows"}
+    end
+  end
+
+  defp valid_runtime_row?(%{"source" => source, "status" => status}),
+    do: is_binary(source) and is_binary(status)
+
+  defp valid_runtime_row?(_row), do: false
+
+  defp render_plugins(entries, runtime) do
+    details = Enum.map(entries, &plugin_detail(&1, runtime))
+
+    %{
+      name: "plugins",
+      status: details |> Enum.map(& &1.status) |> worst_plugin_status(),
+      detail: Enum.map_join(details, "; ", & &1.text)
+    }
+  end
+
+  defp plugin_detail(%{remote?: false} = entry, _runtime) do
+    %{status: static_plugin_status(entry.status), text: "#{entry.name}: #{entry.status}"}
+  end
+
+  defp plugin_detail(%{remote?: true} = entry, {:ok, live}) do
+    case Map.fetch(live, "plugin:#{entry.name}") do
+      {:ok, status} -> remote_live_detail(entry, status)
+      :error -> remote_absent_detail(entry)
+    end
+  end
+
+  # The design's exact wording (§7.8). The static ladder alone drives severity
+  # here: a down daemon is the `daemon socket` check's finding, not this one's,
+  # and repeating it once per remote plugin would bury the plugin's own state.
+  defp plugin_detail(%{remote?: true} = entry, :daemon_down) do
+    %{
+      status: static_plugin_status(entry.status),
+      text:
+        "#{entry.name}: #{entry.status} (remote; runtime status unavailable — daemon not running)"
+    }
+  end
+
+  # A reachable daemon that cannot answer is a real fault (version skew, or a
+  # build without the op) — never silently treated as "no remote plugins".
+  defp plugin_detail(%{remote?: true} = entry, {:error, message}) do
+    %{
+      status: :fail,
+      text: "#{entry.name}: #{entry.status} (remote; runtime status query failed: #{message})"
+    }
+  end
+
+  defp remote_live_detail(entry, status) do
+    %{
+      status: worst_plugin_status([static_plugin_status(entry.status), runtime_status(status)]),
+      text: "#{entry.name}: #{entry.status} (remote; runtime #{status})"
+    }
+  end
+
+  # The daemon is up and holds no owner for this source. When the plugin is not
+  # startable the static ladder already says why; when it IS startable this is
+  # the "enabled and credentialed but never connected" state — one reload or
+  # restart away — which nothing else on the report would surface.
+  defp remote_absent_detail(entry) do
+    %{
+      status: worst_plugin_status([static_plugin_status(entry.status), :warn]),
+      text: "#{entry.name}: #{entry.status} (remote; no live client registered)"
+    }
+  end
+
+  # Enabled but structurally unusable: the operator's config names a plugin this
+  # build cannot run at all. Every other non-ready status is a setup step that
+  # has not been finished yet.
+  @plugin_broken_statuses [:not_installed, :incompatible, :error]
+
+  defp static_plugin_status(:ready), do: :ok
+  defp static_plugin_status(status) when status in @plugin_broken_statuses, do: :fail
+  defp static_plugin_status(_status), do: :warn
+
+  # The §7.8 terminal states that mean "do not call tools": a signed-contract,
+  # collision, or endpoint-policy refusal is a defect, not a pending step.
+  @remote_broken_statuses ~w(
+    invalid_remote_config upstream_contract_mismatch capability_conflict
+    remote_security_blocked remote_protocol_error
+  )
+
+  defp runtime_status("ready"), do: :ok
+  defp runtime_status(status) when status in @remote_broken_statuses, do: :fail
+  defp runtime_status(_status), do: :warn
+
+  defp worst_plugin_status(statuses) do
+    cond do
+      :fail in statuses -> :fail
+      :warn in statuses -> :warn
+      true -> :ok
+    end
+  end
+
   @spec command_owner_config() :: result()
   def command_owner_config do
     report = ProviderProbe.command_owner_report()
@@ -952,6 +1329,68 @@ defmodule Fermix.CLI.Doctor.Checks do
         fail("auth perms", "stat #{path}: #{inspect(reason)}")
     end
   end
+
+  @doc """
+  Reports whether `FERMIX_HOME` itself is `0700`.
+
+  The home holds `memory.db` — full conversation text — plus `config.toml` and
+  every trace file; only `auth.json` carries its own `0600`. `ConfigStore`
+  restricts the mode on every daemon boot, but deliberately only logs on
+  failure, because returning an error there would take the supervision tree
+  down. A home that could not be secured therefore has to surface here, which is
+  the same division of labour `auth perms` already uses.
+  """
+  @spec home_permissions() :: result()
+  def home_permissions do
+    home = ConfigStore.fermix_home()
+
+    case File.stat(home) do
+      {:ok, %File.Stat{mode: mode}} ->
+        home_permissions_result(home, Bitwise.band(mode, 0o777))
+
+      {:error, reason} ->
+        fail("home perms", "stat #{home}: #{inspect(reason)}")
+    end
+  end
+
+  defp home_permissions_result(home, 0o700), do: ok("home perms", "#{home} is 0700")
+
+  defp home_permissions_result(home, mode) do
+    fail(
+      "home perms",
+      "#{home} is #{Integer.to_string(mode, 8)} — it holds memory.db, config.toml " <>
+        "and traces. Fix with: chmod 700 #{home}"
+    )
+  end
+
+  @doc """
+  Reports whether `cosign` is on PATH.
+
+  Two shipped features shell out to it and fail closed without it: `fermix
+  upgrade` verifies the downloaded binary's keyless signature, and every plugin
+  install verifies the plugin's. A Homebrew install pulls cosign in as a formula
+  dependency; `curl | sh` does not, and Homebrew installs are the ones that
+  never reach `fermix upgrade` anyway. So on the install path that actually uses
+  the verifier, cosign is absent by default — and without this row the operator
+  discovers that only when an upgrade or a plugin install refuses.
+  """
+  @spec cosign(keyword()) :: result()
+  def cosign(opts \\ []) when is_list(opts) do
+    opts
+    |> Keyword.get_lazy(:cosign_path, fn -> System.find_executable("cosign") end)
+    |> cosign_result()
+  end
+
+  defp cosign_result(nil) do
+    warn(
+      "cosign",
+      "not on PATH — `fermix upgrade` and `fermix plugins install` both refuse " <>
+        "without it. Install it from https://github.com/sigstore/cosign " <>
+        "(`brew install cosign` on macOS)."
+    )
+  end
+
+  defp cosign_result(path) when is_binary(path), do: ok("cosign", "present at #{path}")
 
   @spec plaintext_secrets() :: result()
   def plaintext_secrets do

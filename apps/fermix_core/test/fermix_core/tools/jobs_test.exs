@@ -467,6 +467,53 @@ defmodule FermixCore.Tools.JobsTest do
     assert result.error =~ ~s(delivery_mode "origin" requires a conversation context)
   end
 
+  # MILESTONE_29_ACP_AGENT_SURFACE §4/§9: an ACP session is owned by the client
+  # and ends with it, so a job that reports back "to the origin" would deliver
+  # into nothing. Refused at schedule time, naming the way forward.
+  test "schedule_job refuses origin mode from an acp conversation", %{context: context} do
+    context = %{context | conversation_key: {"acp", "sess-abc", :root}}
+
+    assert {:ok, result} =
+             ScheduleJob.execute(
+               %{
+                 "name" => "ACP Origin",
+                 "schedule" => "every 15 minutes",
+                 "task" => "Report back here.",
+                 "delivery_mode" => "origin"
+               },
+               context
+             )
+
+    assert result.success == false
+    assert result.error =~ "ACP session"
+    assert result.error =~ "delivery_target"
+  end
+
+  test "schedule_job accepts an explicit delivery_target from an acp conversation", %{
+    context: context
+  } do
+    context = %{context | conversation_key: {"acp", "sess-abc", :root}}
+
+    assert {:ok, created} =
+             ScheduleJob.execute(
+               %{
+                 "name" => "ACP Explicit Target",
+                 "schedule" => "every 15 minutes",
+                 "task" => "Report to telegram.",
+                 "delivery_mode" => "channel",
+                 "delivery_target" => %{"platform" => "telegram", "chat_id" => "chat-1"}
+               },
+               context
+             )
+
+    assert created.success == true
+    payload = Jason.decode!(created.output)
+
+    assert {:ok, job} = Repo.get_scheduled_job(payload["id"], server: context.memory_repo)
+    assert job.delivery_mode == "channel"
+    assert job.delivery_target == %{"platform" => "telegram", "chat_id" => "chat-1"}
+  end
+
   test "schedule_job exposes the skill_name binding parameter" do
     params = ScheduleJob.parameters()
     assert Map.has_key?(params.properties, :skill_name)

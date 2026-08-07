@@ -11,6 +11,13 @@ defmodule FermixChannels.Gateway.Idempotency do
   a daemon restart starts fresh, which is acceptable since provider
   retry windows are typically minutes, not hours.
 
+  The TTL is enforced on two paths and both are required: a lookup of the
+  SAME key ignores an expired row, and a periodic `:sweep` deletes every
+  expired row so the table cannot grow without bound. Without the sweep the
+  declared TTL only ever applied to a key that was asked about again —
+  outbound media claims (60s TTL, one row per media send, reachable in the
+  DEFAULT config) accumulated for the life of the daemon.
+
   Atomicity model (audit F-06 second-pass review):
 
   The check-and-set runs inside the GenServer's `handle_call/3`, so
@@ -35,6 +42,9 @@ defmodule FermixChannels.Gateway.Idempotency do
   @table __MODULE__.Table
   @default_ttl_ms 24 * 60 * 60 * 1_000
   @default_outbound_ttl_ms 60_000
+  # Short relative to the 24h inbound TTL, because the shortest-lived rows are
+  # the 60s outbound media claims: they set the reclaim latency, not the TTL.
+  @sweep_interval_ms 5 * 60 * 1_000
 
   @type outbound_media_claim :: {term(), reference()}
 
@@ -112,7 +122,7 @@ defmodule FermixChannels.Gateway.Idempotency do
         :ok
     end
 
-    {:ok, %{table: table}}
+    {:ok, %{table: table, sweep_timer: schedule_sweep()}}
   end
 
   @impl true
@@ -167,8 +177,29 @@ defmodule FermixChannels.Gateway.Idempotency do
     {:reply, :ok, state}
   end
 
+  # MUST stay above the catch-all below. A `handle_info(_other, state)` placed
+  # first swallows `:sweep`, the timer never re-arms, and the declared TTL goes
+  # back to being enforced only on a lookup of the same key.
   @impl true
+  def handle_info(:sweep, state) do
+    sweep_expired(state.table, System.monotonic_time(:millisecond))
+    {:noreply, %{state | sweep_timer: schedule_sweep()}}
+  end
+
   def handle_info(_other, state), do: {:noreply, state}
+
+  defp schedule_sweep, do: Process.send_after(self(), :sweep, @sweep_interval_ms)
+
+  # Two match specs because the table stores two value shapes — a bare deadline
+  # (inbound message ids) and `{deadline, claim_ref}` (outbound media claims).
+  # This mirrors the discrimination `expired?/2` makes on lookup; a third shape
+  # invented here would drift from it.
+  defp sweep_expired(table, now_ms) do
+    bare = [{{:_, :"$1"}, [{:is_integer, :"$1"}, {:"=<", :"$1", now_ms}], [true]}]
+    claimed = [{{:_, {:"$1", :_}}, [{:is_integer, :"$1"}, {:"=<", :"$1", now_ms}], [true]}]
+
+    :ets.select_delete(table, bare) + :ets.select_delete(table, claimed)
+  end
 
   defp fresh_outbound_claim(table, key, deadline) do
     claim_ref = make_ref()
