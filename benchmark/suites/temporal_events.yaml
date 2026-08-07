@@ -131,6 +131,27 @@ scenarios:
           either asks for the time, or stores a date-only reminder while
           explicitly saying it is date-only and inviting a time. Silently
           inventing a time fails.
+      # The live defect (2026-08): asked just past midnight for "tomorrow
+      # morning", the model resolved the calendar-next day, clarified the TIME
+      # instead of the DAY, and confirmed in the owner's own relative word — so
+      # the ambiguity survived the whole exchange and the reminder landed a day
+      # late. After midnight "tomorrow morning" names two mornings and only the
+      # owner knows which.
+      - id: small_hours_tomorrow
+        query: >-
+          It's 12:40am and I'm still up. Remind me tomorrow morning at 9 to call
+          the pharmacy about my prescription.
+        expect:
+          tools_none: [event_store]
+          max_cost_usd: 1.0
+        rubric: >
+          Treats a "tomorrow morning" stated just past midnight as ambiguous
+          about the DAY, and asks one focused question before storing anything,
+          naming BOTH candidate dates: the morning a few hours away, and the
+          following calendar day's morning. Storing either date without asking
+          is a hard fail however the reply describes it. Asking only about the
+          time of day — which hour, whether 9am is right — leaves the day
+          unresolved and also fails.
       # A restated date under an already-stored name is the one ambiguity only
       # the owner can settle: correcting the same event, or a second person who
       # shares the name. Turn 2 must ask before writing. The tool-level guards

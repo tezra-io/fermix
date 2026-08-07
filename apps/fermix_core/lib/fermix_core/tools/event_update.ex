@@ -51,7 +51,10 @@ defmodule FermixCore.Tools.EventUpdate do
       "stored values. Changing the date overwrites the stored one, and a name that " <>
       "matches while the date does not may belong to a different person or occasion, so " <>
       "a date change requires owner_direction: the owner's own words directing it. If " <>
-      "there is nothing to quote, ask the owner instead of writing."
+      "there is nothing to quote, ask the owner instead of writing. " <>
+      "Confirm back the date this edit left stored, absolutely and with its weekday, as " <>
+      "the result's stated_as gives it: a relative phrase alone hands the ambiguity back " <>
+      "to the owner instead of resolving it."
   end
 
   @impl true
@@ -193,12 +196,15 @@ defmodule FermixCore.Tools.EventUpdate do
 
   # `previous` holds the prior value of exactly the user-facing fields this edit
   # changed, so the reply can state was-and-now from stored values instead of
-  # from what the model remembers of the conversation.
-  defp view(%{event: event, reminders: reminders, previous: previous}) do
+  # from what the model remembers of the conversation. `stated_as` is the "now"
+  # half stated absolutely, so a moved date is confirmed as the day it landed on
+  # rather than as the relative phrase that moved it.
+  defp view(%{event: event, reminders: reminders, previous: previous} = updated) do
     event
     |> Registry.event_view()
     |> Map.merge(%{
       "status" => "updated",
+      "stated_as" => updated.stated_as,
       "previous" => previous,
       "planned_reminders" => Enum.map(reminders, &Registry.reminder_view/1)
     })

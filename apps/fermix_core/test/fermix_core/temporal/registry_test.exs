@@ -1110,6 +1110,121 @@ defmodule FermixCore.Temporal.RegistryTest do
     end
   end
 
+  # The live defect (2026-08): asked at 00:40 for "tomorrow morning", the model
+  # stored one candidate day and confirmed it with the owner's own relative word,
+  # so the confirmation repeated the ambiguity rather than settling it. Every
+  # write now carries the absolute date it actually stored, weekday included —
+  # the weekday is what tells the coming morning from the following calendar day.
+  describe "the stated occurrence (§5.2)" do
+    test "a created yearly event states its recurrence and its next occurrence", %{repo: repo} do
+      assert {:ok, %{stated_as: stated}} = create(repo, birthday_params())
+
+      assert stated == "every September 14 — next on Monday, September 14"
+    end
+
+    test "an idempotent repeat states the same stored occurrence", %{repo: repo} do
+      assert {:ok, %{status: :created, stated_as: first}} = create(repo, birthday_params())
+      assert {:ok, %{status: :existing, stated_as: second}} = create(repo, birthday_params())
+
+      assert second == first
+    end
+
+    test "a timed one-time event states weekday, date, wall time, and zone", %{repo: repo} do
+      params = %{
+        title: "Dentist appointment",
+        kind: "appointment",
+        when: %{"type" => "datetime", "date" => "2026-08-16", "time" => "15:00:00"}
+      }
+
+      assert {:ok, %{stated_as: stated}} = create(repo, params)
+
+      assert stated == "Sunday, August 16 at 3:00 PM EDT"
+    end
+
+    test "a date-only one-time event states the weekday and the date", %{repo: repo} do
+      params = %{
+        title: "Submit the report",
+        kind: "deadline",
+        when: %{"type" => "date", "date" => "2026-08-14"}
+      }
+
+      assert {:ok, %{stated_as: stated}} = create(repo, params)
+
+      assert stated == "Friday, August 14"
+    end
+
+    # The incident's own shape: two candidate mornings whose statements differ
+    # only by the weekday.
+    test "the two candidate mornings state different weekdays", %{repo: repo} do
+      morning = fn date ->
+        %{
+          title: "Call the clinic #{date}",
+          kind: "explicit_reminder",
+          when: %{"type" => "datetime", "date" => date, "time" => "09:00:00"}
+        }
+      end
+
+      assert {:ok, %{stated_as: coming}} = create(repo, morning.("2026-08-07"))
+      assert {:ok, %{stated_as: following}} = create(repo, morning.("2026-08-08"))
+
+      assert coming == "Friday, August 7 at 9:00 AM EDT"
+      assert following == "Saturday, August 8 at 9:00 AM EDT"
+    end
+
+    test "an occurrence in another calendar year names the year", %{repo: repo} do
+      params = %{
+        title: "Passport renewal",
+        kind: "deadline",
+        when: %{"type" => "date", "date" => "2027-09-14"}
+      }
+
+      assert {:ok, %{stated_as: stated}} = create(repo, params)
+
+      assert stated == "Tuesday, September 14, 2027"
+    end
+
+    test "an edit states the occurrence it stored, not the one it replaced", %{repo: repo} do
+      params = %{
+        title: "Dentist appointment",
+        kind: "appointment",
+        when: %{"type" => "datetime", "date" => "2026-08-16", "time" => "15:00:00"}
+      }
+
+      assert {:ok, %{event: event, stated_as: before}} = create(repo, params)
+      assert before == "Sunday, August 16 at 3:00 PM EDT"
+
+      assert {:ok, %{stated_as: stated}} =
+               Registry.update_event(
+                 event.id,
+                 %{
+                   when: %{"type" => "datetime", "date" => "2026-08-21", "time" => "16:00:00"},
+                   owner_direction: "move the dentist to Friday the 21st at 4"
+                 },
+                 context(repo),
+                 opts()
+               )
+
+      assert stated == "Friday, August 21 at 4:00 PM EDT"
+    end
+
+    test "a delivery rebind states the stored occurrence unchanged", %{repo: repo} do
+      assert {:ok, %{event: event, stated_as: stored}} = create(repo, birthday_params())
+
+      rebound = jobs_config(default_delivery_target: [platform: "slack", channel_id: "C99"])
+
+      assert {:ok, %{event: updated, stated_as: stated}} =
+               Registry.update_event(
+                 event.id,
+                 %{rebind_delivery_to_default: true},
+                 context(repo),
+                 opts(jobs_config: rebound)
+               )
+
+      assert updated.delivery_platform == "slack"
+      assert stated == stored
+    end
+  end
+
   describe "cancel_event/3" do
     test "soft-cancels the event and its unsent reminders", %{repo: repo} do
       assert {:ok, %{event: event}} = create(repo, birthday_params())

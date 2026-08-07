@@ -150,4 +150,58 @@ defmodule FermixCore.Temporal.RendererTest do
       assert {:error, {:invalid_timezone, "Mars/Olympus"}} = Renderer.render(broken, now)
     end
   end
+
+  # The statement form `Temporal.Registry` confirms a WRITE with. A reminder
+  # arrives beside its event, so the templates above lean on a relative clause;
+  # a confirmation has to settle which day was meant, so this form always carries
+  # the weekday and never a relative word.
+  describe "stated_date!/4" do
+    # 2026-08-02 08:00 EDT
+    @stating_now DateTime.shift_zone!(~U[2026-08-02 12:00:00Z], @tz)
+
+    test "a timed occurrence states weekday, date, wall time, and zone" do
+      assert Renderer.stated_date!(~D[2026-08-16], ~T[15:00:00], @tz, @stating_now) ==
+               "Sunday, August 16 at 3:00 PM EDT"
+    end
+
+    test "a date-only occurrence states the weekday and the date" do
+      assert Renderer.stated_date!(~D[2026-08-14], nil, @tz, @stating_now) == "Friday, August 14"
+    end
+
+    # The same differs-from-the-current-year rule the reminder templates use, so
+    # a next-year occurrence can never be read as this year's.
+    test "an occurrence in another calendar year names the year; this year's does not" do
+      assert Renderer.stated_date!(~D[2027-09-14], nil, @tz, @stating_now) ==
+               "Tuesday, September 14, 2027"
+
+      assert Renderer.stated_date!(~D[2026-09-14], nil, @tz, @stating_now) ==
+               "Monday, September 14"
+    end
+
+    # The live defect in one assertion: asked just past midnight on a Friday for
+    # "tomorrow morning", the two candidate days are Friday and Saturday, and the
+    # weekday is the only part of the statement that tells them apart.
+    test "consecutive days state different weekdays" do
+      friday = Renderer.stated_date!(~D[2026-08-07], ~T[09:00:00], @tz, @stating_now)
+      saturday = Renderer.stated_date!(~D[2026-08-08], ~T[09:00:00], @tz, @stating_now)
+
+      assert friday == "Friday, August 7 at 9:00 AM EDT"
+      assert saturday == "Saturday, August 8 at 9:00 AM EDT"
+    end
+  end
+
+  describe "weekday/1 and month_name/1" do
+    test "weekdays are spelled out from known dates" do
+      assert Renderer.weekday(~D[2026-08-07]) == "Friday"
+      assert Renderer.weekday(~D[2026-08-08]) == "Saturday"
+      assert Renderer.weekday(~D[2026-09-14]) == "Monday"
+      assert Renderer.weekday(~D[2026-08-02]) == "Sunday"
+    end
+
+    test "months are spelled out from their number" do
+      assert Renderer.month_name(1) == "January"
+      assert Renderer.month_name(9) == "September"
+      assert Renderer.month_name(12) == "December"
+    end
+  end
 end
