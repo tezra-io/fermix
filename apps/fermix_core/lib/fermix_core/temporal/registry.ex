@@ -37,6 +37,7 @@ defmodule FermixCore.Temporal.Registry do
   alias FermixCore.Memory.Repo
   alias FermixCore.Temporal.Defaults
   alias FermixCore.Temporal.Planner
+  alias FermixCore.Temporal.Renderer
   alias FermixCore.Temporal.Telemetry, as: TemporalTelemetry
 
   # Referenced as a registered NAME only: the scheduler module is built
@@ -115,13 +116,16 @@ defmodule FermixCore.Temporal.Registry do
   Validates and creates one event with its materialized reminder plan.
 
   Returns `{:ok, %{status: :created | :existing, event: row, reminders: rows,
-  similar_events: rows}}`; `:existing` means an identical active event was
-  already stored, so the caller must not claim a second set of reminders was
-  created (§5.2).
+  similar_events: rows, stated_as: text}}`; `:existing` means an identical active
+  event was already stored, so the caller must not claim a second set of
+  reminders was created (§5.2).
 
   `:similar_events` is the other active events of the same kind this one could
   be a duplicate of, so a differently-titled twin is visible in the very
   acknowledgement that created it.
+
+  `:stated_as` is the stored occurrence rendered absolutely, weekday included —
+  what the confirmation must say instead of echoing the owner's relative word.
   """
   @spec create_event(map(), map(), keyword()) ::
           {:ok,
@@ -129,7 +133,8 @@ defmodule FermixCore.Temporal.Registry do
              status: :created | :existing,
              event: map(),
              reminders: [map()],
-             similar_events: [map()]
+             similar_events: [map()],
+             stated_as: String.t()
            }}
           | {:error, term()}
   def create_event(params, context, opts \\ [])
@@ -151,7 +156,8 @@ defmodule FermixCore.Temporal.Registry do
          status: status,
          event: with_delivery_source(event, target),
          reminders: reminders,
-         similar_events: similar_events(status, event, context)
+         similar_events: similar_events(status, event, context),
+         stated_as: stated_as(event, now)
        }}
     end
   end
@@ -164,7 +170,8 @@ defmodule FermixCore.Temporal.Registry do
 
   `:previous` carries the prior value of every user-facing field this edit
   actually changed, so the acknowledgement can state was-and-now from stored
-  values alone (§5.2); it is empty when nothing user-facing moved.
+  values alone (§5.2); it is empty when nothing user-facing moved. `:stated_as`
+  is the occurrence this edit left stored, rendered absolutely with its weekday.
 
   A patch carrying `:when` also requires `owner_direction`, a bounded excerpt of
   the owner's own directing words — the stored date is the one value an edit
@@ -172,7 +179,8 @@ defmodule FermixCore.Temporal.Registry do
   persisted, never read for content.
   """
   @spec update_event(String.t(), map(), map(), keyword()) ::
-          {:ok, %{event: map(), reminders: [map()], previous: map()}} | {:error, term()}
+          {:ok, %{event: map(), reminders: [map()], previous: map(), stated_as: String.t()}}
+          | {:error, term()}
   def update_event(id, patch, context, opts \\ [])
       when is_binary(id) and is_map(patch) and is_map(context) and is_list(opts) do
     now = now(opts)
@@ -194,7 +202,8 @@ defmodule FermixCore.Temporal.Registry do
        %{
          event: with_delivery_source(event, target),
          reminders: reminders,
-         previous: previous_values(existing, event)
+         previous: previous_values(existing, event),
+         stated_as: stated_as(event, now)
        }}
     end
   end
@@ -366,6 +375,37 @@ defmodule FermixCore.Temporal.Registry do
   defp previous_value(:recurrence_month, value), do: value
   defp previous_value(:recurrence_day, value), do: value
   defp previous_value(_field, value), do: iso(value)
+
+  # §5.2 for the date itself. The owner's own words are routinely relative
+  # ("tomorrow", "next Friday"), and a confirmation that echoes the relative word
+  # repeats whatever ambiguity the request carried instead of settling it — which
+  # is how a request made after midnight was stored a day late and acknowledged
+  # in the very phrase that hid it. So every write hands the model the occurrence
+  # it actually PERSISTED, stated absolutely and always with the weekday: the
+  # weekday is the value that tells one candidate day from the next.
+  #
+  # Read from the stored row, so it can only ever state what was written, and
+  # shifted through the event's own zone, so the year rule compares against the
+  # owner's calendar rather than UTC's.
+  defp stated_as(event, now) do
+    stated_text(event, DateTime.shift_zone!(now, event.timezone))
+  end
+
+  # A yearly event stores no year, so its statement carries both halves: the
+  # recurring calendar day it will keep, and the concrete next occurrence its
+  # reminders were materialized for.
+  defp stated_text(%{recurrence_kind: "yearly"} = event, local_now) do
+    "every " <>
+      Renderer.month_name(event.recurrence_month) <>
+      " " <>
+      Integer.to_string(event.recurrence_day) <>
+      " — next on " <>
+      Renderer.stated_date!(event.next_occurrence_on, nil, event.timezone, local_now)
+  end
+
+  defp stated_text(event, local_now) do
+    Renderer.stated_date!(event.local_date, event.local_time, event.timezone, local_now)
+  end
 
   # --- canonical views -----------------------------------------------------
 

@@ -2046,6 +2046,35 @@ evidence, not preemptively. ~A dozen lines of production code; no state,
 schema, config, telemetry, or path changes; scheduler/delivery/snooze/cancel
 untouched.
 
+**2026-08-07 addendum — the small-hours "tomorrow" and `stated_as` (first
+production incident).** Prod (0.8.0, upgraded by the owner) captured its first
+real reminder at 12:40 AM — "remind me to book the pickleball event tomorrow
+morning" — and resolved calendar-tomorrow (Saturday) when the owner meant the
+coming morning (Friday); the model even clarified, but about the TIME, and its
+confirmation said "tomorrow at 9:00 AM", repeating the ambiguity instead of
+resolving it. Storage, zone math (owner-local, not UTC), and delivery were all
+correct — the miss was one semantic reading plus a §5.2 ack that echoed a
+relative phrase. Fixes: (1) `stated_as` — create/update/rebind results carry
+the stored occurrence rendered absolutely, ALWAYS with the weekday (the
+weekday is the disambiguation payload for tomorrow-vs-day-after), computed
+post-commit from the stored row via new `@doc false` Renderer publics
+(`stated_date!/4`, `weekday/1`, `month_name/1`; bang by design — a committed
+write must never become a tool error over rendering); conduct sentences on
+both tools direct the confirmation to echo it and never rely on a relative
+phrase alone. (2) Small-hours conduct on `event_store`: after midnight,
+"tomorrow" + a morning time is ambiguous about the DAY — ask one question
+naming both candidate dates; model judgment, zero code enforcement, no
+time-of-day detection in code. (3) Eval case
+`clarify_dont_guess/small_hours_tomorrow` grades asking which DAY (naming
+both dates); merely clarifying the hour fails — precisely the mistake the
+live model made. The incident is pinned verbatim as the renderer's
+consecutive-days test (Friday Aug 7 vs Saturday Aug 8). Delivered-reminder
+templates deliberately remain weekday-free and unchanged. Also proven by the
+same incident: production derivation worked on first contact
+(`delivery.source: derived` — prod has no configured target). These fixes
+reach production with the next release; prod remains on 0.8.0 behavior until
+then.
+
 **2026-08-06 addendum — the relative clause floored away an hour.** First
 organic 24h-before delivery (13ms of scheduler latency) rendered "(in 23
 hours)"; the same floor would have OMITTED tomorrow's "(in 1 hour)" clause
