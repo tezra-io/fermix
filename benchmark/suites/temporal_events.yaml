@@ -7,13 +7,15 @@ description: >
   routing boundary, the ask-don't-guess clarification contract, and the full
   conversational lifecycle (list, update, remove). What this suite deliberately
   does NOT cover, because an ask->grade loop cannot arrange it: reminder
-  DELIVERY (the scheduler fires detached from any turn), and the implicit
-  "snooze that"/"cancel that" resolutions (both resolve against a reminder
-  actually DELIVERED into the caller's conversation within 24h — no such row
-  can exist in a fresh eval home). Those paths are pinned by the hermetic
-  ExUnit tier (temporal/ + tools/ suites). Events created here carry far-future
-  dates and every management case ends by removing what it created, so nothing
-  comes due inside an eval window.
+  DELIVERY (the scheduler fires detached from any turn), the post-delivery
+  follow-up RUN a delivery can spawn (the same boundary: it begins only after a
+  delivery settles, so only the flagging judgment that decides it is drivable
+  here), and the implicit "snooze that"/"cancel that" resolutions (both
+  resolve against a reminder actually DELIVERED into the caller's conversation
+  within 24h — no such row can exist in a fresh eval home). Those paths are
+  pinned by the hermetic ExUnit tier (temporal/ + tools/ suites). Events created
+  here carry far-future dates and every management case ends by removing what it
+  created, so nothing comes due inside an eval window.
 defaults:
   timeout_ms: 180000
   judge: true
@@ -192,6 +194,53 @@ scenarios:
           restatement of a fact it inferred. An overwrite justified by a
           fabricated direction, or by the bare restated date dressed up as an
           instruction, is a hard fail however the reply describes it.
+
+  # The follow-up flag (M30 §22.3) is decided once, at the attended turn that
+  # stores the event, and nowhere else — there is no kind-based default in code
+  # to fall back on, so this judgment IS the feature's control surface. The run
+  # it eventually spawns is scheduler-detached and undrivable here (see the
+  # suite description); what is drivable is whether the model reads the occasion
+  # correctly and says so.
+  - id: followup_flagging
+    title: "Flags occasions worth a check-in, and leaves logistics unflagged"
+    severity: normal
+    tags: [temporal, judgment]
+    cases:
+      - id: anniversary_wants_a_check_in
+        query: >-
+          My parents' 40th wedding anniversary is on October 18 and I'd hate to
+          let it slip past me.
+        expect:
+          tools_any: [event_store]
+          # Deliberately coarse: this matches the JSON of ALL tool inputs in the
+          # turn combined, so it proves the flag was written somewhere in this
+          # turn rather than on this exact call. It is the one labelled sanity
+          # gate; the rubric grades the judgment and the conduct.
+          tool_inputs_match_all: ['"followup":\s*true']
+          max_cost_usd: 1.0
+        rubric: >
+          Stores the October 18 anniversary through the event rail AND flags it
+          for a post-reminder check-in — the stored event's arguments carry
+          followup set true. The confirmation must also name that check-in in
+          plain terms: that Fermix will follow up or check in with the owner
+          after the reminder arrives, not merely that a reminder will be sent,
+          so a wrong call is visible the moment it is made and the owner can
+          correct it. Read the tool span evidence, not only the reply: storing
+          the date while the reply says nothing about a check-in is a fail, and
+          so is promising a check-in the stored event was never flagged for.
+      - id: dentist_is_just_logistics
+        query: "Dentist on March 3 at 8:15am — remind me so I don't blank on it."
+        expect:
+          tools_any: [event_store]
+          max_cost_usd: 1.0
+        rubric: >
+          Stores the March 3, 8:15 AM appointment and leaves it UNFLAGGED: a
+          logistics ping needs only the fact, so the stored event's arguments
+          must not set followup true, and the reply confirms the date and the
+          reminder plan while promising no check-in, follow-up, or offer of help
+          afterwards. Read the tool span evidence, not only the reply — a stored
+          event carrying followup true is a hard fail however the reply
+          describes it.
 
   - id: manage_roundtrip
     title: "Lists, edits, and removes events through conversation"

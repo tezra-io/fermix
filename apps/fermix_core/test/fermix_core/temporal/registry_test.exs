@@ -113,6 +113,13 @@ defmodule FermixCore.Temporal.RegistryTest do
 
   defp with_target(target), do: [jobs_config: jobs_config(default_delivery_target: target)]
 
+  defp reminders_for(repo, event_id) do
+    {:ok, rows} =
+      Repo.list_temporal_reminders(%{event_id: event_id, status: ["pending"]}, server: repo)
+
+    rows
+  end
+
   describe "create_event/3 — identity and stored shape" do
     test "stores a yearly birthday with its default plan and the snapshotted target", %{
       repo: repo
@@ -1107,6 +1114,78 @@ defmodule FermixCore.Temporal.RegistryTest do
     test "an unknown event id is not found", %{repo: repo} do
       assert {:error, :not_found} =
                Registry.update_event("evt_missing", %{title: "x"}, context(repo), opts())
+    end
+  end
+
+  describe "the follow-up flag (§22.3)" do
+    test "an unflagged create stores and views false", %{repo: repo} do
+      assert {:ok, %{event: event}} = create(repo, birthday_params())
+
+      assert event.followup === false
+      assert Registry.event_view(event)["followup"] === false
+    end
+
+    test "a flagged create stores and views true", %{repo: repo} do
+      assert {:ok, %{event: event}} = create(repo, birthday_params(%{followup: true}))
+
+      assert event.followup === true
+      assert Registry.event_view(event)["followup"] === true
+    end
+
+    test "every materialized reminder carries the flag in its payload", %{repo: repo} do
+      assert {:ok, %{reminders: reminders}} = create(repo, birthday_params(%{followup: true}))
+
+      assert reminders != []
+      assert Enum.all?(reminders, &(&1.payload["followup"] === true))
+    end
+
+    test "a non-boolean flag is refused", %{repo: repo} do
+      assert {:error, {:invalid_param, "followup=\"yes\""}} =
+               create(repo, birthday_params(%{followup: "yes"}))
+    end
+
+    # Setting or clearing the flag is not a date change, so it must not be
+    # gated on the owner's directing words.
+    test "the flag is set and cleared without owner_direction", %{repo: repo} do
+      assert {:ok, %{event: event}} = create(repo, birthday_params())
+
+      assert {:ok, %{event: flagged}} =
+               Registry.update_event(event.id, %{followup: true}, context(repo), opts())
+
+      assert flagged.followup === true
+
+      assert {:ok, %{event: cleared}} =
+               Registry.update_event(event.id, %{followup: false}, context(repo), opts())
+
+      assert cleared.followup === false
+    end
+
+    # The merge base enumerates the carried fields by hand, so a field missing
+    # from it is silently reset to the column default by any unrelated edit —
+    # a title fix would quietly turn the follow-up off.
+    test "a title-only edit preserves a set flag", %{repo: repo} do
+      assert {:ok, %{event: event}} = create(repo, birthday_params(%{followup: true}))
+
+      assert {:ok, %{event: retitled}} =
+               Registry.update_event(
+                 event.id,
+                 %{title: "Sarah's birthday party"},
+                 context(repo),
+                 opts()
+               )
+
+      assert retitled.title == "Sarah's birthday party"
+      assert retitled.followup === true
+      assert Enum.all?(reminders_for(repo, event.id), &(&1.payload["followup"] === true))
+    end
+
+    test "a title-only edit preserves an unset flag", %{repo: repo} do
+      assert {:ok, %{event: event}} = create(repo, birthday_params())
+
+      assert {:ok, %{event: retitled}} =
+               Registry.update_event(event.id, %{title: "Sarah B"}, context(repo), opts())
+
+      assert retitled.followup === false
     end
   end
 

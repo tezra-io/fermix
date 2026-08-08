@@ -35,6 +35,7 @@ defmodule FermixCore.Tools.EventUpdate do
     {"leap_day_policy", :leap_day_policy},
     {"reminders", :reminders},
     {"no_reminders", :no_reminders},
+    {"followup", :followup},
     {"rebind_delivery_to_default", :rebind_delivery_to_default},
     {"owner_direction", :owner_direction}
   ]
@@ -82,6 +83,13 @@ defmodule FermixCore.Tools.EventUpdate do
           description: "A replacement reminder plan; it replaces the stored one entirely."
         },
         no_reminders: %{type: "boolean", description: "Drop every reminder for this event."},
+        followup: %{
+          type: "boolean",
+          description:
+            "Set this for an occasion the owner would plausibly want help acting on — a " <>
+              "message to send, something to prepare or decide — and clear it for a " <>
+              "logistics ping that needs only the fact."
+        },
         rebind_delivery_to_default: %{
           type: "boolean",
           description:

@@ -94,7 +94,8 @@ defmodule FermixCore.Temporal.Registry do
     :leap_day_policy,
     :when,
     :reminders,
-    :no_reminders
+    :no_reminders,
+    :followup
   ]
 
   @target_keys %{
@@ -433,6 +434,7 @@ defmodule FermixCore.Temporal.Registry do
       "occurrence_at" => iso(event.occurrence_at),
       "next_occurrence_on" => iso(event.next_occurrence_on),
       "reminder_plan" => event.reminder_plan,
+      "followup" => event.followup,
       "delivery" => delivery_view(event)
     }
     |> Map.merge(delivery_state_view(event))
@@ -824,6 +826,7 @@ defmodule FermixCore.Temporal.Registry do
          {:ok, kind} <- required_kind(params),
          {:ok, timezone} <- resolve_timezone(params, opts),
          {:ok, policy} <- leap_policy(params),
+         {:ok, followup} <- followup_flag(params),
          {:ok, time} <- resolve_when(Map.get(params, :when), timezone, now),
          {:ok, rules} <- plan_rules(params, kind, time.time_kind) do
       {:ok,
@@ -833,7 +836,8 @@ defmodule FermixCore.Temporal.Registry do
          kind: kind,
          timezone: timezone,
          leap_day_policy: policy,
-         reminder_plan: rules
+         reminder_plan: rules,
+         followup: followup
        })}
     end
   end
@@ -874,6 +878,18 @@ defmodule FermixCore.Temporal.Registry do
       nil -> {:ok, nil}
       policy when policy in @leap_policies -> {:ok, policy}
       other -> {:error, {:invalid_param, "leap_day_policy=#{inspect(other)}"}}
+    end
+  end
+
+  # Whether this occasion earns a follow-up turn after its reminder lands
+  # (§22.3). Absent is false: there is no kind-based default anywhere in code,
+  # because a second decider would drift from the model's judgment at the
+  # attended turn.
+  defp followup_flag(params) do
+    case Map.get(params, :followup) do
+      nil -> {:ok, false}
+      followup when is_boolean(followup) -> {:ok, followup}
+      other -> {:error, {:invalid_param, "followup=#{inspect(other)}"}}
     end
   end
 
@@ -1330,7 +1346,8 @@ defmodule FermixCore.Temporal.Registry do
       reminder_plan: Defaults.encode_plan(spec.reminder_plan),
       delivery_platform: target.platform,
       delivery_destination: target.destination,
-      delivery_thread_scope: target.thread_scope
+      delivery_thread_scope: target.thread_scope,
+      followup: spec.followup
     }
   end
 
@@ -1601,6 +1618,9 @@ defmodule FermixCore.Temporal.Registry do
   defp merge_params(existing, patch) do
     with {:ok, rules} <- Defaults.decode_plan(existing.reminder_plan),
          {:ok, when_form} <- existing_when(existing) do
+      # Enumerated by hand, so every stored field an edit must CARRY belongs
+      # here: one left out is silently reset to its column default by any
+      # unrelated patch — a title fix would quietly clear the follow-up flag.
       base = %{
         title: existing.title,
         description: existing.description,
@@ -1608,7 +1628,8 @@ defmodule FermixCore.Temporal.Registry do
         timezone: existing.timezone,
         leap_day_policy: existing.leap_day_policy,
         when: when_form,
-        plan_rules: rules
+        plan_rules: rules,
+        followup: existing.followup
       }
 
       {:ok, Map.merge(base, Map.take(patch, @patchable))}

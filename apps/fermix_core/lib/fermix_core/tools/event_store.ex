@@ -43,7 +43,9 @@ defmodule FermixCore.Tools.EventStore do
       "settling the time instead leaves the day unsettled. " <>
       "Confirm back the date this actually stored, absolutely and with its weekday, as " <>
       "the result's stated_as gives it: a relative phrase alone hands the ambiguity back " <>
-      "to the owner instead of resolving it."
+      "to the owner instead of resolving it. " <>
+      "When followup is set, say in that same confirmation that you will check in after " <>
+      "the reminder, so a wrong call is visible the moment it is made."
   end
 
   @impl true
@@ -87,6 +89,13 @@ defmodule FermixCore.Tools.EventStore do
         no_reminders: %{
           type: "boolean",
           description: "Store the date with no notifications. Only when the owner asks."
+        },
+        followup: %{
+          type: "boolean",
+          description:
+            "Set this for an occasion the owner would plausibly want help acting on — a " <>
+              "message to send, something to prepare or decide — and leave it off for a " <>
+              "logistics ping that needs only the fact."
         }
       }
     }
@@ -182,7 +191,8 @@ defmodule FermixCore.Tools.EventStore do
       timezone: Map.get(args, "timezone"),
       leap_day_policy: Map.get(args, "leap_day_policy"),
       reminders: Map.get(args, "reminders"),
-      no_reminders: Map.get(args, "no_reminders")
+      no_reminders: Map.get(args, "no_reminders"),
+      followup: Map.get(args, "followup")
     }
   end
 

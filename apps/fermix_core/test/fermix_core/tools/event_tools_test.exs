@@ -275,6 +275,21 @@ defmodule FermixCore.Tools.EventToolsTest do
       assert result.error =~ "not exist"
     end
 
+    test "an unflagged store confirms no follow-up", %{repo: repo} do
+      assert payload(store_birthday(repo))["followup"] === false
+    end
+
+    test "a flagged store confirms the follow-up in the same acknowledgement", %{repo: repo} do
+      stored = payload(store_birthday(repo, %{"followup" => true}))
+
+      assert stored["followup"] === true
+    end
+
+    test "declares the follow-up parameter as a boolean and directs the confirmation" do
+      assert EventStore.parameters().properties.followup.type == "boolean"
+      assert EventStore.description() =~ ~r/(?i)check in/
+    end
+
     test "emits one tool telemetry event carrying the model's arguments", %{repo: repo} do
       handler = "event-store-telemetry-#{System.unique_integer([:positive])}"
       test_pid = self()
@@ -439,6 +454,34 @@ defmodule FermixCore.Tools.EventToolsTest do
       assert description =~ "stated_as"
       assert description =~ ~r/(?i)absolute/
       assert description =~ ~r/(?i)weekday/
+    end
+
+    test "sets the follow-up flag without owner_direction and keeps it through a retitle", %{
+      repo: repo
+    } do
+      stored = payload(store_birthday(repo))
+
+      {:ok, flagged} =
+        EventUpdate.execute(
+          %{"event_id" => stored["event_id"], "followup" => true},
+          context(repo)
+        )
+
+      assert flagged.success == true
+      assert payload(flagged)["followup"] === true
+
+      {:ok, retitled} =
+        EventUpdate.execute(
+          %{"event_id" => stored["event_id"], "title" => "Sarah's birthday party"},
+          context(repo)
+        )
+
+      assert payload(retitled)["title"] == "Sarah's birthday party"
+      assert payload(retitled)["followup"] === true
+    end
+
+    test "declares the follow-up parameter as a boolean" do
+      assert EventUpdate.parameters().properties.followup.type == "boolean"
     end
 
     test "rebinds to the current default target on explicit request", %{repo: repo} do

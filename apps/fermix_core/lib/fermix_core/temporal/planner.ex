@@ -357,9 +357,17 @@ defmodule FermixCore.Temporal.Planner do
       "occurrence_key" => Date.to_iso8601(date),
       "event_local_date" => Date.to_iso8601(date),
       "event_local_time" => optional_time(spec.local_time),
-      "timezone" => spec.timezone
+      "timezone" => spec.timezone,
+      "followup" => followup(spec)
     }
   end
+
+  # The payload is a JSON snapshot, so the flag must reach it as a boolean: the
+  # storage integer would read false at every `== true` above it. The single
+  # guarded clause is the assertion — a spec that lost the flag, or carries the
+  # raw column, fails here rather than materializing a plan that quietly never
+  # follows up.
+  defp followup(%{followup: followup}) when is_boolean(followup), do: followup
 
   defp optional_time(nil), do: nil
   defp optional_time(%Time{} = time), do: Time.to_iso8601(time)
