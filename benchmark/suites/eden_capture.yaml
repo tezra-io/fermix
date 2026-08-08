@@ -1,0 +1,108 @@
+# Eden CAPTURE profile — proves a write actually lands and reads back.
+#
+# WHY THIS IS A SEPARATE SUITE. `eden.yaml` is the retrieval-profile suite: its
+# defaults forbid all seven capture tools, and prohibitions ACCUMULATE onto
+# case-level `tools_none` (see suites/SCHEMA.md), so a case there cannot
+# un-forbid a write even if it wanted to. Holding "a write must never happen"
+# and "this write must happen" in one file would also make both statements
+# easier to misread. Two files, two postures.
+#
+# WHY IT EXISTS. The retrieval suite is structurally blind to write failures: it
+# can only ever prove a write did NOT happen. Across three days of testing, seven
+# Eden write attempts produced ONE success — `eden_create_board` — and the six
+# failures (`:dispatch_failed`, two `{:http, :closed}`, one `"invalid"`, two
+# `"unspecified"`) scored zero red anywhere, because no case asks a capture tool
+# to succeed. The operator found it by opening Eden and seeing an empty board.
+# That is the gap this closes.
+#
+# RESIDUE — READ BEFORE RUNNING. Eden publishes NO delete, remove, archive, or
+# trash tool (verified against all 20 in the manifest), so this suite CANNOT
+# clean up after itself. Every run leaves a real note in the operator's real
+# workspace, permanently, until they delete it by hand in the Eden UI. Each run
+# leaves exactly TWO items — one note and one sticky note — and both carry
+# `__EVAL_RUN_ID__` for that reason: every artifact is traceable to the run that
+# made it, and they sort together. Do not add board or link cases "for coverage"
+# without accepting that each one is another item somebody deletes by hand.
+#
+# PRECONDITIONS: the eden plugin is enabled on the **capture** access profile
+# with a read/write token, and one workspace selected. On `retrieval` the write
+# tools are not registered at all and every case here fails at `tools_any` —
+# correctly, because that is a real posture difference and not a skip.
+#
+# COST: none. The whole round trip runs on free tools — `eden_create_note` to
+# write, `eden_get_note_markdown` / `eden_search_workspace_items` /
+# `eden_list_workspace_items` to read back. The three credit-metered tools
+# (`eden_find_workspace_items`, `eden_read_board`, `eden_search_highlights`) are
+# forbidden outright below, so this suite can never spend a credit — which
+# matters, because the account's 50-credit grant is a one-time `free_grant` that
+# never resets.
+#
+# PRIVACY: the note content is synthetic, but it is written to a hosted US
+# service and lands in local Opik traces when content capture is on.
+suite: eden_capture
+risk: external_write
+confirm_cost: false
+title: "Eden — the capture profile really writes, and the write reads back"
+description: >
+  Proves the Eden capture path end-to-end on the real agent path: a note asked
+  for in ordinary language is actually created upstream, and is then found and
+  quoted back in a later turn. The retrieval suite asserts writes never happen;
+  this one asserts that when they are meant to, they do.
+defaults:
+  timeout_ms: 180000
+  judge: false
+  expect:
+    status: ok
+    no_tool_errors: true
+    tools_none:
+      # Setup-only (§8.1): the operator picks one workspace; the agent must
+      # never enumerate or substitute another.
+      - eden_list_workspaces
+      # Credit-metered. This suite is free by construction and stays that way.
+      - eden_find_workspace_items
+      - eden_read_board
+      - eden_search_highlights
+
+scenarios:
+  # The round trip is the whole point: creating without reading back proves only
+  # that the tool returned :ok, and `eden_create_board` returned :ok while
+  # putting nothing on the board. Only a later turn that finds the note and
+  # quotes its body proves the write reached Eden and persisted.
+  - id: eden_capture_round_trip
+    title: "Eden — a captured note is written upstream and reads back"
+    severity: critical
+    risk: external_write
+    tags: [plugins, eden, capture]
+    cases:
+      - id: note_round_trip
+        turns:
+          - query: >
+              Save a note in my Eden second brain titled
+              "Fermix capture check __EVAL_RUN_ID__" with the body
+              "round-trip marker __EVAL_RUN_ID__".
+            expect:
+              tools_any: [eden_create_note]
+          # A fresh turn, and deliberately by TITLE rather than "the note you
+          # just made": resolving it from the workspace is what proves it is
+          # really there, rather than being recited from conversation history.
+          - query: >
+              Find the Eden note titled "Fermix capture check __EVAL_RUN_ID__"
+              and quote its body back to me exactly.
+            expect:
+              tools_any:
+                - eden_get_note_markdown
+                - eden_search_workspace_items
+                - eden_list_workspace_items
+              reply_matches: "round-trip marker"
+
+      # The failures that went unseen were tool errors, not refusals — the agent
+      # asked correctly and Eden rejected it. This pins the tool call itself, so
+      # a regression in argument construction (the `"invalid"` class) fails here
+      # even if the model's prose sounds like it worked.
+      - id: sticky_note_accepted
+        query: >
+          Put a sticky note in my Eden second brain that says
+          "fermix sticky __EVAL_RUN_ID__".
+        expect:
+          tools_any: [eden_create_sticky_note]
+          max_tool_calls: 10
