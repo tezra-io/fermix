@@ -9,6 +9,7 @@ defmodule FermixCore.Temporal.SchedulerTest do
   alias FermixCore.Temporal.Delivery
   alias FermixCore.Temporal.DeliverySupervisor
   alias FermixCore.Temporal.DeliveryWorker
+  alias FermixCore.Temporal.FollowupSupervisor
   alias FermixCore.Temporal.Planner
   alias FermixCore.Temporal.Renderer
   alias FermixCore.Temporal.Scheduler
@@ -170,28 +171,33 @@ defmodule FermixCore.Temporal.SchedulerTest do
       recurrence_month: nil,
       recurrence_day: nil,
       leap_day_policy: nil,
-      reminder_plan: [%{rule_id: "at_time", kind: :at_occurrence}]
+      reminder_plan: [%{rule_id: "at_time", kind: :at_occurrence}],
+      followup: false
     }
   end
 
-  defp birthday_spec do
+  defp birthday_spec(overrides \\ %{}) do
     {:ok, rules} = Defaults.plan_for("birthday", "date")
 
-    %{
-      title: "Sarah's birthday",
-      description: nil,
-      kind: "birthday",
-      time_kind: "date",
-      local_date: nil,
-      local_time: nil,
-      timezone: @tz,
-      occurrence_at: nil,
-      recurrence_kind: "yearly",
-      recurrence_month: 9,
-      recurrence_day: 14,
-      leap_day_policy: nil,
-      reminder_plan: rules
-    }
+    Map.merge(
+      %{
+        title: "Sarah's birthday",
+        description: nil,
+        kind: "birthday",
+        time_kind: "date",
+        local_date: nil,
+        local_time: nil,
+        timezone: @tz,
+        occurrence_at: nil,
+        recurrence_kind: "yearly",
+        recurrence_month: 9,
+        recurrence_day: 14,
+        leap_day_policy: nil,
+        reminder_plan: rules,
+        followup: false
+      },
+      overrides
+    )
   end
 
   defp create!(ctx, spec, now \\ @created_at) do
@@ -501,6 +507,20 @@ defmodule FermixCore.Temporal.SchedulerTest do
 
       assert child_index(order, Scheduler) < child_index(order, DeliverySupervisor) == forward?
     end
+
+    # §22.4: the follow-up supervisor starts LAST of the three, so shutdown
+    # (reverse order) kills it first — the exit the delivery worker's spawn
+    # request is hardened against — and a scheduler crash still tears down
+    # deliveries and follow-ups together under `:rest_for_one`.
+    test "the follow-up supervisor starts after the delivery supervisor", _ctx do
+      order =
+        FermixCore.Supervisor |> Supervisor.which_children() |> Enum.map(&elem(&1, 0))
+
+      forward? = child_index(order, Repo) < child_index(order, MainAgent)
+
+      assert child_index(order, DeliverySupervisor) < child_index(order, FollowupSupervisor) ==
+               forward?
+    end
   end
 
   describe "boot sweep" do
@@ -634,6 +654,29 @@ defmodule FermixCore.Temporal.SchedulerTest do
         ctx |> reminders(%{event_id: event.id}) |> Enum.map(& &1.occurrence_key) |> Enum.uniq()
 
       assert "2028-09-14" in keys
+    end
+
+    # The rollover reads the stored row and re-materializes payloads from it, so
+    # it is the one path where the stored 0/1 could reach a payload. Every
+    # recurring reminder after year one comes from here: an integer here means
+    # every birthday silently loses its follow-up in year two.
+    test "the annual rollover re-materializes payloads that still carry the flag", ctx do
+      {event, rows} = create!(ctx, birthday_spec(%{followup: true}))
+      assert Enum.all?(rows, &(&1.payload["followup"] === true))
+
+      after_occurrence = ~U[2026-09-15 12:00:00Z]
+      set_now(ctx, after_occurrence)
+      scheduler = start_scheduler(ctx, [])
+
+      :ok = Scheduler.reconcile(scheduler, now: after_occurrence)
+
+      rolled =
+        ctx
+        |> reminders(%{event_id: event.id})
+        |> Enum.filter(&(&1.occurrence_key == "2028-09-14"))
+
+      assert rolled != []
+      assert Enum.all?(rolled, &(&1.payload["followup"] === true))
     end
 
     # The scan's threshold is `today + 366`, but a yearly event can only ever be

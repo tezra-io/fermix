@@ -6,6 +6,22 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **A reminder that matters can be followed by a check-in.** When you store a
+  date, Fermix decides whether it is an occasion you would plausibly want help
+  acting on — a birthday, an anniversary, something to prepare or decide — and
+  says so in the confirmation, so a wrong call is visible immediately and a
+  plain "actually, no need to check in" fixes it. After that reminder has been
+  delivered, Fermix may send one short follow-up into the same conversation: an
+  offer to help, something it remembers about the person, or a single question.
+  It stays quiet when it has nothing worth adding, and a plain logistics ping
+  stays a plain reminder. The reminder itself is untouched — it is still
+  rendered and sent word for word, the follow-up begins only once the reminder
+  has landed, and nothing that goes wrong with the follow-up can cost you the
+  reminder. What it offers is remembered, so your reply to it lands with
+  context.
+
 ## [0.8.0] - 2026-08-05
 
 ### Added

@@ -54,7 +54,13 @@ defmodule FermixCore.Temporal.Telemetry do
     :superseded,
     :cancelled,
     :event_completed,
-    :scheduler_error
+    :scheduler_error,
+    # A post-delivery follow-up that never became a run (§22.7): the supervisor
+    # was full, dead, or shutting down, or the event was cancelled or unflagged
+    # between settlement and the spawn. The reason travels in `result`, so
+    # `error_class` names it mechanically. A follow-up that DID start has a
+    # session and belongs to `Temporal.FollowupTelemetry`, never here.
+    :followup_skipped
   ]
 
   @id_keys [:event_id, :reminder_id, :occurrence_key, :rule_id, :platform]

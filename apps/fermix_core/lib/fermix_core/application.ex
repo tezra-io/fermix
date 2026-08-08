@@ -44,6 +44,7 @@ defmodule FermixCore.Application do
   alias FermixCore.SkillCuration.Config, as: SkillCurationConfig
   alias FermixCore.SkillCuration.Scheduler, as: SkillCurationScheduler
   alias FermixCore.Temporal.DeliverySupervisor, as: TemporalDeliverySupervisor
+  alias FermixCore.Temporal.FollowupSupervisor, as: TemporalFollowupSupervisor
   alias FermixCore.Temporal.Scheduler, as: TemporalScheduler
   alias FermixCore.Trace
 
@@ -169,8 +170,15 @@ defmodule FermixCore.Application do
         # scheduler. That invariant is what replaces lease tokens and fenced
         # settlement. Timers are gated by an init-time flag (the jobs-scheduler
         # precedent), disabled in `config/test.exs`, never by omission.
+        #
+        # The follow-up supervisor (§22.4) is LAST of the three, which the same
+        # property serves twice: a scheduler crash tears down in-flight
+        # deliveries and in-flight follow-ups together, and shutdown — reverse
+        # order — kills follow-ups first, so a worker settling mid-shutdown can
+        # find it already gone. That exit is caught, never fatal to a settlement.
         {TemporalScheduler, temporal_scheduler_opts()},
         TemporalDeliverySupervisor,
+        TemporalFollowupSupervisor,
         # Coding-harness local rail (design §6.4 / spec §5): one `:rest_for_one`
         # supervisor (Manager → RunSupervisor → DeliveryWorker) so a Manager crash
         # tears down and re-reconciles live runs instead of orphaning them. Always

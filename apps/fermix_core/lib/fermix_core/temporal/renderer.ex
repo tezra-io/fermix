@@ -79,6 +79,19 @@ defmodule FermixCore.Temporal.Renderer do
   end
 
   @doc false
+  # Shared with `Temporal.Followup`, whose one model-composed message rides the
+  # same channel under the same §13 one-message bound. Unlike `bounded/3` there
+  # is no load-bearing absolute date to protect, so the tail is what gives way.
+  @spec clamp(String.t()) :: String.t()
+  def clamp(text) when is_binary(text) do
+    if byte_size(text) <= @max_bytes do
+      text
+    else
+      truncate(text, @max_bytes - byte_size(@ellipsis)) <> @ellipsis
+    end
+  end
+
+  @doc false
   # Spelled out, no locale machinery: `Date.day_of_week/1` counts Monday as 1.
   @spec weekday(Date.t()) :: String.t()
   def weekday(%Date{} = date), do: elem(@weekdays, Date.day_of_week(date) - 1)

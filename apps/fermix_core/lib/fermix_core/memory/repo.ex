@@ -29,6 +29,7 @@ defmodule FermixCore.Memory.Repo do
   @skill_curation_migration_version 16
   @temporal_events_migration_version 17
   @reminder_snooze_migration_version 18
+  @event_followup_migration_version 19
   @sqlite_open_intent :readwritecreate
 
   @base_schema_sql """
@@ -2549,7 +2550,8 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_skill_usage_migration(conn, versions),
          :ok <- apply_skill_curation_migration(conn, versions),
          :ok <- apply_temporal_events_migration(conn, versions),
-         :ok <- apply_reminder_snooze_migration(conn, versions) do
+         :ok <- apply_reminder_snooze_migration(conn, versions),
+         :ok <- apply_event_followup_migration(conn, versions) do
       :ok
     end
   end
@@ -2875,6 +2877,26 @@ defmodule FermixCore.Memory.Repo do
         BEGIN;
         #{TemporalSql.snooze_schema_sql()}
         INSERT INTO schema_migrations(version) VALUES (#{@reminder_snooze_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  # Post-delivery follow-ups (MILESTONE_30 §22.3). Schema-additive: `followup` is
+  # APPENDED by its own ALTER so a migrated database and a fresh one share column
+  # order, and existing rows take the default — no event stored before this
+  # migration is retroactively flagged.
+  defp apply_event_followup_migration(conn, versions) do
+    if Enum.member?(versions, @event_followup_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{TemporalSql.followup_schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@event_followup_migration_version});
         COMMIT;
         """
       )

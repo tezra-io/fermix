@@ -2116,3 +2116,464 @@ remain the documented escalation if live `behavioral-isolated` runs show quote
 attestation also decaying. The `manage_roundtrip` first-attempt watch-item
 stands, now easier to satisfy: the directing words are literally the turn
 text.
+
+**2026-08-08 — §22 follow-up turns implemented in full (uncommitted), same
+day as the rev-2 design.** Three staged implementation passes plus one
+post-review fix, every §22.11 stage red-first. Gates: full umbrella 6,303
+tests + 2 doctests, 0 failures (one unreproduced single failure in one run,
+temporal family stable across five repetitions — consistent with the
+documented macOS-keychain-spurious wizard family, not the new work); credo
+strict clean (20,060 mods/funs); `--warnings-as-errors` and format clean;
+eval dry-run validates 6 scenarios / 15 cases including the new
+`followup_flagging` pair; eval-safety suite 154 passed. Live acceptance
+still owed: dev-daemon restart, flagged seed minutes out, `[SILENT]`
+control, memory-note check.
+
+Deviations from §22 as written, all reviewed and accepted:
+
+- *Storage:* the `followup` column exists only in the v19 `ALTER` block, not
+  in `@schema_sql` — the v18 mechanism taken literally, so fresh and
+  migrated databases share one path by construction. `Planner.payload/3`
+  *requires* a boolean flag (guarded clause) rather than defaulting an
+  absent one — a default would be a second, silent normalization point,
+  which is the failure class the one-point rule exists to kill; spec
+  fixtures across five test files gained `followup: false`. The conduct
+  sentence lives on the tool descriptions, not `RuntimeSections`, per the
+  §12.3 routing-vs-conduct line. Decided and accepted: `followup` is not an
+  identity column, so a repeat `event_store` under the same identity with a
+  different flag returns `:existing` unchanged — same contract as
+  `title`/`description`, visible in the returned view, correctable with
+  `event_update`.
+- *Run and trigger:* skip reasons are more granular than designed
+  (`:event_unflagged` / `:event_inactive` / `:supervisor_unavailable` /
+  `:max_children` / `:followup_ignored`), each with its own derived
+  `error_class`. `[SILENT]` is matched locally (trim + exact) rather than
+  importing `Jobs.Delivery.silent?/2` — one compare is not worth a
+  cross-rail dependency. The worker takes `:followup_supervisor` and
+  `:timeout_ms` as args seams (scheduler threads the production default,
+  mirroring `delivery_supervisor:`); absent means "not wired in this
+  process", reachable only from hand-built test args. The prompt includes
+  the current-date note (jobs precedent for unattended runs). No
+  `worker_routing` merge and no `memory_source_*` context keys — zero
+  consumers either way.
+- *Telemetry:* the run is a **root and unthreaded** — §22.7's rev-1
+  `thread_id: platform:destination` sentence was overruled and amended in
+  place: the temporal family never carries the destination (the emitter
+  allowlist is the privacy boundary), so the trace is found by the
+  `followup_` session prefix and `event_id`/`reminder_id` metadata.
+  `outcome` rides `followup_complete` only; `followup_error` carries
+  `status` + `error` (the jobs shape). `agent` ("followup:<event_id>") was
+  added to metadata because `agent_field` must name a key actually set.
+  `delivery_failed` exports as trace status `"ok"` with
+  `metadata.outcome` as the discriminator, per the §22.8 table — an
+  operator filtering Opik by status will not see it; the outcome field is
+  the query. Post-review fix: `run_start/2` now carries `max_duration_ms`
+  (the run's watchdog) and the exporter opener forwards it as the sweep
+  floor — the watchdog and the exporter's idle TTL are both 120s, so
+  without it a run whose first provider call was merely slow could have
+  its root idle-swept just before the closer arrived, tombstoning it (the
+  jobs rail's own mechanism, now proven by a sweep test on this run kind).
+- *Tests:* §22.10's memory-scope assertion ("the note lands in the delivery
+  conversation's scope") is deliberately not an ExUnit test — exercising
+  `memory_store` through the run would write the globally named store from
+  an async test (the host-state pitfall); the conversation-key wiring is
+  pinned by unit assertions and the behavior belongs to live acceptance.
+  The exporter's phase-completeness test now covers `:followup_skipped`,
+  so §22.7's "zero exporter changes for skips" is proven, not asserted.
+
+---
+
+## 22. Extension — Post-Delivery Follow-Up Turns (rev 2)
+
+Status: designed 2026-08-08, rev 2 the same day after an adversarial code
+review of rev 1 (findings folded below: conversation-key memory breakage,
+integer/boolean flag normalization, spawn-edge hardening, send clamp);
+awaiting owner review; not implemented. Owner
+request 2026-08-07: keep the deterministic delivery exactly as shipped, and
+after it — for important events only — run one model turn that can
+personalize, offer help, or ask a question, so the moment also lands in
+memory. This section is self-contained: deltas against the v1 sections are
+listed here rather than edited in place.
+
+### 22.1 Motivation and shape
+
+Two facts drive this. First, the deterministic send never touches
+conversation history or memory: `Temporal.Delivery` hands the rendered text
+to `Delivery.ChannelSend` and stops, so the agent has no conversational
+record that it ever reminded the owner of anything — snooze and "cancel
+that" resolve through the delivery ledger, not through memory, and an owner
+reply like "should I get her something?" arrives with zero context. Second,
+the reminder is deliberately only ever the fact (§13); it can never offer
+the thing an assistant would naturally offer on a birthday.
+
+The shape is **after, not instead**. The reminder is a promise; the
+follow-up is a flourish. The flourish spawns only once the promise has
+settled `delivered`, so a provider outage, a slow model, or a bad follow-up
+can never cost the owner the reminder itself. Everything in this section
+serves that asymmetry: the promise stays deterministic and durable; the
+flourish is model-driven and best-effort.
+
+### 22.2 Standing of §6.4
+
+§6.4 ("No new agent run kind") remains true of **delivery**: the delivery
+path still never calls `AgentLoop.run/1`, creates no provider call, and its
+lifecycle events still carry no session. The follow-up is a separate run
+that begins only after settlement, and it is a genuinely new run kind under
+`docs/TELEMETRY_CONTRACT.md` ("anything that calls `AgentLoop.run/1` in its
+own context"), with the full obligations that definition carries (§22.7).
+§6.4's scope narrows from "the temporal rail spawns no runs" to "the
+delivery path spawns no runs"; this section is the amendment.
+
+The same scoping applies to §19.2 and §19.3, which rejected a model run as
+the *delivery mechanism* — per-reminder agent runs standing in for
+deterministic sends. The follow-up replaces nothing: it spawns only after
+delivery has settled, it is opt-in per event, and losing it loses no
+promise. Those rejections stand for delivery exactly as written.
+
+### 22.3 The flag: decided at the attended turn, snapshotted like everything else
+
+Whether an event deserves a follow-up is a judgment about the occasion, and
+the only place the model reasons about the occasion with the owner present
+is the attended turn that stores or edits it. So the decision is captured
+there — never at delivery time, which stays model-free.
+
+- `temporal_events` gains `followup INTEGER NOT NULL DEFAULT 0 CHECK
+  (followup IN (0, 1))` — migration v19, following the v17/v18 mechanism
+  exactly (new `@…_migration_version 19` constant in `memory/repo.ex` plus
+  one `apply_*` clause appended to the `run_migrations/1` chain at
+  repo.ex:2552; an additive `ALTER TABLE` block in `TemporalSql` beside the
+  v18 one). The column is appended at the END of `@event_columns` and the
+  DDL — the v18 `source_reminder_id` discipline: never inserted mid-list.
+- **One integer↔boolean normalization point, and it is load-bearing:**
+  SQLite stores the flag as 0/1 and `event_row/1` currently converts
+  nothing, so without normalization the annual rollover — which feeds the
+  raw event row straight into the planner (`scheduler.ex:436`) — would
+  snapshot `"followup" => 1` into the payload, the trigger's `== true`
+  check would read false, and every reminder materialized by rollover
+  (every recurring birthday after year one) would silently lose its
+  follow-up. `event_row/1` therefore converts the column to a real boolean
+  (the jobs `bool_with_default!` precedent, repo.ex:5077) and the write
+  path maps boolean→integer; everything above the row — `event_view`,
+  patch merging, `Planner.payload/3` — sees only booleans, and the payload
+  carries JSON `true`/`false`, never the storage integer.
+- The field threads through every existing gate, all of which currently
+  reject or drop unknown keys: `@event_columns` and `@updatable_columns` in
+  `temporal_sql.ex` (plus the create-path `Map.take`), `@patchable` and
+  boolean validation in `Temporal.Registry`, `@patch_keys` in
+  `Tools.EventUpdate`, `Registry.event_view/1` (key `"followup"`), **and
+  the explicit base map in `Registry.merge_params/2`** (registry.ex:1601 —
+  the base enumerates fields by hand, so omitting `followup:
+  existing.followup` there would make any unrelated edit, a title fix,
+  silently clear the flag through the column defaults). `event_list` rows
+  and both confirmation payloads show it.
+- `event_store` and `event_update` gain a `followup` boolean parameter. Its
+  description is one principle, no examples (owner rule): flag occasions
+  where the owner would plausibly want help acting on it — a message to
+  send, something to prepare or decide — not logistics pings that need only
+  the fact. The store conduct adds: when set, the confirmation names the
+  check-in, so a wrong call is visible the moment it is made and
+  correctable with a plain `event_update` (clearing or setting the flag is
+  not a date change; `owner_direction` is not involved).
+- No kind-based defaults in code. One question, one decider: the model at
+  the attended turn, steered by the tool description, checked by the eval
+  (§22.10). A code default per kind would be a second decider that drifts.
+- `Planner.payload/3` adds `"followup"` beside `"title"`/`"kind"`: the
+  claim row already carries no event columns (the claim SELECT returns
+  reminder columns only), and the payload is the established snapshot
+  vehicle. §7.3 semantics follow for free — any event edit re-materializes
+  the plan under a new revision, regenerating payloads — so turning the
+  flag on always reaches future reminders, and rows materialized before
+  v19 simply lack the key and read as false.
+
+### 22.4 Trigger: stateless, post-settlement, fire-and-forget
+
+In `DeliveryWorker.settle/5`, on the `:ok` branch and only after
+`Repo.temporal_reminder_delivered/3` returns `{:ok, delivered}`
+(delivery_worker.ex:114-119), the worker checks
+`row.payload["followup"] == true` and asks
+`Temporal.FollowupSupervisor.start_followup/2` to spawn a run with the
+claim row and the delivered text. The call is fire-and-forget, and that
+takes deliberate hardening: `DynamicSupervisor.start_child/2` is a
+GenServer call that **exits** rather than error-returns against a dead or
+shutting-down supervisor — and app shutdown terminates children in reverse
+order, so `FollowupSupervisor` dies before the delivery supervisor — so
+the spawn is wrapped in a caught exit. Any failure to spawn, returned or
+caught, logs, emits a skip (§22.7), and the worker still exits `:normal`
+with its settlement untouched. Two consequences for neighbors:
+`Followup.init/1` defers all work through `handle_continue` (the
+DeliveryWorker's own discipline) so `start_child` returns immediately and
+a follow-up can never hold one of the four delivery slots hostage; and the
+DeliveryWorker moduledoc's "settlement is the last thing the worker does"
+pin is amended to "the last **ledger** act" — the spawn request follows it
+and touches no ledger state.
+
+- **One follow-up per delivered reminder, with zero new state.** The ledger
+  already guarantees a reminder row settles `delivered` at most once, so
+  the trigger needs no dedup table, no queue, no marker column. A
+  birthday's 7-day lead and its day-of reminder each produce one spawn —
+  different moments invite different help, and `[SILENT]` (§22.6) covers
+  the case where the model has nothing to add the second time.
+- A snooze-revived reminder that delivers is a delivered reminder: it
+  follows up too, through the same payload flag.
+- **Capacity is a refusal, not a queue.** `FollowupSupervisor` caps
+  concurrent runs (`max_children: 2`; deliveries cap at 4 and are
+  seconds-long, follow-up runs are model-long); `{:error, :max_children}`
+  becomes a traced skip. Nothing is ever deferred for later.
+
+### 22.5 The run: a slim clone of the jobs pattern
+
+`Jobs.Runner` cannot be reused directly — it is hard-coupled to a persisted
+`scheduled_jobs` row (`job_runs.job_id` is `NOT NULL REFERENCES
+scheduled_jobs(id)` with foreign keys on; every `upsert_job_run` is
+hard-matched; finalize re-reads the job) and synthetic job rows would leak
+into the jobs surface. The repo's sanctioned move is cloning the pattern
+(`Harness.RunSupervisor` is the existing precedent). Two new modules:
+
+- **`Temporal.FollowupSupervisor`** — a `DynamicSupervisor`
+  (`:one_for_one`, `max_children: 2`, children `restart: :temporary`),
+  added to the application child list directly after
+  `TemporalDeliverySupervisor` (application.ex:173). The `:rest_for_one`
+  property §6.3 relies on extends naturally: a temporal-scheduler crash
+  tears down in-flight deliveries and in-flight follow-ups together, which
+  is exactly what best-effort means here.
+- **`Temporal.Followup`** — one run, one process, modeled on the runner's
+  watchdog anatomy (spawn_monitor'd loop, hard kill on expiry) but radically
+  smaller: no persisted run row, no delivery-mode dispatch, no skill
+  resolution, no transient-retry wrapper. Sequence:
+  1. Fetch the event by `row.event_id` via `Repo.get_temporal_event/2` —
+     the read `Registry.update_event/3` already uses; nothing new. Not
+     `active`, or no longer flagged → traced skip. This also makes a
+     cancel-between-delivery-and-spawn suppress the follow-up for free.
+  2. Run `AgentLoop.run/1` with `max_iterations: 6` and a 120-second
+     wall-clock watchdog (no inactivity timer at this size). Routes come
+     from the main selection chain (`Selection.ordered_routes/0`) — no pin,
+     no cron override, no config knob.
+  3. Settle the outcome per §22.6 and emit the closing bookend (§22.7).
+
+The loop context follows the jobs template (runner.ex:749-780) with the
+follow-up's own identity:
+
+- `session_id: "followup_" <> reminder_id` — unique because the trigger is
+  unique per delivered row; `agent_name: "followup:" <> event_id`;
+  `route_transient_retry: false`.
+- `conversation_key: {row.delivery_platform, row.delivery_destination,
+  row.delivery_thread_scope}` — the delivery-target triple, all binaries on
+  the claim row. This choice is load-bearing, not cosmetic:
+  `Memory.Store.assert_scope!/1` accepts only binary-shaped keys (an
+  atom-headed synthetic tuple raises out of both memory tools), and this
+  key scopes the run's memory into the very conversation where the
+  reminder landed and the owner will reply — the note `memory_store`
+  writes is found by the main agent's default current-conversation recall
+  on the owner's next message there, which is §22.1's motivation made
+  mechanical, and `memory_recall`'s default scope reads the owner's prior
+  words in that same chat. (The jobs rail survives its own atom-headed
+  `{:scheduled_job, …}` key only through a `memory_recall` special case
+  plus runner-side summary persistence — precedents this run neither needs
+  nor copies.)
+- `source_trust: :operator` (the event's `created_by_trust` is
+  CHECK-constrained to exactly that) and **no `computer_use_origin` key**.
+  Under `Temporal.Access` this lands precisely in the carve-out the rail
+  already defines: `operator_scheduled_turn?/1` (access.ex:53-58) requires
+  the key's strict absence, so `event_list` is readable, while every
+  mutation tool (`event_store`, `event_update`, `event_remove`,
+  `reminder_snooze`) refuses at both advertisement and execution — the
+  follow-up structurally cannot edit what it is talking about. Zero access
+  changes.
+- Memory context carries only the standard agent/owner identity (the
+  event's `agent_id`, `MemoryConfig.owner_id/0`, the repo). No
+  `memory_source_*` keys: outside the jobs recall pin they have zero
+  consumers, and mirroring them would attribute nothing.
+- To `Temporal.Access` this context is indistinguishable from an
+  operator-created scheduled job — deliberately so: in every way the
+  access model cares about (operator-created, unattended, top-level), it
+  is one.
+- Tool surface: `allowed_tools: ["event_list", "memory_recall",
+  "memory_store"]` with the minimal policy classes that admit them
+  (`memory_store` is `:read_write`, builtin.ex:47-48). No channel tools —
+  the rail delivers the final text itself (the cron prompt's
+  no-self-delivery rule, made structural); no web, no subagents, no
+  harness. `memory_recall` is what makes personalization real: the run can
+  retrieve what the owner has said about the person or occasion before
+  deciding what to offer.
+
+The instructions the runner composes are principles, never example strings
+(owner rule): the owner has just received the delivered reminder text
+(quoted verbatim) for this event (the `event_view`); add something the
+reminder did not already say — an offer to help act, a relevant remembered
+fact, one focused question — or reply exactly `[SILENT]`; at most one short
+message; never restate the schedule as if it were news; when a message is
+sent, store a one-line memory note of what was offered or asked.
+
+### 22.6 Output contract: a positive signal or nothing
+
+- **`[SILENT]`** (exact after trim — the jobs rail's own convention,
+  `Jobs.Delivery.silent?/2`) → outcome `declined`, nothing sent, no memory
+  note expected. Declining is a success, recorded as itself.
+- **Empty output is not silence.** An empty final text without the sentinel
+  is the Codex-empty-turn shape — absence of a protocol marker, not a
+  decision — so it settles as outcome `empty`, traced as an anomaly,
+  nothing sent. This deviates from the jobs rail (which delivers `""`)
+  deliberately: a job owes its owner a report; a follow-up owes nothing,
+  and the safe reading of ambiguity is silence.
+- **Non-empty text** → exactly one send through `Temporal.Delivery.attempt/4`
+  with the same claim row — same platform, destination, and thread options
+  as the reminder it trails, same closed error vocabulary, single attempt,
+  and a fixed 60-second watchdog (the reminder's own §10.2 derivation keys
+  off `valid_until`, which is typically already past by follow-up time).
+  The text is clamped to §13's grapheme-safe 1,800-byte bound before
+  sending — that bound exists so adapter chunking can never turn one
+  message into several, and "at most one message" would be prompt-deep
+  without it. A send failure settles `delivery_failed`, traced, dropped.
+  The §11.4 ladder never applies to a follow-up.
+
+### 22.7 Telemetry: the run-kind contract, paid in full
+
+Two emitters, split exactly where §6.4 draws the line — has a session or
+not:
+
+- **Pre-run skips are point events on the existing lifecycle.**
+  `Temporal.Telemetry` gains one phase, `:followup_skipped`, carried like
+  every phase in metadata under the single `[:fermix, :reminder,
+  :lifecycle]` name, with the skip reason in `result` (so `error_class`
+  derives `max_children` / `event_inactive` mechanically). Because the
+  Opik side maps every phase of that event generically into a self-closing
+  trace (aggregation.ex:619-627), this costs zero exporter changes.
+- **The run itself gets its own bookend emitter**,
+  `Temporal.FollowupTelemetry`, modeled on `Jobs.Telemetry`:
+  `[:fermix, :reminder, :followup_start | :followup_complete |
+  :followup_error]`, carrying `session_id`, the reminder correlation ids
+  (`event_id`, `reminder_id`, `occurrence_key`), the outcome, duration, and
+  the sent text only behind `Telemetry.capture_content?/0`. It exposes
+  `trace_event_definitions/0` for `Trace.TelemetryHandler` registration
+  (`trace_type: :agent_event`, `agent_field` naming a key the emitter
+  actually sets). `Temporal.Telemetry` itself is untouched beyond the new
+  phase — it deliberately accepts no `session_id` and stays that way.
+- **Root, not nested, and unthreaded.** There is no live turn session to
+  parent to — the origin turn closed hours or days before delivery — so
+  `parent_session` is absent and the run is a root trace (the
+  memory-reviewer and harness precedents; nesting would resurrect a closed
+  trace). It carries no `thread_id` either — rev 1 wanted
+  `platform:destination`, but the temporal telemetry family deliberately
+  never carries the delivery destination (its emitter allowlists `platform`
+  only, a privacy stance this run inherits), so the trace is found by its
+  `followup_` session prefix and the `event_id`/`reminder_id` metadata
+  instead (implementation decision, 2026-08-08). The run's provider and
+  tool spans need no new mapping — they ride the generic
+  `[:fermix, :provider, :call]` / `[:fermix, :tool, :exec]` clauses and
+  nest under the shared `session_id`.
+- **`fermix_opik` deltas** (the contract's three-edit rule): the three new
+  event names in `Reporter.@events`; an `Aggregation.apply_event/5` opener
+  clause (`ensure_session`, explicit `kind: :reminder_followup`) and closer
+  clause (`close_root` with outcome and status); an `infer_kind/1` clause
+  for the `"followup_"` session prefix (the contract requires it alongside
+  the explicit kind, so a lazily-created session classifies correctly
+  instead of falling through to `:subagent`); optionally `wrapper_name/3`
+  for the label. Extended
+  `aggregation_test.exs`, red first.
+
+### 22.8 Failure semantics
+
+The reminder's own promise is untouchable by every row of this table — each
+condition below can only ever cost the flourish.
+
+| Condition | Outcome | Trace | Owner sees |
+|---|---|---|---|
+| Model/provider down, loop crash | `error` | `followup_error` | Nothing (reminder already arrived) |
+| Wall-clock expiry | `timeout` | `followup_error` | Nothing |
+| Daemon restart between settle and run | Dropped, no record | None (documented) | Nothing |
+| Supervisor at capacity, dead, or shutting down (caught exit) | Skipped | `:followup_skipped` point event | Nothing |
+| Event cancelled/unflagged since delivery | Skipped | `:followup_skipped` point event | Nothing |
+| Model declines | `declined` | `followup_complete` | Nothing, by the model's choice |
+| Empty output, no sentinel | `empty` | `followup_complete` (anomaly) | Nothing |
+| Channel send fails | `delivery_failed` | `followup_complete` | Nothing; no retry |
+| Success | `sent` | `followup_complete` + content | One short personal message |
+
+No boot sweep, no durable outcome row, no retry — deliberately. The trace
+is the record on failure; the memory note the run writes is the record on
+success. The moment a follow-up needs durable state it has become a second
+delivery subsystem for a courtesy, and the answer is no.
+
+### 22.9 What this deliberately is not
+
+- **Not a rewording of the reminder.** §13 stands whole: the delivered
+  reminder text is rendered, never model-touched.
+- **Not a delivery-time classifier.** No model call decides anything in the
+  delivery path, ever.
+- **Not configurable.** No `[fermix_core.temporal]` toggle, no per-channel
+  switch. The per-event flag, model-judged and owner-correctable, is the
+  entire control surface (minimal-knobs rule).
+- **Not queued, retried, or swept.** Best-effort is load-bearing (§22.8).
+- **Not a messaging agent.** The run cannot reach channel tools; the rail
+  sends its one message.
+- **Accepted race:** an owner who replies to the reminder within seconds
+  may interleave with the follow-up landing — at worst one redundant
+  courtesy message. Main-agent single-flight does not cover detached runs,
+  and serializing them against live turns would be machinery without a
+  failure to justify it.
+
+### 22.10 Test matrix and the eval boundary
+
+Hermetic ExUnit, red first:
+
+- Migration v19 applies once and is recorded; the flag round-trips through
+  store → view → update, and every unknown-field gate still rejects
+  adjacent typos.
+- The two silent-kill regressions from the rev-1 review, pinned forever:
+  an **unrelated edit** (title-only patch) preserves the flag through the
+  `merge_params/2` base, and an **annual rollover** re-materializes
+  payloads that still carry JSON `true` (the integer↔boolean normalization
+  proven at the row boundary, not assumed).
+- `Planner.payload/3` carries the flag; pre-v19 payloads (no key) read as
+  false end to end.
+- A scripted run's `memory_store` note lands in the delivery
+  conversation's scope and is recallable from a subsequent main-agent
+  context with the same key (the §22.1 motivation, asserted).
+- The spawn edges: `start_child` against a dead supervisor is caught, the
+  skip is emitted, and the worker still exits `:normal`.
+- The worker spawns exactly one follow-up on `delivered` + flagged (asserted
+  through an injected test supervisor), and never on any other settlement,
+  never on unflagged rows, and settlement is unaffected when spawning
+  fails.
+- Capacity and inactive-event skips settle as skips with distinct reasons.
+- With a scripted provider (jobs-runner test precedent): `[SILENT]` →
+  `declined` and nothing sent; empty → `empty` and nothing sent; text →
+  one `Delivery.attempt` with the row's own thread options; send failure →
+  `delivery_failed` with no second attempt; watchdog kill → `timeout`.
+- Access invariant, extended over the new context: every temporal mutation
+  tool refuses the follow-up context at advertisement and execution;
+  `event_list` is readable (the existing loop-over-the-seeder invariant
+  test gains this context).
+- Telemetry assertions red-first for the new phase and all three bookends;
+  `fermix_opik` `aggregation_test.exs` proves the root trace, the nested
+  provider/tool spans, and the lazy-creation prefix clause.
+
+Behavioral eval (`benchmark/suites/temporal_events.yaml`): the flagging
+judgment only — a birthday-shaped store flags (`rubric` judged, plus a
+coarse `tool_inputs_match_all` sanity on `"followup": true`, acknowledging
+it matches across calls by design), and a logistics-shaped store does not
+(rubric reads span evidence in prose, the `owner_direction` precedent).
+The run itself is undrivable by ask→grade — it originates from the
+scheduler, the same boundary the suite already states for delivery — so
+its conduct is pinned hermetically above and observed live; phrasing
+quality is judged behavior, and the eval is its only detector once live.
+
+Live acceptance: a dev-daemon seed with a flagged event minutes out;
+verify the reminder arrives untouched, the follow-up trails it, `[SILENT]`
+appears in traces for an unflagged control, and the memory note lands.
+
+### 22.11 Stages (`step -> verify`)
+
+- **Stage 0 — contracts red:** migration v19 test, flag round-trip tests,
+  payload test, telemetry assertion tests, access-invariant extension —
+  all failing.
+- **Stage 1 — the flag through the stack:** schema, gates, tools, view,
+  payload, conduct sentences. Stage-0 storage tests green.
+- **Stage 2 — trigger and run:** supervisor, runner, outcomes, watchdog,
+  both emitters. Remaining Stage-0 tests green.
+- **Stage 3 — exporter, eval, docs:** `fermix_opik` three-edit set plus
+  tests; eval cases with `--dry-run`; `self_knowledge`
+  (`events_reminders.md` + SKILL.md), site reminders page + chatbot KB,
+  CHANGELOG. Full umbrella gates, credo strict, format, zero warnings.
+
+§21 receives the implementation addendum when this ships, including any
+deviation from this section.

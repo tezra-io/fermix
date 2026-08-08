@@ -4,6 +4,7 @@ defmodule FermixCore.Tools.EventToolsTrustInvariantTest do
   alias FermixCore.Capabilities.Advertisement
   alias FermixCore.Capabilities.Builtin
   alias FermixCore.Capabilities.BuiltinSeeder
+  alias FermixCore.Temporal.Followup
   alias FermixCore.Tools.EventList
 
   # MILESTONE_30 §12.1 / §14 / §20, written as the whole-feature invariant the
@@ -20,9 +21,27 @@ defmodule FermixCore.Tools.EventToolsTrustInvariantTest do
   # outside `event_*` must not be able to sit outside the gate.
   @family_prefixes ["event_", "reminder_"]
 
+  # The post-delivery follow-up context (M30 §22.5) is built by the module that
+  # runs it, never copied here: if a later edit adds `computer_use_origin` to
+  # that context, this invariant fails instead of quietly handing a detached
+  # model run the four mutating tools.
+  @followup_context Followup.loop_context(%{
+                      reminder: %{
+                        id: "rem_invariant",
+                        event_id: "evt_invariant",
+                        delivery_platform: "telegram",
+                        delivery_destination: "12345",
+                        delivery_thread_scope: "root"
+                      },
+                      event: %{id: "evt_invariant", agent_id: "main"},
+                      repo: :unused_repo,
+                      capability_registry: :unused_registry
+                    })
+
   @non_attended [
     {"guest trust", %{source_trust: :guest, computer_use_origin: :interactive}},
     {"scheduled run (no origin marker)", %{source_trust: :operator}},
+    {"post-delivery follow-up run", @followup_context},
     {"detached background run", %{source_trust: :operator, computer_use_origin: :unattended}},
     {"delegated subagent",
      %{source_trust: :operator, computer_use_origin: :interactive, subagent_depth: 1}},
@@ -70,15 +89,16 @@ defmodule FermixCore.Tools.EventToolsTrustInvariantTest do
     assert "reminder_snooze" in names
   end
 
-  # `event_list` alone is readable from an operator-created scheduled run (the
-  # §12.1 read carve-out); every other context refuses the whole family, and
-  # the scheduled context still refuses all four mutating tools.
-  @scheduled_label "scheduled run (no origin marker)"
+  # `event_list` alone is readable from an operator-created scheduled run and
+  # from the post-delivery follow-up run (the §12.1 read carve-out, which
+  # §22.5 deliberately lands inside); every other context refuses the whole
+  # family, and both carve-out contexts still refuse all four mutating tools.
+  @read_carve_out_labels ["scheduled run (no origin marker)", "post-delivery follow-up run"]
 
   for {label, context} <- @non_attended do
     test "the event family is gated on a #{label} turn" do
       context = base(unquote(Macro.escape(context)))
-      carved_out = unquote(label) == @scheduled_label
+      carved_out = unquote(label) in @read_carve_out_labels
 
       for tool <- event_tools(), not (carved_out and tool.name() == "event_list") do
         refute tool.advertise?(context),
@@ -95,7 +115,7 @@ defmodule FermixCore.Tools.EventToolsTrustInvariantTest do
       capabilities = Enum.map(event_tools(), &Builtin.from_tool_module/1)
       advertised = Advertisement.prepare(capabilities, context) |> Enum.map(& &1.name)
 
-      expected = if unquote(label) == @scheduled_label, do: ["event_list"], else: []
+      expected = if unquote(label) in @read_carve_out_labels, do: ["event_list"], else: []
       assert advertised == expected
     end
   end
@@ -133,6 +153,14 @@ defmodule FermixCore.Tools.EventToolsTrustInvariantTest do
 
     test "a guest-created scheduled run cannot read events" do
       refute EventList.advertise?(base(%{source_trust: :guest}))
+    end
+
+    test "event_list advertises and executes on a post-delivery follow-up run", %{repo: repo} do
+      context = Map.put(@followup_context, :memory_repo, repo)
+
+      assert EventList.advertise?(context)
+      assert {:ok, result} = EventList.execute(%{}, context)
+      assert result.success, inspect(result)
     end
   end
 

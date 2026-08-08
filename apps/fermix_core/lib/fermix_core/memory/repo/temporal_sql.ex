@@ -68,7 +68,12 @@ defmodule FermixCore.Memory.Repo.TemporalSql do
     :created_by_trust,
     :created_by_origin,
     :created_at,
-    :updated_at
+    :updated_at,
+    # APPENDED by migration v19's ALTER (§22.3, post-delivery follow-ups), never
+    # inserted mid-list, for the same reason `source_reminder_id` is appended
+    # below: a database that reached this column by migrating must have the same
+    # column order as one created today.
+    :followup
   ]
 
   @reminder_columns [
@@ -136,7 +141,8 @@ defmodule FermixCore.Memory.Repo.TemporalSql do
     :reminder_plan,
     :delivery_platform,
     :delivery_destination,
-    :delivery_thread_scope
+    :delivery_thread_scope,
+    :followup
   ]
 
   # Columns a create must supply; everything else has an explicit default.
@@ -290,6 +296,15 @@ defmodule FermixCore.Memory.Repo.TemporalSql do
     );
   """
 
+  # Post-delivery follow-ups (§22.3), schema-additive on top of v17. SQLite
+  # stores the flag as 0/1; `event_row/1` is the one place it becomes a boolean.
+  # Nothing indexes it: it is read from a row already fetched by id, never
+  # selected on.
+  @followup_schema_sql """
+  ALTER TABLE temporal_events
+    ADD COLUMN followup INTEGER NOT NULL DEFAULT 0 CHECK (followup IN (0, 1));
+  """
+
   # The source row plus exactly the parent columns the snooze decisions need.
   # The owner predicate lives in the JOIN: a row belonging to someone else is
   # simply not found, so the lookup cannot confirm its existence either.
@@ -309,6 +324,10 @@ defmodule FermixCore.Memory.Repo.TemporalSql do
   @doc "Schema for the additive snooze migration (§20)."
   @spec snooze_schema_sql() :: String.t()
   def snooze_schema_sql, do: @snooze_schema_sql
+
+  @doc "Schema for the additive follow-up-flag migration (§22.3)."
+  @spec followup_schema_sql() :: String.t()
+  def followup_schema_sql, do: @followup_schema_sql
 
   @doc "Maximum durable claim cycles for one reminder (§11.4)."
   @spec max_attempts() :: pos_integer()
@@ -369,8 +388,9 @@ defmodule FermixCore.Memory.Repo.TemporalSql do
          {:ok, text} <- normalize_text_fields(fields),
          {:ok, times} <- normalize_time_fields(fields),
          {:ok, enums} <- normalize_enum_fields(fields),
-         {:ok, plan} <- normalize_plan_field(fields) do
-      {:ok, Map.merge(text, times) |> Map.merge(enums) |> Map.merge(plan)}
+         {:ok, plan} <- normalize_plan_field(fields),
+         {:ok, flag} <- normalize_followup_field(fields) do
+      {:ok, Map.merge(text, times) |> Map.merge(enums) |> Map.merge(plan) |> Map.merge(flag)}
     end
   end
 
@@ -1813,10 +1833,19 @@ defmodule FermixCore.Memory.Repo.TemporalSql do
       next_occurrence_on: parse_optional_date(raw.next_occurrence_on),
       materialized_through_on: parse_optional_date(raw.materialized_through_on),
       reminder_plan: Jason.decode!(raw.reminder_plan_json),
+      followup: followup_boolean(raw.followup),
       created_at: parse_timestamp!(raw.created_at),
       updated_at: parse_timestamp!(raw.updated_at)
     })
   end
+
+  # The one integer→boolean point (§22.3), and it is load-bearing: the annual
+  # rollover feeds this row straight into the planner, so a raw 0/1 escaping
+  # here would snapshot the storage integer into every payload it materializes
+  # and read false at the trigger's `== true`. The CHECK admits nothing else, so
+  # a third value is a broken database and fails loudly.
+  defp followup_boolean(0), do: false
+  defp followup_boolean(1), do: true
 
   defp reminder_row(raw) do
     raw
@@ -1887,7 +1916,8 @@ defmodule FermixCore.Memory.Repo.TemporalSql do
     recurrence_month: nil,
     recurrence_day: nil,
     leap_day_policy: nil,
-    delivery_thread_scope: "root"
+    delivery_thread_scope: "root",
+    followup: 0
   }
 
   defp base_event_columns(attrs, fields, stamp) do
@@ -1992,6 +2022,18 @@ defmodule FermixCore.Memory.Repo.TemporalSql do
     case Map.fetch(fields, :reminder_plan) do
       :error -> {:ok, %{}}
       {:ok, plan} -> encode_bounded_json(plan, :reminder_plan, :reminder_plan_json)
+    end
+  end
+
+  # The one boolean→integer point (§22.3). Callers above this module deal only
+  # in booleans, so anything else is a caller bug and is refused rather than
+  # coerced: a coerced value is how a flag turns into a silent `false`.
+  defp normalize_followup_field(fields) do
+    case Map.fetch(fields, :followup) do
+      :error -> {:ok, %{}}
+      {:ok, true} -> {:ok, %{followup: 1}}
+      {:ok, false} -> {:ok, %{followup: 0}}
+      {:ok, other} -> {:error, {:invalid, :followup, other}}
     end
   end
 
