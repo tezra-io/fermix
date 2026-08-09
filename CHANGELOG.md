@@ -6,6 +6,17 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Recompiling under a daemon run from source no longer breaks process-group
+  sweeping.** The `kill_pgid` NIF carried no upgrade callback, so a hot code
+  swap — a second `mix compile`, or the Phoenix code reloader picking up
+  changed sources — was refused by the VM: the module lost its native binding
+  and every external command's group sweep then crashed until the daemon
+  restarted. The NIF (stateless by design) now accepts the swap and keeps its
+  binding across it. Released installs were never affected; they load the
+  library once and never hot-swap code.
+
 ### Added
 
 - **A reminder that matters can be followed by a check-in.** When you store a
