@@ -210,6 +210,21 @@ jobs:
             *) echo "::error::--version output does not contain ${tag#v}"; exit 1 ;;
           esac
 
+      - name: Verify the disclaim shim inside the extracted payload (macOS)
+        # `--version` above already made the wrapper self-extract, so the shim
+        # the browser tool will spawn is on disk — prove it is present,
+        # executable, and can resolve the disclaim API on a real macOS host.
+        if: matrix.os == 'macos-15'
+        run: |
+          set -euo pipefail
+          shim="$(find "$HOME/Library/Application Support/.burrito" -type f \
+            -path "*fermix_nif*/priv/disclaim" | head -1)"
+          if [ -z "$shim" ]; then
+            echo "::error::disclaim shim not found in the extracted Burrito payload"
+            exit 1
+          fi
+          "$shim" --check
+
       - name: Verify the Homebrew formula serves this release (stable tags)
         if: matrix.os == 'macos-15' && !contains(github.ref_name, '-')
         run: |

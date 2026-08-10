@@ -191,6 +191,11 @@ defmodule FermixCore.Tools.Browser do
       %{tag: "invalid_action", description: "action is not one of the supported browser verbs"},
       %{tag: "missing_action_arg", description: "the selected action is missing a required arg"},
       %{tag: "chrome_missing", description: "Chrome or Chromium is not installed or configured"},
+      %{tag: "shim_missing", description: "the macOS disclaim launch shim is not built"},
+      %{
+        tag: "disclaim_failed",
+        description: "the macOS disclaim launch shim could not exec Chrome"
+      },
       %{tag: "navigation_blocked", description: "browser URL policy blocked the navigation"},
       %{tag: "browser_busy", description: "all browser profile slots are active"}
     ]
