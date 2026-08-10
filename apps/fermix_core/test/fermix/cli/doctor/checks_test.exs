@@ -39,6 +39,46 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     end
   end
 
+  describe "browser_disclaim/1" do
+    test "not required off macOS" do
+      result = Checks.browser_disclaim({:unix, :linux})
+      assert result.name == "browser"
+      assert result.status == :ok
+      assert result.detail =~ "not required"
+    end
+
+    if match?({:unix, :darwin}, :os.type()) do
+      test "reports the built shim on macOS" do
+        result = Checks.browser_disclaim()
+        assert result.name == "browser"
+        # :warn only when the host has no Chrome/Chromium; never :fail with a
+        # correctly built shim.
+        assert result.status in [:ok, :warn]
+        assert result.detail =~ "disclaim shim ready"
+      end
+
+      # An operator-authored `[fermix_core.browser]` section can be refused by
+      # `Browser.Config.current/0`, and doctor is the command that explains such
+      # an install: it must report the row, never die with a MatchError and print
+      # nothing (CLAUDE.md, the `df`/tree-less-CLI pitfall).
+      test "an invalid browser config is a row, not a crashed doctor run" do
+        previous = Application.get_env(:fermix_core, :browser)
+        on_exit(fn -> restore_env(:fermix_core, :browser, previous) end)
+
+        Application.put_env(:fermix_core, :browser,
+          snapshot_default_depth: 12,
+          snapshot_max_depth: 4
+        )
+
+        result = Checks.browser_disclaim()
+
+        assert result.name == "browser"
+        assert result.status == :warn
+        assert result.detail =~ "snapshot_default_depth"
+      end
+    end
+  end
+
   describe "computer_use_permissions/1" do
     test "disabled is a quiet ok" do
       result = Checks.computer_use_permissions({:ok, %{state: :disabled}})

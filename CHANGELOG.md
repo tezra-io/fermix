@@ -17,6 +17,19 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   binding across it. Released installs were never affected; they load the
   library once and never hot-swap code.
 
+- **Upgrading no longer makes macOS ask to allow a new "fermix" under App
+  Management.** The browser tool now launches Chrome through a small disclaim
+  shim, so Chrome runs as its own macOS privacy principal instead of being
+  attributed to the fermix daemon — Chrome's launch-time probe of its own
+  bundle was raising an App Management notification against fermix's
+  versioned install path after every upgrade, and the password-gated grant
+  could never carry over to the next release. Existing "fermix" rows in App
+  Management are inert leftovers and no grant is needed. A launch that cannot
+  disclaim refuses loudly instead of ever spawning Chrome undisclaimed
+  (`fermix doctor` gains a `browser` row for the shim), and a Chrome that
+  dies at launch now fails fast with its exit code instead of waiting out
+  the launch timeout.
+
 ### Added
 
 - **Fermix can look up real places.** Ask for coffee near Alexanderplatz, a

@@ -16,6 +16,8 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias Fermix.CLI.VersionSkew
   alias FermixCore.Acp.IdentityStore
   alias FermixCore.Auth.Store, as: AuthStore
+  alias FermixCore.Browser.ChromeLauncher
+  alias FermixCore.Browser.Config, as: BrowserConfig
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Harness.Artifacts, as: HarnessArtifacts
   alias FermixCore.Harness.Config, as: HarnessConfig
@@ -775,6 +777,59 @@ defmodule Fermix.CLI.Doctor.Checks do
 
   defp computer_use_input_hint(probe) do
     "input control is not available (#{probe.platform}/#{probe.display_server})."
+  end
+
+  @doc """
+  Browser launch health on macOS: the disclaim exec shim must be present and
+  able to resolve the private disclaim API, or every browser launch refuses
+  (Chrome is never spawned undisclaimed — spawned directly it would inherit the
+  daemon as TCC responsible process and raise App Management prompts keyed to
+  the versioned install path). Elsewhere the shim is not used.
+  """
+  @spec browser_disclaim({atom(), atom()}) :: result()
+  def browser_disclaim(os_type \\ :os.type())
+
+  def browser_disclaim({:unix, :darwin}) do
+    shim = Application.app_dir(:fermix_nif, "priv/disclaim")
+
+    cond do
+      not File.regular?(shim) ->
+        fail("browser", "disclaim shim missing at #{shim} — rebuild fermix or reinstall")
+
+      not disclaim_check_ok?(shim) ->
+        fail("browser", "disclaim shim --check failed — browser launches will refuse until fixed")
+
+      true ->
+        browser_chrome_result()
+    end
+  end
+
+  def browser_disclaim(_os_type), do: ok("browser", "disclaim shim not required on this OS")
+
+  # `BrowserConfig.current/0` refuses an operator-authored `[fermix_core.browser]`
+  # section that is out of range or names an unusable profile — the exact host
+  # whose owner runs `fermix doctor` to find out why. Binding it with `{:ok, _}`
+  # would kill the whole run with a MatchError and print nothing.
+  defp browser_chrome_result do
+    case BrowserConfig.current() do
+      {:ok, config} -> browser_chrome_row(config)
+      {:error, error} -> warn("browser", "disclaim shim ready; #{error.message}")
+    end
+  end
+
+  defp browser_chrome_row(config) do
+    case ChromeLauncher.find_executable(config, nil) do
+      {:ok, path} -> ok("browser", "disclaim shim ready; Chrome at #{path}")
+      {:error, _error} -> warn("browser", "disclaim shim ready; no Chrome/Chromium found")
+    end
+  end
+
+  defp disclaim_check_ok?(shim) do
+    match?({_output, 0}, System.cmd(shim, ["--check"], stderr_to_stdout: true))
+  rescue
+    # A present-but-unrunnable shim (e.g. lost exec bit) must surface as the
+    # fail row above, not crash the doctor run.
+    _error -> false
   end
 
   @doc """
