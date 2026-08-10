@@ -102,3 +102,110 @@ scenarios:
           max_cost_usd: 1.5
           max_duration_ms: 150000
         rubric: "Fetches the RFC Editor homepage and explains that it publishes/hosts RFC documents, grounded in the fetched content."
+
+  # MILESTONE_31 §9 (evidence-preserving answer contract) and §18 row "Citation
+  # eval". The contract is a prompt contract, not a response rewriter, so the
+  # only honest place to prove it is a real turn.
+  #
+  # The two halves are graded by different machinery on purpose. "Source
+  # present" is deterministic — a research answer must contain a literal URL, so
+  # it is a `reply_matches` gate. "Source faithful" needs the tool-result
+  # allow-set, which no structural gate can see; the judge does receive the tool
+  # spans' output as span-backed evidence, so it is the rubric that compares the
+  # answer's links against what the tools actually returned. Rubrics are worded
+  # so a truncated evidence record cannot cause a false failure.
+  #
+  # These live in the web suite rather than in `places.yaml` because the
+  # citation contract is exercised by `web_search`/`web_fetch`, which this suite
+  # already drives with the same judge config and network budgets, and because
+  # `place_search` needs a Brave key that a stock development daemon does not
+  # have — proving the evidence contract must not depend on that credential.
+  - id: research_answers_keep_their_sources
+    title: "A researched answer keeps the exact URLs its tools returned"
+    severity: critical
+    tags: [web, search, citations, evidence]
+    cases:
+      - id: recent_webb_findings
+        query: >
+          What has the James Webb Space Telescope turned up recently? Give me
+          two or three highlights from the past few months.
+        expect:
+          tools_any: [web_search, web_fetch]
+          reply_matches: '(?is)(?=.*(?:webb|jwst))(?=.*https?://)'
+          max_cost_usd: 2.0
+          max_duration_ms: 150000
+        rubric: >
+          Reports recent James Webb Space Telescope findings grounded in the
+          tool results, and every URL in the answer appears verbatim among the
+          URLs the tool evidence returned — none is invented, none is rebuilt
+          from a title or a bare domain, and no provider redirect token has been
+          stripped. Links sit next to the claims they support, or in one compact
+          Sources list. Judge only the links you can check against the evidence
+          shown; do not penalise links whose evidence record was truncated.
+      - id: openssl_security_advisories
+        query: >
+          What are the most recent OpenSSL security advisories? Just the
+          headline items and how serious they are.
+        expect:
+          tools_any: [web_search, web_fetch]
+          reply_matches: '(?is)(?=.*(?:openssl|cve|advisor))(?=.*https?://)'
+          max_cost_usd: 2.0
+          max_duration_ms: 150000
+        rubric: >
+          Reports real recent OpenSSL advisories from the tool results with
+          their severity, and every URL in the answer appears verbatim among the
+          URLs the tool evidence returned — no fabricated advisory link, no URL
+          reconstructed from a CVE id or a domain. Judge only the links you can
+          check against the evidence shown; do not penalise links whose evidence
+          record was truncated.
+      - id: elixir_release_notes
+        query: >
+          What changed in the last couple of Elixir releases? A short summary
+          and where you read it.
+        expect:
+          tools_any: [web_search, web_fetch]
+          reply_matches: '(?is)(?=.*elixir)(?=.*https?://)'
+          max_cost_usd: 2.0
+          max_duration_ms: 150000
+        rubric: >
+          Summarises recent Elixir release changes from the tool results and
+          says where it read them, with every URL in the answer appearing
+          verbatim among the URLs the tool evidence returned — none invented,
+          none rebuilt from a version number, a repository name, or a bare
+          domain. Judge only the links you can check against the evidence shown;
+          do not penalise links whose evidence record was truncated.
+
+  # The counterfactual control for the scenario above (§9: "ordinary
+  # conversational answers are not forced to append an empty or ceremonial
+  # Sources section"). Without it, a model that staples a Sources heading onto
+  # everything would score perfectly on citations.
+  #
+  # `tools_none` is what makes the control mean anything: it establishes that no
+  # research happened, so a Sources section could only be ceremony. Both queries
+  # are creative asks where the word "sources" cannot plausibly open a line of
+  # the answer, which is what `reply_not_matches` keys on.
+  - id: no_research_no_ceremonial_sources
+    title: "An answer that looked nothing up gets no Sources section"
+    severity: normal
+    tags: [web, citations, control]
+    cases:
+      - id: haiku_about_debugging
+        query: "Write me a short haiku about debugging code."
+        expect:
+          tools_none: [web_search, web_fetch, browser]
+          reply_not_matches: '(?im)^[\s>#*_-]*sources\b'
+          max_cost_usd: 1.0
+          max_duration_ms: 90000
+        rubric: >
+          Writes a haiku about debugging and nothing else. No sources, no
+          citations, no references section — there was nothing to cite.
+      - id: puppy_name_ideas
+        query: "Give me three names for a golden retriever puppy — nothing fancy."
+        expect:
+          tools_none: [web_search, web_fetch, browser]
+          reply_not_matches: '(?im)^[\s>#*_-]*sources\b'
+          max_cost_usd: 1.0
+          max_duration_ms: 90000
+        rubric: >
+          Offers three plain puppy names from its own head, with no sources,
+          citations, or references section appended.

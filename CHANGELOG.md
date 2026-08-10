@@ -19,6 +19,25 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Fermix can look up real places.** Ask for coffee near Alexanderplatz, a
+  pharmacy open now, or the address of a landmark and Fermix answers from a
+  place search rather than a web page: name, hours, rating, contact details,
+  distance, and a link to the place's own page for every result. It needs a
+  Brave Search API key, which is the same key the Brave web-search backend
+  uses — you can set it in setup without making Brave your web backend, and
+  the tool stays hidden until you do. Web calls and place calls are billed
+  separately by Brave. Results are transient: nothing is cached or stored,
+  and only the answer persists, as ordinary chat history. Ask for somewhere
+  "near me" without naming an area and Fermix uses the area you have already
+  mentioned — in this conversation first, then a neighborhood or city it
+  remembers about you — and asks which area to search when it knows neither;
+  it names the area it searched so you can correct it.
+- **Answers keep the links they were built from.** When a lookup supplies a
+  fact, the answer now carries that tool's exact URL — beside the claim, or
+  in a short source list — instead of dropping it. Places link to their own
+  page, images link to the page they came from, and an answer that did no
+  research gets no ceremonial sources section.
+
 - **A reminder that matters can be followed by a check-in.** When you store a
   date, Fermix decides whether it is an occasion you would plausibly want help
   acting on — a birthday, an anniversary, something to prepare or decide — and

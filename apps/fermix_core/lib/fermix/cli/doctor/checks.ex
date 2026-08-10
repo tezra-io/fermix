@@ -414,6 +414,75 @@ defmodule Fermix.CLI.Doctor.Checks do
   end
 
   @doc """
+  `place_search` readiness (M31 §14.3): the shared Brave key, the active
+  `web_search` backend, and whether the tool is advertised.
+
+  Offline, always — this check takes no `full?` flag, so the default run cannot
+  reach the network by any argument. The metered live probe is `place_probe/1`,
+  which `Fermix.CLI.Doctor` calls only from its `--full` block. Having no Brave
+  key is a normal configuration (the tool is optional and simply hidden), so it
+  reports `:ok`, not a warning.
+  """
+  @spec place_search() :: result()
+  def place_search do
+    []
+    |> ProviderProbe.place_search_report()
+    |> format_place_search()
+  end
+
+  # Advertisement is the row's one fact: the tool answers it from the same
+  # credential seam a `place_search` call would, so the row cannot claim a
+  # readiness the runtime does not have. A missing key is a normal, optional
+  # configuration, so it reads `:ok` and says how to enable the tool.
+  defp format_place_search(%{advertised?: false} = report) do
+    ok(
+      "place search",
+      "no Brave key — place_search hidden (optional; web backend #{report.backend}). " <>
+        "Set [fermix_core.tools.web_search] brave_api_key in setup to enable it."
+    )
+  end
+
+  defp format_place_search(report) do
+    ok(
+      "place search",
+      "Brave key present, place_search advertised; web backend #{report.backend}. " <>
+        "Web and place calls are metered separately."
+    )
+  end
+
+  @doc """
+  One metered live request to the place endpoint (M31 §14.3), for `--full` only.
+
+  Fixed innocuous query, `count: 1`, result discarded, never anchored to the
+  owner's saved location. Auth, rate-limit, schema, and transport failures each
+  keep their own name, and a failure never switches provider — there is one
+  adapter and no fallback. `opts` carries the `req_options`/`net_resolver`
+  injection seam so tests stub the transport.
+  """
+  @spec place_probe(keyword()) :: result()
+  def place_probe(opts \\ []) when is_list(opts) do
+    opts
+    |> Keyword.put(:full, true)
+    |> ProviderProbe.place_search_report()
+    |> format_place_probe()
+  end
+
+  defp format_place_probe(%{probe_result: :ok, result_count: count}) do
+    ok(
+      "place probe",
+      "live place probe ok (#{count} result(s), discarded) — this probe is metered"
+    )
+  end
+
+  defp format_place_probe(%{probe_error: reason}) do
+    warn("place probe", "live place probe failed: #{reason} — this probe is metered")
+  end
+
+  defp format_place_probe(_report) do
+    ok("place probe", "skipped — no Brave key configured, so no metered call was made")
+  end
+
+  @doc """
   Image-generation backend health: which backend is selected and whether its
   credential is present. Offline only — never bills the operator with a live
   image call. Not configuring `generate_image` is normal (optional capability),

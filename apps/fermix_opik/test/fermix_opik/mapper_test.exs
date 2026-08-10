@@ -235,6 +235,35 @@ defmodule FermixOpik.MapperTest do
   # `MCP.Capability.invoke/6`; before this key was allowlisted it was dropped from
   # every Opik tool span (each builder hard-codes its own key set — there is no
   # global allowlist).
+  # MILESTONE_31 §16: the search family's bounded metadata. `location_mode` is the
+  # only record of WHICH anchor a place search used — the coordinates themselves
+  # never leave the outbound request — so dropping it here erases the privacy
+  # evidence, not just a nice-to-have field.
+  test "tool_span keeps the search-family backend, counts, and anchor mode" do
+    metadata = %{
+      tool: "place_search",
+      success: true,
+      backend: "brave",
+      result_count: 5,
+      has_media_count: 4,
+      location_mode: "named"
+    }
+
+    span =
+      Mapper.tool_span(metadata, %{duration_ms: 120},
+        trace_id: "t",
+        project_name: "fermix",
+        ended: @ended
+      )
+
+    assert span.metadata == %{
+             backend: "brave",
+             result_count: 5,
+             has_media_count: 4,
+             location_mode: "named"
+           }
+  end
+
   test "tool_span keeps the outbound MCP server identity" do
     metadata = %{tool: "eden_get_note_markdown", success: true, mcp_server: "eden"}
 

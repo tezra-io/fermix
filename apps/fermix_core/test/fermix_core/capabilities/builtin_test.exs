@@ -37,6 +37,21 @@ defmodule FermixCore.Capabilities.BuiltinTest do
       assert cap.policy_class == :network
     end
 
+    # MILESTONE_31 §14.1: the first credential-gated built-in. `requires_setup`
+    # was reserved-but-unused until now, so the metadata carrying a real value is
+    # part of the contract, not decoration.
+    test "wraps Tools.PlaceSearch as a credential-gated :network web builtin" do
+      cap = Builtin.from_tool_module(FermixCore.Tools.PlaceSearch)
+
+      assert cap.name == "place_search"
+      assert cap.policy_class == :network
+      assert cap.owner_only? == false
+      assert cap.metadata.category == :web
+      assert cap.metadata.requires_setup.credential == "brave_api_key"
+      assert cap.metadata.requires_setup.config_path =~ "brave_api_key"
+      assert FermixCore.Tools.PlaceSearch in BuiltinSeeder.builtin_tool_modules()
+    end
+
     test "wraps Tools.SendAttachment as the only channel-category builtin" do
       cap = Builtin.from_tool_module(FermixCore.Tools.SendAttachment)
 
