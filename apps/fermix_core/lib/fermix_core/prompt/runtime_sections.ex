@@ -10,6 +10,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
   alias FermixCore.Capabilities.Deferral
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Harness.Config, as: HarnessConfig
+  alias FermixCore.Tools.SearchCredential
 
   @type skill :: AgentDefinition.t()
 
@@ -91,9 +92,15 @@ defmodule FermixCore.Prompt.RuntimeSections do
       - If a connected plugin owns the surface (e.g. `github_*` for GitHub, `notion_*` for Notion, `obsidian_*` for the vault, `x_*` for X/Twitter, the Google tools for mail/calendar/drive) use its tools — they hit the real API directly; do NOT open the browser or `web_search` for that surface. Any such plugin is listed under Plugins below.
       - `web_search` for static facts with no known URL (hours, prices, schedules, addresses, lookups).
       - `web_fetch` for the readable text of ONE known URL whose content is in the server HTML.
-      - `browser` for JavaScript/dynamic/interactive pages or live data (flight prices, seat maps, dashboards, login, forms) — in its OWN browser instance, not the page/app the user has open on screen (for that, `computer_use`).
+    #{place_routing_rule()}  - `browser` for JavaScript/dynamic/interactive pages or live data (flight prices, seat maps, dashboards, login, forms) — in its OWN browser instance, not the page/app the user has open on screen (for that, `computer_use`).
       - Never shell-scrape a JS-rendered site (`curl`/`urllib`/`requests` return empty or partial markup — a dead end, not a retry). An empty `web_search`/`web_fetch` result on dynamic content is the signal to switch to `browser`, not to rerun the same tool.
     - Drive ONE surface per task: don't restart the same work in the other tool's separate session — wait for a change with the session you're already in (the browser's `act` wait for a page you drive, `computer_use`'s `wait_for_change` for the host screen). On a single shared page, structure goes through `browser` and pixels through `computer_use`: that split is one context, not a switch.
+    - Research evidence — when a tool result (`web_search`, `web_fetch`, or any other tool that returns URLs) supplies a fact you state, keep that tool's exact URL in the answer:
+      - Put the link right after the claim it supports; a compact `Sources` list at the end is fine when inline links would make the answer unreadable.
+      - Link a place you recommend to the page the tool returned for it, and link a discovered image to the image AND its source page — the source page is the attribution, not optional metadata.
+      - Use the returned URL as given: never invent one, never strip a provider redirect token, never rebuild one from a title or domain.
+      - Cite only results you actually used; when a result carried no usable URL, say the lookup was unsourced instead of supplying a plausible-looking link.
+      - An answer you did not look up gets no `Sources` section — a ceremonial or empty one is noise.
     - Use `event_store` for deterministic personal reminders, appointments, deadlines, birthdays, anniversaries, and other stored dates whose future action is only to notify the owner.
     - Use `schedule_job` when the future run must reason, call a provider, use tools, inspect changing state, produce a digest, or perform work — recurring work, cron-style requests, periodic checks, digests, watchers, and "run this later" tasks.
     - Defer a delivered reminder with `reminder_snooze` ("snooze that for two hours"); it never edits the event's stored plan — `event_update` does that.
@@ -110,6 +117,36 @@ defmodule FermixCore.Prompt.RuntimeSections do
     - Use `skill_run` when a specialized skill should execute as a delegated sub-agent.
     """
     |> String.trim()
+  end
+
+  # M31 §14.1: `place_search` is the first credential-gated built-in, hidden from
+  # the wire whenever the shared Brave key does not resolve. The routing rule
+  # follows the wire — steering local intent to a tool the model cannot call is
+  # the same dead end `harness_when_unusable?/1` removes below. Gated on the one
+  # credential seam every Brave consumer asks (§8.1), so the prompt and the
+  # advertisement cannot answer differently.
+  #
+  # Rev 4: the near-me path is conversational — the model fills the existing
+  # `location` argument from an area the user has shared. That is a model
+  # contract, not a tool behavior: `place_search` stays memory-blind (§10.5),
+  # which is why the ordering has to live here.
+  defp place_routing_rule do
+    case SearchCredential.brave() do
+      {:ok, _key} ->
+        "  - `place_search` for businesses, landmarks, addresses, and local " <>
+          "recommendations; when the user names an area (\"in SoHo\", \"near " <>
+          "Alexanderplatz\"), pass it as `location` (or coordinates) instead of " <>
+          "leaving it inside `query`.\n" <>
+          "  - For \"near me\" with no named area, fill `location` from the area " <>
+          "the user has shared — this conversation first, then a coarse area you " <>
+          "remember about them (neighborhood/city/zip, never a street address); " <>
+          "knowing neither, ask which area to search before calling.\n" <>
+          "  - Name the area you actually searched (the result's `search_anchor` " <>
+          "label, or the area you passed) so the user can correct a stale one.\n"
+
+      {:error, _reason} ->
+        ""
+    end
   end
 
   # M10 §3.4: rendered only when tool-schema deferral is on — the off-path
@@ -165,6 +202,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
       capabilities
       |> Enum.reject(&(&1.metadata[:category] == :plugin))
       |> Enum.reject(&harness_when_unusable?/1)
+      |> Enum.reject(&credential_gated_when_unready?/1)
       |> Enum.group_by(&(&1.metadata[:category] || :system))
       |> Enum.sort_by(fn {category, _caps} -> category_index(category) end)
       |> Enum.map_join("\n\n", &format_category/1)
@@ -183,6 +221,22 @@ defmodule FermixCore.Prompt.RuntimeSections do
   end
 
   defp harness_usable?, do: HarnessConfig.enabled?() and HarnessConfig.approved?()
+
+  # The same rule for the other family the wire gates: a built-in that declares
+  # `requires_setup` (M31 §14.1) is dropped by `Advertisement.prepare/2` while its
+  # credential is missing, so the catalog must drop it too. Written over the whole
+  # family rather than one tool name, so a second credential-gated built-in joins
+  # the invariant instead of quietly reintroducing the dead end. Readiness is a
+  # config fact, not a per-turn one, which is why the empty context answers it.
+  defp credential_gated_when_unready?(%{
+         metadata: %{requires_setup: %{}},
+         executor: {mod, _fun, _args}
+       })
+       when is_atom(mod) do
+    function_exported?(mod, :advertise?, 1) and not mod.advertise?(%{})
+  end
+
+  defp credential_gated_when_unready?(_capability), do: false
 
   # The coding-harness category carries a section-level PREAMBLE line (design
   # §7.4) before its tool list — a new touchpoint, rendered only when the bucket

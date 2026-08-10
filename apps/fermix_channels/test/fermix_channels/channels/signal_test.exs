@@ -234,6 +234,29 @@ defmodule FermixChannels.Channels.SignalTest do
   end
 
   describe "send_message/3" do
+    # MILESTONE_31 §18 row "Channels", plain-text half: Signal renders no markup,
+    # so the portable guarantee is that the tool-returned URL reaches the reader
+    # byte-for-byte — query string, redirect token, and all (§9.5). Nothing may
+    # shorten, rewrite, or strip it on the way out.
+    test "carries place, source, and media URLs verbatim on a plain-text surface" do
+      text = """
+      - [Example Coffee](https://example.coffee/?utm=brave) — 4.6/5, 0.4 km away.
+      Source: https://provider.example/place/abc?token=xyz
+      Photo: https://cdn.example/p.jpg
+      """
+
+      assert :ok =
+               Signal.send_message("+15551234567", text,
+                 client: FakeSignalClient,
+                 client_opts: [test_pid: self()]
+               )
+
+      assert_received {:signal_send, "+15550001111", "+15551234567", sent}
+      assert sent =~ "https://example.coffee/?utm=brave"
+      assert sent =~ "https://provider.example/place/abc?token=xyz"
+      assert sent =~ "https://cdn.example/p.jpg"
+    end
+
     # M30 §11.3: an unconfigured Signal account is an unavailable adapter, not a
     # bare `:not_configured` the delivery normalizer would have to guess at.
     test "rejects missing signal account configuration as an unavailable adapter" do

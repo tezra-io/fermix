@@ -267,6 +267,87 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     end
   end
 
+  describe "place_search/0 (M31 §14.3)" do
+    setup do
+      original = Application.get_env(:fermix_core, :tools, [])
+      on_exit(fn -> Application.put_env(:fermix_core, :tools, original) end)
+      :ok
+    end
+
+    test "reports the key, the active web backend, and the advertised tool" do
+      Application.put_env(:fermix_core, :tools,
+        web_search: [backend: :duckduckgo, brave_api_key: "brave-secret"]
+      )
+
+      result = Checks.place_search()
+
+      assert result.name == "place search"
+      assert result.status == :ok
+      assert result.detail =~ "advertised"
+      assert result.detail =~ "duckduckgo"
+      assert result.detail =~ "metered"
+      refute result.detail =~ "brave-secret"
+    end
+
+    test "reports a missing key as hidden and optional, not a warning" do
+      Application.put_env(:fermix_core, :tools, web_search: [backend: :duckduckgo])
+
+      result = Checks.place_search()
+
+      assert result.status == :ok
+      assert result.detail =~ "hidden"
+      assert result.detail =~ "brave_api_key"
+    end
+
+    test "the default check reports no probe outcome" do
+      Application.put_env(:fermix_core, :tools, web_search: [brave_api_key: "brave-secret"])
+
+      result = Checks.place_search()
+
+      refute result.detail =~ "probe"
+    end
+  end
+
+  describe "place_probe/1 (M31 §14.3)" do
+    setup do
+      original = Application.get_env(:fermix_core, :tools, [])
+      on_exit(fn -> Application.put_env(:fermix_core, :tools, original) end)
+      :ok
+    end
+
+    test "reports one metered live probe as ok" do
+      Application.put_env(:fermix_core, :tools, web_search: [brave_api_key: "brave-secret"])
+
+      result = Checks.place_probe(place_probe_opts(place_ok_plug(self())))
+
+      assert result.name == "place probe"
+      assert result.status == :ok
+      assert result.detail =~ "metered"
+      assert_received {:place_probe_request, query}
+      assert query["count"] == "1"
+    end
+
+    test "warns with the named failure kind and never switches provider" do
+      Application.put_env(:fermix_core, :tools, web_search: [brave_api_key: "brave-secret"])
+
+      result = Checks.place_probe(place_probe_opts(place_status_plug(401)))
+
+      assert result.status == :warn
+      assert result.detail =~ "auth_failed"
+      assert result.detail =~ "metered"
+    end
+
+    test "skips the probe with no Brave key and makes no call" do
+      Application.put_env(:fermix_core, :tools, web_search: [backend: :duckduckgo])
+
+      result = Checks.place_probe(place_probe_opts(place_ok_plug(self())))
+
+      assert result.status == :ok
+      assert result.detail =~ "skipped"
+      refute_received {:place_probe_request, _query}
+    end
+  end
+
   describe "image_generation/0 (M15)" do
     setup do
       original = Application.get_env(:fermix_core, :tools, [])
@@ -1589,6 +1670,41 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     name = :"harness_doctor_reg_#{System.unique_integer([:positive])}"
     start_supervised!({CapabilityRegistry, name: name})
     name
+  end
+
+  defp place_probe_opts(id) do
+    [
+      req_options: [plug: {Req.Test, id}],
+      net_resolver: fn "api.search.brave.com" -> {:ok, [{93, 184, 216, 34}]} end
+    ]
+  end
+
+  defp place_ok_plug(test_pid) do
+    id = :"checks_place_probe_#{System.unique_integer([:positive])}"
+
+    Req.Test.stub(id, fn conn ->
+      send(test_pid, {:place_probe_request, URI.decode_query(conn.query_string)})
+
+      place_probe_json(conn, 200, %{
+        "results" => [%{"title" => "Eiffel Tower", "url" => "https://toureiffel.example/visit"}]
+      })
+    end)
+
+    id
+  end
+
+  defp place_status_plug(status) do
+    id = :"checks_place_status_#{System.unique_integer([:positive])}"
+
+    Req.Test.stub(id, fn conn -> place_probe_json(conn, status, %{"error" => "nope"}) end)
+
+    id
+  end
+
+  defp place_probe_json(conn, status, body) do
+    conn
+    |> Plug.Conn.put_resp_content_type("application/json")
+    |> Plug.Conn.resp(status, Jason.encode!(body))
   end
 
   describe "home_permissions/0" do

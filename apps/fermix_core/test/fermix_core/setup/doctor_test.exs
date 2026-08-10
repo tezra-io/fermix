@@ -924,6 +924,131 @@ defmodule FermixCore.Setup.DoctorTest do
     end
   end
 
+  describe "place_search_report/1 (M31 §14.3)" do
+    test "offline reports the Brave key, the active web backend, and advertisement" do
+      put_web_search(backend: :duckduckgo, brave_api_key: "brave-secret")
+
+      report = Doctor.place_search_report()
+
+      assert report.backend == :duckduckgo
+      assert report.credential_present? == true
+      assert report.advertised? == true
+      refute Map.has_key?(report, :probe_result)
+    end
+
+    test "offline reports a missing key as hidden" do
+      put_web_search(backend: :duckduckgo)
+
+      report = Doctor.place_search_report()
+
+      assert report.credential_present? == false
+      assert report.advertised? == false
+    end
+
+    test "offline treats an unresolved @keyring sentinel as missing" do
+      put_web_search(brave_api_key: "@keyring")
+
+      assert %{credential_present?: false, advertised?: false} = Doctor.place_search_report()
+    end
+
+    test "offline never reaches the network" do
+      id = unique_place_plug(self())
+      put_web_search(brave_api_key: "brave-secret")
+
+      Doctor.place_search_report(
+        req_options: [plug: {Req.Test, id}],
+        net_resolver: place_resolver()
+      )
+
+      refute_received {:place_probe_request, _query}
+    end
+
+    test "--full probes the place endpoint once with the fixed query and count 1" do
+      id = unique_place_plug(self())
+      put_web_search(brave_api_key: "brave-secret")
+
+      report =
+        Doctor.place_search_report(
+          full: true,
+          req_options: [plug: {Req.Test, id}],
+          net_resolver: place_resolver()
+        )
+
+      assert report.probe_result == :ok
+      assert report.result_count == 1
+
+      assert_received {:place_probe_request, query}
+      assert query["count"] == "1"
+      assert query["q"] != ""
+      refute Map.has_key?(query, "latitude")
+      refute Map.has_key?(query, "longitude")
+      refute Map.has_key?(query, "location")
+      refute_received {:place_probe_request, _second}
+    end
+
+    test "--full names an auth failure independently" do
+      id = place_status_plug(401)
+      put_web_search(brave_api_key: "brave-secret")
+
+      report = full_place_report(id)
+
+      assert report.probe_result == :auth_failed
+      assert report.result_count == 0
+    end
+
+    test "--full names a rate limit independently" do
+      id = place_status_plug(429)
+      put_web_search(brave_api_key: "brave-secret")
+
+      assert %{probe_result: :rate_limited} = full_place_report(id)
+    end
+
+    test "--full names a schema change independently" do
+      id = place_body_plug("{\"unexpected\":true}")
+      put_web_search(brave_api_key: "brave-secret")
+
+      assert %{probe_result: :parser_changed} = full_place_report(id)
+    end
+
+    test "--full names a provider status independently" do
+      id = place_status_plug(503)
+      put_web_search(brave_api_key: "brave-secret")
+
+      assert %{probe_result: :provider_error} = full_place_report(id)
+    end
+
+    test "--full names a transport failure independently" do
+      id = unique_place_plug(self())
+      put_web_search(brave_api_key: "brave-secret")
+
+      report =
+        Doctor.place_search_report(
+          full: true,
+          req_options: [plug: {Req.Test, id}],
+          net_resolver: private_place_resolver()
+        )
+
+      assert report.probe_result == :network
+      refute_received {:place_probe_request, _query}
+    end
+
+    test "--full skips the probe when no Brave key is configured" do
+      id = unique_place_plug(self())
+      put_web_search(backend: :duckduckgo)
+
+      report =
+        Doctor.place_search_report(
+          full: true,
+          req_options: [plug: {Req.Test, id}],
+          net_resolver: place_resolver()
+        )
+
+      assert report.credential_present? == false
+      refute Map.has_key?(report, :probe_result)
+      refute_received {:place_probe_request, _query}
+    end
+  end
+
   describe "image_report/1 (M15)" do
     test "reports :unconfigured when no generate_image block is set" do
       Application.put_env(:fermix_core, :tools, [])
@@ -1109,6 +1234,66 @@ defmodule FermixCore.Setup.DoctorTest do
       "api.tavily.com" -> {:ok, [{93, 184, 216, 34}]}
       "html.duckduckgo.com" -> {:ok, [{52, 149, 246, 39}]}
     end
+  end
+
+  defp full_place_report(id) do
+    Doctor.place_search_report(
+      full: true,
+      req_options: [plug: {Req.Test, id}],
+      net_resolver: place_resolver()
+    )
+  end
+
+  # Reports the query params back to the test so the probe's shape (one call,
+  # count 1, no anchor) is asserted on the wire rather than trusted.
+  defp unique_place_plug(test_pid) do
+    id = :"place_probe_#{System.unique_integer([:positive])}"
+
+    Req.Test.stub(id, fn conn ->
+      send(test_pid, {:place_probe_request, URI.decode_query(conn.query_string)})
+      place_json(conn, 200, %{"results" => [place_probe_fixture()]})
+    end)
+
+    id
+  end
+
+  defp place_status_plug(status) do
+    id = :"place_probe_status_#{System.unique_integer([:positive])}"
+
+    Req.Test.stub(id, fn conn -> place_json(conn, status, %{"error" => "nope"}) end)
+
+    id
+  end
+
+  defp place_body_plug(body) do
+    id = :"place_probe_body_#{System.unique_integer([:positive])}"
+
+    Req.Test.stub(id, fn conn ->
+      conn
+      |> Plug.Conn.put_resp_content_type("application/json")
+      |> Plug.Conn.resp(200, body)
+    end)
+
+    id
+  end
+
+  # A title plus one HTTPS page — the minimum the place parser retains.
+  defp place_probe_fixture do
+    %{"title" => "Eiffel Tower", "url" => "https://toureiffel.example/visit"}
+  end
+
+  defp place_json(conn, status, body) do
+    conn
+    |> Plug.Conn.put_resp_content_type("application/json")
+    |> Plug.Conn.resp(status, Jason.encode!(body))
+  end
+
+  defp place_resolver do
+    fn "api.search.brave.com" -> {:ok, [{93, 184, 216, 34}]} end
+  end
+
+  defp private_place_resolver do
+    fn "api.search.brave.com" -> {:ok, [{10, 0, 0, 1}]} end
   end
 
   defp restore_env(app, key, nil), do: Application.delete_env(app, key)

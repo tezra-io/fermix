@@ -56,7 +56,7 @@ defmodule FermixCore.Tools.WebSearch do
   @impl true
   def when_to_use,
     do:
-      "The answer is current, changing, or newer than training — look it up rather than answering from memory. A static fact with no known URL (hours, prices, schedules, lookups); not JS/dynamic pages (use browser)."
+      "The answer is current, changing, or newer than training — look it up rather than answering from memory. A static fact with no known URL (hours, prices, schedules, lookups); not JS/dynamic pages (use browser). Keep the result URLs you use: a researched claim ships with its source link, exactly as returned."
 
   @impl true
   def examples, do: [%{args: %{"query" => "latest Elixir release"}, note: "search public web"}]

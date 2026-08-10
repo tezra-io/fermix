@@ -445,6 +445,32 @@ defmodule FermixChannels.Channels.TelegramTest do
       assert body["text"] == "hello"
     end
 
+    # MILESTONE_31 §18 row "Channels": a place answer's links have to arrive
+    # clickable on an HTML-rendered surface, and the URLs have to survive exactly
+    # as the tool returned them — a rewritten or stripped link is a broken
+    # citation (§9.5). Query strings and redirect tokens are where that breaks.
+    test "renders place, source, and media links from a place answer as clickable HTML" do
+      stub_telegram(self(), 200, %{"ok" => true})
+
+      text = """
+      - [Example Coffee](https://example.coffee/?utm=brave) — 4.6/5, 0.4 km away. [Photo](https://cdn.example/p.jpg)
+      Source: [provider page](https://provider.example/place/abc?token=xyz)
+      """
+
+      assert :ok = send_msg("123", text)
+
+      assert_received {:telegram_request, _path, body}
+      assert body["parse_mode"] == "HTML"
+
+      assert body["text"] =~
+               ~s(<a href="https://example.coffee/?utm=brave">Example Coffee</a>)
+
+      assert body["text"] =~ ~s(<a href="https://cdn.example/p.jpg">Photo</a>)
+
+      assert body["text"] =~
+               ~s(<a href="https://provider.example/place/abc?token=xyz">provider page</a>)
+    end
+
     test "renders common markdown as Telegram HTML by default" do
       stub_telegram(self(), 200, %{"ok" => true})
 

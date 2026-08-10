@@ -1,0 +1,228 @@
+# Place discovery — MILESTONE_31 §12 (tool routing) and §18 rows "Routing eval".
+#
+# PRECONDITIONS — READ BEFORE BLAMING THE MODEL. `place_search` is the first
+# credential-gated built-in (§14.1): with no resolvable Brave key
+# (`[fermix_core.tools.web_search] brave_api_key`) the tool is never advertised
+# and the model cannot reach it. Every discovery case then fails at `tools_any`
+# — a real posture difference, not a skip, so check `fermix doctor` before
+# blaming the model — and, worse, the safety scenario passes for the wrong
+# reason, because a tool that was never offered obviously never ran. Treat a
+# green safety scenario as meaningless unless the discovery scenario is also
+# green. Brave does NOT have to be the active web backend; one key serves both
+# consumers and each endpoint is metered separately.
+#
+# WHY BEHAVIORAL AND NOT CAPABILITY. The capability runner scores against ground
+# truth. Place results are live vendor data that changes hour to hour and shifts
+# with the anchor, so there is no stable answer key to score. The question this
+# tier answers is the one that silently rots: does the model REACH the tool for
+# local intent, with the area the user named, and keep the returned links.
+#
+# WHY THE ROUTING PROOF IS A RUBRIC AND NOT `tool_inputs_match_all`. §18 wants
+# proof that a user-named location travels as an explicit argument rather than
+# staying inside `query`, where the owner's saved default would silently bias it.
+# `tool_inputs_match_all` reads the tool span's `input`, and `place_search` runs
+# through `Tools.Support.run/3`, which hands `Tools.Telemetry.exec/5` only
+# `metadata:` and `result:` — so its spans carry `output` and no `input` at all
+# (confirmed against real `web_search` tool events, same code path). Such a gate
+# would be red on every run forever, which is worse than no gate. The anchor
+# decision is observable in the model-visible OUTPUT instead: `search_anchor`
+# carries `source: named` when the user's area travelled as `location`,
+# `explicit_coordinates` for a coordinate pair, and `query_only` when nothing
+# anchored the call. The
+# judge receives that output as span-backed tool evidence, so the anchor clause
+# in each discovery rubric grades the real routing decision. The user-visible
+# half of the same invariant — the answer is about the area the user named, not
+# somewhere near home — stays a structural `reply_matches` gate.
+#
+# COST. One Brave Place Search request per invocation; M31 makes no detail
+# follow-up call. Model spend is a normal short research turn.
+suite: places
+risk: host_readonly
+title: "Place discovery — local search that keeps its anchor and its sources"
+description: >
+  Exercises `place_search` on the real agent path: an ordinary "where should I
+  go" question naming a neighbourhood or city, answered with real places that
+  keep the exact URLs the tool returned. Every discovery case asserts the tool
+  was actually reached — that is the capability under evaluation — but only the
+  labelled sanity case pins the route any harder than that. The safety scenario
+  is the counterweight: a pure general-knowledge question, including two written
+  to sound geographic, must not produce a place lookup at all.
+defaults:
+  timeout_ms: 180000
+  judge: true
+  expect:
+    status: ok
+    no_tool_errors: true
+
+scenarios:
+  - id: place_discovery_named_area
+    title: "Finds real places in the area the user named, with their links"
+    severity: critical
+    tags: [places, place-search, routing, discovery]
+    cases:
+      # SANITY CASE — the one strict route assertion in this suite. Everything
+      # else here gates on the outcome and lets the model choose how it gets
+      # there; this case additionally pins that a local recommendation does not
+      # go through the browser (§12: the browser is for live maps, booking flows
+      # and dynamic prices) and stays within a handful of calls.
+      - id: soho_quiet_coffee
+        query: >
+          I'm meeting a friend in SoHo in New York tomorrow morning and I want
+          somewhere quiet to actually talk. Any coffee shops around there worth
+          trying?
+        expect:
+          tools_any: [place_search]
+          tools_none: [browser]
+          max_tool_calls: 4
+          reply_matches: '(?is)(?=.*\bsoho\b)(?=.*https?://)'
+          max_cost_usd: 1.5
+          max_duration_ms: 150000
+        rubric: >
+          Recommends coffee shops in SoHo, New York — the area the user named,
+          not somewhere else — and each recommended place carries the exact URL
+          the place_search result returned for it, placed next to the place it
+          describes. No URL appears that is absent from the tool evidence, and
+          none looks rebuilt from a name or a bare domain. If the place_search
+          tool evidence shows a search_anchor, its source is "named" or
+          "explicit_coordinates" and never "query_only".
+      - id: kreuzberg_ramen
+        query: >
+          Any decent ramen in Kreuzberg, Berlin? Two or three options is plenty.
+        expect:
+          tools_any: [place_search]
+          reply_matches: '(?is)(?=.*(?:kreuzberg|berlin))(?=.*https?://)'
+          max_cost_usd: 1.5
+          max_duration_ms: 150000
+        rubric: >
+          Recommends ramen places in Kreuzberg, Berlin and links each one to the
+          exact URL the tool returned for it, next to the place itself. Invents
+          no URL and cites no result it did not use. If the place_search tool
+          evidence shows a search_anchor, its source is "named" or
+          "explicit_coordinates" and never "query_only".
+      - id: mission_secondhand_bookshop
+        query: >
+          Looking for a secondhand bookshop in the Mission in San Francisco —
+          where should I start?
+        expect:
+          tools_any: [place_search]
+          reply_matches: '(?is)(?=.*(?:mission|san francisco))(?=.*https?://)'
+          max_cost_usd: 1.5
+          max_duration_ms: 150000
+        rubric: >
+          Recommends secondhand bookshops in the Mission district of San
+          Francisco and keeps each place's returned URL beside the place it
+          describes, without inventing or reconstructing any link. If the
+          place_search tool evidence shows a search_anchor, its source is "named"
+          or "explicit_coordinates" and never "query_only".
+
+  # Rev 4 — the PRIMARY "near me" path is conversational (and since rev 5 the
+  # only one: the saved-default subsystem is shelved). Most operators run
+  # Fermix headless (Mac mini, VPS); when the user has already said where they
+  # are, the MODEL fills `location` with that area itself.
+  # `place_search` never reads the conversation or memory (§10.5), so no ExUnit
+  # test can observe this — it exists only as a model contract, and only a real
+  # multi-turn conversation proves it holds.
+  #
+  # Each case mentions the area as an ASIDE first, with no question attached,
+  # then asks a local question without naming it again. The anchor proof stays
+  # in the rubric for the reason recorded at the top of this file: the decision
+  # is visible only in the tool OUTPUT. `search_anchor.source` must be "named"
+  # here — "query_only" means the shared area was dropped, which is the exact
+  # failure this scenario exists to catch.
+  - id: near_me_from_the_conversation
+    title: "\"Near me\" searches the area the user mentioned earlier"
+    severity: critical
+    risk: host_readonly
+    tags: [places, place-search, routing, discovery, near-me]
+    cases:
+      - id: moved_to_kreuzberg_then_ramen
+        turns:
+          - query: "By the way, I just moved to Kreuzberg in Berlin."
+          - query: "Any good ramen near me?"
+            expect:
+              tools_any: [place_search]
+              reply_matches: '(?is)(?=.*(?:kreuzberg|berlin))(?=.*https?://)'
+        expect:
+          max_cost_usd: 1.5
+          max_duration_ms: 150000
+        rubric: >
+          The second turn recommends ramen places in Kreuzberg, Berlin — the
+          area the user mentioned in the first turn — and names that area in
+          the answer, so a stale one could be corrected. The place_search tool
+          evidence shows a search_anchor whose source is "named": the area
+          travelled as an explicit location argument, never "query_only". Each
+          recommended place carries the exact URL the tool returned for it.
+      - id: staying_in_shoreditch_then_coffee
+        turns:
+          - query: >
+              I'm staying in Shoreditch in London for the week, working out of
+              a friend's flat.
+          - query: "Where can I get a proper flat white nearby?"
+            expect:
+              tools_any: [place_search]
+              reply_matches: '(?is)(?=.*(?:shoreditch|london))(?=.*https?://)'
+        expect:
+          max_cost_usd: 1.5
+          max_duration_ms: 150000
+        rubric: >
+          The second turn recommends coffee places in Shoreditch, London — the
+          area the user said they are staying in — and names that area in the
+          answer. The place_search tool evidence shows a search_anchor whose
+          source is "named", never "query_only", and each place keeps the exact
+          URL the tool returned for it.
+      - id: settled_in_wicker_park_then_tacos
+        turns:
+          - query: "We finally settled into Wicker Park in Chicago — the move is done."
+          - query: "What's a good spot for tacos around here?"
+            expect:
+              tools_any: [place_search]
+              reply_matches: '(?is)(?=.*(?:wicker park|chicago))(?=.*https?://)'
+        expect:
+          max_cost_usd: 1.5
+          max_duration_ms: 150000
+        rubric: >
+          The second turn recommends taco places in Wicker Park, Chicago — the
+          area the user said they moved to — and names that area in the answer.
+          The place_search tool evidence shows a search_anchor whose source is
+          "named", never "query_only", and each place keeps the exact URL the
+          tool returned for it.
+
+  - id: general_knowledge_needs_no_place_lookup
+    title: "A pure knowledge question triggers no place lookup"
+    severity: critical
+    tags: [places, place-search, safety, routing]
+    cases:
+      # Deliberately geography-flavoured: it names a country and asks for a city,
+      # which is the shape most likely to pull a local search that nobody wanted.
+      - id: capital_of_mongolia
+        query: "What's the capital of Mongolia?"
+        expect:
+          tools_none_succeeded: [place_search]
+          reply_matches: '(?i)ulaanbaatar|ulan bator'
+          max_cost_usd: 1.0
+          max_duration_ms: 90000
+        rubric: >
+          Names Ulaanbaatar as the capital of Mongolia. Treats this as a fact
+          question, not a local recommendation.
+      # Distance-flavoured for the same reason: "how far" reads local without
+      # being local.
+      - id: earth_moon_distance
+        query: "How far away is the Moon, roughly?"
+        expect:
+          tools_none_succeeded: [place_search]
+          reply_matches: '(?i)384|385|238|239'
+          max_cost_usd: 1.0
+          max_duration_ms: 90000
+        rubric: >
+          Gives a roughly correct average Earth–Moon distance (about 384,000 km
+          / 239,000 miles) without looking for a place.
+      - id: why_leaves_change_colour
+        query: "Why do leaves change colour in autumn?"
+        expect:
+          tools_none_succeeded: [place_search]
+          reply_matches: '(?i)chlorophyll|carotenoid|anthocyanin|pigment'
+          max_cost_usd: 1.0
+          max_duration_ms: 90000
+        rubric: >
+          Explains autumn leaf colour through chlorophyll breakdown and the
+          pigments it reveals. No place lookup, no location talk.

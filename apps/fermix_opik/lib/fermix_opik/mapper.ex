@@ -167,7 +167,16 @@ defmodule FermixOpik.Mapper do
             :workspace_scope,
             :read_only,
             :replay_safe,
-            :attempt
+            :attempt,
+            # The search family's bounded metadata (MILESTONE_31 §16). Counts and
+            # provider name only — never a query, a place record, or a
+            # coordinate. `:location_mode` is the sole record of WHICH anchor a
+            # place search used (query_only / named / explicit_coordinates), so
+            # dropping it erases the privacy evidence itself.
+            :backend,
+            :result_count,
+            :has_media_count,
+            :location_mode
           ])
         )
     }

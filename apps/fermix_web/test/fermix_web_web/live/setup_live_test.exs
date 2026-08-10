@@ -1046,6 +1046,84 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert contents =~ ~s(backend = "firecrawl")
       assert contents =~ ~s(firecrawl_api_key = "@keyring")
     end
+
+    # MILESTONE_31 §14.1: one key, two consumers. Reaching `place_search` must not
+    # cost the operator their web backend — a field that renders only under the
+    # Brave radio would make selecting Brave the price of entering the key.
+    test "the Brave key is enterable without making Brave the web backend (M31 §14.1)", %{
+      conn: conn,
+      tmp_home: tmp_home
+    } do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      html = view |> element("button[phx-value-tab=\"search\"]") |> render_click()
+
+      assert html =~ "search_form[brave_api_key]"
+
+      view
+      |> form("form[phx-submit=\"save_search\"]",
+        search_form: %{backend: "duckduckgo", brave_api_key: "brave-place-only"}
+      )
+      |> render_submit()
+
+      web_search =
+        :fermix_core
+        |> Application.get_env(:tools, [])
+        |> Keyword.get(:web_search, [])
+
+      assert Keyword.get(web_search, :backend) == :duckduckgo
+      assert Keyword.get(web_search, :brave_api_key) == "brave-place-only"
+
+      contents = File.read!(Path.join(tmp_home, "config.toml"))
+      assert contents =~ ~s(backend = "duckduckgo")
+      assert contents =~ ~s(brave_api_key = "@keyring")
+    end
+
+    test "the Brave key is labelled for both consumers (M31 §14.1)", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      view |> element("button[phx-value-tab=\"search\"]") |> render_click()
+
+      html =
+        view
+        |> form("form[phx-submit=\"save_search\"]", search_form: %{backend: "brave"})
+        |> render_change()
+
+      assert html =~ "Brave Search API key (web and place search)"
+      refute html =~ ">Brave API key<"
+    end
+
+    test "the place posture is stated whatever the web backend (M31 §13.4)", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      html = view |> element("button[phx-value-tab=\"search\"]") |> render_click()
+
+      # DuckDuckGo is selected: place_search readiness and its posture are still
+      # stated, because the Brave key does not require Brave as the web backend.
+      assert html =~ "place_search"
+      assert html =~ "metered separately"
+      assert html =~ "transient"
+      assert html =~ "https://api-dashboard.search.brave.com"
+    end
+
+    test "place readiness follows the saved Brave key", %{conn: conn} do
+      Application.put_env(:fermix_core, :tools, web_search: [brave_api_key: "brave-secret"])
+
+      {:ok, view, _html} = live(conn, "/setup")
+      html = view |> element("button[phx-value-tab=\"search\"]") |> render_click()
+
+      assert html =~ ~s(data-place-search="ready")
+      refute html =~ "brave-secret"
+    end
+
+    test "place readiness reports the missing key", %{conn: conn} do
+      Application.put_env(:fermix_core, :tools, web_search: [])
+
+      {:ok, view, _html} = live(conn, "/setup")
+      html = view |> element("button[phx-value-tab=\"search\"]") |> render_click()
+
+      assert html =~ ~s(data-place-search="unconfigured")
+    end
   end
 
   describe "Media form (M15)" do
@@ -3612,6 +3690,26 @@ defmodule FermixWebWeb.SetupLiveTest do
   defp restore_env(app, key, {:ok, value}), do: Application.put_env(app, key, value)
   defp restore_env(app, key, nil), do: Application.delete_env(app, key)
   defp restore_env(app, key, value), do: Application.put_env(app, key, value)
+
+  # A refused save writes nothing, so the file may not exist at all.
+  defp squish(html), do: html |> String.replace(~r/\s+/, " ") |> String.trim()
+
+  # §13.2: the captured position must not be in the page at any point. Asserted
+  # as absence, so a future prefill or hidden field fails here rather than
+  # shipping the operator's coordinates into HTML.
+  defp assert_no_coordinates(html) do
+    refute html =~ "40.7233"
+    refute html =~ "40.72330491"
+    refute html =~ "74.003"
+    refute html =~ "74.00300277"
+  end
+
+  defp config_contents(tmp_home) do
+    case File.read(Path.join(tmp_home, "config.toml")) do
+      {:ok, contents} -> contents
+      {:error, :enoent} -> ""
+    end
+  end
 
   # Hermetic harness detection map (the `:harness_detector` seam shape) — no real
   # `codex`/`claude --version` subprocess is ever spawned in these tests.
