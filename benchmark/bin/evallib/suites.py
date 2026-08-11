@@ -44,6 +44,11 @@ EXPECT_SPEC: dict[str, tuple] = {
     "min_subagent_spawns": (int,),
     "reply_matches": (str,),
     "reply_not_matches": (str,),
+    # Source fidelity as a hard fact: every URL in the reply must appear in the
+    # tool-evidence URL inventory (grade.evidence_urls). Mechanically checkable,
+    # so it is a gate — never rubric material (SCHEMA.md: rubrics judge, gates
+    # verify facts).
+    "reply_urls_in_evidence": (bool,),
     "main_model_matches": (str,),
     "subagent_model_matches": (str,),
     "status": (str,),

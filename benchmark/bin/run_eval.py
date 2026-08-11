@@ -520,14 +520,18 @@ def purge(cfg, run_id: str, confirmed: bool) -> int:
 # --- operator-assisted cases (real channel turns) ----------------------------
 
 def eval_daemon_streaming_enabled(cfg) -> bool:
-    """True iff the eval daemon config opts Telegram into streaming (draft or block).
+    """True iff the eval daemon's Telegram section streams (default or explicit).
 
-    Section-aware scan of `$FERMIX_HOME/config.toml` for
-    `[fermix_channels.telegram] streaming = "draft" | "block"`. Config is
-    snapshotted at daemon boot, so enabling it also requires a daemon restart —
-    the runner can only verify the file, and says so in the failure note.
+    Streaming is on by default with a capability-derived mode (a configured
+    draft-capable channel defaults to "draft" with card rotation), so a
+    `[fermix_channels.telegram]` section WITHOUT a `streaming` key streams;
+    only an explicit `streaming = "off"` (or no Telegram section at all)
+    disables it. Config is snapshotted at daemon boot, so changing it also
+    requires a daemon restart — the runner can only verify the file, and says
+    so in the failure note.
     """
     path = os.path.join(os.path.expanduser(cfg.daemon.fermix_home), "config.toml")
+    saw_telegram_section = False
     try:
         with open(path, "r", encoding="utf-8") as fh:
             section = None
@@ -535,11 +539,13 @@ def eval_daemon_streaming_enabled(cfg) -> bool:
                 line = line.strip()
                 if line.startswith("[") and line.endswith("]"):
                     section = line[1:-1].strip()
+                    if section == "fermix_channels.telegram":
+                        saw_telegram_section = True
                 elif section == "fermix_channels.telegram" and line.startswith("streaming"):
                     return '"draft"' in line or '"block"' in line
     except OSError:
         return False
-    return False
+    return saw_telegram_section
 
 
 def operator_requires_streaming(case) -> bool:
@@ -597,8 +603,9 @@ def run_operator_case(cfg, client, suite, scn, case, run_id, trial, judge_on):
            "main_models": [], "main_providers": [], "main_efforts": []}
 
     if operator_requires_streaming(case) and not eval_daemon_streaming_enabled(cfg):
-        rec["drive_error"] = ("streaming not enabled in the eval daemon: set "
-                              '[fermix_channels.telegram] streaming = "draft" (or "block") in '
+        rec["drive_error"] = ("streaming not enabled in the eval daemon: configure "
+                              "[fermix_channels.telegram] (streaming defaults on; remove any "
+                              'streaming = "off" line) in '
                               f"{cfg.daemon.fermix_home}/config.toml and RESTART the daemon")
         print(f"    FAIL precondition: {rec['drive_error']}")
         return {"id": case.id, "trial": trial, "outcome": "incomplete", "passed": False,
@@ -721,8 +728,15 @@ def _tool_failures(view) -> list[dict]:
     return failures
 
 
+_EVIDENCE_URL_LIMIT = 200
+
+
 def _tool_evidence(view, turn_index: int) -> dict:
     tools = []
+    # The same inventory the reply_urls_in_evidence gate checks (one source of
+    # truth, grade.evidence_urls); included so rubric judging can cite it and
+    # per-span byte truncation cannot hide a genuinely-tool-returned URL.
+    urls = grade.evidence_urls(view, limit=_EVIDENCE_URL_LIMIT)
     for span in view.tool_spans[:_EVIDENCE_TOOL_LIMIT]:
         metadata = span.get("metadata") or {}
         detail = {
@@ -739,13 +753,13 @@ def _tool_evidence(view, turn_index: int) -> dict:
             "evidence": _bounded_text(detail, _EVIDENCE_TOOL_MAX_BYTES),
         }
         proposed = tools + [candidate]
-        record = {"turn_index": turn_index, "tools": proposed,
+        record = {"turn_index": turn_index, "evidence_urls": urls, "tools": proposed,
                   "omitted_tool_spans": len(view.tool_spans) - len(proposed)}
         encoded = json.dumps(record, ensure_ascii=False).encode("utf-8")
         if len(encoded) > _EVIDENCE_RECORD_MAX_BYTES:
             break
         tools = proposed
-    return {"turn_index": turn_index, "tools": tools,
+    return {"turn_index": turn_index, "evidence_urls": urls, "tools": tools,
             "omitted_tool_spans": len(view.tool_spans) - len(tools)}
 
 
