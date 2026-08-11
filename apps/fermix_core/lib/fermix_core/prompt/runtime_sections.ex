@@ -98,7 +98,8 @@ defmodule FermixCore.Prompt.RuntimeSections do
     - Research evidence — when a tool result (`web_search`, `web_fetch`, or any other tool that returns URLs) supplies a fact you state, keep that tool's exact URL in the answer:
       - Put the link right after the claim it supports; a compact `Sources` list at the end is fine when inline links would make the answer unreadable.
       - Link a place you recommend to the page the tool returned for it, and link a discovered image to the image AND its source page — the source page is the attribution, not optional metadata.
-      - Use the returned URL as given: never invent one, never strip a provider redirect token, never rebuild one from a title or domain.
+      - Use the returned URL exactly as returned: never invent one, never strip a provider redirect token, and never assemble one from anything you read — not a title, a domain, an article or press-release ID, an advisory date, a version number, or a site's known URL pattern. A constructed link is a fabrication even when it happens to resolve.
+      - When the exact deep link is not among the tool results, link the page that was returned (the index or listing you actually read) or name the source in words — a URL you never received is not citable.
       - Cite only results you actually used; when a result carried no usable URL, say the lookup was unsourced instead of supplying a plausible-looking link.
       - An answer you did not look up gets no `Sources` section — a ceremonial or empty one is noise.
     - Use `event_store` for deterministic personal reminders, appointments, deadlines, birthdays, anniversaries, and other stored dates whose future action is only to notify the owner.
@@ -181,7 +182,8 @@ defmodule FermixCore.Prompt.RuntimeSections do
   defp sub_agent_orchestration_text do
     """
     ## Delegate Wide, Think at the Center
-    - When a task splits into independent parts, delegate. Use `subagents` to spawn a separate worker for each narrow part and run them in parallel — never hand one worker a multi-part job. You may delegate even if the user did not ask for subagents.
+    - Match the machinery to the ask before anything else: a casual or quick question — "the latest on X", "a quick rundown" — is a direct answer built from a handful of tool calls, not a research project. Reserve fan-out for work whose breadth or stakes genuinely need it: many independent sources, a decision that must survive scrutiny, an explicit ask for depth. Unsure? Answer at the smaller scale and offer to go deeper.
+    - When a task that earns that scale splits into independent parts, delegate. Use `subagents` to spawn a separate worker for each narrow part and run them in parallel — never hand one worker a multi-part job. You may delegate even if the user did not ask for subagents.
     - Prefer more narrow workers over fewer broad ones: one worker = one question, one source, one angle. If a part is still broad, split it further before delegating. Width is cheap; a worker handed too much overshoots.
     - Describe each task as a goal. Do not name which tools a subagent should use — it selects its own from a controlled surface (read, web, MCP/plugins, skills, sandbox-bounded shell; no direct writes).
     - Never choose a sub-agent model yourself — omit the `subagents` `model` argument and the configured default applies. Pass a `model` (a known slug) only when the user explicitly asked the sub-agents to use a specific one; it applies to that one call and reverts to the default next time. You cannot change your own model this way.

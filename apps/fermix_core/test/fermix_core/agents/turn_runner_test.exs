@@ -131,6 +131,41 @@ defmodule FermixCore.Agents.TurnRunnerTest do
     end
   end
 
+  # Hands the assembled prompt back to the test and finishes the turn, so the
+  # per-turn system-note splices can be asserted on the real request path.
+  defmodule CapturePromptAdapter do
+    @behaviour FermixCore.Providers.Adapter
+
+    @impl true
+    def chat(messages, _capabilities, opts) do
+      send(Keyword.fetch!(opts, :test_pid), {:captured_prompt, messages})
+
+      {:ok,
+       %{
+         content: "captured",
+         tool_calls: [],
+         provider_state: %{},
+         usage: %{prompt_tokens: 10, completion_tokens: 1, total_tokens: 11},
+         model: "mock-model"
+       }}
+    end
+
+    @impl true
+    def continue(_provider_state, _tool_results, _opts), do: {:error, :unexpected_continue}
+
+    @impl true
+    def to_provider_tools(capabilities), do: capabilities
+
+    @impl true
+    def parse_tool_calls(_response), do: []
+
+    @impl true
+    def parse_response(response), do: response
+
+    @impl true
+    def supports_streaming?, do: false
+  end
+
   defmodule FailingAdapter do
     @behaviour FermixCore.Providers.Adapter
 
@@ -1214,6 +1249,99 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       assert reply =~ "Sorry"
       refute reply =~ "/new"
     end
+  end
+
+  # CHANNEL_LONGFORM_PRESENTATION §7: the presentation note rides the same
+  # per-turn seam as the date note, spliced ahead of it.
+  describe "channel presentation note" do
+    test "a chat-channel turn carries the note in the leading system run, before the date" do
+      messages = capture_prompt(%{channel: "telegram", chat_id: "presentation_telegram"})
+
+      system_run = Enum.take_while(messages, &(&1.role == "system"))
+
+      presentation_index =
+        Enum.find_index(system_run, &(&1.content =~ "phone-width chat surface"))
+
+      date_index = Enum.find_index(system_run, &(&1.content =~ "Current date:"))
+
+      assert is_integer(presentation_index)
+      assert is_integer(date_index)
+      assert presentation_index < date_index
+      assert Enum.at(system_run, presentation_index).content =~ "Telegram renders a quote block"
+    end
+
+    test "a machine-surface turn carries no presentation note" do
+      messages = capture_prompt(%{channel: "acp", chat_id: "presentation_acp"})
+
+      refute Enum.any?(messages, &(&1.content =~ "phone-width chat surface"))
+      assert Enum.any?(messages, &(&1.content =~ "Current date:"))
+    end
+
+    test "a shared-chat turn adds the addressing line from the message metadata" do
+      messages =
+        capture_prompt(%{
+          channel: "telegram",
+          chat_id: "presentation_group",
+          metadata: %{chat_type: "supergroup"}
+        })
+
+      assert Enum.any?(messages, &(&1.content =~ "This is a shared chat"))
+    end
+
+    test "two consecutive turns of one conversation produce byte-identical note blocks" do
+      msg = %{channel: "discord", chat_id: "presentation_stable", metadata: %{chat_type: "guild"}}
+
+      first = presentation_note(capture_prompt(msg))
+      second = presentation_note(capture_prompt(msg))
+
+      assert first == second
+      assert first =~ "Discord caps a single message"
+    end
+  end
+
+  # Drive one real turn through TurnRunner and return the message list the
+  # provider adapter actually received.
+  defp capture_prompt(msg_overrides) do
+    registry_name = :"tr_prompt_reg_#{System.unique_integer([:positive])}"
+    store_name = :"tr_prompt_store_#{System.unique_integer([:positive])}"
+
+    # Unique child ids: byte-stability is proven by driving the SAME conversation
+    # twice, so two capture turns coexist under one test's supervisor.
+    start_supervised!(
+      Supervisor.child_spec({CapabilityRegistry, name: registry_name}, id: registry_name)
+    )
+
+    store =
+      start_supervised!(
+        Supervisor.child_spec(
+          {ConversationStore, name: store_name, max_messages: :infinity, repo: nil},
+          id: store_name
+        )
+      )
+
+    msg =
+      Map.merge(
+        %{sender: "user", content: "how does this render?", source_trust: :operator},
+        msg_overrides
+      )
+
+    turn_state =
+      turn_state(
+        adapter: CapturePromptAdapter,
+        adapter_opts: [model: "mock-model", test_pid: self()],
+        capability_registry: registry_name,
+        conversation_store: store
+      )
+
+    assert {:ok, "captured", _tokens} = TurnRunner.run(msg, turn_state, fn _part -> :ok end)
+    assert_receive {:captured_prompt, messages}, 5_000
+    messages
+  end
+
+  defp presentation_note(messages) do
+    Enum.find_value(messages, fn message ->
+      if message.content =~ "phone-width chat surface", do: message.content
+    end)
   end
 
   defp runtime_context do

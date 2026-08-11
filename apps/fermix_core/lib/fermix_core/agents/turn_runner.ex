@@ -34,6 +34,7 @@ defmodule FermixCore.Agents.TurnRunner do
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Memory.Compactor
   alias FermixCore.Memory.ConversationStore
+  alias FermixCore.Prompt.ChannelPresentation
   alias FermixCore.Prompt.CurrentDate
   alias FermixCore.Providers.Error, as: ProviderError
   alias FermixCore.Providers.Failover
@@ -319,9 +320,13 @@ defmodule FermixCore.Agents.TurnRunner do
       inbound_images: Map.get(msg, :media_parts) || []
     }
 
-    # The composed prompt + runtime section are cached per profile, so the
-    # current date can't live there (it would freeze until the cache is
-    # invalidated). Inject it fresh every turn instead.
+    # The composed prompt + runtime section are cached per profile, so neither
+    # the current date (it would freeze until the cache is invalidated) nor the
+    # channel's presentation posture (a profile is shared across channels) can
+    # live there. Inject both fresh every turn instead. Presentation goes FIRST
+    # because it is byte-stable for the conversation's lifetime, which keeps the
+    # date note's once-a-day churn the only churn in this prompt region.
+    messages = inject_channel_presentation(messages, msg)
     messages = inject_current_date(messages)
 
     # `/ultra` is now a run-mode of the normal turn (not a separate
@@ -394,9 +399,21 @@ defmodule FermixCore.Agents.TurnRunner do
 
   # Kept in the leading system run (the Anthropic adapter requires system
   # messages to lead) so the date sits with the rest of the system prompt.
-  defp inject_current_date(messages) do
+  defp inject_current_date(messages), do: append_system_note(messages, CurrentDate.note())
+
+  # Per-channel presentation posture (CHANNEL_LONGFORM_PRESENTATION §7). A pure
+  # function of the channel and chat type — both `ConversationKey`-stable — so
+  # the block is byte-identical across every turn of a conversation. Machine and
+  # terminal surfaces return nil and the prompt is left untouched.
+  defp inject_channel_presentation(messages, msg) do
+    append_system_note(messages, ChannelPresentation.note(msg.channel, chat_type_of(msg)))
+  end
+
+  defp append_system_note(messages, nil), do: messages
+
+  defp append_system_note(messages, note) when is_binary(note) do
     {system_run, rest} = Enum.split_while(messages, &(&1.role == "system"))
-    system_run ++ [%{role: "system", content: CurrentDate.note()}] ++ rest
+    system_run ++ [%{role: "system", content: note}] ++ rest
   end
 
   # Insert the ultra-mode addendum as the last leading system message — after

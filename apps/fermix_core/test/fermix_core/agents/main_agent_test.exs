@@ -895,16 +895,21 @@ defmodule FermixCore.Agents.MainAgentTest do
       # Verify provider received messages including history
       [{messages, _opts}] = MockProvider.get_calls()
 
-      # Should have: composed systems + datetime note + 2 history messages + new user message
-      assert length(messages) == 7
+      # Should have: composed systems + presentation note + datetime note
+      # + 2 history messages + new user message
+      assert length(messages) == 8
 
-      [identity, fermix, runtime, datetime, hist_user, hist_assistant, new_user] = messages
+      [identity, fermix, runtime, presentation, datetime, hist_user, hist_assistant, new_user] =
+        messages
+
       assert identity.role == "system"
       assert identity.content == Defaults.identity_md()
       assert fermix.role == "system"
       assert fermix.content == Defaults.fermix_md()
       assert runtime.role == "system"
       assert runtime.content =~ "## Runtime Contract"
+      assert presentation.role == "system"
+      assert presentation.content =~ "phone-width chat surface"
       assert datetime.role == "system"
       assert datetime.content =~ "Current date:"
       assert hist_user.role == "user"
@@ -924,10 +929,11 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert_receive {:reply, "No prompt files"}, 5_000
 
       [{messages, _opts}] = MockProvider.get_calls()
-      [identity, fermix, runtime, datetime, user] = messages
+      [identity, fermix, runtime, presentation, datetime, user] = messages
       assert identity.role == "system"
       assert fermix.role == "system"
       assert runtime.role == "system"
+      assert presentation.content =~ "phone-width chat surface"
       assert datetime.content =~ "Current date:"
       refute Enum.any?(messages, &(&1.content =~ "## Preferences"))
       refute Enum.any?(messages, &(&1.content =~ "## Working Rules"))
@@ -950,7 +956,7 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert_receive {:reply, "Fallback prompt"}, 5_000
 
       [{messages, _opts}] = MockProvider.get_calls()
-      [identity, fermix, runtime, datetime, user] = messages
+      [identity, fermix, runtime, presentation, datetime, user] = messages
 
       refute File.exists?(identity_path)
       refute File.exists?(fermix_path)
@@ -959,6 +965,7 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert identity.content == Defaults.identity_md()
       assert fermix.content == Defaults.fermix_md()
       assert runtime.content =~ "## Runtime Contract"
+      assert presentation.content =~ "phone-width chat surface"
       assert datetime.content =~ "Current date:"
       assert user.content == "Hello first run"
     end
@@ -976,10 +983,11 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert_receive {:reply, "Empty prompt files"}, 5_000
 
       [{messages, _opts}] = MockProvider.get_calls()
-      [identity, fermix, runtime, datetime, user] = messages
+      [identity, fermix, runtime, presentation, datetime, user] = messages
       assert identity.role == "system"
       assert fermix.role == "system"
       assert runtime.role == "system"
+      assert presentation.content =~ "phone-width chat surface"
       assert datetime.content =~ "Current date:"
       refute Enum.any?(messages, &(&1.content =~ "## Preferences"))
       refute Enum.any?(messages, &(&1.content =~ "## Working Rules"))
@@ -1001,10 +1009,11 @@ defmodule FermixCore.Agents.MainAgentTest do
       [{messages, _opts}] = MockProvider.get_calls()
       # Stable parts (bootstrap, runtime contract) precede the volatile
       # memory context (M10 P1 cache stratification).
-      [identity, fermix, runtime, memory_context, datetime, user] = messages
+      [identity, fermix, runtime, memory_context, presentation, datetime, user] = messages
       assert identity.role == "system"
       assert fermix.role == "system"
       assert runtime.content =~ "## Runtime Contract"
+      assert presentation.content =~ "phone-width chat surface"
       assert memory_context.content =~ "<memory-context>"
       assert memory_context.content =~ "USER PROFILE (who the user is)"
       assert memory_context.content =~ "## Preferences\n- editor: vim"
@@ -1040,22 +1049,29 @@ defmodule FermixCore.Agents.MainAgentTest do
                "system",
                "system",
                "system",
+               "system",
                "user"
              ]
 
       memory_context = Enum.at(messages, 4).content
-      datetime = Enum.at(messages, 5).content
+      presentation = Enum.at(messages, 5).content
+      datetime = Enum.at(messages, 6).content
 
-      # Stable bootstrap + runtime precede volatile memory (M10 P1).
+      # Stable bootstrap + runtime precede volatile memory (M10 P1); the
+      # byte-stable presentation note precedes the daily-churning date note
+      # (CHANNEL_LONGFORM_PRESENTATION §7).
       assert Enum.map(messages, & &1.content) == [
                "IDENTITY bootstrap",
                "SOUL bootstrap",
                "AGENTS bootstrap",
                runtime_message(messages).content,
                memory_context,
+               presentation,
                datetime,
                "Hello with bootstrap"
              ]
+
+      assert presentation =~ "phone-width chat surface"
 
       assert memory_context =~ "<memory-context>"
       assert memory_context =~ "USER memory"
