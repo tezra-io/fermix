@@ -48,6 +48,12 @@ defmodule FermixCore.Prompt.RuntimeSectionsTest do
     assert content =~ "Use `expires_at` for temporary"
     assert content =~ "Prefer direct Fermix built-ins over shell"
     assert content =~ "## Delegate Wide, Think at the Center"
+    # Effort calibration leads the section: scale is decided before the split
+    # (live eval catch: "a quick rundown" answered with a 6-subagent,
+    # 6.1M-token research fan-out that blew the duration budget).
+    assert content =~ "Match the machinery to the ask"
+    assert content =~ "not a research project"
+    assert content =~ "offer to go deeper"
     assert content =~ "Prefer more narrow workers over fewer broad ones"
     assert content =~ "Use `subagents`"
   end
@@ -69,9 +75,16 @@ defmodule FermixCore.Prompt.RuntimeSectionsTest do
     # image links to both the image and its source page.
     assert content =~ "Link a place you recommend"
     assert content =~ "link a discovered image to the image AND its source page"
-    # §9.5 — the exact returned URL, never invented or rebuilt.
-    assert content =~
-             "never invent one, never strip a provider redirect token, never rebuild one"
+    # §9.5 — the exact returned URL, never invented or assembled. Names the
+    # observed fabrication classes (live eval catches: an OpenSSL advisory URL
+    # built from a date, an ESA press-release URL built from an article ID).
+    assert content =~ "never assemble one from anything you read"
+    assert content =~ "press-release ID, an advisory date, a version number"
+    assert content =~ "fabrication even when it happens to resolve"
+    # §9.5b — the fallback when the deep link never arrived: cite the page that
+    # did, never the URL you never received.
+    assert content =~ "link the page that was returned"
+    assert content =~ "a URL you never received is not citable"
 
     # §9.6 — unused results are not citations.
     assert content =~ "Cite only results you actually used"
