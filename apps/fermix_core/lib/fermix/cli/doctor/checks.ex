@@ -1356,7 +1356,11 @@ defmodule Fermix.CLI.Doctor.Checks do
   Channel streaming configuration sanity (docs/design/CHANNEL_STREAMING.md §7):
   `streaming = "draft"` on a channel that cannot edit drafts is a silent no-op
   at runtime, so doctor is the loud boundary. `"block"` sends ordinary messages
-  and works on every channel — nothing to validate. There is deliberately no
+  and works on every channel — nothing to validate. A configured channel that
+  sets no `streaming` key reports its default, which is capability-derived
+  ("draft" where the channel can edit in place, "block" otherwise), so only an
+  explicit `streaming = "draft"` on an edit-less channel can be misconfigured.
+  There is deliberately no
   provider-streaming check — env overrides and per-run profiles make a
   config-derived provider warning wrong in both directions; provider capability
   shows up in stream telemetry instead.
@@ -1377,7 +1381,7 @@ defmodule Fermix.CLI.Doctor.Checks do
         )
 
       enabled == [] ->
-        ok("channel streaming", "off (no channel opted in)")
+        ok("channel streaming", "off (no configured channel streams)")
 
       true ->
         ok(

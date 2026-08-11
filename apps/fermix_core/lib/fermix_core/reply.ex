@@ -45,10 +45,6 @@ defmodule FermixCore.Reply do
     "channel is rate limited; retry after #{format_duration(retry_after_ms)}"
   end
 
-  def format_delivery_error({:text_cap_exceeded, actual, allowed}) do
-    "reply text is #{actual} characters; limit is #{allowed} characters"
-  end
-
   def format_delivery_error({:http_status, status}) do
     "channel rejected the message with HTTP #{status}"
   end

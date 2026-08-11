@@ -445,9 +445,81 @@ defmodule FermixChannels.Channels.SlackTest do
       assert {:error, {:permanent, :adapter_unavailable}} = Slack.send_message("D12345", "hello")
     end
 
-    test "rejects text over Slack's hard truncation bound before send" do
-      assert {:error, {:text_cap_exceeded, 40_001, 40_000}} =
-               Slack.send_message("D12345", String.duplicate("a", 40_001))
+    # CHANNEL_LONGFORM_PRESENTATION §3.1: a reply over Slack's hard truncation
+    # bound is split on the shared boundary ladder and delivered as sequential
+    # messages instead of being refused.
+    test "splits text over Slack's hard truncation bound into sequential sends" do
+      stub_recording_sends(fail_at: nil)
+
+      text = paragraph_fixture(400)
+
+      assert :ok = Slack.send_message("D12345", text)
+
+      chunks = collect_chunks()
+      assert length(chunks) == 3
+      assert Enum.all?(chunks, &(String.length(&1) <= 40_000))
+      # Paragraph-boundary cuts: rejoining reproduces the source exactly.
+      assert Enum.join(chunks, "\n\n") == String.trim(text)
+    end
+
+    test "cuts long text on word boundaries, never mid-word" do
+      stub_recording_sends(fail_at: nil)
+
+      text = sentence_fixture(1_500)
+
+      assert :ok = Slack.send_message("D12345", text)
+
+      chunks = collect_chunks()
+      assert length(chunks) > 1
+      # A chunk that began or ended mid-word would split one source word in two.
+      assert Enum.flat_map(chunks, &String.split/1) == String.split(text)
+    end
+
+    test "the first failing chunk aborts the remaining sends" do
+      stub_recording_sends(fail_at: 2)
+
+      assert {:error, {:permanent, :invalid_destination}} =
+               Slack.send_message("D12345", paragraph_fixture(400))
+
+      # Three chunks were due; the send stopped at the failure.
+      assert length(collect_chunks()) == 2
+    end
+
+    test "sends under-cap text as a single unchanged message" do
+      stub_recording_sends(fail_at: nil)
+
+      assert :ok = Slack.send_message("D12345", "short reply")
+
+      assert collect_chunks() == ["short reply"]
+    end
+
+    # CHANNEL_LONGFORM_PRESENTATION §3.1, S4: Slack reads mrkdwn, not Markdown,
+    # so a long model reply must arrive both TRANSFORMED and SPLIT — the two
+    # halves have to hold together, because the splitter runs on the Markdown
+    # and the renderer runs on each chunk it produced.
+    test "a long markdown reply arrives transformed and split on section boundaries" do
+      stub_recording_sends(fail_at: nil)
+
+      assert :ok = Slack.send_message("D12345", markdown_fixture(400))
+
+      chunks = collect_chunks()
+      assert length(chunks) > 1
+      assert Enum.all?(chunks, &(String.length(&1) <= 40_000))
+
+      # Transformed: no Markdown syntax survives anywhere in the sequence.
+      assert Enum.all?(chunks, &(not String.contains?(&1, "**")))
+      assert Enum.all?(chunks, &(not String.contains?(&1, "## ")))
+      assert Enum.all?(chunks, &(not String.contains?(&1, "](http")))
+
+      # ... and the mrkdwn forms are actually there.
+      first = hd(chunks)
+      assert first =~ "*Overview 1*"
+      assert first =~ "<https://example.com/site/1|dive site 1>"
+      assert first =~ "• bullet 1 alpha"
+
+      # Boundaries stay clean: every message opens on a section heading, so no
+      # chunk stranded one at its tail and none starts mid-sentence.
+      assert Enum.all?(chunks, &String.starts_with?(&1, "*Section "))
     end
 
     test "returns structured rate limit errors when Slack provides Retry-After" do
@@ -521,6 +593,82 @@ defmodule FermixChannels.Channels.SlackTest do
     end
   end
 
+  # -- telemetry --
+
+  # One delivered message is one outbound row (design §8). Before S4 the adapter
+  # emitted a single `count: N` row only when EVERY chunk of a reply landed — so
+  # a reply that half-landed reported nothing at all.
+  describe "outbound telemetry" do
+    defp attach_message_events(handler_id) do
+      :ok =
+        :telemetry.attach(
+          handler_id,
+          [:fermix, :channel, :message],
+          fn event, measurements, metadata, pid ->
+            send(pid, {:telemetry, event, measurements, metadata})
+          end,
+          self()
+        )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+    end
+
+    # Drains the outbound `channel_msg` rows recorded so far, in emission order.
+    defp outbound_rows(acc \\ []) do
+      receive do
+        {:telemetry, [:fermix, :channel, :message], measurements,
+         %{direction: :outbound} = metadata} ->
+          outbound_rows([{measurements, metadata} | acc])
+      after
+        0 -> Enum.reverse(acc)
+      end
+    end
+
+    defp assert_single_message_row({measurements, metadata}) do
+      assert measurements.count == 1
+      assert measurements.duration_us >= 0
+      assert metadata.channel == :slack
+      assert metadata.direction == :outbound
+    end
+
+    test "emits one row per delivered chunk, not one row per reply" do
+      attach_message_events("test-slack-outbound-per-chunk")
+      stub_recording_sends(fail_at: nil)
+
+      assert :ok = Slack.send_message("D12345", paragraph_fixture(400))
+
+      chunks = collect_chunks()
+      assert length(chunks) == 3
+
+      rows = outbound_rows()
+      assert length(rows) == length(chunks)
+      Enum.each(rows, &assert_single_message_row/1)
+    end
+
+    test "a partial failure leaves truthful rows for the chunks that were delivered" do
+      attach_message_events("test-slack-outbound-partial")
+      stub_recording_sends(fail_at: 2)
+
+      assert {:error, {:permanent, :invalid_destination}} =
+               Slack.send_message("D12345", paragraph_fixture(400))
+
+      # Chunk 1 reached the channel and chunk 2 was rejected: exactly one row,
+      # where the all-or-nothing emission reported none.
+      assert [row] = outbound_rows()
+      assert_single_message_row(row)
+    end
+
+    test "a send that fails on its first chunk emits nothing" do
+      attach_message_events("test-slack-outbound-first-chunk-failed")
+      stub_recording_sends(fail_at: 1)
+
+      assert {:error, {:permanent, :invalid_destination}} =
+               Slack.send_message("D12345", "short reply")
+
+      assert outbound_rows() == []
+    end
+  end
+
   describe "health_check/1" do
     test "returns ok when auth.test accepts the bot token" do
       Req.Test.stub(:slack, fn conn ->
@@ -561,6 +709,79 @@ defmodule FermixChannels.Channels.SlackTest do
 
       assert {:error, {:network, %Req.TransportError{reason: :timeout}}} = Slack.health_check()
     end
+  end
+
+  # -- outbound chunking fixtures --
+
+  # Records every outbound message text, and with `fail_at:` rejects exactly
+  # that 1-based send so the sequencing after a failure is observable.
+  defp stub_recording_sends(opts) do
+    test_pid = self()
+    fail_at = Keyword.fetch!(opts, :fail_at)
+    counter = :counters.new(1, [])
+
+    Req.Test.stub(:slack, fn conn ->
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
+      :counters.add(counter, 1, 1)
+      send(test_pid, {:slack_chunk, Jason.decode!(body)["text"]})
+      respond_chunk(conn, :counters.get(counter, 1), fail_at)
+    end)
+  end
+
+  # Slack answers 200 with `ok: false` for API-level rejections.
+  defp respond_chunk(conn, index, fail_at) when index == fail_at do
+    Req.Test.json(conn, %{"ok" => false, "error" => "channel_not_found"})
+  end
+
+  defp respond_chunk(conn, _index, _fail_at) do
+    Req.Test.json(conn, %{"ok" => true, "ts" => "1714000000.000200"})
+  end
+
+  @max_recorded_chunks 32
+
+  defp collect_chunks, do: collect_chunks(@max_recorded_chunks, [])
+
+  defp collect_chunks(0, _acc) do
+    raise "more than #{@max_recorded_chunks} chunk sends recorded"
+  end
+
+  defp collect_chunks(remaining, acc) do
+    receive do
+      {:slack_chunk, text} -> collect_chunks(remaining - 1, [text | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
+  end
+
+  # A model-shaped reply: sectioned, with every inline construct the dialect
+  # rewrites, so the adapter test sees the same text the golden set does.
+  defp markdown_fixture(count) do
+    Enum.map_join(1..count, "\n\n", &fixture_section/1)
+  end
+
+  defp fixture_section(n) do
+    """
+    ## Section #{n}
+
+    **Overview #{n}** covers [dive site #{n}](https://example.com/site/#{n}) and _tides_.
+
+    - bullet #{n} alpha
+    - bullet #{n} bravo\
+    """
+  end
+
+  defp paragraph_fixture(count) do
+    Enum.map_join(1..count, "\n\n", &fixture_paragraph/1)
+  end
+
+  defp fixture_paragraph(n) do
+    "Paragraph #{n}. " <> Enum.map_join(1..20, " ", fn w -> "word-#{n}-#{w}" end) <> "."
+  end
+
+  defp sentence_fixture(count) do
+    Enum.map_join(1..count, " ", fn n ->
+      "Sentence #{n} about alpha bravo charlie delta echo foxtrot golf hotel."
+    end)
   end
 
   defp dm_payload(text) do

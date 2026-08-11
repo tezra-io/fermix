@@ -793,6 +793,46 @@ defmodule FermixCore.Setup.DoctorTest do
 
       refute Enum.any?(report, &(&1.channel == :unconfigured_channel))
     end
+
+    test "an unset streaming key reports the capability-derived default" do
+      Application.put_env(:fermix_channels, :channel_registry, [
+        %{
+          name: "drafty",
+          config_key: :drafty_channel,
+          adapter: DraftCapableAdapter,
+          remote?: true,
+          transport: :webhook,
+          child: nil
+        },
+        %{
+          name: "plain",
+          config_key: :plain_channel,
+          adapter: NoStreamAdapter,
+          remote?: true,
+          transport: :webhook,
+          child: nil
+        }
+      ])
+
+      # Configured, but neither sets `streaming` — exactly what a fresh install
+      # and every upgrader's config.toml look like.
+      Application.put_env(:fermix_channels, :drafty_channel, enabled: true)
+      Application.put_env(:fermix_channels, :plain_channel, enabled: true)
+
+      on_exit(fn ->
+        Application.delete_env(:fermix_channels, :channel_registry)
+        Application.delete_env(:fermix_channels, :drafty_channel)
+        Application.delete_env(:fermix_channels, :plain_channel)
+      end)
+
+      report = Doctor.streaming_config_report()
+
+      assert %{channel: :drafty_channel, streaming: "draft", capability: :draft_edit} =
+               Enum.find(report, &(&1.channel == :drafty_channel))
+
+      assert %{channel: :plain_channel, streaming: "block", capability: :none} =
+               Enum.find(report, &(&1.channel == :plain_channel))
+    end
   end
 
   describe "network errors" do

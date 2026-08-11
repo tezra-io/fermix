@@ -93,8 +93,8 @@ defmodule FermixOpik.Mapper do
 
   @doc """
   Build a draft-stream lifecycle span from a `[:fermix, :channel, :stream]`
-  event (phases `:open`/`:seal`/`:discard`; see docs/design/CHANNEL_STREAMING.md
-  §8 in the fermix repo).
+  event (phases `:open`/`:block`/`:rotate`/`:seal`/`:discard`; see
+  docs/design/CHANNEL_STREAMING.md §8 in the fermix repo).
   """
   @spec stream_span(map(), map(), keyword()) :: map()
   def stream_span(metadata, measurements, opts) do

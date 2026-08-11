@@ -1,6 +1,8 @@
 defmodule FermixChannels.Gateway.DraftStreamTest do
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog
+
   alias FermixChannels.Gateway.DraftStream
   alias FermixChannels.Gateway.DraftStream.Spec
 
@@ -338,6 +340,35 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
     end)
   end
 
+  # A block spec that can also send (and later delete) ephemeral thought
+  # messages — the S1 shape for a channel that supports deletion. Every
+  # ephemeral send answers with one deterministic id so a test can pin exactly
+  # which ids the sweep deletes.
+  defp ephemeral_block_spec(test_pid, overrides \\ []) do
+    {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+    spec =
+      DraftStream.build_block_spec(
+        "fake",
+        fn text ->
+          send(test_pid, {:block_sent, text})
+          :ok
+        end,
+        ephemeral_send: fn text ->
+          n = Agent.get_and_update(counter, fn n -> {n + 1, n + 1} end)
+          ids = ["id-#{n}"]
+          send(test_pid, {:thought_sent, text, ids})
+          {:ok, ids}
+        end,
+        delete: fn id ->
+          send(test_pid, {:thought_deleted, id})
+          :ok
+        end
+      )
+
+    struct!(spec, overrides)
+  end
+
   # Tiny thresholds so tests don't need 800-char fixtures.
   @block_fast [
     edit_interval_ms: 1,
@@ -509,7 +540,7 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
     end
 
     test "reasoning_done shows only the thought heading, not the summary body" do
-      pid = DraftStream.start_link(block_spec(self()), @block_fast)
+      pid = DraftStream.start_link(ephemeral_block_spec(self()), @block_fast)
 
       summary =
         "**Checking the weather tool**\n\n" <>
@@ -517,7 +548,7 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
           "tool for Singapore first and then summarize the precipitation forecast."
 
       DraftStream.push(pid, {:reasoning_done, summary})
-      assert_receive {:block_sent, "💭 Checking the weather tool"}, 1_000
+      assert_receive {:thought_sent, "💭 Checking the weather tool", _ids}, 1_000
 
       DraftStream.push(pid, {:text_delta, "Checking the weather now, one moment please."})
       DraftStream.push(pid, {:text_done, "Checking the weather now, one moment please."})
@@ -527,18 +558,18 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
     end
 
     test "multi-part reasoning joins its headings into one 💭 line" do
-      pid = DraftStream.start_link(block_spec(self()), @block_fast)
+      pid = DraftStream.start_link(ephemeral_block_spec(self()), @block_fast)
 
       summary =
         "**Reading the config**\n\nFirst I need the current values.\n\n" <>
           "**Planning the edit**\n\nThen I'll apply the change."
 
       DraftStream.push(pid, {:reasoning_done, summary})
-      assert_receive {:block_sent, "💭 Reading the config · Planning the edit"}, 1_000
+      assert_receive {:thought_sent, "💭 Reading the config · Planning the edit", _ids}, 1_000
     end
 
     test "a headingless reasoning summary falls back to a truncated first line" do
-      pid = DraftStream.start_link(block_spec(self()), @block_fast)
+      pid = DraftStream.start_link(ephemeral_block_spec(self()), @block_fast)
 
       long_first_line =
         "The user is asking about umbrella weather so I will check the forecast " <>
@@ -546,18 +577,19 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
 
       DraftStream.push(pid, {:reasoning_done, long_first_line <> "\nsecond line"})
 
-      assert_receive {:block_sent, "💭 " <> shown}, 1_000
+      assert_receive {:thought_sent, "💭 " <> shown, _ids}, 1_000
       assert String.length(shown) <= 80
       assert String.ends_with?(shown, "…")
       assert String.starts_with?(long_first_line, String.trim_trailing(shown, "…"))
     end
 
-    test "draft mode ignores reasoning_done and treats text_done as a snapshot" do
+    test "draft mode routes reasoning_done to the 💭 status bubble, text_done to the draft" do
+      # S2 replaces S1's "draft mode drops thoughts": a draft-capable channel
+      # shows them in one rolling status bubble instead (design §6).
       pid = DraftStream.start_link(spec(self()), @fast)
 
       DraftStream.push(pid, {:reasoning_done, "thinking about it"})
-      Process.sleep(50)
-      refute_received {:open, _text}
+      assert_receive {:open, "💭 thinking about it"}, 1_000
 
       DraftStream.push(pid, {:text_done, "the full final answer text"})
       assert_receive {:open, "the full final answer text"}, 1_000
@@ -603,6 +635,681 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
       assert {:ok, _tail} = DraftStream.seal(pid, two_paras <> " end.")
       assert_receive {:stream_telemetry, :seal, seal_meas}
       assert seal_meas.total_edits == 2
+    end
+  end
+
+  # -- S1: conditional final drain (CHANNEL_LONGFORM_PRESENTATION §5) --
+
+  describe "block mode: text_done drain" do
+    test "an over-max remainder is cut on a paragraph boundary, never a blind slice" do
+      pid = DraftStream.start_link(block_spec(self()), @block_fast)
+
+      text =
+        "Paragraph one, padded out.\n\nParagraph two, also padded out here.\n\n" <>
+          "Paragraph three, the tail of the answer."
+
+      DraftStream.push(pid, {:text_delta, text})
+      DraftStream.push(pid, {:text_done, text})
+
+      assert_receive {:block_sent, "Paragraph one, padded out."}, 1_000
+      assert_receive {:block_sent, "Paragraph two, also padded out here."}, 1_000
+      assert_receive {:block_sent, "Paragraph three, the tail of the answer."}, 1_000
+
+      assert {:ok, nil} = DraftStream.seal(pid, text)
+    end
+
+    test "a fence-unbalanced remainder flushes whole instead of wedging until seal" do
+      pid = DraftStream.start_link(block_spec(self()), @block_fast)
+
+      text =
+        "```elixir\ndefmodule A do\n  def go, do: :ok\nend\n" <>
+          "still inside the fence and going on past the window"
+
+      DraftStream.push(pid, {:text_delta, text})
+      Process.sleep(20)
+      # No balanced cut exists inside the window, so nothing streams yet.
+      refute_received {:block_sent, _text}
+
+      DraftStream.push(pid, {:text_done, text})
+
+      # One send, the whole remainder — the adapter ladder-splits it safely.
+      assert_receive {:block_sent, sent}, 1_000
+      assert sent == text
+      refute_received {:block_sent, _more}
+
+      assert {:ok, nil} = DraftStream.seal(pid, text)
+    end
+  end
+
+  # -- S1: answer priority + thought coalescing (§5) --
+
+  describe "block mode: thought priority and coalescing" do
+    test "answer text wins the tick; queued thoughts drain after it" do
+      pid =
+        DraftStream.start_link(
+          ephemeral_block_spec(self()),
+          edit_interval_ms: 100,
+          block_min_chars: 20,
+          block_max_chars: 60,
+          idle_flush_ms: 60_000
+        )
+
+      # The first send opens the throttle window, so the next two events both
+      # sit pending for the same tick.
+      DraftStream.push(pid, {:text_delta, "Paragraph one, padded out.\n\n"})
+      assert_receive {:block_sent, "Paragraph one, padded out."}, 1_000
+
+      DraftStream.push(pid, {:reasoning_done, "**Checking the calendar**\n\nbody text"})
+
+      DraftStream.push(
+        pid,
+        {:text_delta, "Paragraph one, padded out.\n\nParagraph two, padded out.\n\n"}
+      )
+
+      assert_receive next, 1_000
+      assert {:block_sent, "Paragraph two, padded out."} = next
+      assert_receive {:thought_sent, "💭 Checking the calendar", _ids}, 1_000
+    end
+
+    test "queued thoughts coalesce into exactly one 💭 message with one prefix" do
+      pid =
+        DraftStream.start_link(
+          ephemeral_block_spec(self()),
+          edit_interval_ms: 120,
+          block_min_chars: 20,
+          block_max_chars: 200,
+          idle_flush_ms: 60_000
+        )
+
+      # The first thought drains alone and opens the throttle window.
+      DraftStream.push(pid, {:reasoning_done, "**First thought**\n\nbody text"})
+      assert_receive {:thought_sent, "💭 First thought", _first_ids}, 1_000
+
+      for heading <- ["**Alpha**", "**Beta**", "**Gamma**"] do
+        DraftStream.push(pid, {:reasoning_done, heading <> "\n\nbody text"})
+      end
+
+      assert_receive {:thought_sent, coalesced, _ids}, 1_000
+      assert coalesced == "💭 Alpha\nBeta\nGamma"
+      refute_received {:thought_sent, _more, _more_ids}
+    end
+  end
+
+  # -- S1: ephemeral thought sweep (§5, decision §9.1/§9.2) --
+
+  describe "block mode: thought sweep" do
+    test "sent thought ids accumulate and the seal deletes each exactly once" do
+      pid = DraftStream.start_link(ephemeral_block_spec(self()), @block_fast)
+
+      DraftStream.push(pid, {:reasoning_done, "**First thought**\n\nbody"})
+      assert_receive {:thought_sent, "💭 First thought", ["id-1"]}, 1_000
+
+      DraftStream.push(pid, {:reasoning_done, "**Second thought**\n\nbody"})
+      assert_receive {:thought_sent, "💭 Second thought", ["id-2"]}, 1_000
+
+      assert {:ok, :no_draft} = DraftStream.seal(pid, "the answer")
+
+      # The sweep runs after the seal reply lands — wait for it.
+      assert_receive {:thought_deleted, "id-1"}, 1_000
+      assert_receive {:thought_deleted, "id-2"}, 1_000
+      refute_received {:thought_deleted, _again}
+    end
+
+    test "discard sweeps every thought it sent" do
+      pid = DraftStream.start_link(ephemeral_block_spec(self()), @block_fast)
+
+      DraftStream.push(pid, {:reasoning_done, "**Only thought**\n\nbody"})
+      assert_receive {:thought_sent, "💭 Only thought", ["id-1"]}, 1_000
+
+      assert :ok = DraftStream.discard(pid)
+      assert_receive {:thought_deleted, "id-1"}, 1_000
+    end
+
+    test "a failed delete is logged, never retried, and the seal still returns" do
+      test_pid = self()
+
+      failing_delete = fn id ->
+        send(test_pid, {:thought_deleted, id})
+        if id == "id-1", do: {:error, :gone}, else: :ok
+      end
+
+      pid =
+        DraftStream.start_link(
+          ephemeral_block_spec(self(), delete: failing_delete),
+          @block_fast
+        )
+
+      DraftStream.push(pid, {:reasoning_done, "**First thought**\n\nbody"})
+      assert_receive {:thought_sent, _first, ["id-1"]}, 1_000
+
+      DraftStream.push(pid, {:reasoning_done, "**Second thought**\n\nbody"})
+      assert_receive {:thought_sent, _second, ["id-2"]}, 1_000
+
+      log =
+        capture_log(fn ->
+          assert {:ok, :no_draft} = DraftStream.seal(pid, "the answer")
+          # Sweep (and its warning) happens after the reply — hold the capture
+          # open until both deletes have run.
+          assert_receive {:thought_deleted, "id-1"}, 1_000
+          assert_receive {:thought_deleted, "id-2"}, 1_000
+        end)
+
+      assert log =~ "gone"
+      refute_received {:thought_deleted, _retry}
+    end
+
+    test "a slow delete never delays the seal reply (swept after the reply)" do
+      test_pid = self()
+
+      slow_delete = fn id ->
+        Process.sleep(400)
+        send(test_pid, {:thought_deleted, id})
+        :ok
+      end
+
+      pid =
+        DraftStream.start_link(
+          ephemeral_block_spec(self(), delete: slow_delete),
+          @block_fast
+        )
+
+      DraftStream.push(pid, {:reasoning_done, "**Only thought**\n\nbody"})
+      assert_receive {:thought_sent, _text, ["id-1"]}, 1_000
+
+      # Sync window (200 ms) shorter than one delete (400 ms): before the
+      # ordering fix this returned {:error, :draft_stream_timeout} and the
+      # queue re-delivered the full reply — a duplicated message in chat.
+      assert {:ok, :no_draft} = DraftStream.seal(pid, "the answer", 200)
+      assert_receive {:thought_deleted, "id-1"}, 2_000
+    end
+
+    test "a spec without ephemeral support drops thoughts instead of sending them" do
+      test_pid = self()
+
+      answer_only = fn text ->
+        if String.starts_with?(text, "💭"), do: raise("a thought reached the answer path")
+        send(test_pid, {:block_sent, text})
+        :ok
+      end
+
+      pid =
+        DraftStream.start_link(
+          DraftStream.build_block_spec("fake", answer_only),
+          @block_fast
+        )
+
+      DraftStream.push(pid, {:reasoning_done, "**Dropped thought**\n\nbody"})
+      Process.sleep(30)
+      refute_received {:block_sent, _text}
+      assert Process.alive?(pid)
+
+      DraftStream.push(pid, {:text_delta, "The answer paragraph, padded.\n\n"})
+      assert_receive {:block_sent, "The answer paragraph, padded."}, 1_000
+    end
+
+    test "a half-wired thought sweep is refused at spec build" do
+      assert_raise ArgumentError, fn ->
+        DraftStream.build_block_spec("fake", fn _text -> :ok end,
+          ephemeral_send: fn _text -> {:ok, []} end
+        )
+      end
+    end
+  end
+
+  # -- S2: draft rotation (CHANNEL_LONGFORM_PRESENTATION §6) -------------------
+
+  # The draft spec the gateway builds for a draft-capable channel: the rotation
+  # pair is wired, and every open answers with a FRESH handle so a test can tell
+  # the sealed bubbles apart from the live one.
+  defp rotating_spec(test_pid, overrides \\ []) do
+    {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+    base = %Spec{
+      channel: "fake",
+      open: fn text ->
+        n = Agent.get_and_update(counter, fn n -> {n + 1, n + 1} end)
+        handle = {:bubble, n}
+        send(test_pid, {:open, handle, text})
+        {:ok, handle}
+      end,
+      edit: fn handle, text ->
+        send(test_pid, {:edit, handle, text})
+        :ok
+      end,
+      seal: fn handle, text ->
+        send(test_pid, {:seal, handle, text})
+        {:ok, nil}
+      end,
+      discard: fn handle ->
+        send(test_pid, {:discard, handle})
+        :ok
+      end,
+      measure: &String.length/1,
+      rotate_at: 60
+    }
+
+    struct!(base, overrides)
+  end
+
+  @rotate_fast [edit_interval_ms: 1, min_draft_chars: 1]
+
+  @para_one "Paragraph one, padded out to a good size here."
+  @para_two "Paragraph two is still streaming in"
+  @two_paras "Paragraph one, padded out to a good size here.\n\n" <>
+               "Paragraph two is still streaming in"
+
+  describe "draft rotation" do
+    test "seals the live bubble at the card boundary and opens a fresh one" do
+      pid = DraftStream.start_link(rotating_spec(self()), @rotate_fast)
+
+      DraftStream.push(pid, {:text_delta, @two_paras})
+
+      assert_receive {:open, {:bubble, 1}, @two_paras}, 1_000
+      assert_receive {:seal, {:bubble, 1}, @para_one}, 1_000
+
+      # The next flush opens a NEW bubble holding only the live slice — the
+      # sealed card is never re-rendered.
+      DraftStream.push(pid, {:text_delta, @two_paras <> " and finishes."})
+      assert_receive {:open, {:bubble, 2}, live}, 1_000
+      assert live == @para_two <> " and finishes."
+    end
+
+    test "no rotation while the whole live slice still fits one card" do
+      pid = DraftStream.start_link(rotating_spec(self()), @rotate_fast)
+
+      DraftStream.push(pid, {:text_delta, "Short enough to stay one bubble."})
+      assert_receive {:open, {:bubble, 1}, _text}, 1_000
+
+      Process.sleep(30)
+      refute_received {:seal, _handle, _text}
+    end
+
+    test "no rotation when the first chunk consumes the whole slice" do
+      # An oversized fenced block is atomic: it is the first chunk AND the
+      # entire slice, so the boundary is not strictly inside — nothing to seal.
+      fence =
+        "```sh\n" <> Enum.map_join(1..8, "\n", fn i -> "line #{i} of the log" end) <> "\n```"
+
+      pid = DraftStream.start_link(rotating_spec(self()), @rotate_fast)
+
+      DraftStream.push(pid, {:text_delta, fence})
+      assert_receive {:open, {:bubble, 1}, _text}, 1_000
+
+      Process.sleep(30)
+      refute_received {:seal, _handle, _text}
+    end
+
+    test "a cumulative restart below sealed_upto clamps, recovers, and seals cleanly" do
+      pid = DraftStream.start_link(rotating_spec(self()), @rotate_fast)
+
+      DraftStream.push(pid, {:text_delta, @two_paras})
+      assert_receive {:open, {:bubble, 1}, @two_paras}, 1_000
+      assert_receive {:seal, {:bubble, 1}, @para_one}, 1_000
+
+      # Mid-stream provider retry: the SSE cumulative restarts from scratch,
+      # shorter than the already-sealed prefix. The engine clamps — no write
+      # for the empty live slice, no crash.
+      DraftStream.push(pid, {:text_delta, "Para"})
+      Process.sleep(30)
+      refute_received {:open, _handle, _text}
+
+      # The retried stream regrows past the sealed offset; the live slice
+      # resumes rendering from there.
+      full = @two_paras <> " and now it finishes."
+      DraftStream.push(pid, {:text_delta, full})
+      assert_receive {:open, {:bubble, 2}, live}, 1_000
+      assert live == @para_two <> " and now it finishes."
+
+      final = full <> " Done."
+      assert {:ok, nil} = DraftStream.seal(pid, final)
+      assert_receive {:seal, {:bubble, 2}, tail_text}, 1_000
+      assert tail_text == @para_two <> " and now it finishes. Done."
+    end
+
+    test "sealed_upto advances by BYTES, not characters, on multi-byte content" do
+      head = "Résumé — naïve café ☕ notes on the wreck dive."
+      tail = "Second paragraph 🌊 continues here."
+      text = head <> "\n\n" <> tail
+
+      pid = DraftStream.start_link(rotating_spec(self()), @rotate_fast)
+
+      DraftStream.push(pid, {:text_delta, text})
+      assert_receive {:open, {:bubble, 1}, ^text}, 1_000
+      assert_receive {:seal, {:bubble, 1}, ^head}, 1_000
+
+      # A grapheme-counted offset would slice mid-word here (the head measures
+      # 45 characters but 51 bytes).
+      DraftStream.push(pid, {:text_delta, text <> " Done."})
+      assert_receive {:open, {:bubble, 2}, live}, 1_000
+      assert live == tail <> " Done."
+    end
+
+    test "post-rotation edits render only the live slice" do
+      pid = DraftStream.start_link(rotating_spec(self()), @rotate_fast)
+
+      DraftStream.push(pid, {:text_delta, @two_paras})
+      assert_receive {:seal, {:bubble, 1}, @para_one}, 1_000
+
+      DraftStream.push(pid, {:text_delta, @two_paras <> " more"})
+      assert_receive {:open, {:bubble, 2}, _live}, 1_000
+
+      DraftStream.push(pid, {:text_delta, @two_paras <> " more and more"})
+      assert_receive {:edit, {:bubble, 2}, edited}, 1_000
+      assert edited == @para_two <> " more and more"
+      refute edited =~ "Paragraph one"
+    end
+
+    test "a refusing rotation stops after two tries; edits and the seal still land" do
+      test_pid = self()
+      final = @two_paras <> " The end."
+
+      picky_seal = fn handle, text ->
+        send(test_pid, {:seal, handle, text})
+        if text == final, do: {:ok, nil}, else: {:error, :rotate_boom}
+      end
+
+      log =
+        capture_log(fn ->
+          pid = DraftStream.start_link(rotating_spec(self(), seal: picky_seal), @rotate_fast)
+
+          DraftStream.push(pid, {:text_delta, @two_paras})
+          assert_receive {:seal, {:bubble, 1}, @para_one}, 1_000
+
+          DraftStream.push(pid, {:text_delta, @two_paras <> " x"})
+          assert_receive {:seal, {:bubble, 1}, _second_try}, 1_000
+
+          # Cap reached: the draft degrades to one growing bubble — still
+          # edited, never rotated again.
+          DraftStream.push(pid, {:text_delta, @two_paras <> " xy"})
+          assert_receive {:edit, {:bubble, 1}, _grown}, 1_000
+          refute_received {:seal, {:bubble, 1}, _third_try}
+
+          assert {:ok, nil} = DraftStream.seal(pid, final)
+          assert_received {:seal, {:bubble, 1}, ^final}
+        end)
+
+      assert log =~ "rotate_boom"
+    end
+
+    test "rotation writes count against max_edits" do
+      pid =
+        DraftStream.start_link(
+          rotating_spec(self()),
+          edit_interval_ms: 1,
+          min_draft_chars: 1,
+          max_edits: 2
+        )
+
+      # Write 1 = the open, write 2 = the rotation seal ⇒ the cap is spent.
+      DraftStream.push(pid, {:text_delta, @two_paras})
+      assert_receive {:open, {:bubble, 1}, _text}, 1_000
+      assert_receive {:seal, {:bubble, 1}, @para_one}, 1_000
+
+      DraftStream.push(pid, {:text_delta, @two_paras <> " and more text here."})
+      Process.sleep(40)
+      refute_received {:open, {:bubble, 2}, _live}
+
+      assert {:ok, tail} = DraftStream.seal(pid, @two_paras <> " and more text here.")
+      assert tail == @para_two <> " and more text here."
+    end
+
+    test "telemetry: a mid-turn rotation is :rotate, never the terminal :seal" do
+      handler_id = "draft-stream-rotate-telemetry-#{System.unique_integer()}"
+      test_pid = self()
+      session_id = "sess-r-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        handler_id,
+        [:fermix, :channel, :stream],
+        fn _event, measurements, metadata, _config ->
+          if metadata.session_id == session_id do
+            send(test_pid, {:stream_telemetry, metadata.phase, measurements})
+          end
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      pid = DraftStream.start_link(rotating_spec(self()), @rotate_fast)
+
+      DraftStream.push(pid, {:session_started, session_id})
+      DraftStream.push(pid, {:text_delta, @two_paras})
+      assert_receive {:seal, {:bubble, 1}, @para_one}, 1_000
+
+      assert_receive {:stream_telemetry, :open, _open_meas}
+      assert_receive {:stream_telemetry, :rotate, rotate_meas}
+      assert rotate_meas.edit_index == 2
+      refute_received {:stream_telemetry, :seal, _seal_meas}
+
+      assert {:ok, _tail} = DraftStream.seal(pid, @two_paras)
+      assert_receive {:stream_telemetry, :seal, seal_meas}
+      assert seal_meas.total_edits == 2
+    end
+
+    test "a spec with only half the rotation pair is refused at start" do
+      assert_raise ArgumentError, ~r/rotation requires both/, fn ->
+        DraftStream.start_link(rotating_spec(self(), rotate_at: nil))
+      end
+
+      assert_raise ArgumentError, ~r/rotation requires both/, fn ->
+        DraftStream.start_link(rotating_spec(self(), measure: nil))
+      end
+    end
+  end
+
+  describe "draft rotation: iteration reset" do
+    test "the live bubble is sealed as commentary and the next iteration opens its own" do
+      pid =
+        DraftStream.start_link(rotating_spec(self()), edit_interval_ms: 300, min_draft_chars: 1)
+
+      DraftStream.push(pid, {:text_delta, "First round commentary."})
+      assert_receive {:open, {:bubble, 1}, "First round commentary."}, 1_000
+
+      # Arrives inside the throttle window, so it is still unwritten when the
+      # iteration ends — the reset seal is what puts it on screen.
+      DraftStream.push(pid, {:text_delta, "First round commentary. Extended."})
+      DraftStream.push(pid, {:iteration_started, 2})
+
+      assert_receive {:seal, {:bubble, 1}, "First round commentary. Extended."}, 1_000
+      refute_received {:discard, {:bubble, 1}}
+
+      DraftStream.push(pid, {:text_delta, "The actual answer of the final round."})
+      assert_receive {:open, {:bubble, 2}, "The actual answer of the final round."}, 1_000
+
+      assert {:ok, nil} = DraftStream.seal(pid, "The actual answer of the final round.")
+    end
+  end
+
+  describe "draft rotation: turn end" do
+    test "a tiny tail merges into the live bubble instead of ringing a new message" do
+      pid = DraftStream.start_link(rotating_spec(self()), @rotate_fast)
+
+      DraftStream.push(pid, {:text_delta, @two_paras})
+      assert_receive {:seal, {:bubble, 1}, @para_one}, 1_000
+
+      DraftStream.push(pid, {:text_delta, @two_paras})
+      assert_receive {:open, {:bubble, 2}, _live}, 1_000
+
+      final = @two_paras <> " and it ends right here."
+      assert {:ok, nil} = DraftStream.seal(pid, final)
+
+      # One bubble carries the live slice AND the tail — no queue delivery.
+      assert_received {:seal, {:bubble, 2}, merged}
+      assert merged == @para_two <> " and it ends right here."
+    end
+
+    test "an oversized tail comes back as the channel's overflow for normal delivery" do
+      overflowing_seal = fn _handle, _text -> {:ok, "the remainder chunk"} end
+
+      pid = DraftStream.start_link(rotating_spec(self(), seal: overflowing_seal), @rotate_fast)
+
+      DraftStream.push(pid, {:text_delta, @two_paras})
+      # The rotation self-schedules the next tick, which opens the new bubble.
+      assert_receive {:open, {:bubble, 2}, _live}, 1_000
+
+      assert {:ok, "the remainder chunk"} = DraftStream.seal(pid, @two_paras <> " tail")
+    end
+
+    test "with no live bubble the tail goes out through normal delivery" do
+      pid =
+        DraftStream.start_link(
+          rotating_spec(self()),
+          edit_interval_ms: 60_000,
+          min_draft_chars: 1
+        )
+
+      DraftStream.push(pid, {:text_delta, @two_paras})
+      assert_receive {:seal, {:bubble, 1}, @para_one}, 1_000
+
+      # The throttle keeps the next bubble from opening, so the remainder has
+      # no live bubble to land in.
+      assert {:ok, tail} = DraftStream.seal(pid, @two_paras <> " done.")
+      assert tail == @para_two <> " done."
+      refute_received {:open, {:bubble, 2}, _text}
+    end
+
+    test "a final response that is not an extension of the sealed cards delivers in full" do
+      log =
+        capture_log(fn ->
+          pid = DraftStream.start_link(rotating_spec(self()), @rotate_fast)
+
+          DraftStream.push(pid, {:text_delta, @two_paras})
+          assert_receive {:seal, {:bubble, 1}, @para_one}, 1_000
+
+          DraftStream.push(pid, {:text_delta, @two_paras})
+          assert_receive {:open, {:bubble, 2}, _live}, 1_000
+
+          assert {:ok, :no_draft} =
+                   DraftStream.seal(pid, "A completely different final response.")
+
+          # The unconfirmed live bubble goes; the sealed card stands.
+          assert_received {:discard, {:bubble, 2}}
+          refute_received {:discard, {:bubble, 1}}
+        end)
+
+      assert log =~ "not a prefix"
+    end
+
+    test "/stop discards only the live bubble; sealed cards persist" do
+      pid = DraftStream.start_link(rotating_spec(self()), @rotate_fast)
+
+      DraftStream.push(pid, {:text_delta, @two_paras})
+      assert_receive {:seal, {:bubble, 1}, @para_one}, 1_000
+
+      DraftStream.push(pid, {:text_delta, @two_paras})
+      assert_receive {:open, {:bubble, 2}, _live}, 1_000
+
+      assert :ok = DraftStream.discard(pid)
+      assert_received {:discard, {:bubble, 2}}
+      refute_received {:discard, {:bubble, 1}}
+    end
+  end
+
+  # -- S2: rolling 💭 status bubble (§6) --------------------------------------
+
+  describe "draft mode: status bubble" do
+    test "opens lazily on the first reasoning heading and rolls in place after that" do
+      pid = DraftStream.start_link(rotating_spec(self()), @rotate_fast)
+
+      DraftStream.push(pid, {:text_delta, "Working on it now."})
+      assert_receive {:open, {:bubble, 1}, "Working on it now."}, 1_000
+      refute_received {:open, _handle, "💭" <> _rest}
+
+      DraftStream.push(pid, {:reasoning_done, "**Comparing operators**\n\nbody text"})
+      assert_receive {:open, {:bubble, 2}, "💭 Comparing operators"}, 1_000
+
+      DraftStream.push(pid, {:reasoning_done, "**Checking night dives**\n\nbody text"})
+
+      assert_receive {:edit, {:bubble, 2}, "💭 Comparing operators\nChecking night dives"},
+                     1_000
+    end
+
+    test "the rolling join keeps the newest headings and marks the trim" do
+      pid =
+        DraftStream.start_link(
+          rotating_spec(self(), rotate_at: 40),
+          edit_interval_ms: 1,
+          min_draft_chars: 1
+        )
+
+      for heading <- ["**Alpha one**", "**Beta two**", "**Gamma three**", "**Delta four**"] do
+        DraftStream.push(pid, {:reasoning_done, heading <> "\n\nbody"})
+        Process.sleep(10)
+      end
+
+      assert_receive {:edit, _handle, "💭 …\n" <> kept}, 1_000
+      assert String.contains?(kept, "Delta four")
+      refute String.contains?(kept, "Alpha one")
+      assert String.length("💭 …\n" <> kept) <= 40
+    end
+
+    test "the status bubble never writes on a tick that flushed answer content" do
+      pid =
+        DraftStream.start_link(rotating_spec(self()), edit_interval_ms: 60, min_draft_chars: 1)
+
+      DraftStream.push(pid, {:text_delta, "First snapshot of the answer."})
+      assert_receive {:open, {:bubble, 1}, "First snapshot of the answer."}, 1_000
+
+      DraftStream.push(pid, {:reasoning_done, "**Deferred thought**\n\nbody"})
+      DraftStream.push(pid, {:text_delta, "First snapshot of the answer. Second half."})
+
+      assert_receive {:edit, {:bubble, 1}, "First snapshot of the answer. Second half."}, 1_000
+      # Answer beat the thought on that tick; the bubble only opens later.
+      refute_received {:open, _handle, "💭" <> _rest}
+      assert_receive {:open, {:bubble, 2}, "💭 Deferred thought"}, 1_000
+    end
+
+    test "the status bubble is deleted when the answer is sealed" do
+      pid = DraftStream.start_link(rotating_spec(self()), @rotate_fast)
+
+      DraftStream.push(pid, {:reasoning_done, "**Only thought**\n\nbody"})
+      assert_receive {:open, {:bubble, 1}, "💭 Only thought"}, 1_000
+
+      DraftStream.push(pid, {:text_delta, "The answer text arrives."})
+      assert_receive {:open, {:bubble, 2}, "The answer text arrives."}, 1_000
+
+      assert {:ok, nil} = DraftStream.seal(pid, "The answer text arrives.")
+      assert_receive {:discard, {:bubble, 1}}, 1_000
+      refute_received {:discard, {:bubble, 2}}
+    end
+
+    test "the status bubble is deleted on /stop along with the live draft" do
+      pid = DraftStream.start_link(rotating_spec(self()), @rotate_fast)
+
+      DraftStream.push(pid, {:reasoning_done, "**Only thought**\n\nbody"})
+      assert_receive {:open, {:bubble, 1}, "💭 Only thought"}, 1_000
+
+      DraftStream.push(pid, {:text_delta, "Half an answer."})
+      assert_receive {:open, {:bubble, 2}, "Half an answer."}, 1_000
+
+      assert :ok = DraftStream.discard(pid)
+      assert_received {:discard, {:bubble, 2}}
+      assert_receive {:discard, {:bubble, 1}}, 1_000
+    end
+
+    test "a failed status write is logged and never fails the seal" do
+      test_pid = self()
+
+      failing_open = fn text ->
+        if String.starts_with?(text, "💭"), do: {:error, :status_boom}, else: {:ok, {:bubble, 1}}
+      end
+
+      log =
+        capture_log(fn ->
+          pid =
+            DraftStream.start_link(rotating_spec(test_pid, open: failing_open), @rotate_fast)
+
+          DraftStream.push(pid, {:reasoning_done, "**Doomed thought**\n\nbody"})
+          Process.sleep(40)
+
+          DraftStream.push(pid, {:text_delta, "The answer still lands."})
+          Process.sleep(40)
+
+          assert {:ok, nil} = DraftStream.seal(pid, "The answer still lands.")
+        end)
+
+      assert log =~ "status_boom"
     end
   end
 
