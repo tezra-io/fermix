@@ -73,6 +73,28 @@ defmodule FermixChannels.Gateway.PolicyTest do
     end
   end
 
+  # Ordinary chat adapter that can also post and delete ephemeral messages — the
+  # thought-sweep pair the block-mode spec wires (CHANNEL_LONGFORM_PRESENTATION
+  # §5).
+  defmodule SweepChannel do
+    def build_text_reply(%Message{reply_target: reply_target}) do
+      test_pid = self()
+
+      fn text ->
+        send(test_pid, {:reply_sent, reply_target, text})
+        :ok
+      end
+    end
+
+    def build_media_reply(%Message{}) do
+      fn _media_part -> {:error, :media_unsupported} end
+    end
+
+    def send_ephemeral(%Message{}, text), do: {:ok, ["id-" <> text]}
+
+    def delete_message(%Message{}, _id), do: :ok
+  end
+
   setup do
     test_pid = self()
     handler_id = "gateway-policy-#{System.unique_integer([:positive])}"
@@ -188,10 +210,37 @@ defmodule FermixChannels.Gateway.PolicyTest do
       assert_receive {:agent_message, agent_message}
 
       assert %FermixChannels.Gateway.DraftStream.Spec{mode: :block, channel: "telegram"} =
+               spec =
                agent_message.stream_spec
+
+      # No ephemeral pair on a channel without the callbacks: it gets no thought
+      # stream at all rather than undeletable 💭 messages (decision §9.2).
+      assert spec.ephemeral_send == nil
+      assert spec.delete == nil
 
       refute Map.has_key?(agent_message, :activity_callback)
       refute Map.has_key?(agent_message, :turn_result_fn)
+    end
+
+    test "a channel with send_ephemeral/delete_message gets both thought-sweep closures" do
+      put_telegram(owner_user_id: "owner-1")
+
+      message = message("hello", channel: "telegram", metadata: %{user_id: "owner-1"})
+
+      assert :ok =
+               Gateway.ingest([message],
+                 channel: SweepChannel,
+                 agent: CapturingAgent,
+                 agent_server: self()
+               )
+
+      assert_receive {:agent_message, agent_message}
+      spec = agent_message.stream_spec
+
+      assert is_function(spec.ephemeral_send, 1)
+      assert is_function(spec.delete, 1)
+      assert {:ok, ["id-💭 thinking"]} = spec.ephemeral_send.("💭 thinking")
+      assert :ok = spec.delete.("id-1")
     end
   end
 

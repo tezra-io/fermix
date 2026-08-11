@@ -18,6 +18,7 @@ defmodule FermixChannels.Channels.Discord do
   alias FermixChannels.Gateway.Message
   alias FermixChannels.Gateway.ProposalButton
   alias FermixChannels.Gateway.RetryHint
+  alias FermixChannels.Outbound.Splitter
   alias FermixChannels.Telemetry, as: ChannelTelemetry
   alias FermixCore.Net.HttpClient
   alias FermixCore.Telemetry
@@ -52,32 +53,64 @@ defmodule FermixChannels.Channels.Discord do
   @spec send_message(String.t(), String.t(), FermixChannels.Gateway.Channel.send_opts()) ::
           :ok | {:error, term()}
   def send_message(channel_id, text, opts \\ []) when is_binary(channel_id) and is_binary(text) do
-    with :ok <- enforce_text_cap(text),
-         {:ok, token} <- bot_token() do
-      url = "#{@api_base}/channels/#{channel_id}/messages"
+    case bot_token() do
+      {:ok, token} ->
+        # CHANNEL_LONGFORM_PRESENTATION §3.1: a reply longer than Discord's
+        # content cap rides the shared boundary ladder and is delivered as
+        # sequential messages; it is never refused.
+        text
+        |> Splitter.split(limit: @max_message_length, measure: &codepoint_length/1)
+        |> send_text_chunks(channel_id, token, opts)
 
-      body =
-        %{content: text, allowed_mentions: %{parse: []}}
-        |> maybe_put_message_reference(channel_id, opts)
-        |> maybe_put_components(opts)
-
-      {result, duration_us} =
-        Telemetry.timed_us(fn ->
-          Req.new(url: url, method: :post, json: body)
-          |> Req.Request.put_header("authorization", "Bot #{token}")
-          |> Req.merge(req_options(opts))
-          |> HttpClient.request("Discord sendMessage")
-        end)
-
-      handle_send_response(result, duration_us)
-    else
       # M30 §11.3: an unconfigured bot token means there is no client to send
       # through, which is the `:adapter_unavailable` kind of the closed delivery
       # vocabulary — not a bare atom the delivery normalizer would have to guess
       # at, and then log as a contract violation.
-      {:error, :not_configured} -> {:error, {:permanent, :adapter_unavailable}}
-      {:error, reason} -> {:error, reason}
+      {:error, :not_configured} ->
+        {:error, {:permanent, :adapter_unavailable}}
     end
+  end
+
+  # Discord counts its 2,000-character `content` cap in Unicode CODEPOINTS, not
+  # grapheme clusters: one 👩‍👩‍👦 is a single grapheme but five codepoints, so the
+  # splitter's grapheme default would pass a body Discord rejects with a 400 —
+  # emoji-heavy text only, which is exactly the text that never shows up in a
+  # local fixture.
+  @spec codepoint_length(String.t()) :: non_neg_integer()
+  defp codepoint_length(text) when is_binary(text), do: length(String.to_charlist(text))
+
+  # Strictly sequential: the first failure aborts the remaining chunks and is
+  # the returned reason.
+  defp send_text_chunks(chunks, channel_id, token, opts) do
+    Enum.reduce_while(chunks, :ok, fn chunk, :ok ->
+      halt_on_error(send_text_chunk(chunk, channel_id, token, opts))
+    end)
+  end
+
+  # One delivered message is one outbound row, emitted here rather than once for
+  # the whole reply (design §8): a reply that half-lands then reports truthfully
+  # what WAS delivered instead of reporting nothing.
+  defp send_text_chunk(chunk, channel_id, token, opts) do
+    {result, duration_us} =
+      Telemetry.timed_us(fn -> post_text_chunk(chunk, channel_id, token, opts) end)
+
+    emit_outbound(result, duration_us)
+  end
+
+  defp halt_on_error(:ok), do: {:cont, :ok}
+  defp halt_on_error({:error, _reason} = error), do: {:halt, error}
+
+  defp post_text_chunk(chunk, channel_id, token, opts) do
+    body =
+      %{content: chunk, allowed_mentions: %{parse: []}}
+      |> maybe_put_message_reference(channel_id, opts)
+      |> maybe_put_components(opts)
+
+    Req.new(url: "#{@api_base}/channels/#{channel_id}/messages", method: :post, json: body)
+    |> Req.Request.put_header("authorization", "Bot #{token}")
+    |> Req.merge(req_options(opts))
+    |> HttpClient.request("Discord sendMessage")
+    |> classify_send_response()
   end
 
   @impl true
@@ -532,16 +565,6 @@ defmodule FermixChannels.Channels.Discord do
     {:error, {:byte_cap_exceeded, size, @max_media_bytes}}
   end
 
-  defp enforce_text_cap(text) do
-    length = String.length(text)
-
-    if length <= @max_message_length do
-      :ok
-    else
-      {:error, {:text_cap_exceeded, length, @max_message_length}}
-    end
-  end
-
   defp maybe_put_content(body, nil), do: body
   defp maybe_put_content(body, content), do: Map.put(body, :content, content)
 
@@ -685,17 +708,27 @@ defmodule FermixChannels.Channels.Discord do
     end
   end
 
-  defp handle_send_response({:ok, %{status: status}}, duration_us) when status in [200, 201] do
+  defp handle_send_response(result, duration_us) do
+    result
+    |> classify_send_response()
+    |> emit_outbound(duration_us)
+  end
+
+  defp emit_outbound(:ok, duration_us) do
     ChannelTelemetry.emit_message(:discord, :outbound, 1, duration_us)
     :ok
   end
 
-  defp handle_send_response({:ok, %{status: status, body: body} = response}, _duration_us) do
+  defp emit_outbound({:error, _reason} = error, _duration_us), do: error
+
+  defp classify_send_response({:ok, %{status: status}}) when status in [200, 201], do: :ok
+
+  defp classify_send_response({:ok, %{status: status, body: body} = response}) do
     Logger.error("Discord send failed: #{status} - #{inspect(body)}")
     discord_api_error(response)
   end
 
-  defp handle_send_response({:error, reason}, _duration_us) do
+  defp classify_send_response({:error, reason}) do
     Logger.error("Discord request failed: #{inspect(reason)}")
     {:error, reason}
   end

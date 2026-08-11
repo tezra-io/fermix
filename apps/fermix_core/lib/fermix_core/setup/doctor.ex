@@ -270,21 +270,27 @@ defmodule FermixCore.Setup.Doctor do
   defp streaming_channel_report(%{config_key: key, name: name, adapter: adapter})
        when is_atom(key) do
     case FermixCore.Config.channel(key) do
-      {:ok, config} ->
-        [
-          %{
-            channel: key,
-            name: name,
-            # Mirrors the gateway default (a configured channel streams).
-            streaming: Keyword.get(config, :streaming, "block"),
-            capability: adapter_stream_capability(adapter)
-          }
-        ]
-
-      {:error, :not_configured} ->
-        []
+      {:ok, config} -> [channel_streaming_entry(key, name, config, adapter)]
+      {:error, :not_configured} -> []
     end
   end
+
+  defp channel_streaming_entry(key, name, config, adapter) do
+    capability = adapter_stream_capability(adapter)
+
+    %{
+      channel: key,
+      name: name,
+      streaming: Keyword.get(config, :streaming, default_streaming(capability)),
+      capability: capability
+    }
+  end
+
+  # Mirrors the gateway default (CHANNEL_LONGFORM_PRESENTATION §6, decision
+  # §9.5): a configured channel streams in the best shape it can render —
+  # rotating draft bubbles where it can edit in place, block sends otherwise.
+  defp default_streaming(:draft_edit), do: "draft"
+  defp default_streaming(_capability), do: "block"
 
   defp adapter_stream_capability(adapter) when is_atom(adapter) do
     if Code.ensure_loaded?(adapter) and function_exported?(adapter, :stream_capability, 0) do

@@ -8,12 +8,9 @@ defmodule FermixCore.ReplyTest do
   alias FermixCore.Reply
 
   describe "format_delivery_error/1 — existing channel egress errors" do
-    test "keeps the byte, text, and rate-limit wording" do
+    test "keeps the byte and rate-limit wording" do
       assert Reply.format_delivery_error({:byte_cap_exceeded, 2_097_152, 1_048_576}) =~
                "attachment is 2.0 MiB"
-
-      assert Reply.format_delivery_error({:text_cap_exceeded, 4_097, 4_096}) =~
-               "reply text is 4097 characters"
 
       assert Reply.format_delivery_error({:rate_limited, 2_000}) =~ "rate limited"
       assert Reply.format_delivery_error({:rate_limited, 2_000}) =~ "2s"

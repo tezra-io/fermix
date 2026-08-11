@@ -11,10 +11,12 @@ defmodule FermixChannels.Channels.WhatsApp do
 
   require Logger
 
+  alias FermixChannels.Channels.WhatsApp.Styles
   alias FermixChannels.Gateway.Idempotency
   alias FermixChannels.Gateway.MediaDownload
   alias FermixChannels.Gateway.Message
   alias FermixChannels.Gateway.RetryHint
+  alias FermixChannels.Outbound.Splitter
   alias FermixChannels.Telemetry, as: ChannelTelemetry
   alias FermixCore.Net.HttpClient
   alias FermixCore.Telemetry
@@ -23,7 +25,11 @@ defmodule FermixChannels.Channels.WhatsApp do
   @default_graph_version "v19.0"
   @health_timeout_ms 5_000
   # Free-form Cloud API text messages. Templates and interactive message
-  # fields have separate platform limits and should stay adapter-local.
+  # fields have separate platform limits and should stay adapter-local. Meta
+  # documents the body cap as 4096 "characters" without naming the unit, so the
+  # splitter's grapheme default stands and the uncertainty is named: graphemes
+  # undercount codepoints and UTF-16 units, so an emoji-dense reply could in
+  # principle measure under 4096 here and be refused on the wire. Unverified.
   @max_text_length 4_096
   # Audit F-06: cap media downloads so a hostile or buggy upstream can't
   # exhaust memory/disk. 25 MB is the practical ceiling for WhatsApp's
@@ -114,34 +120,64 @@ defmodule FermixChannels.Channels.WhatsApp do
   @spec send_message(String.t(), String.t(), FermixChannels.Gateway.Channel.send_opts()) ::
           :ok | {:error, term()}
   def send_message(to, text, opts \\ []) when is_binary(to) and is_binary(text) do
-    with :ok <- enforce_text_cap(text),
-         {:ok, config} <- send_config(opts) do
-      url = "#{@graph_api_base}/#{config.graph_version}/#{config.phone_number_id}/messages"
+    case send_config(opts) do
+      {:ok, config} ->
+        # CHANNEL_LONGFORM_PRESENTATION §3.1: a reply longer than the Cloud API
+        # body cap rides the shared boundary ladder and is delivered as
+        # sequential messages; it is never refused. The ladder walks the model's
+        # Markdown — that is where headings and section boundaries are still
+        # legible — while every candidate chunk is *measured* through the
+        # WhatsApp style renderer, so the fill condition sees the text WhatsApp
+        # receives. Each emitted chunk is then rendered for the wire.
+        text
+        |> Splitter.split(limit: @max_text_length, measure: &Styles.rendered_length/1)
+        |> Enum.map(&Styles.render/1)
+        |> send_text_chunks(to, config)
 
-      body = %{
-        messaging_product: "whatsapp",
-        recipient_type: "individual",
-        to: to,
-        type: "text",
-        text: %{preview_url: false, body: text}
-      }
-
-      {result, duration_us} =
-        Telemetry.timed_us(fn ->
-          Req.new(url: url, method: :post, json: body, auth: {:bearer, config.access_token})
-          |> Req.merge(config.req_options)
-          |> HttpClient.request("WhatsApp send")
-        end)
-
-      handle_send_response(result, duration_us)
-    else
       # M30 §11.3: missing send configuration means there is no client to send
       # through, which is the `:adapter_unavailable` kind of the closed delivery
       # vocabulary — not a bare atom the delivery normalizer would have to guess
       # at, and then log as a contract violation.
-      {:error, :not_configured} -> {:error, {:permanent, :adapter_unavailable}}
-      {:error, reason} -> {:error, reason}
+      {:error, :not_configured} ->
+        {:error, {:permanent, :adapter_unavailable}}
     end
+  end
+
+  # Strictly sequential: the first failure aborts the remaining chunks and is
+  # the returned reason.
+  defp send_text_chunks(chunks, to, config) do
+    Enum.reduce_while(chunks, :ok, fn chunk, :ok ->
+      halt_on_error(send_text_chunk(chunk, to, config))
+    end)
+  end
+
+  # One delivered message is one outbound row, emitted here rather than once for
+  # the whole reply (design §8): a reply that half-lands then reports truthfully
+  # what WAS delivered instead of reporting nothing.
+  defp send_text_chunk(chunk, to, config) do
+    {result, duration_us} = Telemetry.timed_us(fn -> post_text_chunk(chunk, to, config) end)
+
+    emit_outbound(result, duration_us)
+  end
+
+  defp halt_on_error(:ok), do: {:cont, :ok}
+  defp halt_on_error({:error, _reason} = error), do: {:halt, error}
+
+  defp post_text_chunk(chunk, to, config) do
+    url = "#{@graph_api_base}/#{config.graph_version}/#{config.phone_number_id}/messages"
+
+    body = %{
+      messaging_product: "whatsapp",
+      recipient_type: "individual",
+      to: to,
+      type: "text",
+      text: %{preview_url: false, body: chunk}
+    }
+
+    Req.new(url: url, method: :post, json: body, auth: {:bearer, config.access_token})
+    |> Req.merge(config.req_options)
+    |> HttpClient.request("WhatsApp send")
+    |> classify_send_response()
   end
 
   @impl true
@@ -532,16 +568,6 @@ defmodule FermixChannels.Channels.WhatsApp do
     {:error, {:byte_cap_exceeded, size, cap}}
   end
 
-  defp enforce_text_cap(text) do
-    length = String.length(text)
-
-    if length <= @max_text_length do
-      :ok
-    else
-      {:error, {:text_cap_exceeded, length, @max_text_length}}
-    end
-  end
-
   defp validate_voice_mime(:voice, "audio/ogg; codecs=opus"), do: :ok
 
   defp validate_voice_mime(:voice, _mime) do
@@ -677,17 +703,27 @@ defmodule FermixChannels.Channels.WhatsApp do
     end
   end
 
-  defp handle_send_response({:ok, %{status: status}}, duration_us) when status in [200, 201] do
+  defp handle_send_response(result, duration_us) do
+    result
+    |> classify_send_response()
+    |> emit_outbound(duration_us)
+  end
+
+  defp emit_outbound(:ok, duration_us) do
     ChannelTelemetry.emit_message(:whatsapp, :outbound, 1, duration_us)
     :ok
   end
 
-  defp handle_send_response({:ok, %{status: status, body: body} = response}, _duration_us) do
+  defp emit_outbound({:error, _reason} = error, _duration_us), do: error
+
+  defp classify_send_response({:ok, %{status: status}}) when status in [200, 201], do: :ok
+
+  defp classify_send_response({:ok, %{status: status, body: body} = response}) do
     Logger.error("WhatsApp send failed: #{status} - #{inspect(body)}")
     whatsapp_api_error(response)
   end
 
-  defp handle_send_response({:error, reason}, _duration_us) do
+  defp classify_send_response({:error, reason}) do
     Logger.error("WhatsApp request failed: #{inspect(reason)}")
     {:error, reason}
   end

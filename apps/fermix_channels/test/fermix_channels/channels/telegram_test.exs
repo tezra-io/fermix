@@ -1,8 +1,17 @@
 defmodule FermixChannels.Channels.TelegramTest do
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias FermixChannels.Channels.Telegram
   alias FermixChannels.Gateway.Message
+
+  # Presentation constants pinned by docs/design/CHANNEL_LONGFORM_PRESENTATION.md
+  # §4.2 / §9 decision 4 — the adapter's own attributes are private, so the
+  # section-card size and entity budget are restated here on purpose: a change
+  # to either is a deliberate change to how every long reply lands.
+  @chunk_limit_units 1_400
+  @entity_budget 90
 
   # -- fixtures --
 
@@ -16,6 +25,95 @@ defmodule FermixChannels.Channels.TelegramTest do
       |> Plug.Conn.put_resp_content_type("application/json")
       |> Plug.Conn.send_resp(status, Jason.encode!(body))
     end)
+  end
+
+  # Like `stub_telegram/3` but hands back a distinct `result.message_id` per
+  # request, in the given order — what the ephemeral thought path collects so a
+  # later sweep can delete each message.
+  defp stub_message_ids(test_pid, ids) do
+    {:ok, agent} = Agent.start_link(fn -> ids end)
+
+    Req.Test.stub(:telegram, fn conn ->
+      {:ok, req_body, conn} = Plug.Conn.read_body(conn)
+      send(test_pid, {:telegram_request, conn.request_path, Jason.decode!(req_body)})
+      id = Agent.get_and_update(agent, fn [head | tail] -> {head, tail} end)
+
+      conn
+      |> Plug.Conn.put_resp_content_type("application/json")
+      |> Plug.Conn.send_resp(
+        200,
+        Jason.encode!(%{"ok" => true, "result" => %{"message_id" => id}})
+      )
+    end)
+  end
+
+  # Answers 200 for the first `ok_count` requests and `status`/`body` after —
+  # the shape a partially delivered reply takes on the wire.
+  defp stub_ok_then_error(test_pid, ok_count, status, body) do
+    {:ok, agent} = Agent.start_link(fn -> 0 end)
+
+    Req.Test.stub(:telegram, fn conn ->
+      {:ok, req_body, conn} = Plug.Conn.read_body(conn)
+      send(test_pid, {:telegram_request, conn.request_path, Jason.decode!(req_body)})
+      seen = Agent.get_and_update(agent, fn n -> {n, n + 1} end)
+
+      {resp_status, resp_body} =
+        if seen < ok_count, do: {200, %{"ok" => true}}, else: {status, body}
+
+      conn
+      |> Plug.Conn.put_resp_content_type("application/json")
+      |> Plug.Conn.send_resp(resp_status, Jason.encode!(resp_body))
+    end)
+  end
+
+  # Drains every sendMessage body this test's stub recorded, in send order.
+  defp sent_bodies(acc \\ []) do
+    receive do
+      {:telegram_request, _path, body} -> sent_bodies([body | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
+  end
+
+  # UTF-16 units of a rendered chunk's visible text (the budget Telegram
+  # enforces). The fixtures are ASCII, so graphemes and UTF-16 units coincide.
+  defp rendered_units(html) do
+    html
+    |> String.replace(~r/<[^>]*>/, "")
+    |> String.length()
+  end
+
+  defp opening_word(html) do
+    String.replace(html, ~r/^(<[^>]+>|•|\s)+/, "")
+  end
+
+  # A slice of the live Florida Keys dive reply that motivated the design (the
+  # 6,018-char research answer of §1). The old splitter cut the "Conch Republic
+  # Divers advertises …" bullet in half; the sections here are sized so the
+  # ladder has to cut somewhere inside the list.
+  defp dive_reply_fixture do
+    """
+    ## Best operators
+
+    - [Rainbow Reef Dive Center](https://example.com/rainbow) runs two-tank morning trips to Molasses Reef and the Spiegel Grove, and is the only shop on the upper Keys with a dedicated wreck boat every day of the week.
+    - [Horizon Divers](https://example.com/horizon) keeps groups small, which matters on the Duane where the current can pick up quickly in the afternoon and stragglers lose the mooring line.
+    - Conch Republic Divers advertises a customer lodging discount at three Tavernier motels, which is worth asking about when you book the boat rather than after.
+    - [Quiescence Diving](https://example.com/quiescence) is the quiet pick for night dives on the shallow patch reefs, with a two-boat limit and no walk-up sales.
+    - [Ocean Divers](https://example.com/ocean) has the largest fleet in Key Largo and the most forgiving cancellation policy, which is the one thing that matters if the wind swings north the night before your trip.
+    - [Sea Dwellers](https://example.com/seadwellers) runs the earliest departure of any shop on the island, and the reef is noticeably emptier at that hour than it is on the mid-morning boats.
+    - [Amoray Dive Resort](https://example.com/amoray) is the only operator here that lets you walk from the room to the boat, which is worth a surcharge on a three-day trip with heavy gear.
+
+    ## Where to stay
+
+    Tavernier and Key Largo both put you within twenty minutes of every dock listed above, and the difference is mostly whether you want restaurants inside walking distance or a quieter room.
+
+    - Islander Resort has the easiest parking for a truck with tanks in the bed.
+    - Bayside Inn is the cheapest option that still has a rinse tank for gear.
+
+    ## What to book first
+
+    The Spiegel Grove slots fill first on weekends, so book that boat before the room. Everything else in the plan can move around it.
+    """
   end
 
   defp send_msg(chat_id, text, opts \\ []) do
@@ -490,15 +588,17 @@ defmodule FermixChannels.Channels.TelegramTest do
       assert_received {:telegram_request, _path, body}
       assert body["parse_mode"] == "HTML"
 
+      # The splitter emits trimmed chunks, so the trailing newline of the source
+      # never reaches the wire.
       assert body["text"] ==
-               """
+               String.trim("""
                <b>Title</b>
                • <i>first</i> item
                • <i>second</i> with <code>code</code>
                1. link to <a href="https://example.com?q=1&amp;x=2">Fermix</a>
                <s>done</s>
                <pre><code class="language-elixir">IO.puts(&quot;&lt;ok&gt;&quot;)</code></pre>
-               """
+               """)
     end
 
     test "renders markdown headings as Telegram HTML by default" do
@@ -517,12 +617,12 @@ defmodule FermixChannels.Channels.TelegramTest do
       assert body["parse_mode"] == "HTML"
 
       assert body["text"] ==
-               """
+               String.trim("""
                <b>Run Summary</b>
                <b>Status:</b> failed
                <b>Details</b>
                • checked <code>mix test</code>
-               """
+               """)
 
       refute body["text"] =~ "##"
       refute body["text"] =~ "###"
@@ -543,10 +643,10 @@ defmodule FermixChannels.Channels.TelegramTest do
       assert body["parse_mode"] == "HTML"
 
       assert body["text"] ==
-               """
+               String.trim("""
                <b>Run Summary &lt;tag&gt;</b>
                <b>Final Check</b>
-               """
+               """)
 
       refute body["text"] =~ "<b><b>"
       refute body["text"] =~ "</b></b>"
@@ -568,10 +668,10 @@ defmodule FermixChannels.Channels.TelegramTest do
       assert body["parse_mode"] == "HTML"
 
       assert body["text"] ==
-               """
+               String.trim("""
                <b>Use ** as wildcard</b>
                <b>**mismatched bold</b>
-               """
+               """)
     end
 
     test "can send plain text without Telegram parse mode" do
@@ -621,56 +721,183 @@ defmodule FermixChannels.Channels.TelegramTest do
       refute Map.has_key?(body, "reply_to_message_id")
     end
 
-    test "splits long messages at 4096 char limit" do
+    # A boundary-free run has no ladder rung to land on, so the hard cut is what
+    # bounds it — every chunk under the section-card limit, nothing dropped.
+    test "hard-cuts a boundary-free run at the chunk limit, losing nothing" do
       stub_telegram(self(), 200, %{"ok" => true})
 
       long_text = String.duplicate("a", 5000)
       :ok = send_msg("123", long_text)
 
-      assert_received {:telegram_request, _path, body1}
-      assert_received {:telegram_request, _path, body2}
-      assert String.length(body1["text"]) <= 4096
-      assert String.length(body2["text"]) <= 4096
-      assert body1["text"] <> body2["text"] == long_text
-      refute_received {:telegram_request, _path, _body}
+      bodies = sent_bodies()
+      assert length(bodies) == 4
+      assert Enum.all?(bodies, &(rendered_units(&1["text"]) <= @chunk_limit_units))
+      assert bodies |> Enum.map_join(& &1["text"]) |> Kernel.==(long_text)
     end
 
-    test "splits using Telegram post-render entity length" do
+    # Entity budget as an independent fill condition: dense inline markup can sit
+    # far under the length limit while blowing past Telegram's entity cap.
+    test "caps formatting entities per chunk independently of length" do
       stub_telegram(self(), 200, %{"ok" => true})
 
-      text = String.duplicate("**a**", 4097)
+      text = String.duplicate("**a** ", 300)
       :ok = send_msg("123", text)
 
-      assert_received {:telegram_request, _path, body1}
-      assert_received {:telegram_request, _path, body2}
-      assert body1["parse_mode"] == "HTML"
-      assert body2["parse_mode"] == "HTML"
-      assert body1["text"] == String.duplicate("<b>a</b>", 4096)
-      assert body2["text"] == "<b>a</b>"
-      refute_received {:telegram_request, _path, _body}
+      bodies = sent_bodies()
+      assert length(bodies) > 1
+
+      Enum.each(bodies, fn body ->
+        assert body["parse_mode"] == "HTML"
+        assert rendered_units(body["text"]) <= @chunk_limit_units
+        assert body["text"] |> String.split("<b>") |> length() |> Kernel.-(1) <= @entity_budget
+      end)
     end
 
     test "prefers semantic split boundaries for rendered Telegram HTML" do
       stub_telegram(self(), 200, %{"ok" => true})
 
-      text = String.duplicate("a", 4_090) <> " [Fermix](https://example.com) tail"
+      text = String.duplicate("a", 1_396) <> " [Fermix](https://example.com) tail"
       :ok = send_msg("123", text)
 
       assert_received {:telegram_request, _path, body1}
       assert_received {:telegram_request, _path, body2}
-      assert body1["text"] == String.duplicate("a", 4_090) <> " "
+      assert body1["text"] == String.duplicate("a", 1_396)
       assert body2["text"] == ~s(<a href="https://example.com">Fermix</a> tail)
       refute_received {:telegram_request, _path, _body}
     end
 
-    test "does not split messages under 4096 chars" do
+    test "does not split a reply that fits one section card" do
       stub_telegram(self(), 200, %{"ok" => true})
 
-      text = String.duplicate("a", 4096)
+      text = String.duplicate("a", @chunk_limit_units)
       :ok = send_msg("123", text)
 
       assert_received {:telegram_request, _path, _body}
       refute_received {:telegram_request, _path, _body}
+    end
+
+    # §4.3: one reply, one ring.
+    test "only the first chunk of a reply rings; every later chunk is silent" do
+      stub_telegram(self(), 200, %{"ok" => true})
+
+      :ok = send_msg("123", String.duplicate("a", 5000))
+
+      [first | rest] = sent_bodies()
+      refute Map.has_key?(first, "disable_notification")
+      assert rest != []
+      assert Enum.all?(rest, &(&1["disable_notification"] == true))
+    end
+
+    test "disables link previews on every outbound text send" do
+      stub_telegram(self(), 200, %{"ok" => true})
+
+      :ok = send_msg("123", "see [Fermix](https://example.com)")
+
+      assert_received {:telegram_request, _path, body}
+      assert body["link_preview_options"] == %{"is_disabled" => true}
+    end
+
+    # §4.2: boundaries carry the structure — a message opens at a section, never
+    # mid-sentence.
+    test "cuts a sectioned reply at section starts, under the card limit" do
+      stub_telegram(self(), 200, %{"ok" => true})
+
+      text =
+        Enum.map_join(1..6, "\n\n", fn n ->
+          "## Section #{n}\n\n" <> String.duplicate("Sentence #{n} of the section body. ", 20)
+        end)
+
+      :ok = send_msg("123", text)
+
+      bodies = sent_bodies()
+      assert length(bodies) > 1
+
+      Enum.each(bodies, fn body ->
+        assert rendered_units(body["text"]) <= @chunk_limit_units
+        assert String.starts_with?(body["text"], "<b>Section ")
+      end)
+    end
+
+    # The reported defect (design §1.1 item 2): the old "last whitespace before
+    # 4096" cut split the "- Conch Republic Divers advertises …" bullet, so the
+    # next message opened lowercase, mid-sentence.
+    test "never opens a chunk mid-sentence on the dive-reply fixture" do
+      stub_telegram(self(), 200, %{"ok" => true})
+
+      :ok = send_msg("123", dive_reply_fixture())
+
+      bodies = sent_bodies()
+      assert length(bodies) > 1
+
+      Enum.each(bodies, fn body ->
+        refute String.match?(opening_word(body["text"]), ~r/^[a-z]/)
+      end)
+    end
+
+    test "resends a chunk unformatted when Telegram cannot parse the entities" do
+      test_pid = self()
+      {:ok, attempts} = Agent.start_link(fn -> 0 end)
+
+      Req.Test.stub(:telegram, fn conn ->
+        {:ok, req_body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:telegram_request, conn.request_path, Jason.decode!(req_body)})
+        attempt = Agent.get_and_update(attempts, fn n -> {n + 1, n + 1} end)
+
+        {status, body} =
+          if attempt == 1 do
+            {400,
+             %{
+               "ok" => false,
+               "description" => "Bad Request: can't parse entities: unsupported start tag"
+             }}
+          else
+            {200, %{"ok" => true}}
+          end
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(status, Jason.encode!(body))
+      end)
+
+      :telemetry.attach(
+        "test-plain-fallback",
+        [:fermix, :channel, :render],
+        fn _event, _measurements, metadata, _config ->
+          send(test_pid, {:render_telemetry, metadata.status})
+        end,
+        nil
+      )
+
+      log =
+        capture_log(fn ->
+          assert :ok = send_msg("123", "answer with **bold**")
+        end)
+
+      :telemetry.detach("test-plain-fallback")
+
+      assert [formatted, plain] = sent_bodies()
+      assert formatted["text"] == "answer with <b>bold</b>"
+      assert formatted["parse_mode"] == "HTML"
+      # The resend is the RAW markdown with no parse mode — never the HTML that
+      # Telegram just refused.
+      assert plain["text"] == "answer with **bold**"
+      refute Map.has_key?(plain, "parse_mode")
+
+      assert log =~ "can't parse entities"
+      assert_received {:render_telemetry, :plain_fallback}
+    end
+
+    test "a second parse failure returns the error instead of retrying again" do
+      stub_telegram(self(), 400, %{
+        "ok" => false,
+        "description" => "Bad Request: can't parse entities: unsupported start tag"
+      })
+
+      capture_log(fn ->
+        assert {:error, {:http_status, 400}} = send_msg("123", "**bold**")
+      end)
+
+      assert length(sent_bodies()) == 2
     end
 
     # M30 §11.3: adapters own platform knowledge and return the structured
@@ -711,6 +938,37 @@ defmodule FermixChannels.Channels.TelegramTest do
 
       assert {:error, _reason} =
                send_msg("123", "hello")
+    end
+
+    # §4.2: a fence too big for one message cannot be split without corrupting
+    # both halves, so it ships as a file after the text chunks land.
+    test "promotes an oversized code block to a document and cleans up its temp file" do
+      test_pid = self()
+
+      Req.Test.stub(:telegram, fn conn ->
+        {:ok, req_body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:telegram_call, conn.request_path, req_body})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(200, Jason.encode!(%{"ok" => true}))
+      end)
+
+      code = String.duplicate("IO.puts(:hello)\n", 300)
+
+      assert :ok = send_msg("123", "Here is the script:\n\n```elixir\n" <> code <> "```\n")
+
+      assert_receive {:telegram_call, "/bottest-bot-token/sendMessage", text_body}
+      assert Jason.decode!(text_body)["text"] =~ "full code attached as a file"
+      refute Jason.decode!(text_body)["text"] =~ "IO.puts"
+
+      assert_receive {:telegram_call, "/bottest-bot-token/sendDocument", doc_body}
+      assert doc_body =~ ~s(name="document")
+      assert doc_body =~ "code-1.txt"
+      assert doc_body =~ "Code from this reply (elixir)"
+      assert doc_body =~ "IO.puts(:hello)"
+
+      assert Path.wildcard(Path.join(System.tmp_dir!(), "fermix-telegram-code-*")) == []
     end
 
     test "a plain text send carries no reply_markup (no button regression)" do
@@ -1068,29 +1326,132 @@ defmodule FermixChannels.Channels.TelegramTest do
 
   # -- telemetry --
 
-  describe "telemetry" do
-    test "emits [:fermix, :channel, :message] on outbound send" do
-      _ref =
+  # One delivered message is one outbound row (design §8). Before S4 the adapter
+  # emitted a single `count: N` row only when EVERY chunk of a reply landed — so
+  # a partial failure reported nothing at all, and a draft-streamed answer that
+  # sealed in place left zero outbound rows for the whole turn.
+  describe "outbound telemetry" do
+    defp attach_message_events(handler_id) do
+      :ok =
         :telemetry.attach(
-          "test-channel-outbound",
+          handler_id,
           [:fermix, :channel, :message],
-          fn event, measurements, metadata, _config ->
-            send(self(), {:telemetry, event, measurements, metadata})
+          fn event, measurements, metadata, pid ->
+            send(pid, {:telemetry, event, measurements, metadata})
           end,
-          nil
+          self()
         )
 
-      stub_telegram(self(), 200, %{"ok" => true})
-      :ok = send_msg("123", "hello")
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+    end
 
-      assert_received {:telemetry, [:fermix, :channel, :message], measurements, metadata}
+    # Drains the outbound `channel_msg` rows recorded so far, in emission order.
+    defp outbound_rows(acc \\ []) do
+      receive do
+        {:telemetry, [:fermix, :channel, :message], measurements,
+         %{direction: :outbound} = metadata} ->
+          outbound_rows([{measurements, metadata} | acc])
+      after
+        0 -> Enum.reverse(acc)
+      end
+    end
+
+    defp assert_single_message_row({measurements, metadata}) do
+      assert measurements.count == 1
+      assert measurements.duration_us >= 0
       assert metadata.channel == :telegram
       assert metadata.direction == :outbound
-      assert is_integer(measurements.count)
+    end
 
-      :telemetry.detach("test-channel-outbound")
-    after
-      :telemetry.detach("test-channel-outbound")
+    test "emits one row per delivered chunk, not one row per reply" do
+      attach_message_events("test-outbound-per-chunk")
+      stub_telegram(self(), 200, %{"ok" => true})
+
+      assert :ok = send_msg("123", dive_reply_fixture())
+
+      bodies = sent_bodies()
+      assert length(bodies) > 1
+
+      rows = outbound_rows()
+      assert length(rows) == length(bodies)
+      Enum.each(rows, &assert_single_message_row/1)
+    end
+
+    test "a partial failure leaves truthful rows for the chunks that were delivered" do
+      attach_message_events("test-outbound-partial")
+      stub_ok_then_error(self(), 1, 403, %{"ok" => false, "description" => "Forbidden"})
+
+      assert {:error, _reason} = send_msg("123", dive_reply_fixture())
+
+      # The first chunk reached the chat and the send then aborted: exactly one
+      # row, where the all-or-nothing emission reported none.
+      assert [row] = outbound_rows()
+      assert_single_message_row(row)
+    end
+
+    test "a chunk rescued by the unformatted resend still counts as one message" do
+      attach_message_events("test-outbound-resend")
+
+      capture_log(fn ->
+        stub_ok_then_error(self(), 0, 400, %{
+          "ok" => false,
+          "description" => "Bad Request: can't parse entities: unexpected tag"
+        })
+
+        assert {:error, _reason} = send_msg("123", "**bold**")
+      end)
+
+      # Both attempts failed here, so nothing was delivered and nothing is
+      # reported — the resend is a second attempt at ONE message, never a
+      # second message.
+      assert outbound_rows() == []
+    end
+
+    test "a created draft bubble emits exactly one row" do
+      attach_message_events("test-outbound-draft-open")
+      stub_telegram(self(), 200, %{"ok" => true, "result" => %{"message_id" => 777}})
+
+      assert {:ok, 777} = Telegram.open_draft(draft_message(), "**bold** start")
+
+      assert [row] = outbound_rows()
+      assert_single_message_row(row)
+    end
+
+    test "a failed draft open emits nothing" do
+      attach_message_events("test-outbound-draft-open-failed")
+      stub_telegram(self(), 403, %{"ok" => false, "description" => "Forbidden"})
+
+      assert {:error, _reason} = Telegram.open_draft(draft_message(), "draft text")
+      assert outbound_rows() == []
+    end
+
+    # Edits and seals rewrite a bubble that has already been counted; they are
+    # visible as [:fermix, :channel, :stream] phases, and counting them would
+    # report one answer as one "message" per streaming tick.
+    test "editing and sealing an existing bubble emit nothing" do
+      attach_message_events("test-outbound-draft-edit")
+      stub_telegram(self(), 200, %{"ok" => true})
+
+      assert :ok = Telegram.edit_draft(draft_message(), 777, "now *italic*")
+      assert {:ok, nil} = Telegram.seal_draft(draft_message(), 777, "final text")
+
+      assert outbound_rows() == []
+    end
+
+    test "a swept thought leaves its outbound row, and the sweep delete leaves none" do
+      attach_message_events("test-outbound-ephemeral")
+      stub_message_ids(self(), [4_001])
+
+      assert {:ok, ["4001"]} =
+               Telegram.send_ephemeral(draft_message(), "💭 Checking the calendar")
+
+      assert [row] = outbound_rows()
+      assert_single_message_row(row)
+
+      stub_telegram(self(), 200, %{"ok" => true})
+      assert :ok = Telegram.delete_message(draft_message(), "4001")
+
+      assert outbound_rows() == []
     end
   end
 
@@ -1115,6 +1476,19 @@ defmodule FermixChannels.Channels.TelegramTest do
     end
   end
 
+  describe "rotation_spec/0" do
+    test "rotates on the same card size a finished reply is split into" do
+      %{measure: measure, rotate_at: rotate_at} = Telegram.rotation_spec()
+
+      assert rotate_at == @chunk_limit_units
+      # The measurer is the rendered UTF-16 length, not graphemes: an emoji
+      # counts two units on the wire and must count two here.
+      assert measure.("ab") == 2
+      assert measure.("😀") == 2
+      assert measure.("**bold**") == 4
+    end
+  end
+
   describe "open_draft/2" do
     test "sends the rendered draft and returns the message_id" do
       stub_telegram(self(), 200, %{"ok" => true, "result" => %{"message_id" => 777}})
@@ -1126,6 +1500,7 @@ defmodule FermixChannels.Channels.TelegramTest do
       assert body["chat_id"] == "123"
       assert body["parse_mode"] == "HTML"
       assert body["text"] == "<b>bold</b> start"
+      assert body["link_preview_options"] == %{"is_disabled" => true}
     end
 
     test "carries the thread id" do
@@ -1155,6 +1530,7 @@ defmodule FermixChannels.Channels.TelegramTest do
       assert body["message_id"] == 777
       assert body["parse_mode"] == "HTML"
       assert body["text"] == "now <i>italic</i>"
+      assert body["link_preview_options"] == %{"is_disabled" => true}
     end
 
     test "holds an overflowing draft to the largest fitting prefix" do
@@ -1164,7 +1540,7 @@ defmodule FermixChannels.Channels.TelegramTest do
       assert :ok = Telegram.edit_draft(draft_message(), 777, long)
 
       assert_receive {:telegram_request, _path, body}
-      assert String.length(body["text"]) <= 4096
+      assert rendered_units(body["text"]) <= 4_000
     end
 
     test "does not retry — interim edits are best-effort" do
@@ -1205,10 +1581,13 @@ defmodule FermixChannels.Channels.TelegramTest do
       assert {:ok, remainder} = Telegram.seal_draft(draft_message(), 777, long)
 
       assert is_binary(remainder)
+      # The remainder is a verbatim suffix of the draft text, so the caller can
+      # deliver it without re-deriving what was already sealed.
       assert String.ends_with?(long, remainder)
 
       assert_receive {:telegram_request, _path, body}
-      assert String.length(body["text"]) <= 4096
+      assert rendered_units(body["text"]) <= 4_000
+      assert body["link_preview_options"] == %{"is_disabled" => true}
     end
 
     test "retries a rate-limited seal honoring retry_after" do
@@ -1265,6 +1644,88 @@ defmodule FermixChannels.Channels.TelegramTest do
     test "surfaces delete failures" do
       stub_telegram(self(), 400, %{"ok" => false, "description" => "message to delete not found"})
       assert {:error, _reason} = Telegram.discard_draft(draft_message(), 777)
+    end
+  end
+
+  # -- Ephemeral thought messages (CHANNEL_LONGFORM_PRESENTATION §5) --
+
+  describe "send_ephemeral/2" do
+    test "sends every chunk silently and returns the message ids in order" do
+      stub_message_ids(self(), [4_001, 4_002, 4_003])
+
+      # Long enough that the ladder has to produce more than one chunk, so the
+      # notification-suppression assertion covers the FIRST chunk too.
+      long = String.duplicate("A thought line about the plan. ", 120)
+
+      assert {:ok, ids} = Telegram.send_ephemeral(draft_message(), long)
+      assert length(ids) > 1
+      assert ids == Enum.take(["4001", "4002", "4003"], length(ids))
+
+      bodies = sent_bodies()
+      assert length(bodies) == length(ids)
+      assert Enum.all?(bodies, &(&1["disable_notification"] == true))
+      assert Enum.all?(bodies, &(&1["chat_id"] == "123"))
+      assert Enum.all?(bodies, &(&1["link_preview_options"] == %{"is_disabled" => true}))
+    end
+
+    test "a single thought line is one silent message" do
+      stub_message_ids(self(), [77])
+
+      assert {:ok, ["77"]} = Telegram.send_ephemeral(draft_message(), "💭 Checking the calendar")
+
+      assert_received {:telegram_request, path, body}
+      assert path =~ "/sendMessage"
+      assert body["disable_notification"] == true
+      assert body["text"] == "💭 Checking the calendar"
+    end
+
+    test "carries the thread id" do
+      stub_message_ids(self(), [78])
+
+      assert {:ok, ["78"]} = Telegram.send_ephemeral(draft_message(99), "💭 In a topic")
+
+      assert_received {:telegram_request, _path, body}
+      assert body["message_thread_id"] == 99
+    end
+
+    test "surfaces a send failure" do
+      stub_telegram(self(), 403, %{"ok" => false, "description" => "Forbidden"})
+
+      assert {:error, _reason} = Telegram.send_ephemeral(draft_message(), "💭 Nope")
+    end
+
+    test "refuses loudly when the API answers 200 without a message id" do
+      stub_telegram(self(), 200, %{"ok" => true})
+
+      assert {:error, :missing_message_id} = Telegram.send_ephemeral(draft_message(), "💭 Hmm")
+    end
+  end
+
+  describe "delete_message/2" do
+    test "posts deleteMessage for the id it was given" do
+      stub_telegram(self(), 200, %{"ok" => true})
+
+      assert :ok = Telegram.delete_message(draft_message(), "4001")
+
+      assert_received {:telegram_request, path, body}
+      assert path =~ "/deleteMessage"
+      assert body["chat_id"] == "123"
+      assert body["message_id"] == 4_001
+    end
+
+    test "a non-numeric id fails loud before any API call" do
+      stub_telegram(self(), 200, %{"ok" => true})
+
+      assert {:error, {:invalid_message_id, "abc"}} =
+               Telegram.delete_message(draft_message(), "abc")
+
+      refute_received {:telegram_request, _path, _body}
+    end
+
+    test "surfaces a delete failure" do
+      stub_telegram(self(), 400, %{"ok" => false, "description" => "message to delete not found"})
+
+      assert {:error, _reason} = Telegram.delete_message(draft_message(), "4001")
     end
   end
 

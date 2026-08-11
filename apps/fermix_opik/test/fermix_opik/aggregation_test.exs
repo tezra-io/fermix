@@ -96,6 +96,8 @@ defmodule FermixOpik.AggregationTest do
          %{channel: "telegram", session_id: "main-1", phase: :edit, status: :ok}},
         {[:fermix, :channel, :stream], %{duration_us: 50_000, block_index: 2},
          %{channel: "telegram", session_id: "main-1", phase: :block, status: :ok}},
+        {[:fermix, :channel, :stream], %{duration_us: 60_000, edit_index: 3},
+         %{channel: "telegram", session_id: "main-1", phase: :rotate, status: :ok}},
         {[:fermix, :provider, :call], %{duration_ms: 1_000},
          %{provider: :openai_codex, model: "gpt-5-codex", status: :ok, session_id: "main-1"}},
         {[:fermix, :channel, :stream], %{total_edits: 12, dropped_snapshots: 40},
@@ -117,6 +119,11 @@ defmodule FermixOpik.AggregationTest do
     block = span_named(spans, "stream:block")
     assert block.parent_span_id == wrapper.id
     assert block.metadata.block_index == 2
+
+    # A mid-turn draft rotation (one sealed section card) exports like a block:
+    # a child span of the turn, never the terminal seal.
+    rotate = span_named(spans, "stream:rotate")
+    assert rotate.parent_span_id == wrapper.id
 
     seal = span_named(spans, "stream:seal")
     assert seal.parent_span_id == wrapper.id

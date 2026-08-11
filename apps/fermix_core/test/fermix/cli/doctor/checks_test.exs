@@ -982,6 +982,21 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.detail =~ "streaming on: telegram=draft"
     end
 
+    test "a capability-derived default reports as the mode it resolved to" do
+      # No channel opted in explicitly; these are the defaults the gateway and
+      # the report agree on (draft where the channel can edit, block otherwise).
+      report = [
+        %{channel: :telegram, name: "telegram", streaming: "draft", capability: :draft_edit},
+        %{channel: :whatsapp, name: "whatsapp", streaming: "block", capability: :none}
+      ]
+
+      result = Checks.streaming_config(report)
+
+      assert result.status == :ok
+      assert result.detail =~ "telegram=draft"
+      assert result.detail =~ "whatsapp=block"
+    end
+
     test "block mode is ok on any channel — no edit capability required" do
       report = [
         %{channel: :whatsapp, name: "whatsapp", streaming: "block", capability: :none}

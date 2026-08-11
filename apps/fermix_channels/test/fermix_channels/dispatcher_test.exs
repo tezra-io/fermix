@@ -1071,6 +1071,22 @@ defmodule FermixChannels.DispatcherTest do
 
     def stream_capability, do: :draft_edit
 
+    def rotation_spec, do: %{measure: &String.length/1, rotate_at: 1_400}
+
+    def open_draft(%Message{}, _text), do: {:ok, 1}
+    def edit_draft(%Message{}, _handle, _text), do: :ok
+    def seal_draft(%Message{}, _handle, _text), do: {:ok, nil}
+    def discard_draft(%Message{}, _handle), do: :ok
+  end
+
+  # Draft-capable but with no rotation callback: proves the gateway wires
+  # rotation only when the channel exports it.
+  defmodule PlainDraftChannel do
+    def build_text_reply(%Message{}), do: fn _text -> :ok end
+    def build_media_reply(%Message{}), do: fn _media_part -> {:error, :media_unsupported} end
+
+    def stream_capability, do: :draft_edit
+
     def open_draft(%Message{}, _text), do: {:ok, 1}
     def edit_draft(%Message{}, _handle, _text), do: :ok
     def seal_draft(%Message{}, _handle, _text), do: {:ok, nil}
@@ -1112,15 +1128,38 @@ defmodule FermixChannels.DispatcherTest do
                agent_message.stream_spec
     end
 
-    test "attaches a block stream_spec by default (streaming on)" do
+    test "a draft-capable channel defaults to draft mode with rotation wired" do
       # The baseline telegram config (setup/0) sets no `streaming` key; the
-      # default is "block", so a configured channel streams without opting in.
+      # default is capability-derived, so a draft-capable channel rotates
+      # without opting in (CHANNEL_LONGFORM_PRESENTATION §6, decision §9.5).
       assert :ok = dispatch_for_streaming(StreamingChannel)
+
+      assert_receive {:agent_message, agent_message}
+
+      assert %FermixChannels.Gateway.DraftStream.Spec{mode: :draft, channel: "telegram"} =
+               agent_message.stream_spec
+
+      assert agent_message.stream_spec.rotate_at == 1_400
+      assert is_function(agent_message.stream_spec.measure, 1)
+    end
+
+    test "an edit-less channel defaults to block mode" do
+      assert :ok = dispatch_for_streaming(ReplyChannel)
 
       assert_receive {:agent_message, agent_message}
 
       assert %FermixChannels.Gateway.DraftStream.Spec{mode: :block, channel: "telegram"} =
                agent_message.stream_spec
+    end
+
+    test "a draft-capable channel without rotation_spec/0 never rotates" do
+      assert :ok = dispatch_for_streaming(PlainDraftChannel)
+
+      assert_receive {:agent_message, agent_message}
+
+      assert %FermixChannels.Gateway.DraftStream.Spec{mode: :draft} = agent_message.stream_spec
+      assert agent_message.stream_spec.rotate_at == nil
+      assert agent_message.stream_spec.measure == nil
     end
 
     test "no stream_spec when streaming is explicitly off" do

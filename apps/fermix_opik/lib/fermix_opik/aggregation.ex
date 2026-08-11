@@ -131,13 +131,14 @@ defmodule FermixOpik.Aggregation do
     place_under(state, parent, meta, at, &Mapper.tool_span(meta, meas, &1))
   end
 
-  # Channel-stream lifecycle ([:fermix, :channel, :stream]): open/block/seal/
-  # discard become child spans of the turn's trace via the shared session_id —
-  # never a root run (the stream has no parent_session of its own). Interim
-  # draft :edit phases are deliberately not exported: at ~1 edit/s they would
-  # flood the trace; the seal span carries total_edits/dropped_snapshots
-  # instead. :block phases (one per sent chunk, a handful per turn) export too,
-  # but only while the run's session is still open (see below).
+  # Channel-stream lifecycle ([:fermix, :channel, :stream]): open/block/rotate/
+  # seal/discard become child spans of the turn's trace via the shared
+  # session_id — never a root run (the stream has no parent_session of its own).
+  # Interim draft :edit phases are deliberately not exported: at ~1 edit/s they
+  # would flood the trace; the seal span carries total_edits/dropped_snapshots
+  # instead. :block (one per sent chunk) and :rotate (one per sealed draft card,
+  # a handful per turn) export too, but only while the run's session is still
+  # open (see below).
   def apply_event(state, [:fermix, :channel, :stream], meas, meta, at) do
     case Map.get(meta, :phase) do
       :open ->
@@ -151,7 +152,7 @@ defmodule FermixOpik.Aggregation do
         # instead of resurrecting it as an empty root.
         add_child_span(state, meta, at, &Mapper.stream_span(meta, meas, &1))
 
-      phase when phase in [:block, :seal, :discard] ->
+      phase when phase in [:block, :rotate, :seal, :discard] ->
         # These phases can arrive AFTER the turn's `agent.message` already closed
         # and shipped the trace: :seal/:discard fire just as the turn completes,
         # and in block streaming a paced :block edit (~1s throttle / idle flush)

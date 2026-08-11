@@ -11,14 +11,23 @@ defmodule FermixChannels.Channels.Signal do
 
   require Logger
 
+  alias FermixChannels.Channels.Signal.Plain
   alias FermixChannels.Gateway.Idempotency
   alias FermixChannels.Gateway.MediaDownload
   alias FermixChannels.Gateway.Message
+  alias FermixChannels.Outbound.Splitter
   alias FermixChannels.Telemetry, as: ChannelTelemetry
   alias FermixCore.Telemetry
 
   @default_cli_path "signal-cli"
   @max_media_bytes 100 * 1_024 * 1_024
+  # Signal imposes no outbound text cap. This ceiling is a Fermix readability
+  # choice (CHANNEL_LONGFORM_PRESENTATION §3.1) — a long reply arrives as a few
+  # readable messages instead of one unbounded wall — not a platform limit. With
+  # no platform counting anything, the unit is ours to pick, and graphemes (the
+  # splitter's default) are the reader-visible characters a readability ceiling
+  # is actually about. The only certain unit of the five channels.
+  @max_message_length 4_000
 
   @impl true
   def parse_webhook(_params), do: {:error, :unsupported_transport}
@@ -70,12 +79,44 @@ defmodule FermixChannels.Channels.Signal do
     end
   end
 
+  # CHANNEL_LONGFORM_PRESENTATION §3.1: the ladder walks the model's Markdown —
+  # that is where headings and section boundaries are still legible — while
+  # every candidate chunk is *measured* through the plain-text renderer, so the
+  # readability ceiling counts what the reader sees rather than the markup the
+  # model wrote. Each emitted chunk is then rendered for the wire.
   defp send_text(account, recipient, text, opts) do
-    case timed_signal_send(account, recipient, text, opts) do
-      {:ok, :ok, duration_us} -> emit_outbound_telemetry(duration_us)
-      {:error, reason} -> {:error, reason}
-    end
+    text
+    |> Splitter.split(limit: @max_message_length, measure: &Plain.rendered_length/1)
+    |> Enum.map(&Plain.render/1)
+    |> send_chunks(account, recipient, opts)
   end
+
+  # Strictly sequential: the first failure aborts the remaining chunks and is
+  # the returned reason.
+  defp send_chunks(chunks, account, recipient, opts) do
+    client = send_client(opts)
+    client_opts = client_opts(opts)
+
+    Enum.reduce_while(chunks, :ok, fn chunk, :ok ->
+      halt_on_error(send_chunk(client, client_opts, account, recipient, chunk))
+    end)
+  end
+
+  # One delivered message is one outbound row, emitted here rather than once for
+  # the whole reply (design §8): a reply that half-lands then reports truthfully
+  # what WAS delivered instead of reporting nothing.
+  defp send_chunk(client, client_opts, account, recipient, chunk) do
+    {result, duration_us} =
+      Telemetry.timed_us(fn -> client.send_message(account, recipient, chunk, client_opts) end)
+
+    emit_delivered(result, duration_us)
+  end
+
+  defp emit_delivered(:ok, duration_us), do: emit_outbound_telemetry(duration_us)
+  defp emit_delivered({:error, _reason} = error, _duration_us), do: error
+
+  defp halt_on_error(:ok), do: {:cont, :ok}
+  defp halt_on_error({:error, _reason} = error), do: {:halt, error}
 
   @impl true
   @spec send_media(String.t(), FermixChannels.Gateway.Channel.media_part()) ::
@@ -249,18 +290,6 @@ defmodule FermixChannels.Channels.Signal do
   end
 
   defp validate_media(_media_part), do: {:error, :invalid_media_part}
-
-  defp timed_signal_send(account, recipient, text, opts) do
-    {result, duration_us} =
-      Telemetry.timed_us(fn ->
-        send_client(opts).send_message(account, recipient, text, client_opts(opts))
-      end)
-
-    case result do
-      :ok -> {:ok, :ok, duration_us}
-      {:error, reason} -> {:error, reason}
-    end
-  end
 
   defp timed_signal_attachment_send(account, recipient, media_part, opts) do
     {result, duration_us} =

@@ -10,9 +10,10 @@ defmodule FermixChannels.Gateway.DraftStream do
   budget: the engine coalesces cumulative snapshots (newest wins) and writes
   them through a throttled, single-flight loop.
 
-  The engine never sees a channel module. It drives the four closures in
-  `DraftStream.Spec`, built by the gateway where the channel module and
-  inbound message both exist. A test greps this file to keep platform-isms
+  The engine never sees a channel module. It drives the closures in
+  `DraftStream.Spec` — including the channel's own length measurer, which is how
+  rotation stays channel-blind — built by the gateway where the channel module
+  and inbound message both exist. A test greps this file to keep platform-isms
   out.
 
   Lifecycle: `push/2` feeds `FermixCore.AgentLoop.stream_event()`s;
@@ -24,6 +25,7 @@ defmodule FermixChannels.Gateway.DraftStream do
 
   require Logger
 
+  alias FermixChannels.Outbound.Splitter
   alias FermixCore.AgentLoop
 
   defmodule Spec do
@@ -37,10 +39,39 @@ defmodule FermixChannels.Gateway.DraftStream do
       `discard` closures over a draft-capable channel.
     - `:block` — completed chunks sent as separate ordinary messages; requires
       only `send` (any channel can do it).
+
+    `measure`/`rotate_at` are the draft-rotation pair
+    (CHANNEL_LONGFORM_PRESENTATION §6): the channel's rendered-length measurer
+    and the card size at which the live bubble is sealed and a fresh one opened,
+    so a long answer lands as section-shaped cards instead of freezing at the
+    platform limit. Both or neither — a threshold with no way to measure against
+    it (or the reverse) is a half-wired spec, so it is refused where the spec is
+    built. Unset, the draft freezes at the channel's own limit (pre-S2 behavior).
+
+    `ephemeral_send`/`delete` are the optional thought-sweep pair
+    (CHANNEL_LONGFORM_PRESENTATION §5, decision §9.1): a silent send that
+    answers with the platform ids of the messages it created, and a delete for
+    those ids. `ephemeral_send` requires `delete` — a channel that can post
+    thoughts but not remove them would leave permanent residue, so a half-wired
+    spec is refused. This is the **delete-only channel tier** (design §6): a
+    channel that can delete but cannot edit in place. A draft-capable channel
+    never uses it — it gets the rolling status bubble instead.
     """
 
     @enforce_keys [:channel]
-    defstruct [:channel, :open, :edit, :seal, :discard, :send, mode: :draft]
+    defstruct [
+      :channel,
+      :open,
+      :edit,
+      :seal,
+      :discard,
+      :send,
+      :ephemeral_send,
+      :delete,
+      :measure,
+      :rotate_at,
+      mode: :draft
+    ]
 
     @type t :: %__MODULE__{
             channel: String.t(),
@@ -49,7 +80,11 @@ defmodule FermixChannels.Gateway.DraftStream do
             edit: (term(), String.t() -> :ok | {:error, term()}) | nil,
             seal: (term(), String.t() -> {:ok, String.t() | nil} | {:error, term()}) | nil,
             discard: (term() -> :ok | {:error, term()}) | nil,
-            send: (String.t() -> :ok | {:error, term()}) | nil
+            send: (String.t() -> :ok | {:error, term()}) | nil,
+            ephemeral_send: (String.t() -> {:ok, [term()]} | {:error, term()}) | nil,
+            delete: (term() -> :ok | {:error, term()}) | nil,
+            measure: (String.t() -> non_neg_integer()) | nil,
+            rotate_at: pos_integer() | nil
           }
   end
 
@@ -75,16 +110,23 @@ defmodule FermixChannels.Gateway.DraftStream do
   Build the closure spec for a draft-capable channel + inbound message. Called
   by the gateway — the one layer that holds the channel module — so the engine
   (and the queue) stay channel-blind.
+
+  `opts` carries the rotation pair the gateway resolved from the channel:
+  `:measure` (rendered-length measurer) and `:rotate_at` (card size). Omitted,
+  the draft freezes at the channel's own limit instead of rotating.
   """
-  @spec build_spec(module(), struct()) :: Spec.t()
-  def build_spec(channel, %{channel: channel_name} = message) when is_atom(channel) do
+  @spec build_spec(module(), struct(), keyword()) :: Spec.t()
+  def build_spec(channel, %{channel: channel_name} = message, opts \\ [])
+      when is_atom(channel) and is_list(opts) do
     %Spec{
       channel: channel_name,
       mode: :draft,
       open: fn text -> channel.open_draft(message, text) end,
       edit: fn handle, text -> channel.edit_draft(message, handle, text) end,
       seal: fn handle, text -> channel.seal_draft(message, handle, text) end,
-      discard: fn handle -> channel.discard_draft(message, handle) end
+      discard: fn handle -> channel.discard_draft(message, handle) end,
+      measure: Keyword.get(opts, :measure),
+      rotate_at: Keyword.get(opts, :rotate_at)
     }
   end
 
@@ -92,11 +134,26 @@ defmodule FermixChannels.Gateway.DraftStream do
   Build a block-mode spec: completed chunks go out as ordinary sends through
   the supplied closure (typically the gateway's reply closure). No draft
   callbacks needed, so any channel qualifies.
+
+  `opts` carries the optional thought-sweep pair — `:ephemeral_send` and
+  `:delete` — which the gateway supplies only for a channel that can both send
+  silently and delete. Omitted (or nil), the engine drops thought blocks
+  entirely rather than posting undeletable ones.
   """
-  @spec build_block_spec(String.t(), (String.t() -> :ok | {:error, term()})) :: Spec.t()
-  def build_block_spec(channel_name, send_fn)
-      when is_binary(channel_name) and is_function(send_fn, 1) do
-    %Spec{channel: channel_name, mode: :block, send: send_fn}
+  @spec build_block_spec(String.t(), (String.t() -> :ok | {:error, term()}), keyword()) ::
+          Spec.t()
+  def build_block_spec(channel_name, send_fn, opts \\ [])
+      when is_binary(channel_name) and is_function(send_fn, 1) and is_list(opts) do
+    spec = %Spec{
+      channel: channel_name,
+      mode: :block,
+      send: send_fn,
+      ephemeral_send: Keyword.get(opts, :ephemeral_send),
+      delete: Keyword.get(opts, :delete)
+    }
+
+    assert_thought_sweep!(spec)
+    spec
   end
 
   @doc """
@@ -119,12 +176,40 @@ defmodule FermixChannels.Gateway.DraftStream do
         is_function(spec.seal, 2) and is_function(spec.discard, 1)
 
     valid? || raise ArgumentError, "draft-mode spec requires open/edit/seal/discard closures"
-    :ok
+    assert_rotation!(spec)
   end
 
   defp assert_spec!(%Spec{mode: :block} = spec) do
     is_function(spec.send, 1) || raise ArgumentError, "block-mode spec requires a send closure"
-    :ok
+    assert_rotation!(spec)
+    assert_thought_sweep!(spec)
+  end
+
+  # Rotation is all-or-none: a threshold with no measurer (or a measurer with no
+  # threshold) is a spec that silently never rotates, which is exactly the class
+  # of half-wired failure this engine refuses at build time.
+  defp assert_rotation!(%Spec{measure: nil, rotate_at: nil}), do: :ok
+
+  defp assert_rotation!(%Spec{measure: measure, rotate_at: rotate_at})
+       when is_function(measure, 1) and is_integer(rotate_at) and rotate_at > 0,
+       do: :ok
+
+  defp assert_rotation!(_spec) do
+    raise ArgumentError,
+          "draft rotation requires both a measure closure and a positive rotate_at"
+  end
+
+  # Thoughts are ephemeral or absent (decision §9.1): a spec that can post them
+  # but not remove them would leave permanent residue in the chat, so a
+  # half-wired pair fails loud where the spec is built, not mid-turn.
+  defp assert_thought_sweep!(%Spec{ephemeral_send: nil}), do: :ok
+
+  defp assert_thought_sweep!(%Spec{ephemeral_send: send_fn, delete: delete_fn})
+       when is_function(send_fn, 1) and is_function(delete_fn, 1),
+       do: :ok
+
+  defp assert_thought_sweep!(_spec) do
+    raise ArgumentError, "thought sweep requires both ephemeral_send and delete closures"
   end
 
   @doc "Feed a stream event (async). Newest cumulative snapshot wins."
@@ -185,11 +270,24 @@ defmodule FermixChannels.Gateway.DraftStream do
       # Block mode: byte offset into the current iteration's cumulative text
       # already emitted as block messages.
       sent_upto: 0,
+      # Draft mode: byte offset into the buffer already sealed into finished
+      # bubbles by rotation. Every open/edit renders the buffer from here on.
+      sealed_upto: 0,
+      # Refused rotation seals this turn; at the cap the engine stops rotating.
+      rotate_failures: 0,
+      # Draft mode: the rolling 💭 status bubble (its own draft) and the rolling
+      # window of reasoning headings it shows.
+      status_handle: nil,
+      status_text: nil,
+      status_headings: [],
       # Block mode: a completed message item is pending full flush (the
       # semantic boundary — flush regardless of the chunk minimum).
       pending_done?: false,
       # Block mode: out-of-band messages (reasoning summaries) awaiting send.
       side_queue: [],
+      # Block mode: platform ids of every ephemeral thought message sent this
+      # turn, swept at seal/discard.
+      thought_ids: [],
       interval_ms: interval,
       min_chars: positive_integer(Keyword.get(opts, :min_draft_chars), @min_draft_chars),
       max_edits: positive_integer(Keyword.get(opts, :max_edits), @max_edits),
@@ -234,7 +332,9 @@ defmodule FermixChannels.Gateway.DraftStream do
   # discarded (a completed item already flushed via :text_done) and the
   # emitted-offset restarts with the new iteration.
   defp apply_event(state, {:iteration_started, _n}) do
-    %{state | buffer: "", dirty?: false, sent_upto: 0, pending_done?: false}
+    state
+    |> seal_live_on_reset()
+    |> Map.merge(%{buffer: "", dirty?: false, sent_upto: 0, pending_done?: false})
   end
 
   # A message output item completed — the semantic block boundary. Block mode
@@ -249,16 +349,15 @@ defmodule FermixChannels.Gateway.DraftStream do
     end
   end
 
-  # The model's decision-making summary. Block mode sends it as its own 💭
-  # message (the OpenClaw-on-Signal behavior) — headings only, the full body
-  # is too noisy for chat; draft mode drops it — a single evolving draft has
-  # no place for out-of-band notes.
-  defp apply_event(%{spec: %Spec{mode: :block}} = state, {:reasoning_done, text})
-       when is_binary(text) do
+  # The model's decision-making summary — headings only, the full body is too
+  # noisy for chat. Block mode sends each drain as its own 💭 message (the
+  # OpenClaw-on-Signal behavior, swept at the end of the turn); draft mode edits
+  # them into ONE rolling 💭 status bubble that is deleted when the answer lands
+  # (CHANNEL_LONGFORM_PRESENTATION §6). Either way the heading only gets queued
+  # here — the write happens on a tick no answer content claimed.
+  defp apply_event(state, {:reasoning_done, text}) when is_binary(text) do
     queue_side_block(state, text |> String.trim() |> reasoning_heading())
   end
-
-  defp apply_event(state, {:reasoning_done, _text}), do: state
 
   defp apply_event(state, {:session_started, session_id}) do
     %{state | session_id: session_id}
@@ -280,16 +379,44 @@ defmodule FermixChannels.Gateway.DraftStream do
     cond do
       frozen?(state) -> state
       elapsed_ms(state) < state.interval_ms -> ensure_timer(state)
-      state.side_queue != [] -> send_side_block(state)
-      true -> emit_ready_block(state, state.block_min)
+      true -> flush_block_tick(state)
     end
   end
 
+  # Draft-mode tick priority (design §6): answer content first, then rotation
+  # (inside do_flush, on the write it just made), then the 💭 status bubble —
+  # which therefore only ever writes on a tick the answer had nothing to say.
   defp maybe_flush(state) do
     cond do
-      not flushable?(state) -> state
-      elapsed_ms(state) >= state.interval_ms -> do_flush(state)
-      true -> ensure_timer(state)
+      frozen?(state) -> state
+      flushable?(state) -> paced(state, &do_flush/1)
+      status_pending?(state) -> paced(state, &flush_status/1)
+      true -> state
+    end
+  end
+
+  defp paced(state, write_fun) when is_function(write_fun, 1) do
+    if elapsed_ms(state) >= state.interval_ms do
+      write_fun.(state)
+    else
+      ensure_timer(state)
+    end
+  end
+
+  # A SUCCESSFUL write can leave work behind — the remainder a rotation just
+  # detached, or a thought the answer outranked this tick — and nothing else
+  # would wake the engine until the next delta, which may never arrive. Only
+  # `mark_written` calls this, so a failed interim write is still never retried
+  # (best-effort by contract); block mode keeps its own timer discipline.
+  # Converges: each scheduled tick either writes (clearing the condition), is
+  # throttled (the timer already exists), or freezes.
+  defp ensure_pending_timer(%{spec: %Spec{mode: :block}} = state), do: state
+
+  defp ensure_pending_timer(state) do
+    if not frozen?(state) and (flushable?(state) or status_pending?(state)) do
+      ensure_timer(state)
+    else
+      state
     end
   end
 
@@ -297,18 +424,27 @@ defmodule FermixChannels.Gateway.DraftStream do
     state.failures >= @max_consecutive_failures or state.write_count >= state.max_edits
   end
 
+  # Measured on the LIVE slice (everything after the last rotation seal), never
+  # on the whole buffer: sealed bubbles are finished messages the engine must
+  # not re-render.
   defp flushable?(state) do
-    state.buffer != "" and state.buffer != state.last_sent and
-      state.failures < @max_consecutive_failures and
-      state.write_count < state.max_edits and
-      (state.phase == :live or String.length(state.buffer) >= state.min_chars)
+    live = live_text(state)
+
+    live != "" and live != state.last_sent and
+      (state.phase == :live or String.length(live) >= state.min_chars)
   end
 
   defp do_flush(%{phase: :idle} = state) do
-    case state.spec.open.(state.buffer) do
+    live = live_text(state)
+    {result, duration_us} = timed_us(fn -> state.spec.open.(live) end)
+
+    case result do
       {:ok, handle} ->
-        emit(state, :open, %{ttfd_ms: monotonic_ms() - state.started_at}, :ok)
-        mark_written(%{state | phase: :live, handle: handle})
+        emit_write(state, :edit, %{duration_us: duration_us, edit_index: state.write_count + 1})
+
+        %{state | phase: :live, handle: handle, last_sent: live}
+        |> mark_written()
+        |> maybe_rotate()
 
       {:error, reason} ->
         note_failure(state, :open, reason)
@@ -316,12 +452,13 @@ defmodule FermixChannels.Gateway.DraftStream do
   end
 
   defp do_flush(%{phase: :live} = state) do
-    {result, duration_us} = timed_us(fn -> state.spec.edit.(state.handle, state.buffer) end)
+    live = live_text(state)
+    {result, duration_us} = timed_us(fn -> state.spec.edit.(state.handle, live) end)
 
     case result do
       :ok ->
-        emit(state, :edit, %{duration_us: duration_us, edit_index: state.write_count + 1}, :ok)
-        mark_written(state)
+        emit_write(state, :edit, %{duration_us: duration_us, edit_index: state.write_count + 1})
+        %{state | last_sent: live} |> mark_written() |> maybe_rotate()
 
       {:error, reason} ->
         note_failure(state, :edit, reason)
@@ -329,14 +466,13 @@ defmodule FermixChannels.Gateway.DraftStream do
   end
 
   defp mark_written(state) do
-    %{
+    ensure_pending_timer(%{
       state
-      | last_sent: state.buffer,
-        dirty?: false,
+      | dirty?: false,
         last_write_at: monotonic_ms(),
         write_count: state.write_count + 1,
         failures: 0
-    }
+    })
   end
 
   # Interim writes are best-effort by contract: log, count, never retry. At
@@ -347,24 +483,170 @@ defmodule FermixChannels.Gateway.DraftStream do
     %{state | failures: state.failures + 1, last_write_at: monotonic_ms()}
   end
 
-  # -- Block-mode emission --
+  # -- Draft rotation (CHANNEL_LONGFORM_PRESENTATION §6) --
 
-  # Emit at most one ready chunk per call; the paced timer picks up the next.
-  # A pending completed item (:text_done) flushes whatever is unsent — the
-  # semantic boundary beats the chunk minimum.
-  defp emit_ready_block(%{pending_done?: true} = state, _min_chars) do
-    window = state |> unsent() |> String.slice(0, state.block_max)
+  # After each successful write: if the live slice has grown past one card AND
+  # the boundary falls strictly inside it (more content is still streaming),
+  # seal the live bubble at that boundary and detach — the next flush opens a
+  # fresh bubble with the remainder. A spec without the rotation pair never
+  # rotates and the draft freezes at the channel's own limit instead.
+  defp maybe_rotate(%{spec: %Spec{rotate_at: nil}} = state), do: state
 
-    case String.trim(window) do
-      "" -> %{state | pending_done?: false}
-      text -> send_block(state, text, byte_size(window))
+  # Defined cap behavior: after @max_consecutive_failures refused rotation seals
+  # in a turn, stop asking. The draft degrades to the freeze-at-limit shape and
+  # the turn-end seal still lands — better than re-hitting a refusing API on
+  # every tick for the rest of the turn.
+  defp maybe_rotate(%{rotate_failures: failures} = state)
+       when failures >= @max_consecutive_failures,
+       do: state
+
+  # The rotation seal is itself a write: once the budget is spent, rotating
+  # would overrun max_edits by one. Freeze instead — same bound frozen?
+  # enforces at tick entry.
+  defp maybe_rotate(%{write_count: writes, max_edits: cap} = state) when writes >= cap,
+    do: state
+
+  defp maybe_rotate(state) do
+    live = live_text(state)
+
+    case Splitter.first_chunk(live, limit: state.spec.rotate_at, measure: state.spec.measure) do
+      {:chunk, chunk, consumed} -> rotate_if_inside(state, live, chunk, consumed)
+      :fits -> state
     end
   end
 
-  defp emit_ready_block(state, min_chars) do
-    case next_block(unsent(state), min_chars, state.block_max) do
-      :wait -> state
-      {:block, text, consumed} -> send_block(state, text, consumed)
+  defp rotate_if_inside(state, live, chunk, consumed) do
+    if chunk != "" and consumed < byte_size(live) do
+      seal_rotation(state, chunk, consumed)
+    else
+      state
+    end
+  end
+
+  # The rotation seal is an interim write by the same contract as an edit: a
+  # failure is logged and counted (two in a row freeze the preview), never
+  # retried. The turn-end seal remains the one reliable write.
+  defp seal_rotation(state, chunk, consumed) do
+    {result, duration_us} = timed_us(fn -> rotation_seal_call(state, chunk) end)
+
+    case result do
+      {:ok, _overflow} ->
+        emit(state, :rotate, %{duration_us: duration_us, edit_index: state.write_count + 1}, :ok)
+        mark_written(detach_bubble(state, consumed))
+
+      {:error, reason} ->
+        state = note_failure(state, :rotate, reason)
+        %{state | rotate_failures: state.rotate_failures + 1}
+    end
+  end
+
+  # The bubble already shows exactly this text (the write that triggered the
+  # rotation landed on a chunk boundary), so re-sending it would be an
+  # idempotent no-op the platform may reject.
+  defp rotation_seal_call(%{last_sent: chunk} = _state, chunk), do: {:ok, nil}
+  defp rotation_seal_call(state, chunk), do: state.spec.seal.(state.handle, chunk)
+
+  defp detach_bubble(state, consumed) do
+    %{
+      state
+      | phase: :idle,
+        handle: nil,
+        last_sent: nil,
+        sealed_upto: state.sealed_upto + consumed
+    }
+  end
+
+  # Per-iteration reset with rotation wired: the live bubble stands as
+  # commentary (mirroring block mode's "sent blocks stand") — seal it as-is,
+  # then the new iteration starts its own bubble from offset zero.
+  defp seal_live_on_reset(%{spec: %Spec{rotate_at: nil}} = state), do: state
+  defp seal_live_on_reset(%{phase: :idle} = state), do: %{state | sealed_upto: 0}
+
+  defp seal_live_on_reset(state) do
+    case live_text(state) do
+      # A mid-stream provider retry can shrink the buffer below the sealed
+      # offset: there is nothing to seal, so the bubble stands with the text it
+      # already shows and the new iteration starts fresh.
+      "" -> state |> detach_bubble(0) |> reset_sealed()
+      live -> commit_reset_seal(state, live)
+    end
+  end
+
+  # The iteration seal is a real channel write — phase-visible like every
+  # other write (:edit / :rotate / :seal), so no write is invisible to the
+  # stream trace. :rotate fits: a seal-as-commentary is a rotation-shaped
+  # non-terminal write.
+  defp commit_reset_seal(state, live) do
+    {result, duration_us} = timed_us(fn -> rotation_seal_call(state, live) end)
+
+    case result do
+      {:ok, _overflow} ->
+        emit(state, :rotate, %{duration_us: duration_us, edit_index: state.write_count + 1}, :ok)
+        state |> detach_bubble(0) |> reset_sealed() |> mark_written()
+
+      {:error, reason} ->
+        state |> detach_bubble(0) |> reset_sealed() |> reset_failure(reason)
+    end
+  end
+
+  defp reset_sealed(state), do: %{state | sealed_upto: 0}
+
+  defp reset_failure(state, reason) do
+    Logger.warning(
+      "DraftStream iteration seal failed (#{state.spec.channel}): #{inspect(reason)}"
+    )
+
+    %{state | failures: state.failures + 1}
+  end
+
+  # -- Block-mode emission --
+
+  # One tick emits at most one chunk; the paced timer picks up the next. Answer
+  # text wins the tick (design §5): the thought queue drains only when no
+  # answer block is ready, so a side message can never land between an
+  # already-streamed paragraph and its continuation.
+  defp flush_block_tick(state) do
+    case take_block(state) do
+      {:block, text, consumed, state} -> send_block(state, text, consumed)
+      {:none, state} -> drain_side_queue(state)
+    end
+  end
+
+  # A pending completed item (:text_done) is the semantic boundary: it beats the
+  # chunk minimum. The remainder goes out whole when it fits one message;
+  # otherwise the cut follows `next_block`'s boundary preference (paragraph,
+  # then newline) rather than a blind max-length slice.
+  defp take_block(%{pending_done?: true} = state) do
+    remainder = state |> unsent() |> String.trim()
+
+    cond do
+      remainder == "" ->
+        {:none, %{state | pending_done?: false}}
+
+      String.length(remainder) <= state.block_max ->
+        {:block, remainder, unsent_size(state), state}
+
+      true ->
+        done_tail_block(state, remainder)
+    end
+  end
+
+  defp take_block(state) do
+    case next_block(unsent(state), state.block_min, state.block_max) do
+      {:block, text, consumed} -> {:block, text, consumed, state}
+      :wait -> {:none, state}
+    end
+  end
+
+  # Over-max remainder at a completed item. `next_block` returns `:wait` here
+  # only for a fence-unbalanced window, and a completed item must never wedge
+  # until seal — so the whole trimmed remainder goes as ONE send. The channel
+  # adapter ladder-splits oversized text safely (S0), so this cannot exceed a
+  # platform limit.
+  defp done_tail_block(state, remainder) do
+    case next_block(unsent(state), state.block_min, state.block_max) do
+      {:block, text, consumed} -> {:block, text, consumed, state}
+      :wait -> {:block, remainder, unsent_size(state), state}
     end
   end
 
@@ -422,6 +704,94 @@ defmodule FermixChannels.Gateway.DraftStream do
   # to a few dozen per turn at most; the cap below is a loud backstop.
   @max_side_blocks 32
 
+  # Every thought message must stay deletable, so the turn's whole thought
+  # stream is capped too: past this many sent messages the stream stops rather
+  # than growing a sweep list without an end.
+  @max_thought_ids 64
+
+  # -- Rolling 💭 status bubble (draft mode, CHANNEL_LONGFORM_PRESENTATION §6) --
+
+  # The status bubble is a rolling window of the LATEST headings, so its text
+  # must stay one short bubble: the oldest headings are dropped (a leading "…"
+  # marks the trim) until the join fits one card. The newest heading is kept
+  # even if it alone exceeds that — `reasoning_heading/1` caps a heading at
+  # @reasoning_heading_max graphemes, so the floor is unreachable in practice,
+  # and a status bubble is disposable meta that is deleted at turn end anyway.
+  @status_limit_units 1_000
+  @max_status_headings 16
+
+  defp status_pending?(%{spec: %Spec{mode: :draft}} = state), do: state.side_queue != []
+  defp status_pending?(_state), do: false
+
+  defp flush_status(state) do
+    headings = Enum.take(state.status_headings ++ state.side_queue, -@max_status_headings)
+    text = status_bubble_text(state, headings)
+    state = %{state | status_headings: headings, side_queue: []}
+
+    if text == state.status_text, do: state, else: write_status(state, text)
+  end
+
+  defp write_status(%{status_handle: nil} = state, text) do
+    {result, duration_us} = timed_us(fn -> state.spec.open.(text) end)
+
+    case result do
+      {:ok, handle} ->
+        emit_write(state, :edit, %{duration_us: duration_us, edit_index: state.write_count + 1})
+        mark_written(%{state | status_handle: handle, status_text: text})
+
+      {:error, reason} ->
+        note_failure(state, :status_open, reason)
+    end
+  end
+
+  defp write_status(state, text) do
+    {result, duration_us} = timed_us(fn -> state.spec.edit.(state.status_handle, text) end)
+
+    case result do
+      :ok ->
+        emit_write(state, :edit, %{duration_us: duration_us, edit_index: state.write_count + 1})
+        mark_written(%{state | status_text: text})
+
+      {:error, reason} ->
+        note_failure(state, :status_edit, reason)
+    end
+  end
+
+  # Candidates from the widest (every heading) to the narrowest (only the
+  # newest); the first that fits the card wins, the last one is the floor.
+  defp status_bubble_text(state, headings) do
+    limit = state.spec.rotate_at || @status_limit_units
+    measure = state.spec.measure || (&String.length/1)
+    candidates = Enum.map(0..(length(headings) - 1), &status_candidate(headings, &1))
+
+    Enum.find(candidates, List.last(candidates), fn text -> measure.(text) <= limit end)
+  end
+
+  defp status_candidate(headings, 0), do: "💭 " <> Enum.join(headings, "\n")
+
+  defp status_candidate(headings, drop) do
+    "💭 …\n" <> (headings |> Enum.drop(drop) |> Enum.join("\n"))
+  end
+
+  # The status bubble is a draft, not a sent message: `discard` deletes it.
+  # Best-effort like every other sweep write — a leftover bubble is cosmetic and
+  # must never touch the seal/discard result.
+  defp discard_status(%{status_handle: nil}), do: :ok
+
+  defp discard_status(state) do
+    case state.spec.discard.(state.status_handle) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "DraftStream status sweep failed (#{state.spec.channel}): #{inspect(reason)}"
+        )
+
+        :ok
+    end
+  end
+
   defp queue_side_block(state, ""), do: state
 
   defp queue_side_block(state, text) when length(state.side_queue) >= @max_side_blocks do
@@ -430,59 +800,129 @@ defmodule FermixChannels.Gateway.DraftStream do
   end
 
   defp queue_side_block(state, text) do
-    %{state | side_queue: state.side_queue ++ ["💭 " <> text]}
+    %{state | side_queue: state.side_queue ++ [text]}
   end
 
-  defp send_side_block(%{side_queue: [text | rest]} = state) do
-    {result, duration_us} = timed_us(fn -> state.spec.send.(text) end)
+  defp drain_side_queue(%{side_queue: []} = state), do: state
+  defp drain_side_queue(state), do: send_side_block(state)
+
+  # Decision §9.2: a channel that cannot delete gets no thought stream at all.
+  # Deliberately NOT a fallback to the ordinary send — an undeletable 💭 message
+  # is exactly the residue the design removes.
+  defp send_side_block(%{spec: %Spec{ephemeral_send: nil}} = state) do
+    %{state | side_queue: []}
+  end
+
+  defp send_side_block(state) when length(state.thought_ids) >= @max_thought_ids do
+    Logger.warning(
+      "DraftStream thought stream capped at #{@max_thought_ids} messages; dropping the rest"
+    )
+
+    %{state | side_queue: []}
+  end
+
+  # The whole queue drains as ONE silent message: one 💭 prefix, one line per
+  # queued heading. Truncated (never split) at the chunk ceiling — thoughts are
+  # disposable meta, so an overlong join loses its tail rather than costing a
+  # second message the sweep would have to track.
+  defp send_side_block(state) do
+    text = truncate("💭 " <> Enum.join(state.side_queue, "\n"), state.block_max)
+    {result, duration_us} = timed_us(fn -> state.spec.ephemeral_send.(text) end)
 
     case result do
-      :ok ->
+      {:ok, ids} when is_list(ids) ->
         emit_block_telemetry(state, duration_us)
-        ensure_timer(%{mark_written(state) | side_queue: rest})
+        state = %{mark_written(state) | side_queue: [], thought_ids: state.thought_ids ++ ids}
+        ensure_timer(state)
 
       {:error, reason} ->
         # A failed side block is dropped (logged) — it's commentary, not the
         # answer; the answer path has its own failure handling.
-        note_failure(%{state | side_queue: rest}, :block, reason)
+        note_failure(%{state | side_queue: []}, :block, reason)
     end
   end
 
-  defp emit_block_telemetry(%{write_count: 0} = state, _duration_us) do
-    emit(state, :open, %{ttfd_ms: monotonic_ms() - state.started_at}, :ok)
+  # Best-effort sweep of everything ephemeral this turn produced: the rolling
+  # status bubble (draft mode) and every 💭 message id (block mode). Failures are
+  # logged and never retried — leftovers are cosmetic and must not touch the
+  # seal/discard result.
+  defp sweep_ephemera(state) do
+    discard_status(state)
+    sweep_thoughts(state)
+  end
+
+  defp sweep_thoughts(%{thought_ids: []}), do: :ok
+
+  defp sweep_thoughts(state) do
+    Enum.each(state.thought_ids, fn id -> delete_thought(state, id) end)
+  end
+
+  defp delete_thought(state, id) do
+    case state.spec.delete.(id) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "DraftStream thought sweep failed (#{state.spec.channel}) for #{inspect(id)}: " <>
+            inspect(reason)
+        )
+
+        :ok
+    end
   end
 
   defp emit_block_telemetry(state, duration_us) do
-    emit(state, :block, %{duration_us: duration_us, block_index: state.write_count + 1}, :ok)
+    emit_write(state, :block, %{duration_us: duration_us, block_index: state.write_count + 1})
   end
+
+  # The stream's first successful write is its `:open` bookend (it carries
+  # ttfd_ms); every later write reports its own phase. A rotation's fresh bubble
+  # is therefore an interim write, not a second stream open.
+  defp emit_write(%{write_count: 0} = state, _phase, _measurements) do
+    emit(state, :open, %{ttfd_ms: monotonic_ms() - state.started_at}, :ok)
+  end
+
+  defp emit_write(state, phase, measurements), do: emit(state, phase, measurements, :ok)
 
   # An idle lull (no deltas for idle_ms) flushes the fence-balanced unsent text
   # even below the chunk minimum — this is how pre-tool commentary becomes its
   # own message instead of waiting for the turn to end.
-  defp idle_flush(%{spec: %Spec{mode: :block}, side_queue: [_ | _]} = state) do
-    if frozen?(state), do: state, else: send_side_block(state)
-  end
-
+  # Same priority as a paced tick: answer text first, thoughts only when there
+  # is no flushable answer text.
   defp idle_flush(%{spec: %Spec{mode: :block}} = state) do
-    window = state |> unsent() |> String.slice(0, state.block_max)
-
-    if frozen?(state) or String.trim(window) == "" or not fence_balanced?(window) do
-      state
-    else
-      send_block(state, String.trim(window), byte_size(window))
-    end
+    if frozen?(state), do: state, else: idle_emit(state)
   end
 
   defp idle_flush(state), do: state
+
+  defp idle_emit(state) do
+    window = state |> unsent() |> String.slice(0, state.block_max)
+    text = String.trim(window)
+
+    if text == "" or not fence_balanced?(window) do
+      drain_side_queue(state)
+    else
+      send_block(state, text, byte_size(window))
+    end
+  end
 
   # A mid-stream provider retry restarts the SSE cumulative from empty
   # (HttpClient retries a dropped connection with a fresh parser), so the
   # buffer can be SHORTER than the consumed offset — clamp, never crash.
   # Emission resumes once the retried stream regrows past the offset; the
   # seal prefix-check guarantees the final reply is correct either way.
-  defp unsent(state) do
-    start = min(state.sent_upto, byte_size(state.buffer))
-    binary_part(state.buffer, start, byte_size(state.buffer) - start)
+  defp unsent(state), do: slice_from(state.buffer, state.sent_upto)
+
+  defp unsent_size(state), do: byte_size(unsent(state))
+
+  # Draft mode's live slice: everything after the last rotation seal. Same clamp
+  # and same reason as `unsent/1`.
+  defp live_text(state), do: slice_from(state.buffer, state.sealed_upto)
+
+  defp slice_from(buffer, offset) do
+    start = min(offset, byte_size(buffer))
+    binary_part(buffer, start, byte_size(buffer) - start)
   end
 
   # Next emit-ready chunk of the unsent region: prefer the last paragraph
@@ -580,6 +1020,11 @@ defmodule FermixChannels.Gateway.DraftStream do
     {reply, status} = do_seal(state, final_text)
     emit(state, :seal, stop_measurements(state), status)
     send(from, {ref, reply})
+    # After the reply, deliberately: the sweep is N synchronous deletes, and
+    # run before the send it can outlast the caller's seal sync window —
+    # converting a successful seal into :draft_stream_timeout and a duplicate
+    # full-reply delivery. Post-reply, a slow delete only delays process exit.
+    sweep_ephemera(state)
     :ok
   end
 
@@ -595,12 +1040,7 @@ defmodule FermixChannels.Gateway.DraftStream do
     prefix = binary_part(state.buffer, 0, consumed)
 
     if String.starts_with?(final_text, prefix) do
-      tail =
-        final_text
-        |> binary_part(byte_size(prefix), byte_size(final_text) - byte_size(prefix))
-        |> String.trim()
-
-      {{:ok, if(tail == "", do: nil, else: tail)}, :ok}
+      {{:ok, blank_to_nil(tail_after(final_text, prefix))}, :ok}
     else
       Logger.warning(
         "DraftStream block seal (#{state.spec.channel}): streamed blocks are not a prefix " <>
@@ -611,6 +1051,20 @@ defmodule FermixChannels.Gateway.DraftStream do
     end
   end
 
+  # Draft mode after at least one rotation: the sealed bubbles already carry the
+  # answer's prefix, so only the tail may still be written. Same prefix check
+  # (and the same clamp for a mid-stream provider retry) as the block path.
+  defp do_seal(%{sealed_upto: sealed} = state, final_text) when sealed > 0 do
+    consumed = min(state.sealed_upto, byte_size(state.buffer))
+    prefix = binary_part(state.buffer, 0, consumed)
+
+    if String.starts_with?(final_text, prefix) do
+      seal_tail(state, tail_after(final_text, prefix))
+    else
+      seal_prefix_mismatch(state)
+    end
+  end
+
   defp do_seal(%{phase: :idle}, _final_text), do: {{:ok, :no_draft}, :ok}
 
   # No-op seal (design §5.7): the last successful write already holds exactly
@@ -618,8 +1072,27 @@ defmodule FermixChannels.Gateway.DraftStream do
   # the platform may reject ("message is not modified").
   defp do_seal(%{last_sent: text}, text), do: {{:ok, nil}, :ok}
 
-  defp do_seal(%{phase: :live} = state, final_text) do
-    case state.spec.seal.(state.handle, final_text) do
+  defp do_seal(%{phase: :live} = state, final_text), do: seal_live(state, final_text)
+
+  # No live bubble (the last rotation detached it): everything after the sealed
+  # prefix goes out through the queue's normal chunked delivery.
+  defp seal_tail(%{phase: :idle}, tail), do: {{:ok, blank_to_nil(tail)}, :ok}
+
+  # The final response stops at the sealed prefix, so whatever the live bubble
+  # holds is not part of the answer — remove it rather than leave stale text.
+  defp seal_tail(state, "") do
+    best_effort_discard(state)
+    {{:ok, nil}, :ok}
+  end
+
+  # The tail seals into the live bubble whole when the channel can hold it; a
+  # tail too big for one message comes back as the channel's overflow remainder
+  # for normal delivery. This is what absorbs a tiny post-completion remainder
+  # into the last card instead of ringing a second message for it.
+  defp seal_tail(state, tail), do: seal_live(state, tail)
+
+  defp seal_live(state, text) do
+    case state.spec.seal.(state.handle, text) do
       {:ok, overflow} ->
         {{:ok, overflow}, :ok}
 
@@ -630,11 +1103,37 @@ defmodule FermixChannels.Gateway.DraftStream do
     end
   end
 
+  # Same posture as the block path: the streamed text is not a prefix of the
+  # authoritative response (a mid-stream provider retry rewrote it), so deliver
+  # the response in full. The unsealed live bubble holds text the answer never
+  # confirmed and is discarded; sealed bubbles stand, exactly as sent blocks do.
+  defp seal_prefix_mismatch(state) do
+    Logger.warning(
+      "DraftStream rotated seal (#{state.spec.channel}): sealed bubbles are not a prefix " <>
+        "of the final response; delivering it in full"
+    )
+
+    best_effort_discard(state)
+    {{:ok, :no_draft}, :ok}
+  end
+
+  defp tail_after(final_text, prefix) do
+    final_text
+    |> binary_part(byte_size(prefix), byte_size(final_text) - byte_size(prefix))
+    |> String.trim()
+  end
+
+  defp blank_to_nil(""), do: nil
+  defp blank_to_nil(text), do: text
+
   defp handle_discard(state, from, ref) do
     state = cancel_timers(state)
     best_effort_discard(state)
     emit(state, :discard, stop_measurements(state), :ok)
     send(from, {ref, :ok})
+    # Post-reply for the same reason as handle_seal: deletes must not delay
+    # the caller past its sync window.
+    sweep_ephemera(state)
     :ok
   end
 
@@ -644,6 +1143,7 @@ defmodule FermixChannels.Gateway.DraftStream do
   defp handle_parent_exit(state, reason) do
     state = cancel_timers(state)
     best_effort_discard(state)
+    sweep_ephemera(state)
     emit(state, :discard, stop_measurements(state), :ok)
     exit(reason)
   end
