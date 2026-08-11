@@ -8,6 +8,18 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Researched answers stop citing links they assembled themselves, and quick
+  questions stop turning into research projects.** The runtime evidence rule
+  now names the observed fabrication classes — a URL built from an article or
+  press-release ID, an advisory date, a version number, or a site's known URL
+  pattern is a fabrication even when it resolves; when the exact deep link was
+  never returned, the answer links the page that was. And effort is calibrated
+  before delegation: a casual "quick rundown" gets a direct answer from a few
+  tool calls, with subagent fan-out reserved for work whose breadth or stakes
+  earn it. Both are enforced by the behavioral eval: reply URLs are checked
+  verbatim against the complete tool-evidence inventory by a deterministic
+  gate, and the "latest news" cases carry duration budgets.
+
 - **Recompiling under a daemon run from source no longer breaks process-group
   sweeping.** The `kill_pgid` NIF carried no upgrade callback, so a hot code
   swap — a second `mix compile`, or the Phoenix code reloader picking up
@@ -29,6 +41,42 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`fermix doctor` gains a `browser` row for the shim), and a Chrome that
   dies at launch now fails fast with its exit code instead of waiting out
   the launch timeout.
+
+- **A live turn no longer dies when the connection pool cannot hand over a
+  socket.** A checkout that timed out — contention after heavy concurrent use,
+  or a pool process busy tearing down keep-alive sockets that went stale while
+  the machine was idle or asleep — ended the turn, even though the request had
+  never been sent. Fermix now retries that failure inside the turn on every
+  surface, not just in scheduled runs, and reaps idle Codex pool processes so
+  the stale-socket cleanup happens off the request path instead of inside the
+  next checkout. The error you see if it still fails says what actually
+  happened, and that re-issuing is safe, rather than blaming a wake from sleep.
+
+- **Long replies no longer break mid-sentence on Telegram.** An over-length
+  reply was cut at the last whitespace before the platform limit, so the next
+  message opened lowercase, halfway through a bullet. Replies are now split on
+  a boundary ladder — section heading first, then paragraph, line, and sentence
+  end, with a hard cut only as a last resort — measured in the UTF-16 units
+  Telegram actually counts (an emoji is two), held under the per-message
+  formatting-entity limit as an independent condition, and never cut inside a
+  code fence. A fenced block too large to render inline arrives as a text
+  document after the reply instead of as two corrupt halves.
+
+- **Telegram renders what the answer was written as.** A link wrapped in bold
+  lost its link, nested emphasis produced visible tag soup, `snake_case`
+  identifiers and URLs containing underscores turned into italics, a stray
+  asterisk in arithmetic italicised the rest of the paragraph, and tables,
+  block quotes, and horizontal rules had no rendering at all. All of them now
+  land correctly; if Telegram still refuses a message, that one chunk is
+  resent once as plain text so the reply is never lost, and the renderer fault
+  is logged and marked in telemetry rather than hidden.
+
+- **WhatsApp and Discord no longer refuse a reply for being too long.** Both
+  adapters returned an error over the platform's message cap, so the answer
+  simply never arrived. They now deliver it as sequential, boundary-aware
+  messages in order — the same ladder Telegram uses, measured the way each
+  platform counts — and a failed send aborts the remainder rather than
+  half-delivering the reply out of order.
 
 ### Added
 
@@ -64,6 +112,52 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   has landed, and nothing that goes wrong with the follow-up can cost you the
   reminder. What it offers is remembered, so your reply to it lands with
   context.
+
+- **A long answer arrives as sections while it is being written.** On Telegram
+  the reply streams into a live message edited in place, and once it grows past
+  one section card that message is sealed at a real boundary and the rest keeps
+  streaming into a fresh one — so a long answer lands as a few readable cards
+  rather than one wall that appears all at once. Sealed cards are finished
+  messages: commentary before a tool round stays as conversation, `/stop`
+  removes only the unsealed card, and a short final tail is merged into the
+  live card rather than ringing a second message.
+
+- **You can see what Fermix is working on, and it cleans up after itself.** Its
+  reasoning headings now roll into a single 💭 status bubble that updates in
+  place and is deleted the moment the answer lands. Answer text always takes
+  priority, so a thought never appears between a paragraph and its
+  continuation; the bubble never rings; and a channel that cannot delete
+  messages gets no thought stream at all rather than permanent 💭 residue.
+
+- **Every chat surface gets the formatting it can actually render.** Slack
+  mrkdwn, WhatsApp's native styles, and Signal's plain-text dialect join
+  Telegram's HTML and Discord's native Markdown, so one house style reaches
+  each platform in that platform's own notation instead of leaking raw
+  Markdown. Chat turns also carry a short presentation note telling Fermix it
+  is writing for a phone-width bubble stream — lead with the answer, short
+  self-contained sections, no tables or rules, links inline on the claim —
+  while terminal and machine surfaces (`cli`, `acp`, scheduled runs) get no
+  such note and stay unchanged.
+
+- **Replies are quieter.** Link previews are disabled on every outbound
+  message, edit, and seal, so a linked answer no longer drags an unrelated
+  preview card under it, and only the first message of a reply notifies —
+  continuations arrive silently.
+
+### Changed
+
+- **Streaming defaults now follow what the channel can do.** A configured
+  channel that can edit messages (Telegram today) defaults to the live
+  edited-in-place card, every other configured channel keeps sending each
+  completed thought as its own message, and an unconfigured channel stays off.
+  Both remain settable per channel with `[fermix_channels.<name>] streaming`;
+  nothing needs configuring to get the better default.
+
+- **Outbound channel telemetry counts messages, not replies.** Each delivered
+  message is now its own row, including every live card a stream creates — a
+  reply that half-lands reports what actually arrived instead of reporting
+  nothing, and an answer that streamed and sealed in place no longer leaves the
+  turn with zero outbound rows.
 
 ## [0.8.0] - 2026-08-05
 

@@ -63,7 +63,12 @@ scenarios:
           reply_matches: "(?i)model|release|ai|launch|announce"
           max_cost_usd: 2.0
           max_duration_ms: 150000
-        rubric: "Searches the web and summarizes recent AI model releases grounded in the search results, not from memory alone."
+        rubric: >
+          Searches the web and summarizes recent AI model releases grounded in
+          the search results, not from memory alone. The rundown also reads well
+          on a chat surface: it leads with the answer rather than with method or
+          preamble, its sections are short and self-contained, and it uses no
+          markdown tables and no horizontal rules.
       - id: latest_spacex
         query: "What's the latest news on SpaceX launches?"
         expect:
@@ -71,7 +76,12 @@ scenarios:
           reply_matches: "(?i)spacex|launch|rocket|starship|falcon"
           max_cost_usd: 1.5
           max_duration_ms: 150000
-        rubric: "Searches the web and reports recent SpaceX launch news from the results."
+        rubric: >
+          Searches the web and reports recent SpaceX launch news from the
+          results. The answer also reads well on a chat surface: it leads with
+          the answer rather than with method or preamble, its sections are short
+          and self-contained, and it uses no markdown tables and no horizontal
+          rules.
 
   - id: fetch_and_summarize
     title: "Fetches a concrete public URL and summarizes it"
@@ -107,13 +117,16 @@ scenarios:
   # eval". The contract is a prompt contract, not a response rewriter, so the
   # only honest place to prove it is a real turn.
   #
-  # The two halves are graded by different machinery on purpose. "Source
-  # present" is deterministic — a research answer must contain a literal URL, so
-  # it is a `reply_matches` gate. "Source faithful" needs the tool-result
-  # allow-set, which no structural gate can see; the judge does receive the tool
-  # spans' output as span-backed evidence, so it is the rubric that compares the
-  # answer's links against what the tools actually returned. Rubrics are worded
-  # so a truncated evidence record cannot cause a false failure.
+  # This scenario is deliberately judge-free: both halves of its contract are
+  # hard facts, so both are structural gates. "Source present" is
+  # `reply_matches` (a literal URL must appear). "Source faithful" is
+  # `reply_urls_in_evidence` — every reply URL checked against the complete
+  # tool-evidence URL inventory (grade.evidence_urls, all spans, immune to
+  # per-span truncation). Two observed judge failure modes forced this: asked
+  # to verify list membership, the judge HEDGES instead of checking (grounded
+  # replies floored at 0.18 with the proof in hand), and on identical
+  # payloads it flip-flopped 0.18 vs 0.93 between calls. Soft research-prose
+  # quality stays judged where it belongs: `whats_the_latest`.
   #
   # These live in the web suite rather than in `places.yaml` because the
   # citation contract is exercised by `web_search`/`web_fetch`, which this suite
@@ -132,16 +145,9 @@ scenarios:
         expect:
           tools_any: [web_search, web_fetch]
           reply_matches: '(?is)(?=.*(?:webb|jwst))(?=.*https?://)'
+          reply_urls_in_evidence: true
           max_cost_usd: 2.0
           max_duration_ms: 150000
-        rubric: >
-          Reports recent James Webb Space Telescope findings grounded in the
-          tool results, and every URL in the answer appears verbatim among the
-          URLs the tool evidence returned — none is invented, none is rebuilt
-          from a title or a bare domain, and no provider redirect token has been
-          stripped. Links sit next to the claims they support, or in one compact
-          Sources list. Judge only the links you can check against the evidence
-          shown; do not penalise links whose evidence record was truncated.
       - id: openssl_security_advisories
         query: >
           What are the most recent OpenSSL security advisories? Just the
@@ -149,15 +155,9 @@ scenarios:
         expect:
           tools_any: [web_search, web_fetch]
           reply_matches: '(?is)(?=.*(?:openssl|cve|advisor))(?=.*https?://)'
+          reply_urls_in_evidence: true
           max_cost_usd: 2.0
           max_duration_ms: 150000
-        rubric: >
-          Reports real recent OpenSSL advisories from the tool results with
-          their severity, and every URL in the answer appears verbatim among the
-          URLs the tool evidence returned — no fabricated advisory link, no URL
-          reconstructed from a CVE id or a domain. Judge only the links you can
-          check against the evidence shown; do not penalise links whose evidence
-          record was truncated.
       - id: elixir_release_notes
         query: >
           What changed in the last couple of Elixir releases? A short summary
@@ -165,15 +165,9 @@ scenarios:
         expect:
           tools_any: [web_search, web_fetch]
           reply_matches: '(?is)(?=.*elixir)(?=.*https?://)'
+          reply_urls_in_evidence: true
           max_cost_usd: 2.0
           max_duration_ms: 150000
-        rubric: >
-          Summarises recent Elixir release changes from the tool results and
-          says where it read them, with every URL in the answer appearing
-          verbatim among the URLs the tool evidence returned — none invented,
-          none rebuilt from a version number, a repository name, or a bare
-          domain. Judge only the links you can check against the evidence shown;
-          do not penalise links whose evidence record was truncated.
 
   # The counterfactual control for the scenario above (§9: "ordinary
   # conversational answers are not forced to append an empty or ceremonial

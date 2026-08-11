@@ -198,6 +198,7 @@ spans have `metadata.status`).
 | `min_subagent_spawns` | int | ≥ N nested `subagent:<id>` worker spans (fan-out breadth) |
 | `reply_matches` | regex | trace `output.text` matches (Python `re.search`) |
 | `reply_not_matches` | regex | trace `output.text` does NOT match |
+| `reply_urls_in_evidence` | bool | every URL in the reply appears verbatim in the tool-evidence URL inventory (all tool spans' inputs+outputs, deduped; the same inventory the judge receives as `evidence_urls`). The deterministic home of "no invented/rebuilt links" — keep it out of rubrics: a judge asked to verify list membership hedges instead of checking |
 | `main_model_matches` | regex | every main-turn llm span's `model` matches (the default model is used); needs ≥1 main llm span |
 | `subagent_model_matches` | regex | every nested subagent-worker llm span's `model` matches AND ≥1 worker span exists (fails loud if fan-out didn't nest into the trace) |
 | `status` | `ok`/`error` | trace status equals it |
