@@ -2103,6 +2103,74 @@ defmodule FermixCore.AgentLoopTest do
       assert length(mock_continues()) == 2
     end
 
+    # The 2026-08-09 incident (Opik trace 019fe89d-9db0-7cde-9923-ff63bd7601cf):
+    # a Finch pool-checkout timeout killed a mid-turn continuation. The checkout
+    # fails BEFORE the request function runs — zero bytes sent — so re-issuing
+    # is duplication-safe by construction, and Finch picks among the host's
+    # pool processes at random, so a bounded retry usually lands on a healthy one.
+    test "a pool-checkout failure retries in place — the request was never sent", %{
+      registry: registry
+    } do
+      register_caps(registry, [SpyTool])
+
+      unavailable =
+        ProviderError.transport(:openai_codex, :codex, :connection_unavailable,
+          stage: :before_response
+        )
+
+      set_mock_responses([
+        turn("", tool_calls: [tool_call("c1", "spy_tool", %{})]),
+        {:error, unavailable},
+        turn("recovered")
+      ])
+
+      capture_log(fn ->
+        assert {:ok, %{response: "recovered"}} =
+                 run_loop(
+                   capability_registry: registry,
+                   trust: :operator,
+                   retry_delay_fn: delay_spy()
+                 )
+      end)
+
+      assert_received {:delay, 2_000}
+      refute_received {:delay, _}
+
+      # The tool ran exactly once — only the LLM call was re-issued.
+      assert_received :spy_tool_executed
+      refute_received :spy_tool_executed
+      assert length(mock_continues()) == 2
+    end
+
+    test "pool-checkout retries are bounded and the error surfaces after exhaustion", %{
+      registry: registry
+    } do
+      register_caps(registry, [EchoTool])
+
+      unavailable = ProviderError.transport(:openai_codex, :codex, :connection_unavailable)
+
+      set_mock_responses([
+        turn("", tool_calls: [tool_call("c1", "echo", %{"text" => "hi"})]),
+        {:error, unavailable},
+        {:error, unavailable},
+        {:error, unavailable}
+      ])
+
+      capture_log(fn ->
+        assert {:error, {:provider_transport_error, %{kind: :connection_unavailable}}} =
+                 run_loop(
+                   capability_registry: registry,
+                   trust: :operator,
+                   retry_delay_fn: delay_spy()
+                 )
+      end)
+
+      assert_received {:delay, 2_000}
+      assert_received {:delay, 4_000}
+      refute_received {:delay, _}
+      assert length(mock_continues()) == 3
+    end
+
     test "a rate limit is not retried mid-loop", %{registry: registry} do
       register_caps(registry, [EchoTool])
 

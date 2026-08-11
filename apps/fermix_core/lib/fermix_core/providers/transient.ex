@@ -6,9 +6,10 @@ defmodule FermixCore.Providers.Transient do
 
   Single source of truth for every retry seam: the route-level retry in
   `FermixCore.Providers.Failover.run_chain/3` (initial call, every surface),
-  the agent loop's continuation retry (`pre_response_timeout?/1`, every
-  surface), and the scheduled-job runner's coarser deadline-bounded backoff
-  (`connection_unavailable?/1`, cron only, before any tool ran). HttpClient
+  the agent loop's continuation retry (`pre_response_timeout?/1` +
+  `connection_unavailable?/1`, every surface), and the scheduled-job runner's
+  coarser deadline-bounded backoff (`connection_unavailable?/1`, cron only,
+  before any tool ran). HttpClient
   additionally retries `:closed`/`:econnrefused` once at the transport layer.
   Keying all of them on one classifier keeps the retry scopes from drifting
   apart.
