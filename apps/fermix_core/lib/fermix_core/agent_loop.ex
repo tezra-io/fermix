@@ -615,16 +615,20 @@ defmodule FermixCore.AgentLoop do
   end
 
   # The continuation's transient classes (rationale at
-  # @continuation_retry_attempts): measured zero-data timeouts, plus an
-  # explicit allowlist — transport cuts and provider-declared unavailability.
-  # A positive list, not `Transient.retryable?/1` minus exceptions: each
-  # kind's mid-loop policy is a deliberate decision. Unmeasured timeouts stay
-  # out (a slow model re-issued for nothing), and so does
-  # `:connection_unavailable` — pool-checkout exhaustion is designed to be
-  # recovered by the scheduled-job runner's own backoff (see
-  # `Providers.Error.transport_kind/1`), not re-spun here.
+  # @continuation_retry_attempts): measured zero-data timeouts, pool-checkout
+  # failures, plus an explicit allowlist — transport cuts and provider-declared
+  # unavailability. A positive list, not `Transient.retryable?/1` minus
+  # exceptions: each kind's mid-loop policy is a deliberate decision, and
+  # unmeasured timeouts stay out (a slow model re-issued for nothing).
+  # `:connection_unavailable` is a Finch pool-checkout timeout, which fires
+  # BEFORE the request function runs — zero bytes on the wire, so re-issuing
+  # cannot duplicate work — and Finch picks among the host's `count: 2` pool
+  # processes at random, so a bounded retry usually lands on a healthy one.
+  # Interactive turns have no outer recovery (only cron runs reach the
+  # scheduled-job runner's backoff), so excluding it here killed live turns.
   defp continuation_retryable?(reason) do
-    Transient.pre_response_timeout?(reason) or continuation_transient?(reason)
+    Transient.pre_response_timeout?(reason) or Transient.connection_unavailable?(reason) or
+      continuation_transient?(reason)
   end
 
   defp continuation_transient?({:provider_transport_error, %{kind: kind}}),

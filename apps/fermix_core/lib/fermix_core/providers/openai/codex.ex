@@ -493,10 +493,12 @@ defmodule FermixCore.Providers.OpenAI.Codex do
   end
 
   def transport_error_message(:connection_unavailable, _stage) do
-    "Codex could not obtain an HTTP connection from the pool before the checkout " <>
-      "timeout — the host network was not ready, typically just after the machine " <>
-      "woke from sleep. Fermix treats this as a transient infrastructure failure; " <>
-      "scheduled runs retry it with backoff."
+    "Codex could not obtain an HTTP connection: Fermix's connection pool for " <>
+      "chatgpt.com did not hand one over within the checkout budget — typically " <>
+      "contention after heavy concurrent use, or stale-socket cleanup after an " <>
+      "idle period or a wake from sleep. The checkout fails before the request is " <>
+      "sent, so nothing reached the provider and re-issuing is safe. Fermix treats " <>
+      "this as a transient infrastructure failure and retries it automatically."
   end
 
   def transport_error_message(reason, _stage), do: "Codex transport error: #{inspect(reason)}"

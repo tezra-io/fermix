@@ -1496,10 +1496,11 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
 
     test "a Finch pool-checkout timeout is classified as a connection-unavailable error" do
       # Finch reraises a RuntimeError ("unable to provide a connection ... excess
-      # queuing") when a checkout exceeds the pool queue timeout — the
-      # wake-from-sleep signature when the host network is not ready yet. Codex
-      # must mint a typed transport error so the scheduled-job runner can retry
-      # it with backoff (not a bare RuntimeError that strands the run).
+      # queuing") when a checkout exceeds the pool queue timeout — pool
+      # contention or stale-socket cleanup, not exclusively a wake-from-sleep
+      # race. Codex must mint a typed transport error so the retry seams (the
+      # agent loop's continuation retry, the scheduled-job runner's backoff) can
+      # recover it, instead of a bare RuntimeError that strands the run.
       message =
         "Finch was unable to provide a connection within the timeout due to " <>
           "excess queuing for connections."
@@ -1519,6 +1520,11 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
       assert error.stage == :before_response
       assert error.message =~ "could not obtain an HTTP connection"
       assert error.message =~ "transient"
+
+      # The operator-facing sentence must not blame wake-from-sleep for every
+      # occurrence, and must state the duplication-safety fact the retry relies on.
+      assert error.message =~ "contention"
+      assert error.message =~ "before the request is sent"
     end
 
     test "an unrelated RuntimeError is left bare, not classified as transport" do
