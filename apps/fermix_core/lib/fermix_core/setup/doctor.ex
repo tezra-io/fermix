@@ -250,6 +250,8 @@ defmodule FermixCore.Setup.Doctor do
           channel: atom(),
           name: String.t(),
           streaming: String.t(),
+          derived: String.t(),
+          explicit?: boolean(),
           capability: :draft_edit | :none
         }
 
@@ -277,11 +279,14 @@ defmodule FermixCore.Setup.Doctor do
 
   defp channel_streaming_entry(key, name, config, adapter) do
     capability = adapter_stream_capability(adapter)
+    derived = default_streaming(capability)
 
     %{
       channel: key,
       name: name,
-      streaming: Keyword.get(config, :streaming, default_streaming(capability)),
+      streaming: Keyword.get(config, :streaming, derived),
+      derived: derived,
+      explicit?: Keyword.has_key?(config, :streaming),
       capability: capability
     }
   end
