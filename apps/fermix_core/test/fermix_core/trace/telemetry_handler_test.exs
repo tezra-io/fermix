@@ -14,12 +14,24 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
     prefix = "test-#{System.unique_integer([:positive])}"
     TelemetryHandler.attach(trace_server: name, handler_prefix: prefix)
 
+    # `task_summary` is prompt content and obeys `capture_content`, so every
+    # test here establishes the switch it needs rather than reading whatever an
+    # earlier module left in the global app env.
+    prior_telemetry = Application.get_env(:fermix_core, :telemetry, [])
+    capture_content(true)
+
     on_exit(fn ->
       TelemetryHandler.detach(prefix)
+      Application.put_env(:fermix_core, :telemetry, prior_telemetry)
       FermixTestSupport.SafeRm.rm_rf!(tmp_dir)
     end)
 
     %{dir: tmp_dir, server: name}
+  end
+
+  defp capture_content(enabled?) do
+    prior = Application.get_env(:fermix_core, :telemetry, [])
+    Application.put_env(:fermix_core, :telemetry, Keyword.put(prior, :capture_content, enabled?))
   end
 
   defp sync(server), do: :sys.get_state(server)
@@ -464,6 +476,46 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
     assert stop_entry["event"] == "agent_stop"
     assert stop_entry["duration_ms"] == 87
     assert stop_entry["reason"] == "normal"
+  end
+
+  # A task summary is the leading text of the delegated prompt — the owner's own
+  # words. `capture_content: false` is the DEFAULT, and it means "no prompt or
+  # response bodies in traces", so the summary must not ride the lifecycle event
+  # either. The Opik exporter renders this field as the trace's `input`, so
+  # leaking it here leaks it off the machine.
+  test "task summaries stay out of traces when content capture is off", %{
+    dir: dir,
+    server: server
+  } do
+    capture_content(false)
+
+    LifecycleTelemetry.agent_task_start(
+      "coding-skill",
+      :skill,
+      "private-session-1",
+      "Book the clinic appointment for Dr Vance"
+    )
+
+    LifecycleTelemetry.skill_invoke(
+      "coding",
+      "private-session-2",
+      "Book the clinic appointment for Dr Vance",
+      true,
+      12,
+      "main-session-1"
+    )
+
+    sync(server)
+    entries = read_entries(dir, :agent_event)
+
+    for session <- ~w(private-session-1 private-session-2) do
+      entry = find_entry!(entries, &(&1["session_id"] == session))
+      refute Map.has_key?(entry, "task_summary")
+      assert entry["session_id"] == session
+    end
+
+    refute File.read!(Path.join([dir, Date.to_iso8601(Date.utc_today()), "agent_event.jsonl"])) =~
+             "Dr Vance"
   end
 
   test "skill lifecycle events create agent_event traces with skill correlation", %{

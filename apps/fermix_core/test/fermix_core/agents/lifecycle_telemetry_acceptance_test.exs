@@ -18,7 +18,21 @@ defmodule FermixCore.Agents.LifecycleTelemetryAcceptanceTest do
     start_supervised!({Trace, base_dir: trace_dir, name: server})
     TelemetryHandler.attach(trace_server: server, handler_prefix: prefix)
 
+    # This suite asserts the FULL trace row, `task_summary` included, and that
+    # field is prompt content gated on `capture_content`. Established here, not
+    # inherited: the suite pins the lean posture, and these assertions used to
+    # pass only because a dev shell exporting FERMIX_OPIK_ENABLED=1 turned
+    # capture on underneath them.
+    prior_telemetry = Application.get_env(:fermix_core, :telemetry, [])
+
+    Application.put_env(
+      :fermix_core,
+      :telemetry,
+      Keyword.put(prior_telemetry, :capture_content, true)
+    )
+
     on_exit(fn ->
+      Application.put_env(:fermix_core, :telemetry, prior_telemetry)
       TelemetryHandler.detach(prefix)
       FermixTestSupport.SafeRm.rm_rf!(trace_dir)
       FermixTestSupport.SafeRm.rm_rf!(journal_dir)

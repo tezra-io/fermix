@@ -785,7 +785,7 @@ defmodule FermixCore.AgentLoop do
         }
 
       {:ok, %{success: false, error: error}} ->
-        text_result("Error: #{error}", :error)
+        text_result("Error: #{wrap_untrusted_content(error, capability)}", :error)
 
       {:ok, other} when is_binary(other) ->
         text_result(wrap_untrusted_content(other, capability), :ok)
@@ -794,7 +794,10 @@ defmodule FermixCore.AgentLoop do
         text_result(wrap_untrusted_content(inspect(other), capability), :ok)
 
       {:error, reason} ->
-        text_result("Error executing tool: #{inspect(reason)}", :error)
+        text_result(
+          "Error executing tool: #{wrap_untrusted_content(inspect(reason), capability)}",
+          :error
+        )
     end
   rescue
     e ->
@@ -803,15 +806,27 @@ defmodule FermixCore.AgentLoop do
           Exception.format_stacktrace(__STACKTRACE__)
       )
 
-      text_result("Error: tool raised #{Exception.message(e)}", :error)
+      text_result(
+        "Error: tool raised #{wrap_untrusted_content(Exception.message(e), capability)}",
+        :error
+      )
   end
 
-  # Provenance as architecture (M10 P2): successful results from tools that
-  # return EXTERNAL CONTENT (web, MCP servers, plugin APIs, computer-use screen
-  # text) are delimited as data so the model never reads third-party text as
-  # instructions. The classification + frame live in
-  # `Capabilities.UntrustedContent` — one boundary shared with the realtime
-  # voice `ToolBridge`, so it can't drift between the two model-facing paths.
+  # Provenance as architecture (M10 P2): results from tools that return EXTERNAL
+  # CONTENT (web, MCP servers, plugin APIs, computer-use screen text) are
+  # delimited as data so the model never reads third-party text as instructions.
+  # The classification + frame live in `Capabilities.UntrustedContent` — one
+  # boundary shared with the realtime voice `ToolBridge`, so it can't drift
+  # between the two model-facing paths.
+  #
+  # EVERY model-facing branch of `dispatch_capability/3` is wrapped, not just the
+  # success one. A failure is not fermix-authored just because fermix wrote the
+  # "Error:" prefix: `Mcp.Capability.format_reason/1` deliberately renders the
+  # remote server's own sentence (so an agent can act on "out of credits" rather
+  # than blind-retry), which means the error path carries attacker-controlled
+  # prose too. Wrapping the vendor text and not the prefix keeps the frame
+  # around exactly the untrusted region. Internal tools classify as non-external
+  # and pass through unchanged on every branch, as before.
   defp wrap_untrusted_content(output, capability),
     do: UntrustedContent.wrap(output, capability)
 
