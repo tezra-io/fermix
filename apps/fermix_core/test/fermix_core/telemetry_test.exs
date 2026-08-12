@@ -10,6 +10,16 @@ defmodule FermixCore.TelemetryTest do
     assert duration_us >= 0
   end
 
+  # `config/runtime.exs` decides the product default (content ON) and runs AFTER
+  # `config/test.exs`, so it would clobber the suite's posture unless it honours
+  # an already-set compile-time value. This asserts that precedence from the
+  # outside: if the resolver goes back to overwriting, every content assertion in
+  # the suite silently flips and this fails first, naming why.
+  test "the test env keeps its pinned lean posture through runtime config" do
+    assert Application.get_env(:fermix_core, :telemetry)[:capture_content] == false
+    refute Telemetry.capture_content?()
+  end
+
   describe "with content capture off" do
     setup do
       set_capture(false)
