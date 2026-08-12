@@ -781,6 +781,8 @@ defmodule FermixCore.Setup.DoctorTest do
                channel: :drafty_channel,
                name: "drafty",
                streaming: "draft",
+               derived: "draft",
+               explicit?: true,
                capability: :draft_edit
              } in report
 
@@ -788,6 +790,8 @@ defmodule FermixCore.Setup.DoctorTest do
                channel: :plain_channel,
                name: "plain",
                streaming: "draft",
+               derived: "block",
+               explicit?: true,
                capability: :none
              } in report
 

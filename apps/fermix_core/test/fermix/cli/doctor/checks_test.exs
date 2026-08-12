@@ -986,8 +986,22 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       # No channel opted in explicitly; these are the defaults the gateway and
       # the report agree on (draft where the channel can edit, block otherwise).
       report = [
-        %{channel: :telegram, name: "telegram", streaming: "draft", capability: :draft_edit},
-        %{channel: :whatsapp, name: "whatsapp", streaming: "block", capability: :none}
+        %{
+          channel: :telegram,
+          name: "telegram",
+          streaming: "draft",
+          derived: "draft",
+          explicit?: false,
+          capability: :draft_edit
+        },
+        %{
+          channel: :whatsapp,
+          name: "whatsapp",
+          streaming: "block",
+          derived: "block",
+          explicit?: false,
+          capability: :none
+        }
       ]
 
       result = Checks.streaming_config(report)
@@ -995,6 +1009,47 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.status == :ok
       assert result.detail =~ "telegram=draft"
       assert result.detail =~ "whatsapp=block"
+      refute result.detail =~ "explicit"
+    end
+
+    test "an explicit value shadowing a different derived default carries the hint" do
+      # The upgrade-path case: a hand-written streaming = "block" from before
+      # the capability-derived default keeps winning silently — doctor is
+      # where the shadowing becomes visible.
+      report = [
+        %{
+          channel: :telegram,
+          name: "telegram",
+          streaming: "block",
+          derived: "draft",
+          explicit?: true,
+          capability: :draft_edit
+        }
+      ]
+
+      result = Checks.streaming_config(report)
+
+      assert result.status == :ok
+      assert result.detail =~ "telegram=block (explicit; unset derives draft)"
+    end
+
+    test "an explicit value equal to the derived default carries no hint" do
+      report = [
+        %{
+          channel: :whatsapp,
+          name: "whatsapp",
+          streaming: "block",
+          derived: "block",
+          explicit?: true,
+          capability: :none
+        }
+      ]
+
+      result = Checks.streaming_config(report)
+
+      assert result.status == :ok
+      assert result.detail =~ "whatsapp=block"
+      refute result.detail =~ "explicit"
     end
 
     test "block mode is ok on any channel — no edit capability required" do

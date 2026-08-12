@@ -1386,9 +1386,24 @@ defmodule Fermix.CLI.Doctor.Checks do
       true ->
         ok(
           "channel streaming",
-          "streaming on: " <>
-            Enum.map_join(enabled, ", ", fn entry -> "#{entry.name}=#{entry.streaming}" end)
+          "streaming on: " <> Enum.map_join(enabled, ", ", &streaming_entry_detail/1)
         )
+    end
+  end
+
+  # An explicit value that shadows a DIFFERENT derived default gets a hint, so
+  # a default change ships visibly instead of silently bypassing everyone who
+  # once wrote the key by hand. An explicit "off" is a clear opt-out and an
+  # explicit value equal to the derived default changes nothing — neither is
+  # hinted. Older report shapes without the annotation fields simply carry no
+  # hint.
+  defp streaming_entry_detail(entry) do
+    base = "#{entry.name}=#{entry.streaming}"
+
+    if Map.get(entry, :explicit?, false) and entry.streaming != Map.get(entry, :derived) do
+      base <> " (explicit; unset derives #{entry.derived})"
+    else
+      base
     end
   end
 
