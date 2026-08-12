@@ -59,6 +59,12 @@ defmodule FermixCore.Agents.LifecycleTelemetryTest do
   end
 
   test "emits the documented lifecycle telemetry payloads" do
+    # `task_summary` is prompt content, so the full payload only exists with
+    # capture on. Established here rather than inherited: the suite pins the lean
+    # posture, and this assertion used to pass only because a dev shell exporting
+    # FERMIX_OPIK_ENABLED=1 turned capture on underneath it.
+    capture_content(true)
+
     LifecycleTelemetry.agent_start(
       "coding-skill",
       :skill,
@@ -203,5 +209,29 @@ defmodule FermixCore.Agents.LifecycleTelemetryTest do
              reason: "normal",
              was_monitored: true
            }
+  end
+
+  # The switch governs every field carrying user content, not only the ones
+  # shaped by `Telemetry.preview/1`. `task_summary` is the leading text of the
+  # delegated prompt and used to ride out regardless.
+  test "task summaries are omitted when content capture is off" do
+    capture_content(false)
+
+    LifecycleTelemetry.agent_task_start("coding-skill", :skill, "s-1", "Read README")
+    assert_receive {:telemetry, [:fermix, :agent, :task_start], %{}, metadata}
+    refute Map.has_key?(metadata, :task_summary)
+    assert metadata.session_id == "s-1"
+
+    LifecycleTelemetry.skill_invoke("coding", "s-2", "Read README", true, 12, "parent-1")
+    assert_receive {:telemetry, [:fermix, :skill, :invoke], %{}, metadata}
+    refute Map.has_key?(metadata, :task_summary)
+    assert metadata.success == true
+  end
+
+  defp capture_content(enabled?) do
+    prior = Application.get_env(:fermix_core, :telemetry, [])
+    Application.put_env(:fermix_core, :telemetry, Keyword.put(prior, :capture_content, enabled?))
+    on_exit(fn -> Application.put_env(:fermix_core, :telemetry, prior) end)
+    :ok
   end
 end

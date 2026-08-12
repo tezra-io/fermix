@@ -6,6 +6,8 @@ defmodule FermixCore.Agents.LifecycleTelemetry do
   event names and fields at the currently available telemetry seams.
   """
 
+  alias FermixCore.Telemetry
+
   @agent_start_event [:fermix, :agent, :start]
   @agent_stop_event [:fermix, :agent, :stop]
   @agent_task_start_event [:fermix, :agent, :task_start]
@@ -105,7 +107,7 @@ defmodule FermixCore.Agents.LifecycleTelemetry do
       @agent_task_start_event,
       %{},
       agent_metadata(name, role, session_id, opts)
-      |> Map.put(:task_summary, task_summary)
+      |> Map.put(:task_summary, captured_content(task_summary))
     )
   end
 
@@ -151,7 +153,7 @@ defmodule FermixCore.Agents.LifecycleTelemetry do
       %{
         skill: skill,
         session_id: session_id,
-        task_summary: task_summary,
+        task_summary: captured_content(task_summary),
         success: success,
         parent: Keyword.get(opts, :parent),
         parent_session: parent_session
@@ -194,6 +196,16 @@ defmodule FermixCore.Agents.LifecycleTelemetry do
       parent: Keyword.get(opts, :parent),
       parent_session: Keyword.get(opts, :parent_session)
     }
+  end
+
+  # A task summary is the leading text of the delegated prompt — the owner's own
+  # words, and the same class of payload as the `input`/`output` previews that
+  # `capture_content` governs (the Opik mapper in fact renders it AS the trace's
+  # `input`). It therefore obeys the same switch instead of shipping regardless.
+  # `compact_map/1` drops the key when this returns nil, so a lean trace keeps
+  # its shape rather than carrying an empty string.
+  defp captured_content(summary) do
+    if Telemetry.capture_content?(), do: summary
   end
 
   defp execute(event, measurements, metadata) do

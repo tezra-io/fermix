@@ -207,6 +207,123 @@ defmodule FermixCore.Tools.GitToolsTest do
     assert result.error =~ "fermix grant path #{PathPolicy.canonical_path(dir)}"
   end
 
+  describe "git_write cannot read a file the sandbox never authorized" do
+    setup %{dir: dir} do
+      outside = FermixTestSupport.SafeRm.make_tmp_dir!("git-secret")
+      secret = Path.join(outside, "auth.json")
+      File.write!(secret, ~s({"access_token":"tok-do-not-leak"}))
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(outside) end)
+      File.write!(Path.join(dir, "staged.txt"), "content\n")
+      %{secret: secret}
+    end
+
+    # `git commit -F <path>` folds any daemon-readable file into the commit
+    # message, which `git_read log` then reads straight back — an arbitrary-file
+    # read that never meets the sandbox, because only the repo path is
+    # authorized, never the args. Every spelling git accepts has to be refused,
+    # not just the bare `-F` (all six were verified to work against real git).
+    for {label, args} <- [
+          {"-F with a separate operand", ["-F", "SECRET"]},
+          {"-F with a glued operand", ["-FSECRET"]},
+          {"-F bundled behind another short flag", ["-aF", "SECRET"]},
+          {"--file=", ["--file=SECRET"]},
+          {"--fil= abbreviation", ["--fil=SECRET"]},
+          {"--pathspec-from-file=", ["--pathspec-from-file=SECRET"]}
+        ] do
+      test "git_write refuses commit #{label}", %{dir: dir, context: context, secret: secret} do
+        args = Enum.map(unquote(args), &String.replace(&1, "SECRET", secret))
+
+        assert {:ok, result} =
+                 GitWrite.execute(
+                   %{"repo" => dir, "command" => "commit", "args" => args},
+                   context
+                 )
+
+        assert result.success == false
+        assert result.error =~ "outside the authorized repository"
+        refute result.error =~ "tok-do-not-leak"
+        assert {"", 0} = System.cmd("git", ["log", "--all", "--grep", "tok-do-not-leak"], cd: dir)
+      end
+    end
+
+    # The refusal walks the short-flag cluster and stops at the first flag that
+    # consumes the rest as a VALUE. Without that, a glued message containing a
+    # capital F reads as `-F` and a legitimate commit is refused.
+    test "a glued -m message containing F still commits", %{dir: dir, context: context} do
+      assert {:ok, %{success: true}} =
+               GitWrite.execute(
+                 %{"repo" => dir, "command" => "add", "args" => ["staged.txt"]},
+                 context
+               )
+
+      assert {:ok, result} =
+               GitWrite.execute(
+                 %{"repo" => dir, "command" => "commit", "args" => ["-mFixed the bug"]},
+                 context
+               )
+
+      assert result.success == true
+      assert {"Fixed the bug\n", 0} = System.cmd("git", ["log", "-1", "--pretty=%s"], cd: dir)
+    end
+  end
+
+  describe "git_read branch mode never writes" do
+    # `git branch` is the one read command with mutating modes, and a BARE
+    # OPERAND creates a branch with no flag at all — so the invariant is
+    # "flags only", not a denylist of the destructive spellings. Each case
+    # asserts the refusal AND that the ref namespace is untouched.
+    for {label, args} <- [
+          {"-D deletes a branch", ["-D", "main"]},
+          {"-d deletes a branch", ["-d", "main"]},
+          {"-m renames a branch", ["-m", "renamed"]},
+          {"-f force-moves a ref", ["-f", "main", "HEAD"]},
+          {"--set-upstream-to retargets", ["--set-upstream-to=origin/main"]},
+          {"--unset-upstream mutates with no operand", ["--unset-upstream"]},
+          {"a bare operand creates a branch", ["created-by-a-read-tool"]}
+        ] do
+      test "git_read refuses branch #{label}", %{dir: dir, context: context} do
+        assert {:ok, result} =
+                 GitRead.execute(
+                   %{"repo" => dir, "command" => "branch", "args" => unquote(args)},
+                   context
+                 )
+
+        assert result.success == false
+        assert result.error =~ "lists branches only"
+        assert branch_names(dir) == ["main"]
+      end
+    end
+
+    test "git_read still lists branches", %{dir: dir, context: context} do
+      assert {:ok, result} =
+               GitRead.execute(
+                 %{"repo" => dir, "command" => "branch", "args" => ["-a", "-v"]},
+                 context
+               )
+
+      assert result.success == true
+      assert result.output =~ "main"
+    end
+
+    # A value that would have been positional goes in the `=` form, which git
+    # accepts — so the flags-only rule costs no read capability.
+    test "git_read accepts a flag value in the = form", %{dir: dir, context: context} do
+      assert {:ok, result} =
+               GitRead.execute(
+                 %{"repo" => dir, "command" => "branch", "args" => ["--contains=HEAD"]},
+                 context
+               )
+
+      assert result.success == true
+      assert result.output =~ "main"
+    end
+  end
+
+  defp branch_names(dir) do
+    {output, 0} = System.cmd("git", ["branch", "--format=%(refname:short)"], cd: dir)
+    String.split(output, "\n", trim: true)
+  end
+
   test "registry policy exposes git_read to read-only filters but not git_write" do
     name = :"git_policy_#{System.unique_integer([:positive])}"
     start_supervised!({Registry, name: name})

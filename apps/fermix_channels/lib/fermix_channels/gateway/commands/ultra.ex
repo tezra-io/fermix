@@ -15,9 +15,15 @@ defmodule FermixChannels.Gateway.Commands.Ultra do
   def description,
     do: "Run a complex task in exhaustive mode (wide fan-out). Usage: /ultra <prompt>"
 
+  # Strictly operator, not the `command_allowlist` guest branch. `/ultra` is
+  # conversation-scoped like `/new` or `/compact`, but what it costs is not: it
+  # multiplies one turn into a wide `subagents` fan-out against the owner's
+  # provider account. That is the same reason `/background` is strict, and a
+  # guest who can already produce ordinary turns should not be able to choose
+  # the expensive one.
   @impl true
   def authorize(message, metadata, context),
-    do: Authorization.owner_only(message, metadata, context)
+    do: Authorization.operator_only(message, metadata, context)
 
   # `/ultra` is not handled inline: it runs as a normal foreground turn tagged
   # with `run_profile: :ultra`. Core (TurnRunner) consumes that tag to run the
