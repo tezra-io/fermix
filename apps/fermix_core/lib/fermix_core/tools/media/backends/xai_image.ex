@@ -1,6 +1,6 @@
 defmodule FermixCore.Tools.Media.Backends.XAIImage do
   @moduledoc """
-  xAI "Imagine" image backend (`grok-imagine-image-quality`) for the `:image`
+  xAI "Imagine" image backend (`grok-imagine-image-2.0`) for the `:image`
   modality.
 
   Generate → `POST /v1/images/generations`; edit → `POST /v1/images/edits`, the
@@ -20,7 +20,11 @@ defmodule FermixCore.Tools.Media.Backends.XAIImage do
   alias FermixCore.Tools.Media.Support
 
   @base_url "https://api.x.ai/v1"
-  @default_model "grok-imagine-image-quality"
+  # Curated, newest first — head is the default (`Media.Backend.supported_models/0`).
+  # Imagine Image 2.0 and Imagine Image Quality are separate models on xAI's
+  # side, not aliases: 2.0 is the current generation and the cheaper of the two.
+  @models ["grok-imagine-image-2.0", "grok-imagine-image-quality"]
+  @default_model hd(@models)
   @provider :xai
   @ext "png"
 
@@ -40,7 +44,7 @@ defmodule FermixCore.Tools.Media.Backends.XAIImage do
 
   @impl true
   @spec supported_models() :: [String.t(), ...]
-  def supported_models, do: [@default_model]
+  def supported_models, do: @models
 
   @impl true
   @spec capabilities() :: FermixCore.Tools.Media.Backend.capabilities()

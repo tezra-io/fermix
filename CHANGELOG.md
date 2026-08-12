@@ -6,7 +6,35 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Grok 4.6 is available and is now the model a new SpaceXAI setup picks.**
+  It joins the catalog with its documented 500k context window, and the xAI
+  model list is ordered newest generation first (larger window breaking ties
+  within a generation), so the model offered first is always the current
+  frontier one. Existing installs are untouched — a `default_model` already in
+  `config.toml` keeps working; only setups that never chose a model follow the
+  new head.
+
+- **`xhigh` reasoning effort is now available on SpaceXAI, for Grok 4.6.** The
+  xAI effort vocabulary previously stopped at `high`, so the level Grok 4.6
+  actually supports was unreachable. Setup offers it only on 4.6 — every older
+  Grok carries a `high` ceiling and a request above it self-heals down at route
+  resolution, which is the same thing SpaceXAI does server-side when an older
+  model is asked for `xhigh`.
+
+- **Grok Imagine Image 2.0 is available for image generation and editing, and
+  is now the SpaceXAI image default.** The previous model, Imagine Image
+  Quality, stays selectable — the two are separate models on xAI's side, not
+  aliases, and 2.0 is both the current generation and the cheaper of the pair.
+
 ### Fixed
+
+- **Two Grok context windows were wrong, so conversations compacted at the
+  wrong point.** The catalog credited Grok 4.5 with a 1M window when xAI
+  documents 500k — which defers compaction past the model's real limit — and
+  credited Grok 4.20 with 256k when it serves 1M, compacting roughly four times
+  earlier than needed. Both now match the published windows.
 
 - **Researched answers stop citing links they assembled themselves, and quick
   questions stop turning into research projects.** The runtime evidence rule

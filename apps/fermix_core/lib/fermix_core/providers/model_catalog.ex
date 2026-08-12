@@ -137,31 +137,59 @@ defmodule FermixCore.Providers.ModelCatalog do
   ]
 
   # xAI model names are volatile (design doc §8) — stale ids fail in the
-  # doctor probe, not the first user turn. Windows from current xAI docs:
-  # Grok 4.5 = 1M, Grok 4.3 = 1M, Grok 4.20 = 256k (same window as Grok 4),
-  # code-fast = 256k. `reasoning_effort?: false` marks the models that reject
-  # `reasoning.effort` (design doc §6.2) — re-verify against current xAI docs
-  # when adding models.
+  # doctor probe, not the first user turn. Ordered newest generation first,
+  # larger window breaking ties within a generation, so the head is always the
+  # current frontier model (= the wizard default).
+  #
+  # Windows re-verified against docs.x.ai/developers/models/<id> (2026-08-12):
+  # Grok 4.6 = 500k, Grok 4.5 = 500k, Grok 4.3 = 1M, Grok 4.20 = 1M,
+  # code-fast = 256k. The 4.5 and 4.20 figures corrected long-stale values here
+  # (they read 1M and 256k respectively) — a window that overstates the real one
+  # defers compaction past the provider's limit.
+  #
+  # `reasoning_effort?: false` marks the models that reject `reasoning.effort`
+  # (design doc §6.2) — re-verify against current xAI docs when adding models.
+  #
+  # `xhigh` is a Grok 4.6 capability, so 4.6 leaves `max_reasoning_effort` unset
+  # (provider ceiling = `:xhigh`) while every older Grok caps at `:high` — the
+  # same shape as the gpt-5.6-vs-gpt-5.5 split above. xAI itself treats an
+  # `xhigh` request to an older model as `high` rather than rejecting it, so the
+  # cap is about not *offering* a level that would silently do nothing, not
+  # about avoiding a 400.
   @xai [
-    %Entry{id: "grok-4.5", label: "Grok 4.5 (recommended)", context_window: 1_000_000},
-    %Entry{id: "grok-4.3", label: "Grok 4.3", context_window: 1_000_000},
+    %Entry{id: "grok-4.6", label: "Grok 4.6 (recommended, latest)", context_window: 500_000},
+    %Entry{
+      id: "grok-4.5",
+      label: "Grok 4.5",
+      context_window: 500_000,
+      max_reasoning_effort: :high
+    },
+    %Entry{
+      id: "grok-4.3",
+      label: "Grok 4.3",
+      context_window: 1_000_000,
+      max_reasoning_effort: :high
+    },
     %Entry{
       id: "grok-4.20-0309-reasoning",
       label: "Grok 4.20 reasoning",
-      context_window: 256_000,
-      reasoning_effort?: false
+      context_window: 1_000_000,
+      reasoning_effort?: false,
+      max_reasoning_effort: :high
     },
     %Entry{
       id: "grok-4.20-0309-non-reasoning",
       label: "Grok 4.20 non-reasoning",
-      context_window: 256_000,
-      reasoning_effort?: false
+      context_window: 1_000_000,
+      reasoning_effort?: false,
+      max_reasoning_effort: :high
     },
     %Entry{
       id: "grok-code-fast-1",
       label: "Grok Code Fast (cheap, coding)",
       context_window: 256_000,
-      reasoning_effort?: false
+      reasoning_effort?: false,
+      max_reasoning_effort: :high
     }
   ]
 
@@ -316,8 +344,10 @@ defmodule FermixCore.Providers.ModelCatalog do
   @doc """
   The highest reasoning-effort level `model_id` accepts when it is lower than
   its provider's ceiling, or `nil` when the model has no per-model cap (unknown
-  models and every uncapped model). Today only the older OpenAI models
-  (gpt-5.5 / gpt-5.4 / gpt-5.4-mini) cap — `max` is a gpt-5.6-family capability.
+  models and every uncapped model). Two families cap today: the older OpenAI
+  models (gpt-5.5 / gpt-5.4 / gpt-5.4-mini), because `max` is a gpt-5.6-family
+  capability, and every xAI model except Grok 4.6, because `xhigh` is a 4.6
+  capability.
   """
   @spec model_effort_ceiling(atom(), String.t()) :: ReasoningEffort.level() | nil
   def model_effort_ceiling(provider, model_id) when is_binary(model_id) do

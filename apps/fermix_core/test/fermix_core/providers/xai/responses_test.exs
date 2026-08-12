@@ -113,7 +113,11 @@ defmodule FermixCore.Providers.XAI.ResponsesTest do
     test "includes reasoning effort for models that accept it and clamps above the ceiling" do
       Req.Test.stub(__MODULE__, fn conn ->
         {:ok, body, conn} = Plug.Conn.read_body(conn)
-        assert Jason.decode!(body)["reasoning"] == %{"effort" => "high"}
+        # :max is above xAI's :xhigh ceiling and clamps to it. The per-MODEL
+        # narrowing (only Grok 4.6 accepts xhigh) happens at route resolution
+        # via ModelCatalog.clamp_effort/3 — this edge knows only the provider
+        # vocabulary, so it must not be asserted here.
+        assert Jason.decode!(body)["reasoning"] == %{"effort" => "xhigh"}
         Req.Test.json(conn, text_response_body())
       end)
 
@@ -121,7 +125,7 @@ defmodule FermixCore.Providers.XAI.ResponsesTest do
                Responses.chat(
                  [%{role: "user", content: "hi"}],
                  [],
-                 chat_opts(reasoning_effort: :xhigh)
+                 chat_opts(reasoning_effort: :max)
                )
     end
 

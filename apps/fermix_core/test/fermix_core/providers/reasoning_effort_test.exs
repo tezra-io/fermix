@@ -50,7 +50,7 @@ defmodule FermixCore.Providers.ReasoningEffortTest do
              ]
 
       assert ReasoningEffort.levels_for(:anthropic) == [:low, :medium, :high, :xhigh, :max]
-      assert ReasoningEffort.levels_for(:xai) == [:none, :low, :medium, :high]
+      assert ReasoningEffort.levels_for(:xai) == [:none, :low, :medium, :high, :xhigh]
       assert ReasoningEffort.levels_for(:unknown) == []
     end
 
@@ -61,12 +61,13 @@ defmodule FermixCore.Providers.ReasoningEffortTest do
       assert ReasoningEffort.supported?(:max, :anthropic)
       refute ReasoningEffort.supported?(:none, :anthropic)
       assert ReasoningEffort.supported?(:none, :xai)
-      refute ReasoningEffort.supported?(:xhigh, :xai)
+      assert ReasoningEffort.supported?(:xhigh, :xai)
+      refute ReasoningEffort.supported?(:max, :xai)
     end
 
-    test "xai clamps above-ceiling levels to high" do
-      assert ReasoningEffort.to_provider(:xhigh, :xai) == {:ok, "high"}
-      assert ReasoningEffort.to_provider(:max, :xai) == {:ok, "high"}
+    test "xai clamps above-ceiling levels to xhigh" do
+      assert ReasoningEffort.to_provider(:xhigh, :xai) == {:ok, "xhigh"}
+      assert ReasoningEffort.to_provider(:max, :xai) == {:ok, "xhigh"}
       assert ReasoningEffort.to_provider(:none, :xai) == :omit
     end
 
@@ -82,7 +83,9 @@ defmodule FermixCore.Providers.ReasoningEffortTest do
                :max
              ]
 
+      # An older Grok's :high ceiling narrows the offered levels to exclude xhigh.
       assert ReasoningEffort.levels_for(:xai, :high) == [:none, :low, :medium, :high]
+      assert ReasoningEffort.levels_for(:xai, nil) == [:none, :low, :medium, :high, :xhigh]
     end
   end
 
@@ -118,9 +121,9 @@ defmodule FermixCore.Providers.ReasoningEffortTest do
     end
 
     test "a level above the provider's ceiling clamps to that ceiling" do
-      # xAI tops out at :high, so :xhigh/:max clamp down to it.
-      assert ReasoningEffort.to_provider(:xhigh, :xai) == {:ok, "high"}
-      assert ReasoningEffort.to_provider(:max, :xai) == {:ok, "high"}
+      # xAI tops out at :xhigh (a Grok 4.6 capability), so :max clamps down to it.
+      assert ReasoningEffort.to_provider(:max, :xai) == {:ok, "xhigh"}
+      assert ReasoningEffort.to_provider(:xhigh, :xai) == {:ok, "xhigh"}
     end
 
     test "a level below the provider's floor is unsupported (reject loud upstream)" do
@@ -143,8 +146,9 @@ defmodule FermixCore.Providers.ReasoningEffortTest do
     end
 
     test "above the ceiling clamps down to the ceiling" do
-      assert ReasoningEffort.clamp(:max, :xai) == :high
-      assert ReasoningEffort.clamp(:xhigh, :xai) == :high
+      assert ReasoningEffort.clamp(:max, :xai) == :xhigh
+      # A now-supported level passes through untouched.
+      assert ReasoningEffort.clamp(:xhigh, :xai) == :xhigh
     end
 
     test "below the floor clamps up to the floor (unlike to_provider, which rejects)" do
