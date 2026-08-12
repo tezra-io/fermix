@@ -275,8 +275,18 @@ scenarios:
         query: |
           Use no tools. Order these synthetic deadlines earliest to latest and
           return one line only: Memo Friday, Review Tuesday, Draft Thursday.
+        # Bare weekday names make the true order depend on the day the eval runs:
+        # the daemon injects the real date, so the model orders by NEXT occurrence
+        # from today. The old gate encoded only the Mon/Tue/Sat/Sun answer and so
+        # failed 3 days in 7 — a stable, product-clean FAIL that reads as a model
+        # regression. All three accepted branches are cyclic rotations of the same
+        # Tue→Thu→Fri sequence, one per run-day group; any other permutation, and
+        # any multi-line answer, still fails.
+        #   Mon/Tue/Sat/Sun -> Review Tue, Draft Thu, Memo Fri
+        #   Wed/Thu         -> Draft Thu, Memo Fri, Review Tue
+        #   Fri             -> Memo Fri, Review Tue, Draft Thu
         expect:
-          reply_matches: '(?i)^\s*review[^\n]*tuesday[^\n]*draft[^\n]*thursday[^\n]*memo[^\n]*friday[.!]?\s*$'
+          reply_matches: '(?i)^\s*(?:review[^\n]*tuesday[^\n]*draft[^\n]*thursday[^\n]*memo[^\n]*friday|draft[^\n]*thursday[^\n]*memo[^\n]*friday[^\n]*review[^\n]*tuesday|memo[^\n]*friday[^\n]*review[^\n]*tuesday[^\n]*draft[^\n]*thursday)[.!]?\s*$'
 
   - id: broad_tasks_get_a_workstream_plan
     title: "Recognizes when independent workstreams merit parallel ownership"
