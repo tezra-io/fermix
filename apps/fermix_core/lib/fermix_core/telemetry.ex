@@ -7,9 +7,11 @@ defmodule FermixCore.Telemetry do
   `parent_session`) and the opt-in content capture (`input`/`output` previews)
   that lets a turn, subagent run, or scheduled job be reassembled downstream.
 
-  Content capture is gated by `config :fermix_core, :telemetry, capture_content:`
-  (default `false`) so production traces stay lean; flip it on for end-to-end
-  evaluation where prompt/response bodies matter.
+  Content capture is gated by `config :fermix_core, :telemetry, capture_content:`,
+  resolved in `config/runtime.exs` — **on** unless `FERMIX_TRACE_CONTENT=0`.
+  Bodies stay on the machine (JSONL under a `0700` `FERMIX_HOME`, and the Opik
+  instance is local), and a trace missing the request and the response cannot
+  answer the questions traces exist for. The test env pins it off.
   """
 
   @max_content_chars 2_000
@@ -25,8 +27,9 @@ defmodule FermixCore.Telemetry do
   @doc """
   Whether prompt/response bodies should be attached to telemetry and traces.
 
-  Off by default. Enable via config or the `FERMIX_TRACE_CONTENT` env var
-  (wired in `config/runtime.exs`) when capturing traces for evaluation.
+  Reads the configured value; `config/runtime.exs` is the one place that decides
+  it (on unless `FERMIX_TRACE_CONTENT=0`). The `false` here is the floor for a VM
+  where nothing configured it at all, not a second statement of the default.
   """
   @spec capture_content?() :: boolean()
   def capture_content? do

@@ -301,14 +301,18 @@ config :fermix_core,
 
 existing_telemetry = Application.get_env(:fermix_core, :telemetry, [])
 
-# Content capture (prompt/response/tool bodies in traces). One knob for the
-# common case: exporting to Opik turns content ON by default — if you're
-# observing, you want to see everything. FERMIX_TRACE_CONTENT is the explicit
-# override (e.g. "=0" for Opik-without-bodies, or "=1" for content in the local
-# JSONL with no Opik).
+# Content capture (prompt/response/tool bodies in traces). ON by default. The
+# JSONL traces live under FERMIX_HOME (0700) and the Opik instance is local, so
+# full-fidelity bodies never leave the machine — and a trace without the request
+# and the response cannot answer the questions traces exist to answer.
+# `FERMIX_TRACE_CONTENT=0` suppresses it.
+#
+# This is the ONE place the default is decided. A value already set at
+# compile time wins over the default (the test env pins the lean posture so the
+# suite establishes its own precondition), and the env var wins over both.
 capture_content =
   case env_bool.("FERMIX_TRACE_CONTENT") do
-    :__unset__ -> env_bool.("FERMIX_OPIK_ENABLED") == true
+    :__unset__ -> Keyword.get(existing_telemetry, :capture_content, true)
     explicit -> explicit
   end
 

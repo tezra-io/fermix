@@ -132,3 +132,10 @@ config :fermix_core, :plugin_provenance_verifier, FermixTestSupport.DistVerifier
 # `--version` processes. The mcp host-runtime probe (RuntimeProbe) denies by
 # default; tests stub success per-call via :find_executable / :version_fetch.
 config :fermix_core, :runtime_probe_host, FermixTestSupport.HostRuntimeStub
+
+# A real daemon captures prompt/response/tool bodies in traces (resolved in
+# config/runtime.exs, which honours this value). The suite pins the LEAN posture
+# instead of inheriting the product default, so a test asserting on captured
+# content opts in explicitly in its own setup and a test asserting content is
+# absent is not reading whatever an earlier module left in the app env.
+config :fermix_core, :telemetry, capture_content: false
