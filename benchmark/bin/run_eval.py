@@ -40,6 +40,7 @@ from evallib.opik import OpikClient, OpikError, valid_run_id
 from evallib.suites import RISK_LEVELS, SuiteError, load_all
 
 _SESS_RE = re.compile(r"[^A-Za-z0-9_-]")
+_SESS_MAX = 90
 _PROVIDER_LIMIT_RE = re.compile(
     r"usage limit\b.*?\btry again in ~|rate-limited this request|quota or credits are exhausted",
     re.IGNORECASE | re.DOTALL,
@@ -65,7 +66,30 @@ def new_run_id() -> str:
 
 
 def sess(*parts: str) -> str:
-    return _SESS_RE.sub("-", "-".join(parts))[:90]
+    """Session id bounded to `_SESS_MAX` that never drops a trailing part.
+
+    A plain `[:90]` silently cut the trial suffix off every id over the cap (83
+    of 449 shipped cases), so trials of one case shared a daemon conversation: a
+    fail-retry re-entered the context of the attempt it exists to independently
+    confirm, and its turns became indistinguishable from that attempt's in Opik
+    correlation. `find_turn_trace` requires a UNIQUE candidate, so an
+    identically-worded retry turn resolved to None and the case went INCOMPLETE
+    with the real verdict masked. Two long case ids sharing a prefix collided
+    the same way.
+
+    Overflow therefore compresses the MIDDLE, never the tail: the readable head
+    and the trailing parts survive, and a digest of the full id keeps every
+    distinct input distinct.
+    """
+    full = _SESS_RE.sub("-", "-".join(parts))
+    if len(full) <= _SESS_MAX:
+        return full
+    tail = _SESS_RE.sub("-", str(parts[-1]))
+    suffix = f"-{hashlib.sha256(full.encode()).hexdigest()[:8]}-{tail}"
+    head = _SESS_MAX - len(suffix)
+    if head < 1:
+        raise ValueError(f"session id tail {tail!r} does not fit in {_SESS_MAX} chars")
+    return full[:head] + suffix
 
 
 def _render_query(query: str, run_id: str, trial: int) -> str:

@@ -1722,3 +1722,45 @@ def test_vendor_error_text_is_redacted_but_the_tool_name_survives():
     failure = redacted["suites"][0]["scenarios"][0]["cases"][0]["turns"][0]["tool_failures"][0]
     assert failure["name"] == "eden_read_board"
     assert failure["error_text"] == "[redacted by default]"
+
+
+# --- session identity -------------------------------------------------------
+#
+# `sess` used to end in `[:90]`, which silently dropped the trailing trial part
+# of any id over the cap (83 of 449 shipped cases). Two failures followed: a
+# fail-retry re-entered the SAME daemon conversation as the attempt it exists to
+# independently confirm, and its turns became indistinguishable from that
+# attempt's in Opik correlation — `find_turn_trace` requires a UNIQUE candidate,
+# so an identically-worded retry turn resolved to None and the case went
+# INCOMPLETE, masking the real verdict.
+
+_LONG_CASE = ("e2e", "20260811T235233Z3d11ec49", "epistemic_integrity",
+              "sycophancy_counterfactual_pair", "incorrect_arithmetic_under_pressure")
+
+
+def test_session_id_keeps_the_trial_apart_when_the_id_would_overflow():
+    first = run_eval.sess(*_LONG_CASE, "1")
+    second = run_eval.sess(*_LONG_CASE, "2")
+    assert len("-".join(_LONG_CASE + ("1",))) > 90, "fixture must exercise the cap"
+    assert first != second
+    assert first.endswith("-1") and second.endswith("-2")
+
+
+def test_session_id_stays_within_the_cap_and_is_deterministic():
+    for trial in ("1", "2", "17"):
+        got = run_eval.sess(*_LONG_CASE, trial)
+        assert len(got) <= 90
+        assert got == run_eval.sess(*_LONG_CASE, trial)
+
+
+def test_short_session_ids_are_unchanged_and_stay_readable():
+    assert run_eval.sess("e2e", "run", "suite", "scn", "case", "1") == \
+        "e2e-run-suite-scn-case-1"
+
+
+def test_distinct_cases_that_share_a_truncated_prefix_stay_distinct():
+    prefix = ("e2e", "20260811T235233Z3d11ec49", "epistemic_integrity",
+              "sycophancy_counterfactual_pair")
+    one = run_eval.sess(*prefix, "incorrect_arithmetic_under_pressure", "1")
+    two = run_eval.sess(*prefix, "incorrect_arithmetic_under_pressure_variant", "1")
+    assert one != two
