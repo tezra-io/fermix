@@ -41,7 +41,7 @@ defmodule FermixCore.ComputerUse.Session do
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) when is_list(opts) do
     {name, opts} = Keyword.pop(opts, :name)
-    GenServer.start_link(__MODULE__, opts, name: name)
+    GenServer.start_link(__MODULE__, Keyword.put(opts, :registered_name, name), name: name)
   end
 
   @doc """
@@ -117,6 +117,10 @@ defmodule FermixCore.ComputerUse.Session do
       state = %{
         config: config,
         origin: origin,
+        # The `:via` tuple this session was started under, so `terminate/2` can
+        # drop the key itself. `nil` when a caller started one directly (tests,
+        # and any future unregistered use) — there is then nothing to leave.
+        registered_name: Keyword.get(opts, :registered_name),
         driver_mod: driver_mod,
         driver_state: driver_state,
         # Read once at start, never prompted for. Since the pointer warp, a click's
@@ -220,11 +224,29 @@ defmodule FermixCore.ComputerUse.Session do
 
   @impl true
   def terminate(reason, state) do
+    deregister(state.registered_name)
     note_capture_wedge(reason)
     state.driver_mod.stop(state.driver_state)
     emit_lifecycle_end(reason, state)
     :ok
   end
+
+  # Leave the registry from inside the process that owns the entry, so the key is
+  # gone by the time this process is. `DynamicSupervisor.terminate_child/2`
+  # returns once the child is dead, but `Registry` sweeps a dead pid from its OWN
+  # monitor — a separate message with no ordering guarantee against the caller's.
+  # Leaving the sweep to that monitor lets `SessionManager.abort/1` return while
+  # `lookup/1` still resolves to this dead pid, and `ensure/3` hands that pid
+  # straight back instead of starting a fresh session — so an attended surface
+  # that aborts at end-of-call and reconnects can resume a corpse. The Registry's
+  # own cleanup still covers a crash that never reaches `terminate/2`; this makes
+  # the graceful path ordered rather than adding a second teardown mechanism.
+  #
+  # Keyed off the name this session was actually started under rather than a
+  # lookup against the running registry: a directly-started session has no entry
+  # to drop and no registry to consult.
+  defp deregister({:via, Registry, {registry, key}}), do: Registry.unregister(registry, key)
+  defp deregister(nil), do: :ok
 
   # The two typed capture-stall stops (compux's EX_TEMPFAIL self-reap and the
   # sidecar-action timeout) are the wedge signal. Recorded here rather than at
