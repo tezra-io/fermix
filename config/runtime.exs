@@ -509,6 +509,20 @@ config :fermix_channels, signal: merged_signal
 # what makes the TOML win.
 config :fermix_channels, acp: Application.get_env(:fermix_channels, :acp, [])
 
+# Mobile settings are owned by config.toml. The APNs credential is the one
+# exception: SecretPaths declares FERMIX_APNS_KEY as a credential source, so a
+# nonblank value overlays only the nested secret after ConfigStore hydration.
+existing_mobile = Application.get_env(:fermix_channels, :mobile, [])
+existing_mobile_push = Keyword.get(existing_mobile, :push, [])
+
+mobile_push =
+  case System.get_env("FERMIX_APNS_KEY") do
+    value when is_binary(value) and value != "" -> Keyword.put(existing_mobile_push, :key, value)
+    _unset_or_blank -> existing_mobile_push
+  end
+
+config :fermix_channels, mobile: Keyword.put(existing_mobile, :push, mobile_push)
+
 if config_env() == :prod do
   # The secret key base signs Phoenix session cookies. The daemon restarts
   # itself (service KeepAlive, and the setup UI's restart button), so the key

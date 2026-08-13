@@ -19,6 +19,7 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias FermixCore.Browser.ChromeLauncher
   alias FermixCore.Browser.Config, as: BrowserConfig
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Config, as: CoreConfig
   alias FermixCore.Harness.Artifacts, as: HarnessArtifacts
   alias FermixCore.Harness.Config, as: HarnessConfig
   alias FermixCore.Harness.Ledger, as: HarnessLedger
@@ -47,6 +48,8 @@ defmodule Fermix.CLI.Doctor.Checks do
 
   @sandbox_trace_days 7
   @sandbox_trace_limit 20
+  @mobile_health_candidate_limit 8
+  @mobile_health_timeout_ms 750
 
   # {vendor, run-tool name} pairs — the boot-registry vs current-PATH mismatch
   # (§7.3) compares each run tool's registration against its vendor's detection.
@@ -547,6 +550,200 @@ defmodule Fermix.CLI.Doctor.Checks do
         )
     end
   end
+
+  @doc "Reports mobile identity permissions and daemon-owned listener state."
+  @spec mobile(keyword()) :: result()
+  def mobile(opts \\ []) when is_list(opts) do
+    config = Application.get_env(:fermix_channels, :mobile, [])
+
+    if Keyword.get(config, :enabled, false) == true do
+      check_mobile_enabled(config, opts)
+    else
+      ok("mobile companion", "disabled")
+    end
+  end
+
+  defp check_mobile_enabled(config, opts) do
+    mobile_dir = Keyword.get(opts, :mobile_dir, ConfigStore.workspace_paths().mobile)
+
+    case mobile_identity_files(mobile_dir) do
+      :ok ->
+        mobile_daemon_result(
+          config,
+          ProviderProbe.mobile_report(Keyword.take(opts, [:client])),
+          opts
+        )
+
+      {:error, detail} ->
+        fail("mobile companion", detail)
+    end
+  end
+
+  defp mobile_identity_files(mobile_dir) do
+    reports = Enum.map(~w(gateway_key tls.crt tls.key), &mobile_identity_file(mobile_dir, &1))
+    missing = for {:missing, name} <- reports, do: name
+    insecure = for {:insecure, name, mode} <- reports, do: "#{name}=#{mode}"
+    errors = for {:error, name, reason} <- reports, do: "#{name}=#{inspect(reason)}"
+
+    cond do
+      missing != [] ->
+        {:error, "missing #{Enum.join(missing, ", ")} — run `fermix pair`"}
+
+      insecure != [] ->
+        {:error, "mobile identity files must be 0600: #{Enum.join(insecure, ", ")}"}
+
+      errors != [] ->
+        {:error, "could not inspect mobile identity files: #{Enum.join(errors, ", ")}"}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp mobile_identity_file(mobile_dir, name) do
+    case File.stat(Path.join(mobile_dir, name)) do
+      {:ok, %File.Stat{type: :regular, mode: mode}} ->
+        permissions = Bitwise.band(mode, 0o777)
+        if permissions == 0o600, do: :ok, else: {:insecure, name, octal(permissions)}
+
+      {:ok, _stat} ->
+        {:error, name, :not_regular}
+
+      {:error, :enoent} ->
+        {:missing, name}
+
+      {:error, reason} ->
+        {:error, name, reason}
+    end
+  end
+
+  defp mobile_daemon_result(_config, %{status: :daemon_not_running}, _opts) do
+    warn(
+      "mobile companion",
+      "identity files 0600; daemon not running (start with `fermix start`)"
+    )
+  end
+
+  defp mobile_daemon_result(_config, %{status: :error, error: error}, _opts) do
+    fail("mobile companion", "identity files 0600; daemon status failed: #{error}")
+  end
+
+  defp mobile_daemon_result(config, %{status: :reported, report: report}, opts) do
+    checks = [
+      mobile_listener(report, opts),
+      mobile_mdns(report, config),
+      mobile_tailnet(report),
+      mobile_apns(report, config),
+      mobile_device_count(report)
+    ]
+
+    detail = ["identity files 0600" | Enum.map(checks, &elem(&1, 1))] |> Enum.join("; ")
+
+    cond do
+      Enum.any?(checks, &(elem(&1, 0) == :fail)) -> fail("mobile companion", detail)
+      Enum.any?(checks, &(elem(&1, 0) == :warn)) -> warn("mobile companion", detail)
+      true -> ok("mobile companion", detail)
+    end
+  end
+
+  defp mobile_listener(
+         %{"listener" => %{"status" => "ready", "candidates" => candidates}},
+         opts
+       )
+       when is_list(candidates) do
+    probe = Keyword.get(opts, :health_probe, &mobile_health_probe/2)
+
+    if is_function(probe, 2) do
+      mobile_candidate_health(candidates, probe)
+    else
+      {:fail, "invalid mobile health probe"}
+    end
+  end
+
+  defp mobile_listener(_report, _opts), do: {:fail, "listener down"}
+
+  defp mobile_candidate_health([], _probe), do: {:fail, "no advertised candidates"}
+
+  defp mobile_candidate_health(candidates, probe) do
+    checked = Enum.take(candidates, @mobile_health_candidate_limit)
+
+    case Enum.find_value(checked, &healthy_mobile_candidate(&1, probe)) do
+      nil ->
+        {:fail, "no advertised candidate passed TLS /healthz (checked #{length(checked)})"}
+
+      candidate ->
+        {:ok, "listener reachable at #{candidate} (#{length(candidates)} candidates)"}
+    end
+  end
+
+  defp healthy_mobile_candidate(candidate, probe) when is_binary(candidate) do
+    with {:ok, health_url} <- mobile_health_url(candidate),
+         :ok <- probe.(health_url, @mobile_health_timeout_ms) do
+      candidate
+    else
+      {:error, _reason} -> nil
+    end
+  end
+
+  defp healthy_mobile_candidate(_candidate, _probe), do: nil
+
+  defp mobile_health_url(candidate) do
+    case URI.parse(candidate) do
+      %URI{scheme: "wss", host: host} = uri when is_binary(host) and host != "" ->
+        {:ok,
+         URI.to_string(%{uri | scheme: "https", path: "/healthz", query: nil, fragment: nil})}
+
+      _uri ->
+        {:error, :invalid_wss_candidate}
+    end
+  end
+
+  defp mobile_health_probe(url, timeout_ms) do
+    request_opts = [
+      retry: false,
+      receive_timeout: timeout_ms,
+      connect_options: [timeout: timeout_ms, transport_opts: [verify: :verify_none]]
+    ]
+
+    case Req.get(url, request_opts) do
+      {:ok, %Req.Response{status: 200, body: %{"fermix" => "mobile", "v" => 1}}} -> :ok
+      {:ok, %Req.Response{status: status}} -> {:error, {:unexpected_status, status}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp mobile_mdns(_report, config) when not is_list(config), do: {:fail, "invalid mDNS config"}
+
+  defp mobile_mdns(report, config) do
+    cond do
+      Keyword.get(config, :advertise_mdns, true) == false -> {:ok, "mDNS disabled"}
+      Map.get(report, "mdns") == "advertising" -> {:ok, "mDNS advertising"}
+      true -> {:fail, "mDNS down"}
+    end
+  end
+
+  defp mobile_tailnet(%{"tailnet" => %{"detected" => true}}), do: {:ok, "tailnet detected"}
+  defp mobile_tailnet(_report), do: {:ok, "tailnet not detected (LAN still available)"}
+
+  defp mobile_apns(report, config) do
+    push = Keyword.get(config, :push, [])
+
+    cond do
+      Keyword.get(push, :enabled, false) == false -> {:ok, "APNs disabled"}
+      get_in(report, ["apns", "credentials"]) == "ready" -> {:ok, "APNs ready"}
+      true -> {:fail, "APNs credentials missing"}
+    end
+  end
+
+  defp mobile_device_count(%{"paired_devices" => count}) when is_integer(count) and count > 0 do
+    suffix = if count == 1, do: "device", else: "devices"
+    {:ok, "#{count} paired #{suffix}"}
+  end
+
+  defp mobile_device_count(%{"paired_devices" => 0}), do: {:warn, "no paired devices"}
+  defp mobile_device_count(_report), do: {:fail, "paired-device count unavailable"}
+
+  defp octal(mode), do: mode |> Integer.to_string(8) |> String.pad_leading(4, "0")
 
   @doc """
   The ACP agent surface (M29 §9 item 5, §17.3): whether it is enabled, where its
@@ -1335,7 +1532,7 @@ defmodule Fermix.CLI.Doctor.Checks do
 
     missing =
       report
-      |> Enum.filter(&(&1.enabled and is_nil(&1.owner_user_id)))
+      |> Enum.filter(&missing_command_owner?/1)
       |> Enum.map(& &1.channel)
 
     detail = Enum.map_join(report, ", ", &format_command_owner/1)
@@ -1350,6 +1547,11 @@ defmodule Fermix.CLI.Doctor.Checks do
           "missing command owner for enabled channels: #{Enum.join(channels, ", ")}; #{detail}"
         )
     end
+  end
+
+  defp missing_command_owner?(entry) do
+    entry.enabled and is_nil(entry.owner_user_id) and
+      CoreConfig.channel_ingress_authority(entry.channel) != :paired_device
   end
 
   @doc """
@@ -1768,14 +1970,22 @@ defmodule Fermix.CLI.Doctor.Checks do
          owner_user_id: owner_user_id,
          command_allowlist: allowlist
        }) do
-    owner_state =
-      if is_nil(owner_user_id) do
-        "owner missing"
-      else
-        "owner set"
-      end
+    owner_state = command_owner_state(channel, owner_user_id)
 
     "#{channel}=#{owner_state}, enabled=#{enabled}, allowlist=#{length(allowlist)}"
+  end
+
+  defp command_owner_state(channel, owner_user_id) do
+    cond do
+      CoreConfig.channel_ingress_authority(channel) == :paired_device ->
+        "paired-device authority"
+
+      is_nil(owner_user_id) ->
+        "owner missing"
+
+      true ->
+        "owner set"
+    end
   end
 
   defp auth_ok_result(path) do

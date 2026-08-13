@@ -16,6 +16,7 @@ defmodule FermixCore.Setup.Doctor do
   Inject `req_options: [plug: ...]` to stub HTTP in tests.
   """
 
+  alias Fermix.CLI.Daemon.Client, as: DaemonClient
   alias FermixCore.Auth.CodexToken
   alias FermixCore.Auth.Redaction
   alias FermixCore.Auth.Store
@@ -106,7 +107,7 @@ defmodule FermixCore.Setup.Doctor do
   @xai_default_base_url "https://api.x.ai/v1"
   @openrouter_default_base_url "https://openrouter.ai/api/v1"
   @mistral_default_base_url "https://api.mistral.ai/v1"
-  @command_channels [:telegram, :whatsapp, :discord, :slack, :signal]
+  @command_channels [:telegram, :whatsapp, :discord, :slack, :signal, :mobile]
   @web_search_probe_query "fermix web search health check"
   # A landmark, not a category: the place probe is never anchored (it must not
   # read the owner's saved location), and an unanchored category query can
@@ -199,6 +200,36 @@ defmodule FermixCore.Setup.Doctor do
       channels: probe_channels(opts)
     }
   end
+
+  @doc "Returns mobile listener state from the running daemon without probing locally."
+  @spec mobile_report(keyword()) :: map()
+  def mobile_report(opts \\ []) when is_list(opts) do
+    config = Application.get_env(:fermix_channels, :mobile, [])
+
+    if Keyword.get(config, :enabled, false) == true do
+      request_mobile_report(Keyword.get(opts, :client, &default_mobile_client/1))
+    else
+      %{enabled: false, status: :disabled}
+    end
+  end
+
+  defp request_mobile_report(client) when is_function(client, 1) do
+    case client.("mobile_status") do
+      {:ok, %{"status" => "ok", "result" => report}} when is_map(report) ->
+        %{enabled: true, status: :reported, report: report}
+
+      {:error, :not_running} ->
+        %{enabled: true, status: :daemon_not_running}
+
+      {:ok, other} ->
+        %{enabled: true, status: :error, error: "unexpected daemon reply: #{inspect(other)}"}
+
+      {:error, reason} ->
+        %{enabled: true, status: :error, error: Redaction.format(reason)}
+    end
+  end
+
+  defp default_mobile_client(method), do: DaemonClient.request(method)
 
   @spec probe_channels(keyword()) :: [channel_probe()]
   def probe_channels(opts \\ []) do

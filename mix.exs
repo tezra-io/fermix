@@ -47,7 +47,8 @@ defmodule Fermix.MixProject do
           fermix_core: :permanent,
           fermix_channels: :permanent,
           fermix_web: :permanent,
-          fermix_nif: :temporary
+          fermix_nif: :temporary,
+          mdns_lite: :load
         ],
         include_executables_for: [:unix],
         steps: [:assemble, &Burrito.wrap/1],

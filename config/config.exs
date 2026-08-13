@@ -43,7 +43,7 @@ config :logger, :default_formatter,
 
 config :phoenix,
   filter_parameters:
-    ~w(password secret token t _csrf_token access_token refresh_token bot_token verify_token api_key)
+    ~w(password secret token t _csrf_token access_token refresh_token bot_token verify_token api_key mobile_push_key mobile_apns_key)
 
 config :fermix_core,
   providers: [
@@ -120,6 +120,7 @@ config :fermix_core, :jobs,
     "discord" => FermixChannels.Channels.Discord,
     "signal" => FermixChannels.Channels.Signal,
     "whatsapp" => FermixChannels.Channels.WhatsApp,
+    "mobile" => FermixChannels.Channels.Mobile,
     "cli" => FermixChannels.CLI
   }
 
@@ -160,6 +161,17 @@ config :fermix_channels,
   signal: [
     enabled: false,
     mode: :subprocess
+  ],
+  mobile: [
+    enabled: false,
+    mode: :listener,
+    port: 4_031,
+    bind: "0.0.0.0",
+    advertise_mdns: true,
+    streaming: "draft",
+    max_media_bytes: 20_971_520,
+    media_store_max_bytes: 2_147_483_648,
+    push: [enabled: false]
   ],
   # The ACP agent surface (M29). `enabled` is the whole operator knob — the
   # socket path is fixed and the caps are internal constants. `mode` is not a

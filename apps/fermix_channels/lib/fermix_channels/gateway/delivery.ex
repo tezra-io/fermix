@@ -39,6 +39,10 @@ defmodule FermixChannels.Gateway.Delivery do
       {:approval_prompt, text, token} when is_binary(text) and is_binary(token) ->
         deliver_approval(channel, message, text_reply, text, token)
 
+      {:approval_prompt, %{kind: kind, text: text, token: token} = spec}
+      when kind in [:sandbox, :soul] and is_binary(text) and is_binary(token) ->
+        deliver_structured_approval(channel, message, text_reply, spec)
+
       other ->
         {:error, {:invalid_reply_part, other}}
     end
@@ -49,10 +53,24 @@ defmodule FermixChannels.Gateway.Delivery do
   # channel delivers the same prompt text (which carries the tap-to-copy
   # `/confirm <token>` command) through the text closure already built above.
   defp deliver_approval(channel, message, text_reply, text, token) do
-    if function_exported?(channel, :send_approval, 3) do
-      observe_reply(fn -> channel.send_approval(message, text, token) end, :text, nil, message)
+    cond do
+      function_exported?(channel, :send_approval, 2) ->
+        spec = %{kind: :sandbox, text: text, token: token, ttl_s: 60}
+        observe_reply(fn -> channel.send_approval(message, spec) end, :text, nil, message)
+
+      function_exported?(channel, :send_approval, 3) ->
+        observe_reply(fn -> channel.send_approval(message, text, token) end, :text, nil, message)
+
+      true ->
+        observe_reply(fn -> text_reply.(text) end, :text, nil, message)
+    end
+  end
+
+  defp deliver_structured_approval(channel, message, text_reply, spec) do
+    if function_exported?(channel, :send_approval, 2) do
+      observe_reply(fn -> channel.send_approval(message, spec) end, :text, nil, message)
     else
-      observe_reply(fn -> text_reply.(text) end, :text, nil, message)
+      observe_reply(fn -> text_reply.(spec.text) end, :text, nil, message)
     end
   end
 

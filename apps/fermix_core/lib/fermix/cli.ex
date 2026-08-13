@@ -14,10 +14,12 @@ defmodule Fermix.CLI do
   alias Fermix.CLI.AuthCommand
   alias Fermix.CLI.CapabilitiesCommand
   alias Fermix.CLI.ChatCommand
+  alias Fermix.CLI.DevicesCommand
   alias Fermix.CLI.Doctor
   alias Fermix.CLI.HealthCommand
   alias Fermix.CLI.LogsCommand
   alias Fermix.CLI.MemoryCommand
+  alias Fermix.CLI.PairCommand
   alias Fermix.CLI.PluginsCommand
   alias Fermix.CLI.RestartCommand
   alias Fermix.CLI.Run
@@ -73,6 +75,8 @@ defmodule Fermix.CLI do
   defp dispatch("capabilities", rest), do: CapabilitiesCommand.run(rest)
   defp dispatch("skills", rest), do: SkillsCommand.run(rest)
   defp dispatch("plugins", rest), do: PluginsCommand.run(rest)
+  defp dispatch("pair", rest), do: PairCommand.run(rest)
+  defp dispatch("devices", rest), do: DevicesCommand.run(rest)
   defp dispatch("logs", rest), do: LogsCommand.run(rest)
   defp dispatch("memory", rest), do: MemoryCommand.run(rest)
   defp dispatch("upgrade", rest), do: UpgradeCommand.run(rest)
@@ -95,6 +99,11 @@ defmodule Fermix.CLI do
                    [--fast|--no-fast]
                    [--realtime-enabled] [--realtime-model VALUE] [--realtime-voice VALUE]
                    [--acp-enabled|--no-acp-enabled]
+                   [--mobile-enabled|--no-mobile-enabled] [--mobile-port N]
+                   [--mobile-push-enabled|--no-mobile-push-enabled]
+                   [--mobile-push-team-id VALUE] [--mobile-push-key-id VALUE]
+                   [--mobile-push-key VALUE] [--mobile-push-topic VALUE]
+                   [--mobile-push-environment development|production]
                    [--telegram-bot-token VALUE] ...
       fermix auth   login   [--no-browser] [--port N] [--timeout SECONDS]
       fermix auth   status
@@ -116,6 +125,9 @@ defmodule Fermix.CLI do
       fermix capabilities [--kind KIND] [--json]  Show registered capabilities
       fermix skills [list|view NAME|reload] [--json]  Inspect and reload installed skills
       fermix plugins [list|catalog|enable NAME|disable NAME|auth ...] [--json]
+      fermix pair                                  Pair an iOS companion device
+      fermix devices list                          List paired mobile devices
+      fermix devices revoke DEVICE_ID              Revoke a paired mobile device
       fermix memory review --now [--conversation KEY] [--json]
       fermix memory restore ID [--json]
       fermix logs   [-f] [-n LINES]                Show daemon log file

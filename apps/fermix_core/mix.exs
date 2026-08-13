@@ -10,11 +10,15 @@ defmodule FermixCore.MixProject do
       deps_path: "../../deps",
       lockfile: "../../mix.lock",
       elixir: "~> 1.17",
+      elixirc_paths: elixirc_paths(Mix.env()),
       elixirc_options: [warnings_as_errors: true],
       start_permanent: Mix.env() == :prod,
       deps: deps()
     ]
   end
+
+  defp elixirc_paths(:test), do: ["lib", Path.expand("../../test/support", __DIR__)]
+  defp elixirc_paths(_env), do: ["lib"]
 
   def application do
     [

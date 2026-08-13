@@ -157,6 +157,56 @@ defmodule FermixChannels.Gateway.Commands.SoulTest do
     assert_receive {:soul_reply, "Confirmation failed: :unknown_token"}
   end
 
+  test "deny discards a pending persona mutation without applying it", ctx do
+    token = propose("/soul revert 1", ctx, ~r/reverting SOUL.md/)
+
+    assert :ok = dispatch("/soul deny #{token}", ctx)
+    assert_receive {:soul_reply, "SOUL.md change denied — the pending edit was discarded."}
+    assert File.read!(ctx.soul_path) == "soul v2\n"
+
+    assert :ok = dispatch("/soul apply #{token}", ctx)
+    assert_receive {:soul_reply, "Confirmation failed: :unknown_token"}
+  end
+
+  test "successful apply and deny report their exact approval resolution", ctx do
+    notify = fn resolution ->
+      send(self(), {:approval_resolution, resolution})
+      :ok
+    end
+
+    approved = propose("/soul revert 1", ctx, ~r/reverting SOUL.md/)
+
+    assert :ok =
+             dispatch("/soul apply #{approved}", ctx, approval_resolution_fn: notify)
+
+    assert_receive {:approval_resolution, %{kind: :soul, token: ^approved, outcome: :approved}}
+    assert_receive {:soul_reply, "Reverted SOUL.md" <> _rest}
+
+    assert :ok =
+             dispatch("/soul apply #{approved}", ctx, approval_resolution_fn: notify)
+
+    refute_receive {:approval_resolution, _resolution}
+    assert_receive {:soul_reply, "Confirmation failed: :unknown_token"}
+
+    denied = propose("/soul reset", ctx, ~r/resetting SOUL.md/)
+    assert :ok = dispatch("/soul deny #{denied}", ctx, approval_resolution_fn: notify)
+    assert_receive {:approval_resolution, %{kind: :soul, token: ^denied, outcome: :denied}}
+    assert_receive {:soul_reply, "SOUL.md change denied" <> _rest}
+  end
+
+  test "wrong-origin deny and apply preserve the owner's token", ctx do
+    token = propose("/soul revert 1", ctx, ~r/reverting SOUL.md/, user_id: "owner-1")
+
+    assert :ok = dispatch("/soul deny #{token}", ctx, user_id: "owner-2")
+    assert_receive {:soul_reply, "Denial failed: :origin_mismatch"}
+
+    assert :ok = dispatch("/soul apply #{token}", ctx, user_id: "owner-2")
+    assert_receive {:soul_reply, "Confirmation failed: :origin_mismatch"}
+
+    assert :ok = dispatch("/soul deny #{token}", ctx, user_id: "owner-1")
+    assert_receive {:soul_reply, "SOUL.md change denied — the pending edit was discarded."}
+  end
+
   test "confirmation rejects a different origin", ctx do
     token = propose("/soul revert 1", ctx, ~r/reverting SOUL.md/, user_id: "owner-1")
 
@@ -199,6 +249,7 @@ defmodule FermixChannels.Gateway.Commands.SoulTest do
       ~s({"no_change": false, "soul_md": "soul v2\\nNow terser.\\n", "rationale": "Tighter voice."})
 
     reply = draft("/soul review be terser", ctx, stub)
+    assert_receive {:soul_approval, %{kind: :soul}}
 
     assert reply =~ "Proposed SOUL.md edit (route: stub/stub-model)"
     assert reply =~ "Now terser."
@@ -351,9 +402,12 @@ defmodule FermixChannels.Gateway.Commands.SoulTest do
 
   defp propose(content, ctx, expected, opts \\ []) do
     assert :ok = dispatch(content, ctx, opts)
+    assert_receive {:soul_approval, %{kind: :soul, token: structured_token}}
     assert_receive {:soul_reply, reply}
     assert reply =~ expected
-    token_from(reply)
+    token = token_from(reply)
+    assert structured_token == token
+    token
   end
 
   defp dispatch(content, ctx, opts \\ []) do
@@ -368,12 +422,17 @@ defmodule FermixChannels.Gateway.Commands.SoulTest do
         main_agent_server: ctx.main_agent
       }
       |> maybe_put_route(Keyword.get(opts, :route))
+      |> maybe_put_resolution(Keyword.get(opts, :approval_resolution_fn))
 
     Commands.dispatch(Commands.parse(message), reply_fn(), context)
   end
 
   defp maybe_put_route(context, nil), do: context
   defp maybe_put_route(context, route), do: Map.put(context, :route, route)
+  defp maybe_put_resolution(context, nil), do: context
+
+  defp maybe_put_resolution(context, callback),
+    do: Map.put(context, :approval_resolution_fn, callback)
 
   defp authorization(:operator), do: %Authorization{role: :operator, trust: :operator}
   defp authorization(:guest), do: %Authorization{role: :guest, trust: :guest}
@@ -429,6 +488,11 @@ defmodule FermixChannels.Gateway.Commands.SoulTest do
     test_pid = self()
 
     fn
+      {:approval_prompt, %{text: text} = spec} ->
+        send(test_pid, {:soul_approval, spec})
+        send(test_pid, {:soul_reply, text})
+        :ok
+
       {:text, text} ->
         send(test_pid, {:soul_reply, text})
         :ok

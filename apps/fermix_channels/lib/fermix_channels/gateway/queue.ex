@@ -306,7 +306,10 @@ defmodule FermixChannels.Gateway.Queue do
           "Failed to start turn #{request_id} for #{format_conversation_key(conversation_key)}: #{inspect(reason)}"
         )
 
-        send_error_reply_async(msg, "Sorry, I encountered an error processing your message.")
+        maybe_send_error_reply_async(
+          msg,
+          "Sorry, I encountered an error processing your message."
+        )
         # No task ever existed to claim it, so this is the only outcome site for
         # this message — a turn-result consumer must never be left waiting.
         invoke_turn_result_async(Map.get(msg, :turn_result_fn), {:failed, reason})
@@ -381,7 +384,8 @@ defmodule FermixChannels.Gateway.Queue do
             :typing_timeout_ms,
             :stream_spec,
             :activity_callback,
-            :turn_result_fn
+            :turn_result_fn,
+            :terminal_error_owner?
           ])
           |> Map.put(:__runtime_context_cache_status, cache_status)
 
@@ -391,7 +395,7 @@ defmodule FermixChannels.Gateway.Queue do
         |> run_and_deliver()
 
       {:error, reason} ->
-        deliver_checkout_error(turn, reason)
+        if not terminal_error_owner?(turn), do: deliver_checkout_error(turn, reason)
         # A turn that never reached the runner still ended — and failed. Its
         # channel gets the raw checkout reason, same as any other error path.
         finish_turn(turn, {:failed, reason})
@@ -495,10 +499,12 @@ defmodule FermixChannels.Gateway.Queue do
   # or a client re-running the prompt — must not reach a model with no record of
   # what the failed turn already did, or it repeats it.
   defp deliver_turn_error(%{runner: runner} = turn, reason) do
-    discard_draft(turn)
-
     if fresh?(turn) do
-      turn.deliver.({:text, runner.error_reply(reason)})
+      if not terminal_error_owner?(turn) do
+        discard_draft(turn)
+        turn.deliver.({:text, runner.error_reply(reason)})
+      end
+
       append_marker(turn, @stopped_turn_marker)
       {:failed, reason}
     else
@@ -762,7 +768,7 @@ defmodule FermixChannels.Gateway.Queue do
   defp maybe_reply_on_crash(active, reason) do
     if completion_reason(reason) == :crashed and
          not Map.get(active, :final_reply_delivered?, false) do
-      send_error_reply_async(
+      maybe_send_error_reply_async(
         active.message,
         "Sorry, I encountered an error processing your message."
       )
@@ -842,6 +848,12 @@ defmodule FermixChannels.Gateway.Queue do
     spawn(fn -> msg.reply_fn.({:text, text}) end)
     :ok
   end
+
+  defp maybe_send_error_reply_async(%{terminal_error_owner?: true}, _text), do: :ok
+  defp maybe_send_error_reply_async(msg, text), do: send_error_reply_async(msg, text)
+
+  defp terminal_error_owner?(%{msg: %{terminal_error_owner?: true}}), do: true
+  defp terminal_error_owner?(_turn), do: false
 
   # Terminate every active turn task and drop all conversation runtime. Pending
   # DOWNs from the killed tasks become no-ops (task_refs cleared); a stopped

@@ -61,12 +61,41 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     end
   end
 
+  test "documents the mobile companion setup and its v1 boundaries" do
+    body = File.read!(self_knowledge_path())
+    reference = File.read!(mobile_reference_path())
+
+    assert body =~ ~s(file: "mobile")
+
+    for required <- [
+          "fermix pair",
+          "fermix devices list",
+          "fermix devices revoke",
+          "FERMIX_APNS_KEY",
+          "media_store_max_bytes",
+          "2 GiB",
+          "Noise",
+          "voice notes",
+          "realtime voice",
+          "fermix doctor"
+        ] do
+      assert reference =~ required, "mobile self-knowledge does not mention #{required}"
+    end
+  end
+
   defp acp_paragraph do
-    Path.expand("../../../priv/skills/self_knowledge/SKILL.md", __DIR__)
+    self_knowledge_path()
     |> File.read!()
     |> String.split("\n\n")
     |> Enum.filter(&String.contains?(&1, "ACP"))
     |> Enum.join("\n\n")
+  end
+
+  defp self_knowledge_path,
+    do: Path.expand("../../../priv/skills/self_knowledge/SKILL.md", __DIR__)
+
+  defp mobile_reference_path do
+    Path.expand("../../../priv/skills/self_knowledge/references/mobile.md", __DIR__)
   end
 
   test "stays decomposed: main body has headroom, references are bounded, pointers resolve" do
@@ -123,7 +152,7 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     end
 
     # Each externalized feature keeps a stub + loader in the main body.
-    for name <- ~w(coding_harness computer_use plugins voice) do
+    for name <- ~w(coding_harness computer_use mobile plugins voice) do
       assert body =~ ~s(file: "#{name}"), "missing stub loader for #{name}"
     end
   end

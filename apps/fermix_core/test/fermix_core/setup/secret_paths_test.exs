@@ -55,4 +55,15 @@ defmodule FermixCore.Setup.SecretPathsTest do
     refute :notion_oauth_client_secret in eligible
     refute :x_oauth_client_secret in eligible
   end
+
+  test "registers the APNs signing key as a keychain-only mobile secret" do
+    secret = SecretPaths.fetch!(:mobile_apns_key)
+
+    assert secret.env == "FERMIX_APNS_KEY"
+    assert secret.path == [:fermix_channels, :mobile, :push, :key]
+    assert secret.functionality == "Mobile APNs push"
+    assert secret.optional? == true
+    refute Map.get(secret, :sandbox_env, false)
+    refute :mobile_apns_key in Enum.map(SecretPaths.sandbox_env_eligible(), & &1.key)
+  end
 end

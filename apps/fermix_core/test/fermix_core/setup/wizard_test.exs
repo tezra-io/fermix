@@ -43,6 +43,7 @@ defmodule FermixCore.Setup.WizardTest do
     slack = Application.fetch_env(:fermix_channels, :slack)
     signal = Application.fetch_env(:fermix_channels, :signal)
     acp = Application.fetch_env(:fermix_channels, :acp)
+    mobile = Application.fetch_env(:fermix_channels, :mobile)
     personalization = Application.get_env(:fermix_core, :personalization, [])
     agent = Application.get_env(:fermix_core, :agent, [])
     realtime = Application.get_env(:fermix_core, :realtime, [])
@@ -64,6 +65,17 @@ defmodule FermixCore.Setup.WizardTest do
     # left in the global app env.
     Application.put_env(:fermix_channels, :acp, enabled: false, mode: :gateway)
 
+    Application.put_env(:fermix_channels, :mobile,
+      enabled: false,
+      mode: :listener,
+      port: 4031,
+      bind: "0.0.0.0",
+      advertise_mdns: true,
+      streaming: "draft",
+      max_media_bytes: 20_971_520,
+      push: [enabled: false, environment: "production"]
+    )
+
     Application.put_env(:fermix_core, :personalization,
       user_name: "Test User",
       timezone: "UTC",
@@ -80,6 +92,7 @@ defmodule FermixCore.Setup.WizardTest do
       restore_env(:fermix_channels, :slack, slack)
       restore_env(:fermix_channels, :signal, signal)
       restore_env(:fermix_channels, :acp, acp)
+      restore_env(:fermix_channels, :mobile, mobile)
       Application.put_env(:fermix_core, :personalization, personalization)
       Application.put_env(:fermix_core, :agent, agent)
       Application.put_env(:fermix_core, :realtime, realtime)
@@ -95,6 +108,177 @@ defmodule FermixCore.Setup.WizardTest do
     end)
 
     :ok
+  end
+
+  describe "mobile setup prompts" do
+    test "fresh setup asks for mobile first and expands only enabled branches" do
+      state = Wizard.report().wizard
+
+      assert mobile_prompt_keys(state, []) == [:mobile_enabled]
+
+      assert mobile_prompt_keys(state, mobile_enabled: true) == [
+               :mobile_enabled,
+               :mobile_port,
+               :mobile_push_enabled
+             ]
+
+      assert mobile_prompt_keys(state, mobile_enabled: true, mobile_push_enabled: true) == [
+               :mobile_enabled,
+               :mobile_port,
+               :mobile_push_enabled,
+               :mobile_push_team_id,
+               :mobile_push_key_id,
+               :mobile_push_key,
+               :mobile_push_topic,
+               :mobile_push_environment
+             ]
+
+      assert mobile_prompt_keys(state, mobile_enabled: false, mobile_push_enabled: true) == [
+               :mobile_enabled
+             ]
+    end
+
+    test "reconfigure offers mobile settings and follows persisted push state" do
+      assert {:ok, _report} =
+               Wizard.save_answers(Wizard.report().wizard,
+                 mobile_enabled: true,
+                 mobile_port: 4_040,
+                 mobile_push_enabled: true,
+                 mobile_push_team_id: "ABCDE12345",
+                 mobile_push_key_id: "KEY987",
+                 mobile_push_key: "private-key-one",
+                 mobile_push_topic: "io.tezra.fermix.app",
+                 mobile_push_environment: "production"
+               )
+
+      state = Wizard.report().wizard
+
+      assert mobile_reconfigure_keys(state, []) == [
+               :mobile_enabled,
+               :mobile_port,
+               :mobile_push_enabled,
+               :mobile_push_team_id,
+               :mobile_push_key_id,
+               :mobile_push_key,
+               :mobile_push_topic,
+               :mobile_push_environment
+             ]
+
+      assert mobile_reconfigure_keys(state, mobile_enabled: false) == [:mobile_enabled]
+    end
+  end
+
+  describe "save_answers/2 mobile channel" do
+    test "persists listener and nested push settings without writing the APNs key" do
+      assert {:ok, _report} =
+               Wizard.save_answers(Wizard.report().wizard,
+                 mobile_enabled: "true",
+                 mobile_port: "4040",
+                 mobile_push_enabled: "true",
+                 mobile_push_team_id: "ABCDE12345",
+                 mobile_push_key_id: "KEY987",
+                 mobile_push_key:
+                   "-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----",
+                 mobile_push_topic: "io.tezra.fermix.app",
+                 mobile_push_environment: "development"
+               )
+
+      assert {:ok, snapshot} = ConfigStore.load_runtime_config()
+      mobile = snapshot.fermix_channels |> Keyword.fetch!(:mobile)
+      push = Keyword.fetch!(mobile, :push)
+
+      assert Keyword.get(mobile, :enabled) == true
+      assert Keyword.get(mobile, :mode) == :listener
+      assert Keyword.get(mobile, :port) == 4040
+      assert Keyword.get(push, :enabled) == true
+      assert Keyword.get(push, :team_id) == "ABCDE12345"
+      assert Keyword.get(push, :key_id) == "KEY987"
+      assert Keyword.get(push, :key) =~ "BEGIN PRIVATE KEY"
+      assert Keyword.get(push, :topic) == "io.tezra.fermix.app"
+      assert Keyword.get(push, :environment) == "development"
+
+      contents = File.read!(ConfigStore.path())
+      refute contents =~ "BEGIN PRIVATE KEY"
+      assert contents =~ "[fermix_channels.mobile.push]"
+      assert contents =~ ~s(key = "@keyring")
+    end
+
+    test "requires complete APNs credentials only when push is enabled" do
+      assert {:ok, _report} =
+               Wizard.save_answers(Wizard.report().wizard,
+                 mobile_enabled: "true",
+                 mobile_port: "4031",
+                 mobile_push_enabled: "false"
+               )
+
+      assert {:error, {:invalid_mobile_push, missing}} =
+               Wizard.save_answers(Wizard.report().wizard,
+                 mobile_push_enabled: "true",
+                 mobile_push_team_id: "ABCDE12345",
+                 mobile_push_environment: "production"
+               )
+
+      assert Enum.sort(missing) == [:key, :key_id, :topic]
+    end
+
+    test "blank APNs key keeps the stored secret during later edits" do
+      assert {:ok, _report} =
+               Wizard.save_answers(Wizard.report().wizard,
+                 mobile_push_enabled: "true",
+                 mobile_push_team_id: "ABCDE12345",
+                 mobile_push_key_id: "KEY987",
+                 mobile_push_key: "private-key-one",
+                 mobile_push_topic: "io.tezra.fermix.app",
+                 mobile_push_environment: "production"
+               )
+
+      assert {:ok, _report} =
+               Wizard.save_answers(Wizard.report().wizard,
+                 mobile_push_enabled: "true",
+                 mobile_push_team_id: "ABCDE12345",
+                 mobile_push_key_id: "KEY987",
+                 mobile_push_key: "",
+                 mobile_push_topic: "io.tezra.fermix.beta",
+                 mobile_push_environment: "production"
+               )
+
+      assert {:ok, snapshot} = ConfigStore.load_runtime_config()
+      push = snapshot.fermix_channels |> Keyword.fetch!(:mobile) |> Keyword.fetch!(:push)
+      assert Keyword.get(push, :key) == "private-key-one"
+      assert Keyword.get(push, :topic) == "io.tezra.fermix.beta"
+    end
+
+    test "rejects ports outside the TCP range" do
+      assert {:error, {:invalid_mobile_port, "70000"}} =
+               Wizard.save_answers(Wizard.report().wizard, mobile_port: "70000")
+    end
+  end
+
+  defp mobile_prompt_keys(state, answers) do
+    state
+    |> Wizard.prompts(answers)
+    |> Enum.map(& &1.key)
+    |> Enum.filter(&(&1 in mobile_answer_keys()))
+  end
+
+  defp mobile_reconfigure_keys(state, answers) do
+    state
+    |> Wizard.reconfigure_prompts(answers)
+    |> Enum.map(& &1.key)
+    |> Enum.filter(&(&1 in mobile_answer_keys()))
+  end
+
+  defp mobile_answer_keys do
+    [
+      :mobile_enabled,
+      :mobile_port,
+      :mobile_push_enabled,
+      :mobile_push_team_id,
+      :mobile_push_key_id,
+      :mobile_push_key,
+      :mobile_push_topic,
+      :mobile_push_environment
+    ]
   end
 
   test "report returns deterministic wizard state for incomplete config" do

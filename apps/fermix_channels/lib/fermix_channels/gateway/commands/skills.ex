@@ -121,15 +121,29 @@ defmodule FermixChannels.Gateway.Commands.Skills do
         ]
 
     task_supervisor = Keyword.get(opts, :task_supervisor, FermixCore.TaskSupervisor)
+    finish_command = defer_command(context)
     reply(reply_fn, "Reviewing your recent history for repeated tasks — results will land here.")
 
     {:ok, _pid} =
       Task.Supervisor.start_child(task_supervisor, fn ->
-        reply_fn.({:text, review_outcome_text(SkillCuration.run_cycle(opts))})
+        result = SkillCuration.run_cycle(opts)
+        reply_fn.({:text, review_outcome_text(result)})
+        settle_command(finish_command, result)
       end)
 
     :ok
   end
+
+  defp defer_command(context) do
+    case Map.get(context, :defer_command_fn) do
+      defer when is_function(defer, 0) -> defer.()
+      nil -> nil
+    end
+  end
+
+  defp settle_command(nil, _result), do: :ok
+  defp settle_command(finish, {:ok, _counts}), do: finish.(:completed)
+  defp settle_command(finish, {:error, reason}), do: finish.({:failed, reason})
 
   defp review_outcome_text({:ok, counts}), do: review_text(counts)
 

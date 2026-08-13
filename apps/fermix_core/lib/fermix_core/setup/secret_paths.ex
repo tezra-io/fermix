@@ -190,6 +190,14 @@ defmodule FermixCore.Setup.SecretPaths do
       env: "SLACK_SIGNING_SECRET",
       path: [:fermix_channels, :slack, :signing_secret]
     },
+    %{
+      key: :mobile_apns_key,
+      env: "FERMIX_APNS_KEY",
+      path: [:fermix_channels, :mobile, :push, :key],
+      functionality: "Mobile APNs push",
+      optional?: true,
+      sandbox_env: false
+    },
     # api_key-plugin secrets (M16): the static credential an `auth: api_key`
     # plugin authenticates with (e.g. a Discord bot token). Plugin-namespaced
     # env + a per-plugin config path so they never collide with the channel

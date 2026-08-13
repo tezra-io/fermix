@@ -27,7 +27,8 @@ defmodule FermixCore.Setup.DoctorTest do
     original_registry = Application.get_env(:fermix_channels, :channel_registry)
 
     original_channels =
-      for channel <- [:telegram, :whatsapp, :discord, :slack, :signal, :acp], into: %{} do
+      for channel <- [:telegram, :whatsapp, :discord, :slack, :signal, :acp, :mobile],
+          into: %{} do
         {channel, Application.get_env(:fermix_channels, channel, [])}
       end
 
@@ -655,6 +656,7 @@ defmodule FermixCore.Setup.DoctorTest do
       )
 
       Application.put_env(:fermix_channels, :signal, enabled: true)
+      Application.put_env(:fermix_channels, :mobile, enabled: true)
 
       report = Doctor.command_owner_report()
 
@@ -666,6 +668,8 @@ defmodule FermixCore.Setup.DoctorTest do
              } in report
 
       assert %{channel: :signal, enabled: true, owner_user_id: nil, command_allowlist: []} in report
+
+      assert %{channel: :mobile, enabled: true, owner_user_id: nil, command_allowlist: []} in report
     end
   end
 

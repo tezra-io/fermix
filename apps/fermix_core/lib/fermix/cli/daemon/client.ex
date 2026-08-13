@@ -16,6 +16,9 @@ defmodule Fermix.CLI.Daemon.Client do
   # with it the read fails immediately with :emsgsize.
   @max_frame_bytes 4_194_304
 
+  @type exchange_fun ::
+          (String.t(), map(), pos_integer() -> {:ok, map()} | {:error, term()})
+
   @spec status(keyword()) :: {:ok, map()} | {:error, term()}
   def status(opts \\ []), do: request("status", opts)
 
@@ -28,15 +31,36 @@ defmodule Fermix.CLI.Daemon.Client do
     request("agent_message", opts)
   end
 
-  @spec request(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
-  def request(method, opts \\ []) when is_binary(method) do
+  @spec mobile_request(String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
+  def mobile_request(method, params \\ %{}, opts \\ [])
+
+  def mobile_request(method, params, opts)
+      when is_binary(method) and is_map(params) and is_list(opts) do
+    request(method, Keyword.put(opts, :params, params))
+  end
+
+  @doc "Runs bounded request exchanges over one control-socket connection."
+  @spec with_connection((exchange_fun() -> term()), keyword()) :: term() | {:error, term()}
+  def with_connection(callback, opts \\ [])
+      when is_function(callback, 1) and is_list(opts) do
     socket_path = Keyword.get(opts, :socket_path, default_socket_path())
     timeout = Keyword.get(opts, :timeout, @default_timeout_ms)
 
     case connect(socket_path, timeout) do
-      {:ok, conn} -> exchange(conn, method, opts, timeout)
+      {:ok, conn} -> run_connected(conn, callback)
       {:error, reason} -> classify(reason)
     end
+  end
+
+  @spec request(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def request(method, opts \\ []) when is_binary(method) do
+    timeout = Keyword.get(opts, :timeout, @default_timeout_ms)
+    params = Keyword.get(opts, :params, %{})
+
+    with_connection(
+      fn exchange -> exchange.(method, params, timeout) end,
+      opts
+    )
   end
 
   defp connect(socket_path, timeout) do
@@ -54,27 +78,38 @@ defmodule Fermix.CLI.Daemon.Client do
     :exit, :badarg -> {:error, :badarg}
   end
 
-  defp exchange(conn, method, opts, timeout) do
-    payload = Jason.encode!(request_payload(method, opts))
+  defp run_connected(conn, callback) do
+    exchange = fn method, params, timeout -> exchange(conn, method, params, timeout) end
 
     try do
-      with :ok <- ensure_within_frame(payload),
-           :ok <- :gen_tcp.send(conn, payload),
-           {:ok, data} <- :gen_tcp.recv(conn, 0, timeout) do
-        case Jason.decode(data) do
-          {:ok, decoded} ->
-            {:ok, decoded}
-
-          {:error, %Jason.DecodeError{position: pos}} ->
-            # A packet-4 frame arrives whole or not at all, so a decode
-            # failure means malformed JSON, not truncation.
-            {:error, "response_decode_failed:#{pos}"}
-        end
-      else
-        {:error, reason} -> {:error, reason}
-      end
+      callback.(exchange)
     after
       :gen_tcp.close(conn)
+    end
+  end
+
+  defp exchange(conn, method, params, timeout)
+       when is_binary(method) and is_map(params) and is_integer(timeout) and timeout > 0 do
+    payload = Jason.encode!(request_payload(method, params))
+
+    with :ok <- ensure_within_frame(payload),
+         :ok <- :gen_tcp.send(conn, payload),
+         {:ok, data} <- :gen_tcp.recv(conn, 0, timeout) do
+      decode_response(data)
+    else
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp decode_response(data) do
+    case Jason.decode(data) do
+      {:ok, decoded} ->
+        {:ok, decoded}
+
+      {:error, %Jason.DecodeError{position: pos}} ->
+        # A packet-4 frame arrives whole or not at all, so a decode
+        # failure means malformed JSON, not truncation.
+        {:error, "response_decode_failed:#{pos}"}
     end
   end
 
@@ -92,9 +127,9 @@ defmodule Fermix.CLI.Daemon.Client do
     end
   end
 
-  @spec request_payload(String.t(), keyword()) :: map()
-  defp request_payload(method, opts) do
-    case Keyword.get(opts, :params, %{}) do
+  @spec request_payload(String.t(), map()) :: map()
+  defp request_payload(method, params) do
+    case params do
       params when params == %{} -> %{"method" => method}
       params when is_map(params) -> %{"method" => method, "params" => params}
     end
