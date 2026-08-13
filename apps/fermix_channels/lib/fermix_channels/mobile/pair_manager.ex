@@ -490,7 +490,9 @@ defmodule FermixChannels.Mobile.PairManager do
     results = Enum.map(entries, &File.lstat/1)
 
     cond do
-      Enum.all?(results, &(&1 == {:error, :enoent})) -> {:ok, :missing}
+      Enum.all?(results, &(&1 == {:error, :enoent})) ->
+        {:ok, :missing}
+
       Enum.any?(results, &match?({:error, reason} when reason != :enoent, &1)) ->
         {:error, :identity_state_unreadable}
 

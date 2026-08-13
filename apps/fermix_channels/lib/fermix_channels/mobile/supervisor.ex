@@ -68,7 +68,14 @@ defmodule FermixChannels.Mobile.Supervisor do
 
       Supervisor.init(children, strategy: :rest_for_one)
     else
-      {:error, reason} -> {:stop, {:invalid_mobile_push_config, reason}}
+      # `{:stop, reason}` is a GenServer init return, not a Supervisor one:
+      # OTP matches only `{:ok, {flags, children}}` or `:ignore` and wraps
+      # anything else as `{:bad_return, {__MODULE__, :init, ...}}`, which buries
+      # the actual reason. Push was explicitly enabled with credentials that do
+      # not resolve, so raise the reason the way `boot_epoch/1` below already
+      # does rather than degrading to a mobile surface with push silently off.
+      {:error, reason} ->
+        raise ArgumentError, "invalid mobile push config: #{inspect(reason)}"
     end
   end
 

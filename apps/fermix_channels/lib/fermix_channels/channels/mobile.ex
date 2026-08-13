@@ -481,7 +481,9 @@ defmodule FermixChannels.Channels.Mobile do
 
   defp validate_proactive_media_opts(opts) do
     case {Keyword.get(opts, :proactive_key), Keyword.get(opts, :proactive_part_id)} do
-      {nil, _part_id} -> :ok
+      {nil, _part_id} ->
+        :ok
+
       {key, part_id} when is_binary(key) and key != "" and is_binary(part_id) and part_id != "" ->
         :ok
 

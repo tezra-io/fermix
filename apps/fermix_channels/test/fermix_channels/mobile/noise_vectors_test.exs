@@ -142,11 +142,46 @@ defmodule FermixChannels.Mobile.NoiseVectorsTest do
     assert Noise.handshake_hash(responder) == Noise.handshake_hash(initiator)
     assert Noise.sas(initiator) == vector["sas"]
 
-    [transport] = vector["transport_messages"]
-    assert {:ok, ciphertext, _initiator} = Noise.encrypt(initiator, hex(transport["plaintext"]))
-    assert Base.encode16(ciphertext, case: :lower) == transport["ciphertext"]
+    {initiator, responder} = assert_transport(vector, initiator, responder)
+    assert_rekey(vector["rekey"], initiator, responder)
+  end
+
+  # More than one message per direction is the point: every handshake AEAD call
+  # and the first transport frame all run at nonce 0, where the three plausible
+  # ChaChaPoly nonce encodings are byte-identical. Only the second frame pins
+  # 4 zero bytes followed by a little-endian counter, which is what a separate
+  # Swift implementation has to agree with.
+  defp assert_transport(vector, initiator, responder) do
+    messages = vector["transport_messages"]
+
+    Enum.reduce(messages, {initiator, responder}, fn message, {sender, receiver} ->
+      assert sender.send_cipher.nonce == message["nonce"]
+      assert {:ok, ciphertext, sender} = Noise.encrypt(sender, hex(message["plaintext"]))
+      assert Base.encode16(ciphertext, case: :lower) == message["ciphertext"]
+      assert {:ok, plaintext, receiver} = Noise.decrypt(receiver, ciphertext)
+      assert plaintext == hex(message["plaintext"])
+      {sender, receiver}
+    end)
+  end
+
+  # Rekeying both ends with the same code round-trips even when the derivation
+  # is wrong, because both ends are wrong identically — only the iOS client
+  # would break, and only after 2^20 frames. So pin the derived key itself
+  # against the cross-implementation vector, not just the round trip.
+  defp assert_rekey(rekey, initiator, responder) do
+    assert initiator.send_cipher.nonce == rekey["nonce"]
+
+    assert {:ok, initiator} = Noise.rekey(initiator, :send)
+    assert {:ok, responder} = Noise.rekey(responder, :receive)
+
+    assert Base.encode16(initiator.send_cipher.key, case: :lower) == rekey["key"]
+    assert initiator.send_cipher.nonce == rekey["nonce"]
+    assert responder.receive_cipher.nonce == rekey["nonce"]
+
+    assert {:ok, ciphertext, _initiator} = Noise.encrypt(initiator, hex(rekey["plaintext"]))
+    assert Base.encode16(ciphertext, case: :lower) == rekey["ciphertext"]
     assert {:ok, plaintext, _responder} = Noise.decrypt(responder, ciphertext)
-    assert plaintext == hex(transport["plaintext"])
+    assert plaintext == hex(rekey["plaintext"])
   end
 
   defp keypair(vector, prefix) do
