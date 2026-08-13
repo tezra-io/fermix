@@ -6,6 +6,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-08-13
+
 ### Added
 
 - **Grok 4.6 is available and is now the model a new SpaceXAI setup picks.**
@@ -173,6 +175,13 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   continuations arrive silently.
 
 ### Changed
+
+- **Traces now record the full prompt, response, and tool bodies by default.**
+  A trace that omits the request and the response cannot answer the questions
+  traces exist to answer, and the privacy argument for the lean default does not
+  apply here — the JSONL lives under a `0700` `FERMIX_HOME` and any Opik
+  instance is local, so bodies never leave the machine. Set
+  `FERMIX_TRACE_CONTENT=0` to go back to the lean posture.
 
 - **Streaming defaults now follow what the channel can do.** A configured
   channel that can edit messages (Telegram today) defaults to the live
