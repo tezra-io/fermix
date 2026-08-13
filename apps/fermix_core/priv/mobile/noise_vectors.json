@@ -30,9 +30,22 @@
       "transport_messages": [
         {
           "plaintext": "6d6f62696c652d6d657373616765",
-          "ciphertext": "db9e39a60bc39256f9e465006e1cca863ba183f1cad8a053a281950bdc5a"
+          "ciphertext": "db9e39a60bc39256f9e465006e1cca863ba183f1cad8a053a281950bdc5a",
+          "nonce": 0
+        },
+        {
+          "nonce": 1,
+          "plaintext": "7365636f6e642d6672616d65",
+          "ciphertext": "7dbb46ced6704f7ff7b2a821f4683af505b1a11e5f8c724ca9ff8b83"
         }
-      ]
+      ],
+      "rekey": {
+        "direction": "initiator_to_responder",
+        "nonce": 2,
+        "key": "7b4693c298ac347c5c1fd90a943506f1fa0317af62c8c11f56fbd89c7d398b00",
+        "plaintext": "61667465722d72656b6579",
+        "ciphertext": "d36996053e1f9737abe7e5941bb2e9433c276282e56332352509e3"
+      }
     },
     {
       "pattern": "ikpsk2",
@@ -61,9 +74,23 @@
       "transport_messages": [
         {
           "plaintext": "6d6f62696c652d6d657373616765",
-          "ciphertext": "f37cc5974aec8dbad38e8e98d58f88675729bd724400fd8ee5404a0385a3"
+          "ciphertext": "f37cc5974aec8dbad38e8e98d58f88675729bd724400fd8ee5404a0385a3",
+          "nonce": 0
+        },
+        {
+          "nonce": 1,
+          "plaintext": "7365636f6e642d6672616d65",
+          "ciphertext": "4faa00ef553157d115fc48afd01b5a4ae3359eb3c834eef65b1f7b98"
         }
-      ]
+      ],
+      "rekey": {
+        "direction": "initiator_to_responder",
+        "nonce": 2,
+        "key": "febfd245af8e95261708c571a32867e0c048c21cb81e300679f0c390fb885a2b",
+        "plaintext": "61667465722d72656b6579",
+        "ciphertext": "bf37af341b83057d21fce9041ef7d32ab058c2c737143c7770f4e0"
+      }
     }
-  ]
+  ],
+  "rekey": "Noise rev 34 s11.3 REKEY: ChaCha20-Poly1305 of 32 zero bytes at nonce 2^64-1, first 32 bytes become the new key; the direction's nonce is preserved, not reset"
 }

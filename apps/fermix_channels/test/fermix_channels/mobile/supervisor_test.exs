@@ -100,14 +100,19 @@ defmodule FermixChannels.Mobile.SupervisorTest do
 
     refute Enum.any?(children, &(&1.id == FermixChannels.Mobile.Push.PigeonDispatcher))
 
-    assert {:stop, {:invalid_mobile_push_config, {:invalid_push_config, :team_id, :missing}}} =
-             MobileSupervisor.init(
-               root: "/tmp/fermix-mobile-supervisor-invalid-push-test",
-               boot_epoch: "invalid-push-test-epoch",
-               config: [advertise_mdns: false, push: [enabled: true]],
-               start_listener?: false,
-               names: names()
-             )
+    error =
+      assert_raise ArgumentError, fn ->
+        MobileSupervisor.init(
+          root: "/tmp/fermix-mobile-supervisor-invalid-push-test",
+          boot_epoch: "invalid-push-test-epoch",
+          config: [advertise_mdns: false, push: [enabled: true]],
+          start_listener?: false,
+          names: names()
+        )
+      end
+
+    assert error.message =~ "invalid mobile push config"
+    assert error.message =~ "{:invalid_push_config, :team_id, :missing}"
   end
 
   test "defaults a cryptographically random epoch for the request coordinator" do
