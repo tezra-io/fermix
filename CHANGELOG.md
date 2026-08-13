@@ -32,6 +32,14 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Ending a computer-use session no longer risks the next one resuming the
+  session that just ended.** Tearing a session down left its registry entry to
+  be swept asynchronously, so for a brief moment after the teardown returned,
+  starting a session for the same conversation could hand back the one that had
+  already stopped instead of opening a fresh one. Most visible where a voice
+  call ends and another begins straight after, since ending an attended call
+  tears the session down. The entry is now dropped as part of the teardown.
+
 - **Two Grok context windows were wrong, so conversations compacted at the
   wrong point.** The catalog credited Grok 4.5 with a 1M window when xAI
   documents 500k — which defers compaction past the model's real limit — and
