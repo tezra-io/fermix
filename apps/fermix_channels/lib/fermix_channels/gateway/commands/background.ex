@@ -104,7 +104,7 @@ defmodule FermixChannels.Gateway.Commands.Background do
     finish(result)
   end
 
-  defp release_runner({owner, ref}, ack_result, finish_command) do
+  defp release_runner({_owner, ref}, ack_result, finish_command) do
     receive do
       {^ref, runner} when is_pid(runner) ->
         send(runner, {ref, release_action(ack_result)})
@@ -145,7 +145,7 @@ defmodule FermixChannels.Gateway.Commands.Background do
   defp settle_command(finish, {:ok, _response}), do: finish.(:completed)
   defp settle_command(finish, {:error, reason}), do: finish.({:failed, reason})
 
-  defp settle_after_reply(finish, result, {:error, reason}),
+  defp settle_after_reply(finish, _result, {:error, reason}),
     do: settle_failed(finish, {:final_reply_failed, reason})
 
   defp settle_after_reply(finish, result, _success), do: settle_command(finish, result)
