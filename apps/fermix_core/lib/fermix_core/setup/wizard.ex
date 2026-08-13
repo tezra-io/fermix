@@ -80,6 +80,14 @@ defmodule FermixCore.Setup.Wizard do
           | {:signal_account, String.t()}
           | {:signal_owner_user_id, String.t()}
           | {:acp_enabled, boolean() | String.t()}
+          | {:mobile_enabled, boolean() | String.t()}
+          | {:mobile_port, pos_integer() | String.t()}
+          | {:mobile_push_enabled, boolean() | String.t()}
+          | {:mobile_push_team_id, String.t()}
+          | {:mobile_push_key_id, String.t()}
+          | {:mobile_push_key, String.t()}
+          | {:mobile_push_topic, String.t()}
+          | {:mobile_push_environment, String.t()}
           | {:user_name, String.t()}
           | {:timezone, String.t()}
           | {:communication_style, String.t()}
@@ -95,6 +103,25 @@ defmodule FermixCore.Setup.Wizard do
 
   @realtime_true_values ~w(true yes y 1)
   @realtime_false_values ~w(false no n 0)
+  @mobile_answer_keys [
+    :mobile_enabled,
+    :mobile_port,
+    :mobile_push_enabled,
+    :mobile_push_team_id,
+    :mobile_push_key_id,
+    :mobile_push_key,
+    :mobile_push_topic,
+    :mobile_push_environment
+  ]
+  @mobile_push_environments ~w(development production)
+  @mobile_base_prompt_keys [:mobile_port, :mobile_push_enabled]
+  @mobile_push_prompt_keys [
+    :mobile_push_team_id,
+    :mobile_push_key_id,
+    :mobile_push_key,
+    :mobile_push_topic,
+    :mobile_push_environment
+  ]
   @realtime_followup_prompt_keys [
     :realtime_api_key,
     :realtime_voice,
@@ -110,7 +137,8 @@ defmodule FermixCore.Setup.Wizard do
     :reasoning_effort,
     :fast,
     :realtime_enabled,
-    :computer_use_enabled
+    :computer_use_enabled,
+    :mobile_enabled
   ]
 
   @channel_owner_reconfigure_keys %{
@@ -169,6 +197,12 @@ defmodule FermixCore.Setup.Wizard do
         prompt.key in @realtime_advanced_prompt_keys ->
           false
 
+        prompt.key in @mobile_base_prompt_keys ->
+          mobile_setup_followup?(prompt, specs, answers)
+
+        prompt.key in @mobile_push_prompt_keys ->
+          mobile_push_setup_followup?(prompt, specs, answers)
+
         true ->
           prompt.required?
       end
@@ -187,6 +221,7 @@ defmodule FermixCore.Setup.Wizard do
     |> Enum.filter(fn prompt ->
       (prompt.key in @reconfigure_prompt_keys and reconfigure_offered?(prompt, persisted)) or
         realtime_reconfigure_followup?(prompt, answers) or
+        mobile_reconfigure_followup?(prompt, specs, answers) or
         channel_owner_reconfigure?(prompt, persisted)
     end)
     |> Enum.map(&Map.put(&1, :required?, true))
@@ -226,6 +261,7 @@ defmodule FermixCore.Setup.Wizard do
       compaction_prompts(context) ++
       realtime_prompts(context) ++
       channel_prompts(context) ++
+      mobile_prompts(context) ++
       personalization_prompts(context)
   end
 
@@ -400,6 +436,54 @@ defmodule FermixCore.Setup.Wizard do
     ]
   end
 
+  defp mobile_prompts(%{persisted: persisted}) do
+    channels = Map.get(persisted, :fermix_channels, [])
+    config = Keyword.get(channels, :mobile, [])
+    configured? = config != []
+    enabled? = Keyword.get(config, :enabled, false) == true
+    port = Keyword.get(config, :port, 4_031)
+    push = Keyword.get(config, :push, [])
+    push_enabled? = Keyword.get(push, :enabled, false) == true
+    environment = Keyword.get(push, :environment, "production") |> to_string()
+
+    [
+      mobile_prompt(:mobile_enabled, "Enable iOS mobile companion?", enabled?, not configured?),
+      mobile_prompt(:mobile_port, "Mobile listener port", port, not configured?),
+      mobile_prompt(
+        :mobile_push_enabled,
+        "Enable mobile push notifications?",
+        push_enabled?,
+        not configured?
+      ),
+      mobile_secret_prompt(:mobile_push_team_id, "APNs team ID", push, :team_id, push_enabled?),
+      mobile_secret_prompt(:mobile_push_key_id, "APNs key ID", push, :key_id, push_enabled?),
+      mobile_secret_prompt(:mobile_push_key, "APNs .p8 private key", push, :key, push_enabled?),
+      mobile_secret_prompt(:mobile_push_topic, "APNs bundle topic", push, :topic, push_enabled?),
+      %{
+        key: :mobile_push_environment,
+        label: "APNs environment (development/production; blank = #{environment})",
+        default: environment,
+        required?: push_enabled? and blank?(Keyword.get(push, :environment))
+      }
+    ]
+  end
+
+  defp mobile_prompt(key, label, default, required?) do
+    %{
+      key: key,
+      label: "#{label} (blank = #{mobile_default(default)})",
+      default: default,
+      required?: required?
+    }
+  end
+
+  defp mobile_secret_prompt(key, label, config, field, push_enabled?) do
+    %{key: key, label: label, required?: push_enabled? and blank?(Keyword.get(config, field))}
+  end
+
+  defp mobile_default(value) when is_boolean(value), do: yes_no(value)
+  defp mobile_default(value), do: to_string(value)
+
   defp compaction_prompts(_context) do
     [
       %{
@@ -499,6 +583,71 @@ defmodule FermixCore.Setup.Wizard do
   end
 
   defp realtime_reconfigure_followup?(_prompt, _answers), do: false
+
+  defp mobile_setup_followup?(prompt, specs, answers) do
+    prompt.required? and mobile_resolves_enabled?(specs, answers)
+  end
+
+  defp mobile_push_setup_followup?(prompt, specs, answers) do
+    enabled? = mobile_resolves_enabled?(specs, answers)
+    push_enabled? = mobile_push_resolves_enabled?(specs, answers)
+    explicitly_enabled? = mobile_boolean_answer(answers, :mobile_push_enabled) == true
+
+    enabled? and push_enabled? and (prompt.required? or explicitly_enabled?)
+  end
+
+  defp mobile_reconfigure_followup?(%{key: key}, specs, answers)
+       when key in @mobile_base_prompt_keys do
+    mobile_resolves_enabled?(specs, answers)
+  end
+
+  defp mobile_reconfigure_followup?(%{key: key}, specs, answers)
+       when key in @mobile_push_prompt_keys do
+    mobile_resolves_enabled?(specs, answers) and
+      mobile_push_resolves_enabled?(specs, answers)
+  end
+
+  defp mobile_reconfigure_followup?(_prompt, _specs, _answers), do: false
+
+  defp mobile_resolves_enabled?(specs, answers) do
+    resolve_boolean_prompt(specs, answers, :mobile_enabled)
+  end
+
+  defp mobile_push_resolves_enabled?(specs, answers) do
+    resolve_boolean_prompt(specs, answers, :mobile_push_enabled)
+  end
+
+  defp resolve_boolean_prompt(specs, answers, key) do
+    case mobile_boolean_answer(answers, key) do
+      value when is_boolean(value) -> value
+      nil -> prompt_boolean_default(specs, key)
+    end
+  end
+
+  defp mobile_boolean_answer(answers, key) do
+    case Keyword.get(answers, key) do
+      value when is_boolean(value) -> value
+      value when is_binary(value) -> normalized_mobile_boolean(value)
+      _value -> nil
+    end
+  end
+
+  defp normalized_mobile_boolean(value) do
+    normalized = value |> String.trim() |> String.downcase()
+
+    cond do
+      normalized in @realtime_true_values -> true
+      normalized in @realtime_false_values -> false
+      true -> nil
+    end
+  end
+
+  defp prompt_boolean_default(specs, key) do
+    case Enum.find(specs, &(&1.key == key)) do
+      %{default: value} when is_boolean(value) -> value
+      _prompt -> false
+    end
+  end
 
   defp channel_owner_reconfigure?(%{key: key}, persisted) do
     case Map.fetch(@channel_owner_reconfigure_keys, key) do
@@ -606,6 +755,12 @@ defmodule FermixCore.Setup.Wizard do
 
   @spec save_answers(WizardState.t(), [answer()]) :: {:ok, report()} | {:error, term()}
   def save_answers(%WizardState{} = state, answers) do
+    with :ok <- validate_mobile_answers(state.config_snapshot, answers) do
+      save_valid_answers(state, answers)
+    end
+  end
+
+  defp save_valid_answers(state, answers) do
     # Model/effort/fast writes target the provider being EDITED (the web pane's
     # `:edit_provider`), not the primary — so editing a fallback's settings doesn't
     # have to promote it. Falls back to the active/primary provider when unset (CLI).
@@ -641,6 +796,7 @@ defmodule FermixCore.Setup.Wizard do
       |> put_slack_config(answers)
       |> put_signal_config(answers)
       |> put_acp_config(answers)
+      |> put_mobile_config(answers)
       |> put_channel_owner_user_ids(answers)
       |> put_personalization(answers)
       |> put_skill_curation_enabled(Keyword.get(answers, :skill_curation_enabled))
@@ -888,7 +1044,7 @@ defmodule FermixCore.Setup.Wizard do
     }
   end
 
-  @channel_components ~w(channel:telegram channel:whatsapp channel:discord channel:slack channel:signal)
+  @channel_components ~w(channel:telegram channel:whatsapp channel:discord channel:slack channel:signal channel:mobile)
 
   defp step_for(failures, snapshot) do
     components = Enum.map(failures, & &1.component) |> MapSet.new()
@@ -947,6 +1103,7 @@ defmodule FermixCore.Setup.Wizard do
     |> put_enabled_channel(:slack, Keyword.get(channels, :slack, []), false)
     |> put_enabled_channel(:signal, Keyword.get(channels, :signal, []), false)
     |> put_enabled_channel(:acp, Keyword.get(channels, :acp, []), true)
+    |> put_enabled_channel(:mobile, Keyword.get(channels, :mobile, []), false)
     |> Enum.reverse()
   end
 
@@ -1943,6 +2100,175 @@ defmodule FermixCore.Setup.Wizard do
 
         Map.put(snapshot, :fermix_channels, Keyword.put(channels, :acp, config))
     end
+  end
+
+  defp put_mobile_config(snapshot, answers) do
+    if Enum.any?(@mobile_answer_keys, &Keyword.has_key?(answers, &1)) do
+      channels = Map.get(snapshot, :fermix_channels, [])
+      mobile = channels |> Keyword.get(:mobile, []) |> Keyword.put(:mode, :listener)
+
+      mobile =
+        mobile
+        |> maybe_put_mobile_bool(:enabled, Keyword.get(answers, :mobile_enabled))
+        |> maybe_put_mobile_port(Keyword.get(answers, :mobile_port))
+        |> put_mobile_push(answers)
+
+      Map.put(snapshot, :fermix_channels, Keyword.put(channels, :mobile, mobile))
+    else
+      snapshot
+    end
+  end
+
+  defp maybe_put_mobile_bool(config, _key, nil), do: config
+  defp maybe_put_mobile_bool(config, _key, ""), do: config
+
+  defp maybe_put_mobile_bool(config, key, value) do
+    Keyword.put(config, key, normalize_realtime_bool(value, key))
+  end
+
+  defp maybe_put_mobile_port(config, nil), do: config
+  defp maybe_put_mobile_port(config, ""), do: config
+
+  defp maybe_put_mobile_port(config, value) do
+    {:ok, port} = mobile_port(value)
+    Keyword.put(config, :port, port)
+  end
+
+  defp put_mobile_push(mobile, answers) do
+    if Enum.any?(
+         @mobile_answer_keys -- [:mobile_enabled, :mobile_port],
+         &Keyword.has_key?(answers, &1)
+       ) do
+      push = Keyword.get(mobile, :push, [])
+
+      push =
+        push
+        |> maybe_put_mobile_bool(:enabled, Keyword.get(answers, :mobile_push_enabled))
+        |> maybe_put_mobile_string(:team_id, Keyword.get(answers, :mobile_push_team_id))
+        |> maybe_put_mobile_string(:key_id, Keyword.get(answers, :mobile_push_key_id))
+        |> maybe_put_mobile_secret(Keyword.get(answers, :mobile_push_key))
+        |> maybe_put_mobile_string(:topic, Keyword.get(answers, :mobile_push_topic))
+        |> maybe_put_mobile_string(
+          :environment,
+          Keyword.get(answers, :mobile_push_environment)
+        )
+
+      Keyword.put(mobile, :push, push)
+    else
+      mobile
+    end
+  end
+
+  defp maybe_put_mobile_string(config, _key, nil), do: config
+  defp maybe_put_mobile_string(config, _key, ""), do: config
+
+  defp maybe_put_mobile_string(config, key, value) when is_binary(value) do
+    Keyword.put(config, key, String.trim(value))
+  end
+
+  defp maybe_put_mobile_secret(config, value) do
+    case secret_snapshot_value(:mobile_apns_key, value) do
+      nil -> config
+      sentinel -> Keyword.put(config, :key, sentinel)
+    end
+  end
+
+  defp validate_mobile_answers(snapshot, answers) do
+    if Enum.any?(@mobile_answer_keys, &Keyword.has_key?(answers, &1)) do
+      validate_answered_mobile(snapshot, answers)
+    else
+      :ok
+    end
+  end
+
+  defp validate_answered_mobile(snapshot, answers) do
+    with :ok <- validate_mobile_port(Keyword.get(answers, :mobile_port)),
+         :ok <- validate_mobile_environment(Keyword.get(answers, :mobile_push_environment)),
+         :ok <- validate_mobile_push(snapshot, answers) do
+      :ok
+    end
+  end
+
+  defp validate_mobile_port(nil), do: :ok
+  defp validate_mobile_port(""), do: :ok
+
+  defp validate_mobile_port(value) do
+    case mobile_port(value) do
+      {:ok, _port} -> :ok
+      :error -> {:error, {:invalid_mobile_port, value}}
+    end
+  end
+
+  defp mobile_port(value) when is_integer(value) and value in 1..65_535, do: {:ok, value}
+
+  defp mobile_port(value) when is_binary(value) do
+    case Integer.parse(String.trim(value)) do
+      {port, ""} when port in 1..65_535 -> {:ok, port}
+      _invalid -> :error
+    end
+  end
+
+  defp mobile_port(_value), do: :error
+
+  defp validate_mobile_environment(nil), do: :ok
+  defp validate_mobile_environment(""), do: :ok
+
+  defp validate_mobile_environment(environment) when environment in @mobile_push_environments,
+    do: :ok
+
+  defp validate_mobile_environment(environment),
+    do: {:error, {:invalid_mobile_push_environment, environment}}
+
+  defp validate_mobile_push(snapshot, answers) do
+    existing = snapshot |> Map.get(:fermix_channels, []) |> Keyword.get(:mobile, [])
+    push = Keyword.get(existing, :push, [])
+
+    case mobile_push_enabled(push, answers) do
+      {:ok, true} -> validate_mobile_push_fields(push, answers)
+      {:ok, _disabled_or_unset} -> :ok
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp mobile_push_enabled(push, answers) do
+    case Keyword.fetch(answers, :mobile_push_enabled) do
+      :error -> {:ok, Keyword.get(push, :enabled, false)}
+      {:ok, value} -> mobile_bool(value, :mobile_push_enabled)
+    end
+  end
+
+  defp mobile_bool(value, _key) when is_boolean(value), do: {:ok, value}
+
+  defp mobile_bool(value, key) when is_binary(value) do
+    case value |> String.trim() |> String.downcase() do
+      normalized when normalized in @realtime_true_values -> {:ok, true}
+      normalized when normalized in @realtime_false_values -> {:ok, false}
+      _invalid -> {:error, {:invalid_mobile_boolean, key, value}}
+    end
+  end
+
+  defp mobile_bool(value, key), do: {:error, {:invalid_mobile_boolean, key, value}}
+
+  defp validate_mobile_push_fields(push, answers) do
+    fields = [
+      team_id: :mobile_push_team_id,
+      key_id: :mobile_push_key_id,
+      key: :mobile_push_key,
+      topic: :mobile_push_topic
+    ]
+
+    missing =
+      for {field, answer_key} <- fields,
+          not mobile_push_field_present?(push, answers, field, answer_key),
+          do: field
+
+    if missing == [], do: :ok, else: {:error, {:invalid_mobile_push, missing}}
+  end
+
+  defp mobile_push_field_present?(push, answers, field, answer_key) do
+    value = Keyword.get(answers, answer_key)
+    value = if blank?(value), do: Keyword.get(push, field), else: value
+    not blank?(value)
   end
 
   defp put_channel_owner_user_ids(snapshot, answers) do

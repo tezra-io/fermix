@@ -7,6 +7,7 @@ defmodule FermixCore.Setup.ConfigStore do
   health reporting, traces, and logs.
   """
 
+  alias FermixCore.Browser.Config, as: BrowserConfig
   alias FermixCore.Capabilities.MCP.Config, as: McpConfig
   alias FermixCore.ComputerUse.Config, as: ComputerUseConfig
   alias FermixCore.Harness.Config, as: HarnessConfig
@@ -30,6 +31,7 @@ defmodule FermixCore.Setup.ConfigStore do
     browser: "browser",
     journals: "journals",
     realtime: "realtime",
+    mobile: "mobile",
     traces: "traces",
     logs: "logs"
   ]
@@ -45,6 +47,9 @@ defmodule FermixCore.Setup.ConfigStore do
     "scope_profile" => :scope_profile,
     "unsupported" => :unsupported
   }
+
+  @mobile_keys ~w(enabled mode port bind advertise_mdns streaming max_media_bytes media_store_max_bytes push)
+  @mobile_push_keys ~w(enabled team_id key_id key topic environment)
 
   @type runtime_config :: %{
           fermix_core: keyword(),
@@ -76,6 +81,7 @@ defmodule FermixCore.Setup.ConfigStore do
           browser: String.t(),
           journals: String.t(),
           realtime: String.t(),
+          mobile: String.t(),
           traces: String.t(),
           logs: String.t()
         }
@@ -106,6 +112,7 @@ defmodule FermixCore.Setup.ConfigStore do
         routing: Application.get_env(:fermix_core, :routing, []),
         compaction: Application.get_env(:fermix_core, :compaction, []),
         harness: Application.get_env(:fermix_core, :harness, []),
+        browser: Application.get_env(:fermix_core, :browser, []),
         skill_curation: Application.get_env(:fermix_core, :skill_curation, []),
         memory: Application.get_env(:fermix_core, :memory, []),
         realtime: Application.get_env(:fermix_core, :realtime, []),
@@ -124,7 +131,8 @@ defmodule FermixCore.Setup.ConfigStore do
         discord: Application.get_env(:fermix_channels, :discord, []),
         slack: Application.get_env(:fermix_channels, :slack, []),
         signal: Application.get_env(:fermix_channels, :signal, []),
-        acp: Application.get_env(:fermix_channels, :acp, [])
+        acp: Application.get_env(:fermix_channels, :acp, []),
+        mobile: Application.get_env(:fermix_channels, :mobile, [])
       ],
       fermix_web: []
     }
@@ -180,6 +188,7 @@ defmodule FermixCore.Setup.ConfigStore do
     apply_routing_config(Keyword.get(persisted.fermix_core, :routing, []))
     apply_compaction_config(Keyword.get(persisted.fermix_core, :compaction, []))
     apply_harness_config(Keyword.get(persisted.fermix_core, :harness, []))
+    apply_browser_config(Keyword.get(persisted.fermix_core, :browser, []))
     apply_skill_curation_config(Keyword.get(persisted.fermix_core, :skill_curation, []))
     apply_memory_config(Keyword.get(persisted.fermix_core, :memory, []))
     apply_realtime_config(Keyword.get(persisted.fermix_core, :realtime, []))
@@ -198,6 +207,7 @@ defmodule FermixCore.Setup.ConfigStore do
     apply_channel_config(:slack, Keyword.get(persisted.fermix_channels, :slack, []))
     apply_channel_config(:signal, Keyword.get(persisted.fermix_channels, :signal, []))
     apply_channel_config(:acp, Keyword.get(persisted.fermix_channels, :acp, []))
+    apply_channel_config(:mobile, Keyword.get(persisted.fermix_channels, :mobile, []))
   end
 
   @doc """
@@ -287,6 +297,11 @@ defmodule FermixCore.Setup.ConfigStore do
           |> Map.get(:fermix_core, [])
           |> Keyword.get(:harness, [])
           |> normalize_harness(),
+        browser:
+          snapshot
+          |> Map.get(:fermix_core, [])
+          |> Keyword.get(:browser, [])
+          |> normalize_browser(),
         skill_curation:
           snapshot
           |> Map.get(:fermix_core, [])
@@ -372,7 +387,12 @@ defmodule FermixCore.Setup.ConfigStore do
           snapshot
           |> Map.get(:fermix_channels, [])
           |> Keyword.get(:acp, [])
-          |> normalize_acp()
+          |> normalize_acp(),
+        mobile:
+          snapshot
+          |> Map.get(:fermix_channels, [])
+          |> Keyword.get(:mobile, [])
+          |> normalize_mobile()
       ],
       fermix_web: []
     }
@@ -435,6 +455,7 @@ defmodule FermixCore.Setup.ConfigStore do
         routing: [],
         compaction: [],
         harness: [],
+        browser: [],
         skill_curation: [],
         memory: [],
         realtime: [],
@@ -453,7 +474,8 @@ defmodule FermixCore.Setup.ConfigStore do
         discord: [],
         slack: [],
         signal: [],
-        acp: []
+        acp: [],
+        mobile: []
       ],
       fermix_web: []
     }
@@ -560,6 +582,14 @@ defmodule FermixCore.Setup.ConfigStore do
   # complete intended state (same rationale as routing/computer_use).
   defp apply_harness_config(harness_config) do
     Application.put_env(:fermix_core, :harness, harness_config)
+    :ok
+  end
+
+  # Replace (not merge), same rationale as harness: the section has no
+  # compile-time baseline, so the persisted keyword is the complete intended
+  # state. `Browser.Config` supplies every default the section omits.
+  defp apply_browser_config(browser_config) do
+    Application.put_env(:fermix_core, :browser, browser_config)
     :ok
   end
 
@@ -674,6 +704,7 @@ defmodule FermixCore.Setup.ConfigStore do
     routing = Keyword.get(fermix_core, :routing, [])
     compaction = Keyword.get(fermix_core, :compaction, [])
     harness = Keyword.get(fermix_core, :harness, [])
+    browser = Keyword.get(fermix_core, :browser, [])
     skill_curation = Keyword.get(fermix_core, :skill_curation, [])
     memory = Keyword.get(fermix_core, :memory, [])
     realtime = Keyword.get(fermix_core, :realtime, [])
@@ -708,6 +739,7 @@ defmodule FermixCore.Setup.ConfigStore do
       render_section(["fermix_core", "routing"], routing),
       render_section(["fermix_core", "compaction"], compaction),
       render_section(["fermix_core", "harness"], harness),
+      render_section(["fermix_core", "browser"], browser),
       render_section(["fermix_core", "skill_curation"], skill_curation),
       render_section(["fermix_core", "memory"], memory),
       render_section(["fermix_core", "realtime"], realtime),
@@ -731,7 +763,8 @@ defmodule FermixCore.Setup.ConfigStore do
       render_section(["fermix_channels", "discord"], Keyword.get(channels, :discord, [])),
       render_section(["fermix_channels", "slack"], Keyword.get(channels, :slack, [])),
       render_section(["fermix_channels", "signal"], Keyword.get(channels, :signal, [])),
-      render_section(["fermix_channels", "acp"], Keyword.get(channels, :acp, []))
+      render_section(["fermix_channels", "acp"], Keyword.get(channels, :acp, [])),
+      render_mobile(Keyword.get(channels, :mobile, []))
     ]
     |> List.flatten()
     |> Enum.reject(&(&1 in [nil, ""]))
@@ -759,6 +792,15 @@ defmodule FermixCore.Setup.ConfigStore do
       |> Enum.join("\n")
 
     Enum.join([header, body], "\n")
+  end
+
+  defp render_mobile([]), do: nil
+
+  defp render_mobile(mobile) do
+    [
+      render_section(["fermix_channels", "mobile"], Keyword.delete(mobile, :push)),
+      render_section(["fermix_channels", "mobile", "push"], Keyword.get(mobile, :push, []))
+    ]
   end
 
   defp render_plugins([]), do: nil
@@ -920,6 +962,7 @@ defmodule FermixCore.Setup.ConfigStore do
         routing: normalize_routing(get_in(document, ["fermix_core", "routing"])),
         compaction: normalize_compaction(get_in(document, ["fermix_core", "compaction"])),
         harness: normalize_harness(get_in(document, ["fermix_core", "harness"])),
+        browser: normalize_browser(get_in(document, ["fermix_core", "browser"])),
         skill_curation:
           normalize_skill_curation(get_in(document, ["fermix_core", "skill_curation"])),
         memory: normalize_memory(get_in(document, ["fermix_core", "memory"])),
@@ -941,7 +984,8 @@ defmodule FermixCore.Setup.ConfigStore do
         discord: normalize_discord(get_in(document, ["fermix_channels", "discord"])),
         slack: normalize_slack(get_in(document, ["fermix_channels", "slack"])),
         signal: normalize_signal(get_in(document, ["fermix_channels", "signal"])),
-        acp: normalize_acp(get_in(document, ["fermix_channels", "acp"]))
+        acp: normalize_acp(get_in(document, ["fermix_channels", "acp"])),
+        mobile: normalize_mobile(get_in(document, ["fermix_channels", "mobile"]))
       ],
       fermix_web: []
     }
@@ -1591,6 +1635,46 @@ defmodule FermixCore.Setup.ConfigStore do
     end
   end
 
+  # `[fermix_core.browser]`. Only `allowed_hosts` is settable — it is the
+  # documented recovery for a host the browser policy refuses, so the refusals
+  # need it reachable. Every other field of `Browser.Config` is a timeout, a cap
+  # or a buffer size: tuning, which stays an internal constant.
+  #
+  # Unknown keys are rejected here at the parse boundary rather than dropped. The
+  # keys an operator most plausibly writes (`action_timeout_ms`, `max_tabs`) are
+  # REAL struct fields, so a silent drop would leave a config.toml line that
+  # reads as if it were in force and is not — the failure this whole section
+  # exists to end. Value validation lives in `Config.validate_allowed_hosts/1`,
+  # which runs on every read and is surfaced by `fermix doctor`.
+  defp normalize_browser(config) do
+    validate_browser_section_keys!(config)
+    BrowserConfig.normalize(config)
+  end
+
+  defp validate_browser_section_keys!(nil), do: :ok
+
+  defp validate_browser_section_keys!(config) when is_map(config) or is_list(config) do
+    allowed = MapSet.new(BrowserConfig.config_keys(), &Atom.to_string/1)
+
+    unknown =
+      config
+      |> section_keys()
+      |> Enum.reject(&MapSet.member?(allowed, &1))
+      |> Enum.sort()
+
+    if unknown == [] do
+      :ok
+    else
+      raise ArgumentError, """
+      config.toml [fermix_core.browser] has unknown key(s): #{Enum.join(unknown, ", ")}.
+
+      Allowed keys: #{Enum.map_join(BrowserConfig.config_keys(), ", ", &Atom.to_string/1)}.
+      Browser timeouts, caps and buffer sizes are internal constants, not config.
+      Remove or fix the key(s); the daemon will not boot until this is fixed.
+      """
+    end
+  end
+
   # `[fermix_core.skill_curation]` (MILESTONE_26_SKILL_CURATION §6.1). Value
   # validation lives in SkillCurationConfig.normalize (fail-loud per key);
   # unknown keys are rejected here at the parse boundary, mirroring
@@ -1814,6 +1898,128 @@ defmodule FermixCore.Setup.ConfigStore do
     put_if_present([], :enabled, lookup(config, "enabled", :enabled))
   end
 
+  defp normalize_mobile(nil), do: []
+
+  defp normalize_mobile(config) when is_map(config) or is_list(config) do
+    validate_mobile_keys!(config, @mobile_keys, "mobile")
+    push = lookup(config, "push", :push)
+
+    []
+    |> put_if_present(:enabled, normalize_mobile_boolean(config, :enabled))
+    |> put_if_present(:mode, normalize_mobile_mode(lookup(config, "mode", :mode)))
+    |> put_if_present(:port, normalize_mobile_port(lookup(config, "port", :port)))
+    |> put_if_present(:bind, normalize_mobile_string(config, :bind))
+    |> put_if_present(:advertise_mdns, normalize_mobile_boolean(config, :advertise_mdns))
+    |> put_streaming(config)
+    |> put_if_present(
+      :max_media_bytes,
+      normalize_mobile_positive_integer(config, :max_media_bytes)
+    )
+    |> put_if_present(
+      :media_store_max_bytes,
+      normalize_mobile_positive_integer(config, :media_store_max_bytes)
+    )
+    |> put_mobile_push(push)
+  end
+
+  defp normalize_mobile(config) do
+    raise ArgumentError, "invalid mobile config #{inspect(config)}; expected a table"
+  end
+
+  defp put_mobile_push(fields, nil), do: fields
+
+  defp put_mobile_push(fields, push) when is_map(push) or is_list(push) do
+    validate_mobile_keys!(push, @mobile_push_keys, "mobile.push")
+
+    normalized =
+      []
+      |> put_if_present(:enabled, normalize_mobile_boolean(push, :enabled, "mobile.push"))
+      |> put_if_present(:team_id, normalize_mobile_string(push, :team_id, "mobile.push"))
+      |> put_if_present(:key_id, normalize_mobile_string(push, :key_id, "mobile.push"))
+      |> put_if_present(:key, normalize_mobile_string(push, :key, "mobile.push"))
+      |> put_if_present(:topic, normalize_mobile_string(push, :topic, "mobile.push"))
+      |> put_if_present(
+        :environment,
+        normalize_mobile_environment(lookup(push, "environment", :environment))
+      )
+
+    Keyword.put(fields, :push, normalized)
+  end
+
+  defp put_mobile_push(_fields, push) do
+    raise ArgumentError, "invalid mobile.push #{inspect(push)}; expected a table"
+  end
+
+  defp validate_mobile_keys!(config, allowed, label) do
+    unknown = config |> section_keys() |> Enum.reject(&(&1 in allowed)) |> Enum.sort()
+
+    if unknown != [] do
+      raise ArgumentError,
+            "invalid #{label} config; unknown key(s): #{Enum.join(unknown, ", ")}"
+    end
+  end
+
+  defp normalize_mobile_boolean(config, key, label \\ "mobile") do
+    case lookup(config, Atom.to_string(key), key) do
+      nil -> nil
+      value when is_boolean(value) -> value
+      value -> raise ArgumentError, "invalid #{label}.#{key} #{inspect(value)}; expected boolean"
+    end
+  end
+
+  defp normalize_mobile_string(config, key, label \\ "mobile") do
+    case lookup(config, Atom.to_string(key), key) do
+      nil ->
+        nil
+
+      value when is_binary(value) ->
+        case String.trim(value) do
+          "" -> raise ArgumentError, "invalid #{label}.#{key} #{inspect(value)}; expected string"
+          normalized -> normalized
+        end
+
+      value ->
+        raise ArgumentError, "invalid #{label}.#{key} #{inspect(value)}; expected string"
+    end
+  end
+
+  defp normalize_mobile_positive_integer(config, key) do
+    case lookup(config, Atom.to_string(key), key) do
+      nil ->
+        nil
+
+      value when is_integer(value) and value > 0 ->
+        value
+
+      value ->
+        raise ArgumentError, "invalid mobile.#{key} #{inspect(value)}; expected positive integer"
+    end
+  end
+
+  defp normalize_mobile_port(nil), do: nil
+  defp normalize_mobile_port(value) when is_integer(value) and value in 1..65_535, do: value
+
+  defp normalize_mobile_port(value) do
+    raise ArgumentError, "invalid mobile.port #{inspect(value)}; expected integer 1..65535"
+  end
+
+  defp normalize_mobile_mode(nil), do: nil
+  defp normalize_mobile_mode(value) when value in [:listener, "listener"], do: :listener
+
+  defp normalize_mobile_mode(value) do
+    raise ArgumentError, "invalid mobile.mode #{inspect(value)}; expected listener"
+  end
+
+  defp normalize_mobile_environment(nil), do: nil
+
+  defp normalize_mobile_environment(value) when value in ["development", "production"],
+    do: value
+
+  defp normalize_mobile_environment(value) do
+    raise ArgumentError,
+          "invalid mobile.push.environment #{inspect(value)}; expected development or production"
+  end
+
   defp normalize_auth_mode(:api_key), do: :api_key
   defp normalize_auth_mode("api_key"), do: :api_key
   defp normalize_auth_mode(:oauth), do: :oauth
@@ -1824,10 +2030,12 @@ defmodule FermixCore.Setup.ConfigStore do
   defp normalize_mode(:webhook), do: :webhook
   defp normalize_mode(:gateway), do: :gateway
   defp normalize_mode(:subprocess), do: :subprocess
+  defp normalize_mode(:listener), do: :listener
   defp normalize_mode("polling"), do: :polling
   defp normalize_mode("webhook"), do: :webhook
   defp normalize_mode("gateway"), do: :gateway
   defp normalize_mode("subprocess"), do: :subprocess
+  defp normalize_mode("listener"), do: :listener
   defp normalize_mode(_value), do: nil
 
   # Channel streaming opt-in (docs/design/CHANNEL_STREAMING.md §7). Shared by

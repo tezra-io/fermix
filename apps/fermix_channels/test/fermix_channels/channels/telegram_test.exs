@@ -215,6 +215,21 @@ defmodule FermixChannels.Channels.TelegramTest do
       assert msg.metadata.user_id == "111"
     end
 
+    test "synthesizes a /deny message from a denial tap" do
+      update = %{
+        "callback_query" => %{
+          "id" => "cbq-2",
+          "data" => "deny:AB12CD34",
+          "from" => %{"id" => 111, "username" => "alice"},
+          "message" => %{"message_id" => 55, "chat" => %{"id" => 123, "type" => "private"}}
+        }
+      }
+
+      assert {:ok, [msg]} = Telegram.parse_update(update)
+      assert msg.content == "/deny AB12CD34"
+      assert msg.metadata.user_id == "111"
+    end
+
     test "parses a photo message into an image attachment ref (largest variant, file_id only)" do
       update = %{
         "message" => %{
@@ -981,7 +996,7 @@ defmodule FermixChannels.Channels.TelegramTest do
     end
   end
 
-  # -- send_approval/3 (one-tap Approve button) --
+  # -- send_approval/3 (Approve/Deny buttons) --
 
   describe "send_approval/3" do
     defp approval_message(chat_id, thread_ts \\ nil) do
@@ -996,7 +1011,7 @@ defmodule FermixChannels.Channels.TelegramTest do
       })
     end
 
-    test "attaches an inline Approve button whose callback_data is the grant-namespaced token" do
+    test "attaches Approve and Deny buttons with namespaced tokens" do
       stub_telegram(self(), 200, %{"ok" => true})
 
       assert :ok =
@@ -1012,7 +1027,10 @@ defmodule FermixChannels.Channels.TelegramTest do
       assert body["text"] =~ "Approve"
 
       assert body["reply_markup"]["inline_keyboard"] == [
-               [%{"text" => "✅ Approve", "callback_data" => "grant:TOK12345"}]
+               [
+                 %{"text" => "✅ Approve", "callback_data" => "grant:TOK12345"},
+                 %{"text" => "❌ Deny", "callback_data" => "deny:TOK12345"}
+               ]
              ]
     end
 

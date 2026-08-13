@@ -8,8 +8,29 @@ defmodule FermixChannels.Gateway.PolicyTest do
   use ExUnit.Case, async: false
 
   alias FermixChannels.Gateway
+  alias FermixChannels.Gateway.Commands.Sandbox.Confirmations
   alias FermixChannels.Gateway.Commands.Registry, as: CommandRegistry
   alias FermixChannels.Gateway.Message
+
+  defmodule MobileChannel do
+    def build_text_reply(%Message{}), do: fn _text -> :ok end
+    def build_media_reply(%Message{}), do: fn _media -> :ok end
+    def stream_capability, do: :draft_edit
+    def open_draft(_message, text), do: {:ok, {:draft, text}}
+    def edit_draft(_message, _handle, _text), do: :ok
+    def seal_draft(_message, _handle, _text), do: {:ok, nil}
+    def discard_draft(_message, _handle), do: :ok
+
+    def build_activity_callback(%Message{id: id}) do
+      test_pid = self()
+      fn event -> send(test_pid, {:mobile_activity, id, event}) end
+    end
+
+    def build_turn_result(%Message{id: id}) do
+      test_pid = self()
+      fn event -> send(test_pid, {:mobile_terminal, id, event}) end
+    end
+  end
 
   defmodule CapturingAgent do
     def handle_message(message, test_pid) do
@@ -244,6 +265,98 @@ defmodule FermixChannels.Gateway.PolicyTest do
     end
   end
 
+  describe "authenticated mobile ingress" do
+    setup do
+      register_mobile()
+      put_mobile(streaming: "draft")
+      :ok
+    end
+
+    test "fails closed without explicit transport proof even if metadata is forged" do
+      message =
+        message("hello",
+          channel: "mobile",
+          chat_id: "main",
+          reply_target: "main",
+          metadata: %{
+            transport_auth: %{transport: :mobile, authenticated_device_id: "forged"}
+          }
+        )
+
+      assert :ok =
+               Gateway.ingest([message],
+                 channel: MobileChannel,
+                 agent: CapturingAgent,
+                 agent_server: self()
+               )
+
+      refute_receive {:agent_message, _message}
+    end
+
+    test "authenticated device is operator and receives draft/activity/terminal closures" do
+      ingress_context = %{
+        transport: :mobile,
+        authenticated_device_id: "device-1"
+      }
+
+      message =
+        message("hello",
+          channel: "mobile",
+          chat_id: "main",
+          reply_target: "main",
+          metadata: %{}
+        )
+
+      assert :ok =
+               Gateway.ingest([message],
+                 channel: MobileChannel,
+                 agent: CapturingAgent,
+                 agent_server: self(),
+                 ingress_context: ingress_context
+               )
+
+      assert_receive {:agent_message, agent_message}
+      assert agent_message.source_trust == :operator
+      assert agent_message.chat_id == "main"
+
+      assert %FermixChannels.Gateway.DraftStream.Spec{mode: :draft} =
+               agent_message.stream_spec
+
+      assert is_function(agent_message.activity_callback, 1)
+      assert is_function(agent_message.turn_result_fn, 1)
+      assert is_function(agent_message.approval_fn, 1)
+
+      assert {:ok, token, :new} =
+               agent_message.approval_fn.(%{
+                 path: "/tmp/mobile-approved-root",
+                 reason: "the mobile request needs it",
+                 diff: "allowed_roots + /tmp/mobile-approved-root"
+               })
+
+      assert {:ok, pending} = Confirmations.take(token)
+      assert pending.ingress_context == ingress_context
+      refute Map.has_key?(agent_message.metadata, :ingress_context)
+    end
+
+    test "proof for another transport cannot authorize mobile" do
+      message =
+        message("hello", channel: "mobile", chat_id: "main", reply_target: "main")
+
+      assert :ok =
+               Gateway.ingest([message],
+                 channel: MobileChannel,
+                 agent: CapturingAgent,
+                 agent_server: self(),
+                 ingress_context: %{
+                   transport: :acp,
+                   authenticated_device_id: "device-1"
+                 }
+               )
+
+      refute_receive {:agent_message, _message}
+    end
+  end
+
   # Every trigger the command surface answers to, discovered from
   # `Commands.Registry.list/0` (the module list `Commands.dispatch/3` looks up
   # through) — name plus each alias.
@@ -281,6 +394,33 @@ defmodule FermixChannels.Gateway.PolicyTest do
         :error -> Application.delete_env(:fermix_channels, :telegram)
       end
     end)
+  end
+
+  defp put_mobile(config) do
+    previous = Application.fetch_env(:fermix_channels, :mobile)
+    Application.put_env(:fermix_channels, :mobile, config)
+
+    on_exit(fn ->
+      case previous do
+        {:ok, value} -> Application.put_env(:fermix_channels, :mobile, value)
+        :error -> Application.delete_env(:fermix_channels, :mobile)
+      end
+    end)
+  end
+
+  defp register_mobile do
+    entry = %{
+      name: "mobile",
+      config_key: :mobile,
+      adapter: MobileChannel,
+      remote?: true,
+      transport: :listener,
+      child: nil,
+      ingress_auth: :paired_device
+    }
+
+    Application.put_env(:fermix_channels, :channel_registry, [entry])
+    on_exit(fn -> Application.delete_env(:fermix_channels, :channel_registry) end)
   end
 
   defp ingest(content, channel) do

@@ -66,16 +66,81 @@ defmodule Fermix.CLI.DaemonTest do
     end
   end
 
+  defmodule TestMobileProvider do
+    def begin_pairing do
+      call(:begin_pairing, [])
+    end
+
+    def await_pairing(session_id, timeout_ms) do
+      call(:await_pairing, [session_id, timeout_ms])
+    end
+
+    def decide_pairing(session_id, approved?) do
+      call(:decide_pairing, [session_id, approved?])
+    end
+
+    def cancel_pairing(session_id), do: call(:cancel_pairing, [session_id])
+
+    def list_devices, do: call(:list_devices, [])
+    def revoke_device(device_id), do: call(:revoke_device, [device_id])
+    def status, do: call(:status, [])
+
+    defp call(operation, args) do
+      test_pid = Application.fetch_env!(:fermix_core, :daemon_test_pid)
+      send(test_pid, {:mobile_provider_call, operation, args})
+
+      result =
+        :fermix_core
+        |> Application.fetch_env!(:daemon_mobile_results)
+        |> Map.fetch!(operation)
+
+      if is_function(result, 1), do: result.(args), else: result
+    end
+  end
+
   setup do
     previous_bridge = Application.get_env(:fermix_core, :cli_channel_bridge)
     previous_pid = Application.get_env(:fermix_core, :daemon_test_pid)
     previous_result = Application.get_env(:fermix_core, :daemon_bridge_result)
+    previous_mobile_results = Application.get_env(:fermix_core, :daemon_mobile_results)
+    previous_mobile_provider = Application.get_env(:fermix_core, :mobile_management_provider)
     {:ok, _sup} = Task.Supervisor.start_link(name: __MODULE__.TaskSup)
     socket_dir = mkdir!()
     socket_path = Path.join(socket_dir, "fermix.sock")
     Application.put_env(:fermix_core, :cli_channel_bridge, TestCLIBridge)
     Application.put_env(:fermix_core, :daemon_test_pid, self())
     Application.put_env(:fermix_core, :daemon_bridge_result, :ok)
+    Application.delete_env(:fermix_core, :mobile_management_provider)
+
+    Application.put_env(:fermix_core, :daemon_mobile_results, %{
+      begin_pairing:
+        {:ok,
+         %{
+           session_id: "pair-session-1",
+           uri: "fermix://pair?v=1",
+           qr: "QR",
+           expires_in_s: 120
+         }},
+      await_pairing:
+        {:ok,
+         %{
+           device_id: "3f4a1a55-69a0-4f8a-9132-17d6ac728f84",
+           name: "Sujeeth",
+           model: "iPhone 16 Pro",
+           sas: "047291"
+         }},
+      decide_pairing:
+        {:ok,
+         %{
+           approved: true,
+           device_id: "3f4a1a55-69a0-4f8a-9132-17d6ac728f84",
+           name: "Sujeeth"
+         }},
+      cancel_pairing: {:ok, %{cancelled: true}},
+      list_devices: {:ok, %{devices: []}},
+      revoke_device: {:ok, %{device_id: "3f4a1a55-69a0-4f8a-9132-17d6ac728f84"}},
+      status: {:ok, %{enabled: true, listener: :ready, paired_devices: 1}}
+    })
 
     {:ok, daemon} =
       Daemon.start_link(
@@ -84,11 +149,15 @@ defmodule Fermix.CLI.DaemonTest do
         task_supervisor: __MODULE__.TaskSup
       )
 
+    Application.put_env(:fermix_core, :mobile_management_provider, TestMobileProvider)
+
     on_exit(fn ->
       if Process.alive?(daemon), do: GenServer.stop(daemon, :normal, 1_000)
       restore_app_env(:cli_channel_bridge, previous_bridge)
       restore_app_env(:daemon_test_pid, previous_pid)
       restore_app_env(:daemon_bridge_result, previous_result)
+      restore_app_env(:daemon_mobile_results, previous_mobile_results)
+      restore_app_env(:mobile_management_provider, previous_mobile_provider)
       FermixTestSupport.SafeRm.rm_rf(socket_dir)
     end)
 
@@ -113,6 +182,172 @@ defmodule Fermix.CLI.DaemonTest do
     assert reply["status"] == "error"
     assert reply["reason"] == "unknown method"
     assert reply["method"] == "does-not-exist"
+  end
+
+  test "mobile pairing RPCs share one leased control connection", %{
+    socket_path: socket_path
+  } do
+    result =
+      Client.with_connection(
+        fn request ->
+          assert {:ok, begin_reply} = request.("mobile_pair_begin", %{}, 1_000)
+          assert begin_reply["result"]["session_id"] == "pair-session-1"
+
+          assert {:ok, wait_reply} =
+                   request.("mobile_pair_wait", %{"session_id" => "pair-session-1"}, 1_000)
+
+          assert wait_reply["result"]["sas"] == "047291"
+
+          assert {:ok, decide_reply} =
+                   request.(
+                     "mobile_pair_decide",
+                     %{"session_id" => "pair-session-1", "approved" => true},
+                     1_000
+                   )
+
+          assert decide_reply["result"]["approved"] == true
+          :paired
+        end,
+        socket_path: socket_path,
+        timeout: 1_000
+      )
+
+    assert result == :paired
+    assert_received {:mobile_provider_call, :begin_pairing, []}
+
+    assert_received {:mobile_provider_call, :await_pairing, ["pair-session-1", wait_timeout_ms]}
+    assert wait_timeout_ms == 120_000
+    assert_received {:mobile_provider_call, :decide_pairing, ["pair-session-1", true]}
+    refute_received {:mobile_provider_call, :cancel_pairing, _args}
+  end
+
+  test "a dead pair CLI cancels its exact window while wait is still blocked", %{
+    socket_path: socket_path
+  } do
+    test_pid = self()
+
+    await = fn ["pair-session-1", 120_000] ->
+      send(test_pid, :pair_wait_started)
+      receive do: (:never -> {:error, :unexpected})
+    end
+
+    results = Application.fetch_env!(:fermix_core, :daemon_mobile_results)
+
+    Application.put_env(
+      :fermix_core,
+      :daemon_mobile_results,
+      Map.put(results, :await_pairing, await)
+    )
+
+    cli =
+      spawn(fn ->
+        Client.with_connection(
+          fn request ->
+            {:ok, _window} = request.("mobile_pair_begin", %{}, 1_000)
+
+            request.("mobile_pair_wait", %{"session_id" => "pair-session-1"}, 125_000)
+          end,
+          socket_path: socket_path,
+          timeout: 1_000
+        )
+      end)
+
+    assert_receive :pair_wait_started, 1_000
+    Process.exit(cli, :kill)
+
+    assert_receive {:mobile_provider_call, :cancel_pairing, ["pair-session-1"]}, 1_000
+  end
+
+  test "normal explicit pairing cancellation stays terminal and is not repeated", %{
+    socket_path: socket_path
+  } do
+    result =
+      Client.with_connection(
+        fn request ->
+          assert {:ok, _window} = request.("mobile_pair_begin", %{}, 1_000)
+
+          request.("mobile_pair_cancel", %{"session_id" => "pair-session-1"}, 1_000)
+        end,
+        socket_path: socket_path,
+        timeout: 1_000
+      )
+
+    assert {:ok, cancel_reply} = result
+    assert cancel_reply["result"]["cancelled"] == true
+    assert_received {:mobile_provider_call, :cancel_pairing, ["pair-session-1"]}
+    refute_receive {:mobile_provider_call, :cancel_pairing, ["pair-session-1"]}, 100
+  end
+
+  test "mobile device management and status RPCs return JSON-safe results", %{
+    socket_path: socket_path
+  } do
+    for {method, operation, result_key} <- [
+          {"mobile_devices_list", :list_devices, "devices"},
+          {"mobile_status", :status, "listener"}
+        ] do
+      assert {:ok, reply} =
+               Client.request(method, socket_path: socket_path, timeout: 1_000)
+
+      assert reply["status"] == "ok"
+      assert Map.has_key?(reply["result"], result_key)
+      assert_received {:mobile_provider_call, ^operation, []}
+    end
+
+    device_id = "3f4a1a55-69a0-4f8a-9132-17d6ac728f84"
+
+    assert {:ok, reply} =
+             Client.request("mobile_device_revoke",
+               socket_path: socket_path,
+               timeout: 1_000,
+               params: %{"device_id" => device_id}
+             )
+
+    assert reply["result"]["device_id"] == device_id
+    assert_received {:mobile_provider_call, :revoke_device, [^device_id]}
+  end
+
+  test "mobile RPC validates parameters before invoking the provider", %{socket_path: socket_path} do
+    assert {:ok, wait_reply} =
+             Client.request("mobile_pair_wait",
+               socket_path: socket_path,
+               timeout: 1_000,
+               params: %{"session_id" => "../../bad"}
+             )
+
+    assert wait_reply == %{"status" => "error", "reason" => "invalid session_id"}
+    refute_received {:mobile_provider_call, :await_pairing, _args}
+
+    assert {:ok, revoke_reply} =
+             Client.request("mobile_device_revoke",
+               socket_path: socket_path,
+               timeout: 1_000,
+               params: %{"device_id" => "not-a-uuid"}
+             )
+
+    assert revoke_reply == %{"status" => "error", "reason" => "invalid device_id"}
+    refute_received {:mobile_provider_call, :revoke_device, _args}
+  end
+
+  test "mobile provider failures remain structured and do not crash the daemon", %{
+    socket_path: socket_path
+  } do
+    Application.put_env(
+      :fermix_core,
+      :daemon_mobile_results,
+      Map.put(
+        Application.fetch_env!(:fermix_core, :daemon_mobile_results),
+        :begin_pairing,
+        {:error, :pairing_already_active}
+      )
+    )
+
+    assert {:ok, reply} =
+             Client.request("mobile_pair_begin", socket_path: socket_path, timeout: 1_000)
+
+    assert reply == %{"status" => "error", "reason" => "pairing_already_active"}
+
+    assert {:ok, %{"status" => "ok"}} =
+             Client.status(socket_path: socket_path, timeout: 1_000)
   end
 
   test "no daemon listening returns :not_running" do

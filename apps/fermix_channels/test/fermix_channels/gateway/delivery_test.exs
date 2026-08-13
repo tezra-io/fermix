@@ -48,6 +48,16 @@ defmodule FermixChannels.Gateway.DeliveryTest do
     def build_media_reply(_message), do: fn _media -> :ok end
   end
 
+  defmodule RichApprovalChannel do
+    def build_text_reply(_message), do: fn _text -> :ok end
+    def build_media_reply(_message), do: fn _media -> :ok end
+
+    def send_approval(%Message{id: id}, spec) do
+      send(self(), {:rich_approval_sent, id, spec})
+      :ok
+    end
+  end
+
   defp message do
     Message.new!(%{
       id: "42",
@@ -114,6 +124,14 @@ defmodule FermixChannels.Gateway.DeliveryTest do
       deliver = Delivery.build_deliver(ReplyContext.new(TextOnlyChannel, message()))
 
       refute match?({:error, {:invalid_reply_part, _}}, deliver.({:approval_prompt, "x", "TOK"}))
+    end
+
+    test "routes a structured approval without inferring its kind from text" do
+      deliver = Delivery.build_deliver(ReplyContext.new(RichApprovalChannel, message()))
+      spec = %{kind: :soul, text: "Apply persona update?", token: "SOUL", ttl_s: 300}
+
+      assert :ok = deliver.({:approval_prompt, spec})
+      assert_received {:rich_approval_sent, "42", ^spec}
     end
   end
 end

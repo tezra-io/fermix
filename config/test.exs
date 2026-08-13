@@ -100,6 +100,19 @@ config :fermix_channels,
     enabled: false,
     bot_token: "test-token"
   ],
+  # Never bind a mobile listener or advertise mDNS from the suite. Tests that
+  # exercise mobile start isolated instances on ephemeral ports.
+  mobile: [
+    enabled: false,
+    mode: :listener,
+    port: 4_031,
+    bind: "127.0.0.1",
+    advertise_mdns: false,
+    streaming: "draft",
+    max_media_bytes: 20_971_520,
+    media_store_max_bytes: 2_147_483_648,
+    push: [enabled: false]
+  ],
   # Hermetic default, same reason telegram is off above: the acp surface ships
   # enabled, and a ready test tree would bind a real `<FERMIX_HOME>/acp.sock` —
   # colliding with the operator's own daemon whenever FERMIX_HOME is unset.

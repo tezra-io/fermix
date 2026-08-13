@@ -17,9 +17,17 @@ defmodule FermixCore.Jobs.DeliveryTest do
           "queuing for connections."
     }
 
-    def send_message(_destination, _text, _opts) do
+    def send_message(_destination, _text, opts) do
+      notify_attempt(opts)
       n = Agent.get_and_update(:delivery_test_counter, fn c -> {c + 1, c + 1} end)
       if n < 3, do: {:error, @pool_timeout}, else: :ok
+    end
+
+    defp notify_attempt(opts) do
+      case Keyword.get(opts, :test_pid) do
+        pid when is_pid(pid) -> send(pid, {:delivery_attempt, opts})
+        _not_configured -> :ok
+      end
     end
   end
 
@@ -79,6 +87,24 @@ defmodule FermixCore.Jobs.DeliveryTest do
              Delivery.deliver(@job, "hi", adapter: FlakyAdapter, delivery_backoff_ms: 0)
 
     assert Agent.get(@counter, & &1) == 3
+  end
+
+  test "keeps the scheduled run proactive key stable across send retries" do
+    key = "job:run-123"
+
+    assert {:ok, "sent"} =
+             Delivery.deliver(@job, "hi",
+               adapter: FlakyAdapter,
+               delivery_backoff_ms: 0,
+               delivery_opts: [test_pid: self(), proactive_key: key]
+             )
+
+    assert_receive {:delivery_attempt, first_opts}
+    assert_receive {:delivery_attempt, second_opts}
+    assert_receive {:delivery_attempt, third_opts}
+
+    assert Enum.map([first_opts, second_opts, third_opts], &Keyword.fetch!(&1, :proactive_key)) ==
+             [key, key, key]
   end
 
   test "does not retry a non-transient delivery error (fails fast)" do

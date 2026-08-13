@@ -8,6 +8,7 @@ defmodule FermixCore.Memory.Repo do
   alias Exqlite.Sqlite3
   alias FermixCore.Agents.IterationLimits
   alias FermixCore.Memory.Config
+  alias FermixCore.Memory.Repo.MobileSql
   alias FermixCore.Memory.Repo.TemporalSql
   alias FermixCore.Memory.Scope
 
@@ -30,6 +31,9 @@ defmodule FermixCore.Memory.Repo do
   @temporal_events_migration_version 17
   @reminder_snooze_migration_version 18
   @event_followup_migration_version 19
+  @mobile_store_migration_version 20
+  @mobile_client_message_migration_version 21
+  @mobile_attempt_fence_migration_version 22
   @sqlite_open_intent :readwritecreate
 
   @base_schema_sql """
@@ -621,6 +625,76 @@ defmodule FermixCore.Memory.Repo do
           optional(:kind) => String.t()
         }
 
+  @type mobile_profile_selector :: %{
+          required(:agent_id) => String.t(),
+          required(:owner_id) => String.t(),
+          required(:profile_id) => String.t()
+        }
+
+  @type mobile_owner_selector :: %{
+          required(:agent_id) => String.t(),
+          required(:owner_id) => String.t()
+        }
+
+  @type mobile_timeline_attrs :: %{
+          required(:agent_id) => String.t(),
+          required(:owner_id) => String.t(),
+          required(:profile_id) => String.t(),
+          required(:role) => String.t(),
+          required(:content) => String.t(),
+          optional(:kind) => String.t(),
+          optional(:client_msg_id) => String.t() | nil,
+          optional(:in_reply_to) => String.t() | nil,
+          optional(:media_refs) => [map()],
+          optional(:metadata) => map() | nil,
+          optional(:proactive_key) => String.t() | nil,
+          optional(:created_at) => DateTime.t()
+        }
+
+  @type mobile_timeline_row :: %{
+          agent_id: String.t(),
+          owner_id: String.t(),
+          profile_id: String.t(),
+          server_seq: pos_integer(),
+          kind: String.t(),
+          role: String.t(),
+          content: String.t(),
+          client_msg_id: String.t() | nil,
+          in_reply_to: String.t() | nil,
+          media_refs: [map()],
+          metadata: map() | nil,
+          proactive_key: String.t() | nil,
+          request_client_msg_id: String.t() | nil,
+          request_attempt: non_neg_integer() | nil,
+          output_key: String.t() | nil,
+          created_at: DateTime.t()
+        }
+
+  @type mobile_media_descriptor :: %{
+          server_seq: pos_integer(),
+          media: map()
+        }
+
+  @type mobile_client_request_row :: %{
+          agent_id: String.t(),
+          owner_id: String.t(),
+          profile_id: String.t(),
+          client_msg_id: String.t(),
+          request_type: String.t(),
+          status: String.t(),
+          payload_digest: String.t(),
+          payload: term(),
+          turn_id: String.t() | nil,
+          result_server_seq: pos_integer() | nil,
+          error: term() | nil,
+          authenticated_device_id: String.t() | nil,
+          runner_epoch: String.t() | nil,
+          attempt: non_neg_integer(),
+          claimed_at: DateTime.t(),
+          expires_at: DateTime.t(),
+          updated_at: DateTime.t()
+        }
+
   @type memory_attrs :: %{
           required(:agent_id) => String.t(),
           required(:owner_id) => String.t(),
@@ -1024,6 +1098,233 @@ defmodule FermixCore.Memory.Repo do
   @spec delete_messages(message_selector(), keyword()) :: :ok | {:error, term()}
   def delete_messages(selector, opts \\ []) when is_map(selector) do
     call({:delete_messages, selector}, opts)
+  end
+
+  @spec append_mobile_timeline(mobile_timeline_attrs(), keyword()) ::
+          {:ok, mobile_timeline_row()} | {:error, term()}
+  def append_mobile_timeline(attrs, opts \\ []) when is_map(attrs) do
+    call({:append_mobile_timeline, attrs}, opts)
+  end
+
+  @spec append_mobile_client_message(mobile_timeline_attrs(), keyword()) ::
+          {:ok, {:created | :existing, mobile_timeline_row()}} | {:error, term()}
+  def append_mobile_client_message(attrs, opts \\ []) when is_map(attrs) do
+    call({:append_mobile_client_message, attrs}, opts)
+  end
+
+  @spec append_mobile_proactive(mobile_timeline_attrs(), keyword()) ::
+          {:ok, {:created | :existing, mobile_timeline_row()}} | {:error, term()}
+  def append_mobile_proactive(attrs, opts \\ []) when is_map(attrs) do
+    call({:append_mobile_proactive, attrs}, opts)
+  end
+
+  @spec get_mobile_history(
+          mobile_profile_selector(),
+          non_neg_integer(),
+          1..200,
+          keyword()
+        ) :: {:ok, map()} | {:error, term()}
+  def get_mobile_history(selector, after_seq, limit, opts \\ [])
+      when is_map(selector) and is_integer(after_seq) and after_seq >= 0 and
+             is_integer(limit) and limit > 0 and limit <= 200 do
+    call({:get_mobile_history, selector, after_seq, limit}, opts)
+  end
+
+  @spec mobile_history_head(mobile_profile_selector(), keyword()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def mobile_history_head(selector, opts \\ []) when is_map(selector) do
+    call({:mobile_history_head, selector}, opts)
+  end
+
+  @spec get_mobile_media_descriptor(mobile_profile_selector(), String.t(), keyword()) ::
+          {:ok, mobile_media_descriptor()}
+          | {:error, :not_found | {:malformed_media_descriptor, term()} | term()}
+  def get_mobile_media_descriptor(selector, ref, opts \\ [])
+      when is_map(selector) and is_binary(ref) do
+    call({:get_mobile_media_descriptor, selector, ref}, opts)
+  end
+
+  @spec attach_mobile_timeline_media(
+          mobile_profile_selector(),
+          pos_integer(),
+          map(),
+          keyword()
+        ) :: {:ok, mobile_timeline_row()} | {:error, term()}
+  def attach_mobile_timeline_media(selector, server_seq, media_ref, opts \\ [])
+      when is_map(selector) and is_integer(server_seq) and server_seq > 0 and is_map(media_ref) do
+    call({:attach_mobile_timeline_media, selector, server_seq, media_ref}, opts)
+  end
+
+  @spec advance_mobile_read_frontier(
+          mobile_profile_selector(),
+          non_neg_integer(),
+          DateTime.t(),
+          keyword()
+        ) :: {:ok, non_neg_integer()} | {:error, term()}
+  def advance_mobile_read_frontier(selector, reported_seq, %DateTime{} = now, opts \\ [])
+      when is_map(selector) and is_integer(reported_seq) and reported_seq >= 0 do
+    call({:advance_mobile_read_frontier, selector, reported_seq, now}, opts)
+  end
+
+  @spec get_mobile_read_frontier(mobile_profile_selector(), keyword()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def get_mobile_read_frontier(selector, opts \\ []) when is_map(selector) do
+    call({:get_mobile_read_frontier, selector}, opts)
+  end
+
+  @spec claim_mobile_client_request(mobile_profile_selector(), map(), keyword()) ::
+          {:ok, {:claimed | :duplicate | :conflict, mobile_client_request_row()}}
+          | {:error, term()}
+  def claim_mobile_client_request(selector, attrs, opts \\ [])
+      when is_map(selector) and is_map(attrs) do
+    call({:claim_mobile_client_request, selector, attrs}, opts)
+  end
+
+  @spec get_mobile_client_request(mobile_profile_selector(), String.t(), keyword()) ::
+          {:ok, mobile_client_request_row()} | {:error, :not_found | term()}
+  def get_mobile_client_request(selector, client_msg_id, opts \\ [])
+      when is_map(selector) and is_binary(client_msg_id) do
+    call({:get_mobile_client_request, selector, client_msg_id}, opts)
+  end
+
+  @spec start_mobile_client_request(
+          mobile_profile_selector(),
+          String.t(),
+          String.t(),
+          DateTime.t(),
+          keyword()
+        ) ::
+          {:ok, {:started | :active | :completed | :failed, mobile_client_request_row()}}
+          | {:error, term()}
+  def start_mobile_client_request(
+        selector,
+        client_msg_id,
+        runner_epoch,
+        %DateTime{} = now,
+        opts \\ []
+      )
+      when is_map(selector) and is_binary(client_msg_id) and is_binary(runner_epoch) do
+    call({:start_mobile_client_request, selector, client_msg_id, runner_epoch, now}, opts)
+  end
+
+  @spec get_recoverable_mobile_client_requests(
+          mobile_owner_selector(),
+          String.t(),
+          1..200,
+          DateTime.t(),
+          keyword()
+        ) :: {:ok, [mobile_client_request_row()]} | {:error, term()}
+  def get_recoverable_mobile_client_requests(
+        selector,
+        runner_epoch,
+        limit,
+        %DateTime{} = now,
+        opts \\ []
+      )
+      when is_map(selector) and is_binary(runner_epoch) and is_integer(limit) and limit > 0 and
+             limit <= 200 do
+    call({:get_recoverable_mobile_client_requests, selector, runner_epoch, limit, now}, opts)
+  end
+
+  @spec settle_mobile_client_request(
+          mobile_profile_selector(),
+          String.t(),
+          String.t(),
+          map(),
+          DateTime.t(),
+          keyword()
+        ) :: {:ok, mobile_client_request_row()} | {:error, term()}
+  def settle_mobile_client_request(
+        selector,
+        client_msg_id,
+        status,
+        fields,
+        %DateTime{} = now,
+        opts \\ []
+      )
+      when is_map(selector) and is_binary(client_msg_id) and is_binary(status) and is_map(fields) do
+    call({:settle_mobile_client_request, selector, client_msg_id, status, fields, now}, opts)
+  end
+
+  @spec append_mobile_client_output(
+          mobile_profile_selector(),
+          String.t(),
+          non_neg_integer(),
+          String.t(),
+          map(),
+          DateTime.t(),
+          keyword()
+        ) :: {:ok, {:created | :existing, mobile_timeline_row()}} | {:error, term()}
+  def append_mobile_client_output(
+        selector,
+        client_msg_id,
+        attempt,
+        output_key,
+        attrs,
+        %DateTime{} = now,
+        opts \\ []
+      )
+      when is_map(selector) and is_binary(client_msg_id) and is_integer(attempt) and attempt >= 0 and
+             is_binary(output_key) and is_map(attrs) do
+    call(
+      {:append_mobile_client_output, selector, client_msg_id, attempt, output_key, attrs, now},
+      opts
+    )
+  end
+
+  @spec complete_mobile_client_request(
+          mobile_profile_selector(),
+          String.t(),
+          non_neg_integer(),
+          map(),
+          DateTime.t(),
+          keyword()
+        ) :: {:ok, mobile_client_request_row()} | {:error, term()}
+  def complete_mobile_client_request(
+        selector,
+        client_msg_id,
+        attempt,
+        fields,
+        %DateTime{} = now,
+        opts \\ []
+      )
+      when is_map(selector) and is_binary(client_msg_id) and is_integer(attempt) and attempt >= 0 and
+             is_map(fields) do
+    call({:complete_mobile_client_request, selector, client_msg_id, attempt, fields, now}, opts)
+  end
+
+  @spec append_mobile_client_response(
+          mobile_profile_selector(),
+          String.t(),
+          non_neg_integer(),
+          map(),
+          DateTime.t(),
+          keyword()
+        ) :: {:ok, {:created | :existing, mobile_timeline_row()}} | {:error, term()}
+  def append_mobile_client_response(
+        selector,
+        client_msg_id,
+        attempt,
+        attrs,
+        %DateTime{} = now,
+        opts \\ []
+      )
+      when is_map(selector) and is_binary(client_msg_id) and is_integer(attempt) and attempt >= 0 and
+             is_map(attrs) do
+    call({:append_mobile_client_response, selector, client_msg_id, attempt, attrs, now}, opts)
+  end
+
+  @spec update_mobile_client_message(
+          mobile_profile_selector(),
+          String.t(),
+          non_neg_integer(),
+          map(),
+          keyword()
+        ) :: {:ok, mobile_timeline_row()} | {:error, term()}
+  def update_mobile_client_message(selector, client_msg_id, attempt, attrs, opts \\ [])
+      when is_map(selector) and is_binary(client_msg_id) and is_integer(attempt) and attempt >= 0 and
+             is_map(attrs) do
+    call({:update_mobile_client_message, selector, client_msg_id, attempt, attrs}, opts)
   end
 
   @spec upsert_memory(memory_attrs(), keyword()) :: {:ok, memory_row()} | {:error, term()}
@@ -2126,6 +2427,168 @@ defmodule FermixCore.Memory.Repo do
     {:reply, reply, state}
   end
 
+  def handle_call({:append_mobile_timeline, attrs}, _from, state) do
+    reply = with_connection(state, &MobileSql.append(&1, attrs))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:append_mobile_client_message, attrs}, _from, state) do
+    reply = with_connection(state, &MobileSql.append_client_message(&1, attrs))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:append_mobile_proactive, attrs}, _from, state) do
+    reply = with_connection(state, &MobileSql.append_proactive(&1, attrs))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:get_mobile_history, selector, after_seq, limit}, _from, state) do
+    reply = with_connection(state, &MobileSql.history(&1, selector, after_seq, limit))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:mobile_history_head, selector}, _from, state) do
+    reply = with_connection(state, &MobileSql.history_head(&1, selector))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:get_mobile_media_descriptor, selector, ref}, _from, state) do
+    reply = with_connection(state, &MobileSql.media_descriptor(&1, selector, ref))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:attach_mobile_timeline_media, selector, server_seq, media_ref}, _from, state) do
+    reply =
+      with_connection(
+        state,
+        &MobileSql.attach_timeline_media(&1, selector, server_seq, media_ref)
+      )
+
+    {:reply, reply, state}
+  end
+
+  def handle_call({:advance_mobile_read_frontier, selector, reported_seq, now}, _from, state) do
+    reply =
+      with_connection(state, &MobileSql.advance_read_frontier(&1, selector, reported_seq, now))
+
+    {:reply, reply, state}
+  end
+
+  def handle_call({:get_mobile_read_frontier, selector}, _from, state) do
+    reply = with_connection(state, &MobileSql.read_frontier(&1, selector))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:claim_mobile_client_request, selector, attrs}, _from, state) do
+    reply = with_connection(state, &MobileSql.claim_request(&1, selector, attrs))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:get_mobile_client_request, selector, client_msg_id}, _from, state) do
+    reply = with_connection(state, &MobileSql.get_request(&1, selector, client_msg_id))
+    {:reply, reply, state}
+  end
+
+  def handle_call(
+        {:start_mobile_client_request, selector, client_msg_id, epoch, now},
+        _from,
+        state
+      ) do
+    reply =
+      with_connection(state, fn conn ->
+        MobileSql.start_request(conn, selector, client_msg_id, epoch, now)
+      end)
+
+    {:reply, reply, state}
+  end
+
+  def handle_call(
+        {:get_recoverable_mobile_client_requests, selector, epoch, limit, now},
+        _from,
+        state
+      ) do
+    reply =
+      with_connection(state, &MobileSql.recoverable_requests(&1, selector, epoch, limit, now))
+
+    {:reply, reply, state}
+  end
+
+  def handle_call(
+        {:settle_mobile_client_request, selector, client_msg_id, status, fields, now},
+        _from,
+        state
+      ) do
+    reply =
+      with_connection(state, fn conn ->
+        MobileSql.settle_request(conn, selector, client_msg_id, status, fields, now)
+      end)
+
+    {:reply, reply, state}
+  end
+
+  def handle_call(
+        {:append_mobile_client_output, selector, client_msg_id, attempt, output_key, attrs, now},
+        _from,
+        state
+      ) do
+    reply =
+      with_connection(state, fn conn ->
+        MobileSql.append_client_output(
+          conn,
+          selector,
+          client_msg_id,
+          attempt,
+          output_key,
+          attrs,
+          now
+        )
+      end)
+
+    {:reply, reply, state}
+  end
+
+  def handle_call(
+        {:complete_mobile_client_request, selector, client_msg_id, attempt, fields, now},
+        _from,
+        state
+      ) do
+    reply =
+      with_connection(
+        state,
+        &MobileSql.complete_request(&1, selector, client_msg_id, attempt, fields, now)
+      )
+
+    {:reply, reply, state}
+  end
+
+  def handle_call(
+        {:append_mobile_client_response, selector, client_msg_id, attempt, attrs, now},
+        _from,
+        state
+      ) do
+    reply =
+      with_connection(
+        state,
+        &MobileSql.append_client_response(&1, selector, client_msg_id, attempt, attrs, now)
+      )
+
+    {:reply, reply, state}
+  end
+
+  def handle_call(
+        {:update_mobile_client_message, selector, client_msg_id, attempt, attrs},
+        _from,
+        state
+      ) do
+    reply =
+      with_connection(
+        state,
+        &MobileSql.update_client_message(&1, selector, client_msg_id, attempt, attrs)
+      )
+
+    {:reply, reply, state}
+  end
+
   def handle_call({:upsert_memory, attrs}, _from, state) do
     reply = with_connection(state, &upsert_memory_row(&1, attrs))
     {:reply, reply, state}
@@ -2551,7 +3014,10 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_skill_curation_migration(conn, versions),
          :ok <- apply_temporal_events_migration(conn, versions),
          :ok <- apply_reminder_snooze_migration(conn, versions),
-         :ok <- apply_event_followup_migration(conn, versions) do
+         :ok <- apply_event_followup_migration(conn, versions),
+         :ok <- apply_mobile_store_migration(conn, versions),
+         :ok <- apply_mobile_client_message_migration(conn, versions),
+         :ok <- apply_mobile_attempt_fence_migration(conn, versions) do
       :ok
     end
   end
@@ -2897,6 +3363,54 @@ defmodule FermixCore.Memory.Repo do
         BEGIN;
         #{TemporalSql.followup_schema_sql()}
         INSERT INTO schema_migrations(version) VALUES (#{@event_followup_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  defp apply_mobile_store_migration(conn, versions) do
+    if Enum.member?(versions, @mobile_store_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{MobileSql.schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@mobile_store_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  defp apply_mobile_client_message_migration(conn, versions) do
+    if Enum.member?(versions, @mobile_client_message_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{MobileSql.client_message_schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@mobile_client_message_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  defp apply_mobile_attempt_fence_migration(conn, versions) do
+    if Enum.member?(versions, @mobile_attempt_fence_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{MobileSql.attempt_fence_schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@mobile_attempt_fence_migration_version});
         COMMIT;
         """
       )

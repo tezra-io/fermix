@@ -36,7 +36,9 @@ defmodule FermixChannels.Gateway do
     transcription_opts = Keyword.get(opts, :transcription, [])
     reply_fn_override = Keyword.get(opts, :reply_fn)
     conversation_store = Keyword.get(opts, :conversation_store, ConversationStore)
+    ingress_context = Keyword.get(opts, :ingress_context)
     command_context_opts = command_context_opts(opts)
+    ingest_enriched_fn = Keyword.get(opts, :ingest_enriched_fn)
 
     Enum.reduce_while(messages, :ok, fn message, :ok ->
       case dispatch_message(
@@ -47,7 +49,9 @@ defmodule FermixChannels.Gateway do
              transcription_opts,
              reply_fn_override,
              conversation_store,
-             command_context_opts
+             ingress_context,
+             command_context_opts,
+             ingest_enriched_fn
            ) do
         :ok ->
           {:cont, :ok}
@@ -175,6 +179,11 @@ defmodule FermixChannels.Gateway do
     end
   end
 
+  defp terminal_error_owner?(channel) do
+    function_exported?(channel, :terminal_error_capability, 0) and
+      channel.terminal_error_capability() == :turn_result
+  end
+
   # A configured channel streams by default, in the best shape it can render
   # (design §6, decision §9.5): a draft-capable channel gets rotating draft
   # bubbles, every other channel gets block sends (a no-op for non-streaming
@@ -241,7 +250,9 @@ defmodule FermixChannels.Gateway do
          transcription_opts,
          reply_fn_override,
          conversation_store,
-         command_context_opts
+         ingress_context,
+         command_context_opts,
+         ingest_enriched_fn
        ) do
     {normalize_result, normalize_duration_us} =
       Telemetry.timed_us(fn -> normalize_message(message) end)
@@ -249,7 +260,7 @@ defmodule FermixChannels.Gateway do
     emit_normalize_telemetry(message, normalize_result, normalize_duration_us)
 
     with {:ok, reply_message} <- normalize_result,
-         {:ok, authorization} <- authorize(reply_message) do
+         {:ok, authorization} <- authorize(reply_message, ingress_context) do
       reply_fn =
         Delivery.build_deliver(ReplyContext.new(channel, reply_message), reply_fn_override)
 
@@ -258,7 +269,9 @@ defmodule FermixChannels.Gateway do
         agent_server: agent_server,
         transcription_opts: transcription_opts,
         conversation_store: conversation_store,
-        command_context_opts: command_context_opts
+        ingress_context: ingress_context,
+        command_context_opts: command_context_opts,
+        ingest_enriched_fn: ingest_enriched_fn
       }
 
       ingest_authorized(channel, reply_message, authorization, reply_fn, deps)
@@ -299,7 +312,19 @@ defmodule FermixChannels.Gateway do
            deps.transcription_opts
          ) do
       {:ok, reply_message} ->
-        attach_images_and_deliver(channel, reply_message, authorization, reply_fn, deps)
+        with {:ok, reply_message} <-
+               MediaIngest.maybe_attach_images(channel, reply_message),
+             :ok <- notify_enriched(deps.ingest_enriched_fn, reply_message),
+             :actionable <- ensure_actionable(reply_message, reply_fn) do
+          run_commands_or_deliver(channel, reply_message, authorization, reply_fn, deps)
+        else
+          :replied_empty ->
+            :ok
+
+          {:error, reason} = error ->
+            Logger.error("Dispatcher ingress failed (media): #{inspect(reason)}")
+            error
+        end
 
       {:error, {:transcription_failed, _reason} = wrapped} ->
         reply_ingress_failure(reply_message.channel, reply_fn, wrapped)
@@ -313,28 +338,17 @@ defmodule FermixChannels.Gateway do
     end
   end
 
-  # Image materialization is not part of speech intake, so its download/read
-  # failures stay log-only (pre-D14 behavior) — no sender reply, and the turn is
-  # not scheduled.
-  defp attach_images_and_deliver(channel, reply_message, authorization, reply_fn, deps) do
-    with {:ok, reply_message} <- MediaIngest.maybe_attach_images(channel, reply_message),
-         :actionable <- ensure_actionable(reply_message, reply_fn) do
-      run_commands_or_deliver(channel, reply_message, authorization, reply_fn, deps)
-    else
-      :replied_empty ->
-        :ok
+  defp notify_enriched(nil, _message), do: :ok
 
-      {:error, reason} = error ->
-        Logger.error("Dispatcher ingress failed (media): #{inspect(reason)}")
-        error
-    end
+  defp notify_enriched(callback, message) when is_function(callback, 1) do
+    callback.(message)
   end
 
   # Channels the registry marks `commands?: false` never see the slash-command
   # pipeline: no parse, no dispatch, content reaches the model as ordinary text
   # (M29 §4). Every other channel keeps today's exact path.
   defp run_commands_or_deliver(channel, reply_message, authorization, reply_fn, deps) do
-    closures = build_closures(channel, reply_message, reply_fn)
+    closures = build_closures(channel, reply_message, reply_fn, deps.ingress_context)
 
     if ChannelRegistry.commands?(reply_message.channel) do
       run_commands(reply_message, authorization, reply_fn, closures, deps)
@@ -343,15 +357,17 @@ defmodule FermixChannels.Gateway do
     end
   end
 
-  defp build_closures(channel, %Message{} = message, reply_fn) do
+  defp build_closures(channel, %Message{} = message, reply_fn, ingress_context) do
     %{
       reply_fn: reply_fn,
       typing_fn: build_typing_fn(channel, message),
       stream_spec: build_stream_spec(channel, message, reply_fn),
       reaction_spec: build_reaction_spec(channel),
       approval_button?: function_exported?(channel, :send_approval, 3),
+      approval_ingress_context: ingress_context,
       activity_callback: build_activity_callback(channel, message),
-      turn_result_fn: build_turn_result_fn(channel, message)
+      turn_result_fn: build_turn_result_fn(channel, message),
+      terminal_error_owner?: terminal_error_owner?(channel)
     }
   end
 
@@ -428,12 +444,12 @@ defmodule FermixChannels.Gateway do
 
   defp download_failure_copy(_reason), do: @download_failed_reply
 
-  defp authorize(%Message{} = message) do
+  defp authorize(%Message{} = message, ingress_context) do
     {result, duration_us} =
       Telemetry.timed_us(fn ->
         message
         |> Map.from_struct()
-        |> Source.from_message()
+        |> Source.from_message(ingress_context)
         |> Authorizer.resolve()
       end)
 
@@ -485,14 +501,20 @@ defmodule FermixChannels.Gateway do
     |> to_agent_message()
     |> Map.put(:reply_fn, closures.reply_fn)
     |> Map.put(:source_trust, authorization.trust)
-    |> maybe_put_approval_fn(message, authorization)
+    |> maybe_put_approval_fn(message, authorization, closures.approval_ingress_context)
     |> maybe_put_approval_button(authorization, closures.approval_button?)
     |> maybe_put_typing_fn(closures.typing_fn)
     |> maybe_put_stream_spec(closures.stream_spec)
     |> maybe_put_reaction_spec(closures.reaction_spec)
     |> maybe_put_callback(:activity_callback, closures.activity_callback)
     |> maybe_put_callback(:turn_result_fn, closures.turn_result_fn)
+    |> maybe_put_terminal_error_owner(closures.terminal_error_owner?)
   end
+
+  defp maybe_put_terminal_error_owner(message, true),
+    do: Map.put(message, :terminal_error_owner?, true)
+
+  defp maybe_put_terminal_error_owner(message, false), do: message
 
   defp agent_alive?(pid) when is_pid(pid), do: Process.alive?(pid)
 
@@ -531,6 +553,11 @@ defmodule FermixChannels.Gateway do
     }
     |> maybe_put_context_opt(:route, Keyword.get(opts, :route))
     |> maybe_put_context_opt(:context_window, Keyword.get(opts, :context_window))
+    |> maybe_put_context_opt(:defer_command_fn, Keyword.get(opts, :defer_command_fn))
+    |> maybe_put_context_opt(
+      :approval_resolution_fn,
+      Keyword.get(opts, :approval_resolution_fn)
+    )
   end
 
   defp maybe_put_context_opt(context, _key, nil), do: context
@@ -565,17 +592,21 @@ defmodule FermixChannels.Gateway do
   # `/confirm <token>`, so a channel the registry marks `commands?: false` has no
   # path back and the approval could never be completed (M29 §11). Withholding
   # the closure is what makes `request_directory_access` self-hide there.
-  defp maybe_put_approval_fn(agent_message, %Message{channel: channel} = message, %{
-         trust: :operator
-       }) do
+  defp maybe_put_approval_fn(
+         agent_message,
+         %Message{channel: channel} = message,
+         %{trust: :operator},
+         ingress_context
+       ) do
     if ChannelRegistry.commands?(channel) do
-      Map.put(agent_message, :approval_fn, build_approval_fn(message))
+      Map.put(agent_message, :approval_fn, build_approval_fn(message, ingress_context))
     else
       agent_message
     end
   end
 
-  defp maybe_put_approval_fn(agent_message, _message, _authorization), do: agent_message
+  defp maybe_put_approval_fn(agent_message, _message, _authorization, _ingress_context),
+    do: agent_message
 
   # Whether this channel renders a private one-tap approval button that carries the
   # confirmation token (SANDBOX_ACCESS_APPROVAL_FLOW). Core-facing plain data (like
@@ -591,14 +622,16 @@ defmodule FermixChannels.Gateway do
   defp maybe_put_approval_button(agent_message, _authorization, _approval_button?),
     do: agent_message
 
-  defp build_approval_fn(%Message{} = message) do
-    origin = %{
-      channel: message.channel,
-      chat_id: message.chat_id,
-      thread_ts: message.thread_ts,
-      user_id: approval_user_id(message.metadata),
-      resume: resume_intent(message)
-    }
+  defp build_approval_fn(%Message{} = message, ingress_context) do
+    origin =
+      %{
+        channel: message.channel,
+        chat_id: message.chat_id,
+        thread_ts: message.thread_ts,
+        user_id: approval_user_id(message.metadata),
+        resume: resume_intent(message)
+      }
+      |> maybe_put_context_opt(:ingress_context, ingress_context)
 
     fn request -> Commands.Sandbox.store_pending_grant(request, origin) end
   end

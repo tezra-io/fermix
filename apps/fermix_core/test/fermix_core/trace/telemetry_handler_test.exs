@@ -327,6 +327,50 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
     assert entry["duration_us"] == 1200
   end
 
+  test "channel:pair event creates a bounded channel_pair agent_event trace", %{
+    dir: dir,
+    server: server
+  } do
+    :telemetry.execute(
+      [:fermix, :channel, :pair],
+      %{count: 1, duration_us: 42},
+      %{channel: :mobile, status: :approved}
+    )
+
+    sync(server)
+
+    entries = read_entries(dir, :agent_event)
+    entry = find_entry!(entries, &(&1["event"] == "channel_pair"))
+    assert entry["agent"] == "mobile"
+    assert entry["channel"] == "mobile"
+    assert entry["status"] == "approved"
+    assert entry["count"] == 1
+    assert entry["duration_us"] == 42
+    refute Map.has_key?(entry, "content")
+  end
+
+  test "channel:push event creates a bounded channel_push agent_event trace", %{
+    dir: dir,
+    server: server
+  } do
+    :telemetry.execute(
+      [:fermix, :channel, :push],
+      %{count: 1, duration_us: 73},
+      %{channel: :mobile, status: :failed}
+    )
+
+    sync(server)
+
+    entries = read_entries(dir, :agent_event)
+    entry = find_entry!(entries, &(&1["event"] == "channel_push"))
+    assert entry["agent"] == "mobile"
+    assert entry["channel"] == "mobile"
+    assert entry["status"] == "failed"
+    assert entry["count"] == 1
+    assert entry["duration_us"] == 73
+    refute Map.has_key?(entry, "content")
+  end
+
   test "memory:review event creates a memory_review agent_event trace", %{
     dir: dir,
     server: server
