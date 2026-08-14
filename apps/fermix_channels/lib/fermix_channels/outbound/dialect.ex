@@ -105,6 +105,10 @@ defmodule FermixChannels.Outbound.Dialect do
   @alnum_pattern ~r/^[\p{L}\p{N}]$/u
   @bullet_pattern ~r/^([ \t]*)[-*][ \t]+(.*)$/u
   @fence_pattern ~r/^[ \t]*```([A-Za-z0-9_+.-]*)[ \t]*$/u
+  # Boundary-only, and wider than the pattern above on purpose — see
+  # `fence_line?/1`. A trailing `\r` is info-string content here, so a CRLF
+  # document is still fenced correctly.
+  @fence_line_pattern ~r/^[ \t]*`{3,}[^`]*$/u
   @heading_pattern ~r/^[ ]{0,3}\#{1,6}[ \t]+(.*?)[ \t]*\#*[ \t]*$/u
   @heading_bold_pattern ~r/\*\*([^*\n]+?)\*\*/u
   @quote_pattern ~r/^>[ ]?(.*)$/u
@@ -136,6 +140,25 @@ defmodule FermixChannels.Outbound.Dialect do
     rule = Enum.map_join(widths, "-+-", &String.duplicate("-", &1))
     [header, rule | body]
   end
+
+  @doc """
+  True when `line` opens or closes a fenced code block.
+
+  CommonMark's rule, deliberately: three or more backticks, then an info string
+  containing no backtick, to end of line. That is a WIDER test than
+  `@fence_pattern` above, which additionally demands an info string this module
+  can map to a platform language tag — and the width matters in both
+  directions. Too narrow and a legitimate opener (```` ```c# ````, an info
+  string after a space, an attribute list) goes unrecognised while its closing
+  ```` ``` ```` still matches, so the closer opens a region that runs to
+  end-of-text. Too wide and ```` ```mono``` ```` inline in a sentence — a code
+  *span*, since the info string may not contain a backtick — opens a fence
+  nothing closes. Either way the outbound splitter stops finding cut points and
+  emits the remainder as one chunk the channel then refuses, which is why this
+  question has one answer in one place.
+  """
+  @spec fence_line?(String.t()) :: boolean()
+  def fence_line?(line) when is_binary(line), do: Regex.match?(@fence_line_pattern, line)
 
   defp assert_spec!(spec) do
     case Enum.reject(@required_keys, &Map.has_key?(spec, &1)) do

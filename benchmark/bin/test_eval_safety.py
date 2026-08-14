@@ -1231,6 +1231,45 @@ def test_query_placeholder_resolves_the_harness_repo_for_dev_daemon_reads():
     assert rendered == f"read {expected}"
 
 
+def test_gate_placeholders_pin_a_read_back_to_this_run():
+    # Without this, a suite whose every run leaves a permanent artifact scores
+    # green off a PREVIOUS run's leftovers: the marker matches either way.
+    rendered = run_eval._render_expect(
+        {"tools_any": ["eden_get_note_markdown"],
+         "reply_matches": "round-trip marker __EVAL_RUN_ID__",
+         "max_tool_calls": 10},
+        "20260715T151102Z",
+        1,
+    )
+    assert rendered["reply_matches"] == "round-trip marker 20260715T151102Z"
+    assert rendered["tools_any"] == ["eden_get_note_markdown"]
+    assert rendered["max_tool_calls"] == 10
+
+
+def test_gate_placeholders_escape_only_what_can_carry_metacharacters():
+    # `expect` holds regex gates AND exact-match gates. A repo path can carry a
+    # `+` or `(` that would fail to compile as a pattern, so it is escaped; the
+    # run id and trial are alphanumeric and go in verbatim, which is the only
+    # substitution that is correct in an exact-match gate too.
+    rendered = run_eval._render_expect(
+        {"reply_matches": "quoted __EVAL_REPO_ROOT__ verbatim"}, "20260715T151102Z", 1)
+    expected = re.escape(run_eval.REPO_ROOT.replace(os.sep, "/"))
+    assert rendered["reply_matches"] == f"quoted {expected} verbatim"
+    assert re.compile(rendered["reply_matches"])
+
+    exact = run_eval._render_expect({"status": "__EVAL_RUN_ID__"}, "20260715T151102Z", 1)
+    assert exact["status"] == "20260715T151102Z", "an exact-match gate must not be escaped"
+
+
+def test_generated_run_ids_stay_substitution_safe():
+    # `_render_gate_value` substitutes the run id unescaped because the
+    # generator only ever produces alphanumerics. Pin that to the generator, so
+    # a future id format with a `-` or `.` in it fails here rather than
+    # silently turning an exact-match gate into a pattern that cannot match.
+    for _ in range(20):
+        assert re.fullmatch(r"[A-Za-z0-9]+", run_eval.new_run_id())
+
+
 def test_max_cases_caps_driven_cases_not_skipped_operator_cases(tmp_path):
     suite = _write_suite(tmp_path, "host_readonly")
     suite.scenarios[0].cases[0].drive = "telegram_operator"

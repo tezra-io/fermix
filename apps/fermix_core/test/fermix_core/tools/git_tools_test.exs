@@ -317,6 +317,47 @@ defmodule FermixCore.Tools.GitToolsTest do
       assert result.success == true
       assert result.output =~ "main"
     end
+
+    # `-u` is the one mutating short option that takes a value, so it also comes
+    # in the GLUED spelling — which an exact-match denylist never sees.
+    # It mutates config rather than the ref namespace, so `branch_names/1`
+    # cannot observe it; the upstream is a real local ref so the refusal, not
+    # git's own validation, is what stops the write.
+    test "git_read refuses a glued short mutating flag", %{dir: dir, context: context} do
+      {_output, 0} = System.cmd("git", ["branch", "tracked"], cd: dir)
+
+      assert {:ok, result} =
+               GitRead.execute(
+                 %{"repo" => dir, "command" => "branch", "args" => ["-utracked"]},
+                 context
+               )
+
+      assert result.success == false
+      assert result.error =~ "lists branches only"
+      assert branch_config(dir, "main") == []
+    end
+
+    # The same walk must not over-block: bundled read flags carry no mutating
+    # letter and stay allowed.
+    test "git_read accepts a bundled read-only cluster", %{dir: dir, context: context} do
+      assert {:ok, result} =
+               GitRead.execute(
+                 %{"repo" => dir, "command" => "branch", "args" => ["-av"]},
+                 context
+               )
+
+      assert result.success == true
+      assert result.output =~ "main"
+    end
+  end
+
+  # `--get-regexp` exits 1 when nothing matches, which is the passing case here.
+  defp branch_config(dir, branch) do
+    {output, status} =
+      System.cmd("git", ["config", "--get-regexp", "^branch\\.#{branch}\\."], cd: dir)
+
+    assert status in [0, 1]
+    String.split(output, "\n", trim: true)
   end
 
   defp branch_names(dir) do

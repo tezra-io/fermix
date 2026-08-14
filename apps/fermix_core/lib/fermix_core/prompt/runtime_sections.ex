@@ -123,9 +123,14 @@ defmodule FermixCore.Prompt.RuntimeSections do
   # M31 §14.1: `place_search` is the first credential-gated built-in, hidden from
   # the wire whenever the shared Brave key does not resolve. The routing rule
   # follows the wire — steering local intent to a tool the model cannot call is
-  # the same dead end `harness_when_unusable?/1` removes below. Gated on the one
-  # credential seam every Brave consumer asks (§8.1), so the prompt and the
-  # advertisement cannot answer differently.
+  # the same dead end `harness_when_unusable?/1` removes below. Both ask the one
+  # credential seam every Brave consumer asks (§8.1) — but not at the same time:
+  # `Advertisement.prepare/2` resolves it per turn, while this section is baked
+  # into the per-epoch `RuntimeContext` cache, which a setup save does not
+  # invalidate. So a key saved through web setup advertises the tool immediately
+  # while the cached prompt still omits this rule, until something else
+  # invalidates the epoch. Add-direction only — setup drops empty values, so the
+  # key cannot be cleared from that pane — and it self-heals on restart.
   #
   # Rev 4: the near-me path is conversational — the model fills the existing
   # `location` argument from an area the user has shared. That is a model

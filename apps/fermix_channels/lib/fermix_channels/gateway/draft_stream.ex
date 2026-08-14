@@ -97,6 +97,10 @@ defmodule FermixChannels.Gateway.DraftStream do
   @max_consecutive_failures 2
   @seal_timeout_ms 15_000
 
+  # Write ops belonging to the 💭 status bubble rather than to the answer. Named
+  # once so a status op added later joins the separate breaker by construction.
+  @status_ops [:status_open, :status_edit]
+
   # Block-mode chunking (OpenClaw-proven defaults): paragraph-aligned chunks of
   # 800–1200 chars; a 1 s idle lull flushes smaller fence-balanced text (this is
   # what lets pre-tool commentary land as its own message).
@@ -270,11 +274,22 @@ defmodule FermixChannels.Gateway.DraftStream do
       # Block mode: byte offset into the current iteration's cumulative text
       # already emitted as block messages.
       sent_upto: 0,
-      # Draft mode: byte offset into the buffer already sealed into finished
-      # bubbles by rotation. Every open/edit renders the buffer from here on.
-      sealed_upto: 0,
+      # Draft mode: the buffer prefix rotation has already sealed away into
+      # finished bubbles. Every open/edit renders the buffer from its end on.
+      # Held as TEXT, not as an offset: a mid-stream provider retry replaces the
+      # buffer wholesale, and an offset into a buffer that is no longer the same
+      # stream makes the turn-end prefix check compare a slice of the new text
+      # against itself. It is the RAW prefix, not the bubbles' rendered text —
+      # a bubble is sent the trimmed chunk, so storing that instead would shrink
+      # the offset by the boundary whitespace and re-render sealed bytes.
+      sealed_text: "",
       # Refused rotation seals this turn; at the cap the engine stops rotating.
       rotate_failures: 0,
+      # Refused 💭 status writes; at the cap the bubble stops asking. Counted
+      # apart from `failures` because the status bubble writes only on ticks the
+      # answer had nothing new — so on its own counter two cosmetic refusals
+      # would freeze the answer preview for the rest of the turn.
+      status_failures: 0,
       # Draft mode: the rolling 💭 status bubble (its own draft) and the rolling
       # window of reasoning headings it shows.
       status_handle: nil,
@@ -390,7 +405,7 @@ defmodule FermixChannels.Gateway.DraftStream do
     cond do
       frozen?(state) -> state
       flushable?(state) -> paced(state, &do_flush/1)
-      status_pending?(state) -> paced(state, &flush_status/1)
+      status_writable?(state) -> paced(state, &flush_status/1)
       true -> state
     end
   end
@@ -413,7 +428,7 @@ defmodule FermixChannels.Gateway.DraftStream do
   defp ensure_pending_timer(%{spec: %Spec{mode: :block}} = state), do: state
 
   defp ensure_pending_timer(state) do
-    if not frozen?(state) and (flushable?(state) or status_pending?(state)) do
+    if not frozen?(state) and (flushable?(state) or status_writable?(state)) do
       ensure_timer(state)
     else
       state
@@ -475,9 +490,27 @@ defmodule FermixChannels.Gateway.DraftStream do
     })
   end
 
+  # A status write spends the shared edit budget — a write is a write — but its
+  # outcome moves only its own breaker, and it does not clear `dirty?`: the
+  # answer delta it coalesced past is still undelivered.
+  defp mark_status_written(state) do
+    ensure_pending_timer(%{
+      state
+      | last_write_at: monotonic_ms(),
+        write_count: state.write_count + 1,
+        status_failures: 0
+    })
+  end
+
   # Interim writes are best-effort by contract: log, count, never retry. At
   # @max_consecutive_failures the preview freezes; seal (the reliable write)
-  # still runs at turn end.
+  # still runs at turn end. Status writes count on their own breaker — see
+  # `status_failures` — so a refused 💭 write can never freeze the answer.
+  defp note_failure(state, op, reason) when op in @status_ops do
+    Logger.warning("DraftStream #{op} failed (#{state.spec.channel}): #{inspect(reason)}")
+    %{state | status_failures: state.status_failures + 1, last_write_at: monotonic_ms()}
+  end
+
   defp note_failure(state, op, reason) do
     Logger.warning("DraftStream #{op} failed (#{state.spec.channel}): #{inspect(reason)}")
     %{state | failures: state.failures + 1, last_write_at: monotonic_ms()}
@@ -517,7 +550,7 @@ defmodule FermixChannels.Gateway.DraftStream do
 
   defp rotate_if_inside(state, live, chunk, consumed) do
     if chunk != "" and consumed < byte_size(live) do
-      seal_rotation(state, chunk, consumed)
+      seal_rotation(state, chunk, binary_part(live, 0, consumed))
     else
       state
     end
@@ -526,13 +559,13 @@ defmodule FermixChannels.Gateway.DraftStream do
   # The rotation seal is an interim write by the same contract as an edit: a
   # failure is logged and counted (two in a row freeze the preview), never
   # retried. The turn-end seal remains the one reliable write.
-  defp seal_rotation(state, chunk, consumed) do
+  defp seal_rotation(state, chunk, sealed) do
     {result, duration_us} = timed_us(fn -> rotation_seal_call(state, chunk) end)
 
     case result do
       {:ok, _overflow} ->
         emit(state, :rotate, %{duration_us: duration_us, edit_index: state.write_count + 1}, :ok)
-        mark_written(detach_bubble(state, consumed))
+        mark_written(detach_bubble(state, sealed))
 
       {:error, reason} ->
         state = note_failure(state, :rotate, reason)
@@ -546,13 +579,13 @@ defmodule FermixChannels.Gateway.DraftStream do
   defp rotation_seal_call(%{last_sent: chunk} = _state, chunk), do: {:ok, nil}
   defp rotation_seal_call(state, chunk), do: state.spec.seal.(state.handle, chunk)
 
-  defp detach_bubble(state, consumed) do
+  defp detach_bubble(state, sealed) do
     %{
       state
       | phase: :idle,
         handle: nil,
         last_sent: nil,
-        sealed_upto: state.sealed_upto + consumed
+        sealed_text: state.sealed_text <> sealed
     }
   end
 
@@ -560,14 +593,14 @@ defmodule FermixChannels.Gateway.DraftStream do
   # commentary (mirroring block mode's "sent blocks stand") — seal it as-is,
   # then the new iteration starts its own bubble from offset zero.
   defp seal_live_on_reset(%{spec: %Spec{rotate_at: nil}} = state), do: state
-  defp seal_live_on_reset(%{phase: :idle} = state), do: %{state | sealed_upto: 0}
+  defp seal_live_on_reset(%{phase: :idle} = state), do: reset_sealed(state)
 
   defp seal_live_on_reset(state) do
     case live_text(state) do
       # A mid-stream provider retry can shrink the buffer below the sealed
-      # offset: there is nothing to seal, so the bubble stands with the text it
+      # prefix: there is nothing to seal, so the bubble stands with the text it
       # already shows and the new iteration starts fresh.
-      "" -> state |> detach_bubble(0) |> reset_sealed()
+      "" -> state |> detach_bubble("") |> reset_sealed()
       live -> commit_reset_seal(state, live)
     end
   end
@@ -582,14 +615,14 @@ defmodule FermixChannels.Gateway.DraftStream do
     case result do
       {:ok, _overflow} ->
         emit(state, :rotate, %{duration_us: duration_us, edit_index: state.write_count + 1}, :ok)
-        state |> detach_bubble(0) |> reset_sealed() |> mark_written()
+        state |> detach_bubble("") |> reset_sealed() |> mark_written()
 
       {:error, reason} ->
-        state |> detach_bubble(0) |> reset_sealed() |> reset_failure(reason)
+        state |> detach_bubble("") |> reset_sealed() |> reset_failure(reason)
     end
   end
 
-  defp reset_sealed(state), do: %{state | sealed_upto: 0}
+  defp reset_sealed(state), do: %{state | sealed_text: ""}
 
   defp reset_failure(state, reason) do
     Logger.warning(
@@ -723,6 +756,14 @@ defmodule FermixChannels.Gateway.DraftStream do
   defp status_pending?(%{spec: %Spec{mode: :draft}} = state), do: state.side_queue != []
   defp status_pending?(_state), do: false
 
+  # Defined cap behavior, the same shape rotation uses: after
+  # @max_consecutive_failures refused status writes the 💭 bubble stops asking
+  # for the rest of the turn. Without it, taking status writes off the answer's
+  # breaker would leave them re-hitting a refusing API on every tick.
+  defp status_writable?(state) do
+    status_pending?(state) and state.status_failures < @max_consecutive_failures
+  end
+
   defp flush_status(state) do
     headings = Enum.take(state.status_headings ++ state.side_queue, -@max_status_headings)
     text = status_bubble_text(state, headings)
@@ -737,7 +778,7 @@ defmodule FermixChannels.Gateway.DraftStream do
     case result do
       {:ok, handle} ->
         emit_write(state, :edit, %{duration_us: duration_us, edit_index: state.write_count + 1})
-        mark_written(%{state | status_handle: handle, status_text: text})
+        mark_status_written(%{state | status_handle: handle, status_text: text})
 
       {:error, reason} ->
         note_failure(state, :status_open, reason)
@@ -750,7 +791,7 @@ defmodule FermixChannels.Gateway.DraftStream do
     case result do
       :ok ->
         emit_write(state, :edit, %{duration_us: duration_us, edit_index: state.write_count + 1})
-        mark_written(%{state | status_text: text})
+        mark_status_written(%{state | status_text: text})
 
       {:error, reason} ->
         note_failure(state, :status_edit, reason)
@@ -918,7 +959,7 @@ defmodule FermixChannels.Gateway.DraftStream do
 
   # Draft mode's live slice: everything after the last rotation seal. Same clamp
   # and same reason as `unsent/1`.
-  defp live_text(state), do: slice_from(state.buffer, state.sealed_upto)
+  defp live_text(state), do: slice_from(state.buffer, byte_size(state.sealed_text))
 
   defp slice_from(buffer, offset) do
     start = min(offset, byte_size(buffer))
@@ -1052,14 +1093,14 @@ defmodule FermixChannels.Gateway.DraftStream do
   end
 
   # Draft mode after at least one rotation: the sealed bubbles already carry the
-  # answer's prefix, so only the tail may still be written. Same prefix check
-  # (and the same clamp for a mid-stream provider retry) as the block path.
-  defp do_seal(%{sealed_upto: sealed} = state, final_text) when sealed > 0 do
-    consumed = min(state.sealed_upto, byte_size(state.buffer))
-    prefix = binary_part(state.buffer, 0, consumed)
-
-    if String.starts_with?(final_text, prefix) do
-      seal_tail(state, tail_after(final_text, prefix))
+  # answer's prefix, so only the tail may still be written. The check is against
+  # the prefix those bubbles consumed, captured when they were sealed — not
+  # against the buffer, because after a mid-stream provider retry the buffer IS
+  # the new stream, so slicing it would compare the final text with a prefix of
+  # itself and always agree.
+  defp do_seal(%{sealed_text: sealed} = state, final_text) when sealed != "" do
+    if String.starts_with?(final_text, sealed) do
+      seal_tail(state, tail_after(final_text, sealed))
     else
       seal_prefix_mismatch(state)
     end

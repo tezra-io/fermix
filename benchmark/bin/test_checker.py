@@ -69,6 +69,20 @@ def test_checker_exit_mode_pass(tmp_path):
     assert r.score == 1.0 and r.error is None
 
 
+def test_checker_missing_fermix_home_is_a_recorded_error_not_a_zero(tmp_path):
+    # A checker reading ground truth from a home that is not there finds nothing
+    # and scores 0 — indistinguishable from the model failing the task. The
+    # workspace was already held to this standard; the home was not.
+    os.makedirs(os.path.join(str(tmp_path), "checkers"), exist_ok=True)
+    _script(tmp_path, "checkers/ok.sh", "#!/bin/sh\nexit 0\n")
+    r = checker.run_checker(str(tmp_path), {"script": "checkers/ok.sh", "mode": "exit"},
+                            scoped_dir=str(tmp_path),
+                            fermix_home=os.path.join(str(tmp_path), "no-such-home"),
+                            reply="")
+    assert r.score == 0.0
+    assert r.error is not None and "fermix_home not found" in r.error
+
+
 def test_checker_exit_mode_fail(tmp_path):
     os.makedirs(os.path.join(str(tmp_path), "checkers"), exist_ok=True)
     _script(tmp_path, "checkers/no.sh", "#!/bin/sh\nexit 3\n")

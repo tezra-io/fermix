@@ -33,7 +33,7 @@ defmodule FermixCore.Reply do
   Human-readable rendering of a `{:error, reason}` returned by a channel's
   media/text delivery. Shared by `send_attachment` and `Tools.Media.Output`
   so both surface the same wording for the channel egress error tuples
-  (byte/text caps, rate limits) and by every reason in the closed delivery
+  (byte caps, rate limits) and by every reason in the closed delivery
   vocabulary `FermixCore.Delivery.Error.t/0` (M30 §11.3).
   """
   @spec format_delivery_error(term()) :: String.t()
