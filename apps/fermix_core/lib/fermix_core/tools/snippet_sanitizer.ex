@@ -29,9 +29,14 @@ defmodule FermixCore.Tools.SnippetSanitizer do
   `web_search` backends is a separate cleanup (§10.2).
   """
 
-  # Both bounds of a tag must be present — a bare `<` in "open 8 < 9 hours" is
-  # text, not markup.
-  @tag ~r/<[^>]*>/
+  # A tag must be shaped like one: `<`, an optional closing slash, then an ASCII
+  # letter, then the name and any attributes up to the first `>` (a `>` inside a
+  # quoted attribute value still ends the match, as it always has). Requiring
+  # that letter is what keeps a comparison such as
+  # "kids < 12 free, seniors > 65 half price" intact — an unanchored `<[^>]*>`
+  # spans from the `<` to the next `>` anywhere in the string and silently eats
+  # the words between them.
+  @tag ~r/<\/?[A-Za-z][^<>]*>/
   @entity ~r/&(#[0-9]+|#[xX][0-9a-fA-F]+|[a-zA-Z][a-zA-Z0-9]*);/
   @whitespace ~r/\s+/u
 

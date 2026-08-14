@@ -258,6 +258,92 @@ defmodule FermixChannels.Outbound.SplitterTest do
       assert rest == ["That is everything."]
       assert String.length(fence) > 200
     end
+
+    # An inline code span is not a fence — CommonMark forbids a backtick in the
+    # info string, and both renderers agree. When the splitter disagreed, the
+    # unmatched line opened a region that ran to end-of-text, every later cut
+    # candidate was discarded, and the remainder went out as one atomic chunk
+    # many times the limit — refused outright by Discord, whose limit IS the
+    # platform cap.
+    test "an inline code span does not open a fence" do
+      text =
+        "```mono``` is the flag you want.\n\n" <>
+          sentences(900) <> "\n\nAnd that is the whole procedure.\n"
+
+      chunks = Splitter.split(text, limit: 120)
+
+      assert Enum.all?(chunks, &(String.length(&1) <= 120)),
+             "over-limit chunk: #{inspect(Enum.max_by(chunks, &String.length/1))}"
+
+      assert List.last(chunks) =~ "whole procedure"
+    end
+
+    # The mirror-image failure, and the one a narrower predicate causes: an
+    # OPENER that goes unrecognised while its closer still matches leaves the
+    # closer opening a region that runs to end-of-text. Same over-limit chunk,
+    # reached from the other side — so the fence rule has to be CommonMark's
+    # (any info string without a backtick), not the renderer's mappable-language
+    # subset. `c#` is the everyday case; a space before the info string and an
+    # attribute list are the others.
+    for {label, info} <- [
+          {"a language the renderer cannot map", "c#"},
+          {"an info string behind a space", " sh"},
+          {"an attribute-carrying info string", ~s(js title="a.js")}
+        ] do
+      test "a fence with #{label} is still a fence" do
+        code = Enum.map_join(1..15, "\n", fn i -> "var line#{i} = compute(#{i});" end)
+        prose = sentences(900)
+        text = "Here is the snippet.\n\n```#{unquote(info)}\n#{code}\n```\n\n#{prose}\n"
+
+        chunks = Splitter.split(text, limit: 200)
+        prose_chunks = Enum.reject(chunks, &String.contains?(&1, "```"))
+
+        assert Enum.all?(prose_chunks, &(String.length(&1) <= 200)),
+               "over-limit prose chunk: #{inspect(Enum.max_by(prose_chunks, &String.length/1))}"
+
+        fence_chunk = Enum.find(chunks, &String.contains?(&1, "```#{unquote(info)}"))
+        assert String.contains?(fence_chunk, "var line1 =")
+        assert String.contains?(fence_chunk, "var line15 =")
+      end
+    end
+
+    # A fence may be longer than three backticks, and a CRLF document is still a
+    # document. Both were protected before and must stay protected: the splitter
+    # runs on raw channel text, which the renderer's own newline normalisation
+    # never touches.
+    test "four backticks and CRLF line endings still fence" do
+      code = Enum.map_join(1..15, "\n", fn i -> "var line#{i} = compute(#{i});" end)
+
+      four = "Lead in.\n\n````elixir\n#{code}\n````\n\nTrailing prose here.\n"
+
+      assert Enum.find(Splitter.split(four, limit: 200), &String.contains?(&1, "````elixir")) =~
+               "var line15 ="
+
+      crlf =
+        String.replace("Lead in.\n\n```c\n#{code}\n```\n\nTrailing prose here.\n", "\n", "\r\n")
+
+      assert Enum.find(Splitter.split(crlf, limit: 200), &String.contains?(&1, "```c")) =~
+               "var line15 ="
+    end
+
+    # A fence line may carry an info string and trailing whitespace, and may be
+    # indented — the shapes the renderer recognises must still be protected.
+    test "an indented fence with an info string is still a fence" do
+      body = Enum.map_join(1..20, "\n", fn i -> "  line #{i} of an indented transcript" end)
+      fence = "  ```sh \n" <> body <> "\n  ```"
+      text = "Here is the log.\n\n" <> fence <> "\n\nThat is everything.\n"
+
+      chunks = Splitter.split(text, limit: 200)
+
+      # Chunks are trimmed, so the fence chunk loses its leading indent —
+      # assert it stayed whole rather than byte-identical.
+      assert hd(chunks) == "Here is the log."
+      assert List.last(chunks) == "That is everything."
+
+      fence_chunk = Enum.find(chunks, &String.contains?(&1, "```sh"))
+      assert String.contains?(fence_chunk, "line 1 of an indented transcript")
+      assert String.contains?(fence_chunk, "line 20 of an indented transcript")
+    end
   end
 
   describe "entity budget" do

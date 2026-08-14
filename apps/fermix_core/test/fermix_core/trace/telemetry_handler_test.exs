@@ -479,10 +479,13 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
   end
 
   # A task summary is the leading text of the delegated prompt — the owner's own
-  # words. `capture_content: false` is the DEFAULT, and it means "no prompt or
-  # response bodies in traces", so the summary must not ride the lifecycle event
-  # either. The Opik exporter renders this field as the trace's `input`, so
-  # leaking it here leaks it off the machine.
+  # words. `capture_content: false` means "no prompt or response bodies in
+  # traces", so the summary must not ride the lifecycle event either. The
+  # posture is ESTABLISHED here rather than assumed — content capture is on by
+  # default now, and a test that reads a global default instead of setting one
+  # is the order-dependent flake this file has had before. The Opik exporter
+  # renders this field as the trace's `input`, so leaking it here leaks it off
+  # the machine.
   test "task summaries stay out of traces when content capture is off", %{
     dir: dir,
     server: server

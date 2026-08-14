@@ -131,10 +131,21 @@ the `query` shorthand; multi-turn uses `turns`.
 - `query` (string) — single-turn shorthand; mutually exclusive with `turns`.
 - `turns` (list) — ordered turns sharing one session; each has its own `query`
   and optional per-turn `expect`.
-- `__EVAL_REPO_ROOT__` (query token) — `run_eval.py` replaces this token with the
-  current harness checkout's absolute path before driving a behavioral turn. Use
-  it for repo-read prompts instead of assuming the development daemon's sandbox
-  workspace is this checkout.
+- **Run placeholders** — three tokens `run_eval.py` substitutes before driving a
+  turn, in `query` **and** in every string inside `expect` (at any depth):
+  - `__EVAL_RUN_ID__` — this run's id, unique per invocation.
+  - `__EVAL_TRIAL__` — the 1-based trial number, for `--repeat` runs.
+  - `__EVAL_REPO_ROOT__` — the harness checkout's absolute path. Use it for
+    repo-read prompts instead of assuming the development daemon's sandbox
+    workspace is this checkout.
+
+  Rendering them into `expect` is what lets a **read-back gate pin the run that
+  wrote the artifact**. A suite whose every run leaves something permanent must
+  do this: `reply_matches: "marker __EVAL_RUN_ID__"` proves this run's write,
+  where a bare `marker` matches a previous run's leftovers and scores green off
+  work it never did. The run id and trial substitute verbatim (they are
+  alphanumeric, so they are equally valid in a regex gate and an exact-match
+  one); the repo root is regex-escaped, since a path may carry a `+` or `(`.
 - `drive` (string, optional) — `ask` (default; drives `fermix ask`) or
   `telegram_operator`: the runner prompts the operator to send ONE marked
   message to the dedicated eval Telegram bot, correlates the resulting `telegram:*`

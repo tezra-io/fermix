@@ -939,7 +939,7 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
       refute_received {:seal, _handle, _text}
     end
 
-    test "a cumulative restart below sealed_upto clamps, recovers, and seals cleanly" do
+    test "a cumulative restart below the sealed prefix clamps, recovers, and seals cleanly" do
       pid = DraftStream.start_link(rotating_spec(self()), @rotate_fast)
 
       DraftStream.push(pid, {:text_delta, @two_paras})
@@ -966,7 +966,7 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
       assert tail_text == @para_two <> " and now it finishes. Done."
     end
 
-    test "sealed_upto advances by BYTES, not characters, on multi-byte content" do
+    test "the sealed prefix advances by BYTES, not characters, on multi-byte content" do
       head = "Résumé — naïve café ☕ notes on the wreck dive."
       tail = "Second paragraph 🌊 continues here."
       text = head <> "\n\n" <> tail
@@ -1191,6 +1191,38 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
       assert log =~ "not a prefix"
     end
 
+    # The retry that matters is the one that DIVERGES. HttpClient blindly
+    # retries a mid-stream :closed and the fresh SSE parser restarts the
+    # cumulative at zero, with no :iteration_started to reset the sealed
+    # prefix — so the buffer becomes the regenerated stream while the sealed
+    # bubbles still hold the first one. Checked against a slice of the buffer
+    # this passes tautologically and the delivered answer is spliced at an
+    # arbitrary byte offset; checked against the sealed text it is caught.
+    test "a diverging mid-stream retry is caught and delivers in full" do
+      log =
+        capture_log(fn ->
+          pid = DraftStream.start_link(rotating_spec(self()), @rotate_fast)
+
+          DraftStream.push(pid, {:text_delta, @two_paras})
+          assert_receive {:seal, {:bubble, 1}, @para_one}, 1_000
+
+          # The connection dropped; the provider regenerated a different answer,
+          # longer than the sealed prefix so the live slice is non-empty.
+          regenerated =
+            "A different answer entirely, regenerated after the connection dropped mid-stream."
+
+          DraftStream.push(pid, {:text_delta, regenerated})
+          assert_receive {:open, {:bubble, 2}, _live}, 1_000
+
+          assert {:ok, :no_draft} = DraftStream.seal(pid, regenerated)
+
+          assert_received {:discard, {:bubble, 2}}
+          refute_received {:discard, {:bubble, 1}}
+        end)
+
+      assert log =~ "not a prefix"
+    end
+
     test "/stop discards only the live bubble; sealed cards persist" do
       pid = DraftStream.start_link(rotating_spec(self()), @rotate_fast)
 
@@ -1310,6 +1342,63 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
         end)
 
       assert log =~ "status_boom"
+    end
+
+    # The 💭 bubble writes only on ticks the answer had nothing new, so
+    # consecutive status-only ticks are the normal case during a tool-heavy
+    # stretch. On a shared breaker two refused cosmetic writes would spend the
+    # answer's whole failure budget and freeze its preview for the rest of the
+    # turn — the answer's own writes having never failed at all.
+    test "consecutive status-write failures never freeze the answer preview" do
+      test_pid = self()
+
+      picky_open = fn text ->
+        if String.starts_with?(text, "💭") do
+          send(test_pid, {:status_refused, text})
+          {:error, :status_boom}
+        else
+          send(test_pid, {:open, {:bubble, 1}, text})
+          {:ok, {:bubble, 1}}
+        end
+      end
+
+      log =
+        capture_log(fn ->
+          pid = DraftStream.start_link(rotating_spec(test_pid, open: picky_open), @rotate_fast)
+
+          DraftStream.push(pid, {:reasoning_done, "**First thought**\n\nbody"})
+          assert_receive {:status_refused, _first}, 1_000
+
+          DraftStream.push(pid, {:reasoning_done, "**Second thought**\n\nbody"})
+          assert_receive {:status_refused, _second}, 1_000
+
+          DraftStream.push(pid, {:text_delta, "The answer still opens."})
+          assert_receive {:open, {:bubble, 1}, "The answer still opens."}, 1_000
+        end)
+
+      assert log =~ "status_boom"
+    end
+
+    # ... and the status bubble does not retry a refusing API forever either.
+    test "the status bubble stops asking after the failure cap" do
+      test_pid = self()
+
+      refusing_open = fn text ->
+        send(test_pid, {:status_refused, text})
+        {:error, :status_boom}
+      end
+
+      capture_log(fn ->
+        pid = DraftStream.start_link(rotating_spec(test_pid, open: refusing_open), @rotate_fast)
+
+        for label <- ["**One**", "**Two**", "**Three**", "**Four**"] do
+          DraftStream.push(pid, {:reasoning_done, label <> "\n\nbody"})
+          Process.sleep(15)
+        end
+
+        for _attempt <- 1..2, do: assert_receive({:status_refused, _text}, 1_000)
+        refute_received {:status_refused, _text}
+      end)
     end
   end
 

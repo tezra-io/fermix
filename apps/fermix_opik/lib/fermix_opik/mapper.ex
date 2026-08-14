@@ -116,6 +116,12 @@ defmodule FermixOpik.Mapper do
           status: stringify(Map.get(metadata, :status)),
           ttfd_ms: Map.get(measurements, :ttfd_ms),
           block_index: Map.get(measurements, :block_index),
+          # The write phases' own pair (`Gateway.DraftStream`): unlisted, a
+          # :rotate span exported as channel+status alone, so every rotation in a
+          # turn was indistinguishable from the next. Microseconds keep the
+          # emitter's unit in the key name, as `Aggregation` does.
+          edit_index: Map.get(measurements, :edit_index),
+          duration_us: Map.get(measurements, :duration_us),
           total_edits: Map.get(measurements, :total_edits),
           dropped_snapshots: Map.get(measurements, :dropped_snapshots)
         })
