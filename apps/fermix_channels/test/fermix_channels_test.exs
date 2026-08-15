@@ -7,6 +7,7 @@ defmodule FermixChannelsTest do
   alias FermixChannels.Channels.Signal
   alias FermixChannels.Channels.Telegram
   alias FermixChannels.Gateway.ChannelRegistry
+  alias FermixChannels.Mobile
 
   @ready %{status: :ready, failures: []}
   @setup_required %{status: :setup_required, failures: [%{component: "channel"}]}
@@ -91,6 +92,31 @@ defmodule FermixChannelsTest do
 
       Application.put_env(:fermix_channels, :signal, enabled: true, mode: :subprocess)
       refute listener in ChannelRegistry.transport_children(@ready)
+    end
+
+    # The mobile backend ships before the iOS app exists, so an installation
+    # that never configured it — and an upgrade that only swapped the binary —
+    # must start nothing at all: no listener, no pairing state, no mDNS.
+    test "starts no part of the mobile surface until it is explicitly enabled" do
+      mobile = {Mobile.Supervisor, []}
+      previous = Application.get_env(:fermix_channels, :mobile)
+
+      on_exit(fn ->
+        case previous do
+          nil -> Application.delete_env(:fermix_channels, :mobile)
+          config -> Application.put_env(:fermix_channels, :mobile, config)
+        end
+      end)
+
+      Application.delete_env(:fermix_channels, :mobile)
+      refute mobile in ChannelRegistry.transport_children(@ready)
+
+      Application.put_env(:fermix_channels, :mobile, enabled: false, mode: :listener)
+      refute mobile in ChannelRegistry.transport_children(@ready)
+
+      Application.put_env(:fermix_channels, :mobile, enabled: true, mode: :listener)
+      assert mobile in ChannelRegistry.transport_children(@ready)
+      refute mobile in ChannelRegistry.transport_children(@setup_required)
     end
   end
 

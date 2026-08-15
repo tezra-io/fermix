@@ -12,9 +12,12 @@ defmodule FermixChannels.Mobile.EventRouter do
   alias FermixChannels.Channels.Mobile
   alias FermixChannels.Gateway
   alias FermixChannels.Gateway.Queue
+  alias FermixChannels.Mobile.DeviceRegistry
   alias FermixChannels.Mobile.MediaStore
   alias FermixChannels.Mobile.RequestCoordinator
+  alias FermixChannels.Telemetry, as: ChannelTelemetry
   alias FermixCore.Mobile.Store
+  alias FermixCore.Telemetry
 
   @type ingress_context :: %{
           required(:transport) => :mobile,
@@ -33,9 +36,9 @@ defmodule FermixChannels.Mobile.EventRouter do
   @spec recover_request(map(), map(), keyword()) :: :ok | {:error, term()}
   def recover_request(row, context, opts \\ [])
       when is_map(row) and is_map(context) and is_list(opts) do
-    with {:ok, device_id} <- authenticated_device(context),
+    with {:ok, _device_id} <- authenticated_device(context),
          {:ok, event, type, profile, client_id} <- recovered_event(row) do
-      acquire_and_run(event, type, profile, client_id, device_id, context, true, opts)
+      acquire_and_run(event, type, profile, client_id, context, opts)
     end
   end
 
@@ -50,8 +53,9 @@ defmodule FermixChannels.Mobile.EventRouter do
            store(opts).history_page(
              profile,
              store_opts(opts, after_seq: payload["after_seq"], limit: payload["limit"])
-           ) do
-      emit(opts, {:device, device_id}, history_event(profile, page))
+           ),
+         {:ok, messages} <- timeline_messages(page) do
+      emit(opts, {:device, device_id}, history_event(profile, page, messages))
     end
   end
 
@@ -98,13 +102,13 @@ defmodule FermixChannels.Mobile.EventRouter do
               accepted_event(client_id, false, request)
             )
 
-          acquire_and_run(event, type, profile, client_id, device_id, context, false, opts)
+          acquire_and_run(event, type, profile, client_id, context, opts)
 
         {:ok, {:duplicate, request}} ->
           _ =
             best_effort_emit(opts, {:device, device_id}, accepted_event(client_id, true, request))
 
-          acquire_and_run(event, type, profile, client_id, device_id, context, true, opts)
+          acquire_and_run(event, type, profile, client_id, context, opts)
 
         {:ok, {:conflict, _request}} ->
           {:error, :client_message_conflict}
@@ -115,7 +119,7 @@ defmodule FermixChannels.Mobile.EventRouter do
     end
   end
 
-  defp acquire_and_run(event, type, profile, client_id, device_id, context, duplicate?, opts) do
+  defp acquire_and_run(event, type, profile, client_id, context, opts) do
     case coordinator(opts).acquire(
            coordinator_server(opts),
            profile,
@@ -123,17 +127,7 @@ defmodule FermixChannels.Mobile.EventRouter do
            store_opts(opts)
          ) do
       {:ok, {:started, %{attempt: attempt}}} when is_integer(attempt) and attempt > 0 ->
-        run_started(
-          event,
-          type,
-          profile,
-          client_id,
-          device_id,
-          context,
-          duplicate?,
-          attempt,
-          opts
-        )
+        run_started(event, type, profile, client_id, context, attempt, opts)
 
       {:ok, {state, _row}} when state in [:active, :completed, :failed] ->
         :ok
@@ -143,41 +137,103 @@ defmodule FermixChannels.Mobile.EventRouter do
     end
   end
 
-  defp run_started(
-         event,
-         type,
-         profile,
-         client_id,
-         _device_id,
-         context,
-         _duplicate?,
-         attempt,
-         opts
-       ) do
+  defp run_started(event, type, profile, client_id, context, attempt, opts) do
     {deferred_ref, defer_command_fn} = deferred_lifecycle(type, profile, client_id, attempt, opts)
 
-    result =
-      with {:ok, prepared, media_refs} <- resolve_attachments(event, opts),
-           {:ok, [message]} <- Mobile.parse_event(prepared),
-           message = with_attempt(message, attempt),
-           {:ok, {append_status, row}} <-
-             append_user(profile, message, client_id, media_refs, opts),
-           :ok <- schedule_user_unfurl(append_status, profile, row, message.content, opts),
-           :ok <- ingest_gateway(message, context, attempt, defer_command_fn, opts),
-           :ok <-
-             finish_synchronous_request(
-               type,
-               profile,
-               client_id,
-               attempt,
-               deferred?(deferred_ref),
-               opts
-             ) do
-        :ok
-      end
+    run = %{
+      event: event,
+      type: type,
+      profile: profile,
+      client_id: client_id,
+      context: context,
+      attempt: attempt,
+      deferred_ref: deferred_ref,
+      defer_command_fn: defer_command_fn
+    }
 
-    settle_request_error(result, profile, client_id, type, attempt, opts)
+    run
+    |> guarded_span(opts)
+    |> settle_request_error(profile, client_id, type, attempt, opts)
   end
+
+  # This process owns settlement only until `ingest_gateway` hands the turn to
+  # the queue. A raise or exit inside that span would otherwise leave the request
+  # `running` under this boot epoch with nobody left to settle it, so the attempt
+  # is failed here before the crash continues to propagate untouched.
+  defp guarded_span(run, opts) do
+    ingest_span(run, opts)
+  rescue
+    exception ->
+      fail_attempt(run, exception, opts)
+      reraise exception, __STACKTRACE__
+  catch
+    kind, value ->
+      fail_attempt(run, {kind, value}, opts)
+      :erlang.raise(kind, value, __STACKTRACE__)
+  end
+
+  defp ingest_span(run, opts) do
+    with {:ok, prepared, media_refs} <- resolve_attachments(run.event, opts),
+         {:ok, [message]} <- parse_inbound(prepared),
+         message = with_attempt(message, run.attempt),
+         {:ok, {append_status, row}} <-
+           append_user(run.profile, message, run.client_id, media_refs, opts),
+         :ok <- schedule_user_unfurl(append_status, run.profile, row, message.content, opts),
+         :ok <- ingest_gateway(message, run.context, run.attempt, run.defer_command_fn, opts),
+         :ok <- handoff_settlement(run, opts) do
+      finish_synchronous_request(
+        run.type,
+        run.profile,
+        run.client_id,
+        run.attempt,
+        deferred?(run.deferred_ref),
+        opts
+      )
+    end
+  end
+
+  # Ingest has returned, so the turn now runs inside the queue and this process
+  # may disconnect at any moment. Move the coordinator's liveness fence onto the
+  # queue so its death — not this socket's disconnect — releases the attempt.
+  defp handoff_settlement(run, opts) do
+    agent_server = Keyword.get(opts, :agent_server, Queue)
+
+    case GenServer.whereis(agent_server) do
+      owner when is_pid(owner) ->
+        coordinator(opts).handoff(
+          coordinator_server(opts),
+          run.profile,
+          run.client_id,
+          run.attempt,
+          owner
+        )
+
+      nil ->
+        {:error, {:settlement_owner_unavailable, agent_server}}
+    end
+  end
+
+  defp fail_attempt(run, cause, opts) do
+    fields = %{error: %{type: run.type, reason: inspect(cause)}}
+
+    settle_failed(run.profile, run.client_id, run.attempt, fields, opts)
+  end
+
+  # One authenticated client event that becomes a gateway message is one inbound
+  # message for the mobile channel, counted here — the single ingress every
+  # `msg` and `command` passes through.
+  defp parse_inbound(event) do
+    {result, duration_us} = Telemetry.timed_us(fn -> Mobile.parse_event(event) end)
+
+    _ = emit_inbound_message(result, duration_us)
+    result
+  end
+
+  defp emit_inbound_message({:ok, messages}, duration_us) when messages != [] do
+    ChannelTelemetry.emit_message(:mobile, :inbound, length(messages), duration_us)
+  end
+
+  defp emit_inbound_message(_result, _duration_us), do: :ok
 
   defp resolve_attachments(%{type: "command"} = event, _opts), do: {:ok, event, []}
 
@@ -223,7 +279,9 @@ defmodule FermixChannels.Mobile.EventRouter do
     Mobile.schedule_unfurl(profile, row.server_seq, text,
       unfurl: Keyword.get(opts, :unfurl),
       unfurl_launcher: Keyword.get(opts, :unfurl_launcher),
-      event_sink: Keyword.get(opts, :event_sink)
+      event_sink: Keyword.get(opts, :event_sink),
+      store: store(opts),
+      store_opts: Keyword.get(opts, :store_opts, [])
     )
   end
 
@@ -345,8 +403,25 @@ defmodule FermixChannels.Mobile.EventRouter do
 
   defp settle_request_error({:error, reason}, profile, client_id, type, attempt, opts) do
     fields = %{error: %{type: type, reason: inspect(reason)}}
-    _ = store(opts).fail_client_request(profile, client_id, attempt, fields, store_opts(opts))
+    settle_failed(profile, client_id, attempt, fields, opts)
     {:error, reason}
+  end
+
+  # A durable settle that itself fails would otherwise wedge the row in
+  # `running` invisibly, so the write's own failure is always reported.
+  defp settle_failed(profile, client_id, attempt, fields, opts) do
+    case store(opts).fail_client_request(profile, client_id, attempt, fields, store_opts(opts)) do
+      {:ok, _request} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error(
+          "mobile request #{inspect({profile, client_id})} attempt #{attempt} could not be " <>
+            "settled as failed: #{inspect(reason)}"
+        )
+
+        :ok
+    end
   end
 
   defp enrichment_fn(profile, client_id, attempt, opts) do
@@ -413,15 +488,57 @@ defmodule FermixChannels.Mobile.EventRouter do
     |> maybe_put("server_seq", Map.get(request, :result_server_seq))
   end
 
-  defp history_event(profile, page) do
+  defp history_event(profile, page, messages) do
     %{
       "t" => "history_page",
       "profile_id" => profile,
-      "messages" => page.messages,
+      "messages" => messages,
       "next_after_seq" => page.next_after_seq,
       "history_head_seq" => Map.get(page, :history_head_seq, page.next_after_seq)
     }
   end
+
+  defp timeline_messages(%{messages: rows}) when is_list(rows) do
+    rows
+    |> Enum.reduce_while({:ok, []}, fn row, {:ok, acc} ->
+      case timeline_message(row) do
+        {:ok, message} -> {:cont, {:ok, [message | acc]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> then(fn
+      {:ok, messages} -> {:ok, Enum.reverse(messages)}
+      {:error, reason} -> {:error, reason}
+    end)
+  end
+
+  defp timeline_messages(page), do: {:error, {:invalid_history_page, page}}
+
+  # A store row is internal bookkeeping — agent and owner ids, the proactive and
+  # request keys, an Elixir DateTime. The wire carries the exported shape only,
+  # so a column added later can never leak to a device, and `ts` is always there.
+  defp timeline_message(
+         %{server_seq: seq, role: role, content: content, created_at: %DateTime{} = created_at} =
+           row
+       )
+       when is_integer(seq) and seq > 0 and is_binary(role) and is_binary(content) do
+    message =
+      %{
+        "server_seq" => seq,
+        "role" => role,
+        "content" => content,
+        "ts" => DateTime.to_iso8601(created_at),
+        "media_refs" => Map.get(row, :media_refs) || []
+      }
+      |> maybe_put("kind", Map.get(row, :kind))
+      |> maybe_put("client_msg_id", Map.get(row, :client_msg_id))
+      |> maybe_put("in_reply_to", Map.get(row, :in_reply_to))
+      |> maybe_put("metadata", Map.get(row, :metadata))
+
+    {:ok, message}
+  end
+
+  defp timeline_message(row), do: {:error, {:invalid_timeline_row, Map.get(row, :server_seq)}}
 
   defp gateway_attachment(attachment) do
     %{
@@ -437,9 +554,9 @@ defmodule FermixChannels.Mobile.EventRouter do
       "ref" => value(attachment, :ref),
       "kind" => value(attachment, :kind),
       "mime" => value(attachment, :mime_type),
-      "size_bytes" => value(attachment, :size_bytes),
-      "filename" => value(attachment, :file_name)
+      "size_bytes" => value(attachment, :size_bytes)
     }
+    |> maybe_put("filename", value(attachment, :file_name))
   end
 
   defp normalize_kind(kind) when kind in ["image", :image], do: :image
@@ -455,11 +572,10 @@ defmodule FermixChannels.Mobile.EventRouter do
   end
 
   defp emit_registered({:device, device_id}, event),
-    do: FermixChannels.Mobile.DeviceRegistry.send_device_event(device_id, event)
+    do: DeviceRegistry.send_device_event(device_id, event)
 
   defp emit_registered({:profile, profile}, event),
-    do:
-      profile_emit_result(FermixChannels.Mobile.DeviceRegistry.send_profile_event(profile, event))
+    do: profile_emit_result(DeviceRegistry.send_profile_event(profile, event))
 
   defp profile_emit_result(count) when is_integer(count) and count >= 0, do: :ok
 

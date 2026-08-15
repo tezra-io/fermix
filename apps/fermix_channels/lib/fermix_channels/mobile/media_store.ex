@@ -573,27 +573,63 @@ defmodule FermixChannels.Mobile.MediaStore do
     )
   end
 
+  # An unusable entry is a per-ENTRY fault, never a per-store one. This process
+  # is a `:permanent` child, so refusing the whole store over a Finder
+  # `.DS_Store` or one blob a backup restored 0644 would crash-loop the daemon
+  # the moment mobile is enabled. Such an entry is excluded from the index and
+  # logged loudly; a reference to it then answers `media_gone`, which design
+  # §9.3 defines as a legitimate outcome. Nothing on disk is repaired or
+  # deleted here — the store never rewrites material it refuses to trust.
   defp scan_blobs(media_dir) do
     with {:ok, names} <- File.ls(media_dir) do
-      names
-      |> Enum.sort()
-      |> Enum.with_index(1)
-      |> Enum.reduce_while({:ok, %{}, 0}, &scan_blob(media_dir, &1, &2))
+      {blobs, total} =
+        names
+        |> Enum.sort()
+        |> Enum.with_index(1)
+        |> Enum.reduce({%{}, 0}, &index_blob(media_dir, &1, &2))
+
+      {:ok, blobs, total}
     end
   end
 
-  defp scan_blob(media_dir, {name, access}, {:ok, blobs, total}) do
+  defp index_blob(media_dir, {name, access}, {blobs, total}) do
     path = Path.join(media_dir, name)
 
-    case {valid_sha256?(name), File.stat(path)} do
-      {true, {:ok, %{type: :regular, size: size, mode: mode}}}
-      when Bitwise.band(mode, 0o077) == 0 ->
+    case classify_blob(path, name) do
+      {:ok, size} ->
         blob = %{path: path, size_bytes: size, last_access: access}
-        {:cont, {:ok, Map.put(blobs, name, blob), total + size}}
+        {Map.put(blobs, name, blob), total + size}
 
-      _other ->
-        {:halt, {:error, {:invalid_media_entry, path}}}
+      {:excluded, reason} ->
+        Logger.error("mobile media entry excluded from the index: #{path} (#{reason})")
+        {blobs, total}
     end
+  end
+
+  defp classify_blob(path, name) do
+    if valid_sha256?(name),
+      do: blob_stat(path),
+      else: {:excluded, "name is not a sha256 digest"}
+  end
+
+  defp blob_stat(path) do
+    case File.stat(path) do
+      {:ok, %{type: :regular, size: size, mode: mode}} when Bitwise.band(mode, 0o077) == 0 ->
+        {:ok, size}
+
+      {:ok, %{type: :regular, mode: mode}} ->
+        {:excluded, "mode #{octal(mode)} is readable beyond the owner"}
+
+      {:ok, %{type: type}} ->
+        {:excluded, "not a regular file (#{type})"}
+
+      {:error, reason} ->
+        {:excluded, "stat failed: #{inspect(reason)}"}
+    end
+  end
+
+  defp octal(mode) do
+    mode |> Bitwise.band(0o777) |> Integer.to_string(8) |> String.pad_leading(4, "0")
   end
 
   defp load_attachment_manifest(config, blobs) do

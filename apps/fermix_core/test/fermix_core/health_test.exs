@@ -84,6 +84,7 @@ defmodule FermixCore.HealthTest do
              browser: Path.join(tmp_home, "browser"),
              journals: Path.join(tmp_home, "journals"),
              realtime: Path.join(tmp_home, "realtime"),
+             mobile: Path.join(tmp_home, "mobile"),
              traces: Path.join(tmp_home, "traces"),
              logs: Path.join(tmp_home, "logs")
            }

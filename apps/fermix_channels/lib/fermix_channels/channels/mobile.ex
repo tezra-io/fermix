@@ -15,6 +15,7 @@ defmodule FermixChannels.Channels.Mobile do
   alias FermixChannels.Gateway.Channel
   alias FermixChannels.Gateway.Commands.Registry, as: CommandRegistry
   alias FermixChannels.Gateway.Message
+  alias FermixChannels.Mobile.DeviceRegistry
   alias FermixChannels.Mobile.EventRouter
   alias FermixChannels.Mobile.Management
   alias FermixChannels.Mobile.MediaStore
@@ -68,10 +69,6 @@ defmodule FermixChannels.Channels.Mobile do
          {:ok, command} <- command_text(payload) do
       {:ok, [message(client_id, profile, command, [], "command")]}
     end
-  end
-
-  defp do_parse_event(%{"t" => type} = envelope) when type in ["msg", "command"] do
-    do_parse_event(%{type: type, payload: Map.drop(envelope, ["v", "t", "seq"])})
   end
 
   defp do_parse_event(%{type: type}) when is_binary(type),
@@ -148,15 +145,13 @@ defmodule FermixChannels.Channels.Mobile do
   @impl true
   def seal_draft(%Message{} = message, %{turn_id: turn_id, state: state}, text)
       when is_binary(turn_id) and is_pid(state) and is_binary(text) do
-    try do
-      with {:ok, {_status, row}} <- persist_final_text(message, text) do
-        _ = emit_after_commit(message.chat_id, text_done(turn_id, row.server_seq, text))
-        _ = schedule_unfurl(message.chat_id, row.server_seq, text)
-        {:ok, nil}
-      end
-    after
-      stop_draft_state(state)
+    with {:ok, {_status, row}} <- persist_final_text(message, text) do
+      _ = emit_after_commit(message.chat_id, text_done(turn_id, row.server_seq, text))
+      _ = schedule_unfurl(message.chat_id, row.server_seq, text)
+      {:ok, nil}
     end
+  after
+    stop_draft_state(state)
   end
 
   @impl true
@@ -231,8 +226,7 @@ defmodule FermixChannels.Channels.Mobile do
     case management.health() do
       {:ok, %{listener: :ready, identity: :ready, paired_devices: count}}
       when is_integer(count) and count >= 0 ->
-        {:ok,
-         %{detail: "mobile listener ready; identity ready; #{count} paired device(s)"}}
+        {:ok, %{detail: "mobile listener ready; identity ready; #{count} paired device(s)"}}
 
       {:error, reason} ->
         {:error, reason}
@@ -247,10 +241,16 @@ defmodule FermixChannels.Channels.Mobile do
   @spec send_message(String.t(), String.t(), Channel.send_opts()) :: :ok | {:error, term()}
   def send_message(profile_id, text, opts \\ [])
       when is_binary(profile_id) and is_binary(text) and is_list(opts) do
-    with :ok <- validate_profile(profile_id),
-         {:ok, {status, row}} <- persist_text(profile_id, text, Map.new(opts)) do
-      deliver_persisted_text(status, profile_id, text, row, opts)
-    end
+    {result, duration_us} =
+      Telemetry.timed_us(fn ->
+        with :ok <- validate_profile(profile_id),
+             {:ok, {status, row}} <- persist_text(profile_id, text, Map.new(opts)),
+             :ok <- deliver_persisted_text(status, profile_id, text, row, opts) do
+          {:ok, status}
+        end
+      end)
+
+    emit_outbound(result, duration_us)
   end
 
   @impl true
@@ -259,15 +259,27 @@ defmodule FermixChannels.Channels.Mobile do
           :ok | {:error, term()}
   def send_media(profile_id, media, opts \\ [])
       when is_binary(profile_id) and is_map(media) and is_list(opts) do
-    with :ok <- validate_profile(profile_id),
-         :ok <- validate_proactive_media_opts(opts),
-         {:ok, ref} <- resolve_outbound_media(media),
-         {:ok, {status, row}} <- persist_media(profile_id, media, ref, Map.new(opts)) do
-      deliver_persisted_media(status, profile_id, media, ref, row, opts)
-    end
+    {result, duration_us} =
+      Telemetry.timed_us(fn ->
+        with :ok <- validate_profile(profile_id),
+             :ok <- validate_proactive_media_opts(opts),
+             {:ok, ref} <- resolve_outbound_media(media),
+             {:ok, {status, row}} <- persist_media(profile_id, media, ref, Map.new(opts)),
+             :ok <- deliver_persisted_media(status, profile_id, media, ref, row, opts) do
+          {:ok, status}
+        end
+      end)
+
+    emit_outbound(result, duration_us)
   end
 
-  @doc "Resolve and fan out link previews asynchronously after a durable timeline commit."
+  @doc """
+  Resolve and fan out link previews asynchronously after a durable timeline commit.
+
+  An injected `:unfurl` resolver is called as `resolver.(text, store_thumbnail)`,
+  the same shape `Unfurl.resolve/2` receives, so every resolver reaches the
+  writer that attaches a thumbnail to the durable row before it is announced.
+  """
   @spec schedule_unfurl(String.t(), pos_integer(), String.t(), keyword()) :: :ok
   def schedule_unfurl(profile_id, server_seq, text, opts \\ [])
       when is_binary(profile_id) and is_integer(server_seq) and server_seq > 0 and
@@ -479,6 +491,16 @@ defmodule FermixChannels.Channels.Mobile do
     :ok
   end
 
+  # One durable timeline row is one delivered outbound message. A row the store
+  # deduplicated (`:existing`) was already counted when it was created, so a
+  # proactive retry never inflates the channel's message count.
+  defp emit_outbound({:ok, :created}, duration_us) do
+    ChannelTelemetry.emit_message(:mobile, :outbound, 1, duration_us)
+  end
+
+  defp emit_outbound({:ok, :existing}, _duration_us), do: :ok
+  defp emit_outbound({:error, reason}, _duration_us), do: {:error, reason}
+
   defp validate_proactive_media_opts(opts) do
     case {Keyword.get(opts, :proactive_key), Keyword.get(opts, :proactive_part_id)} do
       {nil, _part_id} ->
@@ -566,11 +588,23 @@ defmodule FermixChannels.Channels.Mobile do
   end
 
   defp push_notify(profile_id, server_seq, preview, opts) do
-    notify = Keyword.get(opts, :push) || Application.get_env(:fermix_channels, :mobile_push)
+    override = Keyword.get(opts, :push) || Application.get_env(:fermix_channels, :mobile_push)
 
-    if is_function(notify, 3),
-      do: notify.(profile_id, server_seq, preview),
-      else: Push.notify(profile_id, server_seq, preview)
+    case injected(override, 3, :mobile_push) do
+      nil -> Push.notify(profile_id, server_seq, preview)
+      notify -> notify.(profile_id, server_seq, preview)
+    end
+  end
+
+  # An override either has the shape its call site uses, or the injection is
+  # wrong and says so here. Quietly selecting the real implementation for a
+  # mis-shaped override is how a unit test reached the live network.
+  defp injected(nil, _arity, _name), do: nil
+  defp injected(fun, arity, _name) when is_function(fun, arity), do: fun
+
+  defp injected(other, arity, name) do
+    raise ArgumentError,
+          "mobile #{name} override must be a function of arity #{arity}, got: #{inspect(other)}"
   end
 
   defp log_post_commit_error(effect, reason) do
@@ -597,15 +631,21 @@ defmodule FermixChannels.Channels.Mobile do
   end
 
   defp resolve_unfurls(profile_id, server_seq, text, opts) do
-    resolver =
-      Keyword.get(opts, :unfurl) || Application.get_env(:fermix_channels, :mobile_unfurl)
+    thumbnail_store = thumbnail_store(profile_id, server_seq, opts)
 
     result =
-      if is_function(resolver, 1),
-        do: resolver.(text),
-        else: Unfurl.resolve(text, store_thumbnail: &store_unfurl_thumbnail/2)
+      case unfurl_resolver(opts) do
+        nil -> Unfurl.resolve(text, store_thumbnail: thumbnail_store)
+        resolver -> resolver.(text, thumbnail_store)
+      end
 
     handle_unfurl_result(result, profile_id, server_seq, opts)
+  end
+
+  defp unfurl_resolver(opts) do
+    override = Keyword.get(opts, :unfurl) || Application.get_env(:fermix_channels, :mobile_unfurl)
+
+    injected(override, 2, :mobile_unfurl)
   end
 
   defp handle_unfurl_result({:ok, previews, warnings}, profile_id, server_seq, opts)
@@ -645,6 +685,54 @@ defmodule FermixChannels.Channels.Mobile do
     end
   end
 
+  # A thumbnail ref is only fetchable once it sits in the durable row's
+  # media_refs: `media_fetch` authorizes every ref against that row. Storing the
+  # blob and attaching it are therefore one step, finished before the
+  # `link_preview` naming the ref is fanned out.
+  defp thumbnail_store(profile_id, server_seq, opts) do
+    writer = thumbnail_writer(opts)
+
+    fn bytes, mime ->
+      store_and_attach_thumbnail(writer, {profile_id, server_seq}, bytes, mime, opts)
+    end
+  end
+
+  defp thumbnail_writer(opts) do
+    override = injected(Keyword.get(opts, :thumbnail_store), 2, :thumbnail_store)
+
+    override || (&store_unfurl_thumbnail/2)
+  end
+
+  defp store_and_attach_thumbnail(writer, target, bytes, mime, opts)
+       when is_binary(bytes) and is_binary(mime) do
+    with {:ok, ref} when is_binary(ref) <- writer.(bytes, mime),
+         descriptor = thumbnail_descriptor(ref, bytes, mime),
+         {:ok, _row} <- attach_thumbnail(target, descriptor, opts) do
+      {:ok, ref}
+    end
+  end
+
+  defp thumbnail_descriptor(ref, bytes, mime) do
+    %{
+      "ref" => ref,
+      "sha256" => ref,
+      "kind" => "image",
+      "mime" => mime,
+      "size_bytes" => byte_size(bytes)
+    }
+  end
+
+  defp attach_thumbnail({profile_id, server_seq}, descriptor, opts) do
+    store_module = Keyword.get(opts, :store, store())
+
+    store_module.attach_timeline_media(
+      profile_id,
+      server_seq,
+      descriptor,
+      Keyword.get(opts, :store_opts, [])
+    )
+  end
+
   defp store_unfurl_thumbnail(bytes, mime) do
     MediaStore.put_bytes(MediaStore, bytes, %{kind: :image, mime_type: mime})
   end
@@ -655,9 +743,11 @@ defmodule FermixChannels.Channels.Mobile do
   end
 
   defp resolve_outbound_media(media) do
-    case Application.get_env(:fermix_channels, :mobile_media_resolver) do
-      resolver when is_function(resolver, 1) -> resolver.(media)
-      _other -> store_outbound_media(media)
+    override = Application.get_env(:fermix_channels, :mobile_media_resolver)
+
+    case injected(override, 1, :mobile_media_resolver) do
+      nil -> store_outbound_media(media)
+      resolver -> resolver.(media)
     end
   end
 
@@ -716,12 +806,16 @@ defmodule FermixChannels.Channels.Mobile do
 
   defp emit(profile_id, event) do
     case Application.get_env(:fermix_channels, :mobile_event_sink) do
+      nil ->
+        _count = DeviceRegistry.send_profile_event(profile_id, event)
+        :ok
+
       sink when is_function(sink, 2) ->
         sink.(profile_id, event)
 
-      _other ->
-        _count = FermixChannels.Mobile.DeviceRegistry.send_profile_event(profile_id, event)
-        :ok
+      other ->
+        raise ArgumentError,
+              ":mobile_event_sink must be a 2-arity function, got: #{inspect(other)}"
     end
   end
 

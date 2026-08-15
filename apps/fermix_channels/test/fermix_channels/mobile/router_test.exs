@@ -4,6 +4,7 @@ defmodule FermixChannels.Mobile.RouterTest do
   import Plug.Conn
   import Plug.Test
 
+  alias FermixChannels.Mobile.PairManager
   alias FermixChannels.Mobile.Router
 
   test "health endpoint exposes only the fixed liveness envelope" do
@@ -47,6 +48,10 @@ defmodule FermixChannels.Mobile.RouterTest do
     assert state.device_registry == :registry
     assert socket_opts[:compress] == false
     assert socket_opts[:max_frame_size] == 65_535
-    assert socket_opts[:timeout] == 50_000
+
+    # The upgrade precedes the prelude, so this one idle timeout also governs a
+    # pairing socket: it must outlive the whole owner-approval window or a slow
+    # approval kills the ceremony from underneath.
+    assert socket_opts[:timeout] > PairManager.max_ttl_ms()
   end
 end

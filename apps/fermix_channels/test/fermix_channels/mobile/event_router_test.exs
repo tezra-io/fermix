@@ -2,6 +2,9 @@ defmodule FermixChannels.Mobile.EventRouterTest do
   use ExUnit.Case, async: true
 
   alias FermixChannels.Mobile.EventRouter
+  alias FermixChannels.Mobile.RequestCoordinator
+  alias FermixCore.Memory.Repo
+  alias FermixCore.Mobile.Store
 
   defmodule StoreStub do
     def claim_client_request(_profile, "duplicate", _type, _payload, _opts) do
@@ -51,15 +54,32 @@ defmodule FermixChannels.Mobile.EventRouterTest do
 
     def history_page("main", opts) do
       if Keyword.get(opts, :after_seq) == 87 do
-        {:ok,
-         %{
-           messages: [%{server_seq: 88, role: "assistant", kind: "text", content: "done"}],
-           next_after_seq: 88
-         }}
+        {:ok, %{messages: [timeline_row(88, "done")], next_after_seq: 88}}
       else
-        {:ok,
-         %{messages: [%{server_seq: 9, role: "assistant", content: "hi"}], next_after_seq: 9}}
+        {:ok, %{messages: [timeline_row(9, "hi")], next_after_seq: 9}}
       end
+    end
+
+    # Shaped exactly like `Repo.mobile_timeline_row()`, internal columns included.
+    defp timeline_row(server_seq, content) do
+      %{
+        agent_id: "agent",
+        owner_id: "owner",
+        profile_id: "main",
+        server_seq: server_seq,
+        kind: "text",
+        role: "assistant",
+        content: content,
+        client_msg_id: nil,
+        in_reply_to: "client-1",
+        media_refs: [],
+        metadata: nil,
+        proactive_key: nil,
+        request_client_msg_id: "client-1",
+        request_attempt: 3,
+        output_key: "final",
+        created_at: ~U[2026-08-12 12:00:00Z]
+      }
     end
 
     def advance_read_frontier("main", reported, _opts), do: {:ok, max(8, reported)}
@@ -73,6 +93,11 @@ defmodule FermixChannels.Mobile.EventRouterTest do
     def acquire(_server, _profile, _id, opts) do
       send(self(), {:acquired, opts})
       {:ok, {:started, %{attempt: 3}}}
+    end
+
+    def handoff(_server, profile, id, attempt, owner) do
+      send(self(), {:handoff, profile, id, attempt, owner})
+      :ok
     end
   end
 
@@ -104,7 +129,45 @@ defmodule FermixChannels.Mobile.EventRouterTest do
        }}
     end
 
+    def attachment(:media, "doc-1") do
+      {:ok,
+       %{
+         attach_id: "doc-1",
+         ref: String.duplicate("b", 64),
+         kind: "document",
+         mime_type: "application/pdf",
+         size_bytes: 3,
+         file_name: "answer.pdf"
+       }}
+    end
+
     def attachment(:media, _id), do: {:error, :unknown_attachment}
+  end
+
+  # Blocks the pre-ingest span until the test releases it, which is the window
+  # in which the router process is killed.
+  defmodule GatedMediaStore do
+    def attachment(test_pid, attach_id) do
+      send(test_pid, {:media_wait, self(), attach_id})
+
+      receive do
+        {:media_release, attachment} -> {:ok, attachment}
+      after
+        5_000 -> {:error, :media_gate_timeout}
+      end
+    end
+  end
+
+  defmodule CrashingMediaStore do
+    def attachment(_server, "raise-1"), do: raise("attachment store exploded")
+    def attachment(_server, "exit-1"), do: exit(:attachment_store_down)
+  end
+
+  defmodule ForwardingGatewayStub do
+    def ingest(messages, opts) do
+      send(Keyword.fetch!(opts, :agent_server), {:gateway_ingest, messages, opts})
+      :ok
+    end
   end
 
   setup do
@@ -128,7 +191,7 @@ defmodule FermixChannels.Mobile.EventRouterTest do
         task.()
         :ok
       end,
-      unfurl: fn text ->
+      unfurl: fn text, _store_thumbnail ->
         send(test_pid, {:unfurl_resolved, text})
 
         {:ok,
@@ -199,6 +262,25 @@ defmodule FermixChannels.Mobile.EventRouterTest do
                        "in_reply_to" => 12,
                        "url" => "https://example.com"
                      }}
+  end
+
+  # One wire object, one rule: an absent optional field is an absent key, never
+  # an explicit null. `Channels.Mobile` already omits it, so the inbound side
+  # must too or the client sees two shapes for the same `mediaRef`.
+  test "a timeline media ref omits the filename an attachment does not carry", ctx do
+    event =
+      decoded("msg", %{
+        "client_msg_id" => "client-refs",
+        "profile_id" => "main",
+        "text" => "look",
+        "attach_ids" => ["photo-1", "doc-1"]
+      })
+
+    assert :ok = EventRouter.route(event, ctx.context, ctx.opts)
+    assert_received {:appended, "main", %{media_refs: [unnamed, named]}}
+
+    refute Map.has_key?(unnamed, "filename")
+    assert named["filename"] == "answer.pdf"
   end
 
   test "accepted fanout failure never gates durable execution", ctx do
@@ -327,10 +409,12 @@ defmodule FermixChannels.Mobile.EventRouterTest do
         "client_msg_id" => "deferred-output",
         "profile_id" => "main",
         "name" => "background",
-        "args" => ["do", "it"]
+        "args" => "do it"
       })
 
     assert :ok = EventRouter.route(event, ctx.context, opts)
+    assert_received {:gateway_ingest, [message], _gateway_opts}
+    assert message.content == "/background do it"
     assert_received {:deferred_finish, finish}
     refute_received {:completed, "main", "deferred-output", 3, %{}}
 
@@ -338,6 +422,38 @@ defmodule FermixChannels.Mobile.EventRouterTest do
     assert_received {:completed, "main", "deferred-output", 3, %{}}
     assert_received {:push, "main", 88, "done"}
     refute_received {:push, _, _, _}
+  end
+
+  test "a command whose args are not a string is refused and settled failed", ctx do
+    event =
+      decoded("command", %{
+        "client_msg_id" => "bad-args",
+        "profile_id" => "main",
+        "name" => "background",
+        "args" => ["do", "it"]
+      })
+
+    assert {:error, :invalid_command} = EventRouter.route(event, ctx.context, ctx.opts)
+    refute_received {:gateway_ingest, _messages, _opts}
+    assert_received {:failed, "main", "bad-args", 3, %{error: %{type: "command"}}}
+  end
+
+  test "a history page ships the exported message shape, never the store row", ctx do
+    history = decoded("history_pull", %{"profile_id" => "main", "after_seq" => 0, "limit" => 20})
+    assert :ok = EventRouter.route(history, ctx.context, ctx.opts)
+
+    assert_received {:event, {:device, "device-1"},
+                     %{"t" => "history_page", "messages" => [message]}}
+
+    assert message == %{
+             "server_seq" => 9,
+             "role" => "assistant",
+             "content" => "hi",
+             "kind" => "text",
+             "in_reply_to" => "client-1",
+             "media_refs" => [],
+             "ts" => "2026-08-12T12:00:00Z"
+           }
   end
 
   test "history and monotonic read state use the durable store", ctx do
@@ -364,6 +480,161 @@ defmodule FermixChannels.Mobile.EventRouterTest do
                %{transport: :acp, authenticated_device_id: "device-1"},
                ctx.opts
              )
+  end
+
+  test "a crash inside the pre-ingest span settles the attempt and still propagates", ctx do
+    opts = Keyword.put(ctx.opts, :media_store, CrashingMediaStore)
+
+    assert_raise RuntimeError, "attachment store exploded", fn ->
+      EventRouter.route(crashing_event("raised", "raise-1"), ctx.context, opts)
+    end
+
+    assert_received {:failed, "main", "raised", 3, %{error: %{type: "msg"}}}
+
+    assert catch_exit(EventRouter.route(crashing_event("exited", "exit-1"), ctx.context, opts)) ==
+             :attachment_store_down
+
+    assert_received {:failed, "main", "exited", 3, %{error: %{type: "msg"}}}
+  end
+
+  test "a runner killed before ingest releases its attempt so a resend re-runs" do
+    test_pid = self()
+    store_opts = [repo: start_mobile_repo(), agent_id: "agent-a", owner_id: "owner-a"]
+
+    coordinator =
+      start_supervised!(
+        {RequestCoordinator,
+         store: Store,
+         store_opts: store_opts,
+         recover?: false,
+         boot_epoch: "boot-router-kill",
+         name: nil}
+      )
+
+    opts = [
+      store: Store,
+      store_opts: store_opts,
+      request_coordinator: coordinator,
+      gateway: ForwardingGatewayStub,
+      media_store: GatedMediaStore,
+      media_server: test_pid,
+      agent_server: test_pid,
+      unfurl_launcher: fn _task -> :ok end,
+      event_sink: fn _target, _event -> :ok end
+    ]
+
+    context = %{transport: :mobile, authenticated_device_id: "device-1"}
+
+    event =
+      decoded("msg", %{
+        "client_msg_id" => "killed-runner",
+        "profile_id" => "main",
+        "text" => "run me",
+        "attach_ids" => ["photo-1"]
+      })
+
+    killed = spawn(fn -> EventRouter.route(event, context, opts) end)
+    assert_receive {:media_wait, ^killed, "photo-1"}
+
+    assert {:ok, %{status: "running", attempt: 1}} =
+             Store.get_client_request("main", "killed-runner", store_opts)
+
+    kill_and_settle(coordinator, killed)
+
+    assert {:ok, %{status: "accepted", attempt: 1, runner_epoch: nil}} =
+             Store.get_client_request("main", "killed-runner", store_opts)
+
+    resend = spawn(fn -> EventRouter.route(event, context, opts) end)
+    assert_receive {:media_wait, ^resend, "photo-1"}
+    send(resend, {:media_release, gated_attachment()})
+
+    assert_receive {:gateway_ingest, [message], _gateway_opts}
+    assert message.content == "run me"
+    assert message.metadata.mobile_attempt == 2
+
+    assert {:ok, %{status: "running", attempt: 2, runner_epoch: "boot-router-kill"}} =
+             Store.get_client_request("main", "killed-runner", store_opts)
+  end
+
+  test "an ingested client event counts one inbound message for the mobile channel", ctx do
+    handler_id = attach_message_telemetry(self())
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
+    event =
+      decoded("msg", %{
+        "client_msg_id" => "client-telemetry",
+        "profile_id" => "main",
+        "text" => "hello",
+        "attach_ids" => []
+      })
+
+    assert :ok = EventRouter.route(event, ctx.context, ctx.opts)
+
+    assert_receive {:telemetry, [:fermix, :channel, :message], %{count: 1, duration_us: us},
+                    %{channel: :mobile, direction: :inbound}}
+
+    assert us >= 0
+  end
+
+  defp attach_message_telemetry(test_pid) do
+    handler_id = "router-message-telemetry-#{System.unique_integer([:positive])}"
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:fermix, :channel, :message],
+        fn event, measurements, metadata, pid ->
+          send(pid, {:telemetry, event, measurements, metadata})
+        end,
+        test_pid
+      )
+
+    handler_id
+  end
+
+  defp start_mobile_repo do
+    unique = System.unique_integer([:positive])
+    db_path = Path.join(System.tmp_dir!(), "fermix-mobile-router-#{unique}.db")
+    repo = :"mobile_router_repo_#{unique}"
+
+    {Repo, name: repo, enabled: true, database_path: db_path}
+    |> Supervisor.child_spec(id: repo)
+    |> start_supervised!()
+
+    on_exit(fn ->
+      Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
+    end)
+
+    repo
+  end
+
+  # Kill the fenced process and block until the coordinator has drained the
+  # resulting `:DOWN`, so the durable assertion never races the fence.
+  defp kill_and_settle(coordinator, pid) do
+    ref = Process.monitor(pid)
+    Process.exit(pid, :kill)
+    assert_receive {:DOWN, ^ref, :process, ^pid, :killed}
+    _epoch = RequestCoordinator.epoch(coordinator)
+    :ok
+  end
+
+  defp crashing_event(client_id, attach_id) do
+    decoded("msg", %{
+      "client_msg_id" => client_id,
+      "profile_id" => "main",
+      "text" => "crash",
+      "attach_ids" => [attach_id]
+    })
+  end
+
+  defp gated_attachment do
+    %{
+      attach_id: "photo-1",
+      ref: String.duplicate("a", 64),
+      kind: "image",
+      mime_type: "image/jpeg",
+      size_bytes: 42
+    }
   end
 
   defp decoded(type, payload),

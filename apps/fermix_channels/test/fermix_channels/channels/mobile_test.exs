@@ -18,6 +18,7 @@ defmodule FermixChannels.Channels.MobileTest do
 
     def append_client_output(profile, client_id, attempt, key, attrs, _opts) do
       send(self(), {:fenced_output, profile, client_id, attempt, key})
+
       append(profile, Map.put(attrs, :role, "assistant"), [])
       |> then(fn {:ok, row} -> {:ok, {:created, row}} end)
     end
@@ -111,7 +112,7 @@ defmodule FermixChannels.Channels.MobileTest do
       :ok
     end)
 
-    Application.put_env(:fermix_channels, :mobile_unfurl, fn text ->
+    Application.put_env(:fermix_channels, :mobile_unfurl, fn text, _store_thumbnail ->
       send(test_pid, {:unfurl_resolve, text})
 
       {:ok,
@@ -192,6 +193,19 @@ defmodule FermixChannels.Channels.MobileTest do
 
       assert {:ok, [%Message{content: "/sandbox status", chat_id: "main"}]} =
                Mobile.parse_event(event)
+    end
+
+    test "refuses a raw wire envelope: only decoded protocol events parse" do
+      assert {:error, :invalid_event} =
+               Mobile.parse_event(%{
+                 "v" => 1,
+                 "t" => "msg",
+                 "seq" => 1,
+                 "client_msg_id" => "client-1",
+                 "profile_id" => "main",
+                 "text" => "hello",
+                 "attachments" => [%{"path" => "/etc/passwd"}]
+               })
     end
 
     test "rejects unsupported profiles and malformed commands" do
@@ -375,6 +389,7 @@ defmodule FermixChannels.Channels.MobileTest do
 
   test "multiple output parts schedule one push at terminal completion" do
     message = mobile_message()
+
     opts = [
       turn_id: "turn-client-1",
       in_reply_to: "client-1",
@@ -462,6 +477,62 @@ defmodule FermixChannels.Channels.MobileTest do
                      %{"t" => "link_preview", "image_ref" => ^digest}}
   end
 
+  test "a mis-shaped injected seam raises instead of selecting the real implementation" do
+    assert_raise ArgumentError, ~r/mobile_unfurl override/, fn ->
+      Mobile.schedule_unfurl("main", 73, "see https://example.com",
+        unfurl: fn _text -> {:ok, [], []} end,
+        unfurl_launcher: fn task -> task.() end
+      )
+    end
+
+    assert :ok = Mobile.send_message("main", "seed", [])
+
+    assert_raise ArgumentError, ~r/mobile_push override/, fn ->
+      Mobile.schedule_push("main", 73,
+        push: fn _profile, _seq -> :ok end,
+        push_launcher: fn task -> task.() end
+      )
+    end
+
+    Application.put_env(:fermix_channels, :mobile_media_resolver, fn _media, _extra -> :ok end)
+
+    assert_raise ArgumentError, ~r/mobile_media_resolver override/, fn ->
+      Mobile.send_media("main", %{kind: :image, path: "/unused", mime_type: "image/png"}, [])
+    end
+  end
+
+  test "delivered rows emit outbound channel telemetry exactly once" do
+    handler_id = attach_message_telemetry(self())
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
+    assert :ok = Mobile.send_message("main", "hello", [])
+
+    assert_receive {:telemetry, [:fermix, :channel, :message], %{count: 1, duration_us: text_us},
+                    %{channel: :mobile, direction: :outbound}}
+
+    assert text_us >= 0
+
+    dir = FermixTestSupport.SafeRm.make_tmp_dir!("mobile-telemetry")
+    path = Path.join(dir, "image.png")
+    File.write!(path, "image")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
+
+    assert :ok =
+             Mobile.send_media("main", %{kind: :image, path: path, mime_type: "image/png"}, [])
+
+    assert_receive {:telemetry, [:fermix, :channel, :message], %{count: 1},
+                    %{channel: :mobile, direction: :outbound}}
+
+    proactive = [proactive_key: "job:telemetry-1"]
+    assert :ok = Mobile.send_message("main", "daily", proactive)
+
+    assert_receive {:telemetry, [:fermix, :channel, :message], %{count: 1},
+                    %{channel: :mobile, direction: :outbound}}
+
+    assert :ok = Mobile.send_message("main", "daily", proactive)
+    refute_receive {:telemetry, [:fermix, :channel, :message], _measurements, _metadata}, 100
+  end
+
   test "health delegates to the fail-closed mobile management facade" do
     assert {:ok, %{detail: detail}} = Mobile.health_check(management: HealthyManagement)
     assert detail =~ "listener ready"
@@ -477,7 +548,7 @@ defmodule FermixChannels.Channels.MobileTest do
       {:error, :apns_down}
     end)
 
-    Application.put_env(:fermix_channels, :mobile_unfurl, fn _text -> {:ok, [], []} end)
+    Application.put_env(:fermix_channels, :mobile_unfurl, fn _text, _store -> {:ok, [], []} end)
 
     log =
       capture_log(fn ->
@@ -508,6 +579,22 @@ defmodule FermixChannels.Channels.MobileTest do
         |> Map.put(:mobile_attempt, 2)
         |> Map.put(:turn_id, "turn-client-1")
     })
+  end
+
+  defp attach_message_telemetry(test_pid) do
+    handler_id = "mobile-message-telemetry-#{System.unique_integer([:positive])}"
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:fermix, :channel, :message],
+        fn event, measurements, metadata, pid ->
+          send(pid, {:telemetry, event, measurements, metadata})
+        end,
+        test_pid
+      )
+
+    handler_id
   end
 
   defp restore_env(key, {:ok, value}), do: Application.put_env(:fermix_channels, key, value)

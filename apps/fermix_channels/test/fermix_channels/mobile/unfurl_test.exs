@@ -12,13 +12,23 @@ defmodule FermixChannels.Mobile.UnfurlTest do
     request = fn pinned, opts ->
       send(test_pid, {:request, pinned, opts})
 
-      {:ok,
-       %{
-         status: 200,
-         headers: %{"content-type" => ["text/html; charset=utf-8"]},
-         private: %{},
-         body: html("Fermix", "A private assistant", "/card.png")
-       }}
+      if String.ends_with?(pinned.original_url, "/card.png") do
+        {:ok,
+         %{
+           status: 200,
+           headers: %{"content-type" => ["image/png"]},
+           private: %{},
+           body: "png-bytes"
+         }}
+      else
+        {:ok,
+         %{
+           status: 200,
+           headers: %{"content-type" => ["text/html; charset=utf-8"]},
+           private: %{},
+           body: html("Fermix", "A private assistant", "/card.png")
+         }}
+      end
     end
 
     store_thumbnail = fn bytes, mime ->
@@ -50,7 +60,39 @@ defmodule FermixChannels.Mobile.UnfurlTest do
 
     assert {"host", "example.com"} in opts[:headers]
     assert opts[:receive_timeout] == 15_000
-    assert_receive {:stored_thumbnail, _bytes, "text/html; charset=utf-8"}
+    assert_receive {:stored_thumbnail, "png-bytes", "image/png"}
+  end
+
+  test "stores only image thumbnails and reports a non-image content type" do
+    request = fn pinned, _opts ->
+      if String.ends_with?(pinned.original_url, "/card.png") do
+        {:ok,
+         %{
+           status: 200,
+           headers: %{"content-type" => ["text/html; charset=utf-8"]},
+           private: %{},
+           body: "<html><body>not an image</body></html>"
+         }}
+      else
+        {:ok,
+         %{
+           status: 200,
+           headers: %{"content-type" => ["text/html"]},
+           private: %{},
+           body: html("Title", nil, "/card.png")
+         }}
+      end
+    end
+
+    assert {:ok, [%{title: "Title", image_ref: nil}], [warning]} =
+             Unfurl.resolve("https://example.com/a",
+               resolver: resolver(),
+               request: request,
+               store_thumbnail: fn _bytes, _mime -> flunk("a non-image thumbnail was stored") end
+             )
+
+    assert warning ==
+             {"https://example.com/card.png", {:unsupported_thumbnail_type, "text/html"}}
   end
 
   test "revalidates and pins every redirect target" do

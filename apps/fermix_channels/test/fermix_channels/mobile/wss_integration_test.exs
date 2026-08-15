@@ -22,7 +22,7 @@ defmodule FermixChannels.Mobile.WssIntegrationTest do
 
     @impl true
     def handle_connect(conn, parent) do
-      send(parent, {:wss_connected, self(), conn.transport})
+      send(parent, {:wss_connected, self(), conn.transport, :ssl.peercert(conn.socket)})
       {:ok, parent}
     end
 
@@ -53,9 +53,14 @@ defmodule FermixChannels.Mobile.WssIntegrationTest do
     cert_der = X509.Certificate.to_der(identity.tls_certificate)
     assert :crypto.hash(:sha256, cert_der) == identity.tls_fingerprint
 
-    connection = pinned_connection(port, cert_der)
-    client = start_supervised!({WssClient, {connection, self()}})
-    assert_receive {:wss_connected, ^client, :ssl}, @timeout_ms
+    client = start_supervised!({WssClient, {pinned_connection(port), self()}})
+    assert_receive {:wss_connected, ^client, :ssl, {:ok, presented_der}}, @timeout_ms
+
+    # The app's trust model (design 6.1): TLS exists for iOS ATS, the chain is
+    # never validated, and the leaf is accepted only because its SHA-256 equals
+    # the fingerprint the QR carried. Trust lives in the Noise layer below.
+    assert :crypto.hash(:sha256, presented_der) == identity.tls_fingerprint
+    assert presented_der == cert_der
 
     assert {:ok, noise} =
              Noise.initialize(:initiator, :ik,
@@ -111,13 +116,12 @@ defmodule FermixChannels.Mobile.WssIntegrationTest do
     )
   end
 
-  defp pinned_connection(port, cert_der) do
+  defp pinned_connection(port) do
     url = "wss://127.0.0.1:#{port}/ws"
 
     assert %WebSockex.Conn{} =
              WebSockex.Conn.new(url,
-               insecure: false,
-               cacerts: [cert_der],
+               ssl_options: [verify: :verify_none],
                socket_connect_timeout: @timeout_ms,
                socket_recv_timeout: @timeout_ms
              )

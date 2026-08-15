@@ -1,6 +1,7 @@
 defmodule FermixChannels.Mobile.ListenerTest do
   use ExUnit.Case, async: true
 
+  alias FermixChannels.Mobile.Identity
   alias FermixChannels.Mobile.Listener
 
   test "builds an isolated HTTPS Bandit listener and permits an ephemeral test port" do
@@ -13,6 +14,7 @@ defmodule FermixChannels.Mobile.ListenerTest do
                port: 0,
                keyfile: keyfile,
                certfile: certfile,
+               identity: identity(keyfile, certfile),
                router_opts: [device_registry: :registry]
              )
 
@@ -21,28 +23,21 @@ defmodule FermixChannels.Mobile.ListenerTest do
     assert options[:port] == 0
     assert options[:keyfile] == keyfile
     assert options[:certfile] == certfile
-    assert options[:plug] == {FermixChannels.Mobile.Router, [device_registry: :registry]}
+
+    assert {FermixChannels.Mobile.Router, router_opts} = options[:plug]
+    assert router_opts[:device_registry] == :registry
+    assert router_opts[:identity_root] == identity_root(keyfile)
     assert options[:websocket_options] == [max_frame_size: 65_535, compress: false]
   end
 
   test "passes only the identity root to sockets, never gateway private key bytes" do
-    identity = %FermixChannels.Mobile.Identity{
-      gateway_private_key: <<1::256>>,
-      gateway_public_key: <<2::256>>,
-      tls_private_key: :unused,
-      tls_certificate: :unused,
-      tls_fingerprint: <<3::256>>,
-      tls_key_path: "/tmp/key.pem",
-      tls_cert_path: "/tmp/cert.pem"
-    }
-
     assert {:ok, options} =
              Listener.options(
                bind: {127, 0, 0, 1},
                port: 0,
                keyfile: "/tmp/key.pem",
                certfile: "/tmp/cert.pem",
-               identity: identity,
+               identity: identity("/tmp/key.pem", "/tmp/cert.pem"),
                router_opts: [device_registry: :registry]
              )
 
@@ -69,7 +64,7 @@ defmodule FermixChannels.Mobile.ListenerTest do
       )
 
     on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(root) end)
-    assert {:ok, _identity} = FermixChannels.Mobile.Identity.ensure(root: root)
+    assert {:ok, _identity} = Identity.ensure(root: root)
 
     listener =
       start_supervised!({Listener, root: root, bind: {127, 0, 0, 1}, port: 0})
@@ -86,10 +81,28 @@ defmodule FermixChannels.Mobile.ListenerTest do
     File.chmod!(mobile_dir, 0o700)
     File.ln_s!(Path.join(root, "missing-key"), Path.join(mobile_dir, "gateway_key"))
 
+    # The designed stop is an init refusal, so the linked starter must trap the
+    # exit to read it instead of dying with the listener it just refused to run.
+    Process.flag(:trap_exit, true)
+
     assert {:error, {:mobile_identity_unavailable, {:identity_incomplete, missing}}} =
              Listener.start_link(name: nil, root: root)
 
     assert Enum.sort(missing) ==
              Enum.sort([Path.join(mobile_dir, "tls.crt"), Path.join(mobile_dir, "tls.key")])
   end
+
+  defp identity(keyfile, certfile) do
+    %Identity{
+      gateway_private_key: <<1::256>>,
+      gateway_public_key: <<2::256>>,
+      tls_private_key: :unused,
+      tls_certificate: :unused,
+      tls_fingerprint: <<3::256>>,
+      tls_key_path: keyfile,
+      tls_cert_path: certfile
+    }
+  end
+
+  defp identity_root(keyfile), do: keyfile |> Path.dirname() |> Path.dirname()
 end

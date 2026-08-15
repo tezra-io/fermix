@@ -839,6 +839,8 @@ defmodule FermixChannels.Gateway.QueueTest do
     Map.put(msg, :turn_result_fn, fn outcome -> send(test_pid, {:turn_result, outcome}) end)
   end
 
+  defp with_terminal_error_owner(msg), do: Map.put(msg, :terminal_error_owner?, true)
+
   defp key(chat_id), do: {"telegram", chat_id, :root}
 
   describe "stop_conversation/2" do
@@ -1123,6 +1125,70 @@ defmodule FermixChannels.Gateway.QueueTest do
       assert_receive {:reply, "reply:hello"}, 5_000
       assert_receive {:committed, "reply:hello"}, 5_000
       refute_received {:turn_result, _outcome}
+    end
+  end
+
+  # A channel whose `terminal_error_capability` is `:turn_result` renders terminal
+  # errors itself from the raw reason, so the queue suppresses its canned text —
+  # and ONLY that text. The plain-channel canned replies stay pinned by the
+  # "failure handling" describe above.
+  describe "terminal_error_owner? suppression" do
+    test "a checkout failure suppresses the text but still logs and emits telemetry", ctx do
+      attach_telemetry([:fermix, :gateway, :queue, :agent_unavailable])
+      queue = start_queue(ctx, main_agent: :gateway_queue_test_terminal_owner_agent)
+
+      msg =
+        make_msg("hello", "c1", ctx.test_pid)
+        |> with_turn_result(ctx.test_pid)
+        |> with_terminal_error_owner()
+
+      log =
+        capture_log(fn ->
+          Queue.enqueue(queue, msg)
+          assert_receive {:turn_result, {:failed, {:checkout_unavailable, _reason}}}, 5_000
+          refute_receive {:reply, _text}, 300
+        end)
+
+      assert log =~ "checkout failed"
+
+      assert_receive {:telemetry, [:fermix, :gateway, :queue, :agent_unavailable], %{count: 1},
+                      %{channel: "telegram"}},
+                     5_000
+    end
+
+    test "a runner error suppresses the error text and hands over the raw reason", ctx do
+      queue = start_queue(ctx, turn_runner: StreamingFakeRunner)
+
+      msg =
+        make_msg("boom", "c1", ctx.test_pid)
+        |> with_turn_result(ctx.test_pid)
+        |> with_terminal_error_owner()
+
+      Queue.enqueue(queue, msg)
+      assert_receive {:turn_started, "boom", turn_pid}, 5_000
+      send(turn_pid, {:proceed, :error})
+
+      assert_receive {:turn_result, {:failed, :boom}}, 5_000
+      refute_receive {:reply, _text}, 300
+      refute_received {:committed, _response}
+    end
+
+    test "a crashed turn task suppresses the canned crash text", ctx do
+      queue = start_queue(ctx)
+
+      msg =
+        make_msg("boom", "c1", ctx.test_pid)
+        |> with_turn_result(ctx.test_pid)
+        |> with_terminal_error_owner()
+
+      capture_log(fn ->
+        Queue.enqueue(queue, msg)
+        assert_receive {:turn_started, "boom", turn_pid}, 5_000
+        send(turn_pid, {:proceed, :crash})
+
+        assert_receive {:turn_result, {:failed, {:crashed, _reason}}}, 5_000
+        refute_receive {:reply, _text}, 300
+      end)
     end
   end
 

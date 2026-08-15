@@ -1908,7 +1908,7 @@ defmodule FermixCore.Setup.ConfigStore do
     |> put_if_present(:enabled, normalize_mobile_boolean(config, :enabled))
     |> put_if_present(:mode, normalize_mobile_mode(lookup(config, "mode", :mode)))
     |> put_if_present(:port, normalize_mobile_port(lookup(config, "port", :port)))
-    |> put_if_present(:bind, normalize_mobile_string(config, :bind))
+    |> put_if_present(:bind, normalize_mobile_bind(config))
     |> put_if_present(:advertise_mdns, normalize_mobile_boolean(config, :advertise_mdns))
     |> put_streaming(config)
     |> put_if_present(
@@ -1993,6 +1993,29 @@ defmodule FermixCore.Setup.ConfigStore do
 
       value ->
         raise ArgumentError, "invalid mobile.#{key} #{inspect(value)}; expected positive integer"
+    end
+  end
+
+  # The listener parses `bind` as an IP literal, and it does that at boot inside
+  # a supervised child: a typo there is a daemon-killing stop on an install that
+  # is already paired. Reject it here, where every other mobile key is decided.
+  defp normalize_mobile_bind(config) do
+    case normalize_mobile_string(config, :bind) do
+      nil -> nil
+      value -> parsed_mobile_bind(value)
+    end
+  end
+
+  # Strict parsing on purpose: `:inet.parse_address/1` still accepts the
+  # inet_aton short forms, so a truncated "0.0.0" would sail through the gate
+  # and bind an address the operator never wrote.
+  defp parsed_mobile_bind(value) do
+    case :inet.parse_strict_address(String.to_charlist(value)) do
+      {:ok, _address} ->
+        value
+
+      {:error, _reason} ->
+        raise ArgumentError, "invalid mobile.bind #{inspect(value)}; expected an IP address"
     end
   end
 

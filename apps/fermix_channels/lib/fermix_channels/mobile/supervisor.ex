@@ -9,6 +9,8 @@ defmodule FermixChannels.Mobile.Supervisor do
 
   use Supervisor
 
+  require Logger
+
   alias FermixChannels.Mobile.DeviceRegistry
   alias FermixChannels.Mobile.DeviceStore
   alias FermixChannels.Mobile.Listener
@@ -21,14 +23,65 @@ defmodule FermixChannels.Mobile.Supervisor do
 
   @default_max_media_bytes 20 * 1_024 * 1_024
   @default_max_store_bytes 2 * 1_024 * 1_024 * 1_024
+  @keyring_sentinel FermixCore.Setup.SecretWriter.sentinel()
 
+  @doc """
+  Start the mobile subtree, or refuse it when its trust store is unusable.
+
+  A structurally broken `devices.toml` is a mobile-only fault. It is refused and
+  never rebuilt (design §0), and refusing it must not take Telegram and every
+  other channel down with it — so the subtree does not start, the reason is
+  recorded for `health`/`doctor`, and the application keeps running.
+  """
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(opts \\ []) when is_list(opts) do
+    root = root(opts)
+    store = names(opts).device_store
+
+    case DeviceStore.list(root: root) do
+      {:ok, _devices} -> start_subtree(opts, store)
+      {:error, reason} -> refuse(root, store, reason)
+    end
+  end
+
+  @doc "Reason the mobile surface refused to start for a trust store, if it did."
+  @spec refusal(atom()) :: {:error, term()} | :none
+  def refusal(store \\ DeviceStore) when is_atom(store) do
+    case :persistent_term.get(refusal_key(store), :none) do
+      :none -> :none
+      reason -> {:error, reason}
+    end
+  end
+
+  @doc "Clear a recorded refusal, as a healthy boot of the same trust store does."
+  @spec forget_refusal(atom()) :: :ok
+  def forget_refusal(store) when is_atom(store) do
+    _erased? = :persistent_term.erase(refusal_key(store))
+    :ok
+  end
+
+  defp start_subtree(opts, store) do
+    :ok = forget_refusal(store)
+
     case Keyword.get(opts, :name, __MODULE__) do
       nil -> Supervisor.start_link(__MODULE__, opts)
       name -> Supervisor.start_link(__MODULE__, opts, name: name)
     end
   end
+
+  defp refuse(root, store, reason) do
+    :persistent_term.put(refusal_key(store), reason)
+
+    Logger.error(
+      "mobile surface refused this boot: #{DeviceStore.store_path(root)} is unusable " <>
+        "(#{inspect(reason)}). No mobile child started; other channels are unaffected. " <>
+        "Fermix never regenerates a trust store — repair or remove the file, then restart."
+    )
+
+    :ignore
+  end
+
+  defp refusal_key(store), do: {__MODULE__, :refused_trust_store, store}
 
   @impl true
   def init(opts) do
@@ -126,7 +179,29 @@ defmodule FermixChannels.Mobile.Supervisor do
     end
   end
 
+  # A locked or unreachable OS keychain leaves the `@keyring` sentinel sitting at
+  # the push key: `SecretStore.resolve_sentinels/2` deliberately warns and boots
+  # through rather than taking the node down. That is an UNRESOLVED credential,
+  # not a malformed config, and raising on it would crash-loop the whole daemon
+  # under KeepAlive over a keychain the operator can simply unlock. Mirror the
+  # secret store's posture: start the mobile surface without the dispatcher, say
+  # so loudly, and let `Management.status/1` report APNs credentials missing so
+  # `fermix doctor` names it. Every other push-config fault still raises.
   defp enabled_push_child(push, name) do
+    if Keyword.get(push, :key) == @keyring_sentinel do
+      Logger.error(
+        "mobile push is enabled but its APNs key is still the #{@keyring_sentinel} sentinel — " <>
+          "the OS keychain could not be read this boot. Mobile started WITHOUT push; " <>
+          "unlock the keychain and restart, or run `fermix doctor` to confirm."
+      )
+
+      {:ok, []}
+    else
+      validated_push_child(push, name)
+    end
+  end
+
+  defp validated_push_child(push, name) do
     case PushConfig.new(push) do
       {:ok, %PushConfig{enabled: true} = config} ->
         {:ok, [{PigeonDispatcher, name: name, config: config}]}

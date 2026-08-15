@@ -263,6 +263,28 @@ defmodule FermixCore.Mobile.Store do
     end
   end
 
+  @doc """
+  Release a running attempt whose runner died without settling it.
+
+  Returns the claim to `accepted` so a resend or the next boot's recovery scan
+  starts the next attempt, instead of a wedged `running` row that answers every
+  resend as an already-running duplicate.
+  """
+  @spec abandon_client_request(String.t(), String.t(), non_neg_integer(), keyword()) ::
+          {:ok, Repo.mobile_client_request_row()} | {:error, term()}
+  def abandon_client_request(profile_id, client_msg_id, attempt, opts \\ [])
+      when is_binary(profile_id) and is_binary(client_msg_id) do
+    with :ok <- validate_attempt(attempt) do
+      Repo.abandon_mobile_client_request(
+        profile_selector(profile_id, opts),
+        client_msg_id,
+        attempt,
+        now(opts),
+        repo_opts(opts)
+      )
+    end
+  end
+
   @spec append_client_response(String.t(), String.t(), non_neg_integer(), map(), keyword()) ::
           {:ok, {:created | :existing, Repo.mobile_timeline_row()}} | {:error, term()}
   def append_client_response(profile_id, client_msg_id, attempt, attrs, opts \\ [])

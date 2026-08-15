@@ -110,66 +110,28 @@ defmodule FermixCore.Setup.WizardTest do
     :ok
   end
 
-  describe "mobile setup prompts" do
-    test "fresh setup asks for mobile first and expands only enabled branches" do
-      state = Wizard.report().wizard
+  # The mobile channel ships feature-flagged with NO setup surface: hand-editing
+  # `[fermix_channels.mobile] enabled = true` in config.toml is the only enable
+  # path. These pin the absence, in both directions — setup never asks, and a
+  # hand-written section survives a save that knows nothing about it.
+  describe "mobile has no wizard surface" do
+    test "no setup or reconfigure prompt mentions mobile, on a fresh or enabled install" do
+      assert_no_mobile_prompts(Wizard.report().wizard)
 
-      assert mobile_prompt_keys(state, []) == [:mobile_enabled]
+      # A hand-enabled channel must not resurrect the step either: the flag is
+      # the whole UI, so an enabled install is asked exactly as much as a
+      # dormant one — nothing.
+      Application.put_env(:fermix_channels, :mobile,
+        enabled: true,
+        mode: :listener,
+        port: 4_040,
+        push: [enabled: true, team_id: "ABCDE12345", environment: "production"]
+      )
 
-      assert mobile_prompt_keys(state, mobile_enabled: true) == [
-               :mobile_enabled,
-               :mobile_port,
-               :mobile_push_enabled
-             ]
-
-      assert mobile_prompt_keys(state, mobile_enabled: true, mobile_push_enabled: true) == [
-               :mobile_enabled,
-               :mobile_port,
-               :mobile_push_enabled,
-               :mobile_push_team_id,
-               :mobile_push_key_id,
-               :mobile_push_key,
-               :mobile_push_topic,
-               :mobile_push_environment
-             ]
-
-      assert mobile_prompt_keys(state, mobile_enabled: false, mobile_push_enabled: true) == [
-               :mobile_enabled
-             ]
+      assert_no_mobile_prompts(Wizard.report().wizard)
     end
 
-    test "reconfigure offers mobile settings and follows persisted push state" do
-      assert {:ok, _report} =
-               Wizard.save_answers(Wizard.report().wizard,
-                 mobile_enabled: true,
-                 mobile_port: 4_040,
-                 mobile_push_enabled: true,
-                 mobile_push_team_id: "ABCDE12345",
-                 mobile_push_key_id: "KEY987",
-                 mobile_push_key: "private-key-one",
-                 mobile_push_topic: "io.tezra.fermix.app",
-                 mobile_push_environment: "production"
-               )
-
-      state = Wizard.report().wizard
-
-      assert mobile_reconfigure_keys(state, []) == [
-               :mobile_enabled,
-               :mobile_port,
-               :mobile_push_enabled,
-               :mobile_push_team_id,
-               :mobile_push_key_id,
-               :mobile_push_key,
-               :mobile_push_topic,
-               :mobile_push_environment
-             ]
-
-      assert mobile_reconfigure_keys(state, mobile_enabled: false) == [:mobile_enabled]
-    end
-  end
-
-  describe "save_answers/2 mobile channel" do
-    test "persists listener and nested push settings without writing the APNs key" do
+    test "injected mobile answers are ignored and never reach config.toml" do
       assert {:ok, _report} =
                Wizard.save_answers(Wizard.report().wizard,
                  mobile_enabled: "true",
@@ -177,108 +139,82 @@ defmodule FermixCore.Setup.WizardTest do
                  mobile_push_enabled: "true",
                  mobile_push_team_id: "ABCDE12345",
                  mobile_push_key_id: "KEY987",
-                 mobile_push_key:
-                   "-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----",
+                 mobile_push_key: "private-key-must-not-persist",
                  mobile_push_topic: "io.tezra.fermix.app",
                  mobile_push_environment: "development"
                )
 
+      contents = File.read!(ConfigStore.path())
+      refute contents =~ "private-key-must-not-persist"
+      refute contents =~ "ABCDE12345"
+      refute contents =~ "KEY987"
+      refute contents =~ "io.tezra.fermix.app"
+
       assert {:ok, snapshot} = ConfigStore.load_runtime_config()
       mobile = snapshot.fermix_channels |> Keyword.fetch!(:mobile)
+      assert Keyword.get(mobile, :enabled) == false
+      assert Keyword.get(mobile, :port) == 4031
+      assert Keyword.get(mobile, :push) |> Keyword.get(:team_id) == nil
+    end
+
+    # Web setup round-trips the live config to disk on every save, so a section
+    # the form does not own is only safe if the save pipeline preserves it. A
+    # hand-enabled mobile block that a telegram save silently reverted would
+    # un-enable the channel behind the operator's back.
+    test "a hand-written enabled mobile section survives an unrelated wizard save" do
+      File.write!(ConfigStore.path(), """
+      [fermix_channels.mobile]
+      enabled = true
+      mode = "listener"
+      port = 4040
+      bind = "127.0.0.1"
+      advertise_mdns = false
+
+      [fermix_channels.mobile.push]
+      enabled = true
+      team_id = "ABCDE12345"
+      key_id = "KEY987"
+      topic = "io.tezra.fermix.app"
+      environment = "development"
+      """)
+
+      # Boot hydrates app env from the persisted document; the wizard snapshot
+      # reads app env, so this is the state a running daemon saves from.
+      assert {:ok, persisted} = ConfigStore.load_runtime_config()
+
+      Application.put_env(
+        :fermix_channels,
+        :mobile,
+        Keyword.fetch!(persisted.fermix_channels, :mobile)
+      )
+
+      assert {:ok, _report} =
+               Wizard.save_answers(Wizard.report().wizard, telegram_owner_user_id: "owner-1")
+
+      assert {:ok, saved} = ConfigStore.load_runtime_config()
+      mobile = saved.fermix_channels |> Keyword.fetch!(:mobile)
       push = Keyword.fetch!(mobile, :push)
 
       assert Keyword.get(mobile, :enabled) == true
-      assert Keyword.get(mobile, :mode) == :listener
       assert Keyword.get(mobile, :port) == 4040
+      assert Keyword.get(mobile, :bind) == "127.0.0.1"
+      assert Keyword.get(mobile, :advertise_mdns) == false
       assert Keyword.get(push, :enabled) == true
       assert Keyword.get(push, :team_id) == "ABCDE12345"
       assert Keyword.get(push, :key_id) == "KEY987"
-      assert Keyword.get(push, :key) =~ "BEGIN PRIVATE KEY"
       assert Keyword.get(push, :topic) == "io.tezra.fermix.app"
       assert Keyword.get(push, :environment) == "development"
-
-      contents = File.read!(ConfigStore.path())
-      refute contents =~ "BEGIN PRIVATE KEY"
-      assert contents =~ "[fermix_channels.mobile.push]"
-      assert contents =~ ~s(key = "@keyring")
-    end
-
-    test "requires complete APNs credentials only when push is enabled" do
-      assert {:ok, _report} =
-               Wizard.save_answers(Wizard.report().wizard,
-                 mobile_enabled: "true",
-                 mobile_port: "4031",
-                 mobile_push_enabled: "false"
-               )
-
-      assert {:error, {:invalid_mobile_push, missing}} =
-               Wizard.save_answers(Wizard.report().wizard,
-                 mobile_push_enabled: "true",
-                 mobile_push_team_id: "ABCDE12345",
-                 mobile_push_environment: "production"
-               )
-
-      assert Enum.sort(missing) == [:key, :key_id, :topic]
-    end
-
-    test "blank APNs key keeps the stored secret during later edits" do
-      assert {:ok, _report} =
-               Wizard.save_answers(Wizard.report().wizard,
-                 mobile_push_enabled: "true",
-                 mobile_push_team_id: "ABCDE12345",
-                 mobile_push_key_id: "KEY987",
-                 mobile_push_key: "private-key-one",
-                 mobile_push_topic: "io.tezra.fermix.app",
-                 mobile_push_environment: "production"
-               )
-
-      assert {:ok, _report} =
-               Wizard.save_answers(Wizard.report().wizard,
-                 mobile_push_enabled: "true",
-                 mobile_push_team_id: "ABCDE12345",
-                 mobile_push_key_id: "KEY987",
-                 mobile_push_key: "",
-                 mobile_push_topic: "io.tezra.fermix.beta",
-                 mobile_push_environment: "production"
-               )
-
-      assert {:ok, snapshot} = ConfigStore.load_runtime_config()
-      push = snapshot.fermix_channels |> Keyword.fetch!(:mobile) |> Keyword.fetch!(:push)
-      assert Keyword.get(push, :key) == "private-key-one"
-      assert Keyword.get(push, :topic) == "io.tezra.fermix.beta"
-    end
-
-    test "rejects ports outside the TCP range" do
-      assert {:error, {:invalid_mobile_port, "70000"}} =
-               Wizard.save_answers(Wizard.report().wizard, mobile_port: "70000")
     end
   end
 
-  defp mobile_prompt_keys(state, answers) do
-    state
-    |> Wizard.prompts(answers)
-    |> Enum.map(& &1.key)
-    |> Enum.filter(&(&1 in mobile_answer_keys()))
-  end
-
-  defp mobile_reconfigure_keys(state, answers) do
-    state
-    |> Wizard.reconfigure_prompts(answers)
-    |> Enum.map(& &1.key)
-    |> Enum.filter(&(&1 in mobile_answer_keys()))
-  end
-
-  defp mobile_answer_keys do
-    [
-      :mobile_enabled,
-      :mobile_port,
-      :mobile_push_enabled,
-      :mobile_push_team_id,
-      :mobile_push_key_id,
-      :mobile_push_key,
-      :mobile_push_topic,
-      :mobile_push_environment
-    ]
+  defp assert_no_mobile_prompts(state) do
+    Enum.each([Wizard.prompts(state), Wizard.reconfigure_prompts(state)], fn prompts ->
+      Enum.each(prompts, fn prompt ->
+        refute to_string(prompt.key) =~ "mobile"
+        refute String.downcase(Map.get(prompt, :label, "")) =~ "mobile"
+        refute String.downcase(Map.get(prompt, :label, "")) =~ "apns"
+      end)
+    end)
   end
 
   test "report returns deterministic wizard state for incomplete config" do

@@ -34,6 +34,30 @@ defmodule Fermix.CLI.DevicesCommandTest do
     assert output(stderr) == ""
   end
 
+  test "list strips every terminal control sequence a stored name could carry" do
+    request = fn "mobile_devices_list", %{}, _timeout ->
+      ok(%{
+        "devices" => [
+          %{
+            "device_id" => @device_id,
+            "name" => "\e[2KSujeeth\u{009B}31m",
+            "created_at" => "2026-08-12T12:00:00Z",
+            "last_seen" => nil
+          }
+        ]
+      })
+    end
+
+    {stdout, stderr} = io()
+
+    assert DevicesCommand.run(["list"], request: request, stdout: stdout, stderr: stderr) == 0
+    printed = output(stdout)
+    assert printed =~ "Sujeeth"
+    refute printed =~ "\e"
+    refute printed =~ "\u{009B}"
+    assert output(stderr) == ""
+  end
+
   test "list renders an empty store clearly" do
     request = fn "mobile_devices_list", %{}, _timeout -> ok(%{"devices" => []}) end
     {stdout, stderr} = io()
@@ -86,6 +110,45 @@ defmodule Fermix.CLI.DevicesCommandTest do
     assert DevicesCommand.run(["list"], request: request, stdout: stdout, stderr: stderr) == 1
     assert output(stdout) == ""
     assert output(stderr) =~ "Fermix daemon is not running"
+  end
+
+  # Same contract as `fermix pair`: `config.toml` is the only enable path, so a
+  # disabled channel names the flag and the restart and never mentions setup.
+  test "a disabled mobile channel points at the config flag, not at setup" do
+    request = fn method, _params, _timeout when method in ~w(mobile_devices_list) ->
+      {:ok, %{"status" => "error", "reason" => "mobile_disabled"}}
+    end
+
+    {stdout, stderr} = io()
+
+    assert DevicesCommand.run(["list"], request: request, stdout: stdout, stderr: stderr) == 1
+
+    printed = output(stderr)
+    assert printed =~ "[fermix_channels.mobile]"
+    assert printed =~ "enabled = true"
+    assert printed =~ "config.toml"
+    assert printed =~ "fermix restart"
+    refute printed =~ "fermix setup"
+    refute printed =~ "setup page"
+  end
+
+  test "revoke on a disabled mobile channel points at the config flag" do
+    request = fn "mobile_device_revoke", %{"device_id" => _id}, _timeout ->
+      {:ok, %{"status" => "error", "reason" => "mobile_disabled"}}
+    end
+
+    {stdout, stderr} = io()
+
+    assert DevicesCommand.run(["revoke", @device_id],
+             request: request,
+             stdout: stdout,
+             stderr: stderr
+           ) == 1
+
+    printed = output(stderr)
+    assert printed =~ "[fermix_channels.mobile]"
+    assert printed =~ "enabled = true"
+    refute printed =~ "fermix setup"
   end
 
   test "invalid verbs return usage status" do

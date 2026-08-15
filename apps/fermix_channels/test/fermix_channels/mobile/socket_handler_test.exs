@@ -61,8 +61,9 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
       device_registry: :registry,
       noise: :noise,
       client_seq: 0,
+      max_media_bytes: 20_971_520,
       decrypt: fn :noise, "ciphertext" -> {:ok, "plaintext", :noise1} end,
-      decode_client: fn "plaintext" -> {:ok, hello} end
+      decode_client: fn "plaintext", _opts -> {:ok, hello} end
     }
 
     assert {:stop, :identity_mismatch, {4003, "authenticated device mismatch"}, next} =
@@ -87,28 +88,29 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
       bytes: <<>>
     }
 
-    state = %{
-      phase: :await_hello,
-      authenticated_device: %{device_id: "paired-device"},
-      device_registry: :registry,
-      profile_id: "main",
-      noise: :noise,
-      client_seq: 0,
-      server_seq: 0,
-      decrypt: fn :noise, "ciphertext" -> {:ok, "plaintext", :noise1} end,
-      decode_client: fn "plaintext" -> {:ok, hello} end,
-      update_device: fn _store, "paired-device", %{last_seen: %DateTime{}} ->
-        {:ok, %{device_id: "paired-device"}}
-      end,
-      attach_socket: fn :registry, "paired-device", ^test_pid, profile_id: "main" ->
-        :ok
-      end,
-      hello_ack_builder: fn _state -> {:ok, %{"session_id" => "session"}} end,
-      encode_server: fn "hello_ack", %{"session_id" => "session"}, 1 ->
-        {:ok, "encoded"}
-      end,
-      encrypt: fn :noise1, "encoded" -> {:ok, "ciphertext-out", :noise2} end
-    }
+    {:ok, state} =
+      SocketHandler.init(%{
+        phase: :await_hello,
+        authenticated_device: %{device_id: "paired-device"},
+        device_registry: :registry,
+        profile_id: "main",
+        noise: :noise,
+        client_seq: 0,
+        server_seq: 0,
+        decrypt: fn :noise, "ciphertext" -> {:ok, "plaintext", :noise1} end,
+        decode_client: fn "plaintext", _opts -> {:ok, hello} end,
+        update_device: fn _store, "paired-device", %{last_seen: %DateTime{}} ->
+          {:ok, %{device_id: "paired-device"}}
+        end,
+        attach_socket: fn :registry, "paired-device", ^test_pid, profile_id: "main" ->
+          :ok
+        end,
+        hello_ack_builder: fn _state -> {:ok, %{"session_id" => "session"}} end,
+        encode_server: fn "hello_ack", %{"session_id" => "session"}, 1 ->
+          {:ok, "encoded"}
+        end,
+        encrypt: fn :noise1, "encoded" -> {:ok, "ciphertext-out", :noise2} end
+      })
 
     assert {:push, {:binary, "ciphertext-out"}, next} =
              SocketHandler.handle_in({"ciphertext", opcode: :binary}, state)
@@ -141,7 +143,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
         profile_name: "Orbit",
         wall_clock: fn -> ~U[2026-08-12 19:00:00Z] end,
         decrypt: fn :noise, "ciphertext" -> {:ok, "plaintext", :noise1} end,
-        decode_client: fn "plaintext" -> {:ok, hello} end,
+        decode_client: fn "plaintext", _opts -> {:ok, hello} end,
         update_device: fn _store, "paired-device", %{last_seen: ~U[2026-08-12 19:00:00Z]} ->
           {:ok, %{device_id: "paired-device"}}
         end,
@@ -176,7 +178,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
         noise: :noise,
         wall_clock: fn -> seen_at end,
         decrypt: fn :noise, "ciphertext" -> {:ok, "plaintext", :noise1} end,
-        decode_client: fn "plaintext" ->
+        decode_client: fn "plaintext", _opts ->
           {:ok,
            %{
              version: 1,
@@ -223,7 +225,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
         noise: :noise,
         wall_clock: fn -> ~U[2026-08-12 19:00:00Z] end,
         decrypt: fn :noise, "ciphertext" -> {:ok, "plaintext", :noise1} end,
-        decode_client: fn "plaintext" ->
+        decode_client: fn "plaintext", _opts ->
           {:ok,
            %{
              version: 1,
@@ -267,6 +269,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
         media_store: store,
         max_media_bytes: 4,
         noise: :noise,
+        authorize_socket: fn _registry, "paired-device", _pid -> :ok end,
         decrypt: fn :noise, plaintext -> {:ok, plaintext, :noise} end,
         encode_server: fn "attach_status", payload, 1 ->
           assert payload["status"] == "upload"
@@ -332,8 +335,9 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
         media_store: store,
         noise: :noise,
         negotiated_version: 1,
+        authorize_socket: fn _registry, "paired-device", _pid -> :ok end,
         decrypt: fn :noise, "request" -> {:ok, "request", :noise} end,
-        decode_client: fn "request" ->
+        decode_client: fn "request", _opts ->
           {:ok,
            %{
              type: "media_fetch",
@@ -369,6 +373,63 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     assert next.server_seq == 3
   end
 
+  test "a media batch that fails to encode never advances the Noise send cipher" do
+    root = FermixTestSupport.SafeRm.make_tmp_dir!("socket-media-batch")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(root) end)
+    store = start_supervised!({MediaStore, name: nil, root: root, max_store_bytes: 64})
+    bytes = "pdf"
+    digest = sha256(bytes)
+
+    assert {:ok, ^digest} = MediaStore.put_bytes(store, bytes)
+
+    descriptor = %{
+      server_seq: 41,
+      media: %{
+        "ref" => digest,
+        "sha256" => digest,
+        "kind" => "document",
+        "mime" => "application/pdf",
+        "size_bytes" => byte_size(bytes)
+      }
+    }
+
+    {:ok, state} =
+      SocketHandler.init(%{
+        phase: :ready,
+        device_id: "paired-device",
+        profile_id: "main",
+        media_store: store,
+        # The stub cipher is its own nonce: every encryption advances it, so the
+        # frame the client finally receives shows exactly how far it moved.
+        noise: 0,
+        negotiated_version: 1,
+        authorize_socket: fn _registry, "paired-device", _pid -> :ok end,
+        decrypt: fn 0, "request" -> {:ok, "request", 0} end,
+        decode_client: fn "request", _opts ->
+          {:ok,
+           %{
+             type: "media_fetch",
+             version: 1,
+             seq: 1,
+             payload: %{"ref" => digest},
+             bytes: <<>>
+           }}
+        end,
+        media_descriptor: fn "main", ^digest -> {:ok, descriptor} end,
+        encode_server: fn
+          "media_end", _payload, _seq, _bytes, _version -> {:error, :encoder_unavailable}
+          type, _payload, seq, _bytes, _version -> {:ok, "#{type}-#{seq}"}
+        end,
+        encrypt: fn nonce, plaintext -> {:ok, {nonce, plaintext}, nonce + 1} end
+      })
+
+    assert {:push, {:binary, {0, "error-1"}}, next} =
+             SocketHandler.handle_in({"request", opcode: :binary}, state)
+
+    assert next.noise == 1
+    assert next.server_seq == 1
+  end
+
   test "media_fetch reports an evicted durable blob after consuming the request sequence" do
     root = FermixTestSupport.SafeRm.make_tmp_dir!("socket-media-gone")
     on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(root) end)
@@ -393,8 +454,9 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
         profile_id: "main",
         media_store: store,
         noise: :noise,
+        authorize_socket: fn _registry, "paired-device", _pid -> :ok end,
         decrypt: fn :noise, "request" -> {:ok, "request", :noise} end,
-        decode_client: fn "request" ->
+        decode_client: fn "request", _opts ->
           {:ok,
            %{
              type: "media_fetch",
@@ -428,8 +490,9 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
         device_id: "paired-device",
         noise: :noise,
         push_environment: "production",
+        authorize_socket: fn _registry, "paired-device", _pid -> :ok end,
         decrypt: fn :noise, "ciphertext" -> {:ok, "plaintext", :noise1} end,
-        decode_client: fn "plaintext" ->
+        decode_client: fn "plaintext", _opts ->
           {:ok,
            %{
              type: "push_register",
@@ -466,8 +529,9 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
         device_id: "paired-device",
         noise: :noise,
         push_environment: :production,
+        authorize_socket: fn _registry, "paired-device", _pid -> :ok end,
         decrypt: fn :noise, "ciphertext" -> {:ok, "plaintext", :noise1} end,
-        decode_client: fn "plaintext" ->
+        decode_client: fn "plaintext", _opts ->
           {:ok,
            %{
              type: "push_register",
@@ -496,10 +560,11 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
         device_id: "paired-device",
         noise: :noise,
         negotiated_version: 1,
+        authorize_socket: fn _registry, "paired-device", _pid -> :ok end,
         decrypt: fn :noise, ciphertext -> {:ok, ciphertext, :noise} end,
         decode_client: fn
-          "first" -> {:ok, %{type: "ping", version: 1, seq: 1, payload: %{}, bytes: <<>>}}
-          "second" -> {:ok, %{type: "ping", version: 1, seq: 2, payload: %{}, bytes: <<>>}}
+          "first", _opts -> {:ok, %{type: "ping", version: 1, seq: 1, payload: %{}, bytes: <<>>}}
+          "second", _opts -> {:ok, %{type: "ping", version: 1, seq: 2, payload: %{}, bytes: <<>>}}
         end,
         event_router: fn
           %{seq: 1}, _context, _opts -> {:error, :busy}
@@ -517,6 +582,185 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     assert state.client_seq == 2
   end
 
+  test "the msg pipeline runs off the socket process so control frames keep flowing" do
+    test_pid = self()
+
+    {:ok, state} =
+      SocketHandler.init(%{
+        phase: :ready,
+        device_id: "paired-device",
+        noise: :noise,
+        negotiated_version: 1,
+        authorize_socket: fn _registry, "paired-device", _pid -> :ok end,
+        decrypt: fn :noise, ciphertext -> {:ok, ciphertext, :noise} end,
+        decode_client: fn
+          "msg", _opts -> {:ok, client_msg("c1", 1)}
+          "ping", _opts -> {:ok, %{type: "ping", version: 1, seq: 2, payload: %{}, bytes: <<>>}}
+        end,
+        event_router: fn event, _context, _opts ->
+          send(test_pid, {:routed, event.type, self()})
+          await_release(event.type)
+        end,
+        run_request: fn job -> {:ok, spawn(job)} end
+      })
+
+    assert {:ok, state} = SocketHandler.handle_in({"msg", opcode: :binary}, state)
+    assert_receive {:routed, "msg", worker}
+    refute worker == self()
+
+    assert {:ok, state} = SocketHandler.handle_in({"ping", opcode: :binary}, state)
+    assert_receive {:routed, "ping", socket}
+    assert socket == self()
+    assert state.client_seq == 2
+
+    send(worker, :release)
+  end
+
+  test "queued requests run one at a time in arrival order" do
+    test_pid = self()
+
+    {:ok, state} =
+      SocketHandler.init(%{
+        phase: :ready,
+        device_id: "paired-device",
+        noise: :noise,
+        negotiated_version: 1,
+        authorize_socket: fn _registry, "paired-device", _pid -> :ok end,
+        decrypt: fn :noise, ciphertext -> {:ok, ciphertext, :noise} end,
+        decode_client: fn
+          "first", _opts -> {:ok, client_msg("c1", 1)}
+          "second", _opts -> {:ok, client_msg("c2", 2)}
+        end,
+        event_router: fn event, _context, _opts ->
+          send(test_pid, {:ran, event.payload["client_msg_id"]})
+          :ok
+        end,
+        run_request: fn job ->
+          pid = spawn(fn -> receive(do: (:run -> job.())) end)
+          send(test_pid, {:launched, pid})
+          {:ok, pid}
+        end
+      })
+
+    assert {:ok, state} = SocketHandler.handle_in({"first", opcode: :binary}, state)
+    assert_receive {:launched, first_worker}
+
+    assert {:ok, state} = SocketHandler.handle_in({"second", opcode: :binary}, state)
+    refute_receive {:launched, _second_worker}, 50
+
+    send(first_worker, :run)
+    assert_receive {:ran, "c1"}
+    assert_receive {:DOWN, _ref, :process, ^first_worker, :normal} = down
+    assert {:ok, state} = SocketHandler.handle_info(down, state)
+
+    assert_receive {:launched, second_worker}
+    send(second_worker, :run)
+    assert_receive {:ran, "c2"}
+    assert state.pending_requests == []
+  end
+
+  test "an asynchronous request failure still reaches the client as a typed error" do
+    {:ok, state} =
+      SocketHandler.init(%{
+        phase: :ready,
+        device_id: "paired-device",
+        noise: :noise,
+        negotiated_version: 1,
+        authorize_socket: fn _registry, "paired-device", _pid -> :ok end,
+        decrypt: fn :noise, "msg" -> {:ok, "msg", :noise} end,
+        decode_client: fn "msg", _opts -> {:ok, client_msg("c1", 1)} end,
+        event_router: fn _event, _context, _opts -> {:error, :busy} end,
+        run_request: fn job -> {:ok, spawn(job)} end,
+        encode_server: fn "error", payload, 1, <<>>, 1 ->
+          assert payload["code"] == "busy"
+          {:ok, "error-frame"}
+        end,
+        encrypt: fn :noise, "error-frame" -> {:ok, "encrypted-error", :noise} end
+      })
+
+    assert {:ok, state} = SocketHandler.handle_in({"msg", opcode: :binary}, state)
+    assert_receive {:mobile_request_failed, :busy} = failure
+
+    assert {:push, {:binary, "encrypted-error"}, next} = SocketHandler.handle_info(failure, state)
+    assert next.server_seq == 1
+  end
+
+  test "a worker that dies reports a bounded typed error and starts the next request" do
+    test_pid = self()
+
+    {:ok, state} =
+      SocketHandler.init(%{
+        phase: :ready,
+        device_id: "paired-device",
+        noise: :noise,
+        negotiated_version: 1,
+        authorize_socket: fn _registry, "paired-device", _pid -> :ok end,
+        decrypt: fn :noise, ciphertext -> {:ok, ciphertext, :noise} end,
+        decode_client: fn <<seq>>, _opts -> {:ok, client_msg("c#{seq}", seq)} end,
+        event_router: fn _event, _context, _opts -> :ok end,
+        run_request: fn job ->
+          pid = spawn(fn -> receive(do: (:run -> job.())) end)
+          send(test_pid, {:launched, pid})
+          {:ok, pid}
+        end,
+        encode_server: fn "error", payload, 1, <<>>, 1 ->
+          assert payload["code"] == "request_failed"
+          send(test_pid, {:error_message, payload["message"]})
+          {:ok, "error-frame"}
+        end,
+        encrypt: fn :noise, "error-frame" -> {:ok, "encrypted-error", :noise} end
+      })
+
+    assert {:ok, state} = SocketHandler.handle_in({<<1>>, opcode: :binary}, state)
+    assert {:ok, state} = SocketHandler.handle_in({<<2>>, opcode: :binary}, state)
+    assert_receive {:launched, worker}
+
+    Process.exit(worker, {:badarg, huge_stacktrace()})
+    assert_receive {:DOWN, _ref, :process, ^worker, _reason} = down
+
+    assert {:push, {:binary, "encrypted-error"}, next} = SocketHandler.handle_info(down, state)
+    assert_receive {:error_message, message}
+    assert String.length(message) <= 512
+
+    # The queue keeps draining after the failure.
+    assert_receive {:launched, _next_worker}
+    assert next.pending_requests == []
+  end
+
+  test "a full request backlog is refused loudly instead of growing without bound" do
+    worker = spawn(fn -> receive(do: (:stop -> :ok)) end)
+    on_exit(fn -> send(worker, :stop) end)
+
+    {:ok, state} =
+      SocketHandler.init(%{
+        phase: :ready,
+        device_id: "paired-device",
+        noise: :noise,
+        negotiated_version: 1,
+        authorize_socket: fn _registry, "paired-device", _pid -> :ok end,
+        decrypt: fn :noise, ciphertext -> {:ok, ciphertext, :noise} end,
+        decode_client: fn <<seq>>, _opts -> {:ok, client_msg("c#{seq}", seq)} end,
+        event_router: fn _event, _context, _opts -> :ok end,
+        run_request: fn _job -> {:ok, worker} end,
+        encode_server: fn "error", payload, 1, <<>>, 1 ->
+          assert payload["code"] == "request_backlog_full"
+          {:ok, "error-frame"}
+        end,
+        encrypt: fn :noise, "error-frame" -> {:ok, "encrypted-error", :noise} end
+      })
+
+    state =
+      Enum.reduce(1..33, state, fn seq, state ->
+        assert {:ok, next} = SocketHandler.handle_in({<<seq>>, opcode: :binary}, state)
+        next
+      end)
+
+    assert length(state.pending_requests) == 32
+
+    assert {:push, {:binary, "encrypted-error"}, _next} =
+             SocketHandler.handle_in({<<34>>, opcode: :binary}, state)
+  end
+
   test "a repeated hello emits a typed terminal error and closes" do
     {:ok, state} =
       SocketHandler.init(%{
@@ -525,7 +769,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
         noise: :noise,
         client_seq: 1,
         decrypt: fn :noise, "second-hello" -> {:ok, "second-hello", :noise} end,
-        decode_client: fn "second-hello" ->
+        decode_client: fn "second-hello", _opts ->
           {:ok,
            %{
              type: "hello",
@@ -585,10 +829,11 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
         phase: :ready,
         device_id: "paired-device",
         noise: :noise,
+        authorize_socket: fn _registry, "paired-device", _pid -> :ok end,
         decrypt: fn :noise, ciphertext -> {:ok, ciphertext, :noise} end,
         decode_client: fn
-          "first" -> {:ok, %{type: "ping", version: 1, seq: 1, payload: %{}, bytes: <<>>}}
-          "second" -> {:ok, %{type: "ping", version: 2, seq: 2, payload: %{}, bytes: <<>>}}
+          "first", _opts -> {:ok, %{type: "ping", version: 1, seq: 1, payload: %{}, bytes: <<>>}}
+          "second", _opts -> {:ok, %{type: "ping", version: 2, seq: 2, payload: %{}, bytes: <<>>}}
         end,
         event_router: fn _event, _context, _opts -> :ok end
       })
@@ -620,10 +865,11 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
 
   test "pairing binds the active window before crypto and counts a failed attempt once" do
     test_pid = self()
+    gateway = %{private: <<1::256>>, public: <<2::256>>}
 
     {:ok, state} =
       SocketHandler.init(%{
-        gateway_keypair: :gateway,
+        gateway_keypair: gateway,
         pair_manager: :pair,
         current_pair: fn :pair ->
           {:ok, %{session_id: "pair-session", secret: <<1::256>>}}
@@ -644,6 +890,86 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     assert_receive :failure_recorded
     SocketHandler.terminate(:normal, stopped)
     refute_receive :failure_recorded
+  end
+
+  test "a pending pairing decision answers keepalive ping instead of closing" do
+    test_pid = self()
+
+    {:ok, state} =
+      SocketHandler.init(%{
+        phase: :await_pair_decision,
+        pair_manager: :pair,
+        pairing_session_id: "pair-session",
+        noise: :noise,
+        negotiated_version: 1,
+        client_seq: 1,
+        decrypt: fn :noise, "ping" -> {:ok, "ping", :noise1} end,
+        decode_client: fn "ping", _opts ->
+          {:ok, %{type: "ping", version: 1, seq: 2, payload: %{}, bytes: <<>>}}
+        end,
+        encode_server: fn "pong", %{}, 1, <<>>, 1 -> {:ok, "pong-frame"} end,
+        encrypt: fn :noise1, "pong-frame" -> {:ok, "encrypted-pong", :noise2} end,
+        record_pair_failure: fn :pair, "pair-session" ->
+          send(test_pid, :failure_recorded)
+          {:ok, 1}
+        end
+      })
+
+    assert {:push, {:binary, "encrypted-pong"}, next} =
+             SocketHandler.handle_in({"ping", opcode: :binary}, state)
+
+    assert next.phase == :await_pair_decision
+    assert next.client_seq == 2
+    assert next.server_seq == 1
+    refute_received :failure_recorded
+  end
+
+  test "a pending pairing decision still refuses any other event" do
+    {:ok, state} =
+      SocketHandler.init(%{
+        phase: :await_pair_decision,
+        pair_manager: :pair,
+        pairing_session_id: "pair-session",
+        noise: :noise,
+        negotiated_version: 1,
+        client_seq: 1,
+        decrypt: fn :noise, "early" -> {:ok, "early", :noise1} end,
+        decode_client: fn "early", _opts ->
+          {:ok,
+           %{
+             type: "msg",
+             version: 1,
+             seq: 2,
+             payload: %{"client_msg_id" => "c1", "profile_id" => "main", "text" => "hi"},
+             bytes: <<>>
+           }}
+        end,
+        record_pair_failure: fn :pair, "pair-session" -> {:ok, 1} end
+      })
+
+    assert {:stop, :pairing_decision_pending, {1002, "mobile protocol error"}, _next} =
+             SocketHandler.handle_in({"early", opcode: :binary}, state)
+  end
+
+  test "an idle timeout while the owner decides is not a failed pairing handshake" do
+    test_pid = self()
+
+    {:ok, state} =
+      SocketHandler.init(%{
+        phase: :await_pair_decision,
+        pair_manager: :pair,
+        pairing_session_id: "pair-session",
+        record_pair_failure: fn :pair, "pair-session" ->
+          send(test_pid, :failure_recorded)
+          {:ok, 1}
+        end
+      })
+
+    assert :ok = SocketHandler.terminate(:timeout, state)
+    refute_received :failure_recorded
+
+    assert :ok = SocketHandler.terminate({:error, :closed}, state)
+    assert_received :failure_recorded
   end
 
   test "one-hour Noise lifetime closes cleanly instead of unilateral rekey" do
@@ -716,7 +1042,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
         device_registry: :registry,
         noise: :noise,
         decrypt: fn :noise, "ping" -> {:ok, "ping", :noise} end,
-        decode_client: fn "ping" ->
+        decode_client: fn "ping", _opts ->
           {:ok, %{type: "ping", version: 1, seq: 1, payload: %{}, bytes: <<>>}}
         end,
         authorize_socket: fn :registry, "revoked-device", ^test_pid ->
@@ -762,6 +1088,37 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     assert next.noise == :next_noise
     assert next.server_seq == 5
   end
+
+  defp client_msg(client_msg_id, seq) do
+    %{
+      type: "msg",
+      version: 1,
+      seq: seq,
+      payload: %{
+        "client_msg_id" => client_msg_id,
+        "profile_id" => "main",
+        "text" => "hi",
+        "attach_ids" => []
+      },
+      bytes: <<>>
+    }
+  end
+
+  defp huge_stacktrace do
+    Enum.map(1..40, fn index ->
+      {SomeModule, :some_function, 3, [file: String.duplicate("l", 200), line: index]}
+    end)
+  end
+
+  defp await_release("msg") do
+    receive do
+      :release -> :ok
+    after
+      1_000 -> :ok
+    end
+  end
+
+  defp await_release(_type), do: :ok
 
   defp attach_begin_frame(attach_id, size_bytes) do
     payload = %{

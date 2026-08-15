@@ -30,6 +30,9 @@ defmodule FermixChannels.Mobile.SocketHandler do
   @rekey_after_frames 1_048_576
   @session_lifetime_ms 3_600_000
   @profile_id "main"
+  @queued_events ~w(msg command)
+  @max_pending_requests 32
+  @max_error_message 512
 
   @type state :: map()
 
@@ -65,6 +68,8 @@ defmodule FermixChannels.Mobile.SocketHandler do
     |> Map.put_new(:server_seq, 0)
     |> Map.put_new(:negotiated_version, nil)
     |> Map.put_new(:uploads, MapSet.new())
+    |> Map.put_new(:pending_requests, [])
+    |> Map.put_new(:request_ref, nil)
     |> Map.put_new(:session_started_ms, nil)
     |> Map.put_new(:session_timer_ref, nil)
     |> Map.put_new(:session_timer_token, nil)
@@ -103,8 +108,12 @@ defmodule FermixChannels.Mobile.SocketHandler do
     end
   end
 
-  def handle_in({_ciphertext, opcode: :binary}, %{phase: :await_pair_decision} = state) do
-    protocol_error(:pairing_decision_pending, state)
+  def handle_in({ciphertext, opcode: :binary}, %{phase: :await_pair_decision} = state) do
+    if session_expired?(state) do
+      session_expired(state)
+    else
+      handle_pending_decision(ciphertext, state)
+    end
   end
 
   def handle_in({ciphertext, opcode: :binary}, %{phase: :ready} = state) do
@@ -154,14 +163,25 @@ defmodule FermixChannels.Mobile.SocketHandler do
       else: {:ok, state}
   end
 
+  def handle_info({:mobile_request_failed, reason}, %{phase: :ready} = state) do
+    application_error(reason, state)
+  end
+
+  def handle_info({:DOWN, ref, :process, _worker, reason}, %{request_ref: ref} = state) do
+    case start_next_request(%{state | request_ref: nil}) do
+      {:ok, next} -> finished_request_reply(reason, next)
+      {:error, start_reason, failed_state} -> protocol_error(start_reason, failed_state)
+    end
+  end
+
   def handle_info(_message, state), do: {:ok, state}
 
   @impl true
-  def terminate(_reason, state) do
+  def terminate(reason, state) do
     cancel_session_timer(state)
     detach_socket(state)
     cancel_uploads(state)
-    record_abandoned_pair(state)
+    record_abandoned_pair(reason, state)
     :ok
   end
 
@@ -189,6 +209,7 @@ defmodule FermixChannels.Mobile.SocketHandler do
     |> Map.put_new(:discover, &Discovery.discover/0)
     |> Map.put_new(:media_descriptor, &Store.media_descriptor/2)
     |> Map.put_new(:event_router, &EventRouter.route/3)
+    |> Map.put_new(:run_request, &Task.Supervisor.start_child(FermixCore.TaskSupervisor, &1))
   end
 
   defp begin_handshake(wire, state) do
@@ -310,6 +331,30 @@ defmodule FermixChannels.Mobile.SocketHandler do
     end
   end
 
+  # Owner approval is a human decision that can outlast the client keepalive
+  # interval, so a pairing socket answers `ping` while a decision is pending.
+  # Nothing else is serviced before the decision arrives.
+  defp handle_pending_decision(ciphertext, state) do
+    with {:ok, event, state} <- decrypt_event(ciphertext, state),
+         {:ok, state} <- consume_event(event, state) do
+      pending_decision_reply(event, state)
+    else
+      {:error, reason, failed_state} -> pairing_error(reason, failed_state)
+      {:error, reason} -> pairing_error(reason, state)
+    end
+  end
+
+  defp pending_decision_reply(%{type: "ping"}, state) do
+    case encode_event("pong", %{}, <<>>, state) do
+      {:ok, frame, state} -> {:push, {:binary, frame}, state}
+      {:error, reason, state} -> pairing_error(reason, state)
+      {:error, reason} -> pairing_error(reason, state)
+    end
+  end
+
+  defp pending_decision_reply(_event, state),
+    do: protocol_error(:pairing_decision_pending, state)
+
   defp handle_ready_event(ciphertext, state) do
     with {:ok, event, state} <- decrypt_event(ciphertext, state),
          {:ok, state} <- consume_event(event, state),
@@ -330,8 +375,11 @@ defmodule FermixChannels.Mobile.SocketHandler do
       {:error, {:socket_not_authorized, _reason} = reason, failed_state} ->
         protocol_error(reason, failed_state)
 
-      {:error, reason, state} -> protocol_error(reason, state)
-      {:error, reason} -> protocol_error(reason, state)
+      {:error, reason, state} ->
+        protocol_error(reason, state)
+
+      {:error, reason} ->
+        protocol_error(reason, state)
     end
   end
 
@@ -359,10 +407,7 @@ defmodule FermixChannels.Mobile.SocketHandler do
   end
 
   defp decode_event(plaintext, state) do
-    case :erlang.fun_info(state.decode_client, :arity) do
-      {:arity, 1} -> state.decode_client.(plaintext)
-      {:arity, 2} -> state.decode_client.(plaintext, max_media_bytes: state.max_media_bytes)
-    end
+    state.decode_client.(plaintext, max_media_bytes: state.max_media_bytes)
   end
 
   defp next_sequence(%{seq: seq}, %{client_seq: prior}) when seq == prior + 1, do: :ok
@@ -583,28 +628,98 @@ defmodule FermixChannels.Mobile.SocketHandler do
     end
   end
 
+  defp dispatch_event(%{type: type} = event, state) when type in @queued_events do
+    queue_request(event, state)
+  end
+
   defp dispatch_event(event, state) do
-    context = %{transport: :mobile, authenticated_device_id: state.device_id}
+    case state.event_router.(event, ingress_context(state), router_opts(state)) do
+      :ok -> {:ok, nil, state}
+      {:error, reason} -> {:error, reason, state}
+    end
+  end
+
+  # A `msg` or `command` carries the whole pre-turn pipeline — attachment
+  # resolution, voice-note transcription, the durable append, gateway ingest —
+  # which runs for tens of seconds on a large upload. Inline, it would starve
+  # ping and every control frame on this socket until it finished and the client
+  # would reconnect mid-processing, so it runs in one supervised worker at a
+  # time: per-connection order is preserved, concurrency stays at one, and the
+  # coordinator's liveness fence follows the worker that actually owns
+  # settlement until ingest hands the turn to the queue.
+  defp queue_request(_event, %{pending_requests: pending} = state)
+       when length(pending) >= @max_pending_requests do
+    {:error, :request_backlog_full, state}
+  end
+
+  defp queue_request(event, state) do
+    queued = %{state | pending_requests: state.pending_requests ++ [event]}
+
+    case start_next_request(queued) do
+      {:ok, next} -> {:ok, nil, next}
+      {:error, reason, failed_state} -> {:error, reason, failed_state}
+    end
+  end
+
+  defp start_next_request(%{request_ref: ref} = state) when is_reference(ref), do: {:ok, state}
+  defp start_next_request(%{pending_requests: []} = state), do: {:ok, state}
+
+  defp start_next_request(%{pending_requests: [event | rest]} = state) do
+    case state.run_request.(request_job(event, state)) do
+      {:ok, worker} when is_pid(worker) ->
+        {:ok, %{state | pending_requests: rest, request_ref: Process.monitor(worker)}}
+
+      other ->
+        {:error, {:request_worker_unavailable, other}, state}
+    end
+  end
+
+  # The job carries only what the pipeline needs: the socket's Noise state never
+  # leaves this process, and the reply path is the same registry fanout every
+  # other asynchronous mobile event already uses.
+  defp request_job(event, state) do
+    socket = self()
+    router = state.event_router
+    context = ingress_context(state)
+    opts = router_opts(state)
+
+    fn ->
+      case router.(event, context, opts) do
+        :ok ->
+          :ok
+
+        {:error, reason} ->
+          send(socket, {:mobile_request_failed, reason})
+          :ok
+      end
+    end
+  end
+
+  defp finished_request_reply(:normal, state), do: {:ok, state}
+
+  defp finished_request_reply(reason, state),
+    do: application_error({:request_failed, reason}, state)
+
+  defp ingress_context(state),
+    do: %{transport: :mobile, authenticated_device_id: state.device_id}
+
+  defp router_opts(state) do
+    registry = state.device_registry
 
     event_sink = fn
       {:device, device_id}, logical ->
-        DeviceRegistry.send_device_event(state.device_registry, device_id, logical)
+        DeviceRegistry.send_device_event(registry, device_id, logical)
 
       {:profile, profile_id}, logical ->
-        DeviceRegistry.send_profile_event(state.device_registry, profile_id, logical)
+        DeviceRegistry.send_profile_event(registry, profile_id, logical)
         :ok
     end
 
-    opts = [
+    [
       media_server: state.media_store,
       request_coordinator: state.request_coordinator,
       event_sink: event_sink
     ]
-
-    case state.event_router.(event, context, opts) do
-      :ok -> {:ok, nil, state}
-      {:error, reason} -> {:error, reason, state}
-    end
   end
 
   defp attach_begin_reply(attach_id, status, state) do
@@ -742,18 +857,56 @@ defmodule FermixChannels.Mobile.SocketHandler do
     chunk_binary(rest, size, [chunk | acc])
   end
 
+  # The whole batch is serialized before anything is encrypted. Encrypting as we
+  # go would advance the Noise send cipher for frames a later encoding failure
+  # then discards, and the error frame that replaces them would carry a nonce the
+  # client cannot follow — an undiagnosable desync instead of one typed refusal.
   defp encode_events(events, state) do
-    Enum.reduce_while(events, {:ok, [], state}, fn event, {:ok, frames, state} ->
-      case encode_logical_event(event, state) do
+    case encode_batch(events, state) do
+      {:ok, plaintexts} -> encrypt_batch(plaintexts, state)
+      {:error, reason} -> {:error, reason, state}
+    end
+  end
+
+  defp encode_batch(events, state) do
+    events
+    |> Enum.with_index(state.server_seq + 1)
+    |> Enum.reduce_while({:ok, []}, fn {event, seq}, {:ok, plaintexts} ->
+      case encode_plaintext(event, seq, state) do
+        {:ok, plaintext} -> {:cont, {:ok, [plaintext | plaintexts]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> then(fn
+      {:ok, plaintexts} -> {:ok, Enum.reverse(plaintexts)}
+      {:error, reason} -> {:error, reason}
+    end)
+  end
+
+  defp encrypt_batch(plaintexts, state) do
+    Enum.reduce_while(plaintexts, {:ok, [], state}, fn plaintext, {:ok, frames, state} ->
+      case encrypt_frame(plaintext, state) do
         {:ok, frame, state} -> {:cont, {:ok, [frame | frames], state}}
         {:error, reason, state} -> {:halt, {:error, reason, state}}
-        {:error, reason} -> {:halt, {:error, reason, state}}
       end
     end)
     |> then(fn
       {:ok, frames, state} -> {:ok, Enum.reverse(frames), state}
       error -> error
     end)
+  end
+
+  defp encode_plaintext(event, seq, state) do
+    with {:ok, type, payload, bytes} <- normalize_logical_event(event) do
+      call_encoder(
+        state.encode_server,
+        type,
+        payload,
+        seq,
+        bytes,
+        Map.get(state, :negotiated_version)
+      )
+    end
   end
 
   defp encode_logical_event(event, state) do
@@ -774,20 +927,26 @@ defmodule FermixChannels.Mobile.SocketHandler do
   defp normalize_logical_event(event), do: {:error, {:invalid_server_event, event}}
 
   defp encode_event(type, payload, bytes, state) do
-    seq = state.server_seq + 1
+    encoded =
+      call_encoder(
+        state.encode_server,
+        type,
+        payload,
+        state.server_seq + 1,
+        bytes,
+        Map.get(state, :negotiated_version)
+      )
 
+    case encoded do
+      {:ok, plaintext} -> encrypt_frame(plaintext, state)
+      {:error, reason} -> {:error, reason, state}
+    end
+  end
+
+  defp encrypt_frame(plaintext, state) do
     with {:ok, state} <- maybe_rekey(state, :send),
-         {:ok, plaintext} <-
-           call_encoder(
-             state.encode_server,
-             type,
-             payload,
-             seq,
-             bytes,
-             Map.get(state, :negotiated_version)
-           ),
          {:ok, ciphertext, noise} <- state.encrypt.(state.noise, plaintext) do
-      {:ok, ciphertext, %{state | noise: noise, server_seq: seq}}
+      {:ok, ciphertext, %{state | noise: noise, server_seq: state.server_seq + 1}}
     else
       {:error, reason} -> {:error, reason, state}
     end
@@ -874,7 +1033,7 @@ defmodule FermixChannels.Mobile.SocketHandler do
   end
 
   defp application_error(reason, state) do
-    payload = %{"code" => error_code(reason), "message" => inspect(reason)}
+    payload = %{"code" => error_code(reason), "message" => error_message(reason)}
 
     case encode_event("error", payload, <<>>, state) do
       {:ok, frame, state} -> {:push, {:binary, frame}, state}
@@ -938,10 +1097,15 @@ defmodule FermixChannels.Mobile.SocketHandler do
 
   defp cancel_uploads(_state), do: :ok
 
-  defp record_abandoned_pair(%{phase: :await_pair_decision} = state),
+  # A socket that idled out while the owner was still deciding is a slow human,
+  # not a failed handshake: section 6.2 rate-limits failed handshakes only, so
+  # counting this would spend the pairing window on the owner's own thinking time.
+  defp record_abandoned_pair(:timeout, _state), do: :ok
+
+  defp record_abandoned_pair(_reason, %{phase: :await_pair_decision} = state),
     do: record_pair_failure(state)
 
-  defp record_abandoned_pair(_state), do: :ok
+  defp record_abandoned_pair(_reason, _state), do: :ok
 
   defp record_pair_failure(%{pair_failure_recorded?: true} = state), do: state
 
@@ -993,6 +1157,13 @@ defmodule FermixChannels.Mobile.SocketHandler do
 
   defp session_id do
     16 |> :crypto.strong_rand_bytes() |> Base.url_encode64(padding: false)
+  end
+
+  # A worker exit reason can carry an exception and its stacktrace, and the JSON
+  # header is capped at 4 KiB: an unbounded message would fail to encode and
+  # close the socket instead of reporting the failure it describes.
+  defp error_message(reason) do
+    reason |> inspect(limit: 5, printable_limit: 256) |> String.slice(0, @max_error_message)
   end
 
   defp error_code(reason) when is_atom(reason), do: Atom.to_string(reason)
@@ -1047,8 +1218,11 @@ defmodule FermixChannels.Mobile.SocketHandler do
 
   defp normalize_identity_loader(opts) do
     case Map.pop(opts, :gateway_keypair) do
-      {nil, state} -> Map.put_new(state, :load_gateway_keypair, &load_gateway_keypair/1)
-      {keypair, state} -> Map.put_new(state, :load_gateway_keypair, fn _root -> {:ok, keypair} end)
+      {nil, state} ->
+        Map.put_new(state, :load_gateway_keypair, &load_gateway_keypair/1)
+
+      {keypair, state} ->
+        Map.put_new(state, :load_gateway_keypair, fn _root -> {:ok, keypair} end)
     end
   end
 

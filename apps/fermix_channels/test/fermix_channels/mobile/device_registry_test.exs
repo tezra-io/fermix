@@ -92,7 +92,8 @@ defmodule FermixChannels.Mobile.DeviceRegistryTest do
   } do
     dead = spawn(fn -> :ok end)
     ref = Process.monitor(dead)
-    assert_receive {:DOWN, ^ref, :process, ^dead, :normal}
+    # :noproc when the process already exited before the monitor was set.
+    assert_receive {:DOWN, ^ref, :process, ^dead, reason} when reason in [:normal, :noproc]
 
     assert {:error, :socket_not_alive} = DeviceRegistry.attach(registry, "dead", dead)
 

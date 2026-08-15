@@ -135,44 +135,41 @@ defmodule Fermix.CLI.SetupTest do
     assert Keyword.get(opts, :acp_enabled) == true
   end
 
-  test "mobile and APNs switches route all terminal answers to setup runtime" do
-    parent = self()
-
+  # The mobile channel is feature-flagged with no setup surface: every mobile
+  # switch is unregistered, so each one has to be refused by the ordinary
+  # unknown-flag path rather than quietly parsed and dropped. Looping over the
+  # whole withdrawn set keeps a later re-addition from slipping past one case.
+  test "every withdrawn mobile switch is rejected like any unregistered flag" do
     argv = [
-      "--mobile-enabled",
-      "--mobile-port",
-      "4555",
-      "--mobile-push-enabled",
-      "--mobile-push-team-id",
-      "ABCDE12345",
-      "--mobile-push-key-id",
-      "KEY987",
-      "--mobile-push-key",
-      "p8-fixture",
-      "--mobile-push-topic",
-      "io.tezra.fermix.app",
-      "--mobile-push-environment",
-      "development"
+      ["--mobile-enabled"],
+      ["--no-mobile-enabled"],
+      ["--mobile-port", "4555"],
+      ["--mobile-push-enabled"],
+      ["--mobile-push-team-id", "ABCDE12345"],
+      ["--mobile-push-key-id", "KEY987"],
+      ["--mobile-push-key", "p8-fixture"],
+      ["--mobile-push-topic", "io.tezra.fermix.app"],
+      ["--mobile-push-environment", "development"]
     ]
 
-    assert 0 =
-             Setup.run(argv,
-               standalone?: fn -> true end,
-               display?: fn -> true end,
-               setup_ready?: fn -> false end,
-               runtime: runtime(parent),
-               web_launcher: unexpected_web_launcher(parent)
-             )
+    Enum.each(argv, fn args ->
+      parent = self()
 
-    assert_receive {:runtime, opts}
-    assert Keyword.get(opts, :mobile_enabled) == true
-    assert Keyword.get(opts, :mobile_port) == 4_555
-    assert Keyword.get(opts, :mobile_push_enabled) == true
-    assert Keyword.get(opts, :mobile_push_team_id) == "ABCDE12345"
-    assert Keyword.get(opts, :mobile_push_key_id) == "KEY987"
-    assert Keyword.get(opts, :mobile_push_key) == "p8-fixture"
-    assert Keyword.get(opts, :mobile_push_topic) == "io.tezra.fermix.app"
-    assert Keyword.get(opts, :mobile_push_environment) == "development"
+      stderr =
+        capture_io(:stderr, fn ->
+          assert 1 =
+                   Setup.run(args,
+                     standalone?: fn -> true end,
+                     display?: fn -> true end,
+                     runtime: unexpected_runtime(parent),
+                     web_launcher: unexpected_web_launcher(parent)
+                   )
+        end)
+
+      assert stderr =~ "invalid options", "expected #{inspect(args)} to be refused"
+      refute_received {:runtime, _opts}
+      refute_received {:web_launcher, _opts}
+    end)
   end
 
   test "rejects an unregistered flag next to the acp switch" do

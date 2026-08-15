@@ -186,7 +186,11 @@ defmodule FermixCore.Setup.RuntimeTest do
     path
   end
 
-  test "terminal setup expands mobile and APNs prompts after each enable answer" do
+  # The mobile channel ships feature-flagged: `[fermix_channels.mobile] enabled
+  # = true` in config.toml is the only enable path, so a terminal setup run must
+  # ask nothing about it and must never turn it on or write APNs credentials —
+  # not even when a caller injects the withdrawn answer keys.
+  test "terminal setup asks nothing mobile and never enables the channel" do
     home = tmp_home()
     on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
     FermixTestSupport.SecretWriterStub.reset()
@@ -196,41 +200,39 @@ defmodule FermixCore.Setup.RuntimeTest do
     prompt = fn label ->
       Agent.update(prompt_log, &[label | &1])
 
-      cond do
-        String.starts_with?(label, "Enable local voice companion") -> "no"
-        String.starts_with?(label, "Mobile listener port") -> "4555"
-        String.starts_with?(label, "Enable mobile push") -> "yes"
-        String.starts_with?(label, "APNs team ID") -> "ABCDE12345"
-        String.starts_with?(label, "APNs key ID") -> "KEY987"
-        String.starts_with?(label, "APNs .p8 private key") -> "p8-fixture"
-        String.starts_with?(label, "APNs bundle topic") -> "io.tezra.fermix.app"
-        String.starts_with?(label, "APNs environment") -> "development"
-        true -> ""
-      end
+      if String.starts_with?(label, "Enable local voice companion"), do: "no", else: ""
     end
 
     {puts, _collector} = puts_collector()
 
     assert :ok =
-             Runtime.run([mobile_enabled: true, skip_probe: true],
+             Runtime.run(
+               [
+                 mobile_enabled: true,
+                 mobile_port: 4_555,
+                 mobile_push_enabled: true,
+                 mobile_push_team_id: "ABCDE12345",
+                 mobile_push_key: "p8-fixture",
+                 mobile_push_topic: "io.tezra.fermix.app",
+                 skip_probe: true
+               ],
                puts: puts,
                prompt: prompt
              )
 
     labels = Agent.get(prompt_log, &Enum.reverse/1)
-    assert Enum.any?(labels, &String.starts_with?(&1, "Mobile listener port"))
-    assert Enum.any?(labels, &String.starts_with?(&1, "Enable mobile push"))
-    assert Enum.any?(labels, &String.starts_with?(&1, "APNs .p8 private key"))
+    refute Enum.any?(labels, &(String.downcase(&1) =~ "mobile"))
+    refute Enum.any?(labels, &(String.downcase(&1) =~ "apns"))
 
     assert {:ok, snapshot} = ConfigStore.load_runtime_config()
     mobile = snapshot.fermix_channels |> Keyword.fetch!(:mobile)
-    push = Keyword.fetch!(mobile, :push)
-    assert Keyword.get(mobile, :enabled) == true
-    assert Keyword.get(mobile, :port) == 4_555
-    assert Keyword.get(push, :enabled) == true
-    assert Keyword.get(push, :topic) == "io.tezra.fermix.app"
-    assert Keyword.get(push, :environment) == "development"
-    assert Keyword.get(push, :key) == "p8-fixture"
+    assert Keyword.get(mobile, :enabled) == false
+    refute Keyword.get(mobile, :port) == 4_555
+
+    contents = File.read!(ConfigStore.path())
+    refute contents =~ "ABCDE12345"
+    refute contents =~ "p8-fixture"
+    refute contents =~ "io.tezra.fermix.app"
   end
 
   test "runtime config file raises when bootstrap returns an error" do

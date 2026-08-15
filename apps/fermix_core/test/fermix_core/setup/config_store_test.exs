@@ -1588,6 +1588,8 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     invalid_configs = [
       {[port: 0], ~r/mobile.port/},
       {[mode: :gateway], ~r/mobile.mode/},
+      {[bind: "0.0.0"], ~r/mobile.bind/},
+      {[bind: "localhost"], ~r/mobile.bind/},
       {[max_media_bytes: -1], ~r/mobile.max_media_bytes/},
       {[media_store_max_bytes: 0], ~r/mobile.media_store_max_bytes/},
       {[push: [environment: "staging"]], ~r/mobile.push.environment/}

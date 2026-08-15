@@ -23,6 +23,11 @@ defmodule FermixChannels.Mobile.RequestCoordinatorTest do
       send(opts[:test_pid], {:recovery_failed, profile, client_id, attempt, fields})
       {:ok, %{status: "failed", attempt: attempt}}
     end
+
+    def abandon_client_request(profile, client_id, attempt, opts) do
+      send(opts[:test_pid], {:abandoned, profile, client_id, attempt})
+      {:ok, %{status: "accepted", attempt: attempt, runner_epoch: nil}}
+    end
   end
 
   test "serializes acquisition under one random boot epoch" do
@@ -130,6 +135,87 @@ defmodule FermixChannels.Mobile.RequestCoordinatorTest do
     second = RequestCoordinator.epoch(second_server)
     refute first == second
     assert {:ok, <<_::256>>} = Base.url_decode64(second, padding: false)
+  end
+
+  test "a started attempt is released when its acquiring runner dies" do
+    test_pid = self()
+    server = fenced_coordinator(test_pid)
+
+    socket = acquire_from_new_process(server, "crashed", 2, test_pid)
+    assert_received {:started, "main", "crashed", _epoch}
+
+    kill_and_settle(server, socket)
+
+    assert_received {:abandoned, "main", "crashed", 2}
+  end
+
+  test "settlement handoff moves the fence to the process that owns the turn" do
+    test_pid = self()
+    server = fenced_coordinator(test_pid)
+    queue = spawn(fn -> Process.sleep(:infinity) end)
+
+    socket = acquire_from_new_process(server, "handed", 5, test_pid, queue)
+
+    kill_and_settle(server, socket)
+    refute_received {:abandoned, "main", "handed", 5}
+
+    kill_and_settle(server, queue)
+    assert_received {:abandoned, "main", "handed", 5}
+  end
+
+  test "a fence older than the durable claim TTL is collected, not settled" do
+    test_pid = self()
+    server = fenced_coordinator(test_pid, fence_ttl_ms: 0)
+
+    socket = acquire_from_new_process(server, "stale-fence", 7, test_pid)
+
+    send(server, :sweep)
+    _epoch = RequestCoordinator.epoch(server)
+
+    kill_and_settle(server, socket)
+
+    refute_received {:abandoned, "main", "stale-fence", 7}
+  end
+
+  defp fenced_coordinator(test_pid, extra \\ []) do
+    start_supervised!(
+      {RequestCoordinator,
+       [
+         store: StoreStub,
+         store_opts: [test_pid: test_pid],
+         recover?: false,
+         boot_epoch: random_epoch(),
+         name: nil
+       ] ++ extra}
+    )
+  end
+
+  defp acquire_from_new_process(server, client_id, attempt, test_pid, handoff_to \\ nil) do
+    owner =
+      spawn(fn ->
+        {:ok, {:started, _row}} =
+          RequestCoordinator.acquire(server, "main", client_id, attempt: attempt)
+
+        if handoff_to do
+          :ok = RequestCoordinator.handoff(server, "main", client_id, attempt, handoff_to)
+        end
+
+        send(test_pid, {:acquired, self()})
+        Process.sleep(:infinity)
+      end)
+
+    assert_receive {:acquired, ^owner}
+    owner
+  end
+
+  # Kill the fenced process and block until the coordinator has drained the
+  # resulting `:DOWN`, so the assertion never races the fence.
+  defp kill_and_settle(server, pid) do
+    ref = Process.monitor(pid)
+    Process.exit(pid, :kill)
+    assert_receive {:DOWN, ^ref, :process, ^pid, :killed}
+    _epoch = RequestCoordinator.epoch(server)
+    :ok
   end
 
   defp random_epoch do

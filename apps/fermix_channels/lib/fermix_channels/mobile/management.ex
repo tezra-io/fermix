@@ -15,6 +15,7 @@ defmodule FermixChannels.Mobile.Management do
   alias FermixChannels.Mobile.MdnsAdvertiser
   alias FermixChannels.Mobile.PairManager
   alias FermixChannels.Mobile.Push.Config, as: PushConfig
+  alias FermixChannels.Mobile.Supervisor, as: MobileSupervisor
 
   @max_wait_ms 120_000
 
@@ -164,7 +165,8 @@ defmodule FermixChannels.Mobile.Management do
     config = Keyword.get(opts, :config, Application.get_env(:fermix_channels, :mobile, []))
     store = Keyword.get(opts, :device_store, DeviceStore)
 
-    with {:ok, candidates} <- discover(opts),
+    with :ok <- require_started(opts, store),
+         {:ok, candidates} <- discover(opts),
          {:ok, devices} <- invoke(opts, :list_devices, &DeviceStore.list/1, [store]) do
       port = Keyword.get(config, :port, 4_031)
       addresses = Enum.map(candidates, & &1.address)
@@ -190,12 +192,24 @@ defmodule FermixChannels.Mobile.Management do
   @spec health(keyword()) :: {:ok, map()} | {:error, term()}
   def health(opts) when is_list(opts) do
     config = Keyword.get(opts, :config, Application.get_env(:fermix_channels, :mobile, []))
+    store = Keyword.get(opts, :device_store, DeviceStore)
 
     with :ok <- require_enabled(config),
+         :ok <- require_started(opts, store),
          :ok <- require_listener(opts),
          :ok <- require_identity(opts),
          {:ok, count} <- paired_device_count(opts) do
       {:ok, %{listener: :ready, identity: :ready, paired_devices: count}}
+    end
+  end
+
+  # A refused trust store keeps the whole mobile subtree from starting, so every
+  # probe below would report processes that were never meant to run. Name the
+  # boot refusal instead of the `:noproc` it causes.
+  defp require_started(opts, store) do
+    case Keyword.get(opts, :refusal, &MobileSupervisor.refusal/1).(store) do
+      :none -> :ok
+      {:error, reason} -> {:error, {:mobile_surface_refused, reason}}
     end
   end
 

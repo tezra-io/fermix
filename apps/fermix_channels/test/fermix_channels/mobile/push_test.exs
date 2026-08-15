@@ -1,7 +1,7 @@
 defmodule FermixChannels.Mobile.PushTest do
   use ExUnit.Case, async: false
 
-  import ExUnit.CaptureLog, only: [capture_log: 1]
+  import ExUnit.CaptureLog, only: [capture_log: 1, with_log: 1]
 
   require Logger
 
@@ -11,6 +11,7 @@ defmodule FermixChannels.Mobile.PushTest do
   alias Pigeon.APNS.Notification
 
   @nonce <<0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11>>
+  @push_vectors_path Application.app_dir(:fermix_core, "priv/mobile/push_vectors.json")
 
   setup_all do
     assert {:ok, _started} = Application.ensure_all_started(:telemetry)
@@ -28,6 +29,50 @@ defmodule FermixChannels.Mobile.PushTest do
     assert byte_size(gateway_key) == 32
 
     refute gateway_key == :crypto.compute_key(:ecdh, device_public, gateway_private, :x25519)
+  end
+
+  # The Swift Notification Service Extension is written against the exported
+  # vector and nothing else, so the derivation and the payload have to be pinned
+  # by material this repository did not compute with the same code — otherwise
+  # both ends agree only because they are the same implementation.
+  test "the exported push vector pins the derivation and the payload byte for byte" do
+    document = @push_vectors_path |> File.read!() |> Jason.decode!()
+    vector = document["vector"]
+
+    assert document["kdf"] =~ "fermix-push-v1"
+    assert document["reference"] =~ "Independent"
+
+    gateway_private = hex(vector["gateway_static_private"])
+    gateway_public = hex(vector["gateway_static_public"])
+    device_private = hex(vector["device_static_private"])
+    device_public = hex(vector["device_static_public"])
+    salt = hex(vector["apns_key_salt"])
+    nonce = hex(vector["nonce"])
+    push_key = hex(vector["push_key"])
+
+    assert device_public(gateway_private) == gateway_public
+    assert device_public(device_private) == device_public
+
+    assert {:ok, ^push_key} = Push.derive_key(gateway_private, device_public, salt)
+    assert {:ok, ^push_key} = Push.derive_key(device_private, gateway_public, salt)
+
+    device = device("device-vector", device_public, salt, "vector-token")
+
+    assert {:ok, notification} =
+             Push.build_notification(
+               device,
+               gateway_private,
+               vector["profile_id"],
+               vector["preview_text"],
+               "io.tezra.fermix",
+               nonce_fun: fn 12 -> nonce end
+             )
+
+    assert notification.payload == vector["payload"]
+
+    fx = vector["payload"]["fx"]
+    assert Base.decode64!(fx["c"]) == hex(vector["sealed"])
+    assert decrypt_raw(push_key, fx["n"], fx["c"]) == vector["inner_plaintext"]
   end
 
   test "push config inspection omits the APNs private key" do
@@ -361,6 +406,27 @@ defmodule FermixChannels.Mobile.PushTest do
     assert wrong_type_result == {:error, {:invalid_preview_text, :not_binary}}
   end
 
+  test "a raising dependency is reported with its exception type and stacktrace" do
+    {result, log} =
+      with_log(fn ->
+        Push.notify("main", 1, "preview",
+          config: valid_config(),
+          profile_connected: fn _ -> {:ok, false} end,
+          read_frontier: fn _ -> {:ok, 0} end,
+          list_devices: fn -> raise KeyError, key: :registered_devices, term: %{} end,
+          load_identity: fn -> flunk("a raising dependency continued the delivery") end,
+          dispatcher: fn _, _ -> flunk("a raising dependency dispatched") end
+        )
+      end)
+
+    assert {:error, {:push_dependency_exception, :list_devices, KeyError, message}} = result
+    assert message =~ ":registered_devices"
+
+    assert log =~ "mobile push dependency :list_devices raised"
+    assert log =~ "KeyError"
+    assert log =~ "push_test.exs"
+  end
+
   defp notify_with_dispatcher(device, gateway_private, dispatcher) do
     Push.notify("main", 52, "private preview",
       config: valid_config(),
@@ -409,7 +475,13 @@ defmodule FermixChannels.Mobile.PushTest do
     public
   end
 
+  defp hex(value), do: Base.decode16!(value, case: :lower)
+
   defp decrypt_preview(key, nonce_b64, ciphertext_b64) do
+    key |> decrypt_raw(nonce_b64, ciphertext_b64) |> Jason.decode!()
+  end
+
+  defp decrypt_raw(key, nonce_b64, ciphertext_b64) do
     nonce = Base.decode64!(nonce_b64)
     ciphertext_and_tag = Base.decode64!(ciphertext_b64)
     encrypted_size = byte_size(ciphertext_and_tag) - 16
@@ -424,6 +496,5 @@ defmodule FermixChannels.Mobile.PushTest do
       tag,
       false
     )
-    |> Jason.decode!()
   end
 end

@@ -12,6 +12,36 @@ defmodule FermixChannels.Mobile.MdnsAdvertiserTest do
     assert MdnsAdvertiser.status(advertiser) == :disabled
   end
 
+  test "supervisor-driven shutdown removes the service and releases the responder" do
+    test_pid = self()
+
+    opts = [
+      name: nil,
+      enabled: true,
+      port: 4_031,
+      host_label: "fermix-host",
+      start_mdns: fn -> {:ok, [:mdns_lite]} end,
+      add_service: fn _service -> :ok end,
+      remove_service: fn id ->
+        send(test_pid, {:removed, id})
+        :ok
+      end,
+      stop_mdns: fn ->
+        send(test_pid, :stopped)
+        :ok
+      end
+    ]
+
+    assert {:ok, parent} =
+             Supervisor.start_link([{MdnsAdvertiser, opts}], strategy: :one_for_one)
+
+    on_exit(fn -> if Process.alive?(parent), do: Process.exit(parent, :shutdown) end)
+    assert :ok = Supervisor.stop(parent)
+
+    assert_receive {:removed, :fermix_mobile}
+    assert_receive :stopped
+  end
+
   test "publishes only version and host label and removes its service on shutdown" do
     test_pid = self()
 

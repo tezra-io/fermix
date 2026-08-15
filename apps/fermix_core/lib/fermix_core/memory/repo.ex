@@ -1246,6 +1246,24 @@ defmodule FermixCore.Memory.Repo do
     call({:settle_mobile_client_request, selector, client_msg_id, status, fields, now}, opts)
   end
 
+  @spec abandon_mobile_client_request(
+          mobile_profile_selector(),
+          String.t(),
+          non_neg_integer(),
+          DateTime.t(),
+          keyword()
+        ) :: {:ok, mobile_client_request_row()} | {:error, term()}
+  def abandon_mobile_client_request(
+        selector,
+        client_msg_id,
+        attempt,
+        %DateTime{} = now,
+        opts \\ []
+      )
+      when is_map(selector) and is_binary(client_msg_id) and is_integer(attempt) and attempt >= 0 do
+    call({:abandon_mobile_client_request, selector, client_msg_id, attempt, now}, opts)
+  end
+
   @spec append_mobile_client_output(
           mobile_profile_selector(),
           String.t(),
@@ -2521,6 +2539,19 @@ defmodule FermixCore.Memory.Repo do
     reply =
       with_connection(state, fn conn ->
         MobileSql.settle_request(conn, selector, client_msg_id, status, fields, now)
+      end)
+
+    {:reply, reply, state}
+  end
+
+  def handle_call(
+        {:abandon_mobile_client_request, selector, client_msg_id, attempt, now},
+        _from,
+        state
+      ) do
+    reply =
+      with_connection(state, fn conn ->
+        MobileSql.abandon_request(conn, selector, client_msg_id, attempt, now)
       end)
 
     {:reply, reply, state}

@@ -326,6 +326,136 @@ defmodule FermixCore.Mobile.StoreTest do
     assert DateTime.compare(replacement.claimed_at, expired_at) == :eq
   end
 
+  test "a re-claim after expiry resumes the attempt sequence above stale outputs", %{repo: repo} do
+    assert {:ok, {:claimed, %{attempt: 0}}} = claim_request(repo, "client-resend")
+
+    assert {:ok, {:started, %{attempt: 1}}} =
+             Store.start_client_request(
+               "main",
+               "client-resend",
+               "boot-a",
+               store_opts(repo, now: at(1))
+             )
+
+    assert {:ok, {:created, stale}} =
+             Store.append_client_output(
+               "main",
+               "client-resend",
+               1,
+               "text:final",
+               %{content: "first generation", kind: "text"},
+               store_opts(repo, now: at(2))
+             )
+
+    expired_at = at(@day_seconds)
+
+    assert {:ok, {:claimed, reclaimed}} =
+             Store.claim_client_request(
+               "main",
+               "client-resend",
+               "msg",
+               %{"content" => "same"},
+               store_opts(repo, now: expired_at)
+             )
+
+    assert reclaimed.attempt == 1
+
+    assert {:ok, {:started, %{attempt: 2}}} =
+             Store.start_client_request(
+               "main",
+               "client-resend",
+               "boot-b",
+               store_opts(repo, now: DateTime.add(expired_at, 1, :second))
+             )
+
+    assert {:ok, {:created, fresh}} =
+             Store.append_client_output(
+               "main",
+               "client-resend",
+               2,
+               "text:final",
+               %{content: "second generation", kind: "text"},
+               store_opts(repo, now: DateTime.add(expired_at, 2, :second))
+             )
+
+    assert fresh.server_seq == stale.server_seq + 1
+    assert fresh.content == "second generation"
+
+    assert {:ok, %{result_server_seq: result_seq}} =
+             Store.get_client_request("main", "client-resend", store_opts(repo))
+
+    assert result_seq == fresh.server_seq
+  end
+
+  test "abandoning a running attempt returns the claim to the startable state", %{repo: repo} do
+    assert {:ok, {:claimed, _request}} = claim_request(repo, "client-abandon")
+    assert {:ok, {:started, %{attempt: 1}}} = start_request(repo, "client-abandon")
+
+    assert {:error, :stale_attempt} =
+             Store.abandon_client_request(
+               "main",
+               "client-abandon",
+               2,
+               store_opts(repo, now: at(1))
+             )
+
+    assert {:ok, abandoned} =
+             Store.abandon_client_request(
+               "main",
+               "client-abandon",
+               1,
+               store_opts(repo, now: at(2))
+             )
+
+    assert abandoned.status == "accepted"
+    assert abandoned.attempt == 1
+    assert is_nil(abandoned.runner_epoch)
+
+    assert {:ok, {:started, restarted}} =
+             Store.start_client_request(
+               "main",
+               "client-abandon",
+               "boot-a",
+               store_opts(repo, now: at(3))
+             )
+
+    assert restarted.attempt == 2
+    assert restarted.runner_epoch == "boot-a"
+
+    assert {:error, :stale_attempt} =
+             Store.abandon_client_request(
+               "main",
+               "client-abandon",
+               1,
+               store_opts(repo, now: at(4))
+             )
+  end
+
+  test "a settled request is never abandoned back into flight", %{repo: repo} do
+    assert {:ok, {:claimed, _request}} = claim_request(repo, "client-settled")
+    assert {:ok, {:started, %{attempt: 1}}} = start_request(repo, "client-settled")
+
+    assert {:ok, %{status: "completed"}} =
+             Store.complete_client_request(
+               "main",
+               "client-settled",
+               1,
+               %{},
+               store_opts(repo, now: at(1))
+             )
+
+    assert {:error, :stale_attempt} =
+             Store.abandon_client_request(
+               "main",
+               "client-settled",
+               1,
+               store_opts(repo, now: at(2))
+             )
+
+    assert {:ok, %{status: "completed"}} =
+             Store.get_client_request("main", "client-settled", store_opts(repo))
+  end
+
   test "new request claims require an authenticated device id", %{repo: repo} do
     opts =
       repo
@@ -402,22 +532,32 @@ defmodule FermixCore.Mobile.StoreTest do
     assert {:ok, {:claimed, _request}} = claim_request(repo, "client-recover")
 
     assert {:ok, {:started, first}} =
-             Store.start_client_request("main", "client-recover", "boot-a", store_opts(repo))
+             Store.start_client_request(
+               "main",
+               "client-recover",
+               "boot-a",
+               store_opts(repo, now: at(1))
+             )
 
     assert first.attempt == 1
 
     assert {:ok, []} =
-             Store.recoverable_client_requests("boot-a", store_opts(repo, limit: 20))
+             Store.recoverable_client_requests("boot-a", store_opts(repo, limit: 20, now: at(2)))
 
     assert {:ok, [recoverable]} =
-             Store.recoverable_client_requests("boot-b", store_opts(repo, limit: 20))
+             Store.recoverable_client_requests("boot-b", store_opts(repo, limit: 20, now: at(2)))
 
     assert recoverable.client_msg_id == "client-recover"
     assert recoverable.payload == %{"content" => "same"}
     assert recoverable.authenticated_device_id == "device-a"
 
     assert {:ok, {:started, second}} =
-             Store.start_client_request("main", "client-recover", "boot-b", store_opts(repo))
+             Store.start_client_request(
+               "main",
+               "client-recover",
+               "boot-b",
+               store_opts(repo, now: at(3))
+             )
 
     assert second.attempt == 2
     assert second.runner_epoch == "boot-b"
@@ -429,7 +569,7 @@ defmodule FermixCore.Mobile.StoreTest do
                1,
                "text:final",
                %{content: "stale"},
-               store_opts(repo)
+               store_opts(repo, now: at(4))
              )
 
     assert {:error, :stale_attempt} =
@@ -438,7 +578,7 @@ defmodule FermixCore.Mobile.StoreTest do
                "client-recover",
                1,
                %{error: %{"code" => "late"}},
-               store_opts(repo)
+               store_opts(repo, now: at(4))
              )
 
     assert {:error, :stale_attempt} =
@@ -447,7 +587,7 @@ defmodule FermixCore.Mobile.StoreTest do
                "client-recover",
                1,
                %{content: "late transcript"},
-               store_opts(repo)
+               store_opts(repo, now: at(4))
              )
 
     assert {:ok, %{messages: []}} = Store.history_page("main", store_opts(repo))
@@ -470,7 +610,7 @@ defmodule FermixCore.Mobile.StoreTest do
     end)
 
     assert {:ok, rows} =
-             Store.recoverable_client_requests("boot-a", store_opts(repo, limit: 2))
+             Store.recoverable_client_requests("boot-a", store_opts(repo, limit: 2, now: at(1)))
 
     assert Enum.map(rows, &{&1.profile_id, &1.client_msg_id}) == [
              {"main", "client-a"},
@@ -482,7 +622,12 @@ defmodule FermixCore.Mobile.StoreTest do
     assert {:ok, {:claimed, _request}} = claim_request(repo, "client-output")
 
     assert {:ok, {:started, %{attempt: 1}}} =
-             Store.start_client_request("main", "client-output", "boot-a", store_opts(repo))
+             Store.start_client_request(
+               "main",
+               "client-output",
+               "boot-a",
+               store_opts(repo, now: at(1))
+             )
 
     assert {:ok, {:created, text}} =
              Store.append_client_output(
@@ -491,7 +636,7 @@ defmodule FermixCore.Mobile.StoreTest do
                1,
                "text:final",
                %{content: "answer", kind: "text"},
-               store_opts(repo)
+               store_opts(repo, now: at(2))
              )
 
     assert {:ok, {:existing, same_text}} =
@@ -501,7 +646,7 @@ defmodule FermixCore.Mobile.StoreTest do
                1,
                "text:final",
                %{content: "ignored retry", kind: "text"},
-               store_opts(repo)
+               store_opts(repo, now: at(3))
              )
 
     assert same_text.server_seq == text.server_seq
@@ -514,7 +659,7 @@ defmodule FermixCore.Mobile.StoreTest do
                1,
                "media:#{@media_ref}",
                %{content: "file", kind: "media", media_refs: [media_descriptor()]},
-               store_opts(repo)
+               store_opts(repo, now: at(4))
              )
 
     assert media.server_seq == text.server_seq + 1
@@ -525,7 +670,12 @@ defmodule FermixCore.Mobile.StoreTest do
     assert result_seq == media.server_seq
 
     assert {:ok, {:started, retry}} =
-             Store.start_client_request("main", "client-output", "boot-b", store_opts(repo))
+             Store.start_client_request(
+               "main",
+               "client-output",
+               "boot-b",
+               store_opts(repo, now: at(5))
+             )
 
     assert retry.attempt == 2
 
@@ -536,7 +686,7 @@ defmodule FermixCore.Mobile.StoreTest do
                1,
                "text:final",
                %{content: "stale retry"},
-               store_opts(repo)
+               store_opts(repo, now: at(6))
              )
 
     assert {:ok, {:created, retried_text}} =
@@ -546,7 +696,7 @@ defmodule FermixCore.Mobile.StoreTest do
                2,
                "text:final",
                %{content: "retry answer", kind: "text"},
-               store_opts(repo)
+               store_opts(repo, now: at(7))
              )
 
     assert {:ok, completed} =
@@ -555,7 +705,7 @@ defmodule FermixCore.Mobile.StoreTest do
                "client-output",
                2,
                %{},
-               store_opts(repo)
+               store_opts(repo, now: at(8))
              )
 
     assert completed.status == "completed"
@@ -569,7 +719,12 @@ defmodule FermixCore.Mobile.StoreTest do
     assert {:ok, {:claimed, _request}} = claim_request(repo, "client-response")
 
     assert {:ok, {:started, %{attempt: 1}}} =
-             Store.start_client_request("main", "client-response", "boot-a", store_opts(repo))
+             Store.start_client_request(
+               "main",
+               "client-response",
+               "boot-a",
+               store_opts(repo, now: at(1))
+             )
 
     assert {:ok, {:created, response}} =
              Store.append_client_response(
@@ -577,7 +732,7 @@ defmodule FermixCore.Mobile.StoreTest do
                "client-response",
                1,
                %{content: "done", metadata: %{"turn_id" => "turn-1"}},
-               store_opts(repo)
+               store_opts(repo, now: at(2))
              )
 
     assert response.server_seq == 1
@@ -702,11 +857,16 @@ defmodule FermixCore.Mobile.StoreTest do
                1,
                "text:final",
                %{content: "preview me"},
-               store_opts(repo)
+               store_opts(repo, now: at(1))
              )
 
     assert {:ok, {:started, %{attempt: 2}}} =
-             Store.start_client_request("main", "client-preview", "boot-b", store_opts(repo))
+             Store.start_client_request(
+               "main",
+               "client-preview",
+               "boot-b",
+               store_opts(repo, now: at(2))
+             )
 
     assert {:error, :stale_attempt} =
              Store.attach_timeline_media(
@@ -730,7 +890,7 @@ defmodule FermixCore.Mobile.StoreTest do
                "client-completed",
                1,
                %{},
-               store_opts(repo)
+               store_opts(repo, now: at(1))
              )
 
     assert {:ok, {:completed, %{attempt: 1}}} =
@@ -738,7 +898,7 @@ defmodule FermixCore.Mobile.StoreTest do
                "main",
                "client-completed",
                "boot-b",
-               store_opts(repo)
+               store_opts(repo, now: at(2))
              )
 
     assert {:ok, {:claimed, _request}} = claim_request(repo, "client-failed")
@@ -750,17 +910,22 @@ defmodule FermixCore.Mobile.StoreTest do
                "client-failed",
                :failed,
                %{attempt: 1, error: %{"code" => "gateway_failed"}},
-               store_opts(repo)
+               store_opts(repo, now: at(3))
              )
 
     assert {:ok, {:failed, %{attempt: 1}}} =
-             Store.start_client_request("main", "client-failed", "boot-b", store_opts(repo))
+             Store.start_client_request(
+               "main",
+               "client-failed",
+               "boot-b",
+               store_opts(repo, now: at(4))
+             )
 
     assert {:ok, []} =
-             Store.recoverable_client_requests("boot-b", store_opts(repo, limit: 200))
+             Store.recoverable_client_requests("boot-b", store_opts(repo, limit: 200, now: at(5)))
 
     assert {:error, {:invalid_recovery_limit, 201}} =
-             Store.recoverable_client_requests("boot-b", store_opts(repo, limit: 201))
+             Store.recoverable_client_requests("boot-b", store_opts(repo, limit: 201, now: at(5)))
   end
 
   test "proactive output dedupe inserts one durable row and returns it thereafter", context do
@@ -824,6 +989,10 @@ defmodule FermixCore.Mobile.StoreTest do
       ],
       extra
     )
+  end
+
+  defp at(offset_seconds) when is_integer(offset_seconds) do
+    DateTime.add(@now, offset_seconds, :second)
   end
 
   defp claim_request(repo, client_msg_id) do

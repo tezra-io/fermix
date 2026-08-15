@@ -6,35 +6,78 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **The daemon half of an iPhone companion — the app itself is not released
+  yet.** A new `mobile` channel serves a first-party companion app over your own
+  network — LAN, or a tailnet when both devices are on one — with streaming
+  replies that edit in place, tool activity as it happens, photo and voice-note
+  attachments, the same slash commands the other channels have, and history that
+  re-syncs exactly after a reconnect rather than approximately. Every frame is
+  Noise-encrypted between a key on the phone and a key on your machine, so the
+  conversation is unreadable to anything on the path; nothing is relayed through
+  a server we run, because there is no server. This is the order FermixPet
+  shipped in: the daemon publishes the wire contract first and the app follows in
+  its own release, so until that release there is nothing to connect. Because of
+  that, this is groundwork shipped dormant behind a feature flag rather than a
+  feature you can use today: the channel is disabled by default and is offered
+  nowhere in setup — no wizard step, no CLI flag, no tab on the setup page. The
+  only way to turn it on is to hand-write `enabled = true` under
+  `[fermix_channels.mobile]` in `config.toml` and restart the daemon. Setup will
+  start offering it when the companion app ships.
+- **The pairing ceremony is in place, waiting for the app.** `fermix pair` mints
+  a one-time secret, renders the QR, and waits: the phone shows a six-digit code
+  derived from the handshake itself, your terminal shows the code it derived, and
+  you approve only if they match — so a QR photographed over your shoulder cannot
+  complete the pairing. Outside that window there is no pairing endpoint at all.
+  `fermix devices list` shows what is paired and when it was last seen; `fermix
+  devices revoke <id>` removes the device and drops its live socket in the same
+  breath. All three verbs need the channel flag on; with it off they refuse and
+  tell you which line of `config.toml` to write. There is nothing to scan the QR
+  with until the companion app ships.
+- **Push notifications Apple cannot read, for when the app arrives.** When a turn
+  finishes and no phone is connected, Fermix sends one notification per
+  registered device with the preview encrypted under a key derived at pairing —
+  the phone decrypts it locally, and APNs carries ciphertext only. A message you
+  already read on another device does not notify you again. Push stays off until
+  you supply your own APNs credentials under `[fermix_channels.mobile.push]`, and
+  the signing key lives in the keychain or `FERMIX_APNS_KEY`, never as plaintext
+  in `config.toml`.
+
+### Security
+
+- **The browser tool refuses ambiguous host spellings and non-web documents.**
+  Fermix vetted the host `URI.parse/1` produced while Chrome fetched the host its
+  own parser produced, and the two agree only over ASCII: `%2e` decodes to a dot,
+  a backslash ends the authority (`169.254.169.254\.example.com` read as a
+  subdomain of `example.com` here and reached the metadata endpoint there), a
+  trailing dot is the DNS root anchor (`metadata.google.internal.` named exactly
+  what its undotted spelling names), and IDN mapping rewrites or deletes
+  characters outright. Every one of those was a way past the private-network and
+  internal-name blocks. A host is now accepted only as ASCII letters, digits,
+  `-`, `.` and `_`, or as an address literal, with the trailing root dot removed
+  before classification — so an internationalised domain must be given in its
+  punycode (`xn--`) spelling to navigate, and the refusal says so. Reading page
+  content became an allow-list on the same pass: the tool reads `http`, `https`
+  and `about:blank`, and refuses `file:`, `view-source:`, `filesystem:` and
+  `data:` documents with `read_origin_blocked` — a `blob:` URL is judged by the
+  document it wraps, so `blob:file:///…` and `blob:null/…` are refused with it.
+  The refusal points at the file tools instead of leaving the model to retry
+  against a `file://` tab.
+- **`[fermix_core.browser] allowed_hosts` is the way back in.** Every host the
+  policy refuses can be listed there and is matched before the localhost,
+  internal-suffix and private-range rules, so a refusal is never a dead end. It
+  is the only settable key in that section — the timeouts and caps beside it are
+  internal constants — and it is validated rather than assumed: an entry outside
+  the canonical host alphabet is refused by name (it could never have matched
+  anything), and any other key in the section stops the daemon from booting with
+  a message naming it, instead of sitting in `config.toml` reading as if it were
+  in force.
+
 ## [0.9.0] - 2026-08-13
 
 ### Added
 
-- **Chat with Fermix from your iPhone.** A new `mobile` channel serves a
-  first-party companion app over your own network — LAN, or a tailnet when both
-  devices are on one — with streaming replies that edit in place, tool activity
-  as it happens, photo and voice-note attachments, the same slash commands the
-  other channels have, and history that re-syncs exactly after a reconnect
-  rather than approximately. Every frame is Noise-encrypted between a key on the
-  phone and a key on your machine, so the conversation is unreadable to anything
-  on the path; nothing is relayed through a server we run, because there is no
-  server. The channel ships disabled — turn it on in `fermix setup`, on the
-  setup page, or with `[fermix_channels.mobile] enabled = true`.
-- **Pairing a phone is a QR ceremony you approve in your terminal.** `fermix
-  pair` mints a one-time secret, renders the QR, and waits: the phone shows a
-  six-digit code derived from the handshake itself, your terminal shows the code
-  it derived, and you approve only if they match — so a QR photographed over
-  your shoulder cannot complete the pairing. Outside that window there is no
-  pairing endpoint at all. `fermix devices list` shows what is paired and when
-  it was last seen; `fermix devices revoke <id>` removes the device and drops
-  its live socket in the same breath.
-- **Push notifications Apple cannot read.** When a turn finishes and no phone is
-  connected, Fermix sends one notification per registered device with the
-  preview encrypted under a key derived at pairing — the phone decrypts it
-  locally, and APNs carries ciphertext only. A message you already read on
-  another device does not notify you again. Push is off until you supply your
-  own APNs credentials, and the signing key lives in the keychain or
-  `FERMIX_APNS_KEY`, never in `config.toml`.
 - **Grok 4.6 is available and is now the model a new SpaceXAI setup picks.**
   It joins the catalog with its documented 500k context window, and the xAI
   model list is ordered newest generation first (larger window breaking ties

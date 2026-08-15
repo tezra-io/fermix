@@ -732,6 +732,25 @@ defmodule FermixCore.Setup.DoctorTest do
       assert Doctor.probe_channels(test_pid: self()) == []
       refute_received {:channel_health_checked, :healthy}
     end
+
+    # `fermix doctor --full` runs in a tree-less CLI VM. `Channels.Mobile`'s
+    # health check `GenServer.call`s daemon-only named processes, so probing it
+    # here red-fails a healthy host with a phantom `listener_unavailable`. The
+    # real registry is used deliberately: the exemption has to survive a
+    # registry edit, not just a fixture.
+    test "excludes the daemon-owned mobile listener from live channel probes" do
+      Application.delete_env(:fermix_channels, :channel_registry)
+
+      for channel <- [:telegram, :whatsapp, :discord, :slack, :signal, :acp] do
+        Application.put_env(:fermix_channels, channel, enabled: false)
+      end
+
+      Application.put_env(:fermix_channels, :mobile, enabled: true)
+
+      refute Process.whereis(FermixChannels.Mobile.Listener)
+      refute Enum.any?(Doctor.channel_probe_specs(), &(&1.config_key == :mobile))
+      assert Doctor.probe_channels(test_pid: self()) == []
+    end
   end
 
   defmodule DraftCapableAdapter do

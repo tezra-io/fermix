@@ -28,14 +28,29 @@ defmodule Fermix.CLI.Doctor.MobileCheckTest do
     assert result == %{name: "mobile companion", status: :ok, detail: "disabled"}
   end
 
-  test "enabled mobile fails when its identity files do not exist", %{mobile_dir: mobile_dir} do
+  test "enabled but never paired is a dormant warning, not a doctor failure", %{
+    mobile_dir: mobile_dir
+  } do
+    Application.put_env(:fermix_channels, :mobile, enabled: true)
+
+    result = Checks.mobile(mobile_dir: mobile_dir, client: fn _ -> flunk("no RPC") end)
+
+    assert result.status == :warn
+    assert result.detail =~ "never paired"
+    assert result.detail =~ "fermix pair"
+  end
+
+  test "a half-created identity is refused rather than read as unpaired", %{
+    mobile_dir: mobile_dir
+  } do
+    write_identity_files(mobile_dir)
+    File.rm!(Path.join(mobile_dir, "tls.key"))
     Application.put_env(:fermix_channels, :mobile, enabled: true)
 
     result = Checks.mobile(mobile_dir: mobile_dir, client: fn _ -> flunk("no RPC") end)
 
     assert result.status == :fail
-    assert result.detail =~ "missing"
-    assert result.detail =~ "fermix pair"
+    assert result.detail =~ "tls.key"
   end
 
   test "enabled mobile refuses identity files that are not 0600", %{mobile_dir: mobile_dir} do
@@ -151,6 +166,23 @@ defmodule Fermix.CLI.Doctor.MobileCheckTest do
 
     assert result.status == :warn
     assert result.detail =~ "daemon not running"
+  end
+
+  test "a mobile surface the daemon refused to start names the refusal", %{mobile_dir: mobile_dir} do
+    write_identity_files(mobile_dir)
+    Application.put_env(:fermix_channels, :mobile, enabled: true)
+
+    refusal =
+      ~s({:mobile_surface_refused, {:devices_decode_failed, "/home/o/.fermix/mobile/devices.toml", :bad}})
+
+    client = fn "mobile_status" -> {:ok, %{"status" => "error", "reason" => refusal}} end
+
+    result = Checks.mobile(mobile_dir: mobile_dir, client: client)
+
+    assert result.status == :fail
+    assert result.detail =~ "mobile_surface_refused"
+    assert result.detail =~ "devices.toml"
+    refute result.detail =~ "unexpected daemon reply"
   end
 
   test "listener, mDNS, APNs, and empty-pairing problems are not hidden", %{
