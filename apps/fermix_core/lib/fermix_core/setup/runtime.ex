@@ -64,7 +64,15 @@ defmodule FermixCore.Setup.Runtime do
                    :slack_owner_user_id,
                    :signal_account,
                    :signal_owner_user_id,
-                   :acp_enabled
+                   :acp_enabled,
+                   :mobile_enabled,
+                   :mobile_port,
+                   :mobile_push_enabled,
+                   :mobile_push_team_id,
+                   :mobile_push_key_id,
+                   :mobile_push_key,
+                   :mobile_push_topic,
+                   :mobile_push_environment
                  ]
 
   @type puts_fun :: (String.t() -> any())

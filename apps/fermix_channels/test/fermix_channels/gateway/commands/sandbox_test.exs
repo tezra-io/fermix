@@ -50,6 +50,73 @@ defmodule FermixChannels.Gateway.Commands.SandboxTest do
     assert_receive {:sandbox_reply, "Confirmation failed: :unknown_token"}
   end
 
+  test "deny discards a pending grant without applying it", %{root: root} do
+    token = propose_grant(root, message("/grant path #{root}", user_id: "owner-1"))
+
+    assert :ok = dispatch(message("/deny #{token}", user_id: "owner-1"))
+
+    assert_receive {:sandbox_reply, "Sandbox change denied — the pending grant was discarded."}
+
+    refute PathPolicy.canonical_path(root) in SandboxConfig.current().allowed_roots
+
+    assert :ok = dispatch(message("/confirm #{token}", user_id: "owner-1"))
+    assert_receive {:sandbox_reply, "Confirmation failed: :unknown_token"}
+  end
+
+  test "successful approve and deny report resolution without exposing it on failures", %{
+    root: root
+  } do
+    notify = fn resolution ->
+      send(self(), {:approval_resolution, resolution})
+      :ok
+    end
+
+    approved = propose_grant(root, message("/grant path #{root}", user_id: "owner-1"))
+
+    assert :ok =
+             dispatch_with_context(
+               message("/confirm #{approved}", user_id: "owner-1"),
+               approval_resolution_fn: notify
+             )
+
+    assert_receive {:approval_resolution, %{kind: :sandbox, token: ^approved, outcome: :approved}}
+    assert_receive {:sandbox_reply, "Sandbox updated." <> _rest}
+
+    assert :ok =
+             dispatch_with_context(
+               message("/confirm #{approved}", user_id: "owner-1"),
+               approval_resolution_fn: notify
+             )
+
+    refute_receive {:approval_resolution, _resolution}
+    assert_receive {:sandbox_reply, "Confirmation failed: :unknown_token"}
+
+    denied_root = root <> "-denied"
+    File.mkdir_p!(denied_root)
+    denied = propose_grant(denied_root, message("/grant path #{denied_root}", user_id: "owner-1"))
+
+    assert :ok =
+             dispatch_with_context(
+               message("/deny #{denied}", user_id: "owner-1"),
+               approval_resolution_fn: notify
+             )
+
+    assert_receive {:approval_resolution, %{kind: :sandbox, token: ^denied, outcome: :denied}}
+    assert_receive {:sandbox_reply, "Sandbox change denied" <> _rest}
+  end
+
+  test "wrong-origin deny does not consume the owner's token", %{root: root} do
+    token =
+      propose_grant(root, message("/grant path #{root}", user_id: "owner-1", thread_ts: "t1"))
+
+    assert :ok = dispatch(message("/deny #{token}", user_id: "owner-1", thread_ts: "t2"))
+    assert_receive {:sandbox_reply, "Denial failed: :origin_mismatch"}
+
+    assert :ok = dispatch(message("/deny #{token}", user_id: "owner-1", thread_ts: "t1"))
+
+    assert_receive {:sandbox_reply, "Sandbox change denied — the pending grant was discarded."}
+  end
+
   test "confirmation rejects an owner confirming from a mismatched thread", %{root: root} do
     token =
       propose_grant(root, message("/grant path #{root}", user_id: "owner-1", thread_ts: "t1"))
@@ -195,6 +262,7 @@ defmodule FermixChannels.Gateway.Commands.SandboxTest do
     assert usage =~ "/sandbox env set"
     assert usage =~ "/sandbox commands enable"
     assert usage =~ "/confirm"
+    assert usage =~ "/deny"
   end
 
   test "rejected mutations include a follow-up command" do
@@ -207,22 +275,33 @@ defmodule FermixChannels.Gateway.Commands.SandboxTest do
 
   defp propose_grant(root, message) do
     assert :ok = dispatch(message)
+    assert_receive {:sandbox_approval, %{kind: :sandbox, token: structured_token}}
     assert_receive {:sandbox_reply, confirm_text}
     assert confirm_text =~ "allowed_roots + #{PathPolicy.canonical_path(root)}"
     [token] = Regex.run(~r/\/confirm ([A-Z2-7]{8})/, confirm_text, capture: :all_but_first)
+    assert structured_token == token
     token
   end
 
   defp dispatch(message), do: dispatch_with(message, reply_fn())
 
   defp dispatch_with(message, reply_fn) do
+    dispatch_with_context(message, [], reply_fn)
+  end
+
+  defp dispatch_with_context(message, extras, reply_fn \\ nil) do
+    reply_fn = reply_fn || reply_fn()
+
     Commands.dispatch(
       Commands.parse(message),
       reply_fn,
-      %{
-        conversation_key: {"telegram", "chat-1", :root},
-        authorization: build_authorization(message)
-      }
+      Map.merge(
+        %{
+          conversation_key: {"telegram", "chat-1", :root},
+          authorization: build_authorization(message)
+        },
+        Map.new(extras)
+      )
     )
   end
 
@@ -258,6 +337,11 @@ defmodule FermixChannels.Gateway.Commands.SandboxTest do
     test_pid = self()
 
     fn
+      {:approval_prompt, %{text: text} = spec} ->
+        send(test_pid, {:sandbox_approval, spec})
+        send(test_pid, {:sandbox_reply, text})
+        :ok
+
       {:text, text} ->
         send(test_pid, {:sandbox_reply, text})
         :ok

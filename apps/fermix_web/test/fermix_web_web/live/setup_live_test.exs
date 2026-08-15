@@ -14,6 +14,7 @@ defmodule FermixWebWeb.SetupLiveTest do
   alias FermixCore.Plugins.Status, as: PluginStatus
   alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Setup.ConfigStore
+  alias FermixChannels.Mobile.DeviceStore
   alias FermixTestSupport.DistFetcherStub
   alias FermixTestSupport.DistFixtures
   alias FermixTestSupport.DistVerifierStub
@@ -129,6 +130,7 @@ defmodule FermixWebWeb.SetupLiveTest do
     computer_use_grant_impl = Application.get_env(:fermix_web, :computer_use_grant_impl)
     harness_detector = Application.get_env(:fermix_web, :harness_detector)
     harness = Application.get_env(:fermix_core, :harness, [])
+    mobile = Application.fetch_env(:fermix_channels, :mobile)
     fermix_home = System.get_env("FERMIX_HOME")
 
     tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-live")
@@ -140,6 +142,18 @@ defmodule FermixWebWeb.SetupLiveTest do
     Application.put_env(:fermix_core, :providers, [])
     Application.put_env(:fermix_core, :agent, name: "fermix", provider: :openai)
     Application.delete_env(:fermix_channels, :telegram)
+
+    Application.put_env(:fermix_channels, :mobile,
+      enabled: false,
+      mode: :listener,
+      port: 4031,
+      bind: "0.0.0.0",
+      advertise_mdns: true,
+      streaming: "draft",
+      max_media_bytes: 20_971_520,
+      push: [enabled: false, environment: "production"]
+    )
+
     Application.put_env(:fermix_core, :secret_writer, FermixTestSupport.SecretWriterStub)
     Application.put_env(:fermix_core, :tools, [])
     # Deterministic transcription baseline so the card's default backend/model
@@ -187,6 +201,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       restore_env(:fermix_web, :computer_use_grant_impl, computer_use_grant_impl)
       restore_env(:fermix_web, :harness_detector, harness_detector)
       Application.put_env(:fermix_core, :harness, harness)
+      restore_env(:fermix_channels, :mobile, mobile)
 
       case fermix_home do
         nil -> System.delete_env("FERMIX_HOME")
@@ -1572,7 +1587,7 @@ defmodule FermixWebWeb.SetupLiveTest do
     test "renders a selectable card per channel with status", %{conn: conn} do
       {:ok, _view, html} = live(conn, "/setup?tab=channels")
 
-      for title <- ~w(Telegram WhatsApp Discord Slack Signal) do
+      for title <- ["Telegram", "WhatsApp", "Discord", "Slack", "Signal", "Mobile"] do
         assert html =~ title
       end
 
@@ -1614,6 +1629,112 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       assert html =~ "Channels saved."
       assert Keyword.get(Application.get_env(:fermix_channels, :acp, []), :enabled) == true
+    end
+
+    test "mobile renders listener and nested APNs fields without exposing a stored key", %{
+      conn: conn,
+      tmp_home: tmp_home
+    } do
+      assert {:ok, _device} =
+               DeviceStore.add(
+                 %{
+                   device_id: "018f3f4c-7d9a-7a2b-8c1d-2e3f4a5b6c7d",
+                   name: "Test iPhone",
+                   model: "iPhone",
+                   noise_pk: :binary.copy(<<1>>, 32),
+                   created_at: DateTime.utc_now(),
+                   apns_key_salt: :binary.copy(<<2>>, 32)
+                 },
+                 root: tmp_home
+               )
+
+      Application.put_env(:fermix_channels, :mobile,
+        enabled: true,
+        mode: :listener,
+        port: 4031,
+        push: [
+          enabled: true,
+          team_id: "ABCDE12345",
+          key_id: "KEY987",
+          key: "private-key-must-not-render",
+          topic: "io.tezra.fermix.app",
+          environment: "production"
+        ]
+      )
+
+      {:ok, view, _html} = live(conn, "/setup?tab=channels")
+
+      html =
+        view
+        |> element(~s(button[phx-click="select_channel"][phx-value-channel="mobile"]))
+        |> render_click()
+
+      assert html =~ ~s(name="channels_form[mobile_enabled]")
+      assert html =~ ~s(name="channels_form[mobile_port]")
+      assert html =~ ~s(name="channels_form[mobile_push_enabled]")
+      assert html =~ ~s(name="channels_form[mobile_push_team_id]")
+      assert html =~ ~s(name="channels_form[mobile_push_key_id]")
+      assert html =~ ~s(name="channels_form[mobile_push_key]")
+      assert html =~ ~s(name="channels_form[mobile_push_topic]")
+      assert html =~ ~s(name="channels_form[mobile_push_environment]")
+      assert html =~ "stored - leave blank to keep or paste to replace"
+      assert html =~ "fermix pair"
+      assert html =~ "1 paired device"
+      refute html =~ "private-key-must-not-render"
+    end
+
+    test "mobile settings persist and require APNs credentials only when push is enabled", %{
+      conn: conn
+    } do
+      {:ok, view, _html} = live(conn, "/setup?tab=channels")
+
+      view
+      |> element(~s(button[phx-click="select_channel"][phx-value-channel="mobile"]))
+      |> render_click()
+
+      invalid_html =
+        view
+        |> form("form[phx-submit=\"save_channels\"]",
+          channels_form: %{
+            mobile_enabled: "true",
+            mobile_port: "4031",
+            mobile_push_enabled: "true",
+            mobile_push_team_id: "ABCDE12345",
+            mobile_push_environment: "production"
+          }
+        )
+        |> render_submit()
+
+      assert invalid_html =~ "APNs Key ID, signing key, and topic are required"
+
+      valid_html =
+        view
+        |> form("form[phx-submit=\"save_channels\"]",
+          channels_form: %{
+            mobile_enabled: "true",
+            mobile_port: "4040",
+            mobile_push_enabled: "true",
+            mobile_push_team_id: "ABCDE12345",
+            mobile_push_key_id: "KEY987",
+            mobile_push_key: "private-key-must-not-persist",
+            mobile_push_topic: "io.tezra.fermix.app",
+            mobile_push_environment: "development"
+          }
+        )
+        |> render_submit()
+
+      assert valid_html =~ "Channels saved."
+      assert valid_html =~ "Apply &amp; restart"
+
+      mobile = Application.get_env(:fermix_channels, :mobile, [])
+      push = Keyword.get(mobile, :push, [])
+      assert Keyword.get(mobile, :enabled) == true
+      assert Keyword.get(mobile, :port) == 4040
+      assert Keyword.get(push, :enabled) == true
+      assert Keyword.get(push, :environment) == "development"
+
+      contents = File.read!(ConfigStore.path())
+      refute contents =~ "private-key-must-not-persist"
     end
 
     test "saving a channel keeps that channel selected, not bounced to telegram", %{conn: conn} do

@@ -87,6 +87,13 @@ defmodule FermixCore.ConfigTest do
   end
 
   describe "channel command and ingress ids" do
+    test "declares paired-device ingress as distinct from config allowlists" do
+      assert Config.channel_ingress_authority(:mobile) == :paired_device
+      assert Config.channel_ingress_authority(:telegram) == :config_allowlist
+      assert Config.channel_ingress_authority(:unknown) == :none
+      assert Config.channel_ingress_user_ids(:mobile) == []
+    end
+
     test "defaults ingress allowlist to owner_user_id when channel allowlist is absent" do
       Application.put_env(:fermix_channels, :telegram, owner_user_id: "111")
 

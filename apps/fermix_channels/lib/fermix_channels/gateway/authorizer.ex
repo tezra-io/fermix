@@ -40,9 +40,19 @@ defmodule FermixChannels.Gateway.Authorizer do
   def resolve(%Source{channel: channel} = source) when is_binary(channel) do
     case ChannelRegistry.trust(channel) do
       :local_operator -> {:ok, %Authorization{role: :operator, trust: :operator}}
-      nil -> resolve_sender(source)
+      nil -> resolve_registered_ingress(source, ChannelRegistry.ingress_auth(channel))
     end
   end
+
+  defp resolve_registered_ingress(source, :paired_device), do: resolve_paired_device(source)
+  defp resolve_registered_ingress(source, nil), do: resolve_sender(source)
+
+  defp resolve_paired_device(%Source{transport_auth: {:mobile_device, device_id}})
+       when is_binary(device_id) and device_id != "" do
+    {:ok, %Authorization{role: :operator, trust: :operator}}
+  end
+
+  defp resolve_paired_device(%Source{}), do: {:error, :unauthorized}
 
   defp resolve_sender(%Source{channel_key: nil}), do: {:error, :unknown_channel}
 

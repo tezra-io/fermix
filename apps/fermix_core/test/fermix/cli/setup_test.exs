@@ -135,6 +135,46 @@ defmodule Fermix.CLI.SetupTest do
     assert Keyword.get(opts, :acp_enabled) == true
   end
 
+  test "mobile and APNs switches route all terminal answers to setup runtime" do
+    parent = self()
+
+    argv = [
+      "--mobile-enabled",
+      "--mobile-port",
+      "4555",
+      "--mobile-push-enabled",
+      "--mobile-push-team-id",
+      "ABCDE12345",
+      "--mobile-push-key-id",
+      "KEY987",
+      "--mobile-push-key",
+      "p8-fixture",
+      "--mobile-push-topic",
+      "io.tezra.fermix.app",
+      "--mobile-push-environment",
+      "development"
+    ]
+
+    assert 0 =
+             Setup.run(argv,
+               standalone?: fn -> true end,
+               display?: fn -> true end,
+               setup_ready?: fn -> false end,
+               runtime: runtime(parent),
+               web_launcher: unexpected_web_launcher(parent)
+             )
+
+    assert_receive {:runtime, opts}
+    assert Keyword.get(opts, :mobile_enabled) == true
+    assert Keyword.get(opts, :mobile_port) == 4_555
+    assert Keyword.get(opts, :mobile_push_enabled) == true
+    assert Keyword.get(opts, :mobile_push_team_id) == "ABCDE12345"
+    assert Keyword.get(opts, :mobile_push_key_id) == "KEY987"
+    assert Keyword.get(opts, :mobile_push_key) == "p8-fixture"
+    assert Keyword.get(opts, :mobile_push_topic) == "io.tezra.fermix.app"
+    assert Keyword.get(opts, :mobile_push_environment) == "development"
+  end
+
   test "rejects an unregistered flag next to the acp switch" do
     stderr =
       capture_io(:stderr, fn ->

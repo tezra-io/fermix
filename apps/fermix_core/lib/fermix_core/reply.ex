@@ -23,7 +23,16 @@ defmodule FermixCore.Reply do
   the tap-to-copy `/confirm <token>` command, so no button is a full fallback,
   not a degraded state.
   """
-  @type approval_prompt :: {:approval_prompt, text :: String.t(), token :: String.t()}
+  @type approval_spec :: %{
+          required(:kind) => :sandbox | :soul,
+          required(:text) => String.t(),
+          required(:token) => String.t(),
+          optional(:detail) => String.t() | nil,
+          optional(:ttl_s) => pos_integer()
+        }
+  @type approval_prompt ::
+          {:approval_prompt, text :: String.t(), token :: String.t()}
+          | {:approval_prompt, approval_spec()}
 
   @type outbound ::
           {:text, String.t()} | {:media, media_part()} | {:react, String.t()} | approval_prompt()

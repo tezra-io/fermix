@@ -10,6 +10,31 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Chat with Fermix from your iPhone.** A new `mobile` channel serves a
+  first-party companion app over your own network — LAN, or a tailnet when both
+  devices are on one — with streaming replies that edit in place, tool activity
+  as it happens, photo and voice-note attachments, the same slash commands the
+  other channels have, and history that re-syncs exactly after a reconnect
+  rather than approximately. Every frame is Noise-encrypted between a key on the
+  phone and a key on your machine, so the conversation is unreadable to anything
+  on the path; nothing is relayed through a server we run, because there is no
+  server. The channel ships disabled — turn it on in `fermix setup`, on the
+  setup page, or with `[fermix_channels.mobile] enabled = true`.
+- **Pairing a phone is a QR ceremony you approve in your terminal.** `fermix
+  pair` mints a one-time secret, renders the QR, and waits: the phone shows a
+  six-digit code derived from the handshake itself, your terminal shows the code
+  it derived, and you approve only if they match — so a QR photographed over
+  your shoulder cannot complete the pairing. Outside that window there is no
+  pairing endpoint at all. `fermix devices list` shows what is paired and when
+  it was last seen; `fermix devices revoke <id>` removes the device and drops
+  its live socket in the same breath.
+- **Push notifications Apple cannot read.** When a turn finishes and no phone is
+  connected, Fermix sends one notification per registered device with the
+  preview encrypted under a key derived at pairing — the phone decrypts it
+  locally, and APNs carries ciphertext only. A message you already read on
+  another device does not notify you again. Push is off until you supply your
+  own APNs credentials, and the signing key lives in the keychain or
+  `FERMIX_APNS_KEY`, never in `config.toml`.
 - **Grok 4.6 is available and is now the model a new SpaceXAI setup picks.**
   It joins the catalog with its documented 500k context window, and the xAI
   model list is ordered newest generation first (larger window breaking ties

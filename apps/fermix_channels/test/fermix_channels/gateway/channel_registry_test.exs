@@ -40,6 +40,7 @@ defmodule FermixChannels.Gateway.ChannelRegistryTest do
       assert ChannelRegistry.channel_key("slack") == :slack
       assert ChannelRegistry.channel_key("discord") == :discord
       assert ChannelRegistry.channel_key("signal") == :signal
+      assert ChannelRegistry.channel_key("mobile") == :mobile
     end
 
     test "is nil for local and unknown channels" do
@@ -63,7 +64,16 @@ defmodule FermixChannels.Gateway.ChannelRegistryTest do
       assert ChannelRegistry.trust("cli") == :local_operator
       assert ChannelRegistry.trust("daemon") == :local_operator
       assert ChannelRegistry.trust("telegram") == nil
+      assert ChannelRegistry.trust("mobile") == nil
       assert ChannelRegistry.trust("matrix") == nil
+    end
+  end
+
+  describe "ingress_auth/1" do
+    test "mobile requires paired-device transport proof" do
+      assert ChannelRegistry.ingress_auth("mobile") == :paired_device
+      assert ChannelRegistry.ingress_auth("telegram") == nil
+      assert ChannelRegistry.ingress_auth("matrix") == nil
     end
   end
 
@@ -117,6 +127,24 @@ defmodule FermixChannels.Gateway.ChannelRegistryTest do
       assert ChannelRegistry.transport_children(%{status: :ready}) == []
       assert ChannelRegistry.missing_ingress_authorizations() == [:fake_remote]
     end
+
+    test "a paired-device listener needs no config sender allowlist" do
+      listener =
+        registry_entry(
+          name: "fake_mobile",
+          config_key: :fake_local,
+          child: FakeChild,
+          trust: nil,
+          ingress_auth: :paired_device,
+          transport: :listener
+        )
+
+      register([listener])
+      Application.put_env(:fermix_channels, :fake_local, enabled: true, mode: :listener)
+
+      assert {FakeChild, []} in ChannelRegistry.transport_children(%{status: :ready})
+      assert ChannelRegistry.missing_ingress_authorizations() == []
+    end
   end
 
   describe "remote_channels/0" do
@@ -124,7 +152,9 @@ defmodule FermixChannels.Gateway.ChannelRegistryTest do
       remote = ChannelRegistry.remote_channels()
       # `acp` is `remote?: true` for its lifecycle meanings (§4) even though its
       # transport is a same-user socket, so it belongs to this list.
-      assert Enum.sort(remote) == [:acp, :discord, :signal, :slack, :telegram, :whatsapp]
+      assert Enum.sort(remote) ==
+               [:acp, :discord, :mobile, :signal, :slack, :telegram, :whatsapp]
+
       refute nil in remote
     end
   end

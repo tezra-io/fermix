@@ -64,6 +64,16 @@ defmodule FermixChannels.Gateway.Commands.BackgroundTest do
     }
   end
 
+  defp deferred_context(registry, background_run \\ FakeBackgroundRun) do
+    test_pid = self()
+
+    operator_context(registry, background_run)
+    |> Map.put(:defer_command_fn, fn ->
+      send(test_pid, :command_deferred)
+      fn outcome -> send(test_pid, {:command_terminal, outcome}) end
+    end)
+  end
+
   defp eventually(fun, attempts \\ 100)
   defp eventually(_fun, 0), do: false
 
@@ -101,6 +111,44 @@ defmodule FermixChannels.Gateway.Commands.BackgroundTest do
       assert Enum.any?(replies, &(&1 =~ "summary of: summarize the news"))
 
       assert eventually(fn -> match?([%{command: "background"}], WorkRegistry.list(registry)) end)
+    end
+
+    test "defers before async work and settles only after the final reply", %{registry: registry} do
+      assert :ok =
+               Background.execute(
+                 message("summarize the news"),
+                 reply_fn(self()),
+                 deferred_context(registry)
+               )
+
+      assert_receive :command_deferred
+      assert_receive {:reply, first}, 2_000
+      assert_receive {:reply, second}, 2_000
+
+      final = Enum.find([first, second], &(&1 =~ "summary of: summarize the news"))
+      assert is_binary(final)
+      assert_receive {:command_terminal, :completed}
+    end
+
+    test "a failed async run settles failed after its final reply", %{registry: registry} do
+      import ExUnit.CaptureLog
+
+      capture_log(fn ->
+        assert :ok =
+                 Background.execute(
+                   message("do it"),
+                   reply_fn(self()),
+                   deferred_context(registry, FailingBackgroundRun)
+                 )
+
+        assert_receive :command_deferred
+        assert_receive {:reply, first}, 2_000
+        assert_receive {:reply, second}, 2_000
+
+        final = Enum.find([first, second], &(&1 =~ "failed: :checkout_unavailable"))
+        assert is_binary(final)
+        assert_receive {:command_terminal, {:failed, :checkout_unavailable}}
+      end)
     end
 
     test "refusing at the running cap names the cap" do

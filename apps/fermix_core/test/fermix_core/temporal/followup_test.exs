@@ -279,7 +279,8 @@ defmodule FermixCore.Temporal.FollowupTest do
 
       assert [%{text: text, opts: opts}] = calls(ctx)
       assert text == "Want me to help you pick something out?"
-      assert opts == [message_thread_id: 42]
+      assert Keyword.fetch!(opts, :message_thread_id) == 42
+      assert Keyword.fetch!(opts, :proactive_key) == "temporal:#{row.id}:followup"
     end
 
     test "an over-long reply is clamped to the one-message bound at a grapheme boundary", ctx do
