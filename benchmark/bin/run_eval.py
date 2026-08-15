@@ -92,12 +92,56 @@ def sess(*parts: str) -> str:
     return full[:head] + suffix
 
 
+def _placeholders(run_id: str, trial: int) -> dict[str, str]:
+    return {"__EVAL_RUN_ID__": run_id,
+            "__EVAL_TRIAL__": str(trial),
+            "__EVAL_REPO_ROOT__": REPO_ROOT.replace(os.sep, "/")}
+
+
 def _render_query(query: str, run_id: str, trial: int) -> str:
     if not isinstance(query, str) or not query.strip():
         raise ValueError("eval query must be a non-empty string")
-    return (query.replace("__EVAL_RUN_ID__", run_id)
-            .replace("__EVAL_TRIAL__", str(trial))
-            .replace("__EVAL_REPO_ROOT__", REPO_ROOT.replace(os.sep, "/")))
+    for token, value in _placeholders(run_id, trial).items():
+        query = query.replace(token, value)
+    return query
+
+
+def _render_expect(expect: dict, run_id: str, trial: int) -> dict:
+    """Substitute the run placeholders inside gate values, not just queries.
+
+    A read-back gate is only proof when it pins THIS run. `reply_matches:
+    "marker"` on a suite whose every run leaves a permanent artifact matches a
+    previous run's leftovers just as happily, so the case scores green off work
+    it never did. Rendering the gate lets the fixture write
+    `reply_matches: "marker __EVAL_RUN_ID__"` and mean it.
+
+    `expect` holds both regex gates and exact-match gates, so what is safe to
+    substitute has to hold for BOTH: the run id and the trial are alphanumeric
+    by construction (`new_run_id`, an int), which is a valid regex matching
+    itself and a valid literal. Only the repo root can carry a metacharacter, so
+    only it is escaped — escaping everything would silently break an exact-match
+    gate, and escaping nothing would let a `+` in a path fail to compile.
+    """
+    return {key: _render_gate_value(value, run_id, trial) for key, value in expect.items()}
+
+
+_GATE_SAFE = re.compile(r"[A-Za-z0-9]*\Z")
+
+
+def _render_gate_value(value, run_id: str, trial: int):
+    if isinstance(value, str):
+        for token, literal in _placeholders(run_id, trial).items():
+            if token not in value:
+                continue
+            if not _GATE_SAFE.match(literal):
+                literal = re.escape(literal)
+            value = value.replace(token, literal)
+        return value
+    if isinstance(value, list):
+        return [_render_gate_value(item, run_id, trial) for item in value]
+    if isinstance(value, dict):
+        return {key: _render_gate_value(item, run_id, trial) for key, item in value.items()}
+    return value
 
 
 def _provider_limit_reply(reply: str | None) -> bool:
@@ -617,7 +661,7 @@ def run_operator_case(cfg, client, suite, scn, case, run_id, trial, judge_on):
     # Human response time makes a CLI-equivalent wall clock unavailable. Keep
     # cost/trace gates, but do not invent latency from Opik or the operator wait.
     eff = {"max_cost_usd": cfg.budgets.max_cost_usd}
-    eff.update(case.expect)
+    eff.update(_render_expect(case.expect, run_id, trial))
     wait_s = (case.timeout_ms or 300_000) / 1000.0
 
     rec = {"index": 0, "query": message, "session": marker, "status": "error",
@@ -866,9 +910,9 @@ def run_case(cfg, client, suite, scn, case, run_id, trial, judge_on):
     for index, turn in enumerate(case.turns):
         query = _render_query(turn.query, run_id, trial)
         expect = dict(budget)
-        expect.update(turn.expect)
+        expect.update(_render_expect(turn.expect, run_id, trial))
         if index == len(case.turns) - 1:
-            expect.update(case.expect)
+            expect.update(_render_expect(case.expect, run_id, trial))
         transcript.append({"role": "user", "content": query})
         result = driver.drive_query(cfg, session, query, timeout_ms=timeout_ms,
                                     attachments=(case.images if index == 0 else None))

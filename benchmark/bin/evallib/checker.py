@@ -189,8 +189,13 @@ def run_checker(skill_dir: str, spec: dict, scoped_dir: str, reply: str,
     scoped = os.path.realpath(os.path.expanduser(scoped_dir))
     if not os.path.isdir(scoped):
         return CheckerResult(0.0, "", f"checker workspace not found: {scoped}")
-    env = _checker_env(scoped, reply,
-                       os.path.realpath(os.path.expanduser(fermix_home)))
+    # Held to the same standard as the workspace: a checker reading ground truth
+    # out of a FERMIX_EVAL_HOME that does not exist finds nothing and scores the
+    # task 0, which is indistinguishable from the model having failed it.
+    home = os.path.realpath(os.path.expanduser(fermix_home))
+    if not os.path.isdir(home):
+        return CheckerResult(0.0, "", f"checker fermix_home not found: {home}")
+    env = _checker_env(scoped, reply, home)
     try:
         proc = subprocess.run([script], env=env, cwd=scoped, capture_output=True,
                               text=True, timeout=timeout_s)

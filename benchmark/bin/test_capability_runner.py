@@ -712,6 +712,10 @@ _AUTH_REPLIES = [
     "OpenAI Codex authentication failed — check the OpenAI Codex API key in "
     "`fermix setup` and retry.",
     "Authentication failed — run `fermix auth login` from the host and try again.",
+    # Worded as an ACCESS denial, not an authentication failure: re-login cannot
+    # buy a plan tier. Permanent for the run all the same.
+    "SpaceXAI subscription access denied — the Grok plan may not include API "
+    "access. Switch to an API key in `fermix setup`, or check the plan tier.",
 ]
 
 
@@ -727,6 +731,38 @@ def test_is_auth_invalidated_reply_matches_fermix_wordings():
     from evallib import driver
     for r in _AUTH_REPLIES:
         assert driver.is_auth_invalidated_reply(r) is True, r
+
+
+def test_auth_invalidated_covers_every_reply_clause():
+    """Derive the wordings from the live source instead of enumerating them.
+
+    A reply shape the regex misses does not abort the sweep: it banks a
+    near-zero leaderboard row that reads as a model regression, which is the
+    2026-08-06 auth-cliff class this check exists to prevent. `_AUTH_REPLIES`
+    above is hand-copied and a hand-copied list rots — most cheaply by a clause
+    being REWORDED, which no count of clauses can see. So assemble each clause's
+    reply out of turn_runner.ex and require the regex to match it.
+    """
+    import pathlib
+    import re
+
+    from evallib import driver
+    import run_eval
+
+    source = (pathlib.Path(run_eval.REPO_ROOT)
+              / "apps/fermix_core/lib/fermix_core/agents/turn_runner.ex").read_text()
+    # Each clause body is one string expression, possibly `<>`-concatenated and
+    # carrying `#{...}` interpolations of a provider label.
+    clauses = re.findall(r"^  defp auth_reply\(.*?^  end$", source,
+                         re.MULTILINE | re.DOTALL)
+    assert len(clauses) == 7, (
+        f"parsed {len(clauses)} auth_reply clauses, expected 7 — the extraction "
+        "below is stale, not the regex"
+    )
+    for clause in clauses:
+        parts = re.findall(r'"((?:[^"\\]|\\.)*)"', clause)
+        reply = re.sub(r"#\{[^}]*\}", "OpenAI Codex", "".join(parts))
+        assert driver.is_auth_invalidated_reply(reply) is True, reply
 
 
 def test_is_auth_invalidated_reply_rejects_content_mentions_and_limits():

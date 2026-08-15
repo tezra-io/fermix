@@ -40,6 +40,19 @@ defmodule FermixCore.Tools.SnippetSanitizerTest do
     assert SnippetSanitizer.sanitize("open 8 < 9 hours") == "open 8 < 9 hours"
   end
 
+  test "a comparison survives even when a later greater-than appears" do
+    assert SnippetSanitizer.sanitize("kids < 12 free, seniors > 65 half price") ==
+             "kids < 12 free, seniors > 65 half price"
+
+    assert SnippetSanitizer.sanitize("under 5 > 3 and 2 < 4") == "under 5 > 3 and 2 < 4"
+  end
+
+  test "opening, closing, and self-closing tags are all still stripped" do
+    assert SnippetSanitizer.sanitize(~s(<a href="https://x.test/m" class="hl">Menu</a>)) == "Menu"
+    assert SnippetSanitizer.sanitize("Quiet<img src='x.png'/>coffee") == "Quiet coffee"
+    assert SnippetSanitizer.sanitize("<p>Open</p><p>daily</p>") == "Open daily"
+  end
+
   test "a string with nothing to strip is returned unchanged" do
     assert SnippetSanitizer.sanitize("Blue Bottle Coffee") == "Blue Bottle Coffee"
   end

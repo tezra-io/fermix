@@ -23,7 +23,19 @@ class GateResult:
 
 
 _URL_RE = re.compile(r"https?://[^\s\"'<>\\\)\]]+")
-_URL_TRAILING = ".,;:!?"
+_URL_TRAILING = ".,;:!?*_`"
+
+
+def _normalize_url(url: str) -> str:
+    """Trim trailing punctuation and markdown emphasis from a captured URL.
+
+    ONE normalizer for both sides on purpose: `reply_urls_in_evidence` compares
+    by bare membership and nothing downstream repairs a mismatch, so a rule
+    applied to only one side reports a fabricated link on a correct reply. A
+    URL whose own last character is one of these (base64url ids end in `_`)
+    loses it consistently, which membership survives.
+    """
+    return url.rstrip(_URL_TRAILING)
 
 
 def evidence_urls(view: "TurnView", limit: int = 1000) -> list[str]:
@@ -42,7 +54,7 @@ def evidence_urls(view: "TurnView", limit: int = 1000) -> list[str]:
         blob = json.dumps({"i": span.get("input"), "o": span.get("output")},
                           ensure_ascii=False, default=str)
         for url in _URL_RE.findall(blob):
-            url = url.rstrip(_URL_TRAILING)
+            url = _normalize_url(url)
             if url not in seen:
                 seen.add(url)
                 urls.append(url)
@@ -56,7 +68,7 @@ def reply_urls(reply: str) -> list[str]:
     seen: set[str] = set()
     urls: list[str] = []
     for url in _URL_RE.findall(reply):
-        url = url.rstrip(_URL_TRAILING).rstrip("*_`")
+        url = _normalize_url(url)
         if url and url not in seen:
             seen.add(url)
             urls.append(url)

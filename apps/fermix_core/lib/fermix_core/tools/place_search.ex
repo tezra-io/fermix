@@ -77,6 +77,13 @@ defmodule FermixCore.Tools.PlaceSearch do
     "walkable from here"
   ]
 
+  # Each marker matches as a whole phrase only. A bare substring test also fires
+  # on "near memphis" and refuses a plainly named city with a sentence claiming
+  # the query is anchored to the caller — so the alternation is boundary-anchored,
+  # and `(*UCP)` makes those boundaries Unicode-aware.
+  @self_anchored_alternation Enum.map_join(@self_anchored_markers, "|", &Regex.escape/1)
+  @self_anchored_pattern Regex.compile!("(*UCP)\\b(?:#{@self_anchored_alternation})\\b", "u")
+
   @location_required "location_required: this query is anchored to the user's own " <>
                        "position, but no location was supplied. Ask which area to search, " <>
                        "then pass it as `location` or as `latitude`/`longitude`."
@@ -471,9 +478,7 @@ defmodule FermixCore.Tools.PlaceSearch do
   end
 
   defp self_anchored?(query) do
-    downcased = String.downcase(query)
-
-    Enum.any?(@self_anchored_markers, &String.contains?(downcased, &1))
+    Regex.match?(@self_anchored_pattern, String.downcase(query))
   end
 
   defp request(fields, anchor) do

@@ -93,7 +93,10 @@ scenarios:
                 - eden_get_note_markdown
                 - eden_search_workspace_items
                 - eden_list_workspace_items
-              reply_matches: "round-trip marker"
+              # Pinned to THIS run: every run leaves its note permanently, so an
+              # unpinned marker matches a previous run's leftovers and the case
+              # scores green off a write it never made.
+              reply_matches: "round-trip marker __EVAL_RUN_ID__"
 
       # The failures that went unseen were tool errors, not refusals — the agent
       # asked correctly and Eden rejected it. This pins the tool call itself, so
