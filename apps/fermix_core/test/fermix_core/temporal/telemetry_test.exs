@@ -32,7 +32,8 @@ defmodule FermixCore.Temporal.TelemetryTest do
     :superseded,
     :cancelled,
     :event_completed,
-    :scheduler_error
+    :scheduler_error,
+    :followup_skipped
   ]
 
   @allowed_metadata_keys [
@@ -264,6 +265,19 @@ defmodule FermixCore.Temporal.TelemetryTest do
       assert metadata.error_class == "unclassified"
     end
 
+    # §22.7: a follow-up that never starts is a point event on this lifecycle,
+    # and the reason it never started is the whole diagnosis — so it has to be
+    # the derived class, not prose in a log line.
+    test "every follow-up skip reason derives its own class" do
+      for reason <- [:max_children, :supervisor_unavailable, :event_inactive, :event_unflagged] do
+        TemporalTelemetry.emit(:followup_skipped, reminder_id: "rem_1", result: {:error, reason})
+
+        {_measurements, metadata} = await(:followup_skipped)
+        assert metadata.result == :error
+        assert metadata.error_class == Atom.to_string(reason)
+      end
+    end
+
     test "a success carries no error class" do
       TemporalTelemetry.emit(:delivered, result: :ok)
 
@@ -391,7 +405,8 @@ defmodule FermixCore.Temporal.TelemetryTest do
       recurrence_month: nil,
       recurrence_day: nil,
       leap_day_policy: nil,
-      reminder_plan: [%{rule_id: "at_time", kind: :at_occurrence}]
+      reminder_plan: [%{rule_id: "at_time", kind: :at_occurrence}],
+      followup: false
     }
   end
 
@@ -409,7 +424,8 @@ defmodule FermixCore.Temporal.TelemetryTest do
       recurrence_month: 9,
       recurrence_day: 14,
       leap_day_policy: nil,
-      reminder_plan: [%{rule_id: "day_of", kind: :days_before, days: 0, at: ~T[09:00:00]}]
+      reminder_plan: [%{rule_id: "day_of", kind: :days_before, days: 0, at: ~T[09:00:00]}],
+      followup: false
     }
   end
 

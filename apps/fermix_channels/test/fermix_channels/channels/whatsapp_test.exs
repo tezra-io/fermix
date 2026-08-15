@@ -544,9 +544,83 @@ defmodule FermixChannels.Channels.WhatsAppTest do
                WhatsApp.send_message("15551234567", "hello")
     end
 
-    test "rejects text over the WhatsApp Cloud API body cap before send" do
-      assert {:error, {:text_cap_exceeded, 4_097, 4_096}} =
-               WhatsApp.send_message("15551234567", String.duplicate("a", 4_097))
+    # CHANNEL_LONGFORM_PRESENTATION §3.1: a reply over the Cloud API body cap is
+    # split on the shared boundary ladder and delivered as sequential messages.
+    # It is never refused — a long final answer used to be undeliverable here.
+    test "splits text over the WhatsApp Cloud API body cap into sequential sends" do
+      stub_recording_sends(fail_at: nil)
+
+      text = paragraph_fixture(48)
+
+      assert :ok = WhatsApp.send_message("15551234567", text)
+
+      parts = collect_chunks()
+      assert length(parts) == 3
+      assert Enum.all?(parts, &(String.length(&1["body"]) <= 4_096))
+      # Link previews stay off on every chunk, not just the first.
+      assert Enum.all?(parts, &(&1["preview_url"] == false))
+      # Paragraph-boundary cuts: rejoining reproduces the source exactly.
+      assert parts |> Enum.map_join("\n\n", & &1["body"]) == String.trim(text)
+    end
+
+    test "cuts long text on word boundaries, never mid-word" do
+      stub_recording_sends(fail_at: nil)
+
+      text = sentence_fixture(200)
+
+      assert :ok = WhatsApp.send_message("15551234567", text)
+
+      bodies = Enum.map(collect_chunks(), & &1["body"])
+      assert length(bodies) > 1
+      # A chunk that began or ended mid-word would split one source word in two.
+      assert Enum.flat_map(bodies, &String.split/1) == String.split(text)
+    end
+
+    test "the first failing chunk aborts the remaining sends" do
+      stub_recording_sends(fail_at: 2)
+
+      assert {:error, {:http_status, 400}} =
+               WhatsApp.send_message("15551234567", paragraph_fixture(48))
+
+      # Three chunks were due; the send stopped at the failure.
+      assert length(collect_chunks()) == 2
+    end
+
+    test "sends under-cap text as a single unchanged message" do
+      stub_recording_sends(fail_at: nil)
+
+      assert :ok = WhatsApp.send_message("15551234567", "short reply")
+
+      assert collect_chunks() == [%{"body" => "short reply", "preview_url" => false}]
+    end
+
+    # CHANNEL_LONGFORM_PRESENTATION §3.1, S4: WhatsApp styles text with its own
+    # spelling, so a long model reply must arrive both TRANSFORMED and SPLIT —
+    # the two halves have to hold together, because the splitter runs on the
+    # Markdown and the renderer runs on each chunk it produced.
+    test "a long markdown reply arrives transformed and split on section boundaries" do
+      stub_recording_sends(fail_at: nil)
+
+      assert :ok = WhatsApp.send_message("15551234567", markdown_fixture(60))
+
+      bodies = Enum.map(collect_chunks(), & &1["body"])
+      assert length(bodies) > 1
+      assert Enum.all?(bodies, &(String.length(&1) <= 4_096))
+
+      # Transformed: no Markdown syntax survives anywhere in the sequence.
+      assert Enum.all?(bodies, &(not String.contains?(&1, "**")))
+      assert Enum.all?(bodies, &(not String.contains?(&1, "## ")))
+      assert Enum.all?(bodies, &(not String.contains?(&1, "](http")))
+
+      # ... and the WhatsApp forms are actually there, URL intact for autolinking.
+      first = hd(bodies)
+      assert first =~ "*Overview 1*"
+      assert first =~ "dive site 1: https://example.com/site/1"
+      assert first =~ "• bullet 1 alpha"
+
+      # Boundaries stay clean: every message opens on a section heading, so no
+      # chunk stranded one at its tail and none starts mid-sentence.
+      assert Enum.all?(bodies, &String.starts_with?(&1, "*Section "))
     end
 
     test "returns structured rate limit errors when Meta provides Retry-After" do
@@ -577,6 +651,82 @@ defmodule FermixChannels.Channels.WhatsAppTest do
 
       assert {:error, %Req.TransportError{reason: :econnreset}} =
                WhatsApp.send_message("15551234567", "hello")
+    end
+  end
+
+  # -- telemetry --
+
+  # One delivered message is one outbound row (design §8). Before S4 the adapter
+  # emitted a single `count: N` row only when EVERY chunk of a reply landed — so
+  # a reply that half-landed reported nothing at all.
+  describe "outbound telemetry" do
+    defp attach_message_events(handler_id) do
+      :ok =
+        :telemetry.attach(
+          handler_id,
+          [:fermix, :channel, :message],
+          fn event, measurements, metadata, pid ->
+            send(pid, {:telemetry, event, measurements, metadata})
+          end,
+          self()
+        )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+    end
+
+    # Drains the outbound `channel_msg` rows recorded so far, in emission order.
+    defp outbound_rows(acc \\ []) do
+      receive do
+        {:telemetry, [:fermix, :channel, :message], measurements,
+         %{direction: :outbound} = metadata} ->
+          outbound_rows([{measurements, metadata} | acc])
+      after
+        0 -> Enum.reverse(acc)
+      end
+    end
+
+    defp assert_single_message_row({measurements, metadata}) do
+      assert measurements.count == 1
+      assert measurements.duration_us >= 0
+      assert metadata.channel == :whatsapp
+      assert metadata.direction == :outbound
+    end
+
+    test "emits one row per delivered chunk, not one row per reply" do
+      attach_message_events("test-whatsapp-outbound-per-chunk")
+      stub_recording_sends(fail_at: nil)
+
+      assert :ok = WhatsApp.send_message("15551234567", paragraph_fixture(48))
+
+      chunks = collect_chunks()
+      assert length(chunks) == 3
+
+      rows = outbound_rows()
+      assert length(rows) == length(chunks)
+      Enum.each(rows, &assert_single_message_row/1)
+    end
+
+    test "a partial failure leaves truthful rows for the chunks that were delivered" do
+      attach_message_events("test-whatsapp-outbound-partial")
+      stub_recording_sends(fail_at: 2)
+
+      assert {:error, {:http_status, 400}} =
+               WhatsApp.send_message("15551234567", paragraph_fixture(48))
+
+      # Chunk 1 reached the recipient and chunk 2 was rejected: exactly one row,
+      # where the all-or-nothing emission reported none.
+      assert [row] = outbound_rows()
+      assert_single_message_row(row)
+    end
+
+    test "a send that fails on its first chunk emits nothing" do
+      attach_message_events("test-whatsapp-outbound-first-chunk-failed")
+      stub_recording_sends(fail_at: 1)
+
+      assert {:error, {:http_status, 400}} =
+               WhatsApp.send_message("15551234567", "short reply")
+
+      assert outbound_rows() == []
     end
   end
 
@@ -657,6 +807,80 @@ defmodule FermixChannels.Channels.WhatsAppTest do
                  "hub.challenge" => "challenge-value"
                })
     end
+  end
+
+  # -- outbound chunking fixtures --
+
+  # Records every outbound text payload, and with `fail_at:` rejects exactly
+  # that 1-based send so the sequencing after a failure is observable.
+  defp stub_recording_sends(opts) do
+    test_pid = self()
+    fail_at = Keyword.fetch!(opts, :fail_at)
+    counter = :counters.new(1, [])
+
+    Req.Test.stub(:whatsapp, fn conn ->
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
+      :counters.add(counter, 1, 1)
+      send(test_pid, {:whatsapp_chunk, Jason.decode!(body)["text"]})
+      respond_chunk(conn, :counters.get(counter, 1), fail_at)
+    end)
+  end
+
+  defp respond_chunk(conn, index, fail_at) when index == fail_at do
+    conn
+    |> Plug.Conn.put_resp_content_type("application/json")
+    |> Plug.Conn.send_resp(400, Jason.encode!(%{"error" => %{"message" => "re-engagement"}}))
+  end
+
+  defp respond_chunk(conn, _index, _fail_at) do
+    Req.Test.json(conn, %{"messages" => [%{"id" => "wamid.reply"}]})
+  end
+
+  @max_recorded_chunks 32
+
+  defp collect_chunks, do: collect_chunks(@max_recorded_chunks, [])
+
+  defp collect_chunks(0, _acc) do
+    raise "more than #{@max_recorded_chunks} chunk sends recorded"
+  end
+
+  defp collect_chunks(remaining, acc) do
+    receive do
+      {:whatsapp_chunk, part} -> collect_chunks(remaining - 1, [part | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
+  end
+
+  # A model-shaped reply: sectioned, with every inline construct the dialect
+  # rewrites, so the adapter test sees the same text the golden set does.
+  defp markdown_fixture(count) do
+    Enum.map_join(1..count, "\n\n", &fixture_section/1)
+  end
+
+  defp fixture_section(n) do
+    """
+    ## Section #{n}
+
+    **Overview #{n}** covers [dive site #{n}](https://example.com/site/#{n}) and _tides_.
+
+    - bullet #{n} alpha
+    - bullet #{n} bravo\
+    """
+  end
+
+  defp paragraph_fixture(count) do
+    Enum.map_join(1..count, "\n\n", &fixture_paragraph/1)
+  end
+
+  defp fixture_paragraph(n) do
+    "Paragraph #{n}. " <> Enum.map_join(1..20, " ", fn w -> "word-#{n}-#{w}" end) <> "."
+  end
+
+  defp sentence_fixture(count) do
+    Enum.map_join(1..count, " ", fn n ->
+      "Sentence #{n} about alpha bravo charlie delta echo foxtrot golf hotel."
+    end)
   end
 
   defp payload(text, overrides \\ %{}) do

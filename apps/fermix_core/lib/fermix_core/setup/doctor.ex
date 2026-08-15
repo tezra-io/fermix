@@ -29,6 +29,9 @@ defmodule FermixCore.Setup.Doctor do
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Tools.Media.Registry, as: MediaRegistry
+  alias FermixCore.Tools.PlaceSearch
+  alias FermixCore.Tools.PlaceSearch.Brave, as: PlaceBrave
+  alias FermixCore.Tools.SearchCredential
   alias FermixCore.Tools.WebSearch
   alias FermixCore.Transcription
 
@@ -67,6 +70,14 @@ defmodule FermixCore.Setup.Doctor do
           optional(:probe_result) => atom(),
           optional(:result_count) => non_neg_integer()
         }
+  @type place_search_report :: %{
+          :backend => atom(),
+          :credential_present? => boolean(),
+          :advertised? => boolean(),
+          optional(:probe_result) => atom(),
+          optional(:probe_error) => String.t(),
+          optional(:result_count) => non_neg_integer()
+        }
   @type image_report ::
           %{:status => :configured, :backend => atom(), :credential_present? => boolean()}
           | %{status: :unconfigured}
@@ -97,6 +108,20 @@ defmodule FermixCore.Setup.Doctor do
   @mistral_default_base_url "https://api.mistral.ai/v1"
   @command_channels [:telegram, :whatsapp, :discord, :slack, :signal]
   @web_search_probe_query "fermix web search health check"
+  # A landmark, not a category: the place probe is never anchored (it must not
+  # read the owner's saved location), and an unanchored category query can
+  # legitimately return nothing — which would read as a broken probe.
+  @place_probe_query "Eiffel Tower Paris"
+  @place_probe_tags [
+    {"auth_failed", :auth_failed},
+    {"rate_limited", :rate_limited},
+    {"provider_error", :provider_error},
+    {"parser_changed", :parser_changed},
+    {"response_too_large", :response_too_large},
+    {"invalid_query", :invalid_query},
+    {"invalid_location", :invalid_location},
+    {"network", :network}
+  ]
   @default_probe_timeout_ms 5_000
 
   @spec probe_provider(provider(), keyword()) :: {:ok, probe_ok()} | {:error, probe_error()}
@@ -225,6 +250,8 @@ defmodule FermixCore.Setup.Doctor do
           channel: atom(),
           name: String.t(),
           streaming: String.t(),
+          derived: String.t(),
+          explicit?: boolean(),
           capability: :draft_edit | :none
         }
 
@@ -245,21 +272,30 @@ defmodule FermixCore.Setup.Doctor do
   defp streaming_channel_report(%{config_key: key, name: name, adapter: adapter})
        when is_atom(key) do
     case FermixCore.Config.channel(key) do
-      {:ok, config} ->
-        [
-          %{
-            channel: key,
-            name: name,
-            # Mirrors the gateway default (a configured channel streams).
-            streaming: Keyword.get(config, :streaming, "block"),
-            capability: adapter_stream_capability(adapter)
-          }
-        ]
-
-      {:error, :not_configured} ->
-        []
+      {:ok, config} -> [channel_streaming_entry(key, name, config, adapter)]
+      {:error, :not_configured} -> []
     end
   end
+
+  defp channel_streaming_entry(key, name, config, adapter) do
+    capability = adapter_stream_capability(adapter)
+    derived = default_streaming(capability)
+
+    %{
+      channel: key,
+      name: name,
+      streaming: Keyword.get(config, :streaming, derived),
+      derived: derived,
+      explicit?: Keyword.has_key?(config, :streaming),
+      capability: capability
+    }
+  end
+
+  # Mirrors the gateway default (CHANNEL_LONGFORM_PRESENTATION §6, decision
+  # §9.5): a configured channel streams in the best shape it can render —
+  # rotating draft bubbles where it can edit in place, block sends otherwise.
+  defp default_streaming(:draft_edit), do: "draft"
+  defp default_streaming(_capability), do: "block"
 
   defp adapter_stream_capability(adapter) when is_atom(adapter) do
     if Code.ensure_loaded?(adapter) and function_exported?(adapter, :stream_capability, 0) do
@@ -293,7 +329,7 @@ defmodule FermixCore.Setup.Doctor do
   end
 
   defp web_search_probe(module, config, opts) do
-    probe_opts = Keyword.put(config, :context, web_search_probe_context(opts))
+    probe_opts = Keyword.put(config, :context, probe_context(opts))
 
     case module.search(@web_search_probe_query, probe_opts) do
       {:ok, results, _trace} -> %{probe_result: :ok, result_count: length(results)}
@@ -301,7 +337,7 @@ defmodule FermixCore.Setup.Doctor do
     end
   end
 
-  defp web_search_probe_context(opts) do
+  defp probe_context(opts) do
     Enum.reduce([:req_options, :net_resolver], %{}, fn key, acc ->
       case Keyword.get(opts, key) do
         nil -> acc
@@ -319,6 +355,67 @@ defmodule FermixCore.Setup.Doctor do
       true -> :network
     end
   end
+
+  @doc """
+  Reports `place_search` readiness: the shared Brave key, the active `web_search`
+  backend, and whether the tool is advertised (MILESTONE_31 §14.3).
+
+  Offline by default — no network call, whatever the config says. With
+  `full: true` and a present key it runs **one** metered live request against the
+  place endpoint (fixed query, `count: 1`, result discarded) and adds
+  `:probe_result` / `:probe_error` / `:result_count`. Each §10.4 failure kind
+  keeps its own tag, and no probe ever switches provider: there is one adapter
+  and no fallback. Inject `req_options`/`net_resolver` to stub the probe in
+  tests.
+
+  Advertisement is asked of the tool itself so a doctor row and the runtime
+  surface cannot drift; the probe never reads the owner's saved default
+  location (§13.2 — an unattended caller may not, and a health check has no
+  business sending it).
+  """
+  @spec place_search_report(keyword()) :: place_search_report()
+  def place_search_report(opts \\ []) do
+    config = WebSearch.config()
+    {backend, _module} = WebSearch.active_backend(config)
+    present? = match?({:ok, _key}, SearchCredential.brave(config))
+
+    base = %{
+      backend: backend,
+      credential_present?: present?,
+      advertised?: PlaceSearch.advertise?(%{})
+    }
+
+    if Keyword.get(opts, :full, false) and present? do
+      Map.merge(base, place_search_probe(config, opts))
+    else
+      base
+    end
+  end
+
+  defp place_search_probe(config, opts) do
+    probe_opts = Keyword.put(config, :context, probe_context(opts))
+    request = %{query: @place_probe_query, count: 1}
+
+    case PlaceBrave.search(request, probe_opts) do
+      {:ok, places, _trace} ->
+        %{probe_result: :ok, result_count: length(places)}
+
+      {:error, reason, _trace} ->
+        %{probe_result: place_probe_tag(reason), probe_error: reason, result_count: 0}
+    end
+  end
+
+  # The §10.4 tag set is closed, so an unrecognized reason is reported as
+  # `:unknown` rather than folded into a kind it is not; callers print the
+  # reason itself, which always carries its own prefix.
+  defp place_probe_tag(reason) do
+    case Enum.find(@place_probe_tags, fn {prefix, _tag} -> tagged?(reason, prefix) end) do
+      {_prefix, tag} -> tag
+      nil -> :unknown
+    end
+  end
+
+  defp tagged?(reason, prefix), do: String.starts_with?(reason, prefix <> ":")
 
   @doc """
   Reports the active `generate_image` backend and whether its credential is

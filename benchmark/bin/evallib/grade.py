@@ -22,6 +22,59 @@ class GateResult:
     detail: str
 
 
+_URL_RE = re.compile(r"https?://[^\s\"'<>\\\)\]]+")
+_URL_TRAILING = ".,;:!?*_`"
+
+
+def _normalize_url(url: str) -> str:
+    """Trim trailing punctuation and markdown emphasis from a captured URL.
+
+    ONE normalizer for both sides on purpose: `reply_urls_in_evidence` compares
+    by bare membership and nothing downstream repairs a mismatch, so a rule
+    applied to only one side reports a fabricated link on a correct reply. A
+    URL whose own last character is one of these (base64url ids end in `_`)
+    loses it consistently, which membership survives.
+    """
+    return url.rstrip(_URL_TRAILING)
+
+
+def evidence_urls(view: "TurnView", limit: int = 1000) -> list[str]:
+    """Every URL any tool span carried (input or output), deduped in order.
+
+    The single source of truth for the tool-URL inventory: the
+    `reply_urls_in_evidence` gate checks reply links against it, and the judge
+    evidence includes it verbatim (run_eval `_tool_evidence`) so rubric prose
+    and the deterministic gate can never disagree about what the tools
+    returned. Scans ALL tool spans — per-span byte truncation applied later to
+    judge evidence cannot hide a URL from this list.
+    """
+    seen: set[str] = set()
+    urls: list[str] = []
+    for span in view.tool_spans:
+        blob = json.dumps({"i": span.get("input"), "o": span.get("output")},
+                          ensure_ascii=False, default=str)
+        for url in _URL_RE.findall(blob):
+            url = _normalize_url(url)
+            if url not in seen:
+                seen.add(url)
+                urls.append(url)
+            if len(urls) >= limit:
+                return urls
+    return urls
+
+
+def reply_urls(reply: str) -> list[str]:
+    """URLs in a reply, markdown-trimmed, deduped in order."""
+    seen: set[str] = set()
+    urls: list[str] = []
+    for url in _URL_RE.findall(reply):
+        url = _normalize_url(url)
+        if url and url not in seen:
+            seen.add(url)
+            urls.append(url)
+    return urls
+
+
 @dataclass
 class TurnView:
     """Flattened, grade-ready projection of a trace + its spans."""
@@ -314,6 +367,14 @@ def grade(trace: dict, spans: list[dict], expect: dict,
     if "max_tool_calls" in expect:
         n = expect["max_tool_calls"]
         add("max_tool_calls", len(v.tool_spans) <= n, f"<= {n} tool calls (got {len(v.tool_spans)})")
+
+    if expect.get("reply_urls_in_evidence"):
+        inventory = evidence_urls(v)
+        cited = reply_urls(v.reply)
+        missing = [u for u in cited if u not in inventory]
+        add("reply_urls_in_evidence", not missing,
+            f"{len(cited)} reply url(s) vs {len(inventory)} tool-evidence url(s): "
+            f"missing={missing or 'none'}")
 
     if "reply_matches" in expect:
         rx = expect["reply_matches"]

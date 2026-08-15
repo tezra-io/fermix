@@ -131,10 +131,21 @@ the `query` shorthand; multi-turn uses `turns`.
 - `query` (string) — single-turn shorthand; mutually exclusive with `turns`.
 - `turns` (list) — ordered turns sharing one session; each has its own `query`
   and optional per-turn `expect`.
-- `__EVAL_REPO_ROOT__` (query token) — `run_eval.py` replaces this token with the
-  current harness checkout's absolute path before driving a behavioral turn. Use
-  it for repo-read prompts instead of assuming the development daemon's sandbox
-  workspace is this checkout.
+- **Run placeholders** — three tokens `run_eval.py` substitutes before driving a
+  turn, in `query` **and** in every string inside `expect` (at any depth):
+  - `__EVAL_RUN_ID__` — this run's id, unique per invocation.
+  - `__EVAL_TRIAL__` — the 1-based trial number, for `--repeat` runs.
+  - `__EVAL_REPO_ROOT__` — the harness checkout's absolute path. Use it for
+    repo-read prompts instead of assuming the development daemon's sandbox
+    workspace is this checkout.
+
+  Rendering them into `expect` is what lets a **read-back gate pin the run that
+  wrote the artifact**. A suite whose every run leaves something permanent must
+  do this: `reply_matches: "marker __EVAL_RUN_ID__"` proves this run's write,
+  where a bare `marker` matches a previous run's leftovers and scores green off
+  work it never did. The run id and trial substitute verbatim (they are
+  alphanumeric, so they are equally valid in a regex gate and an exact-match
+  one); the repo root is regex-escaped, since a path may carry a `+` or `(`.
 - `drive` (string, optional) — `ask` (default; drives `fermix ask`) or
   `telegram_operator`: the runner prompts the operator to send ONE marked
   message to the dedicated eval Telegram bot, correlates the resulting `telegram:*`
@@ -198,6 +209,7 @@ spans have `metadata.status`).
 | `min_subagent_spawns` | int | ≥ N nested `subagent:<id>` worker spans (fan-out breadth) |
 | `reply_matches` | regex | trace `output.text` matches (Python `re.search`) |
 | `reply_not_matches` | regex | trace `output.text` does NOT match |
+| `reply_urls_in_evidence` | bool | every URL in the reply appears verbatim in the tool-evidence URL inventory (all tool spans' inputs+outputs, deduped; the same inventory the judge receives as `evidence_urls`). The deterministic home of "no invented/rebuilt links" — keep it out of rubrics: a judge asked to verify list membership hedges instead of checking |
 | `main_model_matches` | regex | every main-turn llm span's `model` matches (the default model is used); needs ≥1 main llm span |
 | `subagent_model_matches` | regex | every nested subagent-worker llm span's `model` matches AND ≥1 worker span exists (fails loud if fan-out didn't nest into the trace) |
 | `status` | `ok`/`error` | trace status equals it |

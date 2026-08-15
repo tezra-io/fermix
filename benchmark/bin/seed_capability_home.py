@@ -20,7 +20,11 @@ home's credentials:
 
 The sandbox is always regenerated strict + home-scoped (never copied from the
 dev config, whose allowed_roots escape the home and would fail the runner's
-precondition). Regenerate on every `up`.
+precondition). `<home>/skills` is always included as a sandbox root — skill
+tasks verify their created SKILL.md with raw file reads, and the owner-approval
+detour a denial triggers is unanswerable in an eval — and the skills dir is
+reset on every seed so skills created by a prior sweep's model can't make a
+later fresh `skill_create` fail "already exists". Regenerate on every `up`.
 
 CI / explicit mode (`--provider` + `--model`) skips the dev-home derivation
 entirely: no keychain, no auth.json copy, no `[fermix_core] profile` line. The
@@ -29,7 +33,8 @@ provider's environment variable (config/runtime.exs), so no secret lands on
 disk. Only api-key-env providers (plus keyless ollama) work here; OAuth
 providers need the dev-home derivation. `--allow-root` appends absolute paths
 to the sandbox `allowed_roots` (e.g. the repo checkout for behavioral
-repo-read cases); omit it for capability runs, whose preconditions require [].
+repo-read cases); omit it for capability runs, whose preconditions refuse any
+root outside the home (the always-present `<home>/skills` root is in-home).
 """
 
 from __future__ import annotations
@@ -37,6 +42,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tomllib
@@ -109,7 +115,18 @@ def render_config(
             continue
         if key in blk and blk[key] not in (None, ""):
             lines.append(f'{key} = "{blk[key]}"')
-    roots = ", ".join(json.dumps(root) for root in allowed_roots)
+    # `<home>/skills` is always a sandbox root: it is where the daemon
+    # materializes skills, and the skill tasks verify their created SKILL.md
+    # with raw file reads. Under a workspace-only sandbox that read is denied
+    # -> request_directory_access -> "stop and wait for the owner" — an
+    # approval no eval can answer — so the turn ends before the deliverable
+    # is written and the task scores 0 with nothing wrong in the product
+    # (create_and_confirm_skill, 2026-08-06: 9 of 10 base trials died there).
+    # Same rule as the harness consent below: pre-grant every human-decision
+    # gate, scoped to this throwaway home. The runner precondition tolerates
+    # it — only roots that escape the home are refused.
+    roots = ", ".join(
+        json.dumps(root) for root in (os.path.join(home, "skills"), *allowed_roots))
     lines += ["", "[sandbox]", 'mode = "strict"',
               f'workspace_root = "{workspace}"', f"allowed_roots = [{roots}]", ""]
     # Pre-approve coding agents in the disposable home. Consent is a setup decision
@@ -172,6 +189,26 @@ def copy_oauth_token(home: str, pid: str) -> None:
     os.chmod(dest, 0o600)   # the store refuses to load a world-readable auth.json
 
 
+def reset_skills(home: str) -> None:
+    """Drop `<home>/skills` so every sweep starts from the bundled baseline.
+
+    Skills persist across sweeps (the home is only disposable by convention),
+    so a skill a prior sweep's model created makes every later fresh
+    `skill_create` fail "already exists" (a leftover `skills/eval-echo`
+    poisoned two runs before this reset existed). Removal never loses anything
+    an eval needs: the daemon's SkillRegistry recreates the dir and re-seeds
+    the bundled skills at boot whenever it is empty.
+    """
+    # Recursive delete: re-assert main()'s disposable-home guard here so this
+    # function is safe even if a future caller skips that validation.
+    leaf = os.path.basename(os.path.abspath(home)).lower()
+    if "eval" not in leaf and "e2e" not in leaf:
+        die(f"refusing to reset skills outside an eval home: {home}")
+    skills = os.path.join(home, "skills")
+    if os.path.isdir(skills):
+        shutil.rmtree(skills)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Seed a disposable capability/e2e-eval FERMIX_HOME.")
@@ -231,6 +268,7 @@ def main() -> None:
     os.makedirs(workspace, exist_ok=True)
     if not os.path.isdir(os.path.join(workspace, ".git")):
         subprocess.run(["git", "-C", workspace, "init", "-q"], check=True)
+    reset_skills(home)
 
     with open(os.path.join(home, "config.toml"), "w", encoding="utf-8") as fh:
         fh.write(render_config(home, pid, blk, profile, allowed_roots,

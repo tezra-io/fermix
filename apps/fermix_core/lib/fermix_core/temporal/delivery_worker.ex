@@ -14,7 +14,8 @@ defmodule FermixCore.Temporal.DeliveryWorker do
   remainder means a row was claimed that never should have been — it is settled
   as expired and traced loudly, never sent.
 
-  Settlement is the last thing the worker does before exiting `:normal`:
+  Settlement is the last **ledger** act the worker performs before exiting
+  `:normal`:
 
     * `:ok` → `delivered` at the send time;
     * a retryable reason (`Delivery.Error.retryable?/1`) → `pending` at the §11.4
@@ -24,6 +25,12 @@ defmodule FermixCore.Temporal.DeliveryWorker do
 
   A settlement write that fails is not swallowed: the worker exits abnormally so
   the scheduler's monitor recovers the row rather than leaving it `delivering`.
+
+  One thing follows settlement and touches no ledger state: a `delivered` row
+  whose snapshotted payload carries `followup` asks `Temporal.FollowupSupervisor`
+  for a post-delivery run (§22.4). That request is fire-and-forget in the strong
+  sense — a full, dead, or shutting-down supervisor is logged, traced as a skip,
+  and otherwise ignored, because the flourish may never cost the promise.
   """
 
   use GenServer, restart: :temporary
@@ -34,6 +41,7 @@ defmodule FermixCore.Temporal.DeliveryWorker do
   alias FermixCore.Memory.Repo
   alias FermixCore.Telemetry
   alias FermixCore.Temporal.Delivery
+  alias FermixCore.Temporal.FollowupSupervisor
   alias FermixCore.Temporal.Renderer
   alias FermixCore.Temporal.Telemetry, as: TemporalTelemetry
 
@@ -44,10 +52,11 @@ defmodule FermixCore.Temporal.DeliveryWorker do
   @no_attempt %{text: nil, duration_ms: nil}
 
   @type args :: %{
-          reminder: map(),
-          repo: GenServer.server(),
-          now_fn: (-> DateTime.t()),
-          delivery_opts: keyword()
+          required(:reminder) => map(),
+          required(:repo) => GenServer.server(),
+          required(:now_fn) => (-> DateTime.t()),
+          required(:delivery_opts) => keyword(),
+          optional(:followup_supervisor) => Supervisor.supervisor() | nil
         }
 
   @spec start_link(args()) :: GenServer.on_start()
@@ -113,8 +122,12 @@ defmodule FermixCore.Temporal.DeliveryWorker do
 
   defp settle(state, row, now, :ok, attempt) do
     case Repo.temporal_reminder_delivered(row.id, now, server: state.repo) do
-      {:ok, delivered} -> emit(:delivered, delivered, :ok, attempt)
-      {:error, reason} -> settlement_error(row, "delivered", reason)
+      {:ok, delivered} ->
+        emit(:delivered, delivered, :ok, attempt)
+        request_followup(state, row, attempt.text)
+
+      {:error, reason} ->
+        settlement_error(row, "delivered", reason)
     end
   end
 
@@ -197,6 +210,56 @@ defmodule FermixCore.Temporal.DeliveryWorker do
   defp settlement_error(row, phase, reason) do
     Logger.error("Reminder #{row.id} #{phase} settlement failed: #{inspect(reason)}")
     {:error, reason}
+  end
+
+  # --- the post-delivery follow-up (§22.4) ---------------------------------
+
+  # Absent supervisor means the follow-up rail is not wired into THIS process,
+  # which only ever happens where a test constructs worker args by hand: the
+  # scheduler always threads the running supervisor, so production has one code
+  # path. The flag is read from the row's own snapshotted payload — never from
+  # the event, which the delivery path deliberately never reads.
+  defp request_followup(state, row, text) do
+    case {Map.get(state, :followup_supervisor), row.payload["followup"]} do
+      {nil, _flag} -> :ok
+      {supervisor, true} -> spawn_followup(supervisor, state, row, text)
+      {_supervisor, _unflagged} -> :ok
+    end
+  end
+
+  # `start_child/2` is a `GenServer.call`, so it EXITS against a dead or
+  # shutting-down supervisor rather than returning an error — and shutdown
+  # terminates the follow-up supervisor before this worker's own. Catching that
+  # exit is what keeps a settled reminder settled.
+  defp spawn_followup(supervisor, state, row, text) do
+    case FollowupSupervisor.start_followup(supervisor, followup_args(state, row, text)) do
+      {:ok, pid} when is_pid(pid) -> :ok
+      {:ok, pid, _info} when is_pid(pid) -> :ok
+      :ignore -> skip_followup(row, :followup_ignored)
+      {:error, reason} -> skip_followup(row, reason)
+    end
+  catch
+    :exit, reason ->
+      Logger.warning("Reminder #{row.id} follow-up supervisor is gone: #{inspect(reason)}")
+      skip_followup(row, :supervisor_unavailable)
+  end
+
+  defp followup_args(state, row, text) do
+    %{
+      reminder: row,
+      delivered_text: text,
+      repo: state.repo,
+      delivery_opts: state.delivery_opts
+    }
+  end
+
+  defp skip_followup(row, reason) do
+    Logger.warning("Reminder #{row.id} follow-up was not started: #{inspect(reason)}")
+
+    TemporalTelemetry.emit(
+      :followup_skipped,
+      Keyword.put(TemporalTelemetry.reminder(row), :result, {:error, reason})
+    )
   end
 
   # --- lifecycle telemetry (§15.2) -----------------------------------------

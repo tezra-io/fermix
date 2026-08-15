@@ -1,12 +1,17 @@
 # Channel streaming — live streamed replies (docs/design/CHANNEL_STREAMING.md).
 #
 # Stream lifecycle phases export to Opik as tool-type spans named
-# `stream:open` / `stream:block` / `stream:seal` / `stream:discard` (interim
-# draft edits are deliberately not exported), so the normal tools_* gates
-# grade them. The telegram cases below are MODE-AGNOSTIC: both `"draft"`
-# (one edited message) and `"block"` (separate chunk messages) emit
-# stream:open + stream:seal, so they pass under whichever mode the dev
-# daemon config enables.
+# `stream:open` / `stream:block` / `stream:rotate` / `stream:seal` /
+# `stream:discard` (interim draft edits are deliberately not exported), so the
+# normal tools_* gates grade them. `stream:rotate` marks a card rotation or an
+# iteration seal in draft mode (CHANNEL_LONGFORM_PRESENTATION §6) — optional
+# on short replies, so no gate requires it. The telegram cases below are
+# MODE-AGNOSTIC: both `"draft"` (rotating edited cards) and `"block"`
+# (separate chunk messages) emit stream:open + stream:seal, so they pass under
+# whichever mode the dev daemon config enables — and since the default is now
+# capability-derived (draft for Telegram), an unset key also passes. The
+# ephemeral 💭 status bubble is deleted through the channel directly and
+# exports NO stream:discard, so the no-discard gate still holds on success.
 #
 # Two tiers:
 #   - cli_never_streams: fully automated. `fermix ask` turns run the CLI sync
@@ -42,13 +47,17 @@ scenarios:
       - id: plain_ask_no_stream
         query: "In one short sentence, what is the BEAM virtual machine?"
         expect:
-          tools_none: ["stream:open", "stream:seal", "stream:discard"]
+          # The whole stream-span surface, not a subset — a span kind added
+          # later must join this list or the invariant is a hole.
+          tools_none:
+            ["stream:open", "stream:block", "stream:rotate", "stream:seal", "stream:discard"]
           reply_matches: "(?i)erlang|virtual machine|vm"
       - id: tool_ask_no_stream
         query: "Print 'stream-check-ok' for me and tell me exactly what it output."
         expect:
           tools_any: [shell]
-          tools_none: ["stream:open", "stream:seal", "stream:discard"]
+          tools_none:
+            ["stream:open", "stream:block", "stream:rotate", "stream:seal", "stream:discard"]
           reply_matches: "stream-check-ok"
 
   - id: telegram_draft_stream

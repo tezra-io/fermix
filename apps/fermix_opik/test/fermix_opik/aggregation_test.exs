@@ -96,6 +96,8 @@ defmodule FermixOpik.AggregationTest do
          %{channel: "telegram", session_id: "main-1", phase: :edit, status: :ok}},
         {[:fermix, :channel, :stream], %{duration_us: 50_000, block_index: 2},
          %{channel: "telegram", session_id: "main-1", phase: :block, status: :ok}},
+        {[:fermix, :channel, :stream], %{duration_us: 60_000, edit_index: 3},
+         %{channel: "telegram", session_id: "main-1", phase: :rotate, status: :ok}},
         {[:fermix, :provider, :call], %{duration_ms: 1_000},
          %{provider: :openai_codex, model: "gpt-5-codex", status: :ok, session_id: "main-1"}},
         {[:fermix, :channel, :stream], %{total_edits: 12, dropped_snapshots: 40},
@@ -117,6 +119,11 @@ defmodule FermixOpik.AggregationTest do
     block = span_named(spans, "stream:block")
     assert block.parent_span_id == wrapper.id
     assert block.metadata.block_index == 2
+
+    # A mid-turn draft rotation (one sealed section card) exports like a block:
+    # a child span of the turn, never the terminal seal.
+    rotate = span_named(spans, "stream:rotate")
+    assert rotate.parent_span_id == wrapper.id
 
     seal = span_named(spans, "stream:seal")
     assert seal.parent_span_id == wrapper.id
@@ -1189,7 +1196,11 @@ defmodule FermixOpik.AggregationTest do
     :superseded,
     :cancelled,
     :event_completed,
-    :scheduler_error
+    :scheduler_error,
+    # A follow-up that never became a run: no session, so it stays a point event
+    # on this lifecycle and costs the exporter nothing beyond this list. A
+    # follow-up that DID start owns a session and is the run below.
+    :followup_skipped
   ]
 
   defp reminder_meta(phase, extra \\ %{}) do
@@ -1272,6 +1283,185 @@ defmodule FermixOpik.AggregationTest do
       assert trace.metadata.error_class == "permanent"
       assert trace.metadata.attempt == 5
       assert trace.metadata.duration_ms == 87
+    end
+  end
+
+  # Post-delivery follow-up run ([:fermix, :reminder, :followup_start |
+  # :followup_complete | :followup_error], M30 §22.7). The delivery lifecycle
+  # above is session-less by design; this one IS an agent run — it drives the
+  # loop in its own context — so it owns a session, opens a ROOT trace, and its
+  # provider/tool spans nest under it through the shared session_id.
+  @followup_start [:fermix, :reminder, :followup_start]
+  @followup_complete [:fermix, :reminder, :followup_complete]
+  @followup_error [:fermix, :reminder, :followup_error]
+  @followup_session "followup_rem_1"
+
+  # The emitter's own metadata shape (FermixCore.Temporal.FollowupTelemetry):
+  # correlation ids, the run's agent name, and a component tag. `fermix_opik`
+  # declares no dependency on `fermix_core`, so this mirrors it by hand, exactly
+  # like `reminder_meta/2` above.
+  defp followup_meta(extra \\ %{}) do
+    Map.merge(
+      %{
+        component: "temporal_followup",
+        agent: "followup:evt_1",
+        session_id: @followup_session,
+        event_id: "evt_1",
+        reminder_id: "rem_1",
+        occurrence_key: "2026-09-14"
+      },
+      extra
+    )
+  end
+
+  describe "post-delivery follow-up run" do
+    test "a follow-up is swept by its max duration, not the idle TTL" do
+      # The run's wall-clock watchdog and the default idle TTL are both 120s, so
+      # without a sweep floor a slow first provider call could get the root
+      # force-closed just before its closer arrives (which would then tombstone).
+      agg = Aggregation.new(project: "fermix", ttl_ms: 1)
+
+      {agg, []} =
+        Aggregation.apply_event(
+          agg,
+          @followup_start,
+          %{count: 1},
+          followup_meta(%{max_duration_ms: 1_000}),
+          %{at: ~U[2026-06-02 12:00:00.000Z], mono: 0}
+        )
+
+      # mono is microseconds; floor = (1_000 + 60_000) * 1_000 = 61_000_000us.
+      # Well past the 1us idle TTL but within the duration floor: NOT swept.
+      {agg, []} = Aggregation.sweep(agg, 500_000)
+
+      # Past max_duration + grace: swept as one unthreaded root.
+      {_agg, closed} = Aggregation.sweep(agg, 61_000_001)
+      assert [%{trace: trace}] = closed
+      assert trace.name == "followup:evt_1"
+      refute Map.has_key?(trace, :thread_id)
+    end
+
+    test "the reporter subscribes to all three bookends" do
+      for event <- [@followup_start, @followup_complete, @followup_error] do
+        assert event in FermixOpik.Reporter.events(),
+               "#{inspect(event)} is not subscribed, so the run is invisible to Opik"
+      end
+    end
+
+    test "a follow-up run is its own root trace nesting its provider and tool spans" do
+      {_state, closed} =
+        run([
+          {@followup_start, %{count: 1}, followup_meta()},
+          {[:fermix, :provider, :call], %{duration_ms: 700},
+           %{
+             provider: :anthropic,
+             model: "claude-opus-4-8",
+             status: :ok,
+             session_id: @followup_session,
+             tokens: %{prompt: 90, completion: 25}
+           }},
+          {[:fermix, :tool, :exec], %{duration_ms: 12},
+           %{tool: "memory_store", success: true, session_id: @followup_session}},
+          {@followup_complete, %{duration_ms: 4_200},
+           followup_meta(%{outcome: "sent", output: "Want me to draft her a note?"})}
+        ])
+
+      assert [%{trace: trace, spans: spans}] = closed
+      assert trace.name == "followup:evt_1"
+      assert trace.tags == ["reminder_followup"]
+      assert trace.output == %{text: "Want me to draft her a note?"}
+      assert trace.metadata.outcome == "sent"
+      assert trace.metadata.component == "temporal_followup"
+      assert trace.metadata.event_id == "evt_1"
+      assert trace.metadata.reminder_id == "rem_1"
+      assert trace.metadata.occurrence_key == "2026-09-14"
+      # A run that reached a decision is a successful run, whatever it decided.
+      refute Map.has_key?(trace.metadata, :status)
+
+      # No destination anywhere: the temporal family never carries the delivery
+      # target, so the follow-up is an unthreaded root found by session/event id.
+      refute Map.has_key?(trace, :thread_id)
+
+      wrapper = span_named(spans, "followup:evt_1")
+      refute Map.has_key?(wrapper, :parent_span_id)
+
+      assert [llm] = spans_of_type(spans, "llm")
+      assert [tool] = spans_of_type(spans, "tool")
+      assert llm.parent_span_id == wrapper.id
+      assert tool.parent_span_id == wrapper.id
+      assert llm.trace_id == trace.id
+      assert tool.trace_id == trace.id
+    end
+
+    # The turn that stored the event closed hours or days before delivery, so the
+    # run is a root by construction — nesting would resurrect a closed trace (the
+    # harness precedent). The opener hard-codes nil, which this pins by naming a
+    # live parent and proving it is ignored.
+    test "the run stays a root even when a live parent session is named" do
+      {_state, closed} =
+        run([
+          {[:fermix, :provider, :call], %{duration_ms: 100},
+           %{provider: :openai, model: "gpt-5", status: :ok, session_id: "main-1"}},
+          {@followup_start, %{count: 1}, followup_meta(%{parent_session: "main-1"})},
+          {@followup_complete, %{duration_ms: 900}, followup_meta(%{outcome: "declined"})},
+          {[:fermix, :agent, :message], %{iterations: 1},
+           %{channel: :telegram, chat_id: "c1", session_id: "main-1", agent: "main"}}
+        ])
+
+      names = closed |> Enum.map(& &1.trace.name) |> Enum.sort()
+      assert names == ["agent:main", "followup:evt_1"]
+      assert closed |> Enum.map(& &1.trace.id) |> Enum.uniq() |> length() == 2
+
+      followup = Enum.find(closed, &(&1.trace.name == "followup:evt_1"))
+      assert followup.trace.metadata.outcome == "declined"
+      # Declining sends nothing, so there is no owner-facing text to carry.
+      refute Map.has_key?(followup.trace, :output)
+      refute Map.has_key?(span_named(followup.spans, "followup:evt_1"), :parent_span_id)
+
+      turn = Enum.find(closed, &(&1.trace.name == "agent:main"))
+      refute span_named(turn.spans, "followup:evt_1")
+    end
+
+    test "a run that never reached a decision closes with its own status word" do
+      for status <- ["error", "timeout"] do
+        {_state, closed} =
+          run([
+            {@followup_start, %{count: 1}, followup_meta()},
+            {@followup_error, %{duration_ms: 120_000},
+             followup_meta(%{status: status, error: "wall-clock timeout after 120000ms"})}
+          ])
+
+        assert [%{trace: trace}] = closed
+        assert trace.metadata.status == status, "the #{status} status never reached the trace"
+        assert trace.output == %{text: "wall-clock timeout after 120000ms"}
+        assert trace.metadata.event_id == "evt_1"
+        assert trace.metadata.reminder_id == "rem_1"
+      end
+    end
+
+    # A run whose first exported event is a provider call — the opener lost the
+    # race, or was never delivered — must still classify from its session prefix
+    # rather than falling through to :subagent, which is the only evidence left.
+    test "a span arriving before the opener classifies the lazily created run" do
+      {_state, closed} =
+        run([
+          {[:fermix, :provider, :call], %{duration_ms: 300},
+           %{
+             provider: :anthropic,
+             model: "claude-opus-4-8",
+             status: :ok,
+             session_id: @followup_session,
+             agent: "followup:evt_1"
+           }},
+          {@followup_complete, %{duration_ms: 800}, followup_meta(%{outcome: "empty"})}
+        ])
+
+      assert [%{trace: trace, spans: spans}] = closed
+      assert trace.tags == ["reminder_followup"]
+      assert trace.name == "followup:evt_1"
+      assert trace.metadata.outcome == "empty"
+      assert [llm] = spans_of_type(spans, "llm")
+      assert llm.parent_span_id == span_named(spans, "followup:evt_1").id
     end
   end
 end

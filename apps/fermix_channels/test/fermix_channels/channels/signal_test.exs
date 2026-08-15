@@ -89,6 +89,20 @@ defmodule FermixChannels.Channels.SignalTest do
     end
   end
 
+  # Records every outbound chunk in order and, with a `fail_at:` index, rejects
+  # exactly that 1-based send so the sequencing after a failure is observable.
+  defmodule ChunkRecordingSignalClient do
+    def send_message(_account, _recipient, text, opts) do
+      counter = Keyword.fetch!(opts, :counter)
+      :counters.add(counter, 1, 1)
+      send(Keyword.fetch!(opts, :test_pid), {:signal_chunk, text})
+      reply(:counters.get(counter, 1), Keyword.fetch!(opts, :fail_at))
+    end
+
+    defp reply(index, fail_at) when index == fail_at, do: {:error, {:permanent, :remote_rejected}}
+    defp reply(_index, _fail_at), do: :ok
+  end
+
   setup do
     Application.put_env(:fermix_channels, :signal,
       enabled: true,
@@ -234,6 +248,110 @@ defmodule FermixChannels.Channels.SignalTest do
   end
 
   describe "send_message/3" do
+    # MILESTONE_31 §18 row "Channels", plain-text half: Signal renders no markup,
+    # so the portable guarantee is that the tool-returned URL reaches the reader
+    # byte-for-byte — query string, redirect token, and all (§9.5). Nothing may
+    # shorten, rewrite, or strip it on the way out.
+    test "carries place, source, and media URLs verbatim on a plain-text surface" do
+      text = """
+      - [Example Coffee](https://example.coffee/?utm=brave) — 4.6/5, 0.4 km away.
+      Source: https://provider.example/place/abc?token=xyz
+      Photo: https://cdn.example/p.jpg
+      """
+
+      assert :ok =
+               Signal.send_message("+15551234567", text,
+                 client: FakeSignalClient,
+                 client_opts: [test_pid: self()]
+               )
+
+      assert_received {:signal_send, "+15550001111", "+15551234567", sent}
+      assert sent =~ "https://example.coffee/?utm=brave"
+      assert sent =~ "https://provider.example/place/abc?token=xyz"
+      assert sent =~ "https://cdn.example/p.jpg"
+    end
+
+    # CHANNEL_LONGFORM_PRESENTATION §3.1: Signal has no platform cap, so the
+    # ladder runs at Fermix's readability ceiling — a long reply arrives as a
+    # few readable messages instead of one unbounded wall of text.
+    test "splits long text at the readability cap into sequential sends" do
+      text = paragraph_fixture(48)
+
+      assert :ok = Signal.send_message("+15551234567", text, recording_client_opts(fail_at: nil))
+
+      chunks = collect_chunks()
+      assert length(chunks) == 3
+      assert Enum.all?(chunks, &(String.length(&1) <= 4_000))
+      # Paragraph-boundary cuts: rejoining reproduces the source exactly.
+      assert Enum.join(chunks, "\n\n") == String.trim(text)
+    end
+
+    test "cuts long text on word boundaries, never mid-word" do
+      text = sentence_fixture(200)
+
+      assert :ok = Signal.send_message("+15551234567", text, recording_client_opts(fail_at: nil))
+
+      chunks = collect_chunks()
+      assert length(chunks) > 1
+      # A chunk that began or ended mid-word would split one source word in two.
+      assert Enum.flat_map(chunks, &String.split/1) == String.split(text)
+    end
+
+    test "the first failing chunk aborts the remaining sends" do
+      assert {:error, {:permanent, :remote_rejected}} =
+               Signal.send_message(
+                 "+15551234567",
+                 paragraph_fixture(48),
+                 recording_client_opts(fail_at: 2)
+               )
+
+      # Three chunks were due; the send stopped at the failure.
+      assert length(collect_chunks()) == 2
+    end
+
+    test "sends under-cap text as a single unchanged message" do
+      assert :ok =
+               Signal.send_message(
+                 "+15551234567",
+                 "short reply",
+                 recording_client_opts(fail_at: nil)
+               )
+
+      assert collect_chunks() == ["short reply"]
+    end
+
+    # CHANNEL_LONGFORM_PRESENTATION §3.1, S4: signal-cli transmits an unstyled
+    # body, so a long model reply must arrive both STRIPPED and SPLIT — the two
+    # halves have to hold together, because the splitter runs on the Markdown
+    # and the renderer runs on each chunk it produced.
+    test "a long markdown reply arrives stripped and split on section boundaries" do
+      assert :ok =
+               Signal.send_message(
+                 "+15551234567",
+                 markdown_fixture(60),
+                 recording_client_opts(fail_at: nil)
+               )
+
+      chunks = collect_chunks()
+      assert length(chunks) > 1
+      assert Enum.all?(chunks, &(String.length(&1) <= 4_000))
+
+      # Stripped: no Markdown decoration survives anywhere in the sequence.
+      assert Enum.all?(chunks, &(not String.contains?(&1, "**")))
+      assert Enum.all?(chunks, &(not String.contains?(&1, "## ")))
+      assert Enum.all?(chunks, &(not String.contains?(&1, "](http")))
+
+      # ... while the content and the URL survive intact (§9.5).
+      first = hd(chunks)
+      assert first =~ "Overview 1 covers"
+      assert first =~ "dive site 1: https://example.com/site/1"
+      assert first =~ "• bullet 1 alpha"
+
+      # Boundaries stay clean: every message opens on a section heading, so no
+      # chunk stranded one at its tail and none starts mid-sentence.
+      assert Enum.all?(chunks, &String.starts_with?(&1, "Section "))
+    end
+
     # M30 §11.3: an unconfigured Signal account is an unavailable adapter, not a
     # bare `:not_configured` the delivery normalizer would have to guess at.
     test "rejects missing signal account configuration as an unavailable adapter" do
@@ -241,6 +359,92 @@ defmodule FermixChannels.Channels.SignalTest do
 
       assert {:error, {:permanent, :adapter_unavailable}} =
                Signal.send_message("+15551234567", "hello")
+    end
+  end
+
+  # -- telemetry --
+
+  # One delivered message is one outbound row (design §8). Before S4 the adapter
+  # emitted a single `count: N` row only when EVERY chunk of a reply landed — so
+  # a reply that half-landed reported nothing at all.
+  describe "outbound telemetry" do
+    defp attach_message_events(handler_id) do
+      :ok =
+        :telemetry.attach(
+          handler_id,
+          [:fermix, :channel, :message],
+          fn event, measurements, metadata, pid ->
+            send(pid, {:telemetry, event, measurements, metadata})
+          end,
+          self()
+        )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+    end
+
+    # Drains the outbound `channel_msg` rows recorded so far, in emission order.
+    defp outbound_rows(acc \\ []) do
+      receive do
+        {:telemetry, [:fermix, :channel, :message], measurements,
+         %{direction: :outbound} = metadata} ->
+          outbound_rows([{measurements, metadata} | acc])
+      after
+        0 -> Enum.reverse(acc)
+      end
+    end
+
+    defp assert_single_message_row({measurements, metadata}) do
+      assert measurements.count == 1
+      assert measurements.duration_us >= 0
+      assert metadata.channel == :signal
+      assert metadata.direction == :outbound
+    end
+
+    test "emits one row per delivered chunk, not one row per reply" do
+      attach_message_events("test-signal-outbound-per-chunk")
+
+      assert :ok =
+               Signal.send_message(
+                 "+15551234567",
+                 paragraph_fixture(48),
+                 recording_client_opts(fail_at: nil)
+               )
+
+      chunks = collect_chunks()
+      assert length(chunks) == 3
+
+      rows = outbound_rows()
+      assert length(rows) == length(chunks)
+      Enum.each(rows, &assert_single_message_row/1)
+    end
+
+    test "a partial failure leaves truthful rows for the chunks that were delivered" do
+      attach_message_events("test-signal-outbound-partial")
+
+      assert {:error, {:permanent, :remote_rejected}} =
+               Signal.send_message(
+                 "+15551234567",
+                 paragraph_fixture(48),
+                 recording_client_opts(fail_at: 2)
+               )
+
+      # Chunk 1 reached the recipient and chunk 2 was rejected: exactly one row,
+      # where the all-or-nothing emission reported none.
+      assert [row] = outbound_rows()
+      assert_single_message_row(row)
+    end
+
+    test "a send that fails on its first chunk emits nothing" do
+      attach_message_events("test-signal-outbound-first-chunk-failed")
+
+      assert {:error, {:permanent, :remote_rejected}} =
+               Signal.send_message(
+                 "+15551234567",
+                 "short reply",
+                 recording_client_opts(fail_at: 1)
+               )
+
+      assert outbound_rows() == []
     end
   end
 
@@ -341,6 +545,66 @@ defmodule FermixChannels.Channels.SignalTest do
         FermixTestSupport.SafeRm.rm_rf!(tmp_dir)
       end
     end
+  end
+
+  # -- outbound chunking fixtures --
+
+  defp recording_client_opts(opts) do
+    [
+      client: ChunkRecordingSignalClient,
+      client_opts: [
+        test_pid: self(),
+        counter: :counters.new(1, []),
+        fail_at: Keyword.fetch!(opts, :fail_at)
+      ]
+    ]
+  end
+
+  @max_recorded_chunks 32
+
+  defp collect_chunks, do: collect_chunks(@max_recorded_chunks, [])
+
+  defp collect_chunks(0, _acc) do
+    raise "more than #{@max_recorded_chunks} chunk sends recorded"
+  end
+
+  defp collect_chunks(remaining, acc) do
+    receive do
+      {:signal_chunk, text} -> collect_chunks(remaining - 1, [text | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
+  end
+
+  # A model-shaped reply: sectioned, with every inline construct the dialect
+  # strips, so the adapter test sees the same text the golden set does.
+  defp markdown_fixture(count) do
+    Enum.map_join(1..count, "\n\n", &fixture_section/1)
+  end
+
+  defp fixture_section(n) do
+    """
+    ## Section #{n}
+
+    **Overview #{n}** covers [dive site #{n}](https://example.com/site/#{n}) and _tides_.
+
+    - bullet #{n} alpha
+    - bullet #{n} bravo\
+    """
+  end
+
+  defp paragraph_fixture(count) do
+    Enum.map_join(1..count, "\n\n", &fixture_paragraph/1)
+  end
+
+  defp fixture_paragraph(n) do
+    "Paragraph #{n}. " <> Enum.map_join(1..20, " ", fn w -> "word-#{n}-#{w}" end) <> "."
+  end
+
+  defp sentence_fixture(count) do
+    Enum.map_join(1..count, " ", fn n ->
+      "Sentence #{n} about alpha bravo charlie delta echo foxtrot golf hotel."
+    end)
   end
 
   defp receive_event(text) do

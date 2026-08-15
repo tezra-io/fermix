@@ -33,7 +33,7 @@ defmodule FermixCore.Reply do
   Human-readable rendering of a `{:error, reason}` returned by a channel's
   media/text delivery. Shared by `send_attachment` and `Tools.Media.Output`
   so both surface the same wording for the channel egress error tuples
-  (byte/text caps, rate limits) and by every reason in the closed delivery
+  (byte caps, rate limits) and by every reason in the closed delivery
   vocabulary `FermixCore.Delivery.Error.t/0` (M30 §11.3).
   """
   @spec format_delivery_error(term()) :: String.t()
@@ -43,10 +43,6 @@ defmodule FermixCore.Reply do
 
   def format_delivery_error({:rate_limited, retry_after_ms}) do
     "channel is rate limited; retry after #{format_duration(retry_after_ms)}"
-  end
-
-  def format_delivery_error({:text_cap_exceeded, actual, allowed}) do
-    "reply text is #{actual} characters; limit is #{allowed} characters"
   end
 
   def format_delivery_error({:http_status, status}) do

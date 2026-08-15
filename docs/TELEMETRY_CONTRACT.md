@@ -208,14 +208,22 @@ Opik.
 
 ## Reminder lifecycle (temporal events)
 
-A reminder delivery is deterministic — no `AgentLoop`, no provider call, no
+A reminder **delivery** is deterministic — no `AgentLoop`, no provider call, no
 session — so its lifecycle cannot ride any agent-run family. Every transition
 emits the single stable name `[:fermix, :reminder, :lifecycle]` through
 `FermixCore.Temporal.Telemetry` — never hand-rolled, and never a
-`[:fermix, :reminder, <phase>]` tail (exact-name binding would drop it). The
-emitter enforces a fixed metadata allowlist: `phase` (`materialized | claimed |
+`[:fermix, :reminder, <phase>]` tail of its own (exact-name binding would drop
+it). A post-delivery **follow-up** is the other side of that line: it calls
+`AgentLoop.run/1`, so it is a run kind with its own `session_id` and its own
+per-phase names — `[:fermix, :reminder, :followup_start | :followup_complete |
+:followup_error]`, emitted through `FermixCore.Temporal.FollowupTelemetry` and
+bound individually in `FermixOpik.Reporter`. The split is "has a session or
+not": a follow-up that never reached a model has none and stays on the
+lifecycle event, as the `:followup_skipped` phase. The lifecycle emitter
+enforces a fixed metadata allowlist: `phase` (`materialized | claimed |
 delivered | retry_scheduled | failed | expired | superseded | cancelled |
-event_completed | scheduler_error`), `component: "temporal_scheduler"` (the
+event_completed | scheduler_error | followup_skipped`),
+`component: "temporal_scheduler"` (the
 `agent_field`, so JSONL rows name their emitter instead of `"unknown"`),
 correlation ids (`event_id`, `reminder_id`, `occurrence_key`, `rule_id`),
 `platform`, `attempt`, `result`, and a **derived** `error_class` (atom, tagged
@@ -235,16 +243,24 @@ rows. The event tools themselves (`event_store`, `event_list`, `event_update`,
 ## Content (prompts / responses / tool IO)
 
 Attach bodies **only** behind `FermixCore.Telemetry.capture_content?/0`, and
-shape them with `FermixCore.Telemetry.preview/1`. With capture **off** (the
-default), `preview/1` bounds everything (2k chars, default inspect limits);
-with capture **on** it passes content through whole — the operator opted into
-full-fidelity traces for debugging, and clipping would defeat the point.
-Capture-on also enriches some emitters: a failed browser action attaches the
-profile's recent console/JS-exception buffer to its error details. Enabling
-the Opik exporter (`FERMIX_OPIK_ENABLED=1`) defaults content capture **on**
-(resolved in `config/runtime.exs`); `FERMIX_TRACE_CONTENT` is the explicit
-override. Off otherwise — bloat + privacy; bodies are only needed for
-eval/observing.
+shape them with `FermixCore.Telemetry.preview/1`. With capture **on** (the
+default) `preview/1` passes content through whole; with capture **off** it
+bounds everything (2k chars, default inspect limits). Capture-on also enriches
+some emitters: a failed browser action attaches the profile's recent
+console/JS-exception buffer to its error details.
+
+`config/runtime.exs` is the **one place** the default is decided — on unless
+`FERMIX_TRACE_CONTENT=0`. Bodies never leave the machine: the JSONL lives under
+a `0700` `FERMIX_HOME` and the Opik instance is local, so the privacy argument
+for a lean default does not apply, and a trace missing the request and the
+response cannot answer the questions traces exist for. The cost is disk —
+`FermixCore.Trace` has no retention, and a busy day's `tool_exec.jsonl` runs to
+tens of MB with content on. The test env pins it off (`config/test.exs`) so
+every content assertion in the suite establishes its own precondition.
+
+A field carrying user content obeys this switch even when it is not shaped by
+`preview/1` — `agent_task_start` / `skill_invoke` `task_summary` is the one that
+did not, and now does.
 
 ---
 

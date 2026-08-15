@@ -345,6 +345,14 @@ defmodule FermixCore.Tools.WebToolsTest do
     :telemetry.detach(handler)
   end
 
+  # M31 §9: the evidence rules live in the runtime contract, but the two research
+  # tools carry the same expectation at the point of use — a researched claim
+  # keeps the URL the tool returned for it.
+  test "web tool guidance says a researched claim keeps its source URL" do
+    assert WebSearch.when_to_use() =~ "Keep the result URLs you use"
+    assert WebFetch.when_to_use() =~ "Cite that exact URL"
+  end
+
   defp assert_search_error(body, expected_tag) do
     test_id = :"web_search_error_#{System.unique_integer([:positive])}"
     Req.Test.stub(test_id, fn conn -> Plug.Conn.resp(conn, 200, body) end)

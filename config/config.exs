@@ -180,10 +180,6 @@ config :fermix_channels,
 
 config :fermix_core, :trace, base_dir: Path.expand("~/.fermix/traces")
 
-# Telemetry/trace content capture. Off by default so traces stay lean; flip on
-# (config or FERMIX_TRACE_CONTENT) to attach prompt/response bodies for eval.
-config :fermix_core, :telemetry, capture_content: false
-
 config :fermix_core, :log,
   file: Path.expand("~/.fermix/logs/fermix.log"),
   max_no_bytes: 10_485_760,

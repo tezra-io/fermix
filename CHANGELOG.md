@@ -6,6 +6,203 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-08-13
+
+### Added
+
+- **Grok 4.6 is available and is now the model a new SpaceXAI setup picks.**
+  It joins the catalog with its documented 500k context window, and the xAI
+  model list is ordered newest generation first (larger window breaking ties
+  within a generation), so the model offered first is always the current
+  frontier one. Existing installs are untouched — a `default_model` already in
+  `config.toml` keeps working; only setups that never chose a model follow the
+  new head.
+
+- **`xhigh` reasoning effort is now available on SpaceXAI, for Grok 4.6.** The
+  xAI effort vocabulary previously stopped at `high`, so the level Grok 4.6
+  actually supports was unreachable. Setup offers it only on 4.6 — every older
+  Grok carries a `high` ceiling and a request above it self-heals down at route
+  resolution, which is the same thing SpaceXAI does server-side when an older
+  model is asked for `xhigh`.
+
+- **Grok Imagine Image 2.0 is available for image generation and editing, and
+  is now the SpaceXAI image default.** The previous model, Imagine Image
+  Quality, stays selectable — the two are separate models on xAI's side, not
+  aliases, and 2.0 is both the current generation and the cheaper of the pair.
+
+
+- **Fermix can look up real places.** Ask for coffee near Alexanderplatz, a
+  pharmacy open now, or the address of a landmark and Fermix answers from a
+  place search rather than a web page: name, hours, rating, contact details,
+  distance, and a link to the place's own page for every result. It needs a
+  Brave Search API key, which is the same key the Brave web-search backend
+  uses — you can set it in setup without making Brave your web backend, and
+  the tool stays hidden until you do. Web calls and place calls are billed
+  separately by Brave. Results are transient: nothing is cached or stored,
+  and only the answer persists, as ordinary chat history. Ask for somewhere
+  "near me" without naming an area and Fermix uses the area you have already
+  mentioned — in this conversation first, then a neighborhood or city it
+  remembers about you — and asks which area to search when it knows neither;
+  it names the area it searched so you can correct it.
+- **Answers keep the links they were built from.** When a lookup supplies a
+  fact, the answer now carries that tool's exact URL — beside the claim, or
+  in a short source list — instead of dropping it. Places link to their own
+  page, images link to the page they came from, and an answer that did no
+  research gets no ceremonial sources section.
+
+- **A reminder that matters can be followed by a check-in.** When you store a
+  date, Fermix decides whether it is an occasion you would plausibly want help
+  acting on — a birthday, an anniversary, something to prepare or decide — and
+  says so in the confirmation, so a wrong call is visible immediately and a
+  plain "actually, no need to check in" fixes it. After that reminder has been
+  delivered, Fermix may send one short follow-up into the same conversation: an
+  offer to help, something it remembers about the person, or a single question.
+  It stays quiet when it has nothing worth adding, and a plain logistics ping
+  stays a plain reminder. The reminder itself is untouched — it is still
+  rendered and sent word for word, the follow-up begins only once the reminder
+  has landed, and nothing that goes wrong with the follow-up can cost you the
+  reminder. What it offers is remembered, so your reply to it lands with
+  context.
+
+- **A long answer arrives as sections while it is being written.** On Telegram
+  the reply streams into a live message edited in place, and once it grows past
+  one section card that message is sealed at a real boundary and the rest keeps
+  streaming into a fresh one — so a long answer lands as a few readable cards
+  rather than one wall that appears all at once. Sealed cards are finished
+  messages: commentary before a tool round stays as conversation, `/stop`
+  removes only the unsealed card, and a short final tail is merged into the
+  live card rather than ringing a second message.
+
+- **You can see what Fermix is working on, and it cleans up after itself.** Its
+  reasoning headings now roll into a single 💭 status bubble that updates in
+  place and is deleted the moment the answer lands. Answer text always takes
+  priority, so a thought never appears between a paragraph and its
+  continuation; the bubble never rings; and a channel that cannot delete
+  messages gets no thought stream at all rather than permanent 💭 residue.
+
+- **Every chat surface gets the formatting it can actually render.** Slack
+  mrkdwn, WhatsApp's native styles, and Signal's plain-text dialect join
+  Telegram's HTML and Discord's native Markdown, so one house style reaches
+  each platform in that platform's own notation instead of leaking raw
+  Markdown. Chat turns also carry a short presentation note telling Fermix it
+  is writing for a phone-width bubble stream — lead with the answer, short
+  self-contained sections, no tables or rules, links inline on the claim —
+  while terminal and machine surfaces (`cli`, `acp`, scheduled runs) get no
+  such note and stay unchanged.
+
+- **Replies are quieter.** Link previews are disabled on every outbound
+  message, edit, and seal, so a linked answer no longer drags an unrelated
+  preview card under it, and only the first message of a reply notifies —
+  continuations arrive silently.
+
+### Fixed
+
+- **Ending a computer-use session no longer risks the next one resuming the
+  session that just ended.** Tearing a session down left its registry entry to
+  be swept asynchronously, so for a brief moment after the teardown returned,
+  starting a session for the same conversation could hand back the one that had
+  already stopped instead of opening a fresh one. Most visible where a voice
+  call ends and another begins straight after, since ending an attended call
+  tears the session down. The entry is now dropped as part of the teardown.
+
+- **Two Grok context windows were wrong, so conversations compacted at the
+  wrong point.** The catalog credited Grok 4.5 with a 1M window when xAI
+  documents 500k — which defers compaction past the model's real limit — and
+  credited Grok 4.20 with 256k when it serves 1M, compacting roughly four times
+  earlier than needed. Both now match the published windows.
+
+- **Researched answers stop citing links they assembled themselves, and quick
+  questions stop turning into research projects.** The runtime evidence rule
+  now names the observed fabrication classes — a URL built from an article or
+  press-release ID, an advisory date, a version number, or a site's known URL
+  pattern is a fabrication even when it resolves; when the exact deep link was
+  never returned, the answer links the page that was. And effort is calibrated
+  before delegation: a casual "quick rundown" gets a direct answer from a few
+  tool calls, with subagent fan-out reserved for work whose breadth or stakes
+  earn it. Both are enforced by the behavioral eval: reply URLs are checked
+  verbatim against the complete tool-evidence inventory by a deterministic
+  gate, and the "latest news" cases carry duration budgets.
+
+- **Recompiling under a daemon run from source no longer breaks process-group
+  sweeping.** The `kill_pgid` NIF carried no upgrade callback, so a hot code
+  swap — a second `mix compile`, or the Phoenix code reloader picking up
+  changed sources — was refused by the VM: the module lost its native binding
+  and every external command's group sweep then crashed until the daemon
+  restarted. The NIF (stateless by design) now accepts the swap and keeps its
+  binding across it. Released installs were never affected; they load the
+  library once and never hot-swap code.
+
+- **Upgrading no longer makes macOS ask to allow a new "fermix" under App
+  Management.** The browser tool now launches Chrome through a small disclaim
+  shim, so Chrome runs as its own macOS privacy principal instead of being
+  attributed to the fermix daemon — Chrome's launch-time probe of its own
+  bundle was raising an App Management notification against fermix's
+  versioned install path after every upgrade, and the password-gated grant
+  could never carry over to the next release. Existing "fermix" rows in App
+  Management are inert leftovers and no grant is needed. A launch that cannot
+  disclaim refuses loudly instead of ever spawning Chrome undisclaimed
+  (`fermix doctor` gains a `browser` row for the shim), and a Chrome that
+  dies at launch now fails fast with its exit code instead of waiting out
+  the launch timeout.
+
+- **A live turn no longer dies when the connection pool cannot hand over a
+  socket.** A checkout that timed out — contention after heavy concurrent use,
+  or a pool process busy tearing down keep-alive sockets that went stale while
+  the machine was idle or asleep — ended the turn, even though the request had
+  never been sent. Fermix now retries that failure inside the turn on every
+  surface, not just in scheduled runs, and reaps idle Codex pool processes so
+  the stale-socket cleanup happens off the request path instead of inside the
+  next checkout. The error you see if it still fails says what actually
+  happened, and that re-issuing is safe, rather than blaming a wake from sleep.
+
+- **Long replies no longer break mid-sentence on Telegram.** An over-length
+  reply was cut at the last whitespace before the platform limit, so the next
+  message opened lowercase, halfway through a bullet. Replies are now split on
+  a boundary ladder — section heading first, then paragraph, line, and sentence
+  end, with a hard cut only as a last resort — measured in the UTF-16 units
+  Telegram actually counts (an emoji is two), held under the per-message
+  formatting-entity limit as an independent condition, and never cut inside a
+  code fence. A fenced block too large to render inline arrives as a text
+  document after the reply instead of as two corrupt halves.
+
+- **Telegram renders what the answer was written as.** A link wrapped in bold
+  lost its link, nested emphasis produced visible tag soup, `snake_case`
+  identifiers and URLs containing underscores turned into italics, a stray
+  asterisk in arithmetic italicised the rest of the paragraph, and tables,
+  block quotes, and horizontal rules had no rendering at all. All of them now
+  land correctly; if Telegram still refuses a message, that one chunk is
+  resent once as plain text so the reply is never lost, and the renderer fault
+  is logged and marked in telemetry rather than hidden.
+
+- **WhatsApp and Discord no longer refuse a reply for being too long.** Both
+  adapters returned an error over the platform's message cap, so the answer
+  simply never arrived. They now deliver it as sequential, boundary-aware
+  messages in order — the same ladder Telegram uses, measured the way each
+  platform counts — and a failed send aborts the remainder rather than
+  half-delivering the reply out of order.
+
+### Changed
+
+- **Traces now record the full prompt, response, and tool bodies by default.**
+  A trace that omits the request and the response cannot answer the questions
+  traces exist to answer, and the privacy argument for the lean default does not
+  apply here — the JSONL lives under a `0700` `FERMIX_HOME` and any Opik
+  instance is local, so bodies never leave the machine. Set
+  `FERMIX_TRACE_CONTENT=0` to go back to the lean posture.
+
+- **Streaming defaults now follow what the channel can do.** A configured
+  channel that can edit messages (Telegram today) defaults to the live
+  edited-in-place card, every other configured channel keeps sending each
+  completed thought as its own message, and an unconfigured channel stays off.
+  Both remain settable per channel with `[fermix_channels.<name>] streaming`;
+  nothing needs configuring to get the better default.
+
+- **Outbound channel telemetry counts messages, not replies.** Each delivered
+  message is now its own row, including every live card a stream creates — a
+  reply that half-lands reports what actually arrived instead of reporting
+  nothing, and an answer that streamed and sealed in place no longer leaves the
+  turn with zero outbound rows.
+
 ## [0.8.0] - 2026-08-05
 
 ### Added

@@ -141,5 +141,61 @@ def test_reply_gate_leaves_single_asterisks_alone():
     assert g.passed
 
 
+def _url_span(name, output):
+    span = _tool(name)
+    span["output"] = output
+    return span
+
+
+def test_reply_urls_in_evidence_passes_when_every_url_was_tool_returned():
+    spans = [_url_span("web_search", {"results": [
+        {"url": "https://elixir-lang.org/blog/2026/06/03/elixir-v1-20-0-released/"}]})]
+    g = next(g for g in grade.grade(
+        _reply_trace("See [the announcement](https://elixir-lang.org/blog/2026/06/03/elixir-v1-20-0-released/)."),
+        spans, {"reply_urls_in_evidence": True}) if g.key == "reply_urls_in_evidence")
+    assert g.passed
+
+
+def test_reply_urls_in_evidence_fails_on_a_rebuilt_url():
+    # The model saw the index page but cited a per-advisory URL it constructed
+    # from a date — the exact fabrication class this gate exists to catch.
+    spans = [_url_span("web_fetch", {"url": "https://openssl-library.org/news/",
+                                     "content": "advisories: 9 June 2026"})]
+    g = next(g for g in grade.grade(
+        _reply_trace("Latest: https://openssl-library.org/news/secadv/20260609.txt"),
+        spans, {"reply_urls_in_evidence": True}) if g.key == "reply_urls_in_evidence")
+    assert not g.passed
+    assert "secadv/20260609.txt" in g.detail
+
+
+def test_reply_urls_in_evidence_trims_markdown_and_punctuation():
+    # A URL cited as **bold** with a trailing period still matches the
+    # inventory entry; the URL also hides inside a JSON-encoded span output.
+    spans = [_url_span("web_fetch", {"nested": [{"link": "https://example.com/a/b"}]})]
+    g = next(g for g in grade.grade(
+        _reply_trace("Read **https://example.com/a/b**."),
+        spans, {"reply_urls_in_evidence": True}) if g.key == "reply_urls_in_evidence")
+    assert g.passed
+
+
+def test_reply_urls_in_evidence_survives_a_url_ending_in_an_emphasis_char():
+    # Base64url ids end in `_`. Trimmed on the reply side only, the citation
+    # normalized to something absent from the untrimmed inventory and a
+    # byte-for-byte correct reply was reported as a fabricated link.
+    url = "https://www.youtube.com/watch?v=dQw4w9WgXc_"
+    spans = [_url_span("web_search", {"results": [{"url": url}]})]
+    g = next(g for g in grade.grade(
+        _reply_trace(f"Source: {url}"),
+        spans, {"reply_urls_in_evidence": True}) if g.key == "reply_urls_in_evidence")
+    assert g.passed, g.detail
+
+
+def test_reply_urls_in_evidence_passes_with_no_urls_in_reply():
+    g = next(g for g in grade.grade(
+        _reply_trace("No links needed here."), [],
+        {"reply_urls_in_evidence": True}) if g.key == "reply_urls_in_evidence")
+    assert g.passed
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))

@@ -29,7 +29,32 @@ $(LIB_NAME): $(SRC)
 	mkdir -p $(PREFIX)
 	$(CC) $(CFLAGS) $(SRC) $(LDFLAGS) -o $(LIB_NAME)
 
+# The disclaim exec shim (macOS only) is a standalone EXECUTABLE, so it must
+# not be built with $(CC): Burrito's cross-build sets CC to a `zig cc` string
+# with `-shared` baked in, which would emit a dylib. Cross-builds for macOS
+# targets pass DISCLAIM_TARGET (a zig triplet, from the burrito target's
+# nif_env qualifier in the umbrella mix.exs); local macOS builds use cc.
+# Keep DISCLAIM_CFLAGS in lockstep with the ci.yml disclaim_shim job so a
+# strict-zig-only compile error can never first appear at release time.
+DISCLAIM_SRC = c_src/fermix_disclaim.c
+DISCLAIM_BIN = $(PREFIX)/disclaim
+DISCLAIM_CFLAGS = -std=c99 -O2 -Wall -Wextra -Werror
+
+ifdef DISCLAIM_TARGET
+all: $(DISCLAIM_BIN)
+
+$(DISCLAIM_BIN): $(DISCLAIM_SRC)
+	mkdir -p $(PREFIX)
+	zig cc -target $(DISCLAIM_TARGET) $(DISCLAIM_CFLAGS) $(DISCLAIM_SRC) -o $(DISCLAIM_BIN)
+else ifeq ($(KERNEL_NAME), Darwin)
+all: $(DISCLAIM_BIN)
+
+$(DISCLAIM_BIN): $(DISCLAIM_SRC)
+	mkdir -p $(PREFIX)
+	cc $(DISCLAIM_CFLAGS) $(DISCLAIM_SRC) -o $(DISCLAIM_BIN)
+endif
+
 clean:
-	$(RM) $(LIB_NAME)
+	$(RM) $(LIB_NAME) $(DISCLAIM_BIN)
 
 .PHONY: all clean

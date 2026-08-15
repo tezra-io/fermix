@@ -155,6 +155,31 @@ jobs:
       - name: Validate behavioral suites (no spend)
         run: make -C benchmark dry
 
+  disclaim-shim:
+    # The macOS disclaim exec shim ships inside release payloads, cross-compiled
+    # by `zig cc` under strict flags — while dev macOS builds use the lenient
+    # host cc. That split already shipped one release-only C break (the v0.6.0
+    # NIF), so compile the shim here with the release-exact zig flags on every
+    # push. Keep the flags in lockstep with DISCLAIM_CFLAGS in
+    # apps/fermix_nif/Makefile and ZIG_VERSION with release.yml.
+    name: disclaim shim cross-compile (release zig flags)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: "0.15.2"
+      - name: Cross-compile for both macOS targets
+        run: |
+          set -euo pipefail
+          for target in aarch64-macos x86_64-macos; do
+            zig cc -target "$target" -std=c99 -O2 -Wall -Wextra -Werror \
+              apps/fermix_nif/c_src/fermix_disclaim.c -o "${RUNNER_TEMP}/disclaim_${target}"
+            echo "built ${target}"
+          done
+
   # Aggregate gate: the SINGLE stable check name that branch protection requires
   # (`compile · format · credo · test`), decoupled from the OS-matrix leg names.
   # Green iff every `check` leg passed; `if: always()` so a failed/skipped matrix
@@ -163,15 +188,18 @@ jobs:
   gate:
     name: compile · format · credo · test
     runs-on: ubuntu-24.04
-    needs: [check, harness]
+    needs: [check, harness, disclaim-shim]
     if: always()
     steps:
       - name: Require every matrix leg to have passed
         env:
           CHECK_RESULT: ${{ needs.check.result }}
           HARNESS_RESULT: ${{ needs.harness.result }}
+          DISCLAIM_RESULT: ${{ needs.disclaim-shim.result }}
         run: |
           echo "check (matrix) result: $CHECK_RESULT"
           echo "harness result: $HARNESS_RESULT"
+          echo "disclaim-shim result: $DISCLAIM_RESULT"
           [ "$CHECK_RESULT" = "success" ] || exit 1
           [ "$HARNESS_RESULT" = "success" ] || exit 1
+          [ "$DISCLAIM_RESULT" = "success" ] || exit 1

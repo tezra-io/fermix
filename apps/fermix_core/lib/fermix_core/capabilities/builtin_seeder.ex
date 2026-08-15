@@ -49,6 +49,10 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
     FermixCore.Tools.GitWrite,
     FermixCore.Tools.WebFetch,
     FermixCore.Tools.WebSearch,
+    # Seeded unconditionally; `advertise?/1` hides it from a daemon with no Brave
+    # key (MILESTONE_31 §14.1) and `execute/2` repeats that guard, so a boot-time
+    # seed decision would only make readiness stale until the next restart.
+    FermixCore.Tools.PlaceSearch,
     FermixCore.Tools.SkillCreate,
     FermixCore.Tools.SkillReload,
     FermixCore.Tools.SkillView,

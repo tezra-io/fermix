@@ -44,6 +44,7 @@ defmodule FermixCore.Application do
   alias FermixCore.SkillCuration.Config, as: SkillCurationConfig
   alias FermixCore.SkillCuration.Scheduler, as: SkillCurationScheduler
   alias FermixCore.Temporal.DeliverySupervisor, as: TemporalDeliverySupervisor
+  alias FermixCore.Temporal.FollowupSupervisor, as: TemporalFollowupSupervisor
   alias FermixCore.Temporal.Scheduler, as: TemporalScheduler
   alias FermixCore.Trace
 
@@ -169,8 +170,15 @@ defmodule FermixCore.Application do
         # scheduler. That invariant is what replaces lease tokens and fenced
         # settlement. Timers are gated by an init-time flag (the jobs-scheduler
         # precedent), disabled in `config/test.exs`, never by omission.
+        #
+        # The follow-up supervisor (§22.4) is LAST of the three, which the same
+        # property serves twice: a scheduler crash tears down in-flight
+        # deliveries and in-flight follow-ups together, and shutdown — reverse
+        # order — kills follow-ups first, so a worker settling mid-shutdown can
+        # find it already gone. That exit is caught, never fatal to a settlement.
         {TemporalScheduler, temporal_scheduler_opts()},
         TemporalDeliverySupervisor,
+        TemporalFollowupSupervisor,
         # Coding-harness local rail (design §6.4 / spec §5): one `:rest_for_one`
         # supervisor (Manager → RunSupervisor → DeliveryWorker) so a Manager crash
         # tears down and re-reconciles live runs instead of orphaning them. Always
@@ -211,6 +219,20 @@ defmodule FermixCore.Application do
   # rather than the common path.
   @http_pool_count 2
 
+  # Reap a chatgpt.com pool process that has been idle this long: Finch's
+  # `handle_ping` stops it (`{:stop, :idle_timeout}`, `restart: :transient`)
+  # and the next request auto-starts a fresh one. Verified in deps/finch. This
+  # moves stale-socket teardown OFF the request path — after a burst or a
+  # wake, the sockets a returning checkout would otherwise have to close
+  # synchronously are already gone with the reaped pool process, so a teardown
+  # storm cannot land inside a checkout budget. It cannot rescue a pool process
+  # that is ALREADY wedged mid-teardown (reaping is itself a ping-time
+  # decision); the continuation retry in `FermixCore.AgentLoop` covers that.
+  # Deliberately chatgpt.com only — the verified incident is Codex-specific,
+  # and :default fans out over many low-traffic hosts where reaping would just
+  # churn handshakes for no measured benefit.
+  @codex_pool_max_idle_ms 60_000
+
   # Web-search backend hosts get the same idle-capped pool plus the backends'
   # fail-fast connect budget (they degrade to DuckDuckGo on failure, so a dead
   # provider should fail in seconds, not hang the reply path on a stalled
@@ -243,6 +265,7 @@ defmodule FermixCore.Application do
         "https://chatgpt.com" => [
           conn_max_idle_time: @http_conn_max_idle_ms,
           count: @http_pool_count,
+          pool_max_idle_time: @codex_pool_max_idle_ms,
           conn_opts: [transport_opts: [timeout: 5_000]]
         ]
       },

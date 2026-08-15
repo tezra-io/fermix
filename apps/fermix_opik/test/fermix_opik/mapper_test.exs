@@ -235,6 +235,35 @@ defmodule FermixOpik.MapperTest do
   # `MCP.Capability.invoke/6`; before this key was allowlisted it was dropped from
   # every Opik tool span (each builder hard-codes its own key set — there is no
   # global allowlist).
+  # MILESTONE_31 §16: the search family's bounded metadata. `location_mode` is the
+  # only record of WHICH anchor a place search used — the coordinates themselves
+  # never leave the outbound request — so dropping it here erases the privacy
+  # evidence, not just a nice-to-have field.
+  test "tool_span keeps the search-family backend, counts, and anchor mode" do
+    metadata = %{
+      tool: "place_search",
+      success: true,
+      backend: "brave",
+      result_count: 5,
+      has_media_count: 4,
+      location_mode: "named"
+    }
+
+    span =
+      Mapper.tool_span(metadata, %{duration_ms: 120},
+        trace_id: "t",
+        project_name: "fermix",
+        ended: @ended
+      )
+
+    assert span.metadata == %{
+             backend: "brave",
+             result_count: 5,
+             has_media_count: 4,
+             location_mode: "named"
+           }
+  end
+
   test "tool_span keeps the outbound MCP server identity" do
     metadata = %{tool: "eden_get_note_markdown", success: true, mcp_server: "eden"}
 
@@ -246,6 +275,33 @@ defmodule FermixOpik.MapperTest do
       )
 
     assert span.metadata.mcp_server == "eden"
+  end
+
+  # `Gateway.DraftStream` emits :rotate with duration_us + edit_index; while those
+  # keys were unlisted the span carried channel/status only, so three rotations in
+  # one turn exported as three indistinguishable spans. `session_id` is not in the
+  # allowlist and must still drop — this stays an allowlist, not a passthrough.
+  test "stream_span keeps the rotate measurements" do
+    metadata = %{channel: "telegram", session_id: "main-1", phase: :rotate, status: :ok}
+
+    span =
+      Mapper.stream_span(metadata, %{duration_us: 60_000, edit_index: 3},
+        trace_id: "trace-1",
+        parent_span_id: "wrap-1",
+        project_name: "fermix",
+        ended: @ended
+      )
+
+    assert span.name == "stream:rotate"
+    assert span.type == "tool"
+    assert span.parent_span_id == "wrap-1"
+
+    assert span.metadata == %{
+             channel: "telegram",
+             status: "ok",
+             edit_index: 3,
+             duration_us: 60_000
+           }
   end
 
   describe "mcp_client_span/3" do

@@ -12,6 +12,31 @@ defmodule FermixCore.Tools.GitRead do
 
   @commands ~w(status log diff branch show)
 
+  # `branch` is the one read command with mutating modes, and the sharpest of
+  # them needs no flag at all: `git branch <name>` CREATES a ref. So the
+  # invariant is "branch mode takes flags only" rather than a denylist of the
+  # destructive spellings — a denylist would still let a bare operand through.
+  # The named modes are listed as well, so a caller reaching for `-D` is told
+  # what the rule is instead of being refused for the operand it happened to
+  # carry. A `:read_only` capability must never modify or delete a ref.
+  #
+  # The cost is that a flag VALUE cannot be a separate arg; git accepts the `=`
+  # form for all of them (`--contains=HEAD`, `--merged=main`), which the
+  # refusal names.
+  @branch_mutating_flags ~w(
+    --delete --move --copy --force
+    --set-upstream --set-upstream-to --unset-upstream --edit-description
+  )
+  # Short flags bundle (`-av`) and glue their value (`-uorigin/main`), so the
+  # mutating check walks the CLUSTER rather than matching the whole token: an
+  # exact-match denylist never sees `-uorigin/main`, and `-u` rewrites tracking
+  # *config* — a mutation no branch listing can observe. Same walk as the `-F`
+  # check in `FermixCore.Tools.GitCommand`, stopping at the first flag that
+  # consumes the REMAINDER AS A VALUE so a value's own letters are not read as
+  # flags (`-tdirect` is `--track=direct`, not a `-d`).
+  @branch_mutating_short ~c"dDmMcCfu"
+  @branch_value_short ~c"ut"
+
   # Audit F-01 follow-up: dangerous git *flags* that escape the `cd: repo`
   # boundary (`--upload-pack`, `--git-dir`, `--no-index`, ...) are rejected at
   # the shared chokepoint in `FermixCore.Tools.GitCommand`, so every git tool
@@ -51,7 +76,13 @@ defmodule FermixCore.Tools.GitRead do
     [
       %{tag: "unknown_command", description: "command is not in the read-only whitelist"},
       %{tag: "git_failed", description: "git returned a non-zero exit code"},
-      %{tag: "invalid_repo", description: "repo path is missing or not a directory"}
+      %{tag: "invalid_repo", description: "repo path is missing or not a directory"},
+      %{
+        tag: "branch_writes_refused",
+        description:
+          "branch mode lists only: flags that modify refs and bare operands are refused. " <>
+            "Pass a flag value in the = form, e.g. --contains=HEAD"
+      }
     ]
   end
 
@@ -73,6 +104,7 @@ defmodule FermixCore.Tools.GitRead do
          {:ok, resolved_repo} <- Sandbox.read_path(repo, :git_read, context),
          git_args = Support.optional_string_list(args, "args"),
          :ok <- validate_args(git_args),
+         :ok <- validate_branch_mode(command, git_args),
          {:ok, output} <- GitCommand.run(resolved_repo, command, git_args) do
       {:ok, Tool.success(output)}
     else
@@ -82,6 +114,55 @@ defmodule FermixCore.Tools.GitRead do
 
   defp validate_command(command) when command in @commands, do: :ok
   defp validate_command(command), do: {:error, "unknown_command: #{command}"}
+
+  defp validate_branch_mode("branch", args) do
+    Enum.reduce_while(args, :ok, fn arg, :ok ->
+      case classify_branch_arg(arg) do
+        :ok -> {:cont, :ok}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp validate_branch_mode(_command, _args), do: :ok
+
+  defp classify_branch_arg("-" <> _rest = arg) do
+    if branch_mutating_flag?(arg) do
+      {:error, "git arg #{inspect(arg)} modifies refs; git_read lists branches only"}
+    else
+      :ok
+    end
+  end
+
+  defp classify_branch_arg(arg) do
+    {:error,
+     "git arg #{inspect(arg)} would create or retarget a branch; git_read lists branches " <>
+       "only. Pass a flag value in the = form, e.g. --contains=HEAD"}
+  end
+
+  defp branch_mutating_flag?("--" <> rest = arg) when byte_size(rest) > 0 do
+    token = arg |> String.split("=", parts: 2) |> hd()
+    Enum.any?(@branch_mutating_flags, &String.starts_with?(&1, token))
+  end
+
+  defp branch_mutating_flag?("-" <> cluster) when byte_size(cluster) > 0,
+    do: short_cluster_mutates?(cluster)
+
+  defp branch_mutating_flag?(_arg), do: false
+
+  # Byte-level so an arg that is not valid UTF-8 classifies instead of raising;
+  # every flag letter git defines is ASCII.
+  defp short_cluster_mutates?(cluster) do
+    cluster
+    |> :binary.bin_to_list()
+    |> Enum.reduce_while(false, fn letter, acc ->
+      cond do
+        letter in @branch_mutating_short -> {:halt, true}
+        letter in @branch_value_short -> {:halt, acc}
+        true -> {:cont, acc}
+      end
+    end)
+  end
 
   defp validate_args(args) do
     Enum.reduce_while(args, :ok, fn arg, :ok ->

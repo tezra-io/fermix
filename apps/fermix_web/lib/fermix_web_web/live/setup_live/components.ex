@@ -1288,12 +1288,6 @@ defmodule FermixWebWeb.SetupLive.Components do
             set={@search_form.parallel_api_key_set}
           />
           <.secret_input
-            :if={@search_form.backend == :brave}
-            label="Brave API key"
-            name="search_form[brave_api_key]"
-            set={@search_form.brave_api_key_set}
-          />
-          <.secret_input
             :if={@search_form.backend == :perplexity}
             label="Perplexity API key"
             name="search_form[perplexity_api_key]"
@@ -1306,15 +1300,66 @@ defmodule FermixWebWeb.SetupLive.Components do
             set={@search_form.firecrawl_api_key_set}
           />
           <p :if={@search_form.backend == :duckduckgo} class="text-sm text-base-content/60">
-            DuckDuckGo needs no API key — nothing else to configure here.
+            DuckDuckGo needs no API key.
           </p>
         </div>
+
+        <div class="max-w-xl">
+          <.secret_input
+            label="Brave Search API key (web and place search)"
+            name="search_form[brave_api_key]"
+            set={@search_form.brave_api_key_set}
+          />
+        </div>
+
+        <.place_search_note search_form={@search_form} />
 
         <.form_actions active_tab={@active_tab} tabs={@tabs} save_label="Save search" />
       </form>
     </div>
     """
   end
+
+  attr :search_form, :map, required: true
+
+  # `place_search` shares the ONE Brave credential (MILESTONE_31 §14.1), so its
+  # readiness belongs on this pane whatever the selected web backend — Brave does
+  # not have to be the active web search backend for the tool to work. The
+  # retention posture (§13.4) is stated here because this is where the operator
+  # decides to save the key.
+  defp place_search_note(assigns) do
+    ~H"""
+    <div
+      class="rounded-box border border-base-300 bg-base-200/60 p-4 text-sm leading-6 text-base-content/70"
+      data-place-search={place_search_state(@search_form.brave_api_key_set)}
+    >
+      <p>{place_search_status(@search_form.brave_api_key_set)}</p>
+      <p class="pt-1 text-xs">
+        Each web and place call is metered separately. Place results are transient — only the
+        final answer persists, as ordinary chat history.
+        <a
+          class="link"
+          href="https://api-dashboard.search.brave.com/documentation/services/place-search"
+          target="_blank"
+          rel="noreferrer"
+        >
+          Brave API docs
+        </a>
+      </p>
+    </div>
+    """
+  end
+
+  defp place_search_state(true), do: "ready"
+  defp place_search_state(false), do: "unconfigured"
+
+  defp place_search_status(true),
+    do: "place_search is ready — it uses the saved Brave Search API key."
+
+  defp place_search_status(false),
+    do:
+      "place_search (businesses, hours, ratings, contact details) needs a Brave Search API key. " <>
+        "Brave does not have to be your web backend."
 
   defp media_pane(assigns) do
     ~H"""

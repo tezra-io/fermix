@@ -93,8 +93,8 @@ defmodule FermixOpik.Mapper do
 
   @doc """
   Build a draft-stream lifecycle span from a `[:fermix, :channel, :stream]`
-  event (phases `:open`/`:seal`/`:discard`; see docs/design/CHANNEL_STREAMING.md
-  §8 in the fermix repo).
+  event (phases `:open`/`:block`/`:rotate`/`:seal`/`:discard`; see
+  docs/design/CHANNEL_STREAMING.md §8 in the fermix repo).
   """
   @spec stream_span(map(), map(), keyword()) :: map()
   def stream_span(metadata, measurements, opts) do
@@ -116,6 +116,12 @@ defmodule FermixOpik.Mapper do
           status: stringify(Map.get(metadata, :status)),
           ttfd_ms: Map.get(measurements, :ttfd_ms),
           block_index: Map.get(measurements, :block_index),
+          # The write phases' own pair (`Gateway.DraftStream`): unlisted, a
+          # :rotate span exported as channel+status alone, so every rotation in a
+          # turn was indistinguishable from the next. Microseconds keep the
+          # emitter's unit in the key name, as `Aggregation` does.
+          edit_index: Map.get(measurements, :edit_index),
+          duration_us: Map.get(measurements, :duration_us),
           total_edits: Map.get(measurements, :total_edits),
           dropped_snapshots: Map.get(measurements, :dropped_snapshots)
         })
@@ -167,7 +173,16 @@ defmodule FermixOpik.Mapper do
             :workspace_scope,
             :read_only,
             :replay_safe,
-            :attempt
+            :attempt,
+            # The search family's bounded metadata (MILESTONE_31 §16). Counts and
+            # provider name only — never a query, a place record, or a
+            # coordinate. `:location_mode` is the sole record of WHICH anchor a
+            # place search used (query_only / named / explicit_coordinates), so
+            # dropping it erases the privacy evidence itself.
+            :backend,
+            :result_count,
+            :has_media_count,
+            :location_mode
           ])
         )
     }

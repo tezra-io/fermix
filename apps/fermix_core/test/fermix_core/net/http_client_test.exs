@@ -140,6 +140,18 @@ defmodule FermixCore.Net.HttpClientTest do
     assert pools["https://chatgpt.com"][:conn_opts] == [transport_opts: [timeout: 5_000]]
   end
 
+  test "the chatgpt.com pool reaps idle pool processes off the request path" do
+    # Finch's default pool_max_idle_time is :infinity: a pool process lives
+    # forever holding sockets a peer may have RST'd, and their teardown is paid
+    # by the next checkout. Reaping an idle pool process (Finch stops it and
+    # auto-starts a fresh one on the next request) moves that teardown off the
+    # request path. Pinned because Finch exposes no way to read pool config back.
+    pools = FermixCore.Application.finch_pools()
+
+    assert pools["https://chatgpt.com"][:pool_max_idle_time] == 60_000
+    assert pools[:default][:pool_max_idle_time] == nil
+  end
+
   test "web-search hosts ride the shared hardened pool with their fail-fast connect budget" do
     # The search backends' 3s connect budget moved here from per-request
     # `connect_options` — which had silently forked them onto Req-managed
@@ -240,8 +252,8 @@ defmodule FermixCore.Net.HttpClientTest do
   describe "connection_unavailable?/1" do
     test "classifies the Finch pool-checkout timeout RuntimeError" do
       # The exact raise Finch reraises when a checkout exceeds the pool queue
-      # timeout — the wake-from-sleep signature, when the host network is not
-      # ready so connects stall and checkouts queue past their timeout.
+      # timeout — pool contention, a pool process blocked tearing down stale
+      # sockets, or stalled connects just after a wake from sleep.
       exception =
         RuntimeError.exception(
           "Finch was unable to provide a connection within the timeout due to " <>

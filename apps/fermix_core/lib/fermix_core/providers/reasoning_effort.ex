@@ -6,12 +6,13 @@ defmodule FermixCore.Providers.ReasoningEffort do
   The level name *is* the provider's wire value. Transforms, treating the
   levels as an ordered scale: `:none` -> omit the field (providers that
   support it); a level *above* a provider's ceiling clamps to that ceiling
-  (so `:max` on xAI -> `"high"`, its highest); a level *below* a
+  (so `:max` on xAI -> `"xhigh"`, its highest); a level *below* a
   provider's floor (e.g. `:none` on Anthropic) is rejected as unsupported.
 
   This module stays provider-level. Per-*model* effort ceilings (e.g. `max`
   is a gpt-5.6-family capability, so the older OpenAI models top out at
-  `xhigh`) live in `ModelCatalog` as an `Entry` field and are applied via
+  `xhigh`; `xhigh` is a Grok 4.6 capability, so every older xAI model tops out
+  at `high`) live in `ModelCatalog` as an `Entry` field and are applied via
   `cap/2` before the wire — see `ModelCatalog.clamp_effort/3`. Anthropic's
   per-model nuance (`xhigh` is Opus-only) is still left to the provider
   API's 400, matching the prior OpenAI design.
@@ -38,7 +39,7 @@ defmodule FermixCore.Providers.ReasoningEffort do
     openai: [:none, :low, :medium, :high, :xhigh, :max],
     openai_codex: [:none, :low, :medium, :high, :xhigh, :max],
     anthropic: [:low, :medium, :high, :xhigh, :max],
-    xai: [:none, :low, :medium, :high]
+    xai: [:none, :low, :medium, :high, :xhigh]
   }
 
   @spec levels() :: [level()]
@@ -126,7 +127,8 @@ defmodule FermixCore.Providers.ReasoningEffort do
 
     * `:omit` — send no reasoning/effort field (`:none` on a provider that supports it).
     * `{:ok, "xhigh"}` — send this effort string. A level above the provider's
-      ceiling clamps to the ceiling (e.g. `:max` on xAI -> `"high"`).
+      ceiling clamps to the ceiling (e.g. `:max` on xAI -> `"xhigh"`). A model
+      may carry a lower ceiling still — see `levels_for/2`.
     * `{:error, {:unsupported, level, provider}}` — the level is below the
       provider's floor (e.g. `:none` on Anthropic) or is not a canonical level.
   """

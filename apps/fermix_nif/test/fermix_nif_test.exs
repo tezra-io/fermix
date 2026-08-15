@@ -7,6 +7,11 @@ defmodule FermixNifTest do
   @poll_max 50
   @poll_ms 100
 
+  # Beyond every platform's pid ceiling (macOS 99998, Linux ≤ 2^22), so no live
+  # group can ever carry it: kill(2) answers ESRCH deterministically and the
+  # probe signals nothing real.
+  @absent_pgid 999_999_999
+
   describe "kill_pgid/2 signals a real process group" do
     test "SIGKILL reaps a live group and returns :ok" do
       {_port, os_pid} = spawn_sleeper()
@@ -43,6 +48,23 @@ defmodule FermixNifTest do
       on_exit(fn -> liveness_gated_kill(os_pid) end)
 
       assert_raise FunctionClauseError, fn -> FermixNif.kill_pgid(os_pid, :sighup) end
+    end
+  end
+
+  describe "hot code upgrade" do
+    # A dev recompile under a live daemon hot-swaps this module (Phoenix code
+    # reloader, or a second `mix compile` in another shell). Without a NIF
+    # upgrade callback the VM refuses the swap — "Upgrade not supported by this
+    # NIF library" — the module loses its native binding, and every
+    # process-group sweep crashes until the daemon restarts. The load below IS
+    # that swap, against the very same beam.
+    test "kill_pgid/2 survives a reload of the module" do
+      assert FermixNif.kill_pgid(@absent_pgid, :sigkill) == {:error, :esrch}
+
+      assert {:module, FermixNif} = :code.load_file(FermixNif)
+      :code.purge(FermixNif)
+
+      assert FermixNif.kill_pgid(@absent_pgid, :sigkill) == {:error, :esrch}
     end
   end
 

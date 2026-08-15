@@ -131,13 +131,14 @@ defmodule FermixOpik.Aggregation do
     place_under(state, parent, meta, at, &Mapper.tool_span(meta, meas, &1))
   end
 
-  # Channel-stream lifecycle ([:fermix, :channel, :stream]): open/block/seal/
-  # discard become child spans of the turn's trace via the shared session_id —
-  # never a root run (the stream has no parent_session of its own). Interim
-  # draft :edit phases are deliberately not exported: at ~1 edit/s they would
-  # flood the trace; the seal span carries total_edits/dropped_snapshots
-  # instead. :block phases (one per sent chunk, a handful per turn) export too,
-  # but only while the run's session is still open (see below).
+  # Channel-stream lifecycle ([:fermix, :channel, :stream]): open/block/rotate/
+  # seal/discard become child spans of the turn's trace via the shared
+  # session_id — never a root run (the stream has no parent_session of its own).
+  # Interim draft :edit phases are deliberately not exported: at ~1 edit/s they
+  # would flood the trace; the seal span carries total_edits/dropped_snapshots
+  # instead. :block (one per sent chunk) and :rotate (one per sealed draft card,
+  # a handful per turn) export too, but only while the run's session is still
+  # open (see below).
   def apply_event(state, [:fermix, :channel, :stream], meas, meta, at) do
     case Map.get(meta, :phase) do
       :open ->
@@ -151,7 +152,7 @@ defmodule FermixOpik.Aggregation do
         # instead of resurrecting it as an empty root.
         add_child_span(state, meta, at, &Mapper.stream_span(meta, meas, &1))
 
-      phase when phase in [:block, :seal, :discard] ->
+      phase when phase in [:block, :rotate, :seal, :discard] ->
         # These phases can arrive AFTER the turn's `agent.message` already closed
         # and shipped the trace: :seal/:discard fire just as the turn completes,
         # and in block streaming a paced :block edit (~1s throttle / idle flush)
@@ -626,6 +627,56 @@ defmodule FermixOpik.Aggregation do
     {state, [%{trace: reminder_trace(state, meas, meta, at), spans: []}]}
   end
 
+  # A post-delivery follow-up (M30 §22.7) is the one part of the reminder rail
+  # that IS an agent run: it drives the loop in its own context, so unlike every
+  # phase above it owns a session and gets a real root trace with the run's
+  # provider/tool spans nested under it.
+  #
+  # `parent_session` is hard-coded nil for the harness reason: the turn that
+  # stored the event closed hours or days before delivery, so there is no live
+  # turn to nest into and naming one would resurrect a shipped trace. There is
+  # deliberately no `thread_id` either — the temporal family never carries the
+  # delivery destination, so the run is an unthreaded root, found by its session
+  # prefix and its event/reminder ids.
+  def apply_event(state, [:fermix, :reminder, :followup_start], _meas, meta, at) do
+    case Map.get(meta, :session_id) do
+      nil ->
+        {state, []}
+
+      session_id ->
+        ctx = %{
+          parent_session: nil,
+          kind: :reminder_followup,
+          name: Map.get(meta, :agent),
+          input: nil,
+          max_duration_ms: Map.get(meta, :max_duration_ms),
+          trace_metadata: followup_metadata(meta),
+          at: at.at,
+          mono: at.mono
+        }
+
+        {state, _ref} = ensure_session(state, session_id, ctx)
+        {state, []}
+    end
+  end
+
+  # `followup_complete` closes a run that reached a decision — `sent`,
+  # `declined`, `empty`, `delivery_failed` — and every one of those is a
+  # successful run, so the status is "ok" and the `outcome` is what says which.
+  # Only a run that never reached one (`followup_error`) carries its own status
+  # word (`error`/`timeout`). The owner-facing text rides `output` and exists
+  # only when the operator turned content capture on.
+  def apply_event(state, [:fermix, :reminder, run], _meas, meta, at)
+      when run in [:followup_complete, :followup_error] do
+    status = if run == :followup_error, do: Map.get(meta, :status, "error"), else: "ok"
+
+    close_root(state, meta, at, %{
+      output: Map.get(meta, :output) || Map.get(meta, :error),
+      status: status,
+      metadata: followup_metadata(meta)
+    })
+  end
+
   def apply_event(state, _event, _meas, _meta, _at), do: {state, []}
 
   @doc """
@@ -999,6 +1050,7 @@ defmodule FermixOpik.Aggregation do
   defp infer_kind("skill_curation:" <> _), do: :skill_curation
   defp infer_kind("soul_curation:" <> _), do: :soul_curation
   defp infer_kind("memory_review:" <> _), do: :memory_review
+  defp infer_kind("followup_" <> _), do: :reminder_followup
   defp infer_kind(_other), do: :subagent
 
   defp kind_from_role(role) when role in [:skill, "skill"], do: :skill
@@ -1007,6 +1059,10 @@ defmodule FermixOpik.Aggregation do
   defp wrapper_name(:main, _name, _session), do: "agent:main"
   defp wrapper_name(:scheduled, name, session), do: "scheduled:#{name || session}"
   defp wrapper_name(:harness, name, session), do: "harness:#{name || session}"
+  # The run's agent name ("followup:<event_id>") already reads as a label, and
+  # its session id ("followup_<reminder_id>") is its own fallback — the generic
+  # "<kind>:<name>" shape would only say "followup" twice.
+  defp wrapper_name(:reminder_followup, name, session), do: name || session
   defp wrapper_name(kind, nil, session), do: "#{kind}:#{session}"
   defp wrapper_name(kind, name, _session), do: "#{kind}:#{name}"
 
@@ -1079,6 +1135,19 @@ defmodule FermixOpik.Aggregation do
       end_time: Mapper.iso(at.at),
       metadata: compact(reminder_metadata(metadata, duration_ms)),
       tags: ["reminder"]
+    })
+  end
+
+  # The follow-up bookends' correlation allowlist, shared by the opener and the
+  # closer so a run whose opener never arrived still carries the ids. `outcome`
+  # exists only on the closer; `compact` drops it everywhere else.
+  defp followup_metadata(metadata) do
+    compact(%{
+      component: Map.get(metadata, :component),
+      event_id: Map.get(metadata, :event_id),
+      reminder_id: Map.get(metadata, :reminder_id),
+      occurrence_key: Map.get(metadata, :occurrence_key),
+      outcome: Map.get(metadata, :outcome)
     })
   end
 

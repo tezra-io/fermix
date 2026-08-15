@@ -15,9 +15,12 @@ opik:
   ui_base: "http://localhost:5173"
 
 judge:
-  # Independent external judge: the OpenAI API via EVAL_JUDGE_API_KEY (the Makefile
-  # resolves it from the daemon's configured key in the keychain). No daemon/core
-  # code involved. The judge model must differ from the candidate model.
+  # Independent external judge: the OpenAI API via EVAL_JUDGE_API_KEY. The
+  # benchmark Makefile resolves that key from the daemon's keychain slot
+  # (fermix:OPENAI_API_KEY) when the env var isn't exported, so `make
+  # regression` works with zero setup. Valid backends: "openai" | "none" —
+  # there is no in-daemon judge backend. The judge model must differ from the
+  # candidate model.
   backend: "openai"
   model: "gpt-5.4-mini"
   enabled: false

@@ -11,16 +11,24 @@ defmodule FermixChannels.Channels.Slack do
 
   require Logger
 
+  alias FermixChannels.Channels.Slack.Mrkdwn
   alias FermixChannels.Gateway.Idempotency
   alias FermixChannels.Gateway.MediaDownload
   alias FermixChannels.Gateway.Message
   alias FermixChannels.Gateway.RetryHint
+  alias FermixChannels.Outbound.Splitter
   alias FermixChannels.Telemetry, as: ChannelTelemetry
   alias FermixCore.Net.HttpClient
   alias FermixCore.Telemetry
 
   @api_base "https://slack.com/api"
   @health_timeout_ms 5_000
+  # Slack documents the `chat.postMessage` `text` cap as 40,000 "characters"
+  # without saying which unit it counts, so the splitter's grapheme default
+  # stands and the uncertainty is named rather than papered over: graphemes
+  # undercount codepoints and UTF-16 units on emoji-dense text, but 40,000 is
+  # two orders of magnitude above any reply Fermix produces, so the margin
+  # absorbs the ambiguity. Unverified.
   @max_message_length 40_000
   @max_signature_age_seconds 300
   @max_media_bytes 100 * 1_024 * 1_024
@@ -60,29 +68,60 @@ defmodule FermixChannels.Channels.Slack do
   @spec send_message(String.t(), String.t(), FermixChannels.Gateway.Channel.send_opts()) ::
           :ok | {:error, term()}
   def send_message(channel_id, text, opts \\ []) when is_binary(channel_id) and is_binary(text) do
-    with :ok <- enforce_text_cap(text),
-         {:ok, token} <- bot_token() do
-      body =
-        %{channel: channel_id, text: text}
-        |> maybe_put_thread_ts(opts)
+    case bot_token() do
+      {:ok, token} ->
+        # CHANNEL_LONGFORM_PRESENTATION §3.1: a reply longer than Slack's hard
+        # truncation bound rides the shared boundary ladder and is delivered as
+        # sequential messages; it is never refused. The ladder walks the model's
+        # Markdown — that is where headings and section boundaries are still
+        # legible — while every candidate chunk is *measured* through the mrkdwn
+        # renderer, so the fill condition sees the text Slack receives. Each
+        # emitted chunk is then rendered for the wire.
+        text
+        |> Splitter.split(limit: @max_message_length, measure: &Mrkdwn.rendered_length/1)
+        |> Enum.map(&Mrkdwn.render/1)
+        |> send_text_chunks(channel_id, token, opts)
 
-      {result, duration_us} =
-        Telemetry.timed_us(fn ->
-          Req.new(url: "#{@api_base}/chat.postMessage", method: :post, json: body)
-          |> Req.Request.put_header("authorization", "Bearer #{token}")
-          |> Req.merge(req_options(opts))
-          |> HttpClient.request("Slack chat.postMessage")
-        end)
-
-      handle_send_response(result, duration_us)
-    else
       # M30 §11.3: an unconfigured token means there is no Slack client to send
       # through, which is the `:adapter_unavailable` kind of the closed delivery
       # vocabulary — not a bare atom the delivery normalizer would have to guess
       # at, and then log as a contract violation.
-      {:error, :not_configured} -> {:error, {:permanent, :adapter_unavailable}}
-      {:error, reason} -> {:error, reason}
+      {:error, :not_configured} ->
+        {:error, {:permanent, :adapter_unavailable}}
     end
+  end
+
+  # Strictly sequential: the first failure aborts the remaining chunks and is
+  # the returned reason.
+  defp send_text_chunks(chunks, channel_id, token, opts) do
+    Enum.reduce_while(chunks, :ok, fn chunk, :ok ->
+      halt_on_error(send_text_chunk(chunk, channel_id, token, opts))
+    end)
+  end
+
+  # One delivered message is one outbound row, emitted here rather than once for
+  # the whole reply (design §8): a reply that half-lands then reports truthfully
+  # what WAS delivered instead of reporting nothing.
+  defp send_text_chunk(chunk, channel_id, token, opts) do
+    {result, duration_us} =
+      Telemetry.timed_us(fn -> post_text_chunk(chunk, channel_id, token, opts) end)
+
+    emit_outbound(result, duration_us)
+  end
+
+  defp halt_on_error(:ok), do: {:cont, :ok}
+  defp halt_on_error({:error, _reason} = error), do: {:halt, error}
+
+  defp post_text_chunk(chunk, channel_id, token, opts) do
+    body =
+      %{channel: channel_id, text: chunk}
+      |> maybe_put_thread_ts(opts)
+
+    Req.new(url: "#{@api_base}/chat.postMessage", method: :post, json: body)
+    |> Req.Request.put_header("authorization", "Bearer #{token}")
+    |> Req.merge(req_options(opts))
+    |> HttpClient.request("Slack chat.postMessage")
+    |> classify_send_response()
   end
 
   @impl true
@@ -485,16 +524,6 @@ defmodule FermixChannels.Channels.Slack do
     {:error, {:byte_cap_exceeded, size, @max_media_bytes}}
   end
 
-  defp enforce_text_cap(text) do
-    length = String.length(text)
-
-    if length <= @max_message_length do
-      :ok
-    else
-      {:error, {:text_cap_exceeded, length, @max_message_length}}
-    end
-  end
-
   defp maybe_release_claim(:ok, _claim), do: :ok
 
   defp maybe_release_claim({:error, _reason} = error, claim) do
@@ -551,16 +580,26 @@ defmodule FermixChannels.Channels.Slack do
     end
   end
 
-  defp handle_send_response({:ok, %{status: 200, body: %{"ok" => true}}}, duration_us) do
+  defp handle_send_response(result, duration_us) do
+    result
+    |> classify_send_response()
+    |> emit_outbound(duration_us)
+  end
+
+  defp emit_outbound(:ok, duration_us) do
     ChannelTelemetry.emit_message(:slack, :outbound, 1, duration_us)
     :ok
   end
+
+  defp emit_outbound({:error, _reason} = error, _duration_us), do: error
+
+  defp classify_send_response({:ok, %{status: 200, body: %{"ok" => true}}}), do: :ok
 
   # Slack answers 200 for API-level rejections and puts the reason in `ok: false`
   # plus an `error` code. M30 §11.3 maps a bounded known set to permanent kinds
   # and everything else to `:remote_rejected`; the code itself is logged locally
   # (bounded) and never embedded in the returned reason.
-  defp handle_send_response({:ok, %{status: 200, body: %{"ok" => false} = body}}, _duration_us) do
+  defp classify_send_response({:ok, %{status: 200, body: %{"ok" => false} = body}}) do
     code = Map.get(body, "error", "unknown")
 
     Logger.warning(
@@ -571,12 +610,12 @@ defmodule FermixChannels.Channels.Slack do
     {:error, {:permanent, slack_rejection_kind(code)}}
   end
 
-  defp handle_send_response({:ok, %{status: status, body: body} = response}, _duration_us) do
+  defp classify_send_response({:ok, %{status: status, body: body} = response}) do
     Logger.error("Slack send failed: #{status} - #{inspect(body)}")
     slack_api_error(response)
   end
 
-  defp handle_send_response({:error, reason}, _duration_us) do
+  defp classify_send_response({:error, reason}) do
     Logger.error("Slack request failed: #{inspect(reason)}")
     {:error, reason}
   end

@@ -83,4 +83,19 @@ static ErlNifFunc nif_funcs[] = {
     {"kill_pgid_nif", 2, kill_pgid_nif, 0},
 };
 
-ERL_NIF_INIT(Elixir.FermixNif, nif_funcs, NULL, NULL, NULL, NULL)
+// Hot-code-upgrade acceptance. A dev recompile under a live daemon hot-swaps
+// this module, and a NIF library without an upgrade callback makes the VM
+// refuse the swap — the module then loses its native binding and every
+// process-group sweep crashes until the daemon restarts. This NIF keeps no
+// private state, so carrying it across a swap needs nothing beyond saying yes.
+static int upgrade(ErlNifEnv *env, void **priv_data, void **old_priv_data,
+                   ERL_NIF_TERM load_info)
+{
+    (void)env;
+    (void)priv_data;
+    (void)old_priv_data;
+    (void)load_info;
+    return 0;
+}
+
+ERL_NIF_INIT(Elixir.FermixNif, nif_funcs, NULL, NULL, upgrade, NULL)

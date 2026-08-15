@@ -17,7 +17,8 @@ defmodule FermixCore.Capabilities.Capability do
     * `:when_to_use` — one-sentence routing hint used by runtime prompt summaries.
     * `:examples` — list of `%{args: map(), note: String.t()}` examples for `tool_help`.
     * `:failure_modes` — list of JSON-safe `%{tag: String.t(), description: String.t()}` maps.
-    * `:requires_setup` — `nil` for keyless tools; reserved for future setup-gated built-ins.
+    * `:requires_setup` — `nil` for keyless tools; a credential-gated built-in
+      (`place_search`) states the credential and its config path here.
     * `:category` — prompt grouping atom such as `:file`, `:web`, `:git`, or `:memory`.
 
   `policy_class` and `owner_only?` are two different axes and both are load

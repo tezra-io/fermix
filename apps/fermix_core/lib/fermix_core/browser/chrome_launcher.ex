@@ -92,11 +92,41 @@ defmodule FermixCore.Browser.ChromeLauncher do
       {:ok, port, ws_url} ->
         {:ok, runtime |> Map.put(:port, port) |> Map.put(:ws_url, ws_url)}
 
+      {:error, {:exited, status, output}} ->
+        kill_process(os_pid, config)
+        safe_port_close(port_ref)
+        {:error, exited_error(runtime, status, output)}
+
       {:error, output} ->
         kill_process(os_pid, config)
         safe_port_close(port_ref)
         {:error, not_ready_error(runtime, output)}
     end
+  end
+
+  # Exit codes owned by the disclaim shim itself (usage, API unavailable,
+  # setdisclaim/attr failures, exec-of-Chrome failure) — everything else is
+  # Chrome's own exit.
+  @disclaim_exit_codes [64, 70, 71, 72, 74, 75]
+
+  defp exited_error(_runtime, status, output) when status in @disclaim_exit_codes do
+    Error.new(
+      "disclaim_failed",
+      "macOS disclaim shim could not launch Chrome (exit #{status})",
+      %{
+        "exit_status" => status,
+        "chrome_output" => output_tail(output)
+      }
+    )
+  end
+
+  defp exited_error(runtime, status, output) do
+    Error.new("cdp_not_ready", "Chrome exited before its CDP endpoint became ready", %{
+      "headless" => runtime.headless,
+      "port" => runtime.port,
+      "exit_status" => status,
+      "chrome_output" => output_tail(output)
+    })
   end
 
   # The opaque "did not become ready" is the #1 thing operators hit (e.g. a
@@ -256,18 +286,53 @@ defmodule FermixCore.Browser.ChromeLauncher do
   defp launch(executable, profile_dir, port, headless) do
     args = launch_args(profile_dir, port, headless)
 
-    port_ref =
-      Port.open({:spawn_executable, executable}, [
-        :binary,
-        :exit_status,
-        :stderr_to_stdout,
-        {:args, args}
-      ])
+    with {:ok, {spawn_target, spawn_args}} <-
+           spawn_plan(executable, args, :os.type(), disclaim_shim_path()) do
+      port_ref =
+        Port.open({:spawn_executable, spawn_target}, [
+          :binary,
+          :exit_status,
+          :stderr_to_stdout,
+          {:args, spawn_args}
+        ])
 
-    {:os_pid, os_pid} = Port.info(port_ref, :os_pid)
-    {:ok, port_ref, os_pid}
+      {:os_pid, os_pid} = Port.info(port_ref, :os_pid)
+      {:ok, port_ref, os_pid}
+    end
   rescue
     error -> {:error, Error.new("launch_failed", Exception.message(error))}
+  end
+
+  @doc """
+  Compute the spawn target and argv for launching Chrome.
+
+  On macOS Chrome is spawned through the `disclaim` exec shim (`fermix_nif`
+  priv) so it becomes its own TCC responsible process. Spawned directly, its
+  bundle-probing is attributed to the fermix daemon and raises an App
+  Management prompt keyed to the versioned install path — a new one every
+  release. The shim SETEXECs Chrome in place, so the pid the Port observes IS
+  Chrome's. A missing shim refuses loud: an undisclaimed fallback spawn would
+  silently resurrect the prompt churn. Exposed for tests.
+  """
+  @spec spawn_plan(String.t(), [String.t()], {atom(), atom()}, String.t() | nil) ::
+          {:ok, {String.t(), [String.t()]}} | {:error, Error.t()}
+  def spawn_plan(_executable, _args, {:unix, :darwin}, nil) do
+    {:error,
+     Error.new(
+       "shim_missing",
+       "macOS disclaim shim is not built — rebuild fermix (mix compile) or reinstall"
+     )}
+  end
+
+  def spawn_plan(executable, args, {:unix, :darwin}, shim) when is_binary(shim) do
+    {:ok, {shim, [executable | args]}}
+  end
+
+  def spawn_plan(executable, args, _os_type, _shim), do: {:ok, {executable, args}}
+
+  defp disclaim_shim_path do
+    path = Application.app_dir(:fermix_nif, "priv/disclaim")
+    if File.regular?(path), do: path, else: nil
   end
 
   defp launch_args(profile_dir, port, headless) do
@@ -314,10 +379,14 @@ defmodule FermixCore.Browser.ChromeLauncher do
   defp do_wait_until_ready(requested_port, profile_dir, port_ref, deadline, config, output) do
     output = output <> drain_port(port_ref)
 
-    with {:ok, port} <- resolve_port(requested_port, profile_dir),
+    with :running <- early_exit_status(port_ref),
+         {:ok, port} <- resolve_port(requested_port, profile_dir),
          {:ok, ws_url} <- fetch_version(port, config) do
       {:ok, port, ws_url}
     else
+      {:exited, status} ->
+        {:error, {:exited, status, output <> drain_port(port_ref)}}
+
       _not_ready ->
         if System.monotonic_time(:millisecond) >= deadline do
           {:error, output <> drain_port(port_ref)}
@@ -325,6 +394,23 @@ defmodule FermixCore.Browser.ChromeLauncher do
           Process.sleep(config.cdp_ready_poll_interval_ms)
           do_wait_until_ready(requested_port, profile_dir, port_ref, deadline, config, output)
         end
+    end
+  end
+
+  # On macOS the spawn target is the disclaim shim: any pre-ready exit is
+  # terminal (a shim refusal, or Chrome dying/forwarding to an existing
+  # instance), so fail fast with the exit code instead of burning the launch
+  # timeout. Other platforms keep today's behavior untouched — a forking
+  # wrapper script may legitimately exit while Chrome lives on.
+  defp early_exit_status(port_ref) do
+    if darwin?() do
+      receive do
+        {^port_ref, {:exit_status, status}} -> {:exited, status}
+      after
+        0 -> :running
+      end
+    else
+      :running
     end
   end
 
@@ -424,4 +510,6 @@ defmodule FermixCore.Browser.ChromeLauncher do
   defp safe_port_close(_port_ref), do: :ok
 
   defp unix?, do: match?({:unix, _}, :os.type())
+
+  defp darwin?, do: match?({:unix, :darwin}, :os.type())
 end

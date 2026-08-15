@@ -13,19 +13,21 @@ defmodule FermixChannels.Gateway.Commands.CommandGateTest do
   alias FermixChannels.Gateway.Commands.Registry
   alias FermixChannels.Gateway.Message
 
-  # Daemon-global or durable-state triggers. `/soul` rewrites SOUL.md on disk
-  # and its confirmation token is bound to the requester's own conversation, so
-  # an allowlisted guest could otherwise self-approve their own persona edit;
-  # `/skills` writes the operator's skill inventory and approves curation
-  # proposals built from the owner's private history; `/stop` fans out across
-  # every conversation and channel; `/background` spends the owner's provider
-  # budget outside the single-flight queue; the sandbox mutation subcommands
-  # were already strict.
-  @operator_only ~w(soul skills stop background bg grant revoke confirm)
+  # Daemon-global, durable-state, or budget-multiplying triggers. `/soul`
+  # rewrites SOUL.md on disk and its confirmation token is bound to the
+  # requester's own conversation, so an allowlisted guest could otherwise
+  # self-approve their own persona edit; `/skills` writes the operator's skill
+  # inventory and approves curation proposals built from the owner's private
+  # history; `/stop` fans out across every conversation and channel;
+  # `/background` spends the owner's provider budget outside the single-flight
+  # queue; `/ultra` is conversation-scoped but multiplies one turn into a wide
+  # subagent fan-out on the owner's account, so cost puts it here even though
+  # scope would not; the sandbox mutation subcommands were already strict.
+  @operator_only ~w(soul skills stop background bg grant revoke confirm ultra)
 
   # Conversation-scoped lifecycle (plus the two unauthenticated informational
   # commands): this is what the `command_allowlist` guest branch exists for.
-  @guest_reachable ~w(compact new clear help whoami sandbox pause resume tasks ultra)
+  @guest_reachable ~w(compact new clear help whoami sandbox pause resume tasks)
 
   setup do
     previous_channel = Application.get_env(:fermix_channels, :telegram, [])

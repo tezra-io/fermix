@@ -7,6 +7,18 @@ defmodule FermixCore.Prompt.RuntimeSectionsTest do
   alias FermixCore.Capabilities.Registry
   alias FermixCore.Prompt.RuntimeSections
 
+  # Two executor doubles for the credential-gate tests: readiness is the whole
+  # difference, and neither reads config, so the assertions carry no global state.
+  defmodule ReadyGatedTool do
+    def execute(_args, _context), do: {:ok, %{}}
+    def advertise?(_context), do: true
+  end
+
+  defmodule UnreadyGatedTool do
+    def execute(_args, _context), do: {:ok, %{}}
+    def advertise?(_context), do: false
+  end
+
   test "build/1 renders runtime guidance and an empty skill snapshot" do
     content = RuntimeSections.build([])
 
@@ -36,8 +48,88 @@ defmodule FermixCore.Prompt.RuntimeSectionsTest do
     assert content =~ "Use `expires_at` for temporary"
     assert content =~ "Prefer direct Fermix built-ins over shell"
     assert content =~ "## Delegate Wide, Think at the Center"
+    # Effort calibration leads the section: scale is decided before the split
+    # (live eval catch: "a quick rundown" answered with a 6-subagent,
+    # 6.1M-token research fan-out that blew the duration budget).
+    assert content =~ "Match the machinery to the ask"
+    assert content =~ "not a research project"
+    assert content =~ "offer to go deeper"
     assert content =~ "Prefer more narrow workers over fewer broad ones"
     assert content =~ "Use `subagents`"
+  end
+
+  # M31 §9 + §18 row "Runtime prompt": the evidence-preserving answer contract is
+  # a model contract carried by the runtime prompt (no answer post-processor), so
+  # every one of its semantics has to be stated there — and stated once.
+  test "build/1 carries the research evidence rules once" do
+    content = RuntimeSections.build([])
+
+    assert count_matches(content, "Research evidence") == 1
+
+    # §9.1 — an evidence tool's URL survives into the final answer.
+    assert content =~ "keep that tool's exact URL in the answer"
+    # §9.2 — link beside the claim; a compact Sources list is the readable escape.
+    assert content =~ "right after the claim it supports"
+    assert content =~ "compact `Sources` list"
+    # §9.3 / §9.4 — a recommended place links to its returned page; a discovered
+    # image links to both the image and its source page.
+    assert content =~ "Link a place you recommend"
+    assert content =~ "link a discovered image to the image AND its source page"
+    # §9.5 — the exact returned URL, never invented or assembled. Names the
+    # observed fabrication classes (live eval catches: an OpenSSL advisory URL
+    # built from a date, an ESA press-release URL built from an article ID).
+    assert content =~ "never assemble one from anything you read"
+    assert content =~ "press-release ID, an advisory date, a version number"
+    assert content =~ "fabrication even when it happens to resolve"
+    # §9.5b — the fallback when the deep link never arrived: cite the page that
+    # did, never the URL you never received.
+    assert content =~ "link the page that was returned"
+    assert content =~ "a URL you never received is not citable"
+
+    # §9.6 — unused results are not citations.
+    assert content =~ "Cite only results you actually used"
+    # §9.7 — an unsourced lookup is said out loud, not papered over with a link.
+    assert content =~ "say the lookup was unsourced"
+  end
+
+  # M31 §14.1 + §18 row "Advertisement": a credential-gated built-in is filtered
+  # off the wire while its credential is missing, so the catalog has to drop it
+  # too — a name in the prompt that the model cannot call is the dead end the
+  # harness category already removed. Written over the whole family (any
+  # `requires_setup` built-in), not one tool name, and driven by fixtures so it
+  # needs no global config.
+  test "capability_summary/1 drops a credential-gated built-in whose credential is missing" do
+    name = :"runtime_gated_#{System.unique_integer([:positive])}"
+    start_supervised!({Registry, name: name})
+    Registry.register(name, gated_capability("ready_tool", ReadyGatedTool))
+    Registry.register(name, gated_capability("unready_tool", UnreadyGatedTool))
+
+    summary = RuntimeSections.capability_summary(name)
+
+    assert summary =~ "`ready_tool`"
+    refute summary =~ "`unready_tool`"
+  end
+
+  test "capability_summary/1 keeps a keyless built-in that declares no setup" do
+    name = :"runtime_keyless_#{System.unique_integer([:positive])}"
+    start_supervised!({Registry, name: name})
+    Registry.register(name, keyless_capability("plain_tool", UnreadyGatedTool))
+
+    # No `requires_setup`, so `advertise?/1` is not the catalog's business: only
+    # the credential-gated family is filtered here.
+    assert RuntimeSections.capability_summary(name) =~ "`plain_tool`"
+  end
+
+  test "build/1 does not mandate a Sources section on an answer that did no research" do
+    [contract | _rest] = String.split(RuntimeSections.build([]), "\n\n## ")
+
+    assert contract =~ "An answer you did not look up gets no `Sources` section"
+
+    # The contract names `Sources` exactly twice: as the readable escape hatch
+    # for inline links, and as the thing a non-research answer does not get. A
+    # third mention is how a ceremonial mandate creeps back in — a stage that
+    # adds one has to justify it here.
+    assert count_matches(contract, "Sources") == 2
   end
 
   test "capability_summary/1 renders registered built-ins from metadata" do
@@ -234,5 +326,31 @@ defmodule FermixCore.Prompt.RuntimeSectionsTest do
     content = RuntimeSections.build([], capabilities: snapshot)
 
     refute content =~ "google_calendar_search_events"
+  end
+
+  defp count_matches(content, needle) do
+    length(String.split(content, needle)) - 1
+  end
+
+  defp gated_capability(name, module) do
+    name
+    |> keyless_capability(module)
+    |> put_in([Access.key!(:metadata), :requires_setup], %{credential: "some_api_key"})
+  end
+
+  defp keyless_capability(name, module) do
+    Capability.new(%{
+      name: name,
+      description: "A tool that needs a credential.",
+      parameters: %{type: "object", properties: %{}},
+      kind: :builtin,
+      executor: {module, :execute, []},
+      policy_class: :network,
+      metadata: %{
+        category: :web,
+        when_to_use: "when the credential is present",
+        requires_setup: nil
+      }
+    })
   end
 end

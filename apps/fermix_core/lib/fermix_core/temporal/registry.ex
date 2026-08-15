@@ -37,6 +37,7 @@ defmodule FermixCore.Temporal.Registry do
   alias FermixCore.Memory.Repo
   alias FermixCore.Temporal.Defaults
   alias FermixCore.Temporal.Planner
+  alias FermixCore.Temporal.Renderer
   alias FermixCore.Temporal.Telemetry, as: TemporalTelemetry
 
   # Referenced as a registered NAME only: the scheduler module is built
@@ -93,7 +94,8 @@ defmodule FermixCore.Temporal.Registry do
     :leap_day_policy,
     :when,
     :reminders,
-    :no_reminders
+    :no_reminders,
+    :followup
   ]
 
   @target_keys %{
@@ -115,13 +117,16 @@ defmodule FermixCore.Temporal.Registry do
   Validates and creates one event with its materialized reminder plan.
 
   Returns `{:ok, %{status: :created | :existing, event: row, reminders: rows,
-  similar_events: rows}}`; `:existing` means an identical active event was
-  already stored, so the caller must not claim a second set of reminders was
-  created (§5.2).
+  similar_events: rows, stated_as: text}}`; `:existing` means an identical active
+  event was already stored, so the caller must not claim a second set of
+  reminders was created (§5.2).
 
   `:similar_events` is the other active events of the same kind this one could
   be a duplicate of, so a differently-titled twin is visible in the very
   acknowledgement that created it.
+
+  `:stated_as` is the stored occurrence rendered absolutely, weekday included —
+  what the confirmation must say instead of echoing the owner's relative word.
   """
   @spec create_event(map(), map(), keyword()) ::
           {:ok,
@@ -129,7 +134,8 @@ defmodule FermixCore.Temporal.Registry do
              status: :created | :existing,
              event: map(),
              reminders: [map()],
-             similar_events: [map()]
+             similar_events: [map()],
+             stated_as: String.t()
            }}
           | {:error, term()}
   def create_event(params, context, opts \\ [])
@@ -151,7 +157,8 @@ defmodule FermixCore.Temporal.Registry do
          status: status,
          event: with_delivery_source(event, target),
          reminders: reminders,
-         similar_events: similar_events(status, event, context)
+         similar_events: similar_events(status, event, context),
+         stated_as: stated_as(event, now)
        }}
     end
   end
@@ -164,7 +171,8 @@ defmodule FermixCore.Temporal.Registry do
 
   `:previous` carries the prior value of every user-facing field this edit
   actually changed, so the acknowledgement can state was-and-now from stored
-  values alone (§5.2); it is empty when nothing user-facing moved.
+  values alone (§5.2); it is empty when nothing user-facing moved. `:stated_as`
+  is the occurrence this edit left stored, rendered absolutely with its weekday.
 
   A patch carrying `:when` also requires `owner_direction`, a bounded excerpt of
   the owner's own directing words — the stored date is the one value an edit
@@ -172,7 +180,8 @@ defmodule FermixCore.Temporal.Registry do
   persisted, never read for content.
   """
   @spec update_event(String.t(), map(), map(), keyword()) ::
-          {:ok, %{event: map(), reminders: [map()], previous: map()}} | {:error, term()}
+          {:ok, %{event: map(), reminders: [map()], previous: map(), stated_as: String.t()}}
+          | {:error, term()}
   def update_event(id, patch, context, opts \\ [])
       when is_binary(id) and is_map(patch) and is_map(context) and is_list(opts) do
     now = now(opts)
@@ -194,7 +203,8 @@ defmodule FermixCore.Temporal.Registry do
        %{
          event: with_delivery_source(event, target),
          reminders: reminders,
-         previous: previous_values(existing, event)
+         previous: previous_values(existing, event),
+         stated_as: stated_as(event, now)
        }}
     end
   end
@@ -367,6 +377,37 @@ defmodule FermixCore.Temporal.Registry do
   defp previous_value(:recurrence_day, value), do: value
   defp previous_value(_field, value), do: iso(value)
 
+  # §5.2 for the date itself. The owner's own words are routinely relative
+  # ("tomorrow", "next Friday"), and a confirmation that echoes the relative word
+  # repeats whatever ambiguity the request carried instead of settling it — which
+  # is how a request made after midnight was stored a day late and acknowledged
+  # in the very phrase that hid it. So every write hands the model the occurrence
+  # it actually PERSISTED, stated absolutely and always with the weekday: the
+  # weekday is the value that tells one candidate day from the next.
+  #
+  # Read from the stored row, so it can only ever state what was written, and
+  # shifted through the event's own zone, so the year rule compares against the
+  # owner's calendar rather than UTC's.
+  defp stated_as(event, now) do
+    stated_text(event, DateTime.shift_zone!(now, event.timezone))
+  end
+
+  # A yearly event stores no year, so its statement carries both halves: the
+  # recurring calendar day it will keep, and the concrete next occurrence its
+  # reminders were materialized for.
+  defp stated_text(%{recurrence_kind: "yearly"} = event, local_now) do
+    "every " <>
+      Renderer.month_name(event.recurrence_month) <>
+      " " <>
+      Integer.to_string(event.recurrence_day) <>
+      " — next on " <>
+      Renderer.stated_date!(event.next_occurrence_on, nil, event.timezone, local_now)
+  end
+
+  defp stated_text(event, local_now) do
+    Renderer.stated_date!(event.local_date, event.local_time, event.timezone, local_now)
+  end
+
   # --- canonical views -----------------------------------------------------
 
   @doc """
@@ -393,6 +434,7 @@ defmodule FermixCore.Temporal.Registry do
       "occurrence_at" => iso(event.occurrence_at),
       "next_occurrence_on" => iso(event.next_occurrence_on),
       "reminder_plan" => event.reminder_plan,
+      "followup" => event.followup,
       "delivery" => delivery_view(event)
     }
     |> Map.merge(delivery_state_view(event))
@@ -784,6 +826,7 @@ defmodule FermixCore.Temporal.Registry do
          {:ok, kind} <- required_kind(params),
          {:ok, timezone} <- resolve_timezone(params, opts),
          {:ok, policy} <- leap_policy(params),
+         {:ok, followup} <- followup_flag(params),
          {:ok, time} <- resolve_when(Map.get(params, :when), timezone, now),
          {:ok, rules} <- plan_rules(params, kind, time.time_kind) do
       {:ok,
@@ -793,7 +836,8 @@ defmodule FermixCore.Temporal.Registry do
          kind: kind,
          timezone: timezone,
          leap_day_policy: policy,
-         reminder_plan: rules
+         reminder_plan: rules,
+         followup: followup
        })}
     end
   end
@@ -834,6 +878,18 @@ defmodule FermixCore.Temporal.Registry do
       nil -> {:ok, nil}
       policy when policy in @leap_policies -> {:ok, policy}
       other -> {:error, {:invalid_param, "leap_day_policy=#{inspect(other)}"}}
+    end
+  end
+
+  # Whether this occasion earns a follow-up turn after its reminder lands
+  # (§22.3). Absent is false: there is no kind-based default anywhere in code,
+  # because a second decider would drift from the model's judgment at the
+  # attended turn.
+  defp followup_flag(params) do
+    case Map.get(params, :followup) do
+      nil -> {:ok, false}
+      followup when is_boolean(followup) -> {:ok, followup}
+      other -> {:error, {:invalid_param, "followup=#{inspect(other)}"}}
     end
   end
 
@@ -1290,7 +1346,8 @@ defmodule FermixCore.Temporal.Registry do
       reminder_plan: Defaults.encode_plan(spec.reminder_plan),
       delivery_platform: target.platform,
       delivery_destination: target.destination,
-      delivery_thread_scope: target.thread_scope
+      delivery_thread_scope: target.thread_scope,
+      followup: spec.followup
     }
   end
 
@@ -1561,6 +1618,9 @@ defmodule FermixCore.Temporal.Registry do
   defp merge_params(existing, patch) do
     with {:ok, rules} <- Defaults.decode_plan(existing.reminder_plan),
          {:ok, when_form} <- existing_when(existing) do
+      # Enumerated by hand, so every stored field an edit must CARRY belongs
+      # here: one left out is silently reset to its column default by any
+      # unrelated patch — a title fix would quietly clear the follow-up flag.
       base = %{
         title: existing.title,
         description: existing.description,
@@ -1568,7 +1628,8 @@ defmodule FermixCore.Temporal.Registry do
         timezone: existing.timezone,
         leap_day_policy: existing.leap_day_policy,
         when: when_form,
-        plan_rules: rules
+        plan_rules: rules,
+        followup: existing.followup
       }
 
       {:ok, Map.merge(base, Map.take(patch, @patchable))}

@@ -52,14 +52,19 @@ defmodule FermixCore.Net.HttpClient do
   # to excess queuing for connections").
   @connection_unavailable_marker "unable to provide a connection"
 
-  # Pool-checkout (queue) timeout. Finch's default is 5_000ms, but the single
-  # per-host pool process can block ~5s tearing down a stale keep-alive socket
-  # right after the host wakes from sleep (a synchronous `:ssl.close` on a
-  # half-open socket) — starving the very checkout that triggered the teardown
-  # and surfacing as "excess queuing for connections". A wider checkout budget
-  # waits that teardown out instead of failing the request; paired with a
-  # `count > 1` pool (see `FermixCore.Application.finch_pools/0`) so the wait is
-  # the exception, not the rule. Applied to every shared-pool request.
+  # Pool-checkout (queue) timeout. Finch's default is 5_000ms, but a per-host
+  # pool process can block tearing down a stale keep-alive socket (a synchronous
+  # `:ssl.close` on a half-open socket) — starving the very checkout that
+  # triggered the teardown and surfacing as "excess queuing for connections".
+  # There is NO bound on how long that blocks: `:ssl.close/2`'s 5000ms is only
+  # the internal flush budget, while the outer `gen_statem` call runs with an
+  # :infinity timeout, so a wedged socket can hold a pool process far longer
+  # than any checkout budget. The wider budget therefore rides out the common
+  # short teardown, not the pathological one; the checkout timeout is the escape
+  # hatch, and callers treat the resulting error as retryable-before-response
+  # (nothing was sent). Paired with a `count > 1` pool plus idle pool reaping
+  # (see `FermixCore.Application.finch_pools/0`) so a blocked process is rarely
+  # the only one. Applied to every shared-pool request.
   @pool_checkout_timeout_ms 15_000
 
   @spec request(Req.Request.t(), String.t()) :: {:ok, Req.Response.t()} | {:error, Exception.t()}
@@ -94,9 +99,10 @@ defmodule FermixCore.Net.HttpClient do
   `request/2` — the daemon could not obtain *any* connection before the
   checkout timed out.
 
-  This is the wake-from-sleep signature: just after the host resumes, the
-  network is not ready, connects stall, and checkouts queue past their timeout.
-  Callers (e.g. the Codex adapter) use it to mint a typed
+  It fires whenever no pool process can hand over a connection in time:
+  contention after a burst of concurrent requests, a pool process blocked
+  tearing down stale sockets, or the wake-from-sleep case where the network is
+  not ready yet and connects stall. Callers (e.g. the Codex adapter) use it to mint a typed
   `:connection_unavailable` transport error so transient-infrastructure
   recovery can key on the contract instead of a message string. Every other
   `RuntimeError` is a genuine bug and returns `false`.

@@ -29,6 +29,30 @@ defmodule FermixCore.Tools.GitCommand do
     --info-path
   )
 
+  # Flags that make git READ A FILE OF THE CALLER'S CHOOSING and fold its bytes
+  # into the repository. Only the *repo path* is sandbox-authorized — never the
+  # args — so `git commit -F ~/.fermix/auth.json` writes a daemon-readable file
+  # into the commit message, which `git_read log` then reads straight back: an
+  # arbitrary-file read that never meets the sandbox at all.
+  # `--pathspec-from-file` is the same primitive with a narrower echo.
+  #
+  # Matching is the prefix rule `@dangerous_flags` uses, because git honors
+  # unambiguous abbreviations (`--fil=<path>` was verified to work).
+  #
+  # `-t`/`--template` is deliberately NOT here. It only prefills an editor, and
+  # the daemon spawns git with no editor, so it cannot deliver a file's contents
+  # (verified: `git commit -t <file>` aborts). Denying it would cost
+  # `git checkout -t <remote>/<branch>`, where `-t` means `--track`.
+  @file_reading_flags ~w(--file --pathspec-from-file)
+
+  # Short flags bundle (`-aF <path>`) and glue their value (`-F<path>`), so the
+  # `-F` check walks the cluster rather than matching the whole token. It stops
+  # at the first flag that consumes the REMAINDER AS A VALUE — without that,
+  # `git commit -mFixed the bug` would parse as `-F` here and a legitimate
+  # commit would be refused. `commit` is the only whitelisted command with a
+  # file-reading short flag, so the value-taking set is `git commit`'s own.
+  @commit_value_short ~c"FmcCtSu"
+
   # git's smart-transport helper `ext::<program>` executes an arbitrary program
   # for the transport before any handshake — argument-injection-to-RCE that never
   # reaches the command classifier. Modern git already refuses `ext` by default,
@@ -52,7 +76,7 @@ defmodule FermixCore.Tools.GitCommand do
       when is_binary(repo) and is_binary(command) and is_list(args) and is_list(opts) do
     with :ok <- validate_repo(repo),
          :ok <- validate_args(args),
-         :ok <- validate_flags(args),
+         :ok <- validate_flags(command, args),
          {:ok, git} <- resolve_executable(opts) do
       git
       |> CommandRunner.run([command | args],
@@ -108,15 +132,28 @@ defmodule FermixCore.Tools.GitCommand do
     end
   end
 
-  defp validate_flags(args) do
+  defp validate_flags(command, args) do
     Enum.reduce_while(args, :ok, fn arg, :ok ->
-      if denied_flag?(arg) do
-        {:halt,
-         {:error, "git arg #{inspect(arg)} is rejected; it can escape sandbox containment"}}
-      else
-        {:cont, :ok}
+      case classify_flag(command, arg) do
+        :ok -> {:cont, :ok}
+        {:error, _reason} = error -> {:halt, error}
       end
     end)
+  end
+
+  defp classify_flag(command, arg) do
+    cond do
+      denied_flag?(arg) ->
+        {:error, "git arg #{inspect(arg)} is rejected; it can escape sandbox containment"}
+
+      file_reading_flag?(command, arg) ->
+        {:error,
+         "git arg #{inspect(arg)} is rejected; it reads a file outside the authorized " <>
+           "repository. Pass the message inline with -m."}
+
+      true ->
+        :ok
+    end
   end
 
   # Long options only. The token is the part before `=`; reject it when it is a
@@ -128,4 +165,25 @@ defmodule FermixCore.Tools.GitCommand do
   end
 
   defp denied_flag?(_arg), do: false
+
+  defp file_reading_flag?(_command, "--" <> rest = arg) when byte_size(rest) > 0 do
+    token = arg |> String.split("=", parts: 2) |> hd()
+    Enum.any?(@file_reading_flags, &String.starts_with?(&1, token))
+  end
+
+  defp file_reading_flag?("commit", "-" <> cluster) when byte_size(cluster) > 0,
+    do: short_cluster_reads_file?(cluster)
+
+  defp file_reading_flag?(_command, _arg), do: false
+
+  # Byte-level so an arg that is not valid UTF-8 classifies instead of raising;
+  # every flag letter git defines is ASCII.
+  defp short_cluster_reads_file?(cluster) do
+    cluster
+    |> :binary.bin_to_list()
+    |> Enum.reduce_while(false, fn
+      ?F, _acc -> {:halt, true}
+      letter, acc -> if letter in @commit_value_short, do: {:halt, acc}, else: {:cont, acc}
+    end)
+  end
 end
