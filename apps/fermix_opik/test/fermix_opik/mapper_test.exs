@@ -277,6 +277,33 @@ defmodule FermixOpik.MapperTest do
     assert span.metadata.mcp_server == "eden"
   end
 
+  # `Gateway.DraftStream` emits :rotate with duration_us + edit_index; while those
+  # keys were unlisted the span carried channel/status only, so three rotations in
+  # one turn exported as three indistinguishable spans. `session_id` is not in the
+  # allowlist and must still drop — this stays an allowlist, not a passthrough.
+  test "stream_span keeps the rotate measurements" do
+    metadata = %{channel: "telegram", session_id: "main-1", phase: :rotate, status: :ok}
+
+    span =
+      Mapper.stream_span(metadata, %{duration_us: 60_000, edit_index: 3},
+        trace_id: "trace-1",
+        parent_span_id: "wrap-1",
+        project_name: "fermix",
+        ended: @ended
+      )
+
+    assert span.name == "stream:rotate"
+    assert span.type == "tool"
+    assert span.parent_span_id == "wrap-1"
+
+    assert span.metadata == %{
+             channel: "telegram",
+             status: "ok",
+             edit_index: 3,
+             duration_us: 60_000
+           }
+  end
+
   describe "mcp_client_span/3" do
     test "builds a general lifecycle point span from the emitter's allowlist" do
       metadata = %{

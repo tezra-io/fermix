@@ -1470,6 +1470,22 @@ defmodule FermixChannels.Channels.TelegramTest do
     })
   end
 
+  # Reports the `:receive_timeout` a draft request resolved to. A Req option
+  # never reaches the wire, so the plug stub above cannot see it; a Req adapter
+  # is handed the finished request and answers without any network I/O.
+  defp stub_draft_timeout(test_pid, tag) do
+    adapter = fn req ->
+      send(test_pid, {tag, req.options[:receive_timeout]})
+      {req, Req.Response.new(status: 200, body: Jason.encode!(%{"ok" => true}))}
+    end
+
+    Application.put_env(:fermix_channels, :telegram,
+      bot_token: "test-bot-token",
+      allowed_user_ids: ["111"],
+      req_options: [adapter: adapter]
+    )
+  end
+
   describe "stream_capability/0" do
     test "declares draft_edit" do
       assert Telegram.stream_capability() == :draft_edit
@@ -1541,6 +1557,14 @@ defmodule FermixChannels.Channels.TelegramTest do
 
       assert_receive {:telegram_request, _path, body}
       assert rendered_units(body["text"]) <= 4_000
+    end
+
+    test "keeps the configured request options — only the seal is bounded" do
+      stub_draft_timeout(self(), :edit_timeout)
+
+      assert :ok = Telegram.edit_draft(draft_message(), 777, "text")
+
+      assert_received {:edit_timeout, nil}
     end
 
     test "does not retry — interim edits are best-effort" do
@@ -1626,6 +1650,26 @@ defmodule FermixChannels.Channels.TelegramTest do
       assert_receive {:telegram_request, _p2, _b2}
       assert_receive {:telegram_request, _p3, _b3}
       refute_receive {:telegram_request, _p4, _b4}, 100
+    end
+
+    test "bounds the seal request so the whole ladder fits the engine's budget" do
+      stub_draft_timeout(self(), :seal_timeout)
+
+      assert {:ok, nil} = Telegram.seal_draft(draft_message(), 777, "final")
+
+      assert_received {:seal_timeout, timeout}
+
+      # DraftStream kills the engine at its @seal_timeout_ms, and the ladder
+      # makes @seal_retry_attempts attempts with up to @seal_retry_max_wait_ms
+      # of sleep between them. With no explicit window a request inherits Req's
+      # own default and one attempt alone can outlast the whole budget — the
+      # engine dies mid-request and the draft is never discarded.
+      seal_budget_ms = 15_000
+      max_sleep_ms = 4_000
+      attempts = 3
+
+      assert is_integer(timeout) and timeout > 0
+      assert attempts * timeout + (attempts - 1) * max_sleep_ms <= seal_budget_ms
     end
   end
 

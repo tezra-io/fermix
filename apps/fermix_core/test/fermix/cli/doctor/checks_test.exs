@@ -77,6 +77,38 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
         assert result.detail =~ "snapshot_default_depth"
       end
     end
+
+    # `fermix doctor` is the command that explains a broken install, so a shim
+    # that RAN AND REFUSED and a shim that could not be run at all must not
+    # collapse into one "check failed" line — they have different fixes, and
+    # folding distinct failure kinds together is what sends an operator chasing
+    # a phantom. Both run on any OS: the shim path is injected.
+    @tag :tmp_dir
+    test "a refusing shim reports its exit status and its own words", %{tmp_dir: tmp_dir} do
+      shim = Path.join(tmp_dir, "disclaim")
+      File.write!(shim, "#!/bin/sh\necho 'disclaim api unavailable' >&2\nexit 3\n")
+      File.chmod!(shim, 0o755)
+
+      result = Checks.browser_disclaim({:unix, :darwin}, shim)
+
+      assert result.name == "browser"
+      assert result.status == :fail
+      assert result.detail =~ "exited 3"
+      assert result.detail =~ "disclaim api unavailable"
+    end
+
+    @tag :tmp_dir
+    test "a shim that cannot be run says so, not that it refused", %{tmp_dir: tmp_dir} do
+      shim = Path.join(tmp_dir, "disclaim")
+      File.write!(shim, "#!/bin/sh\nexit 0\n")
+      File.chmod!(shim, 0o644)
+
+      result = Checks.browser_disclaim({:unix, :darwin}, shim)
+
+      assert result.status == :fail
+      assert result.detail =~ "could not run"
+      refute result.detail =~ "exited"
+    end
   end
 
   describe "computer_use_permissions/1" do

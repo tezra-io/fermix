@@ -178,6 +178,18 @@ def test_reply_urls_in_evidence_trims_markdown_and_punctuation():
     assert g.passed
 
 
+def test_reply_urls_in_evidence_survives_a_url_ending_in_an_emphasis_char():
+    # Base64url ids end in `_`. Trimmed on the reply side only, the citation
+    # normalized to something absent from the untrimmed inventory and a
+    # byte-for-byte correct reply was reported as a fabricated link.
+    url = "https://www.youtube.com/watch?v=dQw4w9WgXc_"
+    spans = [_url_span("web_search", {"results": [{"url": url}]})]
+    g = next(g for g in grade.grade(
+        _reply_trace(f"Source: {url}"),
+        spans, {"reply_urls_in_evidence": True}) if g.key == "reply_urls_in_evidence")
+    assert g.passed, g.detail
+
+
 def test_reply_urls_in_evidence_passes_with_no_urls_in_reply():
     g = next(g for g in grade.grade(
         _reply_trace("No links needed here."), [],

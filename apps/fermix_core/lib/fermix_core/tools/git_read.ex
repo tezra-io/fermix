@@ -27,7 +27,15 @@ defmodule FermixCore.Tools.GitRead do
     --delete --move --copy --force
     --set-upstream --set-upstream-to --unset-upstream --edit-description
   )
-  @branch_mutating_short ~w(-d -D -m -M -c -C -f -u)
+  # Short flags bundle (`-av`) and glue their value (`-uorigin/main`), so the
+  # mutating check walks the CLUSTER rather than matching the whole token: an
+  # exact-match denylist never sees `-uorigin/main`, and `-u` rewrites tracking
+  # *config* — a mutation no branch listing can observe. Same walk as the `-F`
+  # check in `FermixCore.Tools.GitCommand`, stopping at the first flag that
+  # consumes the REMAINDER AS A VALUE so a value's own letters are not read as
+  # flags (`-tdirect` is `--track=direct`, not a `-d`).
+  @branch_mutating_short ~c"dDmMcCfu"
+  @branch_value_short ~c"ut"
 
   # Audit F-01 follow-up: dangerous git *flags* that escape the `cd: repo`
   # boundary (`--upload-pack`, `--git-dir`, `--no-index`, ...) are rejected at
@@ -137,7 +145,24 @@ defmodule FermixCore.Tools.GitRead do
     Enum.any?(@branch_mutating_flags, &String.starts_with?(&1, token))
   end
 
-  defp branch_mutating_flag?(arg), do: arg in @branch_mutating_short
+  defp branch_mutating_flag?("-" <> cluster) when byte_size(cluster) > 0,
+    do: short_cluster_mutates?(cluster)
+
+  defp branch_mutating_flag?(_arg), do: false
+
+  # Byte-level so an arg that is not valid UTF-8 classifies instead of raising;
+  # every flag letter git defines is ASCII.
+  defp short_cluster_mutates?(cluster) do
+    cluster
+    |> :binary.bin_to_list()
+    |> Enum.reduce_while(false, fn letter, acc ->
+      cond do
+        letter in @branch_mutating_short -> {:halt, true}
+        letter in @branch_value_short -> {:halt, acc}
+        true -> {:cont, acc}
+      end
+    end)
+  end
 
   defp validate_args(args) do
     Enum.reduce_while(args, :ok, fn arg, :ok ->

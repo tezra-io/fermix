@@ -208,14 +208,22 @@ Opik.
 
 ## Reminder lifecycle (temporal events)
 
-A reminder delivery is deterministic — no `AgentLoop`, no provider call, no
+A reminder **delivery** is deterministic — no `AgentLoop`, no provider call, no
 session — so its lifecycle cannot ride any agent-run family. Every transition
 emits the single stable name `[:fermix, :reminder, :lifecycle]` through
 `FermixCore.Temporal.Telemetry` — never hand-rolled, and never a
-`[:fermix, :reminder, <phase>]` tail (exact-name binding would drop it). The
-emitter enforces a fixed metadata allowlist: `phase` (`materialized | claimed |
+`[:fermix, :reminder, <phase>]` tail of its own (exact-name binding would drop
+it). A post-delivery **follow-up** is the other side of that line: it calls
+`AgentLoop.run/1`, so it is a run kind with its own `session_id` and its own
+per-phase names — `[:fermix, :reminder, :followup_start | :followup_complete |
+:followup_error]`, emitted through `FermixCore.Temporal.FollowupTelemetry` and
+bound individually in `FermixOpik.Reporter`. The split is "has a session or
+not": a follow-up that never reached a model has none and stays on the
+lifecycle event, as the `:followup_skipped` phase. The lifecycle emitter
+enforces a fixed metadata allowlist: `phase` (`materialized | claimed |
 delivered | retry_scheduled | failed | expired | superseded | cancelled |
-event_completed | scheduler_error`), `component: "temporal_scheduler"` (the
+event_completed | scheduler_error | followup_skipped`),
+`component: "temporal_scheduler"` (the
 `agent_field`, so JSONL rows name their emitter instead of `"unknown"`),
 correlation ids (`event_id`, `reminder_id`, `occurrence_key`, `rule_id`),
 `platform`, `attempt`, `result`, and a **derived** `error_class` (atom, tagged

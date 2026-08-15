@@ -97,15 +97,26 @@ defmodule FermixCore.ComputerUse.SessionManagerTest do
     ref = Process.monitor(pid)
 
     assert :ok = SessionManager.abort(ctx)
-    assert_receive {:DOWN, ^ref, :process, ^pid, _reason}
 
-    # A :permanent child would be RESTARTED by the :one_for_one supervisor here,
-    # re-registering under the same key — the teardown-defeating blocker. Session
-    # is :temporary and abort goes through terminate_child, so it stays down.
-    assert :error = SessionManager.lookup(ctx)
-    Process.sleep(150)
+    # The contract boundary is `abort/1` RETURNING, not the `:DOWN` landing, so
+    # this asserts before awaiting the monitor deliberately. `Registry` sweeps a
+    # dead pid from its OWN monitor, a separate message with no ordering
+    # guarantee against the caller's; waiting on `:DOWN` first would assert an
+    # ordering no caller can rely on. It matters beyond tidiness because
+    # `ensure/3` hands back whatever the registry holds, so a surviving entry
+    # resumes a dead pid instead of starting a fresh session.
     assert :error = SessionManager.lookup(ctx)
     assert [] = DynamicSupervisor.which_children(CuSupervisor.session_supervisor())
+
+    assert_receive {:DOWN, ^ref, :process, ^pid, _reason}
+
+    # A :permanent child would be RESTARTED by the supervisor here, re-registering
+    # under the same key — the teardown-defeating blocker. Asserted on the child
+    # spec rather than by sleeping and re-reading the registry: the restart
+    # strategy is the thing that must not regress, and it is knowable without
+    # waiting for a restart that should never come.
+    assert %{restart: :temporary} = Session.child_spec([])
+    assert :error = SessionManager.lookup(ctx)
   end
 
   test "abort is a no-op when no session exists for the conversation" do

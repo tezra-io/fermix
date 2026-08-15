@@ -19,8 +19,11 @@ defmodule FermixChannels.Outbound.Splitter do
 
   Invariants, enforced by construction:
 
-    * a cut never lands inside a fenced code block (``` parity) — the cut backs
-      off to a boundary before the fence opens;
+    * a cut never lands inside a fenced code block — the cut backs off to a
+      boundary before the fence opens. A fence is CommonMark's
+      (`Dialect.fence_line?/1`): three or more backticks owning their whole
+      line, so an inline code span never opens one and an unusual info string
+      never fails to;
     * a chunk never ends with a heading line or with a line ending in `:` — the
       cut backs off so the heading / lead-in opens the next chunk. This governs
       split-induced cuts only: a text whose genuine last line is a heading keeps
@@ -48,6 +51,8 @@ defmodule FermixChannels.Outbound.Splitter do
   prefix never measures smaller) — true of every length or entity counter — so
   the fitting boundary can be found by binary search.
   """
+
+  alias FermixChannels.Outbound.Dialect
 
   @type measure :: (String.t() -> non_neg_integer())
 
@@ -441,5 +446,10 @@ defmodule FermixChannels.Outbound.Splitter do
 
   defp rule?(line), do: Regex.match?(@rule_re, String.trim(line))
 
-  defp fence_line?(line), do: line |> String.trim_leading() |> String.starts_with?("```")
+  # One shared answer to "does a fenced block start or end here", because BOTH
+  # ways of getting it wrong end identically: an opener with no closer, or a
+  # closer read as an opener, runs a fence region to end-of-text, discards every
+  # later cut candidate, and emits the remainder as one over-limit atomic chunk
+  # the channel then refuses.
+  defp fence_line?(line), do: Dialect.fence_line?(line)
 end

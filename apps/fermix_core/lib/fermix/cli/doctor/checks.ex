@@ -785,26 +785,31 @@ defmodule Fermix.CLI.Doctor.Checks do
   (Chrome is never spawned undisclaimed — spawned directly it would inherit the
   daemon as TCC responsible process and raise App Management prompts keyed to
   the versioned install path). Elsewhere the shim is not used.
+
+  A shim that ran and refused and a shim that could not be run at all are
+  different faults with different fixes, so each gets its own row detail. The
+  shim path is injectable so both unit-test hermetically.
   """
-  @spec browser_disclaim({atom(), atom()}) :: result()
-  def browser_disclaim(os_type \\ :os.type())
+  @spec browser_disclaim({atom(), atom()}, Path.t() | nil) :: result()
+  def browser_disclaim(os_type \\ :os.type(), shim \\ nil)
 
-  def browser_disclaim({:unix, :darwin}) do
-    shim = Application.app_dir(:fermix_nif, "priv/disclaim")
+  def browser_disclaim({:unix, :darwin}, shim) do
+    shim = shim_path(shim)
 
-    cond do
-      not File.regular?(shim) ->
-        fail("browser", "disclaim shim missing at #{shim} — rebuild fermix or reinstall")
-
-      not disclaim_check_ok?(shim) ->
-        fail("browser", "disclaim shim --check failed — browser launches will refuse until fixed")
-
-      true ->
-        browser_chrome_result()
+    if File.regular?(shim) do
+      checked_disclaim_result(shim)
+    else
+      fail("browser", "disclaim shim missing at #{shim} — rebuild fermix or reinstall")
     end
   end
 
-  def browser_disclaim(_os_type), do: ok("browser", "disclaim shim not required on this OS")
+  def browser_disclaim(_os_type, _shim),
+    do: ok("browser", "disclaim shim not required on this OS")
+
+  # Injectable so the unrunnable-shim row unit-tests hermetically, the same way
+  # `harness/1` injects its probes.
+  defp shim_path(nil), do: Application.app_dir(:fermix_nif, "priv/disclaim")
+  defp shim_path(path) when is_binary(path), do: path
 
   # `BrowserConfig.current/0` refuses an operator-authored `[fermix_core.browser]`
   # section that is out of range or names an unusable profile — the exact host
@@ -824,12 +829,34 @@ defmodule Fermix.CLI.Doctor.Checks do
     end
   end
 
-  defp disclaim_check_ok?(shim) do
-    match?({_output, 0}, System.cmd(shim, ["--check"], stderr_to_stdout: true))
+  defp checked_disclaim_result(shim) do
+    case disclaim_check(shim) do
+      :ok ->
+        browser_chrome_result()
+
+      {:error, detail} ->
+        fail("browser", "disclaim shim --check #{detail}; browser launches refuse until fixed")
+    end
+  end
+
+  # A present-but-unrunnable shim (e.g. lost exec bit) must surface as a fail
+  # row, not crash the doctor run — but it is a DIFFERENT fault from a shim that
+  # ran and refused, and only the row tells the operator which one to fix. The
+  # command's own words carry the diagnosis, bounded so a chatty failure cannot
+  # swamp the report.
+  defp disclaim_check(shim) do
+    case System.cmd(shim, ["--check"], stderr_to_stdout: true) do
+      {_output, 0} -> :ok
+      {output, status} -> {:error, "exited #{status}: #{brief(output)}"}
+    end
   rescue
-    # A present-but-unrunnable shim (e.g. lost exec bit) must surface as the
-    # fail row above, not crash the doctor run.
-    _error -> false
+    error -> {:error, "could not run: #{Exception.message(error)}"}
+  end
+
+  # The report prints one line per row, and a shim that cannot resolve the
+  # private API fails with a multi-line loader message — collapse it to one.
+  defp brief(output) do
+    output |> String.replace(~r/\s+/u, " ") |> String.trim() |> String.slice(0, 200)
   end
 
   @doc """

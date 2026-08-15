@@ -721,7 +721,7 @@ defmodule FermixChannels.Channels.Telegram do
   # Interim edits are best-effort by contract: no retry, warnings not errors —
   # the engine counts failures and freezes the preview; the seal still lands.
   defp post_draft_edit(token, chat_id, message_id, html) do
-    case post_edit_message_text(token, chat_id, message_id, html) do
+    case post_edit_message_text(token, chat_id, message_id, html, req_options([])) do
       {:ok, %{status: 200}} ->
         :ok
 
@@ -739,14 +739,37 @@ defmodule FermixChannels.Channels.Telegram do
   # Telegram's retry_after; an idempotent no-op ("message is not modified")
   # counts as success — the desired final state already holds.
   # The whole retry budget (sleeps + requests) must stay inside the engine's
-  # 15 s seal timeout — a longer wait would get the engine hard-killed
-  # mid-sleep, leaving an orphaned draft. Worst case here: 2 × 4 s sleeps +
-  # 3 requests ≈ 11 s. If Telegram demands a longer retry_after than that,
-  # retries exhaust and the engine's seal-failure path discards the draft and
-  # the full reply goes out as a fresh send — the designed recovery.
+  # seal timeout — a longer wait would get the engine hard-killed mid-request,
+  # leaving an orphaned draft next to the re-delivered reply. That only holds if
+  # each request is itself bounded: without an explicit `receive_timeout` a seal
+  # edit inherits Req's own default, and one attempt can outlast the whole
+  # budget. So the per-request window is DERIVED from the ladder — every attempt
+  # plus every between-attempt sleep fits @seal_budget_ms:
+  #
+  #   @seal_retry_attempts × @seal_request_timeout_ms
+  #     + (@seal_retry_attempts - 1) × @seal_retry_max_wait_ms  ≤  @seal_budget_ms
+  #
+  # If Telegram demands a longer retry_after than that, retries exhaust and the
+  # engine's seal-failure path discards the draft and the full reply goes out as
+  # a fresh send — the designed recovery.
+  #
+  # Read that inequality as the SIZING RULE, not as an enforced total: it bounds
+  # the response wait, which is the part that was unbounded, and three things
+  # outside a per-request option still add to a ladder run. `HttpClient` re-issues
+  # a request once on a transport `:closed`, so an attempt can cost two windows;
+  # connection setup happens inside the pool checkout under Mint's own timeout;
+  # and `@pool_checkout_timeout_ms` is its own ceiling. The ladder is therefore
+  # much tighter than Req's default, not provably inside the engine's deadline.
   @seal_retry_attempts 3
   @seal_retry_base_ms 400
   @seal_retry_max_wait_ms 4_000
+  # Mirrors FermixChannels.Gateway.DraftStream's @seal_timeout_ms: the deadline
+  # after which the engine is killed. Restated here on purpose — a change to
+  # either is a deliberate change to how a seal can fail.
+  @seal_budget_ms 15_000
+  # Sleeps happen between attempts, so there is one fewer sleep than attempt.
+  @seal_sleep_budget_ms @seal_retry_max_wait_ms * (@seal_retry_attempts - 1)
+  @seal_request_timeout_ms div(@seal_budget_ms - @seal_sleep_budget_ms, @seal_retry_attempts)
 
   defp seal_with_retry(token, chat_id, message_id, html, attempt) do
     case post_seal_edit(token, chat_id, message_id, html) do
@@ -771,7 +794,7 @@ defmodule FermixChannels.Channels.Telegram do
   defp seal_backoff_ms(attempt, _reason), do: @seal_retry_base_ms * attempt
 
   defp post_seal_edit(token, chat_id, message_id, html) do
-    case post_edit_message_text(token, chat_id, message_id, html) do
+    case post_edit_message_text(token, chat_id, message_id, html, seal_req_options()) do
       {:ok, %{status: 200}} ->
         :ok
 
@@ -797,7 +820,7 @@ defmodule FermixChannels.Channels.Telegram do
     end
   end
 
-  defp post_edit_message_text(token, chat_id, message_id, html) do
+  defp post_edit_message_text(token, chat_id, message_id, html, req_opts) do
     url = "#{@bot_api_base}/bot#{token}/editMessageText"
 
     body = %{
@@ -809,8 +832,16 @@ defmodule FermixChannels.Channels.Telegram do
     }
 
     Req.new(url: url, method: :post, json: body)
-    |> Req.merge(req_options([]))
+    |> Req.merge(req_opts)
     |> HttpClient.request("Telegram editMessageText")
+  end
+
+  # Only the seal is bounded: interim edits are best-effort and keep whatever
+  # the channel's configured req_options say. The bound wins over a configured
+  # receive_timeout — the ladder's deadline is the engine's, not the operator's.
+  defp seal_req_options do
+    req_options([])
+    |> Keyword.put(:receive_timeout, @seal_request_timeout_ms)
   end
 
   # Shared by `discard_draft/2` (a live draft) and `delete_message/2` (a swept

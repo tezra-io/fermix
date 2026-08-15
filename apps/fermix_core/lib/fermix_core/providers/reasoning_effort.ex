@@ -127,7 +127,8 @@ defmodule FermixCore.Providers.ReasoningEffort do
 
     * `:omit` — send no reasoning/effort field (`:none` on a provider that supports it).
     * `{:ok, "xhigh"}` — send this effort string. A level above the provider's
-      ceiling clamps to the ceiling (e.g. `:max` on xAI -> `"high"`).
+      ceiling clamps to the ceiling (e.g. `:max` on xAI -> `"xhigh"`). A model
+      may carry a lower ceiling still — see `levels_for/2`.
     * `{:error, {:unsupported, level, provider}}` — the level is below the
       provider's floor (e.g. `:none` on Anthropic) or is not a canonical level.
   """

@@ -298,6 +298,47 @@ defmodule FermixCore.Tools.PlaceSearchTest do
       end
     end
 
+    # A marker is a whole PHRASE, not a substring: "near me" also sits inside
+    # "near memphis", and "nearby" inside "nearbyville". A plainly named city has
+    # to search — refusing it asserts something false about the user's query.
+    test "a named place that merely starts with a marker's tail is not self-anchored" do
+      for query <- [
+            "restaurants near memphis",
+            "cafes near melbourne",
+            "hotels near merida",
+            "bars near mexico city",
+            "coffee closest to melrose",
+            "bakeries nearbyville"
+          ] do
+        {:ok, result} =
+          execute(
+            %{"query" => query},
+            fn conn ->
+              refute Map.has_key?(URI.decode_query(conn.query_string), "location")
+              json(conn, %{"results" => []})
+            end,
+            attended()
+          )
+
+        assert result.success == true
+        assert Jason.decode!(result.output)["search_anchor"] == %{"source" => "query_only"}
+      end
+    end
+
+    # The boundary rule must not blunt the trigger: a genuine marker still
+    # refuses bare, mid-query, and at the very end of the query, in any case.
+    test "a genuine self-anchoring phrase is still refused wherever it sits" do
+      for query <- [
+            "near me",
+            "anything NEAR ME open late",
+            "pharmacies in my neighbourhood",
+            "bars within walking distance",
+            "sushi around here"
+          ] do
+        assert_refused(no_request(%{"query" => query}, attended()), "location_required")
+      end
+    end
+
     test "a query that is not anchored to the user's own position searches unanchored" do
       {:ok, %{success: true, output: output}} =
         execute(

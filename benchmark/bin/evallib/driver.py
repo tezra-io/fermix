@@ -35,16 +35,23 @@ _USAGE_LIMIT_RE = re.compile(
 _RESET_HINT_RE = re.compile(r"try again in ~\s*(\d+)\s*min", re.IGNORECASE)
 
 # Fermix's auth-failure replies are likewise purpose-built stable wordings
-# (`auth_reply/1` in fermix_core `agents/turn_runner.ex`): OAuth, api-key, and
-# the generic fallback. All three anchor on "authentication failed —" PLUS the
-# remedy clause, so a task answer that merely discusses auth can't match. An
-# auth failure that reaches the reply is PERMANENT — TokenManager emits it only
-# after a refresh permanently failed — so every later trial refuses before any
-# model call (update here if the wordings change).
+# (`auth_reply/1` in fermix_core `agents/turn_runner.ex`): OAuth reconnect,
+# api-key advice, the generic fallback, and the xAI 403 entitlement denial —
+# which is worded as an ACCESS denial rather than an authentication failure,
+# because re-login cannot fix a plan that does not include API access. Each
+# anchors on its verb PLUS the remedy clause, so a task answer that merely
+# discusses auth can't match. All four are PERMANENT for the run — a plan does
+# not acquire API access mid-sweep, and TokenManager emits the rest only after
+# a refresh permanently failed — so every later trial refuses before any model
+# call. `test_auth_invalidated_covers_every_reply_clause` pins this set to the
+# live source — it ASSEMBLES each clause's reply out of turn_runner.ex and
+# requires a match, so a reworded clause fails there rather than silently here.
 _AUTH_INVALIDATED_RE = re.compile(
-    r"authentication failed — (?:reconnect with `fermix auth login"
+    r"(?:authentication failed — (?:reconnect with `fermix auth login"
     r"|check the .{0,80}API key in `fermix setup`"
-    r"|run `fermix auth login`)",
+    r"|run `fermix auth login`)"
+    r"|subscription access denied — the .{0,40}plan may not include API access\."
+    r" Switch to an API key in `fermix setup`)",
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -91,8 +98,10 @@ class UsageLimitHit(Exception):
 
 class AuthInvalidated(Exception):
     """A driven turn's reply was a Fermix authentication-failure message. The
-    condition is permanent (TokenManager emits it only after a refresh
-    permanently failed), so unlike a usage limit there is nothing to wait out:
+    condition is permanent for the run — TokenManager emits most of these only
+    after a refresh permanently failed, and the xAI 403 entitlement denial is a
+    plan tier that will not change mid-sweep — so unlike a usage limit there is
+    nothing to wait out:
     every remaining trial would refuse at zero tokens. The capability runner
     catches this to STOP the sweep at a known pointer instead of banking
     meaningless failures into a leaderboard row (the 2026-08-06 sweep scored
