@@ -100,9 +100,12 @@ defmodule FermixCore.Application do
     System.halt(run_cli(argv))
   end
 
-  # version / help / start / stop / unknown — strictly read-only, no side
-  # effects. Halt before any sibling app starts so there is no file
-  # logger, no `Memory.Repo`, no `TokenManager`, no port bind.
+  # version / help / start / stop / pair / devices / unknown — no local tree.
+  # Mobile management is deliberately daemon-only: the daemon owns the one
+  # pairing window, device store, and live socket registry. Starting a second
+  # tree here would create a competing listener and a split persistence path.
+  # Halt before any sibling app starts so there is no file logger, no
+  # `Memory.Repo`, no `TokenManager`, and no port bind.
   defp cli_dispatch(argv) do
     System.halt(run_cli(argv))
   end

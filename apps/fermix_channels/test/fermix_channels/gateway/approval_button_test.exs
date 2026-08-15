@@ -28,6 +28,39 @@ defmodule FermixChannels.Gateway.ApprovalButtonTest do
     end
   end
 
+  describe "approve and deny actions" do
+    test "namespaces and parses both actions" do
+      assert ApprovalButton.approve_payload("TOK12345") == "grant:TOK12345"
+      assert ApprovalButton.deny_payload("TOK12345") == "deny:TOK12345"
+      assert {:ok, :approve, "TOK12345"} = ApprovalButton.parse_action("grant:TOK12345")
+      assert {:ok, :deny, "TOK12345"} = ApprovalButton.parse_action("deny:TOK12345")
+    end
+
+    test "rejects malformed and unrelated actions" do
+      assert :ignore = ApprovalButton.parse_action("grant:")
+      assert :ignore = ApprovalButton.parse_action("deny:")
+      assert :ignore = ApprovalButton.parse_action("other:TOK12345")
+      assert :ignore = ApprovalButton.parse_action(nil)
+    end
+
+    test "builds the exact synthesized /deny message" do
+      message =
+        ApprovalButton.action_message(%{
+          id: "callback-9",
+          sender: "alice",
+          channel: "telegram",
+          chat_id: "123",
+          thread_ts: 9,
+          user_id: 111,
+          action: :deny,
+          token: "TOK12345"
+        })
+
+      assert message.content == "/deny TOK12345"
+      assert message.metadata == %{user_id: "111"}
+    end
+  end
+
   describe "confirm_message/1" do
     test "builds the exact synthesized /confirm message from the origin inputs" do
       message =

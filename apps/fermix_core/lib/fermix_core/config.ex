@@ -16,6 +16,7 @@ defmodule FermixCore.Config do
   ]
 
   @type config_error :: {:error, :not_configured}
+  @type ingress_authority :: :config_allowlist | :paired_device | :none
 
   @spec provider(atom()) :: {:ok, keyword()} | config_error()
   def provider(name) when is_atom(name) do
@@ -108,6 +109,14 @@ defmodule FermixCore.Config do
     else
       _ -> []
     end
+  end
+
+  @doc "Names the trust source for inbound channel connections."
+  @spec channel_ingress_authority(atom()) :: ingress_authority()
+  def channel_ingress_authority(:mobile), do: :paired_device
+
+  def channel_ingress_authority(name) when is_atom(name) do
+    if Keyword.has_key?(@channel_ingress_keys, name), do: :config_allowlist, else: :none
   end
 
   @spec get(atom(), term()) :: {:ok, term()} | config_error()

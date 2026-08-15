@@ -83,8 +83,21 @@ defmodule FermixCore.Browser.Config do
   """
 
   alias FermixCore.Browser.Error
+  alias FermixCore.Browser.Policy
 
   @default_allowed_hosts ["localhost", "127.0.0.1", "::1"]
+
+  # The only key of this struct an operator sets from `config.toml`. Everything
+  # else here is a timeout, a cap, a buffer size or a profile shape — tuning,
+  # which is an internal constant rather than a config surface. `allowed_hosts`
+  # is different in kind: it is the documented recovery for every host the policy
+  # refuses (`browser_guidance` SKILL.md tells the operator to list the host
+  # there), so a refusal without it is a refusal with no way out.
+  #
+  # The config store rejects any other key in the section BY NAME, so an operator
+  # reaching for `action_timeout_ms` is told it is not settable instead of
+  # editing a line that silently does nothing.
+  @config_keys [:allowed_hosts]
   @default_profiles %{
     "fermix" => %{mode: :managed, headless: :auto, cdp_port: :auto},
     "fermix_visible" => %{mode: :managed, headless: false, cdp_port: :auto},
@@ -186,6 +199,46 @@ defmodule FermixCore.Browser.Config do
     snapshot_max_children snapshot_max_chars screenshot_max_side_px screenshot_max_bytes
   )a
 
+  @doc """
+  Canonical list of allowed `[fermix_core.browser]` keys, used by the config
+  store to reject unsettable keys at the parse boundary.
+  """
+  @spec config_keys() :: [atom()]
+  def config_keys, do: @config_keys
+
+  @doc """
+  `[fermix_core.browser]` as a keyword list, keeping only the settable keys.
+
+  Value validation is NOT repeated here — `validate_allowed_hosts/1` already runs
+  on every read through `current/1`, and the `fermix doctor` browser row renders
+  its refusal with the offending entry. This is the parse boundary: shape only.
+  """
+  @spec normalize(nil | map() | keyword()) :: keyword()
+  def normalize(nil), do: []
+
+  def normalize(config) when is_map(config) or is_list(config) do
+    Enum.reduce(@config_keys, [], fn key, acc ->
+      case fetch_key(config, key) do
+        {:ok, value} -> Keyword.put(acc, key, value)
+        :error -> acc
+      end
+    end)
+  end
+
+  defp fetch_key(config, key) when is_map(config) do
+    case Map.fetch(config, Atom.to_string(key)) do
+      {:ok, value} -> {:ok, value}
+      :error -> Map.fetch(config, key)
+    end
+  end
+
+  defp fetch_key(config, key) when is_list(config) do
+    case Keyword.fetch(config, key) do
+      {:ok, value} -> {:ok, value}
+      :error -> :error
+    end
+  end
+
   @spec current() :: {:ok, t()} | {:error, Error.t()}
   def current do
     :fermix_core
@@ -255,9 +308,50 @@ defmodule FermixCore.Browser.Config do
   defp validate(%__MODULE__{} = config) do
     with :ok <- validate_positive_fields(config),
          :ok <- validate_depth_bounds(config),
+         :ok <- validate_allowed_hosts(config.allowed_hosts),
          :ok <- validate_profiles(config.profiles) do
       {:ok, config}
     end
+  end
+
+  # `allowed_hosts` is a string-equality membership test against the canonical
+  # host spelling `Policy.canonical_host/1` produces, so an entry outside that
+  # alphabet can never match anything an operator would type. Refused by name
+  # here — not silently dropped, which would leave a list that reads as if it
+  # were in force, and not silently kept, which would be a rule that never fires.
+  # The integer-tunable enumeration in the test suite filters `is_integer/1`, so
+  # a list-valued tunable is invisible to it and had no validation at all.
+  defp validate_allowed_hosts(hosts) when is_list(hosts) do
+    Enum.reduce_while(hosts, :ok, fn host, :ok ->
+      case allowed_host(host) do
+        :ok -> {:cont, :ok}
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+  end
+
+  defp validate_allowed_hosts(_hosts) do
+    {:error, Error.new("invalid_config", "allowed_hosts must be a list of host strings")}
+  end
+
+  defp allowed_host(host) when is_binary(host) do
+    case Policy.canonical_host(host) do
+      {:ok, _canonical} ->
+        :ok
+
+      :error ->
+        {:error,
+         Error.new(
+           "invalid_config",
+           "allowed_hosts entry #{inspect(host)} is not a canonical host spelling: use ASCII " <>
+             "letters, digits, '-', '.' and '_', or an IP address (punycode 'xn--' for an " <>
+             "internationalised domain)"
+         )}
+    end
+  end
+
+  defp allowed_host(host) do
+    {:error, Error.new("invalid_config", "allowed_hosts entry #{inspect(host)} must be a string")}
   end
 
   defp validate_positive_fields(config) do

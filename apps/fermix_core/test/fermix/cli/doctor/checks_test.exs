@@ -76,6 +76,24 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
         assert result.status == :warn
         assert result.detail =~ "snapshot_default_depth"
       end
+
+      # The same path for a LIST-valued key. `allowed_hosts` was validated
+      # nowhere until the canonical-host rule landed, so this is the first key
+      # whose refusal is not an integer-range message — doctor must render it
+      # with the offending entry, since that entry is the whole fix.
+      test "an uncanonical allowed_hosts entry is a row naming the entry" do
+        previous = Application.get_env(:fermix_core, :browser)
+        on_exit(fn -> restore_env(:fermix_core, :browser, previous) end)
+
+        Application.put_env(:fermix_core, :browser, allowed_hosts: ["münchen.de"])
+
+        result = Checks.browser_disclaim()
+
+        assert result.name == "browser"
+        assert result.status == :warn
+        assert result.detail =~ "allowed_hosts"
+        assert result.detail =~ "münchen.de"
+      end
     end
 
     # `fermix doctor` is the command that explains a broken install, so a shim
@@ -1145,7 +1163,7 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
   describe "command_owner_config/0" do
     setup do
       original_channels =
-        for channel <- [:telegram, :whatsapp, :discord, :slack, :signal], into: %{} do
+        for channel <- [:telegram, :whatsapp, :discord, :slack, :signal, :mobile], into: %{} do
           {channel, Application.get_env(:fermix_channels, channel, [])}
         end
 
@@ -1168,6 +1186,20 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.status == :warn
       assert result.detail =~ "telegram"
       assert result.detail =~ "signal=owner set"
+    end
+
+    test "treats paired-device mobile ingress as its own command authority" do
+      for channel <- [:telegram, :whatsapp, :discord, :slack, :signal] do
+        Application.put_env(:fermix_channels, channel, enabled: false)
+      end
+
+      Application.put_env(:fermix_channels, :mobile, enabled: true)
+
+      result = Checks.command_owner_config()
+
+      assert result.status == :ok
+      assert result.detail =~ "mobile=paired-device authority"
+      refute result.detail =~ "missing command owner for enabled channels: mobile"
     end
   end
 

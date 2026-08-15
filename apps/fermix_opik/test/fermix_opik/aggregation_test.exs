@@ -225,6 +225,32 @@ defmodule FermixOpik.AggregationTest do
     assert llm.usage == %{prompt_tokens: 40, completion_tokens: 8, total_tokens: 48}
   end
 
+  test "a mobile turn and its generic stream keep the standard main run attribution" do
+    {_state, closed} =
+      run([
+        {[:fermix, :channel, :stream], %{ttfd_ms: 35},
+         %{channel: :mobile, session_id: "main-19", phase: :open, status: :ok}},
+        {[:fermix, :provider, :call], %{duration_ms: 250},
+         %{provider: :openai, model: "gpt-5", status: :ok, session_id: "main-19"}},
+        {[:fermix, :agent, :message], %{iterations: 1, total_tokens: 12},
+         %{
+           channel: :mobile,
+           chat_id: "main",
+           sender: "device",
+           session_id: "main-19",
+           agent: "main"
+         }}
+      ])
+
+    assert [%{trace: trace, spans: spans}] = closed
+    assert trace.name == "agent:main"
+    assert trace.thread_id == "mobile:main"
+    assert trace.metadata.channel == "mobile"
+
+    stream = span_named(spans, "stream:open")
+    assert stream.metadata.channel == :mobile
+  end
+
   # The M29/Buzz duplicate-reply incident: the one trace worth reading — the
   # failed turn — carried no input, no status and nothing filterable, so a reader
   # could only find it by eyeballing output text.

@@ -1227,7 +1227,7 @@ defmodule FermixCore.Jobs.Runner do
     [
       adapter: state.delivery_adapter,
       channels: state.delivery_channels,
-      delivery_opts: state.delivery_opts,
+      delivery_opts: Keyword.put(state.delivery_opts, :proactive_key, "job:#{state.run.id}"),
       timeout_ms: state.delivery_timeout_ms
     ]
   end

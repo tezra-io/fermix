@@ -6,6 +6,7 @@ defmodule FermixCore.Trace.TelemetryHandler do
   - `[:fermix, :provider, :call]` → `:llm_call`
   - `[:fermix, :tool, :exec]` → `:tool_exec`
   - `[:fermix, :channel, :message]` → `:channel_msg`
+  - `[:fermix, :channel, :pair | :push]` → `:agent_event`
   - M2 lifecycle events → `:agent_event`
   """
 
@@ -42,6 +43,18 @@ defmodule FermixCore.Trace.TelemetryHandler do
       trace_event: "memory_review"
     },
     %{event: [:fermix, :channel, :message], trace_type: :channel_msg, agent_field: :agent},
+    %{
+      event: [:fermix, :channel, :pair],
+      trace_type: :agent_event,
+      agent_field: :channel,
+      trace_event: "channel_pair"
+    },
+    %{
+      event: [:fermix, :channel, :push],
+      trace_type: :agent_event,
+      agent_field: :channel,
+      trace_event: "channel_push"
+    },
     %{
       event: [:fermix, :agent, :message],
       trace_type: :agent_event,

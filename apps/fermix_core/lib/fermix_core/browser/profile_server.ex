@@ -503,9 +503,16 @@ defmodule FermixCore.Browser.ProfileServer do
     end
   end
 
+  # The read gate asks ONE question — may this document be returned — and
+  # `Policy.read_verdict/2` is where that question lives: an explicit scheme
+  # allow-list (http/https, `about:blank`, and a `blob:` whose inner origin is
+  # allowed) and then the host rules on the host it already holds. Reusing
+  # `Policy.validate_url/2` whole is a NAVIGATION policy and would refuse a page
+  # that legitimately committed to a `blob:` URL, naming a navigation the model
+  # never made.
   defp live_page(tab, state) do
     with {:ok, tab} <- live_meta(tab, state),
-         :ok <- read_url_allowed(tab.url, state.config) do
+         :ok <- Policy.read_verdict(tab.url, state.config) do
       {:ok, tab}
     end
   end
@@ -554,59 +561,6 @@ defmodule FermixCore.Browser.ProfileServer do
   end
 
   defp bounded_inspect(value), do: inspect(value, limit: 5, printable_limit: 120)
-
-  # The read gate asks ONE question — did this content come from a host the
-  # policy refuses — so it validates the document's HOST, not the document's
-  # URL. `Policy.validate_url/2` whole is a NAVIGATION policy: its scheme rules
-  # would refuse a page that legitimately committed to a `blob:` URL (the
-  # in-page PDF/print-preview pattern) with "Unsupported URL scheme: blob",
-  # naming a navigation the model never made. Re-validating the host on its own
-  # runs exactly the host rules — `allowed_hosts`, localhost, the `.internal`
-  # suffixes, IPv4-in-IPv6 folding, the private ranges — and nothing else.
-  defp read_url_allowed(url, %Config{} = config) when is_binary(url) do
-    case read_host(url) do
-      nil -> :ok
-      host -> read_host_allowed(host, config)
-    end
-  end
-
-  # A blob URL carries its creator's origin immediately after the scheme, so it
-  # is unwrapped once (the URL spec nests exactly one): `blob:http://169.254.
-  # 169.254/<uuid>` is still the metadata host and is still refused. A document
-  # with no host at all — `about:blank`, `data:` — was not fetched from a
-  # network origin and has no host to judge.
-  defp read_host("blob:" <> inner), do: parse_host(inner)
-  defp read_host(url), do: parse_host(url)
-
-  defp parse_host(url) do
-    case URI.parse(url) do
-      %URI{host: host} when is_binary(host) and host != "" -> host
-      _other -> nil
-    end
-  end
-
-  defp read_host_allowed(host, config) do
-    case Policy.validate_url(host_probe_url(host), config) do
-      {:ok, _uri} -> :ok
-      {:error, %Error{} = error} -> {:error, read_blocked(host, error)}
-    end
-  end
-
-  # `URI.parse/1` strips the brackets off an IPv6 authority, so they have to go
-  # back on: `URI.parse("https://::1")` yields host `nil`, which would fail the
-  # gate OPEN on every IPv6 private address.
-  defp host_probe_url(host) do
-    if String.contains?(host, ":"), do: "https://[#{host}]", else: "https://#{host}"
-  end
-
-  defp read_blocked(host, %Error{} = error) do
-    Error.new(
-      "read_blocked",
-      "Refused to return page content: the page is on #{host}, which the browser " <>
-        "policy blocks (#{error.message}). Navigate somewhere allowed and read again.",
-      error.details
-    )
-  end
 
   # The Accessibility domain is CYCLED (disable → enable) so getFullAXTree is
   # built from the CURRENT document: Chrome otherwise serves the domain's cached

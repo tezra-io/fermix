@@ -25,6 +25,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     mcp_servers = Application.get_env(:fermix_core, :mcp_servers, [])
     mcp_inbound = Application.get_env(:fermix_core, :mcp_inbound, InboundConfig.default())
     secret_writer = Application.get_env(:fermix_core, :secret_writer)
+    mobile = Application.get_env(:fermix_channels, :mobile, [])
 
     FermixTestSupport.SecretWriterStub.reset()
     Application.put_env(:fermix_core, :secret_writer, FermixTestSupport.SecretWriterStub)
@@ -47,6 +48,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
       Application.put_env(:fermix_core, :mcp_servers, mcp_servers)
       Application.put_env(:fermix_core, :mcp_inbound, mcp_inbound)
       restore_secret_writer(secret_writer)
+      Application.put_env(:fermix_channels, :mobile, mobile)
       FermixTestSupport.SecretWriterStub.reset()
 
       case fermix_home do
@@ -211,6 +213,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
              browser: Path.join(tmp_home, "browser"),
              journals: Path.join(tmp_home, "journals"),
              realtime: Path.join(tmp_home, "realtime"),
+             mobile: Path.join(tmp_home, "mobile"),
              traces: Path.join(tmp_home, "traces"),
              logs: Path.join(tmp_home, "logs")
            }
@@ -1038,6 +1041,87 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert Keyword.get(harness, :codex_home) == "/home/op/.codex"
   end
 
+  # `allowed_hosts` is the documented recovery for every host the browser policy
+  # refuses (`browser_guidance` SKILL.md tells the operator to list the host
+  # there), so it has to be reachable from `config.toml`. It was not: the section
+  # existed in `Browser.Config` and nothing carried it from the file into app env.
+  test "save/load round-trips the browser allowed_hosts section" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    snapshot = %{
+      fermix_core: [browser: [allowed_hosts: ["printer.local", "build.internal"]]],
+      fermix_channels: [],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ "[fermix_core.browser]"
+    assert contents =~ ~s(allowed_hosts = ["printer.local", "build.internal"])
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config()
+
+    assert loaded.fermix_core
+           |> Keyword.get(:browser, [])
+           |> Keyword.get(:allowed_hosts) == ["printer.local", "build.internal"]
+  end
+
+  test "apply_snapshot puts browser config in Application env" do
+    # `apply_snapshot/1` applies the WHOLE snapshot, so a snapshot naming only
+    # `browser` still rewrites `:sandbox` to its default as a side effect. Both
+    # keys are therefore saved and restored here — restoring only the one this
+    # test is about leaves the next test reading a sandbox config this test set.
+    previous = %{
+      browser: Application.get_env(:fermix_core, :browser),
+      sandbox: Application.get_env(:fermix_core, :sandbox)
+    }
+
+    on_exit(fn ->
+      Enum.each(previous, fn
+        {key, nil} -> Application.delete_env(:fermix_core, key)
+        {key, value} -> Application.put_env(:fermix_core, key, value)
+      end)
+    end)
+
+    ConfigStore.apply_snapshot(%{
+      fermix_core: [browser: [allowed_hosts: ["build.internal"]]],
+      fermix_channels: [],
+      fermix_web: []
+    })
+
+    assert Application.get_env(:fermix_core, :browser, [])
+           |> Keyword.get(:allowed_hosts) == ["build.internal"]
+  end
+
+  # Everything else in `Browser.Config` is a timeout, a cap, or a buffer size —
+  # tuning, which is an internal constant here rather than a config surface. A
+  # key that names one is refused loudly at the parse boundary so an operator who
+  # tries is told it is not settable, rather than editing a line that does
+  # nothing.
+  test "load refuses to boot on a browser key that is not settable" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.browser]
+    allowed_hosts = ["build.internal"]
+    action_timeout_ms = 60000
+    """)
+
+    assert_raise ArgumentError,
+                 ~r/\[fermix_core.browser\].*action_timeout_ms/s,
+                 fn -> ConfigStore.load_runtime_config() end
+  end
+
   test "apply_snapshot replaces harness config in Application env" do
     Application.put_env(:fermix_core, :harness, enabled: true, max_active: 9)
 
@@ -1447,6 +1531,94 @@ defmodule FermixCore.Setup.ConfigStoreTest do
 
     assert :ok = ConfigStore.apply_snapshot(reloaded)
     assert Keyword.get(Application.get_env(:fermix_channels, :acp, []), :enabled) == true
+  end
+
+  test "mobile config and nested APNs push round-trip without plaintext secrets" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("config-store-mobile")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    snapshot = %{
+      fermix_core: [],
+      fermix_channels: [
+        mobile: [
+          enabled: true,
+          mode: :listener,
+          port: 4_031,
+          bind: "0.0.0.0",
+          advertise_mdns: true,
+          streaming: "draft",
+          max_media_bytes: 20_971_520,
+          media_store_max_bytes: 2_147_483_648,
+          push: [
+            enabled: true,
+            team_id: "TEAM123",
+            key_id: "KEY123",
+            key: "apns-private-key",
+            topic: "io.tezra.fermix",
+            environment: "development"
+          ]
+        ]
+      ],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ "[fermix_channels.mobile]"
+    assert contents =~ "mode = \"listener\""
+    assert contents =~ "port = 4031"
+    assert contents =~ "streaming = \"draft\""
+    assert contents =~ "[fermix_channels.mobile.push]"
+    assert contents =~ ~s(key = "@keyring")
+    refute contents =~ "apns-private-key"
+    assert {:ok, "apns-private-key"} = FermixTestSupport.SecretWriterStub.get(:mobile_apns_key)
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+    mobile = Keyword.fetch!(loaded.fermix_channels, :mobile)
+    assert Keyword.get(mobile, :mode) == :listener
+    assert Keyword.get(mobile, :port) == 4_031
+    assert Keyword.get(mobile, :max_media_bytes) == 20_971_520
+    assert Keyword.get(mobile, :media_store_max_bytes) == 2_147_483_648
+    assert Keyword.get(mobile, :push)[:key] == "@keyring"
+    assert Keyword.get(mobile, :push)[:environment] == "development"
+  end
+
+  test "mobile config rejects unsafe ports, modes, media caps, and push environments" do
+    invalid_configs = [
+      {[port: 0], ~r/mobile.port/},
+      {[mode: :gateway], ~r/mobile.mode/},
+      {[max_media_bytes: -1], ~r/mobile.max_media_bytes/},
+      {[media_store_max_bytes: 0], ~r/mobile.media_store_max_bytes/},
+      {[push: [environment: "staging"]], ~r/mobile.push.environment/}
+    ]
+
+    for {mobile, message} <- invalid_configs do
+      snapshot = %{fermix_core: [], fermix_channels: [mobile: mobile], fermix_web: []}
+      assert_raise ArgumentError, message, fn -> ConfigStore.persistable_snapshot(snapshot) end
+    end
+  end
+
+  test "apply_snapshot merges mobile settings over compile defaults" do
+    Application.put_env(:fermix_channels, :mobile,
+      enabled: false,
+      mode: :listener,
+      port: 4_031,
+      streaming: "draft"
+    )
+
+    assert :ok =
+             ConfigStore.apply_snapshot(%{
+               fermix_core: [],
+               fermix_channels: [mobile: [enabled: true, port: 4_032]],
+               fermix_web: []
+             })
+
+    mobile = Application.fetch_env!(:fermix_channels, :mobile)
+    assert mobile[:enabled] == true
+    assert mobile[:port] == 4_032
+    assert mobile[:mode] == :listener
+    assert mobile[:streaming] == "draft"
   end
 
   test "channel streaming survives the load normalizers for every channel" do

@@ -244,7 +244,8 @@ defmodule FermixCore.Temporal.DeliveryWorkerTest do
       start_channel(ctx, [:ok])
       create!(ctx, birthday_spec(day_of_rules()))
 
-      {exit_reason, row} = deliver!(ctx, claim!(ctx, @day_of_due), @day_of_due)
+      claimed = claim!(ctx, @day_of_due)
+      {exit_reason, row} = deliver!(ctx, claimed, @day_of_due)
 
       assert exit_reason == :normal
       assert row.status == "delivered"
@@ -252,7 +253,7 @@ defmodule FermixCore.Temporal.DeliveryWorkerTest do
       assert DateTime.compare(row.sent_at, @day_of_due) == :eq
       assert [%{text: text, opts: opts}] = calls(ctx)
       assert text == "Today: Sarah's birthday — September 14."
-      assert opts == []
+      assert Keyword.fetch!(opts, :proactive_key) == "temporal:#{claimed.id}"
     end
   end
 
@@ -261,10 +262,13 @@ defmodule FermixCore.Temporal.DeliveryWorkerTest do
       start_channel(ctx, [:ok])
       create!(ctx, birthday_spec(day_of_rules()), %{delivery_thread_scope: "42"})
 
-      {_reason, row} = deliver!(ctx, claim!(ctx, @day_of_due), @day_of_due)
+      claimed = claim!(ctx, @day_of_due)
+      {_reason, row} = deliver!(ctx, claimed, @day_of_due)
 
       assert row.status == "delivered"
-      assert [%{opts: [message_thread_id: 42]}] = calls(ctx)
+      assert [%{opts: opts}] = calls(ctx)
+      assert Keyword.fetch!(opts, :message_thread_id) == 42
+      assert Keyword.fetch!(opts, :proactive_key) == "temporal:#{claimed.id}"
     end
 
     test "a slack thread scope becomes a thread_ts string", ctx do
@@ -275,10 +279,13 @@ defmodule FermixCore.Temporal.DeliveryWorkerTest do
         delivery_thread_scope: "1710000000.000100"
       })
 
-      {_reason, row} = deliver!(ctx, claim!(ctx, @day_of_due), @day_of_due)
+      claimed = claim!(ctx, @day_of_due)
+      {_reason, row} = deliver!(ctx, claimed, @day_of_due)
 
       assert row.status == "delivered"
-      assert [%{opts: [thread_ts: "1710000000.000100"]}] = calls(ctx)
+      assert [%{opts: opts}] = calls(ctx)
+      assert Keyword.fetch!(opts, :thread_ts) == "1710000000.000100"
+      assert Keyword.fetch!(opts, :proactive_key) == "temporal:#{claimed.id}"
     end
 
     test "a thread scope on a platform that has none fails terminally instead of guessing", ctx do
@@ -370,7 +377,12 @@ defmodule FermixCore.Temporal.DeliveryWorkerTest do
       assert fifth.status == "failed"
       assert fifth.attempt_count == 5
       assert fifth.last_error == "transport:connection_reset"
-      assert length(calls(ctx)) == 5
+      attempts = calls(ctx)
+      assert length(attempts) == 5
+
+      assert Enum.uniq(Enum.map(attempts, &Keyword.fetch!(&1.opts, :proactive_key))) == [
+               "temporal:#{fifth.id}"
+             ]
 
       assert Repo.claim_due_reminders(DateTime.add(fifth_at, 3_600, :second), 5, server: ctx.repo) ==
                {:ok, []}

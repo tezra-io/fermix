@@ -124,6 +124,9 @@ defmodule FermixChannels.Gateway.Channel do
   """
   @callback build_turn_result(message()) :: (term() -> any())
 
+  @doc "Whether the turn-result callback exclusively owns terminal error delivery."
+  @callback terminal_error_capability() :: :turn_result | :legacy
+
   @doc "Create the live draft message. Returns a handle for later edits."
   @callback open_draft(message(), String.t()) :: {:ok, stream_handle()} | {:error, term()}
 
@@ -213,6 +216,19 @@ defmodule FermixChannels.Gateway.Channel do
   @callback send_approval(message(), text :: String.t(), token :: String.t()) ::
               :ok | {:error, term()}
 
+  @typedoc "A rich approval card with an explicit kind, expiry, and command routes."
+  @type approval_spec :: %{
+          required(:kind) => :sandbox | :soul,
+          required(:text) => String.t(),
+          required(:token) => String.t(),
+          optional(:approval_id) => String.t(),
+          optional(:detail) => String.t(),
+          optional(:ttl_s) => pos_integer()
+        }
+
+  @doc "Deliver a structured approval card when the caller knows its approval kind."
+  @callback send_approval(message(), approval_spec()) :: :ok | {:error, term()}
+
   @doc """
   Deliver a skill-curation proposal with two-tap approve/deny affordances
   (MILESTONE_26_SKILL_CURATION §6.6). Target-addressed — proposals are
@@ -253,6 +269,7 @@ defmodule FermixChannels.Gateway.Channel do
     build_raw_stream_callback: 1,
     build_activity_callback: 1,
     build_turn_result: 1,
+    terminal_error_capability: 0,
     open_draft: 2,
     edit_draft: 3,
     seal_draft: 3,
@@ -262,6 +279,7 @@ defmodule FermixChannels.Gateway.Channel do
     react: 2,
     reaction_capability: 0,
     send_approval: 3,
+    send_approval: 2,
     send_proposal: 3,
     send_ephemeral: 2,
     delete_message: 2

@@ -1053,7 +1053,8 @@ defmodule FermixCore.Jobs.RunnerTest do
       script: [%{content: "Digest ready."}]
     )
 
-    assert_receive {:delivery_send, "123", "Digest ready.", _opts}, 1_000
+    assert_receive {:delivery_send, "123", "Digest ready.", opts}, 1_000
+    assert Keyword.fetch!(opts, :proactive_key) == "job:#{run.id}"
 
     assert {:ok, delivered_run} = Repo.get_job_run(run.id, server: repo)
     assert delivered_run.status == "ok"

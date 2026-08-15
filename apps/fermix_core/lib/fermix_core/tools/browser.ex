@@ -197,6 +197,21 @@ defmodule FermixCore.Tools.Browser do
         description: "the macOS disclaim launch shim could not exec Chrome"
       },
       %{tag: "navigation_blocked", description: "browser URL policy blocked the navigation"},
+      %{
+        tag: "read_blocked",
+        description:
+          "the page's live host is blocked by browser policy; navigate somewhere allowed"
+      },
+      %{
+        tag: "read_origin_blocked",
+        description:
+          "the page is not an http/https document (file:, view-source:, data:); read local " <>
+            "files with the file tools"
+      },
+      %{
+        tag: "read_url_unavailable",
+        description: "the page's live URL could not be read, so no read policy could be applied"
+      },
       %{tag: "browser_busy", description: "all browser profile slots are active"}
     ]
   end
