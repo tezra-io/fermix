@@ -8,9 +8,10 @@ defmodule FermixCore.Providers.XAI.Responses do
   say `:xai`, never `:openai`. xAI-specific shaping (design doc §6):
 
     * `store: false` and `parallel_tool_calls: true` on every request.
-    * Reasoning effort `none|low|medium|high` via `ReasoningEffort`
-      (above-ceiling clamps to `high`); models that reject
-      `reasoning.effort` get the field omitted.
+    * Reasoning effort `none|low|medium|high|xhigh` via `ReasoningEffort`
+      (above-ceiling clamps to `xhigh`, and to the model's own ceiling
+      where the catalog sets a lower one — every Grok but 4.6 tops out at
+      `high`); models that reject `reasoning.effort` get the field omitted.
     * Tool schemas are sanitized — xAI rejects enum values containing
       slashes (Hermes parity); offending values are dropped and emptied
       enums removed.

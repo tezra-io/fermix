@@ -7,6 +7,7 @@
 `requires_tools` suite validation. No daemon / no Opik. Run: `uv run bin/test_capability_runner.py`."""
 from __future__ import annotations
 
+import json
 import os
 import sys
 from datetime import datetime, timezone
@@ -699,6 +700,153 @@ def test_backoff_minutes_default_env_and_disable(monkeypatch):
     assert cfgmod._backoff_minutes([30], [1]) == [15, 45, 90]                       # env overrides yaml
     monkeypatch.setenv("EVAL_USAGE_RETRY_BACKOFF_MIN", "")
     assert cfgmod._backoff_minutes([30, 60], [1]) == []                             # empty env = fail-fast
+
+
+# --- invalidated auth aborts the sweep (2026-08-06: 70 zero-token trials) ----
+
+# Fermix's actual auth-failure replies (`auth_reply/1` in agents/turn_runner.ex):
+# OAuth, api-key, and the generic fallback.
+_AUTH_REPLIES = [
+    "OpenAI Codex authentication failed — reconnect with `fermix auth login "
+    "--provider openai_codex` and retry.",
+    "OpenAI Codex authentication failed — check the OpenAI Codex API key in "
+    "`fermix setup` and retry.",
+    "Authentication failed — run `fermix auth login` from the host and try again.",
+    # Worded as an ACCESS denial, not an authentication failure: re-login cannot
+    # buy a plan tier. Permanent for the run all the same.
+    "SpaceXAI subscription access denied — the Grok plan may not include API "
+    "access. Switch to an API key in `fermix setup`, or check the plan tier.",
+]
+
+
+def _auth_refused(response=_AUTH_REPLIES[0]):
+    from evallib import driver
+    return driver.DriveResult(
+        ok=True, status="ok", response=response, error=None, session_id="s",
+        exit_code=0, sent_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        auth_invalidated=True)
+
+
+def test_is_auth_invalidated_reply_matches_fermix_wordings():
+    from evallib import driver
+    for r in _AUTH_REPLIES:
+        assert driver.is_auth_invalidated_reply(r) is True, r
+
+
+def test_auth_invalidated_covers_every_reply_clause():
+    """Derive the wordings from the live source instead of enumerating them.
+
+    A reply shape the regex misses does not abort the sweep: it banks a
+    near-zero leaderboard row that reads as a model regression, which is the
+    2026-08-06 auth-cliff class this check exists to prevent. `_AUTH_REPLIES`
+    above is hand-copied and a hand-copied list rots — most cheaply by a clause
+    being REWORDED, which no count of clauses can see. So assemble each clause's
+    reply out of turn_runner.ex and require the regex to match it.
+    """
+    import pathlib
+    import re
+
+    from evallib import driver
+    import run_eval
+
+    source = (pathlib.Path(run_eval.REPO_ROOT)
+              / "apps/fermix_core/lib/fermix_core/agents/turn_runner.ex").read_text()
+    # Each clause body is one string expression, possibly `<>`-concatenated and
+    # carrying `#{...}` interpolations of a provider label.
+    clauses = re.findall(r"^  defp auth_reply\(.*?^  end$", source,
+                         re.MULTILINE | re.DOTALL)
+    assert len(clauses) == 7, (
+        f"parsed {len(clauses)} auth_reply clauses, expected 7 — the extraction "
+        "below is stale, not the regex"
+    )
+    for clause in clauses:
+        parts = re.findall(r'"((?:[^"\\]|\\.)*)"', clause)
+        reply = re.sub(r"#\{[^}]*\}", "OpenAI Codex", "".join(parts))
+        assert driver.is_auth_invalidated_reply(reply) is True, reply
+
+
+def test_is_auth_invalidated_reply_rejects_content_mentions_and_limits():
+    from evallib import driver
+    # The anchor needs Fermix's remedy clause, not just the phrase — a task
+    # ANSWER that merely discusses auth failures must not abort the sweep.
+    assert driver.is_auth_invalidated_reply(
+        "The login endpoint returned 401: authentication failed for that user.") is False
+    assert driver.is_auth_invalidated_reply(
+        "You've hit your Codex usage limit. Try again in ~15 min.") is False
+    assert driver.is_auth_invalidated_reply("") is False
+    assert driver.is_auth_invalidated_reply(None) is False
+
+
+def test_drive_query_flags_auth_and_usage_replies(monkeypatch):
+    from types import SimpleNamespace as NS
+    from evallib import driver
+    replies = iter([_AUTH_REPLIES[0],
+                    "You've hit your Codex usage limit. Try again in ~15 min."])
+    monkeypatch.setattr(
+        driver.subprocess, "run",
+        lambda *a, **k: NS(returncode=0, stderr="",
+                           stdout='{"status":"ok","response":' +
+                                  json.dumps(next(replies)) + ',"session_id":"s"}'))
+    cfg = SimpleNamespace(daemon=SimpleNamespace(fermix_bin="fermix", default_timeout_ms=1),
+                          env={})
+    auth = driver.drive_query(cfg, "s", "q", 1)
+    assert auth.auth_invalidated is True and auth.usage_limited is False
+    limited = driver.drive_query(cfg, "s", "q", 1)
+    assert limited.usage_limited is True and limited.auth_invalidated is False
+
+
+def test_drive_with_usage_retry_aborts_immediately_on_auth(monkeypatch):
+    from evallib import driver
+    slept = []
+    monkeypatch.setattr(driver, "drive_query", lambda *a: _auth_refused())
+    monkeypatch.setattr(driver, "_sleep", lambda s: slept.append(s))
+    with pytest.raises(driver.AuthInvalidated):
+        driver.drive_with_usage_retry(_cfg_backoff([30, 60]), "S", "q", 1, "lbl")
+    assert slept == []   # permanent condition: no backoff is consumed, unlike a limit
+
+
+def test_auth_invalidated_locate_and_excerpt():
+    from evallib import driver
+    e = driver.AuthInvalidated(_AUTH_REPLIES[0])
+    assert e.suite is None and e.case_id is None and e.trial is None
+    e.locate("cap_web_research", "irs_401k_limit_2026", 3)
+    assert (e.suite, e.case_id, e.trial) == ("cap_web_research", "irs_401k_limit_2026", 3)
+    long = driver.AuthInvalidated("word " * 200)
+    assert len(long.reply_excerpt()) <= 161 and long.reply_excerpt().endswith("…")
+
+
+def test_capture_turn_propagates_auth_invalidated(monkeypatch):
+    from evallib import driver
+    monkeypatch.setattr(driver, "drive_query", lambda *a: _auth_refused())
+    with pytest.raises(driver.AuthInvalidated):
+        rc._capture_turn(_cfg_backoff([30]), None, "sess", "q", 1, "lbl")   # opik unused
+
+
+def test_run_task_stamps_the_abort_pointer_on_auth(monkeypatch):
+    from evallib import driver
+
+    def _refuse(*_args, **_kwargs):
+        raise driver.AuthInvalidated(_AUTH_REPLIES[0])
+
+    monkeypatch.setattr(rc, "_standard_trial", _refuse)
+    s = SimpleNamespace(name="cap_coding")
+    case = SimpleNamespace(id="landlord_email", checker_spec=None, cross_session=False)
+    with pytest.raises(driver.AuthInvalidated) as caught:
+        rc.run_task(None, None, s, case, trials=5, k=5, threshold=0.5,
+                    run_id="r", want_judge=False)
+    assert (caught.value.suite, caught.value.case_id, caught.value.trial) == \
+        ("cap_coding", "landlord_email", 0)
+
+
+def test_abort_auth_invalidated_exits_incomplete_without_writing(capsys):
+    from evallib import driver
+    hit = driver.AuthInvalidated(_AUTH_REPLIES[0])
+    hit.locate("cap_coding", "landlord_email", 0)
+    assert rc._abort_auth_invalidated(hit, done=10, total=24) == 4
+    err = capsys.readouterr().err
+    assert "cap_coding/landlord_email (trial 0)" in err
+    assert "authentication failed" in err     # Fermix's own words reach the operator
+    assert "Leaderboard NOT written" in err
 
 
 def test_run_task_stamps_resume_pointer_on_usage_limit(tmp_path, monkeypatch):

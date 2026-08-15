@@ -16,6 +16,15 @@ defmodule FermixCore.Setup.SecretPathsTest do
     end
   end
 
+  # M31 §14.1: one key, two consumers. The operator-facing string is what a
+  # keyring-resolution warning names, so it must not claim only web search.
+  test "the Brave key names both of its consumers" do
+    secret = SecretPaths.fetch!(:brave_api_key)
+
+    assert secret.path == [:fermix_core, :tools, :web_search, :brave_api_key]
+    assert secret.functionality == "Brave web_search backend and place_search"
+  end
+
   test "registers the Eden plugin secret under the plugin-secret shape" do
     secret = SecretPaths.fetch!(:eden_plugin_secret)
 

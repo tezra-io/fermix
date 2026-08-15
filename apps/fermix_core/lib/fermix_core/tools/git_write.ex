@@ -50,7 +50,13 @@ defmodule FermixCore.Tools.GitWrite do
     [
       %{tag: "unknown_command", description: "command is not in the mutating whitelist"},
       %{tag: "push_deferred", description: "this tool cannot push"},
-      %{tag: "git_failed", description: "git returned a non-zero exit code"}
+      %{tag: "git_failed", description: "git returned a non-zero exit code"},
+      %{
+        tag: "file_flag_refused",
+        description:
+          "flags that read a file outside the authorized repository (-F, --file, " <>
+            "--pathspec-from-file) are refused. Pass the commit message inline with -m"
+      }
     ]
   end
 

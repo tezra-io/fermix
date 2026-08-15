@@ -102,15 +102,50 @@ defmodule FermixChannels.Gateway do
   end
 
   defp configured_stream_spec(channel, %Message{} = message, reply_fn) do
-    case streaming_config(ChannelRegistry.channel_key(message.channel)) do
+    case streaming_config(ChannelRegistry.channel_key(message.channel), channel) do
       "draft" ->
-        if draft_capable?(channel), do: DraftStream.build_spec(channel, message)
+        if draft_capable?(channel),
+          do: DraftStream.build_spec(channel, message, rotation_opts(channel))
 
       "block" ->
-        DraftStream.build_block_spec(message.channel, fn text -> reply_fn.({:text, text}) end)
+        DraftStream.build_block_spec(message.channel, fn text -> reply_fn.({:text, text}) end,
+          ephemeral_send: build_ephemeral_send(channel, message),
+          delete: build_delete_message(channel, message)
+        )
 
       _off ->
         nil
+    end
+  end
+
+  # The thought-sweep pair (CHANNEL_LONGFORM_PRESENTATION §5): the engine posts
+  # 💭 messages silently and deletes them when the answer lands. Resolved here
+  # for the same reason as the stream spec itself — the gateway is the one layer
+  # holding the channel module. A channel without the callbacks gets nil, and
+  # the engine then drops thoughts entirely rather than leaving residue in the
+  # chat (decision §9.2).
+  defp build_ephemeral_send(channel, %Message{} = message) do
+    if function_exported?(channel, :send_ephemeral, 2) do
+      fn text -> channel.send_ephemeral(message, text) end
+    end
+  end
+
+  defp build_delete_message(channel, %Message{} = message) do
+    if function_exported?(channel, :delete_message, 2) do
+      fn message_id -> channel.delete_message(message, message_id) end
+    end
+  end
+
+  # Draft rotation (CHANNEL_LONGFORM_PRESENTATION §6): the channel owns both the
+  # rendered-length measurer and its card size; the gateway resolves them here
+  # into plain data so the engine stays channel-blind. A draft-capable channel
+  # without the callback never rotates (its draft freezes at the channel limit).
+  defp rotation_opts(channel) do
+    if function_exported?(channel, :rotation_spec, 0) do
+      %{measure: measure, rotate_at: rotate_at} = channel.rotation_spec()
+      [measure: measure, rotate_at: rotate_at]
+    else
+      []
     end
   end
 
@@ -140,17 +175,22 @@ defmodule FermixChannels.Gateway do
     end
   end
 
-  # A configured channel streams by default ("block" works on every channel and
-  # is a no-op for non-streaming providers); an unknown or unconfigured channel
-  # carries no live turns, so it stays off. Opt out per channel with
-  # `streaming = "off"`.
-  defp streaming_config(nil), do: "off"
+  # A configured channel streams by default, in the best shape it can render
+  # (design §6, decision §9.5): a draft-capable channel gets rotating draft
+  # bubbles, every other channel gets block sends (a no-op for non-streaming
+  # providers). An unknown or unconfigured channel carries no live turns, so it
+  # stays off. Opt out per channel with `streaming = "off"`.
+  defp streaming_config(nil, _channel), do: "off"
 
-  defp streaming_config(config_key) when is_atom(config_key) do
+  defp streaming_config(config_key, channel) when is_atom(config_key) do
     case FermixCore.Config.channel(config_key) do
-      {:ok, config} -> Keyword.get(config, :streaming, "block")
+      {:ok, config} -> Keyword.get(config, :streaming, default_streaming(channel))
       {:error, :not_configured} -> "off"
     end
+  end
+
+  defp default_streaming(channel) do
+    if draft_capable?(channel), do: "draft", else: "block"
   end
 
   defp to_agent_message(%Message{} = message), do: Map.from_struct(message)

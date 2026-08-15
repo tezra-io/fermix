@@ -40,6 +40,7 @@ from evallib.opik import OpikClient, OpikError, valid_run_id
 from evallib.suites import RISK_LEVELS, SuiteError, load_all
 
 _SESS_RE = re.compile(r"[^A-Za-z0-9_-]")
+_SESS_MAX = 90
 _PROVIDER_LIMIT_RE = re.compile(
     r"usage limit\b.*?\btry again in ~|rate-limited this request|quota or credits are exhausted",
     re.IGNORECASE | re.DOTALL,
@@ -65,15 +66,82 @@ def new_run_id() -> str:
 
 
 def sess(*parts: str) -> str:
-    return _SESS_RE.sub("-", "-".join(parts))[:90]
+    """Session id bounded to `_SESS_MAX` that never drops a trailing part.
+
+    A plain `[:90]` silently cut the trial suffix off every id over the cap (83
+    of 449 shipped cases), so trials of one case shared a daemon conversation: a
+    fail-retry re-entered the context of the attempt it exists to independently
+    confirm, and its turns became indistinguishable from that attempt's in Opik
+    correlation. `find_turn_trace` requires a UNIQUE candidate, so an
+    identically-worded retry turn resolved to None and the case went INCOMPLETE
+    with the real verdict masked. Two long case ids sharing a prefix collided
+    the same way.
+
+    Overflow therefore compresses the MIDDLE, never the tail: the readable head
+    and the trailing parts survive, and a digest of the full id keeps every
+    distinct input distinct.
+    """
+    full = _SESS_RE.sub("-", "-".join(parts))
+    if len(full) <= _SESS_MAX:
+        return full
+    tail = _SESS_RE.sub("-", str(parts[-1]))
+    suffix = f"-{hashlib.sha256(full.encode()).hexdigest()[:8]}-{tail}"
+    head = _SESS_MAX - len(suffix)
+    if head < 1:
+        raise ValueError(f"session id tail {tail!r} does not fit in {_SESS_MAX} chars")
+    return full[:head] + suffix
+
+
+def _placeholders(run_id: str, trial: int) -> dict[str, str]:
+    return {"__EVAL_RUN_ID__": run_id,
+            "__EVAL_TRIAL__": str(trial),
+            "__EVAL_REPO_ROOT__": REPO_ROOT.replace(os.sep, "/")}
 
 
 def _render_query(query: str, run_id: str, trial: int) -> str:
     if not isinstance(query, str) or not query.strip():
         raise ValueError("eval query must be a non-empty string")
-    return (query.replace("__EVAL_RUN_ID__", run_id)
-            .replace("__EVAL_TRIAL__", str(trial))
-            .replace("__EVAL_REPO_ROOT__", REPO_ROOT.replace(os.sep, "/")))
+    for token, value in _placeholders(run_id, trial).items():
+        query = query.replace(token, value)
+    return query
+
+
+def _render_expect(expect: dict, run_id: str, trial: int) -> dict:
+    """Substitute the run placeholders inside gate values, not just queries.
+
+    A read-back gate is only proof when it pins THIS run. `reply_matches:
+    "marker"` on a suite whose every run leaves a permanent artifact matches a
+    previous run's leftovers just as happily, so the case scores green off work
+    it never did. Rendering the gate lets the fixture write
+    `reply_matches: "marker __EVAL_RUN_ID__"` and mean it.
+
+    `expect` holds both regex gates and exact-match gates, so what is safe to
+    substitute has to hold for BOTH: the run id and the trial are alphanumeric
+    by construction (`new_run_id`, an int), which is a valid regex matching
+    itself and a valid literal. Only the repo root can carry a metacharacter, so
+    only it is escaped — escaping everything would silently break an exact-match
+    gate, and escaping nothing would let a `+` in a path fail to compile.
+    """
+    return {key: _render_gate_value(value, run_id, trial) for key, value in expect.items()}
+
+
+_GATE_SAFE = re.compile(r"[A-Za-z0-9]*\Z")
+
+
+def _render_gate_value(value, run_id: str, trial: int):
+    if isinstance(value, str):
+        for token, literal in _placeholders(run_id, trial).items():
+            if token not in value:
+                continue
+            if not _GATE_SAFE.match(literal):
+                literal = re.escape(literal)
+            value = value.replace(token, literal)
+        return value
+    if isinstance(value, list):
+        return [_render_gate_value(item, run_id, trial) for item in value]
+    if isinstance(value, dict):
+        return {key: _render_gate_value(item, run_id, trial) for key, item in value.items()}
+    return value
 
 
 def _provider_limit_reply(reply: str | None) -> bool:
@@ -520,14 +588,18 @@ def purge(cfg, run_id: str, confirmed: bool) -> int:
 # --- operator-assisted cases (real channel turns) ----------------------------
 
 def eval_daemon_streaming_enabled(cfg) -> bool:
-    """True iff the eval daemon config opts Telegram into streaming (draft or block).
+    """True iff the eval daemon's Telegram section streams (default or explicit).
 
-    Section-aware scan of `$FERMIX_HOME/config.toml` for
-    `[fermix_channels.telegram] streaming = "draft" | "block"`. Config is
-    snapshotted at daemon boot, so enabling it also requires a daemon restart —
-    the runner can only verify the file, and says so in the failure note.
+    Streaming is on by default with a capability-derived mode (a configured
+    draft-capable channel defaults to "draft" with card rotation), so a
+    `[fermix_channels.telegram]` section WITHOUT a `streaming` key streams;
+    only an explicit `streaming = "off"` (or no Telegram section at all)
+    disables it. Config is snapshotted at daemon boot, so changing it also
+    requires a daemon restart — the runner can only verify the file, and says
+    so in the failure note.
     """
     path = os.path.join(os.path.expanduser(cfg.daemon.fermix_home), "config.toml")
+    saw_telegram_section = False
     try:
         with open(path, "r", encoding="utf-8") as fh:
             section = None
@@ -535,11 +607,13 @@ def eval_daemon_streaming_enabled(cfg) -> bool:
                 line = line.strip()
                 if line.startswith("[") and line.endswith("]"):
                     section = line[1:-1].strip()
+                    if section == "fermix_channels.telegram":
+                        saw_telegram_section = True
                 elif section == "fermix_channels.telegram" and line.startswith("streaming"):
                     return '"draft"' in line or '"block"' in line
     except OSError:
         return False
-    return False
+    return saw_telegram_section
 
 
 def operator_requires_streaming(case) -> bool:
@@ -587,7 +661,7 @@ def run_operator_case(cfg, client, suite, scn, case, run_id, trial, judge_on):
     # Human response time makes a CLI-equivalent wall clock unavailable. Keep
     # cost/trace gates, but do not invent latency from Opik or the operator wait.
     eff = {"max_cost_usd": cfg.budgets.max_cost_usd}
-    eff.update(case.expect)
+    eff.update(_render_expect(case.expect, run_id, trial))
     wait_s = (case.timeout_ms or 300_000) / 1000.0
 
     rec = {"index": 0, "query": message, "session": marker, "status": "error",
@@ -597,8 +671,9 @@ def run_operator_case(cfg, client, suite, scn, case, run_id, trial, judge_on):
            "main_models": [], "main_providers": [], "main_efforts": []}
 
     if operator_requires_streaming(case) and not eval_daemon_streaming_enabled(cfg):
-        rec["drive_error"] = ("streaming not enabled in the eval daemon: set "
-                              '[fermix_channels.telegram] streaming = "draft" (or "block") in '
+        rec["drive_error"] = ("streaming not enabled in the eval daemon: configure "
+                              "[fermix_channels.telegram] (streaming defaults on; remove any "
+                              'streaming = "off" line) in '
                               f"{cfg.daemon.fermix_home}/config.toml and RESTART the daemon")
         print(f"    FAIL precondition: {rec['drive_error']}")
         return {"id": case.id, "trial": trial, "outcome": "incomplete", "passed": False,
@@ -721,8 +796,15 @@ def _tool_failures(view) -> list[dict]:
     return failures
 
 
+_EVIDENCE_URL_LIMIT = 200
+
+
 def _tool_evidence(view, turn_index: int) -> dict:
     tools = []
+    # The same inventory the reply_urls_in_evidence gate checks (one source of
+    # truth, grade.evidence_urls); included so rubric judging can cite it and
+    # per-span byte truncation cannot hide a genuinely-tool-returned URL.
+    urls = grade.evidence_urls(view, limit=_EVIDENCE_URL_LIMIT)
     for span in view.tool_spans[:_EVIDENCE_TOOL_LIMIT]:
         metadata = span.get("metadata") or {}
         detail = {
@@ -739,13 +821,13 @@ def _tool_evidence(view, turn_index: int) -> dict:
             "evidence": _bounded_text(detail, _EVIDENCE_TOOL_MAX_BYTES),
         }
         proposed = tools + [candidate]
-        record = {"turn_index": turn_index, "tools": proposed,
+        record = {"turn_index": turn_index, "evidence_urls": urls, "tools": proposed,
                   "omitted_tool_spans": len(view.tool_spans) - len(proposed)}
         encoded = json.dumps(record, ensure_ascii=False).encode("utf-8")
         if len(encoded) > _EVIDENCE_RECORD_MAX_BYTES:
             break
         tools = proposed
-    return {"turn_index": turn_index, "tools": tools,
+    return {"turn_index": turn_index, "evidence_urls": urls, "tools": tools,
             "omitted_tool_spans": len(view.tool_spans) - len(tools)}
 
 
@@ -828,9 +910,9 @@ def run_case(cfg, client, suite, scn, case, run_id, trial, judge_on):
     for index, turn in enumerate(case.turns):
         query = _render_query(turn.query, run_id, trial)
         expect = dict(budget)
-        expect.update(turn.expect)
+        expect.update(_render_expect(turn.expect, run_id, trial))
         if index == len(case.turns) - 1:
-            expect.update(case.expect)
+            expect.update(_render_expect(case.expect, run_id, trial))
         transcript.append({"role": "user", "content": query})
         result = driver.drive_query(cfg, session, query, timeout_ms=timeout_ms,
                                     attachments=(case.images if index == 0 else None))

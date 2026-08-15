@@ -72,7 +72,9 @@ defmodule FermixCore.Setup.SecretPaths do
       key: :brave_api_key,
       env: "BRAVE_API_KEY",
       path: [:fermix_core, :tools, :web_search, :brave_api_key],
-      functionality: "Brave web_search backend",
+      # One key, two consumers (M31 §14.1): the Brave web_search backend and the
+      # place_search tool. Brave need not be the active web backend.
+      functionality: "Brave web_search backend and place_search",
       optional?: true,
       sandbox_env: true
     },

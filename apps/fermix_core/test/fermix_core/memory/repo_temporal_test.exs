@@ -11,6 +11,7 @@ defmodule FermixCore.Memory.RepoTemporalTest do
   @tz "America/New_York"
   @now ~U[2026-08-02 12:00:00Z]
 
+  @event_columns_sql "SELECT name FROM pragma_table_info('temporal_events')"
   @reminder_columns_sql "SELECT name FROM pragma_table_info('reminder_occurrences')"
   @reminder_indexes_sql "SELECT name FROM sqlite_master WHERE type = 'index' AND " <>
                           "tbl_name = 'reminder_occurrences'"
@@ -59,7 +60,8 @@ defmodule FermixCore.Memory.RepoTemporalTest do
         recurrence_month: 9,
         recurrence_day: 14,
         leap_day_policy: nil,
-        reminder_plan: plan
+        reminder_plan: plan,
+        followup: false
       },
       overrides
     )
@@ -82,7 +84,8 @@ defmodule FermixCore.Memory.RepoTemporalTest do
         recurrence_month: nil,
         recurrence_day: nil,
         leap_day_policy: nil,
-        reminder_plan: plan
+        reminder_plan: plan,
+        followup: false
       },
       overrides
     )
@@ -114,6 +117,16 @@ defmodule FermixCore.Memory.RepoTemporalTest do
   defp plan_with_ids(plan) do
     Map.update!(plan, :occurrences, fn occurrences ->
       Enum.map(occurrences, &Map.put(&1, :id, uid("rem")))
+    end)
+  end
+
+  # The payload shape a reminder materialized before migration v19 carries: the
+  # key is absent, not false.
+  defp pre_v19_payloads(plan) do
+    plan
+    |> plan_with_ids()
+    |> Map.update!(:occurrences, fn occurrences ->
+      Enum.map(occurrences, &Map.update!(&1, :payload, fn p -> Map.delete(p, "followup") end))
     end)
   end
 
@@ -1220,6 +1233,130 @@ defmodule FermixCore.Memory.RepoTemporalTest do
       {_attrs, _event, [row]} = create!(repo, at_time_spec())
 
       assert is_nil(row.source_reminder_id)
+    end
+  end
+
+  describe "migration v19 (follow-up flag)" do
+    test "appends the column and records the version exactly once", %{
+      repo: repo,
+      db_path: db_path
+    } do
+      # Applied at open; replaying it must neither re-add the column nor record
+      # a second marker row.
+      assert :ok = Repo.migrate(server: repo)
+
+      columns = raw_column(db_path, @event_columns_sql)
+      assert "followup" in columns
+      # Appended, never inserted mid-body, so a database that reached this
+      # column by migrating agrees on column order with one created today.
+      assert List.last(columns) == "followup"
+
+      assert {:ok, versions} = Repo.migration_versions(server: repo)
+      assert Enum.count(versions, &(&1 == 19)) == 1
+    end
+  end
+
+  describe "the follow-up flag (§22.3)" do
+    test "an event stored without the flag reads as false", %{repo: repo} do
+      {_attrs, event, _occurrences} = create!(repo, birthday_spec())
+
+      # `=== false`, not falsy: the stored 0 must reach the caller as a boolean,
+      # because every reader above this row compares against `true`.
+      assert event.followup === false
+    end
+
+    test "a flagged create stores the integer and reads back a boolean", %{
+      repo: repo,
+      db_path: db_path
+    } do
+      {_attrs, event, _occurrences} = create!(repo, birthday_spec(%{followup: true}))
+
+      assert event.followup === true
+      assert raw_column(db_path, "SELECT followup FROM temporal_events") == [1]
+
+      assert {:ok, reread} = Repo.get_temporal_event(event.id, server: repo)
+      assert reread.followup === true
+    end
+
+    test "an update sets and clears the flag", %{repo: repo} do
+      {_attrs, event, _occurrences} = create!(repo, birthday_spec())
+      {:ok, plan} = Planner.materialize(birthday_spec(), @now)
+
+      assert {:ok, {flagged, _rows}} =
+               Repo.update_temporal_event(
+                 event.id,
+                 %{followup: true},
+                 plan_with_ids(plan),
+                 @now,
+                 server: repo
+               )
+
+      assert flagged.followup === true
+
+      assert {:ok, {cleared, _rows}} =
+               Repo.update_temporal_event(
+                 event.id,
+                 %{followup: false},
+                 plan_with_ids(plan),
+                 @now,
+                 server: repo
+               )
+
+      assert cleared.followup === false
+    end
+
+    test "an adjacent typo is still refused rather than dropped", %{repo: repo} do
+      {_attrs, event, _occurrences} = create!(repo, birthday_spec())
+      {:ok, plan} = Planner.materialize(birthday_spec(), @now)
+
+      assert {:error, {:unknown_field, :followups}} =
+               Repo.update_temporal_event(
+                 event.id,
+                 %{followups: true},
+                 plan_with_ids(plan),
+                 @now,
+                 server: repo
+               )
+    end
+
+    test "a non-boolean flag is refused", %{repo: repo} do
+      {_attrs, event, _occurrences} = create!(repo, birthday_spec())
+      {:ok, plan} = Planner.materialize(birthday_spec(), @now)
+
+      assert {:error, {:invalid, :followup, 1}} =
+               Repo.update_temporal_event(
+                 event.id,
+                 %{followup: 1},
+                 plan_with_ids(plan),
+                 @now,
+                 server: repo
+               )
+    end
+
+    # The rollover feeds these rows straight into the planner, so an integer
+    # leaking out of this read would snapshot `"followup" => 1` into every
+    # payload a recurring event materializes after year one.
+    test "the annual horizon page hands out booleans, never the stored integer", %{repo: repo} do
+      {_attrs, event, _occurrences} = create!(repo, birthday_spec(%{followup: true}))
+
+      assert {:ok, %{events: [behind]}} =
+               Repo.annual_horizon_events(~D[2027-09-15], nil, 20, server: repo)
+
+      assert behind.id == event.id
+      assert behind.followup === true
+    end
+
+    # A reminder materialized before v19 carries no key at all. It must survive
+    # the round trip untouched and read as "not flagged" rather than crash.
+    test "a payload written before the flag existed reads as absent", %{repo: repo} do
+      {:ok, plan} = Planner.materialize(birthday_spec(%{followup: true}), @now)
+      attrs = event_attrs(birthday_spec())
+
+      assert {:ok, {:created, _event, [row | _rest]}} =
+               Repo.create_temporal_event(attrs, pre_v19_payloads(plan), @now, server: repo)
+
+      refute Map.has_key?(row.payload, "followup")
+      assert Map.get(row.payload, "followup", false) == false
     end
   end
 

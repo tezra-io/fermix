@@ -4,7 +4,7 @@ defmodule Fermix.MixProject do
   def project do
     [
       apps_path: "apps",
-      version: "0.8.0",
+      version: "0.9.0",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       aliases: aliases(),
@@ -53,8 +53,20 @@ defmodule Fermix.MixProject do
         steps: [:assemble, &Burrito.wrap/1],
         burrito: [
           targets: [
-            macos_aarch64: [os: :darwin, cpu: :aarch64],
-            macos_x86_64: [os: :darwin, cpu: :x86_64],
+            # DISCLAIM_TARGET reaches fermix_nif's Makefile through Burrito's
+            # NIF recompile step so the macOS-only disclaim exec shim is
+            # cross-compiled per target (an executable — it cannot use the
+            # recompile step's CC, which bakes in `-shared`).
+            macos_aarch64: [
+              os: :darwin,
+              cpu: :aarch64,
+              nif_env: [{"DISCLAIM_TARGET", "aarch64-macos"}]
+            ],
+            macos_x86_64: [
+              os: :darwin,
+              cpu: :x86_64,
+              nif_env: [{"DISCLAIM_TARGET", "x86_64-macos"}]
+            ],
             linux_aarch64: [os: :linux, cpu: :aarch64],
             linux_x86_64: [os: :linux, cpu: :x86_64]
           ]

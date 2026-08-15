@@ -147,6 +147,25 @@ defmodule FermixChannels.Gateway.Channel do
   @doc "Delete the draft (turn stopped, superseded, or errored)."
   @callback discard_draft(message(), stream_handle()) :: :ok | {:error, term()}
 
+  @typedoc """
+  Draft-rotation parameters (CHANNEL_LONGFORM_PRESENTATION §6): how this channel
+  measures a message's rendered length, and the card size at which the streaming
+  engine seals the live bubble and opens a fresh one.
+  """
+  @type rotation_spec :: %{
+          measure: (String.t() -> non_neg_integer()),
+          rotate_at: pos_integer()
+        }
+
+  @doc """
+  Rotation parameters for a draft-capable channel. The gateway resolves this
+  once per turn into plain data (a closure plus an integer) so the engine can
+  rotate without ever knowing which channel it is writing to. A draft-capable
+  channel without this callback simply never rotates: its draft freezes at the
+  channel's own message limit.
+  """
+  @callback rotation_spec() :: rotation_spec()
+
   @doc """
   Classify an inbound message for album coalescing (`Gateway.AlbumBuffer`).
 
@@ -207,6 +226,25 @@ defmodule FermixChannels.Gateway.Channel do
   @callback send_proposal(target :: map(), text :: String.t(), token :: String.t()) ::
               :ok | {:error, term()}
 
+  @doc """
+  Send text the sender is not notified about, answering with the platform ids
+  of every message it created (CHANNEL_LONGFORM_PRESENTATION §5).
+
+  This is how the streaming engine posts its 💭 thought stream: silent while the
+  answer is being produced, then deleted through `delete_message/2` once the
+  answer lands. A channel that cannot do both gets no thought stream at all
+  (decision §9.2), so implement this only alongside `delete_message/2`.
+  """
+  @callback send_ephemeral(message(), text :: String.t()) ::
+              {:ok, [String.t()]} | {:error, term()}
+
+  @doc """
+  Delete one previously sent message by its platform id (the ids
+  `send_ephemeral/2` returned). Best-effort at the call site: the engine logs a
+  failure and never retries it, so a refusal must be returned, never raised.
+  """
+  @callback delete_message(message(), message_id :: String.t()) :: :ok | {:error, term()}
+
   @optional_callbacks [
     start_typing: 1,
     download_attachment: 2,
@@ -219,10 +257,13 @@ defmodule FermixChannels.Gateway.Channel do
     edit_draft: 3,
     seal_draft: 3,
     discard_draft: 2,
+    rotation_spec: 0,
     album_classify: 1,
     react: 2,
     reaction_capability: 0,
     send_approval: 3,
-    send_proposal: 3
+    send_proposal: 3,
+    send_ephemeral: 2,
+    delete_message: 2
   ]
 end

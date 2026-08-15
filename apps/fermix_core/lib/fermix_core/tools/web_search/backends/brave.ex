@@ -6,25 +6,28 @@ defmodule FermixCore.Tools.WebSearch.Backends.Brave do
   @behaviour FermixCore.Tools.WebSearch.Backend
 
   alias FermixCore.Net.Guard
+  alias FermixCore.Tools.SearchCredential
   alias FermixCore.Tools.WebSearch.Backends.Support
 
   @endpoint "https://api.search.brave.com/res/v1/web/search"
-  @api_key :brave_api_key
   @max_query_chars 400
   @max_query_words 50
 
   @impl true
   def name, do: :brave
 
+  # Readiness and execution answer from the same seam: a backend that advertised
+  # a credential it then refuses to use would be a gate inspecting a different
+  # world than the work runs in.
   @impl true
-  def configured?(opts), do: Support.configured?(opts, @api_key)
+  def configured?(opts), do: match?({:ok, _key}, SearchCredential.brave(opts))
 
   @impl true
   def search(query, opts) when is_binary(query) and is_list(opts) do
     context = Keyword.get(opts, :context, %{})
 
     with :ok <- validate_query(query),
-         {:ok, api_key} <- Support.credential(opts, @api_key, "Brave API key") do
+         {:ok, api_key} <- SearchCredential.brave(opts) do
       request_options = request_options(context, query, api_key)
       trace_metadata = Support.trace_metadata(request_options)
 

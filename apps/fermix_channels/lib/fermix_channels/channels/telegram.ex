@@ -11,28 +11,41 @@ defmodule FermixChannels.Channels.Telegram do
 
   require Logger
 
+  alias FermixChannels.Channels.Telegram.Markdown
   alias FermixChannels.Gateway.ApprovalButton
   alias FermixChannels.Gateway.Idempotency
   alias FermixChannels.Gateway.MediaDownload
   alias FermixChannels.Gateway.Message
   alias FermixChannels.Gateway.ProposalButton
   alias FermixChannels.Gateway.RetryHint
+  alias FermixChannels.Outbound.Splitter
   alias FermixChannels.Telemetry, as: ChannelTelemetry
   alias FermixCore.Net.HttpClient
   alias FermixCore.Telemetry
 
   @bot_api_base "https://api.telegram.org"
   @health_timeout_ms 5_000
-  @max_message_length 4096
+  # Presentation constants (CHANNEL_LONGFORM_PRESENTATION §4.2, §9 decision 4).
+  # A reply lands as section-shaped cards, not as 4096-unit walls: @card_limit_units
+  # IS the card — one concept, used both when splitting a finished reply and as
+  # the streaming engine's rotation threshold (§6). The entity budget is an
+  # independent fill condition (hrefs add entities without adding rendered
+  # length), and a fenced block bigger than @max_inline_code_units ships as a
+  # document instead of being split into two corrupt halves.
+  @card_limit_units 1_400
+  @entity_budget 90
+  @max_inline_code_units 3_800
+  # The `format: :plain` dialect is measured in graphemes (no rendering happens),
+  # so its limit is the raw-text headroom under Telegram's 4096 cap.
+  @plain_limit_units 4_000
+  # Draft freeze limit: the largest prefix a single draft message may hold.
+  @draft_limit_units 4_000
+  @code_caption "Code from this reply"
+  @max_caption_chars 1_024
   # Inbound image download cap (≤ Telegram's getFile 20 MB ceiling); the
   # post-receive guard in download_attachment/2 is the hard backstop for a
   # missing/lying declared file_size.
   @max_inbound_media_bytes 20 * 1_024 * 1_024
-  @bullet_markdown_pattern ~r/^(\s*)[-*]\s+/u
-  @heading_markdown_pattern ~r/^([ ]{0,3})\#{1,6}[ \t]+(.+?)(?:[ \t]+\#+[ \t]*)?$/u
-  @fenced_code_pattern ~r/```([A-Za-z0-9_+-]*)\n([\s\S]*?)```/u
-  @inline_markdown_pattern ~r/(\[[^\]\n]+?\]\([^\)\n]+?\)|`[^`\n]+?`|\*\*[^*\n]+?\*\*|~~[^~\n]+?~~|\*[^*\n]+?\*|_[^_\n]+?_)/u
-  @link_markdown_pattern ~r/^\[([^\]\n]+)\]\(([^\)\n]+)\)$/u
   @media_methods %{
     image: {"sendPhoto", :photo, 10 * 1_024 * 1_024},
     document: {"sendDocument", :document, 50 * 1_024 * 1_024},
@@ -158,25 +171,16 @@ defmodule FermixChannels.Channels.Telegram do
   @spec send_message(String.t(), String.t(), FermixChannels.Gateway.Channel.send_opts()) ::
           :ok | {:error, term()}
   def send_message(chat_id, text, opts \\ []) do
-    {chunks, render_duration_us} =
+    {{chunks, code_blocks}, render_duration_us} =
       Telemetry.timed_us(fn -> outbound_text_chunks(text, opts) end)
 
     ChannelTelemetry.emit_render(:telegram, :ok, render_duration_us)
 
-    {results, send_duration_us} =
-      Telemetry.timed_us(fn ->
-        Enum.map(chunks, fn {chunk, chunk_opts} ->
-          post_send_message(chat_id, chunk, chunk_opts)
-        end)
-      end)
-
-    case Enum.find(results, &match?({:error, _}, &1)) do
-      nil ->
-        ChannelTelemetry.emit_message(:telegram, :outbound, length(chunks), send_duration_us)
-        :ok
-
-      error ->
-        error
+    # The outbound rows are emitted per delivered chunk inside `send_chunk/2`,
+    # not once here for the whole reply (design §8).
+    case send_chunks(chat_id, chunks) do
+      {:ok, _message_ids} -> send_code_documents(chat_id, code_blocks, opts)
+      {:error, _reason} = error -> error
     end
   end
 
@@ -410,12 +414,23 @@ defmodule FermixChannels.Channels.Telegram do
   def stream_capability, do: :draft_edit
 
   @impl true
+  @spec rotation_spec() :: FermixChannels.Gateway.Channel.rotation_spec()
+  def rotation_spec do
+    %{measure: &Markdown.rendered_utf16_length/1, rotate_at: @card_limit_units}
+  end
+
+  @impl true
   @spec open_draft(FermixChannels.Gateway.Channel.message(), String.t()) ::
           {:ok, integer()} | {:error, term()}
   def open_draft(%Message{reply_target: reply_target, thread_ts: thread_ts}, text)
       when is_binary(text) do
     body =
-      %{chat_id: reply_target, text: draft_html(text), parse_mode: "HTML"}
+      %{
+        chat_id: reply_target,
+        text: draft_html(text),
+        parse_mode: "HTML",
+        link_preview_options: %{is_disabled: true}
+      }
       |> maybe_put_draft_thread(thread_ts)
 
     with {:ok, token} <- get_bot_token() do
@@ -441,8 +456,7 @@ defmodule FermixChannels.Channels.Telegram do
     {prefix, remainder} = seal_split(text)
 
     with {:ok, token} <- get_bot_token(),
-         :ok <-
-           seal_with_retry(token, reply_target, message_id, basic_markdown_to_html(prefix), 1) do
+         :ok <- seal_with_retry(token, reply_target, message_id, Markdown.to_html(prefix), 1) do
       {:ok, remainder}
     end
   end
@@ -453,7 +467,59 @@ defmodule FermixChannels.Channels.Telegram do
   def discard_draft(%Message{reply_target: reply_target}, message_id)
       when is_integer(message_id) do
     with {:ok, token} <- get_bot_token() do
-      post_draft_delete(token, reply_target, message_id)
+      post_delete_message(token, reply_target, message_id)
+    end
+  end
+
+  # -- Ephemeral messages (docs/design/CHANNEL_LONGFORM_PRESENTATION.md §5) --
+
+  @impl true
+  @spec send_ephemeral(FermixChannels.Gateway.Channel.message(), String.t()) ::
+          {:ok, [String.t()]} | {:error, term()}
+  def send_ephemeral(%Message{reply_target: reply_target, thread_ts: thread_ts}, text)
+      when is_binary(text) do
+    opts = if thread_ts, do: [message_thread_id: thread_ts], else: []
+
+    with {:ok, chunks} <- ephemeral_chunks(text, opts),
+         {:ok, ids} <- send_chunks(reply_target, chunks) do
+      collect_message_ids(ids)
+    end
+  end
+
+  @impl true
+  @spec delete_message(FermixChannels.Gateway.Channel.message(), String.t()) ::
+          :ok | {:error, term()}
+  def delete_message(%Message{reply_target: reply_target}, message_id)
+      when is_binary(message_id) do
+    with {:ok, id} <- parse_message_id(message_id),
+         {:ok, token} <- get_bot_token() do
+      post_delete_message(token, reply_target, id)
+    end
+  end
+
+  # An ephemeral message notifies nobody — including on its first chunk, unlike
+  # a reply (§4.3), because a thought must never ring.
+  defp ephemeral_chunks(text, opts) do
+    case outbound_text_chunks(text, opts) do
+      {chunks, []} ->
+        {:ok, Enum.map(chunks, fn chunk -> %{chunk | silent?: true} end)}
+
+      # A thought line is far too short to promote a fenced block to a document,
+      # and an ephemeral document could not be swept with the text. Refuse the
+      # send rather than half-deliver it.
+      {_chunks, [_ | _]} ->
+        {:error, :ephemeral_code_block}
+    end
+  end
+
+  # The caller deletes these ids later, so an id-less send is a refusal: it
+  # would leave a thought message nothing can sweep.
+  defp collect_message_ids(ids) do
+    if Enum.all?(ids, &is_integer/1) do
+      {:ok, Enum.map(ids, &Integer.to_string/1)}
+    else
+      Logger.error("Telegram ephemeral send returned no message id: #{inspect(ids)}")
+      {:error, :missing_message_id}
     end
   end
 
@@ -491,16 +557,17 @@ defmodule FermixChannels.Channels.Telegram do
 
   defp api_description(_body), do: "request rejected"
 
-  defp post_send_message(chat_id, text, opts) do
+  defp post_send_message(chat_id, text, opts, silent?) do
     with {:ok, token} <- get_bot_token() do
       url = "#{@bot_api_base}/bot#{token}/sendMessage"
 
       body =
-        %{chat_id: chat_id, text: text}
+        %{chat_id: chat_id, text: text, link_preview_options: %{is_disabled: true}}
         |> maybe_put_parse_mode(opts)
         |> maybe_put_reply_to(opts)
         |> maybe_put_message_thread_id(opts)
         |> maybe_put_reply_markup(opts)
+        |> maybe_put_silent(silent?)
 
       result =
         Req.new(url: url, method: :post, json: body)
@@ -508,8 +575,13 @@ defmodule FermixChannels.Channels.Telegram do
         |> HttpClient.request("Telegram sendMessage")
 
       case result do
-        {:ok, %{status: 200}} ->
-          :ok
+        {:ok, %{status: 200, body: body}} ->
+          {:ok, sent_message_id(body)}
+
+        {:ok, %{status: 400, body: %{"description" => description} = response} = api_response}
+        when is_binary(description) ->
+          Logger.error("Telegram sendMessage failed: 400 - #{inspect(response)}")
+          classify_send_400(description, api_response)
 
         {:ok, %{status: status, body: response} = api_response} ->
           Logger.error("Telegram sendMessage failed: #{status} - #{inspect(response)}")
@@ -528,6 +600,25 @@ defmodule FermixChannels.Channels.Telegram do
     end
   end
 
+  # The delivered message's id, or nil when a 200 carried no `result`. A missing
+  # id is NOT a send failure — the message reached the chat, and reporting an
+  # error here would have the caller deliver it a second time. Only the
+  # ephemeral path needs the id (to delete the message later) and it is the one
+  # that refuses without it.
+  defp sent_message_id(%{"result" => %{"message_id" => id}}) when is_integer(id), do: id
+  defp sent_message_id(_body), do: nil
+
+  # A parse failure is the one recoverable send error: the description names the
+  # renderer defect, and the caller resends the raw markdown once. Every other
+  # 400 keeps the structured platform form.
+  defp classify_send_400(description, api_response) do
+    if String.contains?(description, "can't parse entities") do
+      {:error, {:parse_entities, description}}
+    else
+      telegram_api_error(api_response)
+    end
+  end
+
   # Render the largest prefix of the cumulative draft text that fits the
   # message limit. Re-rendering the full prefix each tick keeps partial
   # markdown structurally balanced; mid-stream overflow holds the draft at
@@ -536,28 +627,81 @@ defmodule FermixChannels.Channels.Telegram do
     text
     |> seal_split()
     |> elem(0)
-    |> basic_markdown_to_html()
+    |> Markdown.to_html()
   end
 
+  # Freeze-at-limit: the draft holds the first ladder chunk and the raw
+  # remainder is handed back for normal (chunked) delivery. A draft that opens
+  # with a single fenced block bigger than the limit is the one shape the ladder
+  # cannot cut — it stays whole, Telegram refuses it, and the engine's
+  # seal-failure path discards the draft and re-delivers the reply through
+  # send_message/3, which promotes that block to an attachment.
   defp seal_split(text) do
-    if telegram_rendered_length(text) <= @max_message_length do
+    if Markdown.rendered_utf16_length(text) <= @draft_limit_units do
       {text, nil}
     else
-      {prefix, rest} = take_rendered_prefix(text)
-      {prefix, rest}
+      split_at_draft_limit(text)
     end
   end
+
+  defp split_at_draft_limit(text) do
+    [prefix | _rest] =
+      Splitter.split(text,
+        limit: @draft_limit_units,
+        measure: &Markdown.rendered_utf16_length/1
+      )
+
+    {prefix, draft_remainder(text, prefix)}
+  end
+
+  # The splitter only ever strips from a chunk's edges, so the sealed prefix is a
+  # prefix of the trimmed text and the remainder can be cut from the ORIGINAL
+  # text — keeping it a verbatim suffix the caller can deliver as-is.
+  defp draft_remainder(text, prefix) do
+    lead = byte_size(text) - byte_size(String.trim_leading(text))
+    assert_draft_prefix!(text, lead, prefix)
+    consumed = lead + byte_size(prefix)
+
+    text
+    |> binary_part(consumed, byte_size(text) - consumed)
+    |> String.trim_leading()
+    |> blank_to_nil()
+  end
+
+  defp assert_draft_prefix!(text, lead, prefix) do
+    rest = binary_part(text, lead, byte_size(text) - lead)
+
+    if String.starts_with?(rest, prefix) do
+      :ok
+    else
+      raise RuntimeError,
+            "Telegram draft prefix is not a prefix of the draft text: #{inspect(prefix)}"
+    end
+  end
+
+  defp blank_to_nil(""), do: nil
+  defp blank_to_nil(remainder), do: remainder
 
   defp post_draft_open(token, body) do
     url = "#{@bot_api_base}/bot#{token}/sendMessage"
 
-    result =
-      Req.new(url: url, method: :post, json: body)
-      |> Req.merge(req_options([]))
-      |> HttpClient.request("Telegram sendMessage (draft)")
+    {result, duration_us} =
+      Telemetry.timed_us(fn ->
+        Req.new(url: url, method: :post, json: body)
+        |> Req.merge(req_options([]))
+        |> HttpClient.request("Telegram sendMessage (draft)")
+      end)
 
     case result do
       {:ok, %{status: 200, body: %{"result" => %{"message_id" => id}}}} when is_integer(id) ->
+        # Every bubble a stream CREATES is one delivered outbound message — the
+        # first open and each rotation's fresh open alike (design §8). Without
+        # this, an answer that streams and seals in place left zero outbound
+        # rows for the whole turn. Edits and seals of an existing bubble emit
+        # nothing (see post_draft_edit/4, post_seal_edit/4): they rewrite a
+        # message already counted, and are visible as [:fermix, :channel,
+        # :stream] phases.
+        ChannelTelemetry.emit_message(:telegram, :outbound, 1, duration_us)
         {:ok, id}
 
       {:ok, %{status: 200, body: response}} ->
@@ -577,7 +721,7 @@ defmodule FermixChannels.Channels.Telegram do
   # Interim edits are best-effort by contract: no retry, warnings not errors —
   # the engine counts failures and freezes the preview; the seal still lands.
   defp post_draft_edit(token, chat_id, message_id, html) do
-    case post_edit_message_text(token, chat_id, message_id, html) do
+    case post_edit_message_text(token, chat_id, message_id, html, req_options([])) do
       {:ok, %{status: 200}} ->
         :ok
 
@@ -595,14 +739,37 @@ defmodule FermixChannels.Channels.Telegram do
   # Telegram's retry_after; an idempotent no-op ("message is not modified")
   # counts as success — the desired final state already holds.
   # The whole retry budget (sleeps + requests) must stay inside the engine's
-  # 15 s seal timeout — a longer wait would get the engine hard-killed
-  # mid-sleep, leaving an orphaned draft. Worst case here: 2 × 4 s sleeps +
-  # 3 requests ≈ 11 s. If Telegram demands a longer retry_after than that,
-  # retries exhaust and the engine's seal-failure path discards the draft and
-  # the full reply goes out as a fresh send — the designed recovery.
+  # seal timeout — a longer wait would get the engine hard-killed mid-request,
+  # leaving an orphaned draft next to the re-delivered reply. That only holds if
+  # each request is itself bounded: without an explicit `receive_timeout` a seal
+  # edit inherits Req's own default, and one attempt can outlast the whole
+  # budget. So the per-request window is DERIVED from the ladder — every attempt
+  # plus every between-attempt sleep fits @seal_budget_ms:
+  #
+  #   @seal_retry_attempts × @seal_request_timeout_ms
+  #     + (@seal_retry_attempts - 1) × @seal_retry_max_wait_ms  ≤  @seal_budget_ms
+  #
+  # If Telegram demands a longer retry_after than that, retries exhaust and the
+  # engine's seal-failure path discards the draft and the full reply goes out as
+  # a fresh send — the designed recovery.
+  #
+  # Read that inequality as the SIZING RULE, not as an enforced total: it bounds
+  # the response wait, which is the part that was unbounded, and three things
+  # outside a per-request option still add to a ladder run. `HttpClient` re-issues
+  # a request once on a transport `:closed`, so an attempt can cost two windows;
+  # connection setup happens inside the pool checkout under Mint's own timeout;
+  # and `@pool_checkout_timeout_ms` is its own ceiling. The ladder is therefore
+  # much tighter than Req's default, not provably inside the engine's deadline.
   @seal_retry_attempts 3
   @seal_retry_base_ms 400
   @seal_retry_max_wait_ms 4_000
+  # Mirrors FermixChannels.Gateway.DraftStream's @seal_timeout_ms: the deadline
+  # after which the engine is killed. Restated here on purpose — a change to
+  # either is a deliberate change to how a seal can fail.
+  @seal_budget_ms 15_000
+  # Sleeps happen between attempts, so there is one fewer sleep than attempt.
+  @seal_sleep_budget_ms @seal_retry_max_wait_ms * (@seal_retry_attempts - 1)
+  @seal_request_timeout_ms div(@seal_budget_ms - @seal_sleep_budget_ms, @seal_retry_attempts)
 
   defp seal_with_retry(token, chat_id, message_id, html, attempt) do
     case post_seal_edit(token, chat_id, message_id, html) do
@@ -627,7 +794,7 @@ defmodule FermixChannels.Channels.Telegram do
   defp seal_backoff_ms(attempt, _reason), do: @seal_retry_base_ms * attempt
 
   defp post_seal_edit(token, chat_id, message_id, html) do
-    case post_edit_message_text(token, chat_id, message_id, html) do
+    case post_edit_message_text(token, chat_id, message_id, html, seal_req_options()) do
       {:ok, %{status: 200}} ->
         :ok
 
@@ -653,16 +820,36 @@ defmodule FermixChannels.Channels.Telegram do
     end
   end
 
-  defp post_edit_message_text(token, chat_id, message_id, html) do
+  defp post_edit_message_text(token, chat_id, message_id, html, req_opts) do
     url = "#{@bot_api_base}/bot#{token}/editMessageText"
-    body = %{chat_id: chat_id, message_id: message_id, text: html, parse_mode: "HTML"}
+
+    body = %{
+      chat_id: chat_id,
+      message_id: message_id,
+      text: html,
+      parse_mode: "HTML",
+      link_preview_options: %{is_disabled: true}
+    }
 
     Req.new(url: url, method: :post, json: body)
-    |> Req.merge(req_options([]))
+    |> Req.merge(req_opts)
     |> HttpClient.request("Telegram editMessageText")
   end
 
-  defp post_draft_delete(token, chat_id, message_id) do
+  # Only the seal is bounded: interim edits are best-effort and keep whatever
+  # the channel's configured req_options say. The bound wins over a configured
+  # receive_timeout — the ladder's deadline is the engine's, not the operator's.
+  defp seal_req_options do
+    req_options([])
+    |> Keyword.put(:receive_timeout, @seal_request_timeout_ms)
+  end
+
+  # Shared by `discard_draft/2` (a live draft) and `delete_message/2` (a swept
+  # ephemeral thought) — one delete call site, two thin callback wrappers.
+  # A delete emits no `channel_msg` row: it is not an outbound message, and the
+  # thought it removes was already counted when it was sent. The sweep itself is
+  # visible as a [:fermix, :channel, :stream] phase.
+  defp post_delete_message(token, chat_id, message_id) do
     url = "#{@bot_api_base}/bot#{token}/deleteMessage"
     body = %{chat_id: chat_id, message_id: message_id}
 
@@ -676,11 +863,11 @@ defmodule FermixChannels.Channels.Telegram do
         :ok
 
       {:ok, %{status: status, body: response} = api_response} ->
-        Logger.warning("Telegram draft delete failed: #{status} - #{inspect(response)}")
+        Logger.warning("Telegram deleteMessage failed: #{status} - #{inspect(response)}")
         telegram_api_error(api_response)
 
       {:error, reason} ->
-        Logger.warning("Telegram draft delete request failed: #{inspect(reason)}")
+        Logger.warning("Telegram deleteMessage request failed: #{inspect(reason)}")
         {:error, reason}
     end
   end
@@ -779,173 +966,6 @@ defmodule FermixChannels.Channels.Telegram do
     Map.get(@mime_by_extension, Path.extname(path), "application/octet-stream")
   end
 
-  defp prepare_outbound_text(text, opts) do
-    cond do
-      Keyword.has_key?(opts, :parse_mode) ->
-        {text, opts}
-
-      Keyword.get(opts, :format, :telegram_html) == :plain ->
-        {text, opts}
-
-      true ->
-        {basic_markdown_to_html(text), Keyword.put(opts, :parse_mode, "HTML")}
-    end
-  end
-
-  defp basic_markdown_to_html(text) do
-    case Regex.run(@fenced_code_pattern, text, return: :index) do
-      nil ->
-        render_markdown_lines(text)
-
-      [{start, length}, {lang_start, lang_length}, {body_start, body_length}] ->
-        prefix = binary_part(text, 0, start)
-        lang = binary_part(text, lang_start, lang_length)
-        body = binary_part(text, body_start, body_length)
-        suffix_start = start + length
-        suffix_length = byte_size(text) - suffix_start
-
-        render_markdown_lines(prefix) <>
-          render_code_block(lang, body) <>
-          basic_markdown_to_html(binary_part(text, suffix_start, suffix_length))
-    end
-  end
-
-  defp render_markdown_lines(text) do
-    text
-    |> String.split("\n", trim: false)
-    |> Enum.map_join("\n", &render_markdown_line/1)
-  end
-
-  defp render_markdown_line(line) do
-    case render_heading_line(line) do
-      {:ok, html} ->
-        html
-
-      :error ->
-        line
-        |> normalize_bullet_marker()
-        |> render_inline_markdown()
-    end
-  end
-
-  defp render_heading_line(line) do
-    case Regex.run(@heading_markdown_pattern, line) do
-      [_, indent, content] ->
-        {:ok, indent <> "<b>" <> render_heading_content(content) <> "</b>"}
-
-      nil ->
-        :error
-    end
-  end
-
-  defp render_heading_content(content) do
-    content
-    |> remove_heading_bold_markers()
-    |> render_inline_markdown()
-  end
-
-  defp normalize_bullet_marker(line) do
-    case Regex.run(@bullet_markdown_pattern, line) do
-      [marker, indent] ->
-        rest_start = byte_size(marker)
-        indent <> "• " <> binary_part(line, rest_start, byte_size(line) - rest_start)
-
-      nil ->
-        line
-    end
-  end
-
-  defp render_inline_markdown(text) do
-    @inline_markdown_pattern
-    |> Regex.split(text, include_captures: true, trim: false)
-    |> Enum.map_join(&render_inline_segment/1)
-  end
-
-  defp render_inline_segment(segment) do
-    cond do
-      markdown_link_segment?(segment) ->
-        render_markdown_link(segment)
-
-      wrapped_markdown_segment?(segment, "**") ->
-        render_wrapped_markdown("b", segment, 2)
-
-      wrapped_markdown_segment?(segment, "~~") ->
-        render_wrapped_markdown("s", segment, 2)
-
-      wrapped_markdown_segment?(segment, "`") ->
-        render_wrapped_markdown("code", segment, 1)
-
-      wrapped_markdown_segment?(segment, "*") ->
-        render_wrapped_markdown("i", segment, 1)
-
-      wrapped_markdown_segment?(segment, "_") ->
-        render_wrapped_markdown("i", segment, 1)
-
-      true ->
-        html_escape(segment)
-    end
-  end
-
-  defp render_markdown_link(segment) do
-    [_, text, url] = Regex.run(@link_markdown_pattern, segment)
-    ~s(<a href="#{html_escape(url)}">#{html_escape(text)}</a>)
-  end
-
-  defp render_wrapped_markdown(tag, segment, marker_size) do
-    inner_size = byte_size(segment) - marker_size * 2
-
-    <<_::binary-size(marker_size), inner::binary-size(inner_size), _::binary-size(marker_size)>> =
-      segment
-
-    "<#{tag}>" <> html_escape(inner) <> "</#{tag}>"
-  end
-
-  defp remove_heading_bold_markers(text) do
-    Regex.replace(~r/\*\*([^*\n]+?)\*\*/u, text, "\\1")
-  end
-
-  defp render_code_block(lang, body) do
-    body = body |> trim_code_block_newline() |> html_escape()
-
-    case String.trim(lang) do
-      "" ->
-        "<pre><code>" <> body <> "</code></pre>"
-
-      lang ->
-        ~s(<pre><code class="language-#{html_escape(lang)}">#{body}</code></pre>)
-    end
-  end
-
-  defp trim_code_block_newline(body) do
-    cond do
-      String.ends_with?(body, "\r\n") ->
-        binary_part(body, 0, byte_size(body) - 2)
-
-      String.ends_with?(body, "\n") ->
-        binary_part(body, 0, byte_size(body) - 1)
-
-      true ->
-        body
-    end
-  end
-
-  defp markdown_link_segment?(segment) do
-    Regex.match?(@link_markdown_pattern, segment)
-  end
-
-  defp wrapped_markdown_segment?(segment, marker) do
-    byte_size(segment) > byte_size(marker) * 2 and String.starts_with?(segment, marker) and
-      String.ends_with?(segment, marker)
-  end
-
-  defp html_escape(text) do
-    text
-    |> String.replace("&", "&amp;")
-    |> String.replace("<", "&lt;")
-    |> String.replace(">", "&gt;")
-    |> String.replace("\"", "&quot;")
-  end
-
   defp maybe_put_parse_mode(body, opts) do
     case Keyword.get(opts, :parse_mode) do
       nil -> body
@@ -973,6 +993,9 @@ defmodule FermixChannels.Channels.Telegram do
       markup when is_map(markup) -> Map.put(body, :reply_markup, markup)
     end
   end
+
+  defp maybe_put_silent(body, false), do: body
+  defp maybe_put_silent(body, true), do: Map.put(body, :disable_notification, true)
 
   # Ingress authorization is centralized in the gateway dispatcher
   # (`FermixChannels.Gateway.Authorizer`); the adapter parses every message and
@@ -1099,16 +1122,60 @@ defmodule FermixChannels.Channels.Telegram do
 
   defp maybe_emit_inbound_message(_channel, _result, _duration_us), do: :ok
 
-  defp outbound_text_chunks(text, opts) when is_binary(text) do
-    if telegram_html?(opts) do
-      html_opts = Keyword.put(opts, :parse_mode, "HTML")
+  # One reply becomes: N text chunks (sent first, in order) plus the fenced code
+  # blocks too big to render inline, promoted to file attachments. Each chunk
+  # carries both the HTML it sends and the raw markdown it came from — the raw
+  # form is what the parse-failure recovery resends.
+  @typep outbound_chunk :: %{
+           text: String.t(),
+           raw: String.t(),
+           opts: keyword(),
+           silent?: boolean()
+         }
 
-      split_markdown_for_telegram(text, [])
-      |> Enum.map(fn chunk -> {basic_markdown_to_html(chunk), html_opts} end)
+  @spec outbound_text_chunks(String.t(), keyword()) ::
+          {[outbound_chunk()], [%{lang: String.t() | nil, body: String.t()}]}
+  defp outbound_text_chunks(text, opts) when is_binary(text) and is_list(opts) do
+    if telegram_html?(opts) do
+      html_chunks(text, opts)
     else
-      {text, opts} = prepare_outbound_text(text, opts)
-      Enum.map(split_text_by_length(text), fn chunk -> {chunk, opts} end)
+      {plain_chunks(text, opts), []}
     end
+  end
+
+  defp html_chunks(text, opts) do
+    {text, code_blocks} = Markdown.extract_oversized_code(text, @max_inline_code_units)
+    html_opts = Keyword.put(opts, :parse_mode, "HTML")
+
+    chunks =
+      text
+      |> Splitter.split(
+        limit: @card_limit_units,
+        measure: &Markdown.rendered_utf16_length/1,
+        entity_count: &Markdown.entity_count/1,
+        entity_budget: @entity_budget
+      )
+      |> Enum.map(fn chunk -> {Markdown.to_html(chunk), chunk, html_opts} end)
+      |> with_notification()
+
+    {chunks, code_blocks}
+  end
+
+  defp plain_chunks(text, opts) do
+    text
+    |> Splitter.split(limit: @plain_limit_units)
+    |> Enum.map(fn chunk -> {chunk, chunk, opts} end)
+    |> with_notification()
+  end
+
+  # One reply, one ring (§4.3): the first message of the sequence notifies,
+  # every later one is silent.
+  defp with_notification(rendered) do
+    rendered
+    |> Enum.with_index()
+    |> Enum.map(fn {{text, raw, opts}, index} ->
+      %{text: text, raw: raw, opts: opts, silent?: index > 0}
+    end)
   end
 
   defp telegram_html?(opts) do
@@ -1116,84 +1183,137 @@ defmodule FermixChannels.Channels.Telegram do
       Keyword.get(opts, :format, :telegram_html) != :plain
   end
 
-  defp split_markdown_for_telegram("", acc), do: Enum.reverse(acc)
+  # Strictly sequential: a failed send aborts the remainder rather than
+  # half-delivering a reply out of order. Returns each delivered message's id in
+  # send order — what the ephemeral thought path needs to delete them later.
+  defp send_chunks(chat_id, chunks) do
+    chunks
+    |> Enum.reduce_while({:ok, []}, fn chunk, {:ok, ids} ->
+      case send_chunk(chat_id, chunk) do
+        {:ok, message_id} -> {:cont, {:ok, [message_id | ids]}}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+    |> reverse_ids()
+  end
 
-  defp split_markdown_for_telegram(text, acc) do
-    if telegram_rendered_length(text) <= @max_message_length do
-      Enum.reverse([text | acc])
-    else
-      {chunk, rest} = take_rendered_prefix(text)
-      split_markdown_for_telegram(rest, [chunk | acc])
+  defp reverse_ids({:ok, ids}), do: {:ok, Enum.reverse(ids)}
+  defp reverse_ids({:error, _reason} = error), do: error
+
+  # One delivered message is one outbound row, emitted here rather than once for
+  # the whole reply (design §8): a reply that half-lands then reports truthfully
+  # what WAS delivered instead of reporting nothing. The parse-failure resend is
+  # inside the timed span on purpose — it is a second attempt at the same one
+  # message, so it still emits a single row.
+  defp send_chunk(chat_id, chunk) do
+    {result, duration_us} = Telemetry.timed_us(fn -> post_chunk(chat_id, chunk) end)
+    emit_delivered(result, duration_us)
+    result
+  end
+
+  defp post_chunk(chat_id, chunk) do
+    case post_send_message(chat_id, chunk.text, chunk.opts, chunk.silent?) do
+      {:error, {:parse_entities, description}} -> resend_unformatted(chat_id, chunk, description)
+      result -> result
     end
   end
 
-  defp take_rendered_prefix(text) do
-    graphemes = String.graphemes(text)
-    count = rendered_prefix_count(graphemes, 1, length(graphemes), 1)
-    String.split_at(text, semantic_split_count(graphemes, count))
+  defp emit_delivered({:ok, _message_id}, duration_us),
+    do: ChannelTelemetry.emit_message(:telegram, :outbound, 1, duration_us)
+
+  defp emit_delivered({:error, _reason}, _duration_us), do: :ok
+
+  # Sanctioned Rule 12 exception (design §4.3, decision §9.3): a renderer defect
+  # must never eat the reply. Exactly one retry, of this chunk only, as the raw
+  # markdown with no parse_mode — loud in the log and marked in telemetry so the
+  # defect stays visible. A second failure is returned.
+  defp resend_unformatted(chat_id, chunk, description) do
+    Logger.error("Telegram rejected formatted message (#{description}); resending it unformatted")
+
+    ChannelTelemetry.emit_render(:telegram, {:error, :plain_fallback}, 0)
+
+    chat_id
+    |> post_send_message(chunk.raw, Keyword.delete(chunk.opts, :parse_mode), chunk.silent?)
+    |> close_recovery()
   end
 
-  defp rendered_prefix_count(graphemes, low, high, best) when low <= high do
-    mid = div(low + high, 2)
-    candidate = graphemes |> Enum.take(mid) |> Enum.join()
+  # The unformatted resend ends the recovery: a repeat refusal reaches the caller
+  # as the platform's structured 400, never as a marker inviting another retry.
+  defp close_recovery({:error, {:parse_entities, _description}}),
+    do: {:error, {:http_status, 400}}
 
-    if telegram_rendered_length(candidate) <= @max_message_length do
-      rendered_prefix_count(graphemes, mid + 1, high, mid)
-    else
-      rendered_prefix_count(graphemes, low, mid - 1, best)
-    end
-  end
+  defp close_recovery(result), do: result
 
-  defp rendered_prefix_count(_graphemes, _low, _high, best), do: best
+  defp send_code_documents(_chat_id, [], _opts), do: :ok
 
-  defp semantic_split_count(graphemes, count) do
-    graphemes
-    |> Enum.take(count)
+  defp send_code_documents(chat_id, code_blocks, opts) do
+    code_blocks
     |> Enum.with_index(1)
-    |> Enum.reverse()
-    |> Enum.find_value(count, &semantic_split_at(&1, count))
+    |> Enum.reduce_while(:ok, fn {code_block, index}, :ok ->
+      case send_code_document(chat_id, code_block, index, opts) do
+        :ok -> {:cont, :ok}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
   end
 
-  defp semantic_split_at({grapheme, index}, count) do
-    min_index = max(count - 512, 1)
+  # The body is uploaded from a temp file the adapter owns: written here,
+  # removed on every path (success, send error, write error).
+  defp send_code_document(chat_id, %{lang: lang, body: body}, index, opts) do
+    path = code_temp_path(index)
 
-    if index >= min_index and String.match?(grapheme, ~r/\s/u) do
-      index
+    try do
+      case File.write(path, body) do
+        :ok ->
+          send_media(chat_id, code_media_part(path, lang, index), media_opts(opts))
+
+        {:error, reason} ->
+          Logger.error("Telegram code attachment write failed (#{path}): #{inspect(reason)}")
+          {:error, reason}
+      end
+    after
+      discard_temp_file(path)
     end
   end
 
-  defp telegram_rendered_length(text) do
-    text
-    |> basic_markdown_to_html()
-    |> strip_html_tags()
-    |> html_unescape()
-    |> String.length()
+  defp code_media_part(path, lang, index) do
+    %{
+      kind: :document,
+      path: path,
+      filename: "code-#{index}.txt",
+      mime_type: "text/plain",
+      caption: code_caption(lang)
+    }
   end
 
-  defp split_text_by_length(text) do
-    if String.length(text) <= @max_message_length do
-      [text]
-    else
-      do_split_text_by_length(text, [])
+  defp code_caption(nil), do: @code_caption
+
+  defp code_caption(lang) when is_binary(lang) do
+    String.slice("#{@code_caption} (#{lang})", 0, @max_caption_chars)
+  end
+
+  defp code_temp_path(index) do
+    unique = System.unique_integer([:positive])
+    Path.join(System.tmp_dir!(), "fermix-telegram-code-#{unique}-#{index}.txt")
+  end
+
+  defp discard_temp_file(path) do
+    case File.rm(path) do
+      :ok ->
+        :ok
+
+      {:error, :enoent} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Telegram code attachment cleanup failed (#{path}): #{inspect(reason)}")
+        :ok
     end
   end
 
-  defp do_split_text_by_length("", acc), do: Enum.reverse(acc)
-
-  defp do_split_text_by_length(text, acc) do
-    {chunk, rest} = String.split_at(text, @max_message_length)
-    do_split_text_by_length(rest, [chunk | acc])
-  end
-
-  defp strip_html_tags(text), do: Regex.replace(~r/<[^>]*>/u, text, "")
-
-  defp html_unescape(text) do
-    text
-    |> String.replace("&quot;", "\"")
-    |> String.replace("&lt;", "<")
-    |> String.replace("&gt;", ">")
-    |> String.replace("&amp;", "&")
-  end
+  # Only the transport/threading options belong on the attachment; a reply
+  # markup or parse mode meant for the text chunks must not ride along.
+  defp media_opts(opts), do: Keyword.take(opts, [:message_thread_id, :req_options])
 
   @doc false
   @spec get_bot_token() :: {:ok, String.t()} | {:error, :not_configured}

@@ -172,6 +172,30 @@ defmodule FermixCore.Memory.ReviewerTest do
     assert user_text =~ "User prefers terse answers"
   end
 
+  # MILESTONE_31 §13.2: coarse city/region/postal-code identity stays storable,
+  # but a street address or a coordinate pair is configuration (typed
+  # Personalization), never curated memory. The guidance lives in the reviewer's
+  # system prompt, so the prompt the provider actually receives is the proof.
+  test "the reviewer prompt keeps coarse location but bars precise location", %{repo: repo} do
+    insert_user_message(repo, "I moved to Jersey City.")
+
+    assert {:ok, _result} =
+             Reviewer.review_now(
+               provider: FakeProvider,
+               repo: repo,
+               agent_id: "main",
+               owner_id: "default",
+               conversation_key: {"telegram", "chat-1", :root}
+             )
+
+    assert_receive {:review_prompt, messages}
+    system = Enum.find(messages, &(&1.role == "system")).content
+
+    assert system =~ "city, region, or postal code"
+    assert system =~ "street address"
+    assert system =~ "coordinates"
+  end
+
   defmodule RouteFailAdapter do
     def chat(_messages, _capabilities, opts) do
       send(Process.get(:test_pid), {:route_chat, :primary, opts[:model]})

@@ -2092,12 +2092,20 @@ defmodule FermixCore.Jobs.RunnerTest do
 
       ref = Process.monitor(pid)
 
-      # A tool ran, then the follow-up call lost its connection. The gate stops
-      # the whole-loop retry, so the loop is never replayed — no second chat.
+      # A tool ran, then the follow-up call lost its connection. The AgentLoop
+      # retries that continuation IN PLACE (a pool checkout fails before the
+      # request is sent, so nothing is duplicated and no tool is replayed) —
+      # bounded at 3 attempts. Once those are exhausted the runner's own gate
+      # stops the WHOLE-LOOP retry, so the loop is never replayed: no second
+      # chat, and the tool never runs again. The in-place backoff is real time
+      # here (the runner's `delay_fn` is its own seam, not the loop's), hence
+      # the wider DOWN window.
       assert_receive {:tool_then_transient, :chat}, 1_000
       assert_receive {:tool_then_transient, :continue}, 1_000
+      assert_receive {:tool_then_transient, :continue}, 5_000
+      assert_receive {:tool_then_transient, :continue}, 10_000
       refute_receive {:tool_then_transient, :chat}, 200
-      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 5_000
 
       assert {:ok, stored_run} = Repo.get_job_run(run.id, server: repo)
       assert stored_run.status == "error"

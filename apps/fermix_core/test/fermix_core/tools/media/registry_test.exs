@@ -75,7 +75,8 @@ defmodule FermixCore.Tools.Media.RegistryTest do
     end
 
     test "returns the xAI image model" do
-      assert {:ok, ["grok-imagine-image-quality"]} = Registry.supported_models(:image, "xai")
+      assert {:ok, ["grok-imagine-image-2.0", "grok-imagine-image-quality"]} =
+               Registry.supported_models(:image, "xai")
     end
 
     test "returns the Google image models, default first" do

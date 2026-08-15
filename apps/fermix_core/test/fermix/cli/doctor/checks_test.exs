@@ -39,6 +39,78 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     end
   end
 
+  describe "browser_disclaim/1" do
+    test "not required off macOS" do
+      result = Checks.browser_disclaim({:unix, :linux})
+      assert result.name == "browser"
+      assert result.status == :ok
+      assert result.detail =~ "not required"
+    end
+
+    if match?({:unix, :darwin}, :os.type()) do
+      test "reports the built shim on macOS" do
+        result = Checks.browser_disclaim()
+        assert result.name == "browser"
+        # :warn only when the host has no Chrome/Chromium; never :fail with a
+        # correctly built shim.
+        assert result.status in [:ok, :warn]
+        assert result.detail =~ "disclaim shim ready"
+      end
+
+      # An operator-authored `[fermix_core.browser]` section can be refused by
+      # `Browser.Config.current/0`, and doctor is the command that explains such
+      # an install: it must report the row, never die with a MatchError and print
+      # nothing (CLAUDE.md, the `df`/tree-less-CLI pitfall).
+      test "an invalid browser config is a row, not a crashed doctor run" do
+        previous = Application.get_env(:fermix_core, :browser)
+        on_exit(fn -> restore_env(:fermix_core, :browser, previous) end)
+
+        Application.put_env(:fermix_core, :browser,
+          snapshot_default_depth: 12,
+          snapshot_max_depth: 4
+        )
+
+        result = Checks.browser_disclaim()
+
+        assert result.name == "browser"
+        assert result.status == :warn
+        assert result.detail =~ "snapshot_default_depth"
+      end
+    end
+
+    # `fermix doctor` is the command that explains a broken install, so a shim
+    # that RAN AND REFUSED and a shim that could not be run at all must not
+    # collapse into one "check failed" line — they have different fixes, and
+    # folding distinct failure kinds together is what sends an operator chasing
+    # a phantom. Both run on any OS: the shim path is injected.
+    @tag :tmp_dir
+    test "a refusing shim reports its exit status and its own words", %{tmp_dir: tmp_dir} do
+      shim = Path.join(tmp_dir, "disclaim")
+      File.write!(shim, "#!/bin/sh\necho 'disclaim api unavailable' >&2\nexit 3\n")
+      File.chmod!(shim, 0o755)
+
+      result = Checks.browser_disclaim({:unix, :darwin}, shim)
+
+      assert result.name == "browser"
+      assert result.status == :fail
+      assert result.detail =~ "exited 3"
+      assert result.detail =~ "disclaim api unavailable"
+    end
+
+    @tag :tmp_dir
+    test "a shim that cannot be run says so, not that it refused", %{tmp_dir: tmp_dir} do
+      shim = Path.join(tmp_dir, "disclaim")
+      File.write!(shim, "#!/bin/sh\nexit 0\n")
+      File.chmod!(shim, 0o644)
+
+      result = Checks.browser_disclaim({:unix, :darwin}, shim)
+
+      assert result.status == :fail
+      assert result.detail =~ "could not run"
+      refute result.detail =~ "exited"
+    end
+  end
+
   describe "computer_use_permissions/1" do
     test "disabled is a quiet ok" do
       result = Checks.computer_use_permissions({:ok, %{state: :disabled}})
@@ -264,6 +336,87 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
 
       assert result.status == :warn
       assert result.detail =~ "tavily"
+    end
+  end
+
+  describe "place_search/0 (M31 §14.3)" do
+    setup do
+      original = Application.get_env(:fermix_core, :tools, [])
+      on_exit(fn -> Application.put_env(:fermix_core, :tools, original) end)
+      :ok
+    end
+
+    test "reports the key, the active web backend, and the advertised tool" do
+      Application.put_env(:fermix_core, :tools,
+        web_search: [backend: :duckduckgo, brave_api_key: "brave-secret"]
+      )
+
+      result = Checks.place_search()
+
+      assert result.name == "place search"
+      assert result.status == :ok
+      assert result.detail =~ "advertised"
+      assert result.detail =~ "duckduckgo"
+      assert result.detail =~ "metered"
+      refute result.detail =~ "brave-secret"
+    end
+
+    test "reports a missing key as hidden and optional, not a warning" do
+      Application.put_env(:fermix_core, :tools, web_search: [backend: :duckduckgo])
+
+      result = Checks.place_search()
+
+      assert result.status == :ok
+      assert result.detail =~ "hidden"
+      assert result.detail =~ "brave_api_key"
+    end
+
+    test "the default check reports no probe outcome" do
+      Application.put_env(:fermix_core, :tools, web_search: [brave_api_key: "brave-secret"])
+
+      result = Checks.place_search()
+
+      refute result.detail =~ "probe"
+    end
+  end
+
+  describe "place_probe/1 (M31 §14.3)" do
+    setup do
+      original = Application.get_env(:fermix_core, :tools, [])
+      on_exit(fn -> Application.put_env(:fermix_core, :tools, original) end)
+      :ok
+    end
+
+    test "reports one metered live probe as ok" do
+      Application.put_env(:fermix_core, :tools, web_search: [brave_api_key: "brave-secret"])
+
+      result = Checks.place_probe(place_probe_opts(place_ok_plug(self())))
+
+      assert result.name == "place probe"
+      assert result.status == :ok
+      assert result.detail =~ "metered"
+      assert_received {:place_probe_request, query}
+      assert query["count"] == "1"
+    end
+
+    test "warns with the named failure kind and never switches provider" do
+      Application.put_env(:fermix_core, :tools, web_search: [brave_api_key: "brave-secret"])
+
+      result = Checks.place_probe(place_probe_opts(place_status_plug(401)))
+
+      assert result.status == :warn
+      assert result.detail =~ "auth_failed"
+      assert result.detail =~ "metered"
+    end
+
+    test "skips the probe with no Brave key and makes no call" do
+      Application.put_env(:fermix_core, :tools, web_search: [backend: :duckduckgo])
+
+      result = Checks.place_probe(place_probe_opts(place_ok_plug(self())))
+
+      assert result.status == :ok
+      assert result.detail =~ "skipped"
+      refute_received {:place_probe_request, _query}
     end
   end
 
@@ -859,6 +1012,76 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
 
       assert result.status == :ok
       assert result.detail =~ "streaming on: telegram=draft"
+    end
+
+    test "a capability-derived default reports as the mode it resolved to" do
+      # No channel opted in explicitly; these are the defaults the gateway and
+      # the report agree on (draft where the channel can edit, block otherwise).
+      report = [
+        %{
+          channel: :telegram,
+          name: "telegram",
+          streaming: "draft",
+          derived: "draft",
+          explicit?: false,
+          capability: :draft_edit
+        },
+        %{
+          channel: :whatsapp,
+          name: "whatsapp",
+          streaming: "block",
+          derived: "block",
+          explicit?: false,
+          capability: :none
+        }
+      ]
+
+      result = Checks.streaming_config(report)
+
+      assert result.status == :ok
+      assert result.detail =~ "telegram=draft"
+      assert result.detail =~ "whatsapp=block"
+      refute result.detail =~ "explicit"
+    end
+
+    test "an explicit value shadowing a different derived default carries the hint" do
+      # The upgrade-path case: a hand-written streaming = "block" from before
+      # the capability-derived default keeps winning silently — doctor is
+      # where the shadowing becomes visible.
+      report = [
+        %{
+          channel: :telegram,
+          name: "telegram",
+          streaming: "block",
+          derived: "draft",
+          explicit?: true,
+          capability: :draft_edit
+        }
+      ]
+
+      result = Checks.streaming_config(report)
+
+      assert result.status == :ok
+      assert result.detail =~ "telegram=block (explicit; unset derives draft)"
+    end
+
+    test "an explicit value equal to the derived default carries no hint" do
+      report = [
+        %{
+          channel: :whatsapp,
+          name: "whatsapp",
+          streaming: "block",
+          derived: "block",
+          explicit?: true,
+          capability: :none
+        }
+      ]
+
+      result = Checks.streaming_config(report)
+
+      assert result.status == :ok
+      assert result.detail =~ "whatsapp=block"
+      refute result.detail =~ "explicit"
     end
 
     test "block mode is ok on any channel — no edit capability required" do
@@ -1589,6 +1812,41 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     name = :"harness_doctor_reg_#{System.unique_integer([:positive])}"
     start_supervised!({CapabilityRegistry, name: name})
     name
+  end
+
+  defp place_probe_opts(id) do
+    [
+      req_options: [plug: {Req.Test, id}],
+      net_resolver: fn "api.search.brave.com" -> {:ok, [{93, 184, 216, 34}]} end
+    ]
+  end
+
+  defp place_ok_plug(test_pid) do
+    id = :"checks_place_probe_#{System.unique_integer([:positive])}"
+
+    Req.Test.stub(id, fn conn ->
+      send(test_pid, {:place_probe_request, URI.decode_query(conn.query_string)})
+
+      place_probe_json(conn, 200, %{
+        "results" => [%{"title" => "Eiffel Tower", "url" => "https://toureiffel.example/visit"}]
+      })
+    end)
+
+    id
+  end
+
+  defp place_status_plug(status) do
+    id = :"checks_place_status_#{System.unique_integer([:positive])}"
+
+    Req.Test.stub(id, fn conn -> place_probe_json(conn, status, %{"error" => "nope"}) end)
+
+    id
+  end
+
+  defp place_probe_json(conn, status, body) do
+    conn
+    |> Plug.Conn.put_resp_content_type("application/json")
+    |> Plug.Conn.resp(status, Jason.encode!(body))
   end
 
   describe "home_permissions/0" do

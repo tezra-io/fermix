@@ -29,6 +29,8 @@ defmodule FermixCore.Temporal.Renderer do
   @months {"January", "February", "March", "April", "May", "June", "July", "August", "September",
            "October", "November", "December"}
 
+  @weekdays {"Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"}
+
   @doc """
   Renders one reminder row for delivery at `now`.
 
@@ -53,6 +55,52 @@ defmodule FermixCore.Temporal.Renderer do
   end
 
   def render(_row, _now), do: {:error, {:invalid_payload, "reminder"}}
+
+  # --- stating a stored occurrence -----------------------------------------
+
+  @doc false
+  # Shared with `Temporal.Registry`, which states back the occurrence a write
+  # actually stored. Unlike the reminder templates above it always carries the
+  # WEEKDAY and never a relative clause: a reminder arrives beside its event, but
+  # a confirmation has to settle which day was meant, and the weekday is the one
+  # part of the statement that separates one candidate day from the next.
+  #
+  # Bang, like the caller's own `DateTime.shift_zone!`: the zone was validated at
+  # acceptance and the caller shifted the clock through it before calling, so a
+  # stored row that cannot be stated absolutely is a corrupt row, not a case to
+  # degrade around.
+  @spec stated_date!(Date.t(), Time.t() | nil, String.t(), DateTime.t()) :: String.t()
+  def stated_date!(%Date{} = date, time, timezone, %DateTime{} = local_now)
+      when (is_nil(time) or is_struct(time, Time)) and is_binary(timezone) and timezone != "" do
+    case absolute_text(date, time, timezone, local_now) do
+      {:ok, absolute} -> weekday(date) <> ", " <> absolute
+      {:error, reason} -> raise ArgumentError, "cannot state #{date}: #{inspect(reason)}"
+    end
+  end
+
+  @doc false
+  # Shared with `Temporal.Followup`, whose one model-composed message rides the
+  # same channel under the same §13 one-message bound. Unlike `bounded/3` there
+  # is no load-bearing absolute date to protect, so the tail is what gives way.
+  @spec clamp(String.t()) :: String.t()
+  def clamp(text) when is_binary(text) do
+    if byte_size(text) <= @max_bytes do
+      text
+    else
+      truncate(text, @max_bytes - byte_size(@ellipsis)) <> @ellipsis
+    end
+  end
+
+  @doc false
+  # Spelled out, no locale machinery: `Date.day_of_week/1` counts Monday as 1.
+  @spec weekday(Date.t()) :: String.t()
+  def weekday(%Date{} = date), do: elem(@weekdays, Date.day_of_week(date) - 1)
+
+  @doc false
+  # Shared with `Temporal.Registry`, which names a yearly event's recurring month
+  # from the stored number rather than from any date.
+  @spec month_name(1..12) :: String.t()
+  def month_name(month) when is_integer(month) and month in 1..12, do: elem(@months, month - 1)
 
   # --- payload reading -----------------------------------------------------
 

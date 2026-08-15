@@ -18,6 +18,7 @@ defmodule FermixCore.Tools.EventToolsTest do
 
   @channels %{"telegram" => FakeAdapter, "slack" => FakeAdapter}
   @owner_channels [:telegram, :discord, :signal, :slack, :whatsapp]
+  @weekdays ~w(Monday Tuesday Wednesday Thursday Friday Saturday Sunday)
 
   setup do
     unique = System.unique_integer([:positive])
@@ -129,6 +130,30 @@ defmodule FermixCore.Tools.EventToolsTest do
       assert Enum.all?(planned, &(&1["rule_id"] in ["week_before", "day_of"]))
       assert Enum.all?(planned, &is_binary(&1["scheduled_for"]))
       assert Enum.all?(planned, &String.ends_with?(&1["occurrence_key"], "-09-14"))
+    end
+
+    # The clock is the real one here, so the assertion is on the SHAPE the
+    # confirmation needs: the calendar day, spelled out, with its weekday.
+    test "the acknowledgement carries the stored occurrence stated absolutely", %{repo: repo} do
+      stored = payload(store_birthday(repo))
+
+      assert stored["stated_as"] =~ "September 14"
+      assert Enum.any?(@weekdays, &String.contains?(stored["stated_as"], &1))
+    end
+
+    test "the description directs the confirmation at the stored absolute date" do
+      description = EventStore.description()
+
+      assert description =~ "stated_as"
+      assert description =~ ~r/(?i)absolute/
+      assert description =~ ~r/(?i)weekday/
+    end
+
+    test "the description names the small-hours which-day ambiguity" do
+      description = EventStore.description()
+
+      assert description =~ ~r/(?i)midnight/
+      assert description =~ ~r/(?i)both dates/
     end
 
     test "a fresh install with a configured channel stores through its derived inbox", %{
@@ -248,6 +273,21 @@ defmodule FermixCore.Tools.EventToolsTest do
 
       assert result.success == false
       assert result.error =~ "not exist"
+    end
+
+    test "an unflagged store confirms no follow-up", %{repo: repo} do
+      assert payload(store_birthday(repo))["followup"] === false
+    end
+
+    test "a flagged store confirms the follow-up in the same acknowledgement", %{repo: repo} do
+      stored = payload(store_birthday(repo, %{"followup" => true}))
+
+      assert stored["followup"] === true
+    end
+
+    test "declares the follow-up parameter as a boolean and directs the confirmation" do
+      assert EventStore.parameters().properties.followup.type == "boolean"
+      assert EventStore.description() =~ ~r/(?i)check in/
     end
 
     test "emits one tool telemetry event carrying the model's arguments", %{repo: repo} do
@@ -386,6 +426,62 @@ defmodule FermixCore.Tools.EventToolsTest do
       assert updated["recurrence"]["month"] == 6
       assert updated["recurrence"]["day"] == 10
       refute Map.has_key?(updated["previous"], "title")
+    end
+
+    test "the acknowledgement states the occurrence the edit stored", %{repo: repo} do
+      stored = payload(store_birthday(repo))
+
+      {:ok, result} =
+        EventUpdate.execute(
+          %{
+            "event_id" => stored["event_id"],
+            "when" => %{"type" => "annual", "month" => 6, "day" => 10},
+            "owner_direction" => "her birthday is June 10, change it"
+          },
+          context(repo)
+        )
+
+      updated = payload(result)
+
+      assert updated["stated_as"] =~ "June 10"
+      assert Enum.any?(@weekdays, &String.contains?(updated["stated_as"], &1))
+      refute updated["stated_as"] =~ "September"
+    end
+
+    test "the description directs the confirmation at the stored absolute date" do
+      description = EventUpdate.description()
+
+      assert description =~ "stated_as"
+      assert description =~ ~r/(?i)absolute/
+      assert description =~ ~r/(?i)weekday/
+    end
+
+    test "sets the follow-up flag without owner_direction and keeps it through a retitle", %{
+      repo: repo
+    } do
+      stored = payload(store_birthday(repo))
+
+      {:ok, flagged} =
+        EventUpdate.execute(
+          %{"event_id" => stored["event_id"], "followup" => true},
+          context(repo)
+        )
+
+      assert flagged.success == true
+      assert payload(flagged)["followup"] === true
+
+      {:ok, retitled} =
+        EventUpdate.execute(
+          %{"event_id" => stored["event_id"], "title" => "Sarah's birthday party"},
+          context(repo)
+        )
+
+      assert payload(retitled)["title"] == "Sarah's birthday party"
+      assert payload(retitled)["followup"] === true
+    end
+
+    test "declares the follow-up parameter as a boolean" do
+      assert EventUpdate.parameters().properties.followup.type == "boolean"
     end
 
     test "rebinds to the current default target on explicit request", %{repo: repo} do

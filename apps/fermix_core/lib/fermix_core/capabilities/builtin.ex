@@ -21,6 +21,10 @@ defmodule FermixCore.Capabilities.Builtin do
     "git_write" => %{policy_class: :read_write, hidden_from_agent?: false, owner_only?: false},
     "web_fetch" => %{policy_class: :network, hidden_from_agent?: false, owner_only?: false},
     "web_search" => %{policy_class: :network, hidden_from_agent?: false, owner_only?: false},
+    # Provider place data, not owner data: the owner's saved default location is
+    # only ever an outbound request parameter and never appears in the result
+    # (MILESTONE_31 §13.2). Seeded always; `advertise?/1` hides it without a key.
+    "place_search" => %{policy_class: :network, hidden_from_agent?: false, owner_only?: false},
     "skill_create" => %{policy_class: :read_write, hidden_from_agent?: false, owner_only?: false},
     "skill_reload" => %{policy_class: :read_write, hidden_from_agent?: false, owner_only?: false},
     "skill_view" => %{policy_class: :exec, hidden_from_agent?: false, owner_only?: false},

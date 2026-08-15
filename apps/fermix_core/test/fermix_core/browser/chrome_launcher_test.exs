@@ -102,6 +102,65 @@ defmodule FermixCore.Browser.ChromeLauncherTest do
     end
   end
 
+  describe "spawn_plan/4 (macOS disclaim shim wrapping)" do
+    @chrome "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+    @chrome_args ["--remote-debugging-port=0", "about:blank"]
+    @shim "/release/lib/fermix_nif/priv/disclaim"
+
+    test "darwin spawns the disclaim shim with Chrome as its first argument" do
+      assert {:ok, {@shim, [@chrome | @chrome_args]}} =
+               ChromeLauncher.spawn_plan(@chrome, @chrome_args, {:unix, :darwin}, @shim)
+    end
+
+    test "darwin without a built shim refuses loud — never an undisclaimed spawn" do
+      assert {:error, error} =
+               ChromeLauncher.spawn_plan(@chrome, @chrome_args, {:unix, :darwin}, nil)
+
+      assert error.code == "shim_missing"
+    end
+
+    test "every other OS spawns Chrome directly, byte-identical to before" do
+      for os <- [{:unix, :linux}, {:unix, :freebsd}, {:win32, :nt}], shim <- [nil, @shim] do
+        assert {:ok, {@chrome, @chrome_args}} =
+                 ChromeLauncher.spawn_plan(@chrome, @chrome_args, os, shim)
+      end
+    end
+  end
+
+  if match?({:unix, :darwin}, :os.type()) do
+    describe "start/4 on macOS (through the disclaim shim)" do
+      test "fails fast with the exit status when Chrome dies before CDP readiness",
+           %{home: home} do
+        path = Path.join(home, "fake-chrome-exits")
+        File.write!(path, "#!/bin/sh\nexit 3\n")
+        File.chmod!(path, 0o700)
+
+        {:ok, config} = Config.current(launch_timeout_ms: 5_000, cdp_ready_poll_interval_ms: 20)
+        profile = %{mode: :managed, headless: true, cdp_port: :auto, executable_path: path}
+
+        assert {:error, error} = ChromeLauncher.start(config, profile, "owner", "exits")
+        assert error.code == "cdp_not_ready"
+        # Fail-fast proof: the exit was consumed, not waited out — the timeout
+        # path carries no exit_status detail.
+        assert error.details["exit_status"] == 3
+      end
+
+      test "surfaces a shim exec failure as disclaim_failed", %{home: home} do
+        path = Path.join(home, "fake-chrome-not-executable")
+        File.write!(path, "not a binary")
+        File.chmod!(path, 0o644)
+
+        {:ok, config} = Config.current(launch_timeout_ms: 5_000, cdp_ready_poll_interval_ms: 20)
+        profile = %{mode: :managed, headless: true, cdp_port: :auto, executable_path: path}
+
+        assert {:error, error} = ChromeLauncher.start(config, profile, "owner", "noexec")
+        assert error.code == "disclaim_failed"
+        assert error.details["exit_status"] == 72
+        assert error.details["chrome_output"] =~ "disclaim:"
+      end
+    end
+  end
+
   # Fake Chrome: binds an OS-assigned port (like `--remote-debugging-port=0`),
   # publishes it in the profile's DevToolsActivePort, records the requested and
   # bound ports, and never serves `/json/version` — so readiness fails and the

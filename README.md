@@ -352,6 +352,7 @@ The current built-in capability set is:
 | `git_write` | Stage, commit, checkout, or pull changes; push is deferred to M10 approval |
 | `web_fetch` | Fetch a public URL and return markdown-light text |
 | `web_search` | Search the public web through the configured backend (Brave, Exa, Firecrawl, Parallel, Perplexity, Tavily, or the keyless DuckDuckGo default); a configured backend that is unavailable degrades once to DuckDuckGo |
+| `place_search` | Find businesses, landmarks, and addresses with hours, ratings, contact details, and a source link per result; advertised only when a Brave Search API key is configured (the same key as the Brave `web_search` backend, metered separately per call) |
 | `subagents` | Run one or more temporary subagents for delegated work, concurrently up to a cap |
 | `skill_create` | Scaffold a local skill with starter eval cases |
 | `skill_list` | List installed skills available to run via `skill_run` |

@@ -36,7 +36,16 @@ defmodule FermixCore.Tools.EventStore do
       "A stored event sharing a name with this one but carrying a different date may " <>
       "belong to a different person or occasion, so ask the owner which it is before " <>
       "changing or duplicating it — unless they are correcting a date they themselves " <>
-      "gave you, which needs no question."
+      "gave you, which needs no question. " <>
+      "In the small hours after midnight a relative day word paired with a morning time " <>
+      "does not name one date — the coming morning and the following calendar day are " <>
+      "both live readings — so ask which is meant, naming both dates, before storing; " <>
+      "settling the time instead leaves the day unsettled. " <>
+      "Confirm back the date this actually stored, absolutely and with its weekday, as " <>
+      "the result's stated_as gives it: a relative phrase alone hands the ambiguity back " <>
+      "to the owner instead of resolving it. " <>
+      "When followup is set, say in that same confirmation that you will check in after " <>
+      "the reminder, so a wrong call is visible the moment it is made."
   end
 
   @impl true
@@ -80,6 +89,13 @@ defmodule FermixCore.Tools.EventStore do
         no_reminders: %{
           type: "boolean",
           description: "Store the date with no notifications. Only when the owner asks."
+        },
+        followup: %{
+          type: "boolean",
+          description:
+            "Set this for an occasion the owner would plausibly want help acting on — a " <>
+              "message to send, something to prepare or decide — and leave it off for a " <>
+              "logistics ping that needs only the fact."
         }
       }
     }
@@ -175,23 +191,27 @@ defmodule FermixCore.Tools.EventStore do
       timezone: Map.get(args, "timezone"),
       leap_day_policy: Map.get(args, "leap_day_policy"),
       reminders: Map.get(args, "reminders"),
-      no_reminders: Map.get(args, "no_reminders")
+      no_reminders: Map.get(args, "no_reminders"),
+      followup: Map.get(args, "followup")
     }
   end
 
   # `similar_events` is the owner's other active events of this kind: a twin
   # stored under a different title is invisible to the dedupe key, so the
   # acknowledgement carries it and the model can raise it before two people's
-  # dates drift apart under one name.
-  defp view(%{status: status, event: event, reminders: reminders, similar_events: similar}) do
+  # dates drift apart under one name. `stated_as` is the date this call actually
+  # persisted, stated absolutely, so the confirmation quotes a stored value
+  # rather than repeating the owner's relative phrasing back at them.
+  defp view(%{status: status, event: event, reminders: reminders} = stored) do
     planned = Enum.map(reminders, &Registry.reminder_view/1)
 
     event
     |> Registry.event_view()
     |> Map.merge(%{
       "status" => Atom.to_string(status),
+      "stated_as" => stored.stated_as,
       "planned_reminders" => planned,
-      "similar_events" => similar,
+      "similar_events" => stored.similar_events,
       "note" => note(status, planned)
     })
   end

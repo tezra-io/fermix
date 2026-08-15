@@ -30,6 +30,20 @@ defmodule FermixCore.Tools.Media.Backends.XAIImageTest do
                async: false
              }
     end
+
+    test "curates the Imagine models newest first, and the run path defaults to the head" do
+      assert XAIImage.supported_models() == [
+               "grok-imagine-image-2.0",
+               "grok-imagine-image-quality"
+             ]
+
+      # The `head = default` contract in Media.Backend: the id the setup
+      # dropdown pre-selects must be the one an un-overridden call sends.
+      {_result, req} =
+        run_generate(%{prompt: "x"}, %{"data" => [%{"b64_json" => Base.encode64("Y")}]})
+
+      assert req.body["model"] == hd(XAIImage.supported_models())
+    end
   end
 
   describe "run(:generate, ...)" do
@@ -42,7 +56,7 @@ defmodule FermixCore.Tools.Media.Backends.XAIImageTest do
         })
 
       assert {:ok, %{bytes: ^png, mime: "image/png", ext: "png"}, %{}} = result
-      assert req.body["model"] == "grok-imagine-image-quality"
+      assert req.body["model"] == "grok-imagine-image-2.0"
       assert req.body["prompt"] == "a neon city"
       assert req.body["n"] == 1
       # xAI defaults to a temporary URL unless b64_json is requested explicitly.

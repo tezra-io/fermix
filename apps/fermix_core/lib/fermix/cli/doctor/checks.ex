@@ -16,6 +16,8 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias Fermix.CLI.VersionSkew
   alias FermixCore.Acp.IdentityStore
   alias FermixCore.Auth.Store, as: AuthStore
+  alias FermixCore.Browser.ChromeLauncher
+  alias FermixCore.Browser.Config, as: BrowserConfig
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Harness.Artifacts, as: HarnessArtifacts
   alias FermixCore.Harness.Config, as: HarnessConfig
@@ -414,6 +416,75 @@ defmodule Fermix.CLI.Doctor.Checks do
   end
 
   @doc """
+  `place_search` readiness (M31 §14.3): the shared Brave key, the active
+  `web_search` backend, and whether the tool is advertised.
+
+  Offline, always — this check takes no `full?` flag, so the default run cannot
+  reach the network by any argument. The metered live probe is `place_probe/1`,
+  which `Fermix.CLI.Doctor` calls only from its `--full` block. Having no Brave
+  key is a normal configuration (the tool is optional and simply hidden), so it
+  reports `:ok`, not a warning.
+  """
+  @spec place_search() :: result()
+  def place_search do
+    []
+    |> ProviderProbe.place_search_report()
+    |> format_place_search()
+  end
+
+  # Advertisement is the row's one fact: the tool answers it from the same
+  # credential seam a `place_search` call would, so the row cannot claim a
+  # readiness the runtime does not have. A missing key is a normal, optional
+  # configuration, so it reads `:ok` and says how to enable the tool.
+  defp format_place_search(%{advertised?: false} = report) do
+    ok(
+      "place search",
+      "no Brave key — place_search hidden (optional; web backend #{report.backend}). " <>
+        "Set [fermix_core.tools.web_search] brave_api_key in setup to enable it."
+    )
+  end
+
+  defp format_place_search(report) do
+    ok(
+      "place search",
+      "Brave key present, place_search advertised; web backend #{report.backend}. " <>
+        "Web and place calls are metered separately."
+    )
+  end
+
+  @doc """
+  One metered live request to the place endpoint (M31 §14.3), for `--full` only.
+
+  Fixed innocuous query, `count: 1`, result discarded, never anchored to the
+  owner's saved location. Auth, rate-limit, schema, and transport failures each
+  keep their own name, and a failure never switches provider — there is one
+  adapter and no fallback. `opts` carries the `req_options`/`net_resolver`
+  injection seam so tests stub the transport.
+  """
+  @spec place_probe(keyword()) :: result()
+  def place_probe(opts \\ []) when is_list(opts) do
+    opts
+    |> Keyword.put(:full, true)
+    |> ProviderProbe.place_search_report()
+    |> format_place_probe()
+  end
+
+  defp format_place_probe(%{probe_result: :ok, result_count: count}) do
+    ok(
+      "place probe",
+      "live place probe ok (#{count} result(s), discarded) — this probe is metered"
+    )
+  end
+
+  defp format_place_probe(%{probe_error: reason}) do
+    warn("place probe", "live place probe failed: #{reason} — this probe is metered")
+  end
+
+  defp format_place_probe(_report) do
+    ok("place probe", "skipped — no Brave key configured, so no metered call was made")
+  end
+
+  @doc """
   Image-generation backend health: which backend is selected and whether its
   credential is present. Offline only — never bills the operator with a live
   image call. Not configuring `generate_image` is normal (optional capability),
@@ -706,6 +777,86 @@ defmodule Fermix.CLI.Doctor.Checks do
 
   defp computer_use_input_hint(probe) do
     "input control is not available (#{probe.platform}/#{probe.display_server})."
+  end
+
+  @doc """
+  Browser launch health on macOS: the disclaim exec shim must be present and
+  able to resolve the private disclaim API, or every browser launch refuses
+  (Chrome is never spawned undisclaimed — spawned directly it would inherit the
+  daemon as TCC responsible process and raise App Management prompts keyed to
+  the versioned install path). Elsewhere the shim is not used.
+
+  A shim that ran and refused and a shim that could not be run at all are
+  different faults with different fixes, so each gets its own row detail. The
+  shim path is injectable so both unit-test hermetically.
+  """
+  @spec browser_disclaim({atom(), atom()}, Path.t() | nil) :: result()
+  def browser_disclaim(os_type \\ :os.type(), shim \\ nil)
+
+  def browser_disclaim({:unix, :darwin}, shim) do
+    shim = shim_path(shim)
+
+    if File.regular?(shim) do
+      checked_disclaim_result(shim)
+    else
+      fail("browser", "disclaim shim missing at #{shim} — rebuild fermix or reinstall")
+    end
+  end
+
+  def browser_disclaim(_os_type, _shim),
+    do: ok("browser", "disclaim shim not required on this OS")
+
+  # Injectable so the unrunnable-shim row unit-tests hermetically, the same way
+  # `harness/1` injects its probes.
+  defp shim_path(nil), do: Application.app_dir(:fermix_nif, "priv/disclaim")
+  defp shim_path(path) when is_binary(path), do: path
+
+  # `BrowserConfig.current/0` refuses an operator-authored `[fermix_core.browser]`
+  # section that is out of range or names an unusable profile — the exact host
+  # whose owner runs `fermix doctor` to find out why. Binding it with `{:ok, _}`
+  # would kill the whole run with a MatchError and print nothing.
+  defp browser_chrome_result do
+    case BrowserConfig.current() do
+      {:ok, config} -> browser_chrome_row(config)
+      {:error, error} -> warn("browser", "disclaim shim ready; #{error.message}")
+    end
+  end
+
+  defp browser_chrome_row(config) do
+    case ChromeLauncher.find_executable(config, nil) do
+      {:ok, path} -> ok("browser", "disclaim shim ready; Chrome at #{path}")
+      {:error, _error} -> warn("browser", "disclaim shim ready; no Chrome/Chromium found")
+    end
+  end
+
+  defp checked_disclaim_result(shim) do
+    case disclaim_check(shim) do
+      :ok ->
+        browser_chrome_result()
+
+      {:error, detail} ->
+        fail("browser", "disclaim shim --check #{detail}; browser launches refuse until fixed")
+    end
+  end
+
+  # A present-but-unrunnable shim (e.g. lost exec bit) must surface as a fail
+  # row, not crash the doctor run — but it is a DIFFERENT fault from a shim that
+  # ran and refused, and only the row tells the operator which one to fix. The
+  # command's own words carry the diagnosis, bounded so a chatty failure cannot
+  # swamp the report.
+  defp disclaim_check(shim) do
+    case System.cmd(shim, ["--check"], stderr_to_stdout: true) do
+      {_output, 0} -> :ok
+      {output, status} -> {:error, "exited #{status}: #{brief(output)}"}
+    end
+  rescue
+    error -> {:error, "could not run: #{Exception.message(error)}"}
+  end
+
+  # The report prints one line per row, and a shim that cannot resolve the
+  # private API fails with a multi-line loader message — collapse it to one.
+  defp brief(output) do
+    output |> String.replace(~r/\s+/u, " ") |> String.trim() |> String.slice(0, 200)
   end
 
   @doc """
@@ -1232,7 +1383,11 @@ defmodule Fermix.CLI.Doctor.Checks do
   Channel streaming configuration sanity (docs/design/CHANNEL_STREAMING.md §7):
   `streaming = "draft"` on a channel that cannot edit drafts is a silent no-op
   at runtime, so doctor is the loud boundary. `"block"` sends ordinary messages
-  and works on every channel — nothing to validate. There is deliberately no
+  and works on every channel — nothing to validate. A configured channel that
+  sets no `streaming` key reports its default, which is capability-derived
+  ("draft" where the channel can edit in place, "block" otherwise), so only an
+  explicit `streaming = "draft"` on an edit-less channel can be misconfigured.
+  There is deliberately no
   provider-streaming check — env overrides and per-run profiles make a
   config-derived provider warning wrong in both directions; provider capability
   shows up in stream telemetry instead.
@@ -1253,14 +1408,29 @@ defmodule Fermix.CLI.Doctor.Checks do
         )
 
       enabled == [] ->
-        ok("channel streaming", "off (no channel opted in)")
+        ok("channel streaming", "off (no configured channel streams)")
 
       true ->
         ok(
           "channel streaming",
-          "streaming on: " <>
-            Enum.map_join(enabled, ", ", fn entry -> "#{entry.name}=#{entry.streaming}" end)
+          "streaming on: " <> Enum.map_join(enabled, ", ", &streaming_entry_detail/1)
         )
+    end
+  end
+
+  # An explicit value that shadows a DIFFERENT derived default gets a hint, so
+  # a default change ships visibly instead of silently bypassing everyone who
+  # once wrote the key by hand. An explicit "off" is a clear opt-out and an
+  # explicit value equal to the derived default changes nothing — neither is
+  # hinted. Older report shapes without the annotation fields simply carry no
+  # hint.
+  defp streaming_entry_detail(entry) do
+    base = "#{entry.name}=#{entry.streaming}"
+
+    if Map.get(entry, :explicit?, false) and entry.streaming != Map.get(entry, :derived) do
+      base <> " (explicit; unset derives #{entry.derived})"
+    else
+      base
     end
   end
 

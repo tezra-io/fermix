@@ -15,6 +15,7 @@ defmodule FermixCore.Trace.TelemetryHandler do
   alias FermixCore.Jobs.Telemetry, as: JobTelemetry
   alias FermixCore.SkillCuration.Telemetry, as: SkillCurationTelemetry
   alias FermixCore.SoulCuration.Telemetry, as: SoulTelemetry
+  alias FermixCore.Temporal.FollowupTelemetry, as: TemporalFollowupTelemetry
   alias FermixCore.Temporal.Telemetry, as: TemporalTelemetry
   alias FermixCore.Trace
 
@@ -237,7 +238,8 @@ defmodule FermixCore.Trace.TelemetryHandler do
       SoulTelemetry.trace_event_definitions() ++
       SkillCurationTelemetry.trace_event_definitions() ++
       MCPClientTelemetry.trace_event_definitions() ++
-      TemporalTelemetry.trace_event_definitions()
+      TemporalTelemetry.trace_event_definitions() ++
+      TemporalFollowupTelemetry.trace_event_definitions()
   end
 
   defp build_trace_payload(%{agent_field: agent_field} = config, measurements, metadata) do
