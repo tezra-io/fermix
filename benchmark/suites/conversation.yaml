@@ -55,8 +55,14 @@ scenarios:
             expect:
               reply_matches: "(?i)photosynthesis|light|sunlight|glucose|energy"
           - query: "Thanks!"
+            # No positive phrasing gate. An acknowledgment has no content
+            # floor, so any word/emoji allowlist here is a hand-maintained
+            # vocabulary — and it rejected a correct ack twice (2026-08-13 an
+            # emoji reaction via the react tool, 2026-08-15 a bare "🤝"
+            # outside the three enumerated emoji) while the judge scored both
+            # 1.0. The structural half is reply_not_matches — proof the model
+            # did not re-lecture — and the rubric owns "is this an ack".
             expect:
-              reply_matches: "(?i)welcome|any ?time|glad|no problem|sure|happy to|of course|pleasure|you bet|cheers|👍|🙏|😊"
               reply_not_matches: "(?i)photosynthesis|chlorophyll|glucose"
               max_tool_calls: 1
               max_iterations: 2
@@ -64,8 +70,10 @@ scenarios:
           max_cost_usd: 1.0
           max_duration_ms: 120000
         rubric: >
-          The second reply acknowledges the thanks briefly. It does NOT launch
-          back into re-explaining photosynthesis.
+          The second reply is a brief acknowledgment of the thanks — words, an
+          emoji, or an emoji reaction (react tool, possibly with no reply
+          text) all count. It does NOT launch back into re-explaining
+          photosynthesis.
       - id: new_question_after_fact
         turns:
           - query: "Briefly, what causes ocean tides?"
