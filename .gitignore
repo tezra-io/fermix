@@ -13,6 +13,8 @@
 # Umbrella apps
 /apps/*/deps/
 /apps/*/_build/
+# ExUnit @tag :tmp_dir working dirs (created under each app cwd per test run)
+/apps/*/tmp/
 
 # Phoenix
 /apps/fermix_web/priv/static/assets/

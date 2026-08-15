@@ -1,6 +1,38 @@
 defmodule FermixTestSupport.SecretWriterStub do
   @moduledoc false
 
+  # A `:named_table` dies with the process that created it. When the first
+  # caller is a short-lived `Task`, every sibling still holding the name gets an
+  # ArgumentError the moment that task exits, so the table is created and held
+  # by this process instead — started once, race-safely, for the VM's life.
+  defmodule TableOwner do
+    @moduledoc false
+
+    use GenServer
+
+    @spec start(atom()) :: {:ok, pid()} | {:error, {:already_started, pid()}}
+    def start(table) when is_atom(table) do
+      GenServer.start(__MODULE__, table, name: __MODULE__)
+    end
+
+    @doc """
+    Blocks until the owner has finished `init/1`, i.e. until the table exists.
+    A losing racer gets `{:error, {:already_started, pid}}` while the winner is
+    still inside `init/1`, and a GenServer serves no call before then.
+    """
+    @spec await_table(pid()) :: :ok
+    def await_table(pid) when is_pid(pid), do: GenServer.call(pid, :await_table)
+
+    @impl true
+    def init(table) do
+      _tid = :ets.new(table, [:named_table, :public, read_concurrency: true])
+      {:ok, table}
+    end
+
+    @impl true
+    def handle_call(:await_table, _from, table), do: {:reply, :ok, table}
+  end
+
   @behaviour FermixCore.Setup.SecretWriter
 
   @table __MODULE__
@@ -51,17 +83,19 @@ defmodule FermixTestSupport.SecretWriterStub do
 
   defp ensure_table do
     case :ets.whereis(@table) do
-      :undefined ->
-        try do
-          :ets.new(@table, [:named_table, :public, read_concurrency: true])
-        rescue
-          ArgumentError -> @table
-        end
-
-      _tid ->
-        @table
+      :undefined -> start_owner()
+      _tid -> @table
     end
   end
+
+  defp start_owner do
+    case TableOwner.start(@table) do
+      {:ok, _pid} -> @table
+      {:error, {:already_started, pid}} -> table_after(TableOwner.await_table(pid))
+    end
+  end
+
+  defp table_after(:ok), do: @table
 end
 
 defmodule FermixTestSupport.UnavailableSecretWriter do

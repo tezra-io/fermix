@@ -1,5 +1,31 @@
 import Config
 
+# Hermetic boot. The umbrella starts before a single test runs: the config
+# provider hydrates `config.toml`, `SkillRegistry` loads the installed plugin
+# store, `ensure_workspace/0` creates directories. With `FERMIX_HOME` unset all
+# of that reads the OPERATOR's `~/.fermix`, which the suite neither controls nor
+# restores — and two of the stubs pinned below are reached at boot, before any
+# test has set them up: an installed `remote_mcp` plugin sends boot into the
+# provenance gate (DistVerifierStub), a `@keyring` sentinel sends it into the
+# secret writer (SecretWriterStub). Either one kills `mix test` outright, and on
+# a machine where boot survives the suite is reading a live home instead.
+#
+# So the suite supplies a home of its own when the caller left it out. An
+# explicit `FERMIX_HOME` still wins — `FERMIX_HOME=$(mktemp -d) mix test` is the
+# documented invocation — which also keeps a re-read of this chain
+# (`Config.Reader.read!(env: :test)`) a no-op rather than moving the suite's
+# home mid-run. Blank is unset, the same rule `ConfigStore.fermix_home/0` uses.
+case System.get_env("FERMIX_HOME") do
+  home when is_binary(home) and home != "" ->
+    :ok
+
+  _unset_or_blank ->
+    System.put_env(
+      "FERMIX_HOME",
+      Path.join(System.tmp_dir!(), "fermix-test-home-#{System.system_time(:nanosecond)}")
+    )
+end
+
 # SetupLive model-listing seam: never reach Ollama/OpenRouter from tests
 # (hermetic rule); live-UI tests swap in their own stub per test.
 config :fermix_web, :model_listing_impl, FermixWebWeb.TestSupport.StaticModelListing
@@ -132,7 +158,10 @@ config :phoenix,
 # Hermetic default: tests must never touch a real OS keychain. Secure-on-save
 # (SecretStore) routes through this stub; tests exercising the writer-less path
 # override with FermixTestSupport.UnavailableSecretWriter. The module lives in
-# test/support and is loaded by each app's test_helper.exs.
+# the umbrella's test/support, which `fermix_core`'s `elixirc_paths(:test)`
+# compiles into its ebin — every app depends on `fermix_core`, so the default
+# resolves in all three suites and, unlike the old test_helper `require_file`,
+# it also resolves during boot.
 config :fermix_core, :secret_writer, FermixTestSupport.SecretWriterStub
 
 # The remote_mcp provenance gate under test. DENY-BY-DEFAULT: a test that wants a

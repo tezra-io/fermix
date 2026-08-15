@@ -1,5 +1,13 @@
 defmodule Fermix.CLI.SecretInputTest do
-  use ExUnit.Case, async: true
+  # Sync because `:standard_error` is one globally registered device and
+  # `ExUnit.CaptureIO` captures it by name: concurrent captures share a single
+  # buffer, so a capturer sees everything any other async test wrote during the
+  # overlap. Every assertion below pins the prompt exactly ("nothing was
+  # prompted", "the prompt does not contain the secret"), which a foreign line
+  # breaks. Having the writers capture their own stderr does not help — the
+  # sharing is between capturers. Sync runs after every async module, so no
+  # other test's stderr can overlap.
+  use ExUnit.Case, async: false
 
   import ExUnit.CaptureIO
 
