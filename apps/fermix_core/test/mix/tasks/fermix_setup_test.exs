@@ -160,6 +160,12 @@ defmodule Mix.Tasks.Fermix.SetupTest do
         fermix_web: []
       })
 
+    # Deliberately no `[fermix_channels.mobile]` section: the mobile channel is
+    # feature-flagged with no setup surface, so an absent section is
+    # disabled-AND-setup-complete. A no-arg run must seed and report ready
+    # rather than block on a pending mobile question.
+    refute File.read!(ConfigStore.path()) =~ "[fermix_channels.mobile]"
+
     refute File.exists?(BootstrapPaths.identity_path("main"))
 
     Mix.Task.reenable("fermix.setup")
@@ -292,7 +298,12 @@ defmodule Mix.Tasks.Fermix.SetupTest do
       })
 
     Mix.Task.reenable("fermix.setup")
-    SetupTask.run(["--acp-enabled", "--no-realtime-enabled", "--skip-probe"])
+
+    SetupTask.run([
+      "--acp-enabled",
+      "--no-realtime-enabled",
+      "--skip-probe"
+    ])
 
     assert {:ok, persisted} = ConfigStore.load_runtime_config()
     assert Keyword.fetch!(persisted.fermix_channels, :acp) == [enabled: true]
@@ -302,6 +313,21 @@ defmodule Mix.Tasks.Fermix.SetupTest do
     assert_raise Mix.Error, ~r/invalid options/, fn ->
       SetupTask.run(["--acp-enable"])
     end
+
+    # The mobile channel is feature-flagged with no setup surface, so the Mix
+    # wrapper must refuse its withdrawn switches exactly like any other
+    # unregistered flag — including the boolean negation OptionParser used to
+    # derive for free.
+    Enum.each(
+      [["--mobile-enabled"], ["--no-mobile-enabled"], ["--mobile-port", "4555"]],
+      fn args ->
+        Mix.Task.reenable("fermix.setup")
+
+        assert_raise Mix.Error, ~r/invalid options/, fn ->
+          SetupTask.run(args)
+        end
+      end
+    )
   end
 
   defp restart_global_memory_repo! do

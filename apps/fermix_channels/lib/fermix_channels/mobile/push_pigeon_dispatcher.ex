@@ -144,16 +144,37 @@ defmodule FermixChannels.Mobile.Push.PigeonDispatcher do
     :exit, reason -> {:error, {:push_dispatcher_unavailable, reason}}
   end
 
+  # Same contract as `FermixChannels.Mobile.Push.call_dependency/3`: the
+  # exception class travels in the reason and the trace is logged, so a Fermix
+  # defect stops reading as an APNs hiccup. Stack frame arguments are dropped
+  # before formatting — they carry the notification list, whose device tokens and
+  # encrypted payloads must never reach a log line.
   defp call_dependency(name, callback, args) when is_function(callback, length(args)) do
     apply(callback, args)
   rescue
-    error -> {:error, {:push_dependency_exception, name, Exception.message(error)}}
+    error ->
+      Logger.error(
+        "mobile push dependency #{inspect(name)} raised:\n" <>
+          Exception.format(:error, error, arity_only(__STACKTRACE__))
+      )
+
+      {:error, {:push_dependency_exception, name, error.__struct__, Exception.message(error)}}
   catch
     :exit, reason -> {:error, {:push_dependency_exit, name, reason}}
   end
 
   defp call_dependency(name, callback, _args),
     do: {:error, {:invalid_push_dependency, name, callback}}
+
+  defp arity_only(stacktrace) do
+    Enum.map(stacktrace, fn
+      {module, function, args, location} when is_list(args) ->
+        {module, function, length(args), location}
+
+      entry ->
+        entry
+    end)
+  end
 
   defp config_fingerprint(config) do
     config

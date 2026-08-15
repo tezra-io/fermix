@@ -8,8 +8,8 @@ defmodule FermixChannels.Gateway.PolicyTest do
   use ExUnit.Case, async: false
 
   alias FermixChannels.Gateway
-  alias FermixChannels.Gateway.Commands.Sandbox.Confirmations
   alias FermixChannels.Gateway.Commands.Registry, as: CommandRegistry
+  alias FermixChannels.Gateway.Commands.Sandbox.Confirmations
   alias FermixChannels.Gateway.Message
 
   defmodule MobileChannel do
@@ -92,6 +92,8 @@ defmodule FermixChannels.Gateway.PolicyTest do
       test_pid = self()
       fn outcome -> send(test_pid, {:turn_result, id, outcome}) end
     end
+
+    def terminal_error_capability, do: :turn_result
   end
 
   # Ordinary chat adapter that can also post and delete ephemeral messages — the
@@ -203,6 +205,20 @@ defmodule FermixChannels.Gateway.PolicyTest do
       assert :ok = ingest("stream please", RawChannel)
       assert_receive {:agent_message, agent_message}
       assert %{mode: :raw} = agent_message.stream_spec
+    end
+
+    # The queue reads `:terminal_error_owner?` to suppress its canned error text
+    # for a channel that renders terminal errors itself from the raw reason.
+    test "terminal_error_capability :turn_result stamps the flag; a plain channel gets none" do
+      register(commands?: false)
+
+      assert :ok = ingest("hello", RawChannel)
+      assert_receive {:agent_message, owning_message}
+      assert owning_message.terminal_error_owner? == true
+
+      assert :ok = ingest("hello", PlainChannel)
+      assert_receive {:agent_message, plain_message}
+      refute Map.has_key?(plain_message, :terminal_error_owner?)
     end
 
     test "a plain adapter carries none of the optional keys" do

@@ -8,6 +8,8 @@ defmodule FermixChannels.Mobile.Push do
   profile open or has read the emitted timeline row.
   """
 
+  require Logger
+
   alias FermixChannels.Mobile.DeviceRegistry
   alias FermixChannels.Mobile.DeviceStore
   alias FermixChannels.Mobile.DeviceStore.Device
@@ -417,16 +419,39 @@ defmodule FermixChannels.Mobile.Push do
     end
   end
 
+  # A dependency callback that raises is either a vendor fault or a Fermix
+  # defect, and the two used to be indistinguishable: everything collapsed into
+  # one reason with no type and no stacktrace, so a `FunctionClauseError` in our
+  # own code read as an APNs hiccup and got blind-retried. The exception class
+  # now travels in the reason and the full trace is logged. Stack frame
+  # arguments are dropped before formatting because they carry the notification
+  # list — device tokens and encrypted payloads never belong in a log line.
   defp call_dependency(name, callback, args) when is_function(callback, length(args)) do
     apply(callback, args)
   rescue
-    error -> {:error, {:push_dependency_exception, name, Exception.message(error)}}
+    error ->
+      Logger.error(
+        "mobile push dependency #{inspect(name)} raised:\n" <>
+          Exception.format(:error, error, arity_only(__STACKTRACE__))
+      )
+
+      {:error, {:push_dependency_exception, name, error.__struct__, Exception.message(error)}}
   catch
     :exit, reason -> {:error, {:push_dependency_exit, name, reason}}
   end
 
   defp call_dependency(name, callback, _args),
     do: {:error, {:invalid_push_dependency, name, callback}}
+
+  defp arity_only(stacktrace) do
+    Enum.map(stacktrace, fn
+      {module, function, args, location} when is_list(args) ->
+        {module, function, length(args), location}
+
+      entry ->
+        entry
+    end)
+  end
 
   defp config_input(opts) do
     Keyword.get_lazy(opts, :config, fn ->

@@ -123,9 +123,11 @@ defmodule Fermix.CLI.DevicesCommand do
   defp optional_time(value) when is_binary(value) and value != "", do: {:ok, value}
   defp optional_time(_value), do: :error
 
+  # C1 (U+0080–U+009F) belongs in the class alongside C0 and DEL: U+009B is a
+  # single-codepoint CSI that a terminal honours exactly like ESC-[.
   defp safe_field(value) do
     value
-    |> String.replace(~r/[\x00-\x1F\x7F]/u, " ")
+    |> String.replace(~r/[\x{0000}-\x{001F}\x{007F}-\x{009F}]/u, " ")
     |> String.slice(0, 128)
   end
 
@@ -169,6 +171,14 @@ defmodule Fermix.CLI.DevicesCommand do
   defp fail(io, message) do
     IO.puts(io.stderr, message)
     1
+  end
+
+  # The mobile channel is feature-flagged and has no setup surface — neither
+  # `fermix setup` nor the web setup can turn it on — so the refusal names the
+  # one thing that does.
+  defp format_reason("mobile_disabled") do
+    "the mobile channel is off — set `enabled = true` under `[fermix_channels.mobile]` " <>
+      "in config.toml, then run `fermix restart`"
   end
 
   defp format_reason(reason) when is_binary(reason), do: reason

@@ -58,6 +58,23 @@ defmodule FermixChannels.Gateway.DeliveryTest do
     end
   end
 
+  # Stands in for the CLI sync-capture / bench override: it handles exactly the
+  # `Reply.outbound()` shapes an override is expected to, and fails loud on the rest.
+  defp capturing_override(test_pid) do
+    fn
+      {:text, text} ->
+        send(test_pid, {:override_part, {:text, text}})
+        :ok
+
+      {:approval_prompt, text, token} ->
+        send(test_pid, {:override_part, {:approval_prompt, text, token}})
+        :ok
+
+      other ->
+        {:error, {:invalid_reply_part, other}}
+    end
+  end
+
   defp message do
     Message.new!(%{
       id: "42",
@@ -132,6 +149,57 @@ defmodule FermixChannels.Gateway.DeliveryTest do
 
       assert :ok = deliver.({:approval_prompt, spec})
       assert_received {:rich_approval_sent, "42", ^spec}
+    end
+  end
+
+  describe "build_deliver/2 — reply_fn override" do
+    test "flattens a structured approval to the text+token shape an override handles" do
+      deliver =
+        Delivery.build_deliver(
+          ReplyContext.new(TextOnlyChannel, message()),
+          capturing_override(self())
+        )
+
+      spec = %{
+        kind: :sandbox,
+        text: "Confirm sandbox change with /confirm AB12CD34",
+        token: "AB12CD34",
+        detail: "allowed_roots + /tmp/project",
+        ttl_s: 60
+      }
+
+      assert :ok = deliver.({:approval_prompt, spec})
+
+      assert_received {:override_part,
+                       {:approval_prompt, "Confirm sandbox change with /confirm AB12CD34",
+                        "AB12CD34"}}
+    end
+
+    test "leaves every other part untouched for the override" do
+      deliver =
+        Delivery.build_deliver(
+          ReplyContext.new(TextOnlyChannel, message()),
+          capturing_override(self())
+        )
+
+      assert :ok = deliver.({:text, "plain"})
+      assert_received {:override_part, {:text, "plain"}}
+
+      assert :ok = deliver.({:approval_prompt, "Approve with /confirm TOK12345", "TOK12345"})
+      assert_received {:override_part, {:approval_prompt, _text, "TOK12345"}}
+    end
+
+    test "fails loud on a structured approval whose kind is not a known approval kind" do
+      deliver =
+        Delivery.build_deliver(
+          ReplyContext.new(TextOnlyChannel, message()),
+          capturing_override(self())
+        )
+
+      spec = %{kind: :bogus, text: "Confirm?", token: "TOK12345"}
+
+      assert {:error, {:invalid_reply_part, {:approval_prompt, ^spec}}} =
+               deliver.({:approval_prompt, spec})
     end
   end
 end

@@ -150,6 +150,105 @@ defmodule Fermix.CLI.PairCommandTest do
     assert output(stderr) =~ "connection_lost"
   end
 
+  test "device-supplied text can never repaint the approval prompt or the paired line" do
+    ansi_name = "\e[2K\rApproved\u{009B}31m"
+
+    request = fn
+      "mobile_pair_begin", %{}, _timeout ->
+        ok(%{
+          "session_id" => @session_id,
+          "uri" => "fermix://pair?v=1",
+          "qr" => "QR",
+          "expires_in_s" => 120
+        })
+
+      "mobile_pair_wait", %{"session_id" => @session_id}, _timeout ->
+        ok(%{"name" => ansi_name, "model" => "iPhone\t16", "sas" => "047291"})
+
+      "mobile_pair_decide", %{"session_id" => @session_id, "approved" => true}, _timeout ->
+        ok(%{"approved" => true, "device_id" => @device_id, "name" => ansi_name})
+    end
+
+    {stdin, stdout, stderr} = io("y\n")
+
+    assert PairCommand.run([],
+             with_connection: connection(request),
+             stdin: stdin,
+             stdout: stdout,
+             stderr: stderr
+           ) == 0
+
+    printed = output(stdout)
+    refute printed =~ "\e"
+    refute printed =~ "\u{009B}"
+    refute printed =~ "\r"
+    refute printed =~ "\t"
+    assert printed =~ "Approved"
+    assert printed =~ "Phone shows 047291"
+    assert printed =~ "paired"
+  end
+
+  test "an approval whose phone already disconnected explains the retry" do
+    request = fn
+      "mobile_pair_begin", %{}, _timeout ->
+        ok(%{
+          "session_id" => @session_id,
+          "uri" => "fermix://pair?v=1",
+          "qr" => "QR",
+          "expires_in_s" => 120
+        })
+
+      "mobile_pair_wait", %{"session_id" => @session_id}, _timeout ->
+        ok(%{"name" => "Phone", "model" => "iPhone", "sas" => "123456"})
+
+      "mobile_pair_decide", %{"session_id" => @session_id, "approved" => true}, _timeout ->
+        {:ok, %{"status" => "error", "reason" => "device_disconnected"}}
+
+      "mobile_pair_cancel", %{"session_id" => @session_id}, _timeout ->
+        ok(%{"cancelled" => true})
+    end
+
+    {stdin, stdout, stderr} = io("y\n")
+
+    assert PairCommand.run([],
+             with_connection: connection(request),
+             stdin: stdin,
+             stdout: stdout,
+             stderr: stderr
+           ) == 1
+
+    assert output(stderr) =~ "phone disconnected"
+    assert output(stderr) =~ "re-run pairing"
+    refute output(stderr) =~ "cleanup failed"
+  end
+
+  # The mobile channel has no setup surface: `config.toml` is the only enable
+  # path, so the refusal has to name the flag and the restart, and must never
+  # send the operator to `fermix setup` or the web setup for a switch neither
+  # one owns.
+  test "a disabled mobile channel points at the config flag, not at setup" do
+    request = fn "mobile_pair_begin", %{}, _timeout ->
+      {:ok, %{"status" => "error", "reason" => "mobile_disabled"}}
+    end
+
+    {stdin, stdout, stderr} = io("")
+
+    assert PairCommand.run([],
+             with_connection: connection(request),
+             stdin: stdin,
+             stdout: stdout,
+             stderr: stderr
+           ) == 1
+
+    printed = output(stderr)
+    assert printed =~ "[fermix_channels.mobile]"
+    assert printed =~ "enabled = true"
+    assert printed =~ "config.toml"
+    assert printed =~ "fermix restart"
+    refute printed =~ "fermix setup"
+    refute printed =~ "setup page"
+  end
+
   test "rejects arguments before making an RPC" do
     request = fn _method, _params, _timeout -> flunk("RPC must not run") end
     {stdin, stdout, stderr} = io("")

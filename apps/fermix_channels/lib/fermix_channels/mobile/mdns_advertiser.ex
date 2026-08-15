@@ -26,6 +26,12 @@ defmodule FermixChannels.Mobile.MdnsAdvertiser do
 
   @impl true
   def init(opts) do
+    # `terminate/2` is the only thing that withdraws the service and stops the
+    # owned `mdns_lite` app. A supervisor shuts a child down with an exit signal,
+    # which kills an untrapped GenServer outright and never calls `terminate/2` —
+    # so without this the UDP responder outlives the mobile tree and keeps
+    # answering for `_fermix._tcp` after the channel is gone.
+    Process.flag(:trap_exit, true)
     enabled = Keyword.get(opts, :enabled, false)
     state = build_state(opts, enabled)
     if enabled, do: start_advertising(state), else: {:ok, state}

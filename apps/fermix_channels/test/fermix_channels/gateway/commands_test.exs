@@ -1,6 +1,7 @@
 defmodule FermixChannels.Gateway.CommandsTest do
   use ExUnit.Case, async: false
 
+  alias FermixChannels.CLI
   alias FermixChannels.Gateway.Authorization, as: IngressAuthorization
   alias FermixChannels.Gateway.Authorizer
   alias FermixChannels.Gateway.Commands
@@ -11,6 +12,14 @@ defmodule FermixChannels.Gateway.CommandsTest do
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Sandbox.PathPolicy
+
+  # A slash command never reaches the agent; this records it if one ever does.
+  defmodule NoTurnAgent do
+    def handle_message(message, test_pid) do
+      send(test_pid, {:unexpected_turn, message})
+      :ok
+    end
+  end
 
   defp operator_ctx,
     do: %{authorization: %IngressAuthorization{role: :operator, trust: :operator}}
@@ -263,6 +272,24 @@ defmodule FermixChannels.Gateway.CommandsTest do
 
       FermixTestSupport.SafeRm.rm_rf!(home)
     end
+
+    test "the CLI sync path receives the sandbox confirmation prompt instead of hanging" do
+      {home, root} = sandbox_fixture!()
+
+      assert {:ok, %{response: confirm_text}} =
+               CLI.dispatch_input_sync("/grant path #{root}",
+                 sender: "operator",
+                 session_id: "cli-approval",
+                 timeout_ms: 2_000,
+                 agent: NoTurnAgent,
+                 agent_server: self()
+               )
+
+      assert confirm_text =~ "/confirm "
+      refute_received {:unexpected_turn, _message}
+
+      FermixTestSupport.SafeRm.rm_rf!(home)
+    end
   end
 
   describe "Compact.execute/3" do
@@ -386,6 +413,13 @@ defmodule FermixChannels.Gateway.CommandsTest do
   defp reply_fn(test_pid) do
     fn
       {:text, text} ->
+        send(test_pid, {:compact_reply, text})
+        :ok
+
+      # A channel with no one-tap affordance delivers the prompt text (which
+      # carries the tap-to-copy `/confirm <token>`), the same degrade `Delivery`
+      # applies for a channel without `send_approval/2`.
+      {:approval_prompt, %{text: text}} ->
         send(test_pid, {:compact_reply, text})
         :ok
 

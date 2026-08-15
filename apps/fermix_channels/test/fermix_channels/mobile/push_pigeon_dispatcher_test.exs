@@ -1,6 +1,8 @@
 defmodule FermixChannels.Mobile.Push.PigeonDispatcherTest do
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog, only: [with_log: 1]
+
   alias FermixChannels.Mobile.Push.Config
   alias FermixChannels.Mobile.Push.PigeonDispatcher
   alias Pigeon.APNS.Notification
@@ -102,6 +104,30 @@ defmodule FermixChannels.Mobile.Push.PigeonDispatcherTest do
 
     assert {:error, :push_dispatcher_config_mismatch} =
              PigeonDispatcher.dispatch(server, [], changed)
+  end
+
+  test "a raising push dependency is reported with its exception type and stacktrace" do
+    config = config()
+    server = unique_name()
+
+    start_supervised!(
+      {PigeonDispatcher,
+       name: server,
+       config: config,
+       start_dispatcher: fn _ -> {:ok, make_ref()} end,
+       push: fn _dispatcher, _notifications, _timeout -> raise ArgumentError, "pigeon defect" end,
+       stop_dispatcher: fn _ -> :ok end}
+    )
+
+    notification = %Notification{device_token: "token", topic: "io.tezra.fermix"}
+
+    {result, log} =
+      with_log(fn -> PigeonDispatcher.dispatch(server, [notification], config) end)
+
+    assert {:error, {:push_dependency_exception, :push, ArgumentError, "pigeon defect"}} = result
+    assert log =~ "mobile push dependency :push raised"
+    assert log =~ "ArgumentError"
+    assert log =~ "push_pigeon_dispatcher_test.exs"
   end
 
   defp config do

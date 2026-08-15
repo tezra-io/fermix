@@ -2,7 +2,6 @@ defmodule FermixWebWeb.SetupLive do
   use FermixWebWeb, :live_view
 
   alias Fermix.CLI.Service
-  alias FermixChannels.Mobile.DeviceStore
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Auth.AnthropicLogin
   alias FermixCore.Auth.CodexLogin
@@ -33,7 +32,6 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Setup.AccessToken
-  alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.Doctor
   alias FermixCore.Setup.Wizard
   alias FermixCore.SkillCuration.Delivery, as: SkillCurationDelivery
@@ -111,14 +109,6 @@ defmodule FermixWebWeb.SetupLive do
     :slack_owner_user_id,
     :signal_account,
     :signal_owner_user_id,
-    :mobile_enabled,
-    :mobile_port,
-    :mobile_push_enabled,
-    :mobile_push_team_id,
-    :mobile_push_key_id,
-    :mobile_push_key,
-    :mobile_push_topic,
-    :mobile_push_environment,
     # The ACP listener is a supervised transport child started at boot, so
     # flipping it needs a restart before the socket appears (or disappears).
     :acp_enabled
@@ -321,14 +311,6 @@ defmodule FermixWebWeb.SetupLive do
       |> maybe_put_string(:slack_owner_user_id, params["slack_owner_user_id"])
       |> maybe_put_string(:signal_account, params["signal_account"])
       |> maybe_put_string(:signal_owner_user_id, params["signal_owner_user_id"])
-      |> maybe_put_string(:mobile_enabled, params["mobile_enabled"])
-      |> maybe_put_string(:mobile_port, params["mobile_port"])
-      |> maybe_put_string(:mobile_push_enabled, params["mobile_push_enabled"])
-      |> maybe_put_string(:mobile_push_team_id, params["mobile_push_team_id"])
-      |> maybe_put_string(:mobile_push_key_id, params["mobile_push_key_id"])
-      |> maybe_put_string(:mobile_push_key, params["mobile_push_key"])
-      |> maybe_put_string(:mobile_push_topic, params["mobile_push_topic"])
-      |> maybe_put_string(:mobile_push_environment, params["mobile_push_environment"])
       |> maybe_put_string(:acp_enabled, params["acp_enabled"])
 
     socket =
@@ -870,40 +852,7 @@ defmodule FermixWebWeb.SetupLive do
 
   defp format_config_error({:blank_config_value, key}), do: "#{key} requires a value."
 
-  defp format_config_error({:invalid_mobile_port, value}) do
-    "Mobile listener port #{inspect(value)} is invalid; use a port from 1 to 65535."
-  end
-
-  defp format_config_error({:invalid_mobile_push_environment, value}) do
-    "Mobile push environment #{inspect(value)} must be development or production."
-  end
-
-  defp format_config_error({:invalid_mobile_boolean, key, value}) do
-    "#{key} value #{inspect(value)} must be true or false."
-  end
-
-  defp format_config_error({:invalid_mobile_push, missing}) do
-    labels = Enum.map(missing, &mobile_push_field_label/1)
-    "#{sentence_list(labels)} #{plural_requirement(labels)} required when push is enabled."
-  end
-
   defp format_config_error(reason), do: Redaction.format(reason)
-
-  defp mobile_push_field_label(:team_id), do: "APNs Team ID"
-  defp mobile_push_field_label(:key_id), do: "APNs Key ID"
-  defp mobile_push_field_label(:key), do: "signing key"
-  defp mobile_push_field_label(:topic), do: "topic"
-
-  defp sentence_list([one]), do: one
-  defp sentence_list([one, two]), do: "#{one} and #{two}"
-
-  defp sentence_list(labels) do
-    {last, leading} = List.pop_at(labels, -1)
-    Enum.join(leading, ", ") <> ", and " <> last
-  end
-
-  defp plural_requirement([_one]), do: "is"
-  defp plural_requirement(_labels), do: "are"
 
   # One commit per key — the form carries only the missing required entries,
   # typically one (e.g. a vault path). Any failure halts and surfaces loud.
@@ -1229,7 +1178,6 @@ defmodule FermixWebWeb.SetupLive do
       discord: discord_form(channels),
       slack: slack_form(channels),
       signal: signal_form(channels),
-      mobile: mobile_form(channels),
       acp: acp_form(channels)
     }
   end
@@ -1287,38 +1235,6 @@ defmodule FermixWebWeb.SetupLive do
       account: safe_string(Keyword.get(config, :account)),
       owner_user_id: safe_string(Keyword.get(config, :owner_user_id))
     }
-  end
-
-  defp mobile_form(channels) do
-    config = Keyword.get(channels, :mobile, [])
-    push = Keyword.get(config, :push, [])
-
-    %{
-      enabled: channel_enabled?(config, false),
-      port: Keyword.get(config, :port, 4031),
-      push_enabled: channel_enabled?(push, false),
-      push_team_id: safe_string(Keyword.get(push, :team_id)),
-      push_key_id: safe_string(Keyword.get(push, :key_id)),
-      push_key_set: secret_set?(push, :key),
-      push_topic: safe_string(Keyword.get(push, :topic)),
-      push_environment: safe_string(Keyword.get(push, :environment, "production")),
-      device_summary: mobile_device_summary()
-    }
-  end
-
-  defp mobile_device_summary do
-    case DeviceStore.list(root: ConfigStore.fermix_home()) do
-      {:ok, []} ->
-        "No paired devices. After enabling and restarting, run fermix pair to add an iPhone."
-
-      {:ok, devices} ->
-        count = length(devices)
-
-        "#{count} paired #{if count == 1, do: "device", else: "devices"}. Add another with fermix pair; manage them with fermix devices."
-
-      {:error, reason} ->
-        "Device list unavailable: #{Redaction.format(reason)}. Repair it before running fermix pair."
-    end
   end
 
   # ACP carries no credential and no owner id — the toggle is the whole form.
@@ -2736,7 +2652,6 @@ defmodule FermixWebWeb.SetupLive do
   defp parse_channel_field("discord", _default), do: :discord
   defp parse_channel_field("slack", _default), do: :slack
   defp parse_channel_field("signal", _default), do: :signal
-  defp parse_channel_field("mobile", _default), do: :mobile
   defp parse_channel_field("acp", _default), do: :acp
   defp parse_channel_field(_, default), do: default
 

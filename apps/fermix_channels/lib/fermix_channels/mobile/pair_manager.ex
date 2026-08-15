@@ -12,9 +12,13 @@ defmodule FermixChannels.Mobile.PairManager do
 
   import Bitwise, only: [band: 2, bor: 2]
 
+  alias FermixChannels.Mobile.Identity
+
   @max_ttl_ms 120_000
   @max_failures 5
   @max_wait_ms 120_000
+  @max_text_bytes 128
+  @control_chars ~r/[\x{0000}-\x{001F}\x{007F}-\x{009F}]/u
 
   @type session_id :: String.t()
   @type request :: %{
@@ -31,6 +35,14 @@ defmodule FermixChannels.Mobile.PairManager do
     {name, opts} = Keyword.pop(opts, :name, __MODULE__)
     GenServer.start_link(__MODULE__, opts, name: name)
   end
+
+  @doc "Longest a pairing window can stay open waiting for the owner's decision."
+  @spec max_ttl_ms() :: pos_integer()
+  def max_ttl_ms, do: @max_ttl_ms
+
+  @doc "Largest device-supplied name, model, or app version accepted at intake."
+  @spec max_text_bytes() :: pos_integer()
+  def max_text_bytes, do: @max_text_bytes
 
   @spec open(GenServer.server()) :: {:ok, map()} | {:error, term()}
   def open(server \\ __MODULE__), do: GenServer.call(server, :open)
@@ -76,9 +88,16 @@ defmodule FermixChannels.Mobile.PairManager do
     GenServer.call(server, {:deny, session_id})
   end
 
+  @doc """
+  Close the window this session owns, if it is still open.
+
+  Cancel is the CLI's cleanup call and expiry is the ordinary end of a pairing
+  ceremony, so cancelling an already-closed window succeeds. Use `deny/2` when
+  the absence of a window is itself an error worth reporting.
+  """
   @spec cancel(GenServer.server(), session_id()) :: :ok | {:error, term()}
   def cancel(server, session_id) when is_binary(session_id) and session_id != "" do
-    deny(server, session_id)
+    GenServer.call(server, {:cancel, session_id})
   end
 
   @impl true
@@ -153,6 +172,7 @@ defmodule FermixChannels.Mobile.PairManager do
   def handle_call({:approve, session_id}, _from, state) do
     with {:ok, state, window} <- fetch_window(state, session_id),
          :ok <- require_request(window),
+         :ok <- require_live_socket(window.request),
          {:ok, attrs} <- build_device(window.request, state),
          {:ok, device} <- persist_device(attrs, state) do
       window =
@@ -167,12 +187,16 @@ defmodule FermixChannels.Mobile.PairManager do
   end
 
   def handle_call({:deny, session_id}, _from, state) do
-    with {:ok, state, window} <- fetch_window(state, session_id) do
-      window = reply_waiter(window, :decision_waiter, {:error, :denied}, state)
-      state = close_window(%{state | window: window}, :denied)
-      {:reply, :ok, state}
-    else
+    case fetch_window(state, session_id) do
+      {:ok, state, window} -> deny_window(state, window)
       {:error, reason, state} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:cancel, session_id}, _from, state) do
+    case fetch_window(state, session_id) do
+      {:ok, state, window} -> deny_window(state, window)
+      {:error, :session_not_found, state} -> {:reply, :ok, state}
     end
   end
 
@@ -323,6 +347,11 @@ defmodule FermixChannels.Mobile.PairManager do
     end
   end
 
+  defp deny_window(state, window) do
+    window = reply_waiter(window, :decision_waiter, {:error, :denied}, state)
+    {:reply, :ok, close_window(%{state | window: window}, :denied)}
+  end
+
   defp failure_reply(state, %{failures: failures} = window) when failures >= @max_failures do
     state = %{state | window: window} |> close_window(:rate_limited)
     {:reply, {:error, :rate_limited}, state}
@@ -366,28 +395,55 @@ defmodule FermixChannels.Mobile.PairManager do
   end
 
   defp validate_request(request) do
-    cond do
-      not nonempty?(request.name) ->
-        {:error, {:invalid_pair_request, :name}}
-
-      not nonempty?(request.model) ->
-        {:error, {:invalid_pair_request, :model}}
-
-      not nonempty?(request.app_version) ->
-        {:error, {:invalid_pair_request, :app_version}}
-
-      not (is_binary(request.noise_pk) and byte_size(request.noise_pk) == 32) ->
-        {:error, {:invalid_pair_request, :noise_pk}}
-
-      not valid_sas?(request.sas) ->
-        {:error, {:invalid_pair_request, :sas}}
-
-      not (is_pid(request.socket_pid) and Process.alive?(request.socket_pid)) ->
-        {:error, {:invalid_pair_request, :socket_pid}}
-
-      true ->
-        {:ok, request}
+    with :ok <- validate_text(:name, request.name),
+         :ok <- validate_text(:model, request.model),
+         :ok <- validate_text(:app_version, request.app_version),
+         :ok <- validate_noise_pk(request.noise_pk),
+         :ok <- validate_sas(request.sas),
+         :ok <- validate_socket(request.socket_pid) do
+      {:ok, request}
     end
+  end
+
+  # Device-supplied text is rendered in the operator's SAS approval prompt, so
+  # intake is where it must be proven printable: an ESC or C1 sequence could
+  # repaint the very prompt the ceremony exists to protect. 128 bytes is the one
+  # intake bound; the CLI and the durable store assert the same ceiling
+  # downstream instead of discovering it after the handshake completed.
+  defp validate_text(field, value) when is_binary(value) do
+    cond do
+      not String.valid?(value) -> {:error, {:invalid_pair_request, {field, :invalid_utf8}}}
+      String.trim(value) == "" -> {:error, {:invalid_pair_request, field}}
+      byte_size(value) > @max_text_bytes -> {:error, {:invalid_pair_request, {field, :too_long}}}
+      Regex.match?(@control_chars, value) -> control_character_error(field)
+      true -> :ok
+    end
+  end
+
+  defp validate_text(field, _value), do: {:error, {:invalid_pair_request, field}}
+
+  defp control_character_error(field),
+    do: {:error, {:invalid_pair_request, {field, :control_characters}}}
+
+  defp validate_noise_pk(pk) when is_binary(pk) and byte_size(pk) == 32, do: :ok
+  defp validate_noise_pk(_pk), do: {:error, {:invalid_pair_request, :noise_pk}}
+
+  defp validate_sas(sas) do
+    if valid_sas?(sas), do: :ok, else: {:error, {:invalid_pair_request, :sas}}
+  end
+
+  defp validate_socket(pid) when is_pid(pid) do
+    if Process.alive?(pid), do: :ok, else: {:error, {:invalid_pair_request, :socket_pid}}
+  end
+
+  defp validate_socket(_pid), do: {:error, {:invalid_pair_request, :socket_pid}}
+
+  # The requesting socket must still be alive at the moment of approval: writing
+  # a devices.toml row for a phone that never receives `pair_approved` leaves it
+  # unable to re-pair, because the duplicate-noise-identity guard refuses the
+  # second attempt until the owner revokes the orphan by hand.
+  defp require_live_socket(%{socket_pid: pid}) do
+    if Process.alive?(pid), do: :ok, else: {:error, :device_disconnected}
   end
 
   defp build_device(request, state) do
@@ -477,7 +533,7 @@ defmodule FermixChannels.Mobile.PairManager do
     fn ->
       opts = if is_nil(root), do: [], else: [root: root]
 
-      with {:ok, paths} <- FermixChannels.Mobile.Identity.paths(opts),
+      with {:ok, paths} <- Identity.paths(opts),
            {:ok, state} <- identity_artifact_state(paths) do
         guard_missing_identity(state, device_store, root)
       end
@@ -524,11 +580,9 @@ defmodule FermixChannels.Mobile.PairManager do
   end
 
   defp guarded_store_call(call) do
-    try do
-      call.()
-    catch
-      :exit, reason -> {:error, {:device_store_exit, reason}}
-    end
+    call.()
+  catch
+    :exit, reason -> {:error, {:device_store_exit, reason}}
   end
 
   defp public_identity(identity) do
@@ -561,8 +615,6 @@ defmodule FermixChannels.Mobile.PairManager do
 
   defp field(attrs, atom_key, string_key),
     do: Map.get(attrs, atom_key, Map.get(attrs, string_key))
-
-  defp nonempty?(value), do: is_binary(value) and String.trim(value) != ""
 
   defp valid_sas?(sas) when is_binary(sas) and byte_size(sas) == 6 do
     sas |> String.to_charlist() |> Enum.all?(&(&1 in ?0..?9))

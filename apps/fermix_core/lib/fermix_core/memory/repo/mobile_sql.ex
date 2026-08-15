@@ -306,6 +306,35 @@ defmodule FermixCore.Memory.Repo.MobileSql do
     end)
   end
 
+  @doc """
+  Release a running attempt whose runner died without settling it.
+
+  The claim returns to `accepted` with its attempt counter intact, so the next
+  start — a client resend or the next boot's recovery scan — runs as a new
+  attempt. Fenced on the exact attempt, so a settled or superseded request is
+  never dragged back into flight.
+  """
+  @spec abandon_request(term(), map(), String.t(), non_neg_integer(), DateTime.t()) ::
+          {:ok, map()} | {:error, term()}
+  def abandon_request(conn, selector, client_msg_id, attempt, now) do
+    profile = normalize_profile(selector)
+
+    with {:ok, rows} <-
+           query_all(
+             conn,
+             """
+             UPDATE mobile_client_requests
+             SET status = 'accepted', runner_epoch = NULL, updated_at = ?
+             WHERE agent_id = ? AND owner_id = ? AND profile_id = ? AND client_msg_id = ?
+               AND status = 'running' AND attempt = ?
+             RETURNING *
+             """,
+             [timestamp(now)] ++ profile_params(profile) ++ [client_msg_id, attempt]
+           ) do
+      updated_request_result(rows)
+    end
+  end
+
   @spec append_client_output(
           term(),
           map(),
@@ -521,7 +550,8 @@ defmodule FermixCore.Memory.Repo.MobileSql do
   end
 
   defp insert_claim(conn, request) do
-    with :ok <-
+    with {:ok, attempt} <- prior_attempt_high_water(conn, request),
+         :ok <-
            execute(
              conn,
              """
@@ -530,12 +560,31 @@ defmodule FermixCore.Memory.Repo.MobileSql do
                payload_digest, payload_json, turn_id, result_server_seq, error_json,
                claimed_at, expires_at, updated_at, authenticated_device_id,
                runner_epoch, attempt
-             ) VALUES (?, ?, ?, ?, ?, 'accepted', ?, ?, NULL, NULL, NULL, ?, ?, ?, ?, NULL, 0)
+             ) VALUES (?, ?, ?, ?, ?, 'accepted', ?, ?, NULL, NULL, NULL, ?, ?, ?, ?, NULL, ?)
              """,
-             request_insert_params(request)
+             request_insert_params(request) ++ [attempt]
            ),
          {:ok, row} <- get_request(conn, request, request.client_msg_id) do
       {:ok, {:claimed, row}}
+    end
+  end
+
+  # A claim whose TTL lapsed is deleted and re-inserted, but the previous
+  # generation's output rows survive in the timeline. Resuming the attempt
+  # sequence above their high-water mark keeps the fresh run's output keys
+  # distinct, so its outputs are recorded instead of resolving to stale rows.
+  defp prior_attempt_high_water(conn, request) do
+    with {:ok, [[attempt]]} <-
+           query_all(
+             conn,
+             """
+             SELECT COALESCE(MAX(request_attempt), 0) FROM mobile_timeline
+             WHERE agent_id = ? AND owner_id = ? AND profile_id = ?
+               AND request_client_msg_id = ?
+             """,
+             profile_params(request) ++ [request.client_msg_id]
+           ) do
+      {:ok, attempt}
     end
   end
 

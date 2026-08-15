@@ -310,6 +310,7 @@ defmodule FermixChannels.Gateway.Queue do
           msg,
           "Sorry, I encountered an error processing your message."
         )
+
         # No task ever existed to claim it, so this is the only outcome site for
         # this message — a turn-result consumer must never be left waiting.
         invoke_turn_result_async(Map.get(msg, :turn_result_fn), {:failed, reason})
@@ -395,7 +396,7 @@ defmodule FermixChannels.Gateway.Queue do
         |> run_and_deliver()
 
       {:error, reason} ->
-        if not terminal_error_owner?(turn), do: deliver_checkout_error(turn, reason)
+        deliver_checkout_error(turn, reason)
         # A turn that never reached the runner still ended — and failed. Its
         # channel gets the raw checkout reason, same as any other error path.
         finish_turn(turn, {:failed, reason})
@@ -684,6 +685,10 @@ defmodule FermixChannels.Gateway.Queue do
 
   defp maybe_notify_compacted(_result, _deliver), do: :ok
 
+  # The log line and the `agent_unavailable` event are operator diagnostics and
+  # fire for every channel. Only the canned user-facing text is suppressed for a
+  # channel that owns terminal error rendering (it gets the raw reason through
+  # its turn-result callback instead).
   defp deliver_checkout_error(turn, reason) do
     {text, agent_unavailable?} = checkout_error_reply(reason)
 
@@ -699,8 +704,11 @@ defmodule FermixChannels.Gateway.Queue do
       )
     end
 
-    turn.deliver.({:text, text})
+    deliver_checkout_text(turn, text)
   end
+
+  defp deliver_checkout_text(%{msg: %{terminal_error_owner?: true}}, _text), do: :ok
+  defp deliver_checkout_text(turn, text), do: turn.deliver.({:text, text})
 
   defp checkout_error_reply({:checkout_unavailable, _reason}),
     do: {"I'm restarting — please send your message again in a moment.", true}

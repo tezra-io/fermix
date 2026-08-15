@@ -221,6 +221,12 @@ defmodule FermixCore.Setup.Doctor do
       {:error, :not_running} ->
         %{enabled: true, status: :daemon_not_running}
 
+      # A daemon that answers "error" is reporting a real mobile fault — a
+      # refused trust store, a dormant listener. Quote its reason instead of
+      # labelling the answer malformed, which reads as a protocol bug.
+      {:ok, %{"status" => "error", "reason" => reason}} ->
+        %{enabled: true, status: :error, error: Redaction.format(reason)}
+
       {:ok, other} ->
         %{enabled: true, status: :error, error: "unexpected daemon reply: #{inspect(other)}"}
 
@@ -525,6 +531,15 @@ defmodule FermixCore.Setup.Doctor do
   # control socket; probing here would only add a "no live health probe" warning
   # next to that answer.
   defp enabled_probe_channel?(%{trust: :local_operator}), do: false
+
+  # A `transport: :listener` channel (the mobile companion) is a daemon-owned
+  # socket, not a remote service. Its adapter's health check `GenServer.call`s
+  # named processes that exist only inside the daemon supervision tree, so
+  # probing it from the tree-less `fermix doctor` VM answers `:noproc` and
+  # red-fails a perfectly healthy host with a phantom listener failure.
+  # `Fermix.CLI.Doctor.Checks.mobile/1` owns that answer: it asks the running
+  # daemon over the control socket, which is the only world that can answer it.
+  defp enabled_probe_channel?(%{transport: :listener}), do: false
 
   defp enabled_probe_channel?(%{config_key: key} = channel) when is_atom(key) do
     case FermixCore.Config.channel(key) do

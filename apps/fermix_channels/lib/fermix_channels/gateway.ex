@@ -31,28 +31,10 @@ defmodule FermixChannels.Gateway do
   @spec ingest([Message.t() | map()], keyword()) :: :ok | {:error, term()}
   def ingest(messages, opts) when is_list(messages) do
     channel = Keyword.fetch!(opts, :channel)
-    agent = Keyword.fetch!(opts, :agent)
-    agent_server = Keyword.fetch!(opts, :agent_server)
-    transcription_opts = Keyword.get(opts, :transcription, [])
-    reply_fn_override = Keyword.get(opts, :reply_fn)
-    conversation_store = Keyword.get(opts, :conversation_store, ConversationStore)
-    ingress_context = Keyword.get(opts, :ingress_context)
-    command_context_opts = command_context_opts(opts)
-    ingest_enriched_fn = Keyword.get(opts, :ingest_enriched_fn)
+    deps = ingest_deps(opts)
 
     Enum.reduce_while(messages, :ok, fn message, :ok ->
-      case dispatch_message(
-             channel,
-             message,
-             agent,
-             agent_server,
-             transcription_opts,
-             reply_fn_override,
-             conversation_store,
-             ingress_context,
-             command_context_opts,
-             ingest_enriched_fn
-           ) do
+      case dispatch_message(channel, message, deps) do
         :ok ->
           {:cont, :ok}
 
@@ -60,6 +42,23 @@ defmodule FermixChannels.Gateway do
           {:halt, error}
       end
     end)
+  end
+
+  # The ingest dependency context: every collaborator this batch dispatches
+  # through, resolved once from `opts` and then read by name at each stage.
+  # Threading it as one named value keeps the stages from carrying a positional
+  # argument list nobody can read at the call site.
+  defp ingest_deps(opts) do
+    %{
+      agent: Keyword.fetch!(opts, :agent),
+      agent_server: Keyword.fetch!(opts, :agent_server),
+      transcription_opts: Keyword.get(opts, :transcription, []),
+      reply_fn_override: Keyword.get(opts, :reply_fn),
+      conversation_store: Keyword.get(opts, :conversation_store, ConversationStore),
+      ingress_context: Keyword.get(opts, :ingress_context),
+      command_context_opts: command_context_opts(opts),
+      ingest_enriched_fn: Keyword.get(opts, :ingest_enriched_fn)
+    }
   end
 
   defp build_typing_fn(channel, %Message{reply_target: reply_target}) do
@@ -242,37 +241,16 @@ defmodule FermixChannels.Gateway do
   @download_failed_reply "I couldn't download your attachment to transcribe it. " <>
                            "Please try again."
 
-  defp dispatch_message(
-         channel,
-         message,
-         agent,
-         agent_server,
-         transcription_opts,
-         reply_fn_override,
-         conversation_store,
-         ingress_context,
-         command_context_opts,
-         ingest_enriched_fn
-       ) do
+  defp dispatch_message(channel, message, deps) do
     {normalize_result, normalize_duration_us} =
       Telemetry.timed_us(fn -> normalize_message(message) end)
 
     emit_normalize_telemetry(message, normalize_result, normalize_duration_us)
 
     with {:ok, reply_message} <- normalize_result,
-         {:ok, authorization} <- authorize(reply_message, ingress_context) do
+         {:ok, authorization} <- authorize(reply_message, deps.ingress_context) do
       reply_fn =
-        Delivery.build_deliver(ReplyContext.new(channel, reply_message), reply_fn_override)
-
-      deps = %{
-        agent: agent,
-        agent_server: agent_server,
-        transcription_opts: transcription_opts,
-        conversation_store: conversation_store,
-        ingress_context: ingress_context,
-        command_context_opts: command_context_opts,
-        ingest_enriched_fn: ingest_enriched_fn
-      }
+        Delivery.build_deliver(ReplyContext.new(channel, reply_message), deps.reply_fn_override)
 
       ingest_authorized(channel, reply_message, authorization, reply_fn, deps)
     else

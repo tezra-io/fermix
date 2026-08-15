@@ -6,6 +6,13 @@ defmodule FermixChannels.Mobile.RequestCoordinator do
   started. On restart, accepted work and work owned by an older epoch is
   recovered from its stored authenticated request envelope. Requests already
   running in this epoch are never started twice.
+
+  A started attempt is also fenced on the liveness of whichever process owns its
+  settlement: the acquiring socket process until `Gateway.ingest` returns, then
+  the queue that owns the turn (`handoff/5`). If that owner dies without
+  settling, the attempt is abandoned so a resend — or the next boot's recovery
+  scan — runs a new attempt, instead of a `running` row nobody will ever settle
+  answering every resend as an already-running duplicate.
   """
 
   use GenServer
@@ -17,6 +24,12 @@ defmodule FermixChannels.Mobile.RequestCoordinator do
 
   @default_recovery_limit 200
   @default_max_recovery_batches 100
+
+  # Past the durable claim's own 24h TTL a fence can no longer protect anything:
+  # the request row has expired, so a resend re-claims from scratch. Collecting
+  # those fences is what keeps the table bounded for a long-lived queue owner.
+  @default_fence_ttl_ms 24 * 60 * 60 * 1_000
+  @fence_sweep_ms 15 * 60 * 1_000
 
   @type acquire_state :: :started | :active | :completed | :failed
 
@@ -39,6 +52,18 @@ defmodule FermixChannels.Mobile.RequestCoordinator do
     GenServer.call(server, {:acquire, profile_id, client_msg_id, opts})
   end
 
+  @doc """
+  Move an in-flight attempt's liveness fence to the process that owns settlement
+  once ingest has returned. A handoff for an attempt the fence no longer tracks
+  is a no-op: that claim has already been superseded or released.
+  """
+  @spec handoff(GenServer.server(), String.t(), String.t(), pos_integer(), pid()) :: :ok
+  def handoff(server, profile_id, client_msg_id, attempt, owner)
+      when is_binary(profile_id) and profile_id != "" and is_binary(client_msg_id) and
+             client_msg_id != "" and is_integer(attempt) and attempt > 0 and is_pid(owner) do
+    GenServer.call(server, {:handoff, profile_id, client_msg_id, attempt, owner})
+  end
+
   @impl true
   def init(opts) do
     state = %{
@@ -50,8 +75,13 @@ defmodule FermixChannels.Mobile.RequestCoordinator do
       recovery_launcher: Keyword.get(opts, :recovery_launcher, &launch_recovery/1),
       recover_request: Keyword.get(opts, :recover_request, &EventRouter.recover_request/3),
       recover?: Keyword.get(opts, :recover?, true),
+      fence_ttl_ms: fence_ttl_ms(opts),
+      fences: %{},
+      fence_refs: %{},
       server: self()
     }
+
+    schedule_sweep()
 
     {:ok, state, {:continue, :recover}}
   end
@@ -82,14 +112,119 @@ defmodule FermixChannels.Mobile.RequestCoordinator do
   @impl true
   def handle_call(:epoch, _from, state), do: {:reply, state.epoch, state}
 
-  def handle_call({:acquire, profile_id, client_msg_id, opts}, _from, state) do
+  def handle_call({:acquire, profile_id, client_msg_id, opts}, {caller, _tag}, state) do
     store_opts = Keyword.merge(state.store_opts, opts)
 
     result =
       state.store.start_client_request(profile_id, client_msg_id, state.epoch, store_opts)
 
-    {:reply, result, state}
+    {:reply, result, fence_started(state, {profile_id, client_msg_id}, caller, result)}
   end
+
+  def handle_call({:handoff, profile_id, client_msg_id, attempt, owner}, _from, state) do
+    key = {profile_id, client_msg_id}
+
+    case Map.get(state.fences, key) do
+      %{attempt: ^attempt} ->
+        {:reply, :ok, state |> drop_fence(key) |> put_fence(key, owner, attempt)}
+
+      _superseded ->
+        {:reply, :ok, state}
+    end
+  end
+
+  @impl true
+  def handle_info({:DOWN, ref, :process, _pid, reason}, state) do
+    case Map.pop(state.fence_refs, ref) do
+      {nil, _refs} ->
+        {:noreply, state}
+
+      {key, fence_refs} ->
+        {fence, fences} = Map.pop(state.fences, key)
+        abandon_fenced_attempt(key, fence, reason, state)
+        {:noreply, %{state | fences: fences, fence_refs: fence_refs}}
+    end
+  end
+
+  def handle_info(:sweep, state) do
+    schedule_sweep()
+    {:noreply, sweep_fences(state, System.monotonic_time(:millisecond))}
+  end
+
+  def handle_info(message, state) do
+    Logger.debug("mobile request coordinator ignored message: #{inspect(message)}")
+    {:noreply, state}
+  end
+
+  defp fence_started(state, key, owner, {:ok, {:started, %{attempt: attempt}}}) do
+    state |> drop_fence(key) |> put_fence(key, owner, attempt)
+  end
+
+  defp fence_started(state, _key, _owner, _other_result), do: state
+
+  defp put_fence(state, key, owner, attempt) do
+    ref = Process.monitor(owner)
+
+    fence = %{
+      ref: ref,
+      attempt: attempt,
+      deadline_ms: System.monotonic_time(:millisecond) + state.fence_ttl_ms
+    }
+
+    %{
+      state
+      | fences: Map.put(state.fences, key, fence),
+        fence_refs: Map.put(state.fence_refs, ref, key)
+    }
+  end
+
+  defp drop_fence(state, key) do
+    case Map.pop(state.fences, key) do
+      {nil, _fences} ->
+        state
+
+      {%{ref: ref}, fences} ->
+        Process.demonitor(ref, [:flush])
+        %{state | fences: fences, fence_refs: Map.delete(state.fence_refs, ref)}
+    end
+  end
+
+  defp sweep_fences(state, now_ms) do
+    state.fences
+    |> Enum.filter(fn {_key, fence} -> fence.deadline_ms <= now_ms end)
+    |> Enum.reduce(state, fn {key, _fence}, acc -> drop_fence(acc, key) end)
+  end
+
+  defp abandon_fenced_attempt({profile_id, client_msg_id}, %{attempt: attempt}, reason, state) do
+    case state.store.abandon_client_request(
+           profile_id,
+           client_msg_id,
+           attempt,
+           state.store_opts
+         ) do
+      {:ok, _request} ->
+        Logger.warning(
+          "mobile request runner for #{inspect({profile_id, client_msg_id})} died " <>
+            "(#{inspect(reason)}); attempt #{attempt} released for a new attempt"
+        )
+
+      # The owner settled the attempt before it exited, which is the ordinary
+      # end of a turn: there is nothing left to fence.
+      {:error, :stale_attempt} ->
+        Logger.debug(
+          "mobile request #{inspect({profile_id, client_msg_id})} attempt #{attempt} " <>
+            "was already settled when its runner exited"
+        )
+
+      {:error, abandon_reason} ->
+        Logger.error(
+          "mobile request attempt could not be released for " <>
+            "#{inspect({profile_id, client_msg_id})}: #{inspect(abandon_reason)}"
+        )
+    end
+  end
+
+  defp schedule_sweep, do: Process.send_after(self(), :sweep, @fence_sweep_ms)
 
   defp recover(state) do
     recover_batches(state, 1)
@@ -109,14 +244,13 @@ defmodule FermixChannels.Mobile.RequestCoordinator do
           do: recover_batches(state, batch + 1),
           else: :ok
 
-      {:error, reason} -> Logger.error("mobile request recovery scan failed: #{inspect(reason)}")
+      {:error, reason} ->
+        Logger.error("mobile request recovery scan failed: #{inspect(reason)}")
     end
   end
 
   defp recover_batches(state, _batch) do
-    Logger.error(
-      "mobile request recovery exceeded #{state.max_recovery_batches} bounded batches"
-    )
+    Logger.error("mobile request recovery exceeded #{state.max_recovery_batches} bounded batches")
   end
 
   defp recover_row(row, state) do
@@ -181,10 +315,20 @@ defmodule FermixChannels.Mobile.RequestCoordinator do
     end
   end
 
+  defp fence_ttl_ms(opts) do
+    case Keyword.get(opts, :fence_ttl_ms, @default_fence_ttl_ms) do
+      ttl when is_integer(ttl) and ttl >= 0 -> ttl
+      invalid -> raise ArgumentError, "fence_ttl_ms must be non-negative, got #{inspect(invalid)}"
+    end
+  end
+
   defp max_recovery_batches(opts) do
     case Keyword.get(opts, :max_recovery_batches, @default_max_recovery_batches) do
-      batches when is_integer(batches) and batches > 0 -> batches
-      invalid -> raise ArgumentError, "max_recovery_batches must be positive, got #{inspect(invalid)}"
+      batches when is_integer(batches) and batches > 0 ->
+        batches
+
+      invalid ->
+        raise ArgumentError, "max_recovery_batches must be positive, got #{inspect(invalid)}"
     end
   end
 

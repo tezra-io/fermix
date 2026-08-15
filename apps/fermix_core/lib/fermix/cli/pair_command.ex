@@ -121,7 +121,7 @@ defmodule Fermix.CLI.PairCommand do
 
   defp prompt_approval(pairing, io) do
     prompt =
-      "#{pairing["model"]} '#{pairing["name"]}' requests pairing. " <>
+      "#{safe_field(pairing["model"])} '#{safe_field(pairing["name"])}' requests pairing. " <>
         "Phone shows #{pairing["sas"]}. Approve? [y/N] "
 
     IO.write(io.stdout, prompt)
@@ -142,7 +142,7 @@ defmodule Fermix.CLI.PairCommand do
     with true <- Map.get(result, "approved") == true,
          {:ok, device_id} <- valid_device_id(Map.get(result, "device_id")),
          name when is_binary(name) and name != "" <- Map.get(result, "name") do
-      IO.puts(io.stdout, "\npaired #{name} (#{device_id})")
+      IO.puts(io.stdout, "\npaired #{safe_field(name)} (#{device_id})")
       :ok
     else
       _ -> {:error, :invalid_pairing_approval}
@@ -206,7 +206,29 @@ defmodule Fermix.CLI.PairCommand do
   defp valid_device_id(_value), do: :error
   defp valid_text?(value), do: is_binary(value) and value != "" and byte_size(value) <= 128
 
+  # The daemon refuses control characters at pairing intake, so this is the
+  # second half of that guard: whatever reaches a terminal here is printable,
+  # and an ANSI-laden device name can never redraw the approval prompt.
+  defp safe_field(value) do
+    value
+    |> String.replace(~r/[\x{0000}-\x{001F}\x{007F}-\x{009F}]/u, " ")
+    |> String.slice(0, 128)
+  end
+
+  # `:device_disconnected` is the daemon's approval-time liveness refusal; the
+  # ceremony has to start over because the phone never learned its device id.
+  defp format_reason("device_disconnected"), do: "phone disconnected — re-run pairing"
+
+  # The mobile channel is feature-flagged and has no setup surface — neither
+  # `fermix setup` nor the web setup can turn it on — so the refusal names the
+  # one thing that does.
+  defp format_reason("mobile_disabled"), do: mobile_disabled_message()
   defp format_reason(reason) when is_binary(reason), do: reason
   defp format_reason(reason) when is_atom(reason), do: Atom.to_string(reason)
   defp format_reason(reason), do: inspect(reason)
+
+  defp mobile_disabled_message do
+    "the mobile channel is off — set `enabled = true` under `[fermix_channels.mobile]` " <>
+      "in config.toml, then run `fermix restart`"
+  end
 end

@@ -13,7 +13,6 @@ defmodule FermixWebWeb.SetupLive.Components do
     {:discord, "Discord"},
     {:slack, "Slack"},
     {:signal, "Signal"},
-    {:mobile, "Mobile (iOS)"},
     {:acp, "ACP (editors & agent clients)"}
   ]
 
@@ -2836,27 +2835,6 @@ defmodule FermixWebWeb.SetupLive.Components do
       checked={@field.checked}
       hint={@field.hint}
     />
-    <.number_field
-      :if={@field.kind == :number}
-      label={@field.label}
-      name={@field.name}
-      value={@field.value}
-      min={@field.min}
-      max={@field.max}
-    />
-    <.select_field
-      :if={@field.kind == :select}
-      label={@field.label}
-      name={@field.name}
-      value={@field.value}
-      options={@field.options}
-    />
-    <div
-      :if={@field.kind == :note}
-      class="sm:col-span-2 rounded-field border border-base-300 bg-base-200/60 p-3 text-xs leading-5 text-base-content/65"
-    >
-      <span class="font-medium text-base-content/80">{@field.label}.</span> {@field.text}
-    </div>
     """
   end
 
@@ -3269,35 +3247,6 @@ defmodule FermixWebWeb.SetupLive.Components do
     ]
   end
 
-  defp channel_fields(:mobile, form) do
-    [
-      toggle_field(
-        "Enable iOS companion",
-        "mobile_enabled",
-        form.enabled,
-        "Starts the dedicated encrypted mobile listener after Fermix restarts."
-      ),
-      number_channel_field("Listener port", "mobile_port", form.port, "1", "65535"),
-      toggle_field(
-        "Enable direct APNs push",
-        "mobile_push_enabled",
-        form.push_enabled,
-        "Requires the Apple push credentials below; leave off for socket-only delivery."
-      ),
-      select_channel_field(
-        "APNs environment",
-        "mobile_push_environment",
-        form.push_environment,
-        ~w(development production)
-      ),
-      text_field("APNs Team ID", "mobile_push_team_id", form.push_team_id),
-      text_field("APNs Key ID", "mobile_push_key_id", form.push_key_id),
-      secret_field("APNs signing key (.p8)", "mobile_push_key", form.push_key_set),
-      text_field("App bundle ID (topic)", "mobile_push_topic", form.push_topic),
-      note_field("Pairing and devices", form.device_summary)
-    ]
-  end
-
   defp channel_fields(:acp, form) do
     [
       toggle_field(
@@ -3320,29 +3269,6 @@ defmodule FermixWebWeb.SetupLive.Components do
   defp toggle_field(label, key, checked, hint) do
     %{kind: :toggle, label: label, name: "channels_form[#{key}]", checked: checked, hint: hint}
   end
-
-  defp number_channel_field(label, key, value, min, max) do
-    %{
-      kind: :number,
-      label: label,
-      name: "channels_form[#{key}]",
-      value: value,
-      min: min,
-      max: max
-    }
-  end
-
-  defp select_channel_field(label, key, value, options) do
-    %{
-      kind: :select,
-      label: label,
-      name: "channels_form[#{key}]",
-      value: value,
-      options: options
-    }
-  end
-
-  defp note_field(label, text), do: %{kind: :note, label: label, text: text}
 
   defp current_step_number(tab_id, tabs) do
     case Enum.find_index(tabs, &(&1.id == tab_id)) do

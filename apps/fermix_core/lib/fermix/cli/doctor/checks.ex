@@ -574,11 +574,22 @@ defmodule Fermix.CLI.Doctor.Checks do
           opts
         )
 
+      :never_paired ->
+        warn(
+          "mobile companion",
+          "enabled but never paired — run `fermix pair` to create the gateway identity"
+        )
+
       {:error, detail} ->
         fail("mobile companion", detail)
     end
   end
 
+  # Design §0: an enabled install with NO identity at all is the normal dormant
+  # state — `fermix pair` is what creates the gateway key and TLS material, and
+  # the channel is only ever enabled by hand-editing config.toml. Only a
+  # partial, insecure, or unreadable identity is a failure, because those are
+  # refused rather than regenerated and the operator has to repair them by hand.
   defp mobile_identity_files(mobile_dir) do
     reports = Enum.map(~w(gateway_key tls.crt tls.key), &mobile_identity_file(mobile_dir, &1))
     missing = for {:missing, name} <- reports, do: name
@@ -586,8 +597,13 @@ defmodule Fermix.CLI.Doctor.Checks do
     errors = for {:error, name, reason} <- reports, do: "#{name}=#{inspect(reason)}"
 
     cond do
+      length(missing) == length(reports) ->
+        :never_paired
+
       missing != [] ->
-        {:error, "missing #{Enum.join(missing, ", ")} — run `fermix pair`"}
+        {:error,
+         "incomplete mobile identity, missing #{Enum.join(missing, ", ")} — Fermix never " <>
+           "regenerates identity files; remove the rest and run `fermix pair`"}
 
       insecure != [] ->
         {:error, "mobile identity files must be 0600: #{Enum.join(insecure, ", ")}"}

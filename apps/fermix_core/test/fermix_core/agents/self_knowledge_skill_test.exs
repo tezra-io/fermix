@@ -83,6 +83,38 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     end
   end
 
+  # The channel is feature-flagged with no setup surface, so the runtime
+  # self-reference must name the one enable path (the config flag) and must not
+  # point an owner at surfaces that no longer exist. The refutations name
+  # concrete withdrawn artifacts rather than a phrasing allowlist, so a true
+  # sentence that happens to mention setup (e.g. `--migrate-secrets`) stays
+  # legal while a re-added mobile step or flag fails here.
+  test "documents mobile as a config-flag-only channel, never a setup step" do
+    reference = File.read!(mobile_reference_path())
+    paragraph = mobile_paragraph()
+
+    for text <- [reference, paragraph] do
+      assert text =~ "[fermix_channels.mobile]"
+      assert text =~ "enabled = true"
+      refute text =~ "Channels page"
+      refute text =~ "Channels tab"
+      refute text =~ "--mobile-enabled"
+      refute text =~ "--mobile-push"
+    end
+
+    assert reference =~ "config.toml"
+    assert reference =~ "restart"
+    assert reference =~ "no setup surface"
+  end
+
+  defp mobile_paragraph do
+    self_knowledge_path()
+    |> File.read!()
+    |> String.split("\n\n")
+    |> Enum.filter(&String.contains?(&1, "Mobile companion"))
+    |> Enum.join("\n\n")
+  end
+
   defp acp_paragraph do
     self_knowledge_path()
     |> File.read!()

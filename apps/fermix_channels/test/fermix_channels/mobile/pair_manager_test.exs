@@ -124,6 +124,76 @@ defmodule FermixChannels.Mobile.PairManagerTest do
     assert :none = PairManager.current(ctx.manager)
   end
 
+  test "device text that could rewrite the operator's approval prompt never enters the window",
+       ctx do
+    assert {:ok, _window} = PairManager.open(ctx.manager)
+
+    assert {:error, {:invalid_pair_request, {:name, :control_characters}}} =
+             submit(ctx, %{name: "\e[2K\rApproved: iPhone 16 Pro"})
+
+    # U+009B is the single-byte C1 introducer; terminals honour it like ESC-[.
+    assert {:error, {:invalid_pair_request, {:model, :control_characters}}} =
+             submit(ctx, %{model: "iPhone\u{009B}2K"})
+
+    assert {:error, {:invalid_pair_request, {:app_version, :invalid_utf8}}} =
+             submit(ctx, %{app_version: <<0xFF, 0xFE>>})
+
+    assert {:ok, %{request: nil}} = PairManager.current(ctx.manager)
+  end
+
+  test "one intake bound rejects oversized device text before the owner is prompted", ctx do
+    assert {:ok, _window} = PairManager.open(ctx.manager)
+
+    assert {:error, {:invalid_pair_request, {:name, :too_long}}} =
+             submit(ctx, %{name: String.duplicate("a", 129)})
+
+    assert {:error, {:invalid_pair_request, {:model, :too_long}}} =
+             submit(ctx, %{model: String.duplicate("b", 129)})
+
+    assert {:error, {:invalid_pair_request, {:app_version, :too_long}}} =
+             submit(ctx, %{app_version: String.duplicate("c", 129)})
+
+    assert {:ok, request} = submit(ctx, %{name: String.duplicate("a", 128)})
+    assert byte_size(request.name) == 128
+  end
+
+  test "approving after the phone disconnects refuses instead of writing an orphan device", ctx do
+    assert {:ok, _window} = PairManager.open(ctx.manager)
+
+    socket = spawn(fn -> receive do: (:stop -> :ok) end)
+    monitor = Process.monitor(socket)
+
+    assert {:ok, _request} = submit(ctx, %{socket_pid: socket})
+
+    send(socket, :stop)
+    assert_receive {:DOWN, ^monitor, :process, ^socket, _reason}
+
+    assert {:error, :device_disconnected} = PairManager.approve(ctx.manager, "pair-session")
+    refute_receive {:device_persisted, _device}
+
+    # The window stays open so the CLI's own cleanup closes it exactly once.
+    assert {:ok, %{session_id: "pair-session"}} = PairManager.current(ctx.manager)
+  end
+
+  test "cancelling an expired window is a clean no-op while deny still fails loud", ctx do
+    assert {:ok, window} = PairManager.open(ctx.manager)
+    Agent.update(ctx.clock, fn _ -> window.expires_at_ms end)
+
+    assert :ok = PairManager.cancel(ctx.manager, "pair-session")
+    assert_receive {:pair_telemetry, :expired, 120_000_000}
+    assert {:error, :session_not_found} = PairManager.deny(ctx.manager, "pair-session")
+  end
+
+  test "cancelling a live window is terminal for the waiting device", ctx do
+    assert {:ok, _window} = PairManager.open(ctx.manager)
+    assert {:ok, _request} = submit(ctx, %{})
+
+    assert :ok = PairManager.cancel(ctx.manager, "pair-session")
+    assert_receive {:mobile_pair_decision, "pair-session", {:error, :denied}}
+    assert_receive {:pair_telemetry, :denied, 0}
+    assert :none = PairManager.current(ctx.manager)
+  end
+
   test "the fifth failed handshake closes the window with no persistent lockout", ctx do
     assert {:ok, _window} = PairManager.open(ctx.manager)
 
@@ -185,10 +255,7 @@ defmodule FermixChannels.Mobile.PairManagerTest do
     manager =
       start_supervised!(
         {PairManager,
-         name: nil,
-         root: root,
-         device_store: nil,
-         activate_listener: fn _identity -> :ok end},
+         name: nil, root: root, device_store: nil, activate_listener: fn _identity -> :ok end},
         id: make_ref()
       )
 
@@ -231,15 +298,22 @@ defmodule FermixChannels.Mobile.PairManagerTest do
     assert {:error, :enoent} = File.lstat(paths.tls_cert)
   end
 
-  defp request_attrs do
-    %{
-      name: "Sujeeth's iPhone",
-      model: "iPhone17,1",
-      app_version: "1.0",
-      noise_pk: <<4::256>>,
-      sas: "047291",
-      socket_pid: self()
-    }
+  defp submit(ctx, overrides) do
+    PairManager.submit_request(ctx.manager, "pair-session", request_attrs(overrides))
+  end
+
+  defp request_attrs(overrides \\ %{}) do
+    Map.merge(
+      %{
+        name: "Sujeeth's iPhone",
+        model: "iPhone17,1",
+        app_version: "1.0",
+        noise_pk: <<4::256>>,
+        sas: "047291",
+        socket_pid: self()
+      },
+      overrides
+    )
   end
 
   defp assert_waiter_registered(manager, key, attempts \\ 50)

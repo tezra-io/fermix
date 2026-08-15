@@ -73,20 +73,21 @@ defmodule FermixChannels.Gateway.Commands.SkillsTest do
   defp dispatch(content, ctx, opts \\ []) do
     test_pid = self()
 
-    context = %{
-      conversation_key: {"telegram", "chat-1", :root},
-      authorization: authorization(Keyword.get(opts, :role, :operator)),
-      skill_curation_opts:
-        [
-          repo: ctx.repo,
-          skills_root: ctx.skills_root,
-          main_agent_server: nil,
-          adapter: Keyword.get(opts, :adapter, DraftStub),
-          configured_owners: %{"telegram" => "owner-1"},
-          jobs_config: []
-        ] ++ registry_opt(opts)
-    }
-    |> maybe_put_defer(Keyword.get(opts, :defer_command_fn))
+    context =
+      %{
+        conversation_key: {"telegram", "chat-1", :root},
+        authorization: authorization(Keyword.get(opts, :role, :operator)),
+        skill_curation_opts:
+          [
+            repo: ctx.repo,
+            skills_root: ctx.skills_root,
+            main_agent_server: nil,
+            adapter: Keyword.get(opts, :adapter, DraftStub),
+            configured_owners: %{"telegram" => "owner-1"},
+            jobs_config: []
+          ] ++ registry_opt(opts)
+      }
+      |> maybe_put_defer(Keyword.get(opts, :defer_command_fn))
 
     message = message(content, opts)
     reply_fn = fn {:text, text} -> send(test_pid, {:skills_reply, text}) end

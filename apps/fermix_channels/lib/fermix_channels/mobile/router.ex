@@ -10,9 +10,13 @@ defmodule FermixChannels.Mobile.Router do
 
   import Plug.Conn
 
+  alias FermixChannels.Mobile.PairManager
   alias FermixChannels.Mobile.SocketHandler
 
-  @socket_options [compress: false, max_frame_size: 65_535, timeout: 50_000]
+  # The upgrade happens before the prelude picks paired or pairing mode, so one
+  # idle timeout covers both. It must outlive the owner-approval window, or the
+  # transport closes a pairing socket while the owner is still deciding.
+  @idle_grace_ms 30_000
 
   @impl true
   @spec init(keyword()) :: keyword()
@@ -28,13 +32,21 @@ defmodule FermixChannels.Mobile.Router do
 
   def call(%Plug.Conn{method: "GET", path_info: ["ws"]} = conn, opts) do
     if websocket_upgrade?(conn) do
-      WebSockAdapter.upgrade(conn, SocketHandler, Map.new(opts), @socket_options)
+      WebSockAdapter.upgrade(conn, SocketHandler, Map.new(opts), socket_options())
     else
       conn |> put_resp_header("upgrade", "websocket") |> send_resp(426, "upgrade required")
     end
   end
 
   def call(%Plug.Conn{} = conn, _opts), do: send_resp(conn, 404, "not found")
+
+  defp socket_options do
+    [
+      compress: false,
+      max_frame_size: 65_535,
+      timeout: PairManager.max_ttl_ms() + @idle_grace_ms
+    ]
+  end
 
   defp websocket_upgrade?(conn) do
     upgrade =

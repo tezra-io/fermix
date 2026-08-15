@@ -44,6 +44,11 @@ defmodule FermixChannels.Mobile.DeviceStore do
     GenServer.start_link(__MODULE__, opts, name: name)
   end
 
+  @doc "Absolute path of the durable trust store for one Fermix home."
+  @spec store_path(String.t()) :: String.t()
+  def store_path(root) when is_binary(root) and root != "",
+    do: Path.join(mobile_dir(root), "devices.toml")
+
   @doc "List all paired devices in stable device-id order."
   @spec list() :: result([Device.t()])
   def list, do: list(__MODULE__)
@@ -358,6 +363,9 @@ defmodule FermixChannels.Mobile.DeviceStore do
 
   defp validate_device_id(_id), do: {:error, {:invalid_device, :device_id, :invalid_uuid}}
 
+  # Intake decides how long device-supplied text may be: `PairManager` bounds
+  # name/model/app_version at 128 bytes before anything is persisted. This is
+  # the wider durable-store assertion, which also covers `push_token`.
   defp validate_text(_field, value) when is_binary(value) and byte_size(value) in 1..255, do: :ok
   defp validate_text(field, _value), do: {:error, {:invalid_device, field, :invalid_text}}
 
@@ -556,7 +564,6 @@ defmodule FermixChannels.Mobile.DeviceStore do
   end
 
   defp mobile_dir(root), do: Path.join(root, "mobile")
-  defp store_path(root), do: Path.join(mobile_dir(root), "devices.toml")
 
   defp temp_path(path) do
     suffix = System.unique_integer([:positive, :monotonic])

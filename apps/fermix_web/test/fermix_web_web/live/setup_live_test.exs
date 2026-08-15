@@ -14,7 +14,6 @@ defmodule FermixWebWeb.SetupLiveTest do
   alias FermixCore.Plugins.Status, as: PluginStatus
   alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Setup.ConfigStore
-  alias FermixChannels.Mobile.DeviceStore
   alias FermixTestSupport.DistFetcherStub
   alias FermixTestSupport.DistFixtures
   alias FermixTestSupport.DistVerifierStub
@@ -1587,7 +1586,7 @@ defmodule FermixWebWeb.SetupLiveTest do
     test "renders a selectable card per channel with status", %{conn: conn} do
       {:ok, _view, html} = live(conn, "/setup?tab=channels")
 
-      for title <- ["Telegram", "WhatsApp", "Discord", "Slack", "Signal", "Mobile"] do
+      for title <- ["Telegram", "WhatsApp", "Discord", "Slack", "Signal", "ACP"] do
         assert html =~ title
       end
 
@@ -1631,23 +1630,11 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert Keyword.get(Application.get_env(:fermix_channels, :acp, []), :enabled) == true
     end
 
-    test "mobile renders listener and nested APNs fields without exposing a stored key", %{
-      conn: conn,
-      tmp_home: tmp_home
-    } do
-      assert {:ok, _device} =
-               DeviceStore.add(
-                 %{
-                   device_id: "018f3f4c-7d9a-7a2b-8c1d-2e3f4a5b6c7d",
-                   name: "Test iPhone",
-                   model: "iPhone",
-                   noise_pk: :binary.copy(<<1>>, 32),
-                   created_at: DateTime.utc_now(),
-                   apns_key_salt: :binary.copy(<<2>>, 32)
-                 },
-                 root: tmp_home
-               )
-
+    # The mobile channel ships feature-flagged with NO setup surface: hand-editing
+    # `[fermix_channels.mobile] enabled = true` in config.toml is the only enable
+    # path, so the Channels page must not offer the channel at all — including on
+    # an install where the operator already hand-enabled it.
+    test "the channels page offers no mobile tab and no mobile field", %{conn: conn} do
       Application.put_env(:fermix_channels, :mobile,
         enabled: true,
         mode: :listener,
@@ -1662,79 +1649,94 @@ defmodule FermixWebWeb.SetupLiveTest do
         ]
       )
 
+      {:ok, view, html} = live(conn, "/setup?tab=channels")
+
+      refute html =~ ~s(phx-value-channel="mobile")
+      refute html =~ "Mobile (iOS)"
+      refute html =~ "channels_form[mobile_"
+      refute html =~ "APNs"
+      refute html =~ "private-key-must-not-render"
+      refute html =~ "fermix pair"
+
+      # No selector click can reach it either — the tab simply does not exist.
+      assert view
+             |> element(~s(button[phx-click="select_channel"][phx-value-channel="mobile"]))
+             |> has_element?() == false
+    end
+
+    test "mobile params injected into a save POST are ignored", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup?tab=channels")
+
+      html =
+        render_submit(view, "save_channels", %{
+          "channels_form" => %{
+            "telegram_owner_user_id" => "owner-1",
+            "mobile_enabled" => "true",
+            "mobile_port" => "4040",
+            "mobile_push_enabled" => "true",
+            "mobile_push_team_id" => "ABCDE12345",
+            "mobile_push_key_id" => "KEY987",
+            "mobile_push_key" => "private-key-must-not-persist",
+            "mobile_push_topic" => "io.tezra.fermix.app",
+            "mobile_push_environment" => "development"
+          }
+        })
+
+      assert html =~ "Channels saved."
+
+      mobile = Application.get_env(:fermix_channels, :mobile, [])
+      assert Keyword.get(mobile, :enabled) == false
+      assert Keyword.get(mobile, :port) == 4031
+
+      contents = File.read!(ConfigStore.path())
+      refute contents =~ "private-key-must-not-persist"
+      refute contents =~ "ABCDE12345"
+      refute contents =~ "io.tezra.fermix.app"
+    end
+
+    # Web setup round-trips the whole live config to disk on every save. A
+    # section the form no longer owns is only safe if the pipeline preserves it —
+    # otherwise saving Telegram would silently un-enable a hand-enabled channel.
+    test "a hand-enabled mobile section survives a channels save", %{conn: conn} do
+      Application.put_env(:fermix_channels, :mobile,
+        enabled: true,
+        mode: :listener,
+        port: 4040,
+        bind: "127.0.0.1",
+        advertise_mdns: false,
+        push: [
+          enabled: true,
+          team_id: "ABCDE12345",
+          key_id: "KEY987",
+          topic: "io.tezra.fermix.app",
+          environment: "development"
+        ]
+      )
+
       {:ok, view, _html} = live(conn, "/setup?tab=channels")
 
       html =
         view
-        |> element(~s(button[phx-click="select_channel"][phx-value-channel="mobile"]))
-        |> render_click()
-
-      assert html =~ ~s(name="channels_form[mobile_enabled]")
-      assert html =~ ~s(name="channels_form[mobile_port]")
-      assert html =~ ~s(name="channels_form[mobile_push_enabled]")
-      assert html =~ ~s(name="channels_form[mobile_push_team_id]")
-      assert html =~ ~s(name="channels_form[mobile_push_key_id]")
-      assert html =~ ~s(name="channels_form[mobile_push_key]")
-      assert html =~ ~s(name="channels_form[mobile_push_topic]")
-      assert html =~ ~s(name="channels_form[mobile_push_environment]")
-      assert html =~ "stored - leave blank to keep or paste to replace"
-      assert html =~ "fermix pair"
-      assert html =~ "1 paired device"
-      refute html =~ "private-key-must-not-render"
-    end
-
-    test "mobile settings persist and require APNs credentials only when push is enabled", %{
-      conn: conn
-    } do
-      {:ok, view, _html} = live(conn, "/setup?tab=channels")
-
-      view
-      |> element(~s(button[phx-click="select_channel"][phx-value-channel="mobile"]))
-      |> render_click()
-
-      invalid_html =
-        view
         |> form("form[phx-submit=\"save_channels\"]",
-          channels_form: %{
-            mobile_enabled: "true",
-            mobile_port: "4031",
-            mobile_push_enabled: "true",
-            mobile_push_team_id: "ABCDE12345",
-            mobile_push_environment: "production"
-          }
+          channels_form: %{telegram_owner_user_id: "owner-1"}
         )
         |> render_submit()
 
-      assert invalid_html =~ "APNs Key ID, signing key, and topic are required"
+      assert html =~ "Channels saved."
 
-      valid_html =
-        view
-        |> form("form[phx-submit=\"save_channels\"]",
-          channels_form: %{
-            mobile_enabled: "true",
-            mobile_port: "4040",
-            mobile_push_enabled: "true",
-            mobile_push_team_id: "ABCDE12345",
-            mobile_push_key_id: "KEY987",
-            mobile_push_key: "private-key-must-not-persist",
-            mobile_push_topic: "io.tezra.fermix.app",
-            mobile_push_environment: "development"
-          }
-        )
-        |> render_submit()
+      assert {:ok, saved} = ConfigStore.load_runtime_config()
+      mobile = Keyword.fetch!(saved.fermix_channels, :mobile)
+      push = Keyword.fetch!(mobile, :push)
 
-      assert valid_html =~ "Channels saved."
-      assert valid_html =~ "Apply &amp; restart"
-
-      mobile = Application.get_env(:fermix_channels, :mobile, [])
-      push = Keyword.get(mobile, :push, [])
       assert Keyword.get(mobile, :enabled) == true
       assert Keyword.get(mobile, :port) == 4040
+      assert Keyword.get(mobile, :bind) == "127.0.0.1"
+      assert Keyword.get(mobile, :advertise_mdns) == false
       assert Keyword.get(push, :enabled) == true
+      assert Keyword.get(push, :team_id) == "ABCDE12345"
+      assert Keyword.get(push, :key_id) == "KEY987"
+      assert Keyword.get(push, :topic) == "io.tezra.fermix.app"
       assert Keyword.get(push, :environment) == "development"
-
-      contents = File.read!(ConfigStore.path())
-      refute contents =~ "private-key-must-not-persist"
     end
 
     test "saving a channel keeps that channel selected, not bounced to telegram", %{conn: conn} do
@@ -3811,26 +3813,6 @@ defmodule FermixWebWeb.SetupLiveTest do
   defp restore_env(app, key, {:ok, value}), do: Application.put_env(app, key, value)
   defp restore_env(app, key, nil), do: Application.delete_env(app, key)
   defp restore_env(app, key, value), do: Application.put_env(app, key, value)
-
-  # A refused save writes nothing, so the file may not exist at all.
-  defp squish(html), do: html |> String.replace(~r/\s+/, " ") |> String.trim()
-
-  # §13.2: the captured position must not be in the page at any point. Asserted
-  # as absence, so a future prefill or hidden field fails here rather than
-  # shipping the operator's coordinates into HTML.
-  defp assert_no_coordinates(html) do
-    refute html =~ "40.7233"
-    refute html =~ "40.72330491"
-    refute html =~ "74.003"
-    refute html =~ "74.00300277"
-  end
-
-  defp config_contents(tmp_home) do
-    case File.read(Path.join(tmp_home, "config.toml")) do
-      {:ok, contents} -> contents
-      {:error, :enoent} -> ""
-    end
-  end
 
   # Hermetic harness detection map (the `:harness_detector` seam shape) — no real
   # `codex`/`claude --version` subprocess is ever spawned in these tests.

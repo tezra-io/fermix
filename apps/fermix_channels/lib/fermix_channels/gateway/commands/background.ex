@@ -3,6 +3,8 @@ defmodule FermixChannels.Gateway.Commands.Background do
 
   @behaviour FermixChannels.Gateway.Command
 
+  require Logger
+
   alias FermixChannels.Gateway.Authorization, as: IngressAuthorization
   alias FermixChannels.Gateway.Commands.Authorization
   alias FermixChannels.Gateway.WorkRegistry
@@ -69,7 +71,7 @@ defmodule FermixChannels.Gateway.Commands.Background do
                "/tasks to check, /stop to cancel."}
           )
 
-        release_runner(gate, ack, finish_command)
+        release_runner(gate, ack)
 
       {:error, {:max_running_work, max}} ->
         reply_fn.(
@@ -90,10 +92,8 @@ defmodule FermixChannels.Gateway.Commands.Background do
   # result back to this conversation through the captured reply context.
   defp runner(prompt, source_trust, reply_fn, background_run, finish_command, gate) do
     fn work_id ->
-      case await_runner_release(gate) do
-        :run -> run_background(work_id, prompt, source_trust, reply_fn, background_run, finish_command)
-        {:abort, reason} -> abort_background(reason, finish_command)
-      end
+      await_ack_ordering(gate)
+      run_background(work_id, prompt, source_trust, reply_fn, background_run, finish_command)
     end
   end
 
@@ -104,35 +104,50 @@ defmodule FermixChannels.Gateway.Commands.Background do
     finish(result)
   end
 
-  defp release_runner({_owner, ref}, ack_result, finish_command) do
+  # The gate is ordering-only: it exists so the ack lands before the result, never
+  # to decide whether the run happens. The runner is released once the ack attempt
+  # has settled, whatever its outcome — a refused ack is logged, not a veto over
+  # work the owner already asked for and the registry already started.
+  defp release_runner({_owner, ref}, ack_result) do
+    log_ack_failure(ack_result)
+
     receive do
       {^ref, runner} when is_pid(runner) ->
-        send(runner, {ref, release_action(ack_result)})
+        send(runner, {ref, :run})
         :ok
     after
       @runner_gate_timeout_ms ->
-        settle_failed(finish_command, :runner_start_timeout)
-        {:error, :runner_start_timeout}
+        Logger.warning(
+          "Background ack gate: runner did not check in within " <>
+            "#{@runner_gate_timeout_ms}ms; it releases itself on its own bound"
+        )
+
+        :ok
     end
   end
 
-  defp await_runner_release({owner, ref}) do
+  # Cap behavior on expiry is to RELEASE: the ack may be late or lost, but the
+  # work is already running and its result still belongs in the conversation.
+  defp await_ack_ordering({owner, ref}) do
     send(owner, {ref, self()})
 
     receive do
-      {^ref, action} when action == :run or elem(action, 0) == :abort -> action
+      {^ref, :run} -> :ok
     after
-      @runner_gate_timeout_ms -> {:abort, :ack_timeout}
+      @runner_gate_timeout_ms ->
+        Logger.warning(
+          "Background ack gate expired after #{@runner_gate_timeout_ms}ms; " <>
+            "running without a confirmed ack"
+        )
+
+        :ok
     end
   end
 
-  defp release_action({:error, reason}), do: {:abort, {:ack_failed, reason}}
-  defp release_action(_success), do: :run
+  defp log_ack_failure({:error, reason}),
+    do: Logger.error("Background ack delivery failed: #{inspect(reason)}")
 
-  defp abort_background(reason, finish_command) do
-    settle_failed(finish_command, reason)
-    exit({:shutdown, {:background_run_failed, reason}})
-  end
+  defp log_ack_failure(_success), do: :ok
 
   defp defer_command(context) do
     case Map.get(context, :defer_command_fn) do

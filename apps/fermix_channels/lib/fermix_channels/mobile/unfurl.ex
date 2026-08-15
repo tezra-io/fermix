@@ -168,11 +168,37 @@ defmodule FermixChannels.Mobile.Unfurl do
         {:ok, nil, []}
 
       store when is_function(store, 2) ->
-        do_store_thumbnail(store, url, body, content_type(response))
+        store_image_thumbnail(store, url, body, response)
     end
   end
 
   defp store_thumbnail(url, _response, _opts), do: {:ok, nil, [{url, :invalid_body}]}
+
+  # A stored thumbnail is recorded as an `:image` blob and rendered as one by
+  # every device, so only an image response may be stored. Anything else is
+  # skipped and reported; the preview still goes out without an image.
+  defp store_image_thumbnail(store, url, body, response) do
+    case image_type(response) do
+      {:ok, mime} -> do_store_thumbnail(store, url, body, mime)
+      {:error, reason} -> {:ok, nil, [{url, reason}]}
+    end
+  end
+
+  defp image_type(response) do
+    mime = response |> content_type() |> base_type()
+
+    if String.starts_with?(mime, "image/") and mime != "image/",
+      do: {:ok, mime},
+      else: {:error, {:unsupported_thumbnail_type, mime}}
+  end
+
+  defp base_type(content_type) do
+    content_type
+    |> String.split(";", parts: 2)
+    |> List.first()
+    |> String.trim()
+    |> String.downcase()
+  end
 
   defp do_store_thumbnail(store, url, body, mime) do
     case store.(body, mime) do

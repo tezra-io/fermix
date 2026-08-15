@@ -1,6 +1,8 @@
 defmodule FermixChannels.Mobile.MediaStoreTest do
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog, only: [with_log: 1]
+
   alias FermixChannels.Mobile.MediaStore
 
   setup do
@@ -227,6 +229,45 @@ defmodule FermixChannels.Mobile.MediaStoreTest do
     assert_start_failure(root, :insecure_attachment_manifest)
   end
 
+  test "a foreign media entry is skipped loudly instead of refusing the boot", %{
+    root: root,
+    store: store
+  } do
+    bytes = "survives a finder visit"
+    digest = sha256(bytes)
+    assert {:ok, ^digest} = MediaStore.put_bytes(store, bytes, %{})
+
+    assert :ok = stop_supervised({MediaStore, root})
+    stray = Path.join([root, "media", ".DS_Store"])
+    File.write!(stray, "finder junk")
+
+    {restarted, log} = with_log(fn -> start_store(root) end)
+
+    assert log =~ ".DS_Store"
+    assert {:ok, %{ref: ^digest}} = MediaStore.fetch(restarted, digest)
+    assert File.exists?(stray)
+  end
+
+  test "a blob restored with loose permissions is excluded, not repaired or refused", %{
+    root: root,
+    store: store
+  } do
+    bytes = "restored from backup"
+    digest = sha256(bytes)
+    assert {:ok, ^digest} = MediaStore.put_bytes(store, bytes, %{})
+
+    assert :ok = stop_supervised({MediaStore, root})
+    blob = Path.join([root, "media", digest])
+    File.chmod!(blob, 0o644)
+
+    {restarted, log} = with_log(fn -> start_store(root) end)
+
+    assert log =~ digest
+    assert log =~ "0644"
+    assert {:error, :media_gone} = MediaStore.fetch(restarted, digest)
+    assert file_mode(blob) == 0o644
+  end
+
   test "validates identifiers, hashes, sizes, and root modes", %{root: root, store: store} do
     assert {:error, {:invalid_field, :attach_id}} =
              MediaStore.begin_upload(store, upload("", "x", sha256("x")))
@@ -257,7 +298,10 @@ defmodule FermixChannels.Mobile.MediaStoreTest do
 
   defp restart_store(root, opts \\ []) do
     assert :ok = stop_supervised({MediaStore, root})
+    start_store(root, opts)
+  end
 
+  defp start_store(root, opts \\ []) do
     start_supervised!(
       {MediaStore,
        name: nil,
