@@ -17,6 +17,11 @@ defmodule FermixCore.MixProject do
     ]
   end
 
+  # This app is the single owner of the umbrella's shared `test/support`: the
+  # stubs land in `fermix_core`'s ebin, and `fermix_channels`/`fermix_web` reach
+  # them through their dependency on it. A sibling app repeating this path would
+  # compile the same modules a second time. `fermix_web` adds its own
+  # `test/support` for its app-local ConnCase, which is a different set.
   defp elixirc_paths(:test), do: ["lib", Path.expand("../../test/support", __DIR__)]
   defp elixirc_paths(_env), do: ["lib"]
 
