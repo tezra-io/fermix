@@ -19,6 +19,8 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias FermixCore.Browser.ChromeLauncher
   alias FermixCore.Browser.Config, as: BrowserConfig
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.ComputerHistory
+  alias FermixCore.ComputerHistory.Config, as: ComputerHistoryConfig
   alias FermixCore.Config, as: CoreConfig
   alias FermixCore.Harness.Artifacts, as: HarnessArtifacts
   alias FermixCore.Harness.Config, as: HarnessConfig
@@ -1099,6 +1101,47 @@ defmodule Fermix.CLI.Doctor.Checks do
   end
 
   @doc """
+  Computer history (MILESTONE_32 §15.3): a macOS-only, opt-in row. Tree-less —
+  reports config-level state (availability, on/off, summarizer posture,
+  allowlist sizes); runtime detail (spool size, grant, pause) integrates with
+  the capturer stage over the control socket. `:macos?`/`:config` are injectable
+  so the row is hermetic on non-macOS CI.
+  """
+  @spec computer_history(keyword()) :: result()
+  def computer_history(opts \\ []) when is_list(opts) do
+    macos? = Keyword.get_lazy(opts, :macos?, &ComputerHistory.macos?/0)
+
+    if macos? do
+      computer_history_result(opts)
+    else
+      ok("computer history", "macOS only; unavailable on this host")
+    end
+  end
+
+  defp computer_history_result(opts) do
+    config =
+      Keyword.get_lazy(opts, :config, fn ->
+        Application.get_env(:fermix_core, :computer_history, [])
+      end)
+
+    if ComputerHistoryConfig.enabled?(config) do
+      ok(
+        "computer history",
+        "on; summarizer #{summarizer_label(ComputerHistoryConfig.summarizer(config))}; " <>
+          "#{length(ComputerHistoryConfig.apps(config))} app(s), " <>
+          "#{length(ComputerHistoryConfig.sites(config))} site(s) allowlisted"
+      )
+    else
+      ok("computer history", "off (opt-in; enable in setup)")
+    end
+  end
+
+  defp summarizer_label(:local), do: "on-device"
+
+  defp summarizer_label({:provider, provider}),
+    do: "#{provider} (remote, raw activity leaves this Mac)"
+
+  @doc """
   Skill-curation delivery health (MILESTONE_26_SKILL_CURATION §6.6 rung 3):
   when the feature is on, name whether proposals have an owner-private
   delivery target — a CLI-only install would otherwise mine forever and
@@ -1107,6 +1150,7 @@ defmodule Fermix.CLI.Doctor.Checks do
   `nil` to skip when curation is disabled.
   """
   @spec skill_curation(keyword()) :: result() | nil
+
   def skill_curation(opts \\ []) when is_list(opts) do
     enabled? = Keyword.get_lazy(opts, :skill_curation_enabled, &SkillCurationConfig.enabled?/0)
     memory? = Keyword.get_lazy(opts, :memory_enabled, &FermixCore.Memory.Config.enabled?/0)

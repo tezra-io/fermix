@@ -19,6 +19,8 @@ defmodule FermixCore.Application do
   alias FermixCore.Capabilities.MCP.Supervisor, as: McpSupervisor
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.CommandHost.Supervisor, as: CommandHostSupervisor
+  alias FermixCore.ComputerHistory
+  alias FermixCore.ComputerHistory.Supervisor, as: ComputerHistorySupervisor
   alias FermixCore.ComputerUse
   alias FermixCore.ComputerUse.Supervisor, as: ComputerUseSupervisor
   alias FermixCore.Config, as: CoreConfig
@@ -133,7 +135,7 @@ defmodule FermixCore.Application do
     redact_default_logger()
     Trace.TelemetryHandler.attach()
     DecisionTelemetry.attach()
-    maybe_ensure_computer_use_sidecar()
+    maybe_ensure_sidecar()
 
     children =
       [
@@ -192,6 +194,7 @@ defmodule FermixCore.Application do
         maybe_daemon_socket(),
         maybe_realtime_supervisor(),
         maybe_computer_use_supervisor(),
+        maybe_computer_history_supervisor(),
         maybe_skill_curation_scheduler()
       ]
       |> List.flatten()
@@ -338,6 +341,20 @@ defmodule FermixCore.Application do
     end
   end
 
+  # Computer History (MILESTONE_32 §6.3): the always-present, inert supervisor
+  # is present on macOS whenever the daemon boots, regardless of `enabled?()` —
+  # Retention must always run so a spool left behind by a disable still drains
+  # by the 48h horizon (inv. 16). Its work is tick-gated; the timer is disabled
+  # in `:test` (the scheduler precedent), never by omission. Off macOS the whole
+  # feature is unavailable, so the supervisor is absent (Decision 12).
+  defp maybe_computer_history_supervisor do
+    if ComputerHistory.macos?() do
+      [{ComputerHistorySupervisor, timer_enabled: @compiled_env != :test}]
+    else
+      []
+    end
+  end
+
   # Skill-curation clock (MILESTONE_26_SKILL_CURATION §6.1): child-ABSENT when
   # gated out. Three conditions, all required — the compile-time env gate (the
   # env-flag-is-not-an-env-gate lesson), the config switch, and memory
@@ -356,14 +373,21 @@ defmodule FermixCore.Application do
     end
   end
 
-  # Only in a real daemon boot: if computer-use is enabled but the sidecar for the
-  # compiled-in compux version isn't installed — the state a fermix upgrade that
-  # bumped the compux ref lands in — download it now, before the
-  # `ComputerUse.ready?/0` gates (tool registration + supervisor boot) run, so the
-  # upgrade transparently keeps computer-use working. Fail-soft and bounded; see
-  # `ComputerUse.ensure_sidecar_installed/1`.
-  defp maybe_ensure_computer_use_sidecar do
-    if daemon_boot?(), do: ComputerUse.ensure_sidecar_installed(), else: :ok
+  # Only in a real daemon boot: if a feature that needs the compux sidecar is
+  # enabled but the sidecar for the compiled-in version isn't installed — the
+  # state a fermix upgrade that bumped the compux ref lands in — download it now,
+  # before the readiness gates (tool registration + supervisor boot) run, so the
+  # upgrade transparently keeps those features working. The one binary is shared,
+  # so EITHER computer-use or computer-history wanting it triggers the download.
+  # Fail-soft and bounded; see `ComputerUse.ensure_sidecar_installed/1`.
+  defp maybe_ensure_sidecar do
+    if daemon_boot?() do
+      ComputerUse.ensure_sidecar_installed(
+        wanted?: ComputerUse.enabled?() or ComputerHistory.operative?()
+      )
+    else
+      :ok
+    end
   end
 
   # A real in-process daemon run (`fermix run` / `mix fermix.dev`) — both enable

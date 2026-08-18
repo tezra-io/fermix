@@ -446,6 +446,59 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     end
   end
 
+  test "save/load round-trip preserves computer_history config (M32)" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    snapshot = %{
+      fermix_core: [
+        computer_history: [
+          enabled: true,
+          apps: ["com.apple.Safari"],
+          sites: ["github.com"],
+          summarizer: :local
+        ]
+      ],
+      fermix_channels: [],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ "[fermix_core.computer_history]"
+    assert contents =~ "enabled = true"
+    assert contents =~ ~s(summarizer = "local")
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+    computer_history = Keyword.get(loaded.fermix_core, :computer_history, [])
+    assert Keyword.get(computer_history, :enabled) == true
+    assert Keyword.get(computer_history, :apps) == ["com.apple.Safari"]
+    assert Keyword.get(computer_history, :summarizer) == :local
+  end
+
+  test "load refuses to boot on an unknown computer_history key (M32)" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.computer_history]
+    enabled = true
+    aps = ["com.apple.Safari"]
+    """)
+
+    assert_raise ArgumentError, ~r/unknown key\(s\): aps/, fn ->
+      ConfigStore.load_runtime_config(resolve_secrets: false)
+    end
+  end
+
   test "load refuses to boot on an unknown generate_image backend (M15)" do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")

@@ -9,6 +9,7 @@ defmodule FermixCore.Setup.ConfigStore do
 
   alias FermixCore.Browser.Config, as: BrowserConfig
   alias FermixCore.Capabilities.MCP.Config, as: McpConfig
+  alias FermixCore.ComputerHistory.Config, as: ComputerHistoryConfig
   alias FermixCore.ComputerUse.Config, as: ComputerUseConfig
   alias FermixCore.Harness.Config, as: HarnessConfig
   alias FermixCore.MCP.Inbound.Config, as: InboundMcpConfig
@@ -117,6 +118,7 @@ defmodule FermixCore.Setup.ConfigStore do
         memory: Application.get_env(:fermix_core, :memory, []),
         realtime: Application.get_env(:fermix_core, :realtime, []),
         computer_use: Application.get_env(:fermix_core, :computer_use, []),
+        computer_history: Application.get_env(:fermix_core, :computer_history, []),
         transcription: Application.get_env(:fermix_core, :transcription, []),
         tools: Application.get_env(:fermix_core, :tools, []),
         plugins: Application.get_env(:fermix_core, :plugins, []),
@@ -193,6 +195,7 @@ defmodule FermixCore.Setup.ConfigStore do
     apply_memory_config(Keyword.get(persisted.fermix_core, :memory, []))
     apply_realtime_config(Keyword.get(persisted.fermix_core, :realtime, []))
     apply_computer_use_config(Keyword.get(persisted.fermix_core, :computer_use, []))
+    apply_computer_history_config(Keyword.get(persisted.fermix_core, :computer_history, []))
     apply_transcription_config(Keyword.get(persisted.fermix_core, :transcription, []))
     apply_tools_config(Keyword.get(persisted.fermix_core, :tools, []))
     apply_plugins_config(Keyword.get(persisted.fermix_core, :plugins, []))
@@ -322,6 +325,11 @@ defmodule FermixCore.Setup.ConfigStore do
           |> Map.get(:fermix_core, [])
           |> Keyword.get(:computer_use, [])
           |> normalize_computer_use(),
+        computer_history:
+          snapshot
+          |> Map.get(:fermix_core, [])
+          |> Keyword.get(:computer_history, [])
+          |> normalize_computer_history(),
         transcription:
           snapshot
           |> Map.get(:fermix_core, [])
@@ -460,6 +468,7 @@ defmodule FermixCore.Setup.ConfigStore do
         memory: [],
         realtime: [],
         computer_use: [],
+        computer_history: [],
         transcription: [],
         tools: [],
         plugins: [],
@@ -627,6 +636,14 @@ defmodule FermixCore.Setup.ConfigStore do
     :ok
   end
 
+  # Replace (not merge): the computer-history section has no compile-time baseline
+  # (MILESTONE_32 §9.4, config.ex), so the persisted keyword is the complete
+  # intended consent state.
+  defp apply_computer_history_config(computer_history_config) do
+    Application.put_env(:fermix_core, :computer_history, computer_history_config)
+    :ok
+  end
+
   # Merge (not replace) so the compile-time transcription baseline (backend +
   # model + max_file_mb from config.exs) survives a partial TOML edit that omits
   # some keys — same rationale as memory/realtime. But `model` is a single shared
@@ -709,6 +726,7 @@ defmodule FermixCore.Setup.ConfigStore do
     memory = Keyword.get(fermix_core, :memory, [])
     realtime = Keyword.get(fermix_core, :realtime, [])
     computer_use = Keyword.get(fermix_core, :computer_use, [])
+    computer_history = Keyword.get(fermix_core, :computer_history, [])
     transcription = Keyword.get(fermix_core, :transcription, [])
     tools = Keyword.get(fermix_core, :tools, [])
     plugins = Keyword.get(fermix_core, :plugins, [])
@@ -744,6 +762,7 @@ defmodule FermixCore.Setup.ConfigStore do
       render_section(["fermix_core", "memory"], memory),
       render_section(["fermix_core", "realtime"], realtime),
       render_section(["fermix_core", "computer_use"], computer_use),
+      render_section(["fermix_core", "computer_history"], computer_history),
       render_section(["fermix_core", "transcription"], transcription),
       render_section(["fermix_core", "tools", "web_search"], Keyword.get(tools, :web_search, [])),
       render_section(
@@ -968,6 +987,8 @@ defmodule FermixCore.Setup.ConfigStore do
         memory: normalize_memory(get_in(document, ["fermix_core", "memory"])),
         realtime: normalize_realtime(get_in(document, ["fermix_core", "realtime"])),
         computer_use: normalize_computer_use(get_in(document, ["fermix_core", "computer_use"])),
+        computer_history:
+          normalize_computer_history(get_in(document, ["fermix_core", "computer_history"])),
         transcription:
           normalize_transcription(get_in(document, ["fermix_core", "transcription"])),
         tools: normalize_tools(get_in(document, ["fermix_core", "tools"])),
@@ -1117,6 +1138,39 @@ defmodule FermixCore.Setup.ConfigStore do
     config
     |> ComputerUseConfig.normalize()
     |> ComputerUseConfig.to_keyword()
+  end
+
+  # `[fermix_core.computer_history]` (MILESTONE_32). Value validation lives in
+  # ComputerHistoryConfig.normalize (fail-loud per key); `normalize/1` already
+  # returns a keyword (no to_keyword round-trip). Unknown keys refuse boot at the
+  # parse boundary — a default-off consent section has no keyless degrade path
+  # (Rule #12), mirroring validate_harness_section_keys!/1.
+  defp normalize_computer_history(config) do
+    validate_computer_history_section_keys!(config)
+    ComputerHistoryConfig.normalize(config)
+  end
+
+  defp validate_computer_history_section_keys!(nil), do: :ok
+
+  defp validate_computer_history_section_keys!(config) when is_map(config) or is_list(config) do
+    allowed = MapSet.new(ComputerHistoryConfig.config_keys(), &Atom.to_string/1)
+
+    unknown =
+      config
+      |> section_keys()
+      |> Enum.reject(&MapSet.member?(allowed, &1))
+      |> Enum.sort()
+
+    if unknown == [] do
+      :ok
+    else
+      raise ArgumentError, """
+      config.toml [fermix_core.computer_history] has unknown key(s): #{Enum.join(unknown, ", ")}.
+
+      Allowed keys: #{Enum.map_join(ComputerHistoryConfig.config_keys(), ", ", &Atom.to_string/1)}.
+      Remove or fix the key(s); the daemon will not boot until this is fixed.
+      """
+    end
   end
 
   # `[fermix_core.transcription]` (M21). Speech-to-text has no keyless degrade

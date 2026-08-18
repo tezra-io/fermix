@@ -11,6 +11,8 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Auth.XAILogin
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.ComputerHistory
+  alias FermixCore.ComputerHistory.Config, as: ComputerHistoryConfig
   alias FermixCore.ComputerUse
   alias FermixCore.ComputerUse.SidecarInstaller
   alias FermixCore.Harness.Vendors, as: HarnessVendors
@@ -430,18 +432,18 @@ defmodule FermixWebWeb.SetupLive do
   # plugin registry — enabling it means "ensure the sidecar binary, flip the
   # feature flag", not the generic install→register→enable path.
   def handle_event("plugin_enable", %{"name" => name}, socket) do
-    if computer_use_plugin?(name) do
-      {:noreply, enable_computer_use(socket)}
-    else
-      {:noreply, enable_registry_plugin(socket, name)}
+    cond do
+      computer_use_plugin?(name) -> {:noreply, enable_computer_use(socket)}
+      computer_history_feature?(name) -> {:noreply, enable_computer_history(socket)}
+      true -> {:noreply, enable_registry_plugin(socket, name)}
     end
   end
 
   def handle_event("plugin_disable", %{"name" => name}, socket) do
-    if computer_use_plugin?(name) do
-      {:noreply, set_computer_use_feature(socket, false)}
-    else
-      {:noreply, disable_registry_plugin(socket, name)}
+    cond do
+      computer_use_plugin?(name) -> {:noreply, set_computer_use_feature(socket, false)}
+      computer_history_feature?(name) -> {:noreply, set_computer_history_feature(socket, false)}
+      true -> {:noreply, disable_registry_plugin(socket, name)}
     end
   end
 
@@ -450,6 +452,25 @@ defmodule FermixWebWeb.SetupLive do
   # of on the model's first screenshot. Re-probes after so the pane reflects reality.
   def handle_event("computer_use_grant", _params, socket) do
     {:noreply, request_computer_use_permissions(socket)}
+  end
+
+  # Computer-history's Accessibility grant (MILESTONE_32 §22.3) — the shared compux
+  # driver, so the same TCC identity as computer-use.
+  def handle_event("computer_history_grant", _params, socket) do
+    {:noreply, request_computer_history_permissions(socket)}
+  end
+
+  # The card's app-allowlist editor: a comma/newline-separated list of bundle ids
+  # persisted to `[fermix_core.computer_history] apps`.
+  def handle_event("save_computer_history_apps", %{"computer_history_apps" => apps}, socket) do
+    {:noreply,
+     save_answers(
+       socket,
+       [computer_history_apps: apps],
+       "Computer-history app allowlist saved — restart to apply.",
+       nil,
+       restart_required?: true
+     )}
   end
 
   # The §4.4 Connect-time collection: the needs_config card form posts the
@@ -1489,14 +1510,26 @@ defmodule FermixWebWeb.SetupLive do
   defp plugin_summary(snapshot) do
     case PluginCatalog.overview(plugins_dist_opts()) do
       {:ok, overview} ->
-        plugins = installed_cards(overview, snapshot)
-        catalog = Enum.map(overview.available, &catalog_card(&1, snapshot))
+        # Core-feature cards (computer-use, computer-history) render in their own
+        # "Native driver features" section (§22.6), NOT mixed with the integration
+        # catalog — so drop computer-use from BOTH the installed and catalog lists
+        # (it moves between them by sidecar-install state) and surface both there.
+        plugins =
+          overview
+          |> installed_cards(snapshot)
+          |> Enum.reject(&computer_use_plugin?(&1.name))
+
+        catalog =
+          overview.available
+          |> Enum.reject(&computer_use_plugin?(&1.name))
+          |> Enum.map(&catalog_card(&1, snapshot))
 
         %{
           available: true,
           oauth_clients: oauth_client_forms(snapshot, plugins ++ catalog),
           plugins: plugins,
           catalog: catalog,
+          core_features: core_feature_cards(snapshot),
           index_error: format_index_error(overview.index_error)
         }
 
@@ -1507,8 +1540,46 @@ defmodule FermixWebWeb.SetupLive do
           oauth_clients: %{},
           plugins: [],
           catalog: [],
+          core_features: core_feature_cards(snapshot),
           index_error: nil
         }
+    end
+  end
+
+  # The native-driver features (§22.6): computer-use always; computer-history only
+  # on macOS (`ComputerHistory.macos?/0`), where its AXObserver capture can run.
+  defp core_feature_cards(snapshot) do
+    [computer_use_card(snapshot)] ++
+      if ComputerHistory.macos?(), do: [computer_history_card(snapshot)], else: []
+  end
+
+  # Computer-use as a core-feature card (same clean shape as computer_history_card),
+  # so both render through one component in the dedicated section.
+  defp computer_use_card(snapshot) do
+    {enabled?, status} = computer_use_card_state(snapshot)
+
+    %{
+      kind: :computer_use,
+      name: SidecarInstaller.plugin_name(),
+      display_name: "Computer Use",
+      description:
+        "Lets Fermix see your screen and control your mouse and keyboard in the apps you drive.",
+      enabled?: enabled?,
+      status: status,
+      version: compux_version(),
+      logo: @computer_use_logo_uri,
+      apps: nil,
+      summarizer_provider: nil
+    }
+  end
+
+  # The shared compux driver version (both features run on it). `Application.spec/2`
+  # returns nil when compux isn't loaded — keep the nil so the card drops the version
+  # rather than rendering a bare "v".
+  defp compux_version do
+    case Application.spec(:compux, :vsn) do
+      nil -> nil
+      vsn -> to_string(vsn)
     end
   end
 
@@ -1971,6 +2042,104 @@ defmodule FermixWebWeb.SetupLive do
   end
 
   defp computer_use_plugin?(name), do: name == SidecarInstaller.plugin_name()
+
+  # --- computer history (MILESTONE_32 §22.3, a native-driver feature, macOS-only) ---
+
+  @computer_history_name "computer_history"
+
+  defp computer_history_feature?(name), do: name == @computer_history_name
+
+  # Enable = ensure the SHARED compux sidecar, then flip the flag. Independent of
+  # computer-use: this card installs the sidecar itself if computer-use has not.
+  defp enable_computer_history(socket) do
+    if SidecarInstaller.installed?() do
+      set_computer_history_feature(socket, true)
+    else
+      install_catalog_plugin(socket, SidecarInstaller.plugin_name())
+    end
+  end
+
+  defp set_computer_history_feature(socket, enabled?) do
+    message =
+      if enabled?,
+        do: "Computer History enabled — restart to apply.",
+        else: "Computer History disabled — restart to apply."
+
+    socket
+    |> assign_report(Wizard.report())
+    |> save_answers([computer_history_enabled: enabled?], message, nil, restart_required?: true)
+  end
+
+  # Capture needs only the Accessibility grant (via the shared compux driver, so the
+  # same TCC identity as computer-use). The prompt is async, so a fresh grant may
+  # only show on the next probe.
+  defp request_computer_history_permissions(socket) do
+    case ComputerHistory.request_permissions() do
+      {:ok, %{input_control: true}} ->
+        refresh_report(socket, "Accessibility granted.")
+
+      {:ok, _partial} ->
+        refresh_report(
+          socket,
+          "Approve the Accessibility prompt, then restart to start capturing."
+        )
+
+      {:error, reason} ->
+        flash_error(socket, "Couldn't open the Accessibility prompt: #{Redaction.format(reason)}")
+    end
+  end
+
+  defp computer_history_card_state(snapshot) do
+    cond do
+      not computer_history_config_enabled?(snapshot) -> {false, :not_configured}
+      ComputerHistory.operative?() and SidecarInstaller.installed?() -> {true, :ready}
+      true -> {true, :partial}
+    end
+  end
+
+  defp computer_history_config_enabled?(snapshot) do
+    snapshot
+    |> get_fermix_core(:computer_history)
+    |> Keyword.get(:enabled, false) == true
+  end
+
+  # The card's data. Rendered ONLY on macOS (`ComputerHistory.macos?/0`); the
+  # `apps` allowlist round-trips as a comma-separated string for a single clean
+  # input, and the disclosure names the resolved summarizer provider (§22.4).
+  defp computer_history_card(snapshot) do
+    {enabled?, status} = computer_history_card_state(snapshot)
+    config = get_fermix_core(snapshot, :computer_history)
+
+    %{
+      kind: :computer_history,
+      name: @computer_history_name,
+      display_name: "Computer History",
+      description:
+        "On-device activity memory: records what you do in the apps you allow and " <>
+          "summarizes it so Fermix can recall your recent work.",
+      enabled?: enabled?,
+      status: status,
+      version: compux_version(),
+      logo: nil,
+      apps: config |> Keyword.get(:apps, []) |> Enum.join(", "),
+      summarizer_provider: computer_history_summarizer_label()
+    }
+  end
+
+  # The model summarization runs on — the subagent tier (provider + model), shown
+  # on the card so the operator sees exactly which model reads their activity (§22.3).
+  defp computer_history_summarizer_label do
+    provider =
+      case ComputerHistoryConfig.default_summarizer_provider() do
+        {:ok, p} -> to_string(p)
+        {:error, _reason} -> "your default provider"
+      end
+
+    case Keyword.get(ComputerHistoryConfig.default_summarizer_route_opts(), :model) do
+      nil -> provider
+      model -> "#{provider} · #{model}"
+    end
+  end
 
   defp start_plugin_auth_or_explain(socket, plugin) do
     cond do

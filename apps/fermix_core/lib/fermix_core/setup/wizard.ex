@@ -3,6 +3,7 @@ defmodule FermixCore.Setup.Wizard do
   Shared setup/readiness surface for CLI and web onboarding.
   """
 
+  alias FermixCore.ComputerHistory.Config, as: ComputerHistoryConfig
   alias FermixCore.ComputerUse.Config, as: ComputerUseConfig
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Prompt.SetupSeeder
@@ -51,6 +52,8 @@ defmodule FermixCore.Setup.Wizard do
           | {:realtime_max_cost_cents, pos_integer() | String.t()}
           | {:realtime_persist_transcripts, boolean() | String.t()}
           | {:computer_use_enabled, boolean() | String.t()}
+          | {:computer_history_enabled, boolean() | String.t()}
+          | {:computer_history_apps, [String.t()] | String.t()}
           | {:web_search_backend, atom() | String.t()}
           | {:tavily_api_key, String.t()}
           | {:exa_api_key, String.t()}
@@ -110,7 +113,8 @@ defmodule FermixCore.Setup.Wizard do
     :reasoning_effort,
     :fast,
     :realtime_enabled,
-    :computer_use_enabled
+    :computer_use_enabled,
+    :computer_history_enabled
   ]
 
   @channel_owner_reconfigure_keys %{
@@ -632,6 +636,7 @@ defmodule FermixCore.Setup.Wizard do
       |> put_memory_config(answers)
       |> put_realtime_config(answers)
       |> put_computer_use_config(answers)
+      |> put_computer_history_config(answers)
       |> put_web_search_config(answers)
       |> put_image_config(answers)
       |> put_transcription_config(answers)
@@ -1500,6 +1505,51 @@ defmodule FermixCore.Setup.Wizard do
 
         Map.put(snapshot, :fermix_core, Keyword.put(fermix_core, :computer_use, computer_use))
     end
+  end
+
+  # Computer history (MILESTONE_32 §22.3) exposes two setup knobs: the on/off flag
+  # and the app allowlist (bundle ids). The shared compux sidecar + the
+  # Accessibility grant are prerequisites the card surfaces separately. Absent
+  # answers leave the config untouched, so toggling enable doesn't wipe a
+  # hand-edited allowlist and vice versa.
+  defp put_computer_history_config(snapshot, answers) do
+    enabled =
+      normalize_realtime_bool(
+        Keyword.get(answers, :computer_history_enabled),
+        :computer_history_enabled
+      )
+
+    apps = normalize_computer_history_apps(Keyword.get(answers, :computer_history_apps))
+
+    if is_nil(enabled) and is_nil(apps) do
+      snapshot
+    else
+      fermix_core = Map.get(snapshot, :fermix_core, [])
+      existing = Keyword.get(fermix_core, :computer_history, [])
+
+      updated =
+        existing
+        |> put_unless_nil(:enabled, enabled)
+        |> put_unless_nil(:apps, apps)
+        |> ComputerHistoryConfig.normalize()
+
+      Map.put(snapshot, :fermix_core, Keyword.put(fermix_core, :computer_history, updated))
+    end
+  end
+
+  defp put_unless_nil(kw, _key, nil), do: kw
+  defp put_unless_nil(kw, key, value), do: Keyword.put(kw, key, value)
+
+  # The card sends the allowlist as a comma/newline-separated string of bundle ids;
+  # nil (field absent) leaves the existing allowlist. An empty string clears it.
+  defp normalize_computer_history_apps(nil), do: nil
+  defp normalize_computer_history_apps(apps) when is_list(apps), do: apps
+
+  defp normalize_computer_history_apps(raw) when is_binary(raw) do
+    raw
+    |> String.split([",", "\n"], trim: true)
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
   end
 
   defp normalize_review_interval_hours(nil), do: nil

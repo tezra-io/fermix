@@ -1552,6 +1552,41 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
   # the call site passes. The mechanism is pinned one level down, in
   # `Harness.ArtifactsTest`, where a dead supervisor name reproduces the CLI's
   # world for real.
+  describe "computer_history/1" do
+    test "non-macOS host reports macOS-only" do
+      result = Checks.computer_history(macos?: false)
+      assert result.name == "computer history"
+      assert result.status == :ok
+      assert result.detail =~ "macOS only"
+    end
+
+    test "macOS + disabled config reports off" do
+      result = Checks.computer_history(macos?: true, config: [enabled: false])
+      assert result.status == :ok
+      assert result.detail =~ "off"
+    end
+
+    test "macOS + enabled local summarizer reports on-device + allowlist sizes" do
+      result =
+        Checks.computer_history(
+          macos?: true,
+          config: [enabled: true, apps: ["com.apple.Safari"], sites: [], summarizer: :local]
+        )
+
+      assert result.status == :ok
+      assert result.detail =~ "on"
+      assert result.detail =~ "on-device"
+      assert result.detail =~ "1 app(s)"
+    end
+
+    test "macOS + Tier-3 summarizer flags the remote egress" do
+      result =
+        Checks.computer_history(macos?: true, config: [enabled: true, summarizer: :anthropic])
+
+      assert result.detail =~ "anthropic (remote"
+    end
+  end
+
   describe "skill_curation/1" do
     test "skips when curation is disabled" do
       assert Checks.skill_curation(skill_curation_enabled: false) == nil

@@ -398,7 +398,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       {:ok, view, _html} = live(conn, "/setup")
       view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
 
-      card = view |> element(~s|section[data-plugin-name="computer_use_sidecar"]|) |> render()
+      card = view |> element(~s|section[data-feature-name="computer_use_sidecar"]|) |> render()
 
       assert card =~ "Disable"
       assert card =~ "Needs setup"
@@ -413,7 +413,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert card =~ "data:image/svg+xml"
     end
 
-    test "the computer-use catalog card shows the compux release version, not the catalog entry",
+    test "the computer-use native-driver card shows the compux release version, not the catalog entry",
          %{conn: conn} do
       # The sidecar ships via the pinned compux release; the bundled catalog
       # still carries the pre-compux 0.1.0 entry, whose version must not leak
@@ -421,7 +421,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       {:ok, view, _html} = live(conn, "/setup")
       view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
 
-      card = view |> element(~s|section[data-catalog-name="computer_use_sidecar"]|) |> render()
+      card = view |> element(~s|section[data-feature-name="computer_use_sidecar"]|) |> render()
 
       compux_vsn = to_string(Application.spec(:compux, :vsn))
       assert card =~ "v" <> compux_vsn
@@ -454,13 +454,33 @@ defmodule FermixWebWeb.SetupLiveTest do
       {:ok, view, _html} = live(conn, "/setup")
       view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
 
-      card = view |> element(~s|section[data-plugin-name="computer_use_sidecar"]|) |> render()
+      card = view |> element(~s|section[data-feature-name="computer_use_sidecar"]|) |> render()
 
       assert card =~ "Ready"
       assert card =~ "Disable"
       # The config-gated sidecar's registry status is :not_configured, so the
       # generic Check button would flash "not ready"; it must not render.
       refute card =~ ~s(phx-click="plugin_check")
+    end
+
+    # The computer-history card renders only on macOS (its AXObserver capture does
+    # not port). Compile the assertion in only there so Linux CI stays green.
+    if :os.type() == {:unix, :darwin} do
+      test "the computer-history native-driver card renders with its disclosure + controls (§22.3)",
+           %{conn: conn} do
+        {:ok, view, _html} = live(conn, "/setup")
+        view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+        card = view |> element(~s|section[data-feature-name="computer_history"]|) |> render()
+
+        assert card =~ "Computer History"
+        # The §22.4 disclosure names the privacy posture up front.
+        assert card =~ "passwords and secure fields are never captured"
+        assert card =~ "off-device"
+        # The app allowlist input + the Accessibility grant action are present.
+        assert card =~ ~s(name="computer_history_apps")
+        assert card =~ ~s(phx-click="computer_history_grant")
+      end
     end
 
     test "oauth plugin connect requires Google client config before enabling", %{conn: conn} do
