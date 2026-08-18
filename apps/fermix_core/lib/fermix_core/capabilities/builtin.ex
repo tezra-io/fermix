@@ -121,6 +121,28 @@ defmodule FermixCore.Capabilities.Builtin do
       policy_class: :read_write,
       hidden_from_agent?: false,
       owner_only?: true
+    },
+    # Meetings notetaker (MILESTONE_21 C2 §14.1). `:external_api` sits in the
+    # operator's default policy and the guest deny-list, and owner-only keeps
+    # the owner's own meetings out of a guest's surface; the attended-operator
+    # advertise?/execute gate these three share with the temporal family — and
+    # `Meetings.join/2` repeats — is the hard barrier. Only seeded when
+    # `Meetings.ready?()` (BuiltinSeeder), so a disabled or lane-less daemon
+    # never advertises them.
+    "join_meeting" => %{
+      policy_class: :external_api,
+      hidden_from_agent?: false,
+      owner_only?: true
+    },
+    "leave_meeting" => %{
+      policy_class: :external_api,
+      hidden_from_agent?: false,
+      owner_only?: true
+    },
+    "list_meetings" => %{
+      policy_class: :external_api,
+      hidden_from_agent?: false,
+      owner_only?: true
     }
   }
 

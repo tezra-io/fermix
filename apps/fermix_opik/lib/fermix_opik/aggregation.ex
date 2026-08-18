@@ -677,6 +677,66 @@ defmodule FermixOpik.Aggregation do
     })
   end
 
+  # A meeting run (M21 §11.1) is a detached run that outlives the turn which
+  # asked for it: the Session joins the call, streams transcript for an hour,
+  # then summarizes and delivers. So it is its OWN root trace and
+  # `parent_session` rides as correlation metadata only, never as a parent (the
+  # harness reason: the originating turn ships long first, so nesting would drop
+  # every later span into the tombstone and mint a broken second root when the
+  # closer finally arrives). run_start opens the root; the phase spans and the
+  # run's provider/tool spans nest via the shared `meeting_<id>_<ts>` session;
+  # run_complete/run_error close it. `url`/`title` reach this module only when
+  # the operator turned content capture on (a meeting URL can embed a passcode).
+  def apply_event(state, [:fermix, :meeting, :run_start], _meas, meta, at) do
+    case Map.get(meta, :session_id) do
+      nil ->
+        {state, []}
+
+      session_id ->
+        ctx = %{
+          parent_session: nil,
+          kind: :meeting,
+          name: Map.get(meta, :agent),
+          input: Map.get(meta, :url),
+          # A quiet meeting emits nothing between phase transitions, which can
+          # outlast the idle TTL — the run's own cap is the honest sweep floor.
+          max_duration_ms: Map.get(meta, :max_duration_ms),
+          trace_metadata: meeting_metadata(meta),
+          at: at.at,
+          mono: at.mono
+        }
+
+        {state, _ref} = ensure_session(state, session_id, ctx)
+        {state, []}
+    end
+  end
+
+  # `run_complete` carries the delivered run's counters; `run_error` carries the
+  # TERMINAL STATE word (`failed`, `refused`, …), which is the diagnosis — the
+  # generic "error" would erase which wall the meeting hit — plus `error_info`
+  # so the failure is filterable in Opik rather than only readable.
+  def apply_event(state, [:fermix, :meeting, run], meas, meta, at)
+      when run in [:run_complete, :run_error] do
+    status =
+      if run == :run_error,
+        do: Map.get(meta, :status, "error"),
+        else: Map.get(meta, :status, "ok")
+
+    close_root(state, meta, at, %{
+      output: Map.get(meta, :error),
+      status: status,
+      error_info: meeting_error_info(run, meta),
+      metadata: compact(Map.merge(meeting_metadata(meta), meeting_counters(meas)))
+    })
+  end
+
+  # One Session state transition: a point span under the run's trace via the
+  # shared session_id. `reason` is a typed end_reason/detail atom, never free
+  # text, so a phase span carries no meeting content.
+  def apply_event(state, [:fermix, :meeting, :phase], meas, meta, at) do
+    add_child_span(state, meta, at, &Mapper.meeting_phase_span(meta, meas, &1))
+  end
+
   def apply_event(state, _event, _meas, _meta, _at), do: {state, []}
 
   @doc """
@@ -1051,6 +1111,7 @@ defmodule FermixOpik.Aggregation do
   defp infer_kind("soul_curation:" <> _), do: :soul_curation
   defp infer_kind("memory_review:" <> _), do: :memory_review
   defp infer_kind("followup_" <> _), do: :reminder_followup
+  defp infer_kind("meeting_" <> _), do: :meeting
   defp infer_kind(_other), do: :subagent
 
   defp kind_from_role(role) when role in [:skill, "skill"], do: :skill
@@ -1063,6 +1124,10 @@ defmodule FermixOpik.Aggregation do
   # its session id ("followup_<reminder_id>") is its own fallback — the generic
   # "<kind>:<name>" shape would only say "followup" twice.
   defp wrapper_name(:reminder_followup, name, session), do: name || session
+  # Same shape: the run's agent name is already "meeting:<id>", and its session
+  # id ("meeting_<id>_<ts>") is its own fallback — the generic "<kind>:<name>"
+  # would only say "meeting" twice.
+  defp wrapper_name(:meeting, name, session), do: name || session
   defp wrapper_name(kind, nil, session), do: "#{kind}:#{session}"
   defp wrapper_name(kind, name, _session), do: "#{kind}:#{name}"
 
@@ -1150,6 +1215,36 @@ defmodule FermixOpik.Aggregation do
       outcome: Map.get(metadata, :outcome)
     })
   end
+
+  # The meeting bookends' correlation allowlist, shared by the opener and the
+  # closer so a run whose opener never arrived still carries the ids. `title` is
+  # content-gated at the emitter and simply absent when capture is off; the URL
+  # rides as the trace input under that same gate.
+  defp meeting_metadata(metadata) do
+    compact(%{
+      meeting_id: Map.get(metadata, :meeting_id),
+      platform: stringify(Map.get(metadata, :platform)),
+      origin: stringify(Map.get(metadata, :origin)),
+      parent_session: Map.get(metadata, :parent_session),
+      title: Map.get(metadata, :title)
+    })
+  end
+
+  # The closer's measurements: what the run actually captured. Absent on
+  # `run_error` (no counters to report), where `compact` drops them.
+  defp meeting_counters(measurements) do
+    %{
+      duration_ms: Map.get(measurements, :duration_ms),
+      segments: Map.get(measurements, :segments),
+      words: Map.get(measurements, :words),
+      participants_peak: Map.get(measurements, :participants_peak)
+    }
+  end
+
+  defp meeting_error_info(:run_error, metadata),
+    do: error_info("MeetingError", stringify(Map.get(metadata, :error)))
+
+  defp meeting_error_info(_run, _metadata), do: nil
 
   defp reminder_metadata(metadata, duration_ms) do
     %{

@@ -4,6 +4,7 @@ defmodule FermixCore.Setup.DoctorTest do
   alias FermixCore.Auth.Store
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Setup.Doctor
+  alias FermixCore.Transcription.Local.ModelStore
 
   defmodule HealthyChannel do
     def health_check(opts) do
@@ -1233,6 +1234,193 @@ defmodule FermixCore.Setup.DoctorTest do
       assert error =~ "no configured backend"
     end
   end
+
+  describe "transcription_report/1 on-device backend (M21 Phase 2b)" do
+    setup do
+      transcription = Application.get_env(:fermix_core, :transcription, [])
+      plugins = Application.get_env(:fermix_core, :plugins, [])
+      fermix_home = System.get_env("FERMIX_HOME")
+      home = FermixTestSupport.SafeRm.make_tmp_dir!("doctor-local-stt")
+
+      System.put_env("FERMIX_HOME", home)
+      Application.put_env(:fermix_core, :plugins, [])
+      put_transcription(backend: "local")
+
+      on_exit(fn ->
+        Application.put_env(:fermix_core, :transcription, transcription)
+        Application.put_env(:fermix_core, :plugins, plugins)
+        restore_fermix_home(fermix_home)
+        FermixTestSupport.SafeRm.rm_rf!(home)
+      end)
+
+      %{home: home}
+    end
+
+    test "a build with no pinned release says so instead of telling the operator to install" do
+      assert %{
+               status: :needs_install,
+               backend: :local,
+               missing: :no_release_pinned,
+               remedy: remedy
+             } =
+               Doctor.transcription_report()
+
+      assert remedy =~ "dev_local"
+    end
+
+    test "with a release pinned, a missing sidecar is an ordinary install" do
+      assert %{status: :needs_install, missing: :sidecar_not_installed, remedy: remedy} =
+               Doctor.transcription_report(release_pinned?: true)
+
+      assert remedy =~ "sidecar is not installed"
+    end
+
+    test "an installed sidecar with unpinned model files reports the model pins, not the model",
+         ctx do
+      install_fake_stt_sidecar(ctx.home)
+
+      assert %{status: :needs_install, missing: :model_pins_missing, remedy: remedy} =
+               Doctor.transcription_report()
+
+      assert remedy =~ "sha256 pins"
+    end
+
+    test "with pins minted, a missing model is an ordinary install", ctx do
+      install_fake_stt_sidecar(ctx.home)
+
+      assert %{status: :needs_install, missing: :model_not_installed, remedy: remedy} =
+               Doctor.transcription_report(pins_pinned?: true)
+
+      assert remedy =~ "model is not installed"
+    end
+
+    test "both halves installed reports the on-device backend as configured", ctx do
+      install_fake_stt_sidecar(ctx.home)
+      install_fake_stt_model(ctx.home)
+
+      assert %{status: :configured, backend: :local, credential_present?: true} =
+               Doctor.transcription_report()
+    end
+  end
+
+  describe "meetings_report/1 (M21 Phase 3)" do
+    setup do
+      meetings = Application.get_env(:fermix_core, :meetings, [])
+      plugins = Application.get_env(:fermix_core, :plugins, [])
+      fermix_home = System.get_env("FERMIX_HOME")
+      home = FermixTestSupport.SafeRm.make_tmp_dir!("doctor-meetings")
+
+      System.put_env("FERMIX_HOME", home)
+      Application.put_env(:fermix_core, :plugins, [])
+
+      on_exit(fn ->
+        Application.put_env(:fermix_core, :meetings, meetings)
+        Application.put_env(:fermix_core, :plugins, plugins)
+        restore_fermix_home(fermix_home)
+        FermixTestSupport.SafeRm.rm_rf!(home)
+      end)
+
+      %{home: home}
+    end
+
+    test "reports the subsystem as disabled without touching the sidecar" do
+      Application.put_env(:fermix_core, :meetings, enabled: false)
+
+      assert %{status: :disabled} == Doctor.meetings_report()
+    end
+
+    test "enabled with no usable lane names the one thing to do" do
+      Application.put_env(:fermix_core, :meetings, enabled: true)
+
+      assert %{
+               status: :enabled,
+               ready?: false,
+               sidecar_installed?: false,
+               pinned_tag: nil,
+               profile: :absent,
+               rtms_configured?: false,
+               remedy: remedy
+             } = Doctor.meetings_report()
+
+      assert remedy =~ "dev_local"
+    end
+
+    test "an absent profile warns that the first Meet join would be anonymous" do
+      Application.put_env(:fermix_core, :meetings, enabled: true)
+
+      assert %{profile: :absent, profile_note: note} = Doctor.meetings_report()
+
+      assert note =~ "anonymous"
+      assert note =~ "sign the bot account in"
+    end
+
+    test "a complete Zoom credential set makes the subsystem ready with no remedy" do
+      Application.put_env(:fermix_core, :meetings,
+        enabled: true,
+        zoom_account_id: "acct",
+        zoom_client_id: "client",
+        zoom_client_secret: "secret",
+        zoom_ws_subscription_id: "sub"
+      )
+
+      assert %{ready?: true, rtms_configured?: true, remedy: nil} = Doctor.meetings_report()
+    end
+
+    test "an installed sidecar and an existing profile report the Meet lane as usable", ctx do
+      Application.put_env(:fermix_core, :meetings, enabled: true)
+      install_fake_meetbot_sidecar(ctx.home)
+      File.mkdir_p!(FermixCore.Meetings.SidecarInstaller.profile_dir())
+
+      assert %{
+               ready?: true,
+               sidecar_installed?: true,
+               profile: :present,
+               profile_note: note,
+               remedy: nil
+             } = Doctor.meetings_report()
+
+      assert note =~ "signed-in state unknown"
+    end
+  end
+
+  defp install_fake_stt_sidecar(home) do
+    {:ok, target} = FermixCore.Transcription.Local.SidecarInstaller.target()
+    dev_local = Path.join(home, "dev-local")
+    binary = Path.join([dev_local, "stt_sidecar", "bin", target, "fermix-stt"])
+
+    write_executable!(binary)
+    Application.put_env(:fermix_core, :plugins, dev_local: dev_local)
+  end
+
+  defp install_fake_meetbot_sidecar(home) do
+    {:ok, target} = FermixCore.Meetings.SidecarInstaller.target()
+    dev_local = Path.join(home, "dev-local")
+    binary = Path.join([dev_local, "meetbot_sidecar", "bin", target, "fermix-meetbot"])
+
+    write_executable!(binary)
+    Application.put_env(:fermix_core, :plugins, dev_local: dev_local)
+  end
+
+  # Presence, not content: the doctor never runs either sidecar, so an empty
+  # executable file is a faithful stand-in for an installed one.
+  defp write_executable!(path) do
+    File.mkdir_p!(Path.dirname(path))
+    File.write!(path, "")
+    File.chmod!(path, 0o755)
+  end
+
+  defp install_fake_stt_model(_home) do
+    engine = "sherpa-onnx"
+    model = "parakeet-tdt-0.6b-v3-int8"
+    {:ok, names} = ModelStore.file_names(engine, model)
+    dir = Path.join([ModelStore.model_root(), engine, model])
+
+    File.mkdir_p!(dir)
+    Enum.each(names, &File.write!(Path.join(dir, &1), ""))
+  end
+
+  defp restore_fermix_home(nil), do: System.delete_env("FERMIX_HOME")
+  defp restore_fermix_home(value), do: System.put_env("FERMIX_HOME", value)
 
   defp put_transcription(config) do
     Application.put_env(:fermix_core, :transcription, config)

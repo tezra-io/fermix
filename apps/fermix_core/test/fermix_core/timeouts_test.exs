@@ -115,6 +115,36 @@ defmodule FermixCore.TimeoutsTest do
     end
   end
 
+  describe "transcription streaming deadlines" do
+    test "the WS connect and close-drain budgets are named constants" do
+      assert Timeouts.transcription_ws_connect() == 10_000
+      assert Timeouts.transcription_ws_close_drain() == 10_000
+    end
+
+    test "the local STT sidecar deadlines bound spawn, one batch, and the flush" do
+      # hello precedes model load, so it bounds process start only; a batch is a
+      # whole-file recognition and needs minutes of headroom.
+      assert Timeouts.stt_sidecar_hello() == 10_000
+      assert Timeouts.stt_sidecar_batch() == 300_000
+      assert Timeouts.stt_sidecar_flush() == 30_000
+      assert Timeouts.stt_sidecar_hello() < Timeouts.stt_sidecar_flush()
+      assert Timeouts.stt_sidecar_flush() < Timeouts.stt_sidecar_batch()
+    end
+  end
+
+  describe "meetings deadlines" do
+    test "handshake, join, and summarize escalate in that order" do
+      # Join contains a human step (the host admitting the bot), and summarize
+      # contains the transcript drain plus a map-reduce over the whole meeting —
+      # so each stage is strictly longer than the one before it.
+      assert Timeouts.meetbot_handshake() == 15_000
+      assert Timeouts.meetbot_join() == 90_000
+      assert Timeouts.meeting_summarize() == 600_000
+      assert Timeouts.meetbot_handshake() < Timeouts.meetbot_join()
+      assert Timeouts.meetbot_join() < Timeouts.meeting_summarize()
+    end
+  end
+
   describe "ctx gating (FermixCore.Timeouts.Telemetry)" do
     test "correlation ids ride always-on; context is omitted when capture is off" do
       attach([:fermix, :timeout, :expired])

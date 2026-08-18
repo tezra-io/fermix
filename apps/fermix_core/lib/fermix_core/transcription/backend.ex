@@ -6,10 +6,16 @@ defmodule FermixCore.Transcription.Backend do
   backend states in `capabilities/0` whether it speaks streaming and whether it
   runs on-device, and the caller dispatches on that declared fact rather than a
   runtime try/fallback. `transcribe/2` (batch file → text) is the only required
-  call in this phase; `open_stream/2` is `@optional_callbacks` and is required
-  only of a backend whose `capabilities().streaming?` is true — the streaming
-  session (meetings/dictation, a later milestone phase) never calls it otherwise.
-  No backend implements `open_stream/2` yet.
+  call; `open_stream/2` is `@optional_callbacks` and is required only of a
+  backend whose `capabilities().streaming?` is true.
+
+  `FermixCore.Transcription.open_stream/2` is what reads that declaration: a
+  streaming backend (Deepgram and xAI natively, the local sidecar on-device)
+  gets its own `open_stream/2`, and a batch-only backend is wrapped by
+  `FermixCore.Transcription.ChunkedStream`, which segments pushed audio and
+  drives `transcribe/2` file by file. Either way the caller talks to one
+  session contract — the messages, lifecycle, and error vocabulary documented in
+  `FermixCore.Transcription.StreamSession`.
   """
 
   @typedoc "What a backend can do: whether it speaks streaming, and whether it runs on-device."
@@ -23,8 +29,8 @@ defmodule FermixCore.Transcription.Backend do
 
   @doc """
   Streaming entrypoint (required only when `capabilities().streaming?`). Starts a
-  session process that accepts pushed PCM and sends transcript segments to
-  `consumer`. Unimplemented in every backend this phase.
+  session process that accepts pushed s16le/16 kHz/mono PCM and sends transcript
+  segments to `consumer`, per `FermixCore.Transcription.StreamSession`.
   """
   @callback open_stream(consumer :: pid(), opts :: keyword()) ::
               {:ok, pid()} | {:error, term()}

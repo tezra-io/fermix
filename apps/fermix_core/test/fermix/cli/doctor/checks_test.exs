@@ -275,6 +275,26 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.status == :ok
       assert result.detail =~ "subagent: inherits main"
       assert result.detail =~ "cron: inherits main"
+      assert result.detail =~ "meeting: inherits main"
+    end
+
+    test "fails on a meeting_model unknown to every provider (M21 Phase 3)" do
+      Application.put_env(:fermix_core, :routing, meeting_model: "claude-opus-4-7")
+      result = Checks.routing_overrides()
+      assert result.status == :fail
+      assert result.detail =~ "meeting_model"
+      assert result.detail =~ "not a known model for any provider"
+    end
+
+    test "summarizes a valid meeting override (M21 Phase 3)" do
+      Application.put_env(:fermix_core, :routing,
+        meeting_provider: "anthropic",
+        meeting_model: "claude-haiku-4-5"
+      )
+
+      result = Checks.routing_overrides()
+      assert result.status == :ok
+      assert result.detail =~ "meeting: provider=anthropic, model=claude-haiku-4-5"
     end
 
     test "ok and summarizes valid subagent/cron overrides" do
@@ -577,6 +597,133 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.detail =~ "Unknown"
     end
   end
+
+  describe "transcription/0 on-device backend (M21 Phase 2b)" do
+    setup do
+      transcription = Application.get_env(:fermix_core, :transcription, [])
+      plugins = Application.get_env(:fermix_core, :plugins, [])
+      fermix_home = System.get_env("FERMIX_HOME")
+      home = FermixTestSupport.SafeRm.make_tmp_dir!("checks-local-stt")
+
+      System.put_env("FERMIX_HOME", home)
+      Application.put_env(:fermix_core, :plugins, [])
+      Application.put_env(:fermix_core, :transcription, backend: "local")
+
+      on_exit(fn ->
+        Application.put_env(:fermix_core, :transcription, transcription)
+        Application.put_env(:fermix_core, :plugins, plugins)
+        restore_fermix_home(fermix_home)
+        FermixTestSupport.SafeRm.rm_rf!(home)
+      end)
+
+      %{home: home}
+    end
+
+    # The row must not say "set a key": the on-device backend has none, and an
+    # operator sent looking for one never finds it.
+    test "names the missing sidecar and carries the installer's own fix line" do
+      result = Checks.transcription()
+
+      assert result.status == :warn
+      assert result.detail =~ "backend local needs its sidecar"
+      assert result.detail =~ "dev_local"
+      refute result.detail =~ "set a key"
+    end
+
+    test "names the missing model once the sidecar is present", ctx do
+      install_fake_stt_sidecar(ctx.home)
+
+      result = Checks.transcription()
+
+      assert result.status == :warn
+      assert result.detail =~ "backend local needs its speech model"
+    end
+  end
+
+  describe "meetings/0 (M21 Phase 3)" do
+    setup do
+      meetings = Application.get_env(:fermix_core, :meetings, [])
+      plugins = Application.get_env(:fermix_core, :plugins, [])
+      fermix_home = System.get_env("FERMIX_HOME")
+      home = FermixTestSupport.SafeRm.make_tmp_dir!("checks-meetings")
+
+      System.put_env("FERMIX_HOME", home)
+      Application.put_env(:fermix_core, :plugins, [])
+
+      on_exit(fn ->
+        Application.put_env(:fermix_core, :meetings, meetings)
+        Application.put_env(:fermix_core, :plugins, plugins)
+        restore_fermix_home(fermix_home)
+        FermixTestSupport.SafeRm.rm_rf!(home)
+      end)
+
+      %{home: home}
+    end
+
+    test "reports the subsystem as disabled" do
+      Application.put_env(:fermix_core, :meetings, enabled: false)
+
+      result = Checks.meetings()
+
+      assert result.name == "meetings"
+      assert result.status == :ok
+      assert result.detail =~ "disabled"
+    end
+
+    test "warns when it is enabled with no usable lane" do
+      Application.put_env(:fermix_core, :meetings, enabled: true)
+
+      result = Checks.meetings()
+
+      assert result.status == :warn
+      assert result.detail =~ "no lane is usable"
+      assert result.detail =~ "dev_local"
+    end
+
+    test "reports the usable lanes and the profile custody note", ctx do
+      Application.put_env(:fermix_core, :meetings,
+        enabled: true,
+        zoom_account_id: "acct",
+        zoom_client_id: "client",
+        zoom_client_secret: "secret",
+        zoom_ws_subscription_id: "sub"
+      )
+
+      install_fake_meetbot_sidecar(ctx.home)
+
+      result = Checks.meetings()
+
+      assert result.status == :ok
+      assert result.detail =~ "meet sidecar installed"
+      assert result.detail =~ "zoom rtms configured"
+      assert result.detail =~ "profile: absent"
+    end
+  end
+
+  defp install_fake_stt_sidecar(home) do
+    {:ok, target} = FermixCore.Transcription.Local.SidecarInstaller.target()
+    write_dev_local_binary!(home, "stt_sidecar", target, "fermix-stt")
+  end
+
+  defp install_fake_meetbot_sidecar(home) do
+    {:ok, target} = FermixCore.Meetings.SidecarInstaller.target()
+    write_dev_local_binary!(home, "meetbot_sidecar", target, "fermix-meetbot")
+  end
+
+  # Presence, not content: the doctor rows never run a sidecar, so an empty
+  # executable file is a faithful stand-in for an installed one.
+  defp write_dev_local_binary!(home, plugin, target, command) do
+    dev_local = Path.join(home, "dev-local")
+    binary = Path.join([dev_local, plugin, "bin", target, command])
+
+    File.mkdir_p!(Path.dirname(binary))
+    File.write!(binary, "")
+    File.chmod!(binary, 0o755)
+    Application.put_env(:fermix_core, :plugins, dev_local: dev_local)
+  end
+
+  defp restore_fermix_home(nil), do: System.delete_env("FERMIX_HOME")
+  defp restore_fermix_home(value), do: System.put_env("FERMIX_HOME", value)
 
   describe "channel_health/1" do
     setup do

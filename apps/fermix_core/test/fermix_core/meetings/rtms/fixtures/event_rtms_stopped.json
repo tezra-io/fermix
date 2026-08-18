@@ -1,0 +1,12 @@
+{
+  "_synthesized": "synthesized from docs 2026-08-16 — revalidate against a live RTMS capture before release",
+  "event": "meeting.rtms_stopped",
+  "event_ts": 1760000060000,
+  "payload": {
+    "account_id": "acct_fixture",
+    "object": {
+      "id": "8123456789",
+      "meeting_uuid": "aBcD1234EfGh5678=="
+    }
+  }
+}
