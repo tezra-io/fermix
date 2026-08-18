@@ -293,6 +293,40 @@ defmodule FermixOpik.Mapper do
   end
 
   @doc """
+  Build a point span from a `[:fermix, :meeting, :phase]` event — one meeting
+  Session state transition, nested under the meeting run's own root trace.
+
+  The key list mirrors the emitter's allowlist exactly
+  (`FermixCore.Meetings.Telemetry`): `reason` is a typed end_reason/detail atom,
+  never free text, so a phase span carries no meeting content at all.
+  """
+  @spec meeting_phase_span(map(), map(), keyword()) :: map()
+  def meeting_phase_span(metadata, _measurements, opts) do
+    ended = Keyword.fetch!(opts, :ended)
+    started = start_of(ended, 0)
+
+    %{
+      id: new_id(started),
+      trace_id: Keyword.fetch!(opts, :trace_id),
+      parent_span_id: Keyword.get(opts, :parent_span_id),
+      project_name: Keyword.fetch!(opts, :project_name),
+      name: "meeting:#{stringify(Map.get(metadata, :to)) || "phase"}",
+      type: "general",
+      start_time: iso(started),
+      end_time: iso(ended),
+      metadata:
+        drop_nil(%{
+          meeting_id: Map.get(metadata, :meeting_id),
+          platform: stringify(Map.get(metadata, :platform)),
+          from: stringify(Map.get(metadata, :from)),
+          to: stringify(Map.get(metadata, :to)),
+          reason: stringify(Map.get(metadata, :reason))
+        })
+    }
+    |> drop_nil()
+  end
+
+  @doc """
   Build a point span from a `[:fermix, :timeout, :expired]` event — a failure
   deadline that fired. `error_info` flags it so the span surfaces as errored, not
   silently green; the timeout `name` rides in the event metadata (the event name
@@ -351,6 +385,12 @@ defmodule FermixOpik.Mapper do
   def provider_string(:openrouter), do: "openrouter"
   def provider_string(:ollama), do: "ollama"
   def provider_string(:mistral), do: "mistral"
+  # The transcription backends emit provider calls of their own (M21). Opik
+  # prices neither, but the clause + test is the same documented contract as
+  # above: `:local` in particular must read as the on-device backend rather than
+  # as an unnamed vendor.
+  def provider_string(:deepgram), do: "deepgram"
+  def provider_string(:local), do: "local"
   def provider_string(other), do: to_string(other)
 
   defp provider_span_name(metadata) do

@@ -46,6 +46,9 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :search_form, :map, required: true
   attr :image_form, :map, required: true
   attr :transcription_form, :map, required: true
+  attr :local_install, :map, default: nil
+  attr :meetings_form, :map, required: true
+  attr :meetbot_install, :map, default: nil
   attr :restarting, :boolean, default: false
   attr :saved_flash, :map, default: nil
   attr :skill_summary, :map, required: true
@@ -133,6 +136,9 @@ defmodule FermixWebWeb.SetupLive.Components do
               search_form={@search_form}
               image_form={@image_form}
               transcription_form={@transcription_form}
+              local_install={@local_install}
+              meetings_form={@meetings_form}
+              meetbot_install={@meetbot_install}
               skill_summary={@skill_summary}
               tabs={@tabs}
               tool_summary={@tool_summary}
@@ -259,6 +265,9 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :search_form, :map, required: true
   attr :image_form, :map, required: true
   attr :transcription_form, :map, required: true
+  attr :local_install, :map, default: nil
+  attr :meetings_form, :map, required: true
+  attr :meetbot_install, :map, default: nil
   attr :skill_summary, :map, required: true
   attr :tabs, :list, required: true
   attr :tool_summary, :map, required: true
@@ -273,6 +282,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   defp render_active_pane("search", assigns), do: search_pane(assigns)
   defp render_active_pane("media", assigns), do: media_pane(assigns)
   defp render_active_pane("transcription", assigns), do: transcription_pane(assigns)
+  defp render_active_pane("meetings", assigns), do: meetings_pane(assigns)
   defp render_active_pane("sandbox", assigns), do: sandbox_pane(assigns)
   defp render_active_pane("coding", assigns), do: coding_pane(assigns)
   defp render_active_pane("memory", assigns), do: memory_pane(assigns)
@@ -1488,6 +1498,12 @@ defmodule FermixWebWeb.SetupLive.Components do
               description="nova-3 — needs a Deepgram key"
               checked={@transcription_form.backend == :deepgram}
             />
+            <.transcription_backend_option
+              value="local"
+              label="On-device"
+              description="Parakeet on this machine — no key, no audio leaves the host"
+              checked={@transcription_form.backend == :local}
+            />
           </div>
         </fieldset>
 
@@ -1531,6 +1547,17 @@ defmodule FermixWebWeb.SetupLive.Components do
             </p>
           </div>
 
+          <div :if={@transcription_form.backend == :local} class="space-y-2">
+            <p class="text-sm text-base-content/70">
+              No key needed. Selecting this backend installs the speech engine and its
+              model into your Fermix home; nothing is downloaded until you pick it.
+            </p>
+            <p class={local_state_class(@transcription_form.local_state)}>
+              {local_state_message(@transcription_form.local_state)}
+            </p>
+            <.install_banner state={@local_install} />
+          </div>
+
           <div :if={@transcription_form.model_options != []} class="space-y-2">
             <.select_field
               label="Model"
@@ -1547,6 +1574,124 @@ defmodule FermixWebWeb.SetupLive.Components do
         <.form_actions active_tab={@active_tab} tabs={@tabs} save_label="Save transcription" />
       </form>
     </div>
+    """
+  end
+
+  defp meetings_pane(assigns) do
+    ~H"""
+    <div>
+      <.pane_header
+        title="Meeting notetaker"
+        subtitle="Let Fermix sit in a meeting you ask it to join, take text notes, and send you a summary. Off until you enable it here."
+      />
+
+      <form phx-submit="save_meetings" class="mt-6 space-y-6">
+        <div class="max-w-xl space-y-4">
+          <.toggle_input
+            label="Enable the meeting notetaker"
+            name="meetings_form[enabled]"
+            checked={@meetings_form.enabled}
+            hint="Enabling downloads the Google Meet notetaker. The Zoom lane below needs no download."
+          />
+          <.install_banner state={@meetbot_install} />
+          <p class={meetbot_state_class(@meetings_form.sidecar_installed?)}>
+            {meetbot_state_message(@meetings_form.sidecar_installed?)}
+          </p>
+
+          <.text_input
+            label="Notetaker name"
+            name="meetings_form[bot_name]"
+            value={@meetings_form.bot_name}
+          />
+
+          <.toggle_input
+            label="Announce itself in the meeting chat"
+            name="meetings_form[announce]"
+            checked={@meetings_form.announce}
+            hint="Posts one consent line on admit. The notetaker never speaks."
+          />
+          <.text_input
+            label="Announcement message"
+            name="meetings_form[announce_message]"
+            value={@meetings_form.announce_message}
+          />
+          <p class="text-sm text-base-content/60">
+            Leave blank for the built-in consent line, which names the notetaker and you.
+          </p>
+
+          <label class="form-control w-full">
+            <span class="label pb-1 text-sm font-medium">Speech-to-text backend</span>
+            <select
+              name="meetings_form[transcription_backend]"
+              class="select select-bordered w-full bg-base-100"
+            >
+              <option
+                :for={option <- @meetings_form.backend_options}
+                value={option}
+                selected={option == @meetings_form.transcription_backend}
+              >
+                {meetings_backend_label(option)}
+              </option>
+            </select>
+            <span class="label pt-1 text-xs text-base-content/60">
+              Blank uses whatever the Transcription tab is set to.
+            </span>
+          </label>
+        </div>
+
+        <section class="max-w-xl space-y-4">
+          <h3 class="text-sm font-semibold">Zoom (RTMS)</h3>
+          <.info_panel>
+            Zoom needs a Server-to-Server OAuth app on your own account with Realtime Media
+            Streams enabled. Fermix can only stream meetings hosted by that account —
+            meetings hosted by anyone else are out of reach on this lane.
+          </.info_panel>
+
+          <.text_input
+            label="Account ID"
+            name="meetings_form[zoom_account_id]"
+            value={@meetings_form.zoom_account_id}
+          />
+          <.text_input
+            label="Client ID"
+            name="meetings_form[zoom_client_id]"
+            value={@meetings_form.zoom_client_id}
+          />
+          <.secret_input
+            label="Client secret"
+            name="meetings_form[zoom_client_secret]"
+            set={@meetings_form.zoom_client_secret_set}
+          />
+          <p :if={@meetings_form.zoom_client_secret_set} class="text-sm text-success">
+            Already configured. Leave blank to keep it, or paste a new secret to replace it.
+          </p>
+          <.text_input
+            label="Webhook subscription ID"
+            name="meetings_form[zoom_ws_subscription_id]"
+            value={@meetings_form.zoom_ws_subscription_id}
+          />
+        </section>
+
+        <.info_panel class="max-w-xl">
+          Google Meet needs the notetaker signed into a Google account of its own. That
+          sign-in step ships with the notetaker release; until then the Meet lane can only
+          join meetings that admit an unauthenticated guest.
+        </.info_panel>
+
+        <.form_actions active_tab={@active_tab} tabs={@tabs} save_label="Save meetings" />
+      </form>
+    </div>
+    """
+  end
+
+  attr :state, :map, default: nil
+
+  defp install_banner(assigns) do
+    ~H"""
+    <p :if={@state} class={["flex items-center gap-2 text-sm", install_banner_class(@state.kind)]}>
+      <span :if={@state.running?} class="loading loading-spinner loading-xs" />
+      <span>{@state.message}</span>
+    </p>
     """
   end
 
@@ -3284,7 +3429,35 @@ defmodule FermixWebWeb.SetupLive.Components do
   # Panes that persist via a single "Save" button — these get the unsaved-edits
   # hint. Plugins and Doctor act per item/probe, so a pane-level hint doesn't fit.
   defp form_pane?(tab_id),
-    do: tab_id in ~w(provider realtime channels search sandbox coding memory personalization)
+    do:
+      tab_id in ~w(provider realtime channels meetings search sandbox coding memory personalization)
+
+  defp install_banner_class(:error), do: "text-error"
+  defp install_banner_class(:info), do: "text-base-content/70"
+
+  # Each half of the on-device backend reports its own absence, so the card can
+  # print the one sentence that fixes what is actually missing.
+  defp local_state_message(:ok), do: "Installed and ready — audio stays on this machine."
+
+  defp local_state_message({:error, :sidecar_not_installed}),
+    do: "Not installed yet — the speech engine is missing."
+
+  defp local_state_message({:error, :model_not_installed}),
+    do: "Speech engine installed; the model is still missing."
+
+  defp local_state_class(:ok), do: "text-sm text-success"
+  defp local_state_class({:error, _reason}), do: "text-sm text-warning"
+
+  defp meetbot_state_message(true), do: "Google Meet notetaker installed."
+
+  defp meetbot_state_message(false),
+    do: "Google Meet notetaker not installed — the Zoom lane below works without it."
+
+  defp meetbot_state_class(true), do: "text-sm text-success"
+  defp meetbot_state_class(false), do: "text-sm text-base-content/60"
+
+  defp meetings_backend_label(""), do: "Global default"
+  defp meetings_backend_label(name), do: name
 
   defp tab_status(%{component: nil}, _report), do: :ready
   defp tab_status(%{component: "provider:*"}, report), do: status_by_prefix(report, "provider:")

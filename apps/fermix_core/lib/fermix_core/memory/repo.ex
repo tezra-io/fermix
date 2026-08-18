@@ -8,6 +8,7 @@ defmodule FermixCore.Memory.Repo do
   alias Exqlite.Sqlite3
   alias FermixCore.Agents.IterationLimits
   alias FermixCore.Memory.Config
+  alias FermixCore.Memory.Repo.MeetingsSql
   alias FermixCore.Memory.Repo.MobileSql
   alias FermixCore.Memory.Repo.TemporalSql
   alias FermixCore.Memory.Scope
@@ -34,6 +35,9 @@ defmodule FermixCore.Memory.Repo do
   @mobile_store_migration_version 20
   @mobile_client_message_migration_version 21
   @mobile_attempt_fence_migration_version 22
+  # 23-25 are reserved for MILESTONE_32 (computer history); meetings takes 26 so
+  # the two milestones can land in either order without renumbering.
+  @meetings_migration_version 26
   @sqlite_open_intent :readwritecreate
 
   @base_schema_sql """
@@ -1040,6 +1044,7 @@ defmodule FermixCore.Memory.Repo do
 
   @type scheduled_job_row :: map()
   @type job_run_row :: map()
+  @type meeting_row :: map()
   @type memory_source_row :: map()
   @type harness_run_attrs :: map()
   @type harness_run_row :: map()
@@ -2269,6 +2274,63 @@ defmodule FermixCore.Memory.Repo do
     end
   end
 
+  @doc """
+  Records a requested meeting (M21 §8.2).
+
+  The row starts at status `requested`; the Session owns every later status.
+  Byte caps, the `mtg_<11>` id shape, and the fixed-width UTC timestamp form are
+  enforced in the caller, so invalid input never reaches the single writer.
+  """
+  @spec create_meeting(map(), keyword()) :: {:ok, meeting_row()} | {:error, term()}
+  def create_meeting(attrs, opts \\ []) when is_map(attrs) do
+    with {:ok, row} <- MeetingsSql.normalize_insert(attrs) do
+      call({:create_meeting, row}, opts)
+    end
+  end
+
+  @doc """
+  Writes one meeting state transition.
+
+  `fields` may carry only `started_at`, `ended_at`, `artifact_dir`, and `error`;
+  any other key is refused rather than dropped.
+  """
+  @spec update_meeting_status(String.t(), String.t(), map(), keyword()) ::
+          {:ok, meeting_row()} | {:error, :not_found | term()}
+  def update_meeting_status(id, status, fields \\ %{}, opts \\ [])
+      when is_binary(id) and is_binary(status) and is_map(fields) do
+    with {:ok, {checked, updates}} <- MeetingsSql.normalize_status_update(status, fields) do
+      call({:update_meeting_status, id, checked, updates}, opts)
+    end
+  end
+
+  @spec get_meeting(String.t(), keyword()) ::
+          {:ok, meeting_row()} | {:error, :not_found | term()}
+  def get_meeting(id, opts \\ []) when is_binary(id) do
+    call({:get_meeting, id}, opts)
+  end
+
+  @doc "Lists meetings newest first: `scope: :active` for live rows, `:recent` for all."
+  @spec list_meetings(map(), keyword()) :: {:ok, [meeting_row()]} | {:error, term()}
+  def list_meetings(filter \\ %{}, opts \\ []) when is_map(filter) do
+    with {:ok, normalized} <- MeetingsSql.normalize_list_filter(filter) do
+      call({:list_meetings, normalized}, opts)
+    end
+  end
+
+  @doc """
+  Fails every meeting still in a live status and returns the ids it named.
+
+  Boot reconciliation: a live row after a restart has no Session behind it, so
+  it is a stranded record, not a running meeting.
+  """
+  @spec sweep_live_meetings(String.t(), DateTime.t(), keyword()) ::
+          {:ok, [String.t()]} | {:error, term()}
+  def sweep_live_meetings(error_text, %DateTime{} = now, opts \\ []) when is_binary(error_text) do
+    with {:ok, {text, stamp}} <- MeetingsSql.normalize_sweep(error_text, now) do
+      call({:sweep_live_meetings, text, stamp}, opts)
+    end
+  end
+
   @spec migrate(keyword()) :: :ok | {:error, term()}
   def migrate(opts \\ []) do
     call(:migrate, opts)
@@ -2985,6 +3047,31 @@ defmodule FermixCore.Memory.Repo do
     {:reply, reply, state}
   end
 
+  def handle_call({:create_meeting, row}, _from, state) do
+    reply = with_connection(state, &MeetingsSql.insert(&1, row))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:update_meeting_status, id, status, updates}, _from, state) do
+    reply = with_connection(state, &MeetingsSql.update_status(&1, id, status, updates))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:get_meeting, id}, _from, state) do
+    reply = with_connection(state, &MeetingsSql.fetch(&1, id))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:list_meetings, filter}, _from, state) do
+    reply = with_connection(state, &MeetingsSql.list(&1, filter))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:sweep_live_meetings, error_text, stamp}, _from, state) do
+    reply = with_connection(state, &MeetingsSql.sweep_live(&1, error_text, stamp))
+    {:reply, reply, state}
+  end
+
   defp call(request, opts) do
     server = Keyword.get(opts, :server, __MODULE__)
     GenServer.call(server, request)
@@ -3048,7 +3135,8 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_event_followup_migration(conn, versions),
          :ok <- apply_mobile_store_migration(conn, versions),
          :ok <- apply_mobile_client_message_migration(conn, versions),
-         :ok <- apply_mobile_attempt_fence_migration(conn, versions) do
+         :ok <- apply_mobile_attempt_fence_migration(conn, versions),
+         :ok <- apply_meetings_migration(conn, versions) do
       :ok
     end
   end
@@ -3442,6 +3530,22 @@ defmodule FermixCore.Memory.Repo do
         BEGIN;
         #{MobileSql.attempt_fence_schema_sql()}
         INSERT INTO schema_migrations(version) VALUES (#{@mobile_attempt_fence_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  defp apply_meetings_migration(conn, versions) do
+    if Enum.member?(versions, @meetings_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{MeetingsSql.schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@meetings_migration_version});
         COMMIT;
         """
       )

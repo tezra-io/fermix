@@ -240,6 +240,29 @@ rows. The event tools themselves (`event_store`, `event_list`, `event_update`,
 `event_remove`) are ordinary built-ins riding `[:fermix, :tool, :exec]` with
 `input:` passed explicitly.
 
+## Meeting notetaker runs
+
+A meeting is a **run kind**: `FermixCore.Meetings.Session` mints
+`session_id = "meeting_<id>_<ts>"` with `parent_session` = the requesting
+turn's session (nil for CLI-origin), and every emission goes through
+`FermixCore.Meetings.Telemetry` — never hand-rolled. Bookends are
+`[:fermix, :meeting, :run_start | :run_complete | :run_error]`; every state
+transition additionally emits `[:fermix, :meeting, :phase]`
+(`count: 1`, `from`/`to`/`reason` as atoms-as-strings, never free text).
+Shared metadata: `agent: "meeting:<id>"`, `meeting_id`, `platform`, `origin`
+(`channel | cli | job`, derived at mint). `url`/`title` attach **only** behind
+the content gate (a meeting URL can embed a passcode). `run_start` carries
+`max_duration_ms` — the Opik exporter's sweep floor for the root; omit it and a
+quiet meeting gets force-closed at the idle TTL. `Trace.TelemetryHandler`
+registers all four; `FermixOpik` binds them (`kind: :meeting`,
+`infer_kind("meeting_" <> _)`, phase spans via the mapper). STT rides the
+provider emitter with the meeting `session_id`: chunked batch calls span
+per-segment, native streams (deepgram/xai/local) emit **one** provider call per
+stream lifetime at terminal (`Transcription.Support.emit_stream_call/5`) — a
+stream session is *not* a run kind. Summarizer calls are ordinary llm spans
+inside the meeting session. Ingress voice-note transcription stays sessionless
+(pre-turn), unchanged.
+
 ## Content (prompts / responses / tool IO)
 
 Attach bodies **only** behind `FermixCore.Telemetry.capture_content?/0`, and

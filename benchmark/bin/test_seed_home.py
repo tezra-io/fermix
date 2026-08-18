@@ -76,6 +76,8 @@ def test_render_config_explicit_mode_has_no_secret_and_parses():
     assert sandbox["allowed_roots"] == ["/tmp/x-eval/skills", "/tmp/x-eval/extra"]
     # M26 §11: skill curation stays off in eval homes.
     assert doc["fermix_core"]["skill_curation"]["enabled"] is False
+    # M21: meetings is default-off, so eval homes pre-grant the enable gate.
+    assert doc["fermix_core"]["meetings"]["enabled"] is True
 
 
 def test_render_config_keyring_mode_unchanged():

@@ -141,6 +141,22 @@ config :fermix_core, :transcription,
   model: "gpt-4o-mini-transcribe",
   max_file_mb: 20
 
+# Meeting notetaker (M21 Phase 3). Off by default: joining a meeting needs a
+# sidecar install (Google Meet) or Zoom RTMS credentials, and neither exists on
+# a fresh install. A blank `announce_message` means the built-in consent line;
+# a blank `transcription_backend` means the globally configured one.
+config :fermix_core, :meetings,
+  enabled: false,
+  bot_name: "Fermix Notetaker",
+  announce: true,
+  announce_message: "",
+  transcription_backend: "",
+  retain_audio: false,
+  zoom_account_id: "",
+  zoom_client_id: "",
+  zoom_client_secret: "",
+  zoom_ws_subscription_id: ""
+
 config :fermix_channels,
   telegram: [
     enabled: true

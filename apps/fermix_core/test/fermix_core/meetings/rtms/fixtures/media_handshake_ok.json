@@ -1,0 +1,6 @@
+{
+  "_synthesized": "synthesized from docs 2026-08-16 — revalidate against a live RTMS capture before release",
+  "msg_type": "DATA_HAND_SHAKE_RESP",
+  "protocol_version": 1,
+  "status_code": "STATUS_OK"
+}

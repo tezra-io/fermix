@@ -26,6 +26,9 @@ defmodule FermixCore.Setup.Doctor do
   alias FermixCore.ComputerUse
   alias FermixCore.ComputerUse.Probe, as: ComputerUseProbe
   alias FermixCore.ComputerUse.SidecarInstaller
+  alias FermixCore.Meetings
+  alias FermixCore.Meetings.Config, as: MeetingsConfig
+  alias FermixCore.Meetings.SidecarInstaller, as: MeetbotInstaller
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.PrimaryConfig
@@ -35,6 +38,8 @@ defmodule FermixCore.Setup.Doctor do
   alias FermixCore.Tools.SearchCredential
   alias FermixCore.Tools.WebSearch
   alias FermixCore.Transcription
+  alias FermixCore.Transcription.Local.ModelStore
+  alias FermixCore.Transcription.Local.SidecarInstaller, as: SttInstaller
 
   @type provider ::
           :openai | :openai_codex | :anthropic | :xai | :openrouter | :ollama | :mistral
@@ -83,9 +88,29 @@ defmodule FermixCore.Setup.Doctor do
           %{:status => :configured, :backend => atom(), :credential_present? => boolean()}
           | %{status: :unconfigured}
           | %{status: :error, error: String.t()}
+  @type local_missing ::
+          :sidecar_not_installed | :no_release_pinned | :model_not_installed | :model_pins_missing
   @type transcription_report ::
           %{:status => :configured, :backend => atom(), :credential_present? => boolean()}
+          | %{
+              :status => :needs_install,
+              :backend => :local,
+              :missing => local_missing(),
+              :remedy => String.t()
+            }
           | %{status: :error, error: String.t()}
+  @type meetings_report ::
+          %{status: :disabled}
+          | %{
+              :status => :enabled,
+              :ready? => boolean(),
+              :sidecar_installed? => boolean(),
+              :pinned_tag => String.t() | nil,
+              :profile => :present | :absent,
+              :profile_note => String.t(),
+              :rtms_configured? => boolean(),
+              :remedy => String.t() | nil
+            }
   @type model_window :: %{
           provider: provider(),
           model: String.t(),
@@ -124,6 +149,21 @@ defmodule FermixCore.Setup.Doctor do
     {"network", :network}
   ]
   @default_probe_timeout_ms 5_000
+  # Operator-facing remedies for the on-device transcription backend. The
+  # "cannot be installed yet" sentences belong to the installer modules (they
+  # own the reason) and are rendered verbatim; these two cover the ordinary
+  # "nothing has been installed yet" case.
+  @local_sidecar_remedy "The on-device speech sidecar is not installed. " <>
+                          "Install it from fermix setup → Transcription."
+  @local_model_remedy "The on-device speech model is not installed. " <>
+                        "Install it from fermix setup → Transcription."
+  # C2 §4.5 verbatim. Presence is all the daemon may know: it never reads inside
+  # the profile, so it cannot tell a signed-in profile from an empty one.
+  @meet_profile_present "profile: present (signed-in state unknown until next join)"
+  @meet_profile_absent "profile: absent — first Meet join will be anonymous (degraded); " <>
+                         "sign the bot account in via fermix setup → Meetings → \"Open bot sign-in\""
+  @meetings_no_lane "No meeting lane is usable. Install the meetbot sidecar from " <>
+                      "fermix setup → Meetings, or complete the Zoom RTMS credentials there."
 
   @spec probe_provider(provider(), keyword()) :: {:ok, probe_ok()} | {:error, probe_error()}
   def probe_provider(provider, opts \\ [])
@@ -494,10 +534,18 @@ defmodule FermixCore.Setup.Doctor do
   key) without transcribing anything. Unlike `image_report/1` there is no
   `:unconfigured` state: `[fermix_core.transcription]` always carries a
   compile-time default backend, so an absent/unknown backend is an `:error`.
+
+  The on-device `local` backend has no credential at all — what it needs is an
+  installed sidecar and an installed model — so it answers `:needs_install` with
+  the missing half named and the one sentence that fixes it. `release_pinned?:`
+  and `pins_pinned?:` are test seams for the far side of the pin gates.
   """
   @spec transcription_report(keyword()) :: transcription_report()
-  def transcription_report(_opts \\ []) do
+  def transcription_report(opts \\ []) do
     case Transcription.active_backend() do
+      {:ok, {:local, module}} ->
+        local_transcription_report(module, opts)
+
       {:ok, {name, module}} ->
         %{status: :configured, backend: name, credential_present?: credential_present?(module)}
 
@@ -505,6 +553,91 @@ defmodule FermixCore.Setup.Doctor do
         %{status: :error, error: message}
     end
   end
+
+  # "Not installed" and "this build cannot install it yet" are different
+  # problems with different fixes, so they stay distinct states rather than
+  # collapsing into one "not configured" line.
+  defp local_transcription_report(module, opts) do
+    case module.configured?([]) do
+      :ok -> %{status: :configured, backend: :local, credential_present?: true}
+      {:error, :sidecar_not_installed} -> local_sidecar_missing(opts)
+      {:error, :model_not_installed} -> local_model_missing(opts)
+    end
+  end
+
+  defp local_sidecar_missing(opts) do
+    if Keyword.get(opts, :release_pinned?, SttInstaller.release_pinned?()) do
+      needs_install(:sidecar_not_installed, @local_sidecar_remedy)
+    else
+      needs_install(:no_release_pinned, SttInstaller.error_message(:no_release_pinned))
+    end
+  end
+
+  defp local_model_missing(opts) do
+    if Keyword.get(opts, :pins_pinned?, ModelStore.pins_pinned?()) do
+      needs_install(:model_not_installed, @local_model_remedy)
+    else
+      needs_install(:model_pins_missing, ModelStore.error_message(:model_pins_missing))
+    end
+  end
+
+  defp needs_install(missing, remedy) do
+    %{status: :needs_install, backend: :local, missing: missing, remedy: remedy}
+  end
+
+  @doc """
+  Reports the meeting notetaker's readiness: whether either lane can actually
+  place a bot (Meet sidecar installed / Zoom RTMS credentials complete), whether
+  the Meet profile directory exists, and the one thing to do when the subsystem
+  is enabled with no usable lane.
+
+  Offline, like `transcription_report/1`: it never spawns the sidecar. Launching
+  a Playwright browser to answer a doctor row is not a diagnostic, and the
+  sidecar offers no cheaper identity call — so this reports installed state, not
+  a live handshake.
+  """
+  @spec meetings_report(keyword()) :: meetings_report()
+  def meetings_report(_opts \\ []) do
+    config = MeetingsConfig.load()
+
+    if config.enabled do
+      enabled_meetings_report(config)
+    else
+      %{status: :disabled}
+    end
+  end
+
+  defp enabled_meetings_report(config) do
+    installed? = MeetbotInstaller.installed?()
+    rtms_configured? = MeetingsConfig.rtms_configured?(config)
+    profile = meet_profile_state()
+
+    %{
+      status: :enabled,
+      ready?: Meetings.ready?(),
+      sidecar_installed?: installed?,
+      pinned_tag: MeetbotInstaller.pinned_tag(),
+      profile: profile,
+      profile_note: meet_profile_note(profile),
+      rtms_configured?: rtms_configured?,
+      remedy: meetings_remedy(installed?, rtms_configured?)
+    }
+  end
+
+  defp meet_profile_state do
+    if File.dir?(MeetbotInstaller.profile_dir()), do: :present, else: :absent
+  end
+
+  defp meet_profile_note(:present), do: @meet_profile_present
+  defp meet_profile_note(:absent), do: @meet_profile_absent
+
+  defp meetings_remedy(false, false), do: unusable_lane_remedy(MeetbotInstaller.pinned_tag())
+  defp meetings_remedy(_installed?, _rtms_configured?), do: nil
+
+  # With no pinned release the sidecar cannot be installed at all, so the
+  # installer's own copy (which names the dev_local path) is the honest fix.
+  defp unusable_lane_remedy(nil), do: MeetbotInstaller.error_message(:no_pinned_release)
+  defp unusable_lane_remedy(_tag), do: @meetings_no_lane
 
   defp credential_present?(module) do
     case module.configured?([]) do

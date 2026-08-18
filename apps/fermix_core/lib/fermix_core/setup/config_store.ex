@@ -19,6 +19,7 @@ defmodule FermixCore.Setup.ConfigStore do
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Setup.SecretStore
   alias FermixCore.SkillCuration.Config, as: SkillCurationConfig
+  alias FermixCore.Transcription.Registry, as: TranscriptionRegistry
 
   require Logger
 
@@ -118,6 +119,7 @@ defmodule FermixCore.Setup.ConfigStore do
         realtime: Application.get_env(:fermix_core, :realtime, []),
         computer_use: Application.get_env(:fermix_core, :computer_use, []),
         transcription: Application.get_env(:fermix_core, :transcription, []),
+        meetings: Application.get_env(:fermix_core, :meetings, []),
         tools: Application.get_env(:fermix_core, :tools, []),
         plugins: Application.get_env(:fermix_core, :plugins, []),
         oauth: Application.get_env(:fermix_core, :oauth, %{}),
@@ -194,6 +196,7 @@ defmodule FermixCore.Setup.ConfigStore do
     apply_realtime_config(Keyword.get(persisted.fermix_core, :realtime, []))
     apply_computer_use_config(Keyword.get(persisted.fermix_core, :computer_use, []))
     apply_transcription_config(Keyword.get(persisted.fermix_core, :transcription, []))
+    apply_meetings_config(Keyword.get(persisted.fermix_core, :meetings, []))
     apply_tools_config(Keyword.get(persisted.fermix_core, :tools, []))
     apply_plugins_config(Keyword.get(persisted.fermix_core, :plugins, []))
     apply_oauth_config(Keyword.get(persisted.fermix_core, :oauth, %{}))
@@ -327,6 +330,11 @@ defmodule FermixCore.Setup.ConfigStore do
           |> Map.get(:fermix_core, [])
           |> Keyword.get(:transcription, [])
           |> normalize_transcription(),
+        meetings:
+          snapshot
+          |> Map.get(:fermix_core, [])
+          |> Keyword.get(:meetings, [])
+          |> normalize_meetings(),
         tools:
           snapshot
           |> Map.get(:fermix_core, [])
@@ -461,6 +469,7 @@ defmodule FermixCore.Setup.ConfigStore do
         realtime: [],
         computer_use: [],
         transcription: [],
+        meetings: [],
         tools: [],
         plugins: [],
         oauth: %{},
@@ -661,6 +670,17 @@ defmodule FermixCore.Setup.ConfigStore do
     end
   end
 
+  # Replace (not merge): a blank is a real value here — clearing `announce_message`
+  # means "use the built-in consent line", and clearing a Zoom credential means
+  # "un-configure the RTMS lane". `normalize_meetings/1` drops blanks, so a merge
+  # would keep the old live value and the notetaker would keep announcing a line
+  # the operator deleted. `Meetings.Config.load/0` supplies every default an absent
+  # key needs, so nothing depends on the compile-time baseline surviving here.
+  defp apply_meetings_config(meetings_config) do
+    Application.put_env(:fermix_core, :meetings, meetings_config)
+    :ok
+  end
+
   defp apply_tools_config(tools_config) do
     Application.put_env(:fermix_core, :tools, tools_config)
     :ok
@@ -710,6 +730,7 @@ defmodule FermixCore.Setup.ConfigStore do
     realtime = Keyword.get(fermix_core, :realtime, [])
     computer_use = Keyword.get(fermix_core, :computer_use, [])
     transcription = Keyword.get(fermix_core, :transcription, [])
+    meetings = Keyword.get(fermix_core, :meetings, [])
     tools = Keyword.get(fermix_core, :tools, [])
     plugins = Keyword.get(fermix_core, :plugins, [])
     oauth = Keyword.get(fermix_core, :oauth, %{})
@@ -745,6 +766,7 @@ defmodule FermixCore.Setup.ConfigStore do
       render_section(["fermix_core", "realtime"], realtime),
       render_section(["fermix_core", "computer_use"], computer_use),
       render_section(["fermix_core", "transcription"], transcription),
+      render_section(["fermix_core", "meetings"], meetings),
       render_section(["fermix_core", "tools", "web_search"], Keyword.get(tools, :web_search, [])),
       render_section(
         ["fermix_core", "tools", "tool_search"],
@@ -970,6 +992,7 @@ defmodule FermixCore.Setup.ConfigStore do
         computer_use: normalize_computer_use(get_in(document, ["fermix_core", "computer_use"])),
         transcription:
           normalize_transcription(get_in(document, ["fermix_core", "transcription"])),
+        meetings: normalize_meetings(get_in(document, ["fermix_core", "meetings"])),
         tools: normalize_tools(get_in(document, ["fermix_core", "tools"])),
         plugins: normalize_plugins(get_in(document, ["fermix_core", "plugins"])),
         oauth: normalize_oauth(get_in(document, ["fermix_core", "oauth"])),
@@ -1123,9 +1146,9 @@ defmodule FermixCore.Setup.ConfigStore do
   # path, so config drift here must refuse boot rather than silently default
   # (Rule #12): a typo'd key, an unknown backend, or a non-positive max_file_mb
   # raises at the parse boundary, mirroring `normalize_generate_image/1`.
-  # `backend` is one of the shipped hosted backends; the on-device `local`
-  # backend ships in a later phase and is not selectable here. `model` is
-  # validated only as a string — a power user may pin any id the backend accepts.
+  # `backend` is one of the shipped backends, on-device `local` included — the
+  # allowed set is the registry's, never a second list maintained here. `model`
+  # is validated only as a string — a power user may pin any id the backend accepts.
   # Each backend has its own optional API-key slot (secure-on-save): openai/xai
   # keys OVERRIDE the reused chat-provider key; deepgram has no chat provider to
   # reuse, so its key is the only source.
@@ -1185,18 +1208,25 @@ defmodule FermixCore.Setup.ConfigStore do
     do: normalize_transcription_backend(Atom.to_string(value))
 
   defp normalize_transcription_backend(value) when is_binary(value) do
-    case value |> String.trim() |> String.downcase() do
-      backend when backend in ~w(openai xai deepgram) ->
-        backend
+    backend = value |> String.trim() |> String.downcase()
 
-      other ->
-        raise ArgumentError, """
-        config.toml [fermix_core.transcription] has an unknown backend: #{inspect(other)}.
+    if backend in transcription_backend_names() do
+      backend
+    else
+      raise ArgumentError, """
+      config.toml [fermix_core.transcription] has an unknown backend: #{inspect(backend)}.
 
-        Allowed backends: deepgram, openai, xai.
-        Remove or fix `backend`; the daemon will not boot until this is fixed.
-        """
+      Allowed backends: #{Enum.join(transcription_backend_names(), ", ")}.
+      Remove or fix `backend`; the daemon will not boot until this is fixed.
+      """
     end
+  end
+
+  # The shipped backend set is the registry's: a backend added there becomes
+  # selectable the same day, and one withdrawn stops parsing without a second
+  # edit here.
+  defp transcription_backend_names do
+    Enum.map(TranscriptionRegistry.backends(), fn {name, _module} -> Atom.to_string(name) end)
   end
 
   defp normalize_transcription_max_file_mb(nil), do: nil
@@ -1207,6 +1237,105 @@ defmodule FermixCore.Setup.ConfigStore do
     raise ArgumentError,
           "config.toml [fermix_core.transcription] max_file_mb #{inspect(value)} " <>
             "must be a positive integer"
+  end
+
+  # `[fermix_core.meetings]` (M21 Phase 3). Same parse-boundary posture as
+  # transcription: an unknown key or an unknown `transcription_backend` refuses
+  # boot rather than being dropped, because a notetaker joining a real meeting
+  # with a silently altered posture (announcement off, audio retained) is worse
+  # than one that will not start. A blank `transcription_backend` is legal and
+  # means "whatever the global transcription block selected" — `normalize_string/1`
+  # turns it into an absent key, which is exactly what `Meetings.Config` reads
+  # back as blank. `zoom_client_secret` is secure-on-save through SecretPaths.
+  @meetings_keys ~w(enabled bot_name announce announce_message transcription_backend retain_audio zoom_account_id zoom_client_id zoom_client_secret zoom_ws_subscription_id)
+
+  defp normalize_meetings(nil), do: []
+
+  defp normalize_meetings(config) when is_map(config) or is_list(config) do
+    validate_meetings_keys!(config)
+
+    []
+    |> put_if_present(:enabled, normalize_boolean(lookup(config, "enabled", :enabled)))
+    |> put_if_present(:bot_name, normalize_string(lookup(config, "bot_name", :bot_name)))
+    |> put_if_present(:announce, normalize_boolean(lookup(config, "announce", :announce)))
+    |> put_if_present(
+      :announce_message,
+      normalize_string(lookup(config, "announce_message", :announce_message))
+    )
+    |> put_if_present(
+      :transcription_backend,
+      normalize_meetings_backend(lookup(config, "transcription_backend", :transcription_backend))
+    )
+    |> put_if_present(
+      :retain_audio,
+      normalize_boolean(lookup(config, "retain_audio", :retain_audio))
+    )
+    |> put_meetings_zoom(config)
+  end
+
+  defp normalize_meetings(_config), do: []
+
+  defp put_meetings_zoom(keyword, config) do
+    keyword
+    |> put_if_present(
+      :zoom_account_id,
+      normalize_string(lookup(config, "zoom_account_id", :zoom_account_id))
+    )
+    |> put_if_present(
+      :zoom_client_id,
+      normalize_string(lookup(config, "zoom_client_id", :zoom_client_id))
+    )
+    |> put_if_present(
+      :zoom_client_secret,
+      normalize_string(lookup(config, "zoom_client_secret", :zoom_client_secret))
+    )
+    |> put_if_present(
+      :zoom_ws_subscription_id,
+      normalize_string(lookup(config, "zoom_ws_subscription_id", :zoom_ws_subscription_id))
+    )
+  end
+
+  defp validate_meetings_keys!(config) do
+    unknown =
+      config
+      |> section_keys()
+      |> Enum.reject(&(&1 in @meetings_keys))
+      |> Enum.sort()
+
+    if unknown != [] do
+      raise ArgumentError, """
+      config.toml [fermix_core.meetings] has unknown key(s): #{Enum.join(unknown, ", ")}.
+
+      Allowed keys: #{Enum.join(@meetings_keys, ", ")}.
+      Remove or fix the key(s); the daemon will not boot until this is fixed.
+      """
+    end
+  end
+
+  defp normalize_meetings_backend(nil), do: nil
+
+  defp normalize_meetings_backend(value) when is_atom(value),
+    do: normalize_meetings_backend(Atom.to_string(value))
+
+  defp normalize_meetings_backend(value) when is_binary(value) do
+    case normalize_string(value) do
+      nil -> nil
+      name -> validated_meetings_backend(String.downcase(name))
+    end
+  end
+
+  defp validated_meetings_backend(name) do
+    if name in transcription_backend_names() do
+      name
+    else
+      raise ArgumentError, """
+      config.toml [fermix_core.meetings] has an unknown transcription_backend: #{inspect(name)}.
+
+      Allowed backends: #{Enum.join(transcription_backend_names(), ", ")}, or blank for the
+      one [fermix_core.transcription] selects.
+      Remove or fix `transcription_backend`; the daemon will not boot until this is fixed.
+      """
+    end
   end
 
   defp normalize_tools(nil), do: []
@@ -1569,9 +1698,10 @@ defmodule FermixCore.Setup.ConfigStore do
 
   defp normalize_routing(nil), do: []
 
-  # subagent_*/cron_* drive delegated-worker and scheduled-job model selection
-  # (docs/design/SUBAGENT_MODEL_SELECTION.md); kept lax strings here and
-  # validated at the consumption seam by FermixCore.Providers.RoutingOverrides.
+  # subagent_*/cron_*/meeting_* drive delegated-worker, scheduled-job and
+  # meeting-summary model selection (docs/design/SUBAGENT_MODEL_SELECTION.md);
+  # kept lax strings here and validated at the consumption seam by
+  # FermixCore.Providers.RoutingOverrides.
   defp normalize_routing(config) do
     []
     |> put_if_present(
@@ -1597,6 +1727,18 @@ defmodule FermixCore.Setup.ConfigStore do
     |> put_if_present(
       :cron_reasoning_effort,
       normalize_string(lookup(config, "cron_reasoning_effort", :cron_reasoning_effort))
+    )
+    |> put_if_present(
+      :meeting_provider,
+      normalize_string(lookup(config, "meeting_provider", :meeting_provider))
+    )
+    |> put_if_present(
+      :meeting_model,
+      normalize_string(lookup(config, "meeting_model", :meeting_model))
+    )
+    |> put_if_present(
+      :meeting_reasoning_effort,
+      normalize_string(lookup(config, "meeting_reasoning_effort", :meeting_reasoning_effort))
     )
   end
 

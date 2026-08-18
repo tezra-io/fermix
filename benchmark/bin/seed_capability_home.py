@@ -140,6 +140,16 @@ def render_config(
     # unset: default_vendor (so both CLIs stay advertised for tasks that name
     # either) and cloud_enabled (defaults off — the cloud rail is not evaluated).
     lines += ["[fermix_core.harness]", "approved = true", ""]
+    # Meetings (MILESTONE_21) are off until the operator turns them on, and a
+    # fresh eval home has never made that decision — so `Meetings.ready?()` is
+    # false, the seeder registers NO meetings tool, and a task asking the
+    # notetaker to join scores 0 with nothing wrong in the product. Same rule as
+    # the harness consent above: pre-grant every human-decision gate, scoped to
+    # this throwaway home. It is deliberately not sufficient on its own —
+    # `ready?()` also wants an installed meetbot sidecar or complete Zoom RTMS
+    # credentials, and this seeder installs neither — so a home that never gets a
+    # lane still advertises nothing and refuses locally rather than dialling out.
+    lines += ["[fermix_core.meetings]", "enabled = true", ""]
     # Skill curation stays OFF in eval homes (MILESTONE_26_SKILL_CURATION §11):
     # the +15d first cycle already makes scheduled firing impossible during an
     # eval window, but a disabled entry also keeps /skills inert if a candidate

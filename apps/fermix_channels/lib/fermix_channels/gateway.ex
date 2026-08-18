@@ -238,6 +238,15 @@ defmodule FermixChannels.Gateway do
                           "backend is configured. Run `fermix setup` to add one."
   @transcription_failed_reply "I couldn't transcribe your voice note — the " <>
                                 "transcription failed. Please try again."
+  # An uninstalled on-device backend is an install state, not a transient
+  # failure: "please try again" is a remedy that can never work, so each half
+  # names the install that fixes it (the doctor wording, D14).
+  @sidecar_not_installed_reply "I couldn't transcribe your voice note — on-device " <>
+                                 "transcription is selected but its speech sidecar is not " <>
+                                 "installed. Install it from `fermix setup` → Transcription."
+  @model_not_installed_reply "I couldn't transcribe your voice note — on-device " <>
+                               "transcription is selected but its speech model is not " <>
+                               "installed. Install it from `fermix setup` → Transcription."
   @download_failed_reply "I couldn't download your attachment to transcribe it. " <>
                            "Please try again."
 
@@ -407,6 +416,8 @@ defmodule FermixChannels.Gateway do
 
   defp transcription_failure_copy(:not_configured), do: @not_configured_reply
   defp transcription_failure_copy({:unsupported_auth_mode, _mode}), do: @not_configured_reply
+  defp transcription_failure_copy(:sidecar_not_installed), do: @sidecar_not_installed_reply
+  defp transcription_failure_copy(:model_not_installed), do: @model_not_installed_reply
 
   defp transcription_failure_copy({:file_too_large, size_mb, cap_mb}) do
     "I couldn't transcribe your voice note — it's #{size_mb} MB, over the " <>

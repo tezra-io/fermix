@@ -208,7 +208,66 @@ defmodule FermixOpik.MapperTest do
     assert Mapper.provider_string(:openrouter) == "openrouter"
     assert Mapper.provider_string(:ollama) == "ollama"
     assert Mapper.provider_string(:mistral) == "mistral"
+    # The transcription backends (M21) name themselves too, so a streaming STT
+    # call is attributable to its backend in the export.
+    assert Mapper.provider_string(:deepgram) == "deepgram"
+    assert Mapper.provider_string(:local) == "local"
     assert Mapper.provider_string(nil) == nil
+  end
+
+  test "meeting_phase_span builds a general transition point span" do
+    span =
+      Mapper.meeting_phase_span(
+        %{
+          meeting_id: "mtg_ab12cd",
+          platform: :meet,
+          from: :capturing,
+          to: :summarizing,
+          reason: :meeting_ended
+        },
+        %{count: 1},
+        trace_id: "trace-1",
+        parent_span_id: "wrap-1",
+        project_name: "fermix",
+        ended: @ended
+      )
+
+    assert span.name == "meeting:summarizing"
+    assert span.type == "general"
+    assert span.trace_id == "trace-1"
+    assert span.parent_span_id == "wrap-1"
+    assert span.start_time == "2026-06-02T12:00:03.200Z"
+
+    assert span.metadata == %{
+             meeting_id: "mtg_ab12cd",
+             platform: "meet",
+             from: "capturing",
+             to: "summarizing",
+             reason: "meeting_ended"
+           }
+  end
+
+  # A meeting URL can embed a passcode and a transcript line is meeting content:
+  # the phase span names neither, and the builder is the last gate before export.
+  test "meeting_phase_span exports no meeting content" do
+    span =
+      Mapper.meeting_phase_span(
+        %{
+          to: :capturing,
+          url: "https://us02web.zoom.us/j/8412345678?pwd=secretpass",
+          title: "Board sync",
+          transcript: "we should acquire them"
+        },
+        %{},
+        trace_id: "t",
+        project_name: "fermix",
+        ended: @ended
+      )
+
+    assert span.metadata == %{to: "capturing"}
+    refute String.contains?(inspect(span), "secretpass")
+    refute String.contains?(inspect(span), "Board sync")
+    refute String.contains?(inspect(span), "acquire them")
   end
 
   test "realtime_span builds a general lifecycle point span" do

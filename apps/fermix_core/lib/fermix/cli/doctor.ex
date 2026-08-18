@@ -74,6 +74,7 @@ defmodule Fermix.CLI.Doctor do
       Checks.place_search(),
       Checks.image_generation(),
       Checks.transcription(),
+      Checks.meetings(),
       Checks.realtime(),
       Checks.mobile(),
       Checks.acp(),

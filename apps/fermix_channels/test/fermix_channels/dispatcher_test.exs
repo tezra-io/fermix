@@ -118,11 +118,25 @@ defmodule FermixChannels.DispatcherTest do
   end
 
   defmodule NotConfiguredBackend do
+    def name, do: :not_configured_stub
     def transcribe(_path, _opts), do: {:error, :not_configured}
   end
 
   defmodule ProviderErrorBackend do
+    def name, do: :provider_error_stub
     def transcribe(_path, _opts), do: {:error, "OpenAI transcription error: 500"}
+  end
+
+  # The on-device backend selected but never installed — an install state, not a
+  # transient failure (`FermixCore.Transcription.Local`).
+  defmodule SidecarNotInstalledBackend do
+    def name, do: :local
+    def transcribe(_path, _opts), do: {:error, :sidecar_not_installed}
+  end
+
+  defmodule ModelNotInstalledBackend do
+    def name, do: :local
+    def transcribe(_path, _opts), do: {:error, :model_not_installed}
   end
 
   # Fails the download with the channel byte-cap tuple (as Telegram's getFile
@@ -725,6 +739,49 @@ defmodule FermixChannels.DispatcherTest do
       assert_receive {:ingress_reply, reply}
       assert reply =~ "transcription failed"
       assert reply =~ "try again"
+      refute_received {:agent_message, _agent_message}
+    end
+
+    test "an uninstalled local sidecar names the install instead of \"try again\"" do
+      test_pid = self()
+
+      capture_log(fn ->
+        assert :ok =
+                 Dispatcher.dispatch([audio_message()],
+                   channel: AudioChannel,
+                   agent: CapturingAgent,
+                   agent_server: test_pid,
+                   transcription: [backend: SidecarNotInstalledBackend],
+                   reply_fn: capture_reply(test_pid)
+                 )
+      end)
+
+      assert_receive {:ingress_reply, reply}
+      assert reply =~ "sidecar is not installed"
+      assert reply =~ "fermix setup"
+      # A retry can never install anything — the generic remedy must not appear.
+      refute reply =~ "try again"
+      refute_received {:agent_message, _agent_message}
+    end
+
+    test "an uninstalled local speech model names the install instead of \"try again\"" do
+      test_pid = self()
+
+      capture_log(fn ->
+        assert :ok =
+                 Dispatcher.dispatch([audio_message()],
+                   channel: AudioChannel,
+                   agent: CapturingAgent,
+                   agent_server: test_pid,
+                   transcription: [backend: ModelNotInstalledBackend],
+                   reply_fn: capture_reply(test_pid)
+                 )
+      end)
+
+      assert_receive {:ingress_reply, reply}
+      assert reply =~ "speech model is not installed"
+      assert reply =~ "fermix setup"
+      refute reply =~ "try again"
       refute_received {:agent_message, _agent_message}
     end
 

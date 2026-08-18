@@ -131,6 +131,16 @@ defmodule FermixCore.Setup.SecretPaths do
       sandbox_env: false
     },
     %{
+      key: :meetings_zoom_client_secret,
+      env: "MEETINGS_ZOOM_CLIENT_SECRET",
+      path: [:fermix_core, :meetings, :zoom_client_secret],
+      functionality: "Zoom RTMS meeting notetaker",
+      optional?: true,
+      # BEAM-internal HTTP/WebSocket (no subprocess), so it is not exposed via
+      # [sandbox.env] — the meetbot sidecar never sees the Zoom credentials.
+      sandbox_env: false
+    },
+    %{
       key: :google_oauth_client_secret,
       env: "GOOGLE_OAUTH_CLIENT_SECRET",
       path: [:fermix_core, :oauth, "google", :client_secret]

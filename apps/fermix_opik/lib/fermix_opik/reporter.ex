@@ -51,6 +51,10 @@ defmodule FermixOpik.Reporter do
     [:fermix, :realtime, :screen_feed_start],
     [:fermix, :realtime, :screen_feed_stop],
     [:fermix, :realtime, :call_stop],
+    [:fermix, :meeting, :run_start],
+    [:fermix, :meeting, :run_complete],
+    [:fermix, :meeting, :run_error],
+    [:fermix, :meeting, :phase],
     [:fermix, :timeout, :expired]
   ]
 
