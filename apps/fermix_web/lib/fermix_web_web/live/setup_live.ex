@@ -13,6 +13,7 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.ComputerHistory
   alias FermixCore.ComputerHistory.Config, as: ComputerHistoryConfig
+  alias FermixCore.ComputerHistory.InstalledApps
   alias FermixCore.ComputerUse
   alias FermixCore.ComputerUse.SidecarInstaller
   alias FermixCore.Harness.Vendors, as: HarnessVendors
@@ -49,6 +50,11 @@ defmodule FermixWebWeb.SetupLive do
   @external_resource @computer_use_logo_path
   @computer_use_logo_uri "data:image/svg+xml;base64," <>
                            Base.encode64(File.read!(@computer_use_logo_path))
+
+  @computer_history_logo_path Path.join(__DIR__, "setup_live/computer_history_logo.svg")
+  @external_resource @computer_history_logo_path
+  @computer_history_logo_uri "data:image/svg+xml;base64," <>
+                               Base.encode64(File.read!(@computer_history_logo_path))
 
   @tabs [
     %{id: "provider", label: "Provider", component: "provider:*", description: "Model and key"},
@@ -160,6 +166,7 @@ defmodule FermixWebWeb.SetupLive do
       |> assign(:plugin_install_tasks, %{})
       |> assign(:oauth_modal, nil)
       |> assign(:resource_picker, nil)
+      |> assign(:computer_history_picker, nil)
       |> assign_report(report)
 
     {:ok, socket}
@@ -431,11 +438,13 @@ defmodule FermixWebWeb.SetupLive do
   # Computer use is special-cased: it registers no tools, so it never enters the
   # plugin registry — enabling it means "ensure the sidecar binary, flip the
   # feature flag", not the generic install→register→enable path.
+  # Computer-history is enabled through its app-picker modal (open_computer_history_apps),
+  # never this generic handler — enabling it with no allowlist would be refused.
   def handle_event("plugin_enable", %{"name" => name}, socket) do
-    cond do
-      computer_use_plugin?(name) -> {:noreply, enable_computer_use(socket)}
-      computer_history_feature?(name) -> {:noreply, enable_computer_history(socket)}
-      true -> {:noreply, enable_registry_plugin(socket, name)}
+    if computer_use_plugin?(name) do
+      {:noreply, enable_computer_use(socket)}
+    else
+      {:noreply, enable_registry_plugin(socket, name)}
     end
   end
 
@@ -460,17 +469,29 @@ defmodule FermixWebWeb.SetupLive do
     {:noreply, request_computer_history_permissions(socket)}
   end
 
-  # The card's app-allowlist editor: a comma/newline-separated list of bundle ids
-  # persisted to `[fermix_core.computer_history] apps`.
-  def handle_event("save_computer_history_apps", %{"computer_history_apps" => apps}, socket) do
-    {:noreply,
-     save_answers(
-       socket,
-       [computer_history_apps: apps],
-       "Computer-history app allowlist saved — restart to apply.",
-       nil,
-       restart_required?: true
-     )}
+  # The app-allowlist picker (§22.7): Enable / Edit apps opens a modal listing the
+  # host's installed apps; the operator checks the ones to record. Filter and toggles
+  # are server-driven so the checked set survives searching. Save persists the selected
+  # bundle ids and enables the feature in one act — an empty selection cannot be saved
+  # (the Save button is disabled), since consent to capture nothing is not consent.
+  def handle_event("open_computer_history_apps", _params, socket) do
+    {:noreply, open_computer_history_picker(socket)}
+  end
+
+  def handle_event("computer_history_apps_filter", %{"q" => query}, socket) do
+    {:noreply, update_computer_history_picker(socket, &%{&1 | query: query})}
+  end
+
+  def handle_event("toggle_computer_history_app", %{"bundle" => bundle}, socket) do
+    {:noreply, update_computer_history_picker(socket, &toggle_picker_app(&1, bundle))}
+  end
+
+  def handle_event("close_computer_history_picker", _params, socket) do
+    {:noreply, assign(socket, :computer_history_picker, nil)}
+  end
+
+  def handle_event("save_computer_history_apps", _params, socket) do
+    {:noreply, save_computer_history_picker(socket)}
   end
 
   # The §4.4 Connect-time collection: the needs_config card form posts the
@@ -774,6 +795,7 @@ defmodule FermixWebWeb.SetupLive do
       plugin_summary={@plugin_summary}
       oauth_modal={@oauth_modal}
       resource_picker={@resource_picker}
+      computer_history_picker={@computer_history_picker}
       installing_plugins={plugin_install_names(@plugin_install_tasks)}
       realtime_form={@realtime_form}
       report={@report}
@@ -1562,14 +1584,15 @@ defmodule FermixWebWeb.SetupLive do
       kind: :computer_use,
       name: SidecarInstaller.plugin_name(),
       display_name: "Computer Use",
-      description:
-        "Lets Fermix see your screen and control your mouse and keyboard in the apps you drive.",
+      tooltip:
+        "Fermix sees your screen and controls the mouse and keyboard in the apps you drive. " <>
+          "Operator-only, off by default.",
+      docs_url: "https://fermix.ai/docs/computer-use/",
       enabled?: enabled?,
       status: status,
       version: compux_version(),
       logo: @computer_use_logo_uri,
-      apps: nil,
-      summarizer_provider: nil
+      app_count: 0
     }
   end
 
@@ -2051,15 +2074,26 @@ defmodule FermixWebWeb.SetupLive do
 
   # Enable = ensure the SHARED compux sidecar, then flip the flag. Independent of
   # computer-use: this card installs the sidecar itself if computer-use has not.
-  defp enable_computer_history(socket) do
+  defp enable_computer_history(socket, extra_answers) do
     if SidecarInstaller.installed?() do
-      set_computer_history_feature(socket, true)
+      set_computer_history_feature(socket, true, extra_answers)
     else
-      install_catalog_plugin(socket, SidecarInstaller.plugin_name())
+      # Sidecar missing: persist the chosen apps and install the shared driver; the
+      # operator re-enables from the card once the async install finishes (mirrors
+      # computer-use). Flipping enabled before the driver exists would only refuse
+      # at runtime. Both steps set a flash, so state one accurate message last —
+      # otherwise the generic "Downloading the Computer Use helper…" install flash
+      # wins and names the wrong feature.
+      socket
+      |> persist_computer_history_answers(extra_answers)
+      |> install_catalog_plugin(SidecarInstaller.plugin_name())
+      |> flash_info(
+        "Apps saved. Installing the capture driver — enable Computer History again once it finishes."
+      )
     end
   end
 
-  defp set_computer_history_feature(socket, enabled?) do
+  defp set_computer_history_feature(socket, enabled?, extra_answers \\ []) do
     message =
       if enabled?,
         do: "Computer History enabled — restart to apply.",
@@ -2067,7 +2101,24 @@ defmodule FermixWebWeb.SetupLive do
 
     socket
     |> assign_report(Wizard.report())
-    |> save_answers([computer_history_enabled: enabled?], message, nil, restart_required?: true)
+    |> save_answers(
+      [computer_history_enabled: enabled?] ++ extra_answers,
+      message,
+      nil,
+      restart_required?: true
+    )
+  end
+
+  defp persist_computer_history_answers(socket, []), do: socket
+
+  defp persist_computer_history_answers(socket, answers) do
+    save_answers(
+      socket,
+      answers,
+      "App selection saved — finish installing the driver, then enable.",
+      nil,
+      restart_required?: false
+    )
   end
 
   # Capture needs only the Accessibility grant (via the shared compux driver, so the
@@ -2114,16 +2165,82 @@ defmodule FermixWebWeb.SetupLive do
       kind: :computer_history,
       name: @computer_history_name,
       display_name: "Computer History",
-      description:
-        "On-device activity memory: records what you do in the apps you allow and " <>
-          "summarizes it so Fermix can recall your recent work.",
+      tooltip:
+        "Opt-in activity memory from the apps you allow — titles, URLs, and typed text; " <>
+          "passwords and secure fields are never captured. Summarized off-device by " <>
+          "#{computer_history_summarizer_label()}; off by default.",
+      docs_url: "https://fermix.ai/docs/computer-history/",
       enabled?: enabled?,
       status: status,
       version: compux_version(),
-      logo: nil,
-      apps: config |> Keyword.get(:apps, []) |> Enum.join(", "),
-      summarizer_provider: computer_history_summarizer_label()
+      logo: @computer_history_logo_uri,
+      app_count: length(Keyword.get(config, :apps, []))
     }
+  end
+
+  # --- app-allowlist picker (§22.7) --------------------------------------
+
+  defp open_computer_history_picker(socket) do
+    config =
+      socket.assigns.report.wizard.config_snapshot
+      |> get_fermix_core(:computer_history)
+
+    selected = config |> Keyword.get(:apps, []) |> MapSet.new()
+
+    picker = %{
+      apps: installed_apps_impl().(),
+      selected: selected,
+      query: "",
+      save_label: computer_history_save_label(config)
+    }
+
+    assign(socket, :computer_history_picker, picker)
+  end
+
+  # Honest about what Save does: it flips the flag only when already enabled (edit) or
+  # when the shared driver is present; with the driver missing it saves + installs and
+  # the operator enables on a second pass, so don't promise "enable".
+  defp computer_history_save_label(config) do
+    cond do
+      ComputerHistoryConfig.enabled?(config) -> "Save"
+      SidecarInstaller.installed?() -> "Save & enable"
+      true -> "Save & install driver"
+    end
+  end
+
+  # Injectable so tests supply a fixed app list instead of scanning the host.
+  defp installed_apps_impl,
+    do: Application.get_env(:fermix_web, :installed_apps_impl, &InstalledApps.list/0)
+
+  defp update_computer_history_picker(socket, fun) do
+    case socket.assigns.computer_history_picker do
+      nil -> socket
+      picker -> assign(socket, :computer_history_picker, fun.(picker))
+    end
+  end
+
+  defp toggle_picker_app(picker, bundle) do
+    selected =
+      if MapSet.member?(picker.selected, bundle),
+        do: MapSet.delete(picker.selected, bundle),
+        else: MapSet.put(picker.selected, bundle)
+
+    %{picker | selected: selected}
+  end
+
+  defp save_computer_history_picker(%{assigns: %{computer_history_picker: nil}} = socket),
+    do: socket
+
+  defp save_computer_history_picker(socket) do
+    apps = socket.assigns.computer_history_picker.selected |> MapSet.to_list() |> Enum.sort()
+
+    if apps == [] do
+      flash_error(socket, "Pick at least one app before enabling Computer History.")
+    else
+      socket
+      |> assign(:computer_history_picker, nil)
+      |> enable_computer_history(computer_history_apps: Enum.join(apps, ", "))
+    end
   end
 
   # The model summarization runs on — the subagent tier (provider + model), shown
