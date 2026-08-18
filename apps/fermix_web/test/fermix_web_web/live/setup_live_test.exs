@@ -118,6 +118,7 @@ defmodule FermixWebWeb.SetupLiveTest do
     tools = Application.get_env(:fermix_core, :tools, [])
     transcription = Application.get_env(:fermix_core, :transcription, [])
     plugins = Application.get_env(:fermix_core, :plugins, [])
+    computer_history = Application.get_env(:fermix_core, :computer_history)
     plugins_dist_opts = Application.get_env(:fermix_core, :plugins_dist_opts)
     oauth = Application.get_env(:fermix_core, :oauth, %{})
     plugin_auth_runner = Application.get_env(:fermix_web, :plugin_auth_runner)
@@ -189,6 +190,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       Application.put_env(:fermix_core, :tools, tools)
       Application.put_env(:fermix_core, :transcription, transcription)
       Application.put_env(:fermix_core, :plugins, plugins)
+      restore_env(:fermix_core, :computer_history, computer_history)
       restore_env(:fermix_core, :plugins_dist_opts, plugins_dist_opts)
       Application.put_env(:fermix_core, :oauth, oauth)
       restore_env(:fermix_web, :plugin_auth_runner, plugin_auth_runner)
@@ -411,6 +413,12 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert card =~ "Computer Use"
       refute card =~ "Sidecar"
       assert card =~ "data:image/svg+xml"
+      # No inline description: the details ride the info-icon tooltip (data-tip) and
+      # the icon links to the docs page. Asserted here because this card renders on
+      # every platform (the computer-history card is macOS-gated).
+      assert card =~ ~s(data-tip="Fermix sees your screen)
+      assert card =~ "Operator-only, off by default."
+      assert card =~ ~s(href="https://fermix.ai/docs/computer-use/")
     end
 
     test "the computer-use native-driver card shows the compux release version, not the catalog entry",
@@ -466,7 +474,7 @@ defmodule FermixWebWeb.SetupLiveTest do
     # The computer-history card renders only on macOS (its AXObserver capture does
     # not port). Compile the assertion in only there so Linux CI stays green.
     if :os.type() == {:unix, :darwin} do
-      test "the computer-history native-driver card renders with its disclosure + controls (§22.3)",
+      test "the computer-history native-driver card renders info tooltip + docs link + controls (§22.3)",
            %{conn: conn} do
         {:ok, view, _html} = live(conn, "/setup")
         view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
@@ -474,13 +482,107 @@ defmodule FermixWebWeb.SetupLiveTest do
         card = view |> element(~s|section[data-feature-name="computer_history"]|) |> render()
 
         assert card =~ "Computer History"
-        # The §22.4 disclosure names the privacy posture up front.
-        assert card =~ "passwords and secure fields are never captured"
-        assert card =~ "off-device"
-        # The app allowlist input + the Accessibility grant action are present.
-        assert card =~ ~s(name="computer_history_apps")
+        # No visible description paragraph: the privacy posture rides the info-icon
+        # tooltip (data-tip) — anchored to the attribute so a regression back to a
+        # visible <p> would fail — and the icon links to the docs page.
+        assert card =~
+                 ~r/data-tip="[^"]*passwords and secure fields are never captured[^"]*off-device/
+
+        assert card =~ ~s(href="https://fermix.ai/docs/computer-history/")
+        # The allowlist is no longer an inline text field — Enable opens the app
+        # picker modal — and the Accessibility grant action is present.
+        refute card =~ ~s(name="computer_history_apps")
+        assert card =~ ~s(phx-click="open_computer_history_apps")
         assert card =~ ~s(phx-click="computer_history_grant")
       end
+    end
+
+    test "the app-picker modal lists installed apps by name, toggles a selection, and filters",
+         %{conn: conn} do
+      # Inject a fixed app list so the modal never scans the host (hermetic).
+      Application.put_env(:fermix_web, :installed_apps_impl, fn ->
+        [
+          %{name: "Safari", bundle_id: "com.apple.Safari"},
+          %{name: "Notes", bundle_id: "com.apple.Notes"}
+        ]
+      end)
+
+      on_exit(fn -> Application.delete_env(:fermix_web, :installed_apps_impl) end)
+
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+      # The card's Enable/Edit-apps button dispatches this; drive it directly so the
+      # modal flow runs on every platform, not only where the macOS card renders.
+      modal = render_hook(view, "open_computer_history_apps", %{})
+
+      assert modal =~ "Apps to record"
+      # The search form intercepts Enter (phx-submit) so a native submit can't reload
+      # the LiveView and wipe the transient picker selection.
+      assert modal =~ ~s(phx-submit="computer_history_apps_filter")
+      assert modal =~ "Safari"
+      assert modal =~ "com.apple.Safari"
+      assert modal =~ "Notes"
+      # Nothing selected yet → Save is disabled, and saving is refused with guidance.
+      assert modal =~ ~r/phx-click="save_computer_history_apps"[^>]*disabled/
+      assert render_hook(view, "save_computer_history_apps", %{}) =~ "Pick at least one app"
+
+      # Toggle Safari on → one selected.
+      assert render_hook(view, "toggle_computer_history_app", %{"bundle" => "com.apple.Safari"}) =~
+               "1 selected"
+
+      # Filtering to a non-match shows the empty state but keeps the selection.
+      filtered = render_hook(view, "computer_history_apps_filter", %{"q" => "zzz"})
+      assert filtered =~ "No app matches your search."
+      assert filtered =~ "1 selected"
+
+      # Cancelling closes the modal.
+      refute render_hook(view, "close_computer_history_picker", %{}) =~ "Apps to record"
+    end
+
+    # The core consent transaction: with the shared sidecar installed, saving the
+    # picker writes the chosen apps AND flips enabled in one act. Needs a resolvable
+    # sidecar target, so it is skipped on hosts compux ships no artifact for.
+    case Compux.Binary.target() do
+      {:ok, _target} ->
+        :ok
+
+      {:error, reason} ->
+        @tag skip: "compux sidecar unsupported on this host: #{inspect(reason)}"
+    end
+
+    test "saving the picker with the sidecar installed enables Computer History with the chosen apps",
+         %{conn: conn} do
+      checkout = FermixTestSupport.SafeRm.make_tmp_dir!("setup-live-ch-enable")
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf(checkout) end)
+      write_cu_dev_local(checkout)
+      write_cu_dev_local_binary(checkout)
+
+      prev_plugins = Application.get_env(:fermix_core, :plugins)
+      on_exit(fn -> restore_env(:fermix_core, :plugins, prev_plugins) end)
+      Application.put_env(:fermix_core, :plugins, dev_local: checkout)
+
+      Application.put_env(:fermix_web, :installed_apps_impl, fn ->
+        [%{name: "Safari", bundle_id: "com.apple.Safari"}]
+      end)
+
+      on_exit(fn -> Application.delete_env(:fermix_web, :installed_apps_impl) end)
+
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+      render_hook(view, "open_computer_history_apps", %{})
+      render_hook(view, "toggle_computer_history_app", %{"bundle" => "com.apple.Safari"})
+      saved = render_hook(view, "save_computer_history_apps", %{})
+
+      # Modal closes and the flash confirms the enable path (not the install path).
+      refute saved =~ "Apps to record"
+      assert saved =~ "Computer History enabled — restart to apply."
+
+      # The apps + enabled flag are persisted together.
+      assert {:ok, persisted} = ConfigStore.load_runtime_config(resolve_secrets: false)
+      ch = persisted[:fermix_core][:computer_history]
+      assert ch[:enabled] == true
+      assert "com.apple.Safari" in ch[:apps]
     end
 
     test "oauth plugin connect requires Google client config before enabling", %{conn: conn} do

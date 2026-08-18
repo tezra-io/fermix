@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" role="img" aria-label="Computer History">
+  <rect x="2" y="3" width="20" height="12.5" rx="2.4" fill="#2b5cff" />
+  <rect x="10.25" y="15.5" width="3.5" height="2.6" fill="#2b5cff" />
+  <rect x="6.5" y="18" width="11" height="2.2" rx="1.1" fill="#2b5cff" />
+  <circle cx="12" cy="9.3" r="3.15" fill="none" stroke="#ffffff" stroke-width="1.2" />
+  <path d="M12 9.3 V7.5 M12 9.3 L13.5 10" stroke="#ffffff" stroke-width="1.05" stroke-linecap="round" />
+  <path d="M14.1 6.2 Q12 4.4 9.9 6.0" fill="none" stroke="#ffffff" stroke-width="1.15" stroke-linecap="round" />
+  <path d="M9.9 6.0 L8.5 5.6 L9.7 4.4 Z" fill="#ffffff" />
+</svg>

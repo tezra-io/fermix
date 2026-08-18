@@ -38,6 +38,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :plugin_summary, :map, required: true
   attr :oauth_modal, :map, default: nil
   attr :resource_picker, :map, default: nil
+  attr :computer_history_picker, :map, default: nil
   attr :installing_plugins, :list, default: []
   attr :realtime_form, :map, required: true
   attr :report, :map, required: true
@@ -125,6 +126,7 @@ defmodule FermixWebWeb.SetupLive.Components do
               plugin_summary={@plugin_summary}
               oauth_modal={@oauth_modal}
               resource_picker={@resource_picker}
+              computer_history_picker={@computer_history_picker}
               installing_plugins={@installing_plugins}
               realtime_form={@realtime_form}
               report={@report}
@@ -251,6 +253,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :plugin_summary, :map, required: true
   attr :oauth_modal, :map, default: nil
   attr :resource_picker, :map, default: nil
+  attr :computer_history_picker, :map, default: nil
   attr :installing_plugins, :list, default: []
   attr :realtime_form, :map, required: true
   attr :report, :map, required: true
@@ -1164,6 +1167,13 @@ defmodule FermixWebWeb.SetupLive.Components do
         subtitle="Connect an integration to sign in and enable its tools. Provider setup (like a Google OAuth client) sits with each group below."
       />
 
+      <div :if={@plugin_summary[:core_features] not in [nil, []]} class="mt-5">
+        <div class="space-y-2">
+          <.core_feature_card :for={card <- @plugin_summary.core_features} card={card} />
+        </div>
+        <hr class="my-6 border-base-300" />
+      </div>
+
       <.google_plugin_group
         :if={@plugin_summary.available}
         plugin_summary={@plugin_summary}
@@ -1199,93 +1209,86 @@ defmodule FermixWebWeb.SetupLive.Components do
         </div>
       </section>
 
-      <section
-        :if={@plugin_summary[:core_features] not in [nil, []]}
-        class="mt-6 space-y-2"
-      >
-        <div>
-          <h3 class="text-sm font-semibold text-base-content/75">Native driver features</h3>
-          <p class="text-xs text-base-content/50">
-            Fermix's own macOS/Linux driver — not third-party integrations.
-          </p>
-        </div>
-        <.core_feature_card :for={card <- @plugin_summary.core_features} card={card} />
-      </section>
-
       <.info_panel :if={!@plugin_summary.available} class="mt-5">
         <p>Plugin catalog unavailable: {@plugin_summary.error}</p>
       </.info_panel>
 
       <.oauth_client_modal oauth_modal={@oauth_modal} plugin_summary={@plugin_summary} />
       <.resource_picker_modal picker={@resource_picker} />
+      <.computer_history_apps_modal picker={@computer_history_picker} />
 
       <.step_actions active_tab={@active_tab} tabs={@tabs} />
     </div>
     """
   end
 
-  # A native-driver feature card (computer-use / computer-history), §22.6. One flat
-  # bordered card — no nested boxes — with an optional disclosure + app allowlist for
-  # computer-history. Enable/Disable + the OS grant reuse the shared plugin handlers.
+  # A native-driver feature card (computer-use / computer-history), §22.6/§22.7. One
+  # compact row like the plugin cards — logo, name, status, actions on the right — with
+  # no inline description (details ride the info-icon tooltip + docs link). Computer-
+  # history's app allowlist is chosen in a modal on Enable, never a visible text field.
   attr :card, :map, required: true
 
   defp core_feature_card(assigns) do
     ~H"""
     <section
       data-feature-name={@card.name}
-      class="w-full rounded-box border border-base-300 bg-base-100/80 p-4 shadow-sm"
+      class="flex w-full items-center gap-3 rounded-box border border-base-300 bg-base-100/80 p-3 shadow-sm"
     >
-      <div class="flex items-center gap-2">
-        <img :if={@card.logo} src={@card.logo} alt="" class="size-5 object-contain" loading="lazy" />
-        <h4 class="text-sm font-semibold">{@card.display_name}</h4>
-        <span :if={@card.version} class="text-xs text-base-content/45">v{@card.version}</span>
-        <.status_pill :if={@card.status != :not_configured} status={@card.status} />
+      <img
+        :if={@card.logo}
+        src={@card.logo}
+        alt=""
+        class="size-8 shrink-0 object-contain"
+        loading="lazy"
+      />
+      <div
+        :if={!@card.logo}
+        class="grid size-8 shrink-0 place-items-center rounded-field border border-base-300 bg-base-100 text-sm font-semibold"
+      >
+        {String.first(@card.display_name)}
       </div>
-      <p class="mt-1 text-xs text-base-content/60">{@card.description}</p>
 
-      <p
-        :if={@card.kind == :computer_history}
-        class="mt-2 text-xs leading-relaxed text-base-content/55"
-      >
-        Captures activity in the apps you allow — window/tab titles, URLs, and text you type
-        (passwords and secure fields are never captured). Every ~30 min it summarizes that
-        activity with your subagent model
-        (<span class="font-medium">{@card.summarizer_provider}</span>), which sends your raw
-        activity off-device. Raw events stay on this Mac for 48h; summaries until you
-        purge. Control it with <code class="font-mono">/history off</code>, <code class="font-mono">/history purge</code>, or the allowlist below. Needs the
-        Accessibility grant.
-      </p>
-
-      <form
-        :if={@card.kind == :computer_history}
-        id="computer-history-apps-form"
-        phx-submit="save_computer_history_apps"
-        class="mt-3 flex items-end gap-2"
-      >
-        <label class="form-control min-w-0 flex-1">
-          <span class="label pb-1 text-xs font-medium">
-            Allowed apps (bundle ids, comma-separated)
+      <div class="min-w-0 flex-1">
+        <div class="flex items-center gap-2">
+          <h4 class="truncate text-sm font-semibold">{@card.display_name}</h4>
+          <span :if={@card.version} class="shrink-0 text-xs text-base-content/45">
+            v{@card.version}
           </span>
-          <input
-            type="text"
-            name="computer_history_apps"
-            value={@card.apps}
-            placeholder="com.apple.Safari, com.apple.mail"
-            class="input input-bordered input-sm w-full bg-base-100 font-mono"
-          />
-        </label>
-        <button type="submit" class="btn btn-outline btn-sm">Save</button>
-      </form>
+          <.status_pill :if={@card.status != :not_configured} status={@card.status} />
+        </div>
+        <p
+          :if={@card.kind == :computer_history and @card.enabled?}
+          class="mt-0.5 truncate text-xs text-base-content/50"
+        >
+          {ch_recording_summary(@card.app_count)}
+        </p>
+      </div>
 
-      <div class="mt-3 flex flex-wrap items-center gap-2">
+      <div class="flex shrink-0 items-center gap-1">
         <button
-          :if={!@card.enabled?}
+          :if={!@card.enabled? and @card.kind == :computer_history}
+          type="button"
+          class="btn btn-primary btn-xs"
+          phx-click="open_computer_history_apps"
+        >
+          Enable
+        </button>
+        <button
+          :if={!@card.enabled? and @card.kind == :computer_use}
           type="button"
           class="btn btn-primary btn-xs"
           phx-click="plugin_enable"
           phx-value-name={@card.name}
         >
           Enable
+        </button>
+        <button
+          :if={@card.enabled? and @card.kind == :computer_history}
+          type="button"
+          class="btn btn-ghost btn-xs"
+          phx-click="open_computer_history_apps"
+        >
+          Edit apps
         </button>
         <button
           :if={@card.enabled?}
@@ -1302,7 +1305,7 @@ defmodule FermixWebWeb.SetupLive.Components do
           class="btn btn-ghost btn-xs"
           phx-click="computer_history_grant"
         >
-          Grant Accessibility
+          Grant
         </button>
         <button
           :if={@card.kind == :computer_use}
@@ -1310,12 +1313,29 @@ defmodule FermixWebWeb.SetupLive.Components do
           class="btn btn-ghost btn-xs"
           phx-click="computer_use_grant"
         >
-          Grant macOS permissions
+          Grant
         </button>
+        <span class="tooltip tooltip-left z-10" data-tip={@card.tooltip}>
+          <a
+            href={@card.docs_url}
+            target="_blank"
+            rel="noopener noreferrer"
+            class="btn btn-ghost btn-xs btn-circle text-base-content/60 hover:text-base-content"
+            aria-describedby={"#{@card.name}-details"}
+            aria-label={"About #{@card.display_name} — open docs"}
+          >
+            <.icon name="hero-information-circle" class="size-4" />
+          </a>
+        </span>
       </div>
+      <p id={"#{@card.name}-details"} class="sr-only">{@card.tooltip}</p>
     </section>
     """
   end
+
+  defp ch_recording_summary(0), do: "No apps selected yet — Edit apps to choose."
+  defp ch_recording_summary(1), do: "Recording 1 app."
+  defp ch_recording_summary(n) when is_integer(n), do: "Recording #{n} apps."
 
   defp search_pane(assigns) do
     ~H"""
@@ -2283,6 +2303,152 @@ defmodule FermixWebWeb.SetupLive.Components do
       </div>
     </div>
     """
+  end
+
+  attr :picker, :map, default: nil
+
+  # The computer-history app-allowlist picker (§22.7): a searchable checklist of the
+  # host's installed apps, opened on Enable / Edit apps. Reuses the resource-picker
+  # overlay shape; the search filter and per-app toggles are server-driven so the
+  # checked set survives filtering.
+  defp computer_history_apps_modal(%{picker: nil} = assigns), do: ~H""
+
+  defp computer_history_apps_modal(assigns) do
+    assigns = assign(assigns, :visible, ch_filtered_apps(assigns.picker))
+
+    ~H"""
+    <div
+      id="computer-history-apps-picker"
+      class="fixed inset-0 z-50 grid place-items-center bg-base-300/70 p-4 backdrop-blur-sm"
+      phx-window-keydown="close_computer_history_picker"
+      phx-key="Escape"
+    >
+      <div
+        class="flex max-h-[80vh] w-full max-w-md flex-col rounded-box border border-base-300 bg-base-100 p-5 shadow-lg"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Choose the apps Computer History records"
+        phx-click-away="close_computer_history_picker"
+        phx-mounted={JS.focus_first()}
+      >
+        <div class="flex items-center justify-between gap-3">
+          <h3 class="text-base font-semibold">Apps to record</h3>
+          <button
+            type="button"
+            class="btn btn-ghost btn-xs btn-circle"
+            phx-click="close_computer_history_picker"
+            aria-label="Close"
+          >
+            <.icon name="hero-x-mark" class="size-4" />
+          </button>
+        </div>
+        <p class="mt-1 text-xs text-base-content/55">
+          Computer History records only the apps you check here — nothing else. Pick them by name;
+          Fermix stores each app's identifier for you.
+        </p>
+
+        <form
+          phx-change="computer_history_apps_filter"
+          phx-submit="computer_history_apps_filter"
+          class="mt-3"
+        >
+          <label class="input input-bordered input-sm flex items-center gap-2 bg-base-100">
+            <.icon name="hero-magnifying-glass" class="size-4 text-base-content/40" />
+            <input
+              type="text"
+              name="q"
+              value={@picker.query}
+              placeholder="Search apps…"
+              class="grow"
+              autocomplete="off"
+              phx-debounce="120"
+            />
+          </label>
+        </form>
+
+        <p :if={@picker.apps == []} class="mt-3 text-xs text-base-content/55">
+          No applications were found on this Mac.
+        </p>
+        <p :if={@picker.apps != [] and @visible == []} class="mt-3 text-xs text-base-content/55">
+          No app matches your search.
+        </p>
+
+        <ul
+          :if={@visible != []}
+          class="mt-3 flex-1 divide-y divide-base-200 overflow-y-auto rounded-field border border-base-300"
+        >
+          <li :for={app <- @visible}>
+            <button
+              type="button"
+              phx-click="toggle_computer_history_app"
+              phx-value-bundle={app.bundle_id}
+              aria-pressed={to_string(MapSet.member?(@picker.selected, app.bundle_id))}
+              class={[
+                "flex w-full items-center gap-3 px-3 py-2 text-left",
+                MapSet.member?(@picker.selected, app.bundle_id) && "bg-primary/5",
+                !MapSet.member?(@picker.selected, app.bundle_id) && "hover:bg-base-200/60"
+              ]}
+            >
+              <.icon
+                name={
+                  if MapSet.member?(@picker.selected, app.bundle_id),
+                    do: "hero-check-circle-solid",
+                    else: "hero-plus-circle"
+                }
+                class={[
+                  "size-5 shrink-0",
+                  MapSet.member?(@picker.selected, app.bundle_id) && "text-primary",
+                  !MapSet.member?(@picker.selected, app.bundle_id) && "text-base-content/30"
+                ]}
+              />
+              <span class="min-w-0 flex-1">
+                <span class="block truncate text-sm font-medium">{app.name}</span>
+                <span class="block truncate font-mono text-xs text-base-content/45">
+                  {app.bundle_id}
+                </span>
+              </span>
+            </button>
+          </li>
+        </ul>
+
+        <div class="mt-4 flex items-center justify-between gap-3">
+          <span class="text-xs text-base-content/55">
+            {MapSet.size(@picker.selected)} selected
+          </span>
+          <div class="flex items-center gap-2">
+            <button
+              type="button"
+              class="btn btn-ghost btn-sm"
+              phx-click="close_computer_history_picker"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              class="btn btn-primary btn-sm"
+              phx-click="save_computer_history_apps"
+              disabled={MapSet.size(@picker.selected) == 0}
+            >
+              {@picker.save_label}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+    """
+  end
+
+  defp ch_filtered_apps(%{apps: apps, query: query}) do
+    q = query |> to_string() |> String.trim() |> String.downcase()
+
+    if q == "" do
+      apps
+    else
+      Enum.filter(apps, fn app ->
+        String.contains?(String.downcase(app.name), q) or
+          String.contains?(String.downcase(app.bundle_id), q)
+      end)
+    end
   end
 
   attr :picker, :map, required: true
