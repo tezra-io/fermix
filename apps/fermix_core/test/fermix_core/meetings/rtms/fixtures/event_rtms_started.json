@@ -1,0 +1,14 @@
+{
+  "_synthesized": "synthesized from docs 2026-08-16 — revalidate against a live RTMS capture before release",
+  "event": "meeting.rtms_started",
+  "event_ts": 1760000000000,
+  "payload": {
+    "account_id": "acct_fixture",
+    "object": {
+      "id": "8123456789",
+      "meeting_uuid": "aBcD1234EfGh5678==",
+      "rtms_stream_id": "rtms_stream_fixture_001",
+      "server_urls": "wss://rtms.example.zoom.us/signaling"
+    }
+  }
+}

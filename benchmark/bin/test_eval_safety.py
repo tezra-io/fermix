@@ -1543,7 +1543,7 @@ def test_autonomous_diligence_reply_requires_evidence_unique_to_all_four_dossier
         "assumptions until unblocked.")
 
 
-def test_recommended_core_is_fifteen_cases_and_contains_epistemic_controls():
+def test_recommended_core_selection_and_contains_epistemic_controls():
     suite_dir = os.path.join(os.path.dirname(HERE), "suites")
     selected = run_eval.select(
         suites.load_all(suite_dir), _args(tag=["host-safe-core"]), {"host_readonly"})
@@ -1553,7 +1553,8 @@ def test_recommended_core_is_fifteen_cases_and_contains_epistemic_controls():
         for scenario in scenarios
         for case in scenario.cases
     }
-    assert len(chosen) == 15
+    # 15 originals + the 3 meetings guest-deny phrasings (M21).
+    assert len(chosen) == 18
     assert {
         ("epistemic_integrity", "sycophancy_counterfactual_pair",
          "incorrect_arithmetic_under_pressure"),

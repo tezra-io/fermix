@@ -1,6 +1,7 @@
 defmodule FermixCore.Transcription.Deepgram do
   @moduledoc """
-  Deepgram transcription backend (`nova-3` by default), batch only in this phase.
+  Deepgram transcription backend (`nova-3` by default), batch and native
+  streaming.
 
   Deepgram's pre-recorded endpoint takes the raw audio as the request body:
   `POST /v1/listen?model=<model>&smart_format=true` with `Authorization: Token
@@ -12,9 +13,16 @@ defmodule FermixCore.Transcription.Deepgram do
   provider, so there is nothing to reuse); a missing key fails loud as
   `:not_configured`.
 
-  `capabilities().streaming?` is `false` here — Deepgram's native WebSocket
-  streaming lands with the streaming session in a later phase; today this is a
-  batch-only backend.
+  The model comes from the caller's `model:` opt when it carries one (a caller
+  that selected this backend explicitly — a per-meeting override — brings its
+  own id, because the shared `[fermix_core.transcription] model` key is snapped
+  to the GLOBAL backend's family and a cross-family id is refused), else that
+  shared key.
+
+  `capabilities().streaming?` is `true`: `open_stream/2` hands the same key and
+  the resolved model to `FermixCore.Transcription.DeepgramStream`, which
+  speaks Deepgram's live WebSocket endpoint and serves the
+  `FermixCore.Transcription.StreamSession` contract.
   """
 
   @behaviour FermixCore.Transcription.Backend
@@ -23,6 +31,7 @@ defmodule FermixCore.Transcription.Deepgram do
 
   alias FermixCore.Net.HttpClient
   alias FermixCore.Net.TimeoutPolicy
+  alias FermixCore.Transcription.DeepgramStream
   alias FermixCore.Transcription.Support
 
   @base_url "https://api.deepgram.com/v1/listen"
@@ -35,7 +44,7 @@ defmodule FermixCore.Transcription.Deepgram do
 
   @impl true
   @spec capabilities() :: FermixCore.Transcription.Backend.capabilities()
-  def capabilities, do: %{streaming?: false, local?: false}
+  def capabilities, do: %{streaming?: true, local?: false}
 
   @impl true
   @spec configured?(keyword()) :: :ok | {:error, term()}
@@ -49,7 +58,7 @@ defmodule FermixCore.Transcription.Deepgram do
   @impl true
   @spec transcribe(String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
   def transcribe(path, opts \\ []) when is_binary(path) do
-    model = model()
+    model = model(opts)
 
     case credential(opts) do
       {:ok, key} ->
@@ -59,6 +68,15 @@ defmodule FermixCore.Transcription.Deepgram do
 
       {:error, reason} ->
         Support.provider_call_error(@provider, model, opts, reason)
+    end
+  end
+
+  @impl true
+  @spec open_stream(pid(), keyword()) :: {:ok, pid()} | {:error, term()}
+  def open_stream(consumer, opts) when is_pid(consumer) and is_list(opts) do
+    case credential(opts) do
+      {:ok, key} -> DeepgramStream.open(consumer, key, model(opts), opts)
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -121,7 +139,19 @@ defmodule FermixCore.Transcription.Deepgram do
     end
   end
 
-  defp model do
+  # The caller's `model:` wins over the shared `[fermix_core.transcription]`
+  # key: that key is snapped to whichever backend is the GLOBAL choice, so a
+  # caller that selected this backend for one job must carry the matching id.
+  # A non-binary `model:` matches no clause and raises rather than reaching the
+  # API as a bogus id.
+  defp model(opts) do
+    case Keyword.get(opts, :model) do
+      nil -> configured_model()
+      model when is_binary(model) -> model
+    end
+  end
+
+  defp configured_model do
     :fermix_core
     |> Application.get_env(:transcription, [])
     |> Keyword.get(:model, @default_model)

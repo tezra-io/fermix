@@ -124,6 +124,44 @@ defmodule FermixCore.Transcription.OpenAITest do
       end
     end
 
+    test "a caller's model: opt wins over the shared transcription model key" do
+      # The shared key is snapped to whichever backend is the GLOBAL choice, so
+      # a caller that selected OpenAI for one job (a per-meeting override under
+      # a global Deepgram) must not send Deepgram's id here.
+      Application.put_env(:fermix_core, :transcription, model: "nova-3")
+      tmp_dir = FermixTestSupport.SafeRm.make_tmp_dir!("transcription-openai-model-opt")
+
+      try do
+        path = Path.join(tmp_dir, "clip.ogg")
+        File.write!(path, "OGGDATA")
+        test_pid = self()
+        test_id = :"transcription_openai_model_#{System.unique_integer([:positive])}"
+
+        Req.Test.stub(test_id, fn conn ->
+          {:ok, body, conn} = Plug.Conn.read_body(conn, length: 10_000_000)
+          send(test_pid, {:request, body})
+
+          conn
+          |> Plug.Conn.put_resp_content_type("application/json")
+          |> Plug.Conn.resp(200, Jason.encode!(%{"text" => "hello world"}))
+        end)
+
+        assert {:ok, "hello world"} =
+                 OpenAI.transcribe(path,
+                   auth_mode: :api_key,
+                   api_key: "sk-test",
+                   model: "gpt-transcribe",
+                   req_options: [plug: {Req.Test, test_id}]
+                 )
+
+        assert_receive {:request, body}
+        assert body =~ "gpt-transcribe"
+        refute body =~ "nova-3"
+      after
+        FermixTestSupport.SafeRm.rm_rf!(tmp_dir)
+      end
+    end
+
     test "maps a non-2xx to the shared tagged error vocabulary" do
       tmp_dir = FermixTestSupport.SafeRm.make_tmp_dir!("transcription-openai-err")
 

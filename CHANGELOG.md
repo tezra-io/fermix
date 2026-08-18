@@ -43,6 +43,58 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   you supply your own APNs credentials under `[fermix_channels.mobile.push]`, and
   the signing key lives in the keychain or `FERMIX_APNS_KEY`, never as plaintext
   in `config.toml`.
+- **Transcription now runs live, not just file by file.** Speech-to-text gained a
+  streaming session: audio is pushed in as it arrives and finished segments come
+  back with their timings while the speaker is still talking. Deepgram, SpaceXAI,
+  and the on-device backend speak a streaming protocol natively; a batch-only
+  backend (OpenAI) is driven by a chunked adapter that transcribes short spoken
+  spans in order, so every configured backend can feed a live listener rather
+  than only the ones with a socket. A stream speaks one audio format — 16 kHz
+  mono s16le PCM — and callers convert before pushing, which is what keeps the
+  meeting notetaker below and the existing voice-note path on one engine. The
+  default backend and model are unchanged; nothing about a voice note behaves
+  differently. OpenAI's newer `gpt-transcribe` is also selectable now, beside the
+  default mini model it does not replace.
+- **A meeting notetaker that joins only when you ask — shipped off by default,
+  because its sidecar has not been released yet.** Fermix can sit in a Google
+  Meet or Zoom meeting, transcribe it with speaker attribution, and deliver a
+  summary when it ends. `join_meeting`, `leave_meeting`, and `list_meetings` are
+  owner-only and attended-only: it never joins on a schedule, off an invite it
+  read, or on an instruction embedded in content someone else wrote, and it
+  attends one meeting at a time. The two platforms work differently on purpose,
+  with no fallback between them: **Google Meet** is joined by a `meetbot` browser
+  sidecar signed in as a dedicated bot account, so it knocks and waits for
+  admission like any participant and reports denial, a sign-in demand, or a block
+  honestly instead of pretending; **Zoom** is joined through Zoom RTMS, an
+  outbound audio subscription with no browser at all, which reaches only meetings
+  hosted by your own Zoom account or by a host who has enabled your RTMS app —
+  that is a Zoom platform limit, not a missing key, and no setting unlocks other
+  people's meetings. On Meet the notetaker announces itself once in the meeting
+  chat and never speaks again (`announce`/`announce_message`/`bot_name`); on Zoom
+  the platform's own recording indicator is what participants see; either way the
+  host can remove it and that ends the capture. Transcripts, a rendered
+  `transcript.md`, and run metadata land under
+  `<FERMIX_HOME>/workspace/meetings/<id>/` where the file tools can read them
+  back, and audio is discarded unless `retain_audio` is set. A capture cut short
+  still delivers what was heard, labelled as partial rather than passed off as
+  the whole meeting. Turn it on with `[fermix_core.meetings] enabled` plus the
+  setup Meetings card — but like the mobile channel, this is groundwork shipped
+  ahead of its other half: no meetbot release is pinned in this build, so
+  installing the Meet sidecar refuses with exactly that fact, and until it lands
+  the Zoom RTMS lane is the only one a configured operator can use. `fermix
+  doctor` gains a `meetings` row that reports the same state without joining
+  anything.
+- **The on-device transcription backend — fermix's half of it.**
+  `[fermix_core.transcription] backend = "local"` selects a `fermix-stt` sidecar
+  running over a locally installed speech model: audio never leaves the machine
+  and there is no key to configure. What it needs instead is an installed binary
+  AND an installed model, and it says which half is missing rather than quietly
+  falling back to a hosted backend. Installing is a deliberate act from the
+  Transcription card — writing the backend name into `config.toml` by hand
+  installs nothing, and boot never downloads. The `fermix-stt` release does not
+  exist yet, so an install attempt refuses honestly on both halves (no pinned
+  sidecar release; the model's checksums are not in this build) instead of
+  fetching an unverified binary or unverified weights.
 
 ### Security
 

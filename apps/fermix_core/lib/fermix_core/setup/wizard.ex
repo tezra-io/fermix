@@ -1833,14 +1833,23 @@ defmodule FermixCore.Setup.Wizard do
     do: normalize_transcription_backend(Atom.to_string(value))
 
   defp normalize_transcription_backend(value) when is_binary(value) do
-    case value |> String.trim() |> String.downcase() do
-      backend when backend in ~w(openai xai deepgram) -> backend
-      invalid -> raise ArgumentError, "invalid transcription_backend #{inspect(invalid)}"
+    backend = value |> String.trim() |> String.downcase()
+
+    if backend in transcription_backend_names() do
+      backend
+    else
+      raise ArgumentError, "invalid transcription_backend #{inspect(backend)}"
     end
   end
 
   defp normalize_transcription_backend(value) do
     raise ArgumentError, "invalid transcription_backend #{inspect(value)}"
+  end
+
+  # The accepted set is the registry's, exactly as ConfigStore parses it: a
+  # backend added there becomes selectable the same day, without a second edit.
+  defp transcription_backend_names do
+    Enum.map(TranscriptionRegistry.backends(), fn {name, _module} -> Atom.to_string(name) end)
   end
 
   # `model` is a single shared key. An explicit model always wins. Otherwise, snap

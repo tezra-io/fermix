@@ -17,6 +17,8 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.ComputerUse
   alias FermixCore.ComputerUse.SidecarInstaller
   alias FermixCore.Harness.Vendors, as: HarnessVendors
+  alias FermixCore.Meetings.Config, as: MeetingsConfig
+  alias FermixCore.Meetings.SidecarInstaller, as: MeetbotInstaller
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Plugins.Auth, as: PluginAuth
   alias FermixCore.Plugins.Catalog, as: PluginCatalog
@@ -35,10 +37,14 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Setup.AccessToken
+  alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.Doctor
   alias FermixCore.Setup.Wizard
   alias FermixCore.SkillCuration.Delivery, as: SkillCurationDelivery
   alias FermixCore.Tools.Media.Registry, as: MediaRegistry
+  alias FermixCore.Transcription.Local, as: LocalTranscription
+  alias FermixCore.Transcription.Local.ModelStore, as: LocalModelStore
+  alias FermixCore.Transcription.Local.SidecarInstaller, as: LocalSttInstaller
   alias FermixCore.Transcription.Registry, as: TranscriptionRegistry
   alias FermixWebWeb.SetupLive.Components
 
@@ -61,6 +67,7 @@ defmodule FermixWebWeb.SetupLive do
     %{id: "realtime", label: "Realtime", component: "realtime:*", description: "Voice companion"},
     %{id: "channels", label: "Channels", component: "channel:*", description: "Message ingress"},
     %{id: "transcription", label: "Transcription", component: nil, description: "Voice notes"},
+    %{id: "meetings", label: "Meetings", component: nil, description: "Meeting notetaker"},
     %{id: "plugins", label: "Plugins", component: nil, description: "Integrations"},
     %{id: "search", label: "Search", component: nil, description: "Web search"},
     %{id: "media", label: "Media", component: nil, description: "Image generation"},
@@ -77,6 +84,10 @@ defmodule FermixWebWeb.SetupLive do
   ]
 
   @default_plugin_auth_url_timeout_ms 300_000
+  @local_installing_message "Installing on-device speech…"
+  @local_ready_message "On-device speech is installed and ready."
+  @meetbot_installing_message "Downloading the meeting notetaker…"
+  @meetbot_ready_message "The meeting notetaker is installed."
   # Providers the per-provider OAuth-client form supports — mirrors
   # FermixCore.Auth.OAuthProviders. Default ports: google 1455, github 1457,
   # notion 1458, x 1459, slack 1460.
@@ -130,6 +141,16 @@ defmodule FermixWebWeb.SetupLive do
   # Flipping skill curation adds/removes the Scheduler child (child-absent
   # gating), so it only takes effect on a daemon restart.
   @skill_curation_restart_keys [:skill_curation_enabled]
+  # `[fermix_core.meetings]` is written as a section rather than through wizard
+  # answers, so these never reach `runtime_restart_answers?/1`; they are the keys
+  # `Meetings.ready?/0` reads, and tool registration reads it only at boot.
+  @meetings_restart_keys [
+    :enabled,
+    :zoom_account_id,
+    :zoom_client_id,
+    :zoom_client_secret,
+    :zoom_ws_subscription_id
+  ]
 
   @impl true
   def mount(params, session, socket) do
@@ -164,6 +185,8 @@ defmodule FermixWebWeb.SetupLive do
       |> assign(:plugin_auth_tasks, %{})
       |> assign(:plugin_auth_url, nil)
       |> assign(:plugin_install_tasks, %{})
+      |> assign(:local_install, nil)
+      |> assign(:meetbot_install, nil)
       |> assign(:oauth_modal, nil)
       |> assign(:resource_picker, nil)
       |> assign(:computer_history_picker, nil)
@@ -381,6 +404,7 @@ defmodule FermixWebWeb.SetupLive do
   end
 
   def handle_event("transcription_changed", %{"transcription_form" => params}, socket) do
+    previous = socket.assigns.transcription_form.backend
     backend = normalize_transcription_backend(Map.get(params, "backend"))
 
     form =
@@ -390,7 +414,10 @@ defmodule FermixWebWeb.SetupLive do
         Map.get(params, "model")
       )
 
-    {:noreply, assign(socket, :transcription_form, form)}
+    {:noreply,
+     socket
+     |> assign(:transcription_form, form)
+     |> maybe_install_local_stt(previous, backend)}
   end
 
   def handle_event("save_transcription", %{"transcription_form" => params} = root, socket) do
@@ -408,6 +435,27 @@ defmodule FermixWebWeb.SetupLive do
 
     # Backends read [fermix_core.transcription] per call, so no daemon restart.
     {:noreply, save_answers(socket, answers, "Transcription saved.", Map.get(root, "__nav"))}
+  end
+
+  # Text and toggle values are always written (a cleared `announce_message` means
+  # "use the built-in consent line", so blank is a real value here); the Zoom
+  # secret is written only when the operator typed one, so an untouched password
+  # field keeps the stored credential.
+  def handle_event("save_meetings", %{"meetings_form" => params} = root, socket) do
+    changes =
+      [
+        enabled: checked?(params["enabled"]),
+        bot_name: safe_string(params["bot_name"]),
+        announce: checked?(params["announce"]),
+        announce_message: safe_string(params["announce_message"]),
+        transcription_backend: normalize_meetings_backend(params["transcription_backend"]),
+        zoom_account_id: safe_string(params["zoom_account_id"]),
+        zoom_client_id: safe_string(params["zoom_client_id"]),
+        zoom_ws_subscription_id: safe_string(params["zoom_ws_subscription_id"])
+      ]
+      |> maybe_put_string(:zoom_client_secret, params["zoom_client_secret"])
+
+    {:noreply, save_meetings(socket, changes, Map.get(root, "__nav"))}
   end
 
   def handle_event(
@@ -717,6 +765,10 @@ defmodule FermixWebWeb.SetupLive do
     {:noreply, maybe_clear_plugin_auth_url(socket, name, url)}
   end
 
+  def handle_info({:local_install_progress, event}, socket) do
+    {:noreply, assign(socket, :local_install, installing(local_progress_message(event)))}
+  end
+
   def handle_info({ref, result}, socket) when is_reference(ref) do
     {:noreply, finish_task(socket, ref, result)}
   end
@@ -768,6 +820,42 @@ defmodule FermixWebWeb.SetupLive do
     {:noreply, finish_workspace_selection(socket, name, {:error, reason})}
   end
 
+  # Re-read only the readiness line: rebuilding the whole report here would
+  # throw away the backend the operator just picked but has not saved yet.
+  def handle_async(:local_install, {:ok, :ok}, socket) do
+    form = %{socket.assigns.transcription_form | local_state: LocalTranscription.configured?([])}
+
+    {:noreply,
+     socket
+     |> assign(:local_install, done(@local_ready_message))
+     |> assign(:transcription_form, form)}
+  end
+
+  def handle_async(:local_install, {:ok, {:error, reason}}, socket) do
+    {:noreply, assign(socket, :local_install, failed(local_install_error(reason)))}
+  end
+
+  def handle_async(:local_install, {:exit, reason}, socket) do
+    {:noreply, assign(socket, :local_install, failed(local_install_error(reason)))}
+  end
+
+  def handle_async(:meetbot_install, {:ok, {:ok, _path}}, socket) do
+    form = %{socket.assigns.meetings_form | sidecar_installed?: MeetbotInstaller.installed?()}
+
+    {:noreply,
+     socket
+     |> assign(:meetbot_install, done(@meetbot_ready_message))
+     |> assign(:meetings_form, form)}
+  end
+
+  def handle_async(:meetbot_install, {:ok, {:error, reason}}, socket) do
+    {:noreply, assign(socket, :meetbot_install, failed(meetbot_install_error(reason)))}
+  end
+
+  def handle_async(:meetbot_install, {:exit, reason}, socket) do
+    {:noreply, assign(socket, :meetbot_install, failed(meetbot_install_error(reason)))}
+  end
+
   @impl true
   def render(assigns) do
     ~H"""
@@ -805,6 +893,9 @@ defmodule FermixWebWeb.SetupLive do
       search_form={@search_form}
       image_form={@image_form}
       transcription_form={@transcription_form}
+      local_install={@local_install}
+      meetings_form={@meetings_form}
+      meetbot_install={@meetbot_install}
       saved_flash={@saved_flash}
       skill_summary={@skill_summary}
       tabs={@tabs}
@@ -832,6 +923,7 @@ defmodule FermixWebWeb.SetupLive do
     |> assign(:search_form, build_search_form(snapshot))
     |> assign(:image_form, build_image_form(snapshot))
     |> assign(:transcription_form, build_transcription_form(snapshot))
+    |> assign(:meetings_form, build_meetings_form(snapshot))
     |> assign(:sandbox_form, build_sandbox_form(snapshot))
     |> assign(:memory_form, build_memory_form(snapshot))
     |> assign(:personalization_form, build_personalization_form(snapshot))
@@ -920,10 +1012,10 @@ defmodule FermixWebWeb.SetupLive do
   defp oauth_default_port("x"), do: 1459
   defp oauth_default_port("slack"), do: 1460
 
-  defp refresh_report(socket, message) do
+  defp refresh_report(socket, message, opts \\ []) do
     Wizard.report()
     |> then(&assign_report(socket, &1))
-    |> flash_info(message)
+    |> flash_info(message, opts)
   end
 
   defp flash_info(socket, message, opts \\ []) do
@@ -1380,6 +1472,7 @@ defmodule FermixWebWeb.SetupLive do
       backend: backend,
       model_options: options,
       model: transcription_model_for_options(Keyword.get(transcription, :model), options),
+      local_state: LocalTranscription.configured?([]),
       openai_api_key_set: secret_set?(transcription, :openai_api_key),
       xai_api_key_set: secret_set?(transcription, :xai_api_key),
       deepgram_api_key_set: secret_set?(transcription, :deepgram_api_key)
@@ -1389,8 +1482,8 @@ defmodule FermixWebWeb.SetupLive do
   # A backend switch resets the model to the new backend's default (the prior
   # backend's model is invalid on a single shared `model` key); a same-backend
   # change keeps the selected model, snapped to a valid option. A modelless
-  # backend (xai) carries an empty option list and a `nil` model — the card hides
-  # the model field.
+  # backend (xai, local) carries an empty option list and a `nil` model — the
+  # card hides the model field.
   defp update_transcription_selection(form, backend, _model) when backend != form.backend do
     options = transcription_models_for(backend)
     %{form | backend: backend, model_options: options, model: default_model_for_options(options)}
@@ -1423,6 +1516,188 @@ defmodule FermixWebWeb.SetupLive do
       model -> if model in options, do: model, else: default
     end
   end
+
+  # `transcription_backend` is a NAME string, blank meaning "whatever the
+  # Transcription tab is set to" — so the picker offers a blank entry alongside
+  # the shipped backend names rather than repeating the global default here.
+  defp build_meetings_form(snapshot) do
+    meetings = get_fermix_core(snapshot, :meetings)
+
+    %{
+      enabled: Keyword.get(meetings, :enabled, false) == true,
+      bot_name: safe_string(Keyword.get(meetings, :bot_name, "Fermix Notetaker")),
+      announce: Keyword.get(meetings, :announce, true) == true,
+      announce_message: safe_string(Keyword.get(meetings, :announce_message)),
+      transcription_backend:
+        normalize_meetings_backend(Keyword.get(meetings, :transcription_backend)),
+      backend_options: meetings_backend_options(),
+      zoom_account_id: safe_string(Keyword.get(meetings, :zoom_account_id)),
+      zoom_client_id: safe_string(Keyword.get(meetings, :zoom_client_id)),
+      zoom_ws_subscription_id: safe_string(Keyword.get(meetings, :zoom_ws_subscription_id)),
+      zoom_client_secret_set: secret_set?(meetings, :zoom_client_secret),
+      sidecar_installed?: MeetbotInstaller.installed?()
+    }
+  end
+
+  defp meetings_backend_options do
+    ["" | Enum.map(TranscriptionRegistry.backends(), fn {name, _module} -> to_string(name) end)]
+  end
+
+  # The picker only ever offers the shipped names plus the blank global-default
+  # entry, so anything else off the wire is normalized back to the blank.
+  defp normalize_meetings_backend(value) do
+    name = safe_string(value)
+    if name in meetings_backend_options(), do: name, else: ""
+  end
+
+  # `[fermix_core.meetings]` is written as a section rather than through wizard
+  # answers: save then apply, the same two steps Wizard.commit_snapshot performs,
+  # so the keyring securing in save_snapshot/1 still owns the Zoom secret.
+  defp save_meetings(socket, changes, nav) do
+    snapshot = ConfigStore.current_snapshot()
+    meetings = snapshot |> get_fermix_core(:meetings) |> Keyword.merge(changes)
+    updated = put_fermix_core(snapshot, :meetings, meetings)
+    restart? = meetings_restart_required?(MeetingsConfig.load(), changes)
+
+    case ConfigStore.save_snapshot(updated) do
+      :ok ->
+        :ok = ConfigStore.apply_snapshot(updated)
+
+        socket
+        |> assign(:restart_pending?, socket.assigns.restart_pending? or restart?)
+        |> refresh_report(meetings_saved_message(restart?), restart_required?: restart?)
+        |> maybe_install_meetbot(Keyword.fetch!(changes, :enabled))
+        |> maybe_advance(nav)
+
+      {:error, reason} ->
+        flash_error(socket, "Save failed: #{format_config_error(reason)}")
+    end
+  end
+
+  defp meetings_saved_message(true), do: "Meetings saved — restart to apply."
+  defp meetings_saved_message(false), do: "Meetings saved."
+
+  # The meetings tools are registered once, at boot, from `Meetings.ready?/0`
+  # (enabled plus either the notetaker binary or the full Zoom credential set),
+  # so a change to any of those keys only reaches the model after a restart —
+  # the same boot-seeded gate the computer-use save asks a restart for. The
+  # remaining keys (bot name, announcement, backend) are read per meeting. The
+  # comparison runs against the loaded config so an unset key reads as its
+  # default rather than as a change.
+  defp meetings_restart_required?(%MeetingsConfig{} = previous, changes) do
+    Enum.any?(@meetings_restart_keys, fn key ->
+      Keyword.has_key?(changes, key) and Keyword.get(changes, key) != Map.fetch!(previous, key)
+    end)
+  end
+
+  defp put_fermix_core(snapshot, key, value) do
+    fermix_core = snapshot |> Map.get(:fermix_core, []) |> Keyword.put(key, value)
+    Map.put(snapshot, :fermix_core, fermix_core)
+  end
+
+  # Enabling meetings is what fetches the Meet notetaker binary — the Zoom RTMS
+  # lane needs no sidecar, so a refusal here never blocks the save.
+  defp maybe_install_meetbot(socket, false), do: socket
+
+  defp maybe_install_meetbot(socket, true) do
+    cond do
+      MeetbotInstaller.installed?() ->
+        assign(socket, :meetbot_install, done(@meetbot_ready_message))
+
+      installing?(socket.assigns.meetbot_install) ->
+        socket
+
+      true ->
+        start_meetbot_install(socket)
+    end
+  end
+
+  defp start_meetbot_install(socket) do
+    install = meetbot_installer()
+
+    socket
+    |> assign(:meetbot_install, installing(@meetbot_installing_message))
+    |> start_async(:meetbot_install, install)
+  end
+
+  # Injectable so a LiveView test never reaches the network (mirrors the
+  # `:plugin_auth_runner` seam). Defaults to the real pinned download.
+  defp meetbot_installer do
+    Application.get_env(:fermix_web, :meetbot_installer, &MeetbotInstaller.install/0)
+  end
+
+  defp meetbot_install_error(:no_pinned_release),
+    do: MeetbotInstaller.error_message(:no_pinned_release)
+
+  defp meetbot_install_error({:unsupported_target, target}),
+    do: "No meeting notetaker build for this machine (#{target})."
+
+  defp meetbot_install_error(reason),
+    do: "Meeting notetaker install failed: #{Redaction.format(reason)}"
+
+  # Choosing the on-device backend is the install trigger (§2b: nothing downloads
+  # at boot, and hand-editing config.toml installs nothing). Already-installed
+  # selects say so instead of re-running the installer.
+  defp maybe_install_local_stt(socket, previous, :local) when previous != :local do
+    cond do
+      LocalTranscription.configured?([]) == :ok ->
+        assign(socket, :local_install, done(@local_ready_message))
+
+      installing?(socket.assigns.local_install) ->
+        socket
+
+      true ->
+        start_local_install(socket)
+    end
+  end
+
+  defp maybe_install_local_stt(socket, _previous, _backend), do: socket
+
+  defp start_local_install(socket) do
+    parent = self()
+    install = local_installer()
+
+    socket
+    |> assign(:local_install, installing(@local_installing_message))
+    |> start_async(:local_install, fn ->
+      install.(progress: fn event -> send(parent, {:local_install_progress, event}) end)
+    end)
+  end
+
+  # Injectable so a LiveView test never reaches the network, and so both
+  # fail-loud refusals (`:no_release_pinned`, `:model_pins_missing`) can be
+  # rendered without a half-installed host.
+  defp local_installer do
+    Application.get_env(:fermix_web, :local_installer, &LocalTranscription.ensure_installed/1)
+  end
+
+  defp local_progress_message({:sidecar, :downloading}), do: "Downloading the speech engine…"
+
+  defp local_progress_message({:sidecar, :done}),
+    do: "Speech engine installed. Fetching the model…"
+
+  defp local_progress_message({:model, :downloading}), do: "Downloading the speech model…"
+  defp local_progress_message({:model, :verifying}), do: "Verifying the speech model…"
+  defp local_progress_message({:model, :done}), do: @local_ready_message
+
+  defp local_install_error(:no_release_pinned),
+    do: LocalSttInstaller.error_message(:no_release_pinned)
+
+  defp local_install_error(:model_pins_missing),
+    do: LocalModelStore.error_message(:model_pins_missing)
+
+  defp local_install_error({:unsupported_target, target}),
+    do: "No on-device speech build for this machine (#{target})."
+
+  defp local_install_error(reason),
+    do: "On-device speech install failed: #{Redaction.format(reason)}"
+
+  defp installing(message), do: %{kind: :info, running?: true, message: message}
+  defp done(message), do: %{kind: :info, running?: false, message: message}
+  defp failed(message), do: %{kind: :error, running?: false, message: message}
+
+  defp installing?(%{running?: true}), do: true
+  defp installing?(_state), do: false
 
   defp build_memory_form(snapshot) do
     compaction = snapshot |> get_fermix_core(:compaction) |> CompactionConfig.normalize()
@@ -3001,9 +3276,11 @@ defmodule FermixWebWeb.SetupLive do
   defp normalize_transcription_backend(:openai), do: :openai
   defp normalize_transcription_backend(:xai), do: :xai
   defp normalize_transcription_backend(:deepgram), do: :deepgram
+  defp normalize_transcription_backend(:local), do: :local
   defp normalize_transcription_backend("openai"), do: :openai
   defp normalize_transcription_backend("xai"), do: :xai
   defp normalize_transcription_backend("deepgram"), do: :deepgram
+  defp normalize_transcription_backend("local"), do: :local
   defp normalize_transcription_backend(_value), do: :openai
 
   defp parse_env_allow(value) when is_binary(value) do
@@ -3090,6 +3367,11 @@ defmodule FermixWebWeb.SetupLive do
   defp present?(value) when is_binary(value), do: String.trim(value) != ""
   defp present?(value) when is_list(value), do: value != []
   defp present?(_), do: true
+
+  # A toggle posts a hidden "false" ahead of its checked "true"; the last value
+  # wins, so anything other than the literal "true" is off.
+  defp checked?("true"), do: true
+  defp checked?(_value), do: false
 
   defp maybe_put_string(answers, _key, nil), do: answers
   defp maybe_put_string(answers, _key, ""), do: answers

@@ -148,6 +148,62 @@ defmodule FermixCore.Timeouts do
   @spec acp_bridge_hello() :: pos_integer()
   def acp_bridge_hello, do: @acp_bridge_hello_ms
 
+  # --- Transcription streaming (M21 Phase 2) --------------------------------
+  # WS connect covers TCP+TLS+upgrade for a native STT stream; close-drain bounds
+  # the window between CloseStream/audio.done and the vendor's final results +
+  # server close. KeepAlive is a periodic timer and deliberately NOT here.
+  @transcription_ws_connect_ms 10_000
+  @transcription_ws_close_drain_ms 10_000
+
+  @doc "WS handshake budget for a native transcription stream (Deepgram/xAI)."
+  @spec transcription_ws_connect() :: pos_integer()
+  def transcription_ws_connect, do: @transcription_ws_connect_ms
+
+  @doc "Budget from CloseStream/audio.done to the vendor's final results + close."
+  @spec transcription_ws_close_drain() :: pos_integer()
+  def transcription_ws_close_drain, do: @transcription_ws_close_drain_ms
+
+  # --- Local STT sidecar (M21 Phase 2b) -------------------------------------
+  # hello is emitted before model load, so it bounds process start only. batch
+  # bounds one whole-file recognition (20 MB ingress cap, 7-20x realtime ⇒ minutes
+  # of headroom). flush bounds stream_end -> stream_done.
+  @stt_sidecar_hello_ms 10_000
+  @stt_sidecar_batch_ms 300_000
+  @stt_sidecar_flush_ms 30_000
+
+  @doc "fermix-stt hello line deadline after spawn."
+  @spec stt_sidecar_hello() :: pos_integer()
+  def stt_sidecar_hello, do: @stt_sidecar_hello_ms
+
+  @doc "One fermix-stt batch transcribe round-trip."
+  @spec stt_sidecar_batch() :: pos_integer()
+  def stt_sidecar_batch, do: @stt_sidecar_batch_ms
+
+  @doc "fermix-stt stream_end -> stream_done flush deadline."
+  @spec stt_sidecar_flush() :: pos_integer()
+  def stt_sidecar_flush, do: @stt_sidecar_flush_ms
+
+  # --- Meetings (M21 Phase 3) -----------------------------------------------
+  # The meetbot sidecar's hello handshake, the join attempt (which includes the
+  # host's admission of the bot from the waiting room), and the post-meeting
+  # summarization — the last also bounds the drain of the transcription tail, so
+  # it is the longest deadline in this module by design.
+  @meetbot_handshake_ms 15_000
+  @meetbot_join_ms 90_000
+  @meeting_summarize_ms 600_000
+
+  @doc "meetbot sidecar hello line deadline after spawn."
+  @spec meetbot_handshake() :: pos_integer()
+  def meetbot_handshake, do: @meetbot_handshake_ms
+
+  @doc "Join request to admission (knock included) before the attempt is failed."
+  @spec meetbot_join() :: pos_integer()
+  def meetbot_join, do: @meetbot_join_ms
+
+  @doc "Transcript drain plus map-reduce summarization of one meeting."
+  @spec meeting_summarize() :: pos_integer()
+  def meeting_summarize, do: @meeting_summarize_ms
+
   @doc """
   Record a fired failure timeout and return its firing-site error shape.
 

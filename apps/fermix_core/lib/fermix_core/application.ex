@@ -28,6 +28,7 @@ defmodule FermixCore.Application do
   alias FermixCore.Jobs.RunnerSupervisor, as: JobRunnerSupervisor
   alias FermixCore.Jobs.Scheduler, as: JobScheduler
   alias FermixCore.Log.RedactingFormatter
+  alias FermixCore.Meetings.Supervisor, as: MeetingsSupervisor
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Store
@@ -167,6 +168,12 @@ defmodule FermixCore.Application do
         AgentSupervisor,
         MainAgent,
         JobRunnerSupervisor,
+        # Meetings tree (M21 C2 §2.9), unconditionally: it holds no OS process
+        # and spawns nothing until `Meetings.join/2`, so an always-on tree lets
+        # web setup enable meetings without a daemon restart, and lets the boot
+        # sweep reconcile rows stranded by an install that has since been
+        # turned off. The enable gate lives in `join/2` and the tool seeder.
+        MeetingsSupervisor,
         {JobScheduler, jobs_scheduler_opts()},
         # Temporal reminder rail (M30 §6.3): the scheduler starts BEFORE its
         # delivery supervisor, and that order is load-bearing — under
