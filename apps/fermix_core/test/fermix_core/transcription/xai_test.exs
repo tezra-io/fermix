@@ -23,9 +23,15 @@ defmodule FermixCore.Transcription.XAITest do
   end
 
   describe "backend metadata" do
-    test "declares its name and batch-only capability gate (streaming lands later)" do
+    test "declares its name and its native streaming capability" do
       assert XAI.name() == :xai
-      assert XAI.capabilities() == %{streaming?: false, local?: false}
+      assert XAI.capabilities() == %{streaming?: true, local?: false}
+    end
+
+    test "exposes one telemetry label for the batch call and the stream to share" do
+      # The endpoint is modelless, so this string is a span tag and never an API
+      # parameter — and it exists once rather than twice.
+      assert XAI.telemetry_model() == "grok-stt"
     end
   end
 

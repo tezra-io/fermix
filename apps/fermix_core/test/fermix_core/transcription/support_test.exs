@@ -159,6 +159,81 @@ defmodule FermixCore.Transcription.SupportTest do
     end
   end
 
+  describe "emit_stream_call/5" do
+    setup do
+      handler_id = "transcription-support-stream-call-#{System.unique_integer([:positive])}"
+      test_pid = self()
+
+      :telemetry.attach(
+        handler_id,
+        [:fermix, :provider, :call],
+        fn _event, measurements, metadata, _config ->
+          send(test_pid, {:provider_call, measurements, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+      :ok
+    end
+
+    test "reports a whole native stream as one provider call" do
+      Application.put_env(:fermix_core, :telemetry, capture_content: true)
+
+      opts = [session_id: "meet-1", parent_session: "turn-1"]
+
+      assert :ok =
+               Support.emit_stream_call(:deepgram, "nova-3", opts, {:ok, "hello there"}, 42_000)
+
+      assert_receive {:provider_call, %{duration_ms: 42_000}, metadata}
+      # The stream's own wall time, not a per-segment HTTP round trip.
+      assert metadata.provider == :deepgram
+      assert metadata.adapter == :deepgram
+      assert metadata.model == "nova-3"
+      assert metadata.status == :ok
+      assert metadata.tokens == %{}
+      assert metadata.reasoning_effort == nil
+      assert metadata.purpose == :transcription
+      assert metadata.session_id == "meet-1"
+      assert metadata.parent_session == "turn-1"
+      assert metadata.output == "hello there"
+    end
+
+    test "a terminal stream failure is flagged with the shared error vocabulary" do
+      Application.put_env(:fermix_core, :telemetry, capture_content: true)
+
+      assert :ok =
+               Support.emit_stream_call(
+                 :xai,
+                 "grok-stt",
+                 [],
+                 {:error, {:reconnect_exhausted, :closed}},
+                 1_500
+               )
+
+      assert_receive {:provider_call, _measurements, metadata}
+      assert metadata.status == :error
+      assert metadata.error_code == "provider_error"
+      assert metadata.error_summary =~ "reconnect_exhausted"
+    end
+
+    test "omits the transcript preview when content capture is off" do
+      Application.put_env(:fermix_core, :telemetry, capture_content: false)
+
+      Support.emit_stream_call(:deepgram, "nova-3", [session_id: "s"], {:ok, "secret"}, 10)
+
+      assert_receive {:provider_call, _measurements, metadata}
+      assert metadata.session_id == "s"
+      refute Map.has_key?(metadata, :output)
+    end
+
+    test "guards reject a negative duration" do
+      assert_raise FunctionClauseError, fn ->
+        Support.emit_stream_call(:deepgram, "nova-3", [], {:ok, ""}, -1)
+      end
+    end
+  end
+
   describe "with_provider_call/4 failure logging" do
     test "logs a warning naming the provider, model, and reason on failure" do
       log =

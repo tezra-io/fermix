@@ -20,9 +20,9 @@ defmodule FermixCore.Transcription.DeepgramTest do
   end
 
   describe "backend metadata" do
-    test "declares its name and batch-only capability gate (streaming lands later)" do
+    test "declares its name and its native streaming capability" do
       assert Deepgram.name() == :deepgram
-      assert Deepgram.capabilities() == %{streaming?: false, local?: false}
+      assert Deepgram.capabilities() == %{streaming?: true, local?: false}
     end
   end
 
@@ -94,6 +94,42 @@ defmodule FermixCore.Transcription.DeepgramTest do
         assert {"content-type", "audio/ogg"} in req.headers
         # Raw audio bytes are the request body (no multipart wrapping).
         assert req.body == "OGGDATA"
+      after
+        FermixTestSupport.SafeRm.rm_rf!(tmp_dir)
+      end
+    end
+
+    test "a caller's model: opt wins over the shared transcription model key" do
+      # The shared key is snapped to whichever backend is the GLOBAL choice, so
+      # a caller that selected Deepgram for one job (a per-meeting override
+      # under a global OpenAI) must not send OpenAI's id here.
+      Application.put_env(:fermix_core, :transcription, model: "gpt-4o-mini-transcribe")
+      tmp_dir = FermixTestSupport.SafeRm.make_tmp_dir!("transcription-deepgram-model-opt")
+
+      try do
+        path = Path.join(tmp_dir, "clip.ogg")
+        File.write!(path, "OGGDATA")
+        test_pid = self()
+        test_id = :"transcription_deepgram_model_#{System.unique_integer([:positive])}"
+
+        Req.Test.stub(test_id, fn conn ->
+          send(test_pid, {:request, conn.query_string})
+
+          conn
+          |> Plug.Conn.put_resp_content_type("application/json")
+          |> Plug.Conn.resp(200, Jason.encode!(@ok_body))
+        end)
+
+        assert {:ok, "deepgram transcript"} =
+                 Deepgram.transcribe(path,
+                   api_key: "dg-opts",
+                   model: "nova-2",
+                   req_options: [plug: {Req.Test, test_id}]
+                 )
+
+        assert_receive {:request, query}
+        assert query =~ "model=nova-2"
+        refute query =~ "gpt-4o-mini-transcribe"
       after
         FermixTestSupport.SafeRm.rm_rf!(tmp_dir)
       end

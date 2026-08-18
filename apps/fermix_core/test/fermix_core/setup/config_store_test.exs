@@ -4,6 +4,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
   import ExUnit.CaptureLog
 
   alias FermixCore.MCP.Inbound.Config, as: InboundConfig
+  alias FermixCore.Meetings.Config, as: MeetingsConfig
   alias FermixCore.Setup.ConfigStore
 
   setup do
@@ -18,6 +19,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     realtime = Application.get_env(:fermix_core, :realtime, [])
     computer_use = Application.get_env(:fermix_core, :computer_use, [])
     transcription = Application.get_env(:fermix_core, :transcription, [])
+    meetings = Application.get_env(:fermix_core, :meetings, [])
     tools = Application.get_env(:fermix_core, :tools, [])
     plugins = Application.get_env(:fermix_core, :plugins, [])
     oauth = Application.get_env(:fermix_core, :oauth, %{})
@@ -41,6 +43,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
       Application.put_env(:fermix_core, :realtime, realtime)
       Application.put_env(:fermix_core, :computer_use, computer_use)
       Application.put_env(:fermix_core, :transcription, transcription)
+      Application.put_env(:fermix_core, :meetings, meetings)
       Application.put_env(:fermix_core, :tools, tools)
       Application.put_env(:fermix_core, :plugins, plugins)
       Application.put_env(:fermix_core, :oauth, oauth)
@@ -538,11 +541,33 @@ defmodule FermixCore.Setup.ConfigStoreTest do
 
     File.write!(Path.join(tmp_home, "config.toml"), """
     [fermix_core.transcription]
-    backend = "local"
+    backend = "vosk"
     """)
 
-    assert_raise ArgumentError, ~r/unknown backend.*local/s, fn ->
+    assert_raise ArgumentError, ~r/unknown backend.*vosk/s, fn ->
       ConfigStore.load_runtime_config(resolve_secrets: false)
+    end
+  end
+
+  # The allowed set is the registry's, so the on-device backend became
+  # selectable the day it was registered — no second list to update here.
+  test "load accepts every backend the transcription registry ships, local included (M21)" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    for {name, _module} <- FermixCore.Transcription.Registry.backends() do
+      File.write!(Path.join(tmp_home, "config.toml"), """
+      [fermix_core.transcription]
+      backend = "#{name}"
+      """)
+
+      assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+      transcription = Keyword.get(loaded.fermix_core, :transcription, [])
+      assert Keyword.get(transcription, :backend) == Atom.to_string(name)
     end
   end
 
@@ -665,6 +690,192 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert Keyword.get(transcription, :max_file_mb) == 20
   end
 
+  test "save/load round-trip preserves meetings config incl. the secret sentinel (M21)" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    snapshot = %{
+      fermix_core: [
+        meetings: [
+          enabled: true,
+          bot_name: "Notes Bot",
+          announce: false,
+          announce_message: "Recording notes for the team.",
+          transcription_backend: "deepgram",
+          retain_audio: true,
+          zoom_account_id: "acct-1",
+          zoom_client_id: "client-1",
+          zoom_client_secret: "@keyring",
+          zoom_ws_subscription_id: "sub-1"
+        ]
+      ],
+      fermix_channels: [],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ "[fermix_core.meetings]"
+    assert contents =~ "enabled = true"
+    assert contents =~ ~s(bot_name = "Notes Bot")
+    assert contents =~ "announce = false"
+    assert contents =~ "retain_audio = true"
+    assert contents =~ ~s(zoom_client_secret = "@keyring")
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+    meetings = Keyword.get(loaded.fermix_core, :meetings, [])
+
+    assert Keyword.get(meetings, :enabled) == true
+    assert Keyword.get(meetings, :bot_name) == "Notes Bot"
+    assert Keyword.get(meetings, :announce) == false
+    assert Keyword.get(meetings, :announce_message) == "Recording notes for the team."
+    assert Keyword.get(meetings, :transcription_backend) == "deepgram"
+    assert Keyword.get(meetings, :retain_audio) == true
+    assert Keyword.get(meetings, :zoom_account_id) == "acct-1"
+    assert Keyword.get(meetings, :zoom_client_id) == "client-1"
+    assert Keyword.get(meetings, :zoom_client_secret) == "@keyring"
+    assert Keyword.get(meetings, :zoom_ws_subscription_id) == "sub-1"
+  end
+
+  test "load refuses to boot on an unknown meetings key (M21)" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.meetings]
+    enabled = true
+    bot_nmae = "typo"
+    """)
+
+    assert_raise ArgumentError, ~r/unknown key\(s\): bot_nmae/, fn ->
+      ConfigStore.load_runtime_config(resolve_secrets: false)
+    end
+  end
+
+  test "load refuses to boot on an unknown meetings transcription_backend (M21)" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.meetings]
+    transcription_backend = "vosk"
+    """)
+
+    assert_raise ArgumentError, ~r/unknown transcription_backend.*vosk/s, fn ->
+      ConfigStore.load_runtime_config(resolve_secrets: false)
+    end
+  end
+
+  # Blank is the documented "use whatever [fermix_core.transcription] selected"
+  # value, so it must parse — the meeting Session reads an absent key as blank.
+  test "load accepts a blank meetings transcription_backend (M21)" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.meetings]
+    enabled = true
+    transcription_backend = ""
+    """)
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+    meetings = Keyword.get(loaded.fermix_core, :meetings, [])
+
+    assert Keyword.get(meetings, :enabled) == true
+    refute Keyword.has_key?(meetings, :transcription_backend)
+  end
+
+  test "apply_snapshot applies meetings config to app env (M21)" do
+    Application.put_env(:fermix_core, :meetings, enabled: false)
+
+    ConfigStore.apply_snapshot(%{
+      fermix_core: [meetings: [enabled: true, bot_name: "Notes Bot"]],
+      fermix_channels: [],
+      fermix_web: []
+    })
+
+    meetings = Application.get_env(:fermix_core, :meetings, [])
+    assert Keyword.get(meetings, :enabled) == true
+    assert Keyword.get(meetings, :bot_name) == "Notes Bot"
+    # Keys the edit omitted are read back from Meetings.Config's own defaults.
+    assert MeetingsConfig.load().announce == true
+  end
+
+  test "apply_snapshot lets a cleared meetings value take effect live (M21)" do
+    Application.put_env(:fermix_core, :meetings,
+      enabled: true,
+      bot_name: "Notes Bot",
+      announce_message: "Recording for the team.",
+      zoom_account_id: "acct-1",
+      zoom_client_id: "client-1",
+      zoom_client_secret: "s3cr3t",
+      zoom_ws_subscription_id: "sub-1"
+    )
+
+    # The card writes every text field on every save; blanks are dropped by
+    # normalization, so a merge would keep the stale live values.
+    ConfigStore.apply_snapshot(%{
+      fermix_core: [
+        meetings: [
+          enabled: true,
+          bot_name: "",
+          announce_message: "",
+          zoom_account_id: "",
+          zoom_client_id: "",
+          zoom_client_secret: "",
+          zoom_ws_subscription_id: ""
+        ]
+      ],
+      fermix_channels: [],
+      fermix_web: []
+    })
+
+    config = MeetingsConfig.load()
+    assert config.bot_name == "Fermix Notetaker"
+    assert config.announce_message =~ "AI notetaker"
+    refute config.announce_message =~ "Recording for the team."
+    refute MeetingsConfig.rtms_configured?(config)
+  end
+
+  test "save secures a plaintext zoom_client_secret through the keychain (M21)" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    snapshot = %{
+      fermix_core: [meetings: [enabled: true, zoom_client_secret: "zoom-secret-plaintext"]],
+      fermix_channels: [],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ ~s(zoom_client_secret = "@keyring")
+    refute contents =~ "zoom-secret-plaintext"
+
+    assert {:ok, "zoom-secret-plaintext"} =
+             FermixTestSupport.SecretWriterStub.get(:meetings_zoom_client_secret)
+  end
+
   test "save/load round-trip preserves the tool_search deferral flag (M10)" do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
@@ -713,7 +924,9 @@ defmodule FermixCore.Setup.ConfigStoreTest do
           subagent_provider: "openai",
           subagent_model: "gpt-5.4-mini",
           subagent_reasoning_effort: "low",
-          cron_model: "claude-haiku-4-5"
+          cron_model: "claude-haiku-4-5",
+          meeting_model: "claude-haiku-4-5",
+          meeting_reasoning_effort: "low"
         ]
       ],
       fermix_channels: [],
@@ -735,6 +948,10 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert Keyword.get(routing, :subagent_model) == "gpt-5.4-mini"
     assert Keyword.get(routing, :subagent_reasoning_effort) == "low"
     assert Keyword.get(routing, :cron_model) == "claude-haiku-4-5"
+    # The meeting-summary route survives too — a dropped key would silently send
+    # every summary back to the main model (M21 Phase 3).
+    assert Keyword.get(routing, :meeting_model) == "claude-haiku-4-5"
+    assert Keyword.get(routing, :meeting_reasoning_effort) == "low"
     refute Keyword.has_key?(routing, :coding_model)
     refute Keyword.has_key?(routing, :default_provider)
   end

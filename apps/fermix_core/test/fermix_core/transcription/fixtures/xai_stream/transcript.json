@@ -1,0 +1,1 @@
+{"type":"transcript.partial","text":"hello there","words":[{"text":"hello","start":0.08,"end":0.48,"confidence":0.99},{"text":"there","start":0.56,"end":1.12,"confidence":0.98}],"is_final":true,"speech_final":true,"start":1.5,"duration":1.2}

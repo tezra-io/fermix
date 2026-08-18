@@ -904,6 +904,14 @@ defmodule Fermix.CLI.Doctor.Checks do
     warn("transcription", error)
   end
 
+  # The on-device backend fails on installation state, not on a key, so the row
+  # names the missing half and carries the installer's own fix sentence — a
+  # "set a key" line would send the operator looking for a credential that does
+  # not exist.
+  defp format_transcription(%{status: :needs_install, missing: missing, remedy: remedy}) do
+    warn("transcription", "backend local #{missing_half(missing)} — #{remedy}")
+  end
+
   defp format_transcription(%{credential_present?: false} = report) do
     warn(
       "transcription",
@@ -914,6 +922,43 @@ defmodule Fermix.CLI.Doctor.Checks do
   defp format_transcription(%{backend: backend}) do
     ok("transcription", "backend #{backend} configured")
   end
+
+  defp missing_half(missing) when missing in [:sidecar_not_installed, :no_release_pinned],
+    do: "needs its sidecar"
+
+  defp missing_half(missing) when missing in [:model_not_installed, :model_pins_missing],
+    do: "needs its speech model"
+
+  @doc """
+  Meeting-notetaker readiness (M21 Phase 3): which lane can place a bot, and the
+  Meet profile's sign-in custody. Offline — it never spawns the sidecar, so the
+  row costs nothing on a host that never uses meetings.
+  """
+  @spec meetings() :: result()
+  def meetings do
+    ProviderProbe.meetings_report()
+    |> format_meetings()
+  end
+
+  defp format_meetings(%{status: :disabled}), do: ok("meetings", "disabled")
+
+  defp format_meetings(%{status: :enabled, ready?: true} = report) do
+    ok("meetings", meetings_lanes(report) <> "; " <> report.profile_note)
+  end
+
+  defp format_meetings(%{status: :enabled, ready?: false, remedy: remedy})
+       when is_binary(remedy) do
+    warn("meetings", "enabled but no lane is usable — " <> remedy)
+  end
+
+  defp meetings_lanes(%{sidecar_installed?: true, rtms_configured?: true}),
+    do: "meet sidecar installed; zoom rtms configured"
+
+  defp meetings_lanes(%{sidecar_installed?: true}),
+    do: "meet sidecar installed; zoom rtms not configured"
+
+  defp meetings_lanes(%{rtms_configured?: true}),
+    do: "zoom rtms configured; meet sidecar not installed"
 
   @doc """
   Computer-use OS-permission state (docs/design/COMPUTER_USE_V2.md, Phase A). The
@@ -2040,21 +2085,30 @@ defmodule Fermix.CLI.Doctor.Checks do
   end
 
   @doc """
-  Validates the `[fermix_core.routing]` `subagent_*`/`cron_*` model-routing keys.
-  A typo'd provider/effort — especially in the UI-less `cron_*` keys — is caught
-  here at the operator's desk rather than at the next unattended job fire.
-  (Whether a routing provider is actually authed is the `auth_probe` check's job.)
+  Validates the `[fermix_core.routing]` `subagent_*`/`cron_*`/`meeting_*`
+  model-routing keys. A typo'd provider/effort — especially in the UI-less
+  `cron_*` and `meeting_*` keys — is caught here at the operator's desk rather
+  than at the next unattended job fire or meeting summary. (Whether a routing
+  provider is actually authed is the `auth_probe` check's job.)
   """
   @spec routing_overrides() :: result()
   def routing_overrides do
     subagent = RoutingOverrides.subagent()
     cron = RoutingOverrides.cron()
+    meeting = RoutingOverrides.meeting()
 
-    case validate_routing_models([{"subagent_model", subagent}, {"cron_model", cron}]) do
+    entries = [
+      {"subagent_model", subagent},
+      {"cron_model", cron},
+      {"meeting_model", meeting}
+    ]
+
+    case validate_routing_models(entries) do
       :ok ->
         ok(
           "routing",
-          "subagent: #{describe_override(subagent)}; cron: #{describe_override(cron)}"
+          "subagent: #{describe_override(subagent)}; cron: #{describe_override(cron)}; " <>
+            "meeting: #{describe_override(meeting)}"
         )
 
       {:error, message} ->

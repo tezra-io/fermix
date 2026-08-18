@@ -7,6 +7,8 @@ defmodule FermixCore.Providers.RoutingOverrides do
       the model delegated `subagents` workers run on.
     * `cron_provider` / `cron_model` / `cron_reasoning_effort` — the model
       unpinned scheduled jobs run on.
+    * `meeting_provider` / `meeting_model` / `meeting_reasoning_effort` — the
+      model the meeting summarizer runs on.
 
   Plus the per-call override the main agent may pass as `subagents` tool args
   (`parse_tool_args/1`), which `merge/2`s field-level over the config default.
@@ -41,14 +43,18 @@ defmodule FermixCore.Providers.RoutingOverrides do
   @spec cron() :: override()
   def cron, do: parse(routing_config(), :cron)
 
+  @doc "The configured meeting-summary override (`[fermix_core.routing] meeting_*`)."
+  @spec meeting() :: override()
+  def meeting, do: parse(routing_config(), :meeting)
+
   defp routing_config, do: Application.get_env(:fermix_core, :routing, [])
 
   @doc """
   Reads + validates the `<prefix>_provider/model/reasoning_effort` keys from a
   routing keyword list. Raises `ArgumentError` on an unknown provider or effort.
   """
-  @spec parse(keyword(), :subagent | :cron) :: override()
-  def parse(routing, prefix) when is_list(routing) and prefix in [:subagent, :cron] do
+  @spec parse(keyword(), :subagent | :cron | :meeting) :: override()
+  def parse(routing, prefix) when is_list(routing) and prefix in [:subagent, :cron, :meeting] do
     provider = validate_provider(get(routing, prefix, :provider), label(prefix, :provider))
     model = normalize_model(get(routing, prefix, :model))
     validate_pairing(provider, model, label(prefix, :model))

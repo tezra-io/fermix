@@ -66,4 +66,18 @@ defmodule FermixCore.Setup.SecretPathsTest do
     refute Map.get(secret, :sandbox_env, false)
     refute :mobile_apns_key in Enum.map(SecretPaths.sandbox_env_eligible(), & &1.key)
   end
+
+  # M21 Phase 3: the Zoom RTMS client secret is secure-on-save like every other
+  # setup secret, and stays off [sandbox.env] — the meetbot sidecar is spawned
+  # for Meet and must never inherit the Zoom credentials.
+  test "registers the Zoom RTMS client secret as a keychain-only meetings secret" do
+    secret = SecretPaths.fetch!(:meetings_zoom_client_secret)
+
+    assert secret.env == "MEETINGS_ZOOM_CLIENT_SECRET"
+    assert secret.path == [:fermix_core, :meetings, :zoom_client_secret]
+    assert secret.functionality == "Zoom RTMS meeting notetaker"
+    assert secret.optional? == true
+    refute Map.get(secret, :sandbox_env, false)
+    refute :meetings_zoom_client_secret in Enum.map(SecretPaths.sandbox_env_eligible(), & &1.key)
+  end
 end

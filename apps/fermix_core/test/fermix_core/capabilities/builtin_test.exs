@@ -162,7 +162,8 @@ defmodule FermixCore.Capabilities.BuiltinTest do
         |> Enum.sort()
 
       # The event family (MILESTONE_30 §12.1, §20) is owner data by definition —
-      # every row is the owner's own calendar.
+      # every row is the owner's own calendar. So is the meetings family
+      # (MILESTONE_21 C2 §14.1): every row is a meeting the owner sat in.
       assert flagged == [
                "content_search",
                "event_list",
@@ -173,8 +174,11 @@ defmodule FermixCore.Capabilities.BuiltinTest do
                "get_job_run",
                "git_read",
                "glob_search",
+               "join_meeting",
+               "leave_meeting",
                "list_job_runs",
                "list_jobs",
+               "list_meetings",
                "memory_sources_list",
                "reminder_snooze"
              ]
