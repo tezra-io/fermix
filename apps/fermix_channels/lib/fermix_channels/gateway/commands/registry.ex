@@ -16,7 +16,8 @@ defmodule FermixChannels.Gateway.Commands.Registry do
     FermixChannels.Gateway.Commands.Resume,
     FermixChannels.Gateway.Commands.Background,
     FermixChannels.Gateway.Commands.Tasks,
-    FermixChannels.Gateway.Commands.Ultra
+    FermixChannels.Gateway.Commands.Ultra,
+    FermixChannels.Gateway.Commands.History
   ]
 
   @spec list() :: [module()]

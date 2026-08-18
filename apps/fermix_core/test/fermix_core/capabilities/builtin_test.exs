@@ -176,6 +176,8 @@ defmodule FermixCore.Capabilities.BuiltinTest do
                "list_job_runs",
                "list_jobs",
                "memory_sources_list",
+               # On-device computer-history recall is owner data (MILESTONE_32 §11.2).
+               "recall_activity",
                "reminder_snooze"
              ]
     end

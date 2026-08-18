@@ -8,6 +8,7 @@ defmodule FermixCore.Memory.Repo do
   alias Exqlite.Sqlite3
   alias FermixCore.Agents.IterationLimits
   alias FermixCore.Memory.Config
+  alias FermixCore.Memory.Repo.ComputerHistorySql
   alias FermixCore.Memory.Repo.MobileSql
   alias FermixCore.Memory.Repo.TemporalSql
   alias FermixCore.Memory.Scope
@@ -34,6 +35,9 @@ defmodule FermixCore.Memory.Repo do
   @mobile_store_migration_version 20
   @mobile_client_message_migration_version 21
   @mobile_attempt_fence_migration_version 22
+  @computer_history_events_migration_version 23
+  @computer_history_memories_migration_version 24
+  @computer_history_state_migration_version 25
   @sqlite_open_intent :readwritecreate
 
   @base_schema_sql """
@@ -1532,6 +1536,143 @@ defmodule FermixCore.Memory.Repo do
     call({:claim_skill_curation_cycle, now, stale_after_ms}, opts)
   end
 
+  # --- computer history (MILESTONE_32 §7) ---------------------------------
+
+  @doc "Idempotently insert a batch of computer-history spool events. Returns the inserted count."
+  @spec computer_history_insert_events([map()], keyword()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def computer_history_insert_events(events, opts \\ []) when is_list(events) do
+    call({:computer_history_insert_events, events}, opts)
+  end
+
+  @doc "Sweep spool events older than `cutoff_ts` (epoch ms). Returns the deleted count."
+  @spec computer_history_sweep_expired_events(integer(), keyword()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def computer_history_sweep_expired_events(cutoff_ts, opts \\ []) when is_integer(cutoff_ts) do
+    call({:computer_history_sweep_expired_events, cutoff_ts}, opts)
+  end
+
+  @doc "Count of computer-history spool events."
+  @spec computer_history_count_events(keyword()) :: {:ok, non_neg_integer()} | {:error, term()}
+  def computer_history_count_events(opts \\ []) do
+    call(:computer_history_count_events, opts)
+  end
+
+  @doc "The oldest spool event's `ts` (epoch ms), or nil when empty."
+  @spec computer_history_oldest_event_ts(keyword()) ::
+          {:ok, integer() | nil} | {:error, term()}
+  def computer_history_oldest_event_ts(opts \\ []) do
+    call(:computer_history_oldest_event_ts, opts)
+  end
+
+  @doc "Read up to `limit` spool events with `id > after_id`, oldest first (summarizer cursor)."
+  @spec computer_history_events_after_id(non_neg_integer(), pos_integer(), keyword()) ::
+          {:ok, [map()]} | {:error, term()}
+  def computer_history_events_after_id(after_id, limit, opts \\ [])
+      when is_integer(after_id) and after_id >= 0 and is_integer(limit) and limit > 0 do
+    call({:computer_history_events_after_id, after_id, limit}, opts)
+  end
+
+  @doc "Count of durable activity memories (excluding superseded)."
+  @spec computer_history_count_memories(keyword()) :: {:ok, non_neg_integer()} | {:error, term()}
+  def computer_history_count_memories(opts \\ []) do
+    call(:computer_history_count_memories, opts)
+  end
+
+  @doc "Insert one durable activity memory. Returns the new row id."
+  @spec computer_history_insert_memory(map(), keyword()) :: {:ok, integer()} | {:error, term()}
+  def computer_history_insert_memory(memory, opts \\ []) when is_map(memory) do
+    call({:computer_history_insert_memory, memory}, opts)
+  end
+
+  @doc "The most recent non-superseded activity memories (Recent Activity section source)."
+  @spec computer_history_recent_memories(pos_integer(), keyword()) ::
+          {:ok, [map()]} | {:error, term()}
+  def computer_history_recent_memories(limit, opts \\ []) when is_integer(limit) and limit > 0 do
+    call({:computer_history_recent_memories, limit}, opts)
+  end
+
+  @doc "Non-superseded activity memories intersecting [from_ts, to_ts] (recall_activity query)."
+  @spec computer_history_memories_in_window(integer(), integer(), pos_integer(), keyword()) ::
+          {:ok, [map()]} | {:error, term()}
+  def computer_history_memories_in_window(from_ts, to_ts, limit, opts \\ [])
+      when is_integer(from_ts) and is_integer(to_ts) and is_integer(limit) and limit > 0 do
+    call({:computer_history_memories_in_window, from_ts, to_ts, limit}, opts)
+  end
+
+  @doc "Purge the [from_ts, to_ts] window: events + intersecting memories + watermark."
+  @spec computer_history_purge_window(integer(), integer(), keyword()) ::
+          {:ok, %{events: non_neg_integer(), memories: non_neg_integer()}} | {:error, term()}
+  def computer_history_purge_window(from_ts, to_ts, opts \\ [])
+      when is_integer(from_ts) and is_integer(to_ts) do
+    call({:computer_history_purge_window, from_ts, to_ts}, opts)
+  end
+
+  @doc "Ensure the summarizer singleton state row exists, then return it."
+  @spec computer_history_ensure_state(keyword()) :: {:ok, map()} | {:error, term()}
+  def computer_history_ensure_state(opts \\ []) do
+    call(:computer_history_ensure_state, opts)
+  end
+
+  @doc "Read the summarizer singleton state row."
+  @spec computer_history_fetch_state(keyword()) :: {:ok, map()} | {:error, :not_found | term()}
+  def computer_history_fetch_state(opts \\ []) do
+    call(:computer_history_fetch_state, opts)
+  end
+
+  @doc "Atomically claim a summarizer cycle (idle -> running), reclaiming a stale one."
+  @spec computer_history_claim_cycle(DateTime.t(), non_neg_integer(), keyword()) ::
+          {:ok, map()} | {:error, :concurrent_run | term()}
+  def computer_history_claim_cycle(%DateTime{} = now, stale_after_ms, opts \\ [])
+      when is_integer(stale_after_ms) and stale_after_ms >= 0 do
+    call({:computer_history_claim_cycle, now, stale_after_ms}, opts)
+  end
+
+  @doc "Write a summarizer cycle result (supersede+insert under the purge guard, advance cursor)."
+  @spec computer_history_write_cycle_result(
+          non_neg_integer(),
+          map() | nil,
+          integer(),
+          DateTime.t(),
+          String.t(),
+          keyword()
+        ) :: {:ok, %{memory_written: boolean()}} | {:error, term()}
+  def computer_history_write_cycle_result(
+        last_id,
+        memory,
+        superseded_at_ms,
+        %DateTime{} = now,
+        last_status,
+        opts \\ []
+      )
+      when is_integer(last_id) and (is_map(memory) or is_nil(memory)) and
+             is_integer(superseded_at_ms) and is_binary(last_status) do
+    call(
+      {:computer_history_write_cycle_result, last_id, memory, superseded_at_ms, now, last_status},
+      opts
+    )
+  end
+
+  @doc "Record the summarizer's paused reason (surfaced to status)."
+  @spec computer_history_set_paused_reason(String.t() | nil, keyword()) :: :ok | {:error, term()}
+  def computer_history_set_paused_reason(reason, opts \\ [])
+      when is_binary(reason) or is_nil(reason) do
+    call({:computer_history_set_paused_reason, reason}, opts)
+  end
+
+  @doc "Set/clear the capture pause horizon (ISO8601 string, or nil to resume)."
+  @spec computer_history_set_pause_until(String.t() | nil, keyword()) :: :ok | {:error, term()}
+  def computer_history_set_pause_until(pause_until, opts \\ [])
+      when is_binary(pause_until) or is_nil(pause_until) do
+    call({:computer_history_set_pause_until, pause_until}, opts)
+  end
+
+  @doc "Release a claimed summarizer cycle (running -> idle)."
+  @spec computer_history_release_claim(DateTime.t(), keyword()) :: :ok | {:error, term()}
+  def computer_history_release_claim(%DateTime{} = now, opts \\ []) do
+    call({:computer_history_release_claim, now}, opts)
+  end
+
   @doc """
   Allowlisted partial update of the singleton state row. Keys present in
   `attrs` are written (nil writes NULL); unknown keys raise. The retry/cadence
@@ -2732,6 +2873,110 @@ defmodule FermixCore.Memory.Repo do
     {:reply, reply, state}
   end
 
+  def handle_call({:computer_history_insert_events, events}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.insert_events(&1, events))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:computer_history_sweep_expired_events, cutoff_ts}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.sweep_expired_events(&1, cutoff_ts))
+    {:reply, reply, state}
+  end
+
+  def handle_call(:computer_history_count_events, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.count_events/1)
+    {:reply, reply, state}
+  end
+
+  def handle_call(:computer_history_oldest_event_ts, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.oldest_event_ts/1)
+    {:reply, reply, state}
+  end
+
+  def handle_call({:computer_history_events_after_id, after_id, limit}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.events_after_id(&1, after_id, limit))
+    {:reply, reply, state}
+  end
+
+  def handle_call(:computer_history_count_memories, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.count_memories/1)
+    {:reply, reply, state}
+  end
+
+  def handle_call({:computer_history_insert_memory, memory}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.insert_memory(&1, memory))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:computer_history_recent_memories, limit}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.recent_memories(&1, limit))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:computer_history_memories_in_window, from_ts, to_ts, limit}, _from, state) do
+    reply =
+      with_connection(state, &ComputerHistorySql.memories_in_window(&1, from_ts, to_ts, limit))
+
+    {:reply, reply, state}
+  end
+
+  def handle_call({:computer_history_purge_window, from_ts, to_ts}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.purge_window(&1, from_ts, to_ts))
+    {:reply, reply, state}
+  end
+
+  def handle_call(:computer_history_ensure_state, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.ensure_state/1)
+    {:reply, reply, state}
+  end
+
+  def handle_call(:computer_history_fetch_state, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.fetch_state/1)
+    {:reply, reply, state}
+  end
+
+  def handle_call({:computer_history_claim_cycle, now, stale_after_ms}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.claim_cycle(&1, now, stale_after_ms))
+    {:reply, reply, state}
+  end
+
+  def handle_call(
+        {:computer_history_write_cycle_result, last_id, memory, superseded_at_ms, now,
+         last_status},
+        _from,
+        state
+      ) do
+    reply =
+      with_connection(
+        state,
+        &ComputerHistorySql.write_cycle_result(
+          &1,
+          last_id,
+          memory,
+          superseded_at_ms,
+          now,
+          last_status
+        )
+      )
+
+    {:reply, reply, state}
+  end
+
+  def handle_call({:computer_history_set_paused_reason, reason}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.set_paused_reason(&1, reason))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:computer_history_set_pause_until, pause_until}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.set_pause_until(&1, pause_until))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:computer_history_release_claim, now}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.release_claim(&1, now))
+    {:reply, reply, state}
+  end
+
   def handle_call({:update_skill_curation_state, attrs, now}, _from, state) do
     reply = with_connection(state, &update_skill_curation_state_row(&1, attrs, now))
     {:reply, reply, state}
@@ -3048,8 +3293,59 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_event_followup_migration(conn, versions),
          :ok <- apply_mobile_store_migration(conn, versions),
          :ok <- apply_mobile_client_message_migration(conn, versions),
-         :ok <- apply_mobile_attempt_fence_migration(conn, versions) do
+         :ok <- apply_mobile_attempt_fence_migration(conn, versions),
+         :ok <- apply_computer_history_events_migration(conn, versions),
+         :ok <- apply_computer_history_memories_migration(conn, versions),
+         :ok <- apply_computer_history_state_migration(conn, versions) do
       :ok
+    end
+  end
+
+  defp apply_computer_history_events_migration(conn, versions) do
+    if Enum.member?(versions, @computer_history_events_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{ComputerHistorySql.events_schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@computer_history_events_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  defp apply_computer_history_memories_migration(conn, versions) do
+    if Enum.member?(versions, @computer_history_memories_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{ComputerHistorySql.memories_schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@computer_history_memories_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  defp apply_computer_history_state_migration(conn, versions) do
+    if Enum.member?(versions, @computer_history_state_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{ComputerHistorySql.state_schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@computer_history_state_migration_version});
+        COMMIT;
+        """
+      )
     end
   end
 

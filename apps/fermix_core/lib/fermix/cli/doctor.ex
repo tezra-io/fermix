@@ -78,6 +78,7 @@ defmodule Fermix.CLI.Doctor do
       Checks.mobile(),
       Checks.acp(),
       Checks.computer_use_permissions(),
+      Checks.computer_history(),
       Checks.browser_disclaim(),
       Checks.harness(),
       Checks.skill_curation(),

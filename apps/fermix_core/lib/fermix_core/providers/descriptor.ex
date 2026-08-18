@@ -17,6 +17,18 @@ defmodule FermixCore.Providers.Descriptor do
   @type auth_mode :: :api_key | :oauth | :none
 
   @typedoc """
+  Where the provider's endpoint physically runs, declared statically per
+  provider (MILESTONE_32 §9.3). `:local_loopback` means the effective base
+  URL is *expected* to resolve to loopback (Ollama); the Computer History
+  Gate still verifies the resolved URL is loopback before treating a route
+  as local, so a `:local_loopback` provider pointed at a non-loopback host is
+  remote for that gate. `:remote` is every hosted provider. Locality is
+  declared, never inferred from a base-URL heuristic on a remote adapter —
+  unverifiable locality is remote.
+  """
+  @type locality :: :local_loopback | :remote
+
+  @typedoc """
   One wizard/web setup field for the provider's config block.
 
     * `:key` — the wizard answer key (for secrets, equal to the
@@ -40,6 +52,7 @@ defmodule FermixCore.Providers.Descriptor do
           label: String.t(),
           adapter: module() | :routed,
           default_base_url: String.t() | nil,
+          locality: locality(),
           auth_modes: [auth_mode(), ...],
           secrets: [atom()],
           config_keys: [atom(), ...],
@@ -52,6 +65,7 @@ defmodule FermixCore.Providers.Descriptor do
     :id,
     :label,
     :adapter,
+    :locality,
     :auth_modes,
     :secrets,
     :config_keys,
@@ -63,6 +77,7 @@ defmodule FermixCore.Providers.Descriptor do
     :label,
     :adapter,
     :default_base_url,
+    :locality,
     :auth_modes,
     :secrets,
     :config_keys,
@@ -86,6 +101,7 @@ defmodule FermixCore.Providers.Descriptor do
       label: "OpenAI Codex (ChatGPT)",
       adapter: FermixCore.Providers.OpenAI.Codex,
       default_base_url: "https://chatgpt.com/backend-api/codex/responses",
+      locality: :remote,
       auth_modes: [:oauth],
       secrets: [],
       config_keys: [:default_model, :reasoning_effort, :fast, :primary],
@@ -97,6 +113,7 @@ defmodule FermixCore.Providers.Descriptor do
       label: "OpenAI",
       adapter: :routed,
       default_base_url: "https://api.openai.com/v1",
+      locality: :remote,
       auth_modes: [:api_key],
       secrets: [:openai_api_key],
       # No :base_url here: config.exs seeds a baseline base_url into the
@@ -119,6 +136,7 @@ defmodule FermixCore.Providers.Descriptor do
       label: "Anthropic",
       adapter: FermixCore.Providers.Anthropic.Messages,
       default_base_url: "https://api.anthropic.com/v1",
+      locality: :remote,
       auth_modes: [:api_key, :oauth],
       secrets: [:anthropic_api_key],
       config_keys: [:auth_mode, :api_key, :base_url, :default_model, :reasoning_effort, :primary],
@@ -138,6 +156,7 @@ defmodule FermixCore.Providers.Descriptor do
       label: "SpaceXAI",
       adapter: FermixCore.Providers.XAI.Responses,
       default_base_url: "https://api.x.ai/v1",
+      locality: :remote,
       auth_modes: [:api_key, :oauth],
       secrets: [:xai_api_key],
       config_keys: [:auth_mode, :api_key, :base_url, :default_model, :reasoning_effort, :primary],
@@ -157,6 +176,7 @@ defmodule FermixCore.Providers.Descriptor do
       label: "OpenRouter",
       adapter: FermixCore.Providers.OpenAI.ChatCompletions,
       default_base_url: "https://openrouter.ai/api/v1",
+      locality: :remote,
       auth_modes: [:api_key],
       secrets: [:openrouter_api_key],
       config_keys: [:api_key, :base_url, :default_model, :primary],
@@ -176,6 +196,7 @@ defmodule FermixCore.Providers.Descriptor do
       label: "Mistral",
       adapter: FermixCore.Providers.OpenAI.ChatCompletions,
       default_base_url: "https://api.mistral.ai/v1",
+      locality: :remote,
       auth_modes: [:api_key],
       secrets: [:mistral_api_key],
       config_keys: [:api_key, :base_url, :default_model, :primary],
@@ -200,6 +221,7 @@ defmodule FermixCore.Providers.Descriptor do
       label: "Ollama",
       adapter: FermixCore.Providers.OpenAI.ChatCompletions,
       default_base_url: "http://localhost:11434/v1",
+      locality: :local_loopback,
       auth_modes: [:none],
       secrets: [],
       config_keys: [:base_url, :default_model, :primary],
@@ -253,4 +275,17 @@ defmodule FermixCore.Providers.Descriptor do
   @doc "Whether the provider exposes an auth-mode choice (gates the web picker)."
   @spec multi_auth_mode?(t()) :: boolean()
   def multi_auth_mode?(%__MODULE__{auth_modes: modes}), do: length(modes) > 1
+
+  @doc """
+  Declared locality of a provider id (MILESTONE_32 §9.3). An unknown id is
+  `:remote` — fail closed, so a route the Computer History Gate cannot
+  classify is never treated as local.
+  """
+  @spec locality(atom()) :: locality()
+  def locality(id) when is_atom(id) do
+    case fetch(id) do
+      {:ok, %__MODULE__{locality: locality}} -> locality
+      :error -> :remote
+    end
+  end
 end

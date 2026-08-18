@@ -1199,6 +1199,19 @@ defmodule FermixWebWeb.SetupLive.Components do
         </div>
       </section>
 
+      <section
+        :if={@plugin_summary[:core_features] not in [nil, []]}
+        class="mt-6 space-y-2"
+      >
+        <div>
+          <h3 class="text-sm font-semibold text-base-content/75">Native driver features</h3>
+          <p class="text-xs text-base-content/50">
+            Fermix's own macOS/Linux driver — not third-party integrations.
+          </p>
+        </div>
+        <.core_feature_card :for={card <- @plugin_summary.core_features} card={card} />
+      </section>
+
       <.info_panel :if={!@plugin_summary.available} class="mt-5">
         <p>Plugin catalog unavailable: {@plugin_summary.error}</p>
       </.info_panel>
@@ -1208,6 +1221,99 @@ defmodule FermixWebWeb.SetupLive.Components do
 
       <.step_actions active_tab={@active_tab} tabs={@tabs} />
     </div>
+    """
+  end
+
+  # A native-driver feature card (computer-use / computer-history), §22.6. One flat
+  # bordered card — no nested boxes — with an optional disclosure + app allowlist for
+  # computer-history. Enable/Disable + the OS grant reuse the shared plugin handlers.
+  attr :card, :map, required: true
+
+  defp core_feature_card(assigns) do
+    ~H"""
+    <section
+      data-feature-name={@card.name}
+      class="w-full rounded-box border border-base-300 bg-base-100/80 p-4 shadow-sm"
+    >
+      <div class="flex items-center gap-2">
+        <img :if={@card.logo} src={@card.logo} alt="" class="size-5 object-contain" loading="lazy" />
+        <h4 class="text-sm font-semibold">{@card.display_name}</h4>
+        <span :if={@card.version} class="text-xs text-base-content/45">v{@card.version}</span>
+        <.status_pill :if={@card.status != :not_configured} status={@card.status} />
+      </div>
+      <p class="mt-1 text-xs text-base-content/60">{@card.description}</p>
+
+      <p
+        :if={@card.kind == :computer_history}
+        class="mt-2 text-xs leading-relaxed text-base-content/55"
+      >
+        Captures activity in the apps you allow — window/tab titles, URLs, and text you type
+        (passwords and secure fields are never captured). Every ~30 min it summarizes that
+        activity with your subagent model
+        (<span class="font-medium">{@card.summarizer_provider}</span>), which sends your raw
+        activity off-device. Raw events stay on this Mac for 48h; summaries until you
+        purge. Control it with <code class="font-mono">/history off</code>, <code class="font-mono">/history purge</code>, or the allowlist below. Needs the
+        Accessibility grant.
+      </p>
+
+      <form
+        :if={@card.kind == :computer_history}
+        id="computer-history-apps-form"
+        phx-submit="save_computer_history_apps"
+        class="mt-3 flex items-end gap-2"
+      >
+        <label class="form-control min-w-0 flex-1">
+          <span class="label pb-1 text-xs font-medium">
+            Allowed apps (bundle ids, comma-separated)
+          </span>
+          <input
+            type="text"
+            name="computer_history_apps"
+            value={@card.apps}
+            placeholder="com.apple.Safari, com.apple.mail"
+            class="input input-bordered input-sm w-full bg-base-100 font-mono"
+          />
+        </label>
+        <button type="submit" class="btn btn-outline btn-sm">Save</button>
+      </form>
+
+      <div class="mt-3 flex flex-wrap items-center gap-2">
+        <button
+          :if={!@card.enabled?}
+          type="button"
+          class="btn btn-primary btn-xs"
+          phx-click="plugin_enable"
+          phx-value-name={@card.name}
+        >
+          Enable
+        </button>
+        <button
+          :if={@card.enabled?}
+          type="button"
+          class="btn btn-ghost btn-xs"
+          phx-click="plugin_disable"
+          phx-value-name={@card.name}
+        >
+          Disable
+        </button>
+        <button
+          :if={@card.kind == :computer_history}
+          type="button"
+          class="btn btn-ghost btn-xs"
+          phx-click="computer_history_grant"
+        >
+          Grant Accessibility
+        </button>
+        <button
+          :if={@card.kind == :computer_use}
+          type="button"
+          class="btn btn-ghost btn-xs"
+          phx-click="computer_use_grant"
+        >
+          Grant macOS permissions
+        </button>
+      </div>
+    </section>
     """
   end
 

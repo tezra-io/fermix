@@ -1283,6 +1283,41 @@ defmodule FermixCore.Setup.WizardTest do
              false
   end
 
+  test "save_answers persists the computer_history enable flag + app allowlist (§22.3)" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-ch-setup-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+    Application.put_env(:fermix_core, :providers, [])
+    Application.delete_env(:fermix_channels, :telegram)
+    start_memory_repo!()
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(
+        computer_history_enabled: "yes",
+        computer_history_apps: "com.apple.Safari, com.apple.mail"
+      )
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    ch = Keyword.get(persisted.fermix_core, :computer_history, [])
+    assert Keyword.get(ch, :enabled) == true
+    # The comma-separated string round-trips to a normalized bundle-id list.
+    assert Keyword.get(ch, :apps) == ["com.apple.Safari", "com.apple.mail"]
+
+    # Toggling enable alone leaves the allowlist untouched (absent answer).
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(computer_history_enabled: "no")
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    ch = Keyword.get(persisted.fermix_core, :computer_history, [])
+    assert Keyword.get(ch, :enabled) == false
+    assert Keyword.get(ch, :apps) == ["com.apple.Safari", "com.apple.mail"]
+  end
+
   test "fresh setup asks for realtime opt-in before realtime details" do
     tmp_home =
       Path.join(

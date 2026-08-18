@@ -25,6 +25,9 @@ defmodule FermixCore.Capabilities.Builtin do
     # only ever an outbound request parameter and never appears in the result
     # (MILESTONE_31 §13.2). Seeded always; `advertise?/1` hides it without a key.
     "place_search" => %{policy_class: :network, hidden_from_agent?: false, owner_only?: false},
+    # Owner-only on-device activity recall (MILESTONE_32 §11.2); the Gate is the
+    # real barrier, this pins the guest filter and classification.
+    "recall_activity" => %{policy_class: :read_only, hidden_from_agent?: false, owner_only?: true},
     "skill_create" => %{policy_class: :read_write, hidden_from_agent?: false, owner_only?: false},
     "skill_reload" => %{policy_class: :read_write, hidden_from_agent?: false, owner_only?: false},
     "skill_view" => %{policy_class: :exec, hidden_from_agent?: false, owner_only?: false},
