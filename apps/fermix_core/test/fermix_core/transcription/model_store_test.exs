@@ -41,10 +41,13 @@ defmodule FermixCore.Transcription.Local.ModelStoreTest do
   end
 
   describe "the baked catalog" do
-    test "refuses to install while its sha256 pins are unminted" do
-      refute ModelStore.pins_pinned?()
+    test "carries minted pins, and the unpinned gate still refuses through the seam" do
+      assert ModelStore.pins_pinned?()
 
-      assert ModelStore.install("sherpa-onnx", "parakeet-tdt-0.6b-v3-int8") ==
+      # The shipped pins are minted now, so the defensive unpinned-model refusal is
+      # only reachable through the `sha256_pinned: false` seam — which returns
+      # before any download, on any host.
+      assert ModelStore.install("sherpa-onnx", "parakeet-tdt-0.6b-v3-int8", sha256_pinned: false) ==
                {:error, :model_pins_missing}
     end
 

@@ -1263,7 +1263,7 @@ defmodule FermixCore.Setup.DoctorTest do
                missing: :no_release_pinned,
                remedy: remedy
              } =
-               Doctor.transcription_report()
+               Doctor.transcription_report(release_pinned?: false)
 
       assert remedy =~ "dev_local"
     end
@@ -1280,7 +1280,7 @@ defmodule FermixCore.Setup.DoctorTest do
       install_fake_stt_sidecar(ctx.home)
 
       assert %{status: :needs_install, missing: :model_pins_missing, remedy: remedy} =
-               Doctor.transcription_report()
+               Doctor.transcription_report(pins_pinned?: false)
 
       assert remedy =~ "sha256 pins"
     end
@@ -1336,13 +1336,15 @@ defmodule FermixCore.Setup.DoctorTest do
                status: :enabled,
                ready?: false,
                sidecar_installed?: false,
-               pinned_tag: nil,
+               pinned_tag: "v0.1.0",
                profile: :absent,
                rtms_configured?: false,
                remedy: remedy
              } = Doctor.meetings_report()
 
-      assert remedy =~ "dev_local"
+      # A release is pinned now, so the honest fix is to install from the setup
+      # card, not to build a dev_local binary.
+      assert remedy =~ "fermix setup"
     end
 
     test "an absent profile warns that the first Meet join would be anonymous" do

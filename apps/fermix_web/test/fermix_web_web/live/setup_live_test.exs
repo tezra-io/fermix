@@ -600,6 +600,86 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert "com.apple.Safari" in ch[:apps]
     end
 
+    test "on-device speech and the meeting notetaker render as native-driver cards beside computer-use",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+      cu = view |> element(~s|section[data-feature-name="computer_use_sidecar"]|) |> render()
+      speech = view |> element(~s|section[data-feature-name="local_transcription"]|) |> render()
+      meetings = view |> element(~s|section[data-feature-name="meetings"]|) |> render()
+
+      assert cu =~ "Computer Use"
+
+      # On-device speech: enable toggle + tooltip + docs, no inline description.
+      assert speech =~ "On-Device Speech"
+      assert speech =~ ~s(data-tip="Transcribe voice notes on this machine)
+      assert speech =~ ~s(href="https://fermix.ai/docs/transcription/")
+      assert speech =~ ~s(phx-click="enable_local_transcription")
+
+      # Meeting notetaker: enable + a Configure jump to the detailed tab.
+      assert meetings =~ "Meeting Notetaker"
+      assert meetings =~ ~s(data-tip="Fermix joins a Google Meet)
+      assert meetings =~ ~s(href="https://fermix.ai/docs/meetings/")
+      assert meetings =~ ~s(phx-click="enable_meetings")
+      assert meetings =~ ~s(phx-click="select_tab")
+      assert meetings =~ ~s(phx-value-tab="meetings")
+    end
+
+    test "enabling on-device speech from the card selects the local backend and installs, refusing loud",
+         %{conn: conn} do
+      Application.put_env(:fermix_web, :local_installer, fn _opts ->
+        {:error, :model_pins_missing}
+      end)
+
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+      view |> element(~s|button[phx-click="enable_local_transcription"]|) |> render_click()
+
+      assert render_async(view) =~ escaped(LocalModelStore.error_message(:model_pins_missing))
+
+      assert Keyword.get(Application.get_env(:fermix_core, :transcription, []), :backend) ==
+               "local"
+    end
+
+    test "enabling the meeting notetaker from the card flips the config, asks for a restart, and installs",
+         %{conn: conn} do
+      parent = self()
+
+      Application.put_env(:fermix_web, :meetbot_installer, fn ->
+        send(parent, :meetbot_install_started)
+        {:error, :no_pinned_release}
+      end)
+
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+      html = view |> element(~s|button[phx-click="enable_meetings"]|) |> render_click()
+
+      assert html =~ "restart to apply"
+      assert_receive :meetbot_install_started, 500
+      assert render_async(view) =~ escaped(MeetbotInstaller.error_message(:no_pinned_release))
+      assert Keyword.get(Application.get_env(:fermix_core, :meetings, []), :enabled) == true
+    end
+
+    test "an enabled meeting-notetaker card offers Disable and Configure, not Enable", %{
+      conn: conn
+    } do
+      prev = Application.get_env(:fermix_core, :meetings)
+      on_exit(fn -> restore_env(:fermix_core, :meetings, prev) end)
+      Application.put_env(:fermix_core, :meetings, enabled: true)
+
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+      card = view |> element(~s|section[data-feature-name="meetings"]|) |> render()
+
+      assert card =~ ~s(phx-click="disable_meetings")
+      assert card =~ ~s(phx-click="select_tab")
+      refute card =~ ~s(phx-click="enable_meetings")
+    end
+
     test "oauth plugin connect requires Google client config before enabling", %{conn: conn} do
       parent = self()
 
@@ -1660,6 +1740,17 @@ defmodule FermixWebWeb.SetupLiveTest do
   end
 
   describe "Transcription form — on-device backend (M21 2b)" do
+    # A release is pinned, so the real installer would download; every test here
+    # drives the UI, not the network, so default the seam to the fail-loud refusal
+    # (tests that assert a different outcome override it).
+    setup do
+      Application.put_env(:fermix_web, :local_installer, fn _opts ->
+        {:error, :no_release_pinned}
+      end)
+
+      :ok
+    end
+
     test "the on-device option is modelless and installs on selection, refusing honestly",
          %{conn: conn} do
       {:ok, view, _html} = live(conn, "/setup")
@@ -1765,6 +1856,17 @@ defmodule FermixWebWeb.SetupLiveTest do
   end
 
   describe "Meetings form (M21 phase 3)" do
+    # A release is pinned, so enabling would download the meetbot binary; these
+    # tests drive the UI, so default the seam to the fail-loud refusal (tests that
+    # assert a different outcome override it).
+    setup do
+      Application.put_env(:fermix_web, :meetbot_installer, fn ->
+        {:error, :no_pinned_release}
+      end)
+
+      :ok
+    end
+
     test "the card carries the notetaker, consent, backend and Zoom fields", %{conn: conn} do
       {:ok, view, _html} = live(conn, "/setup")
 

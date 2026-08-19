@@ -30,10 +30,16 @@ defmodule FermixCore.Meetings.SidecarInstaller do
   @plugin_name "meetbot_sidecar"
   @repo "tezra-io/fermix-meetbot"
 
-  # tag => %{target => sha256}. EMPTY until the first fermix-meetbot release;
-  # a pin is never hand-written — it lands with the release choreography.
-  @releases %{}
-  @pinned_tag nil
+  # tag => %{target => sha256}. Pinned to the released tag per target (v0.1.0
+  # ships macos-aarch64; other targets land as CI builds them). A pin is never
+  # hand-written — it lands with the release choreography. An unpinned target
+  # refuses via `@no_pinned_release_message`.
+  @releases %{
+    "v0.1.0" => %{
+      "macos-aarch64" => "eafde250b376a094023f8f8ec5a2126e207c18cff1d48640a18e932dec8f23ab"
+    }
+  }
+  @pinned_tag "v0.1.0"
 
   @no_pinned_release_message "No meetbot sidecar release is pinned in this fermix build yet. " <>
                                "For development, set [fermix_core.plugins] dev_local to a " <>
@@ -166,8 +172,6 @@ defmodule FermixCore.Meetings.SidecarInstaller do
     do: "https://github.com/#{@repo}/releases/download/#{tag}/#{@command}-#{target}"
 
   defp install_path(tag), do: Path.join([meetbot_root(), "bin", tag, @command])
-
-  defp cached_path(nil), do: {:error, :not_installed}
 
   defp cached_path(tag) do
     path = install_path(tag)

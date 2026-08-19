@@ -52,10 +52,15 @@ defmodule FermixCore.Meetings.SidecarInstallerTest do
     assert SidecarInstaller.profile_dir() == Path.join([home, "plugins", "meetbot", "profile"])
   end
 
+  test "the shipped build pins a release tag" do
+    assert SidecarInstaller.pinned_tag() == "v0.1.0"
+  end
+
   describe "install/1 with no pinned release" do
     test "refuses rather than downloading something unpinned" do
-      assert SidecarInstaller.pinned_tag() == nil
-      assert SidecarInstaller.install() == {:error, :no_pinned_release}
+      # Inject `pinned_tag: nil` so the refusal is exercised on any host, including
+      # macos-aarch64 where the shipped `install/0` would really download.
+      assert SidecarInstaller.install(pinned_tag: nil) == {:error, :no_pinned_release}
     end
 
     test "carries the operator copy the setup card renders verbatim" do

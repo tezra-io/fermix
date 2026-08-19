@@ -631,13 +631,12 @@ defmodule FermixCore.Setup.Doctor do
   defp meet_profile_note(:present), do: @meet_profile_present
   defp meet_profile_note(:absent), do: @meet_profile_absent
 
-  defp meetings_remedy(false, false), do: unusable_lane_remedy(MeetbotInstaller.pinned_tag())
+  # Neither lane is ready: install the meetbot from setup, or configure Zoom RTMS.
+  # A meetbot release is pinned in this build, so the "no release at all" state is
+  # unreachable; a host with no pinned artifact for its target surfaces the
+  # installer's own error at enable time.
+  defp meetings_remedy(false, false), do: @meetings_no_lane
   defp meetings_remedy(_installed?, _rtms_configured?), do: nil
-
-  # With no pinned release the sidecar cannot be installed at all, so the
-  # installer's own copy (which names the dev_local path) is the honest fix.
-  defp unusable_lane_remedy(nil), do: MeetbotInstaller.error_message(:no_pinned_release)
-  defp unusable_lane_remedy(_tag), do: @meetings_no_lane
 
   defp credential_present?(module) do
     case module.configured?([]) do

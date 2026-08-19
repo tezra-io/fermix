@@ -115,15 +115,22 @@ defmodule FermixCore.Transcription.LocalTest do
 
   describe "ensure_installed/1" do
     test "refuses loud while the sidecar has no pinned release" do
-      assert Local.ensure_installed() == {:error, :no_release_pinned}
+      # Inject an empty releases table so the refusal is exercised on any host,
+      # including macos-aarch64 where the shipped path would really download.
+      assert Local.ensure_installed(releases: %{}) == {:error, :no_release_pinned}
     end
 
     test "reaches the model step once the sidecar is present", %{home: home} do
       install_sidecar(home)
       me = self()
 
-      assert Local.ensure_installed(progress: fn event -> send(me, {:progress, event}) end) ==
-               {:error, :model_pins_missing}
+      # The sidecar is present (dev_local), so ensure_installed skips straight to
+      # the model step; `sha256_pinned: false` makes that step refuse before any
+      # download, proving the ordering without fetching the real model.
+      assert Local.ensure_installed(
+               sha256_pinned: false,
+               progress: fn event -> send(me, {:progress, event}) end
+             ) == {:error, :model_pins_missing}
 
       refute_received {:progress, {:sidecar, :downloading}}
     end

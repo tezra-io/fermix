@@ -43,9 +43,20 @@ defmodule FermixCore.Transcription.Local.SidecarInstallerTest do
     assert target in ~w(macos-aarch64 macos-x86_64 linux-x86_64 linux-aarch64)
   end
 
+  test "the shipped build pins the macos-aarch64 release, and only that target so far", %{
+    target: target
+  } do
+    # `release_pinned?/0` reads the baked table for this host without downloading;
+    # only macos-aarch64 is pinned in this build, so it is true there and false
+    # on every other target until their artifacts are cut.
+    assert SidecarInstaller.release_pinned?() == (target == "macos-aarch64")
+  end
+
   describe "install/1 with no pinned release" do
     test "refuses rather than downloading something unpinned" do
-      assert SidecarInstaller.install() == {:error, :no_release_pinned}
+      # Inject an empty table so this exercises the refusal on any host, including
+      # macos-aarch64 where the shipped `install/0` would really download.
+      assert SidecarInstaller.install(releases: %{}) == {:error, :no_release_pinned}
     end
 
     test "a releases table without an entry for this host refuses the same way" do
