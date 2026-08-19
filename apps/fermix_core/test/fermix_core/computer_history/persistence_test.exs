@@ -77,6 +77,88 @@ defmodule FermixCore.ComputerHistory.PersistenceTest do
     end
   end
 
+  describe "byte-ceiling backstop (§22.8)" do
+    # Each row's estimated bytes = LENGTH(text) + LENGTH(window_title) +
+    # LENGTH(page_title) + LENGTH(url) + 160 overhead. A 1 KiB text ⇒ ~1184.
+    defp fat_event(seq, ts), do: event("b1", seq, ts, %{text: String.duplicate("x", 1_024)})
+
+    test "deletes the oldest rows beyond the ceiling, keeps the newest", %{repo: repo} do
+      events = Enum.map(1..10, fn seq -> fat_event(seq, seq * 1_000) end)
+      assert {:ok, 10} = Repo.computer_history_insert_events(events, server: repo)
+
+      # Ceiling of ~3 rows (3 * 1184 = 3552 fits; the 4th crosses): the 6
+      # oldest rows plus the crossing row go, newest 3 stay.
+      assert {:ok, 7} = Repo.computer_history_sweep_spool_over_bytes(3_600, server: repo)
+      assert {:ok, 3} = Repo.computer_history_count_events(server: repo)
+      # The survivors are the NEWEST rows (ids/ts 8..10), not the oldest.
+      assert {:ok, 8_000} = Repo.computer_history_oldest_event_ts(server: repo)
+    end
+
+    test "a spool under the ceiling is untouched", %{repo: repo} do
+      assert {:ok, 2} =
+               Repo.computer_history_insert_events([fat_event(1, 1_000), fat_event(2, 2_000)],
+                 server: repo
+               )
+
+      assert {:ok, 0} = Repo.computer_history_sweep_spool_over_bytes(1_000_000, server: repo)
+      assert {:ok, 2} = Repo.computer_history_count_events(server: repo)
+    end
+
+    test "an empty spool is a no-op", %{repo: repo} do
+      assert {:ok, 0} = Repo.computer_history_sweep_spool_over_bytes(1, server: repo)
+    end
+  end
+
+  describe "access audit (§22.8)" do
+    defp access(ts, sink, count) do
+      %{ts: ts, sink: sink, window_from_ts: nil, window_to_ts: nil, result_count: count}
+    end
+
+    test "records reads and reports {count, last_ts}", %{repo: repo} do
+      assert {:ok, {0, nil}} = Repo.computer_history_access_stats(server: repo)
+
+      assert :ok =
+               Repo.computer_history_record_access(access(1_000, "recall_activity", 3),
+                 server: repo
+               )
+
+      assert :ok =
+               Repo.computer_history_record_access(access(2_000, "recent_activity", 8),
+                 server: repo
+               )
+
+      assert {:ok, {2, 2_000}} = Repo.computer_history_access_stats(server: repo)
+    end
+
+    test "cap keeps the newest rows only", %{repo: repo} do
+      for ts <- 1..5 do
+        assert :ok =
+                 Repo.computer_history_record_access(access(ts * 1_000, "recall_activity", 1),
+                   server: repo
+                 )
+      end
+
+      assert {:ok, 3} = Repo.computer_history_cap_access_rows(2, server: repo)
+      assert {:ok, {2, 5_000}} = Repo.computer_history_access_stats(server: repo)
+    end
+
+    test "purge erases access rows recorded inside the window", %{repo: repo} do
+      assert :ok =
+               Repo.computer_history_record_access(access(1_000, "recall_activity", 1),
+                 server: repo
+               )
+
+      assert :ok =
+               Repo.computer_history_record_access(access(9_000, "recall_activity", 1),
+                 server: repo
+               )
+
+      assert {:ok, _counts} = Repo.computer_history_purge_window(0, 5_000, server: repo)
+      # Only the read recorded outside the purge window survives.
+      assert {:ok, {1, 9_000}} = Repo.computer_history_access_stats(server: repo)
+    end
+  end
+
   describe "summarizer singleton state" do
     test "ensure creates the idle row with a zero cursor; fetch reads it", %{repo: repo} do
       assert {:ok, state} = Repo.computer_history_ensure_state(server: repo)

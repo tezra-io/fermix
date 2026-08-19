@@ -5,10 +5,11 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
   # only from Repo's `handle_call`s, so the single-writer architecture is
   # unchanged; the split keeps `repo.ex` bounded (the TemporalSql precedent).
   #
-  # Three tables, three additive migrations (23/24/25):
+  # Four tables, four additive migrations (23/24/25/27):
   #   * computer_history_events   — the <=48h raw interaction-event spool
   #   * computer_history_memories — durable, derived activity summaries
   #   * computer_history_state    — the summarizer singleton (claim + cursor)
+  #   * computer_history_access   — metadata-only audit rows for agent reads (§22.8)
   #
   # The spool's identity is a DB-generated `id` (AUTOINCREMENT), NOT the
   # capturer's per-boot `source_seq` (which restarts at 1 each boot): the id is
@@ -172,6 +173,23 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
   );
   """
 
+  # Metadata-only audit of agent reads (§22.8, the cua-RFC lesson): when, which
+  # sink, the resolved window, and how many summaries were returned — never any
+  # activity content. Lets the owner answer "what has the agent read from my
+  # history" from the store itself, independent of rotating traces.
+  @access_schema_sql """
+  CREATE TABLE IF NOT EXISTS computer_history_access (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts INTEGER NOT NULL,
+    sink TEXT NOT NULL,
+    window_from_ts INTEGER,
+    window_to_ts INTEGER,
+    result_count INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE INDEX IF NOT EXISTS idx_computer_history_access_ts
+    ON computer_history_access(ts);
+  """
+
   @doc "Schema for migration 23 — the raw event spool."
   @spec events_schema_sql() :: String.t()
   def events_schema_sql, do: @events_schema_sql
@@ -183,6 +201,10 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
   @doc "Schema for migration 25 — the summarizer singleton state row."
   @spec state_schema_sql() :: String.t()
   def state_schema_sql, do: @state_schema_sql
+
+  @doc "Schema for migration 27 — the agent-read access audit."
+  @spec access_schema_sql() :: String.t()
+  def access_schema_sql, do: @access_schema_sql
 
   # --- events -------------------------------------------------------------
 
@@ -221,12 +243,45 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
   end
 
   @doc """
-  Delete every spool event older than `cutoff_ts` (epoch ms). The 48h retention
-  sweep and the byte-ceiling backstop use this. Returns the count deleted.
+  Delete every spool event older than `cutoff_ts` (epoch ms) — the 48h retention
+  sweep. Returns the count deleted. (The byte-ceiling backstop is
+  `sweep_spool_over_bytes/2`, which deletes by id, not time.)
   """
   @spec sweep_expired_events(term(), integer()) :: {:ok, non_neg_integer()} | {:error, term()}
   def sweep_expired_events(conn, cutoff_ts) when is_integer(cutoff_ts) do
     with :ok <- execute(conn, "DELETE FROM computer_history_events WHERE ts < ?", [cutoff_ts]) do
+      {:ok, changed(conn)}
+    end
+  end
+
+  # Estimated content bytes per spool row: the four unbounded text columns plus a
+  # fixed overhead for the bounded rest. An estimate is fine — this is a backstop
+  # ceiling, not accounting.
+  @row_bytes_sql "LENGTH(COALESCE(text,'')) + LENGTH(COALESCE(window_title,'')) + " <>
+                   "LENGTH(COALESCE(page_title,'')) + LENGTH(COALESCE(url,'')) + 160"
+
+  @doc """
+  The byte-ceiling backstop (§22.8): keep the newest spool events whose estimated
+  content bytes fit `ceiling_bytes`; delete everything older, exactly (by id, so
+  ms-timestamp collisions can't over- or under-delete). A no-op while the spool
+  fits. Returns the count deleted — a non-zero count is data loss inside the 48h
+  retention promise and the caller must say so loudly.
+  """
+  @spec sweep_spool_over_bytes(term(), pos_integer()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def sweep_spool_over_bytes(conn, ceiling_bytes)
+      when is_integer(ceiling_bytes) and ceiling_bytes > 0 do
+    # Newest-first running total; the row that crosses the ceiling and all older
+    # rows are deleted. The capturer's 1 MiB frame cap makes the degenerate
+    # single-row-over-ceiling case unreachable at any sane ceiling.
+    sql =
+      "DELETE FROM computer_history_events WHERE id IN (" <>
+        "SELECT id FROM (" <>
+        "SELECT id, SUM(#{@row_bytes_sql}) OVER (ORDER BY id DESC) AS running_bytes " <>
+        "FROM computer_history_events" <>
+        ") WHERE running_bytes > ?)"
+
+    with :ok <- execute(conn, sql, [ceiling_bytes]) do
       {:ok, changed(conn)}
     end
   end
@@ -301,6 +356,14 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
              [to_ts, from_ts]
            ),
          memories_deleted <- changed(conn),
+         :ok <-
+           execute(
+             conn,
+             # Access rows recorded in the window go too: purge means "erase
+             # everything this feature stored in that window", audit included.
+             "DELETE FROM computer_history_access WHERE ts >= ? AND ts <= ?",
+             [from_ts, to_ts]
+           ),
          :ok <-
            execute(
              conn,
@@ -383,6 +446,49 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
     with :ok <- execute(conn, sql, params),
          {:ok, [[rowid]]} <- query_all(conn, "SELECT last_insert_rowid()", []) do
       {:ok, rowid}
+    end
+  end
+
+  # --- access audit (§22.8) -----------------------------------------------
+
+  @doc """
+  Record one agent read of history: `ts` (epoch ms), `sink`
+  (`"recall_activity"` / `"recent_activity"`), the resolved window bounds (nil
+  for the windowless section read), and the result count. Metadata only — never
+  content.
+  """
+  @spec record_access(term(), map()) :: :ok | {:error, term()}
+  def record_access(conn, %{ts: ts, sink: sink, result_count: count} = access)
+      when is_integer(ts) and is_binary(sink) and is_integer(count) do
+    execute(
+      conn,
+      "INSERT INTO computer_history_access " <>
+        "(ts, sink, window_from_ts, window_to_ts, result_count) VALUES (?, ?, ?, ?, ?)",
+      [ts, sink, Map.get(access, :window_from_ts), Map.get(access, :window_to_ts), count]
+    )
+  end
+
+  @doc "Access-audit stats for `/history status`: `{count, last_read_ts | nil}`."
+  @spec access_stats(term()) :: {:ok, {non_neg_integer(), integer() | nil}} | {:error, term()}
+  def access_stats(conn) do
+    with {:ok, [[count, last_ts]]} <-
+           query_all(conn, "SELECT count(*), max(ts) FROM computer_history_access", []) do
+      {:ok, {count, last_ts}}
+    end
+  end
+
+  @doc """
+  Bound the audit (Code Rule 2): keep the newest `max_rows` access rows, delete
+  the rest. Returns the count deleted.
+  """
+  @spec cap_access_rows(term(), pos_integer()) :: {:ok, non_neg_integer()} | {:error, term()}
+  def cap_access_rows(conn, max_rows) when is_integer(max_rows) and max_rows > 0 do
+    sql =
+      "DELETE FROM computer_history_access WHERE id NOT IN (" <>
+        "SELECT id FROM computer_history_access ORDER BY id DESC LIMIT ?)"
+
+    with :ok <- execute(conn, sql, [max_rows]) do
+      {:ok, changed(conn)}
     end
   end
 

@@ -57,6 +57,31 @@ defmodule FermixCore.ComputerHistory.RecallTest do
     end
   end
 
+  describe "access audit (§22.8)" do
+    test "a non-empty digest read appends an access row; an empty one does not", %{repo: repo} do
+      assert Recall.recent_digest(repo: repo) == nil
+      assert {:ok, {0, nil}} = Repo.computer_history_access_stats(server: repo)
+
+      memory(repo, @today_from, @today_to, %{summary: "wrote a design doc"})
+      assert Recall.recent_digest(repo: repo) =~ "wrote a design doc"
+
+      assert {:ok, {1, _last_ts}} = Repo.computer_history_access_stats(server: repo)
+    end
+
+    test "every successful query appends an access row, empty results included", %{repo: repo} do
+      assert {:ok, "No recorded activity" <> _rest} =
+               Recall.query("today", repo: repo, now: @today, timezone: "Etc/UTC")
+
+      memory(repo, @today_from, @today_to, %{summary: "reviewed a PR"})
+
+      assert {:ok, result} = Recall.query("today", repo: repo, now: @today, timezone: "Etc/UTC")
+      assert result =~ "reviewed a PR"
+
+      # One row for the empty read, one for the non-empty read.
+      assert {:ok, {2, _last_ts}} = Repo.computer_history_access_stats(server: repo)
+    end
+  end
+
   describe "query/2 with tz-resolved windows" do
     test "today includes today's memory, excludes last week's", %{repo: repo} do
       memory(repo, @today_from, @today_to, %{summary: "today's work"})

@@ -14,7 +14,9 @@ focused-window titles, focused-field role + settled value, browser URL + page
 title (private-browsing windows excluded best-effort), and first-class
 `observer.gap` events so a capture gap is never mistaken for inactivity. There
 is no historical backfill — macOS Accessibility is live-only, so capture begins
-at enable and only new events flow.
+at enable and only new events flow. The raw spool is double-bounded: 48h
+retention plus a size ceiling that drops the oldest events (with a loud
+warning) if a pathological source balloons it inside the window.
 
 ## The privacy spine (one gate)
 
@@ -89,8 +91,16 @@ never sees it.
 
 ## Managing it
 
-- Enabling is a **setup** act (the consent surface), never a chat command.
-- `/history status` — capture/summarizer/allowlist/spool overview (operator-only).
+- Enabling is a **setup** act (the consent surface), never a chat command. The
+  setup card's app picker lists installed apps by name; an empty allowlist
+  cannot be saved.
+- `/history status` — capture/summarizer/allowlist/spool overview, plus an
+  "Agent reads" line: every agent read of history (the `recall_activity` tool
+  and the Recent Activity section) appends a metadata-only audit row in the
+  store itself — when, which surface, the window, and the result count, never
+  content — so the owner can check what the agent has read, independent of
+  rotating traces. Bounded (newest 10,000 rows kept); purge erases audit rows
+  in the purged window too.
 - `/history pause 10m|1h|24h` — persist a capture pause horizon (survives restart).
 - `/history purge 10m|1h|24h|all` — erase a window from the spool and the
   intersecting activity memories; the ack states what purge cannot reach
