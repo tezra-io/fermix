@@ -600,47 +600,40 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert "com.apple.Safari" in ch[:apps]
     end
 
-    test "on-device speech and the meeting notetaker render as native-driver cards beside computer-use",
+    test "the transcription tab is labelled Voice notes and there is no separate Meetings tab",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup")
+      html = render(view)
+
+      # The transcription tab kept its id but got a clearer label.
+      assert has_element?(view, ~s|button[phx-value-tab="transcription"]|)
+      assert html =~ "Voice notes"
+
+      # The Meetings tab is gone — its config lives in the card's panel now.
+      refute has_element?(view, ~s|button[phx-value-tab="meetings"]|)
+    end
+
+    test "the meeting notetaker renders as a native-driver card beside computer-use, on-device is not a card",
          %{conn: conn} do
       {:ok, view, _html} = live(conn, "/setup")
       view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
 
       cu = view |> element(~s|section[data-feature-name="computer_use_sidecar"]|) |> render()
-      speech = view |> element(~s|section[data-feature-name="local_transcription"]|) |> render()
       meetings = view |> element(~s|section[data-feature-name="meetings"]|) |> render()
 
       assert cu =~ "Computer Use"
+      assert cu =~ "Let Fermix drive the screen"
 
-      # On-device speech: enable toggle + tooltip + docs, no inline description.
-      assert speech =~ "On-Device Speech"
-      assert speech =~ ~s(data-tip="Transcribe voice notes on this machine)
-      assert speech =~ ~s(href="https://fermix.ai/docs/transcription/")
-      assert speech =~ ~s(phx-click="enable_local_transcription")
+      # On-device speech lives in the Voice notes tab, not as its own card.
+      refute has_element?(view, ~s|section[data-feature-name="local_transcription"]|)
 
-      # Meeting notetaker: enable + a Configure jump to the detailed tab.
+      # Meeting notetaker: enable + a Configure button that opens the config panel.
       assert meetings =~ "Meeting Notetaker"
-      assert meetings =~ ~s(data-tip="Fermix joins a Google Meet)
+      assert meetings =~ "Joins Google Meet or Zoom on your ask"
       assert meetings =~ ~s(href="https://fermix.ai/docs/meetings/")
       assert meetings =~ ~s(phx-click="enable_meetings")
-      assert meetings =~ ~s(phx-click="select_tab")
-      assert meetings =~ ~s(phx-value-tab="meetings")
-    end
-
-    test "enabling on-device speech from the card selects the local backend and installs, refusing loud",
-         %{conn: conn} do
-      Application.put_env(:fermix_web, :local_installer, fn _opts ->
-        {:error, :model_pins_missing}
-      end)
-
-      {:ok, view, _html} = live(conn, "/setup")
-      view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
-
-      view |> element(~s|button[phx-click="enable_local_transcription"]|) |> render_click()
-
-      assert render_async(view) =~ escaped(LocalModelStore.error_message(:model_pins_missing))
-
-      assert Keyword.get(Application.get_env(:fermix_core, :transcription, []), :backend) ==
-               "local"
+      assert meetings =~ ~s(phx-click="open_meetings_config")
+      refute meetings =~ ~s(phx-value-tab="meetings")
     end
 
     test "enabling the meeting notetaker from the card flips the config, asks for a restart, and installs",
@@ -676,7 +669,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       card = view |> element(~s|section[data-feature-name="meetings"]|) |> render()
 
       assert card =~ ~s(phx-click="disable_meetings")
-      assert card =~ ~s(phx-click="select_tab")
+      assert card =~ ~s(phx-click="open_meetings_config")
       refute card =~ ~s(phx-click="enable_meetings")
     end
 
@@ -1855,6 +1848,13 @@ defmodule FermixWebWeb.SetupLiveTest do
     end
   end
 
+  # The meetings config lives in a modal opened from the Plugins-tab card, not a
+  # tab. Navigate there and open it, returning the rendered html.
+  defp open_meetings_config(view) do
+    view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+    view |> element(~s|button[phx-click="open_meetings_config"]|) |> render_click()
+  end
+
   describe "Meetings form (M21 phase 3)" do
     # A release is pinned, so enabling would download the meetbot binary; these
     # tests drive the UI, so default the seam to the fail-loud refusal (tests that
@@ -1870,9 +1870,9 @@ defmodule FermixWebWeb.SetupLiveTest do
     test "the card carries the notetaker, consent, backend and Zoom fields", %{conn: conn} do
       {:ok, view, _html} = live(conn, "/setup")
 
-      html = view |> element("button[phx-value-tab=\"meetings\"]") |> render_click()
+      html = open_meetings_config(view)
 
-      assert html =~ "Meeting notetaker"
+      assert html =~ "Meeting Notetaker"
       assert html =~ "meetings_form[enabled]"
       assert html =~ "meetings_form[bot_name]"
       assert html =~ "meetings_form[announce]"
@@ -1890,19 +1890,20 @@ defmodule FermixWebWeb.SetupLiveTest do
         assert html =~ ~s(value="#{name}")
       end
 
-      # Zoom scope honesty and the consent posture are stated on the card.
-      assert html =~ "meetings hosted by anyone else are out of reach"
-      assert html =~ "Leave blank for the built-in consent line"
+      # Zoom scope honesty and the consent posture are stated in the panel.
+      assert html =~ "RTMS reaches only meetings hosted by your Zoom account"
+      assert html =~ "Blank uses the built-in consent line"
 
-      # Bot sign-in ships with the notetaker release — a note, never a dead button.
-      assert html =~ "sign-in step ships with the notetaker release"
+      # Bot sign-in ships with the notetaker release — a disabled affordance, never
+      # a dead button that silently does nothing.
+      assert html =~ "ships with the notetaker release"
       refute html =~ "phx-click=\"meetbot_signin\""
     end
 
     test "enabling refuses loud with the unpinned-release copy verbatim", %{conn: conn} do
       {:ok, view, _html} = live(conn, "/setup")
 
-      view |> element("button[phx-value-tab=\"meetings\"]") |> render_click()
+      open_meetings_config(view)
 
       view
       |> form("form[phx-submit=\"save_meetings\"]",
@@ -1918,7 +1919,7 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       {:ok, view, _html} = live(conn, "/setup")
 
-      view |> element("button[phx-value-tab=\"meetings\"]") |> render_click()
+      open_meetings_config(view)
 
       view
       |> form("form[phx-submit=\"save_meetings\"]", meetings_form: %{enabled: "true"})
@@ -1937,7 +1938,7 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       {:ok, view, _html} = live(conn, "/setup")
 
-      view |> element("button[phx-value-tab=\"meetings\"]") |> render_click()
+      open_meetings_config(view)
 
       view
       |> form("form[phx-submit=\"save_meetings\"]", meetings_form: %{enabled: "false"})
@@ -1952,7 +1953,7 @@ defmodule FermixWebWeb.SetupLiveTest do
     test "completing the Zoom credentials offers the restart the tools need", %{conn: conn} do
       {:ok, view, _html} = live(conn, "/setup")
 
-      view |> element("button[phx-value-tab=\"meetings\"]") |> render_click()
+      open_meetings_config(view)
 
       html =
         view
@@ -1975,7 +1976,7 @@ defmodule FermixWebWeb.SetupLiveTest do
     test "a text-only change is live immediately and asks for no restart", %{conn: conn} do
       {:ok, view, _html} = live(conn, "/setup")
 
-      view |> element("button[phx-value-tab=\"meetings\"]") |> render_click()
+      open_meetings_config(view)
 
       html =
         view
@@ -1989,7 +1990,8 @@ defmodule FermixWebWeb.SetupLiveTest do
         |> render_submit()
 
       assert html =~ "Meetings saved."
-      refute html =~ "restart to apply"
+      # The restart signal is the flash clause, not the toggle's explanatory hint.
+      refute html =~ "Meetings saved — restart to apply"
     end
 
     test "submitting persists the section and secures the Zoom secret", %{
@@ -1998,7 +2000,7 @@ defmodule FermixWebWeb.SetupLiveTest do
     } do
       {:ok, view, _html} = live(conn, "/setup")
 
-      view |> element("button[phx-value-tab=\"meetings\"]") |> render_click()
+      open_meetings_config(view)
 
       view
       |> form("form[phx-submit=\"save_meetings\"]",
@@ -2041,7 +2043,7 @@ defmodule FermixWebWeb.SetupLiveTest do
     } do
       {:ok, view, _html} = live(conn, "/setup")
 
-      view |> element("button[phx-value-tab=\"meetings\"]") |> render_click()
+      open_meetings_config(view)
 
       view
       |> form("form[phx-submit=\"save_meetings\"]",
@@ -2056,7 +2058,7 @@ defmodule FermixWebWeb.SetupLiveTest do
         )
         |> render_submit()
 
-      assert html =~ "Already configured"
+      assert html =~ "Already set"
 
       contents = File.read!(Path.join(tmp_home, "config.toml"))
       assert contents =~ ~s(zoom_client_secret = "@keyring")

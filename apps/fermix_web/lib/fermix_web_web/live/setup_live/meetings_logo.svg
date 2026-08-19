@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" role="img" aria-label="Meeting Notetaker">
+  <rect x="2" y="3" width="20" height="12.5" rx="2.4" fill="#2b5cff" />
+  <rect x="10.25" y="15.5" width="3.5" height="2.6" fill="#2b5cff" />
+  <rect x="6.5" y="18" width="11" height="2.2" rx="1.1" fill="#2b5cff" />
+  <circle cx="9.4" cy="8.2" r="1.75" fill="#ffffff" />
+  <circle cx="14.6" cy="8.6" r="1.4" fill="#ffffff" fill-opacity="0.82" />
+  <path d="M6.1 12.9 Q6.1 10.3 9.4 10.3 Q12.05 10.3 12.5 12.2 L6.1 12.9 Z" fill="#ffffff" />
+  <path d="M11.7 12.4 Q11.7 9.7 14.6 9.7 Q17.2 9.7 17.2 12.1 L11.7 12.4 Z" fill="#ffffff" fill-opacity="0.82" />
+</svg>

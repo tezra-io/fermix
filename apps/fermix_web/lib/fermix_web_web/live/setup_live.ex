@@ -63,12 +63,16 @@ defmodule FermixWebWeb.SetupLive do
   @computer_history_logo_uri "data:image/svg+xml;base64," <>
                                Base.encode64(File.read!(@computer_history_logo_path))
 
+  @meetings_logo_path Path.join(__DIR__, "setup_live/meetings_logo.svg")
+  @external_resource @meetings_logo_path
+  @meetings_logo_uri "data:image/svg+xml;base64," <>
+                       Base.encode64(File.read!(@meetings_logo_path))
+
   @tabs [
     %{id: "provider", label: "Provider", component: "provider:*", description: "Model and key"},
     %{id: "realtime", label: "Realtime", component: "realtime:*", description: "Voice companion"},
     %{id: "channels", label: "Channels", component: "channel:*", description: "Message ingress"},
-    %{id: "transcription", label: "Transcription", component: nil, description: "Voice notes"},
-    %{id: "meetings", label: "Meetings", component: nil, description: "Meeting notetaker"},
+    %{id: "transcription", label: "Voice notes", component: nil, description: "Speech-to-text"},
     %{id: "plugins", label: "Plugins", component: nil, description: "Integrations"},
     %{id: "search", label: "Search", component: nil, description: "Web search"},
     %{id: "media", label: "Media", component: nil, description: "Image generation"},
@@ -191,6 +195,7 @@ defmodule FermixWebWeb.SetupLive do
       |> assign(:oauth_modal, nil)
       |> assign(:resource_picker, nil)
       |> assign(:computer_history_picker, nil)
+      |> assign(:meetings_config_open?, false)
       |> assign_report(report)
 
     {:ok, socket}
@@ -543,22 +548,21 @@ defmodule FermixWebWeb.SetupLive do
     {:noreply, save_computer_history_picker(socket)}
   end
 
-  # On-device speech (M21 Phase 2b) toggle. Enable selects the `local` backend and
-  # installs the sidecar + model; disable falls back to the OpenAI cloud backend.
-  # Selecting the backend is the install trigger — the same one code path the
-  # Transcription tab's picker uses.
-  def handle_event("enable_local_transcription", _params, socket) do
-    {:noreply, enable_local_transcription(socket)}
+  # The Meeting Notetaker config panel opens from the card's Configure button and
+  # holds everything the removed Meetings tab did (the same mechanism the
+  # computer-history app picker uses).
+  def handle_event("open_meetings_config", _params, socket) do
+    {:noreply, assign(socket, :meetings_config_open?, true)}
   end
 
-  def handle_event("disable_local_transcription", _params, socket) do
-    {:noreply, disable_local_transcription(socket)}
+  def handle_event("close_meetings_config", _params, socket) do
+    {:noreply, assign(socket, :meetings_config_open?, false)}
   end
 
   # Meeting notetaker (M21 Phase 3) toggle. Both paths route through `save_meetings/3`,
   # which installs the meetbot sidecar on enable and asks for a restart (the tools are
   # boot-seeded). Only the `enabled` flag changes here; the rest of the config is
-  # edited on the Meetings tab.
+  # edited in the config panel.
   def handle_event("enable_meetings", _params, socket) do
     {:noreply, save_meetings(socket, [enabled: true], nil)}
   end
@@ -921,6 +925,7 @@ defmodule FermixWebWeb.SetupLive do
       local_install={@local_install}
       meetings_form={@meetings_form}
       meetbot_install={@meetbot_install}
+      meetings_config_open?={@meetings_config_open?}
       saved_flash={@saved_flash}
       skill_summary={@skill_summary}
       tabs={@tabs}
@@ -1660,26 +1665,6 @@ defmodule FermixWebWeb.SetupLive do
   defp meetbot_install_error(reason),
     do: "Meeting notetaker install failed: #{Redaction.format(reason)}"
 
-  # The on-device speech card's Enable: select the local backend, then run the same
-  # install trigger the Transcription picker uses. `:openai` as the "previous" value
-  # is any non-local backend, which is what makes `maybe_install_local_stt/3` fire.
-  defp enable_local_transcription(socket) do
-    socket
-    |> save_answers([transcription_backend: "local"], "On-device speech selected.", nil)
-    |> maybe_install_local_stt(:openai, :local)
-  end
-
-  # Disable falls back to the OpenAI cloud backend — the shipped default, and the one
-  # backend that needs no key of its own (it reuses the chat provider's).
-  defp disable_local_transcription(socket) do
-    save_answers(
-      socket,
-      [transcription_backend: "openai"],
-      "Voice notes switched back to the cloud backend.",
-      nil
-    )
-  end
-
   # Choosing the on-device backend is the install trigger (§2b: nothing downloads
   # at boot, and hand-editing config.toml installs nothing). Already-installed
   # selects say so instead of re-running the installer.
@@ -1896,50 +1881,12 @@ defmodule FermixWebWeb.SetupLive do
   defp core_feature_cards(snapshot) do
     [computer_use_card(snapshot)] ++
       if(ComputerHistory.macos?(), do: [computer_history_card(snapshot)], else: []) ++
-      [local_transcription_card(snapshot), meetings_card(snapshot)]
-  end
-
-  # On-device speech (M21 Phase 2b): the `local` transcription backend, an install
-  # trigger for the fermix-stt sidecar + model. The card owns the on-device option;
-  # the Transcription tab keeps the interchangeable cloud backends.
-  defp local_transcription_card(snapshot) do
-    {enabled?, status} = local_transcription_card_state(snapshot)
-
-    %{
-      kind: :local_transcription,
-      name: "local_transcription",
-      display_name: "On-Device Speech",
-      tooltip:
-        "Transcribe voice notes on this machine with a local model — no audio leaves it. " <>
-          "Enabling downloads the speech engine and model.",
-      docs_url: "https://fermix.ai/docs/transcription/",
-      enabled?: enabled?,
-      status: status,
-      version: nil,
-      logo: nil,
-      app_count: 0
-    }
-  end
-
-  defp local_transcription_card_state(snapshot) do
-    cond do
-      transcription_backend_string(snapshot) != "local" -> {false, :not_configured}
-      LocalTranscription.configured?([]) == :ok -> {true, :ready}
-      true -> {true, :partial}
-    end
-  end
-
-  defp transcription_backend_string(snapshot) do
-    snapshot
-    |> get_fermix_core(:transcription)
-    |> Keyword.get(:backend, "openai")
-    |> to_string()
+      [meetings_card(snapshot)]
   end
 
   # Meeting notetaker (M21 Phase 3): enabling installs the meetbot sidecar and flips
   # the boot-seeded tool gate (hence the restart). Detailed config — bot name,
-  # announcement, Zoom RTMS credentials — lives on the Meetings tab, reached from the
-  # card's Configure button.
+  # announcement, Zoom RTMS credentials — opens in the card's Configure panel.
   defp meetings_card(snapshot) do
     {enabled?, status} = meetings_card_state(snapshot)
 
@@ -1947,6 +1894,7 @@ defmodule FermixWebWeb.SetupLive do
       kind: :meetings,
       name: "meetings",
       display_name: "Meeting Notetaker",
+      description: "Joins Google Meet or Zoom on your ask and summarizes it.",
       tooltip:
         "Fermix joins a Google Meet as a named bot — or a Zoom meeting over RTMS — transcribes " <>
           "it, and delivers the notes. Operator-only, off by default.",
@@ -1954,7 +1902,7 @@ defmodule FermixWebWeb.SetupLive do
       enabled?: enabled?,
       status: status,
       version: nil,
-      logo: nil,
+      logo: @meetings_logo_uri,
       app_count: 0
     }
   end
@@ -1982,6 +1930,7 @@ defmodule FermixWebWeb.SetupLive do
       kind: :computer_use,
       name: SidecarInstaller.plugin_name(),
       display_name: "Computer Use",
+      description: "Let Fermix drive the screen — click, type, and navigate apps.",
       tooltip:
         "Fermix sees your screen and controls the mouse and keyboard in the apps you drive. " <>
           "Operator-only, off by default.",
@@ -2563,6 +2512,7 @@ defmodule FermixWebWeb.SetupLive do
       kind: :computer_history,
       name: @computer_history_name,
       display_name: "Computer History",
+      description: "Passive activity memory from the apps you allow.",
       tooltip:
         "Opt-in activity memory from the apps you allow — titles, URLs, and typed text; " <>
           "passwords and secure fields are never captured. Summarized off-device by " <>
