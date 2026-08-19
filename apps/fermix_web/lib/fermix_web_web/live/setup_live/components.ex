@@ -50,6 +50,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :local_install, :map, default: nil
   attr :meetings_form, :map, required: true
   attr :meetbot_install, :map, default: nil
+  attr :meetings_config_open?, :boolean, default: false
   attr :restarting, :boolean, default: false
   attr :saved_flash, :map, default: nil
   attr :skill_summary, :map, required: true
@@ -141,6 +142,7 @@ defmodule FermixWebWeb.SetupLive.Components do
               local_install={@local_install}
               meetings_form={@meetings_form}
               meetbot_install={@meetbot_install}
+              meetings_config_open?={@meetings_config_open?}
               skill_summary={@skill_summary}
               tabs={@tabs}
               tool_summary={@tool_summary}
@@ -271,6 +273,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :local_install, :map, default: nil
   attr :meetings_form, :map, required: true
   attr :meetbot_install, :map, default: nil
+  attr :meetings_config_open?, :boolean, default: false
   attr :skill_summary, :map, required: true
   attr :tabs, :list, required: true
   attr :tool_summary, :map, required: true
@@ -285,7 +288,6 @@ defmodule FermixWebWeb.SetupLive.Components do
   defp render_active_pane("search", assigns), do: search_pane(assigns)
   defp render_active_pane("media", assigns), do: media_pane(assigns)
   defp render_active_pane("transcription", assigns), do: transcription_pane(assigns)
-  defp render_active_pane("meetings", assigns), do: meetings_pane(assigns)
   defp render_active_pane("sandbox", assigns), do: sandbox_pane(assigns)
   defp render_active_pane("coding", assigns), do: coding_pane(assigns)
   defp render_active_pane("memory", assigns), do: memory_pane(assigns)
@@ -1230,6 +1232,11 @@ defmodule FermixWebWeb.SetupLive.Components do
       <.oauth_client_modal oauth_modal={@oauth_modal} plugin_summary={@plugin_summary} />
       <.resource_picker_modal picker={@resource_picker} />
       <.computer_history_apps_modal picker={@computer_history_picker} />
+      <.meetings_config_modal
+        open?={@meetings_config_open?}
+        meetings_form={@meetings_form}
+        meetbot_install={@meetbot_install}
+      />
 
       <.step_actions active_tab={@active_tab} tabs={@tabs} />
     </div>
@@ -1276,6 +1283,12 @@ defmodule FermixWebWeb.SetupLive.Components do
         >
           {ch_recording_summary(@card.app_count)}
         </p>
+        <p
+          :if={Map.get(@card, :description) && !(@card.kind == :computer_history and @card.enabled?)}
+          class="mt-0.5 truncate text-xs text-base-content/50"
+        >
+          {@card.description}
+        </p>
       </div>
 
       <div class="flex shrink-0 items-center gap-1">
@@ -1314,22 +1327,6 @@ defmodule FermixWebWeb.SetupLive.Components do
           Disable
         </button>
         <button
-          :if={!@card.enabled? and @card.kind == :local_transcription}
-          type="button"
-          class="btn btn-primary btn-xs"
-          phx-click="enable_local_transcription"
-        >
-          Enable
-        </button>
-        <button
-          :if={@card.enabled? and @card.kind == :local_transcription}
-          type="button"
-          class="btn btn-ghost btn-xs"
-          phx-click="disable_local_transcription"
-        >
-          Disable
-        </button>
-        <button
           :if={!@card.enabled? and @card.kind == :meetings}
           type="button"
           class="btn btn-primary btn-xs"
@@ -1341,8 +1338,7 @@ defmodule FermixWebWeb.SetupLive.Components do
           :if={@card.kind == :meetings}
           type="button"
           class="btn btn-ghost btn-xs"
-          phx-click="select_tab"
-          phx-value-tab="meetings"
+          phx-click="open_meetings_config"
         >
           Configure
         </button>
@@ -1748,50 +1744,162 @@ defmodule FermixWebWeb.SetupLive.Components do
     """
   end
 
-  defp meetings_pane(assigns) do
+  attr :open?, :boolean, required: true
+  attr :meetings_form, :map, required: true
+  attr :meetbot_install, :map, default: nil
+
+  defp meetings_config_modal(%{open?: false} = assigns), do: ~H""
+
+  defp meetings_config_modal(assigns) do
     ~H"""
-    <div>
-      <.pane_header
-        title="Meeting notetaker"
-        subtitle="Let Fermix sit in a meeting you ask it to join, take text notes, and send you a summary. Off until you enable it here."
-      />
+    <div
+      id="meetings-config"
+      class="fixed inset-0 z-50 grid place-items-center bg-base-300/70 p-4 backdrop-blur-sm"
+      phx-window-keydown="close_meetings_config"
+      phx-key="Escape"
+    >
+      <form
+        phx-submit="save_meetings"
+        class="flex max-h-[86vh] w-full max-w-lg flex-col rounded-box border border-base-300 bg-base-100 shadow-lg"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Configure the meeting notetaker"
+        phx-click-away="close_meetings_config"
+        phx-mounted={JS.focus_first()}
+      >
+        <div class="flex items-center gap-3 border-b border-base-300 px-5 py-4">
+          <.meetings_logo />
+          <div class="min-w-0 flex-1">
+            <h3 class="text-base font-semibold">Meeting Notetaker</h3>
+            <p class="truncate text-xs text-base-content/55">
+              Attends only when you ask, one meeting at a time.
+            </p>
+          </div>
+          <button
+            type="button"
+            class="btn btn-ghost btn-xs btn-circle"
+            phx-click="close_meetings_config"
+            aria-label="Close"
+          >
+            <.icon name="hero-x-mark" class="size-4" />
+          </button>
+        </div>
 
-      <form phx-submit="save_meetings" class="mt-6 space-y-6">
-        <div class="max-w-xl space-y-4">
-          <.toggle_input
-            label="Enable the meeting notetaker"
-            name="meetings_form[enabled]"
-            checked={@meetings_form.enabled}
-            hint="Enabling downloads the Google Meet notetaker. The Zoom lane below needs no download."
-          />
-          <.install_banner state={@meetbot_install} />
-          <p class={meetbot_state_class(@meetings_form.sidecar_installed?)}>
-            {meetbot_state_message(@meetings_form.sidecar_installed?)}
-          </p>
+        <div class="flex-1 space-y-5 overflow-y-auto px-5 py-4">
+          <div class="space-y-3">
+            <.toggle_input
+              label="Enabled"
+              name="meetings_form[enabled]"
+              checked={@meetings_form.enabled}
+              hint="Installs the notetaker on first enable · restart to apply."
+            />
+            <.install_banner state={@meetbot_install} />
+            <p class={meetbot_state_class(@meetings_form.sidecar_installed?)}>
+              {meetbot_state_message(@meetings_form.sidecar_installed?)}
+            </p>
 
-          <.text_input
-            label="Notetaker name"
-            name="meetings_form[bot_name]"
-            value={@meetings_form.bot_name}
-          />
+            <.text_input
+              label="Display name"
+              name="meetings_form[bot_name]"
+              value={@meetings_form.bot_name}
+            />
+            <.toggle_input
+              label="Announce itself in the chat"
+              name="meetings_form[announce]"
+              checked={@meetings_form.announce}
+              hint="Posts one consent line on admit, then stays silent."
+            />
+            <.text_input
+              label="Announcement message"
+              name="meetings_form[announce_message]"
+              value={@meetings_form.announce_message}
+            />
+            <p class="text-xs text-base-content/55">
+              Blank uses the built-in consent line, which names the notetaker and you.
+            </p>
+          </div>
 
-          <.toggle_input
-            label="Announce itself in the meeting chat"
-            name="meetings_form[announce]"
-            checked={@meetings_form.announce}
-            hint="Posts one consent line on admit. The notetaker never speaks."
-          />
-          <.text_input
-            label="Announcement message"
-            name="meetings_form[announce_message]"
-            value={@meetings_form.announce_message}
-          />
-          <p class="text-sm text-base-content/60">
-            Leave blank for the built-in consent line, which names the notetaker and you.
-          </p>
+          <div class="space-y-2">
+            <p class="text-xs font-semibold uppercase tracking-wide text-base-content/45">
+              Providers
+            </p>
+
+            <details class="group rounded-field border border-base-300">
+              <summary class="flex cursor-pointer list-none items-center gap-3 px-3 py-2.5">
+                <.meet_logo />
+                <span class="min-w-0 flex-1">
+                  <span class="block text-sm font-medium">Google Meet</span>
+                  <span class="block text-xs text-base-content/55">
+                    Joins as a signed-in bot account
+                  </span>
+                </span>
+                <.icon
+                  name="hero-chevron-right"
+                  class="size-4 text-base-content/40 transition group-open:rotate-90"
+                />
+              </summary>
+              <div class="space-y-3 border-t border-base-300 px-3 pb-3 pt-3">
+                <p class="text-xs text-base-content/70">
+                  The bot signs in once with its own Google account, then joins by knocking like
+                  any guest — only the meeting URL crosses the wire.
+                </p>
+                <button type="button" class="btn btn-outline btn-xs" disabled>
+                  Sign the bot in — ships with the notetaker release
+                </button>
+              </div>
+            </details>
+
+            <details
+              class="group rounded-field border border-base-300"
+              open={meetings_zoom_present?(@meetings_form)}
+            >
+              <summary class="flex cursor-pointer list-none items-center gap-3 px-3 py-2.5">
+                <.zoom_logo />
+                <span class="min-w-0 flex-1">
+                  <span class="block text-sm font-medium">Zoom</span>
+                  <span class="block text-xs text-base-content/55">
+                    Via Zoom RTMS — your own or a consenting host's meetings
+                  </span>
+                </span>
+                <.icon
+                  name="hero-chevron-right"
+                  class="size-4 text-base-content/40 transition group-open:rotate-90"
+                />
+              </summary>
+              <div class="space-y-3 border-t border-base-300 px-3 pb-3 pt-3">
+                <.text_input
+                  label="Account ID"
+                  name="meetings_form[zoom_account_id]"
+                  value={@meetings_form.zoom_account_id}
+                />
+                <.text_input
+                  label="Client ID"
+                  name="meetings_form[zoom_client_id]"
+                  value={@meetings_form.zoom_client_id}
+                />
+                <.secret_input
+                  label="Client secret"
+                  name="meetings_form[zoom_client_secret]"
+                  set={@meetings_form.zoom_client_secret_set}
+                />
+                <p :if={@meetings_form.zoom_client_secret_set} class="text-xs text-success">
+                  Already set. Leave blank to keep it, or paste a new secret to replace it.
+                </p>
+                <.text_input
+                  label="Webhook subscription ID"
+                  name="meetings_form[zoom_ws_subscription_id]"
+                  value={@meetings_form.zoom_ws_subscription_id}
+                />
+                <p class="text-xs text-base-content/55">
+                  RTMS reaches only meetings hosted by your Zoom account, or a host who enabled
+                  your app — a Zoom limit, not a missing key.
+                </p>
+              </div>
+            </details>
+          </div>
 
           <label class="form-control w-full">
-            <span class="label pb-1 text-sm font-medium">Speech-to-text backend</span>
+            <span class="label pb-1 text-sm font-medium">Transcription</span>
             <select
               name="meetings_form[transcription_backend]"
               class="select select-bordered w-full bg-base-100"
@@ -1805,53 +1913,74 @@ defmodule FermixWebWeb.SetupLive.Components do
               </option>
             </select>
             <span class="label pt-1 text-xs text-base-content/60">
-              Blank uses whatever the Transcription tab is set to.
+              Blank uses whatever the Voice notes tab is set to.
             </span>
           </label>
         </div>
 
-        <section class="max-w-xl space-y-4">
-          <h3 class="text-sm font-semibold">Zoom (RTMS)</h3>
-          <.info_panel>
-            Zoom needs a Server-to-Server OAuth app on your own account with Realtime Media
-            Streams enabled. Fermix can only stream meetings hosted by that account —
-            meetings hosted by anyone else are out of reach on this lane.
-          </.info_panel>
-
-          <.text_input
-            label="Account ID"
-            name="meetings_form[zoom_account_id]"
-            value={@meetings_form.zoom_account_id}
-          />
-          <.text_input
-            label="Client ID"
-            name="meetings_form[zoom_client_id]"
-            value={@meetings_form.zoom_client_id}
-          />
-          <.secret_input
-            label="Client secret"
-            name="meetings_form[zoom_client_secret]"
-            set={@meetings_form.zoom_client_secret_set}
-          />
-          <p :if={@meetings_form.zoom_client_secret_set} class="text-sm text-success">
-            Already configured. Leave blank to keep it, or paste a new secret to replace it.
-          </p>
-          <.text_input
-            label="Webhook subscription ID"
-            name="meetings_form[zoom_ws_subscription_id]"
-            value={@meetings_form.zoom_ws_subscription_id}
-          />
-        </section>
-
-        <.info_panel class="max-w-xl">
-          Google Meet needs the notetaker signed into a Google account of its own. That
-          sign-in step ships with the notetaker release; until then the Meet lane can only
-          join meetings that admit an unauthenticated guest.
-        </.info_panel>
-
-        <.form_actions active_tab={@active_tab} tabs={@tabs} save_label="Save meetings" />
+        <div class="flex items-center justify-end gap-2 border-t border-base-300 px-5 py-3">
+          <button type="button" class="btn btn-ghost btn-sm" phx-click="close_meetings_config">
+            Close
+          </button>
+          <button type="submit" class="btn btn-primary btn-sm">Save</button>
+        </div>
       </form>
     </div>
+    """
+  end
+
+  # Zoom pre-expands when it already carries config, so a configured operator sees
+  # their credentials without a click; Meet stays collapsed behind its sign-in step.
+  defp meetings_zoom_present?(form) do
+    form.zoom_account_id != "" or form.zoom_client_id != "" or form.zoom_client_secret_set or
+      form.zoom_ws_subscription_id != ""
+  end
+
+  # The Meeting Notetaker mark in the Fermix logo language (blue screen + two
+  # participants) — mirrors setup_live/meetings_logo.svg for the modal header.
+  defp meetings_logo(assigns) do
+    ~H"""
+    <svg class="size-8 shrink-0" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <rect x="2" y="3" width="20" height="12.5" rx="2.4" fill="#2b5cff" />
+      <rect x="10.25" y="15.5" width="3.5" height="2.6" fill="#2b5cff" />
+      <rect x="6.5" y="18" width="11" height="2.2" rx="1.1" fill="#2b5cff" />
+      <circle cx="9.4" cy="8.2" r="1.75" fill="#fff" />
+      <circle cx="14.6" cy="8.6" r="1.4" fill="#fff" fill-opacity="0.82" />
+      <path d="M6.1 12.9 Q6.1 10.3 9.4 10.3 Q12.05 10.3 12.5 12.2 L6.1 12.9 Z" fill="#fff" />
+      <path
+        d="M11.7 12.4 Q11.7 9.7 14.6 9.7 Q17.2 9.7 17.2 12.1 L11.7 12.4 Z"
+        fill="#fff"
+        fill-opacity="0.82"
+      />
+    </svg>
+    """
+  end
+
+  # Google Meet's camera mark, in its own colors — a provider identifier, not a
+  # Fermix-owned logo.
+  defp meet_logo(assigns) do
+    ~H"""
+    <svg class="size-7 shrink-0" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <rect x="2.5" y="6" width="14" height="12" rx="2.4" fill="#00ac47" />
+      <path d="M16.5 10 L21 7.2 V16.8 L16.5 14 Z" fill="#00832d" />
+      <path d="M2.5 8.4 A2.4 2.4 0 0 1 4.9 6 H10.5 V12 H2.5 Z" fill="#0066da" />
+      <path d="M10.5 6 H14.1 A2.4 2.4 0 0 1 16.5 8.4 V10 L10.5 10 Z" fill="#e94235" />
+      <path d="M2.5 12 H10.5 V18 H4.9 A2.4 2.4 0 0 1 2.5 15.6 Z" fill="#ffba00" />
+    </svg>
+    """
+  end
+
+  # Zoom's video-camera mark on its blue tile.
+  defp zoom_logo(assigns) do
+    ~H"""
+    <svg class="size-7 shrink-0" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <rect x="2" y="3" width="20" height="18" rx="4.4" fill="#2D8CFF" />
+      <path
+        d="M7 9.6 A1.3 1.3 0 0 1 8.3 8.3 H12.4 A1.3 1.3 0 0 1 13.7 9.6 V14.4 A1.3 1.3 0 0 1 12.4 15.7 H8.3 A1.3 1.3 0 0 1 7 14.4 Z"
+        fill="#fff"
+      />
+      <path d="M14.3 10.7 L17 9 V15 L14.3 13.3 Z" fill="#fff" />
+    </svg>
     """
   end
 
