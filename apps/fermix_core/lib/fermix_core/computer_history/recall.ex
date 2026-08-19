@@ -11,6 +11,8 @@ defmodule FermixCore.ComputerHistory.Recall do
   transitions resolve correctly — no new timezone machinery.
   """
 
+  require Logger
+
   alias FermixCore.Memory.Repo
 
   @section_limit 8
@@ -25,23 +27,30 @@ defmodule FermixCore.ComputerHistory.Recall do
   @doc """
   A bounded, char-capped digest of the most recent activity for the per-turn
   Recent Activity section, or `nil` when there is nothing to show. Framed as
-  untrusted data.
+  untrusted data. A non-empty read appends an access-audit row (§22.8).
   """
   @spec recent_digest(keyword()) :: String.t() | nil
   def recent_digest(opts \\ []) do
     repo = Keyword.get(opts, :repo, Repo)
 
     case Repo.computer_history_recent_memories(@section_limit, server: repo) do
-      {:ok, []} -> nil
-      {:ok, memories} -> render_digest(memories)
-      {:error, _reason} -> nil
+      {:ok, []} ->
+        nil
+
+      {:ok, memories} ->
+        record_access(repo, "recent_activity", nil, nil, length(memories))
+        render_digest(memories)
+
+      {:error, _reason} ->
+        nil
     end
   end
 
   @doc """
   Resolve `window` to a concrete range in the operator timezone and return the
   matching activity memories, formatted, framed as untrusted data. `opts`:
-  `:repo`, `:now` (UTC DateTime), `:timezone`, `:limit`.
+  `:repo`, `:now` (UTC DateTime), `:timezone`, `:limit`. Every successful read
+  (empty included) appends an access-audit row (§22.8).
   """
   @spec query(window(), keyword()) :: {:ok, String.t()} | {:error, term()}
   def query(window, opts \\ []) when is_binary(window) do
@@ -53,8 +62,34 @@ defmodule FermixCore.ComputerHistory.Recall do
     {from_ts, to_ts} = resolve_window(window, now, tz)
 
     case Repo.computer_history_memories_in_window(from_ts, to_ts, limit, server: repo) do
-      {:ok, memories} -> {:ok, render_query(window, memories)}
-      {:error, reason} -> {:error, reason}
+      {:ok, memories} ->
+        record_access(repo, "recall_activity", from_ts, to_ts, length(memories))
+        {:ok, render_query(window, memories)}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  # The audit row is metadata only (sink, window, count). A failed write never
+  # fails the read — the audit is for the owner's inspection, not a gate — but
+  # it is logged loudly, never swallowed silently.
+  defp record_access(repo, sink, from_ts, to_ts, count) do
+    access = %{
+      ts: System.system_time(:millisecond),
+      sink: sink,
+      window_from_ts: from_ts,
+      window_to_ts: to_ts,
+      result_count: count
+    }
+
+    case Repo.computer_history_record_access(access, server: repo) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error("computer_history access-audit write failed: #{inspect(reason)}")
+        :ok
     end
   end
 

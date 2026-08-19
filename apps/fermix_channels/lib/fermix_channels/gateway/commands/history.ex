@@ -22,7 +22,6 @@ defmodule FermixChannels.Gateway.Commands.History do
   alias FermixCore.ComputerHistory.Config
   alias FermixCore.ComputerHistory.Purge
   alias FermixCore.Memory.Repo
-  alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Setup.ConfigStore
 
   @impl true
@@ -68,7 +67,14 @@ defmodule FermixChannels.Gateway.Commands.History do
 
   defp status_text(repo) do
     if ComputerHistory.macos?() do
-      [enabled_line(), capture_line(), allowlist_line(), summarizer_line(), spool_line(repo)]
+      [
+        enabled_line(),
+        capture_line(),
+        allowlist_line(),
+        summarizer_line(),
+        spool_line(repo),
+        access_line(repo)
+      ]
       |> Enum.join("\n")
     else
       "Computer history is macOS only; unavailable on this host."
@@ -127,9 +133,12 @@ defmodule FermixChannels.Gateway.Commands.History do
     end
   end
 
+  # The one shared resolver (§22.1): subagent provider else primary — the same
+  # answer the Gate and the summarizer use, so this privacy line never names a
+  # different vendor than the one raw activity actually reaches.
   defp default_provider_label do
-    case PrimaryConfig.primary() do
-      {:ok, provider} -> "default provider (#{provider})"
+    case Config.default_summarizer_provider() do
+      {:ok, provider} -> "subagent/default (#{provider})"
       {:error, _reason} -> "default provider (none configured)"
     end
   end
@@ -147,6 +156,28 @@ defmodule FermixChannels.Gateway.Commands.History do
         "Spool: unavailable."
     end
   end
+
+  # The access audit (§22.8): what the agent has read from history — recorded in
+  # the store itself, so it survives trace rotation and the owner can check it.
+  defp access_line(repo) do
+    case Repo.computer_history_access_stats(server: repo) do
+      {:ok, {0, _last}} ->
+        "Agent reads: none recorded."
+
+      {:ok, {count, last_ts}} ->
+        "Agent reads: #{count} recorded (last: #{format_ts(last_ts)})."
+
+      {:error, reason} ->
+        Logger.warning("computer_history access stats unavailable: #{inspect(reason)}")
+        "Agent reads: unavailable."
+    end
+  end
+
+  defp format_ts(ts) when is_integer(ts) do
+    ts |> DateTime.from_unix!(:millisecond) |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+  end
+
+  defp format_ts(_other), do: "unknown"
 
   defp count([]), do: "none"
   defp count(list), do: Integer.to_string(length(list))

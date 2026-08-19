@@ -40,6 +40,7 @@ defmodule FermixCore.Memory.Repo do
   @computer_history_memories_migration_version 24
   @computer_history_state_migration_version 25
   @meetings_migration_version 26
+  @computer_history_access_migration_version 27
   @sqlite_open_intent :readwritecreate
 
   @base_schema_sql """
@@ -1555,6 +1556,35 @@ defmodule FermixCore.Memory.Repo do
     call({:computer_history_sweep_expired_events, cutoff_ts}, opts)
   end
 
+  @doc "Byte-ceiling backstop: keep the newest spool events fitting `ceiling_bytes`, delete the rest."
+  @spec computer_history_sweep_spool_over_bytes(pos_integer(), keyword()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def computer_history_sweep_spool_over_bytes(ceiling_bytes, opts \\ [])
+      when is_integer(ceiling_bytes) and ceiling_bytes > 0 do
+    call({:computer_history_sweep_spool_over_bytes, ceiling_bytes}, opts)
+  end
+
+  @doc "Record one agent read of history (metadata only — sink, window, count)."
+  @spec computer_history_record_access(map(), keyword()) :: :ok | {:error, term()}
+  def computer_history_record_access(access, opts \\ []) when is_map(access) do
+    call({:computer_history_record_access, access}, opts)
+  end
+
+  @doc "Access-audit stats: `{count, last_read_ts | nil}`."
+  @spec computer_history_access_stats(keyword()) ::
+          {:ok, {non_neg_integer(), integer() | nil}} | {:error, term()}
+  def computer_history_access_stats(opts \\ []) do
+    call(:computer_history_access_stats, opts)
+  end
+
+  @doc "Keep the newest `max_rows` access rows, delete the rest. Returns the deleted count."
+  @spec computer_history_cap_access_rows(pos_integer(), keyword()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def computer_history_cap_access_rows(max_rows, opts \\ [])
+      when is_integer(max_rows) and max_rows > 0 do
+    call({:computer_history_cap_access_rows, max_rows}, opts)
+  end
+
   @doc "Count of computer-history spool events."
   @spec computer_history_count_events(keyword()) :: {:ok, non_neg_integer()} | {:error, term()}
   def computer_history_count_events(opts \\ []) do
@@ -2958,6 +2988,26 @@ defmodule FermixCore.Memory.Repo do
     {:reply, reply, state}
   end
 
+  def handle_call({:computer_history_sweep_spool_over_bytes, ceiling_bytes}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.sweep_spool_over_bytes(&1, ceiling_bytes))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:computer_history_record_access, access}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.record_access(&1, access))
+    {:reply, reply, state}
+  end
+
+  def handle_call(:computer_history_access_stats, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.access_stats/1)
+    {:reply, reply, state}
+  end
+
+  def handle_call({:computer_history_cap_access_rows, max_rows}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.cap_access_rows(&1, max_rows))
+    {:reply, reply, state}
+  end
+
   def handle_call(:computer_history_count_memories, _from, state) do
     reply = with_connection(state, &ComputerHistorySql.count_memories/1)
     {:reply, reply, state}
@@ -3382,8 +3432,25 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_computer_history_events_migration(conn, versions),
          :ok <- apply_computer_history_memories_migration(conn, versions),
          :ok <- apply_computer_history_state_migration(conn, versions),
-         :ok <- apply_meetings_migration(conn, versions) do
+         :ok <- apply_meetings_migration(conn, versions),
+         :ok <- apply_computer_history_access_migration(conn, versions) do
       :ok
+    end
+  end
+
+  defp apply_computer_history_access_migration(conn, versions) do
+    if Enum.member?(versions, @computer_history_access_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{ComputerHistorySql.access_schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@computer_history_access_migration_version});
+        COMMIT;
+        """
+      )
     end
   end
 
