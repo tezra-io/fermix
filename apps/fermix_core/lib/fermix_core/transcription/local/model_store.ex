@@ -19,14 +19,14 @@ defmodule FermixCore.Transcription.Local.ModelStore do
   checks presence only: integrity was proven at install, and re-hashing hundreds
   of megabytes on every hot-path read would be the wrong trade.
 
-  ## Pins are not yet minted
+  ## Pins
 
-  `@sha256_pinned` is `false` because no `fermix-stt` release exists yet to hash
-  the model files against, and a pin is never hand-written. Until it flips,
-  `install/3` against the baked catalog refuses with `{:error,
-  :model_pins_missing}` rather than downloading unverified weights. The
-  `catalog:` option is the test seam that proves the whole download → verify →
-  rename path against a fake catalog with real hashes.
+  `@sha256_pinned` is `true`: every `sha256:` in the catalog was minted by
+  downloading the file once and hashing it (never hand-written). A build with
+  `@sha256_pinned` `false` refuses with `{:error, :model_pins_missing}` rather
+  than downloading unverified weights — reachable in tests through the
+  `sha256_pinned:` seam. The `catalog:` option is the test seam that proves the
+  whole download → verify → rename path against a fake catalog with real hashes.
   """
 
   require Logger
@@ -34,10 +34,9 @@ defmodule FermixCore.Transcription.Local.ModelStore do
   alias FermixCore.Net.StreamDownload
   alias FermixCore.Setup.ConfigStore
 
-  # Flip to `true` in the same change that fills every `sha256:` below, which is
-  # the first fermix-stt release. Never pin a value without downloading the file
-  # and hashing it.
-  @sha256_pinned false
+  # `true` once every `sha256:` below is minted (v0.1.0). Never pin a value
+  # without downloading the file and hashing it.
+  @sha256_pinned true
 
   @hf_base "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/resolve/main"
 
@@ -47,10 +46,26 @@ defmodule FermixCore.Transcription.Local.ModelStore do
   # contract; the exact file names follow the repo.
   @catalog %{
     {"sherpa-onnx", "parakeet-tdt-0.6b-v3-int8"} => [
-      %{name: "encoder.int8.onnx", url: @hf_base <> "/encoder.int8.onnx", sha256: ""},
-      %{name: "decoder.int8.onnx", url: @hf_base <> "/decoder.int8.onnx", sha256: ""},
-      %{name: "joiner.int8.onnx", url: @hf_base <> "/joiner.int8.onnx", sha256: ""},
-      %{name: "tokens.txt", url: @hf_base <> "/tokens.txt", sha256: ""}
+      %{
+        name: "encoder.int8.onnx",
+        url: @hf_base <> "/encoder.int8.onnx",
+        sha256: "acfc2b4456377e15d04f0243af540b7fe7c992f8d898d751cf134c3a55fd2247"
+      },
+      %{
+        name: "decoder.int8.onnx",
+        url: @hf_base <> "/decoder.int8.onnx",
+        sha256: "179e50c43d1a9de79c8a24149a2f9bac6eb5981823f2a2ed88d655b24248db4e"
+      },
+      %{
+        name: "joiner.int8.onnx",
+        url: @hf_base <> "/joiner.int8.onnx",
+        sha256: "3164c13fc2821009440d20fcb5fdc78bff28b4db2f8d0f0b329101719c0948b3"
+      },
+      %{
+        name: "tokens.txt",
+        url: @hf_base <> "/tokens.txt",
+        sha256: "d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d"
+      }
     ]
   }
 

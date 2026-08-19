@@ -626,7 +626,10 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
 
       assert result.status == :warn
       assert result.detail =~ "backend local needs its sidecar"
-      assert result.detail =~ "dev_local"
+      # The remedy wording is host-dependent (a pinned target — macos-aarch64 —
+      # names the setup card; an unpinned one names dev_local), and both remedy
+      # sentences are covered host-independently by the doctor/installer seam
+      # tests. Here the row must only carry a fix and never say "set a key".
       refute result.detail =~ "set a key"
     end
 
@@ -677,7 +680,9 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
 
       assert result.status == :warn
       assert result.detail =~ "no lane is usable"
-      assert result.detail =~ "dev_local"
+      # A release is pinned now (host-independently — `pinned_tag/0` is a build
+      # constant), so the remedy names the setup card rather than a dev_local build.
+      assert result.detail =~ "fermix setup"
     end
 
     test "reports the usable lanes and the profile custody note", ctx do

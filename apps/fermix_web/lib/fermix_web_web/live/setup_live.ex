@@ -17,6 +17,7 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.ComputerUse
   alias FermixCore.ComputerUse.SidecarInstaller
   alias FermixCore.Harness.Vendors, as: HarnessVendors
+  alias FermixCore.Meetings
   alias FermixCore.Meetings.Config, as: MeetingsConfig
   alias FermixCore.Meetings.SidecarInstaller, as: MeetbotInstaller
   alias FermixCore.Memory.CompactionConfig
@@ -540,6 +541,30 @@ defmodule FermixWebWeb.SetupLive do
 
   def handle_event("save_computer_history_apps", _params, socket) do
     {:noreply, save_computer_history_picker(socket)}
+  end
+
+  # On-device speech (M21 Phase 2b) toggle. Enable selects the `local` backend and
+  # installs the sidecar + model; disable falls back to the OpenAI cloud backend.
+  # Selecting the backend is the install trigger — the same one code path the
+  # Transcription tab's picker uses.
+  def handle_event("enable_local_transcription", _params, socket) do
+    {:noreply, enable_local_transcription(socket)}
+  end
+
+  def handle_event("disable_local_transcription", _params, socket) do
+    {:noreply, disable_local_transcription(socket)}
+  end
+
+  # Meeting notetaker (M21 Phase 3) toggle. Both paths route through `save_meetings/3`,
+  # which installs the meetbot sidecar on enable and asks for a restart (the tools are
+  # boot-seeded). Only the `enabled` flag changes here; the rest of the config is
+  # edited on the Meetings tab.
+  def handle_event("enable_meetings", _params, socket) do
+    {:noreply, save_meetings(socket, [enabled: true], nil)}
+  end
+
+  def handle_event("disable_meetings", _params, socket) do
+    {:noreply, save_meetings(socket, [enabled: false], nil)}
   end
 
   # The §4.4 Connect-time collection: the needs_config card form posts the
@@ -1635,6 +1660,26 @@ defmodule FermixWebWeb.SetupLive do
   defp meetbot_install_error(reason),
     do: "Meeting notetaker install failed: #{Redaction.format(reason)}"
 
+  # The on-device speech card's Enable: select the local backend, then run the same
+  # install trigger the Transcription picker uses. `:openai` as the "previous" value
+  # is any non-local backend, which is what makes `maybe_install_local_stt/3` fire.
+  defp enable_local_transcription(socket) do
+    socket
+    |> save_answers([transcription_backend: "local"], "On-device speech selected.", nil)
+    |> maybe_install_local_stt(:openai, :local)
+  end
+
+  # Disable falls back to the OpenAI cloud backend — the shipped default, and the one
+  # backend that needs no key of its own (it reuses the chat provider's).
+  defp disable_local_transcription(socket) do
+    save_answers(
+      socket,
+      [transcription_backend: "openai"],
+      "Voice notes switched back to the cloud backend.",
+      nil
+    )
+  end
+
   # Choosing the on-device backend is the install trigger (§2b: nothing downloads
   # at boot, and hand-editing config.toml installs nothing). Already-installed
   # selects say so instead of re-running the installer.
@@ -1843,11 +1888,89 @@ defmodule FermixWebWeb.SetupLive do
     end
   end
 
-  # The native-driver features (§22.6): computer-use always; computer-history only
-  # on macOS (`ComputerHistory.macos?/0`), where its AXObserver capture can run.
+  # The native-driver features: capabilities that run on a bundled sidecar rather
+  # than a plugin, presented together so their toggles sit in one place instead of
+  # scattered across tabs. Computer-history is macOS-only (`ComputerHistory.macos?/0`,
+  # where its AXObserver capture runs); the speech and meeting notetakers install
+  # their sidecar on enable and refuse loud until a release is pinned.
   defp core_feature_cards(snapshot) do
     [computer_use_card(snapshot)] ++
-      if ComputerHistory.macos?(), do: [computer_history_card(snapshot)], else: []
+      if(ComputerHistory.macos?(), do: [computer_history_card(snapshot)], else: []) ++
+      [local_transcription_card(snapshot), meetings_card(snapshot)]
+  end
+
+  # On-device speech (M21 Phase 2b): the `local` transcription backend, an install
+  # trigger for the fermix-stt sidecar + model. The card owns the on-device option;
+  # the Transcription tab keeps the interchangeable cloud backends.
+  defp local_transcription_card(snapshot) do
+    {enabled?, status} = local_transcription_card_state(snapshot)
+
+    %{
+      kind: :local_transcription,
+      name: "local_transcription",
+      display_name: "On-Device Speech",
+      tooltip:
+        "Transcribe voice notes on this machine with a local model — no audio leaves it. " <>
+          "Enabling downloads the speech engine and model.",
+      docs_url: "https://fermix.ai/docs/transcription/",
+      enabled?: enabled?,
+      status: status,
+      version: nil,
+      logo: nil,
+      app_count: 0
+    }
+  end
+
+  defp local_transcription_card_state(snapshot) do
+    cond do
+      transcription_backend_string(snapshot) != "local" -> {false, :not_configured}
+      LocalTranscription.configured?([]) == :ok -> {true, :ready}
+      true -> {true, :partial}
+    end
+  end
+
+  defp transcription_backend_string(snapshot) do
+    snapshot
+    |> get_fermix_core(:transcription)
+    |> Keyword.get(:backend, "openai")
+    |> to_string()
+  end
+
+  # Meeting notetaker (M21 Phase 3): enabling installs the meetbot sidecar and flips
+  # the boot-seeded tool gate (hence the restart). Detailed config — bot name,
+  # announcement, Zoom RTMS credentials — lives on the Meetings tab, reached from the
+  # card's Configure button.
+  defp meetings_card(snapshot) do
+    {enabled?, status} = meetings_card_state(snapshot)
+
+    %{
+      kind: :meetings,
+      name: "meetings",
+      display_name: "Meeting Notetaker",
+      tooltip:
+        "Fermix joins a Google Meet as a named bot — or a Zoom meeting over RTMS — transcribes " <>
+          "it, and delivers the notes. Operator-only, off by default.",
+      docs_url: "https://fermix.ai/docs/meetings/",
+      enabled?: enabled?,
+      status: status,
+      version: nil,
+      logo: nil,
+      app_count: 0
+    }
+  end
+
+  defp meetings_card_state(snapshot) do
+    cond do
+      not meetings_config_enabled?(snapshot) -> {false, :not_configured}
+      Meetings.ready?() -> {true, :ready}
+      true -> {true, :partial}
+    end
+  end
+
+  defp meetings_config_enabled?(snapshot) do
+    snapshot
+    |> get_fermix_core(:meetings)
+    |> Keyword.get(:enabled, false) == true
   end
 
   # Computer-use as a core-feature card (same clean shape as computer_history_card),

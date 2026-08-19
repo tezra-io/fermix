@@ -1181,6 +1181,10 @@ defmodule FermixWebWeb.SetupLive.Components do
         <div class="space-y-2">
           <.core_feature_card :for={card <- @plugin_summary.core_features} card={card} />
         </div>
+        <div :if={@local_install || @meetbot_install} class="mt-2 space-y-1">
+          <.install_banner state={@local_install} />
+          <.install_banner state={@meetbot_install} />
+        </div>
         <hr class="my-6 border-base-300" />
       </div>
 
@@ -1301,11 +1305,52 @@ defmodule FermixWebWeb.SetupLive.Components do
           Edit apps
         </button>
         <button
-          :if={@card.enabled?}
+          :if={@card.enabled? and @card.kind in [:computer_use, :computer_history]}
           type="button"
           class="btn btn-ghost btn-xs"
           phx-click="plugin_disable"
           phx-value-name={@card.name}
+        >
+          Disable
+        </button>
+        <button
+          :if={!@card.enabled? and @card.kind == :local_transcription}
+          type="button"
+          class="btn btn-primary btn-xs"
+          phx-click="enable_local_transcription"
+        >
+          Enable
+        </button>
+        <button
+          :if={@card.enabled? and @card.kind == :local_transcription}
+          type="button"
+          class="btn btn-ghost btn-xs"
+          phx-click="disable_local_transcription"
+        >
+          Disable
+        </button>
+        <button
+          :if={!@card.enabled? and @card.kind == :meetings}
+          type="button"
+          class="btn btn-primary btn-xs"
+          phx-click="enable_meetings"
+        >
+          Enable
+        </button>
+        <button
+          :if={@card.kind == :meetings}
+          type="button"
+          class="btn btn-ghost btn-xs"
+          phx-click="select_tab"
+          phx-value-tab="meetings"
+        >
+          Configure
+        </button>
+        <button
+          :if={@card.enabled? and @card.kind == :meetings}
+          type="button"
+          class="btn btn-ghost btn-xs"
+          phx-click="disable_meetings"
         >
           Disable
         </button>

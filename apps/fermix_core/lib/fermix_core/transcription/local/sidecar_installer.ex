@@ -25,10 +25,18 @@ defmodule FermixCore.Transcription.Local.SidecarInstaller do
   @command "fermix-stt"
   @plugin_name "stt_sidecar"
 
-  # target => %{url: String.t(), sha256: String.t()}. EMPTY until the first
-  # fermix-stt release; a pin is never hand-written — it lands with the release
-  # choreography, which downloads the artifact and hashes it.
-  @releases %{}
+  # target => %{url: String.t(), sha256: String.t()}. Pinned per released
+  # target (v0.1.0 ships macos-aarch64; other targets land as CI builds them).
+  # A pin is never hand-written — it lands with the release choreography, which
+  # downloads the artifact and hashes it. An unpinned target refuses via
+  # `@no_release_pinned_message`.
+  @releases %{
+    "macos-aarch64" => %{
+      url:
+        "https://github.com/tezra-io/fermix-stt/releases/download/v0.1.0/fermix-stt-macos-aarch64",
+      sha256: "55e115c3c4fab23dd9758ec57299b9ace0f6bfd5215eb1755c6f496d1bae3b95"
+    }
+  }
 
   @no_release_pinned_message "fermix-stt has no pinned release yet. Build it locally and point " <>
                                "[fermix_core.plugins] dev_local at a checkout containing " <>

@@ -55,8 +55,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   default backend and model are unchanged; nothing about a voice note behaves
   differently. OpenAI's newer `gpt-transcribe` is also selectable now, beside the
   default mini model it does not replace.
-- **A meeting notetaker that joins only when you ask — shipped off by default,
-  because its sidecar has not been released yet.** Fermix can sit in a Google
+- **A meeting notetaker that joins only when you ask — off by default,
+  installed on demand.** Fermix can sit in a Google
   Meet or Zoom meeting, transcribe it with speaker attribution, and deliver a
   summary when it ends. `join_meeting`, `leave_meeting`, and `list_meetings` are
   owner-only and attended-only: it never joins on a schedule, off an invite it
@@ -77,11 +77,14 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `<FERMIX_HOME>/workspace/meetings/<id>/` where the file tools can read them
   back, and audio is discarded unless `retain_audio` is set. A capture cut short
   still delivers what was heard, labelled as partial rather than passed off as
-  the whole meeting. Turn it on with `[fermix_core.meetings] enabled` plus the
-  setup Meetings card — but like the mobile channel, this is groundwork shipped
-  ahead of its other half: no meetbot release is pinned in this build, so
-  installing the Meet sidecar refuses with exactly that fact, and until it lands
-  the Zoom RTMS lane is the only one a configured operator can use. `fermix
+  the whole meeting. Turn it on from its native-driver card on the setup Plugins
+  page — beside computer use and computer history — or its own Meetings tab for
+  the detailed configuration; enabling installs the `meetbot` sidecar (pinned at
+  `v0.1.0`) for your host. Only `macos-aarch64` is pinned in this build, so on
+  other hosts the Meet install refuses honestly and the Zoom RTMS lane is the one
+  a configured operator can use until that target is built. The macOS binary is
+  ad-hoc-signed rather than notarized — fine for the daemon that downloads it,
+  and notarization is the gate for distribution beyond your own machine. `fermix
   doctor` gains a `meetings` row that reports the same state without joining
   anything.
 - **The on-device transcription backend — fermix's half of it.**
@@ -89,12 +92,15 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   running over a locally installed speech model: audio never leaves the machine
   and there is no key to configure. What it needs instead is an installed binary
   AND an installed model, and it says which half is missing rather than quietly
-  falling back to a hosted backend. Installing is a deliberate act from the
-  Transcription card — writing the backend name into `config.toml` by hand
-  installs nothing, and boot never downloads. The `fermix-stt` release does not
-  exist yet, so an install attempt refuses honestly on both halves (no pinned
-  sidecar release; the model's checksums are not in this build) instead of
-  fetching an unverified binary or unverified weights.
+  falling back to a hosted backend. Installing is a deliberate act — from its
+  native-driver card on the setup Plugins page (beside computer use), or by
+  selecting `local` in the Transcription tab; writing the backend name into
+  `config.toml` by hand installs nothing, and boot never downloads. The
+  `fermix-stt` sidecar is released at `v0.1.0` (Parakeet TDT 0.6B v3 int8, both
+  the binary and every model checksum pinned), so on a pinned host enabling it
+  downloads and verifies both halves on-device; only `macos-aarch64` is pinned in
+  this build, so other hosts refuse honestly instead of fetching an unverified
+  binary or unverified weights. The binary is ad-hoc-signed, not notarized.
 
 ### Security
 
