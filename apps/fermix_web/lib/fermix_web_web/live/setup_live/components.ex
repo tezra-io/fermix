@@ -50,6 +50,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :local_install, :map, default: nil
   attr :meetings_form, :map, required: true
   attr :meetbot_install, :map, default: nil
+  attr :meetbot_signin, :map, default: nil
   attr :meetings_config_open?, :boolean, default: false
   attr :restarting, :boolean, default: false
   attr :saved_flash, :map, default: nil
@@ -142,6 +143,7 @@ defmodule FermixWebWeb.SetupLive.Components do
               local_install={@local_install}
               meetings_form={@meetings_form}
               meetbot_install={@meetbot_install}
+              meetbot_signin={@meetbot_signin}
               meetings_config_open?={@meetings_config_open?}
               skill_summary={@skill_summary}
               tabs={@tabs}
@@ -273,6 +275,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :local_install, :map, default: nil
   attr :meetings_form, :map, required: true
   attr :meetbot_install, :map, default: nil
+  attr :meetbot_signin, :map, default: nil
   attr :meetings_config_open?, :boolean, default: false
   attr :skill_summary, :map, required: true
   attr :tabs, :list, required: true
@@ -1236,6 +1239,7 @@ defmodule FermixWebWeb.SetupLive.Components do
         open?={@meetings_config_open?}
         meetings_form={@meetings_form}
         meetbot_install={@meetbot_install}
+        meetbot_signin={@meetbot_signin}
       />
 
       <.step_actions active_tab={@active_tab} tabs={@tabs} />
@@ -1747,6 +1751,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :open?, :boolean, required: true
   attr :meetings_form, :map, required: true
   attr :meetbot_install, :map, default: nil
+  attr :meetbot_signin, :map, default: nil
 
   defp meetings_config_modal(%{open?: false} = assigns), do: ~H""
 
@@ -1793,10 +1798,7 @@ defmodule FermixWebWeb.SetupLive.Components do
               checked={@meetings_form.enabled}
               hint="Installs the notetaker on first enable · restart to apply."
             />
-            <.install_banner state={@meetbot_install} />
-            <p class={meetbot_state_class(@meetings_form.sidecar_installed?)}>
-              {meetbot_state_message(@meetings_form.sidecar_installed?)}
-            </p>
+            <.install_banner :if={transient_status?(@meetbot_install)} state={@meetbot_install} />
 
             <.text_input
               label="Display name"
@@ -1833,6 +1835,7 @@ defmodule FermixWebWeb.SetupLive.Components do
                     Joins as a signed-in bot account
                   </span>
                 </span>
+                <.status_pill status={meet_readiness_status(@meetings_form)} />
                 <.icon
                   name="hero-chevron-right"
                   class="size-4 text-base-content/40 transition group-open:rotate-90"
@@ -1841,11 +1844,22 @@ defmodule FermixWebWeb.SetupLive.Components do
               <div class="space-y-3 border-t border-base-300 px-3 pb-3 pt-3">
                 <p class="text-xs text-base-content/70">
                   The bot signs in once with its own Google account, then joins by knocking like
-                  any guest — only the meeting URL crosses the wire.
+                  any guest — only the meeting URL crosses the wire. Add its email to a meeting's
+                  invite and it skips the waiting room. Google Meet won't work until the bot is
+                  signed in.
                 </p>
-                <button type="button" class="btn btn-outline btn-xs" disabled>
-                  Sign the bot in — ships with the notetaker release
+                <button
+                  type="button"
+                  class="btn btn-outline btn-xs"
+                  phx-click="meetbot_signin"
+                  disabled={not @meetings_form.sidecar_installed? or signin_running?(@meetbot_signin)}
+                >
+                  {if @meetings_form.signed_in?, do: "Sign in again", else: "Sign the bot in"}
                 </button>
+                <p :if={not @meetings_form.sidecar_installed?} class="text-xs text-base-content/55">
+                  Enable the notetaker above to install it first, then sign the bot in here.
+                </p>
+                <.install_banner :if={transient_status?(@meetbot_signin)} state={@meetbot_signin} />
               </div>
             </details>
 
@@ -1935,6 +1949,23 @@ defmodule FermixWebWeb.SetupLive.Components do
     form.zoom_account_id != "" or form.zoom_client_id != "" or form.zoom_client_secret_set or
       form.zoom_ws_subscription_id != ""
   end
+
+  defp signin_running?(%{running?: true}), do: true
+  defp signin_running?(_state), do: false
+
+  # The Meet lane's real readiness, in one place: installed alone is NOT ready —
+  # a signed-in bot account is what lets it join, so the honest in-between state
+  # is amber, never a green "installed".
+  defp meet_readiness_status(%{sidecar_installed?: false}), do: :not_installed
+  defp meet_readiness_status(%{signed_in?: true}), do: :ready
+  defp meet_readiness_status(_form), do: :needs_signin
+
+  # An install/sign-in banner is transient: the spinner while it runs and the
+  # error if it fails, never a permanent success line — the readiness pill owns
+  # the at-rest state.
+  defp transient_status?(%{running?: true}), do: true
+  defp transient_status?(%{kind: :error}), do: true
+  defp transient_status?(_state), do: false
 
   # The Meeting Notetaker mark in the Fermix logo language (blue screen + two
   # participants) — mirrors setup_live/meetings_logo.svg for the modal header.
@@ -3894,14 +3925,6 @@ defmodule FermixWebWeb.SetupLive.Components do
   defp local_state_class(:ok), do: "text-sm text-success"
   defp local_state_class({:error, _reason}), do: "text-sm text-warning"
 
-  defp meetbot_state_message(true), do: "Google Meet notetaker installed."
-
-  defp meetbot_state_message(false),
-    do: "Google Meet notetaker not installed — the Zoom lane below works without it."
-
-  defp meetbot_state_class(true), do: "text-sm text-success"
-  defp meetbot_state_class(false), do: "text-sm text-base-content/60"
-
   defp meetings_backend_label(""), do: "Global default"
   defp meetings_backend_label(name), do: name
 
@@ -3987,6 +4010,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   # rendering as a grey "Unknown". Warning, not error — each has a fix.
   def status_pill_class(:missing_host_runtime), do: "badge badge-warning badge-sm"
   def status_pill_class(:not_installed), do: "badge badge-warning badge-sm"
+  def status_pill_class(:needs_signin), do: "badge badge-warning badge-sm"
   # Remote MCP runtimes (M27 §12 Stage 3). Warning where the operator can act,
   # error where the connection/contract is refused until something upstream or
   # in the artifact changes.
@@ -4017,6 +4041,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   def status_pill_label(:incompatible), do: "Incompatible"
   def status_pill_label(:missing_host_runtime), do: "Needs runtime"
   def status_pill_label(:not_installed), do: "Not installed"
+  def status_pill_label(:needs_signin), do: "Sign-in needed"
   def status_pill_label(:needs_workspace), do: "Needs workspace"
   def status_pill_label(:insufficient_credential_scope), do: "Insufficient scope"
   def status_pill_label(:invalid_remote_config), do: "Invalid config"

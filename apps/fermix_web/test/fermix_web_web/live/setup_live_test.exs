@@ -135,6 +135,7 @@ defmodule FermixWebWeb.SetupLiveTest do
     computer_use_grant_impl = Application.get_env(:fermix_web, :computer_use_grant_impl)
     local_installer = Application.get_env(:fermix_web, :local_installer)
     meetbot_installer = Application.get_env(:fermix_web, :meetbot_installer)
+    meetbot_signin_runner = Application.get_env(:fermix_web, :meetbot_signin_runner)
     harness_detector = Application.get_env(:fermix_web, :harness_detector)
     harness = Application.get_env(:fermix_core, :harness, [])
     mobile = Application.fetch_env(:fermix_channels, :mobile)
@@ -190,6 +191,7 @@ defmodule FermixWebWeb.SetupLiveTest do
     Application.delete_env(:fermix_web, :computer_use_grant_impl)
     Application.delete_env(:fermix_web, :local_installer)
     Application.delete_env(:fermix_web, :meetbot_installer)
+    Application.delete_env(:fermix_web, :meetbot_signin_runner)
     # Hermetic harness detection: never spawn the real codex/claude `--version`
     # subprocesses at mount. Tests that exercise the card override this seam.
     Application.put_env(:fermix_web, :harness_detector, fn -> harness_detections(false, false) end)
@@ -215,6 +217,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       restore_env(:fermix_web, :computer_use_grant_impl, computer_use_grant_impl)
       restore_env(:fermix_web, :local_installer, local_installer)
       restore_env(:fermix_web, :meetbot_installer, meetbot_installer)
+      restore_env(:fermix_web, :meetbot_signin_runner, meetbot_signin_runner)
       restore_env(:fermix_web, :harness_detector, harness_detector)
       Application.put_env(:fermix_core, :harness, harness)
       restore_env(:fermix_channels, :mobile, mobile)
@@ -1855,6 +1858,19 @@ defmodule FermixWebWeb.SetupLiveTest do
     view |> element(~s|button[phx-click="open_meetings_config"]|) |> render_click()
   end
 
+  # A dev_local meetbot binary makes `SidecarInstaller.installed?/0` true without
+  # a download, so the sign-in button is enabled and the Meet lane leaves the
+  # "Not installed" state.
+  defp install_dev_local_meetbot(home) do
+    {:ok, target} = FermixCore.Meetings.SidecarInstaller.target()
+    dev_local = Path.join(home, "dev-local")
+    binary = Path.join([dev_local, "meetbot_sidecar", "bin", target, "fermix-meetbot"])
+    File.mkdir_p!(Path.dirname(binary))
+    File.write!(binary, "#!/bin/sh\n")
+    File.chmod!(binary, 0o755)
+    Application.put_env(:fermix_core, :plugins, dev_local: dev_local)
+  end
+
   describe "Meetings form (M21 phase 3)" do
     # A release is pinned, so enabling would download the meetbot binary; these
     # tests drive the UI, so default the seam to the fail-loud refusal (tests that
@@ -1894,10 +1910,59 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert html =~ "RTMS reaches only meetings hosted by your Zoom account"
       assert html =~ "Blank uses the built-in consent line"
 
-      # Bot sign-in ships with the notetaker release — a disabled affordance, never
-      # a dead button that silently does nothing.
-      assert html =~ "ships with the notetaker release"
-      refute html =~ "phx-click=\"meetbot_signin\""
+      # Bot sign-in is a real button. With no sidecar installed it is disabled and
+      # the Meet lane reads "Not installed" — never a green "installed = ready".
+      assert html =~ ~s(phx-click="meetbot_signin")
+      assert html =~ "Sign the bot in"
+      assert html =~ "Enable the notetaker above to install it first"
+      assert html =~ "Not installed"
+      refute html =~ "Google Meet notetaker installed."
+    end
+
+    test "an installed-but-not-signed-in Meet lane shows Sign-in needed, not a green ready state",
+         %{conn: conn} do
+      home = System.get_env("FERMIX_HOME")
+      install_dev_local_meetbot(home)
+
+      {:ok, view, _html} = live(conn, "/setup")
+      html = open_meetings_config(view)
+
+      # The amber pill is the honest in-between state — installed is not ready.
+      assert html =~ "Sign-in needed"
+      assert html =~ "skips the waiting room"
+      # The sign-in button is enabled (no disabled attribute on it) once installed.
+      refute html =~ ~r/phx-click="meetbot_signin"[^>]*\sdisabled/
+    end
+
+    test "clicking sign-in runs the flow and flips the Meet lane to ready", %{conn: conn} do
+      home = System.get_env("FERMIX_HOME")
+      install_dev_local_meetbot(home)
+      Application.put_env(:fermix_web, :meetbot_signin_runner, fn -> {:ok, :signed_in} end)
+
+      {:ok, view, _html} = live(conn, "/setup")
+      open_meetings_config(view)
+      view |> element(~s|button[phx-click="meetbot_signin"]|) |> render_click()
+      html = render_async(view)
+
+      # Success shows as the readiness flipping and the button offering a re-sign,
+      # not as a green "installed" claim.
+      assert html =~ "Sign in again"
+      refute html =~ "Sign-in needed"
+    end
+
+    test "a cancelled sign-in reports it honestly", %{conn: conn} do
+      home = System.get_env("FERMIX_HOME")
+      install_dev_local_meetbot(home)
+      Application.put_env(:fermix_web, :meetbot_signin_runner, fn -> {:error, :cancelled} end)
+
+      {:ok, view, _html} = live(conn, "/setup")
+      open_meetings_config(view)
+      view |> element(~s|button[phx-click="meetbot_signin"]|) |> render_click()
+      html = render_async(view)
+
+      assert html =~ "cancelled"
+      # Still not signed in after a cancel.
+      assert html =~ "Sign-in needed"
     end
 
     test "enabling refuses loud with the unpinned-release copy verbatim", %{conn: conn} do

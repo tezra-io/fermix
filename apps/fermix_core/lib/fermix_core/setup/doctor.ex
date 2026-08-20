@@ -106,7 +106,7 @@ defmodule FermixCore.Setup.Doctor do
               :ready? => boolean(),
               :sidecar_installed? => boolean(),
               :pinned_tag => String.t() | nil,
-              :profile => :present | :absent,
+              :profile => :signed_in | :not_signed_in | :absent,
               :profile_note => String.t(),
               :rtms_configured? => boolean(),
               :remedy => String.t() | nil
@@ -157,11 +157,14 @@ defmodule FermixCore.Setup.Doctor do
                           "Install it from fermix setup → Transcription."
   @local_model_remedy "The on-device speech model is not installed. " <>
                         "Install it from fermix setup → Transcription."
-  # C2 §4.5 verbatim. Presence is all the daemon may know: it never reads inside
-  # the profile, so it cannot tell a signed-in profile from an empty one.
-  @meet_profile_present "profile: present (signed-in state unknown until next join)"
-  @meet_profile_absent "profile: absent — first Meet join will be anonymous (degraded); " <>
-                         "sign the bot account in via fermix setup → Meetings → \"Open bot sign-in\""
+  # The daemon never reads inside the profile; it knows only whether a sign-in
+  # finished (a marker `SidecarInstaller` writes) and whether the profile it
+  # wrote still exists.
+  @meet_signed_in "bot signed in ✓ — Google Meet joins use the bot account"
+  @meet_not_signed_in "bot not signed in — Google Meet joins are denied until you " <>
+                        "sign the bot in from fermix setup → Meetings → Google Meet"
+  @meet_profile_absent "bot not signed in — Google Meet joins will be denied; sign the " <>
+                         "bot account in from fermix setup → Meetings → Google Meet"
   @meetings_no_lane "No meeting lane is usable. Install the meetbot sidecar from " <>
                       "fermix setup → Meetings, or complete the Zoom RTMS credentials there."
 
@@ -625,10 +628,15 @@ defmodule FermixCore.Setup.Doctor do
   end
 
   defp meet_profile_state do
-    if File.dir?(MeetbotInstaller.profile_dir()), do: :present, else: :absent
+    cond do
+      MeetbotInstaller.signed_in?() -> :signed_in
+      File.dir?(MeetbotInstaller.profile_dir()) -> :not_signed_in
+      true -> :absent
+    end
   end
 
-  defp meet_profile_note(:present), do: @meet_profile_present
+  defp meet_profile_note(:signed_in), do: @meet_signed_in
+  defp meet_profile_note(:not_signed_in), do: @meet_not_signed_in
   defp meet_profile_note(:absent), do: @meet_profile_absent
 
   # Neither lane is ready: install the meetbot from setup, or configure Zoom RTMS.

@@ -20,6 +20,7 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.Meetings
   alias FermixCore.Meetings.Config, as: MeetingsConfig
   alias FermixCore.Meetings.SidecarInstaller, as: MeetbotInstaller
+  alias FermixCore.Meetings.SignIn
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Plugins.Auth, as: PluginAuth
   alias FermixCore.Plugins.Catalog, as: PluginCatalog
@@ -93,6 +94,10 @@ defmodule FermixWebWeb.SetupLive do
   @local_ready_message "On-device speech is installed and ready."
   @meetbot_installing_message "Downloading the meeting notetaker…"
   @meetbot_ready_message "The meeting notetaker is installed."
+  @meetbot_signin_running_message "A browser window is opening — sign the bot's Google account in there, and it closes when done."
+  @meetbot_signin_done_message "The bot is signed in. Google Meet joins can use its account now."
+  @meetbot_signin_cancelled_message "Sign-in was cancelled — the window closed before the account signed in."
+  @meetbot_signin_timeout_message "Sign-in timed out. Open it again and complete the Google sign-in."
   # Providers the per-provider OAuth-client form supports — mirrors
   # FermixCore.Auth.OAuthProviders. Default ports: google 1455, github 1457,
   # notion 1458, x 1459, slack 1460.
@@ -192,6 +197,7 @@ defmodule FermixWebWeb.SetupLive do
       |> assign(:plugin_install_tasks, %{})
       |> assign(:local_install, nil)
       |> assign(:meetbot_install, nil)
+      |> assign(:meetbot_signin, nil)
       |> assign(:oauth_modal, nil)
       |> assign(:resource_picker, nil)
       |> assign(:computer_history_picker, nil)
@@ -567,6 +573,27 @@ defmodule FermixWebWeb.SetupLive do
     {:noreply, save_meetings(socket, [enabled: true], nil)}
   end
 
+  # Opens the meetbot's headed browser so the operator signs the bot's Google
+  # account in. A no-op while one is already running or if the sidecar isn't
+  # installed yet (the button is disabled in that case — this is belt).
+  def handle_event("meetbot_signin", _params, socket) do
+    cond do
+      installing?(socket.assigns.meetbot_signin) ->
+        {:noreply, socket}
+
+      not MeetbotInstaller.installed?() ->
+        {:noreply, socket}
+
+      true ->
+        runner = meetbot_signin_runner()
+
+        {:noreply,
+         socket
+         |> assign(:meetbot_signin, installing(@meetbot_signin_running_message))
+         |> start_async(:meetbot_signin, runner)}
+    end
+  end
+
   def handle_event("disable_meetings", _params, socket) do
     {:noreply, save_meetings(socket, [enabled: false], nil)}
   end
@@ -885,6 +912,25 @@ defmodule FermixWebWeb.SetupLive do
     {:noreply, assign(socket, :meetbot_install, failed(meetbot_install_error(reason)))}
   end
 
+  def handle_async(:meetbot_signin, {:ok, {:ok, :signed_in}}, socket) do
+    # The flow returning :signed_in IS the truth (it wrote the marker itself);
+    # reflect it without re-reading, so the readiness pill flips immediately.
+    form = %{socket.assigns.meetings_form | signed_in?: true}
+
+    {:noreply,
+     socket
+     |> assign(:meetbot_signin, done(@meetbot_signin_done_message))
+     |> assign(:meetings_form, form)}
+  end
+
+  def handle_async(:meetbot_signin, {:ok, {:error, reason}}, socket) do
+    {:noreply, assign(socket, :meetbot_signin, failed(meetbot_signin_error(reason)))}
+  end
+
+  def handle_async(:meetbot_signin, {:exit, reason}, socket) do
+    {:noreply, assign(socket, :meetbot_signin, failed(meetbot_signin_error(reason)))}
+  end
+
   @impl true
   def render(assigns) do
     ~H"""
@@ -925,6 +971,7 @@ defmodule FermixWebWeb.SetupLive do
       local_install={@local_install}
       meetings_form={@meetings_form}
       meetbot_install={@meetbot_install}
+      meetbot_signin={@meetbot_signin}
       meetings_config_open?={@meetings_config_open?}
       saved_flash={@saved_flash}
       skill_summary={@skill_summary}
@@ -1565,7 +1612,8 @@ defmodule FermixWebWeb.SetupLive do
       zoom_client_id: safe_string(Keyword.get(meetings, :zoom_client_id)),
       zoom_ws_subscription_id: safe_string(Keyword.get(meetings, :zoom_ws_subscription_id)),
       zoom_client_secret_set: secret_set?(meetings, :zoom_client_secret),
-      sidecar_installed?: MeetbotInstaller.installed?()
+      sidecar_installed?: MeetbotInstaller.installed?(),
+      signed_in?: MeetbotInstaller.signed_in?()
     }
   end
 
@@ -1664,6 +1712,21 @@ defmodule FermixWebWeb.SetupLive do
 
   defp meetbot_install_error(reason),
     do: "Meeting notetaker install failed: #{Redaction.format(reason)}"
+
+  # Injectable so a LiveView test never launches a real browser (mirrors the
+  # `:meetbot_installer` seam). Defaults to the real headed sign-in flow.
+  defp meetbot_signin_runner do
+    Application.get_env(:fermix_web, :meetbot_signin_runner, &SignIn.run/0)
+  end
+
+  defp meetbot_signin_error(:cancelled), do: @meetbot_signin_cancelled_message
+  defp meetbot_signin_error(:timeout), do: @meetbot_signin_timeout_message
+
+  defp meetbot_signin_error(:not_installed),
+    do: "Enable the meeting notetaker first — it installs the sidecar the sign-in needs."
+
+  defp meetbot_signin_error(reason),
+    do: "Sign-in failed: #{Redaction.format(reason)}"
 
   # Choosing the on-device backend is the install trigger (§2b: nothing downloads
   # at boot, and hand-editing config.toml installs nothing). Already-installed

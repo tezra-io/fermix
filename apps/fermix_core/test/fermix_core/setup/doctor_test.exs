@@ -1336,7 +1336,7 @@ defmodule FermixCore.Setup.DoctorTest do
                status: :enabled,
                ready?: false,
                sidecar_installed?: false,
-               pinned_tag: "v0.1.0",
+               pinned_tag: "v0.2.0",
                profile: :absent,
                rtms_configured?: false,
                remedy: remedy
@@ -1347,12 +1347,12 @@ defmodule FermixCore.Setup.DoctorTest do
       assert remedy =~ "fermix setup"
     end
 
-    test "an absent profile warns that the first Meet join would be anonymous" do
+    test "an absent profile warns that Meet joins are denied until the bot signs in" do
       Application.put_env(:fermix_core, :meetings, enabled: true)
 
       assert %{profile: :absent, profile_note: note} = Doctor.meetings_report()
 
-      assert note =~ "anonymous"
+      assert note =~ "not signed in"
       assert note =~ "sign the bot account in"
     end
 
@@ -1368,7 +1368,7 @@ defmodule FermixCore.Setup.DoctorTest do
       assert %{ready?: true, rtms_configured?: true, remedy: nil} = Doctor.meetings_report()
     end
 
-    test "an installed sidecar and an existing profile report the Meet lane as usable", ctx do
+    test "an installed sidecar with a profile but no sign-in is reported not signed in", ctx do
       Application.put_env(:fermix_core, :meetings, enabled: true)
       install_fake_meetbot_sidecar(ctx.home)
       File.mkdir_p!(FermixCore.Meetings.SidecarInstaller.profile_dir())
@@ -1376,12 +1376,24 @@ defmodule FermixCore.Setup.DoctorTest do
       assert %{
                ready?: true,
                sidecar_installed?: true,
-               profile: :present,
+               profile: :not_signed_in,
                profile_note: note,
                remedy: nil
              } = Doctor.meetings_report()
 
-      assert note =~ "signed-in state unknown"
+      assert note =~ "not signed in"
+    end
+
+    test "a completed sign-in reports the Meet lane as ready to use", ctx do
+      Application.put_env(:fermix_core, :meetings, enabled: true)
+      install_fake_meetbot_sidecar(ctx.home)
+      profile = FermixCore.Meetings.SidecarInstaller.profile_dir()
+      File.mkdir_p!(profile)
+      File.write!(Path.join(profile, "Cookies"), "x")
+      :ok = FermixCore.Meetings.SidecarInstaller.mark_signed_in()
+
+      assert %{profile: :signed_in, profile_note: note} = Doctor.meetings_report()
+      assert note =~ "signed in ✓"
     end
   end
 
