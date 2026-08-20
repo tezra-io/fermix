@@ -6,13 +6,14 @@ defmodule FermixCore.Meetings.SidecarInstaller do
 
       bin/<tag>/fermix-meetbot   the downloaded, sha256-verified executable
       profile/                   the Chromium profile holding the bot's signed-in state
+      signed_in                  a marker that the interactive sign-in succeeded
 
   **fermix pins the checksums.** Unlike the compux sidecar — whose Elixir
   library half carries its own `checksum-compux.exs` — meetbot is a Node
   artifact with no library to own the pin, so the release choreography ends in
   a PR against `@releases` here (tag → notarized artifacts → checksum PR →
-  pin). Until the first `fermix-meetbot` release exists both tables are empty
-  and `install/1` refuses loud rather than downloading something unpinned.
+  pin). `v0.2.0` is pinned for `macos-aarch64`; a target with no pin refuses
+  loud rather than downloading something unpinned.
 
   Resolution prefers a `dev_local` build (the sidecar-author loop) so a locally
   built binary can be driven without a release. `binary_path/0` and
@@ -30,16 +31,22 @@ defmodule FermixCore.Meetings.SidecarInstaller do
   @plugin_name "meetbot_sidecar"
   @repo "tezra-io/fermix-meetbot"
 
-  # tag => %{target => sha256}. Pinned to the released tag per target (v0.1.0
+  # tag => %{target => sha256}. Pinned to the released tag per target (v0.2.0
   # ships macos-aarch64; other targets land as CI builds them). A pin is never
   # hand-written — it lands with the release choreography. An unpinned target
   # refuses via `@no_pinned_release_message`.
   @releases %{
-    "v0.1.0" => %{
-      "macos-aarch64" => "eafde250b376a094023f8f8ec5a2126e207c18cff1d48640a18e932dec8f23ab"
+    "v0.2.0" => %{
+      "macos-aarch64" => "f51f9e6ee147435d8960a54cca08d8f3d87025e56c3bb877526d4e86cb16e561"
     }
   }
-  @pinned_tag "v0.1.0"
+  @pinned_tag "v0.2.0"
+
+  # A sibling of `bin/` and `profile/` recording that an interactive sign-in
+  # succeeded. It lives OUTSIDE the profile because the daemon never reads
+  # inside the profile — it only ever asks "did a sign-in finish", not "what is
+  # in the browser store".
+  @signed_in_marker "signed_in"
 
   @no_pinned_release_message "No meetbot sidecar release is pinned in this fermix build yet. " <>
                                "For development, set [fermix_core.plugins] dev_local to a " <>
@@ -116,6 +123,38 @@ defmodule FermixCore.Meetings.SidecarInstaller do
   """
   @spec profile_dir() :: Path.t()
   def profile_dir, do: Path.join(meetbot_root(), "profile")
+
+  @doc """
+  Records that the bot's Google account was signed in. Called by
+  `FermixCore.Meetings.SignIn` after the interactive flow reports success.
+  """
+  @spec mark_signed_in() :: :ok
+  def mark_signed_in do
+    marker = signed_in_marker_path()
+    File.mkdir_p!(Path.dirname(marker))
+    File.write!(marker, DateTime.to_iso8601(DateTime.utc_now()))
+  end
+
+  @doc """
+  True when a sign-in has completed and the profile it wrote still exists.
+
+  Both halves matter: the marker without a profile (someone deleted the browser
+  store) is not signed in, and a profile without the marker is a bare install
+  that never signed in. Never reads inside the profile.
+  """
+  @spec signed_in?() :: boolean()
+  def signed_in? do
+    File.regular?(signed_in_marker_path()) and profile_present?()
+  end
+
+  defp profile_present? do
+    case File.ls(profile_dir()) do
+      {:ok, [_ | _]} -> true
+      _empty_or_error -> false
+    end
+  end
+
+  defp signed_in_marker_path, do: Path.join(meetbot_root(), @signed_in_marker)
 
   defp install_pinned(tag, releases, opts) do
     with {:ok, target} <- target(),

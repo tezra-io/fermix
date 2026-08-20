@@ -53,7 +53,7 @@ defmodule FermixCore.Meetings.SidecarInstallerTest do
   end
 
   test "the shipped build pins a release tag" do
-    assert SidecarInstaller.pinned_tag() == "v0.1.0"
+    assert SidecarInstaller.pinned_tag() == "v0.2.0"
   end
 
   describe "install/1 with no pinned release" do
@@ -151,5 +151,35 @@ defmodule FermixCore.Meetings.SidecarInstallerTest do
     File.write!(path, "#!/bin/sh\n")
     File.chmod!(path, mode)
     path
+  end
+
+  describe "signed_in?/0 and mark_signed_in/0" do
+    test "a fresh install is not signed in", %{home: _home} do
+      refute SidecarInstaller.signed_in?()
+    end
+
+    test "the marker alone is not enough — the profile must exist too", %{home: home} do
+      :ok = SidecarInstaller.mark_signed_in()
+      refute SidecarInstaller.signed_in?(), "marker without a profile is not signed in"
+
+      # A populated profile beside the marker is signed in.
+      profile = Path.join([home, "plugins", "meetbot", "profile"])
+      File.mkdir_p!(profile)
+      File.write!(Path.join(profile, "Cookies"), "x")
+      assert SidecarInstaller.signed_in?()
+    end
+
+    test "a profile without the marker is a bare install, not signed in", %{home: home} do
+      profile = Path.join([home, "plugins", "meetbot", "profile"])
+      File.mkdir_p!(profile)
+      File.write!(Path.join(profile, "Cookies"), "x")
+      refute SidecarInstaller.signed_in?()
+    end
+
+    test "the marker lives beside the profile, never inside it", %{home: home} do
+      :ok = SidecarInstaller.mark_signed_in()
+      assert File.regular?(Path.join([home, "plugins", "meetbot", "signed_in"]))
+      refute File.exists?(Path.join([home, "plugins", "meetbot", "profile", "signed_in"]))
+    end
   end
 end
