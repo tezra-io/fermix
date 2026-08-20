@@ -483,6 +483,196 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert Keyword.get(computer_history, :summarizer) == :local
   end
 
+  # 2026-08-19 regression: setup's save serialized the LIVE app-env atoms back to
+  # TOML verbatim — `summarizer: :default_provider` became `"default_provider"`,
+  # a spelling the parser rightly refuses, so the very next load crashed the
+  # daemon (and a Tier-3 provider atom or remote_summaries atoms crashed the
+  # save itself). Disk holds TOML spellings, env holds atoms; to_keyword/1 is
+  # the mapping. The atom shapes here ARE what the live env holds.
+  test "save/load round-trip survives every normalized (app-env atom) summarizer shape" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    cases = [
+      {:default_provider, ~s(summarizer = "default"), :default_provider},
+      {:anthropic, ~s(summarizer = "anthropic"), {:tier3, :anthropic}},
+      {:local, ~s(summarizer = "local"), :local}
+    ]
+
+    for {env_value, toml_line, _tag} <- cases do
+      snapshot = %{
+        fermix_core: [
+          computer_history: [
+            enabled: true,
+            apps: ["com.apple.Safari"],
+            remote_summaries: [:anthropic],
+            summarizer: env_value
+          ]
+        ],
+        fermix_channels: [],
+        fermix_web: []
+      }
+
+      assert :ok = ConfigStore.save_snapshot(snapshot)
+
+      contents = File.read!(Path.join(tmp_home, "config.toml"))
+      assert contents =~ toml_line
+      # The internal atom spelling must never reach disk.
+      refute contents =~ "default_provider"
+      assert contents =~ ~s(remote_summaries = ["anthropic"])
+
+      assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+      computer_history = Keyword.get(loaded.fermix_core, :computer_history, [])
+      assert Keyword.get(computer_history, :summarizer) == env_value
+      assert Keyword.get(computer_history, :remote_summaries) == [:anthropic]
+    end
+  end
+
+  # The whole-snapshot round-trip gate (Known Pitfalls, 2026-08-19): a section
+  # whose normalize maps TOML spellings to internal shapes one-way, with no
+  # to_keyword inverse on the persist path, ships a latent parse-refusal — the
+  # computer_history `summarizer: :default_provider` atom rendered verbatim as
+  # `"default_provider"` and crashed the daemon on the next load. This gate makes
+  # the class mechanical: parse a maximal config (the parsed shapes ARE what the
+  # app env holds for verbatim-apply sections), save that snapshot exactly as
+  # setup does, load again, and demand a fixed point. A future section either
+  # joins the fixture (the completeness check below fails naming it) or its
+  # one-way normalizer fails the equality/raise here instead of in production.
+  #
+  # oauth/plugin_secrets are excluded: they carry secrets whose save-time keyring
+  # canonicalization (plaintext -> "@keyring") legitimately breaks byte equality;
+  # their round-trips are covered by the dedicated secret tests in this file.
+  @roundtrip_skip_sections [:oauth, :plugin_secrets]
+
+  @roundtrip_toml """
+  [fermix_core]
+  profile = "general"
+
+  [fermix_core.providers.openai_codex]
+  primary = true
+  reasoning_effort = "high"
+  default_model = "gpt-5.6-terra"
+  fast = false
+
+  [fermix_core.providers.ollama]
+  base_url = "http://localhost:11434/v1"
+  default_model = "qwen3:8b"
+
+  [fermix_core.personalization]
+  user_name = "sujeeth"
+  timezone = "America/New_York"
+  communication_style = "direct"
+
+  [fermix_core.agent]
+  name = "fermi"
+
+  [fermix_core.jobs]
+  network_readiness_enabled = true
+
+  [fermix_core.routing]
+  subagent_model = "gpt-5.4-mini"
+
+  [fermix_core.compaction]
+  threshold = 0.85
+
+  [fermix_core.harness]
+  enabled = true
+  approved = true
+  default_vendor = "claude"
+
+  [fermix_core.browser]
+  allowed_hosts = ["example.com"]
+
+  [fermix_core.skill_curation]
+  enabled = true
+
+  [fermix_core.memory]
+  review_interval_hours = 24
+
+  [fermix_core.realtime]
+  enabled = true
+  provider = "openai"
+  model = "gpt-realtime-2.1"
+  reasoning_effort = "medium"
+  voice = "marin"
+  max_session_minutes = 15
+
+  [fermix_core.computer_use]
+  enabled = true
+  display = 0
+  screenshot_after = true
+  max_actions = 40
+  max_retained_screenshots = 3
+  courtesy = "yield"
+  courtesy_idle_ms = 1000
+
+  [fermix_core.computer_history]
+  enabled = true
+  apps = ["com.apple.Safari"]
+  sites = ["github.com"]
+  remote_summaries = ["anthropic"]
+  summarizer = "default"
+
+  [fermix_core.transcription]
+  backend = "openai"
+  model = "gpt-4o-mini-transcribe"
+  max_file_mb = 20
+
+  [fermix_core.meetings]
+  enabled = false
+  bot_name = "Fermi Notetaker"
+
+  [fermix_core.tools.web_search]
+  backend = "duckduckgo"
+
+  [fermix_core.tools.tool_search]
+  enabled = true
+
+  [fermix_core.tools.generate_image]
+  backend = "openai"
+  model = "gpt-image-2"
+
+  [fermix_core.plugins]
+  dev_local = "/tmp/fermix-dev-local"
+  """
+
+  test "whole-snapshot save/load is a fixed point over every config section (round-trip gate)" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+    File.write!(Path.join(tmp_home, "config.toml"), @roundtrip_toml)
+
+    assert {:ok, first} = ConfigStore.load_runtime_config(resolve_secrets: false)
+
+    # Completeness is derived from the parse output's own roster, so a section
+    # added later cannot silently sit out of this gate: it either gets fixture
+    # coverage or this assertion names it.
+    for {key, value} <- first.fermix_core, key not in @roundtrip_skip_sections do
+      exercised? =
+        case {key, value} do
+          {:providers, providers} -> Enum.any?(providers, fn {_id, block} -> block != [] end)
+          {_key, v} -> v != [] and v != %{} and not is_nil(v)
+        end
+
+      assert exercised?,
+             "config section #{inspect(key)} is not exercised by @roundtrip_toml; " <>
+               "extend the fixture so the save→load round-trip gate covers it"
+    end
+
+    # Save exactly as setup does (the live snapshot), then reload: any section
+    # whose persist path renders an internal shape the parser refuses raises
+    # here; any silent respelling breaks the equality.
+    assert :ok = ConfigStore.save_snapshot(first)
+    assert {:ok, second} = ConfigStore.load_runtime_config(resolve_secrets: false)
+    assert second == first
+  end
+
   test "load refuses to boot on an unknown computer_history key (M32)" do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
