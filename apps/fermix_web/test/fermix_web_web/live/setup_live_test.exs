@@ -107,7 +107,8 @@ defmodule FermixWebWeb.SetupLiveTest do
           source_id,
           generation,
           :upstream_contract_mismatch,
-          :descriptor_changed
+          :descriptor_changed,
+          "eden_read_card"
         )
 
       {:ok, owner}
@@ -1835,7 +1836,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert render(view) =~ "Downloading the speech model…"
     end
 
-    test "a successful install reports ready and stops offering to install again",
+    test "install shows transient progress, not a lingering installed line",
          %{conn: conn} do
       Application.put_env(:fermix_web, :local_installer, fn _opts -> :ok end)
 
@@ -1843,11 +1844,17 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       view |> element("button[phx-value-tab=\"transcription\"]") |> render_click()
 
-      view
-      |> form("form[phx-submit=\"save_transcription\"]", transcription_form: %{backend: "local"})
-      |> render_change()
+      html =
+        view
+        |> form("form[phx-submit=\"save_transcription\"]",
+          transcription_form: %{backend: "local"}
+        )
+        |> render_change()
 
-      assert render_async(view) =~ "On-device speech is installed and ready."
+      # Progress shows while installing; the finished state is the card itself,
+      # not a persistent success banner cluttering the page.
+      assert html =~ "Installing on-device speech…"
+      refute render_async(view) =~ "On-device speech is installed and ready."
     end
 
     test "saving the on-device backend persists it with no model key", %{
@@ -2010,18 +2017,21 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert render_async(view) =~ escaped(MeetbotInstaller.error_message(:no_pinned_release))
     end
 
-    test "a saved enable installs the notetaker once and reports it", %{conn: conn} do
+    test "a saved enable installs the notetaker with only transient progress", %{conn: conn} do
       Application.put_env(:fermix_web, :meetbot_installer, fn -> {:ok, "/tmp/fermix-meetbot"} end)
 
       {:ok, view, _html} = live(conn, "/setup")
 
       open_meetings_config(view)
 
-      view
-      |> form("form[phx-submit=\"save_meetings\"]", meetings_form: %{enabled: "true"})
-      |> render_submit()
+      html =
+        view
+        |> form("form[phx-submit=\"save_meetings\"]", meetings_form: %{enabled: "true"})
+        |> render_submit()
 
-      assert render_async(view) =~ "The meeting notetaker is installed."
+      # Progress shows while installing; no persistent "installed" line after.
+      assert html =~ "Downloading the meeting notetaker…"
+      refute render_async(view) =~ "The meeting notetaker is installed."
     end
 
     test "saving with the toggle off never runs the installer", %{conn: conn} do
@@ -4207,6 +4217,10 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert html =~ ~s(id="resource-picker")
       assert html =~ "Could not select that workspace"
       assert html =~ "upstream_contract_mismatch"
+      # The operator's actual question is WHICH capability, and the modal is the
+      # surface they are looking at when they ask it. Rendered by the same
+      # resolver the daemon log and `fermix doctor` use.
+      assert html =~ "upstream_contract_mismatch/descriptor_changed (eden_read_card)"
       assert html =~ "Alpha"
       refute html =~ "Workspace selected."
     end
