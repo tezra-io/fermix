@@ -1857,7 +1857,7 @@ defmodule FermixWebWeb.SetupLive.Components do
                   {if @meetings_form.signed_in?, do: "Sign in again", else: "Sign the bot in"}
                 </button>
                 <p :if={not @meetings_form.sidecar_installed?} class="text-xs text-base-content/55">
-                  Enable the notetaker above to install it first, then sign the bot in here.
+                  {meetbot_signin_hint(@meetings_form.enabled)}
                 </p>
                 <.install_banner :if={transient_status?(@meetbot_signin)} state={@meetbot_signin} />
               </div>
@@ -3927,6 +3927,15 @@ defmodule FermixWebWeb.SetupLive.Components do
 
   defp meetings_backend_label(""), do: "Global default"
   defp meetings_backend_label(name), do: name
+
+  # Shown under the disabled sign-in button when the sidecar is not installed.
+  # If the notetaker is already enabled, opening this panel starts (or resumes)
+  # the install, so the honest state is "installing", not "enable it first".
+  defp meetbot_signin_hint(true),
+    do: "Installing the notetaker — sign-in unlocks once it's on disk."
+
+  defp meetbot_signin_hint(false),
+    do: "Enable the notetaker above to install it, then sign the bot in here."
 
   defp tab_status(%{component: nil}, _report), do: :ready
   defp tab_status(%{component: "provider:*"}, report), do: status_by_prefix(report, "provider:")

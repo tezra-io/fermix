@@ -659,6 +659,37 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert Keyword.get(Application.get_env(:fermix_core, :meetings, []), :enabled) == true
     end
 
+    test "opening the config while enabled-but-uninstalled resumes the install (version-bump heal)",
+         %{conn: conn} do
+      parent = self()
+      prev = Application.get_env(:fermix_core, :meetings)
+      on_exit(fn -> restore_env(:fermix_core, :meetings, prev) end)
+      # Enabled in config, but the pinned sidecar is not on disk (a fresh tmp
+      # home stands in for the version bump that stranded an older install).
+      Application.put_env(:fermix_core, :meetings, enabled: true)
+
+      Application.put_env(:fermix_web, :meetbot_installer, fn ->
+        send(parent, :meetbot_install_started)
+        {:error, :no_pinned_release}
+      end)
+
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+      html =
+        view
+        |> element(
+          ~s|section[data-feature-name="meetings"] button[phx-click="open_meetings_config"]|
+        )
+        |> render_click()
+
+      # Opening the config — not just enabling — kicks the install, and the hint
+      # under the still-disabled sign-in reads as installing, not "enable first".
+      assert_receive :meetbot_install_started, 500
+      assert html =~ "Installing the notetaker"
+      refute html =~ "Enable the notetaker above"
+    end
+
     test "an enabled meeting-notetaker card offers Disable and Configure, not Enable", %{
       conn: conn
     } do
@@ -1914,7 +1945,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       # the Meet lane reads "Not installed" — never a green "installed = ready".
       assert html =~ ~s(phx-click="meetbot_signin")
       assert html =~ "Sign the bot in"
-      assert html =~ "Enable the notetaker above to install it first"
+      assert html =~ "Enable the notetaker above to install it"
       assert html =~ "Not installed"
       refute html =~ "Google Meet notetaker installed."
     end

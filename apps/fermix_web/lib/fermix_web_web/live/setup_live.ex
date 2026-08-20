@@ -558,7 +558,12 @@ defmodule FermixWebWeb.SetupLive do
   # holds everything the removed Meetings tab did (the same mechanism the
   # computer-history app picker uses).
   def handle_event("open_meetings_config", _params, socket) do
-    {:noreply, assign(socket, :meetings_config_open?, true)}
+    # A notetaker that is enabled but whose pinned sidecar is not on disk — a
+    # fresh enable, or a version bump that stranded an older install — finishes
+    # installing here. Otherwise sign-in stays disabled with no way forward once
+    # the install-on-enable transition has already passed.
+    socket = assign(socket, :meetings_config_open?, true)
+    {:noreply, maybe_install_meetbot(socket, socket.assigns.meetings_form.enabled)}
   end
 
   def handle_event("close_meetings_config", _params, socket) do
