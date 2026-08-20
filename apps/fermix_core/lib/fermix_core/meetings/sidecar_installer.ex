@@ -7,12 +7,13 @@ defmodule FermixCore.Meetings.SidecarInstaller do
       bin/<tag>/fermix-meetbot   the downloaded, sha256-verified executable
       profile/                   the Chromium profile holding the bot's signed-in state
       signed_in                  a marker that the interactive sign-in succeeded
+      browser_installed          a marker that the sidecar's Chromium was installed
 
   **fermix pins the checksums.** Unlike the compux sidecar — whose Elixir
   library half carries its own `checksum-compux.exs` — meetbot is a Node
   artifact with no library to own the pin, so the release choreography ends in
   a PR against `@releases` here (tag → notarized artifacts → checksum PR →
-  pin). `v0.2.0` is pinned for `macos-aarch64`; a target with no pin refuses
+  pin). `v0.3.0` is pinned for `macos-aarch64`; a target with no pin refuses
   loud rather than downloading something unpinned.
 
   Resolution prefers a `dev_local` build (the sidecar-author loop) so a locally
@@ -31,22 +32,28 @@ defmodule FermixCore.Meetings.SidecarInstaller do
   @plugin_name "meetbot_sidecar"
   @repo "tezra-io/fermix-meetbot"
 
-  # tag => %{target => sha256}. Pinned to the released tag per target (v0.2.0
+  # tag => %{target => sha256}. Pinned to the released tag per target (v0.3.0
   # ships macos-aarch64; other targets land as CI builds them). A pin is never
   # hand-written — it lands with the release choreography. An unpinned target
   # refuses via `@no_pinned_release_message`.
   @releases %{
-    "v0.2.0" => %{
-      "macos-aarch64" => "f51f9e6ee147435d8960a54cca08d8f3d87025e56c3bb877526d4e86cb16e561"
+    "v0.3.0" => %{
+      "macos-aarch64" => "f5f8688617f69f7bfaf137649e450f7ab4c3a185544143c6c383df2a97c34a24"
     }
   }
-  @pinned_tag "v0.2.0"
+  @pinned_tag "v0.3.0"
 
   # A sibling of `bin/` and `profile/` recording that an interactive sign-in
   # succeeded. It lives OUTSIDE the profile because the daemon never reads
   # inside the profile — it only ever asks "did a sign-in finish", not "what is
   # in the browser store".
   @signed_in_marker "signed_in"
+
+  # A sibling marker recording that the sidecar installed its matching Chromium.
+  # The browser itself lives in Playwright's own cache, which the daemon does not
+  # inspect — it only records "did an install finish". Re-running the sidecar's
+  # idempotent `install-browser` re-verifies, so a stale marker self-corrects.
+  @browser_installed_marker "browser_installed"
 
   @no_pinned_release_message "No meetbot sidecar release is pinned in this fermix build yet. " <>
                                "For development, set [fermix_core.plugins] dev_local to a " <>
@@ -147,6 +154,25 @@ defmodule FermixCore.Meetings.SidecarInstaller do
     File.regular?(signed_in_marker_path()) and profile_present?()
   end
 
+  @doc """
+  Records that the sidecar installed its matching Chromium. Called by
+  `FermixCore.Meetings.BrowserInstall` after `install-browser` reports success.
+  """
+  @spec mark_browser_installed() :: :ok
+  def mark_browser_installed do
+    marker = browser_installed_marker_path()
+    File.mkdir_p!(Path.dirname(marker))
+    File.write!(marker, DateTime.to_iso8601(DateTime.utc_now()))
+  end
+
+  @doc """
+  True when a browser install has completed. The browser lives in Playwright's
+  cache (not read here); the marker records that the sidecar's idempotent
+  `install-browser` last finished successfully.
+  """
+  @spec browser_installed?() :: boolean()
+  def browser_installed?, do: File.regular?(browser_installed_marker_path())
+
   defp profile_present? do
     case File.ls(profile_dir()) do
       {:ok, [_ | _]} -> true
@@ -155,6 +181,8 @@ defmodule FermixCore.Meetings.SidecarInstaller do
   end
 
   defp signed_in_marker_path, do: Path.join(meetbot_root(), @signed_in_marker)
+
+  defp browser_installed_marker_path, do: Path.join(meetbot_root(), @browser_installed_marker)
 
   defp install_pinned(tag, releases, opts) do
     with {:ok, target} <- target(),

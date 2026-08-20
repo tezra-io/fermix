@@ -105,6 +105,8 @@ defmodule FermixCore.Setup.Doctor do
               :status => :enabled,
               :ready? => boolean(),
               :sidecar_installed? => boolean(),
+              :browser_installed? => boolean(),
+              :browser_note => String.t() | nil,
               :pinned_tag => String.t() | nil,
               :profile => :signed_in | :not_signed_in | :absent,
               :profile_note => String.t(),
@@ -165,6 +167,8 @@ defmodule FermixCore.Setup.Doctor do
                         "sign the bot in from fermix setup → Meetings → Google Meet"
   @meet_profile_absent "bot not signed in — Google Meet joins will be denied; sign the " <>
                          "bot account in from fermix setup → Meetings → Google Meet"
+  @meet_browser_absent "browser not installed — Google Meet can't launch until it is; " <>
+                         "open fermix setup → Meetings and it installs automatically."
   @meetings_no_lane "No meeting lane is usable. Install the meetbot sidecar from " <>
                       "fermix setup → Meetings, or complete the Zoom RTMS credentials there."
 
@@ -612,6 +616,7 @@ defmodule FermixCore.Setup.Doctor do
 
   defp enabled_meetings_report(config) do
     installed? = MeetbotInstaller.installed?()
+    browser_installed? = MeetbotInstaller.browser_installed?()
     rtms_configured? = MeetingsConfig.rtms_configured?(config)
     profile = meet_profile_state()
 
@@ -619,6 +624,8 @@ defmodule FermixCore.Setup.Doctor do
       status: :enabled,
       ready?: Meetings.ready?(),
       sidecar_installed?: installed?,
+      browser_installed?: browser_installed?,
+      browser_note: meet_browser_note(installed?, browser_installed?),
       pinned_tag: MeetbotInstaller.pinned_tag(),
       profile: profile,
       profile_note: meet_profile_note(profile),
@@ -626,6 +633,11 @@ defmodule FermixCore.Setup.Doctor do
       remedy: meetings_remedy(installed?, rtms_configured?)
     }
   end
+
+  # Only meaningful once the binary is present: the browser installs right after
+  # it, so a missing browser on an installed sidecar is the state to name.
+  defp meet_browser_note(true, false), do: @meet_browser_absent
+  defp meet_browser_note(_installed?, _browser_installed?), do: nil
 
   defp meet_profile_state do
     cond do
