@@ -1186,9 +1186,12 @@ defmodule FermixWebWeb.SetupLive.Components do
         <div class="space-y-2">
           <.core_feature_card :for={card <- @plugin_summary.core_features} card={card} />
         </div>
-        <div :if={@local_install || @meetbot_install} class="mt-2 space-y-1">
-          <.install_banner state={@local_install} />
-          <.install_banner state={@meetbot_install} />
+        <div
+          :if={transient_status?(@local_install) or transient_status?(@meetbot_install)}
+          class="mt-2 space-y-1"
+        >
+          <.install_banner :if={transient_status?(@local_install)} state={@local_install} />
+          <.install_banner :if={transient_status?(@meetbot_install)} state={@meetbot_install} />
         </div>
         <hr class="my-6 border-base-300" />
       </div>
@@ -1726,7 +1729,7 @@ defmodule FermixWebWeb.SetupLive.Components do
             <p class={local_state_class(@transcription_form.local_state)}>
               {local_state_message(@transcription_form.local_state)}
             </p>
-            <.install_banner state={@local_install} />
+            <.install_banner :if={transient_status?(@local_install)} state={@local_install} />
           </div>
 
           <div :if={@transcription_form.model_options != []} class="space-y-2">
