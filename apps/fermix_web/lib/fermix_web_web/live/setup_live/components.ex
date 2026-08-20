@@ -1855,12 +1855,12 @@ defmodule FermixWebWeb.SetupLive.Components do
                   type="button"
                   class="btn btn-outline btn-xs"
                   phx-click="meetbot_signin"
-                  disabled={not @meetings_form.sidecar_installed? or signin_running?(@meetbot_signin)}
+                  disabled={not meetbot_ready?(@meetings_form) or signin_running?(@meetbot_signin)}
                 >
                   {if @meetings_form.signed_in?, do: "Sign in again", else: "Sign the bot in"}
                 </button>
-                <p :if={not @meetings_form.sidecar_installed?} class="text-xs text-base-content/55">
-                  {meetbot_signin_hint(@meetings_form.enabled)}
+                <p :if={not meetbot_ready?(@meetings_form)} class="text-xs text-base-content/55">
+                  {meetbot_signin_hint(@meetings_form)}
                 </p>
                 <.install_banner :if={transient_status?(@meetbot_signin)} state={@meetbot_signin} />
               </div>
@@ -1960,6 +1960,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   # a signed-in bot account is what lets it join, so the honest in-between state
   # is amber, never a green "installed".
   defp meet_readiness_status(%{sidecar_installed?: false}), do: :not_installed
+  defp meet_readiness_status(%{browser_installed?: false}), do: :preparing_browser
   defp meet_readiness_status(%{signed_in?: true}), do: :ready
   defp meet_readiness_status(_form), do: :needs_signin
 
@@ -3934,11 +3935,18 @@ defmodule FermixWebWeb.SetupLive.Components do
   # Shown under the disabled sign-in button when the sidecar is not installed.
   # If the notetaker is already enabled, opening this panel starts (or resumes)
   # the install, so the honest state is "installing", not "enable it first".
-  defp meetbot_signin_hint(true),
-    do: "Installing the notetaker — sign-in unlocks once it's on disk."
+  # The bot can be signed in only once both halves are on the machine: the
+  # sidecar binary and its matching browser.
+  defp meetbot_ready?(form), do: form.sidecar_installed? and form.browser_installed?
 
-  defp meetbot_signin_hint(false),
+  defp meetbot_signin_hint(%{enabled: false}),
     do: "Enable the notetaker above to install it, then sign the bot in here."
+
+  defp meetbot_signin_hint(%{sidecar_installed?: false}),
+    do: "Installing the notetaker — sign-in unlocks once it's ready."
+
+  defp meetbot_signin_hint(_form),
+    do: "Setting up the browser — sign-in unlocks once it's ready."
 
   defp tab_status(%{component: nil}, _report), do: :ready
   defp tab_status(%{component: "provider:*"}, report), do: status_by_prefix(report, "provider:")
@@ -4022,6 +4030,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   # rendering as a grey "Unknown". Warning, not error — each has a fix.
   def status_pill_class(:missing_host_runtime), do: "badge badge-warning badge-sm"
   def status_pill_class(:not_installed), do: "badge badge-warning badge-sm"
+  def status_pill_class(:preparing_browser), do: "badge badge-warning badge-sm"
   def status_pill_class(:needs_signin), do: "badge badge-warning badge-sm"
   # Remote MCP runtimes (M27 §12 Stage 3). Warning where the operator can act,
   # error where the connection/contract is refused until something upstream or
@@ -4053,6 +4062,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   def status_pill_label(:incompatible), do: "Incompatible"
   def status_pill_label(:missing_host_runtime), do: "Needs runtime"
   def status_pill_label(:not_installed), do: "Not installed"
+  def status_pill_label(:preparing_browser), do: "Preparing browser"
   def status_pill_label(:needs_signin), do: "Sign-in needed"
   def status_pill_label(:needs_workspace), do: "Needs workspace"
   def status_pill_label(:insufficient_credential_scope), do: "Insufficient scope"

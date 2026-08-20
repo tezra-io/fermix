@@ -1336,7 +1336,9 @@ defmodule FermixCore.Setup.DoctorTest do
                status: :enabled,
                ready?: false,
                sidecar_installed?: false,
-               pinned_tag: "v0.2.0",
+               browser_installed?: false,
+               browser_note: nil,
+               pinned_tag: "v0.3.0",
                profile: :absent,
                rtms_configured?: false,
                remedy: remedy
@@ -1394,6 +1396,28 @@ defmodule FermixCore.Setup.DoctorTest do
 
       assert %{profile: :signed_in, profile_note: note} = Doctor.meetings_report()
       assert note =~ "signed in ✓"
+    end
+
+    test "an installed sidecar without its browser warns the browser is missing", ctx do
+      Application.put_env(:fermix_core, :meetings, enabled: true)
+      install_fake_meetbot_sidecar(ctx.home)
+
+      assert %{
+               sidecar_installed?: true,
+               browser_installed?: false,
+               browser_note: note
+             } = Doctor.meetings_report()
+
+      assert note =~ "browser not installed"
+      assert note =~ "Google Meet can't launch"
+    end
+
+    test "an installed sidecar with its browser marker reports no browser warning", ctx do
+      Application.put_env(:fermix_core, :meetings, enabled: true)
+      install_fake_meetbot_sidecar(ctx.home)
+      :ok = FermixCore.Meetings.SidecarInstaller.mark_browser_installed()
+
+      assert %{browser_installed?: true, browser_note: nil} = Doctor.meetings_report()
     end
   end
 

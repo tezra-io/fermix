@@ -1897,9 +1897,9 @@ defmodule FermixWebWeb.SetupLiveTest do
   end
 
   # A dev_local meetbot binary makes `SidecarInstaller.installed?/0` true without
-  # a download, so the sign-in button is enabled and the Meet lane leaves the
-  # "Not installed" state.
-  defp install_dev_local_meetbot(home) do
+  # a download. This is the intermediate state — binary present, browser not — so
+  # the Meet lane reads "Preparing browser" and sign-in stays gated.
+  defp install_dev_local_binary(home) do
     {:ok, target} = FermixCore.Meetings.SidecarInstaller.target()
     dev_local = Path.join(home, "dev-local")
     binary = Path.join([dev_local, "meetbot_sidecar", "bin", target, "fermix-meetbot"])
@@ -1907,6 +1907,14 @@ defmodule FermixWebWeb.SetupLiveTest do
     File.write!(binary, "#!/bin/sh\n")
     File.chmod!(binary, 0o755)
     Application.put_env(:fermix_core, :plugins, dev_local: dev_local)
+  end
+
+  # A dev_local binary plus its browser marker is the fully-provisioned notetaker:
+  # the sign-in button is enabled and the Meet lane leaves "Not installed" and
+  # "Preparing browser" behind. The binary-only in-between has its own tests.
+  defp install_dev_local_meetbot(home) do
+    install_dev_local_binary(home)
+    :ok = FermixCore.Meetings.SidecarInstaller.mark_browser_installed()
   end
 
   describe "Meetings form (M21 phase 3)" do
@@ -2017,8 +2025,31 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert render_async(view) =~ escaped(MeetbotInstaller.error_message(:no_pinned_release))
     end
 
-    test "a saved enable installs the notetaker with only transient progress", %{conn: conn} do
+    test "an installed binary without its browser shows Preparing browser and gates sign-in",
+         %{conn: conn} do
+      home = System.get_env("FERMIX_HOME")
+      # The in-between state: the sidecar binary is present, its browser is not.
+      install_dev_local_binary(home)
+
+      {:ok, view, _html} = live(conn, "/setup")
+      html = open_meetings_config(view)
+
+      # Installed is not ready — the browser still has to come down first.
+      assert html =~ "Preparing browser"
+      refute html =~ "Sign-in needed"
+      # Sign-in stays gated until the browser is present.
+      assert html =~ ~r/phx-click="meetbot_signin"[^>]*\sdisabled/
+    end
+
+    test "a saved enable installs the notetaker then chains its browser install",
+         %{conn: conn} do
+      parent = self()
       Application.put_env(:fermix_web, :meetbot_installer, fn -> {:ok, "/tmp/fermix-meetbot"} end)
+
+      Application.put_env(:fermix_web, :meetbot_browser_installer, fn ->
+        send(parent, :meetbot_browser_ran)
+        {:ok, :installed}
+      end)
 
       {:ok, view, _html} = live(conn, "/setup")
 
@@ -2029,9 +2060,16 @@ defmodule FermixWebWeb.SetupLiveTest do
         |> form("form[phx-submit=\"save_meetings\"]", meetings_form: %{enabled: "true"})
         |> render_submit()
 
-      # Progress shows while installing; no persistent "installed" line after.
+      # The binary downloads first, with transient progress only.
       assert html =~ "Downloading the meeting notetaker…"
-      refute render_async(view) =~ "The meeting notetaker is installed."
+
+      # The binary success chains straight into the browser install…
+      final = render_async(view)
+      assert_receive :meetbot_browser_ran, 1_000
+
+      # …and once both resolve, no persistent "installed" line lingers.
+      refute final =~ "The meeting notetaker is installed."
+      refute final =~ "Downloading the meeting notetaker…"
     end
 
     test "saving with the toggle off never runs the installer", %{conn: conn} do
