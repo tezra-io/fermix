@@ -332,7 +332,8 @@ defmodule FermixCore.Setup.ConfigStore do
           snapshot
           |> Map.get(:fermix_core, [])
           |> Keyword.get(:computer_history, [])
-          |> normalize_computer_history(),
+          |> normalize_computer_history()
+          |> ComputerHistoryConfig.to_keyword(),
         transcription:
           snapshot
           |> Map.get(:fermix_core, [])
@@ -648,8 +649,17 @@ defmodule FermixCore.Setup.ConfigStore do
   # Replace (not merge): the computer-history section has no compile-time baseline
   # (MILESTONE_32 §9.4, config.ex), so the persisted keyword is the complete
   # intended consent state.
+  # Re-normalize whichever shape arrives — parse_document's atoms (boot) or
+  # persistable_snapshot's TOML strings (save/apply) — so the app env holds
+  # exactly one shape (normalized atoms) on every path. normalize/1 is
+  # idempotent over its own output by contract (config_test).
   defp apply_computer_history_config(computer_history_config) do
-    Application.put_env(:fermix_core, :computer_history, computer_history_config)
+    Application.put_env(
+      :fermix_core,
+      :computer_history,
+      ComputerHistoryConfig.normalize(computer_history_config)
+    )
+
     :ok
   end
 
@@ -1164,10 +1174,14 @@ defmodule FermixCore.Setup.ConfigStore do
   end
 
   # `[fermix_core.computer_history]` (MILESTONE_32). Value validation lives in
-  # ComputerHistoryConfig.normalize (fail-loud per key); `normalize/1` already
-  # returns a keyword (no to_keyword round-trip). Unknown keys refuse boot at the
-  # parse boundary — a default-off consent section has no keyless degrade path
-  # (Rule #12), mirroring validate_harness_section_keys!/1.
+  # ComputerHistoryConfig.normalize (fail-loud per key). The persist path MUST
+  # additionally run `ComputerHistoryConfig.to_keyword/1` (done at the
+  # persistable_snapshot call site): normalize maps TOML spellings to internal
+  # atoms one-way, and rendering those atoms verbatim wrote `"default_provider"`
+  # to disk — a spelling the parser refuses, crashing the daemon on the next
+  # load (2026-08-19). Unknown keys refuse boot at the parse boundary — a
+  # default-off consent section has no keyless degrade path (Rule #12),
+  # mirroring validate_harness_section_keys!/1.
   defp normalize_computer_history(config) do
     validate_computer_history_section_keys!(config)
     ComputerHistoryConfig.normalize(config)

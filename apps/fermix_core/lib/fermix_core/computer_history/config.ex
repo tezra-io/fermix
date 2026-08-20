@@ -168,11 +168,18 @@ defmodule FermixCore.ComputerHistory.Config do
   defp normalize_value(key, value) when key in [:apps, :sites],
     do: normalize_string_list(key, value)
 
-  defp normalize_value(:remote_summaries, value) do
-    :remote_summaries
-    |> normalize_string_list(value)
+  defp normalize_value(:remote_summaries, value) when is_list(value) do
+    value
+    |> Enum.map(&provider_entry_string(:remote_summaries, &1))
     |> Enum.map(&validate_remote_provider/1)
   end
+
+  defp normalize_value(:remote_summaries, value),
+    do:
+      raise(
+        ArgumentError,
+        "invalid computer_history.remote_summaries #{inspect(value)}; expected a list of providers"
+      )
 
   defp normalize_value(:summarizer, "local"), do: :local
   defp normalize_value(:summarizer, :local), do: :local
@@ -180,14 +187,69 @@ defmodule FermixCore.ComputerHistory.Config do
   defp normalize_value(:summarizer, :default_provider), do: :default_provider
 
   defp normalize_value(:summarizer, value) when is_binary(value),
-    do: validate_provider(value)
+    do: validate_summarizer_provider(value)
+
+  # Idempotence over normalize's own output (a provider atom): apply/2 re-normalizes
+  # whichever shape reaches it — parsed atoms or persisted strings — so the app env
+  # holds exactly one shape on every path.
+  defp normalize_value(:summarizer, value)
+       when is_atom(value) and value not in [nil, true, false],
+       do: validate_summarizer_provider(Atom.to_string(value))
 
   defp normalize_value(:summarizer, value),
+    do: raise(ArgumentError, summarizer_error(value))
+
+  # The summarizer's refusal names its FULL vocabulary — "default"/"local" ahead
+  # of the provider ids — because this message is the repair instruction a user
+  # with a typo'd config acts on; validate_provider/1's provider-only list
+  # (correct for remote_summaries) omits the two most likely fixes here.
+  defp validate_summarizer_provider(provider_string) do
+    provider = safe_atom(provider_string)
+
+    if provider in Descriptor.ids() do
+      provider
+    else
+      raise ArgumentError, summarizer_error(provider_string)
+    end
+  end
+
+  defp summarizer_error(value) do
+    ~s(invalid computer_history.summarizer #{inspect(value)}; expected "default", "local", ) <>
+      "or one of #{Enum.map_join(Descriptor.ids(), ", ", &Atom.to_string/1)}"
+  end
+
+  # remote_summaries entries arrive as strings (TOML) or already-validated atoms
+  # (re-normalizing the app env); both funnel through validate_remote_provider.
+  defp provider_entry_string(_key, entry) when is_binary(entry) and entry != "", do: entry
+
+  defp provider_entry_string(_key, entry) when is_atom(entry) and entry not in [nil, true, false],
+    do: Atom.to_string(entry)
+
+  defp provider_entry_string(key, entry),
     do:
       raise(
         ArgumentError,
-        "invalid computer_history.summarizer #{inspect(value)}; expected \"default\", \"local\", or a provider id"
+        "invalid computer_history.#{key} entry #{inspect(entry)}; expected a provider"
       )
+
+  @doc """
+  The inverse of `normalize/1` for the persist path: normalized app-env values
+  back to their TOML spellings (`:default_provider` → `"default"`, provider
+  atoms → strings). `ConfigStore.persistable_snapshot/1` uses it so the section
+  survives save→load→apply — the raw atom spelling `"default_provider"` on disk
+  is exactly the parse-refusal that crashed the daemon (2026-08-19). Present
+  keys only, mirroring `normalize/1`.
+  """
+  @spec to_keyword(keyword()) :: keyword()
+  def to_keyword(config) when is_list(config) do
+    Enum.map(config, fn {key, value} -> {key, persist_value(key, value)} end)
+  end
+
+  defp persist_value(:summarizer, :default_provider), do: "default"
+  defp persist_value(:summarizer, :local), do: "local"
+  defp persist_value(:summarizer, provider) when is_atom(provider), do: Atom.to_string(provider)
+  defp persist_value(:remote_summaries, providers), do: Enum.map(providers, &Atom.to_string/1)
+  defp persist_value(_key, value), do: value
 
   defp normalize_string_list(key, value) when is_list(value) do
     Enum.map(value, fn

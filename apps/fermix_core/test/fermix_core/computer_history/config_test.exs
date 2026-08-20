@@ -134,6 +134,63 @@ defmodule FermixCore.ComputerHistory.ConfigTest do
     end
   end
 
+  describe "to_keyword/1 — normalized env atoms back to TOML spellings (the persist half)" do
+    test "maps every summarizer shape to its config vocabulary" do
+      assert Config.to_keyword(summarizer: :default_provider) == [summarizer: "default"]
+      assert Config.to_keyword(summarizer: :local) == [summarizer: "local"]
+      assert Config.to_keyword(summarizer: :anthropic) == [summarizer: "anthropic"]
+    end
+
+    test "maps remote_summaries atoms to strings; passes bools and string lists through" do
+      assert Config.to_keyword(
+               enabled: true,
+               apps: ["com.apple.Safari"],
+               sites: [],
+               remote_summaries: [:anthropic],
+               summarizer: :default_provider
+             ) == [
+               enabled: true,
+               apps: ["com.apple.Safari"],
+               sites: [],
+               remote_summaries: ["anthropic"],
+               summarizer: "default"
+             ]
+    end
+
+    test "present keys only" do
+      assert Config.to_keyword([]) == []
+      assert Config.to_keyword(enabled: false) == [enabled: false]
+    end
+  end
+
+  describe "normalize/1 is idempotent over its own output (apply re-normalizes both shapes)" do
+    test "atom summarizer shapes and atom remote_summaries survive a second pass" do
+      normalized =
+        Config.normalize(%{
+          "enabled" => true,
+          "remote_summaries" => ["anthropic"],
+          "summarizer" => "default"
+        })
+
+      assert Config.normalize(normalized) == normalized
+
+      tier3 = Config.normalize(%{"summarizer" => "anthropic"})
+      assert Config.normalize(tier3) == tier3
+    end
+
+    test "normalize accepts its own to_keyword output (the full save→apply loop)" do
+      normalized =
+        Config.normalize(%{
+          "enabled" => true,
+          "apps" => ["com.apple.Safari"],
+          "remote_summaries" => ["anthropic"],
+          "summarizer" => "default"
+        })
+
+      assert normalized |> Config.to_keyword() |> Config.normalize() == normalized
+    end
+  end
+
   describe "normalize/1 — fail loud on invalid values" do
     test "non-boolean enabled" do
       assert_raise ArgumentError, ~r/computer_history.enabled/, fn ->
@@ -153,9 +210,15 @@ defmodule FermixCore.ComputerHistory.ConfigTest do
       end
     end
 
-    test "unknown provider as summarizer" do
-      assert_raise ArgumentError, ~r/unknown provider/, fn ->
+    test ~s(unknown summarizer names the FULL vocabulary — "default" and "local" included) do
+      # The refusal is what a user with a typo'd (or legacy-poisoned) config sees;
+      # a message listing only provider ids omits the two most likely fixes.
+      assert_raise ArgumentError, ~r/expected "default", "local", or one of/, fn ->
         Config.normalize(%{"summarizer" => "not_a_provider"})
+      end
+
+      assert_raise ArgumentError, ~r/expected "default", "local", or one of/, fn ->
+        Config.normalize(%{"summarizer" => "default_provider"})
       end
     end
 
