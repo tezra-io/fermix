@@ -162,6 +162,30 @@ defmodule FermixCore.Meetings.DeliveryTest do
     end
   end
 
+  describe "notice/3" do
+    test "sends the plain text to the origin conversation, no notes framing" do
+      assert {:ok, :sent} = Delivery.notice("telegram:123:root", "⚠️ could not join", seams())
+
+      assert [call] = calls()
+      assert call.platform == "telegram"
+      assert call.destination == "123"
+      assert call.text == "⚠️ could not join"
+    end
+
+    test "falls back to the owner inbox when the origin is not a conversation" do
+      assert {:ok, :sent} = Delivery.notice(nil, "⚠️ could not join", seams())
+
+      assert [call] = calls()
+      assert call.destination == "owner-1"
+      assert state().owner_calls == 1
+    end
+
+    test "reports no target rather than swallowing when neither resolves" do
+      put(:owner_inbox, :no_delivery_target)
+      assert {:error, :no_delivery_target} = Delivery.notice(nil, "x", seams())
+    end
+  end
+
   describe "retry ladder" do
     test "a transient failure is retried up to three attempts with the fixed backoff" do
       put(:results, [{:error, :timeout}, {:error, {:transport, :closed}}, :ok])

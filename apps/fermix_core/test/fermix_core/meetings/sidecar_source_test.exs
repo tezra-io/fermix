@@ -248,6 +248,30 @@ defmodule FermixCore.Meetings.SidecarSourceTest do
       assert_receive {:stub_control, %{"type" => "ping"}}, 1_000
       assert_receive {:meeting_source_error, :sidecar_wedged}, 1_000
     end
+
+    test "keeps pinging while audio streams — the 45s capture-death fix" do
+      {:ok, source} = start_source(timers: %{tick_ms: 20, ping_idle_ms: 60, pong_grace_ms: 2_000})
+      assert_receive {:stub_control, %{"type" => "join"}}
+
+      # Audio must keep arriving *while* we wait for the ping — a flooder does it
+      # in another process. Before the fix every inbound frame reset the idle
+      # countdown, so a busy stream meant the daemon never pinged and the
+      # sidecar's own liveness watchdog killed capture at ~45s. Keying the
+      # keepalive on the daemon's last SEND makes inbound traffic irrelevant.
+      deadline = System.monotonic_time(:millisecond) + 1_500
+      flooder = spawn(fn -> flood_audio(source, deadline) end)
+
+      assert_receive {:stub_control, %{"type" => "ping"}}, 1_000
+      Process.exit(flooder, :kill)
+    end
+  end
+
+  defp flood_audio(source, deadline) do
+    if System.monotonic_time(:millisecond) < deadline do
+      send(source, {:sidecar_audio, <<0, 0>>})
+      Process.sleep(10)
+      flood_audio(source, deadline)
+    end
   end
 
   defmodule WedgedSidecar do

@@ -102,7 +102,7 @@ defmodule FermixCore.Meetings.SidecarSource do
       timers: timers,
       relaunches: 0,
       admitted?: false,
-      last_frame_mono: mono(),
+      last_sent_mono: mono(),
       ping_pending?: false,
       ping_sent_mono: nil
     }
@@ -113,7 +113,7 @@ defmodule FermixCore.Meetings.SidecarSource do
   @impl GenServer
   def handle_continue(:launch, state) do
     case state.sidecar_mod.launch(self(), state.launch_opts) do
-      {:ok, sidecar} -> join(%{state | sidecar: sidecar, last_frame_mono: mono()})
+      {:ok, sidecar} -> join(%{state | sidecar: sidecar})
       {:error, reason} -> fail(state, launch_error(reason, state.session_id))
     end
   end
@@ -220,12 +220,7 @@ defmodule FermixCore.Meetings.SidecarSource do
 
     case state.sidecar_mod.launch(self(), state.launch_opts) do
       {:ok, sidecar} ->
-        join(%{
-          state
-          | sidecar: sidecar,
-            relaunches: state.relaunches + 1,
-            last_frame_mono: mono()
-        })
+        join(%{state | sidecar: sidecar, relaunches: state.relaunches + 1})
 
       {:error, reason} ->
         fail(%{state | sidecar: nil}, {:sidecar_crashed, reason})
@@ -236,7 +231,7 @@ defmodule FermixCore.Meetings.SidecarSource do
     case state.sidecar_mod.send_control(state.sidecar, state.join_msg) do
       :ok ->
         notify(state, {:meeting_phase, :joining, %{}})
-        {:noreply, %{state | ping_pending?: false, ping_sent_mono: nil}}
+        {:noreply, %{state | ping_pending?: false, ping_sent_mono: nil, last_sent_mono: mono()}}
 
       {:error, :closed} ->
         fail(state, {:sidecar_crashed, :closed})
@@ -253,8 +248,13 @@ defmodule FermixCore.Meetings.SidecarSource do
 
   defp ping_policy(%{sidecar: nil} = state), do: {:noreply, state}
 
+  # The keepalive keys on the last frame we SENT, not the last we received. The
+  # sidecar runs its own liveness watchdog and leaves the meeting after its
+  # inbound goes silent past a bound; during capture the daemon receives a steady
+  # audio stream while sending nothing, so an inbound-keyed idle timer never
+  # fires — and every capture died at the sidecar's 45 s watchdog.
   defp ping_policy(state) do
-    if mono() - state.last_frame_mono >= state.timers.ping_idle_ms do
+    if mono() - state.last_sent_mono >= state.timers.ping_idle_ms do
       ping(state)
     else
       {:noreply, state}
@@ -262,8 +262,10 @@ defmodule FermixCore.Meetings.SidecarSource do
   end
 
   defp ping(state) do
+    now = mono()
+
     case state.sidecar_mod.send_control(state.sidecar, %{"type" => "ping"}) do
-      :ok -> {:noreply, %{state | ping_pending?: true, ping_sent_mono: mono()}}
+      :ok -> {:noreply, %{state | ping_pending?: true, ping_sent_mono: now, last_sent_mono: now}}
       {:error, :closed} -> fail(state, {:sidecar_crashed, :closed})
     end
   end
@@ -368,8 +370,7 @@ defmodule FermixCore.Meetings.SidecarSource do
 
   defp notify(state, message), do: send(state.session, message)
 
-  defp touch(state),
-    do: %{state | last_frame_mono: mono(), ping_pending?: false, ping_sent_mono: nil}
+  defp touch(state), do: %{state | ping_pending?: false, ping_sent_mono: nil}
 
   defp mono, do: System.monotonic_time(:millisecond)
 end

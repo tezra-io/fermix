@@ -211,18 +211,25 @@ defmodule FermixCore.Meetings.SessionTest.OkDelivery do
     Observer.notify({:deliver, meeting, text, opts})
     {:ok, :sent}
   end
+
+  def notice(origin_session_id, text, opts) do
+    Observer.notify({:notice, origin_session_id, text, opts})
+    {:ok, :sent}
+  end
 end
 
 defmodule FermixCore.Meetings.SessionTest.NoTargetDelivery do
   @moduledoc false
 
   def deliver(_meeting, _text, _opts), do: {:error, :no_delivery_target}
+  def notice(_origin, _text, _opts), do: {:error, :no_delivery_target}
 end
 
 defmodule FermixCore.Meetings.SessionTest.FailingDelivery do
   @moduledoc false
 
   def deliver(_meeting, _text, _opts), do: {:error, {:delivery_failed, :closed}}
+  def notice(_origin, _text, _opts), do: {:error, {:delivery_failed, :closed}}
 end
 
 defmodule FermixCore.Meetings.SessionTest.StubCaffeinate do
@@ -260,6 +267,8 @@ defmodule FermixCore.Meetings.SessionTest do
   # provider call, and no file outside a per-test SafeRm root.
 
   use ExUnit.Case, async: true
+
+  import ExUnit.CaptureLog
 
   alias FermixCore.Meetings.Config
   alias FermixCore.Meetings.Session
@@ -432,7 +441,25 @@ defmodule FermixCore.Meetings.SessionTest do
         await_stop(meeting)
         assert row(ctx, meeting.id).status == Atom.to_string(result)
         assert phase_recorded?(meeting.id, "joining", Atom.to_string(result))
+        # The requester who was told "joining" is told why it did not.
+        assert_receive {:notice, "telegram:99:root", text, _opts}
+        assert text =~ "couldn't join"
       end
+    end
+
+    test "a not-signed-in join failure is logged and names the fix", ctx do
+      meeting = start!(ctx)
+
+      log =
+        capture_log(fn ->
+          send(meeting.pid, {:meeting_phase, :joining, %{}})
+          send(meeting.pid, {:meeting_join_result, :signin_required, %{}})
+          await_stop(meeting)
+        end)
+
+      assert log =~ "meetings: #{meeting.id} signin_required"
+      assert_receive {:notice, "telegram:99:root", text, _opts}
+      assert text =~ "isn't signed in"
     end
   end
 
