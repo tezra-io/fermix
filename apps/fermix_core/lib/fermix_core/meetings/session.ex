@@ -88,6 +88,11 @@ defmodule FermixCore.Meetings.Session do
   @pre_capture_states [:requested, :installing, :launching, :joining, :knocking, :admitted]
   @winding_down_states [:leaving, :max_duration, :alone_timeout]
 
+  # The states before the notetaker is inside the meeting: a failure here is a
+  # join that never landed, and the requester — who was told it was joining — is
+  # owed a reason. `:admitted` is excluded; by then the bot is in the call.
+  @join_failed_states [:requested, :installing, :launching, :joining, :knocking]
+
   @no_speech_notice "No speech was captured, so there are no notes for this meeting."
 
   # The one registry key every Session competes for. `Meetings.check_capacity/0`
@@ -1178,10 +1183,54 @@ defmodule FermixCore.Meetings.Session do
     do: fail_with(state, status, reason_atom(reason), describe(reason))
 
   defp fail_with(state, status, reason, error_text) do
+    Logger.warning("meetings: #{state.id} #{status} — #{error_text}")
+    notify_join_failure(state, reason)
     state = state |> teardown() |> goto(status, terminal_fields(error_text), reason)
     MeetingTelemetry.run_error(telemetry_meeting(state), Atom.to_string(status), error_text)
     {:stop, :normal, state}
   end
+
+  # The requester was told the notetaker was joining; a failure before it is in
+  # the meeting owes them a reason, not silence. Best-effort — a notice that
+  # cannot be sent is logged, never allowed to mask the join failure itself.
+  defp notify_join_failure(%{status: status} = state, reason)
+       when status in @join_failed_states do
+    case state.deps.delivery.notice(
+           state.origin.session_id,
+           join_failure_notice(reason),
+           state.deps.delivery_opts
+         ) do
+      {:ok, :sent} ->
+        :ok
+
+      {:error, notice_reason} ->
+        Logger.warning(
+          "meetings: #{state.id} join-failure notice not delivered: #{inspect(notice_reason)}"
+        )
+    end
+  end
+
+  defp notify_join_failure(_state, _reason), do: :ok
+
+  defp join_failure_notice(reason) when reason in [:signin_required, :login_required] do
+    "⚠️ I couldn't join the meeting — the notetaker isn't signed in to Google. " <>
+      "Re-run sign-in under Setup → Meeting notetaker, then ask me again."
+  end
+
+  defp join_failure_notice(:denied),
+    do: "⚠️ I couldn't join the meeting — the host denied the notetaker's request to join."
+
+  defp join_failure_notice(:bot_blocked),
+    do: "⚠️ I couldn't join the meeting — Google blocked the notetaker account for this call."
+
+  defp join_failure_notice(:knock_timeout),
+    do: "⚠️ I couldn't join the meeting — no one admitted the notetaker in time."
+
+  defp join_failure_notice(:join_timeout),
+    do: "⚠️ I couldn't join the meeting — the meeting page didn't respond in time."
+
+  defp join_failure_notice(reason) when is_atom(reason),
+    do: "⚠️ I couldn't join the meeting (#{reason})."
 
   defp terminal_fields(error_text), do: %{ended_at: DateTime.utc_now(), error: error_text}
 

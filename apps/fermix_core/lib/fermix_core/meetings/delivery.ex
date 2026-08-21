@@ -95,6 +95,24 @@ defmodule FermixCore.Meetings.Delivery do
   end
 
   @doc """
+  Sends a one-line operator notice — a join that never landed, say — to the
+  meeting's origin conversation, or the owner inbox when the origin is not one.
+
+  Same resolution and bounded send ladder as `deliver/3`, but the text is sent
+  verbatim: there are no notes to frame, and no artifact path to point at.
+  """
+  @spec notice(String.t() | nil, String.t(), keyword()) ::
+          {:ok, :sent} | {:error, :no_delivery_target} | {:error, term()}
+  def notice(origin_session_id, text, opts \\ [])
+      when (is_binary(origin_session_id) or is_nil(origin_session_id)) and is_binary(text) and
+             is_list(opts) do
+    case resolve_target(%{origin_session_id: origin_session_id}, opts) do
+      {:ok, target} -> send_with_retry(target, text, opts, 1)
+      :no_delivery_target -> {:error, :no_delivery_target}
+    end
+  end
+
+  @doc """
   True only for send failures another attempt could plausibly clear.
 
   The shapes are the ones the channel adapters actually produce: the closed
