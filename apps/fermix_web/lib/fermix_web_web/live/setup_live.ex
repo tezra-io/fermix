@@ -10,6 +10,7 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.Auth.TokenExpiry
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Auth.XAILogin
+  alias FermixCore.Capabilities.MCP.RuntimeStatus
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.ComputerHistory
   alias FermixCore.ComputerHistory.Config, as: ComputerHistoryConfig
@@ -18,6 +19,7 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.ComputerUse.SidecarInstaller
   alias FermixCore.Harness.Vendors, as: HarnessVendors
   alias FermixCore.Meetings
+  alias FermixCore.Meetings.BrowserInstall
   alias FermixCore.Meetings.Config, as: MeetingsConfig
   alias FermixCore.Meetings.SidecarInstaller, as: MeetbotInstaller
   alias FermixCore.Meetings.SignIn
@@ -93,7 +95,7 @@ defmodule FermixWebWeb.SetupLive do
   @local_installing_message "Installing on-device speech…"
   @local_ready_message "On-device speech is installed and ready."
   @meetbot_installing_message "Downloading the meeting notetaker…"
-  @meetbot_ready_message "The meeting notetaker is installed."
+  @meetbot_browser_installing_message "Downloading the browser the notetaker uses…"
   @meetbot_signin_running_message "A browser window is opening — sign the bot's Google account in there, and it closes when done."
   @meetbot_signin_done_message "The bot is signed in. Google Meet joins can use its account now."
   @meetbot_signin_cancelled_message "Sign-in was cancelled — the window closed before the account signed in."
@@ -900,13 +902,12 @@ defmodule FermixWebWeb.SetupLive do
     {:noreply, assign(socket, :local_install, failed(local_install_error(reason)))}
   end
 
+  # The binary is on disk; the notetaker also needs its matching browser, so the
+  # same flow chains straight into the browser install (one banner, one path).
   def handle_async(:meetbot_install, {:ok, {:ok, _path}}, socket) do
     form = %{socket.assigns.meetings_form | sidecar_installed?: MeetbotInstaller.installed?()}
 
-    {:noreply,
-     socket
-     |> assign(:meetbot_install, done(@meetbot_ready_message))
-     |> assign(:meetings_form, form)}
+    {:noreply, socket |> assign(:meetings_form, form) |> continue_meetbot_setup()}
   end
 
   def handle_async(:meetbot_install, {:ok, {:error, reason}}, socket) do
@@ -915,6 +916,24 @@ defmodule FermixWebWeb.SetupLive do
 
   def handle_async(:meetbot_install, {:exit, reason}, socket) do
     {:noreply, assign(socket, :meetbot_install, failed(meetbot_install_error(reason)))}
+  end
+
+  def handle_async(:meetbot_browser, {:ok, {:ok, _outcome}}, socket) do
+    form = %{
+      socket.assigns.meetings_form
+      | browser_installed?: MeetbotInstaller.browser_installed?()
+    }
+
+    # Done: the transient banner clears; the Meet readiness pill is the truth now.
+    {:noreply, socket |> assign(:meetbot_install, nil) |> assign(:meetings_form, form)}
+  end
+
+  def handle_async(:meetbot_browser, {:ok, {:error, reason}}, socket) do
+    {:noreply, assign(socket, :meetbot_install, failed(meetbot_browser_error(reason)))}
+  end
+
+  def handle_async(:meetbot_browser, {:exit, reason}, socket) do
+    {:noreply, assign(socket, :meetbot_install, failed(meetbot_browser_error(reason)))}
   end
 
   def handle_async(:meetbot_signin, {:ok, {:ok, :signed_in}}, socket) do
@@ -1618,6 +1637,7 @@ defmodule FermixWebWeb.SetupLive do
       zoom_ws_subscription_id: safe_string(Keyword.get(meetings, :zoom_ws_subscription_id)),
       zoom_client_secret_set: secret_set?(meetings, :zoom_client_secret),
       sidecar_installed?: MeetbotInstaller.installed?(),
+      browser_installed?: MeetbotInstaller.browser_installed?(),
       signed_in?: MeetbotInstaller.signed_in?()
     }
   end
@@ -1684,14 +1704,9 @@ defmodule FermixWebWeb.SetupLive do
 
   defp maybe_install_meetbot(socket, true) do
     cond do
-      MeetbotInstaller.installed?() ->
-        assign(socket, :meetbot_install, done(@meetbot_ready_message))
-
-      installing?(socket.assigns.meetbot_install) ->
-        socket
-
-      true ->
-        start_meetbot_install(socket)
+      installing?(socket.assigns.meetbot_install) -> socket
+      not MeetbotInstaller.installed?() -> start_meetbot_install(socket)
+      true -> continue_meetbot_setup(socket)
     end
   end
 
@@ -1703,10 +1718,29 @@ defmodule FermixWebWeb.SetupLive do
     |> start_async(:meetbot_install, install)
   end
 
+  # After the binary is present, ensure the notetaker's matching browser is too —
+  # the sign-in and the join both need it. Idempotent: a present browser is a
+  # no-op that clears the banner; a missing one downloads it (no npx).
+  defp continue_meetbot_setup(socket) do
+    if MeetbotInstaller.browser_installed?() do
+      assign(socket, :meetbot_install, nil)
+    else
+      socket
+      |> assign(:meetbot_install, installing(@meetbot_browser_installing_message))
+      |> start_async(:meetbot_browser, meetbot_browser_installer())
+    end
+  end
+
   # Injectable so a LiveView test never reaches the network (mirrors the
   # `:plugin_auth_runner` seam). Defaults to the real pinned download.
   defp meetbot_installer do
     Application.get_env(:fermix_web, :meetbot_installer, &MeetbotInstaller.install/0)
+  end
+
+  # Injectable so a LiveView test never downloads a browser (mirrors the
+  # `:meetbot_installer` seam). Defaults to the real sidecar install-browser.
+  defp meetbot_browser_installer do
+    Application.get_env(:fermix_web, :meetbot_browser_installer, &BrowserInstall.run/0)
   end
 
   defp meetbot_install_error(:no_pinned_release),
@@ -1717,6 +1751,12 @@ defmodule FermixWebWeb.SetupLive do
 
   defp meetbot_install_error(reason),
     do: "Meeting notetaker install failed: #{Redaction.format(reason)}"
+
+  defp meetbot_browser_error(:not_installed),
+    do: "Install the meeting notetaker first — its browser installs right after."
+
+  defp meetbot_browser_error(reason),
+    do: "The notetaker's browser install failed: #{Redaction.format(reason)}"
 
   # Injectable so a LiveView test never launches a real browser (mirrors the
   # `:meetbot_installer` seam). Defaults to the real headed sign-in flow.
@@ -1730,8 +1770,16 @@ defmodule FermixWebWeb.SetupLive do
   defp meetbot_signin_error(:not_installed),
     do: "Enable the meeting notetaker first — it installs the sidecar the sign-in needs."
 
-  defp meetbot_signin_error(reason),
-    do: "Sign-in failed: #{Redaction.format(reason)}"
+  # A bare sidecar failure most often means the browser isn't installed yet
+  # (the sidecar can't launch it), so name that rather than a bare exit code.
+  defp meetbot_signin_error(reason) do
+    if MeetbotInstaller.browser_installed?() do
+      "Sign-in failed: #{Redaction.format(reason)}"
+    else
+      "Sign-in couldn't start — the notetaker's browser isn't installed yet. " <>
+        "Re-open the notetaker config to finish setting it up."
+    end
+  end
 
   # Choosing the on-device backend is the install trigger (§2b: nothing downloads
   # at boot, and hand-editing config.toml installs nothing). Already-installed
@@ -2316,7 +2364,25 @@ defmodule FermixWebWeb.SetupLive do
   # discovery task exits with a term that can carry a whole stacktrace, and a
   # modal is not a log viewer. The classified prefix is the part that names the
   # failure; the daemon log keeps the rest.
-  defp setup_error(reason) do
+  # A classified remote refusal renders through the SAME resolver the daemon log
+  # and `fermix doctor` use, so the operator reads one description of one fact —
+  # including which capability the upstream withdrew, which is the only question
+  # a contract mismatch actually raises. Every other reason keeps the redacted
+  # inspect: it may carry an endpoint or a peer message.
+  defp setup_error({status, detail, subject} = classified)
+       when is_atom(status) and is_atom(detail) and (is_binary(subject) or is_nil(subject)) do
+    # Shape is NOT provenance. `{:remote_jsonrpc_error, code, message}` has this
+    # exact shape whenever the peer sends a null code, and its third element is
+    # a peer-authored string — which would then render in the slot reserved for
+    # a capability Fermix vouched for, and skip the redaction bound below.
+    if status in RuntimeStatus.statuses(),
+      do: RuntimeStatus.describe(classified),
+      else: redacted_error(classified)
+  end
+
+  defp setup_error(reason), do: redacted_error(reason)
+
+  defp redacted_error(reason) do
     reason
     |> Redaction.format()
     |> String.slice(0, 200)

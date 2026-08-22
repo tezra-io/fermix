@@ -53,7 +53,7 @@ defmodule FermixCore.Meetings.SidecarInstallerTest do
   end
 
   test "the shipped build pins a release tag" do
-    assert SidecarInstaller.pinned_tag() == "v0.2.0"
+    assert SidecarInstaller.pinned_tag() == "v0.3.0"
   end
 
   describe "install/1 with no pinned release" do
@@ -180,6 +180,19 @@ defmodule FermixCore.Meetings.SidecarInstallerTest do
       :ok = SidecarInstaller.mark_signed_in()
       assert File.regular?(Path.join([home, "plugins", "meetbot", "signed_in"]))
       refute File.exists?(Path.join([home, "plugins", "meetbot", "profile", "signed_in"]))
+    end
+  end
+
+  describe "browser_installed?/0 and mark_browser_installed/0" do
+    test "a fresh install has no browser" do
+      refute SidecarInstaller.browser_installed?()
+    end
+
+    test "the marker records the browser install", %{home: home} do
+      refute SidecarInstaller.browser_installed?()
+      :ok = SidecarInstaller.mark_browser_installed()
+      assert SidecarInstaller.browser_installed?()
+      assert File.regular?(Path.join([home, "plugins", "meetbot", "browser_installed"]))
     end
   end
 end

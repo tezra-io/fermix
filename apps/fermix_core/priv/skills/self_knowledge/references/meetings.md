@@ -23,8 +23,11 @@ already in progress instead of queueing.
 
 Turn the subsystem on with `[fermix_core.meetings] enabled`. That alone
 advertises nothing: no meetings tool is offered until a lane is actually usable
-(an installed Meet sidecar, or complete Zoom RTMS credentials), so a
-config-only enable is honest rather than a tool that fails on first use.
+(a Meet sidecar **with its browser installed**, or complete Zoom RTMS
+credentials), so a config-only enable is honest rather than a tool that fails on
+first use. A sidecar whose browser install never ran is a half-installed lane,
+not a usable one: it cannot launch the browser, so it is refused before a
+meeting starts rather than dying part-way through one.
 
 ## Two platforms, two mechanisms, no fallback
 
@@ -80,6 +83,8 @@ failure:
 
 - the Meet sidecar isn't installed — enable meetings in setup → Meetings, which
   installs it;
+- the Meet sidecar is installed but has no browser to drive — open setup →
+  Meetings, which installs the browser;
 - Zoom RTMS isn't configured — set the four Zoom values above in setup;
 - the URL isn't a meeting link it recognizes — it refuses instead of guessing at
   a room;
