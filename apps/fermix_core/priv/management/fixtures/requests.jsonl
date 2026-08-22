@@ -1,0 +1,15 @@
+{"name":"hello","expect":"v1","method":"hello","frame":{"request_id":"req-hello-1","protocol_version":1,"method":"hello","params":{}}}
+{"name":"hello_without_params","expect":"v1","method":"hello","frame":{"request_id":"req-hello-2","protocol_version":1,"method":"hello"}}
+{"name":"overview_get","expect":"v1","method":"overview.get","frame":{"request_id":"req-overview-1","protocol_version":1,"method":"overview.get","params":{}}}
+{"name":"setup_session_create","expect":"v1","method":"setup.session.create","frame":{"request_id":"req-setup-1","protocol_version":1,"method":"setup.session.create","params":{}}}
+{"name":"doctor_start_default_scope","expect":"v1","method":"doctor.start","frame":{"request_id":"req-doctor-1","protocol_version":1,"method":"doctor.start","params":{}}}
+{"name":"doctor_start_network_scope","expect":"v1","method":"doctor.start","frame":{"request_id":"req-doctor-2","protocol_version":1,"method":"doctor.start","params":{"scope":"network"}}}
+{"name":"doctor_get","expect":"v1","method":"doctor.get","frame":{"request_id":"req-doctor-3","protocol_version":1,"method":"doctor.get","params":{"session_id":"doctor:9Fj2mQ7bT1xK"}}}
+{"name":"doctor_cancel","expect":"v1","method":"doctor.cancel","frame":{"request_id":"req-doctor-4","protocol_version":1,"method":"doctor.cancel","params":{"session_id":"doctor:9Fj2mQ7bT1xK"}}}
+{"name":"logs_query_default_tail","expect":"v1","method":"logs.query","frame":{"request_id":"req-logs-1","protocol_version":1,"method":"logs.query","params":{}}}
+{"name":"logs_query_filtered","expect":"v1","method":"logs.query","frame":{"request_id":"req-logs-2","protocol_version":1,"method":"logs.query","params":{"limit":50,"level":"warning","subsystem":"realtime","search":"socket","direction":"backward"}}}
+{"name":"logs_query_next_page","expect":"v1","method":"logs.query","frame":{"request_id":"req-logs-3","protocol_version":1,"method":"logs.query","params":{"limit":200,"direction":"backward","cursor":"eyJhbmNob3IiOjIwMCwiZmluZ2VycHJpbnQiOjExODgxMjkxM30"}}}
+{"name":"lifecycle_prepare","expect":"v1","method":"lifecycle.prepare","frame":{"request_id":"req-lifecycle-1","protocol_version":1,"method":"lifecycle.prepare","params":{}}}
+{"name":"lifecycle_commit","expect":"v1","method":"lifecycle.commit","frame":{"request_id":"req-lifecycle-2","protocol_version":1,"method":"lifecycle.commit","params":{"lease_id":"lease_Qm5xR2t7Vd9pLk3A"}}}
+{"name":"lifecycle_cancel","expect":"v1","method":"lifecycle.cancel","frame":{"request_id":"req-lifecycle-3","protocol_version":1,"method":"lifecycle.cancel","params":{"lease_id":"lease_Qm5xR2t7Vd9pLk3A"}}}
+{"name":"diagnostics_build","expect":"v1","method":"diagnostics.build","frame":{"request_id":"req-diagnostics-1","protocol_version":1,"method":"diagnostics.build","params":{}}}

@@ -18,6 +18,8 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias FermixCore.Auth.Store, as: AuthStore
   alias FermixCore.Browser.ChromeLauncher
   alias FermixCore.Browser.Config, as: BrowserConfig
+  alias FermixCore.BuildInfo
+  alias FermixCore.Capabilities.MCP.RuntimeStatus
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.ComputerHistory
   alias FermixCore.ComputerHistory.Config, as: ComputerHistoryConfig
@@ -45,7 +47,7 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias FermixCore.SkillCuration.Config, as: SkillCurationConfig
   alias FermixCore.SkillCuration.Delivery, as: SkillCurationDelivery
 
-  @type status :: :ok | :warn | :fail
+  @type status :: :ok | :warn | :fail | :not_applicable
   @type result :: %{name: String.t(), status: status(), detail: String.t()}
 
   @sandbox_trace_days 7
@@ -87,13 +89,16 @@ defmodule Fermix.CLI.Doctor.Checks do
     end
   end
 
+  # Management v1 `hello` is the liveness answer: it carries the daemon's
+  # immutable identity and proves the protocol negotiated, which the retired
+  # unversioned `status` method could not.
   @spec daemon_socket(keyword()) :: result()
   def daemon_socket(opts \\ []) do
-    client = Keyword.get(opts, :client, &Client.status/0)
+    client = Keyword.get(opts, :client, fn -> Client.request_v1("hello") end)
 
     case client.() do
-      {:ok, %{"status" => "ok", "version" => version, "uptime_ms" => uptime_ms}} ->
-        daemon_socket_result(version, uptime_ms)
+      {:ok, %{"engine" => %{"product_version" => version}}} ->
+        daemon_socket_result(version)
 
       {:ok, other} ->
         warn("daemon socket", "unexpected reply: #{inspect(other)}")
@@ -102,15 +107,15 @@ defmodule Fermix.CLI.Doctor.Checks do
         warn("daemon socket", "not running (start with `fermix start`)")
 
       {:error, reason} ->
-        fail("daemon socket", inspect(reason))
+        fail("daemon socket", Client.describe_error(reason))
     end
   end
 
   # A daemon on a different version than this binary is the stale state a
   # package-manager upgrade leaves behind (brew swaps the binary on disk,
   # the service keeps running the old release) — warn, don't pass.
-  defp daemon_socket_result(version, uptime_ms) do
-    detail = "running, version #{version}, up #{format_uptime(uptime_ms)}"
+  defp daemon_socket_result(version) do
+    detail = "running, version #{version}"
 
     case VersionSkew.note(version) do
       nil -> ok("daemon socket", detail)
@@ -166,16 +171,30 @@ defmodule Fermix.CLI.Doctor.Checks do
   # Predicates are injectable for the same reason `daemon_socket/1` injects its
   # client: the real ones answer from THIS host, so neither branch below is
   # reachable from a test otherwise.
+  # An app-managed engine has no legacy unit by design: the background service
+  # is `SMAppService` registration, which lives app-side. Reporting its absence
+  # as a warning that names `fermix service install` — a verb this same engine
+  # refuses — makes a correct install look broken, and disagrees with
+  # `Diagnostics.default_service/0` about the same fact.
   @spec service_unit(keyword()) :: result()
   def service_unit(opts \\ []) when is_list(opts) do
     installed? = Keyword.get(opts, :installed?, &installed_safe?/1)
     drifted? = Keyword.get(opts, :drifted?, &drifted_safe?/1)
 
     cond do
+      app_engine?(opts) -> app_managed_service_row()
       installed?.(:user) -> unit_result(:user, drifted?)
       installed?.(:system) -> unit_result(:system, drifted?)
       true -> warn("service unit", "no unit installed (run `fermix service install`)")
     end
+  end
+
+  defp app_managed_service_row do
+    not_applicable(
+      "service unit",
+      "managed by Fermix.app; the background service is a login item the app registers, " <>
+        "not a launchd unit this engine installs"
+    )
   end
 
   # "Installed" was the whole check, so a unit written by an older version read
@@ -255,6 +274,12 @@ defmodule Fermix.CLI.Doctor.Checks do
     binary_path = Keyword.get(opts, :binary_path) || System.find_executable("fermix")
 
     cond do
+      app_engine?(opts) ->
+        not_applicable(
+          "binary integrity",
+          "managed by Fermix.app; the signed bundle is verified by macOS, not by the release feed"
+        )
+
       is_nil(binary_path) ->
         warn("binary integrity", "fermix not on PATH; skipping")
 
@@ -944,6 +969,15 @@ defmodule Fermix.CLI.Doctor.Checks do
 
   defp format_meetings(%{status: :disabled}), do: ok("meetings", "disabled")
 
+  # A half-installed Meet lane is a warning even when another lane carries
+  # readiness: the sidecar is present, so `sidecar_installed?` reads green, but
+  # it cannot launch Chromium and every Meet join is refused. `browser_note` is
+  # the only field that says so.
+  defp format_meetings(%{status: :enabled, ready?: true, browser_note: note} = report)
+       when is_binary(note) do
+    warn("meetings", meetings_lanes(report) <> "; " <> note <> "; " <> report.profile_note)
+  end
+
   defp format_meetings(%{status: :enabled, ready?: true} = report) do
     ok("meetings", meetings_lanes(report) <> "; " <> report.profile_note)
   end
@@ -953,6 +987,13 @@ defmodule Fermix.CLI.Doctor.Checks do
     warn("meetings", "enabled but no lane is usable — " <> remedy)
   end
 
+  defp meetings_lanes(%{
+         browser_installed?: false,
+         sidecar_installed?: true,
+         rtms_configured?: rtms
+       }),
+       do: "meet sidecar installed without its browser; " <> rtms_lane(rtms)
+
   defp meetings_lanes(%{sidecar_installed?: true, rtms_configured?: true}),
     do: "meet sidecar installed; zoom rtms configured"
 
@@ -961,6 +1002,9 @@ defmodule Fermix.CLI.Doctor.Checks do
 
   defp meetings_lanes(%{rtms_configured?: true}),
     do: "zoom rtms configured; meet sidecar not installed"
+
+  defp rtms_lane(true), do: "zoom rtms configured"
+  defp rtms_lane(false), do: "zoom rtms not configured"
 
   @doc """
   Computer-use OS-permission state (docs/design/COMPUTER_USE_V2.md, Phase A). The
@@ -1560,7 +1604,7 @@ defmodule Fermix.CLI.Doctor.Checks do
   # rendered as a plugin whose runtime state is blank.
   defp index_runtime_rows(rows) do
     if Enum.all?(rows, &valid_runtime_row?/1) do
-      {:ok, Map.new(rows, &{&1["source"], &1["status"]})}
+      {:ok, Map.new(rows, &{&1["source"], runtime_triple(&1)})}
     else
       {:error, "malformed runtime_status rows"}
     end
@@ -1570,6 +1614,14 @@ defmodule Fermix.CLI.Doctor.Checks do
     do: is_binary(source) and is_binary(status)
 
   defp valid_runtime_row?(_row), do: false
+
+  # A daemon predating either field simply omits it, which reads as "this
+  # refusal names nothing" — the same shape a `:ready` row has.
+  defp runtime_triple(row),
+    do: {row["status"], present(row["detail"]), present(row["subject"])}
+
+  defp present(value) when is_binary(value) and value != "", do: value
+  defp present(_value), do: nil
 
   defp render_plugins(entries, runtime) do
     details = Enum.map(entries, &plugin_detail(&1, runtime))
@@ -1587,7 +1639,7 @@ defmodule Fermix.CLI.Doctor.Checks do
 
   defp plugin_detail(%{remote?: true} = entry, {:ok, live}) do
     case Map.fetch(live, "plugin:#{entry.name}") do
-      {:ok, status} -> remote_live_detail(entry, status)
+      {:ok, triple} -> remote_live_detail(entry, triple)
       :error -> remote_absent_detail(entry)
     end
   end
@@ -1612,10 +1664,12 @@ defmodule Fermix.CLI.Doctor.Checks do
     }
   end
 
-  defp remote_live_detail(entry, status) do
+  # Rendered by the shared resolver, so this row, the daemon's log line, and the
+  # setup UI cannot describe the same refusal three different ways.
+  defp remote_live_detail(entry, {status, _detail, _subject} = triple) do
     %{
       status: worst_plugin_status([static_plugin_status(entry.status), runtime_status(status)]),
-      text: "#{entry.name}: #{entry.status} (remote; runtime #{status})"
+      text: "#{entry.name}: #{entry.status} (remote; runtime #{RuntimeStatus.describe(triple)})"
     }
   end
 
@@ -1961,6 +2015,17 @@ defmodule Fermix.CLI.Doctor.Checks do
 
   @spec upgrade_available?(keyword()) :: result()
   def upgrade_available?(opts \\ []) do
+    if app_engine?(opts), do: app_managed_upgrade_row(), else: manifest_upgrade_row(opts)
+  end
+
+  defp app_managed_upgrade_row do
+    not_applicable(
+      "upgrade",
+      "managed by Fermix.app; updates ship as whole-app releases, not standalone binaries"
+    )
+  end
+
+  defp manifest_upgrade_row(opts) do
     case Manifest.fetch(opts) do
       {:ok, manifest} ->
         case Manifest.compare_versions(current_version(), manifest.latest) do
@@ -2079,18 +2144,6 @@ defmodule Fermix.CLI.Doctor.Checks do
         0
     end
   end
-
-  defp format_uptime(ms) when is_integer(ms) and ms >= 0 do
-    seconds = div(ms, 1_000)
-
-    cond do
-      seconds < 60 -> "#{seconds}s"
-      seconds < 3_600 -> "#{div(seconds, 60)}m#{rem(seconds, 60)}s"
-      true -> "#{div(seconds, 3_600)}h#{div(rem(seconds, 3_600), 60)}m"
-    end
-  end
-
-  defp format_uptime(other), do: inspect(other)
 
   defp format_threshold(value) when is_float(value) do
     :erlang.float_to_binary(value, [:short])
@@ -2213,4 +2266,11 @@ defmodule Fermix.CLI.Doctor.Checks do
   defp ok(name, detail), do: %{name: name, status: :ok, detail: detail}
   defp warn(name, detail), do: %{name: name, status: :warn, detail: detail}
   defp fail(name, detail), do: %{name: name, status: :fail, detail: detail}
+
+  # A check the distribution does not have. Distinct from `ok` (nothing was
+  # verified) and from `warn` (there is nothing to act on).
+  defp not_applicable(name, detail),
+    do: %{name: name, status: :not_applicable, detail: detail}
+
+  defp app_engine?(opts), do: Keyword.get(opts, :build_info, BuildInfo).app_engine?()
 end

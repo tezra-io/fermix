@@ -209,7 +209,44 @@ defmodule FermixOpik.TraceFile do
     {[:fermix, :realtime, :call_stop], realtime_usage_measurements(row), realtime_meta(row)}
   end
 
+  # A management Doctor run (M34 §5). Counts only — a check summary can name an
+  # operator path, so no summary or evidence text is replayed.
+  defp normalize_agent_event("doctor_session_start", row) do
+    {[:fermix, :doctor, :session_start], %{checks: int(row["checks"])}, doctor_meta(row)}
+  end
+
+  defp normalize_agent_event("doctor_session_complete", row) do
+    {[:fermix, :doctor, :session_complete], %{count: 1, duration_ms: int(row["duration_ms"])},
+     meta(
+       row,
+       [:session_id, :agent, :parent_session, :scope, :budget_ms, :status, :checks_total] ++
+         doctor_count_keys()
+     )}
+  end
+
+  defp normalize_agent_event("doctor_session_error", row) do
+    {[:fermix, :doctor, :session_error], %{count: 1},
+     meta(row, [
+       :session_id,
+       :agent,
+       :parent_session,
+       :scope,
+       :budget_ms,
+       :status,
+       :reason_kind,
+       :error
+     ])}
+  end
+
   defp normalize_agent_event(_other, _row), do: :skip
+
+  defp doctor_meta(row) do
+    meta(row, [:session_id, :agent, :parent_session, :scope, :budget_ms])
+  end
+
+  defp doctor_count_keys do
+    [:passed, :warning, :failed, :unavailable, :skipped, :cancelled, :timed_out]
+  end
 
   defp realtime_meta(row) do
     meta(row, [:session_id, :agent, :device_id, :model, :voice, :session_scope, :reason, :attempt])

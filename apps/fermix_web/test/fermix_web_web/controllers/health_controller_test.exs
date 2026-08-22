@@ -1,6 +1,7 @@
 defmodule FermixWebWeb.HealthControllerTest do
   use FermixWebWeb.ConnCase
 
+  alias FermixCore.BuildInfo
   alias FermixCore.Setup.BootReport
 
   setup do
@@ -45,7 +46,7 @@ defmodule FermixWebWeb.HealthControllerTest do
 
       assert body["status"] == "ok"
       assert body["app"] == "fermix"
-      assert body["version"] == to_string(Application.spec(:fermix_core, :vsn))
+      assert body["version"] == BuildInfo.product_version()
       assert is_binary(body["timestamp"])
     end
 

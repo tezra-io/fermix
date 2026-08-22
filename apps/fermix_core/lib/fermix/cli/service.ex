@@ -20,6 +20,7 @@ defmodule Fermix.CLI.Service do
   alias Fermix.CLI.Service.Launchd
   alias Fermix.CLI.Service.Systemd
   alias Fermix.CLI.Service.Templates
+  alias FermixCore.BuildInfo
   alias FermixCore.Setup.ConfigStore
 
   @label "io.tezra.fermix"
@@ -53,7 +54,8 @@ defmodule Fermix.CLI.Service do
 
   @spec install(scope(), keyword()) :: :ok | {:error, term()}
   def install(scope \\ :user, opts \\ []) when scope in [:user, :system] do
-    with {:ok, spec} <- spec(scope, opts),
+    with :ok <- legacy_mutation(opts),
+         {:ok, spec} <- spec(scope, opts),
          :ok <- File.mkdir_p(Path.dirname(spec.unit_path)),
          :ok <- File.mkdir_p(Path.dirname(spec.log_path)),
          :ok <- write_unit(spec),
@@ -64,7 +66,8 @@ defmodule Fermix.CLI.Service do
 
   @spec uninstall(scope(), keyword()) :: :ok | {:error, term()}
   def uninstall(scope \\ :user, opts \\ []) when scope in [:user, :system] do
-    with {:ok, spec} <- spec(scope, opts),
+    with :ok <- legacy_mutation(opts),
+         {:ok, spec} <- spec(scope, opts),
          :ok <- backend(spec).uninstall(spec),
          :ok <- remove_unit(spec) do
       :ok
@@ -73,17 +76,21 @@ defmodule Fermix.CLI.Service do
 
   @spec start(scope(), keyword()) :: :ok | {:error, term()}
   def start(scope \\ :user, opts \\ []) when scope in [:user, :system] do
-    with {:ok, spec} <- spec(scope, opts), do: backend(spec).start(spec)
+    with :ok <- legacy_mutation(opts), do: do_start(scope, opts)
   end
 
   @spec stop(scope(), keyword()) :: :ok | {:error, term()}
   def stop(scope \\ :user, opts \\ []) when scope in [:user, :system] do
-    with {:ok, spec} <- spec(scope, opts), do: backend(spec).stop(spec)
+    with :ok <- legacy_mutation(opts), do: do_stop(scope, opts)
   end
 
   @spec restart(scope(), keyword()) :: :ok | {:error, term()}
   def restart(scope \\ :user, opts \\ []) when scope in [:user, :system] do
-    with :ok <- stop(scope, opts), do: start(scope, opts)
+    with :ok <- legacy_mutation(opts),
+         :ok <- do_stop(scope, opts),
+         :ok <- do_start(scope, opts) do
+      :ok
+    end
   end
 
   @spec installed?(scope(), keyword()) :: boolean()
@@ -144,6 +151,24 @@ defmodule Fermix.CLI.Service do
     else
       _ -> true
     end
+  end
+
+  defp legacy_mutation(opts) do
+    build_info = Keyword.get(opts, :build_info, BuildInfo)
+
+    case build_info.app_engine?() do
+      true -> {:error, {:app_managed, :legacy_service}}
+      false -> :ok
+      _invalid -> {:error, :invalid_build_info_adapter}
+    end
+  end
+
+  defp do_start(scope, opts) do
+    with {:ok, spec} <- spec(scope, opts), do: backend(spec).start(spec)
+  end
+
+  defp do_stop(scope, opts) do
+    with {:ok, spec} <- spec(scope, opts), do: backend(spec).stop(spec)
   end
 
   defp build_spec(os, scope, opts) do

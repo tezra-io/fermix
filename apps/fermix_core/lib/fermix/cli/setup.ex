@@ -6,8 +6,10 @@ defmodule Fermix.CLI.Setup do
   `FermixCore.Setup.Runtime.run/2` using stdio-backed IO.
   """
 
+  alias Fermix.CLI.AppRoute
   alias Fermix.CLI.ServiceCommand
   alias Fermix.CLI.Setup.WebLauncher
+  alias FermixCore.BuildInfo
   alias FermixCore.Setup.Runtime
   alias FermixCore.Setup.ServiceActivation
   alias FermixCore.Setup.Wizard
@@ -71,9 +73,10 @@ defmodule Fermix.CLI.Setup do
   @spec run([String.t()]) :: non_neg_integer()
   @spec run([String.t()], keyword()) :: non_neg_integer()
   def run(argv, run_opts \\ []) when is_list(argv) and is_list(run_opts) do
-    case OptionParser.parse(argv, strict: @switches) do
-      {opts, _argv, []} -> dispatch(opts, run_opts)
-      {_opts, _argv, invalid} -> invalid_options(invalid)
+    if app_managed?(run_opts) do
+      AppRoute.open_and_report(:setup, "fermix setup", Keyword.get(run_opts, :route_opts, []))
+    else
+      parse_and_dispatch(argv, run_opts)
     end
   end
 
@@ -81,9 +84,24 @@ defmodule Fermix.CLI.Setup do
   @spec supervision_required?([String.t()], keyword()) :: boolean()
   def supervision_required?(argv, run_opts \\ []) when is_list(argv) and is_list(run_opts) do
     case OptionParser.parse(argv, strict: @switches) do
-      {opts, _argv, []} -> terminal_mode?(opts, run_opts)
+      {opts, _argv, []} -> not app_managed?(run_opts) and terminal_mode?(opts, run_opts)
       {_opts, _argv, _invalid} -> false
     end
+  end
+
+  defp parse_and_dispatch(argv, run_opts) do
+    case OptionParser.parse(argv, strict: @switches) do
+      {opts, _argv, []} -> dispatch(opts, run_opts)
+      {_opts, _argv, invalid} -> invalid_options(invalid)
+    end
+  end
+
+  # The application owns setup end to end on an app-managed engine, so the
+  # refusal precedes argument parsing: no switch here selects a mode the CLI is
+  # still allowed to run, and minting a launch token for a surface we will not
+  # open would burn a one-use token.
+  defp app_managed?(run_opts) do
+    Keyword.get(run_opts, :build_info, BuildInfo).app_engine?()
   end
 
   defp dispatch(opts, run_opts) do

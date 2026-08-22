@@ -1,6 +1,8 @@
 defmodule FermixCore.Capabilities.MCP.ServerContractTest do
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.MCP.Naming
   alias FermixCore.Capabilities.MCP.Registry, as: McpRegistry
@@ -158,6 +160,15 @@ defmodule FermixCore.Capabilities.MCP.ServerContractTest do
     McpServer.start_link(opts)
   end
 
+  # `fail_fast?: false` is the DAEMON's posture: discovery runs in
+  # `handle_continue(:discover)` and a terminal reason stops the subtree rather
+  # than failing the child start. The log line under test only exists on that
+  # path, so a `fail_fast?: true` start (the default here) cannot exercise it.
+  defp run_supervised_discovery(ctx) do
+    {:ok, pid} = start_server(ctx, %{}, fail_fast?: false)
+    assert_receive {:EXIT, ^pid, :normal}, 1_000
+  end
+
   defp registered(ctx) do
     ctx.cap_registry |> CapabilityRegistry.list() |> Enum.map(& &1.name) |> Enum.sort()
   end
@@ -202,6 +213,31 @@ defmodule FermixCore.Capabilities.MCP.ServerContractTest do
       assert {:upstream_contract_mismatch, {:missing_tool, "eden_search"}} = reason
       assert registered(ctx) == []
       assert Naming.lookup("eden_get_note") == :error
+    end
+
+    # The log line is the ONLY surface that can name which tool broke the
+    # contract: `RuntimeStatus` stores an atom class by design (§11.1), so a name
+    # dropped here is a name no operator can recover. A bare
+    # `:upstream_contract_mismatch` sent one operator on a live-probe hunt for a
+    # fact the daemon already held.
+    test "the terminal log line names the tool that broke the contract", ctx do
+      StubDiscoverer.set_tools([descriptor("eden_get_note")])
+
+      log = capture_log(fn -> run_supervised_discovery(ctx) end)
+
+      assert log =~ "upstream_contract_mismatch"
+      assert log =~ "missing_tool"
+      assert log =~ "eden_search"
+    end
+
+    test "a name collision names the colliding capability in the terminal log", ctx do
+      {:ok, _name} = Naming.reserve("other", "get_note", "eden_search")
+      StubDiscoverer.set_tools([descriptor("eden_get_note"), descriptor("eden_search")])
+
+      log = capture_log(fn -> run_supervised_discovery(ctx) end)
+
+      assert log =~ "capability_conflict"
+      assert log =~ "eden_search"
     end
   end
 

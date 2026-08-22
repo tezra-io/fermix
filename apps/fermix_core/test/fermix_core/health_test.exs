@@ -1,6 +1,7 @@
 defmodule FermixCore.HealthTest do
   use ExUnit.Case, async: false
 
+  alias FermixCore.BuildInfo
   alias FermixCore.Health
   alias FermixCore.Setup.ConfigStore
 
@@ -71,7 +72,7 @@ defmodule FermixCore.HealthTest do
       )
 
     assert report.status == :degraded
-    assert report.version == to_string(Application.spec(:fermix_core, :vsn))
+    assert report.version == BuildInfo.product_version()
     assert report.config.path == Path.join(tmp_home, "config.toml")
     assert report.config.home == tmp_home
 

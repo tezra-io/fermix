@@ -19,6 +19,7 @@ defmodule Fermix.CLI.Upgrade do
   alias Fermix.CLI.Upgrade.InstallMethod
   alias Fermix.CLI.Upgrade.Manifest
   alias Fermix.CLI.Upgrade.Swapper
+  alias FermixCore.BuildInfo
 
   @health_check_timeout_ms 10_000
   @health_check_poll_ms 500
@@ -35,38 +36,42 @@ defmodule Fermix.CLI.Upgrade do
   def check(opts \\ []) do
     current = current_version()
 
-    with {:ok, manifest} <- Manifest.fetch(opts) do
+    with :ok <- standalone_upgrade(opts),
+         {:ok, manifest} <- Manifest.fetch(opts) do
       {:ok,
        %{
          current: current,
          latest: manifest.latest,
          available: Manifest.compare_versions(current, manifest.latest) == :lt,
-         install_method: InstallMethod.detect(Keyword.get(opts, :binary_path))
+         install_method: install_method(opts).detect(Keyword.get(opts, :binary_path))
        }}
     end
   end
 
   @spec run(keyword()) :: :ok | {:error, term()}
   def run(opts \\ []) do
-    binary_path = Keyword.get(opts, :binary_path)
+    with :ok <- standalone_upgrade(opts) do
+      binary_path = Keyword.get(opts, :binary_path)
 
-    case InstallMethod.detect(binary_path) do
-      {:managed, name, hint} -> {:error, {:managed_install, name, hint}}
-      {:error, reason} -> {:error, reason}
-      {:unmanaged, installed_path} -> do_upgrade(installed_path, opts)
+      case install_method(opts).detect(binary_path) do
+        {:managed, name, hint} -> {:error, {:managed_install, name, hint}}
+        {:error, reason} -> {:error, reason}
+        {:unmanaged, installed_path} -> do_upgrade(installed_path, opts)
+      end
     end
   end
 
   defp do_upgrade(installed_path, opts) do
     current = current_version()
+    swapper = swapper(opts)
 
     with {:ok, manifest} <- Manifest.fetch(opts),
          :ok <- assert_newer(current, manifest.latest),
          {:ok, release} <- Manifest.latest_release(manifest),
          {:ok, target} <- Manifest.target_for_host(),
          {:ok, artifact} <- Manifest.select_artifact(release, target),
-         {:ok, staged} <- Swapper.stage_artifact(artifact, opts),
-         :ok <- Swapper.verify(staged, Keyword.put(opts, :version, manifest.latest)) do
+         {:ok, staged} <- swapper.stage_artifact(artifact, opts),
+         :ok <- swapper.verify(staged, Keyword.put(opts, :version, manifest.latest)) do
       finalize(staged, artifact, current, manifest.latest, installed_path, opts)
     else
       {:error, _reason} = err ->
@@ -80,7 +85,7 @@ defmodule Fermix.CLI.Upgrade do
   # would overwrite the running binary with a stale ~/.fermix/.previous
   # from an earlier upgrade. Only the post-swap path may rollback.
   defp finalize(staged, artifact, current, latest, installed_path, opts) do
-    case Swapper.swap(staged, installed_path, opts) do
+    case swapper(opts).swap(staged, installed_path, opts) do
       {:ok, _swap_info} ->
         case restart_and_health_check(Keyword.put(opts, :expected_version, latest)) do
           :ok ->
@@ -141,7 +146,7 @@ defmodule Fermix.CLI.Upgrade do
   end
 
   defp do_wait(deadline, opts) do
-    status_fun = Keyword.get(opts, :status_fun, &Client.status/1)
+    status_fun = Keyword.get(opts, :status_fun, &default_status/1)
     socket = Keyword.get(opts, :socket_path) || default_socket_path()
     expected = Keyword.get(opts, :expected_version)
 
@@ -158,15 +163,20 @@ defmodule Fermix.CLI.Upgrade do
     end
   end
 
+  # The upgraded daemon is the same binary as this one, so it answers management
+  # v1. A pre-v1 daemon that survived the restart cannot answer `hello` at all,
+  # which is the same "not healthy yet" the version compare below produces.
+  defp default_status(opts), do: Client.request_v1("hello", %{}, opts)
+
   # Healthy only when the daemon answers AND — when we know the target version —
   # reports THAT version. So a stale old daemon that survived the restart (e.g. a
   # wedged SIGTERM) fails the gate and triggers rollback instead of a false green.
-  defp healthy?({:ok, %{"status" => "ok"}}, nil), do: true
+  defp healthy?({:ok, %{"engine" => %{"product_version" => _v}}}, nil), do: true
 
   # Semantic compare (not raw ==) so a compiled vsn carrying build metadata
   # (e.g. "0.5.6+abcdef") still matches manifest.latest "0.5.6" — matching how
   # `assert_newer` compares versions elsewhere, so a good upgrade never false-rolls-back.
-  defp healthy?({:ok, %{"status" => "ok", "version" => v}}, expected),
+  defp healthy?({:ok, %{"engine" => %{"product_version" => v}}}, expected),
     do: Manifest.compare_versions(to_string(v), to_string(expected)) == :eq
 
   defp healthy?(_status, _expected), do: false
@@ -177,9 +187,10 @@ defmodule Fermix.CLI.Upgrade do
   # actually died). Best-effort: the upgrade already failed and `finalize` returns
   # that error, so we don't mask it with a rollback hiccup here.
   defp rollback(installed_path, opts) do
-    previous = Keyword.get(opts, :previous_path, Swapper.default_previous_path())
+    swapper = swapper(opts)
+    previous = Keyword.get_lazy(opts, :previous_path, &swapper.default_previous_path/0)
 
-    with :ok <- Swapper.rollback(previous, installed_path) do
+    with :ok <- swapper.rollback(previous, installed_path) do
       if Keyword.get(opts, :skip_restart, false), do: :ok, else: do_restart(opts)
     end
   end
@@ -200,13 +211,23 @@ defmodule Fermix.CLI.Upgrade do
     File.write!(audit_path, line, [:append])
   end
 
-  defp current_version do
-    Application.spec(:fermix_core, :vsn)
-    |> case do
-      nil -> "0.0.0"
-      vsn -> to_string(vsn)
+  defp standalone_upgrade(opts) do
+    build_info = Keyword.get(opts, :build_info, BuildInfo)
+
+    case build_info.app_engine?() do
+      true -> {:error, {:app_managed, :update}}
+      false -> :ok
+      _invalid -> {:error, :invalid_build_info_adapter}
     end
   end
+
+  # The two collaborators that classify and replace the installed binary. Both
+  # are injectable so `standalone_upgrade/1`'s precedence is provable with
+  # doubles that raise, rather than inferred from a returned error tuple.
+  defp install_method(opts), do: Keyword.get(opts, :install_method, InstallMethod)
+  defp swapper(opts), do: Keyword.get(opts, :swapper, Swapper)
+
+  defp current_version, do: BuildInfo.product_version()
 
   defp default_socket_path do
     Path.join(default_fermix_home(), "daemon.sock")

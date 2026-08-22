@@ -29,6 +29,29 @@ defmodule Fermix.CLI.DoctorTest do
     assert output =~ "failure(s)"
   end
 
+  test "not-applicable rows render and count as their own class, not as passes" do
+    results = [
+      %{name: "workspace", status: :ok, detail: "fine"},
+      %{name: "binary integrity", status: :not_applicable, detail: "managed by Fermix.app"},
+      %{name: "upgrade", status: :not_applicable, detail: "managed by Fermix.app"}
+    ]
+
+    output = capture_io(fn -> Doctor.print_report(results) end)
+
+    assert output =~ "[N/A ] binary integrity"
+    assert output =~ "[N/A ] upgrade"
+    assert output =~ "1 ok, 0 warning(s), 0 failure(s), 2 not applicable"
+  end
+
+  test "not-applicable rows do not fail the run, and a failure still does" do
+    assert Doctor.exit_for([%{name: "upgrade", status: :not_applicable, detail: "n/a"}]) == 0
+
+    assert Doctor.exit_for([
+             %{name: "upgrade", status: :not_applicable, detail: "n/a"},
+             %{name: "workspace", status: :fail, detail: "broken"}
+           ]) == 1
+  end
+
   test "rejects unknown options with non-zero exit" do
     test_self = self()
 

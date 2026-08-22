@@ -5,31 +5,21 @@ on:
     tags: ["v*.*.*"]
 
 permissions:
-  contents: write
-  id-token: write
+  contents: read
 
 jobs:
-  build:
-    name: Build, sign, and publish
+  preflight:
+    name: Validate release metadata
     runs-on: ubuntu-24.04
-    env:
-      MIX_ENV: prod
-      ELIXIR_VERSION: "1.19.5"
-      # Pinned to an EXACT patch, not a bare major. Burrito does not build the
-      # ERTS — it downloads a prebuilt one from beam-machine-universal, keyed on
-      # the string in the installed Erlang's `OTP_VERSION` file
-      # (`Burrito.Util.get_otp_version/0`). beam-machine only publishes upstream
-      # OTP releases (28.4, 28.4.1, 28.5), NOT every maintenance patch, so a
-      # floating major eventually resolves to a patch it has never built and the
-      # download 404s mid-release. That is what killed the first v0.7.0 attempt:
-      # `"28"` resolved to 28.5.0.4, which beam-machine does not carry.
-      # Before bumping this, confirm the artifact exists for EVERY target:
-      #   OTP-<v>/macos/universal/otp_<v>_macos_universal.tar.gz
-      #   OTP-<v>/linux/{x86_64,aarch64}/any/otp_<v>_linux_any_{arch}.tar.gz
-      OTP_VERSION: "28.4.1"
-      ZIG_VERSION: "0.15.2"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Refuse published release replacement
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: scripts/release/refuse_published_release.sh "$REPO" "$TAG_NAME"
 
       - name: Verify tag matches mix.exs version
         env:
@@ -45,10 +35,6 @@ jobs:
           echo "Releasing v$mix_version"
 
       - name: Assemble release notes from CHANGELOG
-        # Curated notes come from the version's CHANGELOG.md section, not from
-        # auto-generated commit/PR titles. Runs before the build so a missing
-        # CHANGELOG entry fails fast (extract_changelog.sh exits non-zero) rather
-        # than after a 10-minute build.
         env:
           TAG_NAME: ${{ github.ref_name }}
           REPO: ${{ github.repository }}
@@ -61,182 +47,486 @@ jobs:
             printf '\n'
             sed "s|__REPO__|${REPO}|g" scripts/release/signing_footer.md
           } > RELEASE_NOTES.md
-          echo '----- assembled RELEASE_NOTES.md -----'
-          cat RELEASE_NOTES.md
 
-      - uses: erlef/setup-beam@v1
+      - name: Upload release metadata
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-metadata
+          path: RELEASE_NOTES.md
+          if-no-files-found: error
+          retention-days: 1
+
+  standalone:
+    name: Build standalone releases
+    needs: preflight
+    runs-on: ubuntu-24.04
+    env:
+      MIX_ENV: prod
+      ELIXIR_VERSION: "1.19.5"
+      # Burrito downloads ERTS by this exact upstream release string. Confirm all
+      # beam-machine target artifacts exist before changing it.
+      OTP_VERSION: "28.4.1"
+      ZIG_VERSION: "0.15.2"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
         with:
           otp-version: ${{ env.OTP_VERSION }}
           elixir-version: ${{ env.ELIXIR_VERSION }}
 
       - name: Install Zig
-        uses: mlugg/setup-zig@v2
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: ${{ env.ZIG_VERSION }}
 
-      - name: Install xz, jq
+      - name: Install release tools
         run: |
           sudo apt-get update
           sudo apt-get install -y xz-utils jq
 
-      - name: Install cosign
-        uses: sigstore/cosign-installer@v3
-
-      - name: Fetch deps
-        run: mix deps.get
-
-      - name: Build and digest assets
+      - name: Compile and deploy web assets
         run: |
           set -euo pipefail
-          mix assets.setup
-          mix assets.deploy
+          mix deps.get
+          mix compile --warnings-as-errors
+          (
+            cd apps/fermix_web
+            mix assets.setup
+            mix assets.deploy
+          )
 
       - name: Build all Burrito targets
         run: mix release fermix --overwrite
 
-      - name: Sign and hash binaries
-        working-directory: burrito_out
-        run: |
-          set -euo pipefail
-          for bin in fermix_*; do
-            case "$bin" in *.sig|*.pem|*.sha256) continue ;; esac
-            cosign sign-blob --yes \
-              --output-signature "${bin}.sig" \
-              --output-certificate "${bin}.pem" \
-              "$bin"
-            sha256sum "$bin" > "${bin}.sha256"
-          done
-          ls -la
-
-      - name: Generate releases.json
+      - name: Generate standalone releases.json
         env:
           VERSION: ${{ github.ref_name }}
           REPO: ${{ github.repository }}
         run: ./scripts/release/build_releases_json.sh > burrito_out/releases.json
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+      - name: Upload standalone candidates
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
+          name: standalone-candidate
+          path: |
+            burrito_out/fermix_*
+            burrito_out/releases.json
+          if-no-files-found: error
+          retention-days: 1
+
+  app-engine:
+    name: Build app engine (${{ matrix.target }})
+    needs: preflight
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-15, target: macos_aarch64 }
+          - { os: macos-15-intel, target: macos_x86_64 }
+    env:
+      ELIXIR_VERSION: "1.19.5"
+      OTP_VERSION: "28.4.1"
+      FERMIX_BUILD_ID: release-${{ github.run_id }}-${{ matrix.target }}
+      FERMIX_BUILD_SOURCE_COMMIT: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+
+      - name: Build native app engine
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          scripts/release/build_app_engine.sh \
+            "${{ matrix.target }}" \
+            app_engine_out \
+            "${VERSION#v}"
+
+      - name: Upload app-engine candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: app-engine-${{ matrix.target }}
+          path: app_engine_out/fermix_app_engine_${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  sign-candidate:
+    name: Sign release candidate
+    needs: [standalone, app-engine]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download standalone candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: standalone-candidate
+          path: burrito_out
+
+      - name: Download app-engine candidates
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: app-engine-*
+          path: app_engine_out
+          merge-multiple: true
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3.9.1
+
+      - name: Sign, hash, and verify candidate artifacts
+        env:
+          CERTIFICATE_IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/release.yml@refs/tags/${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          artifacts=(
+            burrito_out/fermix_*
+            app_engine_out/fermix_app_engine_*.tar.gz
+          )
+          unsigned=()
+          for artifact in "${artifacts[@]}"; do
+            case "$artifact" in *.sig|*.pem|*.sha256) continue ;; esac
+            unsigned+=("$artifact")
+          done
+          [ "${#unsigned[@]}" -eq 6 ] || {
+            echo "::error::Expected four standalone and two app-engine artifacts, found ${#unsigned[@]}"
+            exit 1
+          }
+          for artifact in "${unsigned[@]}"; do
+            cosign sign-blob --yes \
+              --output-signature "${artifact}.sig" \
+              --output-certificate "${artifact}.pem" \
+              "$artifact"
+            digest="$(sha256sum "$artifact" | awk '{print $1}')"
+            printf '%s  %s\n' "$digest" "$(basename "$artifact")" > "${artifact}.sha256"
+            cosign verify-blob \
+              --certificate "${artifact}.pem" \
+              --signature "${artifact}.sig" \
+              --certificate-identity "$CERTIFICATE_IDENTITY" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              "$artifact"
+          done
+
+      - name: Upload signed release candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: signed-release-candidate
+          overwrite: true
+          path: |
+            burrito_out/fermix_*
+            burrito_out/releases.json
+            app_engine_out/fermix_app_engine_*
+          if-no-files-found: error
+          retention-days: 1
+
+  verify-candidate:
+    name: Verify candidate (${{ matrix.name }})
+    needs: sign-candidate
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: standalone-linux-x64, os: ubuntu-24.04, kind: standalone, target: linux_x86_64, mode: native }
+          - { name: standalone-linux-arm64, os: ubuntu-24.04-arm, kind: standalone, target: linux_aarch64, mode: native }
+          - { name: standalone-macos-arm64, os: macos-15, kind: standalone, target: macos_aarch64, mode: native }
+          - { name: standalone-macos-x64, os: macos-15-intel, kind: standalone, target: macos_x86_64, mode: native }
+          - { name: engine-macos-arm64, os: macos-15, kind: app_engine, target: macos_aarch64, mode: native }
+          - { name: engine-macos-x64, os: macos-15-intel, kind: app_engine, target: macos_x86_64, mode: native }
+          - { name: engine-macos-x64-rosetta, os: macos-15, kind: app_engine, target: macos_x86_64, mode: rosetta }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Download signed release candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: signed-release-candidate
+          path: .
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3.9.1
+
+      - name: Verify candidate signature and checksum
+        env:
+          CERTIFICATE_IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/release.yml@refs/tags/${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.kind }}" = standalone ]; then
+            artifact="burrito_out/fermix_${{ matrix.target }}"
+          else
+            artifact="app_engine_out/fermix_app_engine_${{ matrix.target }}.tar.gz"
+          fi
+          directory="$(dirname "$artifact")"
+          basename="$(basename "$artifact")"
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd "$directory" && sha256sum -c "${basename}.sha256")
+          else
+            (cd "$directory" && shasum -a 256 -c "${basename}.sha256")
+          fi
+          cosign verify-blob \
+            --certificate "${artifact}.pem" \
+            --signature "${artifact}.sig" \
+            --certificate-identity "$CERTIFICATE_IDENTITY" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "$artifact"
+
+      - name: Run standalone candidate
+        if: matrix.kind == 'standalone'
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          scripts/release/verify_standalone.sh \
+            "burrito_out/fermix_${{ matrix.target }}" \
+            "${{ matrix.target }}" \
+            "${TAG_NAME#v}"
+
+      - name: Run app-engine candidate
+        if: matrix.kind == 'app_engine'
+        env:
+          SOURCE_COMMIT: ${{ github.sha }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          scripts/release/verify_app_engine.sh \
+            "app_engine_out/fermix_app_engine_${{ matrix.target }}.tar.gz" \
+            "${{ matrix.target }}" \
+            "${TAG_NAME#v}" \
+            "$SOURCE_COMMIT" \
+            "${{ matrix.mode }}"
+
+  stage-release:
+    name: Stage draft release
+    needs: [preflight, verify-candidate]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      release_id: ${{ steps.release.outputs.id }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Refuse published release replacement before staging
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: scripts/release/refuse_published_release.sh "$REPO" "$TAG_NAME"
+
+      - name: Download signed release candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: signed-release-candidate
+          path: .
+
+      - name: Download release metadata
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-metadata
+          path: .
+
+      - name: Create draft GitHub Release
+        id: release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          draft: true
           fail_on_unmatched_files: true
-          # Pre-release tags (those carrying a SemVer pre-release segment, e.g.
-          # v0.3.0-beta) publish as a GitHub pre-release so they are never marked
-          # "Latest". Stable tags (v0.3.0) have no '-' and publish normally.
           prerelease: ${{ contains(github.ref_name, '-') }}
-          # Curated notes assembled from the CHANGELOG section + signing footer.
           body_path: RELEASE_NOTES.md
           files: |
             burrito_out/fermix_*
             burrito_out/releases.json
+            app_engine_out/fermix_app_engine_*
 
-      - name: Bump Homebrew tap
-        # Only stable releases bump the tap. A pre-release tag (v*-beta/-rc/...)
-        # must never promote itself to the formula that all `brew` users install.
-        if: ${{ !contains(github.ref_name, '-') }}
+  verify-published:
+    name: Verify staged assets (${{ matrix.name }})
+    needs: stage-release
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: standalone-linux-x64, os: ubuntu-24.04, kind: standalone, target: linux_x86_64, mode: native }
+          - { name: standalone-linux-arm64, os: ubuntu-24.04-arm, kind: standalone, target: linux_aarch64, mode: native }
+          - { name: standalone-macos-arm64, os: macos-15, kind: standalone, target: macos_aarch64, mode: native }
+          - { name: standalone-macos-x64, os: macos-15-intel, kind: standalone, target: macos_x86_64, mode: native }
+          - { name: engine-macos-arm64, os: macos-15, kind: app_engine, target: macos_aarch64, mode: native }
+          - { name: engine-macos-x64, os: macos-15-intel, kind: app_engine, target: macos_x86_64, mode: native }
+          - { name: engine-macos-x64-rosetta, os: macos-15, kind: app_engine, target: macos_x86_64, mode: rosetta }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3.9.1
+
+      - name: Download exact staged release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ needs.stage-release.outputs.release_id }}
+          REPO: ${{ github.repository }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          [ -n "$RELEASE_ID" ] || {
+            echo "::error::The draft release did not expose its exact release ID."
+            exit 1
+          }
+          if [ "${{ matrix.kind }}" = standalone ]; then
+            artifact="fermix_${{ matrix.target }}"
+          else
+            artifact="fermix_app_engine_${{ matrix.target }}.tar.gz"
+          fi
+          release_json="$RUNNER_TEMP/staged-release.json"
+          gh api "/repos/$REPO/releases/$RELEASE_ID" > "$release_json"
+          [ "$(jq -r '.draft' "$release_json")" = true ] || {
+            echo "::error::Release $RELEASE_ID is not the expected draft."
+            exit 1
+          }
+          [ "$(jq -r '.tag_name' "$release_json")" = "$TAG_NAME" ] || {
+            echo "::error::Release $RELEASE_ID does not belong to $TAG_NAME."
+            exit 1
+          }
+          for name in "$artifact" "${artifact}.sig" "${artifact}.pem" "${artifact}.sha256"; do
+            count="$(jq --arg name "$name" '[.assets[] | select(.name == $name)] | length' "$release_json")"
+            [ "$count" -eq 1 ] || {
+              echo "::error::Expected exactly one staged asset named $name, found $count."
+              exit 1
+            }
+            asset_id="$(jq -r --arg name "$name" '.assets[] | select(.name == $name) | .id' "$release_json")"
+            gh api \
+              --header "Accept: application/octet-stream" \
+              "/repos/$REPO/releases/assets/$asset_id" > "$name"
+          done
+
+      - name: Verify staged signature and checksum
+        env:
+          CERTIFICATE_IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/release.yml@refs/tags/${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.kind }}" = standalone ]; then
+            artifact="fermix_${{ matrix.target }}"
+          else
+            artifact="fermix_app_engine_${{ matrix.target }}.tar.gz"
+          fi
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum -c "${artifact}.sha256"
+          else
+            shasum -a 256 -c "${artifact}.sha256"
+          fi
+          cosign verify-blob \
+            --certificate "${artifact}.pem" \
+            --signature "${artifact}.sig" \
+            --certificate-identity "$CERTIFICATE_IDENTITY" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "$artifact"
+
+      - name: Run staged standalone asset
+        if: matrix.kind == 'standalone'
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          scripts/release/verify_standalone.sh \
+            "fermix_${{ matrix.target }}" \
+            "${{ matrix.target }}" \
+            "${TAG_NAME#v}"
+
+      - name: Run staged app-engine asset
+        if: matrix.kind == 'app_engine'
+        env:
+          SOURCE_COMMIT: ${{ github.sha }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          scripts/release/verify_app_engine.sh \
+            "fermix_app_engine_${{ matrix.target }}.tar.gz" \
+            "${{ matrix.target }}" \
+            "${TAG_NAME#v}" \
+            "$SOURCE_COMMIT" \
+            "${{ matrix.mode }}"
+
+  promote:
+    name: Promote verified release
+    needs: [stage-release, verify-published]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Publish exact verified draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ needs.stage-release.outputs.release_id }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          [ -n "$RELEASE_ID" ] || {
+            echo "::error::The verified draft release ID is missing."
+            exit 1
+          }
+          gh api \
+            --method PATCH \
+            "/repos/$REPO/releases/$RELEASE_ID" \
+            --field draft=false >/dev/null
+
+  homebrew:
+    name: Update and verify Homebrew formula
+    needs: promote
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Download signed release candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: signed-release-candidate
+          path: .
+
+      - name: Bump and verify Homebrew tap
         env:
           TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           VERSION: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           if [ -z "${TAP_TOKEN:-}" ]; then
-            echo "::warning::HOMEBREW_TAP_TOKEN not set - skipping Homebrew tap bump"
+            echo "::warning::HOMEBREW_TAP_TOKEN not set - skipping Homebrew tap bump and verification"
             exit 0
           fi
+          version="${VERSION#v}"
           tap_dir="$(mktemp -d)"
+          trap 'rm -rf -- "$tap_dir"' EXIT
           git clone --depth 1 "https://x-access-token:${TAP_TOKEN}@github.com/tezra-io/homebrew-tap.git" "$tap_dir"
           RELEASES_JSON="$PWD/burrito_out/releases.json" FORMULA="$tap_dir/Formula/fermix.rb" scripts/homebrew/bump.sh
           git -C "$tap_dir" config user.name "github-actions[bot]"
           git -C "$tap_dir" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git -C "$tap_dir" add Formula/fermix.rb
           if git -C "$tap_dir" diff --cached --quiet; then
-            echo "tap formula already current; nothing to push"
-            exit 0
+            echo "tap formula already current"
+          else
+            git -C "$tap_dir" commit -m "fermix $version"
+            git -C "$tap_dir" push
           fi
-          git -C "$tap_dir" commit -m "fermix ${VERSION#v}"
-          git -C "$tap_dir" push
 
-  verify:
-    # M22 T5: prove the artifacts users actually download — signature verifies
-    # keyless against this workflow's OIDC identity, and the binary executes on
-    # every shipped-and-runnable platform. Downloads the PUBLISHED assets, never
-    # a rebuild.
-    name: verify published artifacts (${{ matrix.target }})
-    needs: build
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { os: ubuntu-24.04, target: linux_x86_64 }
-          - { os: ubuntu-24.04-arm, target: linux_aarch64 }
-          - { os: macos-15, target: macos_aarch64 }
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
-    steps:
-      - name: Install cosign
-        uses: sigstore/cosign-installer@v3
-
-      - name: Download the published release assets
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG_NAME: ${{ github.ref_name }}
-        run: |
-          gh release download "$TAG_NAME" \
-            --repo "${{ github.repository }}" \
-            --pattern "fermix_${{ matrix.target }}*"
-          ls -la
-
-      - name: Verify keyless signature against the published blob
-        run: |
-          cosign verify-blob \
-            --certificate "fermix_${{ matrix.target }}.pem" \
-            --signature "fermix_${{ matrix.target }}.sig" \
-            --certificate-identity-regexp "https://github.com/${{ github.repository }}/.github/workflows/release.yml@.*" \
-            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-            "fermix_${{ matrix.target }}"
-
-      - name: Run the shipped binary
-        env:
-          FERMIX_HOME: ${{ runner.temp }}/fermix-verify-home
-          TAG_NAME: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          chmod +x "fermix_${{ matrix.target }}"
-          out=$("./fermix_${{ matrix.target }}" --version)
-          echo "$out"
-          tag="$TAG_NAME"
-          case "$out" in
-            *"${tag#v}"*) echo "version matches tag" ;;
-            *) echo "::error::--version output does not contain ${tag#v}"; exit 1 ;;
-          esac
-
-      - name: Verify the disclaim shim inside the extracted payload (macOS)
-        # `--version` above already made the wrapper self-extract, so the shim
-        # the browser tool will spawn is on disk — prove it is present,
-        # executable, and can resolve the disclaim API on a real macOS host.
-        if: matrix.os == 'macos-15'
-        run: |
-          set -euo pipefail
-          shim="$(find "$HOME/Library/Application Support/.burrito" -type f \
-            -path "*fermix_nif*/priv/disclaim" | head -1)"
-          if [ -z "$shim" ]; then
-            echo "::error::disclaim shim not found in the extracted Burrito payload"
-            exit 1
-          fi
-          "$shim" --check
-
-      - name: Verify the Homebrew formula serves this release (stable tags)
-        if: matrix.os == 'macos-15' && !contains(github.ref_name, '-')
-        run: |
-          set -euo pipefail
           brew tap tezra-io/tap
-          version="${GITHUB_REF_NAME#v}"
-          for _ in $(seq 1 12); do
-            stable=$(brew info --json=v2 tezra-io/tap/fermix 2>/dev/null \
-              | jq -r '.formulae[0].versions.stable // empty')
-            if [ "$stable" = "$version" ]; then break; fi
-            sleep 10
-            brew update >/dev/null 2>&1 || true
+          visible_version=""
+          for attempt in $(seq 1 12); do
+            brew update >/dev/null
+            visible_version="$(brew info --json=v2 tezra-io/tap/fermix | jq -r '.formulae[0].versions.stable // empty')"
+            [ "$visible_version" = "$version" ] && break
+            [ "$attempt" -eq 12 ] || sleep 10
           done
+          [ "$visible_version" = "$version" ] || {
+            echo "::error::Homebrew still exposes $visible_version instead of $version after 12 checks."
+            exit 1
+          }
           brew install tezra-io/tap/fermix
           fermix --version | grep -F "$version"

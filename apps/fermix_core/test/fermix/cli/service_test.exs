@@ -3,6 +3,20 @@ defmodule Fermix.CLI.ServiceTest do
 
   alias Fermix.CLI.Service
 
+  defmodule AppBuildInfo do
+    def app_engine?, do: true
+  end
+
+  describe "app-managed mutation guard" do
+    test "all legacy service mutations fail before OS dispatch" do
+      opts = [build_info: AppBuildInfo, os: :unsupported]
+
+      for action <- [:install, :uninstall, :start, :stop, :restart] do
+        assert {:error, {:app_managed, :legacy_service}} = apply(Service, action, [:user, opts])
+      end
+    end
+  end
+
   describe "spec/2 (linux)" do
     test "user-scope writes to ~/.config/systemd/user" do
       tmp = mkdir!()

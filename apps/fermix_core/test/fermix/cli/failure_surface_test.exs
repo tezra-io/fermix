@@ -21,25 +21,22 @@ defmodule Fermix.CLI.FailureSurfaceTest do
     %{socket_path: Path.join(socket_dir, "daemon.sock")}
   end
 
+  # The v1 projection publishes that jobs are unavailable but not the raw
+  # registry term behind it, so `--full` must still surface the state itself.
   test "status --full makes unavailable jobs visible", %{socket_path: socket_path} do
     task =
-      serve_once(socket_path, %{
-        "status" => "ok",
-        "overview" => %{
-          "daemon" => %{"status" => "running"},
-          "readiness" => %{"status" => "ready"},
-          "agents" => %{"main" => %{"status" => "idle"}, "skill_workers" => 0},
-          "jobs" => %{
-            "status" => "unavailable",
-            "error" => ":missing_job_table",
-            "scheduled" => 0,
-            "running" => 0,
-            "paused" => 0,
-            "failed_recent" => 0
-          },
-          "capabilities" => %{"builtin" => 0, "skill" => 0, "mcp" => 0},
-          "paths" => %{"home" => "/tmp/fermix"}
-        }
+      serve_v1_once(socket_path, %{
+        "daemon" => %{"status" => "running"},
+        "readiness" => %{"status" => "ready"},
+        "agents" => %{"main" => %{"status" => "idle"}, "skill_workers" => 0},
+        "jobs" => %{
+          "status" => "unavailable",
+          "scheduled" => 0,
+          "running" => 0,
+          "paused" => 0,
+          "failed_recent" => 0
+        },
+        "capabilities" => %{"builtin" => 0, "skill" => 0, "mcp" => 0}
       })
 
     test_self = self()
@@ -51,7 +48,8 @@ defmodule Fermix.CLI.FailureSurfaceTest do
 
     assert_receive {:exit_status, 0}
     Task.await(task, 1_000)
-    assert output =~ "jobs: unavailable (:missing_job_table)"
+    assert output =~ "jobs: unavailable"
+    assert output =~ "fermix doctor"
   end
 
   test "capabilities command reports structured daemon errors", %{socket_path: socket_path} do
@@ -95,13 +93,16 @@ defmodule Fermix.CLI.FailureSurfaceTest do
     refute stderr =~ "unexpected reply"
   end
 
+  # A v1 error carries the daemon's own sentence and a stable code; neither is
+  # replaced by an inspected internal term.
   test "status overview reports daemon errors without unexpected-reply noise", %{
     socket_path: socket_path
   } do
     task =
-      serve_once(socket_path, %{
-        "status" => "error",
-        "reason" => "{:main_agent_unavailable, :noproc}"
+      serve_v1_error_once(socket_path, %{
+        "code" => "unavailable",
+        "message" => "The requested management capability is unavailable.",
+        "details" => %{"capability" => "overview"}
       })
 
     test_self = self()
@@ -113,7 +114,8 @@ defmodule Fermix.CLI.FailureSurfaceTest do
 
     assert_receive {:exit_status, 1}
     Task.await(task, 1_000)
-    assert stderr =~ ~s(fermix status: "{:main_agent_unavailable, :noproc}")
+    assert stderr =~ "fermix status: The requested management capability is unavailable."
+    assert stderr =~ "(unavailable)"
     refute stderr =~ "unexpected reply"
   end
 
@@ -213,6 +215,24 @@ defmodule Fermix.CLI.FailureSurfaceTest do
   end
 
   defp serve_once(socket_path, response) do
+    serve(socket_path, fn _request -> response end)
+  end
+
+  # A v1 response must echo the request's own id, so the reply is built from the
+  # frame the client actually sent rather than from a canned literal.
+  defp serve_v1_once(socket_path, result) do
+    serve(socket_path, fn request ->
+      %{"request_id" => request["request_id"], "result" => result}
+    end)
+  end
+
+  defp serve_v1_error_once(socket_path, error) do
+    serve(socket_path, fn request ->
+      %{"request_id" => request["request_id"], "error" => error}
+    end)
+  end
+
+  defp serve(socket_path, respond) do
     parent = self()
 
     Task.async(fn ->
@@ -230,8 +250,8 @@ defmodule Fermix.CLI.FailureSurfaceTest do
       File.chmod!(socket_path, 0o600)
       send(parent, :fake_daemon_ready)
       {:ok, conn} = :gen_tcp.accept(listen_socket, 1_000)
-      {:ok, _request} = :gen_tcp.recv(conn, 0, 1_000)
-      :ok = :gen_tcp.send(conn, Jason.encode!(response))
+      {:ok, request} = :gen_tcp.recv(conn, 0, 1_000)
+      :ok = :gen_tcp.send(conn, Jason.encode!(respond.(Jason.decode!(request))))
       :gen_tcp.close(conn)
       :gen_tcp.close(listen_socket)
       FermixTestSupport.SafeRm.rm(socket_path)

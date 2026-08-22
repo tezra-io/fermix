@@ -1,0 +1,10 @@
+{"name":"v0_health","expect":"v0","frame":{"method":"health"}}
+{"name":"v0_shutdown","expect":"v0","frame":{"method":"shutdown"}}
+{"name":"v0_with_params","expect":"v0","frame":{"method":"mobile_device_revoke","params":{"device_id":"3f4a1a55-69a0-4f8a-9132-17d6ac728f84"}}}
+{"name":"v0_without_method","expect":"invalid_v0","frame":{"params":{"verbose":true}}}
+{"name":"v0_non_object_frame","expect":"invalid_v0","frame":[]}
+{"name":"request_id_marker_never_falls_back_to_v0","expect":"error","error_code":"invalid_request","frame":{"request_id":"req-compat-1","method":"health"}}
+{"name":"protocol_version_marker_never_falls_back_to_v0","expect":"error","error_code":"invalid_request","frame":{"protocol_version":1,"method":"health"}}
+{"name":"client_too_old","expect":"error","error_code":"client_too_old","frame":{"request_id":"req-compat-2","protocol_version":0,"method":"hello","params":{}}}
+{"name":"daemon_too_old","expect":"error","error_code":"daemon_too_old","frame":{"request_id":"req-compat-3","protocol_version":2,"method":"hello","params":{}}}
+{"name":"unknown_top_level_field","expect":"error","error_code":"invalid_request","frame":{"request_id":"req-compat-4","protocol_version":1,"method":"hello","params":{},"trailer":true}}
