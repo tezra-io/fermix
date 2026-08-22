@@ -1,6 +1,7 @@
 defmodule FermixWebWeb.SetupAuthTest do
   use FermixWebWeb.ConnCase
 
+  alias FermixCore.Management.Router
   alias FermixCore.Setup.AccessToken
 
   setup do
@@ -35,6 +36,36 @@ defmodule FermixWebWeb.SetupAuthTest do
     assert html_response(conn, 200) =~ "Fermix setup"
 
     reused = build_conn() |> get(~p"/setup?t=#{launch_token}")
+    assert response(reused, 403) =~ "setup authorization required"
+  end
+
+  test "management setup session reaches authorized Setup and remains one use", %{conn: conn} do
+    request = %{
+      request_id: "req-setup-auth",
+      protocol_version: 1,
+      method: "setup.session.create",
+      params: %{}
+    }
+
+    assert {:ok, %{"url" => url, "expires_at_ms" => expires_at_ms}} =
+             Router.route(request, endpoint_opts: [port: 4030])
+
+    assert is_integer(expires_at_ms)
+    uri = URI.parse(url)
+    assert uri.scheme == "http"
+    assert uri.host == "127.0.0.1"
+    assert uri.port == 4030
+    assert uri.path == "/setup"
+    assert is_binary(uri.query)
+
+    tokenized_path = uri.path <> "?" <> uri.query
+    conn = get(conn, tokenized_path)
+    assert redirected_to(conn) == ~p"/setup"
+
+    conn = conn |> recycle() |> get(~p"/setup")
+    assert html_response(conn, 200) =~ "Fermix setup"
+
+    reused = build_conn() |> get(tokenized_path)
     assert response(reused, 403) =~ "setup authorization required"
   end
 

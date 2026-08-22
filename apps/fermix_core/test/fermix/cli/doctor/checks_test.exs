@@ -22,6 +22,10 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
   # nobody parsed instead of on the sha comparison they exist to make.
   @release_base "https://github.com/tezra-io/fermix/releases/download/v1.0.0"
 
+  defmodule AppBuildInfo do
+    def app_engine?, do: true
+  end
+
   defmodule HealthyChannel do
     def health_check(_opts), do: {:ok, %{detail: "healthy ok", latency_ms: 1}}
   end
@@ -695,6 +699,7 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       )
 
       install_fake_meetbot_sidecar(ctx.home)
+      :ok = FermixCore.Meetings.SidecarInstaller.mark_browser_installed()
 
       result = Checks.meetings()
 
@@ -702,6 +707,37 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.detail =~ "meet sidecar installed"
       assert result.detail =~ "zoom rtms configured"
       assert result.detail =~ "profile: absent"
+    end
+
+    # `browser_note` was computed and discarded, so the operator's only warning
+    # surface said the Meet lane was fine while a join would die when the
+    # sidecar could not launch Chromium.
+    test "warns when the Meet sidecar has no browser even though Zoom works", ctx do
+      Application.put_env(:fermix_core, :meetings,
+        enabled: true,
+        zoom_account_id: "acct",
+        zoom_client_id: "client",
+        zoom_client_secret: "secret",
+        zoom_ws_subscription_id: "sub"
+      )
+
+      install_fake_meetbot_sidecar(ctx.home)
+
+      result = Checks.meetings()
+
+      assert result.status == :warn
+      assert result.detail =~ "browser not installed"
+      assert result.detail =~ "zoom rtms configured"
+    end
+
+    test "warns with the browser remedy when the Meet lane is the only lane", ctx do
+      Application.put_env(:fermix_core, :meetings, enabled: true)
+      install_fake_meetbot_sidecar(ctx.home)
+
+      result = Checks.meetings()
+
+      assert result.status == :warn
+      assert result.detail =~ "browser not installed"
     end
   end
 
@@ -822,7 +858,7 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
 
     test "ok when the daemon version matches this binary" do
       vsn = to_string(Application.spec(:fermix_core, :vsn))
-      client = fn -> {:ok, %{"status" => "ok", "version" => vsn, "uptime_ms" => 5_000}} end
+      client = fn -> {:ok, hello(vsn)} end
 
       result = Checks.daemon_socket(client: client)
 
@@ -831,13 +867,32 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     end
 
     test "warns when the daemon runs a different version than this binary" do
-      client = fn -> {:ok, %{"status" => "ok", "version" => "0.0.1", "uptime_ms" => 5_000}} end
+      client = fn -> {:ok, hello("0.0.1")} end
 
       result = Checks.daemon_socket(client: client)
 
       assert result.status == :warn
       assert result.detail =~ "running, version 0.0.1"
       assert result.detail =~ "`fermix restart`"
+    end
+
+    # A daemon that answers something other than management v1 is a failure with
+    # a next step, not an inspected term the reader has to decode.
+    test "fails with the daemon's own words when the reply is not management v1" do
+      client = fn -> {:error, :invalid_management_response} end
+
+      result = Checks.daemon_socket(client: client)
+
+      assert result.status == :fail
+      assert result.detail =~ "management protocol v1"
+      assert result.detail =~ "`fermix restart`"
+    end
+
+    defp hello(version) do
+      %{
+        "protocol" => %{"current_version" => 1, "minimum_version" => 1, "maximum_version" => 1},
+        "engine" => %{"product_version" => version, "pid" => "1"}
+      }
     end
   end
 
@@ -1098,6 +1153,19 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
   end
 
   describe "binary_integrity/1" do
+    test "is not applicable to an app-managed engine, before any probe" do
+      result =
+        Checks.binary_integrity(
+          build_info: AppBuildInfo,
+          binary_path: "/Applications/Fermix.app/Contents/Resources/Engine/bin/fermix",
+          req_options: [plug: &__MODULE__.raising_manifest_plug/1]
+        )
+
+      assert result.name == "binary integrity"
+      assert result.status == :not_applicable
+      assert result.detail =~ "Fermix.app"
+    end
+
     test "warns when fermix is not on PATH and no path is supplied" do
       result =
         Checks.binary_integrity(
@@ -1160,6 +1228,18 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.name == "upgrade"
       assert result.status == :warn
       assert result.detail =~ "available"
+    end
+
+    test "is not applicable to an app-managed engine, before any probe" do
+      result =
+        Checks.upgrade_available?(
+          build_info: AppBuildInfo,
+          req_options: [plug: &__MODULE__.raising_manifest_plug/1]
+        )
+
+      assert result.name == "upgrade"
+      assert result.status == :not_applicable
+      assert result.detail =~ "Fermix.app"
     end
   end
 
@@ -1558,6 +1638,10 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.detail =~ "503"
     end
   end
+
+  # Under `macos_app` the release feed is not this engine's update source, so a
+  # reachable feed would be a wrong answer, not merely a slow one.
+  def raising_manifest_plug(_conn), do: raise("release manifest fetch must not run")
 
   def bad_sha_manifest_plug(conn) do
     body = manifest_with_sha("0000000000000000000000000000000000000000000000000000000000000000")

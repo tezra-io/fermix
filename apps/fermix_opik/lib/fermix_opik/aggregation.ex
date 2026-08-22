@@ -737,6 +737,64 @@ defmodule FermixOpik.Aggregation do
     add_child_span(state, meta, at, &Mapper.meeting_phase_span(meta, meas, &1))
   end
 
+  # A management Doctor run (M34 §5) is a bounded background run minted with its
+  # own `doctor:<rand>` session before any check executes. It is always a root:
+  # the app asks the daemon directly, so there is no originating turn to nest
+  # under.
+  def apply_event(state, [:fermix, :doctor, :session_start], meas, meta, at) do
+    case Map.get(meta, :session_id) do
+      nil ->
+        {state, []}
+
+      session_id ->
+        ctx = %{
+          parent_session: Map.get(meta, :parent_session),
+          kind: :doctor,
+          name: stringify(Map.get(meta, :scope)),
+          input: nil,
+          trace_metadata:
+            compact(%{
+              scope: stringify(Map.get(meta, :scope)),
+              budget_ms: Map.get(meta, :budget_ms),
+              checks: Map.get(meas, :checks)
+            }),
+          at: at.at,
+          mono: at.mono
+        }
+
+        {state, _ref} = ensure_session(state, session_id, ctx)
+        {state, []}
+    end
+  end
+
+  # Counts only — this compact map is the metadata allowlist for the run
+  # bookends, and `status` carries the run's TERMINAL word (`completed`,
+  # `cancelled`, `timed_out`) rather than a generic "ok" that would erase which
+  # bound the run hit.
+  def apply_event(state, [:fermix, :doctor, run], _meas, meta, at)
+      when run in [:session_complete, :session_error] do
+    status = if run == :session_error, do: "error", else: Map.get(meta, :status, "completed")
+
+    close_root(state, meta, at, %{
+      output: Map.get(meta, :error),
+      status: status,
+      metadata:
+        compact(%{
+          scope: stringify(Map.get(meta, :scope)),
+          budget_ms: Map.get(meta, :budget_ms),
+          reason_kind: stringify(Map.get(meta, :reason_kind)),
+          checks_total: Map.get(meta, :checks_total),
+          passed: Map.get(meta, :passed),
+          warning: Map.get(meta, :warning),
+          failed: Map.get(meta, :failed),
+          unavailable: Map.get(meta, :unavailable),
+          skipped: Map.get(meta, :skipped),
+          cancelled: Map.get(meta, :cancelled),
+          timed_out: Map.get(meta, :timed_out)
+        })
+    })
+  end
+
   def apply_event(state, _event, _meas, _meta, _at), do: {state, []}
 
   @doc """
@@ -1112,6 +1170,7 @@ defmodule FermixOpik.Aggregation do
   defp infer_kind("memory_review:" <> _), do: :memory_review
   defp infer_kind("followup_" <> _), do: :reminder_followup
   defp infer_kind("meeting_" <> _), do: :meeting
+  defp infer_kind("doctor:" <> _), do: :doctor
   defp infer_kind(_other), do: :subagent
 
   defp kind_from_role(role) when role in [:skill, "skill"], do: :skill

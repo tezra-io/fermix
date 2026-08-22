@@ -9,23 +9,28 @@ defmodule Fermix.CLI.UpgradeCommand do
   silently overwriting).
   """
 
+  alias Fermix.CLI.AppRoute
   alias Fermix.CLI.Upgrade
 
   @switches [check: :boolean]
 
-  @spec run([String.t()], module()) :: non_neg_integer()
-  def run(argv, upgrade \\ Upgrade) do
+  @spec run([String.t()], module(), keyword()) :: non_neg_integer()
+  def run(argv, upgrade \\ Upgrade, opts \\ []) when is_list(argv) and is_list(opts) do
     case OptionParser.parse(argv, strict: @switches) do
-      {opts, _, []} -> dispatch(opts, upgrade)
+      {parsed, _, []} -> dispatch(parsed, upgrade, opts)
       {_, _, invalid} -> abort("invalid options: #{inspect(invalid)}")
     end
   end
 
-  defp dispatch(opts, upgrade) do
-    if Keyword.get(opts, :check, false), do: do_check(upgrade), else: do_run(upgrade)
+  defp dispatch(parsed, upgrade, opts) do
+    if Keyword.get(parsed, :check, false) do
+      do_check(upgrade, opts)
+    else
+      do_run(upgrade, opts)
+    end
   end
 
-  defp do_check(upgrade) do
+  defp do_check(upgrade, opts) do
     case upgrade.check() do
       {:ok, %{available: false, current: current}} ->
         IO.puts("fermix upgrade: already on the latest version (#{current}).")
@@ -36,22 +41,28 @@ defmodule Fermix.CLI.UpgradeCommand do
         print_install_method(method)
         0
 
+      {:error, {:app_managed, :update}} ->
+        open_update_settings(opts)
+
       {:error, reason} ->
         abort("check failed: #{inspect(reason)}")
     end
   end
 
-  defp do_run(upgrade) do
+  defp do_run(upgrade, opts) do
     case upgrade.run() do
       :ok ->
         IO.puts("fermix upgrade: complete.")
         0
 
+      {:error, {:app_managed, :update}} ->
+        open_update_settings(opts)
+
       {:error, {:managed_install, name, hint}} ->
         IO.puts(
           :stderr,
           "fermix upgrade: managed by #{name}; run: #{hint}, then " <>
-            "`fermix restart` — the daemon keeps running the old version until restarted"
+            "`fermix restart`; the daemon keeps running the old version until restarted"
         )
 
         2
@@ -63,6 +74,10 @@ defmodule Fermix.CLI.UpgradeCommand do
       {:error, reason} ->
         abort(inspect(reason))
     end
+  end
+
+  defp open_update_settings(opts) do
+    AppRoute.open_and_report(:update, "fermix upgrade", Keyword.get(opts, :route_opts, []))
   end
 
   defp print_install_method({:managed, name, hint}) do

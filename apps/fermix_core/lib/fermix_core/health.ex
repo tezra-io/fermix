@@ -4,6 +4,7 @@ defmodule FermixCore.Health do
   config paths, and memory backends.
   """
 
+  alias FermixCore.BuildInfo
   alias FermixCore.Config
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Store
@@ -70,7 +71,7 @@ defmodule FermixCore.Health do
     %{
       status: overall_status(boot_report.status, channels, memory, realtime),
       app: "fermix",
-      version: to_string(Application.spec(:fermix_core, :vsn) || "unknown"),
+      version: BuildInfo.product_version(),
       timestamp: timestamp,
       failures: Map.get(boot_report, :failures, []),
       config_path: boot_report.config_path,

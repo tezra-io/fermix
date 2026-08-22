@@ -1,0 +1,711 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fermix.sh/management/protocol.schema.json",
+  "title": "Fermix management socket protocol",
+  "description": "Packet-4 framed JSON wire contract between the Fermix daemon and the Fermix macOS application. Source of truth: FermixCore.Management.Protocol. See PROTOCOL.md.",
+  "x-protocol-version": 1,
+  "x-supported-version-range": { "min": 1, "max": 1 },
+  "x-limits": {
+    "max_frame_bytes": 4194304,
+    "max_params_bytes": 65536,
+    "max_result_bytes": 1048576,
+    "max_error_details_bytes": 4096,
+    "max_json_depth": 6,
+    "max_json_collection_items": 500
+  },
+  "$defs": {
+    "request": {
+      "type": "object",
+      "required": ["request_id", "protocol_version", "method"],
+      "additionalProperties": false,
+      "properties": {
+        "request_id": { "$ref": "#/$defs/requestId" },
+        "protocol_version": { "type": "integer", "minimum": 1, "maximum": 1 },
+        "method": {
+          "enum": [
+            "hello",
+            "overview.get",
+            "setup.session.create",
+            "doctor.start",
+            "doctor.get",
+            "doctor.cancel",
+            "logs.query",
+            "lifecycle.prepare",
+            "lifecycle.commit",
+            "lifecycle.cancel",
+            "diagnostics.build"
+          ]
+        },
+        "params": { "type": "object" }
+      },
+      "allOf": [
+        {
+          "if": { "required": ["method"], "properties": { "method": { "const": "hello" } } },
+          "then": { "properties": { "params": { "$ref": "#/$defs/hello_params" } } }
+        },
+        {
+          "if": { "required": ["method"], "properties": { "method": { "const": "overview.get" } } },
+          "then": { "properties": { "params": { "$ref": "#/$defs/overview_get_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "setup.session.create" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/setup_session_create_params" } } }
+        },
+        {
+          "if": { "required": ["method"], "properties": { "method": { "const": "doctor.start" } } },
+          "then": { "properties": { "params": { "$ref": "#/$defs/doctor_start_params" } } }
+        },
+        {
+          "if": { "required": ["method"], "properties": { "method": { "const": "doctor.get" } } },
+          "then": { "properties": { "params": { "$ref": "#/$defs/doctor_get_params" } } }
+        },
+        {
+          "if": { "required": ["method"], "properties": { "method": { "const": "doctor.cancel" } } },
+          "then": { "properties": { "params": { "$ref": "#/$defs/doctor_cancel_params" } } }
+        },
+        {
+          "if": { "required": ["method"], "properties": { "method": { "const": "logs.query" } } },
+          "then": { "properties": { "params": { "$ref": "#/$defs/logs_query_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "lifecycle.prepare" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/lifecycle_prepare_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "lifecycle.commit" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/lifecycle_commit_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "lifecycle.cancel" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/lifecycle_cancel_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "diagnostics.build" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/diagnostics_build_params" } } }
+        }
+      ]
+    },
+    "success": {
+      "type": "object",
+      "required": ["request_id", "result"],
+      "additionalProperties": false,
+      "properties": {
+        "request_id": { "$ref": "#/$defs/requestId" },
+        "result": { "$ref": "#/$defs/result" }
+      }
+    },
+    "error": {
+      "type": "object",
+      "required": ["request_id", "error"],
+      "additionalProperties": false,
+      "properties": {
+        "request_id": {
+          "oneOf": [{ "$ref": "#/$defs/requestId" }, { "type": "null" }]
+        },
+        "error": {
+          "type": "object",
+          "required": ["code", "message", "details"],
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "enum": [
+                "invalid_request",
+                "invalid_params",
+                "method_not_found",
+                "client_too_old",
+                "daemon_too_old",
+                "internal_error",
+                "unavailable",
+                "busy",
+                "lease_expired",
+                "unknown_lease",
+                "unknown_session",
+                "cursor_expired"
+              ]
+            },
+            "message": { "type": "string", "minLength": 1 },
+            "details": { "type": "object", "maxProperties": 100 }
+          }
+        }
+      }
+    },
+    "requestId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "result": {
+      "type": "object",
+      "description": "A response carries no method, so the result shape is selected by the method of the correlated request rather than discriminated from the envelope alone.",
+      "anyOf": [
+        { "$ref": "#/$defs/hello_result" },
+        { "$ref": "#/$defs/overview_get_result" },
+        { "$ref": "#/$defs/setup_session_create_result" },
+        { "$ref": "#/$defs/doctor_start_result" },
+        { "$ref": "#/$defs/doctor_get_result" },
+        { "$ref": "#/$defs/doctor_cancel_result" },
+        { "$ref": "#/$defs/logs_query_result" },
+        { "$ref": "#/$defs/lifecycle_prepare_result" },
+        { "$ref": "#/$defs/lifecycle_commit_result" },
+        { "$ref": "#/$defs/lifecycle_cancel_result" },
+        { "$ref": "#/$defs/diagnostics_build_result" }
+      ]
+    },
+    "hello_params": { "type": "object", "maxProperties": 0, "additionalProperties": false },
+    "hello_result": {
+      "type": "object",
+      "required": ["protocol", "capabilities", "engine", "setup"],
+      "properties": {
+        "protocol": { "$ref": "#/$defs/protocolRange" },
+        "capabilities": {
+          "type": "object",
+          "required": ["methods"],
+          "properties": {
+            "methods": { "type": "array", "items": { "type": "string" }, "maxItems": 500 }
+          }
+        },
+        "engine": { "$ref": "#/$defs/engineIdentity" },
+        "setup": { "$ref": "#/$defs/setupEndpoint" }
+      }
+    },
+    "overview_get_params": { "type": "object", "maxProperties": 0, "additionalProperties": false },
+    "overview_get_result": {
+      "type": "object",
+      "required": [
+        "generated_at",
+        "readiness",
+        "health",
+        "daemon",
+        "provider",
+        "channels",
+        "memory",
+        "jobs",
+        "agents",
+        "realtime",
+        "capabilities"
+      ],
+      "properties": {
+        "generated_at": { "type": ["string", "null"] },
+        "readiness": {
+          "type": "object",
+          "required": ["status", "failure_count"],
+          "properties": {
+            "status": { "type": ["string", "null"] },
+            "failure_count": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "health": {
+          "type": "object",
+          "required": ["status", "restart_required", "providers"],
+          "properties": {
+            "status": { "type": ["string", "null"] },
+            "restart_required": { "type": "boolean" },
+            "providers": {
+              "type": "array",
+              "maxItems": 500,
+              "items": {
+                "type": "object",
+                "required": ["name", "status", "auth_mode", "primary"],
+                "properties": {
+                  "name": { "type": ["string", "null"] },
+                  "status": { "type": ["string", "null"] },
+                  "auth_mode": { "type": ["string", "null"] },
+                  "primary": { "type": "boolean" }
+                }
+              }
+            }
+          }
+        },
+        "daemon": {
+          "type": "object",
+          "required": ["status", "version", "uptime_ms", "pid"],
+          "properties": {
+            "status": { "type": ["string", "null"] },
+            "version": { "type": ["string", "null"] },
+            "uptime_ms": { "type": ["integer", "null"] },
+            "pid": { "type": ["string", "null"] }
+          }
+        },
+        "provider": {
+          "type": "object",
+          "required": ["active", "model", "auth_mode", "reasoning_effort"],
+          "properties": {
+            "active": { "type": ["string", "null"] },
+            "model": { "type": ["string", "null"] },
+            "auth_mode": { "type": ["string", "null"] },
+            "reasoning_effort": { "type": ["string", "null"] }
+          }
+        },
+        "channels": {
+          "type": "array",
+          "maxItems": 500,
+          "items": {
+            "type": "object",
+            "required": ["name", "status", "enabled", "mode", "process_alive"],
+            "properties": {
+              "name": { "type": ["string", "null"] },
+              "status": { "type": ["string", "null"] },
+              "enabled": { "type": "boolean" },
+              "mode": { "type": ["string", "null"] },
+              "process_alive": { "type": ["boolean", "null"] }
+            }
+          }
+        },
+        "memory": {
+          "type": "object",
+          "required": ["repo", "conversation_store", "store"],
+          "properties": {
+            "repo": { "type": ["string", "null"] },
+            "conversation_store": { "type": ["string", "null"] },
+            "store": { "type": ["string", "null"] }
+          }
+        },
+        "jobs": {
+          "type": "object",
+          "required": ["scheduled", "running", "paused", "failed_recent", "next", "status"],
+          "properties": {
+            "scheduled": { "type": "integer", "minimum": 0 },
+            "running": { "type": "integer", "minimum": 0 },
+            "paused": { "type": "integer", "minimum": 0 },
+            "failed_recent": { "type": "integer", "minimum": 0 },
+            "next": {
+              "type": ["object", "null"],
+              "properties": {
+                "id": { "type": ["string", "null"] },
+                "name": { "type": ["string", "null"] },
+                "next_run_at": { "type": ["string", "null"] },
+                "state": { "type": ["string", "null"] }
+              }
+            },
+            "status": { "type": ["string", "null"] }
+          }
+        },
+        "agents": {
+          "type": "object",
+          "required": ["main", "skill_workers", "running_skill_workers"],
+          "properties": {
+            "main": {
+              "type": "object",
+              "required": [
+                "health",
+                "activity",
+                "status",
+                "active_conversations",
+                "pending_conversations"
+              ],
+              "properties": {
+                "health": { "type": ["string", "null"] },
+                "activity": { "type": ["string", "null"] },
+                "status": { "type": ["string", "null"] },
+                "active_conversations": { "type": "integer", "minimum": 0 },
+                "pending_conversations": { "type": "integer", "minimum": 0 }
+              }
+            },
+            "skill_workers": { "type": "integer", "minimum": 0 },
+            "running_skill_workers": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "realtime": {
+          "type": "object",
+          "required": [
+            "enabled",
+            "status",
+            "provider",
+            "model",
+            "socket_alive",
+            "active_sessions",
+            "active_clients",
+            "companion_connected"
+          ],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "status": { "type": ["string", "null"] },
+            "provider": { "type": ["string", "null"] },
+            "model": { "type": ["string", "null"] },
+            "socket_alive": { "type": ["boolean", "null"] },
+            "active_sessions": { "type": "integer", "minimum": 0 },
+            "active_clients": { "type": "integer", "minimum": 0 },
+            "companion_connected": { "type": "boolean" }
+          }
+        },
+        "capabilities": {
+          "type": "object",
+          "required": ["builtin", "skill", "mcp", "total"],
+          "properties": {
+            "builtin": { "type": "integer", "minimum": 0 },
+            "skill": { "type": "integer", "minimum": 0 },
+            "mcp": { "type": "integer", "minimum": 0 },
+            "total": { "type": "integer", "minimum": 0 }
+          }
+        }
+      }
+    },
+    "setup_session_create_params": {
+      "type": "object",
+      "maxProperties": 0,
+      "additionalProperties": false
+    },
+    "setup_session_create_result": {
+      "type": "object",
+      "required": ["url", "expires_at_ms"],
+      "additionalProperties": false,
+      "properties": {
+        "url": { "type": "string", "minLength": 1 },
+        "expires_at_ms": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "doctor_start_params": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": { "scope": { "enum": ["local", "network"] } }
+    },
+    "doctor_start_result": { "$ref": "#/$defs/doctorSession" },
+    "doctor_get_params": {
+      "type": "object",
+      "required": ["session_id"],
+      "additionalProperties": false,
+      "properties": { "session_id": { "type": "string", "minLength": 1, "maxLength": 256 } }
+    },
+    "doctor_get_result": { "$ref": "#/$defs/doctorSession" },
+    "doctor_cancel_params": {
+      "type": "object",
+      "required": ["session_id"],
+      "additionalProperties": false,
+      "properties": { "session_id": { "type": "string", "minLength": 1, "maxLength": 256 } }
+    },
+    "doctor_cancel_result": { "$ref": "#/$defs/doctorSession" },
+    "logs_query_params": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "limit": { "type": "integer", "minimum": 1, "maximum": 500 },
+        "level": {
+          "enum": [
+            "emergency",
+            "alert",
+            "critical",
+            "error",
+            "warning",
+            "notice",
+            "info",
+            "debug"
+          ]
+        },
+        "subsystem": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "search": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "direction": { "enum": ["backward", "forward"] },
+        "cursor": { "type": "string", "minLength": 1 }
+      }
+    },
+    "logs_query_result": {
+      "type": "object",
+      "required": ["entries", "count", "truncated", "direction", "cursor"],
+      "additionalProperties": false,
+      "properties": {
+        "entries": { "type": "array", "maxItems": 500, "items": { "$ref": "#/$defs/logEntry" } },
+        "count": { "type": "integer", "minimum": 0 },
+        "truncated": { "type": "boolean" },
+        "direction": { "enum": ["backward", "forward"] },
+        "cursor": { "type": ["string", "null"] }
+      }
+    },
+    "lifecycle_prepare_params": {
+      "type": "object",
+      "maxProperties": 0,
+      "additionalProperties": false
+    },
+    "lifecycle_prepare_result": {
+      "type": "object",
+      "required": ["lease_id", "ttl_ms"],
+      "additionalProperties": false,
+      "properties": {
+        "lease_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "ttl_ms": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "lifecycle_commit_params": {
+      "type": "object",
+      "required": ["lease_id"],
+      "additionalProperties": false,
+      "properties": { "lease_id": { "type": "string", "minLength": 1, "maxLength": 256 } }
+    },
+    "lifecycle_commit_result": {
+      "type": "object",
+      "required": ["lease_id", "status"],
+      "additionalProperties": false,
+      "properties": {
+        "lease_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "status": { "const": "committed" }
+      }
+    },
+    "lifecycle_cancel_params": {
+      "type": "object",
+      "required": ["lease_id"],
+      "additionalProperties": false,
+      "properties": { "lease_id": { "type": "string", "minLength": 1, "maxLength": 256 } }
+    },
+    "lifecycle_cancel_result": {
+      "type": "object",
+      "required": ["lease_id", "status"],
+      "additionalProperties": false,
+      "properties": {
+        "lease_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "status": { "const": "cancelled" }
+      }
+    },
+    "diagnostics_build_params": {
+      "type": "object",
+      "maxProperties": 0,
+      "additionalProperties": false
+    },
+    "diagnostics_build_result": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "generated_at",
+        "engine",
+        "protocol",
+        "service",
+        "doctor",
+        "logs"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": { "type": "integer", "minimum": 1 },
+        "generated_at": { "type": "string" },
+        "engine": { "$ref": "#/$defs/engineIdentityFields" },
+        "protocol": { "$ref": "#/$defs/protocolRange" },
+        "service": {
+          "type": "object",
+          "required": ["scope", "state"],
+          "additionalProperties": false,
+          "properties": {
+            "scope": { "type": ["string", "null"] },
+            "state": { "type": ["string", "null"] }
+          }
+        },
+        "doctor": {
+          "type": ["object", "null"],
+          "required": ["session_id", "scope", "status", "finished_at", "checks"],
+          "additionalProperties": false,
+          "properties": {
+            "session_id": { "type": ["string", "null"] },
+            "scope": { "type": ["string", "null"] },
+            "status": { "type": ["string", "null"] },
+            "finished_at": { "type": ["string", "null"] },
+            "checks": {
+              "type": "array",
+              "maxItems": 500,
+              "items": { "$ref": "#/$defs/doctorCheck" }
+            }
+          }
+        },
+        "logs": {
+          "type": "object",
+          "required": ["count", "truncated", "entries"],
+          "additionalProperties": false,
+          "properties": {
+            "count": { "type": "integer", "minimum": 0 },
+            "truncated": { "type": "boolean" },
+            "entries": {
+              "type": "array",
+              "maxItems": 500,
+              "items": { "$ref": "#/$defs/logEntry" }
+            }
+          }
+        }
+      }
+    },
+    "protocolRange": {
+      "type": "object",
+      "required": ["current_version", "minimum_version", "maximum_version"],
+      "additionalProperties": false,
+      "properties": {
+        "current_version": { "type": "integer", "minimum": 1 },
+        "minimum_version": { "type": "integer", "minimum": 1 },
+        "maximum_version": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "engineIdentityFields": {
+      "type": "object",
+      "required": [
+        "engine_id",
+        "product_version",
+        "build_id",
+        "source_commit",
+        "distribution_identity",
+        "artifact_target",
+        "architecture",
+        "pid"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "engine_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "product_version": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "build_id": { "type": ["string", "null"], "maxLength": 256 },
+        "source_commit": { "type": ["string", "null"], "maxLength": 256 },
+        "distribution_identity": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "artifact_target": { "type": ["string", "null"], "maxLength": 256 },
+        "architecture": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "pid": { "type": "string", "minLength": 1, "maxLength": 256 }
+      }
+    },
+    "engineIdentity": { "$ref": "#/$defs/engineIdentityFields" },
+    "setupEndpoint": {
+      "type": "object",
+      "required": ["origin", "path"],
+      "additionalProperties": false,
+      "properties": {
+        "origin": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "minLength": 1 }
+      }
+    },
+    "doctorSession": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "scope",
+        "status",
+        "budget_ms",
+        "duration_ms",
+        "started_at",
+        "finished_at",
+        "total",
+        "completed_count",
+        "summary",
+        "checks"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "session_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "scope": { "enum": ["local", "network"] },
+        "status": { "enum": ["running", "completed", "cancelled", "timed_out", "failed"] },
+        "budget_ms": { "type": "integer", "minimum": 0 },
+        "duration_ms": { "type": "integer", "minimum": 0 },
+        "started_at": { "type": "string" },
+        "finished_at": { "type": ["string", "null"] },
+        "total": { "type": "integer", "minimum": 0 },
+        "completed_count": { "type": "integer", "minimum": 0 },
+        "summary": { "$ref": "#/$defs/doctorSummary" },
+        "checks": { "type": "array", "maxItems": 500, "items": { "$ref": "#/$defs/doctorCheck" } }
+      }
+    },
+    "doctorSummary": {
+      "type": "object",
+      "required": [
+        "passed",
+        "warning",
+        "failed",
+        "not_applicable",
+        "unavailable",
+        "skipped",
+        "cancelled",
+        "timed_out"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "passed": { "type": "integer", "minimum": 0 },
+        "warning": { "type": "integer", "minimum": 0 },
+        "failed": { "type": "integer", "minimum": 0 },
+        "not_applicable": { "type": "integer", "minimum": 0 },
+        "unavailable": { "type": "integer", "minimum": 0 },
+        "skipped": { "type": "integer", "minimum": 0 },
+        "cancelled": { "type": "integer", "minimum": 0 },
+        "timed_out": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "doctorCheck": {
+      "type": "object",
+      "required": [
+        "id",
+        "category",
+        "severity",
+        "applicability",
+        "origin",
+        "status",
+        "summary",
+        "evidence",
+        "remediation_code",
+        "duration_ms",
+        "finished_at"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "category": {
+          "enum": [
+            "runtime",
+            "configuration",
+            "security",
+            "capability",
+            "connectivity",
+            "distribution"
+          ]
+        },
+        "severity": { "enum": ["critical", "warning", "info"] },
+        "applicability": { "enum": ["always", "configured", "platform"] },
+        "origin": { "const": "engine" },
+        "status": {
+          "enum": [
+            "passed",
+            "warning",
+            "failed",
+            "not_applicable",
+            "unavailable",
+            "skipped",
+            "cancelled",
+            "timed_out"
+          ]
+        },
+        "summary": { "type": "string", "maxLength": 256 },
+        "evidence": { "type": "object", "maxProperties": 100 },
+        "remediation_code": { "type": ["string", "null"] },
+        "duration_ms": { "type": "integer", "minimum": 0 },
+        "finished_at": { "type": "string" }
+      }
+    },
+    "logEntry": {
+      "type": "object",
+      "required": ["time", "level", "subsystem", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "time": { "type": "string" },
+        "level": {
+          "enum": [
+            "emergency",
+            "alert",
+            "critical",
+            "error",
+            "warning",
+            "notice",
+            "info",
+            "debug"
+          ]
+        },
+        "subsystem": { "type": ["string", "null"], "maxLength": 64 },
+        "message": { "type": "string" }
+      }
+    }
+  },
+  "oneOf": [
+    { "$ref": "#/$defs/request" },
+    { "$ref": "#/$defs/success" },
+    { "$ref": "#/$defs/error" }
+  ]
+}

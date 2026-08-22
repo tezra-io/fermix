@@ -331,7 +331,7 @@ defmodule FermixCore.Capabilities.MCP.Server do
     if attempts >= state.max_discovery_attempts or terminal_contract_error?(reason) do
       Logger.error(
         "MCP server #{state.server_name} discovery failed #{attempts} times, giving up: " <>
-          inspect(error_class(reason))
+          RuntimeStatus.describe(RuntimeStatus.classify(reason))
       )
 
       {:stop, :normal, record_terminal(state, reason)}
@@ -346,8 +346,9 @@ defmodule FermixCore.Capabilities.MCP.Server do
   # A contract mismatch or a name collision cannot become success by repetition:
   # the same signed hashes will disagree with the same live descriptors next
   # time. Retrying it only delays the operator's visible terminal status.
-  defp terminal_contract_error?({:upstream_contract_mismatch, _detail}), do: true
-  defp terminal_contract_error?({:capability_conflict, _detail}), do: true
+  @terminal_classes [:upstream_contract_mismatch, :capability_conflict]
+
+  defp terminal_contract_error?({class, _detail}) when class in @terminal_classes, do: true
   defp terminal_contract_error?(_reason), do: false
 
   # `Server capabilities not set` is the expected response while the MCP
@@ -628,9 +629,9 @@ defmodule FermixCore.Capabilities.MCP.Server do
   end
 
   defp record_terminal(state, reason) do
-    {status, detail} = RuntimeStatus.classify(reason)
+    {status, detail, subject} = RuntimeStatus.classify(reason)
 
-    case put_status(state, status, detail) do
+    case put_status(state, status, detail, subject) do
       :ok -> refresh_runtime_context(state)
       _no_write -> :ok
     end
@@ -638,15 +639,17 @@ defmodule FermixCore.Capabilities.MCP.Server do
     state
   end
 
-  defp put_status(%{generation: nil}, _status, _detail), do: :no_status_sink
+  defp put_status(state, status, detail, subject \\ nil)
+  defp put_status(%{generation: nil}, _status, _detail, _subject), do: :no_status_sink
 
-  defp put_status(state, status, detail) do
+  defp put_status(state, status, detail, subject) do
     case RuntimeStatus.put(
            state.runtime_status,
            state.source_id,
            state.generation,
            status,
-           detail
+           detail,
+           subject
          ) do
       :ok -> :ok
       # A replaced owner's discovery must never overwrite its replacement.
@@ -725,9 +728,8 @@ defmodule FermixCore.Capabilities.MCP.Server do
       []
   end
 
-  # A remote reason can embed an endpoint, a schema, or a peer message. Only the
-  # atom class reaches a log line; the reason itself still rides the classified
-  # `RuntimeStatus` entry the operator reads.
+  # A remote reason can embed an endpoint, a schema, or a peer message, so only
+  # the atom class reaches the retry log line.
   defp error_class(reason) when is_atom(reason), do: reason
   defp error_class(reason) when is_tuple(reason) and tuple_size(reason) > 0, do: elem(reason, 0)
   defp error_class(_reason), do: :unclassified
