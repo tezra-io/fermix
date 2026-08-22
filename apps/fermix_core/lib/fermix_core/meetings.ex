@@ -56,6 +56,7 @@ defmodule FermixCore.Meetings do
           | :operator_only
           | :unrecognized_meeting_url
           | :sidecar_not_installed
+          | :meet_browser_not_installed
           | :zoom_rtms_not_configured
           | {:max_concurrent, String.t()}
           | term()
@@ -72,6 +73,16 @@ defmodule FermixCore.Meetings do
   """
   @spec ready?() :: boolean()
   def ready?, do: ready?(Config.load())
+
+  @doc """
+  Whether the Meet lane can actually place a bot: the sidecar AND the browser it
+  drives. One answer, shared by readiness, the join gate, and the doctor row —
+  an installed sidecar with no browser is not a usable lane.
+  """
+  @spec meet_lane_ready?() :: boolean()
+  def meet_lane_ready? do
+    SidecarInstaller.installed?() and SidecarInstaller.browser_installed?()
+  end
 
   @doc """
   Requests that the notetaker join `url`.
@@ -156,8 +167,16 @@ defmodule FermixCore.Meetings do
     if Access.attended_operator_turn?(context), do: :ok, else: {:error, :operator_only}
   end
 
+  # Two halves, two reasons. The sidecar is the binary; the browser is what it
+  # drives. An installed sidecar with no browser used to pass this gate and die
+  # once the session tried to launch Chromium, so the failure arrived as a dead
+  # meeting rather than a refusal naming the one thing to install.
   defp check_lane(:meet, _config) do
-    if SidecarInstaller.installed?(), do: :ok, else: {:error, :sidecar_not_installed}
+    cond do
+      not SidecarInstaller.installed?() -> {:error, :sidecar_not_installed}
+      not SidecarInstaller.browser_installed?() -> {:error, :meet_browser_not_installed}
+      true -> :ok
+    end
   end
 
   defp check_lane(:zoom, config) do
@@ -175,7 +194,7 @@ defmodule FermixCore.Meetings do
   end
 
   defp ready?(config) do
-    config.enabled and (SidecarInstaller.installed?() or Config.rtms_configured?(config))
+    config.enabled and (meet_lane_ready?() or Config.rtms_configured?(config))
   end
 
   # --- start ----------------------------------------------------------------
