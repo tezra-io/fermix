@@ -6,6 +6,7 @@ defmodule FermixChannels.Gateway.Commands.Compact do
   require Logger
 
   alias FermixChannels.Gateway.Commands.Authorization
+  alias FermixCore.ComputerHistory.Taint
   alias FermixCore.Memory.Compactor
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Providers.Failover
@@ -38,9 +39,15 @@ defmodule FermixChannels.Gateway.Commands.Compact do
 
     case routes_from_context(context) do
       {:ok, routes} ->
+        # Strict Computer History taint (MILESTONE_32 §13.6): the forced
+        # command masks exactly like auto-compaction — a history-tainted turn
+        # must not ride an ungranted-remote hop of this chain. On a permitted
+        # chain the history passes through untouched.
+        masked_history = Taint.mask_for_chain(history, routes)
+
         routes
         |> compaction_routes(before_tokens)
-        |> run_compaction(history, context, conversation_key)
+        |> run_compaction(masked_history, context, conversation_key)
         |> handle_result(%{
           reply_fn: reply_fn,
           conversation_key: conversation_key,

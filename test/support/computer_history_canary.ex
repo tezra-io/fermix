@@ -27,6 +27,10 @@ defmodule FermixTestSupport.ComputerHistoryCanary do
   defp scan(term, token) when is_binary(term), do: String.contains?(term, token)
   defp scan(term, token) when is_list(term), do: Enum.any?(term, &scan(&1, token))
 
+  # Structs are not Enumerable (a DateTime in a history message crashed the
+  # deep scan) — walk their fields as a plain map.
+  defp scan(%_{} = term, token), do: term |> Map.from_struct() |> scan(token)
+
   defp scan(term, token) when is_map(term) do
     Enum.any?(term, fn {key, value} -> scan(key, token) or scan(value, token) end)
   end

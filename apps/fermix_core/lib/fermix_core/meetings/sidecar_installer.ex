@@ -157,21 +157,32 @@ defmodule FermixCore.Meetings.SidecarInstaller do
   @doc """
   Records that the sidecar installed its matching Chromium. Called by
   `FermixCore.Meetings.BrowserInstall` after `install-browser` reports success.
+  The marker carries the PINNED TAG, not a timestamp: Playwright hard-requires
+  its matching Chromium revision, so a browser installed by one sidecar release
+  must not read as installed for another.
   """
   @spec mark_browser_installed() :: :ok
   def mark_browser_installed do
     marker = browser_installed_marker_path()
     File.mkdir_p!(Path.dirname(marker))
-    File.write!(marker, DateTime.to_iso8601(DateTime.utc_now()))
+    File.write!(marker, pinned_tag() || "unpinned")
   end
 
   @doc """
-  True when a browser install has completed. The browser lives in Playwright's
-  cache (not read here); the marker records that the sidecar's idempotent
-  `install-browser` last finished successfully.
+  True when THIS pinned release's browser install has completed. The browser
+  lives in Playwright's cache (not read here); the marker records which sidecar
+  release last ran `install-browser` successfully. A marker from a previous pin
+  (including the pre-versioning timestamp markers) reads as not-installed, so a
+  pin bump self-heals on the next config open — the sidecar's `install-browser`
+  is idempotent, making the re-run a fast no-op when the revision matches.
   """
   @spec browser_installed?() :: boolean()
-  def browser_installed?, do: File.regular?(browser_installed_marker_path())
+  def browser_installed? do
+    case File.read(browser_installed_marker_path()) do
+      {:ok, content} -> String.trim(content) == pinned_tag()
+      {:error, _reason} -> false
+    end
+  end
 
   defp profile_present? do
     case File.ls(profile_dir()) do
@@ -200,7 +211,9 @@ defmodule FermixCore.Meetings.SidecarInstaller do
 
   defp download(tag, target, sha256, req_options) do
     dest = install_path(tag)
-    partial = dest <> ".partial"
+    # Unique per attempt: two concurrent installs (two setup tabs) sharing one
+    # deterministic partial path could interleave writes past the checksum gate.
+    partial = dest <> ".partial-#{System.unique_integer([:positive])}"
     File.mkdir_p!(Path.dirname(dest))
 
     with :ok <- StreamDownload.download(release_url(tag, target), partial, req_options),

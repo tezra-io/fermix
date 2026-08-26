@@ -604,6 +604,50 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert "com.apple.Safari" in ch[:apps]
     end
 
+    # The other half of the consent transaction: driver absent → save persists the
+    # apps, installs the shared driver, and completion enables Computer History —
+    # the feature the operator consented to — never Computer Use.
+    test "saving the picker with the driver missing installs it, then enables Computer History, not Computer Use",
+         %{conn: conn} do
+      test_pid = self()
+
+      Application.put_env(:fermix_web, :computer_use_installer, fn ->
+        send(test_pid, :driver_install_ran)
+        {:ok, :installed}
+      end)
+
+      on_exit(fn -> Application.delete_env(:fermix_web, :computer_use_installer) end)
+
+      Application.put_env(:fermix_web, :installed_apps_impl, fn ->
+        [%{name: "Safari", bundle_id: "com.apple.Safari"}]
+      end)
+
+      on_exit(fn -> Application.delete_env(:fermix_web, :installed_apps_impl) end)
+
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+      render_hook(view, "open_computer_history_apps", %{})
+      render_hook(view, "toggle_computer_history_app", %{"bundle" => "com.apple.Safari"})
+      saved = render_hook(view, "save_computer_history_apps", %{})
+
+      # Save takes the install path (driver missing) and says which feature will
+      # turn on — not the generic Computer Use download flash.
+      assert saved =~ "Computer History will turn on when it finishes."
+      assert_receive :driver_install_ran
+
+      # Install completion flips Computer History on (the `on_done` routing).
+      render_until(view, "Computer History enabled — restart to apply.")
+
+      assert {:ok, persisted} = ConfigStore.load_runtime_config(resolve_secrets: false)
+      ch = persisted[:fermix_core][:computer_history]
+      assert ch[:enabled] == true
+      assert "com.apple.Safari" in ch[:apps]
+      # The driver install must complete the feature that asked for it — a
+      # Computer History-initiated install never turns Computer Use on.
+      cu = persisted[:fermix_core][:computer_use] || []
+      refute Keyword.get(cu, :enabled, false)
+    end
+
     test "the transcription tab is labelled Voice notes and there is no separate Meetings tab",
          %{conn: conn} do
       {:ok, view, _html} = live(conn, "/setup")
@@ -798,8 +842,8 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       assert html =~ "Opening Google Drive sign-in"
       assert_receive {:plugin_auth_started, "google_drive"}
-      html = render(view)
-      assert html =~ "Google Drive connected."
+      # The runner's completion lands async — poll rather than racing one render.
+      html = render_until(view, "Google Drive connected.")
       assert html =~ "Ready"
       refute html =~ "https://auth.example/google_drive"
 
@@ -813,8 +857,7 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       assert html =~ "Opening Google Calendar sign-in"
       assert_receive {:plugin_auth_started, "google_calendar"}
-      html = render(view)
-      assert html =~ "Google Calendar connected."
+      html = render_until(view, "Google Calendar connected.")
       assert html =~ "Ready"
       refute html =~ "https://auth.example/google_calendar"
 
@@ -1978,6 +2021,25 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert html =~ "skips the waiting room"
       # The sign-in button is enabled (no disabled attribute on it) once installed.
       refute html =~ ~r/phx-click="meetbot_signin"[^>]*\sdisabled/
+    end
+
+    test "an installed-but-unsigned notetaker card wears the Sign-in needed pill, not Ready",
+         %{conn: conn} do
+      prev = Application.get_env(:fermix_core, :meetings)
+      on_exit(fn -> restore_env(:fermix_core, :meetings, prev) end)
+      Application.put_env(:fermix_core, :meetings, enabled: true)
+      install_dev_local_meetbot(System.get_env("FERMIX_HOME"))
+
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+      card = view |> element(~s|section[data-feature-name="meetings"]|) |> render()
+
+      # `Meetings.ready?/0` is true here (enabled + installed), but the bot cannot
+      # join until it signs in — the card must show the same amber state its own
+      # Configure modal does, never a green Ready.
+      assert card =~ "Sign-in needed"
+      refute card =~ ">Ready<"
     end
 
     test "clicking sign-in runs the flow and flips the Meet lane to ready", %{conn: conn} do

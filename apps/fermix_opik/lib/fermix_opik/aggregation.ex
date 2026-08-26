@@ -1112,6 +1112,10 @@ defmodule FermixOpik.Aggregation do
   defp infer_kind("memory_review:" <> _), do: :memory_review
   defp infer_kind("followup_" <> _), do: :reminder_followup
   defp infer_kind("meeting_" <> _), do: :meeting
+  # The computer-history summarizer (§22.4) is a headless single-call run with
+  # no bookend events: its provider span creates the session, so the kind must
+  # come from the id prefix or the root would read as a :subagent of nothing.
+  defp infer_kind("computer_history_summarize:" <> _), do: :computer_history_summary
   defp infer_kind(_other), do: :subagent
 
   defp kind_from_role(role) when role in [:skill, "skill"], do: :skill
@@ -1128,6 +1132,10 @@ defmodule FermixOpik.Aggregation do
   # id ("meeting_<id>_<ts>") is its own fallback — the generic "<kind>:<name>"
   # would only say "meeting" twice.
   defp wrapper_name(:meeting, name, session), do: name || session
+  # Same shape again: the agent name is "computer_history_summarizer" and the
+  # session id starts "computer_history_summarize:" — prefixing the kind would
+  # say "computer history" twice.
+  defp wrapper_name(:computer_history_summary, name, session), do: name || session
   defp wrapper_name(kind, nil, session), do: "#{kind}:#{session}"
   defp wrapper_name(kind, name, _session), do: "#{kind}:#{name}"
 

@@ -315,6 +315,19 @@ defmodule FermixCore.Memory.ConversationStore do
       content: content,
       timestamp: normalize_timestamp(Map.get(message, :timestamp, Map.get(message, "timestamp")))
     }
+    |> carry_taint(message)
+  end
+
+  # The Computer History taint marker (MILESTONE_32 §13.6) must survive a
+  # history replacement: compaction's verbatim-retained tail rides through
+  # here, and a stripped marker would let the activity-derived turn be re-sent
+  # unmasked on an ungranted-remote chain once the grant lapses.
+  defp carry_taint(normalized, message) do
+    if Map.get(message, :history_tainted, Map.get(message, "history_tainted")) == true do
+      Map.put(normalized, :history_tainted, true)
+    else
+      normalized
+    end
   end
 
   defp normalize_timestamp(%DateTime{} = timestamp), do: timestamp
@@ -422,7 +435,14 @@ defmodule FermixCore.Memory.ConversationStore do
       repo ->
         attrs =
           Enum.map(messages, fn message ->
-            message_attrs(state, key, message.role, message.content, opts, message.timestamp)
+            message_attrs(
+              state,
+              key,
+              message.role,
+              message.content,
+              replace_message_opts(opts, message),
+              message.timestamp
+            )
           end)
 
         ctx =
@@ -434,6 +454,14 @@ defmodule FermixCore.Memory.ConversationStore do
         start_history_task(state.durable_task_supervisor, ctx)
     end
   end
+
+  # Per-message metadata on the durable replace: a tainted retained message
+  # persists its marker (the backfill side re-derives it from the row's
+  # `"history_tainted"` metadata); untainted messages keep the caller's opts.
+  defp replace_message_opts(opts, %{history_tainted: true}),
+    do: Keyword.put(opts, :metadata, %{history_tainted: true})
+
+  defp replace_message_opts(opts, _message), do: opts
 
   defp history_operation_context(state, key, repo, operation, opts, attrs, versions) do
     %{

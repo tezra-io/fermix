@@ -22,6 +22,16 @@ defmodule FermixCore.Log.RedactingFormatterTest do
   UExBTlRFRC1FQy1BUE5TLVNFQ1JFVA==
   -----END EC PRIVATE KEY-----
   """
+  @fake_openssh_private_key """
+  -----BEGIN OPENSSH PRIVATE KEY-----
+  UExBTlRFRC1PUEVOU1NILVNFQ1JFVA==
+  -----END OPENSSH PRIVATE KEY-----
+  """
+  @fake_pgp_private_key """
+  -----BEGIN PGP PRIVATE KEY BLOCK-----
+  UExBTlRFRC1QR1AtU0VDUkVU
+  -----END PGP PRIVATE KEY BLOCK-----
+  """
 
   describe "redact/1" do
     test "redacts every supported secret shape" do
@@ -56,12 +66,18 @@ defmodule FermixCore.Log.RedactingFormatterTest do
     end
 
     test "redacts literal and escaped multiline private-key PEM blocks" do
-      for pem <- [@fake_private_key, @fake_ec_private_key], line <- [pem, inspect(pem)] do
+      pems = [
+        @fake_private_key,
+        @fake_ec_private_key,
+        @fake_openssh_private_key,
+        @fake_pgp_private_key
+      ]
+
+      for pem <- pems, line <- [pem, inspect(pem)] do
         redacted = RedactingFormatter.redact("before #{line} after")
 
         refute redacted =~ "UExBTlRFRC"
-        refute redacted =~ "BEGIN PRIVATE KEY"
-        refute redacted =~ "BEGIN EC PRIVATE KEY"
+        refute redacted =~ "PRIVATE KEY"
         assert redacted =~ "[REDACTED:private-key]"
       end
     end

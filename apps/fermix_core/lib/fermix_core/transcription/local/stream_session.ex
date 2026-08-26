@@ -68,8 +68,13 @@ defmodule FermixCore.Transcription.Local.StreamSession do
   def handle_info({port, {:exit_status, status}}, %{sidecar: %{port: port}} = state),
     do: fail(detached(state), {:sidecar_exit, status})
 
-  def handle_info({:DOWN, ref, :process, _pid, _reason}, %{consumer_ref: ref} = state),
-    do: {:stop, :normal, state}
+  # No consumer send (it is the process that just died) — but the terminal
+  # span still goes out: a consumer crash is the one terminal where only the
+  # trace can say why the stream ended.
+  def handle_info({:DOWN, ref, :process, _pid, _reason}, %{consumer_ref: ref} = state) do
+    terminal(state, {:error, :consumer_down})
+    {:stop, :normal, state}
+  end
 
   def handle_info(:flush_timeout, state) do
     {:error, reason} =

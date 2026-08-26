@@ -663,6 +663,10 @@ defmodule FermixCore.Meetings.SessionTest do
       assert_receive {:source_leave, ^source}
       await_stop(meeting)
       assert %{status: "failed", error: ":operator_left"} = row(ctx, meeting.id)
+
+      # The leave was the operator's own act: a "couldn't join" warning after
+      # asking to stop would read as a malfunction, so no notice goes out.
+      refute_received {:notice, _origin, _text, _opts}
     end
   end
 
@@ -739,6 +743,25 @@ defmodule FermixCore.Meetings.SessionTest do
 
       send(meeting.pid, {:meeting_ended, :meeting_closed})
       send(meeting.pid, {:transcript_stream_closed, stream, %{segments: 1, dropped: 3}})
+
+      assert_receive {:deliver, delivered, _text, _opts}, 2_000
+      assert delivered.end_reason == :stt_stream_failed
+
+      await_stop(meeting, 2_000)
+      assert row(ctx, meeting.id).status == "delivered"
+
+      assert File.read!(Path.join(artifact_dir(ctx, meeting.id), "summary.md")) =~
+               "Capture ended early (stt_stream_failed)"
+    end
+
+    test "a stream that dies during the drain is labelled cut short, not whole", ctx do
+      meeting = capturing_with_segment!(ctx)
+      assert_receive {:stt_opened, stream}
+
+      send(meeting.pid, {:meeting_ended, :meeting_closed})
+      # The stream errors instead of closing: the tail — the wrap-up content
+      # the drain exists to protect — may be lost.
+      send(meeting.pid, {:transcript_stream_error, stream, {:timeout, :drain, 10_000}})
 
       assert_receive {:deliver, delivered, _text, _opts}, 2_000
       assert delivered.end_reason == :stt_stream_failed

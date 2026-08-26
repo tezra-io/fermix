@@ -37,7 +37,16 @@ defmodule FermixCore.Browser.PolicyTest do
         ] do
       assert {:error, error} = Policy.validate_url(url, config)
       assert error.code == "navigation_blocked"
+      # The refusal names its recovery inline: the model is its primary reader.
+      assert error.message =~ "allowed_hosts"
+      assert error.message =~ "[fermix_core.browser]"
     end
+  end
+
+  test "an internal-hostname refusal names the allowed_hosts recovery", %{config: config} do
+    assert {:error, error} = Policy.validate_url("http://metadata.google.internal", config)
+    assert error.message =~ "allowed_hosts"
+    assert error.message =~ "[fermix_core.browser]"
   end
 
   test "blocks IPv4-in-IPv6 representations of private/metadata hosts", %{config: config} do
@@ -97,6 +106,15 @@ defmodule FermixCore.Browser.PolicyTest do
     {"http://[fec0::]", :blocked, "deprecated site-local fec0::/10"},
     {"http://[fec0::1.2.3.4]", :blocked, "site-local, dotted spelling, classifier path"},
     {"http://169.254.169.254", :blocked, "cloud metadata"},
+    # The inet_aton spellings Chrome also resolves: `:inet.parse_address/1` is
+    # deliberately lenient, so every one of these IS the metadata literal and
+    # must answer as one. These rows pin that leniency — a refactor to
+    # `parse_strict_address/1` (the right call for `mobile.bind`) would turn
+    # each into an allowed dotted NAME here, and that regression must fail loud.
+    {"http://0xa9.0xfe.0xa9.0xfe", :blocked, "hex-octet spelling of the metadata literal"},
+    {"http://0251.0376.0251.0376", :blocked, "octal-octet spelling of the metadata literal"},
+    {"http://169.254.43518", :blocked, "three-part inet_aton spelling of the metadata literal"},
+    {"http://2852039166", :blocked, "dword spelling of the metadata literal"},
     {"http://0.0.0.0", :blocked, "IPv4 unspecified"},
     {"http://10.0.0.1", :blocked, "private 10/8"},
     {"http://172.16.0.1", :blocked, "private 172.16/12"},

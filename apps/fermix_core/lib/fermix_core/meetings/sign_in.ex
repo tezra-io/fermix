@@ -118,7 +118,14 @@ defmodule FermixCore.Meetings.SignIn do
       teardown(port, os_pid)
     end
   rescue
-    ArgumentError -> {:error, {:spawn_failed, executable}}
+    ArgumentError ->
+      {:error, {:spawn_failed, executable}}
+
+    # A vanished or non-executable binary raises ErlangError (:enoent/:eacces)
+    # from open_port, not ArgumentError — without this clause the typed
+    # spawn_failed path was dead code and real failures killed the async Task.
+    error in ErlangError ->
+      {:error, {:spawn_failed, executable, error.original}}
   end
 
   # One receive loop, bounded by the backstop deadline. The exit status is the
@@ -135,7 +142,7 @@ defmodule FermixCore.Meetings.SignIn do
           collect(port, os_pid, progress, deadline, "")
 
         {^port, {:data, {:noeol, chunk}}} ->
-          collect(port, os_pid, progress, deadline, acc <> chunk)
+          collect(port, os_pid, progress, deadline, cap_line(acc <> chunk))
 
         {^port, {:exit_status, status}} ->
           verdict(status)
@@ -154,6 +161,17 @@ defmodule FermixCore.Meetings.SignIn do
   defp verdict(3), do: {:error, :timeout}
   defp verdict(status), do: {:error, {:signin_failed, status}}
 
+  # `{:line, @line_bytes}` bounds each PORT MESSAGE, not the accumulated line:
+  # a child streaming newline-free bytes would otherwise grow the accumulator
+  # until the multi-minute backstop. The exit code decides the verdict, so an
+  # oversized line is truncated (its tail dropped), never fatal.
+  @max_line_accumulator_bytes 1_048_576
+
+  defp cap_line(acc) when byte_size(acc) > @max_line_accumulator_bytes,
+    do: binary_part(acc, 0, @max_line_accumulator_bytes)
+
+  defp cap_line(acc), do: acc
+
   # A status line is best-effort telemetry to the caller; a malformed one is
   # logged and dropped rather than failing the run, because the exit code — not
   # the line — is what decides.
@@ -166,6 +184,7 @@ defmodule FermixCore.Meetings.SignIn do
         emit(progress, {:result, result_atom(status)})
 
       _other ->
+        Logger.debug("meetbot signin: dropped a malformed status line (#{byte_size(line)} bytes)")
         :ok
     end
   end

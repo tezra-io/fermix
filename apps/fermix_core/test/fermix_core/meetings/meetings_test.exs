@@ -127,6 +127,15 @@ defmodule FermixCore.MeetingsTest do
 
       assert Meetings.active_ids() == []
       assert {:error, {:max_concurrent, "mtg_00000000008"}} = join(@zoom_url, repo)
+
+      # The row inserted before the refused start is failed in place — not left
+      # a phantom that `list(scope: :active)` reports and `leave` cannot clear.
+      assert {:ok, []} = Meetings.list(scope: :active, store_opts: [server: repo])
+      assert {:ok, [stranded]} = Meetings.list(store_opts: [server: repo])
+      assert stranded.status == "failed"
+
+      assert {:ok, %{error: "session start failed: " <> _reason}} =
+               Meetings.get(stranded.id, store_opts: [server: repo])
     end
 
     @tag :capture_log

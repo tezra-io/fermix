@@ -237,7 +237,7 @@ defmodule FermixChannels.Mobile.SupervisorTest do
              Management.health(config: [enabled: true], device_store: store)
 
     assert {:error, {:mobile_surface_refused, {:devices_decode_failed, ^path, _}}} =
-             Management.status(device_store: store)
+             Management.status(config: [enabled: true], device_store: store)
   end
 
   test "a repaired trust store clears the refusal on the next boot" do
@@ -268,12 +268,86 @@ defmodule FermixChannels.Mobile.SupervisorTest do
     capture_log(fn -> assert :ignore == boot.() end)
     assert {:error, _reason} = MobileSupervisor.refusal(store)
 
-    File.rm!(path)
+    SafeRm.rm!(path)
 
     assert {:ok, supervisor} = boot.()
     on_exit(fn -> if Process.alive?(supervisor), do: Process.exit(supervisor, :shutdown) end)
     assert MobileSupervisor.refusal(store) == :none
     assert {:ok, []} = DeviceStore.list(store)
+  end
+
+  # A child init `{:stop, ...}` escalates through this supervisor into an
+  # application crash-loop under the service manager. The two states below used
+  # to do exactly that (Listener.init via Identity.ensure; MediaStore.init via
+  # its manifest check); each must instead refuse only the mobile surface.
+  test "partial identity material refuses the subtree instead of crashing the daemon" do
+    root = SafeRm.make_tmp_dir!("mobile-partial-identity")
+    on_exit(fn -> SafeRm.rm_rf!(root) end)
+
+    dir = Path.join(root, "mobile")
+    File.mkdir_p!(dir)
+    File.chmod!(dir, 0o700)
+
+    for file <- ["gateway_key", "tls.key"] do
+      path = Path.join(dir, file)
+      File.write!(path, "stub")
+      File.chmod!(path, 0o600)
+    end
+
+    instance_names = names()
+    store = instance_names.device_store
+    on_exit(fn -> MobileSupervisor.forget_refusal(store) end)
+
+    log =
+      capture_log(fn ->
+        assert :ignore ==
+                 MobileSupervisor.start_link(
+                   name: nil,
+                   root: root,
+                   boot_epoch: "partial-identity-epoch",
+                   start_listener?: false,
+                   names: instance_names
+                 )
+      end)
+
+    assert {:error, {:identity_incomplete, missing}} = MobileSupervisor.refusal(store)
+    assert Enum.any?(missing, &String.ends_with?(&1, "tls.crt"))
+    assert log =~ "identity material"
+    refute Process.whereis(store)
+  end
+
+  test "an insecure attachment manifest refuses the subtree instead of crashing the daemon" do
+    root = SafeRm.make_tmp_dir!("mobile-insecure-manifest")
+    on_exit(fn -> SafeRm.rm_rf!(root) end)
+
+    dir = Path.join(root, "mobile")
+    File.mkdir_p!(dir)
+    File.chmod!(dir, 0o700)
+    manifest = Path.join(dir, "attachments.json")
+    File.write!(manifest, "{}")
+    File.chmod!(manifest, 0o644)
+
+    instance_names = names()
+    store = instance_names.device_store
+    on_exit(fn -> MobileSupervisor.forget_refusal(store) end)
+
+    log =
+      capture_log(fn ->
+        assert :ignore ==
+                 MobileSupervisor.start_link(
+                   name: nil,
+                   root: root,
+                   boot_epoch: "insecure-manifest-epoch",
+                   start_listener?: false,
+                   names: instance_names
+                 )
+      end)
+
+    assert {:error, {:insecure_attachment_manifest, ^manifest, 0o644}} =
+             MobileSupervisor.refusal(store)
+
+    assert log =~ "attachment manifest"
+    refute Process.whereis(store)
   end
 
   defp push_config(key) do

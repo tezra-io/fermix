@@ -685,6 +685,7 @@ defmodule Fermix.CLI.Daemon do
         plugin: Wire.json_safe(Map.get(entry, :plugin)),
         status: Wire.json_safe(Map.get(entry, :status)),
         detail: Wire.json_safe(Map.get(entry, :detail)),
+        capability: Wire.json_safe(Map.get(entry, :capability)),
         updated_at: Wire.json_safe(Map.get(entry, :updated_at))
       }
     end)

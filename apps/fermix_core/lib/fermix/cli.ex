@@ -99,11 +99,6 @@ defmodule Fermix.CLI do
                    [--fast|--no-fast]
                    [--realtime-enabled] [--realtime-model VALUE] [--realtime-voice VALUE]
                    [--acp-enabled|--no-acp-enabled]
-                   [--mobile-enabled|--no-mobile-enabled] [--mobile-port N]
-                   [--mobile-push-enabled|--no-mobile-push-enabled]
-                   [--mobile-push-team-id VALUE] [--mobile-push-key-id VALUE]
-                   [--mobile-push-key VALUE] [--mobile-push-topic VALUE]
-                   [--mobile-push-environment development|production]
                    [--telegram-bot-token VALUE] ...
       fermix auth   login   [--no-browser] [--port N] [--timeout SECONDS]
       fermix auth   status

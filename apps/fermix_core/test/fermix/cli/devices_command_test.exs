@@ -151,6 +151,25 @@ defmodule Fermix.CLI.DevicesCommandTest do
     refute printed =~ "fermix setup"
   end
 
+  test "revoking an unknown device renders a typed message, not a tuple dump" do
+    request = fn "mobile_device_revoke", %{"device_id" => _id}, _timeout ->
+      {:ok, %{"status" => "error", "reason" => "device_not_found"}}
+    end
+
+    {stdout, stderr} = io()
+
+    assert DevicesCommand.run(["revoke", @device_id],
+             request: request,
+             stdout: stdout,
+             stderr: stderr
+           ) == 1
+
+    printed = output(stderr)
+    assert printed =~ "no paired device with that id"
+    assert printed =~ "fermix devices list"
+    refute printed =~ "device_not_found"
+  end
+
   test "invalid verbs return usage status" do
     request = fn _method, _params, _timeout -> flunk("RPC must not run") end
     {stdout, stderr} = io()

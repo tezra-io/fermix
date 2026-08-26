@@ -127,6 +127,47 @@ defmodule FermixCore.Transcription.Local.SidecarTest do
                  env: [{~c"FAKE_STT_MODE", ~c"hang_hello"}]
                )
     end
+
+    # Rule 4 (own resources on every path): a sidecar wedged in compute is not
+    # reading stdin, so the shutdown op and the port's EOF are never observed —
+    # close must SIGKILL its process group after the grace, or every timeout
+    # teardown orphans a fermix-stt with the model resident. ERTS makes each
+    # spawn_executable child its own group leader, so kill(-os_pid) is exactly
+    # the sidecar (and :esrch — already exited — is silent success).
+    test "close kills a sidecar that ignores shutdown instead of orphaning it" do
+      assert {:ok, state} =
+               Sidecar.open(binary_path: @fake, env: [{~c"FAKE_STT_MODE", ~c"hang"}])
+
+      assert is_integer(state.os_pid) and state.os_pid > 0
+
+      # Wedge it: `hang` sleeps 10s inside transcribe, reading nothing.
+      :ok =
+        Sidecar.send_op(state, %{
+          "op" => "transcribe",
+          "id" => "w1",
+          "path" => "/nonexistent.wav",
+          "model_dir" => "/nonexistent"
+        })
+
+      assert Sidecar.close(state) == :ok
+
+      # Dead well before the 10s sleep could end on its own, so the exit came
+      # from close's kill. A signal to a gone group is :esrch.
+      assert eventually_dead(state.os_pid, 3_000)
+    end
+  end
+
+  defp eventually_dead(os_pid, budget_ms) do
+    deadline = System.monotonic_time(:millisecond) + budget_ms
+    poll_dead(os_pid, deadline)
+  end
+
+  defp poll_dead(os_pid, deadline) do
+    cond do
+      FermixNif.kill_pgid(os_pid, :sigkill) == {:error, :esrch} -> true
+      System.monotonic_time(:millisecond) >= deadline -> false
+      true -> Process.sleep(25) && poll_dead(os_pid, deadline)
+    end
   end
 
   describe "batch/2" do

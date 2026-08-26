@@ -104,9 +104,11 @@ defmodule FermixCore.Meetings.Session do
   # died between refusing us and being read, which frees the slot.
   @capacity_attempts 2
 
-  # A stream error and a monitored stream's `:DOWN` carry no close summary; the
-  # drain rules below key on the dropped count, and neither path reports one.
-  @unreported_drops %{segments: 0, dropped: 0}
+  # A stream error and a monitored stream's `:DOWN` carry no close summary —
+  # they mean the stream DIED rather than closed, so whatever tail it still
+  # held is gone uncounted. `on_stream_end/2` takes this marker instead of a
+  # summary map and the drain labels the capture cut short (`drained/2`).
+  @stream_lost :stream_lost
 
   # `Memory.Repo.MeetingsSql` refuses an `error` longer than this many BYTES.
   @max_error_bytes 500
@@ -206,7 +208,10 @@ defmodule FermixCore.Meetings.Session do
     MeetingTelemetry.run_start(telemetry_meeting(state),
       url: state.url,
       title: state.title,
-      max_duration_ms: @max_duration_ms
+      # The EFFECTIVE watchdog (opts can override :timers), not the module
+      # default — the exporter uses this as the trace's sweep floor, and a
+      # floor below the real watchdog would force-close a live run's root.
+      max_duration_ms: state.timers.max_duration_ms
     )
 
     {:ok, state, {:continue, :start}}
@@ -253,7 +258,7 @@ defmodule FermixCore.Meetings.Session do
     do: on_stream_end(state, summary)
 
   def handle_info({:transcript_stream_error, _stt, _reason}, state),
-    do: on_stream_end(state, @unreported_drops)
+    do: on_stream_end(state, @stream_lost)
 
   def handle_info({:phase_timeout, phase}, state), do: on_phase_timeout(phase, state)
   def handle_info({:capture_timeout, kind}, state), do: on_capture_timeout(kind, state)
@@ -617,7 +622,7 @@ defmodule FermixCore.Meetings.Session do
   # The stream is left in place: `on_stream_end/2` releases it inside the clause
   # that acts on it, which is how a stream released earlier stays ignorable.
   defp on_down(ref, _reason, %{stt: %{ref: ref}} = state) do
-    on_stream_end(state, @unreported_drops)
+    on_stream_end(state, @stream_lost)
   end
 
   defp on_down(ref, reason, %{source: %{ref: ref}} = state) do
@@ -678,6 +683,19 @@ defmodule FermixCore.Meetings.Session do
   # outage closes as cleanly as a silent room, so a capture that lost speech is
   # labelled here or nowhere.
   defp drained(state, %{dropped: 0}), do: finish_capture(state)
+
+  # The stream died during the drain window instead of closing: the tail —
+  # exactly the wrap-up/action-items content the drain exists to protect — may
+  # be lost, so the capture is labelled cut short, never passed off as whole
+  # (the moduledoc's "dead transcription stream … with an explicit early-cut
+  # warning", applied to the drain).
+  defp drained(state, :stream_lost) do
+    Logger.warning(
+      "meetings: #{state.id} transcription stream died during drain — notes are partial"
+    )
+
+    state |> label_dropped() |> finish_dropped()
+  end
 
   defp drained(state, %{dropped: dropped}) when is_integer(dropped) and dropped > 0 do
     Logger.warning(
@@ -1189,6 +1207,12 @@ defmodule FermixCore.Meetings.Session do
     MeetingTelemetry.run_error(telemetry_meeting(state), Atom.to_string(status), error_text)
     {:stop, :normal, state}
   end
+
+  # An operator-cancelled join is not a failure to report: the leave itself was
+  # the operator's act and the leave path already acknowledges it, so a
+  # "⚠️ I couldn't join (operator_left)" warning after asking to stop would
+  # read as a malfunction.
+  defp notify_join_failure(_state, :operator_left), do: :ok
 
   # The requester was told the notetaker was joining; a failure before it is in
   # the meeting owes them a reason, not silence. Best-effort — a notice that

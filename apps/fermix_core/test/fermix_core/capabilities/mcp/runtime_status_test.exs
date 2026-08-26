@@ -105,7 +105,26 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatusTest do
           :non_global_answer
         )
 
-      assert {:error, {:remote_security_blocked, :non_global_answer}} = Task.await(waiter)
+      assert {:error, {:remote_security_blocked, :non_global_answer, nil}} = Task.await(waiter)
+    end
+
+    test "a terminal outcome carries the capability the writer named", %{status: status} do
+      {:ok, generation} = RuntimeStatus.register_owner(status, @source, fake_owner())
+
+      :ok =
+        RuntimeStatus.put(
+          status,
+          @source,
+          generation,
+          :upstream_contract_mismatch,
+          :descriptor_changed,
+          "eden_read_card"
+        )
+
+      assert {:ok, %{capability: "eden_read_card"}} = RuntimeStatus.fetch(status, @source)
+
+      assert {:error, {:upstream_contract_mismatch, :descriptor_changed, "eden_read_card"}} =
+               RuntimeStatus.await(status, @source, generation, 1_000)
     end
 
     test "a stale generation's :ready never satisfies the replacement's waiter", %{status: status} do
@@ -142,7 +161,7 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatusTest do
       {:ok, generation} = RuntimeStatus.register_owner(status, @source, fake_owner())
       :ok = RuntimeStatus.put(status, @source, generation, :needs_workspace, nil)
 
-      assert {:error, {:needs_workspace, nil}} =
+      assert {:error, {:needs_workspace, nil, nil}} =
                RuntimeStatus.await(status, @source, generation, 1_000)
     end
   end
@@ -197,7 +216,31 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatusTest do
 
       Process.exit(owner, :kill)
 
-      assert {:error, {:remote_unreachable, _class}} = Task.await(waiter, 1_000)
+      assert {:error, {:remote_unreachable, _class, nil}} = Task.await(waiter, 1_000)
+    end
+
+    test "a terminal capability survives the death that follows it", %{status: status} do
+      owner = fake_owner()
+      {:ok, generation} = RuntimeStatus.register_owner(status, @source, owner)
+
+      :ok =
+        RuntimeStatus.put(
+          status,
+          @source,
+          generation,
+          :upstream_contract_mismatch,
+          :missing_tool,
+          "eden_search"
+        )
+
+      Process.exit(owner, :kill)
+
+      assert eventually(fn ->
+               match?(
+                 {:ok, %{status: :upstream_contract_mismatch, capability: "eden_search"}},
+                 RuntimeStatus.fetch(status, @source)
+               )
+             end)
     end
   end
 
@@ -256,6 +299,66 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatusTest do
         assert status in RuntimeStatus.statuses()
         assert is_atom(detail)
       end
+    end
+  end
+
+  describe "capability_from/1" do
+    test "extracts the tool name a contract failure carries" do
+      assert RuntimeStatus.capability_from(
+               {:upstream_contract_mismatch, {:descriptor_changed, "eden_read_card"}}
+             ) == "eden_read_card"
+
+      assert RuntimeStatus.capability_from({:capability_conflict, "eden_search"}) ==
+               "eden_search"
+    end
+
+    test "yields nothing for a reason that names no capability" do
+      assert RuntimeStatus.capability_from({:upstream_contract_mismatch, :rediscovery_cap}) == nil
+      assert RuntimeStatus.capability_from({:reauthorization_required, "mcp.eden.so"}) == nil
+      assert RuntimeStatus.capability_from({:remote_jsonrpc_error, -32_000, "nope"}) == nil
+      assert RuntimeStatus.capability_from(:session_expired) == nil
+      assert RuntimeStatus.capability_from(%{secret: "eden_pat_do_not_leak"}) == nil
+    end
+
+    # The name comes from the remote's own descriptor; a hostile one must not
+    # ride an unbounded string into every status surface.
+    test "bounds the extracted name" do
+      long = String.duplicate("a", 4_000)
+
+      extracted =
+        RuntimeStatus.capability_from({:upstream_contract_mismatch, {:invalid_schema, long}})
+
+      assert String.length(extracted) == 128
+    end
+  end
+
+  describe "describe/3" do
+    test "renders status, detail, and capability the way every surface shows them" do
+      assert RuntimeStatus.describe(:ready) == "ready"
+
+      assert RuntimeStatus.describe(:upstream_contract_mismatch, :descriptor_changed) ==
+               "upstream_contract_mismatch/descriptor_changed"
+
+      assert RuntimeStatus.describe(
+               :upstream_contract_mismatch,
+               :descriptor_changed,
+               "eden_read_card"
+             ) == "upstream_contract_mismatch/descriptor_changed (eden_read_card)"
+
+      assert RuntimeStatus.describe(:capability_conflict, nil, "eden_search") ==
+               "capability_conflict (eden_search)"
+    end
+
+    # `fermix doctor` renders rows that crossed the control socket, where the
+    # atoms have already become strings; the shared resolver must not care.
+    test "renders wire strings identically" do
+      assert RuntimeStatus.describe(
+               "upstream_contract_mismatch",
+               "descriptor_changed",
+               "eden_read_card"
+             ) == "upstream_contract_mismatch/descriptor_changed (eden_read_card)"
+
+      assert RuntimeStatus.describe("ready", nil, nil) == "ready"
     end
   end
 

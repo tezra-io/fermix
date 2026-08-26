@@ -13,6 +13,7 @@ defmodule FermixChannels.Mobile.Supervisor do
 
   alias FermixChannels.Mobile.DeviceRegistry
   alias FermixChannels.Mobile.DeviceStore
+  alias FermixChannels.Mobile.Identity
   alias FermixChannels.Mobile.Listener
   alias FermixChannels.Mobile.MdnsAdvertiser
   alias FermixChannels.Mobile.MediaStore
@@ -26,21 +27,32 @@ defmodule FermixChannels.Mobile.Supervisor do
   @keyring_sentinel FermixCore.Setup.SecretWriter.sentinel()
 
   @doc """
-  Start the mobile subtree, or refuse it when its trust store is unusable.
+  Start the mobile subtree, or refuse it when its durable state is unusable.
 
-  A structurally broken `devices.toml` is a mobile-only fault. It is refused and
-  never rebuilt (design §0), and refusing it must not take Telegram and every
-  other channel down with it — so the subtree does not start, the reason is
-  recorded for `health`/`doctor`, and the application keeps running.
+  A structurally broken `devices.toml`, partial/unreadable identity material,
+  or a broken attachment manifest is a mobile-only fault. Each is refused and
+  never rebuilt, and refusing it must not take Telegram and every other channel
+  down with it — a child's `init` `{:stop, ...}` would escalate through this
+  supervisor into an application crash-loop under the service manager. So the
+  subtree does not start, the reason is recorded for `health`/`doctor`, and
+  the application keeps running. Transient faults (a port already in use) stay
+  loud child failures on purpose.
   """
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(opts \\ []) when is_list(opts) do
     root = root(opts)
     store = names(opts).device_store
 
-    case DeviceStore.list(root: root) do
-      {:ok, _devices} -> start_subtree(opts, store)
+    case admission_check(opts, root) do
+      :ok -> start_subtree(opts, store)
       {:error, reason} -> refuse(root, store, reason)
+    end
+  end
+
+  defp admission_check(opts, root) do
+    with {:ok, _devices} <- DeviceStore.list(root: root),
+         :ok <- Identity.admissible(root: root) do
+      MediaStore.manifest_admissible(media_opts(opts, root, nil))
     end
   end
 
@@ -73,12 +85,41 @@ defmodule FermixChannels.Mobile.Supervisor do
     :persistent_term.put(refusal_key(store), reason)
 
     Logger.error(
-      "mobile surface refused this boot: #{DeviceStore.store_path(root)} is unusable " <>
-        "(#{inspect(reason)}). No mobile child started; other channels are unaffected. " <>
-        "Fermix never regenerates a trust store — repair or remove the file, then restart."
+      "mobile surface refused this boot: #{refusal_detail(root, reason)} " <>
+        "No mobile child started; other channels are unaffected."
     )
 
     :ignore
+  end
+
+  # The remedy differs per fault class, and copy that names the wrong file
+  # sends the operator repairing the wrong thing.
+  defp refusal_detail(root, reason)
+       when elem(reason, 0) in [
+              :identity_incomplete,
+              :identity_unreadable,
+              :invalid_identity_transaction
+            ] do
+    "the mobile identity material under #{root} is unusable (#{inspect(reason)}). " <>
+      "Fermix never regenerates partial identity material — restore the missing files, " <>
+      "or remove the whole identity directory to re-pair every device, then restart."
+  end
+
+  defp refusal_detail(_root, reason)
+       when elem(reason, 0) in [
+              :insecure_attachment_manifest,
+              :attachment_manifest_too_large,
+              :invalid_attachment_manifest,
+              :invalid_attachment_manifest_target,
+              :attachment_manifest_stat_failed
+            ] do
+    "the mobile attachment manifest is unusable (#{inspect(reason)}). " <>
+      "Repair or remove the file, then restart."
+  end
+
+  defp refusal_detail(root, reason) do
+    "#{DeviceStore.store_path(root)} is unusable (#{inspect(reason)}). " <>
+      "Fermix never regenerates a trust store — repair or remove the file, then restart."
   end
 
   defp refusal_key(store), do: {__MODULE__, :refused_trust_store, store}

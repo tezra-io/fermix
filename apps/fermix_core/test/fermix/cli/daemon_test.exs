@@ -566,7 +566,8 @@ defmodule Fermix.CLI.DaemonTest do
         source_id,
         generation,
         :upstream_contract_mismatch,
-        :tool_missing
+        :tool_missing,
+        "eden_read_card"
       )
 
     {:ok, daemon} =
@@ -592,6 +593,7 @@ defmodule Fermix.CLI.DaemonTest do
     assert row["plugin"] == "eden"
     assert row["status"] == "upstream_contract_mismatch"
     assert row["detail"] == "tool_missing"
+    assert row["capability"] == "eden_read_card"
     assert is_integer(row["updated_at"])
     # The generation ref and owner pid are runtime bookkeeping, not operator
     # facts — §11.1 forbids exporting generation references at all.

@@ -317,7 +317,7 @@ defmodule FermixCore.Capabilities.MCP.Server do
   # The shared registration-completion point: the agent's tool list is only now
   # what the registry says it is.
   defp complete_registration(state) do
-    _ = put_status(state, :ready, nil)
+    _ = put_status(state, :ready, nil, nil)
     emit_lifecycle(state, :ready, :ok, 0, 1)
     if state.proxy, do: Proxy.resume(state.proxy, state.contract)
     refresh_runtime_context(state)
@@ -630,7 +630,7 @@ defmodule FermixCore.Capabilities.MCP.Server do
   defp record_terminal(state, reason) do
     {status, detail} = RuntimeStatus.classify(reason)
 
-    case put_status(state, status, detail) do
+    case put_status(state, status, detail, RuntimeStatus.capability_from(reason)) do
       :ok -> refresh_runtime_context(state)
       _no_write -> :ok
     end
@@ -638,15 +638,16 @@ defmodule FermixCore.Capabilities.MCP.Server do
     state
   end
 
-  defp put_status(%{generation: nil}, _status, _detail), do: :no_status_sink
+  defp put_status(%{generation: nil}, _status, _detail, _capability), do: :no_status_sink
 
-  defp put_status(state, status, detail) do
+  defp put_status(state, status, detail, capability) do
     case RuntimeStatus.put(
            state.runtime_status,
            state.source_id,
            state.generation,
            status,
-           detail
+           detail,
+           capability
          ) do
       :ok -> :ok
       # A replaced owner's discovery must never overwrite its replacement.

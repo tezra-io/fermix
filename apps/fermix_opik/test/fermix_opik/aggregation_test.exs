@@ -669,6 +669,30 @@ defmodule FermixOpik.AggregationTest do
     assert [_write] = spans_of_type(spans, "tool")
   end
 
+  test "a computer-history summarize cycle is its own kind, not a subagent" do
+    # The summarizer (§22.4) is a headless single provider call with no bookend
+    # events — its llm span creates the session, so the kind rides the id prefix.
+    # The trace closes by TTL sweep in production; assert on the open state.
+    {state, closed} =
+      run([
+        {[:fermix, :provider, :call], %{duration_ms: 900},
+         %{
+           provider: :openai,
+           model: "gpt-5.5",
+           status: :ok,
+           agent: "computer_history_summarizer",
+           session_id: "computer_history_summarize:1755900000000",
+           tokens: %{prompt: 400, completion: 60}
+         }}
+      ])
+
+    assert closed == []
+    assert [{_id, trace}] = Map.to_list(state.traces)
+    assert trace.tags == ["computer_history_summary"]
+    # The agent name already says "computer history" — no kind prefix on top.
+    assert trace.name == "computer_history_summarizer"
+  end
+
   test "a soul-curation draft's synthetic command parent keeps it a standalone root" do
     # The draft's parent_session is the originating command id (never a registered
     # turn session), so it resolves to its own root trace — correlatable but

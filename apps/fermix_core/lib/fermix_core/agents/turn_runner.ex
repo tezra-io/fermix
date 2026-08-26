@@ -31,6 +31,7 @@ defmodule FermixCore.Agents.TurnRunner do
   alias FermixCore.Agents.IterationLimits
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Agents.RuntimeContext
+  alias FermixCore.ComputerHistory.Gate, as: ComputerHistoryGate
   alias FermixCore.ComputerHistory.RecentActivity
   alias FermixCore.ComputerHistory.Taint
   alias FermixCore.Memory.CompactionConfig
@@ -139,10 +140,12 @@ defmodule FermixCore.Agents.TurnRunner do
   end
 
   # Stamp the assistant turn history-tainted (MILESTONE_32 §13.6) iff the Recent
-  # Activity section was Gate-permitted this turn — re-derived from the same
-  # inputs the section injection used (`msg` + the turn's snapshot chain), so
-  # the stamp and the section cannot disagree. `turn_state` is the immutable
-  # per-turn snapshot, so the chain is read from it, not the internal context.
+  # Activity section was Gate-permitted this turn. The decision reads the SAME
+  # frozen snapshot the section injection read (`turn_state.computer_history_gate`,
+  # built once by MainAgent), so a `/history off` or grant edit landing mid-turn
+  # can never make the stamp disagree with the section — the exact drift the
+  # live re-derivation had. The context re-derivation remains only as the
+  # fallback for callers without a frozen snapshot.
   defp history_taint_opt(msg, turn_state) do
     gate_context = %{
       source_trust: Map.get(msg, :source_trust),
@@ -151,7 +154,31 @@ defmodule FermixCore.Agents.TurnRunner do
       harness_continuation_depth: harness_continuation_depth(msg)
     }
 
-    if Taint.tainted_turn?(gate_context), do: [metadata: Taint.metadata()], else: []
+    opts =
+      case Map.get(turn_state, :computer_history_gate) do
+        nil -> []
+        snapshot -> [snapshot: snapshot]
+      end
+
+    if Taint.tainted_turn?(gate_context, opts), do: [metadata: Taint.metadata()], else: []
+  end
+
+  @doc """
+  The turn's frozen Computer History gate snapshot (MILESTONE_32 — the Gate is
+  "snapshotted once per turn"). MainAgent builds it when it freezes
+  `turn_state`; every reader in the turn — the Recent Activity section,
+  `recall_activity`'s advertise/execute gates, and the commit-time taint stamp
+  — consumes this one snapshot, so a config flip landing mid-turn cannot make
+  any two of them disagree.
+  """
+  @spec computer_history_gate(map(), term()) :: ComputerHistoryGate.Snapshot.t()
+  def computer_history_gate(msg, ordered_routes) do
+    ComputerHistoryGate.snapshot(%{
+      source_trust: Map.get(msg, :source_trust),
+      ordered_routes: ordered_routes,
+      computer_use_origin: computer_use_origin(msg),
+      harness_continuation_depth: harness_continuation_depth(msg)
+    })
   end
 
   @doc "Map an agent-loop error reason to the user-facing reply text."
@@ -274,6 +301,10 @@ defmodule FermixCore.Agents.TurnRunner do
       # turn — a subagent spawned after a mid-turn failover still starts at
       # the primary and runs its own bounded failover.
       ordered_routes: Map.get(state, :ordered_routes),
+      # The turn-frozen Computer History gate (see computer_history_gate/2):
+      # one snapshot serves the Recent Activity section, the recall_activity
+      # advertise/execute gates, and the commit-time taint stamp.
+      computer_history_gate: Map.get(state, :computer_history_gate),
       skill_registry: state.skill_registry,
       agent_supervisor: state.agent_supervisor,
       task_supervisor: state.task_supervisor,

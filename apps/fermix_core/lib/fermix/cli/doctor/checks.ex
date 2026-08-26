@@ -18,6 +18,7 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias FermixCore.Auth.Store, as: AuthStore
   alias FermixCore.Browser.ChromeLauncher
   alias FermixCore.Browser.Config, as: BrowserConfig
+  alias FermixCore.Capabilities.MCP.RuntimeStatus, as: McpRuntimeStatus
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.ComputerHistory
   alias FermixCore.ComputerHistory.Config, as: ComputerHistoryConfig
@@ -945,7 +946,12 @@ defmodule Fermix.CLI.Doctor.Checks do
   defp format_meetings(%{status: :disabled}), do: ok("meetings", "disabled")
 
   defp format_meetings(%{status: :enabled, ready?: true} = report) do
-    ok("meetings", meetings_lanes(report) <> "; " <> report.profile_note)
+    detail =
+      [meetings_lanes(report), Map.get(report, :browser_note), report.profile_note]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.join("; ")
+
+    ok("meetings", detail)
   end
 
   defp format_meetings(%{status: :enabled, ready?: false, remedy: remedy})
@@ -1182,6 +1188,17 @@ defmodule Fermix.CLI.Doctor.Checks do
   end
 
   defp summarizer_label(:local), do: "on-device"
+
+  # The shipped default (`summarizer` key absent or "default"). Resolved through
+  # the one shared resolver (§22.1) so this row never names a different vendor
+  # than the one raw activity actually reaches — and so doctor cannot die with a
+  # FunctionClauseError on a default-configured install.
+  defp summarizer_label(:default_provider) do
+    case ComputerHistoryConfig.default_summarizer_provider() do
+      {:ok, provider} -> "subagent/default (#{provider}; raw activity leaves this Mac)"
+      {:error, _reason} -> "default provider (none configured)"
+    end
+  end
 
   defp summarizer_label({:provider, provider}),
     do: "#{provider} (remote, raw activity leaves this Mac)"
@@ -1555,21 +1572,28 @@ defmodule Fermix.CLI.Doctor.Checks do
     end
   end
 
-  # Both fields come from the daemon's own serializer, so a row missing either is
-  # a broken or version-skewed build — reported as a failed query rather than
-  # rendered as a plugin whose runtime state is blank.
+  # The required fields come from the daemon's own serializer, so a row missing
+  # either is a broken or version-skewed build — reported as a failed query
+  # rather than rendered as a plugin whose runtime state is blank. `detail` and
+  # `capability` are optional (an older daemon omits `capability`), but when
+  # present they must be renderable, for the same reason.
   defp index_runtime_rows(rows) do
     if Enum.all?(rows, &valid_runtime_row?/1) do
-      {:ok, Map.new(rows, &{&1["source"], &1["status"]})}
+      {:ok, Map.new(rows, &{&1["source"], &1})}
     else
       {:error, "malformed runtime_status rows"}
     end
   end
 
-  defp valid_runtime_row?(%{"source" => source, "status" => status}),
-    do: is_binary(source) and is_binary(status)
+  defp valid_runtime_row?(%{"source" => source, "status" => status} = row) do
+    is_binary(source) and is_binary(status) and
+      optional_string?(Map.get(row, "detail")) and
+      optional_string?(Map.get(row, "capability"))
+  end
 
   defp valid_runtime_row?(_row), do: false
+
+  defp optional_string?(value), do: is_nil(value) or is_binary(value)
 
   defp render_plugins(entries, runtime) do
     details = Enum.map(entries, &plugin_detail(&1, runtime))
@@ -1587,7 +1611,7 @@ defmodule Fermix.CLI.Doctor.Checks do
 
   defp plugin_detail(%{remote?: true} = entry, {:ok, live}) do
     case Map.fetch(live, "plugin:#{entry.name}") do
-      {:ok, status} -> remote_live_detail(entry, status)
+      {:ok, row} -> remote_live_detail(entry, row)
       :error -> remote_absent_detail(entry)
     end
   end
@@ -1612,10 +1636,16 @@ defmodule Fermix.CLI.Doctor.Checks do
     }
   end
 
-  defp remote_live_detail(entry, status) do
+  # Severity keys on the bare status word; the text renders the full
+  # `status/detail (capability)` through the same resolver the setup modal and
+  # the daemon log use, so a contract mismatch names WHICH capability broke.
+  defp remote_live_detail(entry, %{"status" => status} = row) do
+    described =
+      McpRuntimeStatus.describe(status, Map.get(row, "detail"), Map.get(row, "capability"))
+
     %{
       status: worst_plugin_status([static_plugin_status(entry.status), runtime_status(status)]),
-      text: "#{entry.name}: #{entry.status} (remote; runtime #{status})"
+      text: "#{entry.name}: #{entry.status} (remote; runtime #{described})"
     }
   end
 
@@ -1871,23 +1901,38 @@ defmodule Fermix.CLI.Doctor.Checks do
 
   @spec plaintext_secrets() :: result()
   def plaintext_secrets do
-    with {:ok, snapshot} <- ConfigStore.load_runtime_config(resolve_secrets: false) do
-      case SecretMigration.plaintext_secrets(snapshot) do
-        [] ->
-          ok("setup secrets", "no plaintext setup secrets in config.toml")
-
-        secrets ->
-          names = Enum.map_join(secrets, ", ", & &1.env)
-
-          warn(
-            "setup secrets",
-            "plaintext setup secrets found in #{ConfigStore.path()}: #{names}; run `fermix setup --migrate-secrets`"
-          )
-      end
-    else
-      {:error, reason} ->
-        fail("setup secrets", "could not inspect config.toml: #{inspect(reason)}")
+    case runtime_config_snapshot() do
+      {:ok, snapshot} -> plaintext_secrets_result(snapshot)
+      {:error, detail} -> fail("setup secrets", "could not inspect config.toml: #{detail}")
     end
+  end
+
+  defp plaintext_secrets_result(snapshot) do
+    case SecretMigration.plaintext_secrets(snapshot) do
+      [] ->
+        ok("setup secrets", "no plaintext setup secrets in config.toml")
+
+      secrets ->
+        names = Enum.map_join(secrets, ", ", & &1.env)
+
+        warn(
+          "setup secrets",
+          "plaintext setup secrets found in #{ConfigStore.path()}: #{names}; run `fermix setup --migrate-secrets`"
+        )
+    end
+  end
+
+  # `load_runtime_config` RAISES on a config its normalizers refuse (an unknown
+  # section key, an invalid value) — the same refusal that stops the daemon's
+  # boot. The diagnostic verb must render that refusal as a failed row, not die
+  # of it with a stacktrace and zero output.
+  defp runtime_config_snapshot do
+    case ConfigStore.load_runtime_config(resolve_secrets: false) do
+      {:ok, snapshot} -> {:ok, snapshot}
+      {:error, reason} -> {:error, inspect(reason)}
+    end
+  rescue
+    error in ArgumentError -> {:error, error.message}
   end
 
   defp recent_sandbox_events(trace_dir) do

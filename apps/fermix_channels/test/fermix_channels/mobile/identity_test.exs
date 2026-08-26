@@ -98,6 +98,29 @@ defmodule FermixChannels.Mobile.IdentityTest do
     assert {:ok, _identity} = Identity.ensure(root: root)
   end
 
+  # Boot admission: every state ensure/1 can start from is admissible; only
+  # the states ensure/1 itself refuses at activation refuse the subtree.
+  test "admissible accepts missing, present, and interrupted; refuses partial", %{root: root} do
+    assert Identity.admissible(root: root) == :ok
+
+    assert {:ok, _identity} = Identity.ensure(root: root)
+    assert Identity.admissible(root: root) == :ok
+
+    # An interrupted first-pair generation self-heals in ensure/1, so a crash
+    # marker plus partial material must NOT refuse the boot.
+    {:ok, paths} = Identity.paths(root: root)
+    File.write!(paths.transaction, "v1\n")
+    File.chmod!(paths.transaction, 0o600)
+    FermixTestSupport.SafeRm.rm!(paths.tls_cert)
+    assert Identity.admissible(root: root) == :ok
+
+    # The same partial material with NO crash marker is structural damage.
+    FermixTestSupport.SafeRm.rm!(paths.transaction)
+
+    assert {:error, {:identity_incomplete, [cert_path]}} = Identity.admissible(root: root)
+    assert cert_path == paths.tls_cert
+  end
+
   test "ensure recovers a crash-marked partial first-pair transaction", %{root: root} do
     {:ok, paths} = Identity.paths(root: root)
     File.mkdir_p!(paths.dir)

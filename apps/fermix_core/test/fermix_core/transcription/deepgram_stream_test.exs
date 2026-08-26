@@ -197,6 +197,20 @@ defmodule FermixCore.Transcription.DeepgramStreamTest do
       refute_received {:transcript_segment, ^session, _segment}
     end
 
+    # WebSockex reports `{:remote, :normal}` only for a code-LESS close frame;
+    # a close carrying 1000 — the RFC spelling of normal closure — arrives as
+    # `{:remote, 1000, payload}`. Deepgram has no done event, so this close IS
+    # the only clean finish; refusing it would fail every successful stream.
+    test "a close with the RFC normal code (1000) finishes the drain cleanly" do
+      {session, socket} = open_session()
+
+      StreamSession.finish(session)
+      assert_receive {:ws_text, ^socket, ~s({"type":"CloseStream"})}
+
+      send(session, {:transcription_ws, socket, {:disconnect, %{reason: {:remote, 1000, ""}}}})
+      assert_receive {:transcript_stream_closed, ^session, %{segments: 0, dropped: 0}}
+    end
+
     test "the keepalive frame goes out while streaming" do
       {session, socket} = open_session()
 
@@ -416,6 +430,26 @@ defmodule FermixCore.Transcription.DeepgramStreamTest do
       assert_receive {:provider_call, _measurements, metadata}
       assert metadata.status == :error
       assert metadata.error_summary =~ "drain_interrupted"
+    end
+
+    # A consumer crash is the one terminal where post-mortem tracing matters
+    # most: nobody is left to report the stream, so only the span says what it
+    # cost and why it ended.
+    test "a consumer death still reports the stream's terminal span" do
+      consumer = spawn(fn -> Process.sleep(:infinity) end)
+
+      {:ok, session} =
+        DeepgramStream.open(consumer, "dg-key", "nova-3", socket_mod: FakeWsSocket)
+
+      assert_receive {:ws_started, _socket, _url, _headers, ^session}
+      ref = Process.monitor(session)
+
+      Process.exit(consumer, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^session, :normal}
+
+      assert_receive {:provider_call, _measurements, metadata}
+      assert metadata.status == :error
+      assert metadata.error_summary =~ "consumer_down"
     end
 
     test "an aborted stream reports the abort rather than a silent success" do

@@ -65,6 +65,25 @@ defmodule FermixCore.Transcription.EnergyVadTest do
     test "quiet audio below the threshold is never treated as speech" do
       assert segment(PcmFixtures.tone(3_000, 100)) == []
     end
+
+    # The stuck-:speech decay: without it a 1s cough followed by sustained
+    # silence never leaves :speech — silence accumulates to the 30s ceiling and
+    # ships to the paid batch backend as a near-silence chunk every 30s for the
+    # rest of the stream.
+    test "a sub-minimum burst followed by sustained silence yields nothing at all" do
+      pcm = PcmFixtures.pattern([{:tone, 1_000}, {:silence, 60_000}])
+
+      assert segment(pcm) == []
+    end
+
+    test "a burst after the merge window starts a fresh run, not a resumed one" do
+      pcm = PcmFixtures.pattern([{:tone, 1_000}, {:silence, 3_000}, {:tone, 3_000}])
+
+      # The 1s burst is abandoned once the merge window closes; the second run
+      # stands alone with its own preroll before its 4_000ms onset.
+      assert [chunk] = segment(pcm)
+      assert {chunk.t0_ms, chunk.t1_ms} == {3_700, 7_000}
+    end
   end
 
   describe "properties" do

@@ -211,7 +211,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.Owner do
   def handle_info({:EXIT, session, reason}, %{session: session} = state) do
     state = %{state | session: nil}
     {status, detail} = RuntimeStatus.classify(reason)
-    _ = put_status(state, status, detail)
+    _ = put_status(state, status, detail, RuntimeStatus.capability_from(reason))
     Logger.warning("remote MCP session for #{inspect(state.source_id)} exited: #{status}")
     {:stop, :normal, state}
   end
@@ -326,11 +326,13 @@ defmodule FermixCore.Capabilities.MCP.Remote.Owner do
   # start error — the only report a process that never lived can produce.
   defp record_refusal(state, reason) do
     {status, detail} = RuntimeStatus.classify(reason)
-    _ = put_status(state, status, detail)
+    capability = RuntimeStatus.capability_from(reason)
+    _ = put_status(state, status, detail, capability)
     maybe_emit_security_block(state, status, detail)
 
     Logger.error(
-      "remote MCP client #{inspect(state.source_id)} refused (#{status}/#{inspect(detail)}); " <>
+      "remote MCP client #{inspect(state.source_id)} refused " <>
+        "(#{RuntimeStatus.describe(status, detail, capability)}); " <>
         "config=#{inspect(redacted(state.spec))}"
     )
 
@@ -443,7 +445,8 @@ defmodule FermixCore.Capabilities.MCP.Remote.Owner do
     {status, detail} = RuntimeStatus.classify(reason)
 
     Logger.warning(
-      "remote MCP teardown for #{inspect(state.source_id)} failed: #{status}/#{inspect(detail)}"
+      "remote MCP teardown for #{inspect(state.source_id)} failed: " <>
+        RuntimeStatus.describe(status, detail)
     )
   end
 
@@ -464,15 +467,16 @@ defmodule FermixCore.Capabilities.MCP.Remote.Owner do
     generation
   end
 
-  defp put_status(%{generation: nil}, _status, _detail), do: :no_status_sink
+  defp put_status(%{generation: nil}, _status, _detail, _capability), do: :no_status_sink
 
-  defp put_status(state, status, detail) do
+  defp put_status(state, status, detail, capability) do
     case RuntimeStatus.put(
            state.runtime_status,
            state.source_id,
            state.generation,
            status,
-           detail
+           detail,
+           capability
          ) do
       :ok ->
         :ok

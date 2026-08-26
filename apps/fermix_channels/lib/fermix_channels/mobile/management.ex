@@ -27,9 +27,9 @@ defmodule FermixChannels.Mobile.Management do
   def begin_pairing(opts) when is_list(opts) do
     manager = Keyword.get(opts, :pair_manager, PairManager)
 
-    case invoke(opts, :open_pair, &PairManager.open/1, [manager]) do
-      {:ok, window} -> finish_pairing_setup(window, manager, opts)
-      {:error, _reason} = error -> error
+    with :ok <- require_enabled_config(opts),
+         {:ok, window} <- invoke(opts, :open_pair, &PairManager.open/1, [manager]) do
+      finish_pairing_setup(window, manager, opts)
     end
   end
 
@@ -74,7 +74,8 @@ defmodule FermixChannels.Mobile.Management do
              is_integer(timeout_ms) and timeout_ms in 1..@max_wait_ms and is_list(opts) do
     manager = Keyword.get(opts, :pair_manager, PairManager)
 
-    with {:ok, request} <-
+    with :ok <- require_enabled_config(opts),
+         {:ok, request} <-
            invoke(opts, :await_request, &PairManager.await_request/3, [
              manager,
              session_id,
@@ -93,7 +94,8 @@ defmodule FermixChannels.Mobile.Management do
       when is_binary(session_id) and session_id != "" and is_list(opts) do
     manager = Keyword.get(opts, :pair_manager, PairManager)
 
-    with {:ok, device} <-
+    with :ok <- require_enabled_config(opts),
+         {:ok, device} <-
            invoke(opts, :approve_pair, &PairManager.approve/2, [manager, session_id]) do
       {:ok,
        %{
@@ -108,7 +110,8 @@ defmodule FermixChannels.Mobile.Management do
       when is_binary(session_id) and session_id != "" and is_list(opts) do
     manager = Keyword.get(opts, :pair_manager, PairManager)
 
-    with :ok <- invoke(opts, :deny_pair, &PairManager.deny/2, [manager, session_id]) do
+    with :ok <- require_enabled_config(opts),
+         :ok <- invoke(opts, :deny_pair, &PairManager.deny/2, [manager, session_id]) do
       {:ok, %{approved: false}}
     end
   end
@@ -123,7 +126,8 @@ defmodule FermixChannels.Mobile.Management do
       when is_binary(session_id) and session_id != "" and is_list(opts) do
     manager = Keyword.get(opts, :pair_manager, PairManager)
 
-    with :ok <- invoke(opts, :cancel_pair, &PairManager.cancel/2, [manager, session_id]) do
+    with :ok <- require_enabled_config(opts),
+         :ok <- invoke(opts, :cancel_pair, &PairManager.cancel/2, [manager, session_id]) do
       {:ok, %{cancelled: true}}
     end
   end
@@ -136,7 +140,8 @@ defmodule FermixChannels.Mobile.Management do
   def list_devices(opts) when is_list(opts) do
     store = Keyword.get(opts, :device_store, DeviceStore)
 
-    with {:ok, devices} <- invoke(opts, :list_devices, &DeviceStore.list/1, [store]) do
+    with :ok <- require_enabled_config(opts),
+         {:ok, devices} <- invoke(opts, :list_devices, &DeviceStore.list/1, [store]) do
       {:ok, %{devices: Enum.map(devices, &public_device/1)}}
     end
   end
@@ -151,8 +156,14 @@ defmodule FermixChannels.Mobile.Management do
       when is_binary(device_id) and device_id != "" and is_list(opts) do
     registry = Keyword.get(opts, :device_registry, DeviceRegistry)
 
-    with :ok <- invoke(opts, :revoke_device, &DeviceRegistry.revoke/2, [registry, device_id]) do
+    with :ok <- require_enabled_config(opts),
+         :ok <- invoke(opts, :revoke_device, &DeviceRegistry.revoke/2, [registry, device_id]) do
       {:ok, %{device_id: device_id}}
+    else
+      # The facade's wire vocabulary: the registry's tuple would reach the CLI
+      # as an inspect() dump, and the id is already in the caller's hands.
+      {:error, {:device_not_found, _id}} -> {:error, :device_not_found}
+      {:error, _reason} = error -> error
     end
   end
 
@@ -165,7 +176,8 @@ defmodule FermixChannels.Mobile.Management do
     config = Keyword.get(opts, :config, Application.get_env(:fermix_channels, :mobile, []))
     store = Keyword.get(opts, :device_store, DeviceStore)
 
-    with :ok <- require_started(opts, store),
+    with :ok <- require_enabled(config),
+         :ok <- require_started(opts, store),
          {:ok, candidates} <- discover(opts),
          {:ok, devices} <- invoke(opts, :list_devices, &DeviceStore.list/1, [store]) do
       port = Keyword.get(config, :port, 4_031)
@@ -328,6 +340,16 @@ defmodule FermixChannels.Mobile.Management do
 
   defp require_enabled(config) do
     if Keyword.get(config, :enabled, false), do: :ok, else: {:error, :mobile_disabled}
+  end
+
+  # The flag gate every daemon-facing entry point shares. With the channel off
+  # the mobile subtree is not running at all, so a process call from here would
+  # surface as a raw `{:dependency_exit, _, {:noproc, _}}` tuple instead of the
+  # actionable refusal the CLI renders for "mobile_disabled".
+  defp require_enabled_config(opts) do
+    opts
+    |> Keyword.get(:config, Application.get_env(:fermix_channels, :mobile, []))
+    |> require_enabled()
   end
 
   defp require_listener(opts) do

@@ -217,6 +217,19 @@ defmodule FermixCore.Transcription.XAIStreamTest do
       assert_receive {:transcript_stream_closed, ^session, %{segments: 0, dropped: 0}}
     end
 
+    # WebSockex reports `{:remote, :normal}` only for a code-LESS close frame;
+    # a close carrying 1000 — the RFC spelling of normal closure — arrives as
+    # `{:remote, 1000, payload}` and must finish the drain just as cleanly.
+    test "a server close with the RFC normal code (1000) is a clean drain end" do
+      {session, socket} = ready_session()
+
+      StreamSession.finish(session)
+      assert_receive {:ws_text, ^socket, ~s({"type":"audio.done"})}
+
+      send(session, {:transcription_ws, socket, {:disconnect, %{reason: {:remote, 1000, ""}}}})
+      assert_receive {:transcript_stream_closed, ^session, %{segments: 0, dropped: 0}}
+    end
+
     test "finishing before the server is ready defers audio.done until it is" do
       {session, socket} = open_session()
 
@@ -448,6 +461,23 @@ defmodule FermixCore.Transcription.XAIStreamTest do
       assert_receive {:provider_call, _measurements, metadata}
       assert metadata.status == :error
       assert metadata.error_summary =~ "drain_interrupted"
+    end
+
+    # A consumer crash is the one terminal where post-mortem tracing matters
+    # most: nobody is left to report the stream, so only the span says what it
+    # cost and why it ended.
+    test "a consumer death still reports the stream's terminal span" do
+      consumer = spawn(fn -> Process.sleep(:infinity) end)
+      {:ok, session} = XAIStream.open(consumer, "xai-key", socket_mod: FakeWsSocket)
+      assert_receive {:ws_started, _socket, _url, _headers, ^session}
+      ref = Process.monitor(session)
+
+      Process.exit(consumer, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^session, :normal}
+
+      assert_receive {:provider_call, _measurements, metadata}
+      assert metadata.status == :error
+      assert metadata.error_summary =~ "consumer_down"
     end
 
     test "a vendor refusal reaches the span as an error, not a silent success" do

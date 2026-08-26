@@ -216,8 +216,13 @@ defmodule FermixCore.Transcription.DeepgramStream do
   def handle_info({:transcription_ws, socket, {:disconnect, status}}, %{socket: socket} = state),
     do: disconnected(state, status)
 
-  def handle_info({:DOWN, ref, :process, _pid, _reason}, %{consumer_ref: ref} = state),
-    do: {:stop, :normal, state}
+  # No consumer send (it is the process that just died) — but the terminal
+  # span still goes out: a consumer crash is the one terminal where only the
+  # trace can say what the stream cost and why it ended.
+  def handle_info({:DOWN, ref, :process, _pid, _reason}, %{consumer_ref: ref} = state) do
+    terminal(state, {:error, :consumer_down})
+    {:stop, :normal, state}
+  end
 
   def handle_info({:DOWN, ref, :process, _pid, reason}, %{socket_ref: ref} = state),
     do: disconnected(state, {:down, reason})
@@ -389,12 +394,15 @@ defmodule FermixCore.Transcription.DeepgramStream do
      }}
   end
 
-  # Deepgram's own close after `CloseStream` arrives as a remote-normal status
+  # Deepgram's own close after `CloseStream` arrives as a remote-normal status:
+  # WebSockex spells a code-less close frame `{:remote, :normal}` and a close
+  # carrying 1000 — the RFC form of normal closure — `{:remote, 1000, payload}`
   # (`:closed` is the same close reported without a reason). Anything else — a
   # socket crash routed here as `{:down, reason}`, a transport error, a status
   # this codec has never seen — cut the drain before the final results, so it
   # fails loudly instead of passing for a finished stream.
   defp drain_close?(%{reason: {:remote, :normal}}), do: true
+  defp drain_close?(%{reason: {:remote, 1000, _payload}}), do: true
   defp drain_close?(:closed), do: true
   defp drain_close?({:down, :normal}), do: true
   defp drain_close?(_status), do: false

@@ -17,10 +17,17 @@ defmodule FermixCore.ComputerHistory.RecentActivity do
   alias FermixCore.ComputerHistory.Recall
   alias FermixCore.Memory.Repo
 
-  @doc "The Recent Activity system note for this turn, or `nil` to skip."
+  @doc """
+  The Recent Activity system note for this turn, or `nil` to skip. Reads the
+  turn's frozen Gate snapshot from `context.computer_history_gate` when present
+  ("snapshotted once per turn" — the same decision the taint stamp reads);
+  builds one from the context only for callers without a frozen turn snapshot.
+  """
   @spec note(map()) :: String.t() | nil
   def note(context) when is_map(context) do
-    if Gate.allow?(Gate.snapshot(context), {:prompt_section, context}) do
+    snapshot = Map.get(context, :computer_history_gate) || Gate.snapshot(context)
+
+    if Gate.allow?(snapshot, {:prompt_section, context}) do
       Recall.recent_digest(repo: Map.get(context, :memory_repo, Repo))
     end
   end

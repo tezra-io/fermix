@@ -279,6 +279,92 @@ defmodule FermixCore.Memory.CompactorTest do
   defp request_system_text(%{"instructions" => instructions}) when is_binary(instructions),
     do: instructions
 
+  test "a history-tainted older turn taints the checkpoint summary and the persisted row",
+       %{repo: repo} do
+    # MILESTONE_32 §13.6: the summary distilled from a tainted turn is itself
+    # activity-derived — it must carry the marker so replay masks it on an
+    # ungranted-remote chain, and the persisted checkpoint row must record it
+    # so the NEXT compaction's prior-block inclusion can be gated too.
+    stub_summaries(["tainted summary"])
+
+    messages = [
+      %{role: "system", content: "base prompt"},
+      %{
+        role: "assistant",
+        content: String.duplicate("you were editing the Q3 report ", 40),
+        history_tainted: true
+      },
+      %{
+        role: "assistant",
+        content: String.duplicate("older response ", 40),
+        history_tainted: true
+      },
+      %{role: "user", content: "new turn"}
+    ]
+
+    assert {:ok, result} =
+             Compactor.compact(messages,
+               enabled: true,
+               token_budget: 80,
+               route: route(),
+               context: context(repo)
+             )
+
+    summary_message =
+      Enum.find(result.messages, &(&1.role == "system" and &1.content =~ "tainted summary"))
+
+    assert summary_message.history_tainted == true
+    assert result.cache.tainted? == true
+
+    assert {:ok, [row]} =
+             Repo.get_messages(
+               %{
+                 agent_id: "main",
+                 channel: "telegram",
+                 chat_id: "chat-1",
+                 thread_scope: :root,
+                 kind: "checkpoint_summary"
+               },
+               server: repo,
+               limit: 1
+             )
+
+    assert row.metadata["history_tainted"] == true
+  end
+
+  test "an untainted compaction leaves the summary and checkpoint row unmarked", %{repo: repo} do
+    stub_summaries(["clean summary"])
+
+    assert {:ok, result} =
+             Compactor.compact(compactable_messages(),
+               enabled: true,
+               token_budget: 60,
+               route: route(),
+               context: context(repo)
+             )
+
+    summary_message =
+      Enum.find(result.messages, &(&1.role == "system" and &1.content =~ "clean summary"))
+
+    refute Map.has_key?(summary_message, :history_tainted)
+    assert result.cache.tainted? == false
+
+    assert {:ok, [row]} =
+             Repo.get_messages(
+               %{
+                 agent_id: "main",
+                 channel: "telegram",
+                 chat_id: "chat-1",
+                 thread_scope: :root,
+                 kind: "checkpoint_summary"
+               },
+               server: repo,
+               limit: 1
+             )
+
+    refute Map.get(row.metadata || %{}, "history_tainted")
+  end
+
   test "does not create duplicate checkpoint revisions for unchanged summaries", %{repo: repo} do
     stub_summaries(["stable checkpoint", "stable checkpoint"])
 

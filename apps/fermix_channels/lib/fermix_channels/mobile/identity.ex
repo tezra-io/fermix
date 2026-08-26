@@ -77,6 +77,35 @@ defmodule FermixChannels.Mobile.Identity do
           | error()
   def paths(opts \\ []) when is_list(opts), do: resolve_paths(opts)
 
+  @doc """
+  Boot-admission classification of the on-disk identity.
+
+  `:ok` when it is usable now (present), creatable later (fully missing — the
+  listener stays dormant until the first pairing generates it), or recoverable
+  by `ensure/1` (an interrupted generation, which `ensure/1` rolls back along
+  with any partial material). An error for the structurally broken states —
+  partial material, unreadable files, an invalid transaction marker — that
+  `ensure/1` and `load/1` refuse at activation, so the supervisor can refuse
+  the subtree instead of letting a child's init crash the daemon.
+  """
+  @spec admissible(keyword()) :: :ok | error()
+  def admissible(opts \\ []) when is_list(opts) do
+    with {:ok, paths} <- resolve_paths(opts),
+         {:ok, transaction} <- transaction_state(paths) do
+      admissible_state(transaction, paths)
+    end
+  end
+
+  defp admissible_state(:interrupted, _paths), do: :ok
+
+  defp admissible_state(:clean, paths) do
+    case identity_state(paths) do
+      {:ok, {:partial, missing}} -> {:error, {:identity_incomplete, missing}}
+      {:ok, _missing_or_present} -> :ok
+      {:error, _reason} = error -> error
+    end
+  end
+
   defp ensure_state(:missing, paths, opts), do: generate(paths, opts)
   defp ensure_state(:present, paths, _opts), do: load_paths(paths)
 

@@ -181,6 +181,9 @@ defmodule Fermix.CLI.DevicesCommand do
       "in config.toml, then run `fermix restart`"
   end
 
+  defp format_reason("device_not_found"),
+    do: "no paired device with that id — see `fermix devices list`"
+
   defp format_reason(reason) when is_binary(reason), do: reason
   defp format_reason(reason) when is_atom(reason), do: Atom.to_string(reason)
   defp format_reason(reason), do: inspect(reason)

@@ -197,7 +197,9 @@ defmodule FermixCore.Browser.ProfileServerGuardsTest do
     "console" => "browser-scoped event buffer, not a read of the addressed tab",
     "dialog" => "answers or lists a JS dialog; needed to unblock a stuck page",
     "upload" => "a write into a file input; confined by confined_upload_path/1 instead",
-    "download" => "returns a file Chrome fetched; bounded by the byte ceiling, not the tab URL",
+    "download" =>
+      "returns a file Chrome fetched; its SOURCE URL is vetted at downloadWillBegin and " <>
+        "the bytes are bounded by the byte ceiling — the addressed tab's URL is not re-read",
     "act" => "one action, nine kinds — driven kind by kind in the next test"
   }
 
@@ -536,6 +538,67 @@ defmodule FermixCore.Browser.ProfileServerGuardsTest do
 
     assert {:error, %Error{code: "download_too_large"}} =
              req(pid, "download", %{"timeout_ms" => 50})
+  end
+
+  # ── download source policy ─────────────────────────────────────────────────
+
+  # The read gate's one side door: Chrome performs a download NAVIGATION
+  # without PNA/CORS protections and streams the bytes into the workspace,
+  # where file tools read them — so an allowed public page could otherwise
+  # pull `http://192.168.1.1/config.bin` past every host rule. The source URL
+  # is vetted the moment Chrome announces it.
+  test "a download from a private host is blocked, canceled, and its file deleted" do
+    {:ok, config} = Config.current(allow_private_network: false, download_max_bytes: 1_000_000)
+    pid = start_page("https://example.com", config, :guards_download_private)
+    assert {:ok, _} = req(pid, "start")
+
+    partial = download_path("G5")
+    File.mkdir_p!(Path.dirname(partial))
+    File.write!(partial, "router-config-bytes")
+
+    begin_download(pid, "G5", "http://192.168.1.1/config.bin", "config.bin")
+
+    assert_receive {:cdp, _owner, "Browser.cancelDownload", %{guid: "G5"}}
+    refute File.exists?(partial)
+
+    assert {:error, %Error{code: "download_blocked"} = error} =
+             req(pid, "download", %{"timeout_ms" => 50})
+
+    assert error.details["url"] == "http://192.168.1.1/config.bin"
+    assert error.message =~ "browser policy"
+
+    # One verdict, exactly once.
+    assert {:error, %Error{code: "timeout"}} = req(pid, "download", %{"timeout_ms" => 50})
+  end
+
+  test "a metadata download is blocked in its inet_aton spellings too" do
+    {:ok, config} = Config.current(allow_private_network: false, download_max_bytes: 1_000_000)
+    pid = start_page("https://example.com", config, :guards_download_aton)
+    assert {:ok, _} = req(pid, "start")
+
+    begin_download(pid, "G6", "http://0xa9.0xfe.0xa9.0xfe/latest/meta-data/", "meta")
+
+    assert_receive {:cdp, _owner, "Browser.cancelDownload", %{guid: "G6"}}
+
+    assert {:error, %Error{code: "download_blocked"}} =
+             req(pid, "download", %{"timeout_ms" => 50})
+  end
+
+  # Page-local bytes, not a network fetch: a blob: download comes from a
+  # document the navigation gate already admitted (a page-generated CSV
+  # export), and refusing it would break the legitimate case for no gain.
+  test "a blob download from an admitted page stays allowed" do
+    {:ok, config} = Config.current(allow_private_network: false, download_max_bytes: 1_000_000)
+    pid = start_page("https://example.com", config, :guards_download_blob)
+    assert {:ok, _} = req(pid, "start")
+
+    begin_download(pid, "G7", "blob:https://example.com/33e2a1f0", "export.csv")
+    progress(pid, "G7", "completed", 120, 120)
+
+    assert {:ok, %{"guid" => "G7", "suggested_filename" => "export.csv"}} =
+             req(pid, "download", %{"timeout_ms" => 500})
+
+    refute_receive {:cdp, _owner, "Browser.cancelDownload", _params}, 50
   end
 
   test "a download under the ceiling completes and is reported normally" do

@@ -194,5 +194,26 @@ defmodule FermixCore.Meetings.SidecarInstallerTest do
       assert SidecarInstaller.browser_installed?()
       assert File.regular?(Path.join([home, "plugins", "meetbot", "browser_installed"]))
     end
+
+    # Playwright hard-requires its matching Chromium revision, so a marker left by
+    # another sidecar release — including the pre-versioning timestamp markers —
+    # must read as not-installed and let the pin bump self-heal via a re-run.
+    test "a marker from another release (or the old timestamp format) is stale, not trusted",
+         %{home: home} do
+      marker = Path.join([home, "plugins", "meetbot", "browser_installed"])
+      File.mkdir_p!(Path.dirname(marker))
+
+      File.write!(marker, "2026-08-01T12:00:00Z")
+      refute SidecarInstaller.browser_installed?(), "pre-versioning timestamp marker is stale"
+
+      File.write!(marker, "meetbot/v0.0.1-some-other-pin")
+      refute SidecarInstaller.browser_installed?(), "another release's marker is stale"
+
+      # Re-marking under the current pin restores installed (trailing whitespace
+      # from a hand edit is tolerated).
+      :ok = SidecarInstaller.mark_browser_installed()
+      File.write!(marker, File.read!(marker) <> "\n")
+      assert SidecarInstaller.browser_installed?()
+    end
   end
 end
