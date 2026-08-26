@@ -9,7 +9,15 @@ name: eval-nightly
 
 on:
   schedule:
-    - cron: "17 7 * * *"
+    # 04:17 UTC — deliberately clear of Saturday's eval-weekly (06:23 cron,
+    # ~2h of eval-box occupancy). Both callers serialize on the reusable
+    # eval-box concurrency group, whose pending queue keeps only the NEWEST
+    # waiting request: at the old 07:17 the Saturday nightly could queue behind
+    # the weekly capability tier and be silently evicted when the weekly's
+    # dangerous tier requested the group (2026-08-22: run cancelled with zero
+    # steps executed — and the alert job reports only `failure`, so an evicted
+    # tier files nothing).
+    - cron: "17 4 * * *"
   workflow_dispatch: {}
 
 permissions:
