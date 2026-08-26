@@ -25,6 +25,7 @@ defmodule FermixCore.Agents.MainAgent do
   alias FermixCore.Agents.ConversationKey
   alias FermixCore.Agents.RuntimeContext
   alias FermixCore.Agents.SkillRegistry
+  alias FermixCore.Agents.TurnRunner
   alias FermixCore.Memory.Config
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Reviewer
@@ -362,7 +363,12 @@ defmodule FermixCore.Agents.MainAgent do
       runtime_context: state.runtime_context,
       main_agent_server: self(),
       compaction_failures: state.compaction_failures,
-      last_context_tokens: Map.get(state.context_tokens, ConversationKey.from(msg), 0)
+      last_context_tokens: Map.get(state.context_tokens, ConversationKey.from(msg), 0),
+      # The Computer History gate, frozen with the rest of the turn snapshot
+      # (MILESTONE_32 "snapshotted once per turn"): the section injection, the
+      # recall tool gates, and the commit-time taint stamp all read this one
+      # decision, so a mid-turn config flip cannot split them.
+      computer_history_gate: TurnRunner.computer_history_gate(msg, state.ordered_routes)
     }
   end
 

@@ -250,9 +250,18 @@ defmodule FermixCore.Browser.Policy do
     end
   end
 
+  # Both refusal sentences below name the recovery inline, the way
+  # `non_canonical/1` names its punycode fix: the model is the primary reader,
+  # and a refusal with no next step is a dead end unless a skill happens to be
+  # loaded to relay one.
   defp validate_name(host) do
     if internal_hostname?(host),
-      do: blocked(host, "Blocked internal hostname by browser policy"),
+      do:
+        blocked(
+          host,
+          "Blocked internal hostname by browser policy. The operator can allow this " <>
+            "exact host by adding it to allowed_hosts under [fermix_core.browser] in config.toml."
+        ),
       else: :ok
   end
 
@@ -277,7 +286,12 @@ defmodule FermixCore.Browser.Policy do
 
   defp validate_ip(host, ip, %Config{allow_private_network: false}) do
     if private_ip?(ip),
-      do: blocked(host, "Blocked private network URL by browser policy"),
+      do:
+        blocked(
+          host,
+          "Blocked private network URL by browser policy. The operator can allow this " <>
+            "exact host by adding it to allowed_hosts under [fermix_core.browser] in config.toml."
+        ),
       else: :ok
   end
 

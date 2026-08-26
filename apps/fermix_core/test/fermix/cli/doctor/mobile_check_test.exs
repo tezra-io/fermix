@@ -44,7 +44,7 @@ defmodule Fermix.CLI.Doctor.MobileCheckTest do
     mobile_dir: mobile_dir
   } do
     write_identity_files(mobile_dir)
-    File.rm!(Path.join(mobile_dir, "tls.key"))
+    SafeRm.rm!(Path.join(mobile_dir, "tls.key"))
     Application.put_env(:fermix_channels, :mobile, enabled: true)
 
     result = Checks.mobile(mobile_dir: mobile_dir, client: fn _ -> flunk("no RPC") end)

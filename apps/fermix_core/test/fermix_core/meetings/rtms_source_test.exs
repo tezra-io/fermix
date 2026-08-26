@@ -234,11 +234,14 @@ defmodule FermixCore.Meetings.RtmsSourceTest do
     end
 
     test "traffic on the media leg keeps the grace alive" do
-      source = start_source(%{timers: %{keepalive_grace_ms: 120}})
+      # Total activity (5 × 150ms) exceeds the grace, so the pass proves the
+      # pushes RESET the timer; each inter-push gap sits far enough under the
+      # grace that a slow CI scheduler cannot starve one past it.
+      source = start_source(%{timers: %{keepalive_grace_ms: 500}})
       admit(source)
 
-      for bucket <- 0..3 do
-        Process.sleep(40)
+      for bucket <- 0..4 do
+        Process.sleep(150)
         push_audio(source, "audio_participant_one.json", bucket)
       end
 

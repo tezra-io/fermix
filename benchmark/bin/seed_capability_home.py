@@ -150,6 +150,17 @@ def render_config(
     # credentials, and this seeder installs neither — so a home that never gets a
     # lane still advertises nothing and refuses locally rather than dialling out.
     lines += ["[fermix_core.meetings]", "enabled = true", ""]
+    # Computer history (MILESTONE_32) is the DELIBERATE EXCEPTION to the
+    # pre-grant-every-gate rule, recorded here so its absence never reads as an
+    # oversight. Its `enabled` gate does not merely advertise a tool — it starts
+    # a live capturer that would record the eval HOST's real screen activity
+    # into this throwaway home and ship summaries to a provider, which is
+    # exactly the private-data movement the capability runner exists to refuse:
+    # the recall suite's positive half is risk `private_account_read`, a class
+    # `make capability-auto` never loads. Pre-granting would leak, not unblock.
+    # If a future capability task legitimately needs recall_activity, seed a
+    # synthetic spool instead of enabling live capture.
+    lines += ["[fermix_core.computer_history]", "enabled = false", ""]
     # Skill curation stays OFF in eval homes (MILESTONE_26_SKILL_CURATION §11):
     # the +15d first cycle already makes scheduled firing impossible during an
     # eval window, but a disabled entry also keeps /skills inert if a candidate

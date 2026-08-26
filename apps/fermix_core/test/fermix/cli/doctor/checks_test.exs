@@ -701,7 +701,12 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.status == :ok
       assert result.detail =~ "meet sidecar installed"
       assert result.detail =~ "zoom rtms configured"
-      assert result.detail =~ "profile: absent"
+      # The custody note for a bot that never signed in. Assert the stable core
+      # plus the CURRENT surface (the card's Configure modal on the Plugins
+      # page) — the old "profile: absent" rendering and the Meetings tab it
+      # pointed at are both gone (7ec3a33), and this assertion rotted with them.
+      assert result.detail =~ "bot not signed in"
+      assert result.detail =~ "Meeting Notetaker → Configure"
     end
   end
 
@@ -1496,6 +1501,24 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
 
       assert result.name == "setup secrets"
       assert result.status == :ok
+    end
+
+    # The one command that should explain a refused boot must not die with a
+    # raw stacktrace on the same config that refused it (the tree-less-doctor
+    # pitfall class). An unknown [fermix_core.browser] key is the newly
+    # reachable case: inert on 0.9.0, a boot refusal after the upgrade.
+    test "a config.toml the loader refuses renders a failed check, not a crash", %{home: home} do
+      File.write!(Path.join(home, "config.toml"), """
+      [fermix_core.browser]
+      allow_private_network = true
+      """)
+
+      result = Checks.plaintext_secrets()
+
+      assert result.name == "setup secrets"
+      assert result.status == :fail
+      assert result.detail =~ "config.toml"
+      assert result.detail =~ "allow_private_network"
     end
   end
 

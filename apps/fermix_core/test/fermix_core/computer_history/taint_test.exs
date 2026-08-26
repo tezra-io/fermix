@@ -2,6 +2,7 @@ defmodule FermixCore.ComputerHistory.TaintTest do
   @moduledoc "MILESTONE_32 §13.6 — the strict compaction/replay taint (inv. 20, 2nd clause)."
   use ExUnit.Case, async: false
 
+  alias FermixCore.ComputerHistory.Gate
   alias FermixCore.ComputerHistory.Taint
 
   defp local_route, do: {%{provider: :ollama, base_url: "http://localhost:11434/v1"}, []}
@@ -52,7 +53,11 @@ defmodule FermixCore.ComputerHistory.TaintTest do
 
       assert clean == clean_msg()
       assert tainted.role == "assistant"
-      assert tainted.history_tainted == true
+      # The masked copy DROPS the marker: its content is the neutral
+      # placeholder, so downstream consumers (a compaction summarizing the
+      # masked tail, a replace persisting it) treat it as clean instead of
+      # tainting a checkpoint summary that contains no activity content.
+      refute Map.has_key?(tainted, :history_tainted)
       refute tainted.content =~ "Q3 report"
       assert tainted.content =~ "omitted"
     end
@@ -103,6 +108,20 @@ defmodule FermixCore.ComputerHistory.TaintTest do
     test "a disabled feature is never tainted" do
       Application.put_env(:fermix_core, :computer_history, enabled: false)
       refute Taint.tainted_turn?(operator_ctx([local_route()]), macos?: true)
+    end
+
+    test "the turn's frozen snapshot wins over a mid-turn config flip" do
+      # The stamp must read the SAME decision the section injection read: a
+      # `/history off` landing while the turn is running tools must not
+      # un-stamp a reply whose prompt already carried the section.
+      enable([])
+      ctx = operator_ctx([local_route()])
+      snapshot = Gate.snapshot(ctx, macos?: true)
+
+      Application.put_env(:fermix_core, :computer_history, enabled: false)
+
+      assert Taint.tainted_turn?(ctx, snapshot: snapshot)
+      refute Taint.tainted_turn?(ctx, macos?: true)
     end
   end
 end

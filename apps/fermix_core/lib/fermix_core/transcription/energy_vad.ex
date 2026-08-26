@@ -28,12 +28,18 @@ defmodule FermixCore.Transcription.EnergyVad do
   @vad_preroll_ms 300
   @preroll_bytes div(@vad_preroll_ms * @sample_rate * 2, 1000)
 
-  # A shorter speech run stays open and merges with the next burst; a run that
-  # reaches the maximum is cut mid-speech. The maximum is what bounds a run
-  # whose pauses keep failing the minimum: 30s of audio is emitted regardless
-  # of what it contains.
+  # A shorter speech run stays open and merges with the next burst — but only
+  # inside the merge window below; a run that reaches the maximum is cut
+  # mid-speech. The maximum bounds runs whose speech keeps interrupting the
+  # silence: 30s of audio is emitted regardless of what it contains.
   @min_segment_ms 2_000
   @max_segment_ms 30_000
+  # How much trailing silence a sub-minimum run may wait for its next burst.
+  # Past this the run is abandoned back to :silence: no utterance spans a 2s
+  # pause, and without the decay a 1s cough followed by sustained silence
+  # would stay in :speech forever, shipping 30s near-silence chunks to the
+  # paid batch backend for the rest of the stream.
+  @max_merge_silence_ms 2_000
   @max_segment_bytes div(@max_segment_ms * @sample_rate * 2, 1000)
   @max_segment_samples div(@max_segment_ms * @sample_rate, 1000)
   # finish/1: a pending run shorter than this is dropped rather than sent.
@@ -151,6 +157,7 @@ defmodule FermixCore.Transcription.EnergyVad do
     cond do
       run_ms(state) >= @max_segment_ms -> hard_split(state, chunks)
       end_of_run?(state) -> close_run(state, chunks)
+      merge_window_expired?(state) -> abandon_run(state, chunks)
       true -> {state, chunks}
     end
   end
@@ -170,6 +177,18 @@ defmodule FermixCore.Transcription.EnergyVad do
 
   defp end_of_run?(state) do
     state.silence_frames * @frame_ms >= @vad_hangover_ms and speech_ms(state) >= @min_segment_ms
+  end
+
+  # Reached only with sub-minimum speech: an end_of_run? match is closed first.
+  defp merge_window_expired?(state) do
+    state.silence_frames * @frame_ms >= @max_merge_silence_ms
+  end
+
+  # The burst was too short to transcribe and its merge window has closed:
+  # drop it and return to :silence. The run's tail — all silence by now —
+  # seeds the next preroll, exactly as close_run does with its cut tail.
+  defp abandon_run(state, chunks) do
+    {%{reset(state) | preroll: trim_preroll(state.run)}, chunks}
   end
 
   # The trailing silence is cut from the emitted audio and seeds the next

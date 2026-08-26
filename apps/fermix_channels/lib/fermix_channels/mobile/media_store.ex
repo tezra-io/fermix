@@ -94,6 +94,23 @@ defmodule FermixChannels.Mobile.MediaStore do
     GenServer.call(server, {:materialize_attachment, attach_id})
   end
 
+  @doc """
+  Boot-admission probe for the attachment manifest — the same classification
+  `init/1` applies (regular file, `0600` mode, size cap, decodable schema),
+  without starting the store. An absent manifest is admissible (a fresh store
+  writes one); a broken one returns the exact reason `init/1` would stop with,
+  so the supervisor can refuse the subtree instead of crash-looping the daemon.
+  """
+  @spec manifest_admissible(keyword()) :: :ok | {:error, term()}
+  def manifest_admissible(opts) when is_list(opts) do
+    with {:ok, config} <- validate_options(opts),
+         # An empty blob index only widens the manifest's live-filter; every
+         # refusal class is decided before blobs are consulted.
+         {:ok, _attachments, _rewrite?} <- load_attachment_manifest(config, %{}) do
+      :ok
+    end
+  end
+
   @impl true
   def init(opts) do
     with {:ok, config} <- validate_options(opts),

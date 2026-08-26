@@ -130,6 +130,44 @@ defmodule FermixCore.Transcription.Local.StreamSessionTest do
     assert is_integer(measurements.duration_ms)
   end
 
+  # A consumer crash is the one terminal where post-mortem tracing matters
+  # most: nobody is left to report the stream, so only the span says why it
+  # ended.
+  test "a consumer death still reports the stream's terminal span" do
+    handler = "stt-local-consumer-down-#{System.unique_integer([:positive])}"
+    test_pid = self()
+
+    :telemetry.attach(
+      handler,
+      [:fermix, :provider, :call],
+      fn _event, measurements, metadata, _config ->
+        send(test_pid, {:span, measurements, metadata})
+      end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    consumer =
+      spawn(fn ->
+        {:ok, session} = StreamSession.open(self(), opts())
+        send(test_pid, {:session, session})
+
+        receive do
+          :never -> :ok
+        end
+      end)
+
+    assert_receive {:session, session}, 2_000
+    ref = Process.monitor(session)
+    Process.exit(consumer, :kill)
+
+    assert_receive {:DOWN, ^ref, :process, ^session, :normal}, 2_000
+    assert_receive {:span, _measurements, metadata}, 2_000
+    assert metadata.status == :error
+    assert metadata.error_summary =~ "consumer_down"
+  end
+
   defp opts(mode \\ nil) do
     env = if mode, do: [{~c"FAKE_STT_MODE", mode}], else: []
 

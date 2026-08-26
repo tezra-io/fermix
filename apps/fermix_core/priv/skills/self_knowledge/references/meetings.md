@@ -34,9 +34,13 @@ unconfigured lane refuses with its own reason rather than trying the other one.
 - **Google Meet** — a `meetbot` sidecar: a real browser signed in as a dedicated
   bot Google account. It knocks and waits for admission like any other
   participant, and reports honestly when it is denied, blocked, or asked to sign
-  in rather than pretending it got in. Install it from the setup Meetings card.
-  No meetbot release is pinned in this build yet, so the install says exactly
-  that instead of half-working.
+  in rather than pretending it got in. Install it from its card on the setup
+  Plugins page: enabling downloads the pinned sidecar (only `macos-aarch64` is
+  pinned — other hosts refuse honestly), and the sidecar then installs the exact
+  Chromium build it was tested against, so there is no browser to prepare by
+  hand. One deliberate act remains before the first join: signing the bot
+  account in, from the Sign-in button in the card's Configure panel — installed
+  alone is not ready, and the card says "Sign-in needed" until that happens.
 - **Zoom** — Zoom RTMS: an outbound audio subscription, no browser at all. It
   works only for meetings hosted by the operator's own Zoom account, or by a host
   who has enabled the operator's RTMS app. That is a Zoom platform limit, not a
@@ -78,8 +82,10 @@ Speech-to-text uses the globally configured transcription backend unless
 The reason is the fix, and each one is its own message rather than a generic
 failure:
 
-- the Meet sidecar isn't installed — enable meetings in setup → Meetings, which
-  installs it;
+- the Meet sidecar isn't installed — enable the notetaker from its card on the
+  setup Plugins page, which installs it;
+- the bot account isn't signed in — the Sign-in button in the card's Configure
+  panel is the fix;
 - Zoom RTMS isn't configured — set the four Zoom values above in setup;
 - the URL isn't a meeting link it recognizes — it refuses instead of guessing at
   a room;

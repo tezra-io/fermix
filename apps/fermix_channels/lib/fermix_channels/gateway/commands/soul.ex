@@ -306,16 +306,21 @@ defmodule FermixChannels.Gateway.Commands.Soul do
   defp run_approval_callback(callback, kind, token, outcome) do
     case callback.(%{kind: kind, token: token, outcome: outcome}) do
       :ok -> :ok
-      _other -> log_approval_callback_failure(kind, outcome)
+      other -> log_approval_callback_failure(kind, outcome, other)
     end
   rescue
-    _error -> log_approval_callback_failure(kind, outcome)
+    error -> log_approval_callback_failure(kind, outcome, error)
   catch
-    _kind, _reason -> log_approval_callback_failure(kind, outcome)
+    caught_kind, reason -> log_approval_callback_failure(kind, outcome, {caught_kind, reason})
   end
 
-  defp log_approval_callback_failure(kind, outcome) do
-    Logger.error("#{kind} approval resolution callback failed after #{outcome}")
+  # The failure itself must reach the log: "callback failed" with no reason is
+  # undiagnosable when an approval card sticks un-resolved.
+  defp log_approval_callback_failure(kind, outcome, error) do
+    Logger.error(
+      "#{kind} approval resolution callback failed after #{outcome}: #{inspect(error)}"
+    )
+
     :ok
   end
 

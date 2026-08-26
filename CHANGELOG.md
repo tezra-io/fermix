@@ -78,9 +78,16 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   back, and audio is discarded unless `retain_audio` is set. A capture cut short
   still delivers what was heard, labelled as partial rather than passed off as
   the whole meeting. Turn it on from its native-driver card on the setup Plugins
-  page — beside computer use and computer history — or its own Meetings tab for
-  the detailed configuration; enabling installs the `meetbot` sidecar (pinned at
-  `v0.1.0`) for your host. Only `macos-aarch64` is pinned in this build, so on
+  page — beside computer use and computer history — with the detailed
+  configuration (bot name, announcement, transcription backend, Zoom RTMS
+  credentials) in the card's own Configure panel. Enabling installs the pinned
+  `meetbot` sidecar (`v0.3.0`) for your host, and the sidecar then installs the
+  exact Chromium build it was tested against — there is no browser to prepare
+  by hand, and a sidecar upgrade re-runs that install rather than trusting a
+  browser an older release left behind. Meet needs one more deliberate act
+  before the first join: signing the bot account in, from the Sign-in button in
+  that panel; until then the card says "Sign-in needed" rather than pretending
+  installed means ready. Only `macos-aarch64` is pinned in this build, so on
   other hosts the Meet install refuses honestly and the Zoom RTMS lane is the one
   a configured operator can use until that target is built. The macOS binary is
   ad-hoc-signed rather than notarized — fine for the daemon that downloads it,
@@ -92,15 +99,45 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   running over a locally installed speech model: audio never leaves the machine
   and there is no key to configure. What it needs instead is an installed binary
   AND an installed model, and it says which half is missing rather than quietly
-  falling back to a hosted backend. Installing is a deliberate act — from its
-  native-driver card on the setup Plugins page (beside computer use), or by
-  selecting `local` in the Transcription tab; writing the backend name into
+  falling back to a hosted backend. Installing is a deliberate act — select
+  `local` as the backend in the setup page's Voice notes tab and both halves
+  install right there; writing the backend name into
   `config.toml` by hand installs nothing, and boot never downloads. The
   `fermix-stt` sidecar is released at `v0.1.0` (Parakeet TDT 0.6B v3 int8, both
   the binary and every model checksum pinned), so on a pinned host enabling it
   downloads and verifies both halves on-device; only `macos-aarch64` is pinned in
   this build, so other hosts refuse honestly instead of fetching an unverified
   binary or unverified weights. The binary is ad-hoc-signed, not notarized.
+- **Computer History: an activity memory you switch on per app — off by
+  default, macOS only.** When you enable it, Fermix remembers what you were
+  doing in exactly the apps you allowlist — window titles, page URLs, and the
+  text on screen, read from the accessibility tree — so you can ask "what was
+  that article I had open yesterday?" and get an answer. What it is **not** is
+  a surveillance suite: no screenshots, no audio, no keystroke logging, and
+  nothing outside the apps you picked. Password and secure fields are never
+  captured (suppressed at the capturer AND again at ingest), and a scrubber
+  drops secret-shaped text — tokens, JWTs, `password=` URL parameters — before
+  anything is stored. Raw activity lives in a local spool for at most 48 hours
+  (with a byte ceiling as a backstop) and is condensed into durable activity
+  memories by a summarizer that runs on one strict route — your default
+  provider unless you point it at the on-device model or one named provider —
+  and never fails over to a second vendor, because a failover would send
+  activity somewhere you never consented to. A summary that quotes raw field
+  text verbatim is rejected rather than stored. You stay in control from any
+  chat: `/history status`, `/history pause 10m|1h|24h`, `/history purge
+  10m|1h|24h|all` (erases both the spool and the derived memories for the
+  window), and `/history off`; turning it on is a setup-page act — pick the
+  apps in the Computer History card's picker, which also installs the shared
+  capture driver and asks for the Accessibility grant it needs. The model sees
+  a Recent Activity section and a recall tool only while every gate holds, and
+  replies built from activity are tainted so they are purgeable too. `fermix
+  doctor` reports the whole posture in one row.
+- **Declining an access request is now one tap, not a dangling prompt.** When
+  Fermix asks for sandbox access, the prompt on Telegram and Discord carries a
+  Deny button beside Approve — same single-use token, operator-only, same
+  origin — and `/deny <token>` is the typed equivalent on every channel.
+  Denying consumes the token and answers the request honestly instead of
+  leaving it to expire in silence.
 
 ### Security
 

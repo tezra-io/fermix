@@ -57,10 +57,15 @@ defmodule FermixCore.Tools.RecallActivity do
   @impl true
   def category, do: :memory
 
-  @doc "Advertised only when the Gate permits the tool this turn (owner, attended, permitted chain)."
+  @doc """
+  Advertised only when the Gate permits the tool this turn (owner, attended,
+  permitted chain). Reads the turn's frozen snapshot from
+  `context.computer_history_gate` when present, so advertisement, the section,
+  and the taint stamp share one per-turn decision.
+  """
   @spec advertise?(map()) :: boolean()
   def advertise?(context) when is_map(context),
-    do: Gate.allow?(Gate.snapshot(context), {:tool_advertise, context})
+    do: Gate.allow?(turn_snapshot(context), {:tool_advertise, context})
 
   @impl true
   @spec execute(map(), Tool.context()) :: {:ok, Tool.tool_result()}
@@ -68,9 +73,12 @@ defmodule FermixCore.Tools.RecallActivity do
     Support.run(name(), Map.delete(context, :tool_trace), fn -> run(args, context) end)
   end
 
-  # The Gate is re-checked here — advertisement is never the only barrier (§14.1).
+  # The Gate is re-checked here — advertisement is never the only barrier
+  # (§14.1). Same frozen turn snapshot as advertisement: a mid-turn enable can
+  # never open the tool inside a turn that started denied, and a mid-turn
+  # disable keeps the stamp consistent with what actually flowed.
   defp run(args, context) do
-    if Gate.allow?(Gate.snapshot(context), {:tool_execute, context}) do
+    if Gate.allow?(turn_snapshot(context), {:tool_execute, context}) do
       window = Map.get(args, "window", "today")
       repo = Map.get(context, :memory_repo, Repo)
 
@@ -85,4 +93,7 @@ defmodule FermixCore.Tools.RecallActivity do
       {:ok, Tool.error("Computer history is not available on this turn.")}
     end
   end
+
+  defp turn_snapshot(context),
+    do: Map.get(context, :computer_history_gate) || Gate.snapshot(context)
 end

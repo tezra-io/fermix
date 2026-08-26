@@ -128,7 +128,8 @@ defmodule FermixCore.Tools.JoinMeeting do
   """
   @spec describe_error(Meetings.join_error()) :: String.t()
   def describe_error(:meetings_disabled) do
-    "The meeting notetaker is turned off. Open fermix setup (web) → Meetings to enable it."
+    "The meeting notetaker is turned off. Enable the Meeting Notetaker card on " <>
+      "fermix setup (web) → Plugins."
   end
 
   def describe_error(:operator_only), do: refusal()
@@ -139,16 +140,16 @@ defmodule FermixCore.Tools.JoinMeeting do
   end
 
   def describe_error(:sidecar_not_installed) do
-    "The Google Meet notetaker isn't installed yet. Open fermix setup (web) → Meetings " <>
-      "and enable it there to install the meetbot sidecar."
+    "The Google Meet notetaker isn't installed yet. Enable the Meeting Notetaker card " <>
+      "on fermix setup (web) → Plugins to install the meetbot sidecar."
   end
 
   def describe_error(:zoom_rtms_not_configured) do
     "Zoom meetings use Zoom RTMS, which isn't configured. RTMS works for meetings hosted " <>
       "by your own Zoom account (or a host who has enabled your RTMS app): create a Zoom " <>
       "Server-to-Server OAuth app with RTMS scopes and set its credentials in fermix setup " <>
-      "→ Meetings. Meetings hosted by other accounts can't be joined this way — that's a " <>
-      "Zoom platform limit, not a missing key."
+      "(web) → Plugins → Meeting Notetaker → Configure. Meetings hosted by other accounts " <>
+      "can't be joined this way — that's a Zoom platform limit, not a missing key."
   end
 
   def describe_error({:max_concurrent, id}) when is_binary(id) do

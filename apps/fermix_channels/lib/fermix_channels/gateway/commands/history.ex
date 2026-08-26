@@ -146,7 +146,7 @@ defmodule FermixChannels.Gateway.Commands.History do
   defp spool_line(repo) do
     with {:ok, count} <- Repo.computer_history_count_events(server: repo),
          {:ok, state} <- Repo.computer_history_ensure_state(server: repo) do
-      paused = state.pause_until || "no"
+      paused = pause_display(state.pause_until)
 
       "Spool: #{count} event(s). Last summarization: #{state.last_status || "none"}. Paused until: #{paused}."
     else
@@ -179,6 +179,21 @@ defmodule FermixChannels.Gateway.Commands.History do
 
   defp format_ts(_other), do: "unknown"
 
+  # An expired horizon reads as not paused (Ingest resumed at the horizon); an
+  # unparseable one is shown raw — that is the value the owner repairs, and
+  # Ingest fails closed (keeps dropping) until it is cleared.
+  defp pause_display(nil), do: "no"
+
+  defp pause_display(until) when is_binary(until) do
+    case DateTime.from_iso8601(until) do
+      {:ok, horizon, _offset} ->
+        if DateTime.compare(DateTime.utc_now(), horizon) == :lt, do: until, else: "no"
+
+      {:error, _reason} ->
+        "#{until} (unparseable — capture stays paused until cleared)"
+    end
+  end
+
   defp count([]), do: "none"
   defp count(list), do: Integer.to_string(length(list))
 
@@ -188,15 +203,32 @@ defmodule FermixChannels.Gateway.Commands.History do
     case Purge.parse_window(duration) do
       {:ok, {:last, ms}} ->
         until = DateTime.utc_now() |> DateTime.add(ms, :millisecond) |> DateTime.to_iso8601()
-        _ = Repo.computer_history_set_pause_until(until, server: repo)
+        persist_pause(until, reply_fn, repo)
 
+      _invalid ->
+        reply(reply_fn, "Usage: /history pause 10m|1h|24h")
+    end
+  end
+
+  # The horizon is enforced by Ingest (each batch re-reads it), so the success
+  # reply is true the moment the write lands — and a failed write must never be
+  # reported as a pause the owner then relies on.
+  defp persist_pause(until, reply_fn, repo) do
+    case Repo.computer_history_set_pause_until(until, server: repo) do
+      :ok ->
         reply(
           reply_fn,
           "Computer-history capture paused until #{until}. It resumes automatically then."
         )
 
-      _invalid ->
-        reply(reply_fn, "Usage: /history pause 10m|1h|24h")
+      {:error, reason} ->
+        Logger.error("computer_history pause persist failed: #{inspect(reason)}")
+
+        reply(
+          reply_fn,
+          "Couldn't persist the pause (#{inspect(reason)}) — capture is NOT paused. " <>
+            "Check the daemon log and try again."
+        )
     end
   end
 
@@ -225,13 +257,25 @@ defmodule FermixChannels.Gateway.Commands.History do
   # --- off ----------------------------------------------------------------
 
   defp off(reply_fn) do
-    disable()
+    case disable() do
+      :ok ->
+        reply(
+          reply_fn,
+          "Computer history disabled — nothing new is captured and the tools are hidden from the next turn. " <>
+            "Stored data stays until you `/history purge`; re-enable in setup to resume with the same allowlist."
+        )
 
-    reply(
-      reply_fn,
-      "Computer history disabled — nothing new is captured and the tools are hidden from the next turn. " <>
-        "Stored data stays until you `/history purge`; re-enable in setup to resume with the same allowlist."
-    )
+      {:error, reason} ->
+        # The live rail IS stopped (env flipped + reconciled) — only the durable
+        # half failed, and saying otherwise would let a privacy-relevant disable
+        # silently evaporate at the next restart.
+        reply(
+          reply_fn,
+          "Computer history capture is stopped for now, but saving the setting failed " <>
+            "(#{inspect(reason)}) — it will turn back ON at the next daemon restart. " <>
+            "Fix config.toml write access and run /history off again."
+        )
+    end
   end
 
   # Flip app env for the immediate un-advertise, stop the live capture rail, then
@@ -251,8 +295,9 @@ defmodule FermixChannels.Gateway.Commands.History do
       :ok ->
         :ok
 
-      {:error, reason} ->
+      {:error, reason} = error ->
         Logger.warning("computer_history disable persist failed: #{inspect(reason)}")
+        error
     end
   end
 

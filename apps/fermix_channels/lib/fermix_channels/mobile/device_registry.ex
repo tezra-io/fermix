@@ -56,7 +56,7 @@ defmodule FermixChannels.Mobile.DeviceRegistry do
     GenServer.call(server, {:detach, device_id, pid})
   end
 
-  @spec revoke(GenServer.server(), device_id()) :: :ok
+  @spec revoke(GenServer.server(), device_id()) :: :ok | {:error, term()}
   def revoke(server, device_id) when is_binary(device_id) and device_id != "" do
     GenServer.call(server, {:revoke, device_id})
   end

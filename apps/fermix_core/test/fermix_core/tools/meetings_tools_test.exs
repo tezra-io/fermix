@@ -188,8 +188,8 @@ defmodule FermixCore.Tools.MeetingsToolsTest do
       refute result.success
 
       assert result.error ==
-               "The Google Meet notetaker isn't installed yet. Open fermix setup (web) → " <>
-                 "Meetings and enable it there to install the meetbot sidecar."
+               "The Google Meet notetaker isn't installed yet. Enable the Meeting Notetaker " <>
+                 "card on fermix setup (web) → Plugins to install the meetbot sidecar."
     end
 
     test "a Zoom link with no RTMS credentials renders the scope-honesty copy verbatim" do
@@ -204,8 +204,9 @@ defmodule FermixCore.Tools.MeetingsToolsTest do
                "Zoom meetings use Zoom RTMS, which isn't configured. RTMS works for meetings " <>
                  "hosted by your own Zoom account (or a host who has enabled your RTMS app): " <>
                  "create a Zoom Server-to-Server OAuth app with RTMS scopes and set its " <>
-                 "credentials in fermix setup → Meetings. Meetings hosted by other accounts " <>
-                 "can't be joined this way — that's a Zoom platform limit, not a missing key."
+                 "credentials in fermix setup (web) → Plugins → Meeting Notetaker → Configure. " <>
+                 "Meetings hosted by other accounts can't be joined this way — that's a Zoom " <>
+                 "platform limit, not a missing key."
     end
 
     # Only reachable with a meeting actually running, so the copy is asserted

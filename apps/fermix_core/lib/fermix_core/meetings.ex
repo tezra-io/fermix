@@ -31,6 +31,8 @@ defmodule FermixCore.Meetings do
   lifecycle, observable through the meetings row and the meeting telemetry.
   """
 
+  require Logger
+
   alias FermixCore.Meetings.Config
   alias FermixCore.Meetings.Link
   alias FermixCore.Meetings.RtmsSource
@@ -93,9 +95,38 @@ defmodule FermixCore.Meetings do
          {:ok, link} <- Link.parse(url),
          :ok <- check_lane(link.platform, config),
          :ok <- check_capacity(),
-         {:ok, meeting} <- insert(url, link, context, opts),
-         {:ok, _pid} <- start_session(meeting, link, config, context, opts) do
-      {:ok, %{id: meeting.id, status: :requested}}
+         {:ok, meeting} <- insert(url, link, context, opts) do
+      start_inserted_session(meeting, link, config, context, opts)
+    end
+  end
+
+  # The row is inserted before the Session starts, so a start failure (the
+  # documented capacity-slot race, a refused spawn) must fail the row in place
+  # — otherwise `list_meetings(scope: :active)` reports a phantom meeting that
+  # `leave` cannot clear (`:not_active`) until the next boot sweep.
+  defp start_inserted_session(meeting, link, config, context, opts) do
+    case start_session(meeting, link, config, context, opts) do
+      {:ok, _pid} ->
+        {:ok, %{id: meeting.id, status: :requested}}
+
+      {:error, reason} = error ->
+        fail_stranded_row(meeting.id, reason, opts)
+        error
+    end
+  end
+
+  defp fail_stranded_row(id, reason, opts) do
+    fields = %{ended_at: DateTime.utc_now(), error: "session start failed: #{inspect(reason)}"}
+
+    case Store.update_status(id, "failed", fields, store_opts(opts)) do
+      {:ok, _meeting} ->
+        :ok
+
+      {:error, update_reason} ->
+        Logger.error(
+          "meetings: #{id} session start failed AND the row could not be failed " <>
+            "(#{inspect(update_reason)}); the boot sweep will clear it"
+        )
     end
   end
 

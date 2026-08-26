@@ -10,6 +10,7 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.Auth.TokenExpiry
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Auth.XAILogin
+  alias FermixCore.Capabilities.MCP.RuntimeStatus, as: McpRuntimeStatus
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.ComputerHistory
   alias FermixCore.ComputerHistory.Config, as: ComputerHistoryConfig
@@ -1748,6 +1749,12 @@ defmodule FermixWebWeb.SetupLive do
   defp meetbot_install_error({:unsupported_target, target}),
     do: "No meeting notetaker build for this machine (#{target})."
 
+  # The dominant real-world refusal: a supported OS whose target has no pinned
+  # artifact yet (Intel Mac, Linux). Same operator copy as unsupported_target —
+  # never the raw tuple.
+  defp meetbot_install_error({:no_pinned_artifact, _tag, target}),
+    do: "No meeting notetaker build for this machine (#{target})."
+
   defp meetbot_install_error(reason),
     do: "Meeting notetaker install failed: #{Redaction.format(reason)}"
 
@@ -2025,8 +2032,21 @@ defmodule FermixWebWeb.SetupLive do
   defp meetings_card_state(snapshot) do
     cond do
       not meetings_config_enabled?(snapshot) -> {false, :not_configured}
-      Meetings.ready?() -> {true, :ready}
+      Meetings.ready?() -> {true, meetings_ready_status()}
       true -> {true, :partial}
+    end
+  end
+
+  # `Meetings.ready?/0` is enabled + (sidecar installed OR RTMS configured) —
+  # but an installed Meet sidecar whose bot is not signed in cannot join
+  # (1838680: "installed alone is NOT ready"), so the card must not green-check
+  # the state its own Configure modal labels amber "Sign-in needed". A
+  # configured Zoom RTMS lane keeps the card green: that lane is usable as-is.
+  defp meetings_ready_status do
+    cond do
+      MeetingsConfig.rtms_configured?() -> :ready
+      MeetbotInstaller.signed_in?() -> :ready
+      true -> :needs_signin
     end
   end
 
@@ -2359,6 +2379,16 @@ defmodule FermixWebWeb.SetupLive do
   defp settle_picker(picker, {:error, reason}),
     do: %{picker | step: :error, resources: [], error: setup_error(reason)}
 
+  # A classified runtime-status outcome: two atom classes and a bounded
+  # capability name by construction, rendered through the same resolver the
+  # daemon log and `fermix doctor` use — so a contract mismatch tells the
+  # operator WHICH capability broke, in the modal they are looking at.
+  defp setup_error({status, detail, capability})
+       when is_atom(status) and is_atom(detail) and
+              (is_binary(capability) or is_nil(capability)) do
+    McpRuntimeStatus.describe(status, detail, capability)
+  end
+
   # Redacted like every other reason in this pane, and then bounded: a crashed
   # discovery task exits with a term that can carry a whole stacktrace, and a
   # modal is not a log viewer. The classified prefix is the part that names the
@@ -2548,9 +2578,9 @@ defmodule FermixWebWeb.SetupLive do
       # wins and names the wrong feature.
       socket
       |> persist_computer_history_answers(extra_answers)
-      |> install_catalog_plugin(SidecarInstaller.plugin_name())
+      |> install_catalog_plugin(SidecarInstaller.plugin_name(), :computer_history)
       |> flash_info(
-        "Apps saved. Installing the capture driver — enable Computer History again once it finishes."
+        "Apps saved. Installing the capture driver — Computer History will turn on when it finishes."
       )
     end
   end
@@ -2826,11 +2856,17 @@ defmodule FermixWebWeb.SetupLive do
 
   # --- catalog install (§11: enable on a not-installed card = install first) -
 
-  defp install_catalog_plugin(socket, name) do
+  # `on_done` records WHICH feature requested this install, so completion
+  # continues the feature the operator actually consented to. The shared compux
+  # driver is installed by both the Computer Use card and the Computer History
+  # picker — keying completion on the plugin name alone once enabled Computer
+  # Use (mouse/keyboard control) for an operator who had only consented to
+  # Computer History.
+  defp install_catalog_plugin(socket, name, on_done \\ :plugin) do
     if plugin_install_running?(socket, name) do
       flash_info(socket, "#{name} install is already running.")
     else
-      start_plugin_install(socket, name)
+      start_plugin_install(socket, name, on_done)
     end
   end
 
@@ -2840,10 +2876,11 @@ defmodule FermixWebWeb.SetupLive do
     |> Enum.any?(&(&1.name == name))
   end
 
-  defp start_plugin_install(socket, name) do
+  defp start_plugin_install(socket, name, on_done) do
     {work, message} = install_work(name)
     task = Task.Supervisor.async_nolink(FermixCore.TaskSupervisor, work)
-    tasks = Map.put(socket.assigns.plugin_install_tasks, task.ref, %{name: name})
+    entry = %{name: name, on_done: on_done}
+    tasks = Map.put(socket.assigns.plugin_install_tasks, task.ref, entry)
 
     socket
     |> assign(:plugin_install_tasks, tasks)
@@ -2856,7 +2893,7 @@ defmodule FermixWebWeb.SetupLive do
   # {:ok, _} | {:error, reason} shape, so the finish/continue machinery is shared.
   defp install_work(name) do
     if computer_use_plugin?(name) do
-      {fn -> SidecarInstaller.install() end, "Downloading the Computer Use helper…"}
+      {computer_use_installer(), "Downloading the Computer Use helper…"}
     else
       opts = plugins_dist_opts()
 
@@ -2865,10 +2902,16 @@ defmodule FermixWebWeb.SetupLive do
     end
   end
 
+  # Injectable so a LiveView test never downloads the compux binary (mirrors the
+  # `:meetbot_installer` seam). Defaults to the real sha256-verified download.
+  defp computer_use_installer do
+    Application.get_env(:fermix_web, :computer_use_installer, &SidecarInstaller.install/0)
+  end
+
   defp finish_plugin_install(socket, task, tasks, {:ok, _status}) do
     socket
     |> assign(:plugin_install_tasks, tasks)
-    |> continue_after_install(task.name)
+    |> continue_after_install(task)
   end
 
   defp finish_plugin_install(socket, task, tasks, {:error, reason}) do
@@ -2878,23 +2921,35 @@ defmodule FermixWebWeb.SetupLive do
   defp fail_plugin_install(socket, task, tasks, reason) do
     # Use the card's display name ("Computer Use"), not the raw registry name
     # ("computer_use_sidecar"), so the one place a user sees an error matches the
-    # card they clicked.
+    # card they clicked — including when the shared driver was installing for
+    # the Computer History card.
+    display =
+      if Map.get(task, :on_done) == :computer_history,
+        do: "Computer History (capture driver)",
+        else: card_display_name(task.name, task.name)
+
     socket
     |> assign(:plugin_install_tasks, tasks)
-    |> flash_error(
-      "#{card_display_name(task.name, task.name)} install failed: #{install_error(reason)}"
-    )
+    |> flash_error("#{display} install failed: #{install_error(reason)}")
   end
 
   # Install done — continue with the same enable/connect sequence an installed
   # card uses. Config.commit hot-applies via Runtime.reload inside the daemon.
   # The computer-use sidecar never registers as a plugin (no tools), so after its
-  # binary lands we flip the feature flag instead of looking it up in the registry.
-  defp continue_after_install(socket, name) do
-    if computer_use_plugin?(name) do
-      set_computer_use_feature(socket, true)
-    else
-      continue_registry_plugin_after_install(socket, name)
+  # binary lands we flip the feature flag — the one the requesting card asked
+  # for. A Computer History-initiated driver install must NEVER flip Computer
+  # Use on (the apps were persisted before the install started, so enabling
+  # completes the operator's original consent, nothing more).
+  defp continue_after_install(socket, %{name: name} = task) do
+    cond do
+      computer_use_plugin?(name) and Map.get(task, :on_done) == :computer_history ->
+        set_computer_history_feature(socket, true)
+
+      computer_use_plugin?(name) ->
+        set_computer_use_feature(socket, true)
+
+      true ->
+        continue_registry_plugin_after_install(socket, name)
     end
   end
 

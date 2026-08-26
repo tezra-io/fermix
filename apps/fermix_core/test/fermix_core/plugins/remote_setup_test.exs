@@ -343,7 +343,7 @@ defmodule FermixCore.Plugins.RemoteSetupTest do
     end
 
     test "a client that never reaches ready is not reported as connected" do
-      assert {:error, {:reauthorization_required, nil}} =
+      assert {:error, {:reauthorization_required, nil, nil}} =
                RemoteSetup.select_workspace(plugin(),
                  workspace_id: "ws_alpha",
                  workspace_label: "Alpha",

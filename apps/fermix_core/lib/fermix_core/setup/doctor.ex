@@ -158,19 +158,23 @@ defmodule FermixCore.Setup.Doctor do
   @local_sidecar_remedy "The on-device speech sidecar is not installed. " <>
                           "Install it from fermix setup → Transcription."
   @local_model_remedy "The on-device speech model is not installed. " <>
-                        "Install it from fermix setup → Transcription."
+                        "Install it from fermix setup → Voice notes (the on-device backend)."
   # The daemon never reads inside the profile; it knows only whether a sign-in
   # finished (a marker `SidecarInstaller` writes) and whether the profile it
-  # wrote still exists.
+  # wrote still exists. The named surface is the Meeting Notetaker card's
+  # Configure modal on the setup Plugins page — the Meetings tab it replaced
+  # (7ec3a33) no longer exists.
   @meet_signed_in "bot signed in ✓ — Google Meet joins use the bot account"
-  @meet_not_signed_in "bot not signed in — Google Meet joins are denied until you " <>
-                        "sign the bot in from fermix setup → Meetings → Google Meet"
+  @meet_not_signed_in "bot not signed in — Google Meet joins are denied until you sign " <>
+                        "the bot in from fermix setup → Plugins → Meeting Notetaker → Configure"
   @meet_profile_absent "bot not signed in — Google Meet joins will be denied; sign the " <>
-                         "bot account in from fermix setup → Meetings → Google Meet"
-  @meet_browser_absent "browser not installed — Google Meet can't launch until it is; " <>
-                         "open fermix setup → Meetings and it installs automatically."
-  @meetings_no_lane "No meeting lane is usable. Install the meetbot sidecar from " <>
-                      "fermix setup → Meetings, or complete the Zoom RTMS credentials there."
+                         "bot account in from fermix setup → Plugins → Meeting Notetaker → Configure"
+  @meet_browser_absent "browser not installed — Google Meet can't launch until it is; open " <>
+                         "fermix setup → Plugins → Meeting Notetaker → Configure and it " <>
+                         "installs automatically."
+  @meetings_no_lane "No meeting lane is usable. Enable the Meeting Notetaker on the " <>
+                      "fermix setup Plugins page (this installs the sidecar), or complete " <>
+                      "the Zoom RTMS credentials in its Configure."
 
   @spec probe_provider(provider(), keyword()) :: {:ok, probe_ok()} | {:error, probe_error()}
   def probe_provider(provider, opts \\ [])

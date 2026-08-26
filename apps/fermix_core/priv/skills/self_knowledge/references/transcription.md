@@ -6,7 +6,8 @@ Discord, and Signal — and the meeting notetaker listens through the same engin
 When a voice note also carries a caption, both are delivered: the caption first,
 then the transcript under a `[voice note transcript]` delimiter. One config
 section serves both: `[fermix_core.transcription]` (`backend`, `model`,
-`max_file_mb`, per-backend key slots), set from the Transcription card, from `fermix
+`max_file_mb`, per-backend key slots), set from the setup page's Voice notes
+tab, from `fermix
 setup --transcription-backend`/`--transcription-model`/`--transcription-api-key`,
 or by hand. `fermix doctor`'s `transcription` row reports the active backend and
 whether what it needs resolves — offline, it never transcribes to find out.
@@ -14,7 +15,7 @@ whether what it needs resolves — offline, it never transcribes to find out.
 ## Backends and their credentials
 
 Each hosted backend has its own optional key slot, always settable in the
-Transcription card (and `--transcription-api-key` stores under the selected
+Voice notes tab (and `--transcription-api-key` stores under the selected
 backend's slot): `openai` (default, `gpt-4o-mini-transcribe`) and `xai`
 (SpaceXAI, Grok STT — modelless, so it has no model to pick and the card hides
 that field) take a transcription key that OVERRIDES the reused chat-provider key,
@@ -34,13 +35,13 @@ never leaves the machine and there is no key to configure. What it needs instead
 is an installed binary AND an installed model, and it reports which half is
 missing rather than degrading to a hosted backend.
 
-Installing is a deliberate act, done from the Transcription card when `local` is
+Installing is a deliberate act, done from the Voice notes tab when `local` is
 selected. Writing `backend = "local"` into `config.toml` by hand installs
 nothing — every call then fails naming the missing half, and boot never
-downloads. No `fermix-stt` release is pinned in this build yet, so an install
-attempt refuses honestly on both halves (the sidecar has no pinned release; the
-model's checksums are not in this build) instead of fetching an unverified binary
-or unverified weights.
+downloads. A `fermix-stt` release is pinned for `macos-aarch64` only — binary
+and model checksums both — so on that host enabling downloads and verifies both
+halves on-device, and every other host refuses honestly instead of fetching an
+unverified binary or unverified weights.
 
 ## Files versus live streams
 

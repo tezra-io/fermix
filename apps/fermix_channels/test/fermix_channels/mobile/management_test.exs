@@ -10,6 +10,7 @@ defmodule FermixChannels.Mobile.ManagementTest do
     }
 
     opts = [
+      config: [enabled: true],
       pair_manager: :pair,
       listener: :listener,
       open_pair: fn :pair ->
@@ -51,6 +52,7 @@ defmodule FermixChannels.Mobile.ManagementTest do
 
     assert {:error, :listener_down} =
              Management.begin_pairing(
+               config: [enabled: true],
                pair_manager: :pair,
                listener: :listener,
                open_pair: fn :pair ->
@@ -89,12 +91,14 @@ defmodule FermixChannels.Mobile.ManagementTest do
 
     assert {:ok, %{approved: true, device_id: ^device_id, name: "Phone"}} =
              Management.decide_pairing("session", true,
+               config: [enabled: true],
                pair_manager: :pair,
                approve_pair: fn :pair, "session" -> {:ok, device} end
              )
 
     assert {:ok, %{devices: [listed]}} =
              Management.list_devices(
+               config: [enabled: true],
                device_store: :store,
                list_devices: fn :store -> {:ok, [device]} end
              )
@@ -110,6 +114,7 @@ defmodule FermixChannels.Mobile.ManagementTest do
 
     assert {:ok, %{device_id: ^device_id}} =
              Management.revoke_device(device.device_id,
+               config: [enabled: true],
                device_registry: :registry,
                revoke_device: fn :registry, id ->
                  send(test_pid, {:revoked, id})
@@ -120,11 +125,24 @@ defmodule FermixChannels.Mobile.ManagementTest do
     assert_received {:revoked, ^device_id}
   end
 
+  test "revoking an unknown device yields the wire vocabulary, not a registry tuple" do
+    # The raw {:device_not_found, id} tuple would reach the CLI as an
+    # inspect() dump; the facade flattens it so `fermix devices revoke` can
+    # render its typed message. The id is already in the caller's hands.
+    assert {:error, :device_not_found} =
+             Management.revoke_device("22222222-2222-4222-8222-222222222222",
+               config: [enabled: true],
+               device_registry: :registry,
+               revoke_device: fn :registry, id -> {:error, {:device_not_found, id}} end
+             )
+  end
+
   test "cancel_pairing closes the daemon-owned window" do
     test_pid = self()
 
     assert {:ok, %{cancelled: true}} =
              Management.cancel_pairing("session",
+               config: [enabled: true],
                pair_manager: :pair,
                cancel_pair: fn :pair, "session" ->
                  send(test_pid, :cancelled)
@@ -186,6 +204,25 @@ defmodule FermixChannels.Mobile.ManagementTest do
                listener: :listener,
                listener_status: fn :listener -> :dormant end
              )
+  end
+
+  # The un-stubbed world every fresh install and upgrader lives in: the flag is
+  # off, so no PairManager/DeviceStore/Listener process exists. Each entry
+  # point must refuse with :mobile_disabled BEFORE any process call — without
+  # the gate these surfaced as raw `{:dependency_exit, _, {:noproc, _}}`
+  # tuples, and the CLI's "mobile channel is off" copy was unreachable from a
+  # real daemon.
+  test "every entry point refuses :mobile_disabled with the flag off and no subtree" do
+    off = [config: [enabled: false]]
+
+    assert {:error, :mobile_disabled} = Management.begin_pairing(off)
+    assert {:error, :mobile_disabled} = Management.await_pairing("session", 1_000, off)
+    assert {:error, :mobile_disabled} = Management.decide_pairing("session", true, off)
+    assert {:error, :mobile_disabled} = Management.decide_pairing("session", false, off)
+    assert {:error, :mobile_disabled} = Management.cancel_pairing("session", off)
+    assert {:error, :mobile_disabled} = Management.list_devices(off)
+    assert {:error, :mobile_disabled} = Management.revoke_device("device-id", off)
+    assert {:error, :mobile_disabled} = Management.status(off)
   end
 
   test "health surfaces missing or invalid identity and device-store failures" do

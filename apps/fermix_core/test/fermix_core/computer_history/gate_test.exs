@@ -59,6 +59,24 @@ defmodule FermixCore.ComputerHistory.GateTest do
 
   defp snap(ctx), do: Gate.snapshot(ctx, macos?: true)
 
+  # Pin every env key `Config.default_summarizer_provider/0` reads so the
+  # resolved primary is :openai regardless of what ran before, restoring the
+  # run's ambient values afterwards.
+  defp establish_primary_openai do
+    for {key, value} <- [
+          routing: [],
+          providers: [openai: [api_key: "test-key", primary: true]],
+          agent: []
+        ] do
+      original = Application.get_env(:fermix_core, key)
+      Application.put_env(:fermix_core, key, value)
+      on_exit(fn -> restore_env(key, original) end)
+    end
+  end
+
+  defp restore_env(key, nil), do: Application.delete_env(:fermix_core, key)
+  defp restore_env(key, kept), do: Application.put_env(:fermix_core, key, kept)
+
   # --- disabled / operative ----------------------------------------------
 
   describe "disabled or non-macOS" do
@@ -228,7 +246,14 @@ defmodule FermixCore.ComputerHistory.GateTest do
     test "default_provider permits the primary provider's route + grants it for recall (§22.1)" do
       # The default: summarize on the daemon's primary provider. The snapshot
       # resolves the primary, permits its summarizer route, AND grants it so recall
-      # rides the same provider consistently. (The test env's primary is :openai.)
+      # rides the same provider consistently.
+      #
+      # The primary is resolved from three GLOBAL env keys (routing subagent
+      # override → providers primary flag → legacy agent.provider), and an
+      # earlier module can leak any of them (CI 2026-08-26: a leaked override
+      # resolved :openrouter here). A test asserting the resolved primary must
+      # establish all three, not read whatever the run left behind.
+      establish_primary_openai()
       enable(summarizer: :default_provider)
       s = snap(operator_ctx([remote_route(:openai)]))
 

@@ -53,6 +53,15 @@ defmodule FermixCore.ComputerHistory.Ingest do
   @spec ingest([map()], keyword()) :: {:ok, stats()} | {:error, term()}
   def ingest(events, opts \\ []) when is_list(events) do
     repo = Keyword.get(opts, :repo, Repo)
+
+    if capture_paused?(repo, opts) do
+      {:ok, %{written: 0, dropped: length(events)}}
+    else
+      write_batch(events, repo, opts)
+    end
+  end
+
+  defp write_batch(events, repo, opts) do
     apps = Keyword.get_lazy(opts, :apps, &Config.apps/0)
     sites = Keyword.get_lazy(opts, :sites, &Config.sites/0)
 
@@ -66,6 +75,53 @@ defmodule FermixCore.ComputerHistory.Ingest do
       {:error, reason} = error ->
         Logger.error("computer_history ingest write failed: #{inspect(reason)}")
         error
+    end
+  end
+
+  # --- pause horizon (§7.3) ------------------------------------------------
+
+  # `/history pause` is enforced HERE, at the single writer: an event arriving
+  # while `now < pause_until` never reaches the spool, and the horizon passing
+  # resumes capture with no timer to arm (each batch re-reads the persisted
+  # state, so the pause also survives a mid-pause daemon restart). An
+  # unparseable horizon fails CLOSED — this is a privacy control, so a corrupt
+  # value keeps capture off, error-logged, with the raw value visible in
+  # `/history status` for repair.
+  defp capture_paused?(repo, opts) do
+    case pause_horizon(repo) do
+      nil -> false
+      :unparseable -> true
+      {:until, until} -> before_horizon?(Keyword.get(opts, :now), until)
+    end
+  end
+
+  defp before_horizon?(nil, until), do: DateTime.compare(DateTime.utc_now(), until) == :lt
+  defp before_horizon?(%DateTime{} = now, until), do: DateTime.compare(now, until) == :lt
+
+  defp pause_horizon(repo) do
+    case Repo.computer_history_ensure_state(server: repo) do
+      {:ok, %{pause_until: until}} when is_binary(until) ->
+        parse_horizon(until)
+
+      # No horizon set, or a state-read error: not paused. A failing store must
+      # not silently pause capture — the insert below stays the loud path.
+      _none_or_error ->
+        nil
+    end
+  end
+
+  defp parse_horizon(until) do
+    case DateTime.from_iso8601(until) do
+      {:ok, horizon, _offset} ->
+        {:until, horizon}
+
+      {:error, reason} ->
+        Logger.error(
+          "computer_history pause_until unparseable (#{inspect(reason)}): " <>
+            "#{inspect(until)} — capture stays paused until it is cleared"
+        )
+
+        :unparseable
     end
   end
 

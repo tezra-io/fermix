@@ -6,6 +6,7 @@ defmodule FermixChannels.Gateway.Commands.HistoryTest do
   alias FermixChannels.Gateway.Commands.History
   alias FermixChannels.Gateway.Message
   alias FermixCore.ComputerHistory.Config, as: ComputerHistoryConfig
+  alias FermixCore.ComputerHistory.Ingest
   alias FermixCore.Memory.Repo
 
   defp message(content) do
@@ -69,6 +70,58 @@ defmodule FermixChannels.Gateway.Commands.HistoryTest do
     assert :ok = History.execute(message("pause"), reply_fn(self()), ctx)
     assert_receive {:reply, text}
     assert text =~ "Usage"
+  end
+
+  test "pause is ENFORCED at ingest: events inside the window never reach the spool",
+       %{ctx: ctx, repo: repo} do
+    assert :ok = History.execute(message("pause 30m"), reply_fn(self()), ctx)
+    assert_receive {:reply, text}
+    assert text =~ "paused until"
+
+    event = %{boot_id: "b1", source_seq: 1, ts: 1_000, type: "app.activated", bundle_id: "com.a"}
+
+    assert {:ok, %{written: 0, dropped: 1}} =
+             Ingest.ingest([event], repo: repo, apps: ["com.a"], sites: [])
+
+    assert {:ok, 0} = Repo.computer_history_count_events(server: repo)
+
+    # The horizon passing resumes capture with no timer to arm — each batch
+    # re-reads the persisted state.
+    past = DateTime.utc_now() |> DateTime.add(-60, :second) |> DateTime.to_iso8601()
+    assert :ok = Repo.computer_history_set_pause_until(past, server: repo)
+
+    assert {:ok, %{written: 1, dropped: 0}} =
+             Ingest.ingest([event], repo: repo, apps: ["com.a"], sites: [])
+
+    assert {:ok, 1} = Repo.computer_history_count_events(server: repo)
+  end
+
+  test "an unparseable pause horizon fails CLOSED (capture stays off)", %{repo: repo} do
+    assert :ok = Repo.computer_history_set_pause_until("not-a-timestamp", server: repo)
+
+    event = %{boot_id: "b1", source_seq: 1, ts: 1_000, type: "app.activated", bundle_id: "com.a"}
+
+    assert {:ok, %{written: 0, dropped: 1}} =
+             Ingest.ingest([event], repo: repo, apps: ["com.a"], sites: [])
+
+    assert {:ok, 0} = Repo.computer_history_count_events(server: repo)
+  end
+
+  test "pause reports failure instead of claiming success when the persist fails", %{ctx: _ctx} do
+    unique = System.unique_integer([:positive])
+    disabled = :"history_cmd_disabled_repo_#{unique}"
+    start_supervised!({Repo, name: disabled, enabled: false}, id: :disabled_repo)
+
+    assert :ok =
+             History.execute(
+               message("pause 30m"),
+               reply_fn(self()),
+               %{computer_history_repo: disabled}
+             )
+
+    assert_receive {:reply, text}
+    assert text =~ "NOT paused"
+    refute text =~ "resumes automatically"
   end
 
   test "purge erases the spool and acknowledges what it cannot reach", %{ctx: ctx, repo: repo} do

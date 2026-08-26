@@ -25,6 +25,7 @@ defmodule FermixCore.Transcription.Local.Sidecar do
   exit path.
   """
 
+  alias FermixCore.ProcessGroup
   alias FermixCore.Timeouts
   alias FermixCore.Transcription.Local
   alias FermixCore.Transcription.Local.ModelStore
@@ -42,8 +43,22 @@ defmodule FermixCore.Transcription.Local.Sidecar do
   # Raw PCM bytes per `audio` frame, before base64.
   @audio_chunk_bytes 65_536
 
-  @typedoc "An open sidecar: its port, the partial line being reassembled, and the correlation id."
-  @type state :: %{port: port() | nil, acc: binary(), session_id: String.t() | nil}
+  @typedoc """
+  An open sidecar: its port, the child's OS pid (its own process-group id — the
+  kill target for a wedged teardown), the partial line being reassembled, and
+  the correlation id.
+  """
+  @type state :: %{
+          port: port() | nil,
+          os_pid: pos_integer(),
+          acc: binary(),
+          session_id: String.t() | nil
+        }
+
+  # How long close/1 waits for the sidecar to honor the `shutdown` op before
+  # SIGKILLing its process group. A healthy exit lands in milliseconds and pays
+  # nothing; only a sidecar wedged in model load or inference burns the grace.
+  @shutdown_grace_ms 500
 
   @typedoc "One decoded NDJSON frame from the sidecar."
   @type frame :: map()
@@ -172,15 +187,42 @@ defmodule FermixCore.Transcription.Local.Sidecar do
      string(Map.get(frame, "message"), "")}
   end
 
-  @doc "Asks the sidecar to exit, then closes the port and drains its leftovers. Idempotent."
+  @doc """
+  Asks the sidecar to exit and proves it gone. Idempotent.
+
+  A healthy sidecar honors the `shutdown` op within milliseconds and its
+  `exit_status` is observed while the port is still attached. One that is
+  wedged in ONNX compute reads neither the op nor the port's EOF, so after
+  `@shutdown_grace_ms` its process group is SIGKILLed — Port.close alone only
+  closes the pipe and would orphan the child with the model resident (rule 4:
+  own resources on every path). `:esrch` on an already-gone group is silent
+  success.
+  """
   @spec close(state()) :: :ok
   def close(%{port: nil}), do: :ok
 
+  # `Port.info/1` is nil once the port is closed, so a second close (terminal
+  # then terminate) neither waits the grace again nor signals a pid that died
+  # long enough ago to have been recycled.
   def close(%{port: port} = state) do
+    if Port.info(port), do: shut_down(state), else: :ok
+  end
+
+  defp shut_down(%{port: port, os_pid: os_pid} = state) do
     _ = send_op(state, %{"op" => "shutdown"})
+    graceful? = await_exit(port, @shutdown_grace_ms)
     port_close(port)
+    unless graceful?, do: ProcessGroup.signal(os_pid, :sigkill)
     flush(port)
     :ok
+  end
+
+  defp await_exit(port, grace_ms) do
+    receive do
+      {^port, {:exit_status, _status}} -> true
+    after
+      grace_ms -> false
+    end
   end
 
   @doc """
@@ -318,7 +360,8 @@ defmodule FermixCore.Transcription.Local.Sidecar do
         {:env, Keyword.get(opts, :env, [])}
       ])
 
-    {:ok, %{port: port, acc: "", session_id: Keyword.get(opts, :session_id)}}
+    {:os_pid, os_pid} = Port.info(port, :os_pid)
+    {:ok, %{port: port, os_pid: os_pid, acc: "", session_id: Keyword.get(opts, :session_id)}}
   rescue
     # A present but non-executable file: Port.open refuses with ArgumentError.
     ArgumentError -> {:error, {:spawn_failed, binary}}

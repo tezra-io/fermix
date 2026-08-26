@@ -30,9 +30,16 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatus do
   ## Why `detail` is an atom
 
   A crash reason can carry the crashing process's state, and a remote session's
-  state holds a bearer credential. `put/5` therefore accepts only an atom
+  state holds a bearer credential. `put/6` therefore accepts only an atom
   class, so no reason term — however it was constructed — can reach a status a
   UI renders. Callers classify with `classify/1` first.
+
+  The one non-atom a write may carry is `capability`: the *name* of the tool a
+  contract failure is about, which is the operator's actual question on a
+  mismatch. It comes from the remote's own descriptor, so `capability_from/1`
+  extracts it only from the reason shapes known to hold one and bounds its
+  length. `describe/3` is the shared renderer — the setup modal, the daemon
+  log, and `fermix doctor` all show `status/detail (capability)` through it.
   """
 
   use GenServer
@@ -65,11 +72,16 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatus do
   @type entry :: %{
           status: status(),
           detail: atom() | nil,
+          capability: String.t() | nil,
           generation: generation(),
           owner: pid() | nil,
           plugin: String.t() | nil,
           updated_at: integer()
         }
+
+  # `capability_from/1` truncates here so a hostile descriptor's name cannot
+  # ride an unbounded string into every status surface.
+  @max_capability_chars 128
 
   @type opt :: {:name, GenServer.name()}
 
@@ -103,13 +115,23 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatus do
   Write a status for `source_id`, but only if `generation` is still the current
   one. A stale generation returns `{:error, :stale_generation}` and changes
   nothing.
+
+  `capability` names the tool a contract failure is about — extract it with
+  `capability_from/1`, never from an unclassified reason term.
   """
-  @spec put(GenServer.server(), source_id(), generation(), status(), atom() | nil) ::
-          :ok | {:error, :stale_generation}
-  def put(server, {kind, name} = source_id, generation, status, detail \\ nil)
+  @spec put(
+          GenServer.server(),
+          source_id(),
+          generation(),
+          status(),
+          atom() | nil,
+          String.t() | nil
+        ) :: :ok | {:error, :stale_generation}
+  def put(server, {kind, name} = source_id, generation, status, detail \\ nil, capability \\ nil)
       when is_atom(kind) and is_binary(name) and is_reference(generation) and
-             status in @statuses and is_atom(detail) do
-    GenServer.call(server, {:put, source_id, generation, status, detail})
+             status in @statuses and is_atom(detail) and
+             (is_binary(capability) or is_nil(capability)) do
+    GenServer.call(server, {:put, source_id, generation, status, detail, capability})
   end
 
   @spec fetch(GenServer.server(), source_id()) :: {:ok, entry()} | :error
@@ -187,6 +209,40 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatus do
   # unrecognized reason is never mistaken for a diagnosed one.
   def classify(reason), do: {:remote_unreachable, class(reason)}
 
+  @doc """
+  The capability (tool) name a refusal reason carries, or nil.
+
+  `classify/1` keeps only atom classes; this is the deliberate exception for
+  the two reason shapes whose payload IS a tool name from the remote's own
+  descriptor — the fact the operator needs on a contract failure. Bounded, so
+  a hostile descriptor cannot ride an unbounded string into a status surface.
+  """
+  @spec capability_from(term()) :: String.t() | nil
+  def capability_from({:upstream_contract_mismatch, {_class, name}}) when is_binary(name),
+    do: String.slice(name, 0, @max_capability_chars)
+
+  def capability_from({:capability_conflict, name}) when is_binary(name),
+    do: String.slice(name, 0, @max_capability_chars)
+
+  def capability_from(_reason), do: nil
+
+  @doc """
+  The one rendering of a classified status every surface shares: the setup
+  modal, the daemon log, and `fermix doctor` — `status`, `status/detail`, or
+  `status/detail (capability)`.
+
+  Accepts atoms or the strings they become across the control socket.
+  """
+  @spec describe(status() | String.t(), atom() | String.t() | nil, String.t() | nil) ::
+          String.t()
+  def describe(status, detail \\ nil, capability \\ nil)
+      when (is_atom(status) or is_binary(status)) and
+             (is_atom(detail) or is_binary(detail)) and
+             (is_binary(capability) or is_nil(capability)) do
+    base = if is_nil(detail), do: "#{status}", else: "#{status}/#{detail}"
+    if is_nil(capability), do: base, else: "#{base} (#{capability})"
+  end
+
   defp class(reason) when is_atom(reason), do: reason
 
   defp class(reason) when is_tuple(reason) and tuple_size(reason) > 0 do
@@ -213,10 +269,10 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatus do
     {:reply, {:ok, generation}, state}
   end
 
-  def handle_call({:put, source_id, generation, status, detail}, _from, state) do
+  def handle_call({:put, source_id, generation, status, detail, capability}, _from, state) do
     case Map.fetch(state.entries, source_id) do
       {:ok, %{generation: ^generation} = entry} ->
-        {:reply, :ok, write(state, source_id, entry, status, detail)}
+        {:reply, :ok, write(state, source_id, entry, status, detail, capability)}
 
       _replaced_or_absent ->
         {:reply, {:error, :stale_generation}, state}
@@ -269,6 +325,7 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatus do
     entry = %{
       status: :connecting,
       detail: nil,
+      capability: nil,
       generation: generation,
       owner: owner,
       monitor: ref,
@@ -283,11 +340,12 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatus do
     }
   end
 
-  defp write(state, source_id, entry, status, detail) do
+  defp write(state, source_id, entry, status, detail, capability) do
     entry = %{
       entry
       | status: status,
         detail: detail,
+        capability: capability,
         updated_at: System.system_time(:millisecond)
     }
 
@@ -304,7 +362,9 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatus do
   end
 
   defp outcome(%{status: :ready}), do: {:ok, :ready}
-  defp outcome(%{status: status, detail: detail}), do: {:error, {status, detail}}
+
+  defp outcome(%{status: status, detail: detail, capability: capability}),
+    do: {:error, {status, detail, capability}}
 
   defp await_entry(state, source_id, %{status: :connecting} = entry, from, timeout_ms) do
     waiter_id = make_ref()
@@ -326,10 +386,10 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatus do
   # A classified terminal status is the diagnosis the owner already wrote;
   # the death that followed must not overwrite it with a vaguer one.
   defp record_down(state, source_id, entry, reason) do
-    {status, detail} =
+    {status, detail, capability} =
       if terminal?(entry.status),
-        do: {entry.status, entry.detail},
-        else: {:remote_unreachable, class(reason)}
+        do: {entry.status, entry.detail, entry.capability},
+        else: {:remote_unreachable, class(reason), nil}
 
     Telemetry.emit_lifecycle(
       :owner_down,
@@ -338,7 +398,7 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatus do
       0
     )
 
-    write(state, source_id, %{entry | owner: nil, monitor: nil}, status, detail)
+    write(state, source_id, %{entry | owner: nil, monitor: nil}, status, detail, capability)
   end
 
   defp retire(state, source_id, reply) do

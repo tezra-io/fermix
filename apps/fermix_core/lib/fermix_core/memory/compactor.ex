@@ -15,6 +15,7 @@ defmodule FermixCore.Memory.Compactor do
 
   require Logger
 
+  alias FermixCore.ComputerHistory.Gate
   alias FermixCore.Memory.Config
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Scope
@@ -66,7 +67,8 @@ defmodule FermixCore.Memory.Compactor do
       {:ok, unchanged(messages)}
     else
       with {:ok, summary, cache} <- summary_for(older, budget, opts) do
-        summary_message = checkpoint_message(summary)
+        tainted? = Map.get(cache || %{}, :tainted?, any_tainted?(older))
+        summary_message = maybe_taint_summary(checkpoint_message(summary), tainted?)
 
         {:ok,
          %{
@@ -77,6 +79,21 @@ defmodule FermixCore.Memory.Compactor do
       end
     end
   end
+
+  # §13.6: a checkpoint summary distilled from a history-tainted turn (or from a
+  # tainted prior checkpoint) is itself activity-derived, so it carries the
+  # marker and replay/compaction mask it on an ungranted-remote chain. Masked
+  # placeholders were stripped of their marker by the mask, so only live
+  # tainted content taints the summary.
+  defp maybe_taint_summary(summary_message, true),
+    do: Map.put(summary_message, :history_tainted, true)
+
+  defp maybe_taint_summary(summary_message, false), do: summary_message
+
+  defp any_tainted?(messages), do: Enum.any?(messages, &tainted_message?/1)
+
+  defp tainted_message?(message),
+    do: Map.get(message, :history_tainted, Map.get(message, "history_tainted")) == true
 
   defp summary_for(older, budget, opts) do
     case Keyword.get(opts, :cache) do
@@ -89,12 +106,13 @@ defmodule FermixCore.Memory.Compactor do
   end
 
   defp create_summary(older, budget, opts) do
-    prior = latest_checkpoint(opts)
+    {prior, prior_tainted?} = latest_checkpoint(opts)
+    tainted? = prior_tainted? or any_tainted?(older)
 
     with {:ok, summary} <- call_summary_provider(older, prior, budget, opts) do
       # Persistence errors are logged and must not block the turn.
-      _ = maybe_persist_checkpoint(summary, length(older), budget, opts)
-      {:ok, summary, %{summary: summary}}
+      _ = maybe_persist_checkpoint(summary, length(older), budget, tainted?, opts)
+      {:ok, summary, %{summary: summary, tainted?: tainted?}}
     end
   end
 
@@ -244,32 +262,54 @@ defmodule FermixCore.Memory.Compactor do
       String.starts_with?(content(message), "Conversation checkpoint summary:")
   end
 
+  # Returns `{content | nil, tainted?}`. A checkpoint row that folded
+  # activity-derived content (its metadata carries `"history_tainted"`) may
+  # feed the next summarization prompt only when this compaction's route is
+  # permitted to carry history (§13.6) — otherwise the prior is dropped rather
+  # than sent, and an absent/unknown route fails closed the same way.
   defp latest_checkpoint(opts) do
     with {:ok, repo} <- repo_server(Keyword.get(opts, :context, %{})),
          {:ok, selector} <- checkpoint_selector(opts),
          {:ok, [checkpoint]} <- Repo.get_messages(selector, server: repo, limit: 1) do
-      checkpoint.content
+      classify_prior(checkpoint, opts)
     else
-      _no_checkpoint -> nil
+      _no_checkpoint -> {nil, false}
     end
   end
 
-  defp maybe_persist_checkpoint(summary, message_count, budget, opts) do
+  defp classify_prior(%{metadata: %{"history_tainted" => true}} = checkpoint, opts) do
+    case Keyword.get(opts, :route) do
+      nil -> {nil, false}
+      route -> tainted_prior_for_route(checkpoint, route)
+    end
+  end
+
+  defp classify_prior(checkpoint, _opts), do: {checkpoint.content, false}
+
+  defp tainted_prior_for_route(checkpoint, route) do
+    if Gate.chain_permits_history?([route]) do
+      {checkpoint.content, true}
+    else
+      {nil, false}
+    end
+  end
+
+  defp maybe_persist_checkpoint(summary, message_count, budget, tainted?, opts) do
     persist? =
       Keyword.get(opts, :persist_checkpoints, Config.checkpoint_persistence_enabled?(opts))
 
     if persist? do
-      persist_checkpoint(summary, message_count, budget, opts)
+      persist_checkpoint(summary, message_count, budget, tainted?, opts)
     else
       :ok
     end
   end
 
-  defp persist_checkpoint(summary, message_count, budget, opts) do
+  defp persist_checkpoint(summary, message_count, budget, tainted?, opts) do
     context = Keyword.get(opts, :context, %{})
 
     with {:ok, repo} <- repo_server(context),
-         {:ok, attrs} <- checkpoint_attrs(summary, context),
+         {:ok, attrs} <- checkpoint_attrs(summary, tainted?, context),
          {:ok, _row} <- Repo.insert_message(attrs, server: repo),
          {:ok, _revision} <-
            commit_checkpoint_revision(summary, message_count, budget, context, repo) do
@@ -318,7 +358,7 @@ defmodule FermixCore.Memory.Compactor do
     }
   end
 
-  defp checkpoint_attrs(summary, context) do
+  defp checkpoint_attrs(summary, tainted?, context) do
     case Map.get(context, :conversation_key) do
       {channel, chat_id, thread_scope} ->
         {:ok,
@@ -332,13 +372,16 @@ defmodule FermixCore.Memory.Compactor do
            role: "system",
            kind: "checkpoint_summary",
            content: summary,
-           metadata: %{source: "agent_loop_compaction"}
+           metadata: checkpoint_metadata(tainted?)
          }}
 
       _missing ->
         {:error, :missing_checkpoint_context}
     end
   end
+
+  defp checkpoint_metadata(true), do: %{source: "agent_loop_compaction", history_tainted: true}
+  defp checkpoint_metadata(false), do: %{source: "agent_loop_compaction"}
 
   defp checkpoint_selector(opts) do
     context = Keyword.get(opts, :context, %{})

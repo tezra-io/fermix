@@ -27,12 +27,17 @@ defmodule FermixCore.ComputerHistory.Taint do
   @doc """
   Whether the just-completed assistant turn should be stamped history-tainted:
   true exactly when the Recent Activity section was Gate-permitted this turn
-  (the section's own predicate), re-derived from `gate_context`
+  (the section's own predicate). Pass the turn's frozen Gate snapshot as
+  `opts[:snapshot]` so the stamp reads the SAME decision the section injection
+  read — a `/history off` (or grant edit) landing mid-turn must not make the
+  two disagree. Without a snapshot it is re-derived from `gate_context`
   (`source_trust`, `ordered_routes`, origin, depths).
   """
   @spec tainted_turn?(map(), keyword()) :: boolean()
   def tainted_turn?(gate_context, opts \\ []) when is_map(gate_context) and is_list(opts) do
-    Gate.allow?(Gate.snapshot(gate_context, opts), {:prompt_section, gate_context})
+    {snapshot, opts} = Keyword.pop(opts, :snapshot)
+    snapshot = snapshot || Gate.snapshot(gate_context, opts)
+    Gate.allow?(snapshot, {:prompt_section, gate_context})
   end
 
   @doc """
@@ -49,6 +54,13 @@ defmodule FermixCore.ComputerHistory.Taint do
     end
   end
 
-  defp mask(%{history_tainted: true} = message), do: %{message | content: @masked}
+  # The masked copy drops the marker: its content is the neutral placeholder,
+  # so a downstream consumer (compaction summarizing a masked tail, a replace
+  # persisting it) treats it as clean rather than re-protecting placeholder
+  # text — which would otherwise taint a checkpoint summary that contains no
+  # activity content at all.
+  defp mask(%{history_tainted: true} = message),
+    do: message |> Map.put(:content, @masked) |> Map.delete(:history_tainted)
+
   defp mask(message), do: message
 end

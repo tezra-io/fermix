@@ -263,6 +263,36 @@ stream session is *not* a run kind. Summarizer calls are ordinary llm spans
 inside the meeting session. Ingress voice-note transcription stays sessionless
 (pre-turn), unchanged.
 
+## Mobile pairing and push (sessionless channel points)
+
+Pairing decisions and push deliveries are **point events with no agent
+session** (like plugin dist): a pairing resolves in `PairManager` and a push
+fires after the turn already closed. Both go through `FermixChannels.Telemetry`
+— `emit_pair(channel, status, duration_us)` with
+`status ∈ approved | denied | expired | rate_limited`, and
+`emit_push(channel, status, duration_us)` with `status ∈ sent | failed` —
+emitting `[:fermix, :channel, :pair]` / `[:fermix, :channel, :push]`
+(`count: 1` + `duration_us`; `channel`/`status` metadata, atoms only). Never
+hand-roll the event, and never attach device names, tokens, or preview bodies —
+the payloads are ciphertext by design and the trace must not be the plaintext
+side channel. `Trace.TelemetryHandler` maps both to `agent_event` rows; the
+Opik exporter deliberately does **not** subscribe (no session to nest under),
+so a missing pair/push trace in Opik is expected, not a bug.
+
+## Computer-history summarizer (a headless run with no bookends)
+
+The summarizer is **one bounded provider call per cycle**, not an agent loop:
+it mints `session_id = "computer_history_summarize:<unix_ms>"` with **no**
+`parent_session` and emits **no** lifecycle bookends — its provider span (via
+the standard provider emitter, `agent: "computer_history_summarizer"`) is the
+whole run. The Opik exporter keys the run kind off the id prefix
+(`infer_kind("computer_history_summarize:" <> _) → :computer_history_summary`)
+and the root closes by TTL sweep; keep the prefix and the exporter clause in
+lockstep if either changes. Event **content** rides the summarizer's own
+consent gate (`Gate.allow?({:summarizer, route})`) before it ever reaches the
+provider emitter, so the content-capture switch below is the second gate, not
+the first.
+
 ## Content (prompts / responses / tool IO)
 
 Attach bodies **only** behind `FermixCore.Telemetry.capture_content?/0`, and

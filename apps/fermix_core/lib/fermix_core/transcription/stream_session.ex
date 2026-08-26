@@ -47,7 +47,8 @@ defmodule FermixCore.Transcription.StreamSession do
   `{:drain_interrupted, status}` — the connection died after `finish/1` and
   before the vendor's final results, so the tail is lost and the segments
   already delivered are all there will be — `{:sidecar_exit, status}`,
-  `{:ws_start_failed, reason}`.
+  `{:sidecar_error, code, message}` — the local sidecar reported a terminal
+  `error` frame of its own — and `{:ws_start_failed, reason}`.
   """
 
   # A stop is a local shutdown of an already-connected session: generous enough

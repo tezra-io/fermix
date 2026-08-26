@@ -158,6 +158,30 @@ defmodule Fermix.CLI.Doctor.PluginsCheckTest do
       assert result.detail =~ "eden: ready (remote; runtime upstream_contract_mismatch)"
     end
 
+    # The operator's actual question on a contract mismatch is WHICH capability,
+    # so a row that carries the classified detail and the tool name renders both
+    # — through the same resolver the modal and the daemon log use.
+    test "a mismatch row names the failing capability", ctx do
+      put_secret!("eden", "eden_pat_0123456789abcdef")
+
+      mismatch =
+        Map.merge(row("plugin:eden", "eden", "upstream_contract_mismatch"), %{
+          "detail" => "descriptor_changed",
+          "capability" => "eden_read_card"
+        })
+
+      result =
+        Checks.plugins(
+          installed_root: ctx.installed_root,
+          client: runtime_client([mismatch])
+        )
+
+      assert result.status == :fail
+
+      assert result.detail =~
+               "runtime upstream_contract_mismatch/descriptor_changed (eden_read_card)"
+    end
+
     test "a transient remote failure warns rather than fails", ctx do
       put_secret!("eden", "eden_pat_0123456789abcdef")
 

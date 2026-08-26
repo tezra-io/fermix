@@ -77,7 +77,14 @@ defmodule FermixCore.Meetings.BrowserInstall do
       teardown(port, os_pid)
     end
   rescue
-    ArgumentError -> {:error, {:spawn_failed, binary}}
+    ArgumentError ->
+      {:error, {:spawn_failed, binary}}
+
+    # A vanished or non-executable binary raises ErlangError (:enoent/:eacces)
+    # from open_port, not ArgumentError — without this clause the typed
+    # spawn_failed path was dead code and real failures killed the async Task.
+    error in ErlangError ->
+      {:error, {:spawn_failed, binary, error.original}}
   end
 
   # One receive loop, bounded by the backstop deadline. The exit status is the
@@ -95,7 +102,7 @@ defmodule FermixCore.Meetings.BrowserInstall do
           collect(port, os_pid, progress, deadline, "", outcome)
 
         {^port, {:data, {:noeol, chunk}}} ->
-          collect(port, os_pid, progress, deadline, acc <> chunk, outcome)
+          collect(port, os_pid, progress, deadline, cap_line(acc <> chunk), outcome)
 
         {^port, {:exit_status, status}} ->
           verdict(status, outcome)
@@ -104,6 +111,17 @@ defmodule FermixCore.Meetings.BrowserInstall do
       end
     end
   end
+
+  # `{:line, @line_bytes}` bounds each PORT MESSAGE, not the accumulated line:
+  # a child streaming newline-free bytes would otherwise grow the accumulator
+  # until the multi-minute backstop. The exit code decides the verdict, so an
+  # oversized line is truncated (its tail dropped), never fatal.
+  @max_line_accumulator_bytes 1_048_576
+
+  defp cap_line(acc) when byte_size(acc) > @max_line_accumulator_bytes,
+    do: binary_part(acc, 0, @max_line_accumulator_bytes)
+
+  defp cap_line(acc), do: acc
 
   defp verdict(0, outcome) do
     :ok = SidecarInstaller.mark_browser_installed()
