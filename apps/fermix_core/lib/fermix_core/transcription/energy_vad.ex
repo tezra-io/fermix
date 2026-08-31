@@ -35,10 +35,11 @@ defmodule FermixCore.Transcription.EnergyVad do
   @min_segment_ms 2_000
   @max_segment_ms 30_000
   # How much trailing silence a sub-minimum run may wait for its next burst.
-  # Past this the run is abandoned back to :silence: no utterance spans a 2s
-  # pause, and without the decay a 1s cough followed by sustained silence
-  # would stay in :speech forever, shipping 30s near-silence chunks to the
-  # paid batch backend for the rest of the stream.
+  # Past this the run is cut back to :silence: no utterance spans a 2s pause,
+  # and without the decay a 1s cough followed by sustained silence would stay
+  # in :speech forever, shipping 30s near-silence chunks to the paid batch
+  # backend for the rest of the stream. The cut emits whatever speech the run
+  # held (see abandon_run/2) — ending the run must not lose it.
   @max_merge_silence_ms 2_000
   @max_segment_bytes div(@max_segment_ms * @sample_rate * 2, 1000)
   @max_segment_samples div(@max_segment_ms * @sample_rate, 1000)
@@ -184,11 +185,17 @@ defmodule FermixCore.Transcription.EnergyVad do
     state.silence_frames * @frame_ms >= @max_merge_silence_ms
   end
 
-  # The burst was too short to transcribe and its merge window has closed:
-  # drop it and return to :silence. The run's tail — all silence by now —
-  # seeds the next preroll, exactly as close_run does with its cut tail.
+  # The merge window has closed on a sub-minimum run. The run ends either way —
+  # that decay is what stops a 1s cough from holding :speech open forever — but
+  # ending it must not eat the speech it was holding: a run carrying at least
+  # `flush/1`'s floor is emitted through close_run, which cuts the trailing
+  # silence and seeds the next preroll. Only a run below that floor is dropped,
+  # and then its tail seeds the preroll exactly as close_run's cut tail does.
   defp abandon_run(state, chunks) do
-    {%{reset(state) | preroll: trim_preroll(state.run)}, chunks}
+    case speech_ms(state) >= @flush_min_ms do
+      true -> close_run(state, chunks)
+      false -> {%{reset(state) | preroll: trim_preroll(state.run)}, chunks}
+    end
   end
 
   # The trailing silence is cut from the emitted audio and seeds the next

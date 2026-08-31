@@ -69,9 +69,19 @@ defmodule FermixCore.Transcription.EnergyVadTest do
     # The stuck-:speech decay: without it a 1s cough followed by sustained
     # silence never leaves :speech — silence accumulates to the 30s ceiling and
     # ships to the paid batch backend as a near-silence chunk every 30s for the
-    # rest of the stream.
-    test "a sub-minimum burst followed by sustained silence yields nothing at all" do
+    # rest of the stream. The decay ends the run; it must not eat the speech,
+    # which is why the emitted chunk carries the burst and stops at it.
+    test "a sub-minimum burst followed by sustained silence is emitted, not dropped" do
       pcm = PcmFixtures.pattern([{:tone, 1_000}, {:silence, 60_000}])
+
+      assert [chunk] = segment(pcm)
+      assert {chunk.t0_ms, chunk.t1_ms} == {0, 1_000}
+    end
+
+    # The decay's floor is flush/1's floor: a run carrying less speech than
+    # that is genuinely not worth a backend call, and is the only case dropped.
+    test "a burst below the flush floor is the only one the merge window drops" do
+      pcm = PcmFixtures.pattern([{:tone, 40}, {:silence, 60_000}])
 
       assert segment(pcm) == []
     end
@@ -79,10 +89,11 @@ defmodule FermixCore.Transcription.EnergyVadTest do
     test "a burst after the merge window starts a fresh run, not a resumed one" do
       pcm = PcmFixtures.pattern([{:tone, 1_000}, {:silence, 3_000}, {:tone, 3_000}])
 
-      # The 1s burst is abandoned once the merge window closes; the second run
+      # The 1s burst is emitted when the merge window closes; the second run
       # stands alone with its own preroll before its 4_000ms onset.
-      assert [chunk] = segment(pcm)
-      assert {chunk.t0_ms, chunk.t1_ms} == {3_700, 7_000}
+      assert [first, second] = segment(pcm)
+      assert {first.t0_ms, first.t1_ms} == {0, 1_000}
+      assert {second.t0_ms, second.t1_ms} == {3_700, 7_000}
     end
   end
 
