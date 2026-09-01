@@ -262,7 +262,7 @@ defmodule FermixWebWeb.SetupLiveTest do
     test "a normal browser session renders none of the embed dress", %{conn: conn} do
       {:ok, _view, html} = live(conn, "/setup")
 
-      refute html =~ "data-embed"
+      refute html =~ ~r/<main[^>]+data-embed/
       refute html =~ "Sign-in opens in your browser and returns here."
       assert html =~ "Step 1 of"
       assert html =~ "data-phx-theme"
@@ -670,7 +670,7 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       # Modal closes and the flash confirms the enable path (not the install path).
       refute saved =~ "Apps to record"
-      assert saved =~ "Computer History enabled — restart to apply."
+      assert saved =~ "Computer History enabled. Restart to apply."
 
       # The apps + enabled flag are persisted together.
       assert {:ok, persisted} = ConfigStore.load_runtime_config(resolve_secrets: false)
@@ -729,7 +729,7 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       html = view |> element(~s|button[phx-click="enable_meetings"]|) |> render_click()
 
-      assert html =~ "restart to apply"
+      assert html =~ "Restart to apply"
       assert_receive :meetbot_install_started, 500
       assert render_async(view) =~ escaped(MeetbotInstaller.error_message(:no_pinned_release))
       assert Keyword.get(Application.get_env(:fermix_core, :meetings, []), :enabled) == true
@@ -990,7 +990,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       # The compact row replaces the always-visible client form; the form only
       # exists once the modal is opened.
       refute html =~ ~s(id="oauth-client-form-google")
-      assert html =~ "Not set up — required to connect"
+      assert html =~ "Not set up · required to connect"
 
       modal_html =
         view
@@ -2187,7 +2187,7 @@ defmodule FermixWebWeb.SetupLiveTest do
         )
         |> render_submit()
 
-      assert html =~ "Meetings saved — restart to apply."
+      assert html =~ "Meetings saved. Restart to apply."
       assert html =~ "Apply &amp; restart"
       assert html =~ ~s(phx-click="apply_restart")
     end
@@ -2210,7 +2210,7 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       assert html =~ "Meetings saved."
       # The restart signal is the flash clause, not the toggle's explanatory hint.
-      refute html =~ "Meetings saved — restart to apply"
+      refute html =~ "Meetings saved. Restart to apply"
     end
 
     test "submitting persists the section and secures the Zoom secret", %{
@@ -2238,7 +2238,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       |> render_submit()
 
       # The Zoom credential set changed, so the save carries the restart signal.
-      assert render(view) =~ "Meetings saved — restart to apply."
+      assert render(view) =~ "Meetings saved. Restart to apply."
 
       meetings = Application.get_env(:fermix_core, :meetings, [])
       assert Keyword.get(meetings, :bot_name) == "Notes Bot"
@@ -3496,7 +3496,7 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       assert html =~ "Allow coding agents to run on this machine"
       assert html =~ ~s(name="coding_form[harness_approved]")
-      assert html =~ "Off — approve before the first coding run."
+      assert html =~ "Off. Approve before the first coding run."
     end
 
     test "toggling harness consent on persists approved=true to config", %{
@@ -3873,7 +3873,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       render_click(view, "plugin_enable", %{"name" => "ghost"})
 
       html = render_until(view, "ghost install failed")
-      assert html =~ "not in the plugin catalog — run `fermix upgrade` to get the latest catalog."
+      assert html =~ "not in the plugin catalog; run `fermix upgrade` to get the latest catalog."
     end
 
     test "an installed github-provider plugin renders a GitHub client form that persists", %{

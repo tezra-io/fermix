@@ -618,7 +618,7 @@ defmodule FermixWebWeb.SetupLive.Components do
         class="input input-bordered w-full bg-base-100 font-mono"
       />
       <p class="text-xs text-warning">
-        No models installed on this server — run <code>ollama pull &lt;model&gt;</code>.
+        No models installed on this server; run <code>ollama pull &lt;model&gt;</code>.
       </p>
     </div>
     """
@@ -636,7 +636,7 @@ defmodule FermixWebWeb.SetupLive.Components do
         class="input input-bordered w-full bg-base-100 font-mono"
       />
       <p class="text-xs text-warning">
-        Couldn't fetch the live model list ({@reason}) — enter a model id manually.
+        Couldn't fetch the live model list ({@reason}); enter a model id manually.
       </p>
     </div>
     """
@@ -663,7 +663,7 @@ defmodule FermixWebWeb.SetupLive.Components do
 
     ~H"""
     <p class="rounded-field border border-success/40 bg-success/10 p-3 text-xs">
-      Ollama server detected — {@count} installed model(s) listed below.
+      Ollama server detected; {@count} installed model(s) listed below.
     </p>
     """
   end
@@ -1216,8 +1216,8 @@ defmodule FermixWebWeb.SetupLive.Components do
 
       <section class="mt-6 space-y-3">
         <p class="text-xs text-base-content/60">
-          Pick a channel to add its tokens and owner ID. Each channel is independent — there is no
-          primary; configure as many as you need.
+          Pick a channel to add its tokens and owner ID. Each channel is independent; there is
+          no primary. Configure as many as you need.
         </p>
         <div class="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
           <button
@@ -1456,7 +1456,7 @@ defmodule FermixWebWeb.SetupLive.Components do
             rel="noopener noreferrer"
             class="btn btn-ghost btn-xs btn-circle text-base-content/60 hover:text-base-content"
             aria-describedby={"#{@card.name}-details"}
-            aria-label={"About #{@card.display_name} — open docs"}
+            aria-label={"About #{@card.display_name}: open docs"}
           >
             <.icon name="hero-information-circle" class="size-4" />
           </a>
@@ -1467,7 +1467,7 @@ defmodule FermixWebWeb.SetupLive.Components do
     """
   end
 
-  defp ch_recording_summary(0), do: "No apps selected yet — Edit apps to choose."
+  defp ch_recording_summary(0), do: "No apps selected yet; Edit apps to choose."
   defp ch_recording_summary(1), do: "Recording 1 app."
   defp ch_recording_summary(n) when is_integer(n), do: "Recording #{n} apps."
 
@@ -1595,7 +1595,7 @@ defmodule FermixWebWeb.SetupLive.Components do
     >
       <p>{place_search_status(@search_form.brave_api_key_set)}</p>
       <p class="pt-1 text-xs">
-        Each web and place call is metered separately. Place results are transient — only the
+        Each web and place call is metered separately. Place results are transient; only the
         final answer persists, as ordinary chat history.
         <a
           class="link"
@@ -1614,7 +1614,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   defp place_search_state(false), do: "unconfigured"
 
   defp place_search_status(true),
-    do: "place_search is ready — it uses the saved Brave Search API key."
+    do: "place_search is ready; it uses the saved Brave Search API key."
 
   defp place_search_status(false),
     do:
@@ -1636,25 +1636,25 @@ defmodule FermixWebWeb.SetupLive.Components do
             <.image_backend_option
               value="openai"
               label="OpenAI"
-              description="gpt-image — reuses your OpenAI key"
+              description="gpt-image · reuses your OpenAI key"
               checked={@image_form.backend == :openai}
             />
             <.image_backend_option
               value="xai"
               label="SpaceXAI"
-              description="grok image — reuses your SpaceXAI key"
+              description="grok image · reuses your SpaceXAI key"
               checked={@image_form.backend == :xai}
             />
             <.image_backend_option
               value="google"
               label="Google"
-              description="Gemini image — needs a Gemini key"
+              description="Gemini image · needs a Gemini key"
               checked={@image_form.backend == :google}
             />
             <.image_backend_option
               value="openai_codex"
               label="OpenAI Codex (ChatGPT)"
-              description="gpt-image via your ChatGPT subscription — no API key"
+              description="gpt-image via your ChatGPT subscription · no API key"
               checked={@image_form.backend == :openai_codex}
             />
           </div>
@@ -1733,25 +1733,25 @@ defmodule FermixWebWeb.SetupLive.Components do
             <.transcription_backend_option
               value="openai"
               label="OpenAI"
-              description="gpt-4o-mini-transcribe — reuses your OpenAI key"
+              description="gpt-4o-mini-transcribe · reuses your OpenAI key"
               checked={@transcription_form.backend == :openai}
             />
             <.transcription_backend_option
               value="xai"
               label="SpaceXAI"
-              description="Grok STT — reuses your SpaceXAI key"
+              description="Grok STT · reuses your SpaceXAI key"
               checked={@transcription_form.backend == :xai}
             />
             <.transcription_backend_option
               value="deepgram"
               label="Deepgram"
-              description="nova-3 — needs a Deepgram key"
+              description="nova-3 · needs a Deepgram key"
               checked={@transcription_form.backend == :deepgram}
             />
             <.transcription_backend_option
               value="local"
               label="On-device"
-              description="Parakeet on this machine — no key, no audio leaves the host"
+              description="Parakeet on this machine · no key, no audio leaves the host"
               checked={@transcription_form.backend == :local}
             />
           </div>
@@ -1923,7 +1923,7 @@ defmodule FermixWebWeb.SetupLive.Components do
               <div class="space-y-3 border-t border-base-300 px-3 pb-3 pt-3">
                 <p class="text-xs text-base-content/70">
                   The bot signs in once with its own Google account, then joins by knocking like
-                  any guest — only the meeting URL crosses the wire. Add its email to a meeting's
+                  any guest; only the meeting URL crosses the wire. Add its email to a meeting's
                   invite and it skips the waiting room. Google Meet won't work until the bot is
                   signed in.
                 </p>
@@ -1951,7 +1951,7 @@ defmodule FermixWebWeb.SetupLive.Components do
                 <span class="min-w-0 flex-1">
                   <span class="block text-sm font-medium">Zoom</span>
                   <span class="block text-xs text-base-content/55">
-                    Via Zoom RTMS — your own or a consenting host's meetings
+                    Via Zoom RTMS: your own or a consenting host's meetings
                   </span>
                 </span>
                 <.icon
@@ -1985,7 +1985,7 @@ defmodule FermixWebWeb.SetupLive.Components do
                 />
                 <p class="text-xs text-base-content/55">
                   RTMS reaches only meetings hosted by your Zoom account, or a host who enabled
-                  your app — a Zoom limit, not a missing key.
+                  your app. That is a Zoom limit, not a missing key.
                 </p>
               </div>
             </details>
@@ -2227,7 +2227,7 @@ defmodule FermixWebWeb.SetupLive.Components do
             </span>
           </label>
           <p class="max-w-prose pt-1 text-xs leading-relaxed text-base-content/60">
-            Repeated tasks become skill proposals every couple of weeks — each needs your
+            Repeated tasks become skill proposals every couple of weeks; each needs your
             approval. {@personalization_form.skill_curation_destination} Applies after restart.
           </p>
         </div>
@@ -2242,7 +2242,7 @@ defmodule FermixWebWeb.SetupLive.Components do
     <div>
       <.pane_header
         title="Coding agents"
-        subtitle="Hand off repository work — reviewing PRs, fixing bugs, building features — to the Codex or Claude Code CLI on this machine."
+        subtitle="Hand off repository work (reviewing PRs, fixing bugs, building features) to the Codex or Claude Code CLI on this machine."
       />
       <form phx-submit="save_coding" class="mt-6 space-y-5">
         <.harness_card harness_setup={@harness_setup} />
@@ -2302,7 +2302,7 @@ defmodule FermixWebWeb.SetupLive.Components do
               selected={@harness_setup.default_vendor == vendor.vendor}
               disabled={not vendor.available?}
             >
-              {harness_vendor_label(vendor.vendor)} — {harness_vendor_status(vendor)}
+              {harness_vendor_label(vendor.vendor)} · {harness_vendor_status(vendor)}
             </option>
           </select>
           <span class="label pt-1 text-xs text-base-content/60">
@@ -2329,15 +2329,15 @@ defmodule FermixWebWeb.SetupLive.Components do
           Cloud runs (Codex cloud) are off in this release; only local repository runs are available.
         </p>
         <p class="text-xs text-base-content/50">
-          Each CLI keeps its own login — Fermix reads it, never changes it.
+          Each CLI keeps its own login; Fermix reads it, never changes it.
         </p>
       </div>
     </section>
     """
   end
 
-  defp harness_consent_status(true), do: "On — coding runs use your Codex / Claude Code logins."
-  defp harness_consent_status(_false), do: "Off — approve before the first coding run."
+  defp harness_consent_status(true), do: "On. Coding runs use your Codex / Claude Code logins."
+  defp harness_consent_status(_false), do: "Off. Approve before the first coding run."
 
   defp harness_vendor_label("codex"), do: "Codex"
   defp harness_vendor_label("claude"), do: "Claude Code"
@@ -2639,7 +2639,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   end
 
   defp oauth_help_content("notion") do
-    {"Notion → my integrations → New integration → Public. Set the redirect URI to http://localhost:1458/auth/callback (Notion forces https for 127.0.0.1 — use localhost), then paste the OAuth Client ID and secret.",
+    {"Notion → my integrations → New integration → Public. Set the redirect URI to http://localhost:1458/auth/callback (Notion forces https for 127.0.0.1, so use localhost), then paste the OAuth Client ID and secret.",
      "https://www.notion.so/my-integrations"}
   end
 
@@ -2672,8 +2672,8 @@ defmodule FermixWebWeb.SetupLive.Components do
         <p class="text-xs font-medium">OAuth client</p>
         <p class="truncate text-xs text-base-content/55">
           {if @configured?,
-            do: "Configured — credentials stored",
-            else: "Not set up — required to connect"}
+            do: "Configured · credentials stored",
+            else: "Not set up · required to connect"}
         </p>
       </div>
       <button
@@ -2778,7 +2778,7 @@ defmodule FermixWebWeb.SetupLive.Components do
           </button>
         </div>
         <p class="mt-1 text-xs text-base-content/55">
-          Computer History records only the apps you check here — nothing else. Pick them by name;
+          Computer History records only the apps you check here, nothing else. Pick them by name;
           Fermix stores each app's identifier for you.
         </p>
 
@@ -2910,7 +2910,7 @@ defmodule FermixWebWeb.SetupLive.Components do
           <span class="min-w-0">
             <span class="block truncate text-sm font-medium">{profile.display_name}</span>
             <span :if={profile.default?} class="text-xs text-base-content/55">
-              Recommended — read-only.
+              Recommended · read-only.
             </span>
             <span :if={profile.write?} class="text-xs text-base-content/55">
               Needs a read/write token and exposes write tools.
@@ -3059,7 +3059,7 @@ defmodule FermixWebWeb.SetupLive.Components do
             <.icon name="hero-check-circle" class="size-5 shrink-0 text-success" />
             <span>
               {@oauth.display_name} OAuth client saved. Connect each {@oauth.display_name} integration
-              from the list below — re-open this anytime with <span class="font-medium">Edit</span>.
+              from the list below; re-open this anytime with <span class="font-medium">Edit</span>.
             </span>
           </div>
           <div class="mt-4 flex justify-end gap-2">
@@ -3187,7 +3187,7 @@ defmodule FermixWebWeb.SetupLive.Components do
         </div>
         <p :if={@plugin.account} class="truncate text-xs text-base-content/55">{@plugin.account}</p>
         <p :if={@plugin.yanked_version} class="text-xs text-error">
-          Version {@plugin.yanked_version} was yanked — run `fermix plugins upgrade {@plugin.name}`.
+          Version {@plugin.yanked_version} was yanked; run `fermix plugins upgrade {@plugin.name}`.
         </p>
         <form
           :if={@plugin.status == :needs_config && @plugin.missing_config != []}
@@ -3440,7 +3440,7 @@ defmodule FermixWebWeb.SetupLive.Components do
         </li>
         <li>It may require a paid plan, and some operations spend the vendor's own credits.</li>
         <li>
-          A read/write credential authorizes more upstream than Fermix exposes — prefer a read-only
+          A read/write credential authorizes more upstream than Fermix exposes; prefer a read-only
           one if you only need retrieval.
         </li>
         <li>The vendor's AI features may route that content on to third-party model providers.</li>
@@ -4013,10 +4013,10 @@ defmodule FermixWebWeb.SetupLive.Components do
 
   # Each half of the on-device backend reports its own absence, so the card can
   # print the one sentence that fixes what is actually missing.
-  defp local_state_message(:ok), do: "Installed and ready — audio stays on this machine."
+  defp local_state_message(:ok), do: "Installed and ready. Audio stays on this machine."
 
   defp local_state_message({:error, :sidecar_not_installed}),
-    do: "Not installed yet — the speech engine is missing."
+    do: "Not installed yet; the speech engine is missing."
 
   defp local_state_message({:error, :model_not_installed}),
     do: "Speech engine installed; the model is still missing."
@@ -4038,10 +4038,10 @@ defmodule FermixWebWeb.SetupLive.Components do
     do: "Enable the notetaker above to install it, then sign the bot in here."
 
   defp meetbot_signin_hint(%{sidecar_installed?: false}),
-    do: "Installing the notetaker — sign-in unlocks once it's ready."
+    do: "Installing the notetaker. Sign-in unlocks once it's ready."
 
   defp meetbot_signin_hint(_form),
-    do: "Setting up the browser — sign-in unlocks once it's ready."
+    do: "Setting up the browser. Sign-in unlocks once it's ready."
 
   defp tab_status(%{component: nil}, _report), do: :ready
   defp tab_status(%{component: "provider:*"}, report), do: status_by_prefix(report, "provider:")
@@ -4242,13 +4242,13 @@ defmodule FermixWebWeb.SetupLive.Components do
   defp catalog_blocked_reason(_entry), do: nil
 
   defp compat_message({:needs_newer_core, :min_core_version, floor}),
-    do: "needs Fermix ≥ #{floor} — run `fermix upgrade`."
+    do: "needs Fermix ≥ #{floor}; run `fermix upgrade`."
 
   defp compat_message({:needs_newer_core, :plugin_api, api}),
-    do: "needs a newer Fermix (plugin API #{api}) — run `fermix upgrade`."
+    do: "needs a newer Fermix (plugin API #{api}); run `fermix upgrade`."
 
   defp compat_message({:plugin_too_old, :plugin_api, _api}),
-    do: "built for an older Fermix — awaiting a plugin update."
+    do: "built for an older Fermix; awaiting a plugin update."
 
   defp compat_message({:yanked, _name, version}), do: "version #{version} was yanked."
   defp compat_message({:version_not_found, _name, _version}), do: "no installable version yet."

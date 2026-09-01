@@ -96,9 +96,9 @@ defmodule FermixWebWeb.SetupLive do
   @local_ready_message "On-device speech is installed and ready."
   @meetbot_installing_message "Downloading the meeting notetaker…"
   @meetbot_browser_installing_message "Downloading the browser the notetaker uses…"
-  @meetbot_signin_running_message "A browser window is opening — sign the bot's Google account in there, and it closes when done."
+  @meetbot_signin_running_message "A browser window is opening; sign the bot's Google account in there, and it closes when done."
   @meetbot_signin_done_message "The bot is signed in. Google Meet joins can use its account now."
-  @meetbot_signin_cancelled_message "Sign-in was cancelled — the window closed before the account signed in."
+  @meetbot_signin_cancelled_message "Sign-in was cancelled; the window closed before the account signed in."
   @meetbot_signin_timeout_message "Sign-in timed out. Open it again and complete the Google sign-in."
   # Providers the per-provider OAuth-client form supports — mirrors
   # FermixCore.Auth.OAuthProviders. Default ports: google 1455, github 1457,
@@ -783,7 +783,7 @@ defmodule FermixWebWeb.SetupLive do
       {:noreply,
        flash_error(
          socket,
-         "Nothing to restart from here — no OS-supervised Fermix service is running this process. " <>
+         "Nothing to restart from here; no OS-supervised Fermix service is running this process. " <>
            "In dev, stop and re-run `mix fermix.dev`; an installed service restarts itself from this button."
        )}
     end
@@ -1193,7 +1193,7 @@ defmodule FermixWebWeb.SetupLive do
   defp computer_use_permissions_result do
     case Doctor.computer_use_permissions() do
       {:ok, %{state: :disabled}} ->
-        %{status: :ok, grant?: false, detail: "Off — computer use is disabled."}
+        %{status: :ok, grant?: false, detail: "Off. Computer use is disabled."}
 
       {:ok, %{state: :not_installed}} ->
         %{status: :warn, grant?: false, detail: "Enabled, but the helper isn't installed yet."}
@@ -1221,7 +1221,7 @@ defmodule FermixWebWeb.SetupLive do
       status: :warn,
       grant?: macos_probe?(probe),
       detail:
-        "Input control isn't granted — clicks and keystrokes are silently dropped. " <>
+        "Input control isn't granted; clicks and keystrokes are silently dropped. " <>
           "On macOS, grant Accessibility in System Settings → Privacy & Security."
     }
   end
@@ -1691,7 +1691,7 @@ defmodule FermixWebWeb.SetupLive do
     end
   end
 
-  defp meetings_saved_message(true), do: "Meetings saved — restart to apply."
+  defp meetings_saved_message(true), do: "Meetings saved. Restart to apply."
   defp meetings_saved_message(false), do: "Meetings saved."
 
   # The meetings tools are registered once, at boot, from `Meetings.ready?/0`
@@ -1767,7 +1767,7 @@ defmodule FermixWebWeb.SetupLive do
     do: "Meeting notetaker install failed: #{Redaction.format(reason)}"
 
   defp meetbot_browser_error(:not_installed),
-    do: "Install the meeting notetaker first — its browser installs right after."
+    do: "Install the meeting notetaker first; its browser installs right after."
 
   defp meetbot_browser_error(reason),
     do: "The notetaker's browser install failed: #{Redaction.format(reason)}"
@@ -1782,7 +1782,7 @@ defmodule FermixWebWeb.SetupLive do
   defp meetbot_signin_error(:timeout), do: @meetbot_signin_timeout_message
 
   defp meetbot_signin_error(:not_installed),
-    do: "Enable the meeting notetaker first — it installs the sidecar the sign-in needs."
+    do: "Enable the meeting notetaker first; it installs the sidecar the sign-in needs."
 
   # A bare sidecar failure most often means the browser isn't installed yet
   # (the sidecar can't launch it), so name that rather than a bare exit code.
@@ -1790,7 +1790,7 @@ defmodule FermixWebWeb.SetupLive do
     if MeetbotInstaller.browser_installed?() do
       "Sign-in failed: #{Redaction.format(reason)}"
     else
-      "Sign-in couldn't start — the notetaker's browser isn't installed yet. " <>
+      "Sign-in couldn't start; the notetaker's browser isn't installed yet. " <>
         "Re-open the notetaker config to finish setting it up."
     end
   end
@@ -2026,7 +2026,7 @@ defmodule FermixWebWeb.SetupLive do
       display_name: "Meeting Notetaker",
       description: "Joins Google Meet or Zoom on your ask and summarizes it.",
       tooltip:
-        "Fermix joins a Google Meet as a named bot — or a Zoom meeting over RTMS — transcribes " <>
+        "Fermix joins a Google Meet as a named bot (or a Zoom meeting over RTMS), transcribes " <>
           "it, and delivers the notes. Operator-only, off by default.",
       docs_url: "https://fermix.ai/docs/meetings/",
       enabled?: enabled?,
@@ -2060,7 +2060,7 @@ defmodule FermixWebWeb.SetupLive do
       kind: :computer_use,
       name: SidecarInstaller.plugin_name(),
       display_name: "Computer Use",
-      description: "Let Fermix drive the screen — click, type, and navigate apps.",
+      description: "Let Fermix drive the screen: click, type, and navigate apps.",
       tooltip:
         "Fermix sees your screen and controls the mouse and keyboard in the apps you drive. " <>
           "Operator-only, off by default.",
@@ -2525,8 +2525,8 @@ defmodule FermixWebWeb.SetupLive do
   defp set_computer_use_feature(socket, enabled?) do
     message =
       if enabled?,
-        do: "Computer Use enabled — restart to apply.",
-        else: "Computer Use disabled — restart to apply."
+        do: "Computer Use enabled. Restart to apply.",
+        else: "Computer Use disabled. Restart to apply."
 
     socket
     |> assign_report(Wizard.report())
@@ -2583,7 +2583,7 @@ defmodule FermixWebWeb.SetupLive do
       |> persist_computer_history_answers(extra_answers)
       |> install_catalog_plugin(SidecarInstaller.plugin_name())
       |> flash_info(
-        "Apps saved. Installing the capture driver — enable Computer History again once it finishes."
+        "Apps saved. Installing the capture driver; enable Computer History again once it finishes."
       )
     end
   end
@@ -2591,8 +2591,8 @@ defmodule FermixWebWeb.SetupLive do
   defp set_computer_history_feature(socket, enabled?, extra_answers \\ []) do
     message =
       if enabled?,
-        do: "Computer History enabled — restart to apply.",
-        else: "Computer History disabled — restart to apply."
+        do: "Computer History enabled. Restart to apply.",
+        else: "Computer History disabled. Restart to apply."
 
     socket
     |> assign_report(Wizard.report())
@@ -2610,7 +2610,7 @@ defmodule FermixWebWeb.SetupLive do
     save_answers(
       socket,
       answers,
-      "App selection saved — finish installing the driver, then enable.",
+      "App selection saved. Finish installing the driver, then enable.",
       nil,
       restart_required?: false
     )
@@ -2662,7 +2662,7 @@ defmodule FermixWebWeb.SetupLive do
       display_name: "Computer History",
       description: "Passive activity memory from the apps you allow.",
       tooltip:
-        "Opt-in activity memory from the apps you allow — titles, URLs, and typed text; " <>
+        "Opt-in activity memory from the apps you allow: titles, URLs, and typed text; " <>
           "passwords and secure fields are never captured. Summarized off-device by " <>
           "#{computer_history_summarizer_label()}; off by default.",
       docs_url: "https://fermix.ai/docs/computer-history/",
@@ -2937,7 +2937,7 @@ defmodule FermixWebWeb.SetupLive do
         enable_or_connect_plugin(socket, plugin)
 
       :error ->
-        flash_error(socket, "#{name} installed but did not register — check the daemon logs.")
+        flash_error(socket, "#{name} installed but did not register; check the daemon logs.")
 
       {:error, reason} ->
         flash_error(socket, "Save failed: #{Redaction.format(reason)}")
@@ -2947,27 +2947,27 @@ defmodule FermixWebWeb.SetupLive do
   # Per-stage install error prose (§6) — same vocabulary as the CLI dist verbs.
   defp install_error({:download_failed, _reason, _url}), do: "download failed (network)."
   defp install_error({:download_status, status, _url}), do: "download failed (HTTP #{status})."
-  defp install_error({:sha256_mismatch, _details}), do: "checksum mismatch — refusing."
+  defp install_error({:sha256_mismatch, _details}), do: "checksum mismatch; refusing."
 
   defp install_error({:verification_failed, :cosign_not_installed}),
-    do: "cosign not found — install it to verify plugin signatures (e.g. `brew install cosign`)."
+    do: "cosign not found; install it to verify plugin signatures (e.g. `brew install cosign`)."
 
-  defp install_error({:verification_failed, _reason}), do: "signature invalid — refusing."
+  defp install_error({:verification_failed, _reason}), do: "signature invalid; refusing."
 
   defp install_error({:incompatible, {:needs_newer_core, :min_core_version, floor}}),
-    do: "needs Fermix ≥ #{floor} — run `fermix upgrade` first."
+    do: "needs Fermix ≥ #{floor}; run `fermix upgrade` first."
 
   defp install_error({:incompatible, {:needs_newer_core, :plugin_api, api}}),
-    do: "needs a newer Fermix (plugin API #{api}) — run `fermix upgrade` first."
+    do: "needs a newer Fermix (plugin API #{api}); run `fermix upgrade` first."
 
   defp install_error({:incompatible, {:plugin_too_old, :plugin_api, _api}}),
-    do: "built for an older Fermix — awaiting a plugin update."
+    do: "built for an older Fermix; awaiting a plugin update."
 
   defp install_error({:yanked, name, version}),
-    do: "#{name} #{version} was yanked — not installing."
+    do: "#{name} #{version} was yanked; not installing."
 
   defp install_error({:unknown_plugin, _name}),
-    do: "not in the plugin catalog — run `fermix upgrade` to get the latest catalog."
+    do: "not in the plugin catalog; run `fermix upgrade` to get the latest catalog."
 
   defp install_error({:no_build_for_target, target}), do: "no build for this machine (#{target})."
 
@@ -2975,7 +2975,7 @@ defmodule FermixWebWeb.SetupLive do
   defp install_error({:no_checksum_for_target, _target}),
     do: "the Computer Use helper hasn't been published for this platform yet."
 
-  defp install_error({:checksum_mismatch, _details}), do: "checksum mismatch — refusing."
+  defp install_error({:checksum_mismatch, _details}), do: "checksum mismatch; refusing."
   defp install_error({:http_status, status}), do: "download failed (HTTP #{status})."
   defp install_error({:http_error, _reason}), do: "download failed (network or timeout)."
   defp install_error({:untar, _reason}), do: "the downloaded Computer Use archive was invalid."
