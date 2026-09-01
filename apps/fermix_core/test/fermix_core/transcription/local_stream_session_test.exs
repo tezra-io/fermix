@@ -11,6 +11,8 @@ defmodule FermixCore.Transcription.Local.StreamSessionTest do
   # 100 ms of s16le/16 kHz/mono silence: 1 600 samples, 3 200 bytes.
   @pcm :binary.copy(<<0, 0>>, 1_600)
 
+  @model "parakeet-tdt-0.6b-v3-int8"
+
   test "pushes audio, then delivers a segment and a close summary on finish" do
     {:ok, session} = StreamSession.open(self(), opts())
     ref = Process.monitor(session)
@@ -108,7 +110,16 @@ defmodule FermixCore.Transcription.Local.StreamSessionTest do
       handler,
       [:fermix, :provider, :call],
       fn _event, measurements, metadata, _config ->
-        send(test_pid, {:span, measurements, metadata})
+        # [:fermix, :provider, :call] is global and every async module emits on
+        # it, so an unfiltered handler forwards other suites' spans and the
+        # assert_receive below races them (a media call on :openai_codex won
+        # this once). The module's async rationale covers the sidecar and the
+        # consumer mailbox, not a process-independent telemetry handler. This
+        # fixture's model is unique to this backend, and ExUnit serializes the
+        # cases within a module, so it selects exactly this test's span.
+        if metadata[:model] == @model do
+          send(test_pid, {:span, measurements, metadata})
+        end
       end,
       nil
     )
@@ -141,7 +152,16 @@ defmodule FermixCore.Transcription.Local.StreamSessionTest do
       handler,
       [:fermix, :provider, :call],
       fn _event, measurements, metadata, _config ->
-        send(test_pid, {:span, measurements, metadata})
+        # [:fermix, :provider, :call] is global and every async module emits on
+        # it, so an unfiltered handler forwards other suites' spans and the
+        # assert_receive below races them (a media call on :openai_codex won
+        # this once). The module's async rationale covers the sidecar and the
+        # consumer mailbox, not a process-independent telemetry handler. This
+        # fixture's model is unique to this backend, and ExUnit serializes the
+        # cases within a module, so it selects exactly this test's span.
+        if metadata[:model] == @model do
+          send(test_pid, {:span, measurements, metadata})
+        end
       end,
       nil
     )
