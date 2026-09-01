@@ -46,6 +46,18 @@ defmodule FermixCore.BuildInfoTest do
     assert BuildInfo.identity() == before
   end
 
+  test "the recompile hook fires exactly when the build inputs change" do
+    restore = capture_env(@build_env_vars)
+    on_exit(restore)
+
+    # The suite compiles with no inherited build inputs, so the current
+    # environment agrees with the compiled literals and the module is stable.
+    refute BuildInfo.__mix_recompile__?()
+
+    System.put_env("FERMIX_BUILD_ID", "recompile-probe")
+    assert BuildInfo.__mix_recompile__?()
+  end
+
   test "test compilation ignores inherited app-engine build inputs" do
     root = Path.expand("../../../..", __DIR__)
 
