@@ -71,6 +71,22 @@ defmodule FermixCore.BuildInfo do
           architecture: String.t()
         }
 
+  @doc false
+  # The identity inputs are invisible to the compiler: content digests decide
+  # recompilation, so neither a `touch` nor deleting the .beam makes a build
+  # pick up changed FERMIX_BUILD_* values (both failure modes observed live,
+  # 2026-08-21/22 — a release step then calls into a module compiled with the
+  # previous identity, or into no module at all). This hook is the supported
+  # answer: the compiler asks it per build, and the module recompiles exactly
+  # when the compiled literals disagree with the current environment.
+  @spec __mix_recompile__?() :: boolean()
+  def __mix_recompile__? do
+    System.get_env("FERMIX_BUILD_ID") != @build_id or
+      System.get_env("FERMIX_BUILD_SOURCE_COMMIT") != @source_commit or
+      (System.get_env("FERMIX_BUILD_DISTRIBUTION") || "standalone") != @distribution_identity or
+      System.get_env("FERMIX_BUILD_TARGET") != @artifact_target
+  end
+
   @doc "Returns the engine artifact identity compiled into this BEAM build."
   @spec identity() :: identity()
   def identity do
