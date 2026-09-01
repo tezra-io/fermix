@@ -1505,8 +1505,17 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
 
     # The one command that should explain a refused boot must not die with a
     # raw stacktrace on the same config that refused it (the tree-less-doctor
-    # pitfall class). An unknown [fermix_core.browser] key is the newly
-    # reachable case: inert on 0.9.0, a boot refusal after the upgrade.
+    # pitfall class).
+    #
+    # Scope, stated honestly: this exercises runtime_config_snapshot/0 in
+    # isolation. In the shipped binary the release config provider
+    # (config/runtime.exs) evaluates the SAME load_runtime_config at boot and
+    # raises there, before Fermix.CLI dispatches — so an operator whose
+    # config.toml is refused sees the provider's boot error, not this row.
+    # Making that row reachable means letting the config provider tolerate a
+    # refused config for tree-less CLI verbs, which is a boot-behaviour design
+    # decision, not a check-level fix. Until that is decided these assertions
+    # pin the function, not the operator's experience.
     test "a config.toml the loader refuses renders a failed check, not a crash", %{home: home} do
       File.write!(Path.join(home, "config.toml"), """
       [fermix_core.browser]
@@ -1519,6 +1528,23 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.status == :fail
       assert result.detail =~ "config.toml"
       assert result.detail =~ "allow_private_network"
+    end
+
+    # Not every refusal on that path is an ArgumentError: the legacy
+    # provider-layout refusal is a bare `raise`, i.e. a RuntimeError. A rescue
+    # that names only one of them still dies on the other.
+    test "a legacy provider layout is a failed check too, not a crash", %{home: home} do
+      File.write!(Path.join(home, "config.toml"), """
+      [fermix_core.providers.openai]
+      provider = "openai"
+      """)
+
+      result = Checks.plaintext_secrets()
+
+      assert result.name == "setup secrets"
+      assert result.status == :fail
+      assert result.detail =~ "config.toml"
+      assert result.detail =~ "[fermix_core.agent]"
     end
   end
 

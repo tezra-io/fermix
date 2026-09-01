@@ -1926,13 +1926,23 @@ defmodule Fermix.CLI.Doctor.Checks do
   # section key, an invalid value) — the same refusal that stops the daemon's
   # boot. The diagnostic verb must render that refusal as a failed row, not die
   # of it with a stacktrace and zero output.
+  #
+  # Both exception kinds on that path have to be named: the normalizers raise
+  # ArgumentError, while the legacy provider-layout refusal
+  # (`raise_old_provider_layout!/0`) is a bare `raise`, i.e. a RuntimeError.
+  # Catching one and not the other still dies on the other.
+  #
+  # Reachability, recorded so this is not mistaken for operator-visible
+  # behaviour: in the shipped binary the release config provider evaluates the
+  # same load_runtime_config at boot and raises before Fermix.CLI dispatches,
+  # so this rescue fires only where that provider chain does not run.
   defp runtime_config_snapshot do
     case ConfigStore.load_runtime_config(resolve_secrets: false) do
       {:ok, snapshot} -> {:ok, snapshot}
       {:error, reason} -> {:error, inspect(reason)}
     end
   rescue
-    error in ArgumentError -> {:error, error.message}
+    error in [ArgumentError, RuntimeError] -> {:error, Exception.message(error)}
   end
 
   defp recent_sandbox_events(trace_dir) do
