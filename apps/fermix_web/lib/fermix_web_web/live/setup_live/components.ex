@@ -194,7 +194,7 @@ defmodule FermixWebWeb.SetupLive.Components do
         if @embed?, do: nil, else: "rounded-box border border-base-300 bg-base-100 p-4 shadow-sm"
       }>
         <div :if={!@embed?} class="flex items-center gap-2.5 px-1">
-          <.fermix_wordmark class="h-5 w-auto text-base-content" />
+          <.fermix_wordmark class="h-6 w-auto text-base-content" />
         </div>
 
         <div :if={!@embed?} class="mt-4 px-1">
