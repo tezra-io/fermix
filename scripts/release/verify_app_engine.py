@@ -132,7 +132,6 @@ def _verify_in_directories(
     fermix_home, environment = _runtime_environment(runtime_root, scratch)
     executable = release_root / "bin/fermix_app_engine"
     start_command = [*command_prefix, str(executable), "start"]
-    stop_command = [*command_prefix, str(executable), "stop"]
     log_path = scratch / "engine.log"
     process = None
 
@@ -140,8 +139,6 @@ def _verify_in_directories(
         process = _start_engine(start_command, release_root, environment, log_path)
         runtime = _verify_started_engine(
             process,
-            stop_command,
-            release_root,
             fermix_home,
             environment,
             manifest,
@@ -173,8 +170,6 @@ def _start_engine(command, release_root, environment, log_path):
 
 def _verify_started_engine(
     process,
-    stop_command,
-    release_root,
     fermix_home,
     environment,
     manifest,
@@ -185,7 +180,10 @@ def _verify_started_engine(
     protocol_version = manifest["protocols"]["management"]["current_version"]
     result = _management_hello(fermix_home / "daemon.sock", protocol_version, timeouts)
     runtime = _validate_runtime_identity(result, manifest, process.pid, environment)
-    _stop_engine(stop_command, release_root, environment, timeouts)
+    # The engine runs with Erlang distribution off (no epmd), so the generated
+    # release's rpc-based `stop` cannot reach it; the management lifecycle is
+    # the one sanctioned stop path, exactly as the app uses it.
+    _management_lifecycle_stop(fermix_home / "daemon.sock", protocol_version, timeouts)
     _await_exit(process, timeouts, log_path)
     _verify_socket_cleanup(fermix_home)
     return runtime
@@ -542,13 +540,12 @@ def _health_live(environment, manifest, timeouts):
     ) == identity["product_version"]
 
 
-def _management_hello(socket_path, protocol_version, timeouts):
-    request_id = "release-smoke"
+def _management_request(socket_path, protocol_version, method, params, timeouts, request_id):
     request = {
         "request_id": request_id,
         "protocol_version": protocol_version,
-        "method": "hello",
-        "params": {},
+        "method": method,
+        "params": params,
     }
     payload = json.dumps(request, separators=(",", ":")).encode("utf-8")
 
@@ -559,16 +556,41 @@ def _management_hello(socket_path, protocol_version, timeouts):
             connection.sendall(struct.pack(">I", len(payload)) + payload)
             size = struct.unpack(">I", _recv_exact(connection, 4))[0]
             if size > MAX_FRAME_BYTES:
-                raise VerificationError("management hello response exceeds the frame limit")
+                raise VerificationError(f"management {method} response exceeds the frame limit")
             response = json.loads(_recv_exact(connection, size))
     except (OSError, json.JSONDecodeError, struct.error) as error:
-        raise VerificationError(f"management hello failed: {error}") from error
+        raise VerificationError(f"management {method} failed: {error}") from error
 
     if not isinstance(response, dict) or set(response) != {"request_id", "result"}:
-        raise VerificationError("management hello returned an invalid response envelope")
+        raise VerificationError(f"management {method} returned an invalid response envelope")
     if response["request_id"] != request_id or not isinstance(response["result"], dict):
-        raise VerificationError("management hello did not correlate its response")
+        raise VerificationError(f"management {method} did not correlate its response")
     return response["result"]
+
+
+def _management_hello(socket_path, protocol_version, timeouts):
+    return _management_request(
+        socket_path, protocol_version, "hello", {}, timeouts, "release-smoke"
+    )
+
+
+def _management_lifecycle_stop(socket_path, protocol_version, timeouts):
+    prepared = _management_request(
+        socket_path, protocol_version, "lifecycle.prepare", {}, timeouts, "release-smoke-stop-1"
+    )
+    lease = prepared.get("lease_id")
+    if not isinstance(lease, str) or not lease:
+        raise VerificationError("lifecycle.prepare returned no usable lease")
+    committed = _management_request(
+        socket_path,
+        protocol_version,
+        "lifecycle.commit",
+        {"lease_id": lease},
+        timeouts,
+        "release-smoke-stop-2",
+    )
+    if committed.get("status") != "committed":
+        raise VerificationError(f"lifecycle.commit did not commit: {committed}")
 
 
 def _recv_exact(connection, size):
@@ -612,22 +634,6 @@ def _validate_runtime_identity(result, manifest, process_pid, environment):
         raise VerificationError("management setup endpoint contradicts the smoke runtime")
     return engine
 
-
-def _stop_engine(command, release_root, environment, timeouts):
-    try:
-        result = subprocess.run(
-            command,
-            cwd=release_root,
-            env=environment,
-            text=True,
-            capture_output=True,
-            timeout=timeouts.stop_timeout_seconds,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as error:
-        raise VerificationError("app-engine stop command exceeded its deadline") from error
-    if result.returncode != 0:
-        raise VerificationError(f"app-engine stop command failed with code {result.returncode}")
 
 
 def _await_exit(process, timeouts, log_path):

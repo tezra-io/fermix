@@ -57,20 +57,37 @@ class Health(http.server.BaseHTTPRequestHandler):
         return
 
 
-def management_response(request, manifest, port):
-    engine = dict(manifest["identity"])
-    engine["pid"] = str(os.getpid())
-    return {
-        "request_id": request["request_id"],
-        "result": {
+FAKE_LEASE = "lease-fake-engine"
+
+
+def management_response(request, manifest, port, stopping):
+    method = request.get("method")
+    if method == "lifecycle.prepare":
+        result = {"lease_id": FAKE_LEASE, "ttl_ms": 30000}
+    elif method == "lifecycle.commit":
+        if request.get("params", {}).get("lease_id") != FAKE_LEASE:
+            result = {"error": {"code": "unknown_lease"}}
+        else:
+            result = {"lease_id": FAKE_LEASE, "status": "committed"}
+            stopping.set()
+    else:
+        engine = dict(manifest["identity"])
+        engine["pid"] = str(os.getpid())
+        result = {
             "protocol": manifest["protocols"]["management"],
             "capabilities": {
-                "methods": ["hello", "overview.get", "setup.session.create"]
+                "methods": [
+                    "hello",
+                    "overview.get",
+                    "setup.session.create",
+                    "lifecycle.prepare",
+                    "lifecycle.commit",
+                ]
             },
             "engine": engine,
             "setup": {"origin": f"http://127.0.0.1:{port}", "path": "/setup"},
-        },
-    }
+        }
+    return {"request_id": request["request_id"], "result": result}
 
 
 def management_loop(listener, stopping, manifest, port):
@@ -83,7 +100,7 @@ def management_loop(listener, stopping, manifest, port):
         with connection:
             size = struct.unpack(">I", recv_exact(connection, 4))[0]
             request = json.loads(recv_exact(connection, size))
-            response = management_response(request, manifest, port)
+            response = management_response(request, manifest, port, stopping)
             payload = json.dumps(response, separators=(",", ":")).encode()
             connection.sendall(struct.pack(">I", len(payload)) + payload)
 

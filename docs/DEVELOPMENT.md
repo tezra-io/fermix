@@ -58,10 +58,7 @@ app-managed behavior):
 
 ```bash
 # Build (all-zero commit = local, non-publishable marker)
-# BuildInfo's identity is compile-time literals; deleting its beam is the
-# reliable invalidation (a touch is not — proven 2026-08-21). Dev/test builds
-# are untouched: this only affects _build/prod.
-rm -f _build/prod/lib/fermix_core/ebin/Elixir.FermixCore.BuildInfo.beam
+# BuildInfo recompiles itself when FERMIX_BUILD_* changes (__mix_recompile__?).
 FERMIX_BUILD_ID=local-test \
 FERMIX_BUILD_SOURCE_COMMIT=0000000000000000000000000000000000000000 \
 FERMIX_BUILD_DISTRIBUTION=macos_app \
@@ -73,7 +70,7 @@ export FERMIX_HOME=$HOME/.fermix-apptest PORT=4530
 _build/prod/rel/fermix_app_engine/bin/fermix_app_engine daemon
 curl http://127.0.0.1:4530/health/live      # ok when up
 curl http://127.0.0.1:4530/health/ready     # 503 until configured — correct
-_build/prod/rel/fermix_app_engine/bin/fermix_app_engine stop
+FERMIX_HOME=$HOME/.fermix-apptest python3 scripts/dev/engine_stop.py   # bin stop needs distribution, which is off
 ```
 
 The identity lives in compile-time literals inside `_build/prod` only — dev and test
