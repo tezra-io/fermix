@@ -23,6 +23,7 @@
 /apps/fermix_web/priv/static/favicon-*.png
 /apps/fermix_web/priv/static/robots-*.txt
 /apps/fermix_web/priv/static/images/*-*.svg
+/apps/fermix_web/priv/static/images/*-*.png
 
 # Rustler
 /apps/fermix_nif/native/fermix_nif/target/

@@ -110,6 +110,10 @@
     sans-serif;
 }
 
+/* The root scroller too: root.html.heex stamps data-embed on <html> in embed,
+   because the document (not <main>) is what scrolls in the WKWebView, and a
+   descendant selector alone leaves the pane's right-edge scrollbar visible. */
+[data-embed]::-webkit-scrollbar,
 [data-embed] ::-webkit-scrollbar {
   width: 0;
   height: 0;
