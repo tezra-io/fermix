@@ -100,7 +100,10 @@ defmodule FermixWebWeb.SetupLive.Components do
           tabs={@tabs}
         />
 
-        <section class={if @embed?, do: "min-w-0", else: "mt-6 min-w-0 lg:mt-0"}>
+        <%!-- The content column is a size container: pane grids split into
+              columns by the width they actually get, not the viewport's, so the
+              narrow in-app pane and the browser page share one rule. --%>
+        <section class={if @embed?, do: "@container min-w-0", else: "@container mt-6 min-w-0 lg:mt-0"}>
           <div :if={@saved_flash} class="mb-4">
             <.flash_banner flash={@saved_flash} />
           </div>
@@ -465,7 +468,7 @@ defmodule FermixWebWeb.SetupLive.Components do
 
   defp provider_cards(assigns) do
     ~H"""
-    <div class="grid gap-2 sm:grid-cols-2">
+    <div class="grid gap-2 @xl:grid-cols-2">
       <div :for={status <- @provider_statuses} class={provider_card_class(status, @editing)}>
         <label class="flex min-w-0 flex-1 cursor-pointer items-start gap-3">
           <input
@@ -1100,7 +1103,7 @@ defmodule FermixWebWeb.SetupLive.Components do
 
   defp realtime_primary_fields(assigns) do
     ~H"""
-    <div class="grid items-start gap-4 sm:grid-cols-2">
+    <div class="grid items-start gap-4 @xl:grid-cols-2">
       <label class="form-control w-full">
         <span class="label pb-1 text-sm font-medium">Realtime status</span>
         <select name="realtime_form[enabled]" class="select select-bordered w-full bg-base-100">
@@ -1219,7 +1222,7 @@ defmodule FermixWebWeb.SetupLive.Components do
           Pick a channel to add its tokens and owner ID. Each channel is independent; there is
           no primary. Configure as many as you need.
         </p>
-        <div class="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+        <div class="grid gap-2 @xl:grid-cols-2 @3xl:grid-cols-3">
           <button
             :for={section <- @channel_sections}
             type="button"
@@ -1482,7 +1485,7 @@ defmodule FermixWebWeb.SetupLive.Components do
       <form phx-change="search_changed" phx-submit="save_search" class="mt-6 space-y-6">
         <fieldset>
           <legend class="text-sm font-medium text-base-content/80">Provider</legend>
-          <div class="mt-2 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <div class="mt-2 grid gap-3 @xl:grid-cols-2 @5xl:grid-cols-4">
             <.search_backend_option
               value="duckduckgo"
               label="DuckDuckGo"
@@ -1632,7 +1635,7 @@ defmodule FermixWebWeb.SetupLive.Components do
       <form phx-change="image_changed" phx-submit="save_image" class="mt-6 space-y-6">
         <fieldset>
           <legend class="text-sm font-medium text-base-content/80">Backend</legend>
-          <div class="mt-2 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+          <div class="mt-2 grid gap-3 @xl:grid-cols-2 @4xl:grid-cols-3">
             <.image_backend_option
               value="openai"
               label="OpenAI"
@@ -1729,7 +1732,7 @@ defmodule FermixWebWeb.SetupLive.Components do
       <form phx-change="transcription_changed" phx-submit="save_transcription" class="mt-6 space-y-6">
         <fieldset>
           <legend class="text-sm font-medium text-base-content/80">Backend</legend>
-          <div class="mt-2 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+          <div class="mt-2 grid gap-3 @xl:grid-cols-2 @4xl:grid-cols-3">
             <.transcription_backend_option
               value="openai"
               label="OpenAI"
@@ -3465,7 +3468,7 @@ defmodule FermixWebWeb.SetupLive.Components do
         <h3 class="font-semibold">{@title}</h3>
         <.status_pill status={@status} />
       </div>
-      <div class="grid items-start gap-3 sm:grid-cols-2">{render_slot(@inner_block)}</div>
+      <div class="grid items-start gap-3 @xl:grid-cols-2">{render_slot(@inner_block)}</div>
     </section>
     """
   end
