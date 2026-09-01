@@ -234,6 +234,81 @@ defmodule FermixWebWeb.SetupLiveTest do
     %{conn: authorize_setup(conn), tmp_home: tmp_home}
   end
 
+  describe "/setup embed presentation" do
+    # `?embed=1` is the macOS app's in-app dress: same LiveView, native read.
+    # The rail is label-only (the app chrome owns identity, theme, and origin),
+    # the pane is unboxed, and the ground is transparent so the app's palette
+    # shows through the WKWebView.
+    test "embed=1 renders the native presentation without browser chrome", %{conn: conn} do
+      {:ok, _view, html} = live(conn, "/setup?embed=1")
+
+      assert html =~ "data-embed"
+      assert html =~ "bg-transparent"
+
+      # Rail rows are label-only: every section is still reachable...
+      for label <- ["Provider", "Channels", "Plugins", "Doctor"] do
+        assert html =~ label
+      end
+
+      # ...but the website-sidebar chrome is gone: wordmark, step counter,
+      # progress, theme toggle, per-tab subtext, and the config-path line.
+      refute html =~ ~s(aria-label="Fermix")
+      refute html =~ "Step 1 of"
+      refute html =~ "data-phx-theme"
+      refute html =~ "Model and key"
+      refute html =~ ConfigStore.path()
+    end
+
+    test "a normal browser session renders none of the embed dress", %{conn: conn} do
+      {:ok, _view, html} = live(conn, "/setup")
+
+      refute html =~ "data-embed"
+      refute html =~ "Sign-in opens in your browser and returns here."
+      assert html =~ "Step 1 of"
+      assert html =~ "data-phx-theme"
+    end
+
+    test "embed persists in the socket across tab navigation", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup?embed=1")
+
+      html = view |> element("button[phx-value-tab=\"plugins\"]") |> render_click()
+
+      assert html =~ "data-embed"
+      refute html =~ "Step 1 of"
+    end
+
+    # The restart patch stamps `?tab=…&embed=1`, and the post-restart reload
+    # re-mounts from that url: both params must be honored together.
+    test "the post-restart url re-mounts embedded on the stamped tab", %{conn: conn} do
+      {:ok, _view, html} = live(conn, "/setup?embed=1&tab=doctor")
+
+      assert html =~ "data-embed"
+      assert html =~ "Readiness doctor"
+    end
+
+    test "embed explains the browser hand-off under the sign-in action", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup?embed=1")
+
+      html =
+        view
+        |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: "openai_codex"})
+        |> render_change()
+
+      assert html =~ "Sign-in opens in your browser and returns here."
+    end
+
+    test "the browser presentation never renders the hand-off caption", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      html =
+        view
+        |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: "openai_codex"})
+        |> render_change()
+
+      refute html =~ "Sign-in opens in your browser and returns here."
+    end
+  end
+
   describe "/setup shell" do
     test "renders the onboarding header and config path", %{conn: conn} do
       {:ok, _view, html} = live(conn, "/setup")

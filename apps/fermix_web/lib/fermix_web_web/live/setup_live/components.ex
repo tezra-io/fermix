@@ -17,6 +17,9 @@ defmodule FermixWebWeb.SetupLive.Components do
   ]
 
   attr :active_tab, :string, required: true
+  # The macOS app's in-app presentation (`?embed=1`): same components, native
+  # dress — transparent ground, label-only rail, unboxed pane, -sm controls.
+  attr :embed?, :boolean, default: false
   attr :channels_form, :map, required: true
   attr :codex_auth, :map, required: true
   attr :codex_auth_running?, :boolean, required: true
@@ -61,7 +64,13 @@ defmodule FermixWebWeb.SetupLive.Components do
 
   def page(assigns) do
     ~H"""
-    <main class="min-h-screen bg-base-200/40 text-base-content">
+    <main
+      class={[
+        "min-h-screen text-base-content",
+        if(@embed?, do: "bg-transparent", else: "bg-base-200/40")
+      ]}
+      data-embed={@embed?}
+    >
       <div
         :if={@restarting}
         id="restart-reconnect"
@@ -77,15 +86,21 @@ defmodule FermixWebWeb.SetupLive.Components do
         </div>
       </div>
 
-      <div class="mx-auto max-w-6xl gap-6 px-4 py-6 sm:px-6 lg:grid lg:grid-cols-[16rem_minmax(0,1fr)] lg:items-start lg:px-8">
+      <div class={
+        if @embed?,
+          do: "grid max-w-none grid-cols-[11rem_minmax(0,1fr)] items-start gap-5 px-5 py-4",
+          else:
+            "mx-auto max-w-6xl gap-6 px-4 py-6 sm:px-6 lg:grid lg:grid-cols-[16rem_minmax(0,1fr)] lg:items-start lg:px-8"
+      }>
         <.setup_sidebar
           active_tab={@active_tab}
+          embed?={@embed?}
           provider_form={@provider_form}
           report={@report}
           tabs={@tabs}
         />
 
-        <section class="mt-6 min-w-0 lg:mt-0">
+        <section class={if @embed?, do: "min-w-0", else: "mt-6 min-w-0 lg:mt-0"}>
           <div :if={@saved_flash} class="mb-4">
             <.flash_banner flash={@saved_flash} />
           </div>
@@ -93,7 +108,11 @@ defmodule FermixWebWeb.SetupLive.Components do
           <div
             id={"setup-pane-#{@active_tab}"}
             phx-hook="UnsavedHint"
-            class="relative rounded-box border border-base-300 bg-base-100 p-6 shadow-sm sm:p-8"
+            class={
+              if @embed?,
+                do: "relative border-0 bg-transparent p-0 text-[13px] shadow-none",
+                else: "relative rounded-box border border-base-300 bg-base-100 p-6 shadow-sm sm:p-8"
+            }
           >
             <%!-- Client-only dirty hint: the hook reveals this badge on the first
                   input edit and clears it on submit. The ignore island keeps
@@ -109,6 +128,7 @@ defmodule FermixWebWeb.SetupLive.Components do
             </div>
             <.active_pane
               active_tab={@active_tab}
+              embed?={@embed?}
               channels_form={@channels_form}
               codex_auth={@codex_auth}
               codex_auth_running?={@codex_auth_running?}
@@ -157,24 +177,27 @@ defmodule FermixWebWeb.SetupLive.Components do
   end
 
   attr :active_tab, :string, required: true
+  attr :embed?, :boolean, default: false
   attr :provider_form, :map, required: true
   attr :report, :map, required: true
   attr :tabs, :list, required: true
 
+  # One nav, two dresses. The browser card keeps its identity block, step
+  # counter, progress bar, theme toggle, and per-tab subtext. The embed rail is
+  # label-only: the app's own chrome carries identity and theme, and this rail
+  # navigates setup sections the way the app sidebar navigates surfaces —
+  # different jobs, so it must not look like a second website sidebar.
   defp setup_sidebar(assigns) do
     ~H"""
-    <aside class="lg:sticky lg:top-6">
-      <div class="rounded-box border border-base-300 bg-base-100 p-4 shadow-sm">
-        <div class="flex items-center gap-2.5 px-1">
-          <img
-            src={~p"/images/fermix-mascot.png"}
-            alt=""
-            class="size-9 shrink-0 [filter:drop-shadow(0_0_1px_rgba(0,0,0,0.28))]"
-          />
+    <aside class={if @embed?, do: "sticky top-4", else: "lg:sticky lg:top-6"}>
+      <div class={
+        if @embed?, do: nil, else: "rounded-box border border-base-300 bg-base-100 p-4 shadow-sm"
+      }>
+        <div :if={!@embed?} class="flex items-center gap-2.5 px-1">
           <.fermix_wordmark class="h-5 w-auto text-base-content" />
         </div>
 
-        <div class="mt-4 px-1">
+        <div :if={!@embed?} class="mt-4 px-1">
           <div class="flex items-center justify-between text-xs">
             <span class="text-base-content/55">
               Step {current_step_number(@active_tab, @tabs)} of {length(@tabs)}
@@ -189,10 +212,26 @@ defmodule FermixWebWeb.SetupLive.Components do
           </div>
         </div>
 
-        <nav class="mt-4" aria-label="Setup steps">
+        <nav class={if @embed?, do: nil, else: "mt-4"} aria-label="Setup steps">
           <ol class="space-y-0.5">
             <li :for={{tab, index} <- Enum.with_index(@tabs)}>
               <button
+                :if={@embed?}
+                type="button"
+                phx-click="select_tab"
+                phx-value-tab={tab.id}
+                class={embed_nav_class(tab.id, @active_tab)}
+                aria-current={if tab.id == @active_tab, do: "step", else: "false"}
+              >
+                <.icon
+                  :if={step_done?(tab, @active_tab, @report)}
+                  name="hero-check"
+                  class="size-3.5 shrink-0"
+                />
+                <span class="truncate">{tab.label}</span>
+              </button>
+              <button
+                :if={!@embed?}
                 type="button"
                 phx-click="select_tab"
                 phx-value-tab={tab.id}
@@ -209,12 +248,15 @@ defmodule FermixWebWeb.SetupLive.Components do
           </ol>
         </nav>
 
-        <div class="mt-4 flex items-center justify-between gap-3 border-t border-base-300 px-1 pt-3">
+        <div
+          :if={!@embed?}
+          class="mt-4 flex items-center justify-between gap-3 border-t border-base-300 px-1 pt-3"
+        >
           <span class="text-xs font-medium text-base-content/55">Theme</span>
           <Layouts.theme_toggle />
         </div>
 
-        <div class="mt-3 px-1 text-xs text-base-content/55">
+        <div :if={!@embed?} class="mt-3 px-1 text-xs text-base-content/55">
           <p class="truncate">
             {provider_label(@provider_form.provider)} · {@provider_form.default_model}
           </p>
@@ -242,6 +284,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   end
 
   attr :active_tab, :string, required: true
+  attr :embed?, :boolean, default: false
   attr :channels_form, :map, required: true
   attr :codex_auth, :map, required: true
   attr :codex_auth_running?, :boolean, required: true
@@ -381,17 +424,20 @@ defmodule FermixWebWeb.SetupLive.Components do
                 codex_auth={@codex_auth}
                 codex_auth_running?={@codex_auth_running?}
                 codex_auth_url={@codex_auth_url}
+                embed?={@embed?}
               />
               <.xai_auth_field
                 :if={@provider_form.provider == :xai and @provider_form.auth_mode == :oauth}
                 xai_auth={@xai_auth}
                 xai_auth_running?={@xai_auth_running?}
                 xai_auth_url={@xai_auth_url}
+                embed?={@embed?}
               />
               <.anthropic_auth_field
                 :if={@provider_form.provider == :anthropic and @provider_form.auth_mode == :oauth}
                 anthropic_auth={@anthropic_auth}
                 anthropic_import_available?={@anthropic_import_available?}
+                embed?={@embed?}
               />
               <p
                 :if={
@@ -710,10 +756,26 @@ defmodule FermixWebWeb.SetupLive.Components do
     end
   end
 
+  # OAuth explained at the moment of sign-in, never as chrome: in the embedded
+  # presentation the pane reads native, so each external-auth action carries one
+  # line saying where the sign-in happens. Browser mode says nothing — the tab
+  # that opens is the world the user is already in.
+  attr :embed?, :boolean, required: true
+  attr :class, :any, default: nil
+
+  defp browser_signin_caption(assigns) do
+    ~H"""
+    <p :if={@embed?} class={["mt-1.5 text-xs text-base-content/55", @class]}>
+      Sign-in opens in your browser and returns here.
+    </p>
+    """
+  end
+
   attr :provider_form, :map, required: true
   attr :codex_auth, :map, required: true
   attr :codex_auth_running?, :boolean, required: true
   attr :codex_auth_url, :string, default: nil
+  attr :embed?, :boolean, default: false
 
   defp codex_auth_field(assigns) do
     ~H"""
@@ -754,6 +816,8 @@ defmodule FermixWebWeb.SetupLive.Components do
           {codex_auth_button_label(@codex_auth, @codex_auth_running?)}
         </button>
       </div>
+
+      <.browser_signin_caption embed?={@embed?} />
 
       <div
         :if={@codex_auth_url}
@@ -825,6 +889,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :xai_auth, :map, required: true
   attr :xai_auth_running?, :boolean, required: true
   attr :xai_auth_url, :string, default: nil
+  attr :embed?, :boolean, default: false
 
   defp xai_auth_field(assigns) do
     ~H"""
@@ -861,6 +926,8 @@ defmodule FermixWebWeb.SetupLive.Components do
         </button>
       </div>
 
+      <.browser_signin_caption embed?={@embed?} />
+
       <div
         :if={@xai_auth_url}
         class="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-field border border-base-300 bg-base-100/70 px-3 py-2 text-xs text-base-content/65"
@@ -880,6 +947,7 @@ defmodule FermixWebWeb.SetupLive.Components do
 
   attr :anthropic_auth, :map, required: true
   attr :anthropic_import_available?, :boolean, default: false
+  attr :embed?, :boolean, default: false
 
   defp anthropic_auth_field(assigns) do
     ~H"""
@@ -920,6 +988,8 @@ defmodule FermixWebWeb.SetupLive.Components do
           Import Claude Code login
         </button>
       </div>
+
+      <.browser_signin_caption embed?={@embed?} />
     </section>
     """
   end
@@ -1200,6 +1270,7 @@ defmodule FermixWebWeb.SetupLive.Components do
         :if={@plugin_summary.available}
         plugin_summary={@plugin_summary}
         plugin_auth_url={@plugin_auth_url}
+        embed?={@embed?}
       />
 
       <.provider_plugin_group
@@ -1209,13 +1280,18 @@ defmodule FermixWebWeb.SetupLive.Components do
         catalog={group.catalog}
         installing_plugins={@installing_plugins}
         plugin_auth_url={@plugin_auth_url}
+        embed?={@embed?}
       />
 
       <div
         :if={@plugin_summary.available && ungrouped_plugins(@plugin_summary) != []}
         class="mt-5 flex flex-col gap-2"
       >
-        <.plugin_card :for={plugin <- ungrouped_plugins(@plugin_summary)} plugin={plugin} />
+        <.plugin_card
+          :for={plugin <- ungrouped_plugins(@plugin_summary)}
+          plugin={plugin}
+          embed?={@embed?}
+        />
       </div>
 
       <section :if={@plugin_summary.available} class="mt-5">
@@ -2414,6 +2490,7 @@ defmodule FermixWebWeb.SetupLive.Components do
 
   attr :plugin_summary, :map, required: true
   attr :plugin_auth_url, :map, default: nil
+  attr :embed?, :boolean, default: false
 
   defp google_plugin_group(assigns) do
     assigns =
@@ -2447,6 +2524,7 @@ defmodule FermixWebWeb.SetupLive.Components do
           plugin={plugin}
           label={strip_google_prefix(plugin.display_name)}
           auth_preopen?={oauth_client_configured?(@oauth) && plugin.auth_type == :oauth2}
+          embed?={@embed?}
         />
       </div>
     </section>
@@ -2463,6 +2541,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :catalog, :list, default: []
   attr :installing_plugins, :list, default: []
   attr :plugin_auth_url, :map, default: nil
+  attr :embed?, :boolean, default: false
 
   defp provider_plugin_group(assigns) do
     assigns = assign(assigns, :card_count, length(assigns.plugins) + length(assigns.catalog))
@@ -2478,6 +2557,7 @@ defmodule FermixWebWeb.SetupLive.Components do
         plugin={plugin}
         oauth={@oauth}
         auth_preopen?={oauth_client_configured?(@oauth) && plugin.auth_type == :oauth2}
+        embed?={@embed?}
       />
       <.catalog_card
         :for={entry <- @catalog}
@@ -2514,6 +2594,7 @@ defmodule FermixWebWeb.SetupLive.Components do
           :for={plugin <- @plugins}
           plugin={plugin}
           auth_preopen?={oauth_client_configured?(@oauth) && plugin.auth_type == :oauth2}
+          embed?={@embed?}
         />
         <.catalog_card
           :for={entry <- @catalog}
@@ -3070,14 +3151,16 @@ defmodule FermixWebWeb.SetupLive.Components do
   # client Connect/Edit in. Until the client is configured, configuring it is the
   # only action (the plugin can't sign in without it).
   attr :oauth, :map, default: nil
+  attr :embed?, :boolean, default: false
 
   defp plugin_card(assigns) do
     assigns =
-      assign(
-        assigns,
+      assigns
+      |> assign(
         :oauth_unset?,
         assigns.oauth != nil and not oauth_client_configured?(assigns.oauth)
       )
+      |> then(&assign(&1, :signin_action?, plugin_signin_action?(&1)))
 
     ~H"""
     <section
@@ -3228,9 +3311,21 @@ defmodule FermixWebWeb.SetupLive.Components do
         >
           <.icon name="hero-pencil-square" class="size-3.5" /> Edit
         </button>
+        <.browser_signin_caption :if={@signin_action?} embed?={@embed?} class="basis-full text-right" />
       </div>
     </section>
     """
+  end
+
+  # The card actions that hand sign-in to a browser: the oauth2 Sign in /
+  # Reconnect button, or Enable when the configured OAuth client lets it
+  # pre-open the flow. API-key connects and modal-only actions stay silent.
+  defp plugin_signin_action?(%{oauth_unset?: true}), do: false
+
+  defp plugin_signin_action?(%{plugin: plugin, auth_preopen?: auth_preopen?}) do
+    plugin.auth_type == :oauth2 and
+      ((plugin.enabled? and plugin.status != :ready) or
+         (not plugin.enabled? and auth_preopen?))
   end
 
   # A not-yet-installed catalog entry (§6): index branding, Available/Installing/
@@ -3979,6 +4074,17 @@ defmodule FermixWebWeb.SetupLive.Components do
       base <> " bg-primary/10 ring-1 ring-primary/30"
     else
       base <> " hover:bg-base-200"
+    end
+  end
+
+  # The embed rail row: label-only, native list density, tinted only by state.
+  defp embed_nav_class(tab_id, active_tab) do
+    base = "flex h-[30px] w-full items-center gap-1.5 rounded-md px-2.5 text-left text-[13px]"
+
+    if tab_id == active_tab do
+      base <> " bg-primary/12 font-medium text-primary"
+    else
+      base <> " text-base-content/70 hover:bg-base-content/6"
     end
   end
 

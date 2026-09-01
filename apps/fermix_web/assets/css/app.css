@@ -102,4 +102,37 @@
 /* Make LiveView wrapper divs transparent for layout */
 [data-phx-session], [data-phx-teleported-src] { display: contents }
 
+/* Embedded setup (the macOS app's in-app presentation, `?embed=1`): the pane
+   must read native — SF system type, and no visible scrollbars inside the
+   WKWebView (it honors both rules). */
+[data-embed] {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", ui-sans-serif, system-ui,
+    sans-serif;
+}
+
+[data-embed] ::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+/* Embed density: every form control drops to daisyUI's -sm size (the values
+   below are daisyUI's own input-sm/select-sm/btn-sm/toggle-sm declarations),
+   so no pane template needs a size class of its own. Controls already sized
+   below -sm keep their explicit size. */
+[data-embed] .input:not(.input-xs),
+[data-embed] .select:not(.select-xs) {
+  --size: calc(var(--size-field, 0.25rem) * 8);
+  font-size: 0.75rem;
+}
+
+[data-embed] .btn:not(.btn-xs) {
+  --fontsize: 0.75rem;
+  --btn-p: 0.75rem;
+  --size: calc(var(--size-field, 0.25rem) * 8);
+}
+
+[data-embed] .toggle:not(.toggle-xs) {
+  --size: calc(var(--size-selector, 0.25rem) * 5);
+}
+
 /* This file is for your main application CSS */
