@@ -112,7 +112,15 @@
 
 /* The root scroller too: root.html.heex stamps data-embed on <html> in embed,
    because the document (not <main>) is what scrolls in the WKWebView, and a
-   descendant selector alone leaves the pane's right-edge scrollbar visible. */
+   descendant selector alone leaves the pane's right-edge scrollbar visible.
+   The standard scrollbar-width property is what current engines honor on the
+   root scroller (verified live: the webkit pseudo-element alone left a 15px
+   root scrollbar); the pseudo-element rules stay for older WebKit. */
+[data-embed],
+[data-embed] * {
+  scrollbar-width: none;
+}
+
 [data-embed]::-webkit-scrollbar,
 [data-embed] ::-webkit-scrollbar {
   width: 0;
