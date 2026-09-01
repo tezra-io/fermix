@@ -69,6 +69,16 @@ defmodule FermixWebWeb.SetupAuthTest do
     assert response(reused, 403) =~ "setup authorization required"
   end
 
+  # The macOS app appends `embed=1` to the minted launch url for its in-app
+  # presentation. The redirect that spends the token must re-state it, or the
+  # LiveView would mount in browser presentation inside the app's web view.
+  test "launch token keeps the embed presentation through the redirect", %{conn: conn} do
+    {:ok, %{token: launch_token}} = AccessToken.mint_launch_token()
+
+    conn = get(conn, ~p"/setup?t=#{launch_token}&embed=1")
+    assert redirected_to(conn) == "/setup?embed=1"
+  end
+
   test "rotating the persistent setup token invalidates existing setup sessions", %{conn: conn} do
     {:ok, %{token: launch_token}} = AccessToken.mint_launch_token()
 

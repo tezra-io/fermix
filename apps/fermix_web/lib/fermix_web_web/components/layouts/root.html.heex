@@ -14,6 +14,15 @@
     </script>
     <script>
       (() => {
+        // Embedded in the macOS app: ignore any stored theme choice and keep
+        // data-theme off, so daisyUI's prefersdark theme follows
+        // prefers-color-scheme — which WKWebView derives from the app's
+        // appearance. The in-page toggle is not rendered in embed, so the pane
+        // can never diverge from the app.
+        if (new URLSearchParams(location.search).has("embed")) {
+          document.documentElement.removeAttribute("data-theme");
+          return;
+        }
         const setTheme = (theme) => {
           if (theme === "system") {
             localStorage.removeItem("phx:theme");
@@ -27,7 +36,7 @@
           setTheme(localStorage.getItem("phx:theme") || "system");
         }
         window.addEventListener("storage", (e) => e.key === "phx:theme" && setTheme(e.newValue || "system"));
-        
+
         window.addEventListener("phx:set-theme", (e) => setTheme(e.target.dataset.phxTheme));
       })();
     </script>

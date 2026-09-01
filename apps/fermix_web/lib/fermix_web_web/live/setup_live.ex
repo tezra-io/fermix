@@ -167,7 +167,7 @@ defmodule FermixWebWeb.SetupLive do
   @impl true
   def mount(params, session, socket) do
     if AccessToken.session_authorized?(setup_authorization(session)) do
-      mount_authorized(socket, requested_tab(params))
+      mount_authorized(socket, requested_tab(params), params["embed"] == "1")
     else
       {:ok, redirect(socket, to: ~p"/")}
     end
@@ -177,12 +177,17 @@ defmodule FermixWebWeb.SetupLive do
   @impl true
   def handle_params(_params, _uri, socket), do: {:noreply, socket}
 
-  defp mount_authorized(socket, requested_tab) do
+  # `embed?` is the macOS app's in-app presentation (`?embed=1` on the minted
+  # session url). It is decided once at mount and held in the socket for the
+  # whole session: patch navigation never re-reads it, and the restart patch
+  # re-states it in the url so the post-restart reload stays native.
+  defp mount_authorized(socket, requested_tab, embed?) do
     report = Wizard.report()
 
     socket =
       socket
       |> assign(:page_title, "Fermix setup")
+      |> assign(:embed?, embed?)
       |> assign(:active_tab, requested_tab || next_action_tab(report))
       |> assign(:saved_flash, nil)
       |> assign(:doctor_result, nil)
@@ -773,7 +778,7 @@ defmodule FermixWebWeb.SetupLive do
       {:noreply,
        socket
        |> assign(:restarting, true)
-       |> push_patch(to: ~p"/setup?#{[tab: socket.assigns.active_tab]}")}
+       |> push_patch(to: ~p"/setup?#{restart_patch_params(socket)}")}
     else
       {:noreply,
        flash_error(
@@ -782,6 +787,14 @@ defmodule FermixWebWeb.SetupLive do
            "In dev, stop and re-run `mix fermix.dev`; an installed service restarts itself from this button."
        )}
     end
+  end
+
+  # The post-restart reload re-mounts from this url, so an embedded session
+  # must carry `embed=1` forward or it would reconnect in browser presentation.
+  defp restart_patch_params(socket) do
+    params = [tab: socket.assigns.active_tab]
+
+    if socket.assigns.embed?, do: params ++ [embed: 1], else: params
   end
 
   @impl true
@@ -960,6 +973,7 @@ defmodule FermixWebWeb.SetupLive do
     ~H"""
     <Components.page
       active_tab={@active_tab}
+      embed?={@embed?}
       channels_form={@channels_form}
       doctor_result={@doctor_result}
       memory_form={@memory_form}
