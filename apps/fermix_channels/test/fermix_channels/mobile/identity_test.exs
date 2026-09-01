@@ -121,6 +121,48 @@ defmodule FermixChannels.Mobile.IdentityTest do
     assert cert_path == paths.tls_cert
   end
 
+  # Admission exists so the supervisor refuses the subtree instead of letting
+  # the listener's init crash the daemon. That only holds if it classifies the
+  # identity the way activation does: every fault ensure/1 refuses must refuse
+  # admission too, or the fault reaches init/1 and crash-loops the node.
+  test "admissible refuses every fault ensure/1 refuses at activation", %{root: root} do
+    {:ok, paths} = Identity.paths(root: root)
+
+    faults = [
+      {"a world-readable cert", fn -> File.chmod!(paths.tls_cert, 0o644) end},
+      {"a world-readable key", fn -> File.chmod!(paths.tls_key, 0o644) end},
+      {"a symlinked cert",
+       fn ->
+         real = paths.tls_cert <> ".real"
+         File.rename!(paths.tls_cert, real)
+         File.ln_s!(real, paths.tls_cert)
+       end},
+      {"a truncated gateway key", fn -> File.write!(paths.gateway_key, "short") end},
+      {"a corrupt cert", fn -> File.write!(paths.tls_cert, "not a certificate\n") end},
+      {"a key that does not match the cert",
+       fn ->
+         other = X509.PrivateKey.new_ec(:secp256r1)
+         File.write!(paths.tls_key, X509.PrivateKey.to_pem(other))
+         File.chmod!(paths.tls_key, 0o600)
+       end}
+    ]
+
+    File.mkdir_p!(root)
+
+    for {label, break} <- faults do
+      FermixTestSupport.SafeRm.rm_rf!(paths.dir)
+      assert {:ok, _identity} = Identity.ensure(root: root)
+      break.()
+
+      ensure_verdict = Identity.ensure(root: root)
+      assert {:error, _reason} = ensure_verdict, "#{label}: ensure/1 was expected to refuse"
+
+      assert {:error, _reason} = Identity.admissible(root: root),
+             "#{label}: ensure/1 refuses it, so admission must refuse it too — " <>
+               "otherwise it reaches the listener's init/1 and crash-loops the daemon"
+    end
+  end
+
   test "ensure recovers a crash-marked partial first-pair transaction", %{root: root} do
     {:ok, paths} = Identity.paths(root: root)
     File.mkdir_p!(paths.dir)

@@ -80,13 +80,17 @@ defmodule FermixChannels.Mobile.Identity do
   @doc """
   Boot-admission classification of the on-disk identity.
 
-  `:ok` when it is usable now (present), creatable later (fully missing — the
-  listener stays dormant until the first pairing generates it), or recoverable
-  by `ensure/1` (an interrupted generation, which `ensure/1` rolls back along
-  with any partial material). An error for the structurally broken states —
-  partial material, unreadable files, an invalid transaction marker — that
-  `ensure/1` and `load/1` refuse at activation, so the supervisor can refuse
-  the subtree instead of letting a child's init crash the daemon.
+  `:ok` when it is usable now (present AND loadable), creatable later (fully
+  missing — the listener stays dormant until the first pairing generates it),
+  or recoverable by `ensure/1` (an interrupted generation, which `ensure/1`
+  rolls back along with any partial material). An error for every state
+  `ensure/1` and `load/1` refuse at activation — partial material, unreadable
+  files, an invalid transaction marker, and any artifact that fails the mode,
+  file-type, PEM, curve or key/cert-pairing checks — so the supervisor can
+  refuse the subtree instead of letting a child's init crash the daemon.
+
+  The present case is classified by the same `load_paths/1` activation runs:
+  a gate that inspects a shallower world than the work is not a gate.
   """
   @spec admissible(keyword()) :: :ok | error()
   def admissible(opts \\ []) when is_list(opts) do
@@ -101,7 +105,22 @@ defmodule FermixChannels.Mobile.Identity do
   defp admissible_state(:clean, paths) do
     case identity_state(paths) do
       {:ok, {:partial, missing}} -> {:error, {:identity_incomplete, missing}}
-      {:ok, _missing_or_present} -> :ok
+      {:ok, :present} -> present_admissible(paths)
+      {:ok, :missing} -> :ok
+      {:error, _reason} = error -> error
+    end
+  end
+
+  # Presence is not admissibility. `ensure_state(:present, ...)` activates the
+  # identity through `load_paths/1`, which also enforces mode, file type, PEM
+  # structure, curve, and the key/cert pairing — so a gate that only lstats the
+  # three files lets a 0644 tls.crt (or a symlink, or a mismatched pair) through
+  # admission and into the listener's `init/1`, where the `{:stop, ...}` takes
+  # the whole daemon down. Admission runs the same read-only load the activation
+  # path runs, so it reaches the same verdict.
+  defp present_admissible(paths) do
+    case load_paths(paths) do
+      {:ok, _identity} -> :ok
       {:error, _reason} = error -> error
     end
   end

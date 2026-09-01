@@ -152,7 +152,7 @@ defmodule FermixCore.Transcription.Local.SidecarTest do
       assert Sidecar.close(state) == :ok
 
       # Dead well before the 10s sleep could end on its own, so the exit came
-      # from close's kill. A signal to a gone group is :esrch.
+      # from close's kill and not from the sidecar finishing on its own.
       assert eventually_dead(state.os_pid, 3_000)
     end
   end
@@ -162,12 +162,24 @@ defmodule FermixCore.Transcription.Local.SidecarTest do
     poll_dead(os_pid, deadline)
   end
 
+  # The probe must OBSERVE liveness, never cause it: probing with
+  # kill_pgid(_, :sigkill) would kill the very group it is asking about, so the
+  # assertion held whether or not close/1 killed anything and the gate could
+  # not fail. `kill -0` is the non-destructive check this suite already uses in
+  # command_host_test.exs.
   defp poll_dead(os_pid, deadline) do
     cond do
-      FermixNif.kill_pgid(os_pid, :sigkill) == {:error, :esrch} -> true
+      not alive?(os_pid) -> true
       System.monotonic_time(:millisecond) >= deadline -> false
       true -> Process.sleep(25) && poll_dead(os_pid, deadline)
     end
+  end
+
+  defp alive?(os_pid) do
+    {_out, status} =
+      System.cmd("kill", ["-0", Integer.to_string(os_pid)], stderr_to_stdout: true)
+
+    status == 0
   end
 
   describe "batch/2" do
