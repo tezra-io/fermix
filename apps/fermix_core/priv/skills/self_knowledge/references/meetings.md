@@ -35,8 +35,9 @@ unconfigured lane refuses with its own reason rather than trying the other one.
   bot Google account. It knocks and waits for admission like any other
   participant, and reports honestly when it is denied, blocked, or asked to sign
   in rather than pretending it got in. Install it from its card on the setup
-  Plugins page: enabling downloads the pinned sidecar (only `macos-aarch64` is
-  pinned — other hosts refuse honestly), and the sidecar then installs the exact
+  Plugins page: enabling downloads the pinned sidecar (Apple-silicon macOS and
+  both Linux architectures are pinned; Intel macOS is not, and an unpinned host
+  refuses honestly), and the sidecar then installs the exact
   Chromium build it was tested against, so there is no browser to prepare by
   hand. One deliberate act remains before the first join: signing the bot
   account in, from the Sign-in button in the card's Configure panel — installed
@@ -52,8 +53,12 @@ unconfigured lane refuses with its own reason rather than trying the other one.
 
 On Meet the notetaker announces itself once in the meeting chat when it is
 admitted, then never speaks again: `announce` is on by default,
-`announce_message` replaces the default line, and `bot_name` is the name it
-appears under. On Zoom there is no chat announcement — Zoom's own recording/RTMS
+`announce_message` replaces the default line, and `bot_name` names the notetaker
+inside that line. In the participant list a signed-in bot shows the Google
+account's own profile name — Meet offers no name field to an account that is
+already signed in — so that account should be named for what it is. It joins
+with its camera off and its microphone muted, and never turns either on. On Zoom
+there is no chat announcement — Zoom's own recording/RTMS
 indicator is what participants see. Either way the host can remove it at any
 moment, which ends the capture. Audio is discarded unless `retain_audio` is set;
 the text transcript is what is kept.

@@ -678,7 +678,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       # Meeting notetaker: enable + a Configure button that opens the config panel.
       assert meetings =~ "Meeting Notetaker"
       assert meetings =~ "Joins Google Meet or Zoom on your ask"
-      assert meetings =~ ~s(href="https://fermix.ai/docs/meetings/")
+      assert meetings =~ ~s(href="https://fermix.ai/docs/meeting-notetaker/")
       assert meetings =~ ~s(phx-click="enable_meetings")
       assert meetings =~ ~s(phx-click="open_meetings_config")
       refute meetings =~ ~s(phx-value-tab="meetings")
