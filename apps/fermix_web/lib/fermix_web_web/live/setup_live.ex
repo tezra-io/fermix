@@ -2020,7 +2020,7 @@ defmodule FermixWebWeb.SetupLive do
       tooltip:
         "Fermix joins a Google Meet as a named bot — or a Zoom meeting over RTMS — transcribes " <>
           "it, and delivers the notes. Operator-only, off by default.",
-      docs_url: "https://fermix.ai/docs/meetings/",
+      docs_url: "https://fermix.ai/docs/meeting-notetaker/",
       enabled?: enabled?,
       status: status,
       version: nil,
