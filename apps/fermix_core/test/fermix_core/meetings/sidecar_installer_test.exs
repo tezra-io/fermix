@@ -53,7 +53,7 @@ defmodule FermixCore.Meetings.SidecarInstallerTest do
   end
 
   test "the shipped build pins a release tag" do
-    assert SidecarInstaller.pinned_tag() == "v0.3.0"
+    assert SidecarInstaller.pinned_tag() == "v0.3.3"
   end
 
   describe "install/1 with no pinned release" do
