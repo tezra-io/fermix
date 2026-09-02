@@ -13,8 +13,8 @@ defmodule FermixCore.Meetings.SidecarInstaller do
   library half carries its own `checksum-compux.exs` — meetbot is a Node
   artifact with no library to own the pin, so the release choreography ends in
   a PR against `@releases` here (tag → notarized artifacts → checksum PR →
-  pin). `v0.3.0` is pinned for `macos-aarch64`; a target with no pin refuses
-  loud rather than downloading something unpinned.
+  pin). `v0.3.3` is pinned for `macos-aarch64` and both Linux targets; a target
+  with no pin refuses loud rather than downloading something unpinned.
 
   Resolution prefers a `dev_local` build (the sidecar-author loop) so a locally
   built binary can be driven without a release. `binary_path/0` and
@@ -32,16 +32,20 @@ defmodule FermixCore.Meetings.SidecarInstaller do
   @plugin_name "meetbot_sidecar"
   @repo "tezra-io/fermix-meetbot"
 
-  # tag => %{target => sha256}. Pinned to the released tag per target (v0.3.0
-  # ships macos-aarch64; other targets land as CI builds them). A pin is never
-  # hand-written — it lands with the release choreography. An unpinned target
-  # refuses via `@no_pinned_release_message`.
+  # tag => %{target => sha256}. Pinned to the released tag per target, taken
+  # from the release's own SHA256SUMS.txt and verified against the downloaded
+  # artifacts. A pin is never hand-written — it lands with the release
+  # choreography. An unpinned target refuses via `@no_pinned_release_message`;
+  # macos-x86_64 has none because GitHub retired its Intel macOS runners, so
+  # the release builds no such artifact.
   @releases %{
-    "v0.3.0" => %{
-      "macos-aarch64" => "f5f8688617f69f7bfaf137649e450f7ab4c3a185544143c6c383df2a97c34a24"
+    "v0.3.3" => %{
+      "macos-aarch64" => "cb6885cab31fbe65ae885dbd2e14c9f8e8c158514e941937885d0748fb768da9",
+      "linux-aarch64" => "7d1af59423cebb7d2bdd57e84d431073e1de971075974051d9bb431552126daf",
+      "linux-x86_64" => "773aeac2f58cd321245ab3e38c69e8093539a4f3705f3d7c237d1f5316c9292c"
     }
   }
-  @pinned_tag "v0.3.0"
+  @pinned_tag "v0.3.3"
 
   # A sibling of `bin/` and `profile/` recording that an interactive sign-in
   # succeeded. It lives OUTSIDE the profile because the daemon never reads
