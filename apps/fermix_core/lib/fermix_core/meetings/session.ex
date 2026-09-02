@@ -11,14 +11,20 @@ defmodule FermixCore.Meetings.Session do
   The state machine is deliberately platform-blind. Both capture lanes speak the
   `Meetings.AudioSource` message set, so nothing here branches on Meet vs Zoom
   except the two places where the lanes genuinely differ: which source module
-  starts, and whether the launch step has a deadline of its own.
+  starts, and whether the launch step has a deadline of its own. Lane
+  properties the alone timer needs — the bot's own roster seat, whether the
+  roster is presence or speech-recency — come through the source behaviour.
 
   ## Two bounds worth naming
 
   `@max_duration_ms` is a standing watchdog armed once, when capture starts —
   a meeting nobody ends still ends. The alone timer is the other half: a
   notetaker left talking to itself after everyone hangs up would otherwise
-  transcribe an empty room for four hours.
+  transcribe an empty room for four hours. It has two tiers: a room nobody has
+  joined yet gets ten minutes for people to arrive; a room others have left
+  gets one minute, enough for a dropped host to rejoin — on a lane whose roster
+  is presence. The Zoom roster is speech-recency, so there an empty roster is a
+  quiet room and only the long tier applies.
 
   ## Ending a meeting drains the transcript, it does not cut it
 
@@ -68,7 +74,15 @@ defmodule FermixCore.Meetings.Session do
   # shape of the feature, not a posture an operator tunes.
   @max_duration_ms 240 * 60_000
   @knock_timeout_ms 3 * 60_000
-  @alone_timeout_ms 10 * 60_000
+  # The alone grace has two tiers, picked when the room empties (`alone_grace/1`):
+  # admitted into a room nobody has joined yet, the bot waits for people to
+  # arrive; once others have been present and the roster falls back to the
+  # lane's own seat, the meeting is over and the notes are owed promptly — long
+  # enough to ride out a host's drop-and-rejoin (Meet reports the roster every
+  # 1.5 s; the Zoom roster ages out 30–45 s after a participant's last audio),
+  # not so long that "notes when the meeting ends" means ten minutes later.
+  @no_one_joined_ms 10 * 60_000
+  @everyone_left_ms 60_000
   @leave_grace_ms 10_000
   @rtms_start_timeout_ms 600_000
   @min_segments_for_summary 1
@@ -337,14 +351,22 @@ defmodule FermixCore.Meetings.Session do
     defaults = %{
       join_ms: Timeouts.meetbot_join(),
       knock_ms: @knock_timeout_ms,
-      alone_ms: @alone_timeout_ms,
+      no_one_joined_ms: @no_one_joined_ms,
+      everyone_left_ms: @everyone_left_ms,
       leave_grace_ms: @leave_grace_ms,
       launch_ms: @rtms_start_timeout_ms,
       max_duration_ms: @max_duration_ms,
       summarize_ms: Timeouts.meeting_summarize()
     }
 
-    Map.merge(defaults, Map.new(Keyword.get(opts, :timers, %{})))
+    overrides = Map.new(Keyword.get(opts, :timers, %{}))
+    unknown = Map.keys(overrides) -- Map.keys(defaults)
+
+    if unknown != [] do
+      raise ArgumentError, "unknown meeting timer override(s): #{inspect(unknown)}"
+    end
+
+    Map.merge(defaults, overrides)
   end
 
   # `"meeting_<id>_<YYYYMMDD_HHMMSS>"` (C2 §11.2). The meeting id already
@@ -770,6 +792,10 @@ defmodule FermixCore.Meetings.Session do
     end_capture(state, :max_duration, :max_duration)
   end
 
+  # A cancelled timer's message can already be in the mailbox: no timer armed
+  # means the room refilled, and this expiry is stale.
+  defp on_capture_timeout(:alone, %{alone_timer: nil} = state), do: {:noreply, state}
+
   defp on_capture_timeout(:alone, %{status: :capturing} = state) do
     end_capture(state, :alone_timeout, :alone_timeout)
   end
@@ -834,13 +860,35 @@ defmodule FermixCore.Meetings.Session do
   defp update_alone_timer(state, _participant_count), do: state
 
   # Already counting down: a fresh snapshot of the same empty room must not
-  # restart the clock.
+  # restart the clock. The tier is fixed at arm time and cannot go stale: it
+  # flips only when the peak rises, the peak rises only on a snapshot that is
+  # not empty, and that snapshot cancels this timer before the next arm.
   defp arm_alone_timer(%{alone_timer: nil} = state) do
-    ref = Process.send_after(self(), {:capture_timeout, :alone}, state.timers.alone_ms)
-    %{state | alone_timer: ref}
+    {tier, ms} = alone_grace(state)
+
+    Logger.info(
+      "meetings: #{state.id} room is empty (#{tier}: roster #{map_size(state.roster)}, " <>
+        "peak #{state.participants_peak}, own seats #{self_count(state)}) — " <>
+        "leaving in #{div(ms, 1_000)}s unless someone joins"
+    )
+
+    %{state | alone_timer: Process.send_after(self(), {:capture_timeout, :alone}, ms)}
   end
 
   defp arm_alone_timer(state), do: state
+
+  # `participants_peak` counts every seat the lane ever reported — on Meet the
+  # bot's own scraped row included, on Zoom none of ours — so the same seat
+  # discount `update_alone_timer/2` applies to the live count says whether
+  # anyone else was ever here. The short tier needs a roster that means
+  # presence: a speech-recency roster empties whenever everyone is muted.
+  defp alone_grace(state) do
+    if presence_roster?(state) and state.participants_peak > self_count(state) do
+      {:everyone_left, state.timers.everyone_left_ms}
+    else
+      {:no_one_joined, state.timers.no_one_joined_ms}
+    end
+  end
 
   defp rearm_watchdog(state) do
     arm_phase_timer(state, :summarizing, state.timers.summarize_ms)
@@ -996,6 +1044,9 @@ defmodule FermixCore.Meetings.Session do
 
   defp self_count(%{source: %{module: module}}), do: module.self_count()
   defp self_count(%{deps: %{source_module: module}}), do: module.self_count()
+
+  defp presence_roster?(%{source: %{module: module}}), do: module.presence_roster?()
+  defp presence_roster?(%{deps: %{source_module: module}}), do: module.presence_roster?()
 
   defp leave_source(%{source: nil}), do: :ok
   defp leave_source(%{source: %{module: module, pid: pid}}), do: module.leave(pid)
@@ -1244,8 +1295,11 @@ defmodule FermixCore.Meetings.Session do
   defp join_failure_notice(:denied),
     do: "⚠️ I couldn't join the meeting — the host denied the notetaker's request to join."
 
-  defp join_failure_notice(:bot_blocked),
-    do: "⚠️ I couldn't join the meeting — Google blocked the notetaker account for this call."
+  defp join_failure_notice(:bot_blocked) do
+    "⚠️ I couldn't join the meeting — Google Meet kept the notetaker's account out of this call " <>
+      "(not invited, or the meeting isn't open yet). Start the meeting or invite the notetaker's " <>
+      "Google account to the event, then ask me again."
+  end
 
   defp join_failure_notice(:knock_timeout),
     do: "⚠️ I couldn't join the meeting — no one admitted the notetaker in time."

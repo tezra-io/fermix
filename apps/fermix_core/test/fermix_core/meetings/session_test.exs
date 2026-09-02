@@ -47,6 +47,9 @@ defmodule FermixCore.Meetings.SessionTest.StubSource do
   @impl FermixCore.Meetings.AudioSource
   def self_count, do: 1
 
+  @impl true
+  def presence_roster?, do: true
+
   @impl GenServer
   def init({session, args}) do
     Observer.notify({:source_started, self(), args})
@@ -86,6 +89,10 @@ defmodule FermixCore.Meetings.SessionTest.SeatlessSource do
 
   @impl FermixCore.Meetings.AudioSource
   def self_count, do: 0
+
+  # The RTMS shape: no seat of its own, and a roster that is speech-recency.
+  @impl true
+  def presence_roster?, do: false
 end
 
 defmodule FermixCore.Meetings.SessionTest.RefusingSource do
@@ -104,6 +111,9 @@ defmodule FermixCore.Meetings.SessionTest.RefusingSource do
 
   @impl FermixCore.Meetings.AudioSource
   def self_count, do: 1
+
+  @impl true
+  def presence_roster?, do: true
 end
 
 defmodule FermixCore.Meetings.SessionTest.StubStream do
@@ -566,12 +576,13 @@ defmodule FermixCore.Meetings.SessionTest do
       assert line["t0_ms"] == 0
     end
 
-    test "the alone timer waits for the room to empty, and stands down when it refills", ctx do
-      meeting = admitted!(ctx, timers: %{alone_ms: 60})
+    test "everyone leaving starts the short grace, and a return cancels it", ctx do
+      meeting = admitted!(ctx, timers: %{no_one_joined_ms: 5_000, everyone_left_ms: 60})
 
-      # Just the notetaker: the countdown starts.
-      send(meeting.pid, {:meeting_roster, [participant("bot", "Fermix Notetaker")]})
-      # Someone joined before it fired: it is cancelled, not merely restarted.
+      send(meeting.pid, {:meeting_roster, [participant("bot", "Bot"), participant("p1", "Ada")]})
+      # Ada left: the short grace starts.
+      send(meeting.pid, {:meeting_roster, [participant("bot", "Bot")]})
+      # She came back before it fired: cancelled, not merely restarted.
       send(meeting.pid, {:meeting_roster, [participant("bot", "Bot"), participant("p1", "Ada")]})
       assert Session.status(meeting.pid) == :capturing
       Process.sleep(120)
@@ -582,16 +593,66 @@ defmodule FermixCore.Meetings.SessionTest do
       assert_row_status(ctx, meeting.id, "alone_timeout", 2_000)
     end
 
-    test "a lane with no roster seat of its own counts humans directly", ctx do
-      meeting = admitted!(ctx, source_module: SeatlessSource, timers: %{alone_ms: 60})
+    test "a room nobody has joined yet is not ended by the short grace", ctx do
+      meeting = admitted!(ctx, timers: %{no_one_joined_ms: 5_000, everyone_left_ms: 60})
 
-      # One participant is one human here, so nothing is armed.
-      send(meeting.pid, {:meeting_roster, [participant("p1", "Ada")]})
+      send(meeting.pid, {:meeting_roster, [participant("bot", "Bot")]})
       Process.sleep(120)
       assert Session.status(meeting.pid) == :capturing
+    end
+
+    test "the long grace ends a meeting nobody ever joined", ctx do
+      meeting = admitted!(ctx, timers: %{no_one_joined_ms: 60, everyone_left_ms: 5_000})
+
+      send(meeting.pid, {:meeting_roster, [participant("bot", "Bot")]})
+      assert_receive {:source_leave, _source}, 2_000
+      assert_row_status(ctx, meeting.id, "alone_timeout", 2_000)
+    end
+
+    test "a speech-recency roster never gets the short grace: a muted room is not an empty one",
+         ctx do
+      meeting =
+        admitted!(ctx,
+          source_module: SeatlessSource,
+          timers: %{no_one_joined_ms: 5_000, everyone_left_ms: 60}
+        )
+
+      # Ada spoke, then everyone went quiet: on this lane the roster empties
+      # after 30 s of silence, which must not end the meeting a minute later.
+      send(meeting.pid, {:meeting_roster, [participant("p1", "Ada")]})
+      send(meeting.pid, {:meeting_roster, []})
+      Process.sleep(120)
+      assert Session.status(meeting.pid) == :capturing
+    end
+
+    test "a lane with no roster seat of its own still ends on the long grace", ctx do
+      meeting =
+        admitted!(ctx,
+          source_module: SeatlessSource,
+          timers: %{no_one_joined_ms: 60, everyone_left_ms: 5_000}
+        )
 
       send(meeting.pid, {:meeting_roster, []})
       assert_row_status(ctx, meeting.id, "alone_timeout", 2_000)
+    end
+
+    test "an unknown timer override is refused rather than silently ignored", ctx do
+      # `alone_ms` was the old single-tier key: a stale injector must fail loud,
+      # not run the ten-minute default and pass.
+      Process.flag(:trap_exit, true)
+      {:ok, meeting} = Store.insert(attrs("meet"), server: ctx.repo)
+      opts = Keyword.merge(defaults(ctx, meeting, "meet"), timers: %{alone_ms: 60})
+
+      assert {:error, {%ArgumentError{message: message}, _stack}} = Session.start_link(opts)
+      assert message =~ "unknown meeting timer override"
+    end
+
+    test "a stale alone expiry with no timer armed is ignored", ctx do
+      meeting = admitted!(ctx)
+
+      send(meeting.pid, {:meeting_roster, [participant("bot", "Bot"), participant("p1", "Ada")]})
+      send(meeting.pid, {:capture_timeout, :alone})
+      assert Session.status(meeting.pid) == :capturing
     end
 
     test "the standing watchdog ends a meeting nobody closed", ctx do
