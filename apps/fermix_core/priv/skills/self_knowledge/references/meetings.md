@@ -66,8 +66,13 @@ and speaker-labelled), `meta.json`, and `audio.raw` only when `retain_audio` is
 on. That is inside the workspace floor, so the file tools can read the notes back
 afterwards.
 
-The meeting ends when the host removes the notetaker, everyone else leaves, the
-owner asks it to leave, or the long-run watchdog fires. A summary is then written
+The meeting ends when the host removes the notetaker, when the owner asks it to
+leave, or when the long-run watchdog fires. On Google Meet it also leaves about
+a minute after the last other participant does (long enough for a dropped host
+to rejoin); a notetaker admitted to a room nobody else has entered waits ten
+minutes for people to arrive before giving up. On Zoom, where presence is only
+known from who is transmitting, it leaves after ten minutes with nobody
+transmitting. A summary is then written
 and delivered to the conversation the join came from, or to the owner's inbox
 when that origin has no channel to send into. A capture cut short still delivers
 what it heard, labelled as partial rather than presented as the whole meeting. If

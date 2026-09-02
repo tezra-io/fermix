@@ -133,6 +133,11 @@ defmodule FermixCore.Meetings.RtmsSource do
   @spec self_count() :: non_neg_integer()
   def self_count, do: 0
 
+  @doc "The RTMS roster is speech-recency (`Rtms.Mixer` TTL), not presence."
+  @impl true
+  @spec presence_roster?() :: boolean()
+  def presence_roster?, do: false
+
   # --- GenServer ---
 
   @impl GenServer

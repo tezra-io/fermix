@@ -48,4 +48,13 @@ defmodule FermixCore.Meetings.AudioSource do
   its own roster (1), the RTMS app does not (0).
   """
   @callback self_count() :: non_neg_integer()
+
+  @doc """
+  Whether an empty roster means the room is empty. The Meet sidecar scrapes
+  presence, so a roster that falls back to the bot's own seat is everyone having
+  left; the RTMS roster is speech-recency (a participant ages out after 30 s of
+  silence), so on Zoom an empty roster means nobody transmitting — a muted room
+  — and the Session must not read it as the meeting being over.
+  """
+  @callback presence_roster?() :: boolean()
 end

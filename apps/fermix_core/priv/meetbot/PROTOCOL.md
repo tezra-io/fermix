@@ -104,7 +104,9 @@ downloads it, so both halves ship together.
 - `ping` is sent only after 30 s with no inbound frame of any type. If no frame
   arrives within 15 s of a `ping`, the sidecar is considered wedged and is torn
   down — a hung Chromium holds the port open indefinitely, so silence is the
-  only detectable symptom.
+  only detectable symptom. The sidecar therefore answers `ping` ahead of any
+  meeting work in flight: a join can wait in the lobby for minutes, and the
+  announcement after admission is bounded at roughly 40 s.
 
 ## Lifecycle
 
@@ -113,9 +115,13 @@ downloads it, so both halves ship together.
    teardown and a typed error; the sidecar is never left running.
 2. **Join.** The daemon sends `join`. The sidecar reports `state` transitions
    and exactly one `join_result`.
-3. **Capture.** On `admitted` the sidecar posts the announcement (when
-   `announce` is true), emits a `roster` snapshot, and streams audio frames plus
-   `active_speaker` / `roster` updates.
+3. **Capture.** On `admitted` the sidecar attaches the audio tap and emits a
+   `roster` snapshot, then posts the announcement (when `announce` is true) —
+   the audio is the product, the announcement a courtesy, so a slow chat never
+   costs the opening seconds. `chat_posted` is sent only once the message has
+   demonstrably left the composer; a failure is one `log` frame naming the
+   step and a bounded digest of the page. Audio frames plus `active_speaker` /
+   `roster` updates stream for the rest of the meeting.
 4. **Leave.** On `leave` the sidecar leaves and reports
    `meeting_ended`/`reason:"left"`, then exits 0.
 5. **stdin EOF.** The sidecar MUST leave the meeting (best-effort) and exit

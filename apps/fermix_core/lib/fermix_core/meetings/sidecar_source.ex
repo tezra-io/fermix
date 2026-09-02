@@ -86,6 +86,11 @@ defmodule FermixCore.Meetings.SidecarSource do
   @spec self_count() :: non_neg_integer()
   def self_count, do: 1
 
+  @doc "The sidecar scrapes who is in the call, so an empty roster is an empty room."
+  @impl true
+  @spec presence_roster?() :: boolean()
+  def presence_roster?, do: true
+
   @impl GenServer
   def init({session, args, binary_path}) do
     timers = timers(args)
