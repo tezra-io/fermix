@@ -22,6 +22,14 @@ defmodule FermixCore.ComputerHistory.Wire do
   `"kind"` → `:type`, `"seq"` → `:source_seq`, and `app.bundle_id` → `:bundle_id`.
   `scan_flag` is deliberately absent from the wire: `Ingest` computes it from the
   injection scan, so the sidecar can never assert a false verdict.
+
+  Timestamps are **range-checked here**: `ts`, and `gap_from_ts`/`gap_to_ts` when
+  present, must be epoch milliseconds between 2000-01-01 and 2100-01-01; anything
+  else is `{:error, {:invalid_field, name}}`. A far-future `ts` is never swept by
+  the time-based retention (it stays newer than every cutoff) and every render of
+  it would be a date decades away, so it is refused at the boundary rather than
+  stored — the `Capturer` turns the refusal into an `observer.gap`, which is the
+  honest record of an unusable frame.
   """
 
   @type frame :: {:event, map()} | {:ack, map()} | {:error, term()}
@@ -52,6 +60,15 @@ defmodule FermixCore.ComputerHistory.Wire do
     "char_len" => :char_len
   }
 
+  # Epoch-ms sanity window: 2000-01-01 .. 2100-01-01. Retention sweeps by `ts`,
+  # so a far-future stamp would never expire, and the summarizer would render it
+  # as a date decades out on every batch.
+  @min_ts 946_684_800_000
+  @max_ts 4_102_444_800_000
+
+  # The gap bounds that carry a time and must therefore be sane.
+  @bounded_ts_fields ["gap_from_ts", "gap_to_ts"]
+
   @doc """
   Decode one inbound NDJSON line into a typed frame. Returns `{:error, reason}`
   for malformed JSON, an unknown/missing `type`, or an event missing a required
@@ -71,11 +88,35 @@ defmodule FermixCore.ComputerHistory.Wire do
   defp decode_event(frame) do
     with {:ok, boot_id} <- required_string(frame, "boot_id"),
          {:ok, source_seq} <- required_int(frame, "seq"),
-         {:ok, ts} <- required_int(frame, "ts"),
-         {:ok, type} <- required_string(frame, "kind") do
+         {:ok, ts} <- required_ts(frame, "ts"),
+         {:ok, type} <- required_string(frame, "kind"),
+         :ok <- bounded_ts_fields(frame) do
       {:event, build_event(frame, boot_id, source_seq, ts, type)}
     end
   end
+
+  defp required_ts(frame, key) do
+    with {:ok, ts} <- required_int(frame, key) do
+      if in_epoch_window?(ts), do: {:ok, ts}, else: {:error, {:invalid_field, key}}
+    end
+  end
+
+  # A non-integer bound is dropped by `put_integer_fields`, as before; an integer
+  # one has to be sane, or the event claims a gap over a century.
+  defp bounded_ts_fields(frame) do
+    Enum.reduce_while(@bounded_ts_fields, :ok, fn key, :ok ->
+      case Map.get(frame, key) do
+        value when is_integer(value) -> bound_result(key, value)
+        _absent_or_non_int -> {:cont, :ok}
+      end
+    end)
+  end
+
+  defp bound_result(key, value) do
+    if in_epoch_window?(value), do: {:cont, :ok}, else: {:halt, {:error, {:invalid_field, key}}}
+  end
+
+  defp in_epoch_window?(ts), do: ts >= @min_ts and ts <= @max_ts
 
   defp build_event(frame, boot_id, source_seq, ts, type) do
     base = %{
@@ -93,8 +134,10 @@ defmodule FermixCore.ComputerHistory.Wire do
   end
 
   # The app object is optional (system/gap events have no app); a missing or
-  # malformed `app` yields a nil bundle_id, which Ingest treats as a
-  # non-app-scoped event (passes the app allowlist — §13.5 / inv. 11).
+  # malformed `app` yields a nil bundle_id. Ingest lets a nil bundle_id past the
+  # app allowlist ONLY for the metadata-only kinds (`observer.gap`, `system.*`,
+  # `session.*`, `user.switched`); an app-less content or app kind is dropped
+  # there (§13.5 / inv. 11) — the decoder never has to judge it.
   defp nested_bundle_id(%{"app" => %{"bundle_id" => bundle}}) when is_binary(bundle), do: bundle
   defp nested_bundle_id(_frame), do: nil
 

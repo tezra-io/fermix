@@ -16,6 +16,15 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
   # the summarizer's high-water cursor, and `UNIQUE(boot_id, source_seq)` makes
   # a re-delivered event idempotent. `ts` (epoch ms) is for windowed retention
   # and range queries only, never the processing cursor.
+  #
+  # Memories ACCRETE: one memory per summarized batch, never superseded at write
+  # time. Because the cursor is the id high-water mark, every event is summarized
+  # exactly once, so a new memory can never cover an earlier memory's source
+  # events — a ts-intersection supersede could only destroy information (a
+  # late-flushed event whose `ts` reaches back, or a shared boundary millisecond,
+  # hid a whole earlier memory). The `superseded_at` column and every
+  # `WHERE superseded_at IS NULL` filter stay: the schema is additive and a
+  # future EXPLICIT roll-up (many memories into one) is the case that needs them.
 
   require Logger
 
@@ -327,6 +336,38 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
   defp event_row(row), do: Map.new(Enum.zip(@event_read_columns, row))
 
   @doc """
+  Summarizer lag: `{count, oldest_ts | nil}` over the spool events the cursor has
+  not reached (`id > last_summarized_id`). The cursor is read here, in the same
+  call, so the two halves can never be read a batch apart; an absent state row
+  reads as cursor 0 (nothing summarized yet). Surfaced by `/history status` —
+  a backlog is otherwise invisible until the spool starts expiring under it.
+  """
+  @spec unsummarized_stats(term()) ::
+          {:ok, {non_neg_integer(), integer() | nil}} | {:error, term()}
+  def unsummarized_stats(conn) do
+    with {:ok, cursor} <- summarized_cursor(conn),
+         {:ok, [[count, oldest_ts]]} <-
+           query_all(
+             conn,
+             "SELECT count(*), min(ts) FROM computer_history_events WHERE id > ?",
+             [cursor]
+           ) do
+      {:ok, {count, oldest_ts}}
+    end
+  end
+
+  defp summarized_cursor(conn) do
+    sql = "SELECT last_summarized_id FROM computer_history_state WHERE id = 1"
+
+    with {:ok, rows} <- query_all(conn, sql, []) do
+      case rows do
+        [[cursor]] when is_integer(cursor) -> {:ok, cursor}
+        _absent -> {:ok, 0}
+      end
+    end
+  end
+
+  @doc """
   Purge a `[from_ts, to_ts]` window (epoch ms), atomically: delete spool events
   in the window, delete activity memories whose provenance window **intersects**
   it, and advance the purge watermark to `to_ts` (§12). The watermark blocks an
@@ -394,17 +435,21 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
   end
 
   @doc """
-  The most recent (non-superseded) activity memories, newest first — the
-  Recent Activity section source (§11.1). Reads only derived summaries, never
-  the raw spool.
+  The most recent (non-superseded) activity memories whose provenance ends at or
+  after `since_ts` (epoch ms), newest first — the Recent Activity section source
+  (§11.1). The horizon is the caller's: an undated summary from an arbitrarily
+  old window is not "recent activity". Reads only derived summaries, never the
+  raw spool.
   """
-  @spec recent_memories(term(), pos_integer()) :: {:ok, [map()]} | {:error, term()}
-  def recent_memories(conn, limit) when is_integer(limit) and limit > 0 do
+  @spec recent_memories(term(), integer(), pos_integer()) :: {:ok, [map()]} | {:error, term()}
+  def recent_memories(conn, since_ts, limit)
+      when is_integer(since_ts) and is_integer(limit) and limit > 0 do
     sql =
       "SELECT #{@memory_read_select} FROM computer_history_memories " <>
-        "WHERE superseded_at IS NULL ORDER BY provenance_to_ts DESC, id DESC LIMIT ?"
+        "WHERE superseded_at IS NULL AND provenance_to_ts >= ? " <>
+        "ORDER BY provenance_to_ts DESC, id DESC LIMIT ?"
 
-    with {:ok, rows} <- query_all(conn, sql, [limit]) do
+    with {:ok, rows} <- query_all(conn, sql, [since_ts, limit]) do
       {:ok, Enum.map(rows, &memory_row/1)}
     end
   end
@@ -425,6 +470,24 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
 
     with {:ok, rows} <- query_all(conn, sql, [to_ts, from_ts, limit]) do
       {:ok, Enum.map(rows, &memory_row/1)}
+    end
+  end
+
+  @doc """
+  How many non-superseded memories intersect `[from_ts, to_ts]` — the honest
+  denominator behind `memories_in_window/4`'s limited page, so recall can say
+  when older entries were omitted instead of truncating silently (§11.2).
+  """
+  @spec count_memories_in_window(term(), integer(), integer()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def count_memories_in_window(conn, from_ts, to_ts)
+      when is_integer(from_ts) and is_integer(to_ts) do
+    sql =
+      "SELECT count(*) FROM computer_history_memories " <>
+        "WHERE superseded_at IS NULL AND provenance_from_ts <= ? AND provenance_to_ts >= ?"
+
+    with {:ok, [[count]]} <- query_all(conn, sql, [to_ts, from_ts]) do
+      {:ok, count}
     end
   end
 
@@ -578,31 +641,31 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
   end
 
   @doc """
-  Write a cycle's result atomically (§10, §12): if a memory was produced and its
+  Write a batch's result atomically (§10, §12): if a memory was produced and its
   provenance does not intersect a purge issued during the cycle (the watermark
-  guard), supersede overlapping memories and insert it; then advance the
-  `last_summarized_id` cursor and return the summarizer to `idle`. A `nil`
-  memory (validation failed / empty window) only advances the cursor.
+  guard), insert it beside the existing memories; then advance the
+  `last_summarized_id` cursor to the last summarized event. A `nil` memory
+  (empty/abstained output) only advances the cursor. Nothing is superseded here
+  — see the module comment.
   """
   @spec write_cycle_result(
           term(),
           non_neg_integer(),
           map() | nil,
-          integer(),
           DateTime.t(),
           String.t()
         ) ::
           {:ok, %{memory_written: boolean()}} | {:error, term()}
-  def write_cycle_result(conn, last_id, memory, superseded_at_ms, %DateTime{} = now, last_status) do
+  def write_cycle_result(conn, last_id, memory, %DateTime{} = now, last_status) do
     in_transaction(conn, fn ->
-      write_cycle_result_in_tx(conn, last_id, memory, superseded_at_ms, now, last_status)
+      write_cycle_result_in_tx(conn, last_id, memory, now, last_status)
     end)
   end
 
-  defp write_cycle_result_in_tx(conn, last_id, memory, superseded_at_ms, now, last_status) do
+  defp write_cycle_result_in_tx(conn, last_id, memory, now, last_status) do
     with {:ok, _row} <- ensure_state(conn),
          {:ok, watermark} <- read_watermark(conn),
-         {:ok, written?} <- maybe_write_memory(conn, memory, watermark, superseded_at_ms),
+         {:ok, written?} <- maybe_write_memory(conn, memory, watermark),
          :ok <- advance_cursor(conn, last_id, now, last_status) do
       {:ok, %{memory_written: written?}}
     end
@@ -623,16 +686,13 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
   end
 
   # No memory, or its window intersects an issued purge ⇒ do not (re-)materialize.
-  defp maybe_write_memory(_conn, nil, _watermark, _superseded_at), do: {:ok, false}
+  defp maybe_write_memory(_conn, nil, _watermark), do: {:ok, false}
 
-  defp maybe_write_memory(conn, %{} = memory, watermark, superseded_at) do
+  defp maybe_write_memory(conn, %{} = memory, watermark) do
     if purged?(memory, watermark) do
       {:ok, false}
     else
-      with :ok <- supersede_overlapping(conn, memory, superseded_at),
-           {:ok, _id} <- insert_memory(conn, memory) do
-        {:ok, true}
-      end
+      with {:ok, _id} <- insert_memory(conn, memory), do: {:ok, true}
     end
   end
 
@@ -642,15 +702,6 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
     do: from_ts <= watermark
 
   defp purged?(_memory, _watermark), do: false
-
-  defp supersede_overlapping(conn, %{provenance_from_ts: from_ts, provenance_to_ts: to_ts}, at_ms) do
-    execute(
-      conn,
-      "UPDATE computer_history_memories SET superseded_at = ? " <>
-        "WHERE superseded_at IS NULL AND provenance_from_ts <= ? AND provenance_to_ts >= ?",
-      [at_ms, to_ts, from_ts]
-    )
-  end
 
   # Cursor + outcome only; the `status` (idle/running) lifecycle is owned by the
   # scheduler's claim/release so a paused or errored cycle can't leave a

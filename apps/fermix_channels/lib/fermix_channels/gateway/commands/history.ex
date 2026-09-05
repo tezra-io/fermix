@@ -43,30 +43,36 @@ defmodule FermixChannels.Gateway.Commands.History do
 
   @impl true
   def execute(message, reply_fn, context) do
-    dispatch(args(message), reply_fn, repo(context))
+    dispatch(args(message), reply_fn, {repo(context), macos?(context)})
   end
 
-  # `:computer_history_repo` in context is a test-only injection seam; production
-  # dispatch runs in the daemon against the default single-writer Repo.
+  # `:computer_history_repo` / `:computer_history_macos?` in context are test-only
+  # injection seams; production dispatch runs in the daemon against the default
+  # single-writer Repo and the real platform.
   defp repo(context), do: Map.get(context, :computer_history_repo, Repo)
+
+  defp macos?(context),
+    do: Map.get(context, :computer_history_macos?, ComputerHistory.macos?())
 
   defp args(message), do: String.split(message.content, ~r/\s+/, trim: true)
 
-  defp dispatch([], reply_fn, repo), do: reply(reply_fn, status_text(repo))
-  defp dispatch(["status" | _rest], reply_fn, repo), do: reply(reply_fn, status_text(repo))
+  defp dispatch([], reply_fn, host), do: reply(reply_fn, status_text(host))
+  defp dispatch(["status" | _rest], reply_fn, host), do: reply(reply_fn, status_text(host))
 
-  defp dispatch(["pause"], reply_fn, _repo),
+  defp dispatch(["pause"], reply_fn, _host),
     do: reply(reply_fn, "Usage: /history pause 10m|1h|24h")
 
-  defp dispatch(["pause", duration], reply_fn, repo), do: pause(duration, reply_fn, repo)
-  defp dispatch(["purge", window], reply_fn, repo), do: purge(window, reply_fn, repo)
-  defp dispatch(["off" | _rest], reply_fn, _repo), do: off(reply_fn)
-  defp dispatch(_other, reply_fn, _repo), do: reply(reply_fn, usage())
+  defp dispatch(["pause", duration], reply_fn, {repo, _macos?}),
+    do: pause(duration, reply_fn, repo)
+
+  defp dispatch(["purge", window], reply_fn, {repo, _macos?}), do: purge(window, reply_fn, repo)
+  defp dispatch(["off" | _rest], reply_fn, _host), do: off(reply_fn)
+  defp dispatch(_other, reply_fn, _host), do: reply(reply_fn, usage())
 
   # --- status -------------------------------------------------------------
 
-  defp status_text(repo) do
-    if ComputerHistory.macos?() do
+  defp status_text({repo, macos?}) do
+    if macos? do
       [
         enabled_line(),
         capture_line(),
@@ -143,17 +149,41 @@ defmodule FermixChannels.Gateway.Commands.History do
     end
   end
 
+  # The unsummarized count is always shown: a summarizer that has fallen behind
+  # is otherwise invisible until the spool starts expiring under it.
   defp spool_line(repo) do
     with {:ok, count} <- Repo.computer_history_count_events(server: repo),
+         {:ok, {unsummarized, oldest_ts}} <-
+           Repo.computer_history_unsummarized_stats(server: repo),
          {:ok, state} <- Repo.computer_history_ensure_state(server: repo) do
       paused = pause_display(state.pause_until)
 
-      "Spool: #{count} event(s). Last summarization: #{state.last_status || "none"}. Paused until: #{paused}."
+      "Spool: #{count} event(s), #{unsummarized} unsummarized#{lag_display(unsummarized, oldest_ts)}. " <>
+        "Last summarization: #{state.last_status || "none"}. Paused until: #{paused}."
     else
       {:error, reason} ->
         # Log the root cause — "unavailable" alone is undiagnosable from a trace.
         Logger.warning("computer_history spool status unavailable: #{inspect(reason)}")
         "Spool: unavailable."
+    end
+  end
+
+  defp lag_display(0, _oldest_ts), do: ""
+
+  defp lag_display(_unsummarized, oldest_ts) when is_integer(oldest_ts) do
+    " (oldest #{age_phrase(System.system_time(:millisecond) - oldest_ts)} old)"
+  end
+
+  defp lag_display(_unsummarized, _oldest_ts), do: ""
+
+  defp age_phrase(ms) do
+    minutes = div(max(ms, 0), 60_000)
+    hours = div(minutes, 60)
+
+    cond do
+      minutes < 1 -> "under a minute"
+      hours < 1 -> "#{minutes}m"
+      true -> "#{hours}h #{rem(minutes, 60)}m"
     end
   end
 

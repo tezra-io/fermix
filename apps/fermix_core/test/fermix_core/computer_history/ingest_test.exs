@@ -48,13 +48,47 @@ defmodule FermixCore.ComputerHistory.IngestTest do
     test "system/session/gap events (no bundle id) pass even with an empty allowlist", %{
       repo: repo
     } do
+      # The whole §8.4 metadata-only taxonomy, not a sample: a kind added to the
+      # exemption later either joins this list or fails the negative test below.
       events = [
         %{boot_id: "b1", source_seq: 1, ts: 1_000, type: "system.sleep"},
-        %{boot_id: "b1", source_seq: 2, ts: 1_001, type: "observer.gap", gap_reason: "sleep"}
+        %{boot_id: "b1", source_seq: 2, ts: 1_001, type: "observer.gap", gap_reason: "sleep"},
+        %{boot_id: "b1", source_seq: 3, ts: 1_002, type: "system.wake"},
+        %{boot_id: "b1", source_seq: 4, ts: 1_003, type: "session.locked"},
+        %{boot_id: "b1", source_seq: 5, ts: 1_004, type: "session.unlocked"},
+        %{boot_id: "b1", source_seq: 6, ts: 1_005, type: "user.switched"}
       ]
 
-      assert {:ok, %{written: 2, dropped: 0}} =
+      assert {:ok, %{written: 6, dropped: 0}} =
                Ingest.ingest(events, repo: repo, apps: [], sites: [])
+    end
+
+    test "a content or app kind with no bundle id is dropped before any write", %{repo: repo} do
+      # A frame that names no app but claims app content is malformed (§8.4): it
+      # can never be attributed to an allowlisted app, so it must not be written.
+      events = [
+        %{boot_id: "b1", source_seq: 1, ts: 1_000, type: "field.value", text: "hunter2password"},
+        %{boot_id: "b1", source_seq: 2, ts: 1_001, type: "selection.changed", text: "selected"},
+        %{
+          boot_id: "b1",
+          source_seq: 3,
+          ts: 1_002,
+          type: "browser.navigated",
+          page_title: "Inbox"
+        },
+        %{boot_id: "b1", source_seq: 4, ts: 1_003, type: "app.activated"},
+        %{boot_id: "b1", source_seq: 5, ts: 1_004, type: "focus.changed", window_title: "Inbox"}
+      ]
+
+      assert {:ok, %{written: 0, dropped: 5}} =
+               Ingest.ingest(events, repo: repo, apps: [], sites: [])
+
+      # Not merely an empty-allowlist miss: with apps allowlisted, an app-less
+      # content event is still dropped — the exemption is gone, not widened.
+      assert {:ok, %{written: 0, dropped: 5}} =
+               Ingest.ingest(events, repo: repo, apps: ["com.apple.Safari"], sites: [])
+
+      assert stored(repo) == []
     end
 
     test "a browser content event on a non-allowlisted site is dropped", %{repo: repo} do

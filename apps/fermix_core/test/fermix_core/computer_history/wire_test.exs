@@ -4,6 +4,10 @@ defmodule FermixCore.ComputerHistory.WireTest do
 
   alias FermixCore.ComputerHistory.Wire
 
+  # An in-range epoch-ms stamp (2026-02-02); the decoder refuses anything outside
+  # 2000-01-01 .. 2100-01-01.
+  @ts 1_770_000_000_000
+
   defp line(map), do: Jason.encode!(map)
 
   describe "event frames" do
@@ -12,7 +16,7 @@ defmodule FermixCore.ComputerHistory.WireTest do
         line(%{
           "type" => "event",
           "v" => 1,
-          "ts" => 1_700,
+          "ts" => @ts,
           "seq" => 5,
           "boot_id" => "boot-abc",
           "app" => %{"bundle_id" => "com.apple.Safari", "name" => "Safari", "pid" => 42},
@@ -29,7 +33,7 @@ defmodule FermixCore.ComputerHistory.WireTest do
       assert {:event, event} = Wire.decode(frame)
       assert event.boot_id == "boot-abc"
       assert event.source_seq == 5
-      assert event.ts == 1_700
+      assert event.ts == @ts
       assert event.type == "field.value"
       assert event.bundle_id == "com.apple.Safari"
       assert event.window_title == "Inbox"
@@ -45,7 +49,7 @@ defmodule FermixCore.ComputerHistory.WireTest do
       frame =
         line(%{
           "type" => "event",
-          "ts" => 1,
+          "ts" => @ts,
           "seq" => 1,
           "boot_id" => "b",
           "kind" => "browser.navigated",
@@ -62,7 +66,7 @@ defmodule FermixCore.ComputerHistory.WireTest do
       frame =
         line(%{
           "type" => "event",
-          "ts" => 1,
+          "ts" => @ts,
           "seq" => 2,
           "boot_id" => "b",
           "kind" => "observer.gap",
@@ -77,10 +81,12 @@ defmodule FermixCore.ComputerHistory.WireTest do
 
     test "an event missing a required field is an error (a gap, not a crash)" do
       assert {:error, {:missing_field, "kind"}} =
-               Wire.decode(line(%{"type" => "event", "ts" => 1, "seq" => 1, "boot_id" => "b"}))
+               Wire.decode(line(%{"type" => "event", "ts" => @ts, "seq" => 1, "boot_id" => "b"}))
 
       assert {:error, {:missing_field, "seq"}} =
-               Wire.decode(line(%{"type" => "event", "ts" => 1, "boot_id" => "b", "kind" => "x"}))
+               Wire.decode(
+                 line(%{"type" => "event", "ts" => @ts, "boot_id" => "b", "kind" => "x"})
+               )
     end
 
     test "wrong-typed required fields are rejected" do
@@ -89,10 +95,50 @@ defmodule FermixCore.ComputerHistory.WireTest do
                Wire.decode(
                  line(%{
                    "type" => "event",
-                   "ts" => 1,
+                   "ts" => @ts,
                    "seq" => "5",
                    "boot_id" => "b",
                    "kind" => "x"
+                 })
+               )
+    end
+
+    test "an out-of-range ts is refused (a gap, never a stalled renderer)" do
+      assert {:error, {:invalid_field, "ts"}} =
+               Wire.decode(
+                 line(%{
+                   "type" => "event",
+                   "ts" => 999_999_999_999_999_999,
+                   "seq" => 1,
+                   "boot_id" => "b",
+                   "kind" => "x"
+                 })
+               )
+
+      assert {:error, {:invalid_field, "ts"}} =
+               Wire.decode(
+                 line(%{
+                   "type" => "event",
+                   "ts" => -1,
+                   "seq" => 1,
+                   "boot_id" => "b",
+                   "kind" => "x"
+                 })
+               )
+    end
+
+    test "an out-of-range gap bound is refused" do
+      assert {:error, {:invalid_field, "gap_to_ts"}} =
+               Wire.decode(
+                 line(%{
+                   "type" => "event",
+                   "ts" => @ts,
+                   "seq" => 1,
+                   "boot_id" => "b",
+                   "kind" => "observer.gap",
+                   "gap_reason" => "sleep",
+                   "gap_from_ts" => @ts - 1_000,
+                   "gap_to_ts" => 999_999_999_999_999_999
                  })
                )
     end
@@ -101,7 +147,7 @@ defmodule FermixCore.ComputerHistory.WireTest do
       frame =
         line(%{
           "type" => "event",
-          "ts" => 1,
+          "ts" => @ts,
           "seq" => 1,
           "boot_id" => "b",
           "kind" => "x",

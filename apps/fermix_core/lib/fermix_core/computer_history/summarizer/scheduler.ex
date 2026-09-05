@@ -23,7 +23,11 @@ defmodule FermixCore.ComputerHistory.Summarizer.Scheduler do
   @tick_interval_ms :timer.minutes(30)
   @initial_tick_ms :timer.seconds(10)
   @claim_stale_after_ms :timer.minutes(30)
-  @cycle_timeout_ms :timer.minutes(5)
+  # A cycle is a bounded CATCH-UP now: up to @max_batches_per_cycle (6) provider
+  # calls, each with its own render and write, so the old single-call budget
+  # would kill a healthy drain mid-way. Still well under the tick interval and
+  # the stale-claim window, so a wedged cycle cannot outlive its own claim.
+  @cycle_timeout_ms :timer.minutes(15)
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do

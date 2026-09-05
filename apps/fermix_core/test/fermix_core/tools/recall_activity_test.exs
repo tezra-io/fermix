@@ -50,6 +50,12 @@ defmodule FermixCore.Tools.RecallActivityTest do
     assert capability.owner_only? == true
   end
 
+  test "the description says results are newest-first, bounded, and disclose omissions" do
+    description = RecallActivity.description()
+    assert description =~ "newest first"
+    assert description =~ "omitted"
+  end
+
   describe "advertise?/1 fails closed" do
     test "a guest sender never sees the tool" do
       refute RecallActivity.advertise?(ctx(%{source_trust: :guest}))

@@ -396,6 +396,7 @@ defmodule FermixCore.ComputerHistory.Capturer do
   end
 
   defp gap_label({:missing_field, field}), do: "missing_#{field}"
+  defp gap_label({:invalid_field, field}), do: "invalid_#{field}"
   defp gap_label({:unknown_frame_type, _type}), do: "unknown_type"
   defp gap_label({:bad_json, _message}), do: "bad_json"
   defp gap_label(other), do: inspect(other)

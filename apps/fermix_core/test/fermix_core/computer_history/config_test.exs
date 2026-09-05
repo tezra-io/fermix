@@ -252,4 +252,50 @@ defmodule FermixCore.ComputerHistory.ConfigTest do
   test "config_keys/0 is the canonical allowlist" do
     assert Config.config_keys() == [:enabled, :apps, :sites, :remote_summaries, :summarizer]
   end
+
+  describe "timezone/0,1 (the one resolver both surfaces use)" do
+    setup do
+      original = Application.get_env(:fermix_core, :personalization)
+
+      on_exit(fn ->
+        case original do
+          nil -> Application.delete_env(:fermix_core, :personalization)
+          value -> Application.put_env(:fermix_core, :personalization, value)
+        end
+      end)
+
+      :ok
+    end
+
+    test "an unset personalization timezone is UTC" do
+      Application.delete_env(:fermix_core, :personalization)
+      assert Config.timezone() == "Etc/UTC"
+    end
+
+    test "a configured zone is returned; an unusable one falls back to UTC" do
+      Application.put_env(:fermix_core, :personalization, timezone: "America/New_York")
+      assert Config.timezone() == "America/New_York"
+
+      Application.put_env(:fermix_core, :personalization, timezone: "America/New York")
+      assert Config.timezone() == "Etc/UTC"
+    end
+
+    test "a nil or blank :timezone opt behaves as absent, never a raise" do
+      Application.put_env(:fermix_core, :personalization, timezone: "America/New_York")
+
+      assert Config.timezone(timezone: nil) == "America/New_York"
+      assert Config.timezone(timezone: "") == "America/New_York"
+      assert Config.timezone(timezone: :not_a_zone) == "America/New_York"
+      assert Config.timezone([]) == "America/New_York"
+
+      Application.delete_env(:fermix_core, :personalization)
+      assert Config.timezone(timezone: nil) == "Etc/UTC"
+      assert Config.timezone(timezone: "") == "Etc/UTC"
+    end
+
+    test "a given zone wins over the configured one" do
+      Application.put_env(:fermix_core, :personalization, timezone: "America/New_York")
+      assert Config.timezone(timezone: "Europe/Berlin") == "Europe/Berlin"
+    end
+  end
 end

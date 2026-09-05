@@ -57,6 +57,37 @@ defmodule FermixChannels.Gateway.Commands.HistoryTest do
     assert is_binary(text) and text != ""
   end
 
+  # The macOS-only guard is injected, so the status body is asserted on every
+  # host (the feature's own platform check is covered by ComputerHistory).
+  defp macos_ctx(ctx), do: Map.put(ctx, :computer_history_macos?, true)
+
+  test "status reports the unsummarized backlog and how old it is", %{ctx: ctx, repo: repo} do
+    now = System.system_time(:millisecond)
+
+    events = [
+      %{
+        boot_id: "b1",
+        source_seq: 1,
+        ts: now - 2 * 3_600_000 - 600_000,
+        type: "app.activated",
+        bundle_id: "com.a"
+      },
+      %{boot_id: "b1", source_seq: 2, ts: now, type: "app.activated", bundle_id: "com.a"}
+    ]
+
+    assert {:ok, 2} = Repo.computer_history_insert_events(events, server: repo)
+
+    assert :ok = History.execute(message("status"), reply_fn(self()), macos_ctx(ctx))
+    assert_receive {:reply, text}
+    assert text =~ "Spool: 2 event(s), 2 unsummarized (oldest 2h 10m old)."
+  end
+
+  test "status states a zero backlog without an age", %{ctx: ctx} do
+    assert :ok = History.execute(message("status"), reply_fn(self()), macos_ctx(ctx))
+    assert_receive {:reply, text}
+    assert text =~ "Spool: 0 event(s), 0 unsummarized. Last summarization:"
+  end
+
   test "pause persists a pause horizon", %{ctx: ctx, repo: repo} do
     assert :ok = History.execute(message("pause 30m"), reply_fn(self()), ctx)
     assert_receive {:reply, text}
