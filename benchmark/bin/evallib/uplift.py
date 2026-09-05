@@ -20,6 +20,13 @@ import math
 from dataclasses import dataclass
 
 _Z95 = 1.959963984540054
+# Both arms round mean_success to 4 dp before storing it, so an exact fractional bar
+# (majority_threshold(7) = 4/7 = 0.571428…) is a hair ABOVE the stored 0.5714 that
+# cleared it — a true majority binarized as a fail at trial counts 7, 12, 14, 15, 17,
+# 19 and 21. Half a rounding unit of slack restores the intended comparison; the gap
+# between two achievable means is 1/n, three orders of magnitude wider, so nothing
+# that should fail slips through.
+_STORED_SCORE_TOLERANCE = 5e-5
 
 
 @dataclass
@@ -63,8 +70,9 @@ def paired_uplift(fermix: dict[str, float], baseline: dict[str, float],
     if not shared:
         raise ValueError("the two arms share no task ids — nothing to pair")
 
-    f_pass = {t: fermix[t] >= threshold for t in shared}
-    b_pass = {t: baseline[t] >= threshold for t in shared}
+    bar = threshold - _STORED_SCORE_TOLERANCE
+    f_pass = {t: fermix[t] >= bar for t in shared}
+    b_pass = {t: baseline[t] >= bar for t in shared}
     n = len(shared)
     # 2x2 paired table: a=both pass, b=fermix-only, c=baseline-only, d=both fail.
     a = sum(1 for t in shared if f_pass[t] and b_pass[t])
@@ -115,15 +123,104 @@ def _newcombe_paired_ci(a: int, b: int, c: int, d: int) -> tuple[float, float]:
     return max(-1.0, lo), min(1.0, hi)
 
 
+# --- arm compatibility ------------------------------------------------------
+
+def majority_threshold(trials: int) -> float:
+    """The pass bar for "strictly more than half of an arm's trials' worth of credit".
+
+    Expressed as a `>=` bar over mean_success so there is one binarization rule in
+    this module: with 4 trials the bar is 3/4, so a 2-of-4 tie fails. A bare 0.5 bar
+    compared with `>=` called that tie a majority.
+
+    The arms store MEAN success, which keeps partial credit, so this is a bar on mean
+    credit and not a strict count of passing trials: under an f1/judge scorer four
+    trials each scoring 0.8 clear a 3/4 bar although no trial reached any pass line.
+    For a binary scorer (exact/numeric/contains/regex) the two readings coincide."""
+    if trials < 1:
+        raise ValueError(f"majority_threshold: need at least 1 trial, got {trials}")
+    return (trials // 2 + 1) / trials
+
+
+def arm_trial_counts(payload: dict) -> set[int]:
+    """The distinct per-task trial counts this arm recorded. More than one means the
+    arm is ragged and has no single sample size to pair on."""
+    return {int(t["n"]) for t in payload.get("tasks", {}).values()}
+
+
+def compare_arms(fermix: dict, baseline: dict) -> list[str]:
+    """Every reason these two arms cannot be paired; empty list = they can.
+
+    A paired test assumes matched observations. Intersecting whatever task ids happen
+    to overlap, at whatever k and trial count each arm ran, silently reports a
+    comparison of two different experiments — so the mismatches are named and the
+    caller refuses rather than publishing the intersection."""
+    problems = []
+    for field in ("k", "threshold"):
+        mine, theirs = fermix.get(field), baseline.get(field)
+        if mine is None or theirs is None:
+            problems.append(f"{field} missing: fermix {mine!r}, baseline {theirs!r} — an arm "
+                            f"that did not record its own identity cannot be paired")
+        elif mine != theirs:
+            problems.append(f"{field} differs: fermix {mine} vs baseline {theirs}")
+    problems += _validity_problems(fermix, baseline)
+    problems += _trial_count_problems(fermix, baseline)
+    problems += _task_set_problems(fermix, baseline)
+    return problems
+
+
+def _validity_problems(fermix: dict, baseline: dict) -> list[str]:
+    """An arm that did not measure what it reports cannot support a claim. An arm
+    written before `valid` existed did not record the answer, which is not the same as
+    recording True — refuse it and make the operator re-run."""
+    problems = []
+    for name, payload in (("fermix", fermix), ("baseline", baseline)):
+        recorded = payload.get("valid")
+        if recorded is None:
+            problems.append(f"the {name} arm records no measurement validity — re-run it; "
+                            "an arm that never said whether it was valid cannot be paired")
+        elif recorded is not True:
+            problems.append(f"the {name} arm is an INVALID measurement (valid={recorded!r}): "
+                            "its per-task numbers are evidence about the harness")
+    return problems
+
+
+def _trial_count_problems(fermix: dict, baseline: dict) -> list[str]:
+    f_counts, b_counts = arm_trial_counts(fermix), arm_trial_counts(baseline)
+    problems = []
+    for arm, counts in (("fermix", f_counts), ("baseline", b_counts)):
+        if not counts:
+            problems.append(f"the {arm} arm recorded no tasks")
+        elif len(counts) > 1:
+            problems.append(f"the {arm} arm is ragged: tasks ran {sorted(counts)} trials")
+    if f_counts and b_counts and len(f_counts) == 1 == len(b_counts) and f_counts != b_counts:
+        problems.append(f"trial count differs: fermix {f_counts.pop()} vs baseline {b_counts.pop()}")
+    return problems
+
+
+def _task_set_problems(fermix: dict, baseline: dict) -> list[str]:
+    f_ids, b_ids = set(fermix.get("tasks", {})), set(baseline.get("tasks", {}))
+    if f_ids == b_ids:
+        return []
+    only_f, only_b = sorted(f_ids - b_ids), sorted(b_ids - f_ids)
+    return [f"task sets differ — excluded from any pairing: "
+            f"fermix-only {only_f or 'none'}; baseline-only {only_b or 'none'}"]
+
+
 # --- arm results I/O (the shared pairing surface) ---------------------------
 
 def write_arm(path: str, *, arm: str, config_id: str, suite: str, k: int,
-              threshold: float, tasks: dict) -> None:
+              threshold: float, tasks: dict, valid: bool) -> None:
     """Persist one arm's per-task results. `tasks` maps "<suite>/<case>" ->
     {mean_success, pass_hat_k, n}. Both the Fermix arm (run_capability.py) and the
-    baseline arm (run_baseline.py) write this identical shape so they pair cleanly."""
+    baseline arm (run_baseline.py) write this identical shape so they pair cleanly.
+
+    `valid` is the arm's own measurement validity and is REQUIRED: a run whose trials
+    had no usable evidence still produces per-task numbers, and an uplift claim built
+    on them is a claim about the harness. The pairing refuses such an arm."""
+    if not isinstance(valid, bool):
+        raise TypeError(f"write_arm: valid must be a bool, got {type(valid).__name__}")
     payload = {"arm": arm, "config_id": config_id, "suite": suite,
-               "k": k, "threshold": threshold, "tasks": tasks}
+               "k": k, "threshold": threshold, "valid": valid, "tasks": tasks}
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, indent=2)
 
@@ -138,25 +235,32 @@ def tasks_success(payload: dict) -> dict:
     return {key: float(v["mean_success"]) for key, v in payload.get("tasks", {}).items()}
 
 
-def render_md(r: UpliftResult, label: str, suite: str, k: int) -> str:
+def render_md(r: UpliftResult, *, label: str, baseline_label: str, suite: str,
+              k: int, trials: int, task_ids: list[str]) -> str:
     """The defensible claim line (§6 marketing discipline) — scope always attached.
 
-    Significance wording is driven by the EXACT McNemar p (the authoritative test),
-    never by whether the CI visually excludes 0; if the Newcombe CI and the exact
-    test disagree (possible at tiny samples), that's flagged rather than silently
-    contradicting."""
+    The claim names the ACTUAL paired tasks and each arm's real k/n, because a reader
+    cannot otherwise tell whether "on 24 tasks" meant the whole suite or the handful
+    that happened to intersect. Significance wording is driven by the EXACT McNemar p
+    (the authoritative test), never by whether the CI visually excludes 0; if the
+    Newcombe CI and the exact test disagree (possible at tiny samples), that's flagged
+    rather than silently contradicting."""
+    if r.n != len(task_ids):
+        raise ValueError(f"render_md: {r.n} paired tasks but {len(task_ids)} task ids given")
     significant = r.p_value < 0.05
     sig = "significant" if significant else "not significant"
     ci_excludes_zero = r.ci_low > 0 or r.ci_high < 0
     caveat = (" — note: at this sample the CI and exact test mildly disagree; trust the exact p"
               if ci_excludes_zero != significant else "")
     return (
-        f"## Agentic uplift — `{label}` on suite `{suite}`\n\n"
-        f"On {r.n} paired tasks (k={k} trials each, programmatic scorer): "
-        f"**{r.fermix_pass_rate * 100:.1f}% with Fermix vs {r.baseline_pass_rate * 100:.1f}% raw** "
-        f"— uplift **{r.uplift * 100:+.1f}pp** "
+        f"## Agentic uplift — `{label}` vs `{baseline_label}` on suite `{suite}`\n\n"
+        f"On {r.n} paired task(s) — both arms ran exactly these, k={k} over {trials} trials "
+        f"each, same programmatic scorer: "
+        f"**{r.fermix_pass_rate * 100:.1f}% with Fermix vs {r.baseline_pass_rate * 100:.1f}% "
+        f"baseline** — uplift **{r.uplift * 100:+.1f}pp** "
         f"(95% CI [{r.ci_low * 100:+.1f}, {r.ci_high * 100:+.1f}]pp, Newcombe), "
         f"McNemar exact p={r.p_value:.4g} ({sig}{caveat}).\n\n"
         f"Discordant pairs: {r.discordant_fermix_only} Fermix-only wins, "
-        f"{r.discordant_baseline_only} baseline-only wins.\n"
+        f"{r.discordant_baseline_only} baseline-only wins.\n\n"
+        f"Paired tasks: {', '.join(f'`{t}`' for t in task_ids)}\n"
     )

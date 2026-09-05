@@ -4,7 +4,7 @@ Pure and deterministic: given a model's final reply and a `score:` spec, return 
 0.0..1.0 task-success score. These are the closed-form, programmatically-checkable
 scorers (exact / numeric / contains / regex / token-F1) that the capability sweep
 prefers over an LLM judge wherever a verifiable answer exists
-(docs/design/EVAL_CAPABILITY_SCORING.md §4). Open-ended tasks with no ground truth
+(benchmark/docs/EVAL_CAPABILITY_SCORING.md §4). Open-ended tasks with no ground truth
 fall back to the judge (judge.py); this module never calls a model.
 
 This is a SEPARATE concern from the behavioral gate grader (grade.py): grade.py
@@ -41,7 +41,8 @@ def score_answer(reply: str, spec: dict) -> AnswerScore:
     """Score `reply` against a validated `score:` spec.
 
     `spec` shape (validated in suites.py before it ever reaches here):
-        {"match": <method>, "expected": <str|number|list>, "tolerance"?: <number>}
+        {"match": <method>, "expected": <str|number|list>, "tolerance"?: <number>,
+         "single"?: <bool>}
 
     Raises ValueError on an unknown method — callers validate first, so reaching
     this is a programmer error, not user input.
@@ -51,7 +52,7 @@ def score_answer(reply: str, spec: dict) -> AnswerScore:
     if method == "exact":
         return _exact(reply, expected)
     if method == "numeric":
-        return _numeric(reply, expected, spec.get("tolerance", 0))
+        return _numeric(reply, expected, spec.get("tolerance", 0), bool(spec.get("single", False)))
     if method == "contains":
         return _contains(reply, expected)
     if method == "regex":
@@ -70,22 +71,31 @@ def _exact(reply: str, expected) -> AnswerScore:
                        f"exact: {'==' if hit else '!='} expected {want!r} (got {got!r})")
 
 
-def _numeric(reply: str, expected, tolerance) -> AnswerScore:
+def _numeric(reply: str, expected, tolerance, single: bool) -> AnswerScore:
+    """Score the LAST number in the reply against `expected` (the documented rule —
+    benchmark/docs/EVAL_REALISTIC_TASKS.md — which is why those prompts pin "reply with
+    ONLY the number"). The last number is the one the model committed to; crediting any
+    number anywhere let a reply whose stated answer was the trap value still score.
+
+    `single: true` additionally refuses a reply carrying more than one DISTINCT number:
+    a hedge ("either 15750 or 16100") or a shotgun of candidates is not an answer, and
+    under a bare last-number rule it would score full credit half the time."""
     want = _parse_number(_as_text(expected))
     if want is None:
         return AnswerScore(0.0, "numeric", f"numeric: expected {expected!r} is not a number")
     nums = _all_numbers(reply)
     if not nums:
         return AnswerScore(0.0, "numeric", "numeric: no number found in reply")
-    # ANY extracted number within tolerance counts — a correct answer followed by a
-    # parenthetical ("$130.5B, up from $60.9B") or shown work no longer scores 0 just
-    # because a trailing distractor is the last token. A premise number that happens to
-    # equal the exact expected answer is far rarer than such distractors.
+    distinct = sorted(set(nums))
+    if single and len(distinct) > 1:
+        return AnswerScore(0.0, "numeric",
+                           f"numeric: multiple numbers ({len(distinct)} distinct: "
+                           f"{distinct[:6]}) — `single` requires one committed answer")
     tol = float(tolerance or 0)
-    hit = any(abs(n - want) <= tol for n in nums)
-    close = min(nums, key=lambda n: abs(n - want))
+    got = nums[-1]
+    hit = abs(got - want) <= tol
     return AnswerScore(1.0 if hit else 0.0, "numeric",
-                       f"numeric: want {want} (tol {tol}); closest of {len(nums)} = {close} -> "
+                       f"numeric: want {want} (tol {tol}); last of {len(nums)} = {got} -> "
                        f"{'ok' if hit else 'off'}")
 
 
@@ -147,7 +157,7 @@ def _all_numbers(s: str) -> list[float]:
 
 
 def _parse_number(s: str) -> float | None:
-    """The LAST number in the text — used to read a clean single `expected` value.
-    Reply-side scoring uses `_all_numbers` (any-match), not this."""
+    """The LAST number in the text. Reply-side scoring reads the same position off
+    `_all_numbers`, which it also needs for the `single` hedge check."""
     nums = _all_numbers(s)
     return nums[-1] if nums else None

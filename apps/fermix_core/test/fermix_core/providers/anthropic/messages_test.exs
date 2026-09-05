@@ -192,7 +192,64 @@ defmodule FermixCore.Providers.Anthropic.MessagesTest do
 
       turn = Messages.parse_response(body)
 
-      assert turn.usage == %{prompt_tokens: 143, completion_tokens: 2, total_tokens: 145}
+      # `prompt_tokens` stays the blended figure every existing consumer reads;
+      # the two cache counts ride alongside so a reader can subtract back out.
+      assert turn.usage == %{
+               prompt_tokens: 143,
+               completion_tokens: 2,
+               total_tokens: 145,
+               cached_input_tokens: 40,
+               cache_creation_input_tokens: 100
+             }
+    end
+
+    test "omits both cache keys when Anthropic reported neither" do
+      body = %{
+        "model" => "claude-sonnet-4-6",
+        "stop_reason" => "end_turn",
+        "content" => [%{"type" => "text", "text" => "uncached"}],
+        "usage" => %{"input_tokens" => 3, "output_tokens" => 2}
+      }
+
+      turn = Messages.parse_response(body)
+
+      assert turn.usage == %{prompt_tokens: 3, completion_tokens: 2, total_tokens: 5}
+    end
+
+    test "keeps a reported zero distinguishable from an unreported count" do
+      body = %{
+        "model" => "claude-sonnet-4-6",
+        "stop_reason" => "end_turn",
+        "content" => [%{"type" => "text", "text" => "cold"}],
+        "usage" => %{
+          "input_tokens" => 3,
+          "output_tokens" => 2,
+          "cache_creation_input_tokens" => 0,
+          "cache_read_input_tokens" => 0
+        }
+      }
+
+      turn = Messages.parse_response(body)
+
+      assert turn.usage.cached_input_tokens == 0
+      assert turn.usage.cache_creation_input_tokens == 0
+    end
+
+    test "refuses a malformed cache count rather than reporting it as zero" do
+      body = %{
+        "model" => "claude-sonnet-4-6",
+        "stop_reason" => "end_turn",
+        "content" => [%{"type" => "text", "text" => "bad"}],
+        "usage" => %{
+          "input_tokens" => 3,
+          "output_tokens" => 2,
+          "cache_read_input_tokens" => -1
+        }
+      }
+
+      assert_raise ArgumentError, ~r/cache_read_input_tokens/, fn ->
+        Messages.parse_response(body)
+      end
     end
 
     test "surfaces refusal text as terminal content" do
@@ -824,6 +881,48 @@ defmodule FermixCore.Providers.Anthropic.MessagesTest do
       assert metadata.instructions_bytes == byte_size("sys")
       assert metadata.tools_count == 1
       assert metadata.capabilities_count == 1
+    end
+
+    test "the provider call event carries both cache counts into the llm span" do
+      test_pid = self()
+      handler_id = "anthropic-cache-tokens-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        handler_id,
+        [:fermix, :provider, :call],
+        fn event, measurements, metadata, _config ->
+          if self() == test_pid do
+            send(test_pid, {:telemetry, event, measurements, metadata})
+          end
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        Req.Test.json(conn, %{
+          "id" => "msg_cache",
+          "model" => "claude-sonnet-4-6",
+          "stop_reason" => "end_turn",
+          "content" => [%{"type" => "text", "text" => "cached"}],
+          "usage" => %{
+            "input_tokens" => 3,
+            "output_tokens" => 2,
+            "cache_creation_input_tokens" => 100,
+            "cache_read_input_tokens" => 40
+          }
+        })
+      end)
+
+      assert {:ok, _turn} =
+               Messages.chat([%{role: "user", content: "Hi"}], [capability()], chat_opts())
+
+      assert_receive {:telemetry, [:fermix, :provider, :call], _measurements, metadata}
+
+      # Fermix sets ephemeral cache breakpoints on every Anthropic call, so these
+      # two counts are most of the input; `prompt` stays the blended figure.
+      assert metadata.tokens == %{prompt: 143, completion: 2, cached: 40, cache_write: 100}
     end
 
     test "emits error telemetry with the structured error detail" do

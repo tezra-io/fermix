@@ -669,15 +669,37 @@ defmodule FermixCore.Providers.Anthropic.Messages do
   end
 
   # §5.4: prompt = input + cache writes + cache reads; Anthropic sends no total.
+  # The two cache counts ALSO ride alongside as their own keys: `prompt_tokens`
+  # keeps its blended meaning (every existing consumer's arithmetic is
+  # untouched) and a pricing consumer subtracts to recover the uncached
+  # remainder. Fermix sets ephemeral cache breakpoints on every call, so these
+  # are most of the input — and Opik's auto-cost ignores them entirely, which
+  # makes this the only record a cache-aware price can be computed from.
   defp parse_usage(body) do
     usage = Map.get(body, "usage", %{})
+    cache_read = cache_count!(usage["cache_read_input_tokens"], "cache_read_input_tokens")
 
-    prompt =
-      int(usage["input_tokens"]) + int(usage["cache_creation_input_tokens"]) +
-        int(usage["cache_read_input_tokens"])
+    cache_write =
+      cache_count!(usage["cache_creation_input_tokens"], "cache_creation_input_tokens")
 
+    prompt = int(usage["input_tokens"]) + int(cache_write) + int(cache_read)
     completion = int(usage["output_tokens"])
+
     %{prompt_tokens: prompt, completion_tokens: completion, total_tokens: prompt + completion}
+    |> maybe_put(:cached_input_tokens, cache_read)
+    |> maybe_put(:cache_creation_input_tokens, cache_write)
+  end
+
+  # Absent stays absent. A reported 0 means "the vendor cached nothing"; a
+  # missing key means "the vendor reported nothing", and cache-aware pricing has
+  # to tell those apart — so a count is never defaulted to 0. A present count
+  # that is not a non-negative integer is a vendor-contract break, not a value to
+  # quietly round off.
+  defp cache_count!(nil, _field), do: nil
+  defp cache_count!(value, _field) when is_integer(value) and value >= 0, do: value
+
+  defp cache_count!(value, field) do
+    raise ArgumentError, "#{field} must be a non-negative integer, got: #{inspect(value)}"
   end
 
   defp int(value) when is_integer(value) and value >= 0, do: value
@@ -727,8 +749,8 @@ defmodule FermixCore.Providers.Anthropic.Messages do
     {status, tokens, stop_reason, output, tool_calls, error_metadata} =
       case result do
         {:ok, turn} ->
-          {:ok, %{prompt: turn.usage.prompt_tokens, completion: turn.usage.completion_tokens},
-           turn.provider_state.stop_reason, turn.content, turn.tool_calls, %{}}
+          {:ok, telemetry_tokens(turn.usage), turn.provider_state.stop_reason, turn.content,
+           turn.tool_calls, %{}}
 
         {:error, reason} ->
           {:error, %{}, nil, nil, nil, ProviderError.telemetry_metadata(reason)}
@@ -786,6 +808,15 @@ defmodule FermixCore.Providers.Anthropic.Messages do
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, _key, []), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
+  # The token map the shared provider emitter carries into the Opik llm span.
+  # `:cached`/`:cache_write` are present only when Anthropic reported them, so a
+  # span keeps "no cache activity" distinguishable from "no cache reporting".
+  defp telemetry_tokens(usage) do
+    %{prompt: usage.prompt_tokens, completion: usage.completion_tokens}
+    |> maybe_put(:cached, Map.get(usage, :cached_input_tokens))
+    |> maybe_put(:cache_write, Map.get(usage, :cache_creation_input_tokens))
+  end
 
   defp normalize_tool_use(%{"type" => "tool_use", "id" => id, "name" => name, "input" => input}) do
     [%{id: id, call_id: id, name: name, arguments: input}]

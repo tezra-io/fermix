@@ -1,0 +1,238 @@
+{
+  "openai/gpt-5.5/xhigh": {
+    "score": {
+      "config_id": "openai/gpt-5.5/xhigh",
+      "n_tasks": 22,
+      "n_trials": 110,
+      "mean_task_success": 1.0,
+      "mean_pass_hat_k": 1.0,
+      "total_cost": 41.18974,
+      "total_tokens": 7820103,
+      "total_successes": 110,
+      "cost_per_success": 0.3744521818181818,
+      "tokens_per_success": 71091.84545454546,
+      "p95_latency_ms": 122449.89120890386,
+      "safety_violations": 0,
+      "mean_task_success_ci_lo": 1.0,
+      "mean_task_success_ci_hi": 1.0
+    },
+    "meta": {
+      "run_id": "20260705T192915Z",
+      "trials": 5,
+      "k": 5,
+      "tasks": 22,
+      "threshold": 1.0,
+      "tasks_hash": "556b05bb44185fa9",
+      "private": false,
+      "selection": "all",
+      "opik_ui": "http://localhost:5173",
+      "experiment_id": "013beba6-a1dc-7e35-a139-587f6f31243f"
+    }
+  },
+  "openai/gpt-5.4-mini/xhigh": {
+    "score": {
+      "config_id": "openai/gpt-5.4-mini/xhigh",
+      "n_tasks": 29,
+      "n_trials": 145,
+      "mean_task_success": 0.9027586206896552,
+      "mean_pass_hat_k": 0.7931034482758621,
+      "total_cost": 7.134126,
+      "total_tokens": 8292083,
+      "total_successes": 115,
+      "cost_per_success": 0.062035878260869565,
+      "tokens_per_success": 72105.06956521739,
+      "p95_latency_ms": 240305.8766250033,
+      "safety_violations": 0
+    },
+    "meta": {
+      "run_id": "20260704T052036Z",
+      "trials": 5,
+      "k": 5,
+      "tasks": 29,
+      "threshold": 1.0,
+      "tasks_hash": "0d196df392037e4f",
+      "private": false,
+      "selection": "all",
+      "opik_ui": "http://localhost:5173",
+      "experiment_id": "f43559cf-628a-77dd-8363-01f6a027c097"
+    }
+  },
+  "openai/gpt-5.5/high": {
+    "score": {
+      "config_id": "openai/gpt-5.5/high",
+      "n_tasks": 22,
+      "n_trials": 110,
+      "mean_task_success": 0.8818181818181817,
+      "mean_pass_hat_k": 0.8181818181818182,
+      "total_cost": 37.84155,
+      "total_tokens": 7270765,
+      "total_successes": 97,
+      "cost_per_success": 0.39011907216494845,
+      "tokens_per_success": 74956.34020618557,
+      "p95_latency_ms": 124348.1222500559,
+      "safety_violations": 0
+    },
+    "meta": {
+      "run_id": "20260705T170636Z",
+      "trials": 5,
+      "k": 5,
+      "tasks": 22,
+      "threshold": 1.0,
+      "tasks_hash": "e7b573e600c1c9ab",
+      "private": false,
+      "selection": "all",
+      "opik_ui": "http://localhost:5173",
+      "experiment_id": "985fb4c7-ffea-76a1-8d5c-67b2f5626528"
+    }
+  },
+  "openai/gpt-5.6-sol/xhigh": {
+    "score": {
+      "config_id": "openai/gpt-5.6-sol/xhigh",
+      "n_tasks": 24,
+      "n_trials": 120,
+      "mean_task_success": 1.0,
+      "mean_pass_hat_k": 1.0,
+      "total_cost": 0.0,
+      "total_tokens": 11198433,
+      "total_successes": 120,
+      "cost_per_success": 0.0,
+      "tokens_per_success": 93320.275,
+      "p95_latency_ms": 90604.71841599792,
+      "safety_violations": 0,
+      "mean_task_success_ci_lo": 1.0,
+      "mean_task_success_ci_hi": 1.0
+    },
+    "meta": {
+      "run_id": "20260811T024020Z",
+      "trials": 5,
+      "k": 5,
+      "tasks": 24,
+      "threshold": 1.0,
+      "tasks_hash": "03ddb821fd1f6509",
+      "private": false,
+      "selection": "all",
+      "opik_ui": "http://localhost:5173",
+      "experiment_id": "085ab0c1-bd5e-7d56-afd7-91003d7f3cfa"
+    }
+  },
+  "openai/gpt-5.6-terra/max": {
+    "score": {
+      "config_id": "openai/gpt-5.6-terra/max",
+      "n_tasks": 24,
+      "n_trials": 120,
+      "mean_task_success": 0.975,
+      "mean_pass_hat_k": 0.875,
+      "total_cost": 0.0,
+      "total_tokens": 13202760,
+      "total_successes": 117,
+      "cost_per_success": 0.0,
+      "tokens_per_success": 112844.10256410256,
+      "p95_latency_ms": 115373.03650000104,
+      "safety_violations": 0,
+      "mean_task_success_ci_lo": 0.9500000000000001,
+      "mean_task_success_ci_hi": 1.0
+    },
+    "meta": {
+      "run_id": "20260814T012053Z",
+      "trials": 5,
+      "k": 5,
+      "tasks": 24,
+      "threshold": 1.0,
+      "tasks_hash": "03ddb821fd1f6509",
+      "private": false,
+      "selection": "all",
+      "opik_ui": "http://localhost:5173",
+      "experiment_id": "60dbfb81-a737-72fc-b517-fdb7214746bf"
+    }
+  },
+  "openai/gpt-5.6-sol/high": {
+    "score": {
+      "config_id": "openai/gpt-5.6-sol/high",
+      "n_tasks": 22,
+      "n_trials": 110,
+      "mean_task_success": 0.9181818181818181,
+      "mean_pass_hat_k": 0.9090909090909091,
+      "total_cost": 0.0,
+      "total_tokens": 6421149,
+      "total_successes": 101,
+      "cost_per_success": 0.0,
+      "tokens_per_success": 63575.732673267325,
+      "p95_latency_ms": 37576.699165976606,
+      "safety_violations": 0,
+      "mean_task_success_ci_lo": 0.7909090909090909,
+      "mean_task_success_ci_hi": 1.0
+    },
+    "meta": {
+      "run_id": "20260717T211400Z",
+      "trials": 5,
+      "k": 5,
+      "tasks": 22,
+      "threshold": 1.0,
+      "tasks_hash": "556b05bb44185fa9",
+      "private": false,
+      "selection": "all",
+      "opik_ui": "http://localhost:5173",
+      "experiment_id": "e67bf942-0ff0-75a8-8467-8e9a37e01e32"
+    }
+  },
+  "anthropic/claude-opus-4-8/xhigh": {
+    "score": {
+      "config_id": "anthropic/claude-opus-4-8/xhigh",
+      "n_tasks": 22,
+      "n_trials": 110,
+      "mean_task_success": 0.9545454545454546,
+      "mean_pass_hat_k": 0.9545454545454546,
+      "total_cost": 0.0,
+      "total_tokens": 8943398,
+      "total_successes": 105,
+      "cost_per_success": 0.0,
+      "tokens_per_success": 85175.21904761904,
+      "p95_latency_ms": 86663.60674996395,
+      "safety_violations": 0,
+      "mean_task_success_ci_lo": 0.8636363636363636,
+      "mean_task_success_ci_hi": 1.0
+    },
+    "meta": {
+      "run_id": "20260718T142937Z",
+      "trials": 5,
+      "k": 5,
+      "tasks": 22,
+      "threshold": 1.0,
+      "tasks_hash": "556b05bb44185fa9",
+      "private": false,
+      "selection": "all",
+      "opik_ui": "http://localhost:5173",
+      "experiment_id": "6b075cb9-88e0-7383-bed5-c228984f6f9c"
+    }
+  },
+  "openrouter/moonshotai/kimi-k3/default": {
+    "score": {
+      "config_id": "openrouter/moonshotai/kimi-k3/default",
+      "n_tasks": 22,
+      "n_trials": 110,
+      "mean_task_success": 0.9181818181818181,
+      "mean_pass_hat_k": 0.8181818181818182,
+      "total_cost": 0.0,
+      "total_tokens": 7458087,
+      "total_successes": 101,
+      "cost_per_success": 0.0,
+      "tokens_per_success": 73842.44554455446,
+      "p95_latency_ms": 224192.99591705203,
+      "safety_violations": 0,
+      "mean_task_success_ci_lo": 0.8181818181818182,
+      "mean_task_success_ci_hi": 0.990909090909091
+    },
+    "meta": {
+      "run_id": "20260719T150451Z",
+      "trials": 5,
+      "k": 5,
+      "tasks": 22,
+      "threshold": 1.0,
+      "tasks_hash": "556b05bb44185fa9",
+      "private": false,
+      "selection": "all",
+      "opik_ui": "http://localhost:5173",
+      "experiment_id": "f4b39986-2840-71dc-8c97-bd55da5d4d38"
+    }
+  }
+}

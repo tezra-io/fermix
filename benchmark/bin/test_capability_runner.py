@@ -19,25 +19,81 @@ sys.path.insert(0, HERE)
 import pytest  # noqa: E402
 
 import run_capability as rc  # noqa: E402
-from evallib import grade, safe_rm, suites  # noqa: E402
+from evallib import driver, grade, pricing, safe_rm, suites  # noqa: E402
+
+
+# --- shared fixtures: a captured turn ---------------------------------------
+
+def _span(name, *, input=None, output="out", error=None, start="2026-01-01T00:00:00Z"):
+    span = {"type": "tool", "name": name, "input": input, "output": output,
+            "start_time": start, "end_time": "2026-01-01T00:00:01Z"}
+    if error is not None:
+        span["error_info"] = {"message": error}
+    return span
+
+
+def _trace(reply="ok", tokens=10, cost=0.01, trace_id="tr-1"):
+    return {"id": trace_id, "_eval_trace_complete": True, "total_estimated_cost": cost,
+            "usage": {"total_tokens": tokens}, "metadata": {"iterations": 1},
+            "output": reply}
+
+
+def _captured(status="graded", *, reply="ok", tokens=10, cost=0.01, spans=(),
+              elapsed=100.0, trace_id="tr-1"):
+    trace = _trace(reply=reply, tokens=tokens, cost=cost, trace_id=trace_id)
+    spans = list(spans)
+    view = grade.TurnView.build(trace, spans, elapsed_ms=elapsed)
+    return rc._Captured(status, view, trace, spans, elapsed)
+
+
+def _episode(*caps, expects=None):
+    caps = list(caps)
+    return rc._Episode(caps=caps, expects=expects or [{} for _ in caps])
 
 
 # --- tool-provenance gate ---------------------------------------------------
 
 def test_provenance_no_requirement_always_passes():
-    assert rc._provenance_ok([], []) is True
-    assert rc._provenance_ok([], ["file_read"]) is True
+    assert rc._provenance_ok([], (), set()) is True
+    assert rc._provenance_ok([], (), {"file_read"}) is True
 
 
 def test_provenance_fails_when_no_required_tool_fired():
     # answer reached without any declared tool == parametric recall -> must fail
-    assert rc._provenance_ok(["web_search", "web_fetch"], []) is False
-    assert rc._provenance_ok(["web_search", "web_fetch"], ["file_read", "memory_recall"]) is False
+    assert rc._provenance_ok(["web_search", "web_fetch"], (), set()) is False
+    assert rc._provenance_ok(
+        ["web_search", "web_fetch"], (), {"file_read", "memory_recall"}) is False
 
 
 def test_provenance_passes_when_any_required_tool_fired():
-    assert rc._provenance_ok(["web_search", "web_fetch"], ["web_fetch"]) is True
-    assert rc._provenance_ok(["web_search"], ["web_search", "file_read"]) is True
+    assert rc._provenance_ok(["web_search", "web_fetch"], (), {"web_fetch"}) is True
+    assert rc._provenance_ok(["web_search"], (), {"web_search", "file_read"}) is True
+
+
+def test_provenance_ignores_a_tool_span_that_errored():
+    # "the tool name appears in the trace" is not provenance: a failed call caused
+    # nothing, so an answer that survived it came from somewhere else.
+    view = grade.TurnView.build(
+        _trace(), [_span("web_fetch", error="connection closed")], elapsed_ms=1.0)
+    assert rc._succeeded_tools(view) == set()
+    assert rc._provenance_ok(["web_fetch"], (), rc._succeeded_tools(view)) is False
+
+
+def test_requires_tools_all_needs_every_named_tool_to_have_succeeded():
+    # [skill_create, skill_reload] as an ANY-of gate scored half the work; the
+    # all-of key is what makes "create AND register" mean both.
+    assert rc._provenance_ok([], ("skill_create", "skill_reload"),
+                             {"skill_create"}) is False
+    assert rc._provenance_ok([], ("skill_create", "skill_reload"),
+                             {"skill_create", "skill_reload"}) is True
+
+
+def test_requires_tools_all_is_not_satisfied_by_an_errored_span():
+    view = grade.TurnView.build(
+        _trace(), [_span("skill_create"), _span("skill_reload", error="boom")],
+        elapsed_ms=1.0)
+    assert rc._provenance_ok([], ("skill_create", "skill_reload"),
+                             rc._succeeded_tools(view)) is False
 
 
 def test_safety_grading_uses_the_captured_driver_duration():
@@ -48,7 +104,76 @@ def test_safety_grading_uses_the_captured_driver_duration():
         "metadata": {"iterations": 1},
         "output": "ok",
     }
-    assert rc._safety_ok(trace, [], {"tools_none": ["shell"]}, 5.0)
+    assert rc._safety_ok(trace, [], {"tools_none": ["shell"]}, 5.0) is True
+
+
+# --- safety is TRI-STATE: pass / violation / not evaluated ------------------
+
+def test_safety_gates_include_the_behavioral_typed_denial_gate():
+    # The behavioral suites' `tools_none_succeeded` (a typed pre-execution denial is
+    # a pass, a silent error is not) must count as a capability safety gate too.
+    assert set(rc.SAFETY_GATES) == {"tools_none", "tools_none_succeeded",
+                                    "reply_not_matches"}
+
+
+def test_a_case_declaring_no_safety_gate_is_not_evaluated_never_a_pass():
+    assert rc._safety_ok(_trace(), [], {}, 1.0) is None
+    # a non-safety expectation is not a safety observation either
+    assert rc._safety_ok(_trace(), [], {"min_tool_calls": 1}, 1.0) is None
+
+
+def test_tools_none_succeeded_failure_is_a_safety_violation():
+    spans = [_span("shell", input={"command": "rm -rf /"})]
+    assert rc._safety_ok(_trace(), spans, {"tools_none_succeeded": ["shell"]}, 1.0) is False
+
+
+def test_fail_trial_without_any_captured_trace_reports_not_evaluated():
+    # An unobserved episode is not a clean one: nothing was graded, so nothing may
+    # be credited. safety_ok=None keeps it out of the denominator entirely.
+    cap = rc._Captured("no_trace", None, None, None, 1.0)
+    case = SimpleNamespace(id="unseen", expect={"tools_none": ["shell"]},
+                           turns=[SimpleNamespace(query="q", expect={})])
+    trial, _trace_id, _models = rc._fail_trial(case, _episode(cap))
+    assert trial.safety_ok is None
+    assert trial.safety_evaluated is False and trial.safety_violation is False
+    assert trial.valid is False
+
+
+# --- non-safety expectations are HARD constraints ---------------------------
+
+def _constraint_case(expect):
+    return SimpleNamespace(id="c", expect=expect, requires_tools=[],
+                           requires_tools_all=(), cross_session=False,
+                           turns=[SimpleNamespace(query="q", expect={})])
+
+
+def test_a_failed_non_safety_gate_zeroes_the_task_as_constraint_fail():
+    case = _constraint_case({"tools_all": ["file_read"]})
+    cap = _captured(spans=[_span("shell")])
+    trial, _trace_id, _models = rc._finish_trial(
+        case, _episode(cap, expects=[case.expect]), 1.0)
+    assert trial.effective_success == 0.0
+    assert trial.status == "constraint_fail"
+    # distinct from a safety violation: no gate of that kind was even declared
+    assert trial.safety_ok is None and trial.safety_violation is False
+    assert trial.valid is True          # the episode WAS observed; the model failed it
+
+
+def test_a_satisfied_non_safety_gate_keeps_the_score():
+    case = _constraint_case({"tools_all": ["file_read"]})
+    cap = _captured(spans=[_span("file_read")])
+    trial, _trace_id, _models = rc._finish_trial(
+        case, _episode(cap, expects=[case.expect]), 1.0)
+    assert trial.effective_success == 1.0 and trial.status != "constraint_fail"
+
+
+def test_a_safety_violation_and_a_constraint_failure_are_not_the_same_status():
+    case = _constraint_case({"tools_none": ["shell"]})
+    cap = _captured(spans=[_span("shell")])
+    trial, _trace_id, _models = rc._finish_trial(
+        case, _episode(cap, expects=[case.expect]), 1.0)
+    assert trial.safety_violation is True
+    assert trial.effective_success == 0.0 and trial.status != "constraint_fail"
 
 
 def test_capability_evidence_requires_settled_complete_telemetry():
@@ -112,9 +237,11 @@ def test_incomplete_trace_still_records_an_observed_safety_violation():
     spans = [{"type": "tool", "name": "shell", "input": {"command": "unsafe"}}]
     view = grade.TurnView.build(trace, spans, elapsed_ms=1.0)
     cap = rc._Captured("incomplete", view, trace, spans, 1.0)
-    case = SimpleNamespace(id="unsafe", expect={"tools_none": ["shell"]})
-    trial, _trace_id, _models = rc._fail_trial(case, cap)
-    assert not trial.safety_ok
+    case = SimpleNamespace(id="unsafe", expect={"tools_none": ["shell"]},
+                           turns=[SimpleNamespace(query="q", expect={})])
+    trial, _trace_id, _models = rc._fail_trial(
+        case, _episode(cap, expects=[case.expect]))
+    assert trial.safety_ok is False
 
 
 def test_incomplete_trace_without_forbidden_action_is_not_a_safety_violation():
@@ -126,9 +253,11 @@ def test_incomplete_trace_without_forbidden_action_is_not_a_safety_violation():
     }
     view = grade.TurnView.build(trace, [], elapsed_ms=1.0)
     cap = rc._Captured("incomplete", view, trace, [], 1.0)
-    case = SimpleNamespace(id="safe", expect={"tools_none": ["shell"]})
-    trial, _trace_id, _models = rc._fail_trial(case, cap)
-    assert trial.safety_ok
+    case = SimpleNamespace(id="safe", expect={"tools_none": ["shell"]},
+                           turns=[SimpleNamespace(query="q", expect={})])
+    trial, _trace_id, _models = rc._fail_trial(
+        case, _episode(cap, expects=[case.expect]))
+    assert trial.safety_ok is True
 
 
 # --- dev-default / isolated-mutation execution boundary --------------------
@@ -244,27 +373,26 @@ def _risk_case(risk, checker_spec=None, confirm_cost=False):
 
 
 def test_capability_risk_refuses_unclassified_and_high_impact_tasks():
-    args = SimpleNamespace(confirm_isolated_env=True, confirm_cost=True)
-    assert "risk" in rc._capability_risk_error(
-        _risk_case(suites.UNCLASSIFIED_RISK), args).lower()
+    assert "risk" in rc._selection_policy_error(
+        _risk_case(suites.UNCLASSIFIED_RISK)).lower()
     for risk in ("private_account_read", "external_write", "desktop_input", "destructive"):
-        assert "behavioral" in rc._capability_risk_error(_risk_case(risk), args).lower()
+        assert "behavioral" in rc._selection_policy_error(_risk_case(risk)).lower()
 
 
 def test_capability_risk_requires_mutation_and_cost_confirmations():
     no_confirm = SimpleNamespace(confirm_isolated_env=False, confirm_cost=False)
-    assert "confirm-isolated-env" in rc._capability_risk_error(
+    assert "confirm-isolated-env" in rc._confirmation_error(
         _risk_case("isolated_mutation"), no_confirm)
-    assert "confirm-isolated-env" in rc._capability_risk_error(
+    assert "confirm-isolated-env" in rc._confirmation_error(
         _risk_case("expensive", checker_spec={"script": "checker.py"}), no_confirm)
-    assert "confirm-cost" in rc._capability_risk_error(
+    assert "confirm-cost" in rc._confirmation_error(
         _risk_case("expensive"), no_confirm)
-    assert "confirm-cost" in rc._capability_risk_error(
+    assert "confirm-cost" in rc._confirmation_error(
         _risk_case("host_readonly", confirm_cost=True), no_confirm)
     confirmed = SimpleNamespace(confirm_isolated_env=True, confirm_cost=True)
-    assert rc._capability_risk_error(_risk_case("host_readonly"), confirmed) is None
-    assert rc._capability_risk_error(_risk_case("isolated_mutation"), confirmed) is None
-    assert rc._capability_risk_error(_risk_case("expensive"), confirmed) is None
+    assert rc._confirmation_error(_risk_case("host_readonly"), confirmed) is None
+    assert rc._confirmation_error(_risk_case("isolated_mutation"), confirmed) is None
+    assert rc._confirmation_error(_risk_case("expensive"), confirmed) is None
 
 
 def test_all_shipped_capability_scenarios_declare_a_risk():
@@ -368,30 +496,121 @@ def test_cross_session_requires_two_turns_and_score(tmp_path):
     assert any("cross_session" in p and "2 turns" in p for p in ei.value.problems)
 
 
-def test_cross_session_accepts_native_prompt_injected_memory(monkeypatch):
-    case = SimpleNamespace(
+def _xsession_case(**overrides):
+    case = dict(
         id="durable_codeword",
-        turns=[SimpleNamespace(query="store {token}"), SimpleNamespace(query="recall {token}")],
+        turns=[SimpleNamespace(query="store {token}", expect={}),
+               SimpleNamespace(query="recall {token}", expect={})],
+        expect={},
         score_spec={"match": "contains", "expected": "{token}"},
         requires_tools=[],
+        requires_tools_all=(),
+        cross_session=True,
         timeout_ms=120_000,
     )
+    case.update(overrides)
+    return SimpleNamespace(**case)
+
+
+def test_cross_session_accepts_native_prompt_injected_memory(monkeypatch):
+    case = _xsession_case()
     suite = SimpleNamespace(name="cap_memory")
-    captures = iter([
-        rc._Captured("graded", SimpleNamespace(reply="stored", tool_names=["memory_store"]),
-                     {}, [], 1.0),
-        rc._Captured("graded", SimpleNamespace(reply="kestrel-answer", tool_names=[]),
-                     {}, [], 1.0),
-    ])
+    captures = iter([_captured(reply="stored", spans=[_span("memory_store")]),
+                     _captured(reply="kestrel-answer")])
     monkeypatch.setattr(rc, "_capture_turn", lambda *_args: next(captures))
     monkeypatch.setattr(rc.scoring, "score_answer", lambda *_args: SimpleNamespace(score=1.0))
-    monkeypatch.setattr(rc, "_score_trial", lambda _case, _cap, success: (success, None, []))
 
     trial, _trace_id, _models = rc._cross_session_trial(
         SimpleNamespace(), None, suite, case, "run", 0,
     )
 
-    assert trial == 1.0
+    assert trial.effective_success == 1.0
+
+
+def test_cross_session_accounts_for_the_store_turn_too(monkeypatch):
+    # The store turn is real work the model was paid for: its tokens, cost and
+    # wall time belong in the trial, or a two-turn task reports as a one-turn one.
+    case = _xsession_case()
+    suite = SimpleNamespace(name="cap_memory")
+    captures = iter([
+        _captured(reply="stored", tokens=700, cost=0.07, elapsed=1200.0,
+                  spans=[_span("memory_store")], trace_id="store-trace"),
+        _captured(reply="kestrel", tokens=300, cost=0.03, elapsed=800.0,
+                  trace_id="recall-trace"),
+    ])
+    monkeypatch.setattr(rc, "_capture_turn", lambda *_args: next(captures))
+    monkeypatch.setattr(rc.scoring, "score_answer", lambda *_args: SimpleNamespace(score=1.0))
+
+    trial, trace_id, _models = rc._cross_session_trial(
+        SimpleNamespace(), None, suite, case, "run", 0)
+
+    assert trial.tokens == 1000
+    assert trial.cost == pytest.approx(0.10)
+    assert trial.duration_ms == pytest.approx(2000.0)
+    assert trial.tool_calls == 1
+    assert trace_id == "recall-trace"      # the graded turn is still the recall
+
+
+def test_cross_session_grades_the_store_turns_constraints(monkeypatch):
+    # A store turn that violated the case's declared expectation cannot be redeemed
+    # by a correct recall: the episode failed a hard constraint.
+    case = _xsession_case()
+    case.turns[0].expect = {"tools_all": ["memory_store"]}
+    suite = SimpleNamespace(name="cap_memory")
+    captures = iter([_captured(reply="sure, noted"), _captured(reply="kestrel")])
+    monkeypatch.setattr(rc, "_capture_turn", lambda *_args: next(captures))
+    monkeypatch.setattr(rc.scoring, "score_answer", lambda *_args: SimpleNamespace(score=1.0))
+
+    trial, _trace_id, _models = rc._cross_session_trial(
+        SimpleNamespace(), None, suite, case, "run", 0)
+
+    assert trial.effective_success == 0.0 and trial.status == "constraint_fail"
+
+
+def test_cross_session_evaluates_the_store_turns_safety_gates(monkeypatch):
+    case = _xsession_case()
+    case.turns[0].expect = {"tools_none": ["shell"]}
+    suite = SimpleNamespace(name="cap_memory")
+    captures = iter([_captured(reply="ok", spans=[_span("shell")]),
+                     _captured(reply="kestrel")])
+    monkeypatch.setattr(rc, "_capture_turn", lambda *_args: next(captures))
+    monkeypatch.setattr(rc.scoring, "score_answer", lambda *_args: SimpleNamespace(score=1.0))
+
+    trial, _trace_id, _models = rc._cross_session_trial(
+        SimpleNamespace(), None, suite, case, "run", 0)
+
+    assert trial.safety_violation is True and trial.effective_success == 0.0
+
+
+def test_cross_session_provenance_unions_both_turns_spans(monkeypatch):
+    # The store turn is where memory_store fires; requiring it on the recall turn
+    # alone would fail every correct episode.
+    case = _xsession_case(requires_tools=["memory_store"])
+    suite = SimpleNamespace(name="cap_memory")
+    captures = iter([_captured(reply="stored", spans=[_span("memory_store")]),
+                     _captured(reply="kestrel")])
+    monkeypatch.setattr(rc, "_capture_turn", lambda *_args: next(captures))
+    monkeypatch.setattr(rc.scoring, "score_answer", lambda *_args: SimpleNamespace(score=1.0))
+
+    trial, _trace_id, _models = rc._cross_session_trial(
+        SimpleNamespace(), None, suite, case, "run", 0)
+
+    assert trial.effective_success == 1.0
+
+
+def test_cross_session_store_failure_still_accounts_for_the_store_turn(monkeypatch):
+    case = _xsession_case()
+    suite = SimpleNamespace(name="cap_memory")
+    captures = iter([_captured(reply="stored", tokens=500, cost=0.05, elapsed=900.0),
+                     rc._Captured("no_trace", None, None, None, 250.0)])
+    monkeypatch.setattr(rc, "_capture_turn", lambda *_args: next(captures))
+
+    trial, trace_id, _models = rc._cross_session_trial(
+        SimpleNamespace(), None, suite, case, "run", 0)
+
+    assert trial.status == "no_trace" and trial.valid is False
+    assert trial.tokens == 500 and trial.duration_ms == pytest.approx(1150.0)
+    assert trace_id is None
 
 
 def test_the_real_cap_memory_suite_is_valid():
@@ -430,7 +649,8 @@ def test_checker_cleanup_refusal_fails_the_trial_loudly(tmp_path, monkeypatch):
     scoped = tmp_path / "workspace" / "eval" / "task" / "t0"
     scoped.mkdir(parents=True)
     cfg = SimpleNamespace(daemon=SimpleNamespace(fermix_home=str(tmp_path)))
-    case = SimpleNamespace(id="case", turns=[SimpleNamespace(query="q")])
+    case = SimpleNamespace(id="case", expect={}, checker_spec={"reset": []},
+                           turns=[SimpleNamespace(query="q", expect={})])
     suite = SimpleNamespace(name="suite")
     monkeypatch.setattr(rc.checker, "scoped_dir", lambda *_args: str(scoped))
     monkeypatch.setattr(rc.checker, "seed_workspace", lambda *_args: None)
@@ -830,9 +1050,10 @@ def test_run_task_stamps_the_abort_pointer_on_auth(monkeypatch):
 
     monkeypatch.setattr(rc, "_standard_trial", _refuse)
     s = SimpleNamespace(name="cap_coding")
+    scn = SimpleNamespace(id="edit_a_file")
     case = SimpleNamespace(id="landlord_email", checker_spec=None, cross_session=False)
     with pytest.raises(driver.AuthInvalidated) as caught:
-        rc.run_task(None, None, s, case, trials=5, k=5, threshold=0.5,
+        rc.run_task(None, None, s, scn, case, trials=5, k=5, threshold=0.5,
                     run_id="r", want_judge=False)
     assert (caught.value.suite, caught.value.case_id, caught.value.trial) == \
         ("cap_coding", "landlord_email", 0)
@@ -859,8 +1080,8 @@ def test_run_task_stamps_resume_pointer_on_usage_limit(tmp_path, monkeypatch):
 
     monkeypatch.setattr(rc, "_standard_trial", boom)
     with pytest.raises(driver.UsageLimitHit) as ei:
-        rc.run_task(None, None, suite, case, trials=1, k=1, threshold=1.0,
-                    run_id="r", want_judge=False)
+        rc.run_task(None, None, suite, suite.scenarios[0], case, trials=1, k=1,
+                    threshold=1.0, run_id="r", want_judge=False)
     assert (ei.value.suite, ei.value.case_id, ei.value.trial) == ("cap_hard", "h1", 0)
 
 
@@ -875,6 +1096,871 @@ def test_abort_usage_limit_reports_pointer_and_exits_4(capsys):
     assert "~15 min" in err and "3/10" in err         # reset window + progress
     assert "4 retries across ~390 min" in err         # backoff was exhausted
     assert "NOT written" in err                       # leaderboard is left intact
+
+
+
+# --- per-trial token + evidence record --------------------------------------
+
+def test_trial_token_is_deterministic_and_per_trial_unique():
+    a = rc.trial_token("cap_agentic", "job_writes_token", "20260904T0000Z", 0)
+    assert a == rc.trial_token("cap_agentic", "job_writes_token", "20260904T0000Z", 0)
+    assert a.startswith("TOK-") and len(a) == 12
+    assert a[4:] == a[4:].upper() and int(a[4:], 16) >= 0      # 8 uppercase hex
+    assert a != rc.trial_token("cap_agentic", "job_writes_token", "20260904T0000Z", 1)
+    assert a != rc.trial_token("cap_agentic", "job_writes_token", "20260904T0001Z", 0)
+    assert a != rc.trial_token("cap_agentic", "job_writes_token_alt", "20260904T0000Z", 0)
+
+
+def test_evidence_carries_this_trials_token_reply_and_spans():
+    cap = _captured(spans=[_span("schedule_job", input={"task": "write the token"}),
+                           _span("shell", error="policy denied")])
+    ev = rc._evidence("20260904T0000Z", 2, "sess-x", "TOK-DEADBEEF", _episode(cap))
+    assert ev["schema"] == 1
+    assert (ev["run_id"], ev["trial"], ev["session"]) == ("20260904T0000Z", 2, "sess-x")
+    assert ev["token"] == "TOK-DEADBEEF" and ev["reply"] == "ok"
+    assert ev["trace_id"] == "tr-1"
+    assert [(s["name"], s["status"]) for s in ev["tool_spans"]] == [
+        ("schedule_job", "ok"), ("shell", "error")]
+    assert ev["tool_spans"][0]["input"] == {"task": "write the token"}
+    assert ev["tool_spans"][0]["start_time"] == "2026-01-01T00:00:00Z"
+    assert ev["tool_spans"][1]["error"] and "denied" in ev["tool_spans"][1]["error"]
+    json.dumps(ev)                       # the checker reads it as JSON; it must serialize
+
+
+def test_evidence_spans_span_the_whole_episode():
+    # A cross-session episode's store turn is where memory_store fired; a checker
+    # correlating the recall alone would see none of the work.
+    store = _captured(spans=[_span("memory_store")], trace_id="store")
+    recall = _captured(spans=[_span("memory_recall")], trace_id="recall")
+    ev = rc._evidence("run", 0, "s", "TOK-00000000", _episode(store, recall))
+    assert [s["name"] for s in ev["tool_spans"]] == ["memory_store", "memory_recall"]
+    assert ev["trace_id"] == "recall"    # the graded turn
+
+
+# --- checker.reset: restore the declared baseline BEFORE every trial ---------
+
+def test_reset_removes_only_the_declared_subtree(tmp_path):
+    home = tmp_path / "fermix-capability-eval"
+    (home / "skills" / "eval-echo").mkdir(parents=True)
+    (home / "skills" / "eval-echo" / "SKILL.md").write_text("stale body")
+    (home / "skills" / "keep-me").mkdir()
+    rc._reset_declared_state(str(home), ["skills/eval-echo"])
+    assert not (home / "skills" / "eval-echo").exists()
+    assert (home / "skills" / "keep-me").exists()
+
+
+def test_reset_is_a_no_op_when_the_baseline_is_already_clean(tmp_path):
+    home = tmp_path / "fermix-capability-eval"
+    (home / "skills").mkdir(parents=True)
+    rc._reset_declared_state(str(home), ["skills/eval-echo"])   # must not raise
+    assert (home / "skills").is_dir()
+
+
+def test_reset_removes_a_declared_file_too(tmp_path):
+    home = tmp_path / "fermix-capability-eval"
+    (home / "workspace").mkdir(parents=True)
+    stale = home / "workspace" / "answer.txt"
+    stale.write_text("last trial")
+    rc._reset_declared_state(str(home), ["workspace/answer.txt"])
+    assert not stale.exists()
+
+
+def test_reset_removes_a_declared_symlink_not_what_it_points_at(tmp_path):
+    # safe_rm.check returns the REALPATH, so following the link deleted an undeclared
+    # target and left the declared entry behind as a dangling link — a baseline that is
+    # neither restored nor intact.
+    home = tmp_path / "fermix-capability-eval"
+    (home / "skills").mkdir(parents=True)
+    (home / "workspace" / "data").mkdir(parents=True)
+    target = home / "workspace" / "data" / "real.txt"
+    target.write_text("not declared")
+    link = home / "skills" / "flink"
+    link.symlink_to(target)
+    rc._reset_declared_state(str(home), ["skills/flink"])
+    assert not link.exists() and not link.is_symlink()
+    assert target.exists()
+
+
+def test_reset_refuses_a_home_that_is_not_an_eval_home(tmp_path):
+    home = tmp_path / ".fermix"
+    (home / "skills" / "eval-echo").mkdir(parents=True)
+    with pytest.raises(safe_rm.SafeRmError):
+        rc._reset_declared_state(str(home), ["skills/eval-echo"])
+    assert (home / "skills" / "eval-echo").exists()
+
+
+def test_reset_refuses_traversal_and_the_home_itself(tmp_path):
+    home = tmp_path / "fermix-capability-eval"
+    home.mkdir()
+    with pytest.raises(safe_rm.SafeRmError):
+        rc._reset_declared_state(str(home), ["skills/../../escape"])
+    with pytest.raises(safe_rm.SafeRmError):
+        rc._reset_declared_state(str(home), ["skills"])   # a root, not a task subtree
+
+
+def _checker_case(**overrides):
+    case = dict(
+        id="create_and_confirm_skill", expect={}, requires_tools=[],
+        requires_tools_all=(), cross_session=False, score_spec=None, rubric=None,
+        timeout_ms=1000,
+        checker_spec={"script": "chk.py", "mode": "json", "reset": ["skills/eval-echo"]},
+        turns=[SimpleNamespace(query="create eval-echo, token {token}, list to {ws}",
+                               expect={})],
+    )
+    case.update(overrides)
+    return SimpleNamespace(**case)
+
+
+def test_standard_trial_resets_state_and_hands_the_checker_this_trials_evidence(
+        tmp_path, monkeypatch):
+    home = tmp_path / "fermix-capability-eval"
+    scoped = home / "workspace" / "eval" / "task" / "t0"
+    scoped.mkdir(parents=True)
+    (home / "skills" / "eval-echo").mkdir(parents=True)
+    case = _checker_case()
+    cfg = SimpleNamespace(daemon=SimpleNamespace(fermix_home=str(home)))
+    seen = {}
+
+    monkeypatch.setattr(rc.checker, "scoped_dir", lambda *_a: str(scoped))
+    monkeypatch.setattr(rc.checker, "seed_workspace", lambda *_a: None)
+    monkeypatch.setattr(rc.checker, "teardown_workspace", lambda *_a: None)
+
+    def fake_capture(_cfg, _opik, _session, query, *_rest):
+        seen["query"] = query
+        return _captured(spans=[_span("skill_create"), _span("skill_reload")])
+
+    monkeypatch.setattr(rc, "_capture_turn", fake_capture)
+
+    def fake_run_checker(_skill_dir, _spec, _scoped, _reply, _home, evidence=None):
+        seen["evidence"] = evidence
+        return rc.checker.CheckerResult(1.0, "ok")
+
+    monkeypatch.setattr(rc.checker, "run_checker", fake_run_checker)
+    trial, _trace_id, _models = rc._standard_trial(
+        cfg, None, SimpleNamespace(name="cap_agentic"), case, "run", 0, True, "task",
+        None, str(home / "workspace" / "eval"), False)
+
+    assert not (home / "skills" / "eval-echo").exists()    # baseline restored first
+    assert seen["evidence"]["token"] == rc.trial_token("cap_agentic", case.id, "run", 0)
+    assert seen["evidence"]["token"] in seen["query"]      # the model can plant it
+    assert "{ws}" not in seen["query"] and str(scoped) in seen["query"]
+    assert trial.effective_success == 1.0
+
+
+def test_standard_trial_fails_provenance_when_only_half_the_work_succeeded(
+        tmp_path, monkeypatch):
+    home = tmp_path / "fermix-capability-eval"
+    scoped = home / "workspace" / "eval" / "task" / "t0"
+    scoped.mkdir(parents=True)
+    case = _checker_case(requires_tools_all=("skill_create", "skill_reload"))
+    cfg = SimpleNamespace(daemon=SimpleNamespace(fermix_home=str(home)))
+    monkeypatch.setattr(rc.checker, "scoped_dir", lambda *_a: str(scoped))
+    monkeypatch.setattr(rc.checker, "seed_workspace", lambda *_a: None)
+    monkeypatch.setattr(rc.checker, "teardown_workspace", lambda *_a: None)
+    monkeypatch.setattr(rc, "_capture_turn",
+                        lambda *_a: _captured(spans=[_span("skill_create")]))
+    monkeypatch.setattr(
+        rc.checker, "run_checker",
+        lambda *_a, **_k: rc.checker.CheckerResult(1.0, "ok"))
+
+    trial, _trace_id, _models = rc._standard_trial(
+        cfg, None, SimpleNamespace(name="cap_agentic"), case, "run", 0, True, "task",
+        None, str(home / "workspace" / "eval"), False)
+
+    assert trial.effective_success == 0.0
+
+
+def _run_checker_trial(tmp_path, monkeypatch, result, *, case=None):
+    home = tmp_path / "fermix-capability-eval"
+    scoped = home / "workspace" / "eval" / "task" / "t0"
+    scoped.mkdir(parents=True)
+    cfg = SimpleNamespace(daemon=SimpleNamespace(fermix_home=str(home)))
+    monkeypatch.setattr(rc.checker, "scoped_dir", lambda *_a: str(scoped))
+    monkeypatch.setattr(rc.checker, "seed_workspace", lambda *_a: None)
+    monkeypatch.setattr(rc.checker, "teardown_workspace", lambda *_a: None)
+    monkeypatch.setattr(rc, "_capture_turn", lambda *_a: _captured(spans=[_span("shell")]))
+    monkeypatch.setattr(rc.checker, "run_checker", lambda *_a, **_k: result)
+    return rc._standard_trial(cfg, None, SimpleNamespace(name="cap_agentic"),
+                              case or _checker_case(), "run", 0, True, "task", None,
+                              str(home / "workspace" / "eval"), False)
+
+
+def test_a_checker_error_is_an_invalid_trial_not_a_model_zero(tmp_path, monkeypatch):
+    # Every CheckerResult error path (script missing, boundary error, timeout, spawn
+    # OSError, unparseable output) used to become a VALID 0.0 that entered the
+    # leaderboard and dragged pass@1.
+    failed = rc.checker.CheckerResult(0.0, "", error="checker timed out after 120.0s")
+    trial, _trace_id, _models = _run_checker_trial(tmp_path, monkeypatch, failed)
+    assert trial.status == "checker_error"
+    assert trial.valid is False
+    assert "checker_error" in rc.aggregate.INVALID_STATUSES
+
+
+def test_a_checker_declared_violation_is_an_evaluated_safety_violation(
+        tmp_path, monkeypatch):
+    result = rc.checker.CheckerResult(1.0, "done", violations=["deleted an unrelated file"])
+    trial, _trace_id, _models = _run_checker_trial(tmp_path, monkeypatch, result)
+    assert trial.safety_ok is False and trial.safety_violation is True
+    assert trial.effective_success == 0.0        # a violation zeroes the task
+
+
+def test_a_checker_that_says_nothing_leaves_safety_not_evaluated(tmp_path, monkeypatch):
+    result = rc.checker.CheckerResult(1.0, "done")
+    trial, _trace_id, _models = _run_checker_trial(tmp_path, monkeypatch, result)
+    assert trial.safety_ok is None and trial.safety_evaluated is False
+
+
+def test_a_checker_that_looked_and_found_nothing_counts_as_evaluated(tmp_path, monkeypatch):
+    result = rc.checker.CheckerResult(1.0, "done", safety_ok=True)
+    trial, _trace_id, _models = _run_checker_trial(tmp_path, monkeypatch, result)
+    assert trial.safety_ok is True and trial.safety_evaluated is True
+
+
+def test_an_evidence_less_capture_is_no_trace_whatever_the_cli_called_it(monkeypatch):
+    # A CLI "timeout"/"error" with no server-side trace used to keep the CLI's word as
+    # the trial status. Those are outside INVALID_STATUSES, so a trial nobody observed
+    # entered the config score, the leaderboard and pass@1 as a model zero.
+    sent = rc.now_utc()
+    res = driver.DriveResult(ok=False, status="timeout", response="", error=None,
+                             session_id="s", exit_code=1, sent_at=sent, elapsed_ms=5.0)
+    monkeypatch.setattr(rc.driver, "drive_with_usage_retry",
+                        lambda *_a, **_k: (res, "s"))
+
+    class NoTrace:
+        def poll_for_turn(self, *_a, **_k):
+            return None
+
+    cfg = SimpleNamespace(opik=SimpleNamespace(poll_timeout_s=1, poll_interval_s=0.1))
+    cap = rc._capture_turn(cfg, NoTrace(), "s", "q", 1000, "case t0")
+    assert cap.status == "no_trace" and cap.detail == "timeout"
+    assert "no_trace" in rc.aggregate.INVALID_STATUSES
+
+
+# --- plan estimate ----------------------------------------------------------
+
+def _plan_case(turns, cross_session=False):
+    return SimpleNamespace(
+        id="c", cross_session=cross_session,
+        turns=[SimpleNamespace(query=f"q{i}", expect={}) for i in range(turns)])
+
+
+def test_the_runner_refuses_a_multi_turn_case_it_cannot_drive():
+    # `_standard_trial` sends only turns[-1].query while `_planned_turns` counts every
+    # declared turn, so an undriven multi-turn case is estimated as real work and then
+    # scored off its last prompt. The loader refuses this for score/checker cases; it
+    # cannot see a rubric-only one, which becomes a selection only under --judge.
+    rubric_two_turn = SimpleNamespace(id="r", cross_session=False,
+                                      turns=[SimpleNamespace(query="a", expect={}),
+                                             SimpleNamespace(query="b", expect={})])
+    cases = [(SimpleNamespace(name="cap_x"), SimpleNamespace(id="s"), rubric_two_turn)]
+    problem = rc._undriven_case_error(cases)
+    assert problem is not None and "cap_x/r" in problem
+    ok = [(SimpleNamespace(name="cap_x"), SimpleNamespace(id="s"), _plan_case(1)),
+          (SimpleNamespace(name="cap_x"), SimpleNamespace(id="s"),
+           _plan_case(2, cross_session=True))]
+    assert rc._undriven_case_error(ok) is None
+
+
+def test_planned_turns_counts_every_declared_turn():
+    cases = [(SimpleNamespace(name="s"), None, _plan_case(1)),
+             (SimpleNamespace(name="s"), None, _plan_case(2, cross_session=True))]
+    assert rc._planned_turns(cases) == 3        # not 2: the store turn is real work
+
+
+def test_the_shipped_default_sweep_plans_24_tasks_and_130_turns():
+    # The pin the review's §10 called out: "120 turns" omitted the two memory store
+    # turns, understating the declared input by 10 turns at 5 trials.
+    cap_dir = os.path.join(os.path.dirname(HERE), "suites", "capability")
+    selected, _skipped = rc.capability_cases(
+        suites.load_all(cap_dir), None, None, None, False)
+    assert len(selected) == 24
+    assert rc._planned_turns(selected) * 5 == 130
+
+
+def test_selection_label_records_the_candidate_flag():
+    args = SimpleNamespace(suite=None, tag=None, max_tasks=None, candidates=True)
+    assert "candidates" in rc._selection_label(args)
+    args = SimpleNamespace(suite=None, tag=None, max_tasks=None, candidates=False)
+    assert rc._selection_label(args) == "all"
+
+
+def test_selection_policy_refuses_a_destructive_selection_before_any_estimate():
+    # --estimate prints a plan for a selection that would be refused at execution;
+    # printing one for a destructive selection invites running it.
+    assert rc._selection_policy_error(_risk_case("destructive")) is not None
+    assert rc._selection_policy_error(_risk_case(suites.UNCLASSIFIED_RISK)) is not None
+    assert rc._selection_policy_error(_risk_case("isolated_mutation")) is None
+
+
+def test_confirmations_are_an_execution_concern_not_a_planning_one():
+    # An estimate spends nothing and mutates nothing, so the operator attestations
+    # are not required to print one — but they are still required to run.
+    no_confirm = SimpleNamespace(confirm_isolated_env=False, confirm_cost=False)
+    assert rc._confirmation_error(_risk_case("isolated_mutation"), no_confirm) is not None
+    assert rc._selection_policy_error(_risk_case("isolated_mutation")) is None
+
+
+# --- argument validation ----------------------------------------------------
+
+def _args(**overrides):
+    base = dict(trials=5, k=None, threshold=1.0)
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+def test_k_above_the_trial_count_is_refused_not_clamped():
+    problem = rc._argument_error(_args(trials=3, k=5))
+    assert problem is not None and "k" in problem
+
+
+def test_fewer_than_one_trial_is_refused():
+    assert rc._argument_error(_args(trials=0)) is not None
+    assert rc._argument_error(_args(trials=-1)) is not None
+
+
+def test_threshold_outside_the_unit_interval_is_refused():
+    assert rc._argument_error(_args(threshold=0.0)) is not None
+    assert rc._argument_error(_args(threshold=1.5)) is not None
+    assert rc._argument_error(_args()) is None
+
+
+def test_main_exits_2_on_an_unrunnable_k(capsys):
+    assert rc.main(["--trials", "3", "--k", "5", "--estimate"]) == 2
+    assert "k" in capsys.readouterr().err
+
+
+# --- measurement identity (tasks_hash v2) -----------------------------------
+
+_CFG = SimpleNamespace(judge=SimpleNamespace(backend="openai", model="gpt-5.4-mini"))
+
+
+def _hash_case(**overrides):
+    case = dict(
+        id="c1", turns=[SimpleNamespace(query="store {token}", expect={}),
+                        SimpleNamespace(query="recall it", expect={})],
+        expect={}, requires_tools=[], requires_tools_all=(), cross_session=True,
+        score_spec={"match": "contains", "expected": "{token}"}, checker_spec=None,
+        rubric=None, timeout_ms=120000)
+    case.update(overrides)
+    return SimpleNamespace(**case)
+
+
+def _hash(case, cfg=_CFG):
+    return rc.tasks_hash([(SimpleNamespace(name="cap_x"), None, case)], cfg)
+
+
+def test_hash_version_is_2():
+    assert rc.HASH_VERSION == 2
+
+
+def test_changing_an_EARLIER_turns_query_changes_the_hash():
+    # v1 hashed only turns[-1]: rewriting the memory setup prompt left the hash
+    # identical, so two different task sets compared as one.
+    before = _hash(_hash_case())
+    after = _hash(_hash_case(
+        turns=[SimpleNamespace(query="store {token} in a diary", expect={}),
+               SimpleNamespace(query="recall it", expect={})]))
+    assert before != after
+
+
+def test_adding_a_safety_expectation_changes_the_hash():
+    assert _hash(_hash_case()) != _hash(_hash_case(expect={"tools_none": ["shell"]}))
+    assert _hash(_hash_case()) != _hash(_hash_case(
+        turns=[SimpleNamespace(query="store {token}", expect={"tools_none": ["shell"]}),
+               SimpleNamespace(query="recall it", expect={})]))
+
+
+def test_provenance_scorer_and_limit_changes_all_change_the_hash():
+    base = _hash(_hash_case())
+    assert base != _hash(_hash_case(requires_tools=["memory_store"]))
+    assert base != _hash(_hash_case(requires_tools_all=("memory_store",)))
+    assert base != _hash(_hash_case(cross_session=False))
+    assert base != _hash(_hash_case(timeout_ms=60000))
+    assert base != _hash(_hash_case(
+        score_spec={"match": "contains", "expected": "{token}", "single": True}))
+
+
+def test_the_judge_configuration_is_part_of_a_rubric_tasks_identity():
+    rubric = _hash_case(score_spec=None, rubric="rewards a decisive recommendation")
+    other = SimpleNamespace(judge=SimpleNamespace(backend="openai", model="gpt-5.4"))
+    assert _hash(rubric) != _hash(rubric, other)
+    # a deterministic task is not judged, so its identity does not move with the judge
+    assert _hash(_hash_case()) == _hash(_hash_case(), other)
+
+
+def test_a_checker_task_hashes_its_reset_list_and_its_fixture_tree(tmp_path, monkeypatch):
+    monkeypatch.setattr(rc, "SKILL_DIR", str(tmp_path))
+    with open(os.path.join(str(tmp_path), "chk.py"), "w") as fh:
+        fh.write("print('{\"score\": 1}')")
+    fixture = tmp_path / "fx"
+    fixture.mkdir()
+    (fixture / "expenses.csv").write_text("Date,Category,Amount\n1,Groceries,10\n")
+    spec = {"script": "chk.py", "mode": "json", "seed": "fx", "reset": []}
+    case = _hash_case(score_spec=None, checker_spec=spec)
+    before = _hash(case)
+    assert before != _hash(_hash_case(
+        score_spec=None, checker_spec={**spec, "reset": ["skills/eval-echo"]}))
+    (fixture / "expenses.csv").write_text("Date,Category,Amount\n1,Groceries,99\n")
+    assert before != _hash(case)          # a changed fixture is a changed question
+
+
+def test_a_prose_only_comment_leaves_the_hash_unchanged(tmp_path):
+    suite_dir = _write(tmp_path, _XSESSION)
+    before = rc.tasks_hash(
+        [(s, None, c) for s in suites.load_all(suite_dir)
+         for scn in s.scenarios for c in scn.cases], _CFG)
+    with open(os.path.join(suite_dir, "cap_prov.yaml"), "a") as fh:
+        fh.write("\n# a note for the next maintainer, changing nothing that is asked\n")
+    after = rc.tasks_hash(
+        [(s, None, c) for s in suites.load_all(suite_dir)
+         for scn in s.scenarios for c in scn.cases], _CFG)
+    assert before == after
+
+
+def test_repo_revision_records_the_commit_and_a_dirty_diff_digest():
+    revision = rc._repo_revision()
+    assert len(revision["sha"]) == 40
+    assert isinstance(revision["dirty_digest"], str)      # "clean" or a digest
+
+
+# --- run validity: measurement vs outcome vs release decision ---------------
+
+def _trials(statuses):
+    from evallib import aggregate
+    return [aggregate.score_trial("t", task_success=1.0, safety_ok=None, cost=0.0,
+                                  duration_ms=1.0, tokens=1, tool_calls=0, status=st,
+                                  trace_id=f"tr-{i}")
+            for i, st in enumerate(statuses)]
+
+
+def _outcome(statuses, models=("openai/gpt-x/high",)):
+    from evallib import aggregate
+    trials = _trials(statuses)
+    stats = aggregate.aggregate_task(trials, k=1, threshold=1.0)
+    return rc.TaskOutcome(stats=stats, repr_trace_id=None, item_data={},
+                          trial_traces=[], models=list(models), trials=trials)
+
+
+def test_a_fully_observed_single_route_sweep_is_valid():
+    outcomes = [("cap_x", "c1", _outcome(["ok", "ok"]))]
+    assert rc._validity_problems(outcomes, {"openai/gpt-x/high"}) == []
+
+
+def test_one_missing_trace_invalidates_the_run_and_names_the_trial():
+    outcomes = [("cap_x", "c1", _outcome(["ok", "no_trace"]))]
+    problems = rc._validity_problems(outcomes, {"openai/gpt-x/high"})
+    assert len(problems) == 1
+    assert "cap_x/c1" in problems[0] and "no_trace" in problems[0]
+
+
+def test_every_invalid_status_counts_as_missing_evidence():
+    from evallib import aggregate
+    for status in aggregate.INVALID_STATUSES:
+        outcomes = [("cap_x", "c1", _outcome([status]))]
+        assert rc._validity_problems(outcomes, {"r"}), status
+
+
+def test_two_routes_serving_one_sweep_invalidate_it():
+    outcomes = [("cap_x", "c1", _outcome(["ok"]))]
+    problems = rc._validity_problems(
+        outcomes, {"openai/gpt-x/high", "anthropic/claude-y/default"})
+    assert len(problems) == 1
+    assert "anthropic/claude-y/default" in problems[0] and "openai/gpt-x/high" in problems[0]
+
+
+def test_a_constraint_failure_is_a_valid_measurement_of_a_failed_task():
+    outcomes = [("cap_x", "c1", _outcome(["constraint_fail"]))]
+    assert rc._validity_problems(outcomes, {"r"}) == []
+
+
+def test_a_config_id_label_cannot_waive_the_missing_route_guard():
+    # A config id is a NAME for the row, not evidence that a model served the sweep.
+    assert rc._no_route_error([], "openai_codex/gpt-5.6-sol") is not None
+    assert rc._no_route_error([], None) is not None
+    assert rc._no_route_error(["openai/gpt-x/high"], None) is None
+
+
+def test_a_usage_limit_seen_only_in_the_server_trace_is_invalid_not_a_zero(monkeypatch):
+    from evallib import driver
+    limited = "You've hit your Codex usage limit. Try again in ~15 min."
+    monkeypatch.setattr(
+        driver, "drive_with_usage_retry",
+        lambda *_a: (driver.DriveResult(
+            ok=True, status="ok", response="", error=None, session_id="s", exit_code=0,
+            sent_at=datetime(2026, 1, 1, tzinfo=timezone.utc)), "s"))
+    trace = _trace(reply=limited)
+    opik = SimpleNamespace(
+        poll_for_turn=lambda *_a, **_k: trace,
+        await_complete=lambda _t: (trace, []))
+    cfg = SimpleNamespace(opik=SimpleNamespace(poll_timeout_s=1, poll_interval_s=1))
+    cap = rc._capture_turn(cfg, opik, "sess", "q", 1, "lbl")
+    assert cap.status == "incomplete"
+    from evallib import aggregate
+    assert "incomplete" in aggregate.INVALID_STATUSES
+
+
+def test_the_exit_code_table_is_documented():
+    doc = rc.__doc__.lower()
+    assert "release gate" in doc and "invalid" in doc
+    for code in ("0", "2", "3", "4", "5"):
+        assert code in doc
+
+
+# --- the tier contract the runner depends on --------------------------------
+
+def _makefile() -> str:
+    with open(os.path.join(os.path.dirname(HERE), "Makefile"), encoding="utf-8") as fh:
+        return fh.read()
+
+
+def test_the_judged_axis_passes_the_threshold_its_suite_documents():
+    # The tier commands live in bin/tier.sh (the Makefile only aliases them);
+    # bin/test_tier.py asserts each tier's full argv through `tier.sh --print`.
+    with open(os.path.join(HERE, "tier.sh"), encoding="utf-8") as fh:
+        judged = [ln for ln in fh.read().splitlines()
+                  if "run_capability.py" in ln and "cap_response_quality" in ln]
+    assert judged and all("--threshold 0.5" in ln for ln in judged)
+
+
+def test_the_release_gate_tests_run_in_the_tests_loop():
+    loop = [ln for ln in _makefile().splitlines() if "test_$$t.py" in ln or "for t in" in ln]
+    assert any("release_gate" in ln for ln in loop)
+
+
+# --- report: invalid never publishes, valid-but-short exits 5 ----------------
+
+def _report_cfg(tmp_path):
+    return SimpleNamespace(
+        report_dir=str(tmp_path / "reports"),
+        judge=SimpleNamespace(backend="openai", model="gpt-5.4-mini"),
+        opik=SimpleNamespace(ui_base="http://localhost:5173"))
+
+
+def _report_args(**overrides):
+    base = dict(config_id=None, threshold=1.0, private=False, no_opik=True,
+                axis="tokens", suite=None, tag=None, max_tasks=None, candidates=False)
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+def _report_run(statuses, success=1.0, routes=("openai/gpt-x/high",), pricing_cols=None):
+    from evallib import aggregate
+    trials = [aggregate.score_trial("c1", task_success=success, safety_ok=True, cost=0.01,
+                                    duration_ms=10.0, tokens=5, tool_calls=1, status=st,
+                                    trace_id=f"tr-{i}", **(pricing_cols or {}))
+              for i, st in enumerate(statuses)]
+    stats = aggregate.aggregate_task(trials, k=1, threshold=1.0, family="cap_x/s")
+    out = rc.TaskOutcome(stats=stats, repr_trace_id="tr-0",
+                         item_data={"input": "q", "expected": "e", "suite": "cap_x",
+                                    "method": "contains"},
+                         trial_traces=[("tr-0", success)], models=list(routes),
+                         trials=trials)
+    case = SimpleNamespace(id="c1", turns=[SimpleNamespace(query="q", expect={})],
+                           expect={}, requires_tools=[], requires_tools_all=(),
+                           cross_session=False,
+                           score_spec={"match": "contains", "expected": "e"},
+                           checker_spec=None, rubric=None, timeout_ms=1000)
+    return rc._Run(run_id="20260904T000000Z",
+                   revision={"sha": "0" * 40, "dirty_digest": "clean"},
+                   tasks_hash="deadbeefdeadbeef",
+                   cases=[(SimpleNamespace(name="cap_x", soft=False), SimpleNamespace(id="s"), case)],
+                   trials=len(statuses), k=1, want_judge=False,
+                   outcomes=[("cap_x", "c1", out)], all_models=list(routes),
+                   task_stats=[stats])
+
+
+def test_an_invalid_run_keeps_its_evidence_but_publishes_nothing(tmp_path, capsys):
+    cfg = _report_cfg(tmp_path)
+    lb_path = os.path.join(cfg.report_dir, "capability", "leaderboard.json")
+    run = _report_run(["ok", "no_trace"])
+
+    assert rc._report(cfg, _report_args(), lb_path, run) == 4
+
+    out_dir = os.path.join(cfg.report_dir, "capability", run.run_id)
+    with open(os.path.join(out_dir, "report.md")) as fh:
+        report = fh.read()
+    assert "MEASUREMENT INVALID" in report and "no usable evidence" in report
+    # Kept for diagnosis under a name run_uplift.py cannot be pointed at by habit: as
+    # results.json the payload was byte-identical in shape to a valid arm, so an
+    # invalid sweep paired cleanly and published an uplift claim built on harness
+    # failures.
+    assert not os.path.exists(os.path.join(out_dir, "results.json"))
+    invalid = os.path.join(out_dir, "results.invalid.json")
+    assert os.path.isfile(invalid)
+    with open(invalid) as fh:
+        assert json.load(fh)["valid"] is False
+    assert not os.path.exists(lb_path)                             # but never ranked
+    assert "leaderboard NOT written" in capsys.readouterr().err
+
+
+def test_a_valid_run_writes_a_pairable_results_json(tmp_path):
+    cfg = _report_cfg(tmp_path)
+    lb_path = os.path.join(cfg.report_dir, "capability", "leaderboard.json")
+    run = _report_run(["ok", "ok"])
+    rc._report(cfg, _report_args(), lb_path, run)
+    out_dir = os.path.join(cfg.report_dir, "capability", run.run_id)
+    with open(os.path.join(out_dir, "results.json")) as fh:
+        assert json.load(fh)["valid"] is True
+
+
+def test_a_valid_run_that_misses_the_bar_is_recorded_and_exits_5(tmp_path, capsys):
+    cfg = _report_cfg(tmp_path)
+    lb_path = os.path.join(cfg.report_dir, "capability", "leaderboard.json")
+    run = _report_run(["ok", "ok"], success=0.0)
+
+    assert rc._report(cfg, _report_args(), lb_path, run) == 5
+
+    with open(lb_path) as fh:
+        store = json.load(fh)
+    assert store["store_version"] == 2
+    row = next(iter(store["rows"].values()))
+    assert row["meta"]["hash_version"] == rc.HASH_VERSION
+    assert row["meta"]["release_gate"]["passed"] is False
+    assert row["meta"]["repo"]["sha"] == "0" * 40
+    assert row["meta"]["routes"] == ["openai/gpt-x/high"]
+    out_dir = os.path.join(cfg.report_dir, "capability", run.run_id)
+    with open(os.path.join(out_dir, "report.md")) as fh:
+        report = fh.read()
+    assert "RED" in report and "strict pass@1" in report
+    assert "release gate: RED" in capsys.readouterr().err
+
+
+def test_a_run_that_clears_every_target_exits_0(tmp_path):
+    cfg = _report_cfg(tmp_path)
+    lb_path = os.path.join(cfg.report_dir, "capability", "leaderboard.json")
+    run = _report_run(["ok", "ok"], success=1.0)
+    assert rc._report(cfg, _report_args(), lb_path, run) == 0
+    out_dir = os.path.join(cfg.report_dir, "capability", run.run_id)
+    with open(os.path.join(out_dir, "report.md")) as fh:
+        assert "PASS" in fh.read()
+
+
+def test_a_two_route_sweep_is_refused_even_with_perfect_scores(tmp_path):
+    cfg = _report_cfg(tmp_path)
+    lb_path = os.path.join(cfg.report_dir, "capability", "leaderboard.json")
+    run = _report_run(["ok", "ok"], routes=("openai/gpt-x/high", "anthropic/claude/none"))
+    assert rc._report(cfg, _report_args(), lb_path, run) == 4
+    assert not os.path.exists(lb_path)
+
+
+
+# --- the rate card: cost reported BESIDE the score, never inside it ----------
+#
+# The defect this section pins: `$/success` was blank for 5 of 8 leaderboard rows
+# because Opik prices some model slugs and not others. Cost now comes from one rate
+# card applied uniformly, and every way it can fail to produce a number is NAMED.
+
+def _llm(model="gpt-5.6-sol", provider="openai", adapter="codex", *,
+         prompt=1000, completion=200, cached=None, cache_write=None, status="ok"):
+    usage = {}
+    if prompt is not None:
+        usage["prompt_tokens"] = prompt
+    if completion is not None:
+        usage["completion_tokens"] = completion
+    if cached is not None:
+        usage["cached_input_tokens"] = cached
+    if cache_write is not None:
+        usage["cache_creation_input_tokens"] = cache_write
+    return {"type": "llm", "model": model, "provider": provider, "usage": usage,
+            "metadata": {"adapter": adapter, "status": status},
+            "start_time": "2026-01-01T00:00:00Z", "end_time": "2026-01-01T00:00:01Z"}
+
+
+def _priced_cap(*spans, name="agent:main", cost=0.01, trace_id="tr-1"):
+    """A captured turn carrying real llm spans (the trace `name` matters: a vendor-CLI
+    harness delegation exports as `harness:*` with none)."""
+    trace = {"id": trace_id, "name": name, "_eval_trace_complete": True,
+             "total_estimated_cost": cost, "usage": {"total_tokens": 10},
+             "metadata": {"iterations": 1}, "output": "ok"}
+    spans = list(spans)
+    return rc._Captured("graded", grade.TurnView.build(trace, spans, elapsed_ms=100.0),
+                        trace, spans, 100.0)
+
+
+def _pricing_case():
+    return SimpleNamespace(id="p", expect={}, requires_tools=[], requires_tools_all=(),
+                           cross_session=False,
+                           turns=[SimpleNamespace(query="q", expect={})])
+
+
+def test_the_priced_figure_comes_from_the_rate_card_and_never_from_opik():
+    # openai_codex/gpt-5.6-sol = $4.00 in / $20.00 out per MTok.
+    cap = _priced_cap(_llm(prompt=1000, completion=200), cost=99.0)
+    trial, _tid, _m = rc._finish_trial(_pricing_case(), _episode(cap), 1.0)
+    assert trial.priced_cost_usd == pytest.approx(0.008)
+    assert trial.pricing_card_version == pricing.CARD_VERSION
+    assert trial.pricing_basis == "ceiling"      # no cache count reported yet
+    # Opik's own number stays exactly where the declared max_cost_usd gates read it.
+    # Blending the two sources would make the leaderboard figure unattributable.
+    assert trial.cost == pytest.approx(99.0)
+
+
+def test_the_token_split_sums_every_turn_of_the_episode():
+    ep = _episode(_priced_cap(_llm(prompt=1000, completion=200)),
+                  _priced_cap(_llm(prompt=500, completion=50, cached=100), trace_id="tr-2"))
+    trial, _tid, _m = rc._finish_trial(_pricing_case(), ep, 1.0)
+    assert trial.total_input_tokens == 1500 and trial.total_output_tokens == 250
+    assert trial.total_cached_input_tokens == 100
+    # nothing reported a cache-WRITE count: None, never 0 — "said zero" and "said
+    # nothing" are different facts and price differently.
+    assert trial.total_cache_write_tokens is None
+    assert trial.pricing_basis == "ceiling"     # one span lacked cache detail
+
+
+def test_cache_counts_ride_alongside_the_blended_input_total():
+    cap = _priced_cap(_llm(prompt=1000, completion=200, cached=400))
+    trial, _tid, _m = rc._finish_trial(_pricing_case(), _episode(cap), 1.0)
+    assert trial.total_input_tokens == 1000      # BLENDED: cached is INSIDE it, not added
+    assert trial.total_cached_input_tokens == 400
+    # gpt-5.6-sol bills cache WRITES at 1.25x input, and this span reports only the read
+    # count — half a split, so the label stays `ceiling`. `cache_aware` is reserved for a
+    # figure whose every priced leg came from a reported count.
+    assert trial.pricing_basis == "ceiling"
+    # 600 uncached @ $4 + 400 cached @ $0.40 + 200 out @ $20
+    assert trial.priced_cost_usd == pytest.approx(0.00656)
+
+
+def test_a_turn_that_exported_no_llm_span_is_unpriced_under_a_named_reason():
+    # 74 capability traces are vendor-CLI harness delegation (`harness:codex` /
+    # `harness:claude`): zero llm spans, tokens stranded in trace.metadata.usage.
+    # Pricing that at $0.00 publishes a free vendor run.
+    cap = _priced_cap(name="harness:codex")
+    trial, _tid, _m = rc._finish_trial(_pricing_case(), _episode(cap), 1.0)
+    assert trial.pricing_basis == "unpriced" and trial.priced_cost_usd is None
+    assert trial.unpriced_routes == ["(no llm spans)/harness:codex"]
+
+
+def test_one_stranded_turn_withholds_the_whole_episode_figure():
+    ep = _episode(_priced_cap(_llm(prompt=1000, completion=200)),
+                  _priced_cap(name="harness:claude", trace_id="tr-2"))
+    trial, _tid, _m = rc._finish_trial(_pricing_case(), ep, 1.0)
+    # a partial sum published under a total's heading is the defect, not a compromise
+    assert trial.priced_cost_usd is None and trial.pricing_basis == "unpriced"
+    assert "(no llm spans)/harness:claude" in trial.unpriced_routes
+    assert trial.total_input_tokens == 1000      # what WAS observed is still reported
+
+
+def test_a_model_missing_from_the_card_is_recorded_unknown_and_never_scored():
+    cap = _priced_cap(_llm(model="gpt-9-nova", provider="openai", adapter=None))
+    trial, _tid, _m = rc._finish_trial(_pricing_case(), _episode(cap), 1.0)
+    assert trial.pricing_basis == "unpriced" and trial.priced_cost_usd is None
+    assert trial.unpriced_routes == ["openai/gpt-9-nova"]
+    # cost is reported BESIDE task performance, so a missing rate costs the trial
+    # nothing: the score and the measurement's validity are untouched.
+    assert trial.effective_success == 1.0 and trial.valid is True
+
+
+def test_a_span_that_reported_no_usage_is_counted_not_priced_as_free():
+    cap = _priced_cap(_llm(prompt=1000, completion=200),
+                      _llm(prompt=None, completion=None, status="error"))
+    trial, _tid, _m = rc._finish_trial(_pricing_case(), _episode(cap), 1.0)
+    assert trial.spans_without_usage == 1        # real spend, unrecoverable
+    assert trial.priced_cost_usd == pytest.approx(0.008)
+    assert trial.total_input_tokens == 1000
+
+
+def test_a_locally_served_route_is_not_token_billed_rather_than_free():
+    cap = _priced_cap(_llm(model="qwen3:32b", provider="ollama", adapter=None))
+    trial, _tid, _m = rc._finish_trial(_pricing_case(), _episode(cap), 1.0)
+    assert trial.pricing_basis == "not_token_billed" and trial.priced_cost_usd is None
+
+
+def test_an_unobserved_episode_never_attempted_pricing():
+    cap = rc._Captured("no_trace", None, None, None, 1.0)
+    case = SimpleNamespace(id="unseen", expect={},
+                           turns=[SimpleNamespace(query="q", expect={})])
+    trial, _tid, _m = rc._fail_trial(case, _episode(cap))
+    # "never priced" must stay distinct from "priced and found free"
+    assert trial.pricing_basis is None and trial.pricing_card_version is None
+    assert trial.priced_cost_usd is None and trial.unpriced_routes is None
+    assert trial.total_input_tokens is None and trial.spans_without_usage is None
+
+
+def test_a_half_reported_usage_map_stops_the_run_instead_of_under_pricing():
+    cap = _priced_cap(_llm(prompt=1000, completion=None))
+    with pytest.raises(rc.PricingContractError):
+        rc._finish_trial(_pricing_case(), _episode(cap), 1.0)
+
+
+def test_a_pricing_contract_violation_aborts_the_sweep_with_the_invalid_exit(capsys):
+    err = rc.PricingContractError("openai_codex/gpt-5.6-sol reported prompt tokens "
+                                  "but no completion tokens")
+    err.locate("cap_x", "c1", 2)
+    assert rc._abort_pricing_contract(err, 3, 10) == 4
+    stderr = capsys.readouterr().err
+    assert "cap_x/c1 (trial 2)" in stderr and "Leaderboard NOT written" in stderr
+
+
+def test_an_unpriced_route_is_surfaced_loudly_but_never_invalidates_the_run(tmp_path, capsys):
+    cfg = _report_cfg(tmp_path)
+    lb_path = os.path.join(cfg.report_dir, "capability", "leaderboard.json")
+    run = _report_run(["ok", "ok"], pricing_cols=dict(
+        pricing_basis="unpriced", priced_cost_usd=None,
+        pricing_card_version=pricing.CARD_VERSION,
+        unpriced_routes=["openai/gpt-9-nova"], spans_without_usage=0))
+
+    # exit 4 would discard a VALID measurement of task performance over a missing
+    # rate — cost is not a correctness signal (owner decision 1).
+    assert rc._report(cfg, _report_args(), lb_path, run) == 0
+    assert os.path.exists(lb_path)                       # the row IS written
+    stderr = capsys.readouterr().err
+    assert "openai/gpt-9-nova" in stderr and "rate card" in stderr
+    out_dir = os.path.join(cfg.report_dir, "capability", run.run_id)
+    with open(os.path.join(out_dir, "report.md")) as fh:
+        report = fh.read()
+    assert "openai/gpt-9-nova" in report and "bin/evallib/pricing.py" in report
+
+
+def test_a_stranded_turn_reads_as_a_correlation_gap_not_a_missing_rate(tmp_path, capsys):
+    cfg = _report_cfg(tmp_path)
+    lb_path = os.path.join(cfg.report_dir, "capability", "leaderboard.json")
+    run = _report_run(["ok", "ok"], pricing_cols=dict(
+        pricing_basis="unpriced", priced_cost_usd=None,
+        pricing_card_version=pricing.CARD_VERSION,
+        unpriced_routes=["(no llm spans)/harness:codex"], spans_without_usage=0))
+
+    assert rc._report(cfg, _report_args(), lb_path, run) == 0
+    stderr = capsys.readouterr().err
+    assert "harness:codex" in stderr and "trace.metadata.usage" in stderr
+
+
+def test_the_report_labels_a_ceiling_figure_as_an_estimate_not_a_bound(tmp_path):
+    """`ceiling` errs in BOTH directions, so the report must not claim a side.
+
+    An unreported cache READ bills at the full input rate (overstates); an
+    unreported cache WRITE on a vendor charging a premium bills at 1.0x rather
+    than 1.25x (understates). Calling the figure an upper bound was true only
+    while every carded write leg billed at the input rate, and it stopped being
+    true when the GPT-5.6+ write rates were added.
+    """
+    cfg = _report_cfg(tmp_path)
+    lb_path = os.path.join(cfg.report_dir, "capability", "leaderboard.json")
+    run = _report_run(["ok", "ok"], pricing_cols=dict(
+        pricing_basis="ceiling", priced_cost_usd=0.25,
+        pricing_card_version=pricing.CARD_VERSION,
+        unpriced_routes=[], spans_without_usage=0,
+        total_input_tokens=1000, total_output_tokens=200))
+
+    assert rc._report(cfg, _report_args(), lb_path, run) == 0
+    out_dir = os.path.join(cfg.report_dir, "capability", run.run_id)
+    with open(os.path.join(out_dir, "report.md")) as fh:
+        report = fh.read()
+    assert "ESTIMATE, not a bound" in report
+    assert "overstates cached reads" in report and "understates premium cache writes" in report
+    assert "$0.5000" in report                              # two trials at $0.25
+    assert pricing.CARD_VERSION in report
+    # The retired claim must not come back by copy-paste.
+    assert "true billed figure is lower" not in report
+
+
+def test_a_run_with_no_rate_card_result_says_so_rather_than_showing_nothing(tmp_path):
+    cfg = _report_cfg(tmp_path)
+    lb_path = os.path.join(cfg.report_dir, "capability", "leaderboard.json")
+    run = _report_run(["ok", "ok"])                       # no pricing columns at all
+    assert rc._report(cfg, _report_args(), lb_path, run) == 0
+    out_dir = os.path.join(cfg.report_dir, "capability", run.run_id)
+    with open(os.path.join(out_dir, "report.md")) as fh:
+        assert "not priced" in fh.read()
 
 
 if __name__ == "__main__":

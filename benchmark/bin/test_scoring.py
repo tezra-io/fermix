@@ -51,16 +51,53 @@ def test_numeric_no_number_in_reply_is_zero():
     assert scoring.score_answer("no idea", {"match": "numeric", "expected": 5}).score == 0.0
 
 
-def test_numeric_any_match_finds_answer_despite_distractors():
-    # The answer can appear after chain-of-thought OR before a trailing distractor.
-    # Any extracted number within tolerance counts, so neither position defeats it.
+def test_numeric_reads_the_last_number_as_the_answer():
+    # The documented rule (EVAL_REALISTIC_TASKS.md): the LAST number in the reply is
+    # the answer, which is what makes the "reply with ONLY the number" prompts
+    # load-bearing. Shown work before the result still scores.
     reply = "We have 6 shelves, each holds 12, plus 5 on top. Total: 65"
     assert scoring.score_answer(reply, {"match": "numeric", "expected": 65}).score == 1.0
-    # trailing-context distractor (the OLD 'last number' rule read 60.9 and scored 0):
-    trailing = "Revenue was $130.5B, up from $60.9B last year."
-    assert scoring.score_answer(trailing, {"match": "numeric", "expected": 130.5, "tolerance": 0.1}).score == 1.0
-    # a number genuinely absent still fails
     assert scoring.score_answer(reply, {"match": "numeric", "expected": 999}).score == 0.0
+
+
+def test_numeric_does_not_award_a_number_buried_before_a_trailing_figure():
+    # "any number in the reply counts" made the scorer generous enough to credit a
+    # reply whose stated answer is the WRONG one: here the model's final figure is the
+    # prior year. Last-number keeps the graded quantity the one the model committed to.
+    trailing = "Revenue was $130.5B, up from $60.9B last year."
+    spec = {"match": "numeric", "expected": 130.5, "tolerance": 0.1}
+    assert scoring.score_answer(trailing, spec).score == 0.0
+    assert scoring.score_answer(trailing, {"match": "numeric", "expected": 60.9,
+                                           "tolerance": 0.1}).score == 1.0
+
+
+def test_numeric_single_rejects_a_hedged_two_answer_reply():
+    # A model that hedges between the trap value and the right one has not answered.
+    hedged = "It is either 15750 or 16100 depending on the year."
+    spec = {"match": "numeric", "expected": 16100, "tolerance": 0, "single": True}
+    s = scoring.score_answer(hedged, spec)
+    assert s.score == 0.0
+    assert "multiple numbers" in s.detail
+    # without `single` the documented last-number rule still credits it
+    assert scoring.score_answer(hedged, {"match": "numeric", "expected": 16100}).score == 1.0
+
+
+def test_numeric_single_rejects_a_shotgun_of_candidates():
+    shotgun = "Could be 1, 2, 3, 5, 8 or 13."
+    spec = {"match": "numeric", "expected": 13, "tolerance": 0, "single": True}
+    assert scoring.score_answer(shotgun, spec).score == 0.0
+
+
+def test_numeric_single_accepts_one_distinct_number_repeated():
+    spec = {"match": "numeric", "expected": 16100, "tolerance": 0, "single": True}
+    assert scoring.score_answer("16100", spec).score == 1.0
+    # the same value restated is still one answer, not a hedge
+    assert scoring.score_answer("16100 (i.e. 16,100)", spec).score == 1.0
+
+
+def test_numeric_single_still_requires_the_right_number():
+    spec = {"match": "numeric", "expected": 16100, "tolerance": 0, "single": True}
+    assert scoring.score_answer("15750", spec).score == 0.0
 
 
 def test_numeric_accepts_scientific_notation():

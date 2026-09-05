@@ -706,13 +706,29 @@ cmd_run() {
     benchmark/bin/capability-daemon.sh up" || die "daemon failed to boot on the box"
 
   case "$tier" in
-    regression|capability|dry|tests)
-      # The capability target drops its flags unless these are set, and then
+    capability)
+      # Through bin/tier.sh, not `make`: GNU make reports any recipe failure as
+      # exit 2, so every runner outcome reached $rc as 2 and tier_failure could
+      # never tell a red release gate (5) from a missing measurement (3/4) — the
+      # exact confusion the separate exit codes exist to remove. tier.sh execs the
+      # runner, so its code arrives here intact. `dangerous` below runs its runner
+      # inline for the same reason (it is not one of the tier.sh tiers).
+      #
+      # tier.sh drops the capability attestations unless these are set, and then
       # run_capability.py refuses — after the box is already provisioned. True by
       # construction here: the VM and its seeded home exist only for this run.
       remote "$ip" ". /etc/profile.d/fermix-toolchain.sh; cd $REMOTE_REPO/benchmark && \
         $env_prefix FERMIX_EVAL_HOME=$REMOTE_EVAL_HOME \
         CONFIRM_DAEMON_ISOLATED=1 CONFIRM_ISOLATED_ENV=1 CONFIRM_COST=1 \
+        bin/tier.sh capability" || rc=$? ;;
+    regression)
+      # Also tier.sh, so run_eval.py's exit 4 (measurement invalid) survives too.
+      remote "$ip" ". /etc/profile.d/fermix-toolchain.sh; cd $REMOTE_REPO/benchmark && \
+        $env_prefix FERMIX_EVAL_HOME=$REMOTE_EVAL_HOME \
+        bin/tier.sh regression" || rc=$? ;;
+    dry|tests)
+      remote "$ip" ". /etc/profile.d/fermix-toolchain.sh; cd $REMOTE_REPO/benchmark && \
+        $env_prefix FERMIX_EVAL_HOME=$REMOTE_EVAL_HOME \
         make $tier" || rc=$? ;;
     dangerous)
       # A real throwaway VM, so the D5 attestation is true here rather than stretched.
@@ -735,7 +751,28 @@ cmd_run() {
     "root@$ip:$REMOTE_REPO/benchmark/reports/" "$REPO_ROOT/benchmark/reports/" \
     || log "WARNING: could not pull reports from the box"
 
-  [ "$rc" -eq 0 ] || die "tier '$tier' failed (exit $rc) — any reports were pulled to benchmark/reports/"
+  [ "$rc" -eq 0 ] || die "tier '$tier' failed (exit $rc): $(tier_failure "$tier" "$rc") \
+— any reports were pulled to benchmark/reports/"
+}
+
+# What a nonzero capability tier actually means. run_capability.py separates the
+# measurement from the release decision, and "the target failed" hides which one:
+# exit 5 is a complete, recorded, VALID sweep whose release gate is red (read the
+# report — today's sweep declares no safety gate, so the gate reports "safety not
+# evaluated" by design and that is not a candidate regression), while 3/4 mean no
+# valid measurement exists at all (no leaderboard row). These branches are only
+# reachable because the tier runs through `bin/tier.sh`, which execs the runner;
+# through `make` every outcome arrived as 2.
+tier_failure() {
+  local tier="$1" rc="$2"
+  [ "$tier" = capability ] || { printf 'runner failed'; return; }
+  case "$rc" in
+    5)   printf 'release gate red — the sweep was VALID and recorded; read the gate reason in benchmark/reports/capability/<run>/report.md before blaming the model' ;;
+    4)   printf 'measurement invalid — no leaderboard row; results.invalid.json and a banner-marked report were kept for diagnosis' ;;
+    3)   printf 'preconditions failed or no route served the sweep — no measurement exists' ;;
+    2)   printf 'selection or argument refusal — nothing was driven' ;;
+    *)   printf 'runner failed' ;;
+  esac
 }
 
 # Boots a throwaway box from the image and asserts what is actually inside it.

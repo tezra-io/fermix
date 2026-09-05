@@ -21,8 +21,9 @@ import pytest  # noqa: E402
 import run_baseline  # noqa: E402
 
 
-def _case(cid, query, spec):
-    return SimpleNamespace(id=cid, turns=[SimpleNamespace(query=query)], score_spec=spec)
+def _case(cid, query, spec, cross_session=False):
+    return SimpleNamespace(id=cid, turns=[SimpleNamespace(query=query)], score_spec=spec,
+                           cross_session=cross_session)
 
 
 def test_score_case_correct_answer():
@@ -64,8 +65,10 @@ def test_score_case_drives_trials_not_k():
 
 
 def test_baseline_cases_only_closed_form():
-    scored = SimpleNamespace(id="s", score_spec={"match": "exact", "expected": "a"}, rubric=None)
-    rubric_only = SimpleNamespace(id="r", score_spec=None, rubric="judge me")
+    scored = SimpleNamespace(id="s", score_spec={"match": "exact", "expected": "a"},
+                             rubric=None, cross_session=False)
+    rubric_only = SimpleNamespace(id="r", score_spec=None, rubric="judge me",
+                                  cross_session=False)
     scn = SimpleNamespace(id="scn", tags=["capability"], cases=[scored, rubric_only])
     suite = SimpleNamespace(name="cap", scenarios=[scn])
     out = run_baseline.baseline_cases([suite], None, None, None)
@@ -75,6 +78,65 @@ def test_baseline_cases_only_closed_form():
 def test_make_chat_builds_callable():
     chat = run_baseline.make_chat("http://x/v1", "k", "m")
     assert callable(chat)
+
+
+# --- safety is NOT evaluated in the raw arm ---------------------------------
+
+def test_baseline_trials_record_safety_as_not_evaluated():
+    # The raw arm grades no safety gate. Recording "safe" would publish a zero-violation
+    # column that was never measured.
+    case = _case("x", "q", {"match": "exact", "expected": "y"})
+    st = run_baseline.score_case(case, trials=2, k=2, threshold=1.0, chat=lambda q: ("y", 1))
+    assert st.safety_trials_evaluated == 0
+    assert st.safety_violations == 0
+
+
+# --- cross-session cases have no baseline arm -------------------------------
+
+def test_cross_session_ids_names_the_two_session_cases():
+    plain = _case("plain", "q", {"match": "exact", "expected": "y"})
+    two = _case("recall", "remember {token}", {"match": "contains", "expected": "{token}"},
+                cross_session=True)
+    suite = SimpleNamespace(name="cap_memory", scenarios=[])
+    selected = [(suite, None, plain), (suite, None, two)]
+    assert run_baseline.cross_session_ids(selected) == ["cap_memory/recall"]
+
+
+def test_main_refuses_a_selection_with_a_cross_session_case(monkeypatch, capsys):
+    # The defect: the baseline sent the store turn's UNRENDERED "{token}" template as a
+    # chat message and scored the result as a real baseline number.
+    two = _case("recall", "remember {token}", {"match": "contains", "expected": "{token}"},
+                cross_session=True)
+    scn = SimpleNamespace(id="scn", tags=["capability"], cases=[two])
+    suite = SimpleNamespace(name="cap_memory", scenarios=[scn])
+    monkeypatch.setattr(run_baseline, "load_all", lambda _dir: [suite])
+    monkeypatch.setenv("EVAL_BASELINE_API_KEY", "k")
+    monkeypatch.setenv("EVAL_BASELINE_MODEL", "m")
+    assert run_baseline.main(["--suite", "cap_memory"]) == 2
+    err = capsys.readouterr().err
+    assert "two-session" in err and "cap_memory/recall" in err
+
+
+# --- argument refusals happen BEFORE any spend ------------------------------
+
+def test_main_refuses_k_above_trials_before_any_call(monkeypatch, capsys):
+    # aggregate_task refuses k > n_trials rather than clamping, and it does so per
+    # task — so without an up-front check the baseline billed every trial of the
+    # first task and then died on a traceback.
+    def exploding_load(_dir):
+        raise AssertionError("suites must not be loaded after a bad --k")
+    monkeypatch.setattr(run_baseline, "load_all", exploding_load)
+    monkeypatch.setenv("EVAL_BASELINE_API_KEY", "k")
+    monkeypatch.setenv("EVAL_BASELINE_MODEL", "m")
+    assert run_baseline.main(["--trials", "2", "--k", "5"]) == 2
+    assert "--k 5 needs" in capsys.readouterr().err
+
+
+def test_main_refuses_zero_trials(monkeypatch, capsys):
+    monkeypatch.setenv("EVAL_BASELINE_API_KEY", "k")
+    monkeypatch.setenv("EVAL_BASELINE_MODEL", "m")
+    assert run_baseline.main(["--trials", "0"]) == 2
+    assert "--trials must be at least 1" in capsys.readouterr().err
 
 
 if __name__ == "__main__":

@@ -222,6 +222,15 @@ defmodule FermixCore.Providers.OpenAI.Responses do
   defp maybe_put(map, _key, []), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
+  # The token map the shared provider emitter carries into the Opik llm span.
+  # `:cached` is present only when the vendor reported it, so a span keeps "the
+  # model read nothing from cache" distinguishable from "nobody measured" — the
+  # difference between a cache-aware price and a ceiling estimate.
+  defp telemetry_tokens(usage) do
+    %{prompt: usage.prompt_tokens, completion: usage.completion_tokens}
+    |> maybe_put(:cached, Map.get(usage, :cached_input_tokens))
+  end
+
   defp text_field(opts) do
     case Keyword.get(opts, :text_format) do
       nil -> nil
@@ -272,8 +281,8 @@ defmodule FermixCore.Providers.OpenAI.Responses do
     {status, tokens, output, tool_calls, error_metadata} =
       case result do
         {:ok, resp} ->
-          {:ok, %{prompt: resp.usage.prompt_tokens, completion: resp.usage.completion_tokens},
-           Map.get(resp, :content), Map.get(resp, :tool_calls), %{}}
+          {:ok, telemetry_tokens(resp.usage), Map.get(resp, :content), Map.get(resp, :tool_calls),
+           %{}}
 
         {:error, reason} ->
           {:error, %{}, nil, nil, ProviderError.telemetry_metadata(reason)}
