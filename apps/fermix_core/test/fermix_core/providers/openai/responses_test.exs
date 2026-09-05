@@ -486,4 +486,68 @@ defmodule FermixCore.Providers.OpenAI.ResponsesTest do
       500 -> flunk("no body captured")
     end
   end
+
+  # The parsed turn already carries `cached_input_tokens`; these prove the emit
+  # site forwards it instead of rebuilding a two-key map, which is what decides
+  # whether a span can be priced cache-aware or only at the ceiling.
+  describe "chat/3 — cache-aware token telemetry" do
+    test "the provider call event carries the cached count into the llm span" do
+      metadata = cache_telemetry(%{"cached_tokens" => 6})
+
+      assert metadata.tokens == %{prompt: 9, completion: 3, cached: 6}
+    end
+
+    test "a reported zero is kept, because the vendor measured it" do
+      metadata = cache_telemetry(%{"cached_tokens" => 0})
+
+      assert metadata.tokens == %{prompt: 9, completion: 3, cached: 0}
+    end
+
+    test "the cached key is absent when the vendor reported no cache detail" do
+      metadata = cache_telemetry(nil)
+
+      assert metadata.tokens == %{prompt: 9, completion: 3}
+      refute Map.has_key?(metadata.tokens, :cached)
+    end
+  end
+
+  defp cache_telemetry(details) do
+    test_pid = self()
+    handler_id = "test-openai-responses-cache-#{System.unique_integer([:positive])}"
+
+    :telemetry.attach(
+      handler_id,
+      [:fermix, :provider, :call],
+      fn event, measurements, metadata, _config ->
+        if self() == test_pid, do: send(test_pid, {:telemetry, event, measurements, metadata})
+      end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
+    Req.Test.stub(__MODULE__, fn conn ->
+      Req.Test.json(conn, cached_response_body(details))
+    end)
+
+    assert {:ok, _turn} =
+             Responses.chat(
+               [%{role: "user", content: "hi"}],
+               [],
+               api_key: "sk-test",
+               model: "gpt-5.4-mini",
+               base_url: "https://api.openai.com/v1",
+               req_options: [plug: {Req.Test, __MODULE__}]
+             )
+
+    assert_receive {:telemetry, [:fermix, :provider, :call], _measurements, metadata}
+    metadata
+  end
+
+  defp cached_response_body(nil), do: text_response_body()
+
+  defp cached_response_body(details) do
+    body = text_response_body()
+    put_in(body, ["usage", "input_tokens_details"], details)
+  end
 end

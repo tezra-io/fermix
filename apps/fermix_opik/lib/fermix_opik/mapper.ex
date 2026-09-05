@@ -354,14 +354,29 @@ defmodule FermixOpik.Mapper do
     |> drop_nil()
   end
 
-  @doc "OpenAI-style integer usage map, or nil when no token counts are present."
+  @doc """
+  OpenAI-style integer usage map, or nil when no token counts are present.
+
+  The emitters' `:cached`/`:cache_write` counts export as `cached_input_tokens`
+  /`cache_creation_input_tokens`. They ride ALONGSIDE `prompt_tokens`, which
+  keeps its blended per-provider meaning — a reader subtracts to recover the
+  uncached remainder. A count the provider did not report is dropped, never
+  zeroed: Opik's own auto-cost ignores cache entirely, so this split is the only
+  record a cache-aware price can be computed from.
+  """
   @spec usage(map() | nil) :: map() | nil
   def usage(%{} = tokens) when map_size(tokens) > 0 do
     prompt = int(Map.get(tokens, :prompt) || Map.get(tokens, :prompt_tokens))
     completion = int(Map.get(tokens, :completion) || Map.get(tokens, :completion_tokens))
     total = int(Map.get(tokens, :total) || Map.get(tokens, :total_tokens)) || prompt + completion
 
-    drop_nil(%{prompt_tokens: prompt, completion_tokens: completion, total_tokens: total})
+    drop_nil(%{
+      prompt_tokens: prompt,
+      completion_tokens: completion,
+      total_tokens: total,
+      cached_input_tokens: int(Map.get(tokens, :cached)),
+      cache_creation_input_tokens: int(Map.get(tokens, :cache_write))
+    })
     |> case do
       empty when map_size(empty) == 0 -> nil
       usage -> usage

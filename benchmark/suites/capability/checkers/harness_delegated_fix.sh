@@ -15,7 +15,12 @@
 #
 # The hidden tests live OUTSIDE the repo so polling never dirties the tree it is
 # asserting on (and so they can never be committed by a late agent write).
-WAIT_S="${HARNESS_CHECKER_WAIT_S:-480}"
+# Fixed wait, deliberately not a knob: the checker subprocess runs under
+# run_checker's env allowlist (evallib/checker.py `_ENV_ALLOWLIST`), which never
+# forwards HARNESS_CHECKER_WAIT_S — the override this line used to read could not
+# be set by anyone, from anywhere. A tuning constant lives in the code that uses
+# it; an unsettable env read only advertises control that does not exist.
+WAIT_S=480
 POLL_S=10
 
 [ -d .git ] || { echo "no git repository in the scoped dir"; exit 1; }

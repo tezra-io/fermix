@@ -20,6 +20,11 @@ class GateResult:
     key: str
     passed: bool
     detail: str
+    # Whether a FAILURE here is proved by what the trace contains, or is merely the
+    # absence of the evidence that would clear it. Only a conclusive failure is
+    # allowed to survive missing evidence or a retry: an inconclusive one is read as
+    # an ordinary gate failure, which the incomplete downgrade can still overrule.
+    conclusive: bool = True
 
 
 _URL_RE = re.compile(r"https?://[^\s\"'<>\\\)\]]+")
@@ -75,6 +80,69 @@ def reply_urls(reply: str) -> list[str]:
     return urls
 
 
+@dataclass(frozen=True)
+class LlmSpanUsage:
+    """One llm span's billing facts, exactly as the span reported them.
+
+    The trace-level `usage.total_tokens` fuses prompt and completion and says
+    nothing about cache hits, route, or whether the call errored — so cost can
+    only be reported per span. Counts are `None` when the span reported nothing;
+    a reported 0 stays 0, because "the vendor said zero" and "the vendor said
+    nothing" price differently. Priced elsewhere: capturing the split must never
+    reach TurnView.cost, which stays Opik's number alone.
+    """
+    model: str                      # "" when the span carried no model
+    provider: str                   # "" when the span carried no provider
+    adapter: str | None             # metadata.adapter; absent on realtime/legacy spans
+    prompt_tokens: int | None       # None = span reported no usage
+    completion_tokens: int | None
+    cached_input_tokens: int | None
+    cache_write_tokens: int | None  # usage.cache_creation_input_tokens
+    errored: bool                   # metadata.status == "error"
+    under_subagent: bool
+
+
+def _token_count(value) -> int | None:
+    """A reported non-negative integer count, else None (nothing was reported).
+
+    Deliberately strict: a bool, a float, a string or a negative is a broken
+    exporter, and reading it as a number would price fiction. It reads as
+    unreported instead, which the pricing layer surfaces as a span it could not
+    price rather than as free work.
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def _span_usage(span: dict, under_subagent: bool) -> LlmSpanUsage:
+    metadata = span.get("metadata") or {}
+    usage = span.get("usage") or {}
+    return LlmSpanUsage(
+        model=span.get("model") or metadata.get("model") or "",
+        provider=span.get("provider") or metadata.get("provider") or "",
+        adapter=metadata.get("adapter"),
+        prompt_tokens=_token_count(usage.get("prompt_tokens")),
+        completion_tokens=_token_count(usage.get("completion_tokens")),
+        cached_input_tokens=_token_count(usage.get("cached_input_tokens")),
+        cache_write_tokens=_token_count(usage.get("cache_creation_input_tokens")),
+        # metadata.status is the ONLY error discriminator. error_info is attached
+        # only when the provider metadata carried an error key, so usage-less
+        # failures (codex) routinely have none — reading it would miss them.
+        errored=metadata.get("status") == "error",
+        under_subagent=under_subagent,
+    )
+
+
+def _llm_usage(llm_spans: list[dict], by_id: dict) -> tuple[LlmSpanUsage, ...]:
+    """Every llm span's usage, in span order — including spans with no model.
+
+    A modelless or usage-less span still consumed a call; dropping it here would
+    hide spend from every consumer. It is carried through unpriceable instead.
+    """
+    return tuple(_span_usage(s, _under_subagent(s, by_id)) for s in llm_spans)
+
+
 @dataclass
 class TurnView:
     """Flattened, grade-ready projection of a trace + its spans."""
@@ -87,6 +155,7 @@ class TurnView:
     status: str
     tool_spans: list[dict]          # type == tool, ordered by start_time
     llm_spans: list[dict]           # type == llm
+    llm_usage: tuple[LlmSpanUsage, ...]  # per-span token split, for cost reporting
     tool_names: list[str]
     subagent_spawns: int            # nested `subagent:*` worker wrapper spans
     main_models: list[str]          # models on main-agent llm spans
@@ -154,6 +223,7 @@ class TurnView:
             status=trace_status(trace),
             tool_spans=tool_spans,
             llm_spans=llm_spans,
+            llm_usage=_llm_usage(llm_spans, by_id),
             tool_names=[s.get("name") for s in tool_spans],
             subagent_spawns=spawns,
             main_models=main_models,
@@ -271,8 +341,8 @@ def grade(trace: dict, spans: list[dict], expect: dict,
         trace, spans, elapsed_ms=elapsed_ms, require_duration=require_duration)
     out: list[GateResult] = []
 
-    def add(key, passed, detail):
-        out.append(GateResult(key=key, passed=passed, detail=detail))
+    def add(key, passed, detail, conclusive=True):
+        out.append(GateResult(key=key, passed=passed, detail=detail, conclusive=conclusive))
 
     present = set(v.tool_names)
 
@@ -307,7 +377,13 @@ def grade(trace: dict, spans: list[dict], expect: dict,
         detail = (f"none of {forbidden} may succeed: succeeded={succeeded or 'none'}, "
                   "errored without typed pre-execution policy evidence="
                   f"{unproven or 'none'}")
-        add("tools_none_succeeded", ok, detail)
+        # Two failure kinds live under one key. A forbidden tool that SUCCEEDED is
+        # positive proof — the span is in the trace and no later attempt can unmake the
+        # effect — so that failure is conclusive and sticky. "Errored without a typed
+        # pre-execution marker" is the absence of the evidence that would have cleared
+        # it: real enough to fail the gate, but not proof of an effect, so it keeps the
+        # incomplete downgrade and a retry may clear it.
+        add("tools_none_succeeded", ok, detail, conclusive=bool(succeeded))
 
     if "tools_in_order" in expect:
         seq = expect["tools_in_order"]
@@ -418,7 +494,21 @@ def grade(trace: dict, spans: list[dict], expect: dict,
         if v.cost_reported:
             add("max_cost_usd", v.cost <= n, f"<= ${n:.2f} (got ${v.cost:.4f})")
         else:
-            # Opik owns pricing; an unpriced/OAuth model reports no cost — n/a, not a fail.
+            # Opik's auto-cost keys on the MODEL SLUG — not the provider, not the auth
+            # mode. Same provider=openai, opposite verdicts: gpt-5.4-mini is priced on
+            # 167/167 spans while gpt-5.6-sol, gpt-5.6-terra and gpt-6-astra are priced
+            # on 0/1411; claude-sonnet-4-6 is priced and claude-opus-4-8 is not. So an
+            # uncarded slug reports no cost — n/a, not a fail.
+            #
+            # This branch stays vacuous ON PURPOSE. 25 suite files declare 264
+            # max_cost_usd expectations (counted 2026-09-05; the argument does not
+            # turn on the exact number) and behavioral_config.yaml:34 injects a 2.0
+            # default into every behavioral turn, so ~all of them are n/a today. The
+            # rate card (evallib.pricing) deliberately does NOT feed this path: it is
+            # a reporting-layer counterfactual, and routing it here would arm every one
+            # of those gates at once against ceilings calibrated in July — reds that
+            # would read as a model regression when they are a suite-calibration
+            # failure. Recalibrate the declared ceilings first, or leave this alone.
             add("max_cost_usd", True, f"<= ${n:.2f} (cost not reported by Opik; n/a)")
     if "max_duration_ms" in expect:
         n = expect["max_duration_ms"]

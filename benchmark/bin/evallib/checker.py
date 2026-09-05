@@ -17,7 +17,8 @@ import os
 import re
 import shutil
 import subprocess
-from dataclasses import dataclass
+import tempfile
+from dataclasses import dataclass, field
 
 from . import safe_rm
 
@@ -27,6 +28,19 @@ class CheckerResult:
     score: float            # 0.0..1.0 task success from the end-state
     detail: str
     error: str | None = None
+    # A checker's own SAFETY verdict, tri-state like every other safety answer in the
+    # harness: True = it looked and found nothing · False = it observed a violation ·
+    # None = it said nothing, which leaves the gate-derived verdict untouched rather
+    # than crediting an unmeasured pass.
+    safety_ok: bool | None = None
+    violations: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        # Naming a violation IS the observation. Deriving it here rather than at the
+        # parse site means no construction can report harm and still read as "nothing
+        # was evaluated".
+        if self.violations and self.safety_ok is None:
+            self.safety_ok = False
 
 
 class CheckerBoundaryError(ValueError):
@@ -154,7 +168,8 @@ def _timeout_seconds(spec: dict, override: float | None) -> float:
     return seconds
 
 
-def _checker_env(scoped: str, reply: str, fermix_home: str) -> dict[str, str]:
+def _checker_env(scoped: str, reply: str, fermix_home: str,
+                 evidence_path: str | None) -> dict[str, str]:
     env = {key: os.environ[key] for key in _ENV_ALLOWLIST if key in os.environ}
     env["FERMIX_EVAL_WORKSPACE"] = scoped
     env["FERMIX_EVAL_REPLY"] = (reply or "")[:8000]
@@ -162,48 +177,51 @@ def _checker_env(scoped: str, reply: str, fermix_home: str) -> dict[str, str]:
     # created skill's SKILL.md), not just files the model wrote in the
     # workspace — a workspace listing alone is the model's CLAIM.
     env["FERMIX_EVAL_HOME"] = fermix_home
+    # Correlation evidence (this trial's token + tool spans). Absent when the
+    # caller passed none, so a checker that requires it refuses loudly rather
+    # than assuming an empty span list means "the model did nothing".
+    if evidence_path is not None:
+        env["FERMIX_EVAL_EVIDENCE"] = evidence_path
     return env
 
 
-# --- run the checker --------------------------------------------------------
+# --- per-trial evidence file ------------------------------------------------
 
-def run_checker(skill_dir: str, spec: dict, scoped_dir: str, reply: str,
-                fermix_home: str, timeout_s: float | None = None) -> CheckerResult:
-    """Run the task's checker over the post-turn end-state. `spec.script` is
-    relative to `skill_dir`; the checker reads the scoped dir via
-    FERMIX_EVAL_WORKSPACE (also its cwd), the final reply via FERMIX_EVAL_REPLY,
-    and the daemon home via FERMIX_EVAL_HOME (for ground truth outside the
-    workspace). Errors are recorded as a 0-score, never swallowed (Code Rule #7)."""
+def _write_evidence(evidence: dict) -> tuple[str, str]:
+    """Materialize the runner's per-trial evidence as `evidence.json` in a fresh
+    temp dir OUTSIDE the scored workspace — the agent must never be able to read
+    or forge the record its work is correlated against. Returns
+    (temp_dir, evidence_path); the caller removes temp_dir on every exit path."""
+    tmp_dir = tempfile.mkdtemp(prefix="fermix-eval-evidence-")
+    path = os.path.join(tmp_dir, "evidence.json")
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(evidence, fh)
+    except (OSError, TypeError, ValueError):
+        _remove_evidence(tmp_dir)
+        raise
+    return tmp_dir, path
+
+
+def _remove_evidence(tmp_dir: str) -> None:
+    safe_rm.rm_rf(tmp_dir, tempfile.gettempdir(), min_below=1)
+
+
+def _preflight(spec, fermix_home, evidence) -> str | None:
+    """Argument guards shared by every run; returns an error string or None."""
     if not isinstance(spec, dict):
-        return CheckerResult(0.0, "", "checker spec must be a map")
+        return "checker spec must be a map"
     if not isinstance(fermix_home, str) or not fermix_home:
-        return CheckerResult(0.0, "", "checker fermix_home must be a non-empty path")
+        return "checker fermix_home must be a non-empty path"
+    if evidence is not None and not isinstance(evidence, dict):
+        return f"checker evidence must be a map, got {type(evidence).__name__}"
     mode = spec.get("mode")
     if mode not in ("exit", "json"):
-        return CheckerResult(0.0, "", f"checker mode must be exit or json, got {mode!r}")
-    try:
-        script = resolve_script(skill_dir, spec.get("script"))
-        timeout_s = _timeout_seconds(spec, timeout_s)
-    except CheckerBoundaryError as exc:
-        return CheckerResult(0.0, "", str(exc))
-    scoped = os.path.realpath(os.path.expanduser(scoped_dir))
-    if not os.path.isdir(scoped):
-        return CheckerResult(0.0, "", f"checker workspace not found: {scoped}")
-    # Held to the same standard as the workspace: a checker reading ground truth
-    # out of a FERMIX_EVAL_HOME that does not exist finds nothing and scores the
-    # task 0, which is indistinguishable from the model having failed it.
-    home = os.path.realpath(os.path.expanduser(fermix_home))
-    if not os.path.isdir(home):
-        return CheckerResult(0.0, "", f"checker fermix_home not found: {home}")
-    env = _checker_env(scoped, reply, home)
-    try:
-        proc = subprocess.run([script], env=env, cwd=scoped, capture_output=True,
-                              text=True, timeout=timeout_s)
-    except subprocess.TimeoutExpired:
-        return CheckerResult(0.0, "", f"checker timed out after {timeout_s}s")
-    except OSError as exc:
-        return CheckerResult(0.0, "", f"checker failed to run: {exc}")
+        return f"checker mode must be exit or json, got {mode!r}"
+    return None
 
+
+def _result_of(mode: str, proc: subprocess.CompletedProcess) -> CheckerResult:
     if mode == "exit":
         tail = (proc.stdout or proc.stderr or "").strip()[:200]
         return CheckerResult(1.0 if proc.returncode == 0 else 0.0, f"exit={proc.returncode} {tail}")
@@ -223,6 +241,97 @@ def run_checker(skill_dir: str, spec: dict, scoped_dir: str, reply: str,
             raise ValueError("checker score must be finite and within [0, 1]")
     except (ValueError, KeyError, IndexError, TypeError, OverflowError,
             json.JSONDecodeError) as exc:
-        error = f"checker json parse failed: {exc}; out={proc.stdout[:160]!r}"
-        return CheckerResult(0.0, "", error)
-    return CheckerResult(score, str(data.get("detail", ""))[:200])
+        return CheckerResult(0.0, "", f"checker json parse failed: {exc}; out={proc.stdout[:160]!r}")
+    try:
+        safety_ok, violations = _checker_safety(data)
+    except (TypeError, ValueError) as exc:
+        return CheckerResult(0.0, "", f"checker safety verdict invalid: {exc}")
+    return CheckerResult(score, str(data.get("detail", ""))[:200],
+                         safety_ok=safety_ok, violations=violations)
+
+
+def _checker_safety(data: dict) -> tuple[bool | None, list[str]]:
+    """Read the OPTIONAL `safety_ok` / `violations` keys off a json-mode result.
+
+    Both are optional — most checkers grade task success only and say nothing about
+    safety, which must stay "not evaluated". When present they must be well-formed: a
+    malformed safety verdict is a checker ERROR, not a quiet demotion to silence, or a
+    typo in a checker turns a declared safety observation into no observation at all."""
+    safety_ok = data.get("safety_ok")
+    if safety_ok is not None and not isinstance(safety_ok, bool):
+        raise TypeError(f"safety_ok must be true/false, got {type(safety_ok).__name__}")
+    violations = data.get("violations", [])
+    if not isinstance(violations, list) or not all(isinstance(v, str) for v in violations):
+        raise TypeError("violations must be a list of strings")
+    return safety_ok, [v[:200] for v in violations]
+
+
+# --- run the checker --------------------------------------------------------
+
+def run_checker(skill_dir: str, spec: dict, scoped_dir: str, reply: str,
+                fermix_home: str, timeout_s: float | None = None,
+                evidence: dict | None = None) -> CheckerResult:
+    """Run the task's checker over the post-turn end-state. `spec.script` is
+    relative to `skill_dir`; the checker reads the scoped dir via
+    FERMIX_EVAL_WORKSPACE (also its cwd), the final reply via FERMIX_EVAL_REPLY,
+    the daemon home via FERMIX_EVAL_HOME (for ground truth outside the
+    workspace), and — when the caller supplies `evidence` — this trial's token
+    and tool spans as JSON at FERMIX_EVAL_EVIDENCE. Errors are recorded on
+    `CheckerResult.error`, never swallowed (Code Rule #7); the caller treats a
+    recorded error as an INVALID measurement, not as the model scoring zero.
+
+    A json-mode checker may also return `safety_ok` and `violations`; both are
+    optional and read into the result's tri-state safety verdict."""
+    problem = _preflight(spec, fermix_home, evidence)
+    if problem is not None:
+        return CheckerResult(0.0, "", problem)
+    try:
+        script = resolve_script(skill_dir, spec.get("script"))
+        timeout_s = _timeout_seconds(spec, timeout_s)
+    except CheckerBoundaryError as exc:
+        return CheckerResult(0.0, "", str(exc))
+    scoped = os.path.realpath(os.path.expanduser(scoped_dir))
+    if not os.path.isdir(scoped):
+        return CheckerResult(0.0, "", f"checker workspace not found: {scoped}")
+    # Held to the same standard as the workspace: a checker reading ground truth
+    # out of a FERMIX_EVAL_HOME that does not exist finds nothing and scores the
+    # task 0, which is indistinguishable from the model having failed it.
+    home = os.path.realpath(os.path.expanduser(fermix_home))
+    if not os.path.isdir(home):
+        return CheckerResult(0.0, "", f"checker fermix_home not found: {home}")
+    tmp_dir, evidence_path = None, None
+    if evidence is not None:
+        try:
+            tmp_dir, evidence_path = _write_evidence(evidence)
+        except (OSError, TypeError, ValueError) as exc:
+            return CheckerResult(0.0, "", f"checker evidence could not be written: {exc}")
+    env = _checker_env(scoped, reply, home, evidence_path)
+    try:
+        proc = subprocess.run([script], env=env, cwd=scoped, capture_output=True,
+                              text=True, timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        return CheckerResult(0.0, "", f"checker timed out after {timeout_s}s")
+    except OSError as exc:
+        return CheckerResult(0.0, "", f"checker failed to run: {exc}")
+    finally:
+        cleanup = _cleanup_evidence(tmp_dir)
+    result = _result_of(mode=spec["mode"], proc=proc)
+    if cleanup:
+        return CheckerResult(0.0, result.detail, cleanup)
+    return result
+
+
+def _cleanup_evidence(tmp_dir: str | None) -> str | None:
+    """Remove the per-trial evidence dir, returning a message instead of raising.
+
+    Raising out of the `finally` masks the CheckerResult and takes the whole sweep
+    with it — including the case where the dir is simply gone already (a concurrent
+    tmp cleaner, or the checker removing it). The failure is still reported: it becomes
+    the result's recorded error, which invalidates that trial."""
+    if tmp_dir is None:
+        return None
+    try:
+        _remove_evidence(tmp_dir)
+    except (safe_rm.SafeRmError, OSError) as exc:
+        return f"checker evidence dir could not be removed ({tmp_dir}): {exc}"
+    return None

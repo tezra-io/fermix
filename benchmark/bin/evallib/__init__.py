@@ -6,5 +6,5 @@ turn's trace from local Opik, grades it against YAML-declared expectations
 """
 
 __all__ = ["config", "suites", "opik", "driver", "grade", "judge", "report",
-           "scoring", "aggregate", "experiments", "leaderboard", "uplift",
-           "checker", "safe_rm"]
+           "scoring", "pricing", "aggregate", "experiments", "leaderboard",
+           "release_gate", "session_ids", "uplift", "checker", "safe_rm"]

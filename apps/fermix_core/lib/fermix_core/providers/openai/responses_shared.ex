@@ -304,13 +304,41 @@ defmodule FermixCore.Providers.OpenAI.ResponsesShared do
          capabilities: capabilities,
          invariant_metrics: invariant_metrics
        },
-       usage: %{
-         prompt_tokens: prompt,
-         completion_tokens: completion,
-         total_tokens: prompt + completion
-       },
+       usage: usage_map(prompt, completion, cached_input_tokens(usage)),
        model: Map.get(body, "model") || fallback_model
      }}
+  end
+
+  # `input_tokens_details.cached_tokens` is the cache-READ subset of
+  # `input_tokens`, so it rides ALONGSIDE the totals rather than being
+  # subtracted out: `prompt_tokens` keeps the meaning every existing consumer
+  # already reads, and a pricing consumer subtracts to get the uncached
+  # remainder. This surface publishes no cache-WRITE count, so none is emitted.
+  defp usage_map(prompt, completion, cached) do
+    base = %{
+      prompt_tokens: prompt,
+      completion_tokens: completion,
+      total_tokens: prompt + completion
+    }
+
+    if is_nil(cached), do: base, else: Map.put(base, :cached_input_tokens, cached)
+  end
+
+  defp cached_input_tokens(%{"input_tokens_details" => %{} = details}),
+    do: cache_count!(Map.get(details, "cached_tokens"), "input_tokens_details.cached_tokens")
+
+  defp cached_input_tokens(_usage), do: nil
+
+  # Absent stays absent. A reported 0 means "the vendor cached nothing"; a
+  # missing key means "the vendor reported nothing", and cache-aware pricing has
+  # to tell those apart — so a count is never defaulted to 0. A present count
+  # that is not a non-negative integer is a vendor-contract break, not a value to
+  # quietly round off.
+  defp cache_count!(nil, _field), do: nil
+  defp cache_count!(value, _field) when is_integer(value) and value >= 0, do: value
+
+  defp cache_count!(value, field) do
+    raise ArgumentError, "#{field} must be a non-negative integer, got: #{inspect(value)}"
   end
 
   @spec parse_tool_calls(term()) :: [map()]

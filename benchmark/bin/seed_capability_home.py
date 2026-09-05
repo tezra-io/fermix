@@ -22,9 +22,10 @@ The sandbox is always regenerated strict + home-scoped (never copied from the
 dev config, whose allowed_roots escape the home and would fail the runner's
 precondition). `<home>/skills` is always included as a sandbox root — skill
 tasks verify their created SKILL.md with raw file reads, and the owner-approval
-detour a denial triggers is unanswerable in an eval — and the skills dir is
-reset on every seed so skills created by a prior sweep's model can't make a
-later fresh `skill_create` fail "already exists". Regenerate on every `up`.
+detour a denial triggers is unanswerable in an eval. Every seed also restores
+the home's durable-state baseline (`reset_state`: skills, memory, jobs, journals,
+grants, bootstrap), so a sweep measures the product rather than what the previous
+sweep's model left behind. Regenerate on every `up`, with the daemon DOWN.
 
 CI / explicit mode (`--provider` + `--model`) skips the dev-home derivation
 entirely: no keychain, no auth.json copy, no `[fermix_core] profile` line. The
@@ -42,12 +43,33 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
+import socket
 import subprocess
 import sys
 import tomllib
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from evallib import safe_rm  # noqa: E402
+
 DEV_HOME = os.path.expanduser("~/.fermix-dev")
+# Homes this script must never touch, compared as REALPATHS so a symlink cannot dress
+# one of them up as a disposable eval home.
+_NON_DISPOSABLE = tuple(os.path.realpath(os.path.expanduser(p))
+                        for p in ("~/.fermix", "~/.fermix-dev", "~"))
+# Durable state the daemon accumulates under a FERMIX_HOME. Reset on every seed so a
+# sweep measures the product, not the residue of the previous sweep. Layout mirrors
+# `FermixCore.Setup.ConfigStore` (`workspace_paths/0`, `memory_paths/0`) and
+# `Jobs.Runner`'s output base; the sqlite sidecars go with the database they belong to.
+# `workspace/` is NOT here: the checker seeds and tears down its own per-trial scoring
+# dir under it, and the daemon's git-backed workspace root is part of the home's setup.
+# `browser/` holds the Chrome user-data dirs (cookies, local storage, history) that
+# `ChromeLauncher` persists per owner/profile, and `harness/` holds `Harness.Artifacts`
+# run trees — both survive a sweep and are inherited by the next one's web and harness
+# tasks, which is the residue this reset exists to remove.
+STATE_DIRS = ("skills", "memory", "job_runs", "journals", "grants", "bootstrap",
+              "browser", "harness")
+STATE_FILES = ("memory.db", "memory.db-wal", "memory.db-shm")
 # Only these keys are allowed in a provider block (else the daemon refuses boot).
 _PROVIDER_KEYS = ("default_model", "reasoning_effort", "auth_mode", "base_url", "api_key")
 # Primary provider id -> its key in the Fermix auth store ($FERMIX_HOME/auth.json),
@@ -210,24 +232,82 @@ def copy_oauth_token(home: str, pid: str) -> None:
     os.chmod(dest, 0o600)   # the store refuses to load a world-readable auth.json
 
 
-def reset_skills(home: str) -> None:
-    """Drop `<home>/skills` so every sweep starts from the bundled baseline.
+def reset_state(home: str) -> None:
+    """Restore the eval home's durable-state baseline: remove everything a prior
+    sweep's daemon wrote, leaving the home's setup (config.toml, auth.json) alone.
 
-    Skills persist across sweeps (the home is only disposable by convention),
-    so a skill a prior sweep's model created makes every later fresh
-    `skill_create` fail "already exists" (a leftover `skills/eval-echo`
-    poisoned two runs before this reset existed). Removal never loses anything
-    an eval needs: the daemon's SkillRegistry recreates the dir and re-seeds
-    the bundled skills at boot whenever it is empty.
+    THE DAEMON MUST BE DOWN. `capability-daemon.sh` seeds inside `up()`, before it
+    starts the daemon; `down()` does not seed. Deleting `memory.db` under a live daemon
+    would leave it writing to an unlinked file, so this refuses when the home answers a
+    status probe — `up()`'s pidfile check cannot see a daemon started outside the
+    script against the same home, which is the documented manual path.
+
+    Trials are only independent if each starts from the same world. The home is
+    disposable by convention only, so without this everything the previous sweep's
+    model did persists: a created skill makes the next fresh `skill_create` fail
+    "already exists" (a leftover `skills/eval-echo` poisoned two runs), a stored fact
+    can false-green a broken memory store, and a scheduled job or accepted event keeps
+    firing into the next sweep. Nothing removed here is irreplaceable: the daemon
+    recreates each workspace dir at boot, `SkillRegistry` re-seeds the bundled skills,
+    `Memory.Repo` recreates `memory.db` from its schema, and the bootstrap prompt files
+    fall back to `Prompt.Defaults` until setup writes them.
     """
     # Recursive delete: re-assert main()'s disposable-home guard here so this
-    # function is safe even if a future caller skips that validation.
-    leaf = os.path.basename(os.path.abspath(home)).lower()
+    # function is safe even if a future caller skips that validation, then route
+    # every removal through SafeRm (strictly under the home, never the home itself).
+    resolved = disposable_home(home, "reset state")
+    if not os.path.isdir(resolved):
+        die(f"refusing to reset state in a home that does not exist: {home}")
+    if daemon_answers(resolved):
+        die(f"a daemon is answering for {resolved} — stop it before seeding; deleting "
+            "memory.db under a live daemon leaves it writing to an unlinked file")
+    for name in STATE_DIRS:
+        path = os.path.join(resolved, name)
+        if os.path.isdir(path):
+            safe_rm.rm_rf(path, resolved, min_below=1)
+    for name in STATE_FILES:
+        path = os.path.join(resolved, name)
+        if os.path.isfile(path):
+            os.remove(safe_rm.check(path, resolved, min_below=1))
+
+
+def disposable_home(home: str, what: str) -> str:
+    """The home as a REALPATH, refused unless it is disposable.
+
+    realpath, not abspath: `safe_rm.check` resolves symlinks on both sides, so a link
+    named `~/x-eval` pointing at `~/.fermix` cleared an abspath leaf check and every
+    non-disposable comparison, and the removals then landed in the live home."""
+    resolved = os.path.realpath(os.path.expanduser(home))
+    if os.path.islink(os.path.expanduser(home)):
+        die(f"refusing a symlinked home: {home} -> {resolved}")
+    leaf = os.path.basename(resolved).lower()
     if "eval" not in leaf and "e2e" not in leaf:
-        die(f"refusing to reset skills outside an eval home: {home}")
-    skills = os.path.join(home, "skills")
-    if os.path.isdir(skills):
-        shutil.rmtree(skills)
+        die(f"refusing to {what} outside an eval home: {resolved}")
+    if resolved in _NON_DISPOSABLE:
+        die(f"refusing a non-disposable home: {resolved}")
+    return resolved
+
+
+def daemon_answers(home: str) -> bool:
+    """Whether a daemon is serving this home, by connecting to its control socket.
+
+    The same evidence `capability-daemon.sh`'s ready loop waits on (`fermix-shim status`
+    speaks to `<home>/daemon.sock`), read directly so the probe spawns nothing and
+    depends on nothing outside the home. A stale socket file left by a killed daemon
+    refuses the connection and correctly reads as "down"; `up()`'s pidfile check cannot
+    see a daemon started outside the script at all."""
+    path = os.path.join(home, "daemon.sock")
+    if not os.path.exists(path):
+        return False
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    probe.settimeout(2.0)
+    try:
+        probe.connect(path)
+        return True
+    except OSError:
+        return False
+    finally:
+        probe.close()
 
 
 def parse_args() -> argparse.Namespace:
@@ -262,13 +342,7 @@ def explicit_spec(args: argparse.Namespace) -> tuple[str, dict]:
 
 def main() -> None:
     args = parse_args()
-    home = os.path.abspath(os.path.expanduser(args.home))
-    leaf = os.path.basename(home).lower()
-    if "eval" not in leaf and "e2e" not in leaf:
-        die(f"home leaf must contain 'eval' or 'e2e' (got {home!r})")
-    if home in (os.path.expanduser("~/.fermix"), os.path.expanduser("~/.fermix-dev"),
-                os.path.expanduser("~")):
-        die(f"refusing a non-disposable home: {home}")
+    home = disposable_home(args.home, "seed")
     if bool(args.provider) != bool(args.model):
         die("explicit mode needs both --provider and --model")
     allowed_roots = tuple(
@@ -289,7 +363,7 @@ def main() -> None:
     os.makedirs(workspace, exist_ok=True)
     if not os.path.isdir(os.path.join(workspace, ".git")):
         subprocess.run(["git", "-C", workspace, "init", "-q"], check=True)
-    reset_skills(home)
+    reset_state(home)
 
     with open(os.path.join(home, "config.toml"), "w", encoding="utf-8") as fh:
         fh.write(render_config(home, pid, blk, profile, allowed_roots,

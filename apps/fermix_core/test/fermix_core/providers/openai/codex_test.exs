@@ -1077,6 +1077,57 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
     end
   end
 
+  # The codex adapter is 41k of the fleet's 48k llm spans, so a cache count it
+  # parses and then drops at the emit site is the difference between a
+  # cache-aware price and a ceiling estimate for nearly every call the owner
+  # makes. `ResponsesShared` parses `input_tokens_details.cached_tokens` into the
+  # turn; these prove it survives the last hop onto the event.
+  describe "chat/3 — cache-aware token telemetry" do
+    test "the provider call event carries the cached count into the llm span" do
+      metadata = telemetry_from(cached_sse(~s("input_tokens_details":{"cached_tokens":9000},)))
+
+      assert metadata.tokens == %{prompt: 12_500, completion: 4, cached: 9_000}
+    end
+
+    test "a reported zero is kept, because the vendor measured it" do
+      metadata = telemetry_from(cached_sse(~s("input_tokens_details":{"cached_tokens":0},)))
+
+      assert metadata.tokens == %{prompt: 12_500, completion: 4, cached: 0}
+    end
+
+    test "the cached key is absent when the vendor reported no cache detail" do
+      metadata = telemetry_from(cached_sse(""))
+
+      assert metadata.tokens == %{prompt: 12_500, completion: 4}
+      refute Map.has_key?(metadata.tokens, :cached)
+    end
+
+    # A streamed 200 that delivered nothing still spent the tokens it reports,
+    # and that spend is cached-vs-uncached like any other.
+    test "the error path recovers the cached count along with the usage" do
+      sse = """
+      data: {"type":"response.completed","response":{"model":"gpt-5","usage":{"input_tokens":12500,"output_tokens":4,"input_tokens_details":{"cached_tokens":9000}}}}
+
+      """
+
+      metadata = telemetry_from(sse, expect: :error)
+
+      assert metadata.status == :error
+      assert metadata.tokens == %{prompt: 12_500, completion: 4, cached: 9_000}
+    end
+
+    test "the error path omits the cached key when the body reported no cache detail" do
+      sse = """
+      data: {"type":"response.completed","response":{"model":"gpt-5","usage":{"input_tokens":12500,"output_tokens":4}}}
+
+      """
+
+      metadata = telemetry_from(sse, expect: :error)
+
+      assert metadata.tokens == %{prompt: 12_500, completion: 4}
+    end
+  end
+
   # The gate is "nothing was delivered", not "the stream did not finish tidily".
   # `items` fills from output_item.added/.done independently of the terminal
   # event, so a cut stream can still carry a message or a function_call — 3 of the
@@ -1909,4 +1960,40 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
       ] ++ extra_opts
     )
   end
+
+  defp cached_sse(details_json) do
+    """
+    data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_c","content":[]}}
+
+    data: {"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"msg_c","content":[{"type":"output_text","text":"ok"}]}}
+
+    data: {"type":"response.completed","response":{"model":"gpt-5","usage":{#{details_json}"input_tokens":12500,"output_tokens":4}}}
+
+    data: [DONE]
+
+    """
+  end
+
+  defp telemetry_from(sse, opts \\ []) do
+    test_pid = self()
+    handler_id = "test-codex-cache-#{System.unique_integer([:positive])}"
+
+    :telemetry.attach(
+      handler_id,
+      [:fermix, :provider, :call],
+      fn event, measurements, metadata, _config ->
+        if self() == test_pid, do: send(test_pid, {:telemetry, event, measurements, metadata})
+      end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+    run_expecting(sse, Keyword.get(opts, :expect, :ok))
+
+    assert_receive {:telemetry, [:fermix, :provider, :call], _measurements, metadata}
+    metadata
+  end
+
+  defp run_expecting(sse, :ok), do: {:ok, _turn} = run_chat(sse)
+  defp run_expecting(sse, :error), do: {:error, _reason} = run_chat(sse)
 end

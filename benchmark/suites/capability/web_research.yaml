@@ -10,6 +10,11 @@ description: >
   source on 2026-06-30 (provenance below each case). A correct answer requires the
   model to actually fetch/ground, not recall stale parametric memory.
 
+  Each prompt that says "reply with ONLY the number" is graded as written
+  (`single: true`): a reply carrying more than one distinct number does not answer the
+  question that was asked, and the year or the prior-year trap value riding along is
+  exactly the ambiguity the instruction removes.
+
   PRECONDITION: the dev daemon's web_search + web_fetch must work, or ALL of these
   fail uniformly (a daemon gap, not a model difference). Answers are stable
   (closed fiscal years, fixed model-year EPA ratings, set-membership), but re-verify
@@ -35,7 +40,7 @@ scenarios:
         # irs.gov/newsroom "IRS releases tax inflation adjustments for tax year 2026".
         # Verified 2026-07-03. (Replaced nvidia_rev_growth: an old closed-FY figure the
         # model knows, so it flakily answered without fetching -> provenance-flaky.)
-        score: { match: numeric, expected: 16100, tolerance: 0 }
+        score: { match: numeric, expected: 16100, tolerance: 0, single: true }
         # Provenance gate: a no-fetch answer (parametric recall) scores 0 even if the
         # number is right — this task must be answered by live retrieval.
         requires_tools: [web_search, web_fetch]
@@ -49,7 +54,7 @@ scenarios:
         # $24,500 (up from $23,500 in 2025). Fresh fact (announced Nov 2025, Notice
         # 2025-67) — correct answer is strong evidence of a live lookup. Source:
         # irs.gov/newsroom "401(k) limit increases to $24,500 for 2026".
-        score: { match: numeric, expected: 24500, tolerance: 0 }
+        score: { match: numeric, expected: 24500, tolerance: 0, single: true }
         requires_tools: [web_search, web_fetch]
 
       - id: rav4_crv_awd_hybrid_mpg
@@ -85,7 +90,7 @@ scenarios:
         # — a fresh figure the model must look up. Trap: the 2025 value $4,300. Source:
         # irs.gov Rev. Proc. 2025-19. Verified 2026-07-03. (Replaced apple_fy24_total_revenue:
         # an old closed-FY headline figure the model knows -> provenance-flaky, like nvidia.)
-        score: { match: numeric, expected: 4400, tolerance: 0 }
+        score: { match: numeric, expected: 4400, tolerance: 0, single: true }
         requires_tools: [web_search, web_fetch]
 
       - id: ss_wage_base_2026
@@ -97,5 +102,5 @@ scenarios:
         # $184,500 for 2026 (up from $176,100 in 2025), announced by the SSA on 2025-10-24
         # — a fresh figure the model must look up. Trap: the 2025 value $176,100. Source:
         # ssa.gov/oact/cola/cbb.html + payroll.org.
-        score: { match: numeric, expected: 184500, tolerance: 0 }
+        score: { match: numeric, expected: 184500, tolerance: 0, single: true }
         requires_tools: [web_search, web_fetch]

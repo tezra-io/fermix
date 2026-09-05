@@ -4,9 +4,17 @@
 # catalog.bulk_tier that manifests two modules away in report.order_total_dollars, so the
 # fix must be TRACED (report -> pricing -> catalog), not patched at the symptom. The hidden
 # cases use the OTHER tier boundaries (10, 100) + tax, so a fix that special-cases qty==50
-# in pricing/report still fails. cwd = trial scoped dir; PYTHONPATH resolves the modules.
-mkdir -p tests
-cat > tests/test_hidden.py <<'PYEOF'
+# in pricing/report still fails. The seeded visible tests must be untouched, and the hidden
+# cases run from outside the workspace (see _pytest_gate.sh). cwd = trial scoped dir.
+CHECKER_DIR=$(cd "$(dirname "$0")" && pwd)
+. "$CHECKER_DIR/_pytest_gate.sh"
+
+FIXTURE_TESTS="$CHECKER_DIR/../fixtures/code/order_pipeline/tests"
+gate_visible_tests "$FIXTURE_TESTS" || exit 1
+
+HIDDEN=$(mktemp -d) || { echo "cannot create hidden-test dir"; exit 1; }
+trap 'rm -rf "$HIDDEN"' EXIT
+cat > "$HIDDEN/test_hidden.py" <<'EOF'
 from report import order_total_dollars
 
 
@@ -28,6 +36,6 @@ def test_multi_line_with_tax():
 def test_below_boundaries_unchanged():
     # 9 units of C: no discount tier -> 9*400c = 3600c = $36.00 (guards over-correction)
     assert order_total_dollars([("C", 9)], 0) == 36.00
-PYEOF
-exec env PYTHONPATH="$FERMIX_EVAL_WORKSPACE" uv run --quiet --with pytest \
-    python -m pytest -q tests/
+EOF
+
+run_pytest "$HIDDEN" "$FIXTURE_TESTS" catalog.py pricing.py report.py

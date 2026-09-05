@@ -101,27 +101,99 @@ def test_render_config_always_roots_the_homes_skills_dir():
     assert doc["sandbox"]["allowed_roots"] == ["/tmp/x-eval/skills"]
 
 
-def test_reset_skills_removes_the_skills_tree(tmp_path):
-    home = tmp_path / "x-eval"
-    (home / "skills" / "eval-echo").mkdir(parents=True)
-    (home / "skills" / "eval-echo" / "SKILL.md").write_text("# eval-echo\n")
-    seed.reset_skills(str(home))
-    assert not (home / "skills").exists()
+def _populate_state(home):
+    """Every durable-state path a prior sweep's daemon leaves behind."""
+    for name in seed.STATE_DIRS:
+        (home / name / "leftover").mkdir(parents=True)
+        (home / name / "leftover" / "f.txt").write_text("from the previous sweep\n")
+    for name in seed.STATE_FILES:
+        (home / name).write_text("stale\n")
 
 
-def test_reset_skills_is_a_noop_without_a_skills_dir(tmp_path):
+def test_reset_state_removes_every_durable_state_path(tmp_path):
+    # A trial is only independent if it starts from the baseline: a skill, a memory
+    # row, a scheduled job or an event left by the previous sweep changes what the
+    # next one measures.
     home = tmp_path / "x-eval"
     home.mkdir()
-    seed.reset_skills(str(home))
+    _populate_state(home)
+    seed.reset_state(str(home))
+    for name in seed.STATE_DIRS + seed.STATE_FILES:
+        assert not (home / name).exists(), name
+
+
+def test_reset_state_keeps_the_homes_configuration(tmp_path):
+    # config.toml and auth.json are the home's SETUP, not per-sweep state.
+    home = tmp_path / "x-eval"
+    home.mkdir()
+    _populate_state(home)
+    (home / "config.toml").write_text("# managed\n")
+    (home / "auth.json").write_text("{}\n")
+    seed.reset_state(str(home))
+    assert (home / "config.toml").exists() and (home / "auth.json").exists()
+
+
+def test_reset_state_is_a_noop_on_a_fresh_home(tmp_path):
+    home = tmp_path / "x-eval"
+    home.mkdir()
+    seed.reset_state(str(home))
     assert not (home / "skills").exists()
 
 
-def test_reset_skills_refuses_a_non_eval_home(tmp_path):
+def test_reset_state_refuses_a_non_eval_home(tmp_path):
     home = tmp_path / "realhome"
-    (home / "skills").mkdir(parents=True)
+    home.mkdir()
+    _populate_state(home)
     with pytest.raises(SystemExit):
-        seed.reset_skills(str(home))
+        seed.reset_state(str(home))
     assert (home / "skills").exists()
+    assert (home / "memory.db").exists()
+
+
+def test_reset_state_refuses_a_home_that_is_not_a_directory(tmp_path):
+    missing = tmp_path / "x-eval"
+    with pytest.raises(SystemExit):
+        seed.reset_state(str(missing))
+
+
+def test_reset_state_documents_the_daemon_down_requirement(tmp_path):
+    # The contract has to be written down where the next reader of this function
+    # will see it.
+    doc = seed.reset_state.__doc__.lower()
+    assert "daemon" in doc and "down" in doc
+
+
+def test_reset_state_refuses_while_a_daemon_answers_the_home(tmp_path, monkeypatch):
+    # `up()` skips seeding only when its own pidfile names a live pid, so a daemon
+    # started outside the script against the same home is invisible to it — and
+    # unlinking memory.db under one leaves it writing to an unlinked file.
+    home = tmp_path / "x-eval"
+    home.mkdir()
+    _populate_state(home)
+    monkeypatch.setattr(seed, "daemon_answers", lambda _home: True)
+    with pytest.raises(SystemExit):
+        seed.reset_state(str(home))
+    assert (home / "memory.db").exists()
+
+
+def test_reset_state_refuses_a_symlinked_home(tmp_path):
+    # safe_rm compares REALPATHS, so an abspath leaf check let `~/x-eval -> ~/.fermix`
+    # through and the removals landed in the live home.
+    real = tmp_path / "realhome"
+    real.mkdir()
+    _populate_state(real)
+    link = tmp_path / "x-eval"
+    link.symlink_to(real)
+    with pytest.raises(SystemExit):
+        seed.reset_state(str(link))
+    assert (real / "memory.db").exists()
+
+
+def test_browser_and_harness_state_are_part_of_the_baseline():
+    # ConfigStore owns browser/ (Chrome user-data dirs: cookies, local storage,
+    # history) and Harness.Artifacts keeps harness/runs/<id>; both survive a sweep
+    # and are inherited by the next one's web and harness tasks.
+    assert "browser" in seed.STATE_DIRS and "harness" in seed.STATE_DIRS
 
 
 if __name__ == "__main__":
