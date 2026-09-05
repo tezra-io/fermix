@@ -26,51 +26,101 @@ defmodule FermixCore.Providers.ModelCatalog do
   @unknown_model_default_ctx 100_000
   @default_max_output_tokens 8_192
 
-  # Same models, two access routes with different effective windows: the Codex
-  # (ChatGPT subscription / OAuth) path caps the older shared models at 400k,
-  # while the OpenAI direct API (api key) serves their full window. Keyed per
-  # provider so the window follows the auth path automatically (see models_for/1).
-  # The GPT-5.6 generation (sol/terra/luna) is the exception: its Codex
-  # `context_window` and direct-API `max_context_window` are both 272k, so it
-  # serves the same window on either path (windows sourced from the Codex model
-  # catalog, `~/.codex/models_cache.json`). sol = frontier (default), terra =
-  # balanced, luna = fast/affordable.
+  # Same models, two access routes with different effective windows, keyed per
+  # provider so the window follows the auth path automatically (see
+  # models_for/1). This field is the compaction denominator
+  # (`context_tokens / context_window >= compaction.threshold`, default 0.85 —
+  # see `TurnRunner`), NOT a declared capability, so neither column is a
+  # straight copy of a published number. astra = frontier (default);
+  # sol/terra/luna = frontier/balanced/fast of the prior generation.
   #
-  # `max` reasoning effort is a gpt-5.6-family capability, so the 5.6 models
-  # leave `max_reasoning_effort` unset (provider ceiling = `:max`) while
-  # gpt-5.5/gpt-5.4/gpt-5.4-mini cap at `:xhigh`. An over-reaching config
-  # self-heals down to the model's ceiling at route resolution (see
-  # `clamp_effort/3`), it does not 400 at the provider.
+  # Codex column: the cache's `max_context_window` — the ceiling that path
+  # stretches to — deliberately NOT its `context_window`, which is the Codex
+  # CLI's own working budget (272k for every current model, which is why these
+  # numbers do not match what `codex` shows you). Real traffic corroborates the
+  # larger figure: this machine's rollout logs hold single requests of 652,640
+  # (sol) and 630,446 (astra) prompt tokens that the Codex path served. A
+  # ChatGPT subscription bills no per-token rate, so running deeper costs usage
+  # allowance, not dollars. Source: `~/.codex/models_cache.json`. [verify] on
+  # every addition AND periodically: it is a live cache whose numbers move, and
+  # an overstated window defers compaction past the provider's hard limit —
+  # 5.5/5.4-mini read 400_000 here long after the cache had them at 272k, so a
+  # turn would have blown the real window before compaction fired at 340k.
+  #
+  # gpt-5.4 is the one Codex entry the source does not cover: it dropped out of
+  # the cache entirely after 2026-08-12, where it last read
+  # `max_context_window` 1_000_000 (not 272k like its 5.5 sibling). Its 272_000
+  # is therefore INFERRED, chosen because it is the only value safe under both
+  # hypotheses — understating merely compacts early, while restoring the
+  # archived 1_000_000 would overstate badly if 5.4 in fact followed 5.5 down.
+  # A [verify] pass will not find this model; decide whether the Codex path
+  # still serves it at all before touching the number.
+  #
+  # Direct-API column: the published window from
+  # developers.openai.com/api/docs/models/<id> for gpt-5.5, gpt-5.4 and
+  # gpt-5.4-mini only. The other four are deliberate deviations, because every
+  # current model reprices a request above 272k INPUT tokens at 2x input/cache
+  # and 1.5x output "for the full request" — a cliff rather than a ramp, so one
+  # token over doubles the bill for everything before it:
+  #
+  #   * astra 320_000 is NOT its real 1,050,000 window. 0.85 * 320_000 =
+  #     272_000 puts compaction exactly on that boundary, so the
+  #     standard-priced tier is used in full. Do not "correct" it upward.
+  #
+  #   * sol/terra/luna 272_000 predate that calibration and are NOT their
+  #     published windows, which are also 1,050,000. They sit below the cliff
+  #     rather than on it, giving up 40,800 tokens of standard-priced context
+  #     that astra reclaims. Safe, just not tuned — align them at 320_000 if
+  #     that headroom is worth having.
+  #
+  # The calibration couples to the DEFAULT threshold: raising
+  # `compaction.threshold` above 0.85 walks astra off the cliff, lowering it
+  # only compacts earlier. And the gate is one turn late by construction —
+  # `context_tokens` is the prior turn's REAL provider-reported peak
+  # (`TurnRunner` :107, :865), not an estimate, so a turn that grows sharply on
+  # a large tool result can cross 272k and be billed at 2x once before the next
+  # preflight compaction trims it. Zero margin means nothing absorbs that lag.
+  #
+  # `max` reasoning effort is a current-generation capability (GPT-6 Astra and
+  # the GPT-5.6 models), so those leave `max_reasoning_effort` unset (provider
+  # ceiling = `:max`) while gpt-5.5/gpt-5.4/gpt-5.4-mini cap at `:xhigh`. An
+  # over-reaching config self-heals down to the model's ceiling at route
+  # resolution (see `clamp_effort/3`), it does not 400 at the provider. Astra's
+  # Codex-only `ultra` level (maximum reasoning plus automatic task delegation)
+  # is a Codex-harness mode rather than a `reasoning.effort` wire value, so it
+  # is deliberately absent from `ReasoningEffort`.
   @openai_codex [
-    %Entry{id: "gpt-5.6-sol", label: "GPT-5.6 Sol (default, latest)", context_window: 272_000},
-    %Entry{id: "gpt-5.6-terra", label: "GPT-5.6 Terra (balanced)", context_window: 272_000},
-    %Entry{id: "gpt-5.6-luna", label: "GPT-5.6 Luna (fast, cheaper)", context_window: 272_000},
+    %Entry{id: "gpt-6-astra", label: "GPT-6 Astra (default, latest)", context_window: 872_000},
+    %Entry{id: "gpt-5.6-sol", label: "GPT-5.6 Sol", context_window: 872_000},
+    %Entry{id: "gpt-5.6-terra", label: "GPT-5.6 Terra (balanced)", context_window: 872_000},
+    %Entry{id: "gpt-5.6-luna", label: "GPT-5.6 Luna (fast, cheaper)", context_window: 872_000},
     %Entry{
       id: "gpt-5.5",
       label: "GPT-5.5",
-      context_window: 400_000,
+      context_window: 272_000,
       max_reasoning_effort: :xhigh
     },
     %Entry{
       id: "gpt-5.4",
       label: "GPT-5.4",
-      context_window: 400_000,
+      context_window: 272_000,
       max_reasoning_effort: :xhigh
     },
     %Entry{
       id: "gpt-5.4-mini",
       label: "GPT-5.4 mini (faster, cheaper)",
-      context_window: 400_000,
+      context_window: 272_000,
       max_reasoning_effort: :xhigh
     }
   ]
 
   @openai [
     %Entry{
-      id: "gpt-5.6-sol",
-      label: "GPT-5.6 Sol (default, recommended)",
-      context_window: 272_000
+      id: "gpt-6-astra",
+      label: "GPT-6 Astra (default, recommended)",
+      context_window: 320_000
     },
+    %Entry{id: "gpt-5.6-sol", label: "GPT-5.6 Sol", context_window: 272_000},
     %Entry{id: "gpt-5.6-terra", label: "GPT-5.6 Terra (balanced)", context_window: 272_000},
     %Entry{id: "gpt-5.6-luna", label: "GPT-5.6 Luna (fast, cheaper)", context_window: 272_000},
     %Entry{
@@ -95,20 +145,29 @@ defmodule FermixCore.Providers.ModelCatalog do
 
   # Context windows are the API defaults the adapter actually gets (it does not
   # send the `context-1m` beta header, design doc §8) — compaction thresholds key
-  # off these. The 4.6+ generation (Opus 5, Opus 4.8, Sonnet 4.6) ships the full
-  # 1M window by default at standard pricing; only Haiku 4.5 is 200k. (Older
-  # Sonnet 4/4.5 still need the beta for 1M, but they are not in this catalog.)
+  # off these. The 4.6+ generation (Opus 5, Fable 5.1, Fable 5, Opus 4.8,
+  # Sonnet 4.6) ships the full 1M window by default at standard pricing; only
+  # Haiku 4.5 is 200k. (Older Sonnet 4/4.5 still need the beta for 1M, but they
+  # are not in this catalog.)
   #
   # max_output_tokens are the per-model output ceilings Anthropic requires on
   # every request (Hermes reference values — verify against current Anthropic
   # docs before the SSE follow-up raises the adapter's non-streaming cap above
-  # them).
+  # them). Fable 5.1 is a Covered Model: an organization on zero data retention
+  # gets a 400 on every request until Anthropic authorizes it, which is an
+  # account setting rather than a request-shape defect.
   @anthropic [
     %Entry{
       id: "claude-sonnet-4-6",
       label: "Claude Sonnet 4.6 (recommended)",
       context_window: 1_000_000,
       max_output_tokens: 64_000
+    },
+    %Entry{
+      id: "claude-fable-5-1",
+      label: "Claude Fable 5.1",
+      context_window: 1_000_000,
+      max_output_tokens: 128_000
     },
     %Entry{
       id: "claude-fable-5",
@@ -345,9 +404,9 @@ defmodule FermixCore.Providers.ModelCatalog do
   The highest reasoning-effort level `model_id` accepts when it is lower than
   its provider's ceiling, or `nil` when the model has no per-model cap (unknown
   models and every uncapped model). Two families cap today: the older OpenAI
-  models (gpt-5.5 / gpt-5.4 / gpt-5.4-mini), because `max` is a gpt-5.6-family
-  capability, and every xAI model except Grok 4.6, because `xhigh` is a 4.6
-  capability.
+  models (gpt-5.5 / gpt-5.4 / gpt-5.4-mini), because `max` is a
+  current-generation capability (GPT-6 Astra and the GPT-5.6 models), and every
+  xAI model except Grok 4.6, because `xhigh` is a 4.6 capability.
   """
   @spec model_effort_ceiling(atom(), String.t()) :: ReasoningEffort.level() | nil
   def model_effort_ceiling(provider, model_id) when is_binary(model_id) do

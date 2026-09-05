@@ -226,11 +226,11 @@ defmodule FermixCore.Setup.DoctorTest do
 
       plug = fn conn ->
         {:ok, body, conn} = Plug.Conn.read_body(conn)
-        if body =~ "gpt-5.6-sol", do: :counters.add(seen_model, 1, 1)
+        if body =~ "gpt-6-astra", do: :counters.add(seen_model, 1, 1)
         Plug.Conn.send_resp(conn, 200, "{}")
       end
 
-      assert {:ok, %{model: "gpt-5.6-sol"}} =
+      assert {:ok, %{model: "gpt-6-astra"}} =
                Doctor.probe_provider(:openai, req_options: [plug: plug])
 
       assert :counters.get(seen_model, 1) == 1
