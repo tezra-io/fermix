@@ -495,6 +495,10 @@ defmodule FermixWebWeb.SetupLiveTest do
     if :os.type() == {:unix, :darwin} do
       test "the computer-history native-driver card renders info tooltip + docs link + controls (§22.3)",
            %{conn: conn} do
+        # The tooltip's summarizer clause reads the live config, so establish the
+        # shipped posture here rather than inheriting whatever ran before.
+        Application.put_env(:fermix_core, :computer_history, [])
+
         {:ok, view, _html} = live(conn, "/setup")
         view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
 
@@ -505,7 +509,7 @@ defmodule FermixWebWeb.SetupLiveTest do
         # tooltip (data-tip) — anchored to the attribute so a regression back to a
         # visible <p> would fail — and the icon links to the docs page.
         assert card =~
-                 ~r/data-tip="[^"]*passwords and secure fields are never captured[^"]*off-device/
+                 ~r/data-tip="[^"]*Passwords and secure fields are never captured[^"]*off-device/
 
         assert card =~ ~s(href="https://fermix.ai/docs/computer-history/")
         # The allowlist is no longer an inline text field — Enable opens the app
@@ -513,6 +517,68 @@ defmodule FermixWebWeb.SetupLiveTest do
         refute card =~ ~s(name="computer_history_apps")
         assert card =~ ~s(phx-click="open_computer_history_apps")
         assert card =~ ~s(phx-click="computer_history_grant")
+      end
+
+      # The disclosure must name the destination raw activity actually reaches
+      # (§23.3): "off-device" is false when the summarizer runs on this Mac.
+      test "the tooltip says on-device, never off-device, for the local summarizer (§23.3)",
+           %{conn: conn} do
+        Application.put_env(:fermix_core, :computer_history, summarizer: :local)
+
+        {:ok, view, _html} = live(conn, "/setup")
+        view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+        card = view |> element(~s|section[data-feature-name="computer_history"]|) |> render()
+
+        assert card =~ "Summarized on-device (local model); off by default."
+        refute card =~ "off-device"
+      end
+
+      test "the tooltip names the pinned Tier-3 provider as the off-device summarizer (§23.3)",
+           %{conn: conn} do
+        Application.put_env(:fermix_core, :computer_history, summarizer: :anthropic)
+
+        {:ok, view, _html} = live(conn, "/setup")
+        view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+        card = view |> element(~s|section[data-feature-name="computer_history"]|) |> render()
+
+        assert card =~ "Summarized off-device by anthropic; off by default."
+      end
+
+      test "the default summarizer posture names the resolved subagent provider (§23.3)",
+           %{conn: conn} do
+        routing = Application.get_env(:fermix_core, :routing)
+        on_exit(fn -> restore_env(:fermix_core, :routing, routing) end)
+        Application.put_env(:fermix_core, :routing, subagent_provider: :anthropic)
+        Application.put_env(:fermix_core, :computer_history, [])
+
+        {:ok, view, _html} = live(conn, "/setup")
+        view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+        card = view |> element(~s|section[data-feature-name="computer_history"]|) |> render()
+
+        # The subagent tier, not a hardcoded string and not the primary provider
+        # (`:openai` in this suite's baseline agent config).
+        assert card =~ "Summarized off-device by anthropic; off by default."
+      end
+
+      # The pinned native driver withholds typed text inside browsers and captures
+      # no URLs, so the tooltip must not promise either (§23.3).
+      test "the tooltip claims window titles only inside browsers, never URLs (§23.3)",
+           %{conn: conn} do
+        Application.put_env(:fermix_core, :computer_history, [])
+
+        {:ok, view, _html} = live(conn, "/setup")
+        view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+        card = view |> element(~s|section[data-feature-name="computer_history"]|) |> render()
+
+        assert card =~
+                 "Opt-in activity memory from the apps you allow — window titles and typed " <>
+                   "text; inside browsers only window titles are captured today."
+
+        refute card =~ "URLs"
       end
     end
 

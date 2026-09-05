@@ -10,8 +10,9 @@ defmodule FermixCore.ComputerHistory.Ingest do
   **Default-deny (§14 inv. 11):** an event in a non-allowlisted app, or a
   browser content/navigation event on a non-allowlisted site, is dropped
   **before** any write — asserted by the store never containing it, not by a
-  read-time filter. System/session/gap events (no bundle id) are not app
-  content and pass.
+  read-time filter. Only the metadata-only kinds of the §8.4 taxonomy
+  (`@appless_kinds`) may arrive with no bundle id; any other app-less event
+  names no app to check against the allowlist, so it is dropped too.
 
   The scrubber runs on every free-form column, and the injection scanner tags
   suspect free-form text with a `scan_flag` so a captured "ignore previous
@@ -41,6 +42,20 @@ defmodule FermixCore.ComputerHistory.Ingest do
   # AX secure roles whose text is suppressed regardless — defense in depth
   # behind the capturer's own secure-role suppression (§13.1).
   @secure_roles ["AXSecureTextField"]
+
+  # The §8.4 event kinds that are metadata about the machine, not about an app,
+  # and so legitimately carry no bundle id. This list is the single source of
+  # truth for the app-allowlist exemption: every other kind — the content kinds
+  # (`field.value`, `selection.changed`, `browser.navigated`) and the app kinds
+  # (`app.*`, `window.*`, `focus.changed`) — must name its app to be checked.
+  @appless_kinds ~w(
+    observer.gap
+    system.sleep
+    system.wake
+    session.locked
+    session.unlocked
+    user.switched
+  )
 
   @type stats :: %{written: non_neg_integer(), dropped: non_neg_integer()}
 
@@ -131,8 +146,10 @@ defmodule FermixCore.ComputerHistory.Ingest do
 
   # An app-scoped event must have its bundle id on the app allowlist.
   defp app_allowed?(%{bundle_id: bundle}, apps) when is_binary(bundle), do: bundle in apps
-  # No bundle id ⇒ a system/session/gap event, not app content ⇒ pass.
-  defp app_allowed?(_event, _apps), do: true
+  # No bundle id ⇒ only a metadata-only kind passes. A content or app event with
+  # no app is malformed: it can never be attributed to an allowlisted app, so it
+  # is dropped rather than written on an exemption meant for machine metadata.
+  defp app_allowed?(event, _apps), do: Map.get(event, :type) in @appless_kinds
 
   # A browser content/navigation event carrying a host must have that host on
   # the site allowlist.

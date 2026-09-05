@@ -10,11 +10,17 @@ Accessibility field-value-on-settle, not a keystroke tap.
 Capture is **allowlist-scoped, default-deny**: nothing is recorded unless the
 operator lists the app (by bundle id) and, inside allowlisted browsers, the
 site (by host). Within an allowlisted surface: app switches/launches/quits,
-focused-window titles, focused-field role + settled value, browser URL + page
-title (private-browsing windows excluded best-effort), and first-class
-`observer.gap` events so a capture gap is never mistaken for inactivity. There
-is no historical backfill — macOS Accessibility is live-only, so capture begins
-at enable and only new events flow. The raw spool is double-bounded: 48h
+focused-window titles, focused-field role + settled value, and first-class
+`observer.gap` events so a capture gap is never mistaken for inactivity.
+
+**Inside browsers, only window titles are captured today.** The pinned native
+driver withholds browser field text and does not yet emit URLs or navigation
+events, so typed text and URLs inside a browser do not reach the spool at all;
+the site allowlist applies only when a frame carries a host, which that driver
+does not currently supply. Do not tell the owner Fermix has their browsing URLs.
+
+There is no historical backfill — macOS Accessibility is live-only, so capture
+begins at enable and only new events flow. The raw spool is double-bounded: 48h
 retention plus a size ceiling that drops the oldest events (with a loud
 warning) if a pathological source balloons it inside the window.
 
@@ -67,23 +73,56 @@ empty allowlist is refused — consent to capture nothing is not consent.
   (opaque downstream vendors).
 
 The summarizer is prompted for **importance extraction, not an app inventory**:
-it infers the task/project/topic from titles/URLs/field labels, groups related
-activity across apps, ignores brief switches, and names the *subject* of the work
-— the events are heterogeneous app/tool activity, most of it incidental. It never
-transcribes field text (a code-side verbatim-leak check rejects the whole summary
-if it echoes source field values) and never fails over to a second vendor.
+it keeps up to three meaningful tasks with their subject and observed action,
+ignores repetition and transient switches, and never turns a viewed surface into
+a completed task — the events are heterogeneous app/tool activity, most of it
+incidental. It never fails over to a second vendor, and code disposes of what it
+proposes:
+
+- **Verbatim field text is redacted, not stored.** Both the note and the source
+  fields are compared through a normalized projection — letters and digits only,
+  lowercased, in one Unicode normal form — so a copy that was reflowed,
+  re-punctuated, re-cased or differently accent-encoded (NFC/NFD) is still
+  caught. What it catches is a **contiguous run** of source field text above a
+  short floor; the run is replaced with `[…]` and the rest of the note (including
+  what it said about other events in the batch) is kept, so one echoed field no
+  longer discards a whole window's information. A shorter fragment — a bare SSN,
+  a nine-digit routing number — is below the floor and is **not** caught: the
+  prompt forbids copying, and this is the backstop behind it, not the barrier.
+- **It may abstain.** A batch with nothing worth remembering returns a marker,
+  which is recorded as an empty window rather than stored as a memory.
+- **Notes are bounded** — cut at the last sentence end within 900 characters, or
+  hard-cut with `…` when there is none — and each memory's structured
+  artifacts (apps/sites/titles/urls) are ranked by how much of the batch carried
+  them and how recently, then capped — so the title that mattered leads the list
+  instead of being buried under incidental ones. Page titles count as titles.
+- **Memories accrete: one per summarized batch, never superseded.** The cursor is
+  an event-id high-water mark, so every event is summarized exactly once and a
+  later note can never cover an earlier note's evidence.
+- **It catches up and stays oriented.** A cycle drains a backlog over several
+  bounded calls instead of a single fixed batch, the rendered batch is cut to a
+  character budget (the cursor advances only past what was actually sent), and
+  when a note from the previous two hours exists it is offered as continuity
+  context — labelled as context, never as evidence, and counted against the same
+  budget as the events.
 
 ## What surfaces, and the taint
 
 `recall_activity` (owner-only tool) answers "what was I working on this
 morning?" — windows resolve in the owner's configured timezone and it returns
-**derived summaries only**, never raw field text. A per-turn **Recent Activity**
-section injects a short digest under the same gate. Both frame activity as
-untrusted data (a captured "ignore previous instructions…" is tagged at ingest
-and never executed). Verbatim field-value text is contract-barred: the
-summarizer's prose is validated code-side against the source spool before a
-memory is written; titles/URLs are permitted as whitelisted structured
-artifacts. An activity-derived assistant reply is **message-level tainted** so
+**derived summaries only**, never raw field text. Results are newest first, each
+entry dated with its local time range and carrying the apps/pages/URLs it came
+from, and bounded by whole entries; when the window held more than was shown the
+header says how many entries exist and how many are displayed, so an omission is
+never silent. A per-turn **Recent Activity** section injects a short digest under
+the same gate: the **last 24 hours only**, up to 8 dated entries with up to three
+pages each, dropping the oldest entry rather than cutting one mid-sentence — a
+summary from last year is not recent activity. Both frame activity as untrusted
+data (a captured "ignore previous instructions…" is tagged at ingest and never
+executed). Verbatim field-value text is contract-barred: the summarizer's prose
+is validated code-side against the source spool before a memory is written and
+any verbatim run is redacted out of it; titles/URLs are permitted as whitelisted
+structured artifacts. An activity-derived assistant reply is **message-level tainted** so
 compaction and conversation replay never re-send it to an ungranted-remote
 provider (strict taint). Activity lives in its own `memory.db` tables, never the
 general memories store; the general memory reviewer reads only user messages and
@@ -116,9 +155,14 @@ macOS only — the capture layer *is* macOS (Accessibility TCC, NSWorkspace,
 AXObserver) and does not port; on any other host the feature is unavailable.
 The scrubber and secure-field suppression reduce but cannot close the
 secret-capture risk (codes and tokens pasted into allowlisted apps can be seen);
-purge is bounded against an offline attacker by FileVault, not zeroed. Fermix's
-own automation (the driven browser and any Computer-Use action) is excluded so
-the agent's actions are never recorded as the owner's.
+purge is bounded against an offline attacker by FileVault, not zeroed. Excluding
+Fermix's own automation (the driven browser, any Computer-Use action) from
+capture is **designed but not yet enforced** — there is no driven-pid exclusion
+today, so activity the agent itself caused can appear in history as if it were
+the owner's. Never assume your own actions are absent from what you recall.
+`/history status` reports how many spool events are still unsummarized and how
+old the oldest is, so a summarizer falling behind is visible before the 48h
+retention starts eating the backlog.
 
 **Current status:** the config, tools, `/history` commands, summarizer, the
 entire privacy rail, and the macOS capture layer (an AXObserver/CFRunLoop engine

@@ -30,7 +30,9 @@ defmodule FermixCore.Tools.RecallActivity do
   def description,
     do:
       "Recall what the owner was doing on their computer (apps, pages, documents) from " <>
-        "on-device activity memory. Owner-only; returns summaries, never raw keystrokes."
+        "on-device activity memory. Owner-only; returns summaries, never raw keystrokes. " <>
+        "Results are dated, newest first, and bounded; when older entries were omitted the " <>
+        "answer says so, and a narrower window returns them."
 
   @impl true
   def parameters do

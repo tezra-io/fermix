@@ -2659,9 +2659,10 @@ defmodule FermixWebWeb.SetupLive do
       display_name: "Computer History",
       description: "Passive activity memory from the apps you allow.",
       tooltip:
-        "Opt-in activity memory from the apps you allow — titles, URLs, and typed text; " <>
-          "passwords and secure fields are never captured. Summarized off-device by " <>
-          "#{computer_history_summarizer_label()}; off by default.",
+        "Opt-in activity memory from the apps you allow — window titles and typed text; " <>
+          "inside browsers only window titles are captured today. " <>
+          "Passwords and secure fields are never captured. " <>
+          computer_history_summarizer_sentence(),
       docs_url: "https://fermix.ai/docs/computer-history/",
       enabled?: enabled?,
       status: status,
@@ -2736,9 +2737,26 @@ defmodule FermixWebWeb.SetupLive do
     end
   end
 
-  # The model summarization runs on — the subagent tier (provider + model), shown
-  # on the card so the operator sees exactly which model reads their activity (§22.3).
-  defp computer_history_summarizer_label do
+  # "Off-device" is false when summarization runs on this Mac, so the local
+  # summarizer gets its own sentence; every other posture names the destination
+  # raw activity actually reaches (§22.3, §23.3).
+  defp computer_history_summarizer_sentence do
+    case ComputerHistoryConfig.summarizer() do
+      :local ->
+        "Summarized #{computer_history_summarizer_label(:local)}; off by default."
+
+      remote ->
+        "Summarized off-device by #{computer_history_summarizer_label(remote)}; off by default."
+    end
+  end
+
+  # Where summarization runs, shown on the card so the operator sees exactly which
+  # model reads their activity (§22.3): the on-device model, the pinned Tier-3
+  # provider, or the resolved subagent tier (provider + model).
+  defp computer_history_summarizer_label(:local), do: "on-device (local model)"
+  defp computer_history_summarizer_label({:provider, provider}), do: to_string(provider)
+
+  defp computer_history_summarizer_label(:default_provider) do
     provider =
       case ComputerHistoryConfig.default_summarizer_provider() do
         {:ok, p} -> to_string(p)

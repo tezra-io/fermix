@@ -93,7 +93,7 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
       %{
         "type" => "event",
         "v" => 1,
-        "ts" => 1_700 + seq,
+        "ts" => 1_770_000_000_000 + seq,
         "seq" => seq,
         "boot_id" => "boot-t",
         "app" => %{"bundle_id" => "com.apple.Safari", "name" => "Safari", "pid" => 10},
@@ -292,6 +292,25 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
       assert String.starts_with?(gap.gap_reason, "malformed")
       # The real events on either side still made it in.
       assert Enum.count(rows, &(&1.type == "app.activated")) == 2
+    end
+
+    test "an out-of-range ts becomes a gap with a readable reason", ctx do
+      # The decoder refuses the stamp; the gap reason has to name the field, not
+      # print Elixir tuple syntax into a stored column.
+      events = events_file(ctx, [app_event(1), app_event(2, %{"ts" => -1})])
+
+      pid = start_capturer(ctx, sidecar_env: [{~c"FAKE_EVENTS_FILE", String.to_charlist(events)}])
+
+      rows =
+        eventually(fn ->
+          rows = stored(ctx.repo)
+          if Enum.any?(rows, &(&1.type == "observer.gap")), do: {:ok, rows}, else: :retry
+        end)
+
+      assert Process.alive?(pid)
+      gap = Enum.find(rows, &(&1.type == "observer.gap"))
+      assert gap.gap_reason == "malformed:invalid_ts"
+      refute gap.gap_reason =~ "{:invalid_field"
     end
   end
 

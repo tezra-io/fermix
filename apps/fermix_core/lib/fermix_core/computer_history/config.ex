@@ -25,6 +25,8 @@ defmodule FermixCore.ComputerHistory.Config do
   falls back to its own default when the key is absent.
   """
 
+  require Logger
+
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Providers.RoutingOverrides
@@ -135,6 +137,57 @@ defmodule FermixCore.ComputerHistory.Config do
 
   defp put_if(opts, _key, nil), do: opts
   defp put_if(opts, key, value), do: Keyword.put(opts, key, value)
+
+  @doc """
+  The operator's timezone (`[fermix_core.personalization] timezone`), `"Etc/UTC"`
+  when unset **or unusable**. Read-only — this block owns no timezone key. The
+  single resolver for the subsystem: the summarizer stamps event times with it
+  and recall renders memory windows with it, so an event and the note about it
+  never disagree, and neither surface can name a zone it did not actually use.
+  """
+  @spec timezone() :: String.t()
+  def timezone do
+    Application.get_env(@app, :personalization, [])
+    |> Keyword.get(:timezone)
+    |> configured_or_utc()
+  end
+
+  @doc """
+  The timezone for a caller's `opts`: `:timezone` when given, else the configured
+  one. Always a zone the runtime can actually shift into. A present-but-nil or
+  non-string `:timezone` behaves as absent — an opts list built with
+  `Keyword.put(:timezone, nil)` must not take a surface down.
+  """
+  @spec timezone(keyword()) :: String.t()
+  def timezone(opts) when is_list(opts) do
+    case Keyword.get(opts, :timezone) do
+      tz when is_binary(tz) and tz != "" -> usable_timezone(tz)
+      _absent_or_blank -> timezone()
+    end
+  end
+
+  @doc """
+  `tz` if the runtime can shift into it, else `"Etc/UTC"` with a warning. A
+  mistyped zone must not stop a summary or a digest — but the surface has to
+  render (and name) the zone it really used.
+  """
+  @spec usable_timezone(String.t()) :: String.t()
+  def usable_timezone(tz) when is_binary(tz) do
+    case DateTime.shift_zone(DateTime.utc_now(), tz) do
+      {:ok, _local} ->
+        tz
+
+      {:error, reason} ->
+        Logger.warning(
+          "computer_history: unusable timezone #{inspect(tz)} (#{inspect(reason)}); using Etc/UTC"
+        )
+
+        "Etc/UTC"
+    end
+  end
+
+  defp configured_or_utc(tz) when is_binary(tz) and tz != "", do: usable_timezone(tz)
+  defp configured_or_utc(_unset), do: "Etc/UTC"
 
   @doc """
   Normalize a parsed config block: present keys only, values validated

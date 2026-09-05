@@ -1606,6 +1606,13 @@ defmodule FermixCore.Memory.Repo do
     call({:computer_history_events_after_id, after_id, limit}, opts)
   end
 
+  @doc "Summarizer lag: `{count, oldest_ts | nil}` for spool events past the cursor."
+  @spec computer_history_unsummarized_stats(keyword()) ::
+          {:ok, {non_neg_integer(), integer() | nil}} | {:error, term()}
+  def computer_history_unsummarized_stats(opts \\ []) do
+    call(:computer_history_unsummarized_stats, opts)
+  end
+
   @doc "Count of durable activity memories (excluding superseded)."
   @spec computer_history_count_memories(keyword()) :: {:ok, non_neg_integer()} | {:error, term()}
   def computer_history_count_memories(opts \\ []) do
@@ -1618,11 +1625,12 @@ defmodule FermixCore.Memory.Repo do
     call({:computer_history_insert_memory, memory}, opts)
   end
 
-  @doc "The most recent non-superseded activity memories (Recent Activity section source)."
-  @spec computer_history_recent_memories(pos_integer(), keyword()) ::
+  @doc "The newest non-superseded memories ending at/after `since_ts` (Recent Activity source)."
+  @spec computer_history_recent_memories(integer(), pos_integer(), keyword()) ::
           {:ok, [map()]} | {:error, term()}
-  def computer_history_recent_memories(limit, opts \\ []) when is_integer(limit) and limit > 0 do
-    call({:computer_history_recent_memories, limit}, opts)
+  def computer_history_recent_memories(since_ts, limit, opts \\ [])
+      when is_integer(since_ts) and is_integer(limit) and limit > 0 do
+    call({:computer_history_recent_memories, since_ts, limit}, opts)
   end
 
   @doc "Non-superseded activity memories intersecting [from_ts, to_ts] (recall_activity query)."
@@ -1631,6 +1639,14 @@ defmodule FermixCore.Memory.Repo do
   def computer_history_memories_in_window(from_ts, to_ts, limit, opts \\ [])
       when is_integer(from_ts) and is_integer(to_ts) and is_integer(limit) and limit > 0 do
     call({:computer_history_memories_in_window, from_ts, to_ts, limit}, opts)
+  end
+
+  @doc "How many non-superseded activity memories intersect [from_ts, to_ts]."
+  @spec computer_history_count_memories_in_window(integer(), integer(), keyword()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def computer_history_count_memories_in_window(from_ts, to_ts, opts \\ [])
+      when is_integer(from_ts) and is_integer(to_ts) do
+    call({:computer_history_count_memories_in_window, from_ts, to_ts}, opts)
   end
 
   @doc "Purge the [from_ts, to_ts] window: events + intersecting memories + watermark."
@@ -1661,11 +1677,10 @@ defmodule FermixCore.Memory.Repo do
     call({:computer_history_claim_cycle, now, stale_after_ms}, opts)
   end
 
-  @doc "Write a summarizer cycle result (supersede+insert under the purge guard, advance cursor)."
+  @doc "Write a summarizer batch result (insert under the purge guard, advance cursor)."
   @spec computer_history_write_cycle_result(
           non_neg_integer(),
           map() | nil,
-          integer(),
           DateTime.t(),
           String.t(),
           keyword()
@@ -1673,17 +1688,12 @@ defmodule FermixCore.Memory.Repo do
   def computer_history_write_cycle_result(
         last_id,
         memory,
-        superseded_at_ms,
         %DateTime{} = now,
         last_status,
         opts \\ []
       )
-      when is_integer(last_id) and (is_map(memory) or is_nil(memory)) and
-             is_integer(superseded_at_ms) and is_binary(last_status) do
-    call(
-      {:computer_history_write_cycle_result, last_id, memory, superseded_at_ms, now, last_status},
-      opts
-    )
+      when is_integer(last_id) and (is_map(memory) or is_nil(memory)) and is_binary(last_status) do
+    call({:computer_history_write_cycle_result, last_id, memory, now, last_status}, opts)
   end
 
   @doc "Record the summarizer's paused reason (surfaced to status)."
@@ -2988,6 +2998,11 @@ defmodule FermixCore.Memory.Repo do
     {:reply, reply, state}
   end
 
+  def handle_call(:computer_history_unsummarized_stats, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.unsummarized_stats/1)
+    {:reply, reply, state}
+  end
+
   def handle_call({:computer_history_sweep_spool_over_bytes, ceiling_bytes}, _from, state) do
     reply = with_connection(state, &ComputerHistorySql.sweep_spool_over_bytes(&1, ceiling_bytes))
     {:reply, reply, state}
@@ -3018,14 +3033,21 @@ defmodule FermixCore.Memory.Repo do
     {:reply, reply, state}
   end
 
-  def handle_call({:computer_history_recent_memories, limit}, _from, state) do
-    reply = with_connection(state, &ComputerHistorySql.recent_memories(&1, limit))
+  def handle_call({:computer_history_recent_memories, since_ts, limit}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.recent_memories(&1, since_ts, limit))
     {:reply, reply, state}
   end
 
   def handle_call({:computer_history_memories_in_window, from_ts, to_ts, limit}, _from, state) do
     reply =
       with_connection(state, &ComputerHistorySql.memories_in_window(&1, from_ts, to_ts, limit))
+
+    {:reply, reply, state}
+  end
+
+  def handle_call({:computer_history_count_memories_in_window, from_ts, to_ts}, _from, state) do
+    reply =
+      with_connection(state, &ComputerHistorySql.count_memories_in_window(&1, from_ts, to_ts))
 
     {:reply, reply, state}
   end
@@ -3051,22 +3073,14 @@ defmodule FermixCore.Memory.Repo do
   end
 
   def handle_call(
-        {:computer_history_write_cycle_result, last_id, memory, superseded_at_ms, now,
-         last_status},
+        {:computer_history_write_cycle_result, last_id, memory, now, last_status},
         _from,
         state
       ) do
     reply =
       with_connection(
         state,
-        &ComputerHistorySql.write_cycle_result(
-          &1,
-          last_id,
-          memory,
-          superseded_at_ms,
-          now,
-          last_status
-        )
+        &ComputerHistorySql.write_cycle_result(&1, last_id, memory, now, last_status)
       )
 
     {:reply, reply, state}
