@@ -47,9 +47,9 @@ defmodule FermixCore.Providers.ModelCatalogTest do
       end
     end
 
-    test "OpenAI and Codex default to gpt-5.6-sol (frontier of the 5.6 generation)" do
-      assert ModelCatalog.default_model_for(:openai) == "gpt-5.6-sol"
-      assert ModelCatalog.default_model_for(:openai_codex) == "gpt-5.6-sol"
+    test "OpenAI and Codex default to gpt-6-astra (frontier generation)" do
+      assert ModelCatalog.default_model_for(:openai) == "gpt-6-astra"
+      assert ModelCatalog.default_model_for(:openai_codex) == "gpt-6-astra"
     end
 
     test "xAI defaults to grok-4.6 (head = newest generation)" do
@@ -72,19 +72,32 @@ defmodule FermixCore.Providers.ModelCatalogTest do
 
   describe "context_window_for/2" do
     test "returns cataloged context windows for known models" do
-      # OpenAI direct API serves the full window; Codex (OAuth) caps the same model at 400k.
+      # Direct-API entries carry the published window; the Codex column carries
+      # the cache's max_context_window (the ceiling that path stretches to).
       assert ModelCatalog.context_window_for(:openai, "gpt-5.5") == 1_050_000
       assert ModelCatalog.context_window_for(:openai, "gpt-5.4-mini") == 400_000
-      assert ModelCatalog.context_window_for(:openai_codex, "gpt-5.5") == 400_000
-      # GPT-5.6 (sol/terra/luna) serves the same 272k window on both the Codex
-      # and direct-API paths (context_window == max_context_window).
+      # 5.5/5.4-mini are 272k on Codex, NOT the 400k this catalog used to
+      # claim: 0.85 * 400_000 = 340_000 deferred compaction past the real
+      # window, so a long turn hit the provider limit before compacting.
+      assert ModelCatalog.context_window_for(:openai_codex, "gpt-5.5") == 272_000
+      assert ModelCatalog.context_window_for(:openai_codex, "gpt-5.4") == 272_000
+      assert ModelCatalog.context_window_for(:openai_codex, "gpt-5.4-mini") == 272_000
+      # The current generation stretches to 872k on Codex.
+      assert ModelCatalog.context_window_for(:openai_codex, "gpt-6-astra") == 872_000
+      assert ModelCatalog.context_window_for(:openai_codex, "gpt-5.6-sol") == 872_000
+      assert ModelCatalog.context_window_for(:openai_codex, "gpt-5.6-terra") == 872_000
+      assert ModelCatalog.context_window_for(:openai_codex, "gpt-5.6-luna") == 872_000
+      # Astra's direct-API entry is a derived compaction budget, not its real
+      # 1,050,000 window: 0.85 * 320_000 = 272_000, exactly the input-token
+      # boundary above which OpenAI reprices the full request at 2x/1.5x.
+      assert ModelCatalog.context_window_for(:openai, "gpt-6-astra") == 320_000
       assert ModelCatalog.context_window_for(:openai, "gpt-5.6-sol") == 272_000
-      assert ModelCatalog.context_window_for(:openai_codex, "gpt-5.6-sol") == 272_000
       assert ModelCatalog.context_window_for(:openai, "gpt-5.6-terra") == 272_000
       assert ModelCatalog.context_window_for(:openai, "gpt-5.6-luna") == 272_000
       # Anthropic 4.6+ ships 1M by default at standard pricing; only Haiku is 200k.
       assert ModelCatalog.context_window_for(:anthropic, "claude-sonnet-4-6") == 1_000_000
       assert ModelCatalog.context_window_for(:anthropic, "claude-fable-5") == 1_000_000
+      assert ModelCatalog.context_window_for(:anthropic, "claude-fable-5-1") == 1_000_000
       assert ModelCatalog.context_window_for(:anthropic, "claude-opus-5") == 1_000_000
       assert ModelCatalog.context_window_for(:anthropic, "claude-opus-4-8") == 1_000_000
       assert ModelCatalog.context_window_for(:anthropic, "claude-haiku-4-5") == 200_000
@@ -147,6 +160,7 @@ defmodule FermixCore.Providers.ModelCatalogTest do
     test "returns cataloged output ceilings for Anthropic models" do
       assert ModelCatalog.max_output_tokens_for(:anthropic, "claude-sonnet-4-6") == 64_000
       assert ModelCatalog.max_output_tokens_for(:anthropic, "claude-fable-5") == 64_000
+      assert ModelCatalog.max_output_tokens_for(:anthropic, "claude-fable-5-1") == 128_000
       assert ModelCatalog.max_output_tokens_for(:anthropic, "claude-opus-5") == 128_000
       assert ModelCatalog.max_output_tokens_for(:anthropic, "claude-opus-4-8") == 128_000
       assert ModelCatalog.max_output_tokens_for(:anthropic, "claude-haiku-4-5") == 64_000
@@ -202,11 +216,13 @@ defmodule FermixCore.Providers.ModelCatalogTest do
   end
 
   describe "model_effort_ceiling/2, effort_levels_for/2, clamp_effort/3" do
-    test "older OpenAI models cap at :xhigh; gpt-5.6 and other providers are uncapped" do
+    test "older OpenAI models cap at :xhigh; the current generation is uncapped" do
       assert ModelCatalog.model_effort_ceiling(:openai, "gpt-5.5") == :xhigh
       assert ModelCatalog.model_effort_ceiling(:openai, "gpt-5.4") == :xhigh
       assert ModelCatalog.model_effort_ceiling(:openai, "gpt-5.4-mini") == :xhigh
       assert ModelCatalog.model_effort_ceiling(:openai_codex, "gpt-5.5") == :xhigh
+      assert ModelCatalog.model_effort_ceiling(:openai, "gpt-6-astra") == nil
+      assert ModelCatalog.model_effort_ceiling(:openai_codex, "gpt-6-astra") == nil
       assert ModelCatalog.model_effort_ceiling(:openai, "gpt-5.6-sol") == nil
       assert ModelCatalog.model_effort_ceiling(:openai_codex, "gpt-5.6-sol") == nil
       # xhigh is a Grok 4.6 capability: 4.6 is uncapped, every older Grok tops
@@ -223,14 +239,18 @@ defmodule FermixCore.Providers.ModelCatalogTest do
                [:none, :low, :medium, :high, :xhigh]
 
       refute :max in ModelCatalog.effort_levels_for(:openai, "gpt-5.5")
+      assert :max in ModelCatalog.effort_levels_for(:openai, "gpt-6-astra")
+      assert :max in ModelCatalog.effort_levels_for(:openai_codex, "gpt-6-astra")
       assert :max in ModelCatalog.effort_levels_for(:openai, "gpt-5.6-sol")
       assert :max in ModelCatalog.effort_levels_for(:openai_codex, "gpt-5.6-sol")
     end
 
     test "clamp_effort/3 caps to the model ceiling, then the provider ceiling" do
-      # gpt-5.5 caps :max down to its :xhigh model ceiling; gpt-5.6 keeps :max.
+      # gpt-5.5 caps :max down to its :xhigh model ceiling; the current
+      # generation keeps :max.
       assert ModelCatalog.clamp_effort(:openai, "gpt-5.5", :max) == :xhigh
       assert ModelCatalog.clamp_effort(:openai_codex, "gpt-5.5", :max) == :xhigh
+      assert ModelCatalog.clamp_effort(:openai_codex, "gpt-6-astra", :max) == :max
       assert ModelCatalog.clamp_effort(:openai, "gpt-5.6-sol", :max) == :max
       # grok-4.6 reaches xhigh, the xai provider ceiling; an older Grok caps at
       # its own :high, which is what xAI would have downgraded :xhigh to anyway.
@@ -257,6 +277,11 @@ defmodule FermixCore.Providers.ModelCatalogTest do
       assert ModelCatalog.known_model?(:anthropic, "claude-fable-5")
       assert ModelCatalog.default_model_for(:anthropic) == "claude-sonnet-4-6"
     end
+
+    test "claude-fable-5-1 is cataloged without changing the Anthropic default" do
+      assert ModelCatalog.known_model?(:anthropic, "claude-fable-5-1")
+      assert ModelCatalog.default_model_for(:anthropic) == "claude-sonnet-4-6"
+    end
   end
 
   describe "provider_for_model/1" do
@@ -268,6 +293,19 @@ defmodule FermixCore.Providers.ModelCatalogTest do
     test "a slug shared across catalogs resolves to the first provider in catalog order" do
       # gpt-5.5 is in both :openai_codex and :openai; providers/0 lists codex first.
       assert ModelCatalog.provider_for_model("gpt-5.5") == :openai_codex
+      assert ModelCatalog.provider_for_model("gpt-6-astra") == :openai_codex
+    end
+
+    test "the Codex and direct-OpenAI lists carry the same slugs" do
+      # RoutingOverrides.validate_pairing/3 raises at config-parse time when a
+      # slug the catalog knows under one provider is pinned to the other, so a
+      # model added to only one of these two lists turns a legitimate
+      # provider/model pin into a hard boot crash. Whole-surface invariant: a
+      # model added later either joins both lists or fails here.
+      codex = ModelCatalog.models_for(:openai_codex) |> MapSet.new(& &1.id)
+      direct = ModelCatalog.models_for(:openai) |> MapSet.new(& &1.id)
+
+      assert codex == direct
     end
 
     test "an unknown slug is nil" do

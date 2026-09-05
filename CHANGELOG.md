@@ -8,6 +8,33 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **GPT-6 Astra is in the OpenAI and Codex catalogs, and is the new default
+  there.** `gpt-6-astra` is selectable in the setup wizard and the web pane on
+  both the OpenAI (API key) and Codex (ChatGPT subscription) providers, and is
+  what a fresh install resolves to on either, and it reaches `max` reasoning
+  effort. `gpt-5.6-sol` and every earlier model remain selectable. Astra's
+  Codex-only `ultra` effort level is a Codex-harness delegation mode rather than
+  a wire value, so Fermix's effort vocabulary is unchanged. Two things to know
+  before you upgrade. An install that pins `default_model` keeps what it pins,
+  but one that never pinned anything moves to Astra on the next upgrade without
+  being asked — and if your account is not yet entitled to GPT-6, nothing on the
+  upgrade path checks: the entitlement probe runs in the setup wizard's finalize
+  step and in `fermix doctor --full`, neither of which an upgrade re-runs, so the
+  first turn is where it would surface. Pin `default_model = "gpt-5.6-sol"` if
+  you would rather not move yet. And on the API-key provider Fermix compacts
+  Astra at 272k input tokens rather than at its full 1.05M window: above 272k
+  OpenAI reprices the whole request at 2x input and 1.5x output, so this keeps
+  long conversations inside standard pricing instead of silently doubling the
+  bill.
+- **Claude Fable 5.1 on the Anthropic provider.** `claude-fable-5-1` joins the
+  model catalog (1M context, 128k output ceiling) and is offered in both the CLI
+  wizard and web setup; set it with `[fermix_core.providers.anthropic]
+  default_model = "claude-fable-5-1"`. The Anthropic default is unchanged. It
+  rides the same adaptive-thinking, no-sampling wire shape as Fable 5. One
+  account-level caveat worth knowing before you chase a payload bug: Anthropic
+  treats this as a Covered Model requiring 30-day data retention, so an
+  organization on zero data retention gets a 400 on every request until
+  Anthropic authorizes it.
 - **The daemon half of an iPhone companion — the app itself is not released
   yet.** A new `mobile` channel serves a first-party companion app over your own
   network — LAN, or a tailnet when both devices are on one — with streaming
@@ -138,6 +165,24 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   origin — and `/deny <token>` is the typed equivalent on every channel.
   Denying consumes the token and answers the request honestly instead of
   leaving it to expire in silence.
+
+### Fixed
+
+- **Long conversations on the Codex provider now compact against the right
+  window.** The catalog recorded a 400k context window for GPT-5.5 and GPT-5.4
+  mini on the Codex path long after those models had moved to 272k, so Fermix
+  would not begin compacting until 340k — past the point the provider itself
+  refuses the request, which is how a long conversation could fail at the window
+  edge instead of being summarized. Both now read 272k. GPT-5.4, which has since
+  disappeared from the model catalog Codex publishes, is set to the same 272k on
+  the same conservative reasoning rather than on a measured value.
+- **Deep conversations on a ChatGPT subscription run much further before
+  compacting.** GPT-6 Astra and the GPT-5.6 family now read 872k on the Codex
+  path — the ceiling that path actually stretches to, rather than the smaller
+  working budget the `codex` CLI displays, which is the field the catalog had
+  been reading. Requests well past the old 272k figure have always been served,
+  so this stops Fermix compacting far earlier than it needed to.
+
 
 ### Security
 

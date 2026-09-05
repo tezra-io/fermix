@@ -434,7 +434,7 @@ defmodule FermixCore.Providers.Anthropic.MessagesTest do
         Req.Test.json(conn, text_response_body())
       end)
 
-      for model <- ["claude-sonnet-4-6", "claude-opus-5", "claude-opus-4-8"] do
+      for model <- ["claude-sonnet-4-6", "claude-opus-5", "claude-opus-4-8", "claude-fable-5-1"] do
         assert {:ok, _turn} =
                  Messages.chat([%{role: "user", content: "."}], [], chat_opts(model: model))
       end
@@ -477,7 +477,7 @@ defmodule FermixCore.Providers.Anthropic.MessagesTest do
         Req.Test.json(conn, text_response_body())
       end)
 
-      for model <- ["claude-opus-4-8", "claude-opus-5", "claude-fable-5"] do
+      for model <- ["claude-opus-4-8", "claude-opus-5", "claude-fable-5", "claude-fable-5-1"] do
         assert {:ok, _turn} =
                  Messages.chat(
                    [%{role: "user", content: "hi"}],
