@@ -12,6 +12,13 @@ defmodule FermixCore.Plugins.Dist.Lock do
   crashed holder and is broken once, so a dead process cannot brick plugin
   management forever.
 
+  The lockfile is created and removed by `FermixCore.Plugins.Dist.Lock.Owner`,
+  a process linked to the holder, rather than by a `try/after` in the holder
+  itself. `after` covers a return and a raise but not an exit signal, and a
+  cancelled management job stops its run with exactly that — so one Cancel used
+  to strand the lockfile and refuse every plugin operation on the machine until
+  the stale threshold expired.
+
   **Stale-threshold invariant.** The lock is held across the whole install
   pipeline (download → extract → hash → activate), so every stage must be
   time-bounded for stale-breaking to be safe. Download is the only network
@@ -23,15 +30,12 @@ defmodule FermixCore.Plugins.Dist.Lock do
   breaking it is safe.
   """
 
-  @default_attempts 50
-  @default_delay_ms 100
-  # See the stale-threshold invariant above: downloads are idle-bounded, the
-  # local stages are seconds of disk I/O, so a live holder never approaches this.
-  @default_stale_after_ms 600_000
+  alias FermixCore.Plugins.Dist.Lock.Owner
 
   @doc """
-  Acquire the lock at `lock_path`, run `fun`, and release — even if `fun`
-  raises. Returns `fun`'s result, or `{:error, :lock_unavailable}` if the lock
+  Acquire the lock at `lock_path`, run `fun`, and release — on every path the
+  holder can leave by, including a raise and the exit signal a cancelled job
+  sends. Returns `fun`'s result, or `{:error, :lock_unavailable}` if the lock
   could not be acquired within the attempt budget.
 
   Opts: `:attempts`, `:delay_ms`, `:stale_after_ms` (all bounded; tests shrink them).
@@ -39,25 +43,118 @@ defmodule FermixCore.Plugins.Dist.Lock do
   @spec with_lock(Path.t(), (-> result), keyword()) :: result | {:error, :lock_unavailable}
         when result: term()
   def with_lock(lock_path, fun, opts \\ []) when is_binary(lock_path) and is_function(fun, 0) do
-    case acquire(lock_path, opts) do
-      :ok ->
-        try do
-          fun.()
-        after
-          release(lock_path)
-        end
+    File.mkdir_p!(Path.dirname(lock_path))
+    {:ok, owner} = Owner.start_link(lock_path, self())
 
-      {:error, _} = error ->
-        error
+    try do
+      hold(owner, fun, opts)
+    after
+      Owner.release(owner)
     end
   end
 
-  defp acquire(lock_path, opts) do
-    File.mkdir_p!(Path.dirname(lock_path))
+  defp hold(owner, fun, opts) do
+    case Owner.acquire(owner, opts) do
+      :ok -> fun.()
+      {:error, _reason} = error -> error
+    end
+  end
+end
+
+defmodule FermixCore.Plugins.Dist.Lock.Owner do
+  @moduledoc """
+  The process that owns one plugin-store lockfile for the length of one
+  critical section.
+
+  It is linked to the holder and traps exits, so the holder's death — a crash,
+  the `:shutdown` a cancelled management job sends, a brutal kill — arrives
+  here as a message and the lockfile is removed in `terminate/2` before this
+  process stops. `terminate/2` is the only place the file is removed, so there
+  is one release path whether the section ended by returning, by raising, or by
+  being killed.
+  """
+
+  use GenServer
+
+  require Logger
+
+  @default_attempts 50
+  @default_delay_ms 100
+  # See the stale-threshold invariant in `FermixCore.Plugins.Dist.Lock`:
+  # downloads are idle-bounded and the local stages are seconds of disk I/O, so
+  # a live holder never approaches this.
+  @default_stale_after_ms 600_000
+  # `release/1` is synchronous, so `with_lock` returns only once the file is
+  # gone. All `terminate/2` does is one `File.rm`, so anything slower than this
+  # is a wedged filesystem and exits loud rather than waiting on it.
+  @stop_timeout_ms 5_000
+  # Acquisition sleeps `attempts × delay_ms` at most; the slack covers the
+  # filesystem calls around that loop.
+  @acquire_slack_ms 5_000
+
+  @spec start_link(Path.t(), pid()) :: GenServer.on_start()
+  def start_link(lock_path, holder) when is_binary(lock_path) and is_pid(holder) do
+    GenServer.start_link(__MODULE__, {lock_path, holder})
+  end
+
+  @doc """
+  Creates the lockfile, bounded by the attempt budget. The owner holds it until
+  `release/1` or until the holder dies, whichever comes first.
+  """
+  @spec acquire(pid(), keyword()) :: :ok | {:error, term()}
+  def acquire(owner, opts) when is_pid(owner) and is_list(opts) do
+    GenServer.call(owner, {:acquire, opts}, acquire_timeout(opts))
+  end
+
+  @doc "Removes the lockfile and stops the owner, synchronously."
+  @spec release(pid()) :: :ok
+  def release(owner) when is_pid(owner), do: GenServer.stop(owner, :normal, @stop_timeout_ms)
+
+  @impl true
+  def init({lock_path, holder}) do
+    Process.flag(:trap_exit, true)
+    {:ok, %{lock_path: lock_path, holder: holder, held?: false}}
+  end
+
+  @impl true
+  def handle_call({:acquire, opts}, _from, state) do
     attempts = Keyword.get(opts, :attempts, @default_attempts)
     delay = Keyword.get(opts, :delay_ms, @default_delay_ms)
     stale = Keyword.get(opts, :stale_after_ms, @default_stale_after_ms)
-    do_acquire(lock_path, attempts, delay, stale)
+
+    case do_acquire(state.lock_path, attempts, delay, stale) do
+      :ok -> {:reply, :ok, %{state | held?: true}}
+      {:error, _reason} = error -> {:reply, error, state}
+    end
+  end
+
+  # The holder is gone, so nothing will call `release/1`. Say so — a lock
+  # released this way means a critical section was cut short — and stop, which
+  # is what runs `terminate/2`. Matched on the holder itself: any other trapped
+  # exit is a message this process was never meant to receive, and reading it as
+  # a release would drop the lock under a still-running section. It crashes here
+  # instead, loudly.
+  @impl true
+  def handle_info({:EXIT, holder, reason}, %{holder: holder} = state) do
+    Logger.warning(
+      "plugin store lock #{state.lock_path} released: holder #{inspect(holder)} exited " <>
+        inspect(reason)
+    )
+
+    {:stop, :normal, state}
+  end
+
+  @impl true
+  def terminate(_reason, %{held?: false}), do: :ok
+
+  def terminate(_reason, %{held?: true, lock_path: lock_path}) do
+    case File.rm(lock_path) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error("plugin store lock #{lock_path} could not be removed: #{inspect(reason)}")
+    end
   end
 
   defp do_acquire(_lock_path, attempts, _delay, _stale) when attempts <= 0,
@@ -91,7 +188,14 @@ defmodule FermixCore.Plugins.Dist.Lock do
     end
   end
 
-  defp release(lock_path), do: File.rm(lock_path)
+  # The call has to outlast the acquisition budget it carries, so the one bound
+  # that decides the answer stays the attempt budget.
+  defp acquire_timeout(opts) do
+    attempts = Keyword.get(opts, :attempts, @default_attempts)
+    delay = Keyword.get(opts, :delay_ms, @default_delay_ms)
+
+    attempts * delay + @acquire_slack_ms
+  end
 
   # Debug breadcrumb only; staleness is judged by mtime, not this content.
   defp marker, do: "#{System.system_time(:millisecond)} #{System.pid()}\n"

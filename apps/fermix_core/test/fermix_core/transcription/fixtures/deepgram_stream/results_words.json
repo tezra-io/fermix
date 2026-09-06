@@ -1,0 +1,1 @@
+{"type":"Results","channel_index":[0,1],"duration":1.2,"start":0.0,"is_final":true,"speech_final":true,"channel":{"alternatives":[{"transcript":"hello there","confidence":0.9873047,"words":[{"word":"hello","start":0.08,"end":0.48,"confidence":0.9975586,"punctuated_word":"Hello"},{"word":"there","start":0.56,"end":1.12,"confidence":0.9868164,"punctuated_word":"there"}]}]}}

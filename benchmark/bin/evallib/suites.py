@@ -15,16 +15,18 @@ import yaml
 
 from .scoring import MATCH_METHODS, _parse_number
 
-_SCORE_KEYS = {"match", "expected", "tolerance"}
+_SCORE_KEYS = {"match", "expected", "tolerance", "single"}
 _TOP_KEYS = {
     "suite", "title", "description", "risk", "confirm_cost", "defaults", "scenarios", "soft",
     "abort_on_tool_error",
 }
 _DEFAULT_KEYS = {"timeout_ms", "judge", "expect"}
-_SCENARIO_KEYS = {"id", "title", "severity", "risk", "confirm_cost", "tags", "cases"}
+_SCENARIO_KEYS = {"id", "title", "severity", "risk", "confirm_cost", "tags", "cases",
+                  "sticky_gates"}
 _CASE_KEYS = {
     "id", "query", "turns", "expect", "rubric", "judge", "timeout_ms", "drive",
-    "image", "images", "score", "checker", "requires_tools", "cross_session",
+    "image", "images", "score", "checker", "requires_tools", "requires_tools_all",
+    "cross_session",
 }
 _TURN_KEYS = {"query", "expect"}
 
@@ -107,6 +109,10 @@ class Case:
     #     from parametric recall (no real tool use) can't score. Makes uplift real.
     cross_session: bool = False     # capability tier: store in turn-1's session, recall in
     #   a FRESH session (turn-2) — tests owner-scoped durable memory across conversations.
+    requires_tools_all: tuple[str, ...] = ()  # capability tier: ALL of these tool spans must
+    #   have fired without error. `requires_tools` is the any-of form; a task whose completion
+    #   genuinely needs two steps (create AND register) states both here, so half the work
+    #   cannot score. A span carrying error_info satisfies neither key.
 
 
 @dataclass
@@ -118,6 +124,8 @@ class Scenario:
     cases: list[Case]
     risk: str                       # execution profile; unclassified is never runnable
     confirm_cost: bool = False      # additive spend acknowledgement; independent of risk
+    sticky_gates: tuple[str, ...] = ()  # negative gates whose failure in ANY retry attempt
+    #   fails the case — see STICKY_GATE_KEYS.
 
 
 @dataclass
@@ -196,6 +204,32 @@ def _merge_expect(base: dict, override: dict) -> dict:
     return out
 
 
+# The negative gates grade.py implements: each one asserts that something did NOT
+# happen. Only these may be declared `sticky_gates:` — a positive gate is a
+# quality assertion a later attempt can legitimately satisfy, while a disclosed
+# fact or an executed action cannot be taken back by a retry.
+STICKY_GATE_KEYS = ("reply_not_matches", *_PROHIBITION_KEYS)
+# Prohibitions are sticky whether or not a scenario declares them: they are the
+# suite's ban on an action, never a wording floor.
+ALWAYS_STICKY_GATES = _PROHIBITION_KEYS
+
+
+def _validate_sticky_gates(value, where: str, problems: list[str]) -> tuple[str, ...]:
+    """Validate a scenario-level `sticky_gates:` list into a tuple of gate keys."""
+    if not isinstance(value, list):
+        problems.append(
+            f"{where}: `sticky_gates` must be a list of gate keys, got {type(value).__name__}")
+        return ()
+    gates: list[str] = []
+    for key in value:
+        if key in STICKY_GATE_KEYS:
+            gates.append(key)
+            continue
+        problems.append(f"{where}: `sticky_gates` entry {key!r} is not a negative gate "
+                        f"(allowed: {list(STICKY_GATE_KEYS)})")
+    return tuple(dict.fromkeys(gates))
+
+
 def _validate_keys(value: dict, allowed: set[str], where: str, problems: list[str]) -> None:
     for key in value:
         if key not in allowed:
@@ -235,6 +269,12 @@ def _validate_score(score, where: str, problems: list[str]) -> None:
             problems.append(f"{where}: `score.tolerance` is only valid for `match: numeric`")
         elif isinstance(tol, bool) or not isinstance(tol, (int, float)) or tol < 0:
             problems.append(f"{where}: `score.tolerance` must be a non-negative number")
+    if "single" in score:
+        single = score["single"]
+        if not isinstance(single, bool):
+            problems.append(f"{where}: `score.single` must be a boolean")
+        elif method != "numeric":
+            problems.append(f"{where}: `score.single` is only valid for `match: numeric`")
     if method == "regex" and isinstance(score.get("expected"), str):
         try:
             re.compile(score["expected"])
@@ -242,7 +282,12 @@ def _validate_score(score, where: str, problems: list[str]) -> None:
             problems.append(f"{where}: `score.expected` is not a valid regex: {exc}")
 
 
-_CHECKER_KEYS = {"script", "mode", "seed", "timeout_ms"}
+_CHECKER_KEYS = {"script", "mode", "seed", "timeout_ms", "reset"}
+# Roots a `checker.reset` entry may name. Trial independence needs the daemon
+# state a checker task mutates restored, but a reset list is a recursive delete
+# inside the eval home: only the two subtrees a task legitimately owns are
+# resettable, so a typo can never reach memory, jobs, config, or the home itself.
+_RESET_ROOTS = ("skills/", "workspace/")
 
 
 def _valid_checker_path(path) -> bool:
@@ -254,16 +299,52 @@ def _valid_checker_path(path) -> bool:
     return not os.path.isabs(path) and not drive and not portable_absolute and ".." not in parts
 
 
-def _validate_checker(chk, where: str, problems: list[str]) -> None:
+def _validate_reset_paths(value, where: str, problems: list[str]) -> list[str]:
+    """Validate `checker.reset` into the list of home-relative subtrees to restore."""
+    if not isinstance(value, list):
+        problems.append(f"{where}: `checker.reset` must be a list of home-relative paths, "
+                        f"got {type(value).__name__}")
+        return []
+    paths: list[str] = []
+    for item in value:
+        if _valid_reset_entry(item):
+            paths.append(item)
+            continue
+        problems.append(f"{where}: `checker.reset` entry {item!r} must name a subtree "
+                        f"UNDER {' or '.join(_RESET_ROOTS)} (the root itself is not "
+                        "resettable), as a relative path without traversal")
+    return paths
+
+
+def _valid_reset_entry(item) -> bool:
+    """A reset entry names a SUBTREE a task owns, never one of the roots itself.
+
+    `skills/`, `skills/.` and `skills//` all collapse under realpath to <home>/skills,
+    which the runtime SafeRm guard refuses with `min_below=2` — but only when the trial
+    starts, i.e. after loading, `--estimate`, seeding and possibly earlier tasks' spend,
+    and the exception aborts the sweep. The contract SCHEMA.md states is a LOAD error,
+    so it is enforced here."""
+    if not _valid_checker_path(item) or not item.startswith(_RESET_ROOTS):
+        return False
+    _root, _sep, tail = item.partition("/")
+    return any(part not in ("", ".") for part in tail.split("/"))
+
+
+def _validate_checker(chk, where: str, problems: list[str]) -> dict:
     """Validate a case-level `checker:` block (capability tier end-state scoring).
 
     A `checker:` runs a verification script over the sandbox after the turn:
-    `{script, mode: exit|json, seed?, timeout_ms?}`. `script`/`seed` are paths
-    relative to the harness root; the runner seeds `seed/` into the trial's scoped
-    workspace before the turn and runs `script` over it after (checker.py)."""
+    `{script, mode: exit|json, seed?, timeout_ms?, reset?}`. `script`/`seed` are
+    paths relative to the harness root; the runner seeds `seed/` into the trial's
+    scoped workspace before the turn and runs `script` over it after (checker.py).
+    `reset` names home-relative subtrees the runner safe-removes before EVERY
+    trial, so a leftover artifact from the previous trial cannot pass this one.
+
+    Returns the spec with `reset` always present (empty when undeclared), so the
+    runner has one shape to read."""
     if not isinstance(chk, dict):
         problems.append(f"{where}: `checker` must be a map, got {type(chk).__name__}")
-        return
+        return {"reset": []}
     for key in chk:
         if key not in _CHECKER_KEYS:
             problems.append(f"{where}: unknown checker key `{key}` (allowed: {sorted(_CHECKER_KEYS)})")
@@ -279,6 +360,29 @@ def _validate_checker(chk, where: str, problems: list[str]) -> None:
         t = chk["timeout_ms"]
         if isinstance(t, bool) or not isinstance(t, int) or t <= 0:
             problems.append(f"{where}: `checker.timeout_ms` must be a positive integer")
+    return {**chk, "reset": _validate_reset_paths(chk.get("reset", []), where, problems)}
+
+
+def _validate_tool_list(cs: dict, key: str, cloc: str, problems: list[str]) -> list[str]:
+    """A `requires_tools` / `requires_tools_all` provenance list: tool-name strings."""
+    value = cs.get(key, [])
+    if isinstance(value, list) and all(isinstance(t, str) and t for t in value):
+        return value
+    problems.append(f"{cloc}: `{key}` must be a list of tool-name strings")
+    return []
+
+
+def _refuse_undriven_turns(turns, score_spec, checker_spec, cross_session: bool,
+                           cloc: str, problems: list[str]) -> None:
+    """A capability case is driven by run_capability, which sends ONE prompt (or the two
+    of a cross_session pair). Extra turns would be silently dropped and the case scored
+    off its last prompt alone, so refuse them at authoring time rather than publishing a
+    number for work that never ran. The runner refuses the same shape again at selection
+    time, where it also sees rubric-only cases (which carry neither spec)."""
+    if (score_spec is None and checker_spec is None) or cross_session or len(turns) <= 1:
+        return
+    problems.append(f"{cloc}: multi-turn capability cases are not driven; "
+                    "use cross_session or a single turn")
 
 
 def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None:
@@ -373,6 +477,7 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
         confirm_cost = _boolean(
             sc.get("confirm_cost", suite_confirm_cost),
             f"{loc}: confirm_cost", problems, suite_confirm_cost)
+        sticky_gates = _validate_sticky_gates(sc.get("sticky_gates", []), loc, problems)
 
         cases_raw = sc.get("cases")
         if not isinstance(cases_raw, list) or len(cases_raw) < 2:
@@ -441,15 +546,13 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
                 _validate_score(score_spec, f"{cloc}.score", problems)
             checker_spec = cs.get("checker")
             if checker_spec is not None:
-                _validate_checker(checker_spec, f"{cloc}.checker", problems)
+                checker_spec = _validate_checker(checker_spec, f"{cloc}.checker", problems)
             # one scorer per case: score | checker | rubric are mutually exclusive
             present = [k for k in ("score", "checker", "rubric") if cs.get(k) is not None]
             if len(present) > 1:
                 problems.append(f"{cloc}: a case may carry only one of score/checker/rubric, got {present}")
-            requires_tools = cs.get("requires_tools", [])
-            if not isinstance(requires_tools, list) or not all(isinstance(t, str) and t for t in requires_tools):
-                problems.append(f"{cloc}: `requires_tools` must be a list of tool-name strings")
-                requires_tools = []
+            requires_tools = _validate_tool_list(cs, "requires_tools", cloc, problems)
+            requires_all = _validate_tool_list(cs, "requires_tools_all", cloc, problems)
             # cross_session: store the fact in turn 1's session, recall in a fresh
             # session (turn 2) — needs exactly 2 turns + a `score` block on the recall.
             cross_session = _boolean(
@@ -458,6 +561,8 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
                 problems.append(f"{cloc}: `cross_session` requires exactly 2 turns (store, recall)")
             if cross_session and score_spec is None:
                 problems.append(f"{cloc}: `cross_session` requires a `score` block (grades the recall reply)")
+            _refuse_undriven_turns(turns, score_spec, checker_spec, cross_session,
+                                   cloc, problems)
             judge = _boolean(cs.get("judge", default_judge), f"{cloc}.judge", problems,
                              default_judge)
             ctimeout = _timeout(cs["timeout_ms"], cloc) if "timeout_ms" in cs else default_timeout
@@ -515,10 +620,12 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
             cases.append(Case(id=cid, turns=turns, expect=case_expect, rubric=rubric,
                               judge=judge, timeout_ms=ctimeout, drive=drive, images=images,
                               score_spec=score_spec, checker_spec=checker_spec,
-                              requires_tools=requires_tools, cross_session=cross_session))
+                              requires_tools=requires_tools, cross_session=cross_session,
+                              requires_tools_all=tuple(requires_all)))
 
         scenarios.append(Scenario(id=sid, title=stitle, severity=severity, tags=tags,
-                                  cases=cases, risk=risk, confirm_cost=confirm_cost))
+                                  cases=cases, risk=risk, confirm_cost=confirm_cost,
+                                  sticky_gates=sticky_gates))
 
     description = raw.get("description", "")
     if not isinstance(description, str):

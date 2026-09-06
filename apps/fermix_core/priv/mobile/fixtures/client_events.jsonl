@@ -1,0 +1,13 @@
+{"v":1,"t":"hello","seq":1,"device_id":"device-1","app_version":"1.0.0","last_server_seq":0,"protocol_v":1}
+{"v":1,"t":"msg","seq":2,"client_msg_id":"client-1","profile_id":"main","text":"Hello","attach_ids":[]}
+{"v":1,"t":"attach_begin","seq":3,"attach_id":"attach-1","kind":"image","mime":"image/jpeg","size_bytes":4,"name":"photo.jpg","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+{"v":1,"t":"attach_end","seq":5,"attach_id":"attach-1","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+{"v":1,"t":"command","seq":6,"client_msg_id":"client-2","profile_id":"main","name":"help","args":""}
+{"v":1,"t":"history_pull","seq":7,"profile_id":"main","after_seq":0,"limit":200}
+{"v":1,"t":"media_fetch","seq":8,"ref":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+{"v":1,"t":"push_register","seq":9,"apns_token":"0123456789abcdef","environment":"development"}
+{"v":1,"t":"ack","seq":10,"server_seq":12}
+{"v":1,"t":"read_state","seq":11,"profile_id":"main","read_up_to_seq":12}
+{"v":1,"t":"pair_request","seq":1,"device_name":"Sujeeth's iPhone","model":"iPhone","app_version":"1.0.0"}
+{"v":1,"t":"unpair","seq":12}
+{"v":1,"t":"ping","seq":13}

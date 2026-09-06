@@ -9,7 +9,15 @@ name: eval-nightly
 
 on:
   schedule:
-    - cron: "17 7 * * *"
+    # 04:17 UTC — deliberately clear of Saturday's eval-weekly (06:23 cron,
+    # ~2h of eval-box occupancy). Both callers serialize on the reusable
+    # eval-box concurrency group, whose pending queue keeps only the NEWEST
+    # waiting request: at the old 07:17 the Saturday nightly could queue behind
+    # the weekly capability tier and be silently evicted when the weekly's
+    # dangerous tier requested the group (2026-08-22: run cancelled with zero
+    # steps executed — and the alert job reports only `failure`, so an evicted
+    # tier files nothing).
+    - cron: "17 4 * * *"
   workflow_dispatch: {}
 
 permissions:
@@ -71,9 +79,12 @@ jobs:
         run: tail -n 200 "${RUNNER_TEMP}/fermix-smoke-eval/daemon.log" || true
 
   alert:
-    name: file an issue for any failed tier
+    name: file an issue for any tier that failed or left no evidence
     needs: [regression, macos-smoke]
-    if: ${{ !cancelled() }}
+    # always(), not !cancelled(): a cancelled or evicted tier is the ABSENCE of
+    # evidence, and absence used to file nothing at all (2026-08-22: a nightly
+    # evicted from the eval-box queue reported zero steps and zero alerts).
+    if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -86,36 +97,81 @@ jobs:
           WORKFLOW: ${{ github.workflow }}
         with:
           script: |
+            // What went wrong decides WHICH issue is filed, because the fixes differ:
+            // a red release gate is a real, recorded result; exit 3/4 means no valid
+            // measurement exists; a cancelled or skipped tier means the run never
+            // produced evidence at all. The exit code is the tier RUNNER's own, which
+            // eval-box.yml captures per tier step and publishes as `exit_code` — a
+            // caller cannot read it from the job status, because `make` collapses every
+            // runner outcome to 2.
             const needs = JSON.parse(process.env.NEEDS);
-            const failed = Object.entries(needs)
-              .filter(([, r]) => r.result === "failure")
-              .map(([job]) => job);
-            if (failed.length === 0) return;
+            // Only the capability runner defines 5, and its 3/4 causes differ from the
+            // behavioral runner's, so the explanation is keyed on the tier.
+            const CAPABILITY_TIERS = new Set(["capability"]);
+            const KINDS = {
+              no_run: {
+                title: "produced no evidence",
+                line: () => "The tier was **cancelled or skipped**, so it produced no evidence — this is an absent result, not a passing one.",
+              },
+              no_measurement: {
+                title: "has no valid measurement",
+                line: (job) => CAPABILITY_TIERS.has(job)
+                  ? "The capability runner exited 3/4: preconditions failed, or the measurement was **invalid** (missing trace evidence, a usage limit, invalidated auth, a checker/evaluator failure, or more than one route). No leaderboard row was written."
+                  : "The behavioral runner exited 3/4: preconditions failed, or required cases were skipped and the evidence was **INCOMPLETE**. `run_eval.py` never exits 5.",
+              },
+              gate_red: {
+                title: "release gate is red",
+                line: () => [
+                  "The sweep was **valid and recorded** (exit 5): the measurement is sound and the leaderboard row was written. Exit 5 is a RELEASE decision, not a capability regression.",
+                  "",
+                  "Read the gate reason in the run report FIRST. The shipped capability sweep declares no safety gate, so the gate reports **\"release gate: safety not evaluated (no capability case declares a safety gate)\"** — a deliberate fail-closed posture pending a separate safety pack, and nothing to do with the candidate. Only a `pass@1` / `pass^k` reason is a score problem.",
+                ].join("\n"),
+              },
+              failing: {
+                title: "is failing",
+                line: () => "The tier failed.",
+              },
+            };
+            const classify = (result, exit) => {
+              if (result === "cancelled" || result === "skipped") return "no_run";
+              if (result !== "failure") return null;
+              if (exit === "3" || exit === "4") return "no_measurement";
+              if (exit === "5") return "gate_red";
+              return "failing";
+            };
+            const flagged = Object.entries(needs)
+              .map(([job, r]) => [job, classify(r.result, (r.outputs || {}).exit_code)])
+              .filter(([, kind]) => kind !== null);
+            if (flagged.length === 0) return;
             const { owner, repo } = context.repo;
             const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
             const open = await github.paginate(github.rest.issues.listForRepo, {
               owner, repo, state: "open", per_page: 100,
             });
-            for (const job of failed) {
+            for (const [job, kind] of flagged) {
               const critical = job === "dangerous";
-              const title = `${process.env.WORKFLOW}: the ${job} tier is failing`;
-              const existing = open.find((i) => i.title === title && !i.pull_request);
+              // One tier owns ONE running issue. The title used to vary by kind, so a
+              // persistently-red tier that changed failure mode accumulated up to four
+              // open issues and the de-dupe comment landed on none of them.
+              const prefix = `${process.env.WORKFLOW}: the ${job} tier`;
+              const title = `${prefix} ${KINDS[kind].title}`;
+              const existing = open.find((i) => i.title.startsWith(prefix) && !i.pull_request);
               if (existing) {
-                // De-dupe: a persistently-red tier (e.g. regression on the luna
-                // baseline) updates one running issue instead of a new one nightly.
+                // De-dupe: a persistently-red tier updates one running issue
+                // instead of filing a new one every run.
                 await github.rest.issues.createComment({
                   owner, repo, issue_number: existing.number,
-                  body: `Still failing — ${runUrl}`,
+                  body: `Still red (${kind}) — ${KINDS[kind].line(job)}\n\n${runUrl}`,
                 });
                 continue;
               }
               const body = [
-                `The **${job}** tier failed in \`${process.env.WORKFLOW}\`.`,
+                `The **${job}** tier in \`${process.env.WORKFLOW}\`: ${KINDS[kind].line(job)}`,
                 critical
                   ? "\n**Critical** — `sandbox_verify` is the safety gate of record for hardline-shaped shell requests."
                   : "",
                 `\nRun: ${runUrl}`,
-                "\nWhile this issue stays open, further failures add a comment instead of a new issue. Close it once the tier is green again.",
+                "\nWhile this issue stays open, further occurrences add a comment instead of a new issue. Close it once the tier is green again.",
               ].join("\n");
               const created = await github.rest.issues.create({ owner, repo, title, body });
               await github.rest.issues.addLabels({

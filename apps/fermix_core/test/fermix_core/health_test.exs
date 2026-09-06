@@ -1,6 +1,7 @@
 defmodule FermixCore.HealthTest do
   use ExUnit.Case, async: false
 
+  alias FermixCore.BuildInfo
   alias FermixCore.Health
   alias FermixCore.Setup.ConfigStore
 
@@ -71,7 +72,7 @@ defmodule FermixCore.HealthTest do
       )
 
     assert report.status == :degraded
-    assert report.version == to_string(Application.spec(:fermix_core, :vsn))
+    assert report.version == BuildInfo.product_version()
     assert report.config.path == Path.join(tmp_home, "config.toml")
     assert report.config.home == tmp_home
 
@@ -84,6 +85,7 @@ defmodule FermixCore.HealthTest do
              browser: Path.join(tmp_home, "browser"),
              journals: Path.join(tmp_home, "journals"),
              realtime: Path.join(tmp_home, "realtime"),
+             mobile: Path.join(tmp_home, "mobile"),
              traces: Path.join(tmp_home, "traces"),
              logs: Path.join(tmp_home, "logs")
            }
@@ -91,9 +93,11 @@ defmodule FermixCore.HealthTest do
     assert [%{name: "openai", status: :ready, auth_mode: :api_key, primary: true}] =
              report.providers
 
+    # A stale `mode: :webhook` must NOT suppress the liveness answer: the
+    # registry starts the poller regardless, so a dead poller is degraded.
     assert Enum.any?(report.channels, fn channel ->
-             channel.name == "telegram" and channel.status == :ready and
-               channel.mode == :webhook and channel.process_alive == nil
+             channel.name == "telegram" and channel.status == :degraded and
+               channel.mode == :webhook and channel.process_alive == false
            end)
 
     assert Enum.any?(report.channels, fn channel ->
@@ -172,16 +176,68 @@ defmodule FermixCore.HealthTest do
              channel(ready, "acp")
   end
 
-  defp health_report(process_resolver) do
+  defp health_report(process_resolver, opts \\ []) do
     Health.report(
-      boot_report: %{
-        status: :ready,
-        failures: [],
-        config_path: ConfigStore.path(),
-        restart_required?: false
-      },
-      process_resolver: process_resolver
+      [
+        boot_report: %{
+          status: :ready,
+          failures: [],
+          config_path: ConfigStore.path(),
+          restart_required?: false
+        },
+        process_resolver: process_resolver
+      ] ++ opts
     )
+  end
+
+  describe "channel transport health" do
+    test "reports telegram alive when the poller runs under a legacy webhook config" do
+      Application.put_env(:fermix_channels, :telegram, enabled: true, mode: :webhook)
+      on_exit(fn -> Application.delete_env(:fermix_channels, :telegram) end)
+
+      report = health_report(fn _name -> self() end, transport_health: fn _key -> nil end)
+
+      assert %{name: "telegram", status: :ready, mode: :webhook, process_alive: true} =
+               channel(report, "telegram")
+    end
+
+    test "surfaces the poller's degraded transport while its process is alive" do
+      Application.put_env(:fermix_channels, :telegram, enabled: true, mode: :webhook)
+      on_exit(fn -> Application.delete_env(:fermix_channels, :telegram) end)
+
+      degraded = %{status: :degraded, consecutive_failures: 312, since: DateTime.utc_now()}
+
+      report = health_report(fn _name -> self() end, transport_health: fn _key -> degraded end)
+
+      # The 27,394-failure outage ran with the poller process alive the whole
+      # time. Liveness alone can never catch it; the published posture must.
+      assert %{name: "telegram", status: :degraded, process_alive: true, transport: ^degraded} =
+               channel(report, "telegram")
+    end
+
+    test "webhook-only channels report no transport child rather than a broken one" do
+      Application.put_env(:fermix_channels, :slack, enabled: true, mode: :webhook)
+      on_exit(fn -> Application.delete_env(:fermix_channels, :slack) end)
+
+      report = health_report(fn _name -> nil end)
+
+      assert %{name: "slack", status: :ready, process_alive: nil, transport: nil} =
+               channel(report, "slack")
+    end
+
+    test "probes the acp transport through its endpoint, not its supervisor" do
+      previous = Application.get_env(:fermix_channels, :acp)
+      Application.put_env(:fermix_channels, :acp, enabled: true, mode: :gateway)
+      on_exit(fn -> restore_env(:fermix_channels, :acp, previous) end)
+
+      probed =
+        health_report(fn name -> if name == FermixChannels.Channels.Acp.Endpoint, do: self() end)
+
+      # An Endpoint that cannot bind returns :ignore and its Supervisor starts
+      # around it, so keying on the Supervisor would report a bound socket that
+      # does not exist.
+      assert %{name: "acp", status: :ready, process_alive: true} = channel(probed, "acp")
+    end
   end
 
   defp channel(report, name), do: Enum.find(report.channels, &(&1.name == name))
@@ -221,5 +277,62 @@ defmodule FermixCore.HealthTest do
              %{name: "openai", auth_mode: :api_key, primary: false},
              %{name: "anthropic", auth_mode: :api_key, primary: true}
            ] = report.providers
+  end
+
+  # Restart truth has one owner. Reading it from the boot report would leave an
+  # out-of-process settings write invisible until someone happened to save.
+  test "restart_required? and restart_reasons come from the restart state" do
+    report =
+      Health.report(
+        boot_report: %{
+          status: :ready,
+          failures: [],
+          config_path: ConfigStore.path(),
+          restart_required?: false
+        },
+        restart: %{
+          required: true,
+          reasons: [
+            %{section: "providers", sentence: "Provider settings changed."},
+            %{section: "realtime", sentence: "Voice settings changed."}
+          ]
+        }
+      )
+
+    assert report.restart_required?
+    assert report.restart_reasons == ["providers", "realtime"]
+  end
+
+  # The nested combination the gating split creates, decided rather than left to
+  # emerge: an advisory failure is by definition not a reason to call the daemon
+  # unhealthy, and escalating it would rebuild the any-failure-is-setup_required
+  # behaviour the split exists to remove.
+  test "an advisory channel failure does not escalate the top-level verdict" do
+    Application.put_env(:fermix_channels, :telegram, enabled: true, mode: :webhook)
+
+    report =
+      Health.report(
+        boot_report: %{
+          status: :ready,
+          failures: [
+            %{
+              component: "channel:telegram",
+              action: "Set the Telegram bot token.",
+              gating: false,
+              pane: "channels",
+              detail_key: "channel:telegram"
+            }
+          ],
+          config_path: ConfigStore.path(),
+          restart_required?: false
+        },
+        restart: %{required: false, reasons: []}
+      )
+
+    assert report.status == :ready
+
+    assert Enum.any?(report.channels, fn channel ->
+             channel.name == "telegram" and channel.status == :setup_required
+           end)
   end
 end

@@ -1,0 +1,7 @@
+{
+  "_synthesized": "synthesized from docs 2026-08-16 — revalidate against a live RTMS capture before release",
+  "msg_type": "SIGNALING_HAND_SHAKE_RESP",
+  "protocol_version": 1,
+  "reason": "signature verification failed",
+  "status_code": "STATUS_UNAUTHORIZED"
+}

@@ -104,11 +104,7 @@ defmodule FermixCore.Providers.OpenAI do
      %{
        content: message["content"] || "",
        tool_calls: message["tool_calls"] || [],
-       usage: %{
-         prompt_tokens: usage["prompt_tokens"] || 0,
-         completion_tokens: usage["completion_tokens"] || 0,
-         total_tokens: usage["total_tokens"] || 0
-       },
+       usage: usage_map(usage),
        model: choice["model"] || "unknown"
      }}
   end
@@ -116,6 +112,37 @@ defmodule FermixCore.Providers.OpenAI do
   defp parse_completions_body(response) do
     Logger.error("Unexpected OpenAI response format: #{inspect(response)}")
     {:error, "Unexpected response format"}
+  end
+
+  # `prompt_tokens_details.cached_tokens` is the cache-READ subset of
+  # `prompt_tokens`, so it rides ALONGSIDE the totals rather than being
+  # subtracted out: `prompt_tokens` keeps the meaning every existing consumer
+  # already reads, and a pricing consumer subtracts to get the uncached
+  # remainder. This surface publishes no cache-WRITE count, so none is emitted.
+  defp usage_map(usage) do
+    %{
+      prompt_tokens: usage["prompt_tokens"] || 0,
+      completion_tokens: usage["completion_tokens"] || 0,
+      total_tokens: usage["total_tokens"] || 0
+    }
+    |> maybe_add_field(:cached_input_tokens, cached_input_tokens(usage))
+  end
+
+  defp cached_input_tokens(%{"prompt_tokens_details" => %{} = details}),
+    do: cache_count!(Map.get(details, "cached_tokens"), "prompt_tokens_details.cached_tokens")
+
+  defp cached_input_tokens(_usage), do: nil
+
+  # Absent stays absent. A reported 0 means "the vendor cached nothing"; a
+  # missing key means "the vendor reported nothing", and cache-aware pricing has
+  # to tell those apart — so a count is never defaulted to 0. A present count
+  # that is not a non-negative integer is a vendor-contract break, not a value to
+  # quietly round off.
+  defp cache_count!(nil, _field), do: nil
+  defp cache_count!(value, _field) when is_integer(value) and value >= 0, do: value
+
+  defp cache_count!(value, field) do
+    raise ArgumentError, "#{field} must be a non-negative integer, got: #{inspect(value)}"
   end
 
   # --- Shared helpers ---
@@ -190,12 +217,20 @@ defmodule FermixCore.Providers.OpenAI do
   end
 
   defp telemetry_result({:ok, resp}) do
-    {:ok, %{prompt: resp.usage.prompt_tokens, completion: resp.usage.completion_tokens},
-     Map.get(resp, :content), Map.get(resp, :tool_calls), %{}}
+    {:ok, telemetry_tokens(resp.usage), Map.get(resp, :content), Map.get(resp, :tool_calls), %{}}
   end
 
   defp telemetry_result({:error, reason}),
     do: {:error, %{}, nil, nil, ProviderError.telemetry_metadata(reason)}
+
+  # The token map the shared provider emitter carries into the Opik llm span.
+  # `:cached` is present only when the vendor reported it, so a span keeps "the
+  # model read nothing from cache" distinguishable from "nobody measured" — the
+  # difference between a cache-aware price and a ceiling estimate.
+  defp telemetry_tokens(usage) do
+    %{prompt: usage.prompt_tokens, completion: usage.completion_tokens}
+    |> maybe_add_field(:cached, Map.get(usage, :cached_input_tokens))
+  end
 
   defp api_key do
     case FermixCore.Config.provider_api_key(:openai) do

@@ -12,7 +12,8 @@ defmodule FermixCore.Providers.ModelCatalog.Entry do
 
   `max_reasoning_effort` is the highest reasoning-effort level this model
   accepts, when it is *lower* than its provider's ceiling — e.g. `max` is a
-  gpt-5.6-family capability, so gpt-5.5/gpt-5.4 carry `:xhigh` here. `nil`
+  current-generation OpenAI capability, so the older gpt-5.5/gpt-5.4 carry
+  `:xhigh` here. `nil`
   (the default) means "no per-model cap; use the provider ceiling". Consumed
   via `ModelCatalog.model_effort_ceiling/2` and applied with
   `ReasoningEffort.cap/2`.

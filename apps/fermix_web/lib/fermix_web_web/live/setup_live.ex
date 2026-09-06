@@ -10,10 +10,21 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.Auth.TokenExpiry
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Auth.XAILogin
+  alias FermixCore.Capabilities.MCP.RuntimeStatus
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.ComputerHistory
+  alias FermixCore.ComputerHistory.Config, as: ComputerHistoryConfig
+  alias FermixCore.ComputerHistory.InstalledApps
   alias FermixCore.ComputerUse
   alias FermixCore.ComputerUse.SidecarInstaller
   alias FermixCore.Harness.Vendors, as: HarnessVendors
+  alias FermixCore.Management.Protocol, as: ManagementProtocol
+  alias FermixCore.Management.Settings, as: ManagementSettings
+  alias FermixCore.Meetings
+  alias FermixCore.Meetings.BrowserInstall
+  alias FermixCore.Meetings.Config, as: MeetingsConfig
+  alias FermixCore.Meetings.SidecarInstaller, as: MeetbotInstaller
+  alias FermixCore.Meetings.SignIn
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Plugins.Auth, as: PluginAuth
   alias FermixCore.Plugins.Catalog, as: PluginCatalog
@@ -33,9 +44,13 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Setup.AccessToken
   alias FermixCore.Setup.Doctor
+  alias FermixCore.Setup.RestartState
   alias FermixCore.Setup.Wizard
   alias FermixCore.SkillCuration.Delivery, as: SkillCurationDelivery
   alias FermixCore.Tools.Media.Registry, as: MediaRegistry
+  alias FermixCore.Transcription.Local, as: LocalTranscription
+  alias FermixCore.Transcription.Local.ModelStore, as: LocalModelStore
+  alias FermixCore.Transcription.Local.SidecarInstaller, as: LocalSttInstaller
   alias FermixCore.Transcription.Registry, as: TranscriptionRegistry
   alias FermixWebWeb.SetupLive.Components
 
@@ -48,11 +63,21 @@ defmodule FermixWebWeb.SetupLive do
   @computer_use_logo_uri "data:image/svg+xml;base64," <>
                            Base.encode64(File.read!(@computer_use_logo_path))
 
+  @computer_history_logo_path Path.join(__DIR__, "setup_live/computer_history_logo.svg")
+  @external_resource @computer_history_logo_path
+  @computer_history_logo_uri "data:image/svg+xml;base64," <>
+                               Base.encode64(File.read!(@computer_history_logo_path))
+
+  @meetings_logo_path Path.join(__DIR__, "setup_live/meetings_logo.svg")
+  @external_resource @meetings_logo_path
+  @meetings_logo_uri "data:image/svg+xml;base64," <>
+                       Base.encode64(File.read!(@meetings_logo_path))
+
   @tabs [
     %{id: "provider", label: "Provider", component: "provider:*", description: "Model and key"},
     %{id: "realtime", label: "Realtime", component: "realtime:*", description: "Voice companion"},
     %{id: "channels", label: "Channels", component: "channel:*", description: "Message ingress"},
-    %{id: "transcription", label: "Transcription", component: nil, description: "Voice notes"},
+    %{id: "transcription", label: "Voice notes", component: nil, description: "Speech-to-text"},
     %{id: "plugins", label: "Plugins", component: nil, description: "Integrations"},
     %{id: "search", label: "Search", component: nil, description: "Web search"},
     %{id: "media", label: "Media", component: nil, description: "Image generation"},
@@ -69,6 +94,16 @@ defmodule FermixWebWeb.SetupLive do
   ]
 
   @default_plugin_auth_url_timeout_ms 300_000
+  @reload_settings_action "Reload settings from disk"
+  @settings_reloaded_message "Settings reloaded from the settings file."
+  @local_installing_message "Installing on-device speech…"
+  @local_ready_message "On-device speech is installed and ready."
+  @meetbot_installing_message "Downloading the meeting notetaker…"
+  @meetbot_browser_installing_message "Downloading the browser the notetaker uses…"
+  @meetbot_signin_running_message "A browser window is opening; sign the bot's Google account in there, and it closes when done."
+  @meetbot_signin_done_message "The bot is signed in. Google Meet joins can use its account now."
+  @meetbot_signin_cancelled_message "Sign-in was cancelled; the window closed before the account signed in."
+  @meetbot_signin_timeout_message "Sign-in timed out. Open it again and complete the Google sign-in."
   # Providers the per-provider OAuth-client form supports — mirrors
   # FermixCore.Auth.OAuthProviders. Default ports: google 1455, github 1457,
   # notion 1458, x 1459, slack 1460.
@@ -122,11 +157,21 @@ defmodule FermixWebWeb.SetupLive do
   # Flipping skill curation adds/removes the Scheduler child (child-absent
   # gating), so it only takes effect on a daemon restart.
   @skill_curation_restart_keys [:skill_curation_enabled]
+  # `[fermix_core.meetings]` is written as a section rather than through wizard
+  # answers, so these never reach `runtime_restart_answers?/1`; they are the keys
+  # `Meetings.ready?/0` reads, and tool registration reads it only at boot.
+  @meetings_restart_keys [
+    :enabled,
+    :zoom_account_id,
+    :zoom_client_id,
+    :zoom_client_secret,
+    :zoom_ws_subscription_id
+  ]
 
   @impl true
   def mount(params, session, socket) do
     if AccessToken.session_authorized?(setup_authorization(session)) do
-      mount_authorized(socket, requested_tab(params))
+      mount_authorized(socket, requested_tab(params), params["embed"] == "1")
     else
       {:ok, redirect(socket, to: ~p"/")}
     end
@@ -136,12 +181,17 @@ defmodule FermixWebWeb.SetupLive do
   @impl true
   def handle_params(_params, _uri, socket), do: {:noreply, socket}
 
-  defp mount_authorized(socket, requested_tab) do
+  # `embed?` is the macOS app's in-app presentation (`?embed=1` on the minted
+  # session url). It is decided once at mount and held in the socket for the
+  # whole session: patch navigation never re-reads it, and the restart patch
+  # re-states it in the url so the post-restart reload stays native.
+  defp mount_authorized(socket, requested_tab, embed?) do
     report = Wizard.report()
 
     socket =
       socket
       |> assign(:page_title, "Fermix setup")
+      |> assign(:embed?, embed?)
       |> assign(:active_tab, requested_tab || next_action_tab(report))
       |> assign(:saved_flash, nil)
       |> assign(:doctor_result, nil)
@@ -156,8 +206,13 @@ defmodule FermixWebWeb.SetupLive do
       |> assign(:plugin_auth_tasks, %{})
       |> assign(:plugin_auth_url, nil)
       |> assign(:plugin_install_tasks, %{})
+      |> assign(:local_install, nil)
+      |> assign(:meetbot_install, nil)
+      |> assign(:meetbot_signin, nil)
       |> assign(:oauth_modal, nil)
       |> assign(:resource_picker, nil)
+      |> assign(:computer_history_picker, nil)
+      |> assign(:meetings_config_open?, false)
       |> assign_report(report)
 
     {:ok, socket}
@@ -372,6 +427,7 @@ defmodule FermixWebWeb.SetupLive do
   end
 
   def handle_event("transcription_changed", %{"transcription_form" => params}, socket) do
+    previous = socket.assigns.transcription_form.backend
     backend = normalize_transcription_backend(Map.get(params, "backend"))
 
     form =
@@ -381,7 +437,10 @@ defmodule FermixWebWeb.SetupLive do
         Map.get(params, "model")
       )
 
-    {:noreply, assign(socket, :transcription_form, form)}
+    {:noreply,
+     socket
+     |> assign(:transcription_form, form)
+     |> maybe_install_local_stt(previous, backend)}
   end
 
   def handle_event("save_transcription", %{"transcription_form" => params} = root, socket) do
@@ -399,6 +458,27 @@ defmodule FermixWebWeb.SetupLive do
 
     # Backends read [fermix_core.transcription] per call, so no daemon restart.
     {:noreply, save_answers(socket, answers, "Transcription saved.", Map.get(root, "__nav"))}
+  end
+
+  # Text and toggle values are always written (a cleared `announce_message` means
+  # "use the built-in consent line", so blank is a real value here); the Zoom
+  # secret is written only when the operator typed one, so an untouched password
+  # field keeps the stored credential.
+  def handle_event("save_meetings", %{"meetings_form" => params} = root, socket) do
+    changes =
+      [
+        enabled: checked?(params["enabled"]),
+        bot_name: safe_string(params["bot_name"]),
+        announce: checked?(params["announce"]),
+        announce_message: safe_string(params["announce_message"]),
+        transcription_backend: normalize_meetings_backend(params["transcription_backend"]),
+        zoom_account_id: safe_string(params["zoom_account_id"]),
+        zoom_client_id: safe_string(params["zoom_client_id"]),
+        zoom_ws_subscription_id: safe_string(params["zoom_ws_subscription_id"])
+      ]
+      |> maybe_put_string(:zoom_client_secret, params["zoom_client_secret"])
+
+    {:noreply, save_meetings(socket, changes, Map.get(root, "__nav"))}
   end
 
   def handle_event(
@@ -429,6 +509,8 @@ defmodule FermixWebWeb.SetupLive do
   # Computer use is special-cased: it registers no tools, so it never enters the
   # plugin registry — enabling it means "ensure the sidecar binary, flip the
   # feature flag", not the generic install→register→enable path.
+  # Computer-history is enabled through its app-picker modal (open_computer_history_apps),
+  # never this generic handler — enabling it with no allowlist would be refused.
   def handle_event("plugin_enable", %{"name" => name}, socket) do
     if computer_use_plugin?(name) do
       {:noreply, enable_computer_use(socket)}
@@ -438,10 +520,10 @@ defmodule FermixWebWeb.SetupLive do
   end
 
   def handle_event("plugin_disable", %{"name" => name}, socket) do
-    if computer_use_plugin?(name) do
-      {:noreply, set_computer_use_feature(socket, false)}
-    else
-      {:noreply, disable_registry_plugin(socket, name)}
+    cond do
+      computer_use_plugin?(name) -> {:noreply, set_computer_use_feature(socket, false)}
+      computer_history_feature?(name) -> {:noreply, set_computer_history_feature(socket, false)}
+      true -> {:noreply, disable_registry_plugin(socket, name)}
     end
   end
 
@@ -450,6 +532,86 @@ defmodule FermixWebWeb.SetupLive do
   # of on the model's first screenshot. Re-probes after so the pane reflects reality.
   def handle_event("computer_use_grant", _params, socket) do
     {:noreply, request_computer_use_permissions(socket)}
+  end
+
+  # Computer-history's Accessibility grant (MILESTONE_32 §22.3) — the shared compux
+  # driver, so the same TCC identity as computer-use.
+  def handle_event("computer_history_grant", _params, socket) do
+    {:noreply, request_computer_history_permissions(socket)}
+  end
+
+  # The app-allowlist picker (§22.7): Enable / Edit apps opens a modal listing the
+  # host's installed apps; the operator checks the ones to record. Filter and toggles
+  # are server-driven so the checked set survives searching. Save persists the selected
+  # bundle ids and enables the feature in one act — an empty selection cannot be saved
+  # (the Save button is disabled), since consent to capture nothing is not consent.
+  def handle_event("open_computer_history_apps", _params, socket) do
+    {:noreply, open_computer_history_picker(socket)}
+  end
+
+  def handle_event("computer_history_apps_filter", %{"q" => query}, socket) do
+    {:noreply, update_computer_history_picker(socket, &%{&1 | query: query})}
+  end
+
+  def handle_event("toggle_computer_history_app", %{"bundle" => bundle}, socket) do
+    {:noreply, update_computer_history_picker(socket, &toggle_picker_app(&1, bundle))}
+  end
+
+  def handle_event("close_computer_history_picker", _params, socket) do
+    {:noreply, assign(socket, :computer_history_picker, nil)}
+  end
+
+  def handle_event("save_computer_history_apps", _params, socket) do
+    {:noreply, save_computer_history_picker(socket)}
+  end
+
+  # The Meeting Notetaker config panel opens from the card's Configure button and
+  # holds everything the removed Meetings tab did (the same mechanism the
+  # computer-history app picker uses).
+  def handle_event("open_meetings_config", _params, socket) do
+    # A notetaker that is enabled but whose pinned sidecar is not on disk — a
+    # fresh enable, or a version bump that stranded an older install — finishes
+    # installing here. Otherwise sign-in stays disabled with no way forward once
+    # the install-on-enable transition has already passed.
+    socket = assign(socket, :meetings_config_open?, true)
+    {:noreply, maybe_install_meetbot(socket, socket.assigns.meetings_form.enabled)}
+  end
+
+  def handle_event("close_meetings_config", _params, socket) do
+    {:noreply, assign(socket, :meetings_config_open?, false)}
+  end
+
+  # Meeting notetaker (M21 Phase 3) toggle. Both paths route through `save_meetings/3`,
+  # which installs the meetbot sidecar on enable and asks for a restart (the tools are
+  # boot-seeded). Only the `enabled` flag changes here; the rest of the config is
+  # edited in the config panel.
+  def handle_event("enable_meetings", _params, socket) do
+    {:noreply, save_meetings(socket, [enabled: true], nil)}
+  end
+
+  # Opens the meetbot's headed browser so the operator signs the bot's Google
+  # account in. A no-op while one is already running or if the sidecar isn't
+  # installed yet (the button is disabled in that case — this is belt).
+  def handle_event("meetbot_signin", _params, socket) do
+    cond do
+      installing?(socket.assigns.meetbot_signin) ->
+        {:noreply, socket}
+
+      not MeetbotInstaller.installed?() ->
+        {:noreply, socket}
+
+      true ->
+        runner = meetbot_signin_runner()
+
+        {:noreply,
+         socket
+         |> assign(:meetbot_signin, installing(@meetbot_signin_running_message))
+         |> start_async(:meetbot_signin, runner)}
+    end
+  end
+
+  def handle_event("disable_meetings", _params, socket) do
+    {:noreply, save_meetings(socket, [enabled: false], nil)}
   end
 
   # The §4.4 Connect-time collection: the needs_config card form posts the
@@ -464,7 +626,7 @@ defmodule FermixWebWeb.SetupLive do
         {:noreply, refresh_report(socket, "Plugin configuration saved.")}
 
       {:error, reason} ->
-        {:noreply, flash_error(socket, "Save failed: #{format_config_error(reason)}")}
+        {:noreply, save_refused(socket, reason)}
     end
   end
 
@@ -603,6 +765,17 @@ defmodule FermixWebWeb.SetupLive do
      )}
   end
 
+  # The one action offered while the settings file has changed outside this
+  # VM. It re-reads the file, applies it, and re-records the baseline, which
+  # is what clears the refusal; an unreadable file is never offered it,
+  # because the reload runs the parse that just failed.
+  def handle_event("reload_settings", _params, socket) do
+    case ManagementSettings.reload() do
+      {:ok, _report} -> {:noreply, refresh_report(socket, @settings_reloaded_message)}
+      {:error, reason} -> {:noreply, reload_refused(socket, reason)}
+    end
+  end
+
   def handle_event("run_doctor", _params, socket) do
     if socket.assigns.doctor_probe_running? do
       {:noreply, socket}
@@ -620,15 +793,23 @@ defmodule FermixWebWeb.SetupLive do
       {:noreply,
        socket
        |> assign(:restarting, true)
-       |> push_patch(to: ~p"/setup?#{[tab: socket.assigns.active_tab]}")}
+       |> push_patch(to: ~p"/setup?#{restart_patch_params(socket)}")}
     else
       {:noreply,
        flash_error(
          socket,
-         "Nothing to restart from here — no OS-supervised Fermix service is running this process. " <>
+         "Nothing to restart from here; no OS-supervised Fermix service is running this process. " <>
            "In dev, stop and re-run `mix fermix.dev`; an installed service restarts itself from this button."
        )}
     end
+  end
+
+  # The post-restart reload re-mounts from this url, so an embedded session
+  # must carry `embed=1` forward or it would reconnect in browser presentation.
+  defp restart_patch_params(socket) do
+    params = [tab: socket.assigns.active_tab]
+
+    if socket.assigns.embed?, do: params ++ [embed: 1], else: params
   end
 
   @impl true
@@ -673,6 +854,10 @@ defmodule FermixWebWeb.SetupLive do
 
   def handle_info({:clear_plugin_auth_url, name, url}, socket) do
     {:noreply, maybe_clear_plugin_auth_url(socket, name, url)}
+  end
+
+  def handle_info({:local_install_progress, event}, socket) do
+    {:noreply, assign(socket, :local_install, installing(local_progress_message(event)))}
   end
 
   def handle_info({ref, result}, socket) when is_reference(ref) do
@@ -726,11 +911,85 @@ defmodule FermixWebWeb.SetupLive do
     {:noreply, finish_workspace_selection(socket, name, {:error, reason})}
   end
 
+  # Re-read only the readiness line: rebuilding the whole report here would
+  # throw away the backend the operator just picked but has not saved yet.
+  def handle_async(:local_install, {:ok, :ok}, socket) do
+    form = %{socket.assigns.transcription_form | local_state: LocalTranscription.configured?([])}
+
+    {:noreply,
+     socket
+     |> assign(:local_install, done(@local_ready_message))
+     |> assign(:transcription_form, form)}
+  end
+
+  def handle_async(:local_install, {:ok, {:error, reason}}, socket) do
+    {:noreply, assign(socket, :local_install, failed(local_install_error(reason)))}
+  end
+
+  def handle_async(:local_install, {:exit, reason}, socket) do
+    {:noreply, assign(socket, :local_install, failed(local_install_error(reason)))}
+  end
+
+  # The binary is on disk; the notetaker also needs its matching browser, so the
+  # same flow chains straight into the browser install (one banner, one path).
+  def handle_async(:meetbot_install, {:ok, {:ok, _path}}, socket) do
+    form = %{socket.assigns.meetings_form | sidecar_installed?: MeetbotInstaller.installed?()}
+
+    {:noreply, socket |> assign(:meetings_form, form) |> continue_meetbot_setup()}
+  end
+
+  def handle_async(:meetbot_install, {:ok, {:error, reason}}, socket) do
+    {:noreply, assign(socket, :meetbot_install, failed(meetbot_install_error(reason)))}
+  end
+
+  def handle_async(:meetbot_install, {:exit, reason}, socket) do
+    {:noreply, assign(socket, :meetbot_install, failed(meetbot_install_error(reason)))}
+  end
+
+  def handle_async(:meetbot_browser, {:ok, {:ok, _outcome}}, socket) do
+    form = %{
+      socket.assigns.meetings_form
+      | browser_installed?: MeetbotInstaller.browser_installed?()
+    }
+
+    # Done: the transient banner clears; the Meet readiness pill is the truth now.
+    {:noreply, socket |> assign(:meetbot_install, nil) |> assign(:meetings_form, form)}
+  end
+
+  def handle_async(:meetbot_browser, {:ok, {:error, reason}}, socket) do
+    {:noreply, assign(socket, :meetbot_install, failed(meetbot_browser_error(reason)))}
+  end
+
+  def handle_async(:meetbot_browser, {:exit, reason}, socket) do
+    {:noreply, assign(socket, :meetbot_install, failed(meetbot_browser_error(reason)))}
+  end
+
+  def handle_async(:meetbot_signin, {:ok, {:ok, :signed_in}}, socket) do
+    # The flow returning :signed_in IS the truth (it wrote the marker itself);
+    # reflect it without re-reading, so the readiness pill flips immediately.
+    form = %{socket.assigns.meetings_form | signed_in?: true}
+
+    {:noreply,
+     socket
+     |> assign(:meetbot_signin, done(@meetbot_signin_done_message))
+     |> assign(:meetings_form, form)}
+  end
+
+  def handle_async(:meetbot_signin, {:ok, {:error, reason}}, socket) do
+    {:noreply, assign(socket, :meetbot_signin, failed(meetbot_signin_error(reason)))}
+  end
+
+  def handle_async(:meetbot_signin, {:exit, reason}, socket) do
+    {:noreply, assign(socket, :meetbot_signin, failed(meetbot_signin_error(reason)))}
+  end
+
   @impl true
   def render(assigns) do
     ~H"""
+    <.config_banner banner={@config_banner} />
     <Components.page
       active_tab={@active_tab}
+      embed?={@embed?}
       channels_form={@channels_form}
       doctor_result={@doctor_result}
       memory_form={@memory_form}
@@ -753,6 +1012,7 @@ defmodule FermixWebWeb.SetupLive do
       plugin_summary={@plugin_summary}
       oauth_modal={@oauth_modal}
       resource_picker={@resource_picker}
+      computer_history_picker={@computer_history_picker}
       installing_plugins={plugin_install_names(@plugin_install_tasks)}
       realtime_form={@realtime_form}
       report={@report}
@@ -762,11 +1022,44 @@ defmodule FermixWebWeb.SetupLive do
       search_form={@search_form}
       image_form={@image_form}
       transcription_form={@transcription_form}
+      local_install={@local_install}
+      meetings_form={@meetings_form}
+      meetbot_install={@meetbot_install}
+      meetbot_signin={@meetbot_signin}
+      meetings_config_open?={@meetings_config_open?}
       saved_flash={@saved_flash}
       skill_summary={@skill_summary}
       tabs={@tabs}
       tool_summary={@tool_summary}
     />
+    """
+  end
+
+  # One banner, one action (M34 native setup §15.1). The state is the daemon's
+  # and is re-read here rather than remembered: this is the render every save
+  # ends at, so a refusal raised by another door shows up on the next one.
+  attr :banner, :map, default: nil
+
+  defp config_banner(assigns) do
+    ~H"""
+    <div
+      :if={@banner}
+      class="border-b border-warning/40 bg-warning/10 px-4 py-3 text-sm text-warning"
+      role="alert"
+    >
+      <div class="mx-auto flex max-w-6xl items-center gap-2">
+        <.icon name="hero-exclamation-triangle" class="size-4 shrink-0" />
+        <span>{@banner.message}</span>
+        <button
+          :if={@banner.action}
+          type="button"
+          class="btn btn-warning btn-xs ml-auto"
+          phx-click="reload_settings"
+        >
+          {@banner.action}
+        </button>
+      </div>
+    </div>
     """
   end
 
@@ -777,6 +1070,7 @@ defmodule FermixWebWeb.SetupLive do
     socket
     |> assign(:report, report)
     |> assign(:tabs, @tabs)
+    |> assign_config_banner()
     |> assign(:provider_form, provider_form)
     |> assign_model_sources(provider_form)
     |> assign(:provider_statuses, build_provider_statuses(snapshot))
@@ -789,6 +1083,7 @@ defmodule FermixWebWeb.SetupLive do
     |> assign(:search_form, build_search_form(snapshot))
     |> assign(:image_form, build_image_form(snapshot))
     |> assign(:transcription_form, build_transcription_form(snapshot))
+    |> assign(:meetings_form, build_meetings_form(snapshot))
     |> assign(:sandbox_form, build_sandbox_form(snapshot))
     |> assign(:memory_form, build_memory_form(snapshot))
     |> assign(:personalization_form, build_personalization_form(snapshot))
@@ -797,6 +1092,19 @@ defmodule FermixWebWeb.SetupLive do
     |> assign(:skill_summary, skill_summary())
     |> assign(:plugin_summary, plugin_summary(snapshot))
   end
+
+  defp assign_config_banner(socket),
+    do: assign(socket, :config_banner, config_banner_state(RestartState.config_state()))
+
+  defp config_banner_state(:clear), do: nil
+
+  defp config_banner_state({:external_change, sections}),
+    do: %{message: external_change_message(sections), action: @reload_settings_action}
+
+  # An unreadable file is the other state and never offers the reload: the
+  # reload re-runs the read that failed, so the button would be a loop.
+  defp config_banner_state({:config_unreadable, sentence}),
+    do: %{message: sentence, action: nil}
 
   defp save_answers(socket, answers, message, nav, opts \\ []) do
     socket.assigns.report.wizard
@@ -815,13 +1123,13 @@ defmodule FermixWebWeb.SetupLive do
   end
 
   defp save_result({:error, reason}, socket, _message, _nav, _opts) do
-    flash_error(socket, "Save failed: #{format_config_error(reason)}")
+    save_refused(socket, reason)
   end
 
   defp save_config_result({:ok, _snapshot}, socket, message), do: refresh_report(socket, message)
 
   defp save_config_result({:error, reason}, socket, _message) do
-    flash_error(socket, "Save failed: #{format_config_error(reason)}")
+    save_refused(socket, reason)
   end
 
   # save_oauth_client's own {:ok}/{:error} handling, kept out of the shared
@@ -852,7 +1160,39 @@ defmodule FermixWebWeb.SetupLive do
 
   defp format_config_error({:blank_config_value, key}), do: "#{key} requires a value."
 
+  # The two refusals the shared write tails raise. Both sentences are the
+  # daemon's: the external-change one is read from the error catalog both
+  # doors render from, and an unreadable file carries the parser's own.
+  defp format_config_error({:external_change, sections}),
+    do: "#{external_change_message(sections)} #{@reload_settings_action}, then save again."
+
+  defp format_config_error({:config_unreadable, sentence}), do: sentence
+
+  # A save that could not store a credential (design §7.4). The sentence is the
+  # daemon's; before this the value was dropped with a log line and the save
+  # reported success, so the operator saw a stored key and the runtime had none.
+  defp format_config_error({:secret_store_failed, _key, sentence}) when is_binary(sentence),
+    do: sentence
+
   defp format_config_error(reason), do: Redaction.format(reason)
+
+  defp external_change_message(sections) do
+    sentence = Map.fetch!(ManagementProtocol.error_messages(), :external_change)
+
+    "#{sentence} Changed sections: #{Enum.join(sections, ", ")}."
+  end
+
+  defp save_refused(socket, reason) do
+    socket
+    |> assign_config_banner()
+    |> flash_error("Save failed: #{format_config_error(reason)}")
+  end
+
+  defp reload_refused(socket, reason) do
+    socket
+    |> assign_config_banner()
+    |> flash_error("Reload failed: #{format_config_error(reason)}")
+  end
 
   # One commit per key — the form carries only the missing required entries,
   # typically one (e.g. a vault path). Any failure halts and surfaces loud.
@@ -877,10 +1217,10 @@ defmodule FermixWebWeb.SetupLive do
   defp oauth_default_port("x"), do: 1459
   defp oauth_default_port("slack"), do: 1460
 
-  defp refresh_report(socket, message) do
+  defp refresh_report(socket, message, opts \\ []) do
     Wizard.report()
     |> then(&assign_report(socket, &1))
-    |> flash_info(message)
+    |> flash_info(message, opts)
   end
 
   defp flash_info(socket, message, opts \\ []) do
@@ -943,7 +1283,7 @@ defmodule FermixWebWeb.SetupLive do
   defp computer_use_permissions_result do
     case Doctor.computer_use_permissions() do
       {:ok, %{state: :disabled}} ->
-        %{status: :ok, grant?: false, detail: "Off — computer use is disabled."}
+        %{status: :ok, grant?: false, detail: "Off. Computer use is disabled."}
 
       {:ok, %{state: :not_installed}} ->
         %{status: :warn, grant?: false, detail: "Enabled, but the helper isn't installed yet."}
@@ -971,7 +1311,7 @@ defmodule FermixWebWeb.SetupLive do
       status: :warn,
       grant?: macos_probe?(probe),
       detail:
-        "Input control isn't granted — clicks and keystrokes are silently dropped. " <>
+        "Input control isn't granted; clicks and keystrokes are silently dropped. " <>
           "On macOS, grant Accessibility in System Settings → Privacy & Security."
     }
   end
@@ -1337,6 +1677,7 @@ defmodule FermixWebWeb.SetupLive do
       backend: backend,
       model_options: options,
       model: transcription_model_for_options(Keyword.get(transcription, :model), options),
+      local_state: LocalTranscription.configured?([]),
       openai_api_key_set: secret_set?(transcription, :openai_api_key),
       xai_api_key_set: secret_set?(transcription, :xai_api_key),
       deepgram_api_key_set: secret_set?(transcription, :deepgram_api_key)
@@ -1346,8 +1687,8 @@ defmodule FermixWebWeb.SetupLive do
   # A backend switch resets the model to the new backend's default (the prior
   # backend's model is invalid on a single shared `model` key); a same-backend
   # change keeps the selected model, snapped to a valid option. A modelless
-  # backend (xai) carries an empty option list and a `nil` model — the card hides
-  # the model field.
+  # backend (xai, local) carries an empty option list and a `nil` model — the
+  # card hides the model field.
   defp update_transcription_selection(form, backend, _model) when backend != form.backend do
     options = transcription_models_for(backend)
     %{form | backend: backend, model_options: options, model: default_model_for_options(options)}
@@ -1380,6 +1721,232 @@ defmodule FermixWebWeb.SetupLive do
       model -> if model in options, do: model, else: default
     end
   end
+
+  # `transcription_backend` is a NAME string, blank meaning "whatever the
+  # Transcription tab is set to" — so the picker offers a blank entry alongside
+  # the shipped backend names rather than repeating the global default here.
+  defp build_meetings_form(snapshot) do
+    meetings = get_fermix_core(snapshot, :meetings)
+
+    %{
+      enabled: Keyword.get(meetings, :enabled, false) == true,
+      bot_name: safe_string(Keyword.get(meetings, :bot_name, "Fermix Notetaker")),
+      announce: Keyword.get(meetings, :announce, true) == true,
+      announce_message: safe_string(Keyword.get(meetings, :announce_message)),
+      transcription_backend:
+        normalize_meetings_backend(Keyword.get(meetings, :transcription_backend)),
+      backend_options: meetings_backend_options(),
+      zoom_account_id: safe_string(Keyword.get(meetings, :zoom_account_id)),
+      zoom_client_id: safe_string(Keyword.get(meetings, :zoom_client_id)),
+      zoom_ws_subscription_id: safe_string(Keyword.get(meetings, :zoom_ws_subscription_id)),
+      zoom_client_secret_set: secret_set?(meetings, :zoom_client_secret),
+      sidecar_installed?: MeetbotInstaller.installed?(),
+      browser_installed?: MeetbotInstaller.browser_installed?(),
+      signed_in?: MeetbotInstaller.signed_in?()
+    }
+  end
+
+  defp meetings_backend_options do
+    ["" | Enum.map(TranscriptionRegistry.backends(), fn {name, _module} -> to_string(name) end)]
+  end
+
+  # The picker only ever offers the shipped names plus the blank global-default
+  # entry, so anything else off the wire is normalized back to the blank.
+  defp normalize_meetings_backend(value) do
+    name = safe_string(value)
+    if name in meetings_backend_options(), do: name, else: ""
+  end
+
+  # `[fermix_core.meetings]` is written as a section rather than through wizard
+  # answers, but through the same shared write tail every other setup writer
+  # uses: that tail is where the external-change refusal executes and where the
+  # persisted baseline is re-recorded, so a save-plus-apply of its own here
+  # would revert an outside edit silently and then leave every later write in
+  # both doors refusing against a file this daemon had just written.
+  defp save_meetings(socket, changes, nav) do
+    restart? = meetings_restart_required?(MeetingsConfig.load(), changes)
+
+    case MeetingsConfig.save(changes) do
+      {:ok, _report} ->
+        socket
+        |> assign(:restart_pending?, socket.assigns.restart_pending? or restart?)
+        |> refresh_report(meetings_saved_message(restart?), restart_required?: restart?)
+        |> maybe_install_meetbot(Keyword.fetch!(changes, :enabled))
+        |> maybe_advance(nav)
+
+      {:error, reason} ->
+        save_refused(socket, reason)
+    end
+  end
+
+  defp meetings_saved_message(true), do: "Meetings saved. Restart to apply."
+  defp meetings_saved_message(false), do: "Meetings saved."
+
+  # The meetings tools are registered once, at boot, from `Meetings.ready?/0`
+  # (enabled plus either the notetaker binary or the full Zoom credential set),
+  # so a change to any of those keys only reaches the model after a restart —
+  # the same boot-seeded gate the computer-use save asks a restart for. The
+  # remaining keys (bot name, announcement, backend) are read per meeting. The
+  # comparison runs against the loaded config so an unset key reads as its
+  # default rather than as a change.
+  defp meetings_restart_required?(%MeetingsConfig{} = previous, changes) do
+    Enum.any?(@meetings_restart_keys, fn key ->
+      Keyword.has_key?(changes, key) and Keyword.get(changes, key) != Map.fetch!(previous, key)
+    end)
+  end
+
+  # Enabling meetings is what fetches the Meet notetaker binary — the Zoom RTMS
+  # lane needs no sidecar, so a refusal here never blocks the save.
+  defp maybe_install_meetbot(socket, false), do: socket
+
+  defp maybe_install_meetbot(socket, true) do
+    cond do
+      installing?(socket.assigns.meetbot_install) -> socket
+      not MeetbotInstaller.installed?() -> start_meetbot_install(socket)
+      true -> continue_meetbot_setup(socket)
+    end
+  end
+
+  defp start_meetbot_install(socket) do
+    install = meetbot_installer()
+
+    socket
+    |> assign(:meetbot_install, installing(@meetbot_installing_message))
+    |> start_async(:meetbot_install, install)
+  end
+
+  # After the binary is present, ensure the notetaker's matching browser is too —
+  # the sign-in and the join both need it. Idempotent: a present browser is a
+  # no-op that clears the banner; a missing one downloads it (no npx).
+  defp continue_meetbot_setup(socket) do
+    if MeetbotInstaller.browser_installed?() do
+      assign(socket, :meetbot_install, nil)
+    else
+      socket
+      |> assign(:meetbot_install, installing(@meetbot_browser_installing_message))
+      |> start_async(:meetbot_browser, meetbot_browser_installer())
+    end
+  end
+
+  # Injectable so a LiveView test never reaches the network (mirrors the
+  # `:plugin_auth_runner` seam). Defaults to the real pinned download.
+  defp meetbot_installer do
+    Application.get_env(:fermix_web, :meetbot_installer, &MeetbotInstaller.install/0)
+  end
+
+  # Injectable so a LiveView test never downloads a browser (mirrors the
+  # `:meetbot_installer` seam). Defaults to the real sidecar install-browser.
+  defp meetbot_browser_installer do
+    Application.get_env(:fermix_web, :meetbot_browser_installer, &BrowserInstall.run/0)
+  end
+
+  defp meetbot_install_error(:no_pinned_release),
+    do: MeetbotInstaller.error_message(:no_pinned_release)
+
+  defp meetbot_install_error({:unsupported_target, target}),
+    do: "No meeting notetaker build for this machine (#{target})."
+
+  # The dominant real-world refusal: a supported OS whose target has no pinned
+  # artifact yet (Intel Mac, Linux). Same operator copy as unsupported_target —
+  # never the raw tuple.
+  defp meetbot_install_error({:no_pinned_artifact, _tag, target}),
+    do: "No meeting notetaker build for this machine (#{target})."
+
+  defp meetbot_install_error(reason),
+    do: "Meeting notetaker install failed: #{Redaction.format(reason)}"
+
+  defp meetbot_browser_error(:not_installed),
+    do: "Install the meeting notetaker first; its browser installs right after."
+
+  defp meetbot_browser_error(reason),
+    do: "The notetaker's browser install failed: #{Redaction.format(reason)}"
+
+  # Injectable so a LiveView test never launches a real browser (mirrors the
+  # `:meetbot_installer` seam). Defaults to the real headed sign-in flow.
+  defp meetbot_signin_runner do
+    Application.get_env(:fermix_web, :meetbot_signin_runner, &SignIn.run/0)
+  end
+
+  defp meetbot_signin_error(:cancelled), do: @meetbot_signin_cancelled_message
+  defp meetbot_signin_error(:timeout), do: @meetbot_signin_timeout_message
+
+  defp meetbot_signin_error(:not_installed),
+    do: "Enable the meeting notetaker first; it installs the sidecar the sign-in needs."
+
+  # A bare sidecar failure most often means the browser isn't installed yet
+  # (the sidecar can't launch it), so name that rather than a bare exit code.
+  defp meetbot_signin_error(reason) do
+    if MeetbotInstaller.browser_installed?() do
+      "Sign-in failed: #{Redaction.format(reason)}"
+    else
+      "Sign-in couldn't start; the notetaker's browser isn't installed yet. " <>
+        "Re-open the notetaker config to finish setting it up."
+    end
+  end
+
+  # Choosing the on-device backend is the install trigger (§2b: nothing downloads
+  # at boot, and hand-editing config.toml installs nothing). Already-installed
+  # selects say so instead of re-running the installer.
+  defp maybe_install_local_stt(socket, previous, :local) when previous != :local do
+    cond do
+      LocalTranscription.configured?([]) == :ok ->
+        assign(socket, :local_install, done(@local_ready_message))
+
+      installing?(socket.assigns.local_install) ->
+        socket
+
+      true ->
+        start_local_install(socket)
+    end
+  end
+
+  defp maybe_install_local_stt(socket, _previous, _backend), do: socket
+
+  defp start_local_install(socket) do
+    parent = self()
+    install = local_installer()
+
+    socket
+    |> assign(:local_install, installing(@local_installing_message))
+    |> start_async(:local_install, fn ->
+      install.(progress: fn event -> send(parent, {:local_install_progress, event}) end)
+    end)
+  end
+
+  # Injectable so a LiveView test never reaches the network, and so both
+  # fail-loud refusals (`:no_release_pinned`, `:model_pins_missing`) can be
+  # rendered without a half-installed host.
+  defp local_installer do
+    Application.get_env(:fermix_web, :local_installer, &LocalTranscription.ensure_installed/1)
+  end
+
+  defp local_progress_message({:sidecar, :downloading}), do: "Downloading the speech engine…"
+
+  defp local_progress_message({:sidecar, :done}),
+    do: "Speech engine installed. Fetching the model…"
+
+  defp local_progress_message({:model, :downloading}), do: "Downloading the speech model…"
+  defp local_progress_message({:model, :verifying}), do: "Verifying the speech model…"
+  defp local_progress_message({:model, :done}), do: @local_ready_message
+
+  defp local_install_error(:no_release_pinned),
+    do: LocalSttInstaller.error_message(:no_release_pinned)
+
+  defp local_install_error(:model_pins_missing),
+    do: LocalModelStore.error_message(:model_pins_missing)
+
+  defp local_install_error({:unsupported_target, target}),
+    do: "No on-device speech build for this machine (#{target})."
+
+  defp local_install_error(reason),
+    do: "On-device speech install failed: #{Redaction.format(reason)}"
+
+  defp installing(message), do: %{kind: :info, running?: true, message: message}
+  defp done(message), do: %{kind: :info, running?: false, message: message}
+  defp failed(message), do: %{kind: :error, running?: false, message: message}
+
+  defp installing?(%{running?: true}), do: true
+  defp installing?(_state), do: false
 
   defp build_memory_form(snapshot) do
     compaction = snapshot |> get_fermix_core(:compaction) |> CompactionConfig.normalize()
@@ -1489,14 +2056,26 @@ defmodule FermixWebWeb.SetupLive do
   defp plugin_summary(snapshot) do
     case PluginCatalog.overview(plugins_dist_opts()) do
       {:ok, overview} ->
-        plugins = installed_cards(overview, snapshot)
-        catalog = Enum.map(overview.available, &catalog_card(&1, snapshot))
+        # Core-feature cards (computer-use, computer-history) render in their own
+        # "Native driver features" section (§22.6), NOT mixed with the integration
+        # catalog — so drop computer-use from BOTH the installed and catalog lists
+        # (it moves between them by sidecar-install state) and surface both there.
+        plugins =
+          overview
+          |> installed_cards(snapshot)
+          |> Enum.reject(&computer_use_plugin?(&1.name))
+
+        catalog =
+          overview.available
+          |> Enum.reject(&computer_use_plugin?(&1.name))
+          |> Enum.map(&catalog_card(&1, snapshot))
 
         %{
           available: true,
           oauth_clients: oauth_client_forms(snapshot, plugins ++ catalog),
           plugins: plugins,
           catalog: catalog,
+          core_features: core_feature_cards(snapshot),
           index_error: format_index_error(overview.index_error)
         }
 
@@ -1507,8 +2086,102 @@ defmodule FermixWebWeb.SetupLive do
           oauth_clients: %{},
           plugins: [],
           catalog: [],
+          core_features: core_feature_cards(snapshot),
           index_error: nil
         }
+    end
+  end
+
+  # The native-driver features: capabilities that run on a bundled sidecar rather
+  # than a plugin, presented together so their toggles sit in one place instead of
+  # scattered across tabs. Computer-history is macOS-only (`ComputerHistory.macos?/0`,
+  # where its AXObserver capture runs); the speech and meeting notetakers install
+  # their sidecar on enable and refuse loud until a release is pinned.
+  defp core_feature_cards(snapshot) do
+    [computer_use_card(snapshot)] ++
+      if(ComputerHistory.macos?(), do: [computer_history_card(snapshot)], else: []) ++
+      [meetings_card(snapshot)]
+  end
+
+  # Meeting notetaker (M21 Phase 3): enabling installs the meetbot sidecar and flips
+  # the boot-seeded tool gate (hence the restart). Detailed config — bot name,
+  # announcement, Zoom RTMS credentials — opens in the card's Configure panel.
+  defp meetings_card(snapshot) do
+    {enabled?, status} = meetings_card_state(snapshot)
+
+    %{
+      kind: :meetings,
+      name: "meetings",
+      display_name: "Meeting Notetaker",
+      description: "Joins Google Meet or Zoom on your ask and summarizes it.",
+      tooltip:
+        "Fermix joins a Google Meet as a named bot (or a Zoom meeting over RTMS), transcribes " <>
+          "it, and delivers the notes. Operator-only, off by default.",
+      docs_url: "https://fermix.ai/docs/meeting-notetaker/",
+      enabled?: enabled?,
+      status: status,
+      version: nil,
+      logo: @meetings_logo_uri,
+      app_count: 0
+    }
+  end
+
+  defp meetings_card_state(snapshot) do
+    cond do
+      not meetings_config_enabled?(snapshot) -> {false, :not_configured}
+      Meetings.ready?() -> {true, meetings_ready_status()}
+      true -> {true, :partial}
+    end
+  end
+
+  # `Meetings.ready?/0` is enabled + (sidecar installed OR RTMS configured) —
+  # but an installed Meet sidecar whose bot is not signed in cannot join
+  # (1838680: "installed alone is NOT ready"), so the card must not green-check
+  # the state its own Configure modal labels amber "Sign-in needed". A
+  # configured Zoom RTMS lane keeps the card green: that lane is usable as-is.
+  defp meetings_ready_status do
+    cond do
+      MeetingsConfig.rtms_configured?() -> :ready
+      MeetbotInstaller.signed_in?() -> :ready
+      true -> :needs_signin
+    end
+  end
+
+  defp meetings_config_enabled?(snapshot) do
+    snapshot
+    |> get_fermix_core(:meetings)
+    |> Keyword.get(:enabled, false) == true
+  end
+
+  # Computer-use as a core-feature card (same clean shape as computer_history_card),
+  # so both render through one component in the dedicated section.
+  defp computer_use_card(snapshot) do
+    {enabled?, status} = computer_use_card_state(snapshot)
+
+    %{
+      kind: :computer_use,
+      name: SidecarInstaller.plugin_name(),
+      display_name: "Computer Use",
+      description: "Let Fermix drive the screen: click, type, and navigate apps.",
+      tooltip:
+        "Fermix sees your screen and controls the mouse and keyboard in the apps you drive. " <>
+          "Operator-only, off by default.",
+      docs_url: "https://fermix.ai/docs/computer-use/",
+      enabled?: enabled?,
+      status: status,
+      version: compux_version(),
+      logo: @computer_use_logo_uri,
+      app_count: 0
+    }
+  end
+
+  # The shared compux driver version (both features run on it). `Application.spec/2`
+  # returns nil when compux isn't loaded — keep the nil so the card drops the version
+  # rather than rendering a bare "v".
+  defp compux_version do
+    case Application.spec(:compux, :vsn) do
+      nil -> nil
+      vsn -> to_string(vsn)
     end
   end
 
@@ -1807,7 +2480,25 @@ defmodule FermixWebWeb.SetupLive do
   # discovery task exits with a term that can carry a whole stacktrace, and a
   # modal is not a log viewer. The classified prefix is the part that names the
   # failure; the daemon log keeps the rest.
-  defp setup_error(reason) do
+  # A classified remote refusal renders through the SAME resolver the daemon log
+  # and `fermix doctor` use, so the operator reads one description of one fact —
+  # including which capability the upstream withdrew, which is the only question
+  # a contract mismatch actually raises. Every other reason keeps the redacted
+  # inspect: it may carry an endpoint or a peer message.
+  defp setup_error({status, detail, subject} = classified)
+       when is_atom(status) and is_atom(detail) and (is_binary(subject) or is_nil(subject)) do
+    # Shape is NOT provenance. `{:remote_jsonrpc_error, code, message}` has this
+    # exact shape whenever the peer sends a null code, and its third element is
+    # a peer-authored string — which would then render in the slot reserved for
+    # a capability Fermix vouched for, and skip the redaction bound below.
+    if status in RuntimeStatus.statuses(),
+      do: RuntimeStatus.describe(classified),
+      else: redacted_error(classified)
+  end
+
+  defp setup_error(reason), do: redacted_error(reason)
+
+  defp redacted_error(reason) do
     reason
     |> Redaction.format()
     |> String.slice(0, 200)
@@ -1936,8 +2627,8 @@ defmodule FermixWebWeb.SetupLive do
   defp set_computer_use_feature(socket, enabled?) do
     message =
       if enabled?,
-        do: "Computer Use enabled — restart to apply.",
-        else: "Computer Use disabled — restart to apply."
+        do: "Computer Use enabled. Restart to apply.",
+        else: "Computer Use disabled. Restart to apply."
 
     socket
     |> assign_report(Wizard.report())
@@ -1971,6 +2662,217 @@ defmodule FermixWebWeb.SetupLive do
   end
 
   defp computer_use_plugin?(name), do: name == SidecarInstaller.plugin_name()
+
+  # --- computer history (MILESTONE_32 §22.3, a native-driver feature, macOS-only) ---
+
+  @computer_history_name "computer_history"
+
+  defp computer_history_feature?(name), do: name == @computer_history_name
+
+  # Enable = ensure the SHARED compux sidecar, then flip the flag. Independent of
+  # computer-use: this card installs the sidecar itself if computer-use has not.
+  defp enable_computer_history(socket, extra_answers) do
+    if SidecarInstaller.installed?() do
+      set_computer_history_feature(socket, true, extra_answers)
+    else
+      # Sidecar missing: persist the chosen apps and install the shared driver; the
+      # operator re-enables from the card once the async install finishes (mirrors
+      # computer-use). Flipping enabled before the driver exists would only refuse
+      # at runtime. Both steps set a flash, so state one accurate message last —
+      # otherwise the generic "Downloading the Computer Use helper…" install flash
+      # wins and names the wrong feature.
+      socket
+      |> persist_computer_history_answers(extra_answers)
+      |> install_catalog_plugin(SidecarInstaller.plugin_name(), :computer_history)
+      |> flash_info(
+        "Apps saved. Installing the capture driver; Computer History will turn on when it finishes."
+      )
+    end
+  end
+
+  defp set_computer_history_feature(socket, enabled?, extra_answers \\ []) do
+    message =
+      if enabled?,
+        do: "Computer History enabled. Restart to apply.",
+        else: "Computer History disabled. Restart to apply."
+
+    socket
+    |> assign_report(Wizard.report())
+    |> save_answers(
+      [computer_history_enabled: enabled?] ++ extra_answers,
+      message,
+      nil,
+      restart_required?: true
+    )
+  end
+
+  defp persist_computer_history_answers(socket, []), do: socket
+
+  defp persist_computer_history_answers(socket, answers) do
+    save_answers(
+      socket,
+      answers,
+      "App selection saved. Finish installing the driver, then enable.",
+      nil,
+      restart_required?: false
+    )
+  end
+
+  # Capture needs only the Accessibility grant (via the shared compux driver, so the
+  # same TCC identity as computer-use). The prompt is async, so a fresh grant may
+  # only show on the next probe.
+  defp request_computer_history_permissions(socket) do
+    case ComputerHistory.request_permissions() do
+      {:ok, %{input_control: true}} ->
+        refresh_report(socket, "Accessibility granted.")
+
+      {:ok, _partial} ->
+        refresh_report(
+          socket,
+          "Approve the Accessibility prompt, then restart to start capturing."
+        )
+
+      {:error, reason} ->
+        flash_error(socket, "Couldn't open the Accessibility prompt: #{Redaction.format(reason)}")
+    end
+  end
+
+  defp computer_history_card_state(snapshot) do
+    cond do
+      not computer_history_config_enabled?(snapshot) -> {false, :not_configured}
+      ComputerHistory.operative?() and SidecarInstaller.installed?() -> {true, :ready}
+      true -> {true, :partial}
+    end
+  end
+
+  defp computer_history_config_enabled?(snapshot) do
+    snapshot
+    |> get_fermix_core(:computer_history)
+    |> Keyword.get(:enabled, false) == true
+  end
+
+  # The card's data. Rendered ONLY on macOS (`ComputerHistory.macos?/0`); the
+  # `apps` allowlist round-trips as a comma-separated string for a single clean
+  # input, and the disclosure names the resolved summarizer provider (§22.4).
+  defp computer_history_card(snapshot) do
+    {enabled?, status} = computer_history_card_state(snapshot)
+    config = get_fermix_core(snapshot, :computer_history)
+
+    %{
+      kind: :computer_history,
+      name: @computer_history_name,
+      display_name: "Computer History",
+      description: "Passive activity memory from the apps you allow.",
+      tooltip:
+        "Opt-in activity memory from the apps you allow: window titles and typed text; " <>
+          "inside browsers only window titles are captured today. " <>
+          "Passwords and secure fields are never captured. " <>
+          computer_history_summarizer_sentence(),
+      docs_url: "https://fermix.ai/docs/computer-history/",
+      enabled?: enabled?,
+      status: status,
+      version: compux_version(),
+      logo: @computer_history_logo_uri,
+      app_count: length(Keyword.get(config, :apps, []))
+    }
+  end
+
+  # --- app-allowlist picker (§22.7) --------------------------------------
+
+  defp open_computer_history_picker(socket) do
+    config =
+      socket.assigns.report.wizard.config_snapshot
+      |> get_fermix_core(:computer_history)
+
+    selected = config |> Keyword.get(:apps, []) |> MapSet.new()
+
+    picker = %{
+      apps: installed_apps_impl().(),
+      selected: selected,
+      query: "",
+      save_label: computer_history_save_label(config)
+    }
+
+    assign(socket, :computer_history_picker, picker)
+  end
+
+  # Honest about what Save does: it flips the flag only when already enabled (edit) or
+  # when the shared driver is present; with the driver missing it saves + installs and
+  # the operator enables on a second pass, so don't promise "enable".
+  defp computer_history_save_label(config) do
+    cond do
+      ComputerHistoryConfig.enabled?(config) -> "Save"
+      SidecarInstaller.installed?() -> "Save & enable"
+      true -> "Save & install driver"
+    end
+  end
+
+  # Injectable so tests supply a fixed app list instead of scanning the host.
+  defp installed_apps_impl,
+    do: Application.get_env(:fermix_web, :installed_apps_impl, &InstalledApps.list/0)
+
+  defp update_computer_history_picker(socket, fun) do
+    case socket.assigns.computer_history_picker do
+      nil -> socket
+      picker -> assign(socket, :computer_history_picker, fun.(picker))
+    end
+  end
+
+  defp toggle_picker_app(picker, bundle) do
+    selected =
+      if MapSet.member?(picker.selected, bundle),
+        do: MapSet.delete(picker.selected, bundle),
+        else: MapSet.put(picker.selected, bundle)
+
+    %{picker | selected: selected}
+  end
+
+  defp save_computer_history_picker(%{assigns: %{computer_history_picker: nil}} = socket),
+    do: socket
+
+  defp save_computer_history_picker(socket) do
+    apps = socket.assigns.computer_history_picker.selected |> MapSet.to_list() |> Enum.sort()
+
+    if apps == [] do
+      flash_error(socket, "Pick at least one app before enabling Computer History.")
+    else
+      socket
+      |> assign(:computer_history_picker, nil)
+      |> enable_computer_history(computer_history_apps: Enum.join(apps, ", "))
+    end
+  end
+
+  # "Off-device" is false when summarization runs on this Mac, so the local
+  # summarizer gets its own sentence; every other posture names the destination
+  # raw activity actually reaches (§22.3, §23.3).
+  defp computer_history_summarizer_sentence do
+    case ComputerHistoryConfig.summarizer() do
+      :local ->
+        "Summarized #{computer_history_summarizer_label(:local)}; off by default."
+
+      remote ->
+        "Summarized off-device by #{computer_history_summarizer_label(remote)}; off by default."
+    end
+  end
+
+  # Where summarization runs, shown on the card so the operator sees exactly which
+  # model reads their activity (§22.3): the on-device model, the pinned Tier-3
+  # provider, or the resolved subagent tier (provider + model).
+  defp computer_history_summarizer_label(:local), do: "on-device (local model)"
+  defp computer_history_summarizer_label({:provider, provider}), do: to_string(provider)
+
+  defp computer_history_summarizer_label(:default_provider) do
+    provider =
+      case ComputerHistoryConfig.default_summarizer_provider() do
+        {:ok, p} -> to_string(p)
+        {:error, _reason} -> "your default provider"
+      end
+
+    case Keyword.get(ComputerHistoryConfig.default_summarizer_route_opts(), :model) do
+      nil -> provider
+      model -> "#{provider} · #{model}"
+    end
+  end
 
   defp start_plugin_auth_or_explain(socket, plugin) do
     cond do
@@ -2077,11 +2979,17 @@ defmodule FermixWebWeb.SetupLive do
 
   # --- catalog install (§11: enable on a not-installed card = install first) -
 
-  defp install_catalog_plugin(socket, name) do
+  # `on_done` records WHICH feature requested this install, so completion
+  # continues the feature the operator actually consented to. The shared compux
+  # driver is installed by both the Computer Use card and the Computer History
+  # picker — keying completion on the plugin name alone once enabled Computer
+  # Use (mouse/keyboard control) for an operator who had only consented to
+  # Computer History.
+  defp install_catalog_plugin(socket, name, on_done \\ :plugin) do
     if plugin_install_running?(socket, name) do
       flash_info(socket, "#{name} install is already running.")
     else
-      start_plugin_install(socket, name)
+      start_plugin_install(socket, name, on_done)
     end
   end
 
@@ -2091,10 +2999,11 @@ defmodule FermixWebWeb.SetupLive do
     |> Enum.any?(&(&1.name == name))
   end
 
-  defp start_plugin_install(socket, name) do
+  defp start_plugin_install(socket, name, on_done) do
     {work, message} = install_work(name)
     task = Task.Supervisor.async_nolink(FermixCore.TaskSupervisor, work)
-    tasks = Map.put(socket.assigns.plugin_install_tasks, task.ref, %{name: name})
+    entry = %{name: name, on_done: on_done}
+    tasks = Map.put(socket.assigns.plugin_install_tasks, task.ref, entry)
 
     socket
     |> assign(:plugin_install_tasks, tasks)
@@ -2107,7 +3016,7 @@ defmodule FermixWebWeb.SetupLive do
   # {:ok, _} | {:error, reason} shape, so the finish/continue machinery is shared.
   defp install_work(name) do
     if computer_use_plugin?(name) do
-      {fn -> SidecarInstaller.install() end, "Downloading the Computer Use helper…"}
+      {computer_use_installer(), "Downloading the Computer Use helper…"}
     else
       opts = plugins_dist_opts()
 
@@ -2116,10 +3025,16 @@ defmodule FermixWebWeb.SetupLive do
     end
   end
 
+  # Injectable so a LiveView test never downloads the compux binary (mirrors the
+  # `:meetbot_installer` seam). Defaults to the real sha256-verified download.
+  defp computer_use_installer do
+    Application.get_env(:fermix_web, :computer_use_installer, &SidecarInstaller.install/0)
+  end
+
   defp finish_plugin_install(socket, task, tasks, {:ok, _status}) do
     socket
     |> assign(:plugin_install_tasks, tasks)
-    |> continue_after_install(task.name)
+    |> continue_after_install(task)
   end
 
   defp finish_plugin_install(socket, task, tasks, {:error, reason}) do
@@ -2129,23 +3044,35 @@ defmodule FermixWebWeb.SetupLive do
   defp fail_plugin_install(socket, task, tasks, reason) do
     # Use the card's display name ("Computer Use"), not the raw registry name
     # ("computer_use_sidecar"), so the one place a user sees an error matches the
-    # card they clicked.
+    # card they clicked — including when the shared driver was installing for
+    # the Computer History card.
+    display =
+      if Map.get(task, :on_done) == :computer_history,
+        do: "Computer History (capture driver)",
+        else: card_display_name(task.name, task.name)
+
     socket
     |> assign(:plugin_install_tasks, tasks)
-    |> flash_error(
-      "#{card_display_name(task.name, task.name)} install failed: #{install_error(reason)}"
-    )
+    |> flash_error("#{display} install failed: #{install_error(reason)}")
   end
 
   # Install done — continue with the same enable/connect sequence an installed
   # card uses. Config.commit hot-applies via Runtime.reload inside the daemon.
   # The computer-use sidecar never registers as a plugin (no tools), so after its
-  # binary lands we flip the feature flag instead of looking it up in the registry.
-  defp continue_after_install(socket, name) do
-    if computer_use_plugin?(name) do
-      set_computer_use_feature(socket, true)
-    else
-      continue_registry_plugin_after_install(socket, name)
+  # binary lands we flip the feature flag — the one the requesting card asked
+  # for. A Computer History-initiated driver install must NEVER flip Computer
+  # Use on (the apps were persisted before the install started, so enabling
+  # completes the operator's original consent, nothing more).
+  defp continue_after_install(socket, %{name: name} = task) do
+    cond do
+      computer_use_plugin?(name) and Map.get(task, :on_done) == :computer_history ->
+        set_computer_history_feature(socket, true)
+
+      computer_use_plugin?(name) ->
+        set_computer_use_feature(socket, true)
+
+      true ->
+        continue_registry_plugin_after_install(socket, name)
     end
   end
 
@@ -2155,7 +3082,7 @@ defmodule FermixWebWeb.SetupLive do
         enable_or_connect_plugin(socket, plugin)
 
       :error ->
-        flash_error(socket, "#{name} installed but did not register — check the daemon logs.")
+        flash_error(socket, "#{name} installed but did not register; check the daemon logs.")
 
       {:error, reason} ->
         flash_error(socket, "Save failed: #{Redaction.format(reason)}")
@@ -2165,27 +3092,27 @@ defmodule FermixWebWeb.SetupLive do
   # Per-stage install error prose (§6) — same vocabulary as the CLI dist verbs.
   defp install_error({:download_failed, _reason, _url}), do: "download failed (network)."
   defp install_error({:download_status, status, _url}), do: "download failed (HTTP #{status})."
-  defp install_error({:sha256_mismatch, _details}), do: "checksum mismatch — refusing."
+  defp install_error({:sha256_mismatch, _details}), do: "checksum mismatch; refusing."
 
   defp install_error({:verification_failed, :cosign_not_installed}),
-    do: "cosign not found — install it to verify plugin signatures (e.g. `brew install cosign`)."
+    do: "cosign not found; install it to verify plugin signatures (e.g. `brew install cosign`)."
 
-  defp install_error({:verification_failed, _reason}), do: "signature invalid — refusing."
+  defp install_error({:verification_failed, _reason}), do: "signature invalid; refusing."
 
   defp install_error({:incompatible, {:needs_newer_core, :min_core_version, floor}}),
-    do: "needs Fermix ≥ #{floor} — run `fermix upgrade` first."
+    do: "needs Fermix ≥ #{floor}; run `fermix upgrade` first."
 
   defp install_error({:incompatible, {:needs_newer_core, :plugin_api, api}}),
-    do: "needs a newer Fermix (plugin API #{api}) — run `fermix upgrade` first."
+    do: "needs a newer Fermix (plugin API #{api}); run `fermix upgrade` first."
 
   defp install_error({:incompatible, {:plugin_too_old, :plugin_api, _api}}),
-    do: "built for an older Fermix — awaiting a plugin update."
+    do: "built for an older Fermix; awaiting a plugin update."
 
   defp install_error({:yanked, name, version}),
-    do: "#{name} #{version} was yanked — not installing."
+    do: "#{name} #{version} was yanked; not installing."
 
   defp install_error({:unknown_plugin, _name}),
-    do: "not in the plugin catalog — run `fermix upgrade` to get the latest catalog."
+    do: "not in the plugin catalog; run `fermix upgrade` to get the latest catalog."
 
   defp install_error({:no_build_for_target, target}), do: "no build for this machine (#{target})."
 
@@ -2193,7 +3120,7 @@ defmodule FermixWebWeb.SetupLive do
   defp install_error({:no_checksum_for_target, _target}),
     do: "the Computer Use helper hasn't been published for this platform yet."
 
-  defp install_error({:checksum_mismatch, _details}), do: "checksum mismatch — refusing."
+  defp install_error({:checksum_mismatch, _details}), do: "checksum mismatch; refusing."
   defp install_error({:http_status, status}), do: "download failed (HTTP #{status})."
   defp install_error({:http_error, _reason}), do: "download failed (network or timeout)."
   defp install_error({:untar, _reason}), do: "the downloaded Computer Use archive was invalid."
@@ -2510,7 +3437,7 @@ defmodule FermixWebWeb.SetupLive do
     end
   end
 
-  defp xai_auth_summary, do: oauth_profile_summary("xai_oauth")
+  defp xai_auth_summary, do: oauth_profile_summary(Store.profile(:xai))
 
   # --- Anthropic setup-token / Claude Code import (synchronous, no loopback) -
 
@@ -2529,7 +3456,7 @@ defmodule FermixWebWeb.SetupLive do
     end
   end
 
-  defp anthropic_auth_summary, do: oauth_profile_summary("anthropic_oauth")
+  defp anthropic_auth_summary, do: oauth_profile_summary(Store.profile(:anthropic))
 
   defp anthropic_login_impl do
     Application.get_env(:fermix_web, :anthropic_login_impl, AnthropicLogin)
@@ -2715,9 +3642,11 @@ defmodule FermixWebWeb.SetupLive do
   defp normalize_transcription_backend(:openai), do: :openai
   defp normalize_transcription_backend(:xai), do: :xai
   defp normalize_transcription_backend(:deepgram), do: :deepgram
+  defp normalize_transcription_backend(:local), do: :local
   defp normalize_transcription_backend("openai"), do: :openai
   defp normalize_transcription_backend("xai"), do: :xai
   defp normalize_transcription_backend("deepgram"), do: :deepgram
+  defp normalize_transcription_backend("local"), do: :local
   defp normalize_transcription_backend(_value), do: :openai
 
   defp parse_env_allow(value) when is_binary(value) do
@@ -2804,6 +3733,11 @@ defmodule FermixWebWeb.SetupLive do
   defp present?(value) when is_binary(value), do: String.trim(value) != ""
   defp present?(value) when is_list(value), do: value != []
   defp present?(_), do: true
+
+  # A toggle posts a hidden "false" ahead of its checked "true"; the last value
+  # wins, so anything other than the literal "true" is off.
+  defp checked?("true"), do: true
+  defp checked?(_value), do: false
 
   defp maybe_put_string(answers, _key, nil), do: answers
   defp maybe_put_string(answers, _key, ""), do: answers

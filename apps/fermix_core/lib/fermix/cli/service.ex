@@ -20,6 +20,8 @@ defmodule Fermix.CLI.Service do
   alias Fermix.CLI.Service.Launchd
   alias Fermix.CLI.Service.Systemd
   alias Fermix.CLI.Service.Templates
+  alias FermixCore.Boot.PathBaseline
+  alias FermixCore.BuildInfo
   alias FermixCore.Setup.ConfigStore
 
   @label "io.tezra.fermix"
@@ -53,7 +55,8 @@ defmodule Fermix.CLI.Service do
 
   @spec install(scope(), keyword()) :: :ok | {:error, term()}
   def install(scope \\ :user, opts \\ []) when scope in [:user, :system] do
-    with {:ok, spec} <- spec(scope, opts),
+    with :ok <- legacy_mutation(opts),
+         {:ok, spec} <- spec(scope, opts),
          :ok <- File.mkdir_p(Path.dirname(spec.unit_path)),
          :ok <- File.mkdir_p(Path.dirname(spec.log_path)),
          :ok <- write_unit(spec),
@@ -64,7 +67,8 @@ defmodule Fermix.CLI.Service do
 
   @spec uninstall(scope(), keyword()) :: :ok | {:error, term()}
   def uninstall(scope \\ :user, opts \\ []) when scope in [:user, :system] do
-    with {:ok, spec} <- spec(scope, opts),
+    with :ok <- legacy_mutation(opts),
+         {:ok, spec} <- spec(scope, opts),
          :ok <- backend(spec).uninstall(spec),
          :ok <- remove_unit(spec) do
       :ok
@@ -73,17 +77,21 @@ defmodule Fermix.CLI.Service do
 
   @spec start(scope(), keyword()) :: :ok | {:error, term()}
   def start(scope \\ :user, opts \\ []) when scope in [:user, :system] do
-    with {:ok, spec} <- spec(scope, opts), do: backend(spec).start(spec)
+    with :ok <- legacy_mutation(opts), do: do_start(scope, opts)
   end
 
   @spec stop(scope(), keyword()) :: :ok | {:error, term()}
   def stop(scope \\ :user, opts \\ []) when scope in [:user, :system] do
-    with {:ok, spec} <- spec(scope, opts), do: backend(spec).stop(spec)
+    with :ok <- legacy_mutation(opts), do: do_stop(scope, opts)
   end
 
   @spec restart(scope(), keyword()) :: :ok | {:error, term()}
   def restart(scope \\ :user, opts \\ []) when scope in [:user, :system] do
-    with :ok <- stop(scope, opts), do: start(scope, opts)
+    with :ok <- legacy_mutation(opts),
+         :ok <- do_stop(scope, opts),
+         :ok <- do_start(scope, opts) do
+      :ok
+    end
   end
 
   @spec installed?(scope(), keyword()) :: boolean()
@@ -144,6 +152,24 @@ defmodule Fermix.CLI.Service do
     else
       _ -> true
     end
+  end
+
+  defp legacy_mutation(opts) do
+    build_info = Keyword.get(opts, :build_info, BuildInfo)
+
+    case build_info.app_engine?() do
+      true -> {:error, {:app_managed, :legacy_service}}
+      false -> :ok
+      _invalid -> {:error, :invalid_build_info_adapter}
+    end
+  end
+
+  defp do_start(scope, opts) do
+    with {:ok, spec} <- spec(scope, opts), do: backend(spec).start(spec)
+  end
+
+  defp do_stop(scope, opts) do
+    with {:ok, spec} <- spec(scope, opts), do: backend(spec).stop(spec)
   end
 
   defp build_spec(os, scope, opts) do
@@ -256,29 +282,10 @@ defmodule Fermix.CLI.Service do
   # then the standard system locations. `Enum.uniq` collapses the common case
   # where that directory already is a standard bin dir (Homebrew = `…/bin`).
   defp service_path(os, fermix_path) do
-    ([Path.dirname(fermix_path) | standard_bindirs(os)] ++ [user_bindir()])
-    |> Enum.uniq()
+    [os: os, binary_dir: Path.dirname(fermix_path)]
+    |> PathBaseline.dirs()
     |> Enum.join(":")
   end
-
-  defp standard_bindirs(:darwin),
-    do: ~w(/opt/homebrew/bin /usr/local/bin /usr/bin /bin /usr/sbin /sbin)
-
-  defp standard_bindirs(:linux),
-    do: ~w(/usr/local/bin /usr/bin /bin /usr/sbin /sbin)
-
-  # `~/.local/bin` is where the official Codex and Claude Code installers put
-  # their binaries on both platforms, so a service PATH without it detects no
-  # coding-agent CLI on a machine that has both installed — the daemon reports
-  # them absent while the operator's own shell resolves them fine. It is the
-  # standard user-scope bin dir (XDG / systemd `user` convention), not a guess
-  # about one machine.
-  #
-  # Appended LAST on purpose. PATH is first-match-wins, so a tail entry can only
-  # make previously unresolvable names resolvable — it can never shadow the
-  # `cosign`/`node`/`python` this list was originally widened to reach. Leading
-  # with it would silently change resolution for every colliding binary.
-  defp user_bindir, do: Path.join(System.user_home!(), ".local/bin")
 
   defp system_observability_env do
     Map.new(@observability_env, fn key -> {key, System.get_env(key)} end)

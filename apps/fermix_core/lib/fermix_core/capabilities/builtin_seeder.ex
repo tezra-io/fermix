@@ -18,6 +18,7 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
   alias FermixCore.ComputerUse
   alias FermixCore.Harness.Config, as: HarnessConfig
   alias FermixCore.Harness.Vendors
+  alias FermixCore.Meetings
 
   require Logger
 
@@ -63,6 +64,7 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
     FermixCore.Tools.ToolHelp,
     FermixCore.Tools.MemoryStore,
     FermixCore.Tools.MemoryRecall,
+    FermixCore.Tools.RecallActivity,
     FermixCore.Tools.ScheduleJob,
     FermixCore.Tools.UpdateJob,
     FermixCore.Tools.ListJobs,
@@ -131,6 +133,20 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
   # which (with the save+restart enable flow) is the readiness-transition trigger.
   @computer_use_tool_modules [FermixCore.Tools.ComputerUse]
 
+  # Meetings notetaker (MILESTONE_21 C2 §14.1): seeded only when
+  # `Meetings.ready?()` — the subsystem enabled AND a lane that can actually
+  # place a meeting (the Meet sidecar installed, or the Zoom RTMS credentials
+  # complete). A config-only enable advertises nothing, so the model is never
+  # offered a notetaker that would refuse every URL. Re-evaluated each boot,
+  # which (with the save+restart enable flow) is the readiness transition.
+  # Named as its own list so the whole-surface invariant test loops over the
+  # authoritative source rather than a hand-written list of today's three tools.
+  @meetings_tool_modules [
+    FermixCore.Tools.JoinMeeting,
+    FermixCore.Tools.LeaveMeeting,
+    FermixCore.Tools.ListMeetings
+  ]
+
   # Coding harness: seeded only when the harness is enabled (config) AND the
   # relevant vendor CLI is detected at boot — the §7.3 boot snapshot. The two run
   # tools seed per-vendor (codex_run needs `codex`, claude_code_run needs
@@ -168,16 +184,18 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
 
   @doc """
   Every built-in tool module that can be seeded into the capability registry —
-  the unconditional ones plus the conditionally-seeded bridge and computer-use
-  tools. Exposed for the classification guard test that asserts every built-in has
-  an explicit `policy_class` (see `FermixCore.Capabilities.Builtin`); membership
-  here is about classification coverage, not whether a tool is seeded on a given boot.
+  the unconditional ones plus the conditionally-seeded bridge, computer-use,
+  harness, and meetings tools. Exposed for the classification guard test that
+  asserts every built-in has an explicit `policy_class` (see
+  `FermixCore.Capabilities.Builtin`); membership here is about classification
+  coverage, not whether a tool is seeded on a given boot.
   """
   @spec builtin_tool_modules() :: [module()]
   def builtin_tool_modules,
     do:
       @builtin_tool_modules ++
-        @bridge_tool_modules ++ @computer_use_tool_modules ++ @harness_tool_modules
+        @bridge_tool_modules ++
+        @computer_use_tool_modules ++ @harness_tool_modules ++ @meetings_tool_modules
 
   @doc """
   The temporal-event tool family (MILESTONE_30 §12.1). Exposed so the
@@ -187,6 +205,15 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
   @spec event_tool_modules() :: [module()]
   def event_tool_modules, do: @event_tool_modules
 
+  @doc """
+  The meetings notetaker tool family (MILESTONE_21 C2 §14.1). Exposed so the
+  not-ready invariant test gates the WHOLE feature surface: the assertion is
+  that NO member is advertised when `Meetings.ready?()` is false, looped over
+  this list, so a fourth meetings tool either joins the invariant or fails it.
+  """
+  @spec meetings_tool_modules() :: [module()]
+  def meetings_tool_modules, do: @meetings_tool_modules
+
   defp builtin_modules(opts) do
     case Keyword.fetch(opts, :tool_modules) do
       {:ok, modules} ->
@@ -194,7 +221,8 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
 
       :error ->
         @builtin_tool_modules ++
-          bridge_modules() ++ computer_use_modules() ++ auto_harness_modules()
+          bridge_modules() ++
+          computer_use_modules() ++ auto_harness_modules() ++ meetings_modules()
     end
   end
 
@@ -215,6 +243,10 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
 
   defp computer_use_modules do
     if ComputerUse.ready?(), do: @computer_use_tool_modules, else: []
+  end
+
+  defp meetings_modules do
+    if Meetings.ready?(), do: @meetings_tool_modules, else: []
   end
 
   @doc """

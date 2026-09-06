@@ -16,9 +16,9 @@ defmodule FermixCore.Transcription.XAI do
   chat-provider key (which must itself be an api_key, not the OAuth token). A
   missing or sentinel key fails loud as `:not_configured`, never a silent degrade.
 
-  xAI also exposes a `wss` streaming STT endpoint; `capabilities().streaming?` is
-  `false` here — native streaming lands with the streaming session in a later
-  phase, so today this is a batch-only backend.
+  `capabilities().streaming?` is `true`: `open_stream/2` hands the same key to
+  `FermixCore.Transcription.XAIStream`, which speaks xAI's `wss://api.x.ai/v1/stt`
+  endpoint and serves the `FermixCore.Transcription.StreamSession` contract.
   """
 
   @behaviour FermixCore.Transcription.Backend
@@ -28,6 +28,7 @@ defmodule FermixCore.Transcription.XAI do
   alias FermixCore.Net.HttpClient
   alias FermixCore.Net.TimeoutPolicy
   alias FermixCore.Transcription.Support
+  alias FermixCore.Transcription.XAIStream
 
   @endpoint "https://api.x.ai/v1/stt"
   @provider :xai
@@ -45,7 +46,16 @@ defmodule FermixCore.Transcription.XAI do
 
   @impl true
   @spec capabilities() :: FermixCore.Transcription.Backend.capabilities()
-  def capabilities, do: %{streaming?: false, local?: false}
+  def capabilities, do: %{streaming?: true, local?: false}
+
+  @doc """
+  The stable telemetry label for xAI STT. The endpoint is modelless, so this is
+  never an API parameter — it exists so the batch call and the streaming session
+  tag their `[:fermix, :provider, :call]` spans with one string instead of two
+  copies of it.
+  """
+  @spec telemetry_model() :: String.t()
+  def telemetry_model, do: @telemetry_model
 
   @impl true
   @spec configured?(keyword()) :: :ok | {:error, term()}
@@ -67,6 +77,15 @@ defmodule FermixCore.Transcription.XAI do
 
       {:error, reason} ->
         Support.provider_call_error(@provider, @telemetry_model, opts, reason)
+    end
+  end
+
+  @impl true
+  @spec open_stream(pid(), keyword()) :: {:ok, pid()} | {:error, term()}
+  def open_stream(consumer, opts) when is_pid(consumer) and is_list(opts) do
+    case credential(opts) do
+      {:ok, key} -> XAIStream.open(consumer, key, opts)
+      {:error, reason} -> {:error, reason}
     end
   end
 

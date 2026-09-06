@@ -60,6 +60,100 @@ def _abort_markdown(aborted: dict | None) -> list[str]:
     return ["", f"> ⚠️ **{_abort_text(aborted)}**"] if aborted else []
 
 
+# --- cross-suite sections ---------------------------------------------------
+
+def _cases(results: dict):
+    """Every case with the suite and scenario it belongs to, in report order."""
+    for suite in results.get("suites", []):
+        for scenario in suite.get("scenarios", []):
+            yield from ((suite, scenario, case) for case in scenario.get("cases", []))
+
+
+def _label(suite: dict, scenario: dict, case: dict) -> str:
+    return f"{suite['name']}/{scenario['id']}/{case['id']}"
+
+
+def _attempt_trace(attempt: dict) -> str:
+    """The first correlated trace of an attempt, or empty when none exists."""
+    return next((turn.get("trace_url") for turn in attempt.get("turns", [])
+                 if turn.get("trace_url")), "")
+
+
+def _attempt_summary(case: dict) -> list[tuple[str, str]]:
+    return [(attempt.get("outcome", "?"), _attempt_trace(attempt))
+            for attempt in case.get("attempts", [])]
+
+
+def _sticky_rows(results: dict) -> list[tuple[str, dict]]:
+    """One row per sticky-gate failure: a violation any attempt observed.
+
+    Listed apart from the case tree because a later passing attempt reads as a
+    clean case everywhere else, and that is exactly the reading a violation must
+    not get.
+    """
+    rows = []
+    for suite, scenario, case in _cases(results):
+        rows.extend((_label(suite, scenario, case), failure)
+                    for failure in case.get("sticky_gate_failures", []))
+    return rows
+
+
+def _unconfirmed_rows(results: dict) -> list[tuple[str, list[str]]]:
+    return [(_label(suite, scenario, case), case.get("attempt_outcomes", []))
+            for suite, scenario, case in _cases(results)
+            if case.get("unconfirmed_fail")]
+
+
+def _attempts_markdown(case: dict) -> list[str]:
+    """Each retry attempt's own outcome and trace, under the case it belongs to.
+
+    The top level publishes one attempt; without this line the others are in
+    results.json and nowhere a reader looks.
+    """
+    summary = _attempt_summary(case)
+    if len(summary) < 2:
+        return []
+    rendered = " · ".join(f"{outcome} [trace]({url})" if url else outcome
+                          for outcome, url in summary)
+    return [f"  - attempts: {rendered}"]
+
+
+def _sticky_markdown(r: dict) -> list[str]:
+    rows = _sticky_rows(r)
+    if not rows:
+        return []
+    lines = ["## Safety violations (sticky)", "",
+             "A failure of these gates in ANY attempt fails the case: the action ran "
+             "or the text was disclosed, and a later clean attempt cannot take that "
+             "back.", "",
+             "| Case | Attempt | Turn | Gate | Detail |", "|---|---|---|---|---|"]
+    lines.extend(f"| `{label}` | {f['attempt']} | {f.get('turn')} | `{f['key']}` | "
+                 f"{_cell(f.get('detail'))} |" for label, f in rows)
+    lines.append("")
+    return lines
+
+
+def _cell(value) -> str:
+    """A Markdown table cell. Every shipped sticky `reply_not_matches` detail carries
+    the regex verbatim, and every one of those regexes contains `|` — which split the
+    row into extra columns and broke exactly the section that must be read."""
+    return str(value).replace("|", "\\|")
+
+
+def _unconfirmed_markdown(r: dict) -> list[str]:
+    rows = _unconfirmed_rows(r)
+    if not rows:
+        return []
+    lines = ["## Unconfirmed fails", "",
+             "An attempt failed and the retry produced no usable evidence, so the "
+             "case is incomplete rather than passed — the failure is neither "
+             "reproduced nor cleared.", "",
+             "| Case | Attempts |", "|---|---|"]
+    lines.extend(f"| `{label}` | {' → '.join(outcomes)} |" for label, outcomes in rows)
+    lines.append("")
+    return lines
+
+
 def _markdown(r: dict) -> str:
     t = r["totals"]
     overall = {"pass": "✅ PASS", "fail": "❌ FAIL",
@@ -77,6 +171,14 @@ def _markdown(r: dict) -> str:
         f"- Cases: **{t['cases_passed']}/{t['cases']} passed** ({_pct(t['cases_passed'], t['cases'])})  ·  "
         f"failed: **{t['cases_failed']}**  ·  incomplete: **{t['cases_incomplete']}**  ·  "
         f"critical failures: **{t['critical_failed']}**",
+        f"- Safety violations (sticky): **{t['safety_violations']}**  ·  "
+        f"unconfirmed fails: **{t['unconfirmed_fails']}**",
+        # First-attempt performance is reported beside, never inside, the retried
+        # verdict: "the failure reproduced" and "it was right first time" are two
+        # different measurements (review §4 P0).
+        f"- First-attempt passes: **{t.get('first_attempt_passed', 0)}/{t['cases']}** "
+        f"({_pct(t.get('first_attempt_passed', 0), t['cases'])}), before any "
+        "`--fail-retries` re-drive",
         f"- Structural gates: {t['gates_passed']}/{t['gates']} ({_pct(t['gates_passed'], t['gates'])})  ·  "
         f"Rubrics: {t['rubrics_passed']}/{t['rubrics']} ({_pct(t['rubrics_passed'], t['rubrics'])})",
         f"- Turns driven: {t['turns']}  ·  Candidate trace cost: **${t['cost_usd']:.4f}**  ·  "
@@ -92,12 +194,14 @@ def _markdown(r: dict) -> str:
     repeated = [item for item in r.get("reliability", []) if item["trials"] > 1]
     if repeated:
         flaky = sum(1 for item in repeated if item["status"] == "flaky")
-        lines.insert(11, f"- Repeated cases: **{len(repeated)}**  ·  flaky: **{flaky}**")
+        lines.insert(12, f"- Repeated cases: **{len(repeated)}**  ·  flaky: **{flaky}**")
     for s in r["suites"]:
         st = s["totals"]
         lines.append(f"| {s['title']} | {st['cases']} | {st['cases_passed']} | "
                      f"{st['critical_failed']} | ${st['cost_usd']:.4f} |")
     lines.append("")
+    lines.extend(_sticky_markdown(r))
+    lines.extend(_unconfirmed_markdown(r))
 
     for s in r["suites"]:
         lines.append(f"## {s['title']}  `({s['name']})`")
@@ -109,6 +213,7 @@ def _markdown(r: dict) -> str:
             for c in scn["cases"]:
                 lines.append(f"- {_case_mark(c['outcome'])} **{c['id']}** "
                              f"(trial {c.get('trial', 1)}) — {c['outcome'].upper()}")
+                lines.extend(_attempts_markdown(c))
                 for turn in c["turns"]:
                     lines.append(f"  - turn {turn['index'] + 1}: `{_short(turn['query'], 90)}`")
                     if turn["status"] != "ok":
@@ -182,6 +287,48 @@ def _e(s) -> str:
     return html.escape(str(s if s is not None else ""))
 
 
+def _sticky_html(r: dict) -> list[str]:
+    rows = _sticky_rows(r)
+    if not rows:
+        return []
+    out = ["<h2>Safety violations (sticky)</h2>",
+           "<div class='meta'>A failure of these gates in ANY attempt fails the case: "
+           "the action ran or the text was disclosed, and a later clean attempt cannot "
+           "take that back.</div>",
+           "<table><tr><th>Case</th><th>Attempt</th><th>Turn</th><th>Gate</th>"
+           "<th>Detail</th></tr>"]
+    out.extend(f"<tr><td>{_e(label)}</td><td>{_e(f['attempt'])}</td>"
+               f"<td>{_e(f.get('turn'))}</td><td>{_e(f['key'])}</td>"
+               f"<td>{_e(f.get('detail'))}</td></tr>" for label, f in rows)
+    out.append("</table>")
+    return out
+
+
+def _unconfirmed_html(r: dict) -> list[str]:
+    rows = _unconfirmed_rows(r)
+    if not rows:
+        return []
+    out = ["<h2>Unconfirmed fails</h2>",
+           "<div class='meta'>An attempt failed and the retry produced no usable "
+           "evidence, so the case is incomplete rather than passed — the failure is "
+           "neither reproduced nor cleared.</div>",
+           "<table><tr><th>Case</th><th>Attempts</th></tr>"]
+    out.extend(f"<tr><td>{_e(label)}</td><td>{_e(' → '.join(outcomes))}</td></tr>"
+               for label, outcomes in rows)
+    out.append("</table>")
+    return out
+
+
+def _attempts_html(case: dict) -> list[str]:
+    summary = _attempt_summary(case)
+    if len(summary) < 2:
+        return []
+    rendered = " · ".join(
+        f"{_e(outcome)} <a href='{_e(url)}'>trace</a>" if url else _e(outcome)
+        for outcome, url in summary)
+    return [f"<div class='tools'>attempts: {rendered}</div>"]
+
+
 def _html(r: dict) -> str:
     t = r["totals"]
     outcome = r["outcome"]
@@ -201,6 +348,9 @@ def _html(r: dict) -> str:
                  (t["cases_failed"], "cases failed"),
                  (t["cases_incomplete"], "cases incomplete"),
                  (t["critical_failed"], "critical fails"),
+                 (t["safety_violations"], "safety violations (sticky)"),
+                 (t["unconfirmed_fails"], "unconfirmed fails"),
+                 (f"{t.get('first_attempt_passed', 0)}/{t['cases']}", "first-attempt passes"),
                  (f"{t['gates_passed']}/{t['gates']}", "gates passed"),
                  (f"{t['rubrics_passed']}/{t['rubrics']}", "rubrics passed"),
                  (f"${t['cost_usd']:.4f}", "candidate trace cost"),
@@ -219,6 +369,8 @@ def _html(r: dict) -> str:
         out.append(f"<tr><td>{_e(s['title'])}</td><td>{st['cases']}</td><td>{st['cases_passed']}</td>"
                    f"<td>{st['critical_failed']}</td><td>${st['cost_usd']:.4f}</td></tr>")
     out.append("</table>")
+    out.extend(_sticky_html(r))
+    out.extend(_unconfirmed_html(r))
 
     for s in r["suites"]:
         out.append(f"<h2>{_e(s['title'])} <span class='meta'>({_e(s['name'])})</span></h2>")
@@ -231,6 +383,7 @@ def _html(r: dict) -> str:
                 cpill = {"pass": "pass", "fail": "fail", "incomplete": "skip"}[c["outcome"]]
                 out.append(f"<div class='case'><span class='pill {cpill}'>{_e(c['outcome'].upper())}</span> "
                            f"<b>{_e(c['id'])}</b> <span class='meta'>trial {_e(c.get('trial', 1))}</span>")
+                out.extend(_attempts_html(c))
                 for turn in c["turns"]:
                     out.append(f"<div class='q'>▸ {_e(turn['query'])}</div>")
                     if turn["status"] != "ok":

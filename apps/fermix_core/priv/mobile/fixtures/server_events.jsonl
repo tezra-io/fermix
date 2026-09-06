@@ -1,0 +1,21 @@
+{"v":1,"t":"hello_ack","seq":1,"session_id":"mobile-session-1","min_version":1,"max_version":1,"profiles":[{"id":"main","name":"Fermix"}],"candidates":[],"history_head_seq":12,"read_up_to_seq":11,"caps":{"max_media_bytes":20971520,"commands":[]}}
+{"v":1,"t":"accepted","seq":2,"client_msg_id":"client-1","duplicate":false}
+{"v":1,"t":"attach_status","seq":3,"attach_id":"attach-1","status":"upload"}
+{"v":1,"t":"turn_started","seq":4,"profile_id":"main","turn_id":"turn-1","in_reply_to":"client-1"}
+{"v":1,"t":"text_delta","seq":5,"turn_id":"turn-1","text":"Hel"}
+{"v":1,"t":"tool_event","seq":6,"turn_id":"turn-1","tool":"web_search","phase":"start"}
+{"v":1,"t":"text_done","seq":7,"turn_id":"turn-1","server_seq":12,"text":"Hello"}
+{"v":1,"t":"media_begin","seq":8,"ref":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","server_seq":13,"kind":"document","mime":"application/pdf","size_bytes":3,"sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","filename":"answer.pdf"}
+{"v":1,"t":"media_end","seq":10,"ref":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+{"v":1,"t":"turn_error","seq":11,"turn_id":"turn-2","code":"provider_error","message":"The turn failed"}
+{"v":1,"t":"reaction","seq":12,"in_reply_to":"client-1","emoji":"👍"}
+{"v":1,"t":"approval","seq":13,"approval_id":"approval-1","kind":"sandbox","text":"Allow this command?","token":"opaque-token","ttl_s":60,"approve_command":"/confirm opaque-token","deny_command":"/deny opaque-token"}
+{"v":1,"t":"approval_resolved","seq":14,"approval_id":"approval-1","outcome":"approved"}
+{"v":1,"t":"link_preview","seq":15,"in_reply_to":12,"url":"https://example.com","site":"Example","title":"Example page"}
+{"v":1,"t":"read_state","seq":16,"profile_id":"main","read_up_to_seq":12}
+{"v":1,"t":"history_page","seq":17,"profile_id":"main","messages":[{"server_seq":12,"role":"assistant","content":"Hello","ts":"2026-08-12T12:00:00Z","media_refs":[]}],"next_after_seq":12}
+{"v":1,"t":"notice","seq":18,"kind":"compaction","text":"Conversation compacted"}
+{"v":1,"t":"pair_approved","seq":2,"device_id":"device-1","candidates":[],"profiles":[{"id":"main","name":"Fermix"}]}
+{"v":1,"t":"pair_denied","seq":2,"reason":"owner_denied"}
+{"v":1,"t":"error","seq":19,"code":"unsupported","message":"Unknown event","ref_seq":99}
+{"v":1,"t":"pong","seq":20}

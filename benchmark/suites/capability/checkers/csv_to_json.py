@@ -3,7 +3,14 @@
 AND descending order FROM the seeded sales.csv (no hardcoded gold — so it auto-adapts
 if the fixture is changed/randomized and can't be memorized by an eval-iterating
 agent), then compares the agent-written sales_by_region.json. Partial credit:
-per-region value match, with an order penalty."""
+per-region value match, with an order penalty.
+
+Same artifact contract as the other seeded-file tasks (expense_total, order_extract):
+the object must contain the seeded regions and NOTHING else. A key that is not a seeded
+region is fabrication — an invented "Mars" total is worse than a missing one — and scores
+0 outright rather than diluting into partial credit. A value must be a JSON number:
+"89.96" is a string that every consumer of this file would have to re-parse, so it does
+not count as a match."""
 import csv
 import json
 import os
@@ -39,8 +46,17 @@ if not isinstance(data, dict):
     print(json.dumps({"score": 0.0, "detail": "sales_by_region.json is not an object"}))
     sys.exit(0)
 
+invented = [k for k in data if k not in {r for r, _v in gold}]
+if invented:
+    print(json.dumps({"score": 0.0,
+                      "detail": f"invented regions not in the seeded csv: {invented[:5]}"}))
+    sys.exit(0)
+
+# A JSON string is not a total (see the module docstring): isinstance excludes it, and
+# bool is excluded because `True` is an int in Python and is not a revenue figure.
 matched = sum(1 for r, v in gold
-              if isinstance(data.get(r), (int, float)) and abs(float(data[r]) - v) < 0.01)
+              if isinstance(data.get(r), (int, float)) and not isinstance(data[r], bool)
+              and abs(float(data[r]) - v) < 0.01)
 order_ok = list(data.keys())[:len(gold)] == [r for r, _ in gold]
 score = matched / len(gold)
 if matched == len(gold) and not order_ok:

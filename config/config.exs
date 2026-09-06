@@ -43,7 +43,7 @@ config :logger, :default_formatter,
 
 config :phoenix,
   filter_parameters:
-    ~w(password secret token t _csrf_token access_token refresh_token bot_token verify_token api_key)
+    ~w(password secret token t _csrf_token access_token refresh_token bot_token verify_token api_key mobile_push_key mobile_apns_key)
 
 config :fermix_core,
   providers: [
@@ -120,6 +120,7 @@ config :fermix_core, :jobs,
     "discord" => FermixChannels.Channels.Discord,
     "signal" => FermixChannels.Channels.Signal,
     "whatsapp" => FermixChannels.Channels.WhatsApp,
+    "mobile" => FermixChannels.Channels.Mobile,
     "cli" => FermixChannels.CLI
   }
 
@@ -139,6 +140,22 @@ config :fermix_core, :transcription,
   backend: "openai",
   model: "gpt-4o-mini-transcribe",
   max_file_mb: 20
+
+# Meeting notetaker (M21 Phase 3). Off by default: joining a meeting needs a
+# sidecar install (Google Meet) or Zoom RTMS credentials, and neither exists on
+# a fresh install. A blank `announce_message` means the built-in consent line;
+# a blank `transcription_backend` means the globally configured one.
+config :fermix_core, :meetings,
+  enabled: false,
+  bot_name: "Fermix Notetaker",
+  announce: true,
+  announce_message: "",
+  transcription_backend: "",
+  retain_audio: false,
+  zoom_account_id: "",
+  zoom_client_id: "",
+  zoom_client_secret: "",
+  zoom_ws_subscription_id: ""
 
 config :fermix_channels,
   telegram: [
@@ -160,6 +177,17 @@ config :fermix_channels,
   signal: [
     enabled: false,
     mode: :subprocess
+  ],
+  mobile: [
+    enabled: false,
+    mode: :listener,
+    port: 4_031,
+    bind: "0.0.0.0",
+    advertise_mdns: true,
+    streaming: "draft",
+    max_media_bytes: 20_971_520,
+    media_store_max_bytes: 2_147_483_648,
+    push: [enabled: false]
   ],
   # The ACP agent surface (M29). `enabled` is the whole operator knob — the
   # socket path is fixed and the caps are internal constants. `mode` is not a

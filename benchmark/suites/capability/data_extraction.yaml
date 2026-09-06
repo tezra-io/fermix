@@ -9,6 +9,10 @@ description: >
   UPLIFT (the inline version measured none). Each payload keeps its planted traps so
   frontier models diverge, and is graded by a checker over the answer the agent writes.
 
+  Gold answers are NOT written in this file: each checker recomputes them from the
+  seeded fixture, so editing the fixture changes the answer (and the task hash) and
+  nobody iterating the eval reads the answer off the task definition.
+
   PRECONDITION: shell/file tools enabled + a sandbox rooted at the workspace (the
   absolute {ws} resolves in any mode). Checkers grade the written answer.txt end-state.
 defaults:
@@ -28,9 +32,14 @@ scenarios:
           whose Category is "Groceries" — matching case- and whitespace-insensitively —
           what did I spend on groceries in total? Write ONLY the number (two decimals, no
           currency symbol) to {ws}/answer.txt.
-        # gold 1419.35. Traps: refund sign, quoted thousands-separator, a duplicate
-        # header row, "GROCERIES"/"groceries " case+space collisions, singular "Grocery"
-        # excluded, Dining/Transport excluded.
+        # Provenance: the payload lives ONLY in the seeded file, so a scored answer must
+        # come from a tool that actually read it (file_read, or shell). No tool span at
+        # all means the number was invented, whatever it says.
+        requires_tools: [file_read, shell]
+        # Traps: refund sign, quoted thousands-separator, a duplicate header row,
+        # "GROCERIES"/"groceries " case+space collisions, singular "Grocery" excluded,
+        # Dining/Transport excluded. The gold is COMPUTED from the seeded csv by the
+        # checker — never written here, where anyone iterating the eval would read it.
         checker:
           script: "suites/capability/checkers/expense_total.py"
           mode: json
@@ -45,8 +54,10 @@ scenarios:
           is the bare order number, total_charged is the final amount actually charged
           (a number, no symbol), item_count is the TOTAL number of physical items (sum of
           quantities), and delivery_date is YYYY-MM-DD.
-        # gold NW-48213|94.74|6|2026-03-03. Traps: total (94.74) not subtotal (80.50);
-        # item_count = 2+1+3 = 6 (sum of quantities) not 3 line items; date normalization.
+        requires_tools: [file_read, shell]
+        # Traps: the charged total (not the subtotal); item_count sums quantities, not
+        # line items; the delivery date needs normalizing. The gold is parsed from the
+        # seeded order.txt by the checker — never written here.
         checker:
           script: "suites/capability/checkers/order_extract.py"
           mode: json

@@ -78,4 +78,61 @@ defmodule FermixCore.Plugins.Dist.LockTest do
     assert Task.await(second) == :second_done
     refute File.exists?(lock)
   end
+
+  # A cancelled management job stops the run with an exit signal, which skips
+  # `after` entirely. The lockfile must still go, or one Cancel refuses every
+  # plugin operation until the stale threshold expires.
+  test "releases when the holder is stopped with an exit signal", %{lock: lock} do
+    holder = spawn_holder(lock)
+
+    Process.exit(holder, :shutdown)
+
+    assert_lock_released(lock)
+    assert :reacquired = Lock.with_lock(lock, fn -> :reacquired end, tight_budget())
+  end
+
+  test "releases when the holder is brutally killed", %{lock: lock} do
+    holder = spawn_holder(lock)
+
+    Process.exit(holder, :kill)
+
+    assert_lock_released(lock)
+    assert :reacquired = Lock.with_lock(lock, fn -> :reacquired end, tight_budget())
+  end
+
+  # Unlinked on purpose: the test process has to survive the signal it sends.
+  defp spawn_holder(lock) do
+    parent = self()
+
+    holder =
+      spawn(fn ->
+        Lock.with_lock(lock, fn ->
+          send(parent, :holding)
+          Process.sleep(:infinity)
+        end)
+      end)
+
+    assert_receive :holding, 1_000
+    assert File.exists?(lock)
+    holder
+  end
+
+  # Release runs in the owning process just after the holder dies, so the wait
+  # is bounded and reported rather than assumed.
+  defp assert_lock_released(lock, attempts \\ 200)
+
+  defp assert_lock_released(lock, 0), do: flunk("lock #{lock} was never released")
+
+  defp assert_lock_released(lock, attempts) do
+    if File.exists?(lock) do
+      Process.sleep(5)
+      assert_lock_released(lock, attempts - 1)
+    else
+      :ok
+    end
+  end
+
+  # Small enough that a still-held lock fails fast, and stale-breaking is off so
+  # a pass can only come from a real release.
+  defp tight_budget, do: [attempts: 2, delay_ms: 5, stale_after_ms: 600_000]
 end

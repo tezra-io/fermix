@@ -6,6 +6,7 @@ defmodule FermixCore.Trace.TelemetryHandler do
   - `[:fermix, :provider, :call]` → `:llm_call`
   - `[:fermix, :tool, :exec]` → `:tool_exec`
   - `[:fermix, :channel, :message]` → `:channel_msg`
+  - `[:fermix, :channel, :pair | :push]` → `:agent_event`
   - M2 lifecycle events → `:agent_event`
   """
 
@@ -13,6 +14,8 @@ defmodule FermixCore.Trace.TelemetryHandler do
   alias FermixCore.Capabilities.MCP.Telemetry, as: MCPClientTelemetry
   alias FermixCore.Harness.Telemetry, as: HarnessTelemetry
   alias FermixCore.Jobs.Telemetry, as: JobTelemetry
+  alias FermixCore.Management.Telemetry, as: ManagementTelemetry
+  alias FermixCore.Meetings.Telemetry, as: MeetingTelemetry
   alias FermixCore.SkillCuration.Telemetry, as: SkillCurationTelemetry
   alias FermixCore.SoulCuration.Telemetry, as: SoulTelemetry
   alias FermixCore.Temporal.FollowupTelemetry, as: TemporalFollowupTelemetry
@@ -42,6 +45,24 @@ defmodule FermixCore.Trace.TelemetryHandler do
       trace_event: "memory_review"
     },
     %{event: [:fermix, :channel, :message], trace_type: :channel_msg, agent_field: :agent},
+    %{
+      event: [:fermix, :channel, :pair],
+      trace_type: :agent_event,
+      agent_field: :channel,
+      trace_event: "channel_pair"
+    },
+    %{
+      event: [:fermix, :channel, :push],
+      trace_type: :agent_event,
+      agent_field: :channel,
+      trace_event: "channel_push"
+    },
+    %{
+      event: [:fermix, :channel, :transport],
+      trace_type: :agent_event,
+      agent_field: :channel,
+      trace_event: "channel_transport"
+    },
     %{
       event: [:fermix, :agent, :message],
       trace_type: :agent_event,
@@ -234,10 +255,12 @@ defmodule FermixCore.Trace.TelemetryHandler do
       @realtime_events ++
       LifecycleTelemetry.trace_event_definitions() ++
       JobTelemetry.trace_event_definitions() ++
+      MeetingTelemetry.trace_event_definitions() ++
       HarnessTelemetry.trace_event_definitions() ++
       SoulTelemetry.trace_event_definitions() ++
       SkillCurationTelemetry.trace_event_definitions() ++
       MCPClientTelemetry.trace_event_definitions() ++
+      ManagementTelemetry.trace_event_definitions() ++
       TemporalTelemetry.trace_event_definitions() ++
       TemporalFollowupTelemetry.trace_event_definitions()
   end

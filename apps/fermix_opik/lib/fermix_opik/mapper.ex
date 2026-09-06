@@ -293,6 +293,40 @@ defmodule FermixOpik.Mapper do
   end
 
   @doc """
+  Build a point span from a `[:fermix, :meeting, :phase]` event — one meeting
+  Session state transition, nested under the meeting run's own root trace.
+
+  The key list mirrors the emitter's allowlist exactly
+  (`FermixCore.Meetings.Telemetry`): `reason` is a typed end_reason/detail atom,
+  never free text, so a phase span carries no meeting content at all.
+  """
+  @spec meeting_phase_span(map(), map(), keyword()) :: map()
+  def meeting_phase_span(metadata, _measurements, opts) do
+    ended = Keyword.fetch!(opts, :ended)
+    started = start_of(ended, 0)
+
+    %{
+      id: new_id(started),
+      trace_id: Keyword.fetch!(opts, :trace_id),
+      parent_span_id: Keyword.get(opts, :parent_span_id),
+      project_name: Keyword.fetch!(opts, :project_name),
+      name: "meeting:#{stringify(Map.get(metadata, :to)) || "phase"}",
+      type: "general",
+      start_time: iso(started),
+      end_time: iso(ended),
+      metadata:
+        drop_nil(%{
+          meeting_id: Map.get(metadata, :meeting_id),
+          platform: stringify(Map.get(metadata, :platform)),
+          from: stringify(Map.get(metadata, :from)),
+          to: stringify(Map.get(metadata, :to)),
+          reason: stringify(Map.get(metadata, :reason))
+        })
+    }
+    |> drop_nil()
+  end
+
+  @doc """
   Build a point span from a `[:fermix, :timeout, :expired]` event — a failure
   deadline that fired. `error_info` flags it so the span surfaces as errored, not
   silently green; the timeout `name` rides in the event metadata (the event name
@@ -320,14 +354,29 @@ defmodule FermixOpik.Mapper do
     |> drop_nil()
   end
 
-  @doc "OpenAI-style integer usage map, or nil when no token counts are present."
+  @doc """
+  OpenAI-style integer usage map, or nil when no token counts are present.
+
+  The emitters' `:cached`/`:cache_write` counts export as `cached_input_tokens`
+  /`cache_creation_input_tokens`. They ride ALONGSIDE `prompt_tokens`, which
+  keeps its blended per-provider meaning — a reader subtracts to recover the
+  uncached remainder. A count the provider did not report is dropped, never
+  zeroed: Opik's own auto-cost ignores cache entirely, so this split is the only
+  record a cache-aware price can be computed from.
+  """
   @spec usage(map() | nil) :: map() | nil
   def usage(%{} = tokens) when map_size(tokens) > 0 do
     prompt = int(Map.get(tokens, :prompt) || Map.get(tokens, :prompt_tokens))
     completion = int(Map.get(tokens, :completion) || Map.get(tokens, :completion_tokens))
     total = int(Map.get(tokens, :total) || Map.get(tokens, :total_tokens)) || prompt + completion
 
-    drop_nil(%{prompt_tokens: prompt, completion_tokens: completion, total_tokens: total})
+    drop_nil(%{
+      prompt_tokens: prompt,
+      completion_tokens: completion,
+      total_tokens: total,
+      cached_input_tokens: int(Map.get(tokens, :cached)),
+      cache_creation_input_tokens: int(Map.get(tokens, :cache_write))
+    })
     |> case do
       empty when map_size(empty) == 0 -> nil
       usage -> usage
@@ -351,6 +400,12 @@ defmodule FermixOpik.Mapper do
   def provider_string(:openrouter), do: "openrouter"
   def provider_string(:ollama), do: "ollama"
   def provider_string(:mistral), do: "mistral"
+  # The transcription backends emit provider calls of their own (M21). Opik
+  # prices neither, but the clause + test is the same documented contract as
+  # above: `:local` in particular must read as the on-device backend rather than
+  # as an unnamed vendor.
+  def provider_string(:deepgram), do: "deepgram"
+  def provider_string(:local), do: "local"
   def provider_string(other), do: to_string(other)
 
   defp provider_span_name(metadata) do

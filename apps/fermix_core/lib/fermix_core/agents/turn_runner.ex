@@ -31,6 +31,9 @@ defmodule FermixCore.Agents.TurnRunner do
   alias FermixCore.Agents.IterationLimits
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Agents.RuntimeContext
+  alias FermixCore.ComputerHistory.Gate, as: ComputerHistoryGate
+  alias FermixCore.ComputerHistory.RecentActivity
+  alias FermixCore.ComputerHistory.Taint
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Memory.Compactor
   alias FermixCore.Memory.ConversationStore
@@ -109,15 +112,25 @@ defmodule FermixCore.Agents.TurnRunner do
   def commit(msg, turn_state, response, context_tokens) do
     conversation_key = ConversationKey.from(msg)
 
-    ConversationStore.add_message(
-      conversation_key,
-      "assistant",
-      response,
-      server: turn_state.conversation_store,
-      sender: "main",
-      agent_id: turn_state.memory_agent_id,
-      owner_id: turn_state.memory_owner_id
-    )
+    # Read the replayed conversation BEFORE persisting the reply: the stamp
+    # depends on what the model actually saw this turn (§13.6 transitivity).
+    # The re-read is deliberate — the per-turn `context` that knows what was
+    # injected never reaches `commit`, and threading a flag through the channels
+    # gateway was rejected (deviation 8). The conversation is single-flight, so
+    # what this reads is exactly what `run` replayed plus this turn's own
+    # (never-tainted) user message.
+    replayed =
+      ConversationStore.get_history(conversation_key, server: turn_state.conversation_store)
+
+    add_message_opts =
+      [
+        server: turn_state.conversation_store,
+        sender: "main",
+        agent_id: turn_state.memory_agent_id,
+        owner_id: turn_state.memory_owner_id
+      ] ++ history_taint_opt(msg, turn_state, replayed)
+
+    ConversationStore.add_message(conversation_key, "assistant", response, add_message_opts)
 
     maybe_start_memory_review(msg, turn_state)
 
@@ -134,6 +147,69 @@ defmodule FermixCore.Agents.TurnRunner do
     # reply path — mirrors clear_auto_compaction_failure.
     record_context_tokens_peak(turn_state, conversation_key, context_tokens)
     result
+  end
+
+  # Stamp the assistant turn history-tainted (MILESTONE_32 §13.6) on either of
+  # the two ways a reply becomes activity-derived:
+  #
+  #   * the Recent Activity section was Gate-permitted this turn (the section's
+  #     own predicate), or
+  #   * the replay carried an activity-derived message UNMASKED, so the model
+  #     could paraphrase it — the same transitivity the compactor applies to a
+  #     checkpoint summary distilled from a tainted turn. Without this, a
+  #     `/history off` turn on an all-local chain (which legitimately replays
+  #     tainted turns unmasked) persisted the paraphrase clean, and a later
+  #     ungranted-remote turn masked the original and sent the paraphrase.
+  #
+  # The decision reads the SAME frozen snapshot the section injection read
+  # (`turn_state.computer_history_gate`, built once by MainAgent), so a
+  # `/history off` or grant edit landing mid-turn can never make the stamp
+  # disagree with the section — the exact drift the live re-derivation had. The
+  # context re-derivation remains only for callers without a frozen snapshot.
+  defp history_taint_opt(msg, turn_state, replayed) do
+    gate_context = %{
+      source_trust: Map.get(msg, :source_trust),
+      ordered_routes: Map.get(turn_state, :ordered_routes),
+      computer_use_origin: computer_use_origin(msg),
+      harness_continuation_depth: harness_continuation_depth(msg)
+    }
+
+    opts = history_gate_opts(turn_state)
+    routes = Map.get(turn_state, :ordered_routes)
+
+    if Taint.tainted_turn?(gate_context, opts) or
+         Taint.carries_unmasked_taint?(replayed, routes, opts),
+       do: [metadata: Taint.metadata()],
+       else: []
+  end
+
+  # The turn's frozen Gate snapshot as taint opts, or `[]` for a caller that
+  # has none (the live derivation). Built once and shared by every taint
+  # decision in the turn — the replay mask, the compaction mask, and the commit
+  # stamp all read one grant set.
+  defp history_gate_opts(turn_state) do
+    case Map.get(turn_state, :computer_history_gate) do
+      nil -> []
+      snapshot -> [snapshot: snapshot]
+    end
+  end
+
+  @doc """
+  The turn's frozen Computer History gate snapshot (MILESTONE_32 — the Gate is
+  "snapshotted once per turn"). MainAgent builds it when it freezes
+  `turn_state`; every reader in the turn — the Recent Activity section,
+  `recall_activity`'s advertise/execute gates, and the commit-time taint stamp
+  — consumes this one snapshot, so a config flip landing mid-turn cannot make
+  any two of them disagree.
+  """
+  @spec computer_history_gate(map(), term()) :: ComputerHistoryGate.Snapshot.t()
+  def computer_history_gate(msg, ordered_routes) do
+    ComputerHistoryGate.snapshot(%{
+      source_trust: Map.get(msg, :source_trust),
+      ordered_routes: ordered_routes,
+      computer_use_origin: computer_use_origin(msg),
+      harness_continuation_depth: harness_continuation_depth(msg)
+    })
   end
 
   @doc "Map an agent-loop error reason to the user-facing reply text."
@@ -237,7 +313,14 @@ defmodule FermixCore.Agents.TurnRunner do
     maybe_notify_preflight_compacted(preflight_compaction, deliver)
     emit_history_telemetry(msg, conversation_key, history, history_duration_us)
 
-    messages = RuntimeContext.messages_for(ctx, profile, history, user_message)
+    # Strict Computer History taint (MILESTONE_32 §13.6): a prior activity-derived
+    # assistant turn is masked before it can ride this turn's route chain if any
+    # hop is an ungranted remote. On a permitted (all-local-or-granted) chain it
+    # passes through untouched.
+    masked_history =
+      Taint.mask_for_chain(history, Map.get(state, :ordered_routes), history_gate_opts(state))
+
+    messages = RuntimeContext.messages_for(ctx, profile, masked_history, user_message)
     accounting = RuntimeContext.accounting_for(ctx, profile)
     emit_prompt_context_telemetry(state.memory_agent_id, messages, accounting, cache_status)
 
@@ -251,6 +334,10 @@ defmodule FermixCore.Agents.TurnRunner do
       # turn — a subagent spawned after a mid-turn failover still starts at
       # the primary and runs its own bounded failover.
       ordered_routes: Map.get(state, :ordered_routes),
+      # The turn-frozen Computer History gate (see computer_history_gate/2):
+      # one snapshot serves the Recent Activity section, the recall_activity
+      # advertise/execute gates, and the commit-time taint stamp.
+      computer_history_gate: Map.get(state, :computer_history_gate),
       skill_registry: state.skill_registry,
       agent_supervisor: state.agent_supervisor,
       task_supervisor: state.task_supervisor,
@@ -328,6 +415,7 @@ defmodule FermixCore.Agents.TurnRunner do
     # date note's once-a-day churn the only churn in this prompt region.
     messages = inject_channel_presentation(messages, msg)
     messages = inject_current_date(messages)
+    messages = inject_recent_activity(messages, context)
 
     # `/ultra` is now a run-mode of the normal turn (not a separate
     # orchestrator): the tag unlocks the wider `subagents` caps via
@@ -400,6 +488,12 @@ defmodule FermixCore.Agents.TurnRunner do
   # Kept in the leading system run (the Anthropic adapter requires system
   # messages to lead) so the date sits with the rest of the system prompt.
   defp inject_current_date(messages), do: append_system_note(messages, CurrentDate.note())
+
+  # Per-turn Recent Activity section (MILESTONE_32 §11.1), gated by the single
+  # ComputerHistory.Gate — `note/1` returns nil (a no-op here) when the Gate
+  # denies it or there is no activity yet.
+  defp inject_recent_activity(messages, context),
+    do: append_system_note(messages, RecentActivity.note(context))
 
   # Per-channel presentation posture (CHANNEL_LONGFORM_PRESENTATION §7). A pure
   # function of the channel and chat type — both `ConversationKey`-stable — so
@@ -949,6 +1043,10 @@ defmodule FermixCore.Agents.TurnRunner do
   # loop's initial chat — no second retry loop. Compactor itself stays
   # single-route; the chain lives here.
   defp run_auto_compaction(conversation_key, history, {adapter, routes}, config, state) do
+    # Strict taint (MILESTONE_32 §13.6): mask any activity-derived assistant turn
+    # before it is summarized on an ungranted-remote compaction chain. Both the
+    # preflight and post-delivery compaction paths funnel through here.
+    history = Taint.mask_for_chain(history, routes, history_gate_opts(state))
     before_tokens = Compactor.estimate_tokens(history)
     attempt = compaction_attempt(history, adapter, config, conversation_key, state)
 

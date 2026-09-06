@@ -1,0 +1,11 @@
+{
+  "_synthesized": "synthesized from docs 2026-08-16 — revalidate against a live RTMS capture before release",
+  "media_server": {
+    "server_urls": {
+      "audio": "wss://rtms.example.zoom.us/media/audio"
+    }
+  },
+  "msg_type": "SIGNALING_HAND_SHAKE_RESP",
+  "protocol_version": 1,
+  "status_code": "STATUS_OK"
+}

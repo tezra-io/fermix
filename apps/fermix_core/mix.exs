@@ -4,17 +4,26 @@ defmodule FermixCore.MixProject do
   def project do
     [
       app: :fermix_core,
-      version: "0.9.0",
+      version: "0.10.0",
       build_path: "../../_build",
       config_path: "../../config/config.exs",
       deps_path: "../../deps",
       lockfile: "../../mix.lock",
       elixir: "~> 1.17",
+      elixirc_paths: elixirc_paths(Mix.env()),
       elixirc_options: [warnings_as_errors: true],
       start_permanent: Mix.env() == :prod,
       deps: deps()
     ]
   end
+
+  # This app is the single owner of the umbrella's shared `test/support`: the
+  # stubs land in `fermix_core`'s ebin, and `fermix_channels`/`fermix_web` reach
+  # them through their dependency on it. A sibling app repeating this path would
+  # compile the same modules a second time. `fermix_web` adds its own
+  # `test/support` for its app-local ConnCase, which is a different set.
+  defp elixirc_paths(:test), do: ["lib", Path.expand("../../test/support", __DIR__)]
+  defp elixirc_paths(_env), do: ["lib"]
 
   def application do
     [
@@ -30,7 +39,7 @@ defmodule FermixCore.MixProject do
       {:anubis_mcp, "~> 1.6"},
       {:floki, "~> 0.36"},
       {:jason, "~> 1.4"},
-      {:compux, github: "tezra-io/compux", ref: "9afd3f53d8c61d43c26c9d3f5ccbe367f9f559c7"},
+      {:compux, github: "tezra-io/compux", ref: "6b8d5b8d27b304dd67dba354c9464079ed0908a5"},
       # Native kill(2) process-group shim used by the command-sweep (ProcessGroup).
       {:fermix_nif, in_umbrella: true},
       {:plug, "~> 1.15", only: :test},
@@ -48,7 +57,10 @@ defmodule FermixCore.MixProject do
       # Compile-time-embedded IANA tz database (no runtime network fetch, unlike
       # :tzdata) so scheduled-job cron timezones resolve in the Burrito binary.
       {:tz, "~> 0.28"},
-      {:websockex, "~> 0.4"}
+      {:websockex, "~> 0.4"},
+      # Test-only: `Net.Tls` is proved against a live loopback TLS listener, and
+      # minting that listener's throwaway certificate needs a cert builder.
+      {:x509, "~> 0.9", only: :test}
     ] ++ opik_dep()
   end
 

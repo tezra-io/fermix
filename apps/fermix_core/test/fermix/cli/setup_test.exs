@@ -135,6 +135,43 @@ defmodule Fermix.CLI.SetupTest do
     assert Keyword.get(opts, :acp_enabled) == true
   end
 
+  # The mobile channel is feature-flagged with no setup surface: every mobile
+  # switch is unregistered, so each one has to be refused by the ordinary
+  # unknown-flag path rather than quietly parsed and dropped. Looping over the
+  # whole withdrawn set keeps a later re-addition from slipping past one case.
+  test "every withdrawn mobile switch is rejected like any unregistered flag" do
+    argv = [
+      ["--mobile-enabled"],
+      ["--no-mobile-enabled"],
+      ["--mobile-port", "4555"],
+      ["--mobile-push-enabled"],
+      ["--mobile-push-team-id", "ABCDE12345"],
+      ["--mobile-push-key-id", "KEY987"],
+      ["--mobile-push-key", "p8-fixture"],
+      ["--mobile-push-topic", "io.tezra.fermix.app"],
+      ["--mobile-push-environment", "development"]
+    ]
+
+    Enum.each(argv, fn args ->
+      parent = self()
+
+      stderr =
+        capture_io(:stderr, fn ->
+          assert 1 =
+                   Setup.run(args,
+                     standalone?: fn -> true end,
+                     display?: fn -> true end,
+                     runtime: unexpected_runtime(parent),
+                     web_launcher: unexpected_web_launcher(parent)
+                   )
+        end)
+
+      assert stderr =~ "invalid options", "expected #{inspect(args)} to be refused"
+      refute_received {:runtime, _opts}
+      refute_received {:web_launcher, _opts}
+    end)
+  end
+
   test "rejects an unregistered flag next to the acp switch" do
     stderr =
       capture_io(:stderr, fn ->

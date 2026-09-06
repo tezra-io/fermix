@@ -20,7 +20,7 @@ Elixir-native multi-agent AI platform that runs as a local daemon and reaches yo
 Fermix is a personal, self-hosted AI agent: it runs as a background service on your own machine and reaches you through the chat apps you already use. You bring your own model provider key — there is no Fermix cloud, and your config, history, and logs stay under `~/.fermix`.
 
 - **One runtime.** Everything is a single Elixir/OTP application in one BEAM VM — no HTTP bridges, no external worker pool, no message broker. Persistent agents, concurrent conversations, and in-process sub-agents all fall out of that design.
-- **Reaches you anywhere.** Telegram, WhatsApp, Slack, Discord, Signal, and a local CLI all terminate in the same agent loop.
+- **Reaches you anywhere.** Telegram, WhatsApp, Slack, Discord, Signal, and a local CLI all terminate in the same agent loop. The daemon side of a first-party iPhone companion — the `mobile` channel and its pairing ceremony — ships alongside them as groundwork: dormant behind a config flag, with no setup surface, until the app is released.
 - **Bring your own model.** Seven providers — OpenAI, OpenAI Codex, Anthropic, SpaceXAI, OpenRouter, Mistral, and a keyless local Ollama — chosen as one primary with an automatic fallback chain. Sub-agents and scheduled jobs can be pinned to their own cheaper model.
 - **Always on.** Scheduled jobs run digests, watchers, reminders, and checks — each isolated, bounded, stored durably, and delivered back through your channels. Work survives reboots.
 - **Self-contained.** Ships as one self-extracting binary per platform and installs an OS service unit on first run.
@@ -154,6 +154,7 @@ Set it from the web setup **Transcription** card, or with `fermix setup --transc
 | `SLACK_SIGNING_SECRET` | If Slack is enabled | Slack request signing secret |
 | `SIGNAL_ACCOUNT` | If Signal is enabled | Signal phone/account identifier |
 | `SIGNAL_CLI_PATH` | No | Override the `signal-cli` executable path |
+| `FERMIX_APNS_KEY` | If mobile push is enabled | APNs `.p8` signing key for direct push to the iPhone companion; resolved from the keychain first |
 | `FERMIX_HOME` | No | Override the persisted config and workspace root |
 | `FERMIX_TRACE_DIR` | No | Override the trace output directory |
 | `FERMIX_LOG_FILE` | No | Override the log file path |
@@ -220,6 +221,7 @@ All channels normalize inbound messages and dispatch them through the same `Ferm
 - **Slack** — Events API DM and `app_mention` ingress, Web API replies.
 - **Discord** — Gateway DM and app-mention ingress, REST replies.
 - **Signal** — `signal-cli` receive loop, subprocess send path.
+- **Mobile (iOS)** — daemon-side groundwork for a first-party iPhone companion: a dedicated Noise-encrypted listener on `:4031`, advertised over Bonjour and reachable on a tailnet. One socket per paired device carries streaming replies, tool activity, chunked media, slash commands, and cursor-exact history sync; devices are paired with `fermix pair` and revoked with `fermix devices revoke`. The companion app is not released yet — it ships in its own release, after the daemon that defines the wire — so there is nothing to pair with today. The channel therefore ships dormant behind a feature flag and is offered nowhere in setup: turning it on means hand-writing `enabled = true` under `[fermix_channels.mobile]` in `config.toml` and restarting the daemon. It gains a setup surface when the app ships.
 - **CLI** — local stdin/stdout smoke path through the same dispatcher and `MainAgent`.
 
 ### HTTP endpoints
@@ -234,7 +236,7 @@ All channels normalize inbound messages and dispatch them through the same `Ferm
 | `POST` | `/webhook/whatsapp` | WhatsApp webhook ingress |
 | `POST` | `/webhook/slack` | Slack Events API ingress |
 
-Telegram, Discord, and Signal use long-poll or persistent client transports and do not mount HTTP routes.
+Telegram, Discord, and Signal use long-poll or persistent client transports and do not mount HTTP routes. The mobile channel, when enabled, runs its own listener on `:4031` — separate from the web endpoint above — exposing only a WebSocket upgrade at `/ws` and an unauthenticated `GET /healthz` liveness probe, so putting the phone surface on the network never exposes `/setup`.
 
 ## CLI reference
 
@@ -251,6 +253,8 @@ Telegram, Discord, and Signal use long-poll or persistent client transports and 
 | `fermix status` | Print running daemon status via the control socket (exit `3` if not running) |
 | `fermix health` | Print structured daemon readiness and runtime health |
 | `fermix voice status [--json]` | Show local Realtime voice companion status |
+| `fermix pair` | Pair an iPhone companion device — renders a QR, then approves only if the six-digit code matches the one on the phone (needs the `mobile` flag on) |
+| `fermix devices list\|revoke ID` | List paired mobile devices, or revoke one and drop its live socket (needs the `mobile` flag on) |
 | `fermix ask` / `fermix chat` | Send one local prompt to the running daemon and print the MainAgent reply |
 | `fermix sandbox explain` | Show the effective sandbox roots, each annotated `(granted)` or `(mode)` |
 | `fermix grant path PATH` | Persist a sandbox root the agent may work in |
@@ -455,7 +459,7 @@ FERMIX_HOME=~/.fermix-dev ./script/build_and_run.sh
 
 ### Unit and integration tests
 
-`mix test` and `mix test --only integration` do **not** need a running `mix fermix.dev` — each test boots its own minimal supervision tree and uses a tmp-dir-scoped Memory database independent of `FERMIX_HOME`. Run `mix quality` before pushing; the pre-commit hook enforces the same gates.
+`mix test` and `mix test --only integration` do **not** need a running `mix fermix.dev` — each test boots its own minimal supervision tree and uses a tmp-dir-scoped Memory database independent of `FERMIX_HOME`. The suite never runs against your real `~/.fermix` either: with `FERMIX_HOME` unset, the test config points it at a fresh temporary home for that run, so boot reads no installed plugins, no `config.toml`, and no keychain sentinels of yours. Set `FERMIX_HOME` yourself to override it. Run `mix quality` before pushing; the pre-commit hook enforces the same gates.
 
 ### Latency benchmarks
 

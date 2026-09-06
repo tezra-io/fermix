@@ -200,6 +200,56 @@ defmodule FermixOpik.MapperTest do
     assert Mapper.usage(nil) == nil
   end
 
+  test "usage exports the cache split alongside the unchanged totals" do
+    # `prompt` keeps its blended meaning on every provider; the cache counts ride
+    # beside it so a cache-aware price can subtract the discounted remainder.
+    # Opik's own auto-cost ignores them, so this is the only record there is.
+    assert Mapper.usage(%{prompt: 143, completion: 2, total: 145, cached: 40, cache_write: 100}) ==
+             %{
+               prompt_tokens: 143,
+               completion_tokens: 2,
+               total_tokens: 145,
+               cached_input_tokens: 40,
+               cache_creation_input_tokens: 100
+             }
+  end
+
+  test "usage drops a cache key the provider did not report, and keeps a reported zero" do
+    assert Mapper.usage(%{prompt: 10, completion: 2, total: 12}) ==
+             %{prompt_tokens: 10, completion_tokens: 2, total_tokens: 12}
+
+    assert Mapper.usage(%{prompt: 10, completion: 2, total: 12, cached: 0}) ==
+             %{prompt_tokens: 10, completion_tokens: 2, total_tokens: 12, cached_input_tokens: 0}
+  end
+
+  test "llm_span keeps the realtime session's cached count instead of discarding it" do
+    # The shape `Realtime.SessionServer.tokens_from_usage/1` has always emitted.
+    # The allowlist here used to drop `:cached` silently, so every realtime span
+    # in the live instance carries only the three generic keys — and the split
+    # the session's own cost ceiling turns on was unrecoverable after the fact.
+    metadata = %{
+      provider: :openai,
+      model: "gpt-realtime",
+      status: :ok,
+      agent: "realtime",
+      tokens: %{prompt: 2_400, completion: 180, total: 2_580, cached: 2_100}
+    }
+
+    span =
+      Mapper.llm_span(metadata, %{duration_ms: 900},
+        trace_id: "trace-rt",
+        project_name: "fermix",
+        ended: @ended
+      )
+
+    assert span.usage == %{
+             prompt_tokens: 2_400,
+             completion_tokens: 180,
+             total_tokens: 2_580,
+             cached_input_tokens: 2_100
+           }
+  end
+
   test "provider_string maps every Fermix provider to an Opik pricing token" do
     assert Mapper.provider_string(:openai) == "openai"
     assert Mapper.provider_string(:openai_codex) == "openai"
@@ -208,7 +258,66 @@ defmodule FermixOpik.MapperTest do
     assert Mapper.provider_string(:openrouter) == "openrouter"
     assert Mapper.provider_string(:ollama) == "ollama"
     assert Mapper.provider_string(:mistral) == "mistral"
+    # The transcription backends (M21) name themselves too, so a streaming STT
+    # call is attributable to its backend in the export.
+    assert Mapper.provider_string(:deepgram) == "deepgram"
+    assert Mapper.provider_string(:local) == "local"
     assert Mapper.provider_string(nil) == nil
+  end
+
+  test "meeting_phase_span builds a general transition point span" do
+    span =
+      Mapper.meeting_phase_span(
+        %{
+          meeting_id: "mtg_ab12cd",
+          platform: :meet,
+          from: :capturing,
+          to: :summarizing,
+          reason: :meeting_ended
+        },
+        %{count: 1},
+        trace_id: "trace-1",
+        parent_span_id: "wrap-1",
+        project_name: "fermix",
+        ended: @ended
+      )
+
+    assert span.name == "meeting:summarizing"
+    assert span.type == "general"
+    assert span.trace_id == "trace-1"
+    assert span.parent_span_id == "wrap-1"
+    assert span.start_time == "2026-06-02T12:00:03.200Z"
+
+    assert span.metadata == %{
+             meeting_id: "mtg_ab12cd",
+             platform: "meet",
+             from: "capturing",
+             to: "summarizing",
+             reason: "meeting_ended"
+           }
+  end
+
+  # A meeting URL can embed a passcode and a transcript line is meeting content:
+  # the phase span names neither, and the builder is the last gate before export.
+  test "meeting_phase_span exports no meeting content" do
+    span =
+      Mapper.meeting_phase_span(
+        %{
+          to: :capturing,
+          url: "https://us02web.zoom.us/j/8412345678?pwd=secretpass",
+          title: "Board sync",
+          transcript: "we should acquire them"
+        },
+        %{},
+        trace_id: "t",
+        project_name: "fermix",
+        ended: @ended
+      )
+
+    assert span.metadata == %{to: "capturing"}
+    refute String.contains?(inspect(span), "secretpass")
+    refute String.contains?(inspect(span), "Board sync")
+    refute String.contains?(inspect(span), "acquire them")
   end
 
   test "realtime_span builds a general lifecycle point span" do

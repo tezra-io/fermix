@@ -21,6 +21,16 @@ defmodule FermixCore.Capabilities.MCP.Remote.Session do
 
   MCP `2025-06-18` is pinned. A server that negotiates any other version is
   refused rather than silently driven with different semantics.
+
+  ## Server-initiated notifications
+
+  This rail opens no GET stream, so the SSE stream answering a POST is the only
+  place a server-initiated message can reach it. Every event in such a response
+  is decoded once: the message matching the request id becomes the result, and a
+  `notifications/tools/list_changed` in the same stream is forwarded to `notify`
+  as `{:mcp_session, :tools_changed}` before the rest is discarded. Without that
+  forward the §7.6 drift machinery is unreachable from the wire — the
+  notification was silently dropped alongside every other non-matching message.
   """
 
   use GenServer
@@ -41,6 +51,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.Session do
           | {:resolver, (String.t() -> String.t() | nil)}
           | {:connect_opts, keyword()}
           | {:transport, module()}
+          | {:notify, pid() | nil}
 
   @doc "The MCP protocol version this rail pins."
   @spec protocol_version() :: String.t()
@@ -105,6 +116,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.Session do
         credential: credential,
         connection: connection,
         client_info: Keyword.get(opts, :client_info, default_client_info()),
+        notify: Keyword.get(opts, :notify),
         session_id: nil,
         next_id: 1
       }
@@ -342,7 +354,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.Session do
 
   defp classify(state, %{status: status, body: body, headers: headers}, id)
        when status in 200..299 do
-    case decode_result(body, id) do
+    case decode_result(state, body, id) do
       {:ok, result} -> {:ok, state, result, headers}
       {:error, reason} -> {:error, state, reason}
     end
@@ -437,9 +449,18 @@ defmodule FermixCore.Capabilities.MCP.Remote.Session do
 
   defp bound_retry_after(_ms), do: :error
 
-  defp decode_result({:json, raw}, id), do: raw |> decode_message() |> extract(id)
-  defp decode_result({:sse, events}, id), do: events |> sse_message(id) |> extract(id)
-  defp decode_result({:empty, _raw}, _id), do: {:error, {:invalid_remote_result, :empty_body}}
+  defp decode_result(_state, {:json, raw}, id), do: raw |> decode_message() |> extract(id)
+
+  # One decode pass over the stream serves both readers: the result the caller
+  # asked for, and any server-initiated notification riding the same response.
+  defp decode_result(state, {:sse, events}, id) do
+    messages = Enum.map(events, &decode_message(&1.data))
+    forward_tools_changed(state, messages)
+    messages |> sse_message(id) |> extract(id)
+  end
+
+  defp decode_result(_state, {:empty, _raw}, _id),
+    do: {:error, {:invalid_remote_result, :empty_body}}
 
   defp decode_message(raw) do
     Json.decode(raw,
@@ -448,10 +469,25 @@ defmodule FermixCore.Capabilities.MCP.Remote.Session do
     )
   end
 
-  defp sse_message(events, id) do
-    events
-    |> Enum.map(& &1.data)
-    |> Enum.map(&decode_message/1)
+  # A session nobody is watching has nobody to tell. The owner always supplies
+  # itself; a bare session (probe, unit test) legitimately does not.
+  defp forward_tools_changed(%{notify: nil}, _messages), do: :ok
+
+  defp forward_tools_changed(%{notify: notify}, messages) when is_pid(notify) do
+    messages
+    |> Enum.filter(&tools_changed?/1)
+    |> Enum.each(fn _notification -> send(notify, {:mcp_session, :tools_changed}) end)
+  end
+
+  # A JSON-RPC notification carries a method and NO id — the id is what makes a
+  # message a request or a response. Every other notification stays ignored.
+  defp tools_changed?({:ok, %{"method" => "notifications/tools/list_changed"} = message}),
+    do: not Map.has_key?(message, "id")
+
+  defp tools_changed?(_message), do: false
+
+  defp sse_message(messages, id) do
+    messages
     |> Enum.find(:error, &matches_id?(&1, id))
     |> case do
       :error -> {:error, {:invalid_remote_result, :no_matching_message}}

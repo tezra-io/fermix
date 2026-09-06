@@ -1,27 +1,33 @@
 defmodule FermixChannels.Gateway.ApprovalButton do
   @moduledoc """
-  Shared one-tap approval-button plumbing for channel adapters
+  Shared approval-button plumbing for channel adapters
   (SANDBOX_ACCESS_APPROVAL_FLOW).
 
-  A channel that renders an "Approve" affordance carries the single-use sandbox
-  confirmation token in the button payload, namespaced with `grant:` so a future
-  non-grant button can never be mistaken for a confirmation. Telegram
-  (`callback_data`) and Discord (component `custom_id`) both build the payload
-  with `payload/1`, strip it back to the bare token with `parse_payload/1`, and
-  synthesize the inbound `/confirm` message with `confirm_message/1`.
+  Approve and deny affordances carry a single-use token in distinct `grant:` and
+  `deny:` namespaces. Telegram (`callback_data`) and Discord (component
+  `custom_id`) parse the action and synthesize the same `/confirm` or `/deny`
+  command an owner could type.
 
-  This module ONLY builds the message that funnels a tap into the confirm path;
-  the confirm itself stays solely in the unchanged `Commands.Sandbox` (peek →
-  validate → take, operator-only, same-origin, auto-resume).
+  This module only builds the message. Token validation and consumption stay in
+  `Commands.Sandbox` (peek → validate → take, operator-only, same-origin).
   """
 
   alias FermixChannels.Gateway.Message
 
-  @prefix "grant:"
+  @approve_prefix "grant:"
+  @deny_prefix "deny:"
 
   @doc "Namespaced button payload for a confirmation token."
   @spec payload(String.t()) :: String.t()
-  def payload(token) when is_binary(token) and token != "", do: @prefix <> token
+  def payload(token) when is_binary(token) and token != "", do: approve_payload(token)
+
+  @doc "Namespaced Approve-button payload."
+  @spec approve_payload(String.t()) :: String.t()
+  def approve_payload(token) when is_binary(token) and token != "", do: @approve_prefix <> token
+
+  @doc "Namespaced Deny-button payload."
+  @spec deny_payload(String.t()) :: String.t()
+  def deny_payload(token) when is_binary(token) and token != "", do: @deny_prefix <> token
 
   @doc """
   Strip the `grant:` namespace back to the bare token. A payload without the
@@ -29,8 +35,14 @@ defmodule FermixChannels.Gateway.ApprovalButton do
   confirmation tap and must never be treated as one.
   """
   @spec parse_payload(term()) :: {:ok, String.t()} | :ignore
-  def parse_payload(@prefix <> token) when token != "", do: {:ok, token}
+  def parse_payload(@approve_prefix <> token) when token != "", do: {:ok, token}
   def parse_payload(_other), do: :ignore
+
+  @doc "Parse an Approve or Deny payload without treating unknown namespaces as actions."
+  @spec parse_action(term()) :: {:ok, :approve | :deny, String.t()} | :ignore
+  def parse_action(@approve_prefix <> token) when token != "", do: {:ok, :approve, token}
+  def parse_action(@deny_prefix <> token) when token != "", do: {:ok, :deny, token}
+  def parse_action(_other), do: :ignore
 
   @doc """
   Build the synthesized `/confirm <token>` inbound message a tap stands in for.
@@ -58,10 +70,45 @@ defmodule FermixChannels.Gateway.ApprovalButton do
         token: token
       })
       when is_binary(id) and is_binary(sender) and is_binary(channel) and is_binary(chat_id) and
-             is_binary(token) do
+             is_binary(token),
+      do:
+        action_message(%{
+          id: id,
+          sender: sender,
+          channel: channel,
+          chat_id: chat_id,
+          thread_ts: thread_ts,
+          user_id: user_id,
+          action: :approve,
+          token: token
+        })
+
+  @doc "Build the synthesized command message for an approval action."
+  @spec action_message(%{
+          required(:id) => String.t(),
+          required(:sender) => String.t(),
+          required(:channel) => String.t(),
+          required(:chat_id) => String.t(),
+          required(:thread_ts) => term(),
+          required(:user_id) => term(),
+          required(:action) => :approve | :deny,
+          required(:token) => String.t()
+        }) :: Message.t()
+  def action_message(%{
+        id: id,
+        sender: sender,
+        channel: channel,
+        chat_id: chat_id,
+        thread_ts: thread_ts,
+        user_id: user_id,
+        action: action,
+        token: token
+      })
+      when is_binary(id) and is_binary(sender) and is_binary(channel) and is_binary(chat_id) and
+             action in [:approve, :deny] and is_binary(token) and token != "" do
     Message.new!(%{
       id: id,
-      content: "/confirm #{token}",
+      content: "/#{action_command(action)} #{token}",
       sender: sender,
       channel: channel,
       chat_id: chat_id,
@@ -70,4 +117,7 @@ defmodule FermixChannels.Gateway.ApprovalButton do
       metadata: %{user_id: to_string(user_id)}
     })
   end
+
+  defp action_command(:approve), do: "confirm"
+  defp action_command(:deny), do: "deny"
 end

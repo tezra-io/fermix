@@ -13,6 +13,8 @@ defmodule FermixCore.SkillCuration.Miner do
   records `run_error`.
   """
 
+  alias FermixCore.ComputerHistory.Gate
+  alias FermixCore.ComputerHistory.Taint
   alias FermixCore.Providers.Adapter
   alias FermixCore.Providers.Failover
   alias FermixCore.Providers.Selection
@@ -39,7 +41,8 @@ defmodule FermixCore.SkillCuration.Miner do
           candidates: [candidate()],
           dropped_disposition: non_neg_integer(),
           dropped_grounding: non_neg_integer(),
-          dropped_invalid_name: non_neg_integer()
+          dropped_invalid_name: non_neg_integer(),
+          dropped_history_tainted: non_neg_integer()
         }
 
   @doc """
@@ -54,11 +57,30 @@ defmodule FermixCore.SkillCuration.Miner do
   @spec mine(map(), keyword()) ::
           {:ok, mine_result()} | {:error, {:parse | :provider, term()}}
   def mine(inputs, opts \\ []) when is_map(inputs) and is_list(opts) do
-    ctx = build_ctx(inputs, opts)
-    messages = base_messages(inputs)
+    with {:ok, ctx} <- build_ctx(inputs, opts) do
+      {inputs, dropped} = drop_ungated_taint(inputs, ctx.chain)
+      messages = base_messages(inputs)
 
-    with {:ok, decoded} <- call_and_parse(ctx, messages) do
-      {:ok, validate(decoded, inputs)}
+      with {:ok, decoded} <- call_and_parse(ctx, messages) do
+        {:ok, Map.put(validate(decoded, inputs), :dropped_history_tainted, dropped)}
+      end
+    end
+  end
+
+  # MILESTONE_32 §13.6 / inv. 20: curation re-sends conversation content
+  # (checkpoint summaries), so an activity-derived entry must never ride a chain
+  # that is not permitted to carry history — after `/history off` just the same,
+  # because the taint is a property of the entry's origin. The entry is DROPPED,
+  # not masked: placeholder text is useless mining input, and the count is the
+  # honest signal. Dropping before both `base_messages/1` and `validate/2` also
+  # means a candidate citing its `m#` can no longer ground.
+  defp drop_ungated_taint(inputs, chain) do
+    {tainted, kept} = Enum.split_with(inputs.history.entries, &Taint.tainted?/1)
+
+    if tainted == [] or Gate.chain_permits_history?(chain) do
+      {inputs, 0}
+    else
+      {put_in(inputs.history.entries, kept), length(tainted)}
     end
   end
 
@@ -80,12 +102,33 @@ defmodule FermixCore.SkillCuration.Miner do
       |> Keyword.put(:session_id, Map.fetch!(inputs, :session_id))
       |> Keyword.put_new(:temperature, @temperature)
 
-    %{
+    ctx = %{
       adapter: Keyword.get(opts, :adapter),
       route_key: Keyword.get(opts, :route_key),
       routes: Keyword.get(opts, :routes),
       adapter_opts: adapter_opts
     }
+
+    with {:ok, chain} <- resolve_chain(ctx) do
+      {:ok, Map.put(ctx, :chain, chain)}
+    end
+  end
+
+  # The provider chain this mine runs on, resolved ONCE — the taint gate and the
+  # call must read the same world, and the corrective re-prompt must not resolve
+  # a second, possibly different one. The clause order mirrors `provider_turn/2`'s
+  # dispatch exactly: a pre-bound `:adapter` (the test seam) short-circuits
+  # routing entirely, so it has NO chain — and a nil chain fails closed at the
+  # gate, exactly as `Taint.mask_for_chain/2` treats one.
+  defp resolve_chain(%{adapter: adapter}) when not is_nil(adapter), do: {:ok, nil}
+  defp resolve_chain(%{route_key: route_key}) when not is_nil(route_key), do: {:ok, [route_key]}
+  defp resolve_chain(%{routes: [_ | _] = routes}), do: {:ok, routes}
+
+  defp resolve_chain(_ctx) do
+    case Selection.ordered_routes() do
+      {:ok, routes} -> {:ok, routes}
+      {:error, reason} -> {:error, {:provider, {:route_resolution_failed, reason}}}
+    end
   end
 
   # One call; a malformed reply earns exactly one corrective re-prompt before
@@ -125,15 +168,10 @@ defmodule FermixCore.SkillCuration.Miner do
     provider_turn(%{ctx | adapter: Adapter.for_route(route_key)}, messages)
   end
 
-  defp provider_turn(%{routes: [_ | _] = routes} = ctx, messages) do
-    run_route_chain(routes, ctx, messages)
-  end
-
-  defp provider_turn(ctx, messages) do
-    case Selection.ordered_routes() do
-      {:ok, routes} -> run_route_chain(routes, ctx, messages)
-      {:error, reason} -> {:error, {:provider, {:route_resolution_failed, reason}}}
-    end
+  # The chain `build_ctx/2` already resolved — never re-resolved here, so the
+  # corrective re-prompt runs on the same routes the gate inspected.
+  defp provider_turn(%{chain: chain} = ctx, messages) when is_list(chain) do
+    run_route_chain(chain, ctx, messages)
   end
 
   defp run_route_chain(routes, ctx, messages) do

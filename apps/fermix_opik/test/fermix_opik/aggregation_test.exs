@@ -225,6 +225,32 @@ defmodule FermixOpik.AggregationTest do
     assert llm.usage == %{prompt_tokens: 40, completion_tokens: 8, total_tokens: 48}
   end
 
+  test "a mobile turn and its generic stream keep the standard main run attribution" do
+    {_state, closed} =
+      run([
+        {[:fermix, :channel, :stream], %{ttfd_ms: 35},
+         %{channel: :mobile, session_id: "main-19", phase: :open, status: :ok}},
+        {[:fermix, :provider, :call], %{duration_ms: 250},
+         %{provider: :openai, model: "gpt-5", status: :ok, session_id: "main-19"}},
+        {[:fermix, :agent, :message], %{iterations: 1, total_tokens: 12},
+         %{
+           channel: :mobile,
+           chat_id: "main",
+           sender: "device",
+           session_id: "main-19",
+           agent: "main"
+         }}
+      ])
+
+    assert [%{trace: trace, spans: spans}] = closed
+    assert trace.name == "agent:main"
+    assert trace.thread_id == "mobile:main"
+    assert trace.metadata.channel == "mobile"
+
+    stream = span_named(spans, "stream:open")
+    assert stream.metadata.channel == :mobile
+  end
+
   # The M29/Buzz duplicate-reply incident: the one trace worth reading — the
   # failed turn — carried no input, no status and nothing filterable, so a reader
   # could only find it by eyeballing output text.
@@ -641,6 +667,30 @@ defmodule FermixOpik.AggregationTest do
     assert trace.output.value.added == 1
     assert [_llm] = spans_of_type(spans, "llm")
     assert [_write] = spans_of_type(spans, "tool")
+  end
+
+  test "a computer-history summarize cycle is its own kind, not a subagent" do
+    # The summarizer (§22.4) is a headless single provider call with no bookend
+    # events — its llm span creates the session, so the kind rides the id prefix.
+    # The trace closes by TTL sweep in production; assert on the open state.
+    {state, closed} =
+      run([
+        {[:fermix, :provider, :call], %{duration_ms: 900},
+         %{
+           provider: :openai,
+           model: "gpt-5.5",
+           status: :ok,
+           agent: "computer_history_summarizer",
+           session_id: "computer_history_summarize:1755900000000",
+           tokens: %{prompt: 400, completion: 60}
+         }}
+      ])
+
+    assert closed == []
+    assert [{_id, trace}] = Map.to_list(state.traces)
+    assert trace.tags == ["computer_history_summary"]
+    # The agent name already says "computer history" — no kind prefix on top.
+    assert trace.name == "computer_history_summarizer"
   end
 
   test "a soul-curation draft's synthetic command parent keeps it a standalone root" do
@@ -1462,6 +1512,209 @@ defmodule FermixOpik.AggregationTest do
       assert trace.metadata.outcome == "empty"
       assert [llm] = spans_of_type(spans, "llm")
       assert llm.parent_span_id == span_named(spans, "followup:evt_1").id
+    end
+  end
+
+  # Meeting runs ([:fermix, :meeting, :run_start | :run_complete | :run_error |
+  # :phase], M21 §11.1). A meeting outlives the turn that asked for it by an
+  # hour, so it is a root run of its own — the follow-up/harness shape — with the
+  # phase transitions as point spans inside it.
+  @meeting_start [:fermix, :meeting, :run_start]
+  @meeting_complete [:fermix, :meeting, :run_complete]
+  @meeting_error [:fermix, :meeting, :run_error]
+  @meeting_phase [:fermix, :meeting, :phase]
+  @meeting_session "meeting_mtg_ab12cd_20260602_120000"
+
+  # The emitter's own metadata shape (FermixCore.Meetings.Telemetry). `fermix_opik`
+  # declares no dependency on `fermix_core`, so this mirrors it by hand, exactly
+  # like `reminder_meta/2` and `followup_meta/1` above.
+  defp meeting_meta(extra \\ %{}) do
+    Map.merge(
+      %{
+        agent: "meeting:mtg_ab12cd",
+        meeting_id: "mtg_ab12cd",
+        platform: "meet",
+        session_id: @meeting_session,
+        origin: "channel"
+      },
+      extra
+    )
+  end
+
+  describe "meeting runs" do
+    test "the reporter subscribes to all four events" do
+      for event <- [@meeting_start, @meeting_complete, @meeting_error, @meeting_phase] do
+        assert event in FermixOpik.Reporter.events(),
+               "#{inspect(event)} is not subscribed, so the run is invisible to Opik"
+      end
+    end
+
+    test "a meeting is its own root trace nesting its phase, provider and tool spans" do
+      {_state, closed} =
+        run([
+          {@meeting_start, %{}, meeting_meta()},
+          {@meeting_phase, %{count: 1}, meeting_meta(%{from: :admitted, to: :capturing})},
+          {[:fermix, :provider, :call], %{duration_ms: 900},
+           %{
+             provider: :deepgram,
+             model: "nova-3",
+             status: :ok,
+             session_id: @meeting_session,
+             tokens: %{}
+           }},
+          {[:fermix, :tool, :exec], %{duration_ms: 20},
+           %{tool: "send_message", success: true, session_id: @meeting_session}},
+          {@meeting_complete,
+           %{duration_ms: 3_600_000, segments: 412, words: 8_900, participants_peak: 5},
+           meeting_meta(%{status: "delivered"})}
+        ])
+
+      assert [%{trace: trace, spans: spans}] = closed
+      assert trace.name == "meeting:mtg_ab12cd"
+      assert trace.tags == ["meeting"]
+      assert trace.metadata.meeting_id == "mtg_ab12cd"
+      assert trace.metadata.platform == "meet"
+      assert trace.metadata.origin == "channel"
+      assert trace.metadata.status == "delivered"
+      assert trace.metadata.segments == 412
+      assert trace.metadata.words == 8_900
+      assert trace.metadata.participants_peak == 5
+
+      # The meetings family never carries a delivery destination on the run, so
+      # the meeting is an unthreaded root found by its meeting/session ids.
+      refute Map.has_key?(trace, :thread_id)
+
+      wrapper = span_named(spans, "meeting:mtg_ab12cd")
+      refute Map.has_key?(wrapper, :parent_span_id)
+
+      phase = span_named(spans, "meeting:capturing")
+      assert phase.parent_span_id == wrapper.id
+      assert phase.metadata.from == "admitted"
+
+      assert [llm] = spans_of_type(spans, "llm")
+      assert [tool] = spans_of_type(spans, "tool")
+      assert llm.parent_span_id == wrapper.id
+      assert tool.parent_span_id == wrapper.id
+      assert llm.trace_id == trace.id
+      assert tool.trace_id == trace.id
+    end
+
+    # The turn that asked for the meeting closes within seconds while the meeting
+    # runs for an hour, so nesting under it would ship the trace early and leave
+    # every later span to the tombstone (the harness root reason). The opener
+    # hard-codes nil, which this pins by naming a LIVE parent and proving it is
+    # kept as correlation metadata only.
+    test "the run stays a root even when the originating turn is still open" do
+      {_state, closed} =
+        run([
+          {[:fermix, :provider, :call], %{duration_ms: 100},
+           %{provider: :openai, model: "gpt-5", status: :ok, session_id: "main-1"}},
+          {@meeting_start, %{}, meeting_meta(%{parent_session: "main-1"})},
+          {[:fermix, :agent, :message], %{iterations: 1},
+           %{channel: :telegram, chat_id: "c1", session_id: "main-1", agent: "main"}},
+          {@meeting_complete, %{duration_ms: 60_000, segments: 3},
+           meeting_meta(%{parent_session: "main-1", status: "delivered"})}
+        ])
+
+      names = closed |> Enum.map(& &1.trace.name) |> Enum.sort()
+      assert names == ["agent:main", "meeting:mtg_ab12cd"]
+      assert closed |> Enum.map(& &1.trace.id) |> Enum.uniq() |> length() == 2
+
+      meeting = Enum.find(closed, &(&1.trace.name == "meeting:mtg_ab12cd"))
+      assert meeting.trace.metadata.parent_session == "main-1"
+      refute Map.has_key?(span_named(meeting.spans, "meeting:mtg_ab12cd"), :parent_span_id)
+
+      turn = Enum.find(closed, &(&1.trace.name == "agent:main"))
+      refute span_named(turn.spans, "meeting:mtg_ab12cd")
+    end
+
+    # The terminal state word IS the diagnosis (which wall the meeting hit), so
+    # the closer must not flatten it to a generic "error".
+    test "a failed run keeps its terminal state word and exports as errored" do
+      {_state, closed} =
+        run([
+          {@meeting_start, %{}, meeting_meta()},
+          {@meeting_error, %{count: 1, duration_ms: 4_000},
+           meeting_meta(%{status: "failed", error: "join_denied"})}
+        ])
+
+      assert [%{trace: trace}] = closed
+      assert trace.metadata.status == "failed"
+      assert trace.output == %{text: "join_denied"}
+      assert trace.error_info == %{exception_type: "MeetingError", message: "join_denied"}
+    end
+
+    # A run whose first exported event is a phase transition — the opener lost the
+    # race, or was never delivered — must still classify from its session prefix
+    # rather than falling through to :subagent.
+    test "a phase span arriving before the opener classifies the lazily created run" do
+      {_state, closed} =
+        run([
+          {@meeting_phase, %{count: 1}, meeting_meta(%{from: :joining, to: :admitted})},
+          {@meeting_complete, %{duration_ms: 1_000, segments: 1},
+           meeting_meta(%{status: "delivered"})}
+        ])
+
+      assert [%{trace: trace, spans: spans}] = closed
+      assert trace.tags == ["meeting"], "the run fell through to the :subagent fallback"
+      assert trace.name == "meeting:mtg_ab12cd"
+
+      assert span_named(spans, "meeting:admitted").parent_span_id ==
+               span_named(spans, "meeting:mtg_ab12cd").id
+    end
+
+    # The URL can embed a passcode and the title is meeting content, so both are
+    # gated at the emitter: this module exports exactly what it was handed.
+    test "the URL and title export only when the emitter passed them" do
+      {_state, bare} =
+        run([
+          {@meeting_start, %{}, meeting_meta()},
+          {@meeting_phase, %{count: 1},
+           meeting_meta(%{from: :capturing, to: :summarizing, reason: :meeting_ended})},
+          {@meeting_complete, %{duration_ms: 10}, meeting_meta(%{status: "delivered"})}
+        ])
+
+      assert [%{trace: trace, spans: spans}] = bare
+      refute Map.has_key?(span_named(spans, "meeting:mtg_ab12cd"), :input)
+      refute Map.has_key?(trace.metadata, :title)
+      assert span_named(spans, "meeting:summarizing").metadata.reason == "meeting_ended"
+
+      {_state, captured} =
+        run([
+          {@meeting_start, %{},
+           meeting_meta(%{url: "https://meet.google.com/abc-defg-hij", title: "Board sync"})},
+          {@meeting_complete, %{duration_ms: 10}, meeting_meta(%{status: "delivered"})}
+        ])
+
+      assert [%{trace: trace, spans: spans}] = captured
+      # The URL rides the run wrapper's input, the job/harness precedent.
+      assert span_named(spans, "meeting:mtg_ab12cd").input ==
+               %{text: "https://meet.google.com/abc-defg-hij"}
+
+      assert trace.metadata.title == "Board sync"
+    end
+
+    # A quiet meeting emits nothing between phase transitions and would be
+    # force-closed by the idle TTL mid-call, minting a second root when its
+    # closer finally arrives (the follow-up precedent).
+    test "a meeting is swept by its max duration, not the idle TTL" do
+      agg = Aggregation.new(project: "fermix", ttl_ms: 1)
+
+      {agg, []} =
+        Aggregation.apply_event(
+          agg,
+          @meeting_start,
+          %{},
+          meeting_meta(%{max_duration_ms: 1_000}),
+          %{at: ~U[2026-06-02 12:00:00.000Z], mono: 0}
+        )
+
+      # mono is microseconds; floor = (1_000 + 60_000) * 1_000 = 61_000_000us.
+      {agg, []} = Aggregation.sweep(agg, 500_000)
+
+      {_agg, closed} = Aggregation.sweep(agg, 61_000_001)
+      assert [%{trace: trace}] = closed
+      assert trace.name == "meeting:mtg_ab12cd"
     end
   end
 end

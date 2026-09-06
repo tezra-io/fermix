@@ -11,6 +11,8 @@ defmodule FermixChannels.Gateway.Commands.Soul do
 
   @behaviour FermixChannels.Gateway.Command
 
+  require Logger
+
   alias FermixChannels.Gateway.Commands.Authorization
   alias FermixChannels.Gateway.Commands.Soul.Confirmations
   alias FermixCore.Agents.MainAgent
@@ -80,6 +82,9 @@ defmodule FermixChannels.Gateway.Commands.Soul do
 
   defp dispatch(["apply", token], message, reply_fn, context),
     do: apply_token(token, message, reply_fn, context)
+
+  defp dispatch(["deny", token], message, reply_fn, context),
+    do: deny_token(token, message, reply_fn, context)
 
   defp dispatch(_args, _message, reply_fn, _context), do: reply(reply_fn, usage_text())
 
@@ -166,7 +171,14 @@ defmodule FermixChannels.Gateway.Commands.Soul do
 
   defp present_proposal(proposal, message, reply_fn) do
     token = store_pending(%{kind: :proposal, proposal: proposal}, message)
-    reply(reply_fn, proposal_text(proposal, token))
+
+    reply_approval(reply_fn, %{
+      kind: :soul,
+      text: proposal_text(proposal, token),
+      detail: proposal.diff,
+      token: token,
+      ttl_s: div(@ttl_ms, 1_000)
+    })
   end
 
   defp show_diff(token, message, reply_fn, _context) do
@@ -187,10 +199,16 @@ defmodule FermixChannels.Gateway.Commands.Soul do
       {:ok, number} ->
         token = store_pending(%{kind: :revert, revision: number}, message)
 
-        reply(
+        reply_approval(
           reply_fn,
-          "Confirm reverting SOUL.md to revision #{number}. Tap the command below to copy it, " <>
-            "then send:\n" <> apply_command(token)
+          %{
+            kind: :soul,
+            text:
+              "Confirm reverting SOUL.md to revision #{number}. Tap the command below to copy it, " <>
+                "then send:\n" <> apply_command(token),
+            token: token,
+            ttl_s: div(@ttl_ms, 1_000)
+          }
         )
 
       :error ->
@@ -201,17 +219,38 @@ defmodule FermixChannels.Gateway.Commands.Soul do
   defp propose_reset(message, reply_fn) do
     token = store_pending(%{kind: :reset}, message)
 
-    reply(
+    reply_approval(
       reply_fn,
-      "Confirm resetting SOUL.md to the shipped default (itself versioned and revertable). " <>
-        "Tap the command below to copy it, then send:\n" <> apply_command(token)
+      %{
+        kind: :soul,
+        text:
+          "Confirm resetting SOUL.md to the shipped default (itself versioned and revertable). " <>
+            "Tap the command below to copy it, then send:\n" <> apply_command(token),
+        token: token,
+        ttl_s: div(@ttl_ms, 1_000)
+      }
     )
   end
 
   defp apply_token(token, message, reply_fn, context) do
     case take_pending(token, message) do
-      {:ok, record} -> run_pending(record, reply_fn, context)
-      {:error, reason} -> reply(reply_fn, "Confirmation failed: #{format_error(reason)}")
+      {:ok, record} ->
+        :ok = notify_approval(context, :soul, token, :approved)
+        run_pending(record, reply_fn, context)
+
+      {:error, reason} ->
+        reply(reply_fn, "Confirmation failed: #{format_error(reason)}")
+    end
+  end
+
+  defp deny_token(token, message, reply_fn, context) do
+    case take_pending(token, message) do
+      {:ok, _record} ->
+        :ok = notify_approval(context, :soul, token, :denied)
+        reply(reply_fn, "SOUL.md change denied — the pending edit was discarded.")
+
+      {:error, reason} ->
+        reply(reply_fn, "Denial failed: #{format_error(reason)}")
     end
   end
 
@@ -254,6 +293,37 @@ defmodule FermixChannels.Gateway.Commands.Soul do
     end
   end
 
+  defp notify_approval(context, kind, token, outcome) do
+    case Map.get(context, :approval_resolution_fn) do
+      nil ->
+        :ok
+
+      callback when is_function(callback, 1) ->
+        run_approval_callback(callback, kind, token, outcome)
+    end
+  end
+
+  defp run_approval_callback(callback, kind, token, outcome) do
+    case callback.(%{kind: kind, token: token, outcome: outcome}) do
+      :ok -> :ok
+      other -> log_approval_callback_failure(kind, outcome, other)
+    end
+  rescue
+    error -> log_approval_callback_failure(kind, outcome, error)
+  catch
+    caught_kind, reason -> log_approval_callback_failure(kind, outcome, {caught_kind, reason})
+  end
+
+  # The failure itself must reach the log: "callback failed" with no reason is
+  # undiagnosable when an approval card sticks un-resolved.
+  defp log_approval_callback_failure(kind, outcome, error) do
+    Logger.error(
+      "#{kind} approval resolution callback failed after #{outcome}: #{inspect(error)}"
+    )
+
+    :ok
+  end
+
   defp overview_text(context) do
     case SoulCuration.revisions(agent_id(context), soul_opts(context)) do
       {:ok, [latest | _rest] = revisions} ->
@@ -288,7 +358,8 @@ defmodule FermixChannels.Gateway.Commands.Soul do
 
   defp usage_text do
     "Usage: /soul (status), /soul review [instruction] [--with-context], " <>
-      "/soul diff TOKEN, /soul history, /soul revert N, /soul reset, /soul apply TOKEN"
+      "/soul diff TOKEN, /soul history, /soul revert N, /soul reset, " <>
+      "/soul apply TOKEN, /soul deny TOKEN"
   end
 
   defp join_instruction([]), do: nil
@@ -374,9 +445,13 @@ defmodule FermixChannels.Gateway.Commands.Soul do
   end
 
   defp take_pending(token, message) do
-    case Confirmations.take(token) do
-      {:ok, record} -> validate_pending(record, message)
+    with {:ok, record} <- Confirmations.peek(token),
+         {:ok, ^record} <- validate_pending(record, message),
+         {:ok, taken} <- Confirmations.take(token) do
+      {:ok, taken}
+    else
       :error -> {:error, :unknown_token}
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -450,6 +525,11 @@ defmodule FermixChannels.Gateway.Commands.Soul do
 
   defp reply(reply_fn, text) do
     reply_fn.({:text, text})
+    :ok
+  end
+
+  defp reply_approval(reply_fn, spec) do
+    reply_fn.({:approval_prompt, spec})
     :ok
   end
 end

@@ -22,6 +22,10 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
   # nobody parsed instead of on the sha comparison they exist to make.
   @release_base "https://github.com/tezra-io/fermix/releases/download/v1.0.0"
 
+  defmodule AppBuildInfo do
+    def app_engine?, do: true
+  end
+
   defmodule HealthyChannel do
     def health_check(_opts), do: {:ok, %{detail: "healthy ok", latency_ms: 1}}
   end
@@ -75,6 +79,24 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
         assert result.name == "browser"
         assert result.status == :warn
         assert result.detail =~ "snapshot_default_depth"
+      end
+
+      # The same path for a LIST-valued key. `allowed_hosts` was validated
+      # nowhere until the canonical-host rule landed, so this is the first key
+      # whose refusal is not an integer-range message — doctor must render it
+      # with the offending entry, since that entry is the whole fix.
+      test "an uncanonical allowed_hosts entry is a row naming the entry" do
+        previous = Application.get_env(:fermix_core, :browser)
+        on_exit(fn -> restore_env(:fermix_core, :browser, previous) end)
+
+        Application.put_env(:fermix_core, :browser, allowed_hosts: ["münchen.de"])
+
+        result = Checks.browser_disclaim()
+
+        assert result.name == "browser"
+        assert result.status == :warn
+        assert result.detail =~ "allowed_hosts"
+        assert result.detail =~ "münchen.de"
       end
     end
 
@@ -257,6 +279,26 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.status == :ok
       assert result.detail =~ "subagent: inherits main"
       assert result.detail =~ "cron: inherits main"
+      assert result.detail =~ "meeting: inherits main"
+    end
+
+    test "fails on a meeting_model unknown to every provider (M21 Phase 3)" do
+      Application.put_env(:fermix_core, :routing, meeting_model: "claude-opus-4-7")
+      result = Checks.routing_overrides()
+      assert result.status == :fail
+      assert result.detail =~ "meeting_model"
+      assert result.detail =~ "not a known model for any provider"
+    end
+
+    test "summarizes a valid meeting override (M21 Phase 3)" do
+      Application.put_env(:fermix_core, :routing,
+        meeting_provider: "anthropic",
+        meeting_model: "claude-haiku-4-5"
+      )
+
+      result = Checks.routing_overrides()
+      assert result.status == :ok
+      assert result.detail =~ "meeting: provider=anthropic, model=claude-haiku-4-5"
     end
 
     test "ok and summarizes valid subagent/cron overrides" do
@@ -560,6 +602,175 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     end
   end
 
+  describe "transcription/0 on-device backend (M21 Phase 2b)" do
+    setup do
+      transcription = Application.get_env(:fermix_core, :transcription, [])
+      plugins = Application.get_env(:fermix_core, :plugins, [])
+      fermix_home = System.get_env("FERMIX_HOME")
+      home = FermixTestSupport.SafeRm.make_tmp_dir!("checks-local-stt")
+
+      System.put_env("FERMIX_HOME", home)
+      Application.put_env(:fermix_core, :plugins, [])
+      Application.put_env(:fermix_core, :transcription, backend: "local")
+
+      on_exit(fn ->
+        Application.put_env(:fermix_core, :transcription, transcription)
+        Application.put_env(:fermix_core, :plugins, plugins)
+        restore_fermix_home(fermix_home)
+        FermixTestSupport.SafeRm.rm_rf!(home)
+      end)
+
+      %{home: home}
+    end
+
+    # The row must not say "set a key": the on-device backend has none, and an
+    # operator sent looking for one never finds it.
+    test "names the missing sidecar and carries the installer's own fix line" do
+      result = Checks.transcription()
+
+      assert result.status == :warn
+      assert result.detail =~ "backend local needs its sidecar"
+      # The remedy wording is host-dependent (a pinned target — macos-aarch64 —
+      # names the setup card; an unpinned one names dev_local), and both remedy
+      # sentences are covered host-independently by the doctor/installer seam
+      # tests. Here the row must only carry a fix and never say "set a key".
+      refute result.detail =~ "set a key"
+    end
+
+    test "names the missing model once the sidecar is present", ctx do
+      install_fake_stt_sidecar(ctx.home)
+
+      result = Checks.transcription()
+
+      assert result.status == :warn
+      assert result.detail =~ "backend local needs its speech model"
+    end
+  end
+
+  describe "meetings/0 (M21 Phase 3)" do
+    setup do
+      meetings = Application.get_env(:fermix_core, :meetings, [])
+      plugins = Application.get_env(:fermix_core, :plugins, [])
+      fermix_home = System.get_env("FERMIX_HOME")
+      home = FermixTestSupport.SafeRm.make_tmp_dir!("checks-meetings")
+
+      System.put_env("FERMIX_HOME", home)
+      Application.put_env(:fermix_core, :plugins, [])
+
+      on_exit(fn ->
+        Application.put_env(:fermix_core, :meetings, meetings)
+        Application.put_env(:fermix_core, :plugins, plugins)
+        restore_fermix_home(fermix_home)
+        FermixTestSupport.SafeRm.rm_rf!(home)
+      end)
+
+      %{home: home}
+    end
+
+    test "reports the subsystem as disabled" do
+      Application.put_env(:fermix_core, :meetings, enabled: false)
+
+      result = Checks.meetings()
+
+      assert result.name == "meetings"
+      assert result.status == :ok
+      assert result.detail =~ "disabled"
+    end
+
+    test "warns when it is enabled with no usable lane" do
+      Application.put_env(:fermix_core, :meetings, enabled: true)
+
+      result = Checks.meetings()
+
+      assert result.status == :warn
+      assert result.detail =~ "no lane is usable"
+      # A release is pinned now (host-independently — `pinned_tag/0` is a build
+      # constant), so the remedy names the setup card rather than a dev_local build.
+      assert result.detail =~ "fermix setup"
+    end
+
+    test "reports the usable lanes and the profile custody note", ctx do
+      Application.put_env(:fermix_core, :meetings,
+        enabled: true,
+        zoom_account_id: "acct",
+        zoom_client_id: "client",
+        zoom_client_secret: "secret",
+        zoom_ws_subscription_id: "sub"
+      )
+
+      install_fake_meetbot_sidecar(ctx.home)
+      :ok = FermixCore.Meetings.SidecarInstaller.mark_browser_installed()
+
+      result = Checks.meetings()
+
+      assert result.status == :ok
+      assert result.detail =~ "meet sidecar installed"
+      assert result.detail =~ "zoom rtms configured"
+      # The custody note for a bot that never signed in. Assert the stable core
+      # plus the CURRENT surface (the card's Configure modal on the Plugins
+      # page) — the old "profile: absent" rendering and the Meetings tab it
+      # pointed at are both gone (7ec3a33), and this assertion rotted with them.
+      assert result.detail =~ "bot not signed in"
+      assert result.detail =~ "Meeting Notetaker → Configure"
+    end
+
+    # `browser_note` was computed and discarded, so the operator's only warning
+    # surface said the Meet lane was fine while a join would die when the
+    # sidecar could not launch Chromium.
+    test "warns when the Meet sidecar has no browser even though Zoom works", ctx do
+      Application.put_env(:fermix_core, :meetings,
+        enabled: true,
+        zoom_account_id: "acct",
+        zoom_client_id: "client",
+        zoom_client_secret: "secret",
+        zoom_ws_subscription_id: "sub"
+      )
+
+      install_fake_meetbot_sidecar(ctx.home)
+
+      result = Checks.meetings()
+
+      assert result.status == :warn
+      assert result.detail =~ "browser not installed"
+      assert result.detail =~ "zoom rtms configured"
+    end
+
+    test "warns with the browser remedy when the Meet lane is the only lane", ctx do
+      Application.put_env(:fermix_core, :meetings, enabled: true)
+      install_fake_meetbot_sidecar(ctx.home)
+
+      result = Checks.meetings()
+
+      assert result.status == :warn
+      assert result.detail =~ "browser not installed"
+    end
+  end
+
+  defp install_fake_stt_sidecar(home) do
+    {:ok, target} = FermixCore.Transcription.Local.SidecarInstaller.target()
+    write_dev_local_binary!(home, "stt_sidecar", target, "fermix-stt")
+  end
+
+  defp install_fake_meetbot_sidecar(home) do
+    {:ok, target} = FermixCore.Meetings.SidecarInstaller.target()
+    write_dev_local_binary!(home, "meetbot_sidecar", target, "fermix-meetbot")
+  end
+
+  # Presence, not content: the doctor rows never run a sidecar, so an empty
+  # executable file is a faithful stand-in for an installed one.
+  defp write_dev_local_binary!(home, plugin, target, command) do
+    dev_local = Path.join(home, "dev-local")
+    binary = Path.join([dev_local, plugin, "bin", target, command])
+
+    File.mkdir_p!(Path.dirname(binary))
+    File.write!(binary, "")
+    File.chmod!(binary, 0o755)
+    Application.put_env(:fermix_core, :plugins, dev_local: dev_local)
+  end
+
+  defp restore_fermix_home(nil), do: System.delete_env("FERMIX_HOME")
+  defp restore_fermix_home(value), do: System.put_env("FERMIX_HOME", value)
+
   describe "channel_health/1" do
     setup do
       original_registry = Application.get_env(:fermix_channels, :channel_registry)
@@ -652,7 +863,7 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
 
     test "ok when the daemon version matches this binary" do
       vsn = to_string(Application.spec(:fermix_core, :vsn))
-      client = fn -> {:ok, %{"status" => "ok", "version" => vsn, "uptime_ms" => 5_000}} end
+      client = fn -> {:ok, hello(vsn)} end
 
       result = Checks.daemon_socket(client: client)
 
@@ -661,13 +872,32 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     end
 
     test "warns when the daemon runs a different version than this binary" do
-      client = fn -> {:ok, %{"status" => "ok", "version" => "0.0.1", "uptime_ms" => 5_000}} end
+      client = fn -> {:ok, hello("0.0.1")} end
 
       result = Checks.daemon_socket(client: client)
 
       assert result.status == :warn
       assert result.detail =~ "running, version 0.0.1"
       assert result.detail =~ "`fermix restart`"
+    end
+
+    # A daemon that answers something other than management v1 is a failure with
+    # a next step, not an inspected term the reader has to decode.
+    test "fails with the daemon's own words when the reply is not management v1" do
+      client = fn -> {:error, :invalid_management_response} end
+
+      result = Checks.daemon_socket(client: client)
+
+      assert result.status == :fail
+      assert result.detail =~ "management protocol v1"
+      assert result.detail =~ "`fermix restart`"
+    end
+
+    defp hello(version) do
+      %{
+        "protocol" => %{"current_version" => 1, "minimum_version" => 1, "maximum_version" => 1},
+        "engine" => %{"product_version" => version, "pid" => "1"}
+      }
     end
   end
 
@@ -928,6 +1158,19 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
   end
 
   describe "binary_integrity/1" do
+    test "is not applicable to an app-managed engine, before any probe" do
+      result =
+        Checks.binary_integrity(
+          build_info: AppBuildInfo,
+          binary_path: "/Applications/Fermix.app/Contents/Resources/Engine/bin/fermix",
+          req_options: [plug: &__MODULE__.raising_manifest_plug/1]
+        )
+
+      assert result.name == "binary integrity"
+      assert result.status == :not_applicable
+      assert result.detail =~ "Fermix.app"
+    end
+
     test "warns when fermix is not on PATH and no path is supplied" do
       result =
         Checks.binary_integrity(
@@ -990,6 +1233,18 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.name == "upgrade"
       assert result.status == :warn
       assert result.detail =~ "available"
+    end
+
+    test "is not applicable to an app-managed engine, before any probe" do
+      result =
+        Checks.upgrade_available?(
+          build_info: AppBuildInfo,
+          req_options: [plug: &__MODULE__.raising_manifest_plug/1]
+        )
+
+      assert result.name == "upgrade"
+      assert result.status == :not_applicable
+      assert result.detail =~ "Fermix.app"
     end
   end
 
@@ -1145,7 +1400,7 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
   describe "command_owner_config/0" do
     setup do
       original_channels =
-        for channel <- [:telegram, :whatsapp, :discord, :slack, :signal], into: %{} do
+        for channel <- [:telegram, :whatsapp, :discord, :slack, :signal, :mobile], into: %{} do
           {channel, Application.get_env(:fermix_channels, channel, [])}
         end
 
@@ -1168,6 +1423,20 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.status == :warn
       assert result.detail =~ "telegram"
       assert result.detail =~ "signal=owner set"
+    end
+
+    test "treats paired-device mobile ingress as its own command authority" do
+      for channel <- [:telegram, :whatsapp, :discord, :slack, :signal] do
+        Application.put_env(:fermix_channels, channel, enabled: false)
+      end
+
+      Application.put_env(:fermix_channels, :mobile, enabled: true)
+
+      result = Checks.command_owner_config()
+
+      assert result.status == :ok
+      assert result.detail =~ "mobile=paired-device authority"
+      refute result.detail =~ "missing command owner for enabled channels: mobile"
     end
   end
 
@@ -1313,6 +1582,50 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.name == "setup secrets"
       assert result.status == :ok
     end
+
+    # The one command that should explain a refused boot must not die with a
+    # raw stacktrace on the same config that refused it (the tree-less-doctor
+    # pitfall class).
+    #
+    # Scope, stated honestly: this exercises runtime_config_snapshot/0 in
+    # isolation. In the shipped binary the release config provider
+    # (config/runtime.exs) evaluates the SAME load_runtime_config at boot and
+    # raises there, before Fermix.CLI dispatches — so an operator whose
+    # config.toml is refused sees the provider's boot error, not this row.
+    # Making that row reachable means letting the config provider tolerate a
+    # refused config for tree-less CLI verbs, which is a boot-behaviour design
+    # decision, not a check-level fix. Until that is decided these assertions
+    # pin the function, not the operator's experience.
+    test "a config.toml the loader refuses renders a failed check, not a crash", %{home: home} do
+      File.write!(Path.join(home, "config.toml"), """
+      [fermix_core.browser]
+      allow_private_network = true
+      """)
+
+      result = Checks.plaintext_secrets()
+
+      assert result.name == "setup secrets"
+      assert result.status == :fail
+      assert result.detail =~ "config.toml"
+      assert result.detail =~ "allow_private_network"
+    end
+
+    # Not every refusal on that path is an ArgumentError: the legacy
+    # provider-layout refusal is a bare `raise`, i.e. a RuntimeError. A rescue
+    # that names only one of them still dies on the other.
+    test "a legacy provider layout is a failed check too, not a crash", %{home: home} do
+      File.write!(Path.join(home, "config.toml"), """
+      [fermix_core.providers.openai]
+      provider = "openai"
+      """)
+
+      result = Checks.plaintext_secrets()
+
+      assert result.name == "setup secrets"
+      assert result.status == :fail
+      assert result.detail =~ "config.toml"
+      assert result.detail =~ "[fermix_core.agent]"
+    end
   end
 
   describe "auth_probe/1" do
@@ -1374,6 +1687,10 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.detail =~ "503"
     end
   end
+
+  # Under `macos_app` the release feed is not this engine's update source, so a
+  # reachable feed would be a wrong answer, not merely a slow one.
+  def raising_manifest_plug(_conn), do: raise("release manifest fetch must not run")
 
   def bad_sha_manifest_plug(conn) do
     body = manifest_with_sha("0000000000000000000000000000000000000000000000000000000000000000")
@@ -1520,6 +1837,41 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
   # the call site passes. The mechanism is pinned one level down, in
   # `Harness.ArtifactsTest`, where a dead supervisor name reproduces the CLI's
   # world for real.
+  describe "computer_history/1" do
+    test "non-macOS host reports macOS-only" do
+      result = Checks.computer_history(macos?: false)
+      assert result.name == "computer history"
+      assert result.status == :ok
+      assert result.detail =~ "macOS only"
+    end
+
+    test "macOS + disabled config reports off" do
+      result = Checks.computer_history(macos?: true, config: [enabled: false])
+      assert result.status == :ok
+      assert result.detail =~ "off"
+    end
+
+    test "macOS + enabled local summarizer reports on-device + allowlist sizes" do
+      result =
+        Checks.computer_history(
+          macos?: true,
+          config: [enabled: true, apps: ["com.apple.Safari"], sites: [], summarizer: :local]
+        )
+
+      assert result.status == :ok
+      assert result.detail =~ "on"
+      assert result.detail =~ "on-device"
+      assert result.detail =~ "1 app(s)"
+    end
+
+    test "macOS + Tier-3 summarizer flags the remote egress" do
+      result =
+        Checks.computer_history(macos?: true, config: [enabled: true, summarizer: :anthropic])
+
+      assert result.detail =~ "anthropic (remote"
+    end
+  end
+
   describe "skill_curation/1" do
     test "skips when curation is disabled" do
       assert Checks.skill_curation(skill_curation_enabled: false) == nil

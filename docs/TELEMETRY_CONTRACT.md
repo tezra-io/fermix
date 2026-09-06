@@ -82,6 +82,61 @@ this), a recognized short `provider` token, a bare `model` id, and integer
 plugin's `FermixOpik.Mapper.provider_string/1` (e.g. `:openai_codex → "openai"`),
 or Opik can't price it.
 
+### The `:tokens` map
+
+```elixir
+%{prompt: p, completion: c, cached: cache_reads, cache_write: cache_writes}
+```
+
+`:total` is **derived, not emitted.** `FermixOpik.Mapper.usage/1` computes
+`total = given || prompt + completion`, and every provider adapter sends only
+`:prompt`/`:completion` plus whichever cache keys the vendor reported. Do not add
+`:total` to a new adapter — it changes nothing downstream and makes the fleet
+inconsistent. (`Realtime.SessionServer` is the one emitter that still sends it.)
+
+Every key except `:prompt` and `:completion` is **omitted when the vendor did not
+report it**, never defaulted to `0`. A fabricated `0` is indistinguishable from a
+measured one, and the benchmark rate card decides cache-aware versus ceiling
+pricing on whether the count is *present* — so a defaulted zero makes a cold call
+claim a discount nobody measured.
+
+`:prompt` **keeps whatever meaning that provider already gave it** — on
+Anthropic it is the blended `input + cache_creation + cache_read` figure. Do not
+un-fold it: `total_tokens` is what every historical leaderboard row was measured
+with, and changing the sum breaks comparability with all of them. The cache
+counts ride **alongside** as new keys; a consumer subtracts to recover the
+uncached remainder.
+
+`:cached` is the cache-**read** subset of the input, `:cache_write` the
+cache-**creation** count. A vendor that does not report one gets **no key at
+all** — never a `0`. A reported zero ("nothing was cached") and an unreported
+count ("this surface publishes no cache detail") price differently, and once the
+two collapse the difference is unrecoverable from the trace. A present count
+that is not a non-negative integer raises rather than rounding to zero.
+
+Where the counts come from (verify a field name against the surface, never
+guess): Responses `usage.input_tokens_details.cached_tokens`; Chat Completions
+`usage.prompt_tokens_details.cached_tokens`; Anthropic Messages
+`usage.cache_read_input_tokens` + `usage.cache_creation_input_tokens`; Realtime
+`usage.input_token_details.cached_tokens` (singular `token`).
+
+`:cache_write` is **Anthropic-only today, and that is a gap rather than a vendor
+limit.** OpenAI bills cache writes at 1.25x uncached input on GPT-5.6 and later
+(GPT-5.5 and earlier publish no write rate) and reports the count as
+`usage.input_tokens_details.cache_write_tokens` — no adapter reads it. Until one
+does, a GPT-5.6+ turn prices its written tokens at 1.0x, understating that leg by
+20%, and the benchmark's rate card can never label such a turn `cache_aware`.
+Closing it is one field read in the four OpenAI adapters plus a second key name
+in the harness's span reader.
+
+`Mapper.usage/1` exports the pair as `cached_input_tokens` /
+`cache_creation_input_tokens`, dropping nils exactly as it drops the others.
+**Opik's own auto-cost ignores cache entirely** — its `total_estimated_cost` is
+the naive `prompt × full_input_rate + completion × output_rate` — so this split
+is the only record in the trace from which a cache-aware price can be computed
+at all. The allowlist in `Mapper.usage/1` is the whole contract: a token key not
+named there never reaches a span.
+
 ## Adding a new "run kind" (something that drives the agent loop)
 
 A subagent or scheduled job is a *run*. New run kinds (anything that calls
@@ -239,6 +294,107 @@ harness/plugin-dist/MCP-client precedent): `mix opik.replay` skips reminder
 rows. The event tools themselves (`event_store`, `event_list`, `event_update`,
 `event_remove`) are ordinary built-ins riding `[:fermix, :tool, :exec]` with
 `input:` passed explicitly.
+
+## Meeting notetaker runs
+
+A meeting is a **run kind**: `FermixCore.Meetings.Session` mints
+`session_id = "meeting_<id>_<ts>"` with `parent_session` = the requesting
+turn's session (nil for CLI-origin), and every emission goes through
+`FermixCore.Meetings.Telemetry` — never hand-rolled. Bookends are
+`[:fermix, :meeting, :run_start | :run_complete | :run_error]`; every state
+transition additionally emits `[:fermix, :meeting, :phase]`
+(`count: 1`, `from`/`to`/`reason` as atoms-as-strings, never free text).
+Shared metadata: `agent: "meeting:<id>"`, `meeting_id`, `platform`, `origin`
+(`channel | cli | job`, derived at mint). `url`/`title` attach **only** behind
+the content gate (a meeting URL can embed a passcode). `run_start` carries
+`max_duration_ms` — the Opik exporter's sweep floor for the root; omit it and a
+quiet meeting gets force-closed at the idle TTL. `Trace.TelemetryHandler`
+registers all four; `FermixOpik` binds them (`kind: :meeting`,
+`infer_kind("meeting_" <> _)`, phase spans via the mapper). STT rides the
+provider emitter with the meeting `session_id`: chunked batch calls span
+per-segment, native streams (deepgram/xai/local) emit **one** provider call per
+stream lifetime at terminal (`Transcription.Support.emit_stream_call/5`) — a
+stream session is *not* a run kind. Summarizer calls are ordinary llm spans
+inside the meeting session. Ingress voice-note transcription stays sessionless
+(pre-turn), unchanged.
+
+## Sessionless channel points (pairing, push, transport posture)
+
+Pairing decisions and push deliveries are **point events with no agent
+session** (like plugin dist): a pairing resolves in `PairManager` and a push
+fires after the turn already closed. Both go through `FermixChannels.Telemetry`
+— `emit_pair(channel, status, duration_us)` with
+`status ∈ approved | denied | expired | rate_limited`, and
+`emit_push(channel, status, duration_us)` with `status ∈ sent | failed` —
+emitting `[:fermix, :channel, :pair]` / `[:fermix, :channel, :push]`
+(`count: 1` + `duration_us`; `channel`/`status` metadata, atoms only). Never
+hand-roll the event, and never attach device names, tokens, or preview bodies —
+the payloads are ciphertext by design and the trace must not be the plaintext
+side channel. `Trace.TelemetryHandler` maps both to `agent_event` rows; the
+Opik exporter deliberately does **not** subscribe (no session to nest under),
+so a missing pair/push trace in Opik is expected, not a bug.
+
+A channel **transport** crossing into or out of a degraded posture is the third
+event of this family: `emit_transport(channel, status, consecutive_failures,
+error_class)` with `status ∈ degraded | recovered`, emitting
+`[:fermix, :channel, :transport]` (`count: 1` + `consecutive_failures`;
+`channel`/`status`/`error_class` metadata, atoms only). It carries **no
+`duration_us`** — a state transition times nothing, and a fabricated zero would
+read as a real measurement. It fires on **transitions only**: a poller that
+emitted per failure would rebuild in telemetry the very flood that its log
+de-duplication exists to prevent (prod logged 27,394 consecutive Telegram poll
+timeouts across two days with no signal anywhere). `error_class` is classified
+by the caller and guarded to an atom by the emitter, so no response body, URL,
+or credential can reach a trace field. `Trace.TelemetryHandler` maps it to an
+`agent_event` row keyed on `channel`; Opik does **not** subscribe, for the same
+reason as pair/push.
+
+## Computer-history summarizer (a headless run with no bookends)
+
+The summarizer is **one bounded provider call per cycle**, not an agent loop:
+it mints `session_id = "computer_history_summarize:<unix_ms>"` with **no**
+`parent_session` and emits **no** lifecycle bookends — its provider span (via
+the standard provider emitter, `agent: "computer_history_summarizer"`) is the
+whole run. The Opik exporter keys the run kind off the id prefix
+(`infer_kind("computer_history_summarize:" <> _) → :computer_history_summary`)
+and the root closes by TTL sweep; keep the prefix and the exporter clause in
+lockstep if either changes. Event **content** rides the summarizer's own
+consent gate (`Gate.allow?({:summarizer, route})`) before it ever reaches the
+provider emitter, so the content-capture switch below is the second gate, not
+the first.
+## Management socket runs (Doctor sessions and management jobs)
+
+The management wire has two **run kinds** and no others. A Doctor session mints
+`session_id = "doctor:<rand>"`; a management job mints `"job:<rand>"`. Both go
+through `FermixCore.Management.Telemetry` — never hand-rolled. Bookends are
+`[:fermix, :doctor, :session_start | :session_complete | :session_error]` and
+`[:fermix, :management_job, :start | :complete]`, with `agent: "doctor"` /
+`agent: "management_job"` and the whole-run `budget_ms` (the exporter's sweep
+floor for the root). A Doctor session also carries `scope` and the
+`parent_session` that asked for it; a job carries its `kind`. Terminal metadata
+is the run's own diagnosis word (`completed | cancelled | timed_out`, plus
+`failed` for a job), never a bare "ok".
+
+What rides and what does not: check **counts** per status ride the Doctor
+bookend, a check `summary` and its `evidence` never do (both can carry operator
+paths). A job's `failure_code` and its refusal `sentence` do ride, deliberately
+— they are the daemon's own bounded copy and they are the whole diagnosis — but
+no operation `result` ever does.
+
+A provider call made inside a job carries the **job's** id as its `session_id`
+through `Providers.Telemetry.emit_call/3`, so a metered probe nests under the run
+that issued it rather than floating as a root. `Trace.TelemetryHandler` registers
+all five events and `FermixOpik` binds them (`infer_kind("job:" <> _)`, root open
+and close in `Aggregation`, replay in `TraceFile`).
+
+Everything else on this socket is **deliberately sessionless**: `hello`,
+`overview.get`, `settings.*`, `secret.*`, `plugins.*`'s request verbs, `logs.query`,
+`lifecycle.*` and `diagnostics.build` are single bounded request/response calls
+with no run identity, no cancellation and no budget of their own, so they mint no
+`session_id` and emit nothing. Adding an event for one of them would create a
+root span per settings read with nothing nested under it. If a new management
+method has to *wait* on a network, a download or a person, it is a job — start
+one and inherit the bookends rather than minting a sixth event.
 
 ## Content (prompts / responses / tool IO)
 

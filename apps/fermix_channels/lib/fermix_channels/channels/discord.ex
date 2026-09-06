@@ -151,19 +151,29 @@ defmodule FermixChannels.Channels.Discord do
       when is_binary(text) and is_binary(token) do
     # The prompt rides the normal send path (the backticked `/confirm <token>`
     # still renders as tap-to-copy); the action row is the additive one-tap
-    # affordance. custom_id carries the `grant:<token>` payload (well under the
-    # 100-char cap); the interaction handler strips the prefix and funnels the
-    # tap through the unchanged `/confirm` path.
+    # affordance. The namespaced custom ids are well under Discord's 100-char
+    # cap and both funnel through the same command path as typed actions.
     send_message(reply_target, text, reply_to: message_id, components: approval_components(token))
   end
 
-  # Action row (type 1) wrapping a success-style button (type 2, style 3).
+  # Action row (type 1) with success (style 3) and danger (style 4) buttons.
   defp approval_components(token) do
     [
       %{
         type: 1,
         components: [
-          %{type: 2, style: 3, label: "Approve", custom_id: ApprovalButton.payload(token)}
+          %{
+            type: 2,
+            style: 3,
+            label: "Approve",
+            custom_id: ApprovalButton.approve_payload(token)
+          },
+          %{
+            type: 2,
+            style: 4,
+            label: "Deny",
+            custom_id: ApprovalButton.deny_payload(token)
+          }
         ]
       }
     ]
@@ -222,9 +232,12 @@ defmodule FermixChannels.Channels.Discord do
   defp parse_component_interaction(data) do
     custom_id = get_in(data, ["data", "custom_id"])
 
-    case ApprovalButton.parse_payload(custom_id) do
-      {:ok, token} -> build_interaction(data, &confirm_tap_message(&1, token))
-      :ignore -> parse_proposal_interaction(data, custom_id)
+    case ApprovalButton.parse_action(custom_id) do
+      {:ok, action, token} ->
+        build_interaction(data, &approval_tap_message(&1, action, token))
+
+      :ignore ->
+        parse_proposal_interaction(data, custom_id)
     end
   end
 
@@ -244,8 +257,8 @@ defmodule FermixChannels.Channels.Discord do
     end
   end
 
-  defp confirm_tap_message(origin, token) do
-    ApprovalButton.confirm_message(Map.put(origin, :token, token))
+  defp approval_tap_message(origin, action, token) do
+    ApprovalButton.action_message(Map.merge(origin, %{action: action, token: token}))
   end
 
   defp build_interaction(data, build_message) do

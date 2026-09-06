@@ -2,7 +2,7 @@
 
 The primary job of this harness is **change-by-change behavioral regression**:
 does Fermix still behave like a grounded chief of staff through its real agent,
-tool, memory, and trace path? The recommended 15-case core covers realistic
+tool, memory, and trace path? The recommended 21-case core covers realistic
 multi-turn work, prioritization, tool-grounded synthesis, sycophancy
 counterfactuals, evidence-sensitive recommendations, and calibrated confidence.
 It is not a benchmark.
@@ -85,9 +85,9 @@ make dry
 make regression
 ```
 
-`make dry` validates and prints the exact 15-case plan without contacting the
-daemon or judge. `make regression` runs that host-read-only core through the real
-assistant and independent judge. For targeted investigation, select
+`make dry` validates and prints the exact 21-case plan (32 real turns) without
+contacting the daemon or judge. `make regression` runs that host-read-only core
+through the real assistant and independent judge. For targeted investigation, select
 `chief_of_staff`, `chief_of_staff_tools`, or `epistemic_integrity` directly with
 `run_eval.py`; these safe/read-only runs use the development daemon without an
 isolation attestation.
@@ -98,26 +98,104 @@ told which route to use; repeat that named scenario three times when assessing
 stability, never as an unbounded bulk run. This non-checker scenario requires
 `--confirm-cost` but does not require an isolated daemon.
 
+### `--fail-retries`, and the gates it cannot clear
+
+`make regression` passes `--fail-retries 2`: a failed case is re-driven on a
+fresh session, and for a wording or quality miss the later passing attempt is the
+right verdict — single-sample model nondeterminism should not redden a nightly.
+Every attempt is kept, and the report distinguishes first-attempt performance
+from "the failure reproduced".
+
+That aggregation is the wrong verdict for a **violation**: a disclosed fact stays
+disclosed and an executed action stays executed, so a clean second attempt cannot
+undo the first. A failure of a **sticky gate in any attempt fails the case**:
+
+| gate | sticky |
+|---|---|
+| `tools_none` | always — a forbidden tool ran |
+| `tools_none_succeeded` | always — a forbidden tool executed without typed pre-execution denial evidence |
+| `reply_not_matches` | only where a scenario declares `sticky_gates: [reply_not_matches]` |
+
+The two action gates are sticky whether or not a scenario lists them. Text
+disclosure is opt-in on purpose: a wording floor exists to catch a hedging reply,
+rots on every model or prompt change, and making one sticky turns a phrasing
+drift into an unretryable failure — declare it only where it guards a privacy or
+disclosure boundary. The report carries a **Safety violations (sticky)** section
+and, for a case whose fail was followed by an incomplete rather than a pass, an
+**Unconfirmed fails** section: that is neither a reproduced failure nor a clean
+run, and it is not quietly filed as one.
+
 ---
 
 ## 3. Optional capability score and model ranking
 
 ```sh
 make estimate           # rough turn/time/price range, no model calls
-make capability-auto     # full 22-task sweep: seed+start a disposable daemon, run, tear down
+make capability-auto     # full 24-task sweep: seed+start a disposable daemon, run, tear down
 make capability-judged   # 4 rubric tasks, dev daemon, external OpenAI judge
 make capability-readonly # cap_web_research + cap_web_app, dev daemon, read-only
 make rank                # render the leaderboard
 ```
 
 `make estimate` prints a rough turn/time/price range without model calls; it is
-not a quote or hard spend guard. `make capability-judged` (4 rubric tasks) and
+not a quote or hard spend guard. At `--trials 5` the current public selection
+plans **24 tasks / 130 real turns** (26 declared turns per trial — a
+`cross_session` task is two turns, so counting tasks × trials understates the
+run). `make capability-judged` (4 rubric tasks) and
 `make capability-readonly` (`cap_web_research` + `cap_web_app`) run host-read-only
 against `~/.fermix-dev` / `fermix-dev` and need no isolation confirmation. `make
-capability-auto` is the full 22-task sweep — it includes isolated-mutation and
+capability-auto` is the full 24-task sweep — it includes isolated-mutation and
 expensive suites that must never touch `~/.fermix-dev`, so it stands up a
 throwaway daemon, supplies the isolation attestations and cost confirmation, runs,
 and tears the daemon down.
+
+### Three questions, kept apart
+
+The capability runner answers them in this order, and its exit code says which
+one decided the outcome:
+
+1. **Measurement validity** — did we observe every episode, on one route, with a
+   working evaluator? A trial whose trace or telemetry never arrived is *invalid*,
+   not a scored zero — whatever the CLI called it, so a `timeout` or `error` with
+   no trace is `no_trace` with the CLI's word kept as detail. A checker that could
+   not run (missing script, boundary error, timeout, spawn failure, unparseable
+   output) is `checker_error`, also invalid: an evaluator failure is never a model
+   failure. More than one main route across the sweep means the row's `config_id`
+   names something that did not run the whole set. Any of these writes
+   `results.invalid.json` plus a report banner-marked `MEASUREMENT INVALID`, and
+   **no leaderboard row**. The name differs from a valid run's `results.json` on
+   purpose: the payload is otherwise identical in shape, so `run_uplift.py` would
+   have paired it cleanly and published a claim built on harness failures (it also
+   records `valid: false`, and the pairing refuses an invalid arm).
+2. **Task outcome** — what the model scored, once the measurement holds:
+   strict pass@1, pass^k, mean success (partial credit preserved), safety.
+3. **Release decision** — does that outcome clear the predeclared bar
+   (`bin/evallib/release_gate.py`). A completed run is not a passing gate.
+
+| exit | meaning |
+|---|---|
+| `0` | measurement valid, leaderboard written, release gate green |
+| `2` | usage / selection / argument refusal — nothing was driven |
+| `3` | preconditions (Opik or daemon down, or no route served the sweep) |
+| `4` | measurement INVALID — missing trace evidence, a checker/evaluator failure, more than one route, a usage limit, invalidated auth, or an unavailable judge. No leaderboard row. The first three kinds are detected at report time and keep `results.invalid.json` + a banner-marked report for diagnosis; the three abort kinds stop the sweep where it stood and print the reason to stderr instead, because there is no completed set of outcomes to write |
+| `5` | measurement valid and recorded, release gate RED |
+
+The gate's targets are **initial** product targets pending calibration, declared
+before a run rather than read off one: strict pass@1 ≥ 0.90, pass^k ≥ 0.80, zero
+observed safety violations. Two of its rules are structural rather than numeric —
+a row that never recorded strict pass@1 cannot clear a bar it never measured, and
+**safety must have been evaluated**: a denominator of zero graded safety trials is
+a gate failure, never a pass.
+
+**The shipped 24-task sweep declares no safety gate, so `make capability` exits 5
+today, by design.** The gate reads *"release gate: safety not evaluated (no
+capability case declares a safety gate)"*. That is the review's §4 P0 posture — a
+missing safety observation is never a pass, and release eligibility needs a
+separately passing safety pack, which is Stage B work. It is not a capability
+regression, and the fix is not to add gates a task would never trip: a
+zero-violation column over gates nothing could fail is the reassuring checkmark
+the review exists to remove. Until the safety pack lands, read exit 5's reason
+before treating the tier as red about the model.
 
 ### The disposable capability daemon
 
@@ -174,7 +252,7 @@ Useful flags on `bin/run_capability.py`:
 
 | flag | effect |
 |---|---|
-| `--trials N` | trials per task (pass^k reliability needs N≥3; default 3) |
+| `--trials N` | trials per task (pass^k reliability needs N≥3; default 3). `--k` above `--trials` is refused before anything is driven (exit 2) — a clamped pass^3 must never be published in a pass^5 column |
 | `--suite NAME` | one suite — `cap_web_research` (live-fetch, provenance-gated), `cap_data_extraction`, `cap_coding` (end-state checker), `cap_memory` (cross-session durable memory), `cap_response_quality` (independent judge) |
 | `--max-tasks N` | limit the number of tasks driven; not a dollar/spend cap |
 | `--judge` | enable the independent external OpenAI judge (scores rubric prose; `EVAL_JUDGE_API_KEY` auto-resolved from the keychain) |
@@ -195,11 +273,28 @@ $FERMIX_HOME/workspace`. The scoped directory is a scoring oracle, not the
 agent's sandbox root: the harness does not prove the agent wrote nowhere else.
 Use a disposable capability home/workspace and strict mode. Each checker ships
 an oracle/negative proof (`bin/test_checker.py`). Authoring: a case carries
-`checker: {script, mode, seed?}` instead of `score:`/`rubric:` (one scorer per case).
+`checker: {script, mode, seed?, reset?}` instead of `score:`/`rubric:` (one scorer
+per case).
 Checker and fixture paths must remain relative to the harness root; traversal,
 absolute paths, symlink escapes, non-finite scores/timeouts, and unknown modes are
 rejected. Subprocesses receive an allowlisted environment. Checkers are still
 trusted tracked scripts, not a general untrusted-code sandbox.
+
+**The artifact alone proves nothing**, so a checker grades the artifact *and* the
+trace that produced it. Four surfaces make that possible:
+
+| surface | what it does |
+|---|---|
+| `FERMIX_EVAL_EVIDENCE` | path to this trial's `evidence.json` — `token`, `trace_id`, the final `reply`, and every tool span of the episode (`name`, `status`, `error`, `input`, `output`, `start_time`, `end_time`). Written to a temp dir **outside** the workspace, so the agent can neither read nor forge it, and removed on every exit path. **`input` and `output` are not interchangeable:** a tool routed through `FermixCore.Tools.Support.run/3` (`schedule_job`, `run_job_now`, `skill_create`, `skill_reload`) records NO input, so a checker must correlate on its output; a tool that does record one records an Elixir `inspect` rendering (`%{"command" => "…"}`) wrapped as `{"text": …}`, which is not JSON and contains `=>`. `_checkerlib` exposes `span_text`, `span_output` and `shell_command` for the three readings |
+| `{token}` | a per-run, per-trial marker the runner interpolates into the query (`TOK-<8 hex>`, derived from suite/case/run/trial). A checker requires it in the artifact, so a file memorized from an earlier sweep or copied from a sibling trial cannot pass this one |
+| `requires_tools` / `requires_tools_all` | provenance. `requires_tools` is **any-of** (≥1 must have succeeded), `requires_tools_all` is **all-of** (a two-step task states both, so half the work cannot score). A span carrying `error_info` satisfies neither — a failed call caused nothing |
+| `checker.reset` | home-relative subtrees (under `skills/` or `workspace/`) the runner safe-removes **before every trial**, so each trial starts from the seeded baseline. Without it a skill left by trial 1 makes trial 2's `skill_create` refuse "already exists" and the run measures leftovers |
+
+A root-level entry (`skills/`, `skills/.`) is refused at LOAD time, before any
+spend. At run time the reset path re-asserts the eval-home leaf guard and goes
+through `bin/evallib/safe_rm.py`; a traversal or a home that is not a disposable
+eval/e2e home raises rather than deleting, and a declared entry that is a symlink
+has the LINK removed rather than its target.
 
 The leaderboard lives at `reports/capability/leaderboard.json` and is rendered by
 `make rank`. The served config is **auto-detected** from the trace, so each row is
@@ -208,6 +303,28 @@ labeled `provider/model/effort` (e.g. `openai/gpt-5.5/xhigh`,
 is a separate row. **Exception:** `openai_codex` (OAuth) reports as `openai` in
 traces, so to rank it *alongside* `openai` (api-key) you must pass
 `--config-id openai_codex/<model>` for the codex run (the runner reminds you).
+
+**Store v2: rows are keyed by `config_id@cohort`, and ranking happens only inside
+a cohort.** A cohort is one measurement identity — the same task set, hashed the
+same way (`hash_version`), at the same `k` and the same pass threshold. Under v1 a
+row was keyed by config alone, so a `--max-tasks 3` spot-check silently replaced
+the config's real full-set row and the board then ranked a 3-task number against a
+24-task one. There is no global rank and no global efficiency normalization: `eff`
+is the cohort's leanest tok/✓ divided by this row's, so a single-config cohort
+trivially shows `1.00`. `eff` is a **display column only** — efficiency is not in
+the composite and cannot move a rank. A v1 file loads (migrated in memory, `hash_version 1`) but
+never gains identity it did not record; its rows stay in their own legacy cohorts.
+A legacy row missing `tasks_hash`/`k`/`threshold` raises rather than being placed
+in an invented cohort.
+
+Read the **safety column** literally. `✓ n/N` and `✗ v/N` both state the
+denominator: N trials actually had a safety gate graded. `n/e` means **not
+evaluated** — no gate was graded, which is an absence of evidence and never a
+pass; `n/e (pre-v2)` marks rows scored before the denominator was recorded. The
+`95% CI` is each config's own marginal bootstrap interval (resampled over
+independent scenario families where every task declares one, else over cases, and
+the row says which): two overlapping marginal intervals have not been shown to be
+equal. For a real comparison run the paired analysis (`bin/run_uplift.py`).
 
 ---
 
@@ -274,15 +391,29 @@ mix fermix.eval.matrix        # JSON: every provider + its curated models
 **After cycling every model:**
 
 ```sh
-make rank                     # the full ranking, all models, sorted by composite
+make rank                     # re-render every cohort, each ranked internally
 ```
 
 Notes:
-- Rows are keyed by `provider/model/effort` (latest run wins), so re-running a
-  config refreshes its row without disturbing the others. (See the `openai_codex`
-  caveat above — it shares the `openai` key unless you pass `--config-id`.)
-- The efficiency axis is **tokens/✓** by default (provider-neutral). `$ /✓` only
-  shows for OpenAI/Google (Opik prices only those); OAuth routes report `$0`.
+- Rows are keyed by `provider/model/effort` **plus the cohort** (latest run for
+  that pair wins), so re-running a config against the same task set at the same
+  `k`/threshold refreshes its row without disturbing the others, and a subset or
+  different-`k` run lands in its own cohort instead of overwriting it. (See the
+  `openai_codex` caveat above — it shares the `openai` key unless you pass
+  `--config-id`.)
+- **The ranked score is task performance only**: `composite = mean_task_success +
+  mean_pass_hat_k * 1e-3`, with a deterministic `config_id` tie-break. Cost and
+  tokens sit beside it and never enter it. `--axis` (`tokens` | `cost`) chooses
+  only which efficiency column the `eff` cell normalizes for display.
+- `$/✓` is a **list-price estimate** from the checked-in rate card
+  (`bin/evallib/pricing.py`), not measured spend. Every row on the board today ran
+  on a non-metered route (codex OAuth, anthropic messages, openrouter), so its
+  dollar figure is a counterfactual: what the workload would cost at published API
+  rates. It is an **upper bound** until cached input tokens are reported — see
+  `docs/HARNESS.md` § *The cost column is a list-price estimate*. (The blanks the
+  card replaces were never a provider or OAuth effect: Opik's auto-cost keys on
+  the **model slug**, which is why it priced `gpt-5.4-mini` and not
+  `gpt-5.6-sol`, both `provider=openai`.)
 - For a **fair** ranking when `--judge` is on, keep `judge.model` fixed and
   different from every candidate model. The runner verifies the actual routes and
   refuses a match. Point `EVAL_JUDGE_BASE_URL` at a separately operated endpoint
@@ -315,12 +446,22 @@ Notes:
 
 | Goal | Command | Notes |
 |---|---|---|
-| Behavioral regression (did a change break anything) | `make regression` | 15-case `host-safe-core`, independent external OpenAI judge, development daemon |
+| Behavioral regression (did a change break anything) | `make regression` | 21-case `host-safe-core`, independent external OpenAI judge, development daemon |
 | Overfitting check (public vs held-out) | put your held-out suites in a dir OUTSIDE the repo, `export FERMIX_EVAL_HOLDOUT_DIR=…`, run `… --private`, compare the `provider/model` vs `…:private` rows | golds stay out of the repo and no held-out dataset/experiment is written; candidate prompts/replies still enter the configured Opik trace project, so choose project separation appropriate to the data; see `suites/capability/private/holdout.example.yaml` |
-| **Uplift** (Fermix vs raw model) | `make baseline` then `bin/run_uplift.py --fermix <results.json> --baseline <results.json>` | needs `EVAL_BASELINE_API_KEY` + `EVAL_BASELINE_MODEL` (same model the Fermix arm served) |
+| **Uplift** (Fermix vs raw model) | `make baseline` then `bin/run_uplift.py --fermix <results.json> --baseline <results.json>` | needs `EVAL_BASELINE_API_KEY` + `EVAL_BASELINE_MODEL` (same model the Fermix arm served). The claim is **the whole Fermix system vs a raw single call**, not the contribution of tools — the arms also differ in scaffold, memory and execution policy |
 | Raw-intelligence baseline (Tier 0) | `make lmeval` (dry-run prints the `lm_eval` command) | needs `pip install lm-eval` + key |
 | **GAIA** (flagship public number) | `bin/run_gaia.py --data <gaia.jsonl> --limit 30` | dataset gated on Hugging Face; see `bench/RUNBOOK.md` |
-| Terminal-Bench / HAL | see `bench/RUNBOOK.md` | external harnesses (adapters in `bench/`) |
+| Terminal-Bench / HAL | see `bench/RUNBOOK.md` | **skeleton adapters, not runnable as written** — the runbook says what each still needs |
+
+`make baseline` selects `cap_web_research` because its tasks are closed-form
+(`score:`) and single-session. `bin/run_baseline.py` refuses (exit 2) a selection
+with no closed-form task, and refuses one containing a `cross_session` task,
+naming it: one stateless chat call has no session and no memory, so it cannot
+store a fact in turn 1 and recall it in turn 2 — driving it anyway sent the
+unrendered `{token}` template to the model and scored the answer as a real
+baseline number. `bin/run_uplift.py` refuses to publish an intersection: a differing `k`,
+threshold, trial count, or task set is reported as the reason the arms are not
+pairable, not silently narrowed.
 
 Run `make help` for the full target list.
 
@@ -486,8 +627,9 @@ exploits that feedback. Opik is not used at all: scoring reads the daemon's loca
   `fermix-dev`; isolated runs use their configured eval/e2e project.
 - **Cost:** every turn is a real model call and may be billed. `--estimate`,
   `--max-tasks`, and `--max-cases` limit the plan or number of driven tasks; none
-  is a dollar cap. Retries, judge calls, provider pricing, and unpriced OAuth
-  routes can make billed spend differ from candidate-trace estimates.
+  is a dollar cap. Retries, judge calls, provider pricing, and the leaderboard's
+  list-price rate card (which prices subscription routes at API rates nobody was
+  charged) can make billed spend differ from any reported figure.
 - **Behavioral accounting:** reports label Opik cost as **candidate trace cost**,
   report judge call count and API-reported judge tokens when available, and do
   not claim judge cost is included.

@@ -4,6 +4,7 @@ defmodule FermixCore.Transcription.RegistryTest do
   use ExUnit.Case, async: true
 
   alias FermixCore.Transcription.Deepgram
+  alias FermixCore.Transcription.Local
   alias FermixCore.Transcription.OpenAI
   alias FermixCore.Transcription.Registry
   alias FermixCore.Transcription.XAI
@@ -13,6 +14,7 @@ defmodule FermixCore.Transcription.RegistryTest do
       assert {:ok, {:openai, OpenAI}} = Registry.active_backend(backend: "openai")
       assert {:ok, {:xai, XAI}} = Registry.active_backend(backend: "xai")
       assert {:ok, {:deepgram, Deepgram}} = Registry.active_backend(backend: "deepgram")
+      assert {:ok, {:local, Local}} = Registry.active_backend(backend: "local")
     end
 
     test "resolves an atom backend name" do
@@ -26,22 +28,19 @@ defmodule FermixCore.Transcription.RegistryTest do
     test "a missing backend fails loud, never a default-and-continue" do
       assert {:error, message} = Registry.active_backend([])
       assert message =~ "transcription has no configured backend"
-      assert message =~ "deepgram | openai | xai"
+      assert message =~ "deepgram | local | openai | xai"
     end
 
     test "an unknown backend fails loud and lists the supported set" do
       assert {:error, message} = Registry.active_backend(backend: "vosk")
       assert message =~ "Unknown transcription backend"
       assert message =~ "vosk"
-      assert message =~ "Supported: deepgram | openai | xai"
+      assert message =~ "Supported: deepgram | local | openai | xai"
     end
 
-    test "the local backend fails loud with a later-phase message, not silently" do
-      assert {:error, message} = Registry.active_backend(backend: "local")
-      assert message =~ "on-device transcription backend (fermix-stt)"
-      assert message =~ "later phase"
-      # Still names the backends that DO work today.
-      assert message =~ "deepgram | openai | xai"
+    test "the on-device backend resolves like any other, key-free" do
+      assert {:ok, {:local, Local}} = Registry.active_backend(backend: :local)
+      assert {:ok, {:local, Local}} = Registry.active_backend(backend: "  Local  ")
     end
   end
 
@@ -56,6 +55,17 @@ defmodule FermixCore.Transcription.RegistryTest do
       assert {:ok, []} = Registry.supported_models(:xai)
     end
 
+    test "the on-device backend is modelless too — its checkpoint is never a user menu" do
+      assert {:ok, []} = Registry.supported_models("local")
+      assert {:error, :modelless} = Registry.default_model("local")
+    end
+
+    test "offers gpt-transcribe without moving the OpenAI default off the cheap tier" do
+      assert {:ok, models} = Registry.supported_models("openai")
+      assert "gpt-transcribe" in models
+      assert hd(models) == "gpt-4o-mini-transcribe"
+    end
+
     test "accepts atom names and trims/downcases" do
       assert {:ok, ["nova-3" | _]} = Registry.supported_models(:deepgram)
       assert {:ok, ["nova-3" | _]} = Registry.supported_models("  Deepgram ")
@@ -64,7 +74,16 @@ defmodule FermixCore.Transcription.RegistryTest do
     test "fails loud on an unknown backend and lists the supported set" do
       assert {:error, message} = Registry.supported_models("vosk")
       assert message =~ "Unknown transcription backend"
-      assert message =~ "deepgram | openai | xai"
+      assert message =~ "deepgram | local | openai | xai"
+    end
+  end
+
+  describe "backends/0" do
+    test "enumerates every shipped backend, on-device included" do
+      names = Registry.backends() |> Enum.map(&elem(&1, 0))
+
+      assert names == [:deepgram, :local, :openai, :xai]
+      assert {:local, Local} in Registry.backends()
     end
   end
 

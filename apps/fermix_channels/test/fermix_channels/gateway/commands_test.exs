@@ -1,6 +1,7 @@
 defmodule FermixChannels.Gateway.CommandsTest do
   use ExUnit.Case, async: false
 
+  alias FermixChannels.CLI
   alias FermixChannels.Gateway.Authorization, as: IngressAuthorization
   alias FermixChannels.Gateway.Authorizer
   alias FermixChannels.Gateway.Commands
@@ -8,9 +9,18 @@ defmodule FermixChannels.Gateway.CommandsTest do
   alias FermixChannels.Gateway.Commands.Compact
   alias FermixChannels.Gateway.Message
   alias FermixChannels.Gateway.Source
+  alias FermixCore.ComputerHistory.Taint, as: HistoryTaint
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Sandbox.PathPolicy
+
+  # A slash command never reaches the agent; this records it if one ever does.
+  defmodule NoTurnAgent do
+    def handle_message(message, test_pid) do
+      send(test_pid, {:unexpected_turn, message})
+      :ok
+    end
+  end
 
   defp operator_ctx,
     do: %{authorization: %IngressAuthorization{role: :operator, trust: :operator}}
@@ -263,6 +273,24 @@ defmodule FermixChannels.Gateway.CommandsTest do
 
       FermixTestSupport.SafeRm.rm_rf!(home)
     end
+
+    test "the CLI sync path receives the sandbox confirmation prompt instead of hanging" do
+      {home, root} = sandbox_fixture!()
+
+      assert {:ok, %{response: confirm_text}} =
+               CLI.dispatch_input_sync("/grant path #{root}",
+                 sender: "operator",
+                 session_id: "cli-approval",
+                 timeout_ms: 2_000,
+                 agent: NoTurnAgent,
+                 agent_server: self()
+               )
+
+      assert confirm_text =~ "/confirm "
+      refute_received {:unexpected_turn, _message}
+
+      FermixTestSupport.SafeRm.rm_rf!(home)
+    end
   end
 
   describe "Compact.execute/3" do
@@ -319,6 +347,58 @@ defmodule FermixChannels.Gateway.CommandsTest do
       assert measurements.duration_us >= 0
       assert measurements.before_tokens > measurements.after_tokens
       assert metadata.conversation_key == key
+    end
+
+    test "masks a history-tainted turn before it rides an ungranted-remote compaction chain" do
+      # MILESTONE_32 §13.6: the forced command is the third compaction path
+      # (after preflight and post-delivery auto-compaction) and must mask
+      # exactly like them — pre-fix it fed the raw snapshot to the provider.
+      Req.Test.set_req_test_to_shared()
+      test_pid = self()
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:summary_body, body})
+        Req.Test.json(conn, summary_response_body("masked-chain summary"))
+      end)
+
+      store = :"compact_taint_store_#{System.unique_integer([:positive])}"
+      start_supervised!({ConversationStore, name: store, repo: nil})
+
+      key = {"telegram", "chat-1", :root}
+      canary = "CH-CANARY-compact-0a1b2c3d4e5f6a7b"
+
+      ConversationStore.add_message(
+        key,
+        "assistant",
+        String.duplicate("You were editing #{canary} in Numbers. ", 25_000),
+        server: store,
+        metadata: HistoryTaint.metadata()
+      )
+
+      ConversationStore.add_message(key, "user", String.duplicate("clean turn ", 25_000),
+        server: store
+      )
+
+      ConversationStore.add_message(key, "user", "latest question", server: store)
+
+      # No computer_history grants configured, so the openai route is an
+      # ungranted remote and the tainted turn must reach it only as the mask.
+      assert :ok =
+               Compact.execute(message("/compact"), reply_fn(test_pid), %{
+                 conversation_key: key,
+                 conversation_store: store,
+                 route: route(),
+                 context_window: 100_000
+               })
+
+      assert_receive {:summary_body, body}, 5_000
+      # The clean older turn proves compaction really summarized history …
+      assert body =~ "clean turn"
+      # … and the tainted turn's content reached the provider only as the mask
+      # (the small masked placeholder itself may legitimately land in the
+      # retained tail rather than the summarized half).
+      refute body =~ canary
     end
 
     test "does not overwrite messages appended while summary is in flight" do
@@ -386,6 +466,13 @@ defmodule FermixChannels.Gateway.CommandsTest do
   defp reply_fn(test_pid) do
     fn
       {:text, text} ->
+        send(test_pid, {:compact_reply, text})
+        :ok
+
+      # A channel with no one-tap affordance delivers the prompt text (which
+      # carries the tap-to-copy `/confirm <token>`), the same degrade `Delivery`
+      # applies for a channel without `send_approval/2`.
+      {:approval_prompt, %{text: text}} ->
         send(test_pid, {:compact_reply, text})
         :ok
 

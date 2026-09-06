@@ -79,6 +79,7 @@ defmodule FermixChannels.Gateway.Commands.RequestGrantTest do
       assert record.thread_ts == nil
       assert record.user_id == "owner-1"
       assert record.resume == %{content: "do it", reply_target: "chat-1", sender: "alice"}
+      refute Map.has_key?(record, :ingress_context)
       assert record.expires_at > System.monotonic_time(:millisecond)
     end
 
@@ -110,6 +111,25 @@ defmodule FermixChannels.Gateway.Commands.RequestGrantTest do
       assert {:ok, token_b, :new} = SandboxCommand.store_pending_grant(request(root), origin_b)
       refute token_a == token_b
     end
+
+    test "mobile grants from different authenticated devices do not dedupe", %{root: root} do
+      origin =
+        mobile_origin("device-1",
+          resume: %{content: "do it", reply_target: "main", sender: "alice"}
+        )
+
+      other_device =
+        mobile_origin("device-2",
+          resume: %{content: "do it", reply_target: "main", sender: "alice"}
+        )
+
+      assert {:ok, token, :new} = SandboxCommand.store_pending_grant(request(root), origin)
+
+      assert {:ok, other_token, :new} =
+               SandboxCommand.store_pending_grant(request(root), other_device)
+
+      refute token == other_token
+    end
   end
 
   describe "/confirm auto-resume" do
@@ -133,6 +153,25 @@ defmodule FermixChannels.Gateway.Commands.RequestGrantTest do
       assert resumed.chat_id == "chat-1"
       assert resumed.metadata.resumed_from_grant == token
       assert resumed.metadata.user_id == "owner-1"
+    end
+
+    test "a mobile grant resumes with its connection-authenticated ingress context", %{root: root} do
+      origin =
+        mobile_origin("device-1",
+          resume: %{content: "finish on mobile", reply_target: "main", sender: "alice"}
+        )
+
+      {:ok, token, :new} = SandboxCommand.store_pending_grant(request(root), origin)
+
+      assert :ok = confirm_mobile(token, origin.ingress_context, agent_ctx())
+      assert_receive {:sandbox_reply, reply}
+      assert reply =~ "resuming your request"
+
+      assert_receive {:resumed, resumed}, 2_000
+      assert resumed.content == "finish on mobile"
+      assert resumed.channel == "mobile"
+      assert resumed.chat_id == "main"
+      refute Map.has_key?(resumed.metadata, :ingress_context)
     end
 
     test "a CLI-origin record persists but never re-ingests; the owner re-runs", %{root: root} do
@@ -276,6 +315,20 @@ defmodule FermixChannels.Gateway.Commands.RequestGrantTest do
     }
   end
 
+  defp mobile_origin(device_id, opts) do
+    %{
+      channel: "mobile",
+      chat_id: "main",
+      thread_ts: nil,
+      user_id: nil,
+      resume: Keyword.fetch!(opts, :resume),
+      ingress_context: %{
+        transport: :mobile,
+        authenticated_device_id: device_id
+      }
+    }
+  end
+
   defp agent_ctx do
     %{
       conversation_key: {"telegram", "chat-1", :root},
@@ -292,6 +345,17 @@ defmodule FermixChannels.Gateway.Commands.RequestGrantTest do
     dispatch(cli_message("/confirm #{token}"), context)
   end
 
+  defp confirm_mobile(token, ingress_context, context) do
+    message = mobile_message("/confirm #{token}")
+
+    Commands.dispatch(
+      Commands.parse(message),
+      reply_fn(),
+      context
+      |> Map.put(:authorization, build_authorization(message, ingress_context))
+    )
+  end
+
   defp dispatch(message, context) do
     Commands.dispatch(
       Commands.parse(message),
@@ -301,7 +365,14 @@ defmodule FermixChannels.Gateway.Commands.RequestGrantTest do
   end
 
   defp build_authorization(message) do
-    case message |> Map.from_struct() |> Source.from_message() |> Authorizer.resolve() do
+    build_authorization(message, nil)
+  end
+
+  defp build_authorization(message, ingress_context) do
+    case message
+         |> Map.from_struct()
+         |> Source.from_message(ingress_context)
+         |> Authorizer.resolve() do
       {:ok, auth} -> auth
       {:error, _reason} -> nil
     end
@@ -328,6 +399,18 @@ defmodule FermixChannels.Gateway.Commands.RequestGrantTest do
       chat_id: "cli",
       reply_target: "cli",
       metadata: %{user_id: "cli"}
+    })
+  end
+
+  defp mobile_message(content) do
+    Message.new!(%{
+      id: "msg-#{System.unique_integer([:positive])}",
+      content: content,
+      sender: "mobile",
+      channel: "mobile",
+      chat_id: "main",
+      reply_target: "main",
+      metadata: %{}
     })
   end
 

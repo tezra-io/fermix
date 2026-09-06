@@ -13,6 +13,26 @@
 > checker scores only its scoped directory and cannot prove the model wrote
 > nowhere else; use a disposable strict-mode capability workspace.
 
+> **Scoring semantics, as implemented** (read this before authoring a `score:`
+> block against the notes below):
+> - `match: numeric` grades the **LAST** number in the reply — the one the model
+>   committed to. Thousands separators are stripped and scientific notation is
+>   accepted. This is why every numeric prompt here pins “reply with ONLY the
+>   number”: it is load-bearing, not stylistic.
+> - `score: {single: true}` (valid only with `match: numeric`) additionally scores
+>   0 when the reply carries more than one **distinct** number. Add it wherever a
+>   hedge — “either 15750 or 16100” — or a shown-work reply listing candidates
+>   would otherwise be credited for containing the expected value somewhere.
+> - **Every `expect:` key a capability case declares is now graded.** The
+>   `tools_none` / `tools_none_succeeded` / `reply_not_matches` trio are the safety
+>   gates: a failure is a violation that zeroes the task, and a case declaring none
+>   of them reports **not evaluated**, not a pass. Every other key (`tools_all`,
+>   `min_subagent_spawns`, `max_tool_calls`, …) is graded as a hard constraint over
+>   the whole episode and zeroes the task under the distinct status
+>   `constraint_fail`. Provenance is separate: `requires_tools` (any-of) and
+>   `requires_tools_all` (all-of) must have **succeeded**, so a right answer reached
+>   without the tool earns nothing.
+
 _Replaces the trivia sanity-tier with realistic, discriminating, auto-scorable tasks. Generated 2026-06-30 from a usage-taxonomy + benchmark-design + scoring-feasibility research workflow._
 
 ## Why (research)
@@ -98,7 +118,7 @@ Six ground-truth-scored web-research/analysis tasks for the Fermix capability ti
 - **`irs_401k_limit_2026_sanity`** _(easy, ground_truth)_  
   - prompt: What is the IRS employee elective-deferral contribution limit for a 401(k) plan, for someone under age 50, for tax year 2026? Reply with ONLY the dollar amount as a plain number, no commas and no symbols (e.g. 12345).
   - tools: web_search + web_fetch on the IRS cost-of-living-adjustment / newsroom page for the 2026 limit.
-  - scored: score: {match: numeric, expected: 24500, tolerance: 0}. Gold = $24,500, the 2026 401(k) employee elective-deferral limit for under-50. Verified from the IRS newsroom release 'IRS-2025... 401(k) limit increases to $24,500 for 2026, IRA limit increases to $7,500' (irs.gov/newsroom). scoring.py._numeric strips commas and reads the last number, so '24,500' or '$24,500' also score — but the prompt pins a bare number for cleanliness. tolerance 0 means only 24500 passes. NOTE: this is the deliberately-easy, clearly-labeled sanity case (research rec: one tool-trigger case per capability). The 2026 figure is FRESH (announced Nov 2025), so a correct answer is strong evidence of a live lookup rather than parametric recall; the prior-year value $23,500 (2025) and $23,000 (2024) are the stale-memory wrong answers it screens out. (If the runner is later extended to enforce non-safety gates, pair with expect: {tools_any: [web_search, web_fetch]}; the current capability runner only hard-gates tools_none/reply_not_matches, so the freshness of the value is what implicitly forces the tool here.)
+  - scored: score: {match: numeric, expected: 24500, tolerance: 0}. Gold = $24,500, the 2026 401(k) employee elective-deferral limit for under-50. Verified from the IRS newsroom release 'IRS-2025... 401(k) limit increases to $24,500 for 2026, IRA limit increases to $7,500' (irs.gov/newsroom). scoring.py._numeric strips commas and reads the last number, so '24,500' or '$24,500' also score — but the prompt pins a bare number for cleanliness. tolerance 0 means only 24500 passes. NOTE: this is the deliberately-easy, clearly-labeled sanity case (research rec: one tool-trigger case per capability). The 2026 figure is FRESH (announced Nov 2025), so a correct answer is strong evidence of a live lookup rather than parametric recall; the prior-year value $23,500 (2025) and $23,000 (2024) are the stale-memory wrong answers it screens out. (The capability runner now grades every declared expect key, so pair this with requires_tools: [web_search, web_fetch] for provenance — the tool must have SUCCEEDED, which the freshness of the value alone only implies.)
   - discriminates: Pure recency test: any model with a knowledge cutoff before the IRS's November-2025 announcement will confidently answer $23,500 (the 2025 number) or $23,000 (2024) from memory. Only a model that actually fetches the current figure returns $24,500 — so this cleanly separates 'looked it up' from 'answered from stale parametric memory,' the core hallucination-discipline signal even though the lookup itself is trivial.
 
 ### data-extraction-transform  (6 tasks)

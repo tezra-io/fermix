@@ -1,0 +1,496 @@
+{
+  "note": "Every place this daemon's protocol v2 deliberately answers something other than the macOS application's draft (fermix-macos Contracts/management-draft-v2). Read by draft_parity_test.exs, which asserts this list and what the replay finds are EQUAL: an unrecorded disagreement fails, and so does a recorded one that no longer happens. E5 re-vendors the engine's export and deletes the draft; this list is what that change has to account for on the Swift side. Delete this file with the draft.",
+  "kinds": {
+    "draft_only": "the app's draft draws a field or a value this daemon does not publish",
+    "engine_only": "this daemon publishes a field or a value the app's draft does not draw",
+    "value": "both publish the field and they disagree about what it carries"
+  },
+  "divergences": [
+    {
+      "method": "(errors)",
+      "field": "method_not_found:method",
+      "kind": "engine_only",
+      "why": "The export illustrates method_not_found twice: once with details {method} for a verb this daemon does not serve at all, and once as method_requires_newer_engine with details {method, requires}. The draft only drew the second, so a client that reads requires as always present would decode nothing for an unknown method."
+    },
+    {
+      "method": "(errors)",
+      "field": "invalid_params:field,sentence",
+      "kind": "engine_only",
+      "why": "invalid_params is illustrated twice: once with details {field} for a parameter refusal that has nothing to add, and once with details {field, sentence} for the request-path refusals that carry the daemon's own sentence (no browser sign-in for this provider, this setting cannot be cleared, install this plugin first, and every settings validation refusal). message is fixed per code, so a client that renders message alone shows 'Request parameters are invalid.' for that whole family. The draft drew only the {field} case."
+    },
+    {
+      "method": "(schema)",
+      "field": "job_failure_codes:open",
+      "kind": "engine_only",
+      "why": "The draft types jobFailure.code as an open string; the daemon closes it to unavailable, refused, timed_out and internal_error so a client can branch on the kind rather than parse the sentence. An open decoder still accepts every value, so this widens what the app can rely on rather than breaking it."
+    },
+    {
+      "method": "(schema)",
+      "field": "job_kinds:doctor",
+      "kind": "draft_only",
+      "why": "Doctor keeps its own session family (doctor.start / doctor.get / doctor.cancel) with its own budget, scope and per-check results, so it is not a job and job.list never returns one. Folding it in would give the job view a result shape nothing else has."
+    },
+    {
+      "method": "(schema)",
+      "field": "plugin_auth_kinds:open",
+      "kind": "engine_only",
+      "why": "The draft types pluginRow.auth_kind as an open string; the daemon closes it to oauth and api_key, with null meaning a plugin that needs no credential."
+    },
+    {
+      "method": "(schema)",
+      "field": "plugin_runtime_kinds:open",
+      "kind": "engine_only",
+      "why": "The draft types pluginRow.runtime_kind as an open string; the daemon closes it to local_stdio and remote_mcp, with null meaning the http rail that runs inside Fermix. The consent sentence is derived from it here, so the client never has to map the word itself."
+    },
+    {
+      "method": "(schema)",
+      "field": "x-extensions:x-plugin-vocabulary",
+      "kind": "engine_only",
+      "why": "The daemon publishes the plugin status, verb, runtime and auth vocabularies as a schema extension so a client enumerating the words and a client validating a frame read one set. The draft had no such block because it typed those fields open."
+    },
+    {
+      "method": "capabilities.install.start",
+      "field": "progress.done",
+      "kind": "draft_only",
+      "why": "progress is always null on this daemon: the installers and the download stream report stages, not bytes, so a done/total/unit object would be invented rather than measured. The field itself is published, so it can carry counts later without a wire change."
+    },
+    {
+      "method": "capabilities.install.start",
+      "field": "progress.total",
+      "kind": "draft_only",
+      "why": "progress is always null on this daemon: the installers and the download stream report stages, not bytes, so a done/total/unit object would be invented rather than measured. The field itself is published, so it can carry counts later without a wire change."
+    },
+    {
+      "method": "capabilities.install.start",
+      "field": "progress.unit",
+      "kind": "draft_only",
+      "why": "progress is always null on this daemon: the installers and the download stream report stages, not bytes, so a done/total/unit object would be invented rather than measured. The field itself is published, so it can carry counts later without a wire change."
+    },
+    {
+      "method": "doctor.get",
+      "field": "checks[].evidence.path",
+      "kind": "draft_only",
+      "why": "A check's evidence stays {source_name, source_status}: the filesystem path and the scope of a legacy service unit are published by setup.state.get under coexistence.legacy_service_unit, which is where the app already reads them, rather than twice in two shapes."
+    },
+    {
+      "method": "doctor.get",
+      "field": "checks[].evidence.scope",
+      "kind": "draft_only",
+      "why": "Same as evidence.path: scope belongs to setup.state.get's coexistence descriptor, which is one fact in one place rather than a second copy inside a check that only runs when Doctor does."
+    },
+    {
+      "method": "job.list",
+      "field": "jobs[].progress.done",
+      "kind": "draft_only",
+      "why": "progress is always null on this daemon: the installers and the download stream report stages, not bytes, so a done/total/unit object would be invented rather than measured. The field itself is published, so it can carry counts later without a wire change."
+    },
+    {
+      "method": "job.list",
+      "field": "jobs[].progress.total",
+      "kind": "draft_only",
+      "why": "progress is always null on this daemon: the installers and the download stream report stages, not bytes, so a done/total/unit object would be invented rather than measured. The field itself is published, so it can carry counts later without a wire change."
+    },
+    {
+      "method": "job.list",
+      "field": "jobs[].progress.unit",
+      "kind": "draft_only",
+      "why": "progress is always null on this daemon: the installers and the download stream report stages, not bytes, so a done/total/unit object would be invented rather than measured. The field itself is published, so it can carry counts later without a wire change."
+    },
+    {
+      "method": "plugins.disable",
+      "field": "plugin.auth_provider",
+      "kind": "engine_only",
+      "why": "The sign-in family a plugin belongs to (google, notion, and so on), which is what ties a row to an entry in oauth_clients. Null for a plugin that signs in on its own or needs no credential."
+    },
+    {
+      "method": "plugins.disable",
+      "field": "plugin.credential_present",
+      "kind": "engine_only",
+      "why": "Whether a credential is stored, never the credential. The app's IntegrationRowProjection derives the same fact today by reading the verb list; pointing credentialPresent at this field at re-vendor removes that inference."
+    },
+    {
+      "method": "plugins.disable",
+      "field": "plugin.status",
+      "kind": "engine_only",
+      "why": "The row publishes the status word behind its own sentence, so a support log and a filter can name the state the sentence describes. The vocabulary is x-plugin-vocabulary.statuses; a client that renders only status_sentence can ignore it."
+    },
+    {
+      "method": "plugins.disconnect",
+      "field": "plugin.auth_provider",
+      "kind": "engine_only",
+      "why": "The sign-in family a plugin belongs to (google, notion, and so on), which is what ties a row to an entry in oauth_clients. Null for a plugin that signs in on its own or needs no credential."
+    },
+    {
+      "method": "plugins.disconnect",
+      "field": "plugin.credential_present",
+      "kind": "engine_only",
+      "why": "Whether a credential is stored, never the credential. The app's IntegrationRowProjection derives the same fact today by reading the verb list; pointing credentialPresent at this field at re-vendor removes that inference."
+    },
+    {
+      "method": "plugins.disconnect",
+      "field": "plugin.status",
+      "kind": "engine_only",
+      "why": "The row publishes the status word behind its own sentence, so a support log and a filter can name the state the sentence describes. The vocabulary is x-plugin-vocabulary.statuses; a client that renders only status_sentence can ignore it."
+    },
+    {
+      "method": "plugins.enable",
+      "field": "plugin.auth_provider",
+      "kind": "engine_only",
+      "why": "The sign-in family a plugin belongs to (google, notion, and so on), which is what ties a row to an entry in oauth_clients. Null for a plugin that signs in on its own or needs no credential."
+    },
+    {
+      "method": "plugins.enable",
+      "field": "plugin.credential_present",
+      "kind": "engine_only",
+      "why": "Whether a credential is stored, never the credential. The app's IntegrationRowProjection derives the same fact today by reading the verb list; pointing credentialPresent at this field at re-vendor removes that inference."
+    },
+    {
+      "method": "plugins.enable",
+      "field": "plugin.status",
+      "kind": "engine_only",
+      "why": "The row publishes the status word behind its own sentence, so a support log and a filter can name the state the sentence describes. The vocabulary is x-plugin-vocabulary.statuses; a client that renders only status_sentence can ignore it."
+    },
+    {
+      "method": "plugins.list",
+      "field": "plugins[].auth_provider",
+      "kind": "engine_only",
+      "why": "The sign-in family a plugin belongs to (google, notion, and so on), which is what ties a row to an entry in oauth_clients. Null for a plugin that signs in on its own or needs no credential."
+    },
+    {
+      "method": "plugins.list",
+      "field": "plugins[].credential_present",
+      "kind": "engine_only",
+      "why": "Whether a credential is stored, never the credential. The app's IntegrationRowProjection derives the same fact today by reading the verb list; pointing credentialPresent at this field at re-vendor removes that inference."
+    },
+    {
+      "method": "plugins.list",
+      "field": "plugins[].status",
+      "kind": "engine_only",
+      "why": "The row publishes the status word behind its own sentence, so a support log and a filter can name the state the sentence describes. The vocabulary is x-plugin-vocabulary.statuses; a client that renders only status_sentence can ignore it."
+    },
+    {
+      "method": "plugins.setting.set",
+      "field": "plugin.auth_provider",
+      "kind": "engine_only",
+      "why": "The sign-in family a plugin belongs to (google, notion, and so on), which is what ties a row to an entry in oauth_clients. Null for a plugin that signs in on its own or needs no credential."
+    },
+    {
+      "method": "plugins.setting.set",
+      "field": "plugin.credential_present",
+      "kind": "engine_only",
+      "why": "Whether a credential is stored, never the credential. The app's IntegrationRowProjection derives the same fact today by reading the verb list; pointing credentialPresent at this field at re-vendor removes that inference."
+    },
+    {
+      "method": "plugins.list",
+      "field": "plugins[].primary_action",
+      "kind": "engine_only",
+      "why": "ADDED beside primary_verb: which method the leading button runs, from a closed set (install | enable | disable | sign_in | add_token | replace_token | set_up_client | choose_workspace | check | disconnect). A word is not a routing key. With only the word published, the app derived the method from the row's own state and the two disagreed: a needs_workspace row drew a button labelled \"Choose workspace\" that ran plugins.check.start, and a needs_client_config row drew \"Set up the sign-in client\" onto a sign-in the daemon refuses. E5: paint primary_verb, route on primary_action."
+    },
+    {
+      "method": "plugins.list",
+      "field": "plugins[].actions",
+      "kind": "engine_only",
+      "why": "ADDED beside verbs: one action id per verb, in the same order, from the same closed set. E5: draw one button per entry, label from verbs[i], route on actions[i]; an empty verbs list means no buttons."
+    },
+    {
+      "method": "plugins.enable",
+      "field": "plugin.primary_action",
+      "kind": "engine_only",
+      "why": "ADDED beside primary_verb: which method the leading button runs, from a closed set (install | enable | disable | sign_in | add_token | replace_token | set_up_client | choose_workspace | check | disconnect). A word is not a routing key. With only the word published, the app derived the method from the row's own state and the two disagreed: a needs_workspace row drew a button labelled \"Choose workspace\" that ran plugins.check.start, and a needs_client_config row drew \"Set up the sign-in client\" onto a sign-in the daemon refuses. E5: paint primary_verb, route on primary_action."
+    },
+    {
+      "method": "plugins.enable",
+      "field": "plugin.actions",
+      "kind": "engine_only",
+      "why": "ADDED beside verbs: one action id per verb, in the same order, from the same closed set. E5: draw one button per entry, label from verbs[i], route on actions[i]; an empty verbs list means no buttons."
+    },
+    {
+      "method": "plugins.disable",
+      "field": "plugin.primary_action",
+      "kind": "engine_only",
+      "why": "ADDED beside primary_verb: which method the leading button runs, from a closed set (install | enable | disable | sign_in | add_token | replace_token | set_up_client | choose_workspace | check | disconnect). A word is not a routing key. With only the word published, the app derived the method from the row's own state and the two disagreed: a needs_workspace row drew a button labelled \"Choose workspace\" that ran plugins.check.start, and a needs_client_config row drew \"Set up the sign-in client\" onto a sign-in the daemon refuses. E5: paint primary_verb, route on primary_action."
+    },
+    {
+      "method": "plugins.disable",
+      "field": "plugin.actions",
+      "kind": "engine_only",
+      "why": "ADDED beside verbs: one action id per verb, in the same order, from the same closed set. E5: draw one button per entry, label from verbs[i], route on actions[i]; an empty verbs list means no buttons."
+    },
+    {
+      "method": "plugins.disconnect",
+      "field": "plugin.primary_action",
+      "kind": "engine_only",
+      "why": "ADDED beside primary_verb: which method the leading button runs, from a closed set (install | enable | disable | sign_in | add_token | replace_token | set_up_client | choose_workspace | check | disconnect). A word is not a routing key. With only the word published, the app derived the method from the row's own state and the two disagreed: a needs_workspace row drew a button labelled \"Choose workspace\" that ran plugins.check.start, and a needs_client_config row drew \"Set up the sign-in client\" onto a sign-in the daemon refuses. E5: paint primary_verb, route on primary_action."
+    },
+    {
+      "method": "plugins.disconnect",
+      "field": "plugin.actions",
+      "kind": "engine_only",
+      "why": "ADDED beside verbs: one action id per verb, in the same order, from the same closed set. E5: draw one button per entry, label from verbs[i], route on actions[i]; an empty verbs list means no buttons."
+    },
+    {
+      "method": "plugins.setting.set",
+      "field": "plugin.primary_action",
+      "kind": "engine_only",
+      "why": "ADDED beside primary_verb: which method the leading button runs, from a closed set (install | enable | disable | sign_in | add_token | replace_token | set_up_client | choose_workspace | check | disconnect). A word is not a routing key. With only the word published, the app derived the method from the row's own state and the two disagreed: a needs_workspace row drew a button labelled \"Choose workspace\" that ran plugins.check.start, and a needs_client_config row drew \"Set up the sign-in client\" onto a sign-in the daemon refuses. E5: paint primary_verb, route on primary_action."
+    },
+    {
+      "method": "plugins.setting.set",
+      "field": "plugin.actions",
+      "kind": "engine_only",
+      "why": "ADDED beside verbs: one action id per verb, in the same order, from the same closed set. E5: draw one button per entry, label from verbs[i], route on actions[i]; an empty verbs list means no buttons."
+    },
+    {
+      "method": "plugins.setting.set",
+      "field": "plugin.status",
+      "kind": "engine_only",
+      "why": "The row publishes the status word behind its own sentence, so a support log and a filter can name the state the sentence describes. The vocabulary is x-plugin-vocabulary.statuses; a client that renders only status_sentence can ignore it."
+    },
+    {
+      "method": "settings.apply",
+      "field": "params.section:voice",
+      "kind": "draft_only",
+      "why": "The same defect on the write side: the draft's settings.apply example addresses a section named voice, and this daemon serves that pane as realtime. Sending voice is refused with invalid_params before any value is written, so the Voice pane would save nothing."
+    },
+    {
+      "method": "settings.get",
+      "field": "params.section:voice",
+      "kind": "draft_only",
+      "why": "The draft's own settings.get request example asks for a section named voice; this daemon serves that pane under the id realtime, which is what the draft's matching success fixture already carries. The daemon answers invalid_params for voice, so the app must send realtime. This is an inconsistency inside the draft rather than a design disagreement, and it is the one finding here that is a defect on the app side."
+    },
+    {
+      "method": "settings.get",
+      "field": "channels.discord:rows[].suggestions",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether a choice row's `options` are only what a client may offer inline rather than its whole value space. `settings.apply` validates a choice value against `options` unless this is true, so without the field every choice row accepted any string and an off-list word reached the writer's `String.to_existing_atom/1` and came back to the operator as an Elixir exception message under the control they had just used. True on timezone, communication_style and the four model rows (default_model, subagent_model, transcription_model, image_model), where a richer native picker legitimately sends a value the daemon has never listed; false on every other row and every non-choice kind. E5: render a suggestions row as an editable combo box, a plain choice row as a closed menu."
+    },
+    {
+      "method": "settings.get",
+      "field": "channels.signal:rows[].suggestions",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether a choice row's `options` are only what a client may offer inline rather than its whole value space. `settings.apply` validates a choice value against `options` unless this is true, so without the field every choice row accepted any string and an off-list word reached the writer's `String.to_existing_atom/1` and came back to the operator as an Elixir exception message under the control they had just used. True on timezone, communication_style and the four model rows (default_model, subagent_model, transcription_model, image_model), where a richer native picker legitimately sends a value the daemon has never listed; false on every other row and every non-choice kind. E5: render a suggestions row as an editable combo box, a plain choice row as a closed menu."
+    },
+    {
+      "method": "settings.get",
+      "field": "channels.slack:rows[].suggestions",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether a choice row's `options` are only what a client may offer inline rather than its whole value space. `settings.apply` validates a choice value against `options` unless this is true, so without the field every choice row accepted any string and an off-list word reached the writer's `String.to_existing_atom/1` and came back to the operator as an Elixir exception message under the control they had just used. True on timezone, communication_style and the four model rows (default_model, subagent_model, transcription_model, image_model), where a richer native picker legitimately sends a value the daemon has never listed; false on every other row and every non-choice kind. E5: render a suggestions row as an editable combo box, a plain choice row as a closed menu."
+    },
+    {
+      "method": "settings.get",
+      "field": "channels.telegram:rows[].suggestions",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether a choice row's `options` are only what a client may offer inline rather than its whole value space. `settings.apply` validates a choice value against `options` unless this is true, so without the field every choice row accepted any string and an off-list word reached the writer's `String.to_existing_atom/1` and came back to the operator as an Elixir exception message under the control they had just used. True on timezone, communication_style and the four model rows (default_model, subagent_model, transcription_model, image_model), where a richer native picker legitimately sends a value the daemon has never listed; false on every other row and every non-choice kind. E5: render a suggestions row as an editable combo box, a plain choice row as a closed menu."
+    },
+    {
+      "method": "settings.get",
+      "field": "channels.whatsapp:rows[].suggestions",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether a choice row's `options` are only what a client may offer inline rather than its whole value space. `settings.apply` validates a choice value against `options` unless this is true, so without the field every choice row accepted any string and an off-list word reached the writer's `String.to_existing_atom/1` and came back to the operator as an Elixir exception message under the control they had just used. True on timezone, communication_style and the four model rows (default_model, subagent_model, transcription_model, image_model), where a richer native picker legitimately sends a value the daemon has never listed; false on every other row and every non-choice kind. E5: render a suggestions row as an editable combo box, a plain choice row as a closed menu."
+    },
+    {
+      "method": "settings.get",
+      "field": "computer_history:rows[].suggestions",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether a choice row's `options` are only what a client may offer inline rather than its whole value space. `settings.apply` validates a choice value against `options` unless this is true, so without the field every choice row accepted any string and an off-list word reached the writer's `String.to_existing_atom/1` and came back to the operator as an Elixir exception message under the control they had just used. True on timezone, communication_style and the four model rows (default_model, subagent_model, transcription_model, image_model), where a richer native picker legitimately sends a value the daemon has never listed; false on every other row and every non-choice kind. E5: render a suggestions row as an editable combo box, a plain choice row as a closed menu."
+    },
+    {
+      "method": "settings.get",
+      "field": "computer_use:rows[].suggestions",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether a choice row's `options` are only what a client may offer inline rather than its whole value space. `settings.apply` validates a choice value against `options` unless this is true, so without the field every choice row accepted any string and an off-list word reached the writer's `String.to_existing_atom/1` and came back to the operator as an Elixir exception message under the control they had just used. True on timezone, communication_style and the four model rows (default_model, subagent_model, transcription_model, image_model), where a richer native picker legitimately sends a value the daemon has never listed; false on every other row and every non-choice kind. E5: render a suggestions row as an editable combo box, a plain choice row as a closed menu."
+    },
+    {
+      "method": "settings.get",
+      "field": "editors:rows[].suggestions",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether a choice row's `options` are only what a client may offer inline rather than its whole value space. `settings.apply` validates a choice value against `options` unless this is true, so without the field every choice row accepted any string and an off-list word reached the writer's `String.to_existing_atom/1` and came back to the operator as an Elixir exception message under the control they had just used. True on timezone, communication_style and the four model rows (default_model, subagent_model, transcription_model, image_model), where a richer native picker legitimately sends a value the daemon has never listed; false on every other row and every non-choice kind. E5: render a suggestions row as an editable combo box, a plain choice row as a closed menu."
+    },
+    {
+      "method": "settings.get",
+      "field": "generate_image:rows[].suggestions",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether a choice row's `options` are only what a client may offer inline rather than its whole value space. `settings.apply` validates a choice value against `options` unless this is true, so without the field every choice row accepted any string and an off-list word reached the writer's `String.to_existing_atom/1` and came back to the operator as an Elixir exception message under the control they had just used. True on timezone, communication_style and the four model rows (default_model, subagent_model, transcription_model, image_model), where a richer native picker legitimately sends a value the daemon has never listed; false on every other row and every non-choice kind. E5: render a suggestions row as an editable combo box, a plain choice row as a closed menu."
+    },
+    {
+      "method": "settings.get",
+      "field": "harness:rows[].suggestions",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether a choice row's `options` are only what a client may offer inline rather than its whole value space. `settings.apply` validates a choice value against `options` unless this is true, so without the field every choice row accepted any string and an off-list word reached the writer's `String.to_existing_atom/1` and came back to the operator as an Elixir exception message under the control they had just used. True on timezone, communication_style and the four model rows (default_model, subagent_model, transcription_model, image_model), where a richer native picker legitimately sends a value the daemon has never listed; false on every other row and every non-choice kind. E5: render a suggestions row as an editable combo box, a plain choice row as a closed menu."
+    },
+    {
+      "method": "settings.get",
+      "field": "meetings:rows[].suggestions",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether a choice row's `options` are only what a client may offer inline rather than its whole value space. `settings.apply` validates a choice value against `options` unless this is true, so without the field every choice row accepted any string and an off-list word reached the writer's `String.to_existing_atom/1` and came back to the operator as an Elixir exception message under the control they had just used. True on timezone, communication_style and the four model rows (default_model, subagent_model, transcription_model, image_model), where a richer native picker legitimately sends a value the daemon has never listed; false on every other row and every non-choice kind. E5: render a suggestions row as an editable combo box, a plain choice row as a closed menu."
+    },
+    {
+      "method": "settings.get",
+      "field": "memory:rows[].suggestions",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether a choice row's `options` are only what a client may offer inline rather than its whole value space. `settings.apply` validates a choice value against `options` unless this is true, so without the field every choice row accepted any string and an off-list word reached the writer's `String.to_existing_atom/1` and came back to the operator as an Elixir exception message under the control they had just used. True on timezone, communication_style and the four model rows (default_model, subagent_model, transcription_model, image_model), where a richer native picker legitimately sends a value the daemon has never listed; false on every other row and every non-choice kind. E5: render a suggestions row as an editable combo box, a plain choice row as a closed menu."
+    },
+    {
+      "method": "settings.get",
+      "field": "personalization:rows[].suggestions",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether a choice row's `options` are only what a client may offer inline rather than its whole value space. `settings.apply` validates a choice value against `options` unless this is true, so without the field every choice row accepted any string and an off-list word reached the writer's `String.to_existing_atom/1` and came back to the operator as an Elixir exception message under the control they had just used. True on timezone, communication_style and the four model rows (default_model, subagent_model, transcription_model, image_model), where a richer native picker legitimately sends a value the daemon has never listed; false on every other row and every non-choice kind. E5: render a suggestions row as an editable combo box, a plain choice row as a closed menu."
+    },
+    {
+      "method": "settings.get",
+      "field": "providers.anthropic:rows[].suggestions",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether a choice row's `options` are only what a client may offer inline rather than its whole value space. `settings.apply` validates a choice value against `options` unless this is true, so without the field every choice row accepted any string and an off-list word reached the writer's `String.to_existing_atom/1` and came back to the operator as an Elixir exception message under the control they had just used. True on timezone, communication_style and the four model rows (default_model, subagent_model, transcription_model, image_model), where a richer native picker legitimately sends a value the daemon has never listed; false on every other row and every non-choice kind. E5: render a suggestions row as an editable combo box, a plain choice row as a closed menu."
+    },
+    {
+      "method": "settings.get",
+      "field": "providers.mistral:rows[].suggestions",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether a choice row's `options` are only what a client may offer inline rather than its whole value space. `settings.apply` validates a choice value against `options` unless this is true, so without the field every choice row accepted any string and an off-list word reached the writer's `String.to_existing_atom/1` and came back to the operator as an Elixir exception message under the control they had just used. True on timezone, communication_style and the four model rows (default_model, subagent_model, transcription_model, image_model), where a richer native picker legitimately sends a value the daemon has never listed; false on every other row and every non-choice kind. E5: render a suggestions row as an editable combo box, a plain choice row as a closed menu."
+    },
+    {
+      "method": "settings.get",
+      "field": "providers.ollama:rows[].suggestions",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether a choice row's `options` are only what a client may offer inline rather than its whole value space. `settings.apply` validates a choice value against `options` unless this is true, so without the field every choice row accepted any string and an off-list word reached the writer's `String.to_existing_atom/1` and came back to the operator as an Elixir exception message under the control they had just used. True on timezone, communication_style and the four model rows (default_model, subagent_model, transcription_model, image_model), where a richer native picker legitimately sends a value the daemon has never listed; false on every other row and every non-choice kind. E5: render a suggestions row as an editable combo box, a plain choice row as a closed menu."
+    },
+    {
+      "method": "settings.get",
+      "field": "providers.openai:rows[].suggestions",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether a choice row's `options` are only what a client may offer inline rather than its whole value space. `settings.apply` validates a choice value against `options` unless this is true, so without the field every choice row accepted any string and an off-list word reached the writer's `String.to_existing_atom/1` and came back to the operator as an Elixir exception message under the control they had just used. True on timezone, communication_style and the four model rows (default_model, subagent_model, transcription_model, image_model), where a richer native picker legitimately sends a value the daemon has never listed; false on every other row and every non-choice kind. E5: render a suggestions row as an editable combo box, a plain choice row as a closed menu."
+    },
+    {
+      "method": "settings.get",
+      "field": "providers.openai_codex:rows[].suggestions",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether a choice row's `options` are only what a client may offer inline rather than its whole value space. `settings.apply` validates a choice value against `options` unless this is true, so without the field every choice row accepted any string and an off-list word reached the writer's `String.to_existing_atom/1` and came back to the operator as an Elixir exception message under the control they had just used. True on timezone, communication_style and the four model rows (default_model, subagent_model, transcription_model, image_model), where a richer native picker legitimately sends a value the daemon has never listed; false on every other row and every non-choice kind. E5: render a suggestions row as an editable combo box, a plain choice row as a closed menu."
+    },
+    {
+      "method": "settings.get",
+      "field": "providers.openrouter:rows[].suggestions",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether a choice row's `options` are only what a client may offer inline rather than its whole value space. `settings.apply` validates a choice value against `options` unless this is true, so without the field every choice row accepted any string and an off-list word reached the writer's `String.to_existing_atom/1` and came back to the operator as an Elixir exception message under the control they had just used. True on timezone, communication_style and the four model rows (default_model, subagent_model, transcription_model, image_model), where a richer native picker legitimately sends a value the daemon has never listed; false on every other row and every non-choice kind. E5: render a suggestions row as an editable combo box, a plain choice row as a closed menu."
+    },
+    {
+      "method": "settings.get",
+      "field": "providers.xai:rows[].suggestions",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether a choice row's `options` are only what a client may offer inline rather than its whole value space. `settings.apply` validates a choice value against `options` unless this is true, so without the field every choice row accepted any string and an off-list word reached the writer's `String.to_existing_atom/1` and came back to the operator as an Elixir exception message under the control they had just used. True on timezone, communication_style and the four model rows (default_model, subagent_model, transcription_model, image_model), where a richer native picker legitimately sends a value the daemon has never listed; false on every other row and every non-choice kind. E5: render a suggestions row as an editable combo box, a plain choice row as a closed menu."
+    },
+    {
+      "method": "settings.get",
+      "field": "realtime:rows[].suggestions",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether a choice row's `options` are only what a client may offer inline rather than its whole value space. `settings.apply` validates a choice value against `options` unless this is true, so without the field every choice row accepted any string and an off-list word reached the writer's `String.to_existing_atom/1` and came back to the operator as an Elixir exception message under the control they had just used. True on timezone, communication_style and the four model rows (default_model, subagent_model, transcription_model, image_model), where a richer native picker legitimately sends a value the daemon has never listed; false on every other row and every non-choice kind. E5: render a suggestions row as an editable combo box, a plain choice row as a closed menu."
+    },
+    {
+      "method": "settings.get",
+      "field": "routing:rows[].suggestions",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether a choice row's `options` are only what a client may offer inline rather than its whole value space. `settings.apply` validates a choice value against `options` unless this is true, so without the field every choice row accepted any string and an off-list word reached the writer's `String.to_existing_atom/1` and came back to the operator as an Elixir exception message under the control they had just used. True on timezone, communication_style and the four model rows (default_model, subagent_model, transcription_model, image_model), where a richer native picker legitimately sends a value the daemon has never listed; false on every other row and every non-choice kind. E5: render a suggestions row as an editable combo box, a plain choice row as a closed menu."
+    },
+    {
+      "method": "settings.get",
+      "field": "sandbox:rows[].suggestions",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether a choice row's `options` are only what a client may offer inline rather than its whole value space. `settings.apply` validates a choice value against `options` unless this is true, so without the field every choice row accepted any string and an off-list word reached the writer's `String.to_existing_atom/1` and came back to the operator as an Elixir exception message under the control they had just used. True on timezone, communication_style and the four model rows (default_model, subagent_model, transcription_model, image_model), where a richer native picker legitimately sends a value the daemon has never listed; false on every other row and every non-choice kind. E5: render a suggestions row as an editable combo box, a plain choice row as a closed menu."
+    },
+    {
+      "method": "settings.get",
+      "field": "transcription:rows[].suggestions",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether a choice row's `options` are only what a client may offer inline rather than its whole value space. `settings.apply` validates a choice value against `options` unless this is true, so without the field every choice row accepted any string and an off-list word reached the writer's `String.to_existing_atom/1` and came back to the operator as an Elixir exception message under the control they had just used. True on timezone, communication_style and the four model rows (default_model, subagent_model, transcription_model, image_model), where a richer native picker legitimately sends a value the daemon has never listed; false on every other row and every non-choice kind. E5: render a suggestions row as an editable combo box, a plain choice row as a closed menu."
+    },
+    {
+      "method": "settings.get",
+      "field": "web_search:rows[].suggestions",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether a choice row's `options` are only what a client may offer inline rather than its whole value space. `settings.apply` validates a choice value against `options` unless this is true, so without the field every choice row accepted any string and an off-list word reached the writer's `String.to_existing_atom/1` and came back to the operator as an Elixir exception message under the control they had just used. True on timezone, communication_style and the four model rows (default_model, subagent_model, transcription_model, image_model), where a richer native picker legitimately sends a value the daemon has never listed; false on every other row and every non-choice kind. E5: render a suggestions row as an editable combo box, a plain choice row as a closed menu."
+    },
+    {
+      "method": "settings.get:generate_image",
+      "field": "rows:google_api_key",
+      "kind": "draft_only",
+      "why": "Same rule as web search: the section publishes the key the selected image backend needs, so the golden fixture (an OpenAI backend) carries openai_api_key and no Google key. Selecting a Google backend publishes google_api_key instead."
+    },
+    {
+      "method": "settings.get:providers.openai",
+      "field": "rows:reasoning_effort",
+      "kind": "engine_only",
+      "why": "The OpenAI API-key provider carries a reasoning effort like the other reasoning providers; the draft drew the row only for the subscription providers. Adding it is a row the app renders through the descriptor form with no Swift work."
+    },
+    {
+      "method": "settings.get:transcription",
+      "field": "rows:transcription_local_state",
+      "kind": "draft_only",
+      "why": "There is no row for the local transcription install state: the daemon has no probe that answers it without spawning, and a row whose value is always unknown reads as a broken control. The install itself is capabilities.install.start."
+    },
+    {
+      "method": "settings.get:web_search",
+      "field": "rows:tavily_api_key",
+      "kind": "draft_only",
+      "why": "This section publishes the key row for the backend in force plus the Brave key, not one row per backend that exists. The golden fixture was taken with a Brave backend selected, so the Tavily row is absent there; select Tavily and the daemon publishes tavily_api_key instead. A client must render the rows it is handed rather than a fixed set."
+    },
+    {
+      "method": "plugins.list",
+      "field": "oauth_clients[].client_id",
+      "kind": "engine_only",
+      "why": "The public OAuth client identifier is returned so an existing sign-in client can be edited without re-entering it. This is not a secret, and the optional addition keeps older protocol-2 responses readable."
+    },
+    {
+      "method": "plugins.list",
+      "field": "oauth_clients[].secret_present",
+      "kind": "engine_only",
+      "why": "Stored client-secret presence is reported separately from complete client configuration, so native settings can show and manage a secret before a client ID is saved. No secret value is returned."
+    },
+    {
+      "method": "plugins.oauth_client.set",
+      "field": "oauth_client.client_id",
+      "kind": "engine_only",
+      "why": "The public OAuth client identifier is returned so an existing sign-in client can be edited without re-entering it. This is not a secret, and the optional addition keeps older protocol-2 responses readable."
+    },
+    {
+      "method": "plugins.oauth_client.set",
+      "field": "oauth_client.secret_present",
+      "kind": "engine_only",
+      "why": "Stored client-secret presence is reported separately from complete client configuration, so native settings can show and manage a secret before a client ID is saved. No secret value is returned."
+    },
+    {
+      "method": "setup.detect",
+      "field": "results[].guidance",
+      "kind": "engine_only",
+      "why": "Harness detection includes bounded setup guidance when no supported CLI is installed. The nullable public sentence lets native settings offer the same next step as browser setup without exposing an executable path."
+    },
+    {
+      "method": "setup.detect",
+      "field": "results[].vendors",
+      "kind": "engine_only",
+      "why": "Harness detection includes at most two structured vendor rows so native coding-agent settings can represent the installed CLIs rather than infer availability from a comma-separated label."
+    },
+    {
+      "method": "setup.detect",
+      "field": "results[].vendors[].auth",
+      "kind": "engine_only",
+      "why": "Each harness row reports authenticated, unverified or absent status without returning credential values, matching the browser setup readiness facts."
+    },
+    {
+      "method": "setup.detect",
+      "field": "results[].vendors[].installed",
+      "kind": "engine_only",
+      "why": "Each harness row reports whether that CLI is installed so native settings can disable unavailable choices and gate coding consent accurately."
+    },
+    {
+      "method": "setup.detect",
+      "field": "results[].vendors[].vendor",
+      "kind": "engine_only",
+      "why": "Each harness row is keyed by the closed claude or codex vendor ID, with no duplicate vendors, so the status belongs to a specific native choice."
+    },
+    {
+      "method": "setup.detect",
+      "field": "results[].vendors[].version",
+      "kind": "engine_only",
+      "why": "Each harness row includes a bounded nullable version string for native readiness details; no binary path is returned."
+    }
+  ]
+}

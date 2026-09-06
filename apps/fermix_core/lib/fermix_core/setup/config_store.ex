@@ -7,7 +7,9 @@ defmodule FermixCore.Setup.ConfigStore do
   health reporting, traces, and logs.
   """
 
+  alias FermixCore.Browser.Config, as: BrowserConfig
   alias FermixCore.Capabilities.MCP.Config, as: McpConfig
+  alias FermixCore.ComputerHistory.Config, as: ComputerHistoryConfig
   alias FermixCore.ComputerUse.Config, as: ComputerUseConfig
   alias FermixCore.Harness.Config, as: HarnessConfig
   alias FermixCore.MCP.Inbound.Config, as: InboundMcpConfig
@@ -16,8 +18,10 @@ defmodule FermixCore.Setup.ConfigStore do
   alias FermixCore.Providers.ReasoningEffort
   alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Sandbox.Config, as: SandboxConfig
+  alias FermixCore.Setup.RestartState
   alias FermixCore.Setup.SecretStore
   alias FermixCore.SkillCuration.Config, as: SkillCurationConfig
+  alias FermixCore.Transcription.Registry, as: TranscriptionRegistry
 
   require Logger
 
@@ -30,6 +34,7 @@ defmodule FermixCore.Setup.ConfigStore do
     browser: "browser",
     journals: "journals",
     realtime: "realtime",
+    mobile: "mobile",
     traces: "traces",
     logs: "logs"
   ]
@@ -45,6 +50,9 @@ defmodule FermixCore.Setup.ConfigStore do
     "scope_profile" => :scope_profile,
     "unsupported" => :unsupported
   }
+
+  @mobile_keys ~w(enabled mode port bind advertise_mdns streaming max_media_bytes media_store_max_bytes push)
+  @mobile_push_keys ~w(enabled team_id key_id key topic environment)
 
   @type runtime_config :: %{
           fermix_core: keyword(),
@@ -76,6 +84,7 @@ defmodule FermixCore.Setup.ConfigStore do
           browser: String.t(),
           journals: String.t(),
           realtime: String.t(),
+          mobile: String.t(),
           traces: String.t(),
           logs: String.t()
         }
@@ -106,11 +115,14 @@ defmodule FermixCore.Setup.ConfigStore do
         routing: Application.get_env(:fermix_core, :routing, []),
         compaction: Application.get_env(:fermix_core, :compaction, []),
         harness: Application.get_env(:fermix_core, :harness, []),
+        browser: Application.get_env(:fermix_core, :browser, []),
         skill_curation: Application.get_env(:fermix_core, :skill_curation, []),
         memory: Application.get_env(:fermix_core, :memory, []),
         realtime: Application.get_env(:fermix_core, :realtime, []),
         computer_use: Application.get_env(:fermix_core, :computer_use, []),
+        computer_history: Application.get_env(:fermix_core, :computer_history, []),
         transcription: Application.get_env(:fermix_core, :transcription, []),
+        meetings: Application.get_env(:fermix_core, :meetings, []),
         tools: Application.get_env(:fermix_core, :tools, []),
         plugins: Application.get_env(:fermix_core, :plugins, []),
         oauth: Application.get_env(:fermix_core, :oauth, %{}),
@@ -124,7 +136,8 @@ defmodule FermixCore.Setup.ConfigStore do
         discord: Application.get_env(:fermix_channels, :discord, []),
         slack: Application.get_env(:fermix_channels, :slack, []),
         signal: Application.get_env(:fermix_channels, :signal, []),
-        acp: Application.get_env(:fermix_channels, :acp, [])
+        acp: Application.get_env(:fermix_channels, :acp, []),
+        mobile: Application.get_env(:fermix_channels, :mobile, [])
       ],
       fermix_web: []
     }
@@ -148,13 +161,29 @@ defmodule FermixCore.Setup.ConfigStore do
     end
   end
 
+  @doc """
+  Writes the snapshot to the settings file and records it as this VM's baseline.
+
+  The baseline is recorded HERE, not in the callers, because every writer is a
+  write by this VM and the external-change comparison exists to name writes by
+  something else. Two in-tree writers reach this function without going through
+  a setup tail — the model-routing tool and the `/history` channel command — and
+  a baseline recorded only in the tails made both of them look like an outside
+  edit, which then refused every settings, secret, primary and plugin write in
+  both doors until a reload.
+
+  Recording is not gating: it changes what a later comparison is against, and
+  never decides whether this write may happen. In a tree-less process there is
+  no `RestartState` and the call is a no-op, so an out-of-process write is still
+  detected by the daemon that did not make it.
+  """
   @spec save_snapshot(runtime_config(), keyword()) :: :ok | {:error, term()}
   def save_snapshot(snapshot, opts \\ []) do
     with {:ok, persisted} <- persisted_snapshot(snapshot, opts),
          :ok <- File.mkdir_p(fermix_home()),
          :ok <- ensure_workspace(),
          :ok <- File.write(path(), dump_snapshot(persisted)) do
-      :ok
+      RestartState.record_persisted_baseline()
     end
   end
 
@@ -180,11 +209,14 @@ defmodule FermixCore.Setup.ConfigStore do
     apply_routing_config(Keyword.get(persisted.fermix_core, :routing, []))
     apply_compaction_config(Keyword.get(persisted.fermix_core, :compaction, []))
     apply_harness_config(Keyword.get(persisted.fermix_core, :harness, []))
+    apply_browser_config(Keyword.get(persisted.fermix_core, :browser, []))
     apply_skill_curation_config(Keyword.get(persisted.fermix_core, :skill_curation, []))
     apply_memory_config(Keyword.get(persisted.fermix_core, :memory, []))
     apply_realtime_config(Keyword.get(persisted.fermix_core, :realtime, []))
     apply_computer_use_config(Keyword.get(persisted.fermix_core, :computer_use, []))
+    apply_computer_history_config(Keyword.get(persisted.fermix_core, :computer_history, []))
     apply_transcription_config(Keyword.get(persisted.fermix_core, :transcription, []))
+    apply_meetings_config(Keyword.get(persisted.fermix_core, :meetings, []))
     apply_tools_config(Keyword.get(persisted.fermix_core, :tools, []))
     apply_plugins_config(Keyword.get(persisted.fermix_core, :plugins, []))
     apply_oauth_config(Keyword.get(persisted.fermix_core, :oauth, %{}))
@@ -198,6 +230,24 @@ defmodule FermixCore.Setup.ConfigStore do
     apply_channel_config(:slack, Keyword.get(persisted.fermix_channels, :slack, []))
     apply_channel_config(:signal, Keyword.get(persisted.fermix_channels, :signal, []))
     apply_channel_config(:acp, Keyword.get(persisted.fermix_channels, :acp, []))
+    apply_channel_config(:mobile, Keyword.get(persisted.fermix_channels, :mobile, []))
+  end
+
+  @doc """
+  Removes one value from live application environment.
+
+  `apply_snapshot/2` merges, so a key deleted from the document survives in
+  memory until the daemon restarts. That is right for a save (an absent key
+  means "unchanged"), and wrong for a deliberate forget: the runtime would keep
+  using a credential the operator removed while every surface reported it gone.
+  The path is a `SecretPaths` path, so this reaches the same value the snapshot
+  writers do.
+  """
+  @spec forget_value([atom() | String.t()]) :: :ok
+  def forget_value([app, key | rest]) when is_atom(app) and is_atom(key) and rest != [] do
+    current = Application.get_env(app, key, [])
+    Application.put_env(app, key, SecretStore.delete_snapshot_value(current, rest))
+    :ok
   end
 
   @doc """
@@ -218,7 +268,12 @@ defmodule FermixCore.Setup.ConfigStore do
   @spec bootstrap_runtime_config(keyword()) :: :ok | {:error, term()}
   def bootstrap_runtime_config(opts \\ []) do
     with {:ok, snapshot} <- load_runtime_config(Keyword.take(opts, [:supervised])),
-         :ok <- apply_snapshot(snapshot, opts) do
+         :ok <- apply_snapshot(snapshot, opts),
+         # This is the boot read of the file, which is what the external-change
+         # baseline means: the values in application environment now came from
+         # the document on disk. A no-op before the tree starts, and the whole
+         # point after a re-bootstrap.
+         :ok <- RestartState.record_persisted_baseline() do
       apply_mcp_config()
     end
   end
@@ -287,6 +342,11 @@ defmodule FermixCore.Setup.ConfigStore do
           |> Map.get(:fermix_core, [])
           |> Keyword.get(:harness, [])
           |> normalize_harness(),
+        browser:
+          snapshot
+          |> Map.get(:fermix_core, [])
+          |> Keyword.get(:browser, [])
+          |> normalize_browser(),
         skill_curation:
           snapshot
           |> Map.get(:fermix_core, [])
@@ -307,11 +367,22 @@ defmodule FermixCore.Setup.ConfigStore do
           |> Map.get(:fermix_core, [])
           |> Keyword.get(:computer_use, [])
           |> normalize_computer_use(),
+        computer_history:
+          snapshot
+          |> Map.get(:fermix_core, [])
+          |> Keyword.get(:computer_history, [])
+          |> normalize_computer_history()
+          |> ComputerHistoryConfig.to_keyword(),
         transcription:
           snapshot
           |> Map.get(:fermix_core, [])
           |> Keyword.get(:transcription, [])
           |> normalize_transcription(),
+        meetings:
+          snapshot
+          |> Map.get(:fermix_core, [])
+          |> Keyword.get(:meetings, [])
+          |> normalize_meetings(),
         tools:
           snapshot
           |> Map.get(:fermix_core, [])
@@ -372,7 +443,12 @@ defmodule FermixCore.Setup.ConfigStore do
           snapshot
           |> Map.get(:fermix_channels, [])
           |> Keyword.get(:acp, [])
-          |> normalize_acp()
+          |> normalize_acp(),
+        mobile:
+          snapshot
+          |> Map.get(:fermix_channels, [])
+          |> Keyword.get(:mobile, [])
+          |> normalize_mobile()
       ],
       fermix_web: []
     }
@@ -435,11 +511,14 @@ defmodule FermixCore.Setup.ConfigStore do
         routing: [],
         compaction: [],
         harness: [],
+        browser: [],
         skill_curation: [],
         memory: [],
         realtime: [],
         computer_use: [],
+        computer_history: [],
         transcription: [],
+        meetings: [],
         tools: [],
         plugins: [],
         oauth: %{},
@@ -453,7 +532,8 @@ defmodule FermixCore.Setup.ConfigStore do
         discord: [],
         slack: [],
         signal: [],
-        acp: []
+        acp: [],
+        mobile: []
       ],
       fermix_web: []
     }
@@ -563,6 +643,14 @@ defmodule FermixCore.Setup.ConfigStore do
     :ok
   end
 
+  # Replace (not merge), same rationale as harness: the section has no
+  # compile-time baseline, so the persisted keyword is the complete intended
+  # state. `Browser.Config` supplies every default the section omits.
+  defp apply_browser_config(browser_config) do
+    Application.put_env(:fermix_core, :browser, browser_config)
+    :ok
+  end
+
   # Replace (not merge), same rationale as harness.
   defp apply_skill_curation_config(skill_curation_config) do
     Application.put_env(:fermix_core, :skill_curation, skill_curation_config)
@@ -594,6 +682,23 @@ defmodule FermixCore.Setup.ConfigStore do
   # so the persisted keyword is the complete intended state.
   defp apply_computer_use_config(computer_use_config) do
     Application.put_env(:fermix_core, :computer_use, computer_use_config)
+    :ok
+  end
+
+  # Replace (not merge): the computer-history section has no compile-time baseline
+  # (MILESTONE_32 §9.4, config.ex), so the persisted keyword is the complete
+  # intended consent state.
+  # Re-normalize whichever shape arrives — parse_document's atoms (boot) or
+  # persistable_snapshot's TOML strings (save/apply) — so the app env holds
+  # exactly one shape (normalized atoms) on every path. normalize/1 is
+  # idempotent over its own output by contract (config_test).
+  defp apply_computer_history_config(computer_history_config) do
+    Application.put_env(
+      :fermix_core,
+      :computer_history,
+      ComputerHistoryConfig.normalize(computer_history_config)
+    )
+
     :ok
   end
 
@@ -629,6 +734,17 @@ defmodule FermixCore.Setup.ConfigStore do
       nil -> false
       backend -> backend != Keyword.get(baseline, :backend)
     end
+  end
+
+  # Replace (not merge): a blank is a real value here — clearing `announce_message`
+  # means "use the built-in consent line", and clearing a Zoom credential means
+  # "un-configure the RTMS lane". `normalize_meetings/1` drops blanks, so a merge
+  # would keep the old live value and the notetaker would keep announcing a line
+  # the operator deleted. `Meetings.Config.load/0` supplies every default an absent
+  # key needs, so nothing depends on the compile-time baseline surviving here.
+  defp apply_meetings_config(meetings_config) do
+    Application.put_env(:fermix_core, :meetings, meetings_config)
+    :ok
   end
 
   defp apply_tools_config(tools_config) do
@@ -674,11 +790,14 @@ defmodule FermixCore.Setup.ConfigStore do
     routing = Keyword.get(fermix_core, :routing, [])
     compaction = Keyword.get(fermix_core, :compaction, [])
     harness = Keyword.get(fermix_core, :harness, [])
+    browser = Keyword.get(fermix_core, :browser, [])
     skill_curation = Keyword.get(fermix_core, :skill_curation, [])
     memory = Keyword.get(fermix_core, :memory, [])
     realtime = Keyword.get(fermix_core, :realtime, [])
     computer_use = Keyword.get(fermix_core, :computer_use, [])
+    computer_history = Keyword.get(fermix_core, :computer_history, [])
     transcription = Keyword.get(fermix_core, :transcription, [])
+    meetings = Keyword.get(fermix_core, :meetings, [])
     tools = Keyword.get(fermix_core, :tools, [])
     plugins = Keyword.get(fermix_core, :plugins, [])
     oauth = Keyword.get(fermix_core, :oauth, %{})
@@ -708,11 +827,14 @@ defmodule FermixCore.Setup.ConfigStore do
       render_section(["fermix_core", "routing"], routing),
       render_section(["fermix_core", "compaction"], compaction),
       render_section(["fermix_core", "harness"], harness),
+      render_section(["fermix_core", "browser"], browser),
       render_section(["fermix_core", "skill_curation"], skill_curation),
       render_section(["fermix_core", "memory"], memory),
       render_section(["fermix_core", "realtime"], realtime),
       render_section(["fermix_core", "computer_use"], computer_use),
+      render_section(["fermix_core", "computer_history"], computer_history),
       render_section(["fermix_core", "transcription"], transcription),
+      render_section(["fermix_core", "meetings"], meetings),
       render_section(["fermix_core", "tools", "web_search"], Keyword.get(tools, :web_search, [])),
       render_section(
         ["fermix_core", "tools", "tool_search"],
@@ -731,7 +853,8 @@ defmodule FermixCore.Setup.ConfigStore do
       render_section(["fermix_channels", "discord"], Keyword.get(channels, :discord, [])),
       render_section(["fermix_channels", "slack"], Keyword.get(channels, :slack, [])),
       render_section(["fermix_channels", "signal"], Keyword.get(channels, :signal, [])),
-      render_section(["fermix_channels", "acp"], Keyword.get(channels, :acp, []))
+      render_section(["fermix_channels", "acp"], Keyword.get(channels, :acp, [])),
+      render_mobile(Keyword.get(channels, :mobile, []))
     ]
     |> List.flatten()
     |> Enum.reject(&(&1 in [nil, ""]))
@@ -759,6 +882,15 @@ defmodule FermixCore.Setup.ConfigStore do
       |> Enum.join("\n")
 
     Enum.join([header, body], "\n")
+  end
+
+  defp render_mobile([]), do: nil
+
+  defp render_mobile(mobile) do
+    [
+      render_section(["fermix_channels", "mobile"], Keyword.delete(mobile, :push)),
+      render_section(["fermix_channels", "mobile", "push"], Keyword.get(mobile, :push, []))
+    ]
   end
 
   defp render_plugins([]), do: nil
@@ -920,13 +1052,17 @@ defmodule FermixCore.Setup.ConfigStore do
         routing: normalize_routing(get_in(document, ["fermix_core", "routing"])),
         compaction: normalize_compaction(get_in(document, ["fermix_core", "compaction"])),
         harness: normalize_harness(get_in(document, ["fermix_core", "harness"])),
+        browser: normalize_browser(get_in(document, ["fermix_core", "browser"])),
         skill_curation:
           normalize_skill_curation(get_in(document, ["fermix_core", "skill_curation"])),
         memory: normalize_memory(get_in(document, ["fermix_core", "memory"])),
         realtime: normalize_realtime(get_in(document, ["fermix_core", "realtime"])),
         computer_use: normalize_computer_use(get_in(document, ["fermix_core", "computer_use"])),
+        computer_history:
+          normalize_computer_history(get_in(document, ["fermix_core", "computer_history"])),
         transcription:
           normalize_transcription(get_in(document, ["fermix_core", "transcription"])),
+        meetings: normalize_meetings(get_in(document, ["fermix_core", "meetings"])),
         tools: normalize_tools(get_in(document, ["fermix_core", "tools"])),
         plugins: normalize_plugins(get_in(document, ["fermix_core", "plugins"])),
         oauth: normalize_oauth(get_in(document, ["fermix_core", "oauth"])),
@@ -941,7 +1077,8 @@ defmodule FermixCore.Setup.ConfigStore do
         discord: normalize_discord(get_in(document, ["fermix_channels", "discord"])),
         slack: normalize_slack(get_in(document, ["fermix_channels", "slack"])),
         signal: normalize_signal(get_in(document, ["fermix_channels", "signal"])),
-        acp: normalize_acp(get_in(document, ["fermix_channels", "acp"]))
+        acp: normalize_acp(get_in(document, ["fermix_channels", "acp"])),
+        mobile: normalize_mobile(get_in(document, ["fermix_channels", "mobile"]))
       ],
       fermix_web: []
     }
@@ -1075,13 +1212,50 @@ defmodule FermixCore.Setup.ConfigStore do
     |> ComputerUseConfig.to_keyword()
   end
 
+  # `[fermix_core.computer_history]` (MILESTONE_32). Value validation lives in
+  # ComputerHistoryConfig.normalize (fail-loud per key). The persist path MUST
+  # additionally run `ComputerHistoryConfig.to_keyword/1` (done at the
+  # persistable_snapshot call site): normalize maps TOML spellings to internal
+  # atoms one-way, and rendering those atoms verbatim wrote `"default_provider"`
+  # to disk — a spelling the parser refuses, crashing the daemon on the next
+  # load (2026-08-19). Unknown keys refuse boot at the parse boundary — a
+  # default-off consent section has no keyless degrade path (Rule #12),
+  # mirroring validate_harness_section_keys!/1.
+  defp normalize_computer_history(config) do
+    validate_computer_history_section_keys!(config)
+    ComputerHistoryConfig.normalize(config)
+  end
+
+  defp validate_computer_history_section_keys!(nil), do: :ok
+
+  defp validate_computer_history_section_keys!(config) when is_map(config) or is_list(config) do
+    allowed = MapSet.new(ComputerHistoryConfig.config_keys(), &Atom.to_string/1)
+
+    unknown =
+      config
+      |> section_keys()
+      |> Enum.reject(&MapSet.member?(allowed, &1))
+      |> Enum.sort()
+
+    if unknown == [] do
+      :ok
+    else
+      raise ArgumentError, """
+      config.toml [fermix_core.computer_history] has unknown key(s): #{Enum.join(unknown, ", ")}.
+
+      Allowed keys: #{Enum.map_join(ComputerHistoryConfig.config_keys(), ", ", &Atom.to_string/1)}.
+      Remove or fix the key(s); the daemon will not boot until this is fixed.
+      """
+    end
+  end
+
   # `[fermix_core.transcription]` (M21). Speech-to-text has no keyless degrade
   # path, so config drift here must refuse boot rather than silently default
   # (Rule #12): a typo'd key, an unknown backend, or a non-positive max_file_mb
   # raises at the parse boundary, mirroring `normalize_generate_image/1`.
-  # `backend` is one of the shipped hosted backends; the on-device `local`
-  # backend ships in a later phase and is not selectable here. `model` is
-  # validated only as a string — a power user may pin any id the backend accepts.
+  # `backend` is one of the shipped backends, on-device `local` included — the
+  # allowed set is the registry's, never a second list maintained here. `model`
+  # is validated only as a string — a power user may pin any id the backend accepts.
   # Each backend has its own optional API-key slot (secure-on-save): openai/xai
   # keys OVERRIDE the reused chat-provider key; deepgram has no chat provider to
   # reuse, so its key is the only source.
@@ -1141,18 +1315,25 @@ defmodule FermixCore.Setup.ConfigStore do
     do: normalize_transcription_backend(Atom.to_string(value))
 
   defp normalize_transcription_backend(value) when is_binary(value) do
-    case value |> String.trim() |> String.downcase() do
-      backend when backend in ~w(openai xai deepgram) ->
-        backend
+    backend = value |> String.trim() |> String.downcase()
 
-      other ->
-        raise ArgumentError, """
-        config.toml [fermix_core.transcription] has an unknown backend: #{inspect(other)}.
+    if backend in transcription_backend_names() do
+      backend
+    else
+      raise ArgumentError, """
+      config.toml [fermix_core.transcription] has an unknown backend: #{inspect(backend)}.
 
-        Allowed backends: deepgram, openai, xai.
-        Remove or fix `backend`; the daemon will not boot until this is fixed.
-        """
+      Allowed backends: #{Enum.join(transcription_backend_names(), ", ")}.
+      Remove or fix `backend`; the daemon will not boot until this is fixed.
+      """
     end
+  end
+
+  # The shipped backend set is the registry's: a backend added there becomes
+  # selectable the same day, and one withdrawn stops parsing without a second
+  # edit here.
+  defp transcription_backend_names do
+    Enum.map(TranscriptionRegistry.backends(), fn {name, _module} -> Atom.to_string(name) end)
   end
 
   defp normalize_transcription_max_file_mb(nil), do: nil
@@ -1163,6 +1344,105 @@ defmodule FermixCore.Setup.ConfigStore do
     raise ArgumentError,
           "config.toml [fermix_core.transcription] max_file_mb #{inspect(value)} " <>
             "must be a positive integer"
+  end
+
+  # `[fermix_core.meetings]` (M21 Phase 3). Same parse-boundary posture as
+  # transcription: an unknown key or an unknown `transcription_backend` refuses
+  # boot rather than being dropped, because a notetaker joining a real meeting
+  # with a silently altered posture (announcement off, audio retained) is worse
+  # than one that will not start. A blank `transcription_backend` is legal and
+  # means "whatever the global transcription block selected" — `normalize_string/1`
+  # turns it into an absent key, which is exactly what `Meetings.Config` reads
+  # back as blank. `zoom_client_secret` is secure-on-save through SecretPaths.
+  @meetings_keys ~w(enabled bot_name announce announce_message transcription_backend retain_audio zoom_account_id zoom_client_id zoom_client_secret zoom_ws_subscription_id)
+
+  defp normalize_meetings(nil), do: []
+
+  defp normalize_meetings(config) when is_map(config) or is_list(config) do
+    validate_meetings_keys!(config)
+
+    []
+    |> put_if_present(:enabled, normalize_boolean(lookup(config, "enabled", :enabled)))
+    |> put_if_present(:bot_name, normalize_string(lookup(config, "bot_name", :bot_name)))
+    |> put_if_present(:announce, normalize_boolean(lookup(config, "announce", :announce)))
+    |> put_if_present(
+      :announce_message,
+      normalize_string(lookup(config, "announce_message", :announce_message))
+    )
+    |> put_if_present(
+      :transcription_backend,
+      normalize_meetings_backend(lookup(config, "transcription_backend", :transcription_backend))
+    )
+    |> put_if_present(
+      :retain_audio,
+      normalize_boolean(lookup(config, "retain_audio", :retain_audio))
+    )
+    |> put_meetings_zoom(config)
+  end
+
+  defp normalize_meetings(_config), do: []
+
+  defp put_meetings_zoom(keyword, config) do
+    keyword
+    |> put_if_present(
+      :zoom_account_id,
+      normalize_string(lookup(config, "zoom_account_id", :zoom_account_id))
+    )
+    |> put_if_present(
+      :zoom_client_id,
+      normalize_string(lookup(config, "zoom_client_id", :zoom_client_id))
+    )
+    |> put_if_present(
+      :zoom_client_secret,
+      normalize_string(lookup(config, "zoom_client_secret", :zoom_client_secret))
+    )
+    |> put_if_present(
+      :zoom_ws_subscription_id,
+      normalize_string(lookup(config, "zoom_ws_subscription_id", :zoom_ws_subscription_id))
+    )
+  end
+
+  defp validate_meetings_keys!(config) do
+    unknown =
+      config
+      |> section_keys()
+      |> Enum.reject(&(&1 in @meetings_keys))
+      |> Enum.sort()
+
+    if unknown != [] do
+      raise ArgumentError, """
+      config.toml [fermix_core.meetings] has unknown key(s): #{Enum.join(unknown, ", ")}.
+
+      Allowed keys: #{Enum.join(@meetings_keys, ", ")}.
+      Remove or fix the key(s); the daemon will not boot until this is fixed.
+      """
+    end
+  end
+
+  defp normalize_meetings_backend(nil), do: nil
+
+  defp normalize_meetings_backend(value) when is_atom(value),
+    do: normalize_meetings_backend(Atom.to_string(value))
+
+  defp normalize_meetings_backend(value) when is_binary(value) do
+    case normalize_string(value) do
+      nil -> nil
+      name -> validated_meetings_backend(String.downcase(name))
+    end
+  end
+
+  defp validated_meetings_backend(name) do
+    if name in transcription_backend_names() do
+      name
+    else
+      raise ArgumentError, """
+      config.toml [fermix_core.meetings] has an unknown transcription_backend: #{inspect(name)}.
+
+      Allowed backends: #{Enum.join(transcription_backend_names(), ", ")}, or blank for the
+      one [fermix_core.transcription] selects.
+      Remove or fix `transcription_backend`; the daemon will not boot until this is fixed.
+      """
+    end
   end
 
   defp normalize_tools(nil), do: []
@@ -1525,9 +1805,10 @@ defmodule FermixCore.Setup.ConfigStore do
 
   defp normalize_routing(nil), do: []
 
-  # subagent_*/cron_* drive delegated-worker and scheduled-job model selection
-  # (docs/design/SUBAGENT_MODEL_SELECTION.md); kept lax strings here and
-  # validated at the consumption seam by FermixCore.Providers.RoutingOverrides.
+  # subagent_*/cron_*/meeting_* drive delegated-worker, scheduled-job and
+  # meeting-summary model selection (docs/design/SUBAGENT_MODEL_SELECTION.md);
+  # kept lax strings here and validated at the consumption seam by
+  # FermixCore.Providers.RoutingOverrides.
   defp normalize_routing(config) do
     []
     |> put_if_present(
@@ -1553,6 +1834,18 @@ defmodule FermixCore.Setup.ConfigStore do
     |> put_if_present(
       :cron_reasoning_effort,
       normalize_string(lookup(config, "cron_reasoning_effort", :cron_reasoning_effort))
+    )
+    |> put_if_present(
+      :meeting_provider,
+      normalize_string(lookup(config, "meeting_provider", :meeting_provider))
+    )
+    |> put_if_present(
+      :meeting_model,
+      normalize_string(lookup(config, "meeting_model", :meeting_model))
+    )
+    |> put_if_present(
+      :meeting_reasoning_effort,
+      normalize_string(lookup(config, "meeting_reasoning_effort", :meeting_reasoning_effort))
     )
   end
 
@@ -1586,6 +1879,46 @@ defmodule FermixCore.Setup.ConfigStore do
       config.toml [fermix_core.harness] has unknown key(s): #{Enum.join(unknown, ", ")}.
 
       Allowed keys: #{Enum.map_join(HarnessConfig.config_keys(), ", ", &Atom.to_string/1)}.
+      Remove or fix the key(s); the daemon will not boot until this is fixed.
+      """
+    end
+  end
+
+  # `[fermix_core.browser]`. Only `allowed_hosts` is settable — it is the
+  # documented recovery for a host the browser policy refuses, so the refusals
+  # need it reachable. Every other field of `Browser.Config` is a timeout, a cap
+  # or a buffer size: tuning, which stays an internal constant.
+  #
+  # Unknown keys are rejected here at the parse boundary rather than dropped. The
+  # keys an operator most plausibly writes (`action_timeout_ms`, `max_tabs`) are
+  # REAL struct fields, so a silent drop would leave a config.toml line that
+  # reads as if it were in force and is not — the failure this whole section
+  # exists to end. Value validation lives in `Config.validate_allowed_hosts/1`,
+  # which runs on every read and is surfaced by `fermix doctor`.
+  defp normalize_browser(config) do
+    validate_browser_section_keys!(config)
+    BrowserConfig.normalize(config)
+  end
+
+  defp validate_browser_section_keys!(nil), do: :ok
+
+  defp validate_browser_section_keys!(config) when is_map(config) or is_list(config) do
+    allowed = MapSet.new(BrowserConfig.config_keys(), &Atom.to_string/1)
+
+    unknown =
+      config
+      |> section_keys()
+      |> Enum.reject(&MapSet.member?(allowed, &1))
+      |> Enum.sort()
+
+    if unknown == [] do
+      :ok
+    else
+      raise ArgumentError, """
+      config.toml [fermix_core.browser] has unknown key(s): #{Enum.join(unknown, ", ")}.
+
+      Allowed keys: #{Enum.map_join(BrowserConfig.config_keys(), ", ", &Atom.to_string/1)}.
+      Browser timeouts, caps and buffer sizes are internal constants, not config.
       Remove or fix the key(s); the daemon will not boot until this is fixed.
       """
     end
@@ -1814,6 +2147,151 @@ defmodule FermixCore.Setup.ConfigStore do
     put_if_present([], :enabled, lookup(config, "enabled", :enabled))
   end
 
+  defp normalize_mobile(nil), do: []
+
+  defp normalize_mobile(config) when is_map(config) or is_list(config) do
+    validate_mobile_keys!(config, @mobile_keys, "mobile")
+    push = lookup(config, "push", :push)
+
+    []
+    |> put_if_present(:enabled, normalize_mobile_boolean(config, :enabled))
+    |> put_if_present(:mode, normalize_mobile_mode(lookup(config, "mode", :mode)))
+    |> put_if_present(:port, normalize_mobile_port(lookup(config, "port", :port)))
+    |> put_if_present(:bind, normalize_mobile_bind(config))
+    |> put_if_present(:advertise_mdns, normalize_mobile_boolean(config, :advertise_mdns))
+    |> put_streaming(config)
+    |> put_if_present(
+      :max_media_bytes,
+      normalize_mobile_positive_integer(config, :max_media_bytes)
+    )
+    |> put_if_present(
+      :media_store_max_bytes,
+      normalize_mobile_positive_integer(config, :media_store_max_bytes)
+    )
+    |> put_mobile_push(push)
+  end
+
+  defp normalize_mobile(config) do
+    raise ArgumentError, "invalid mobile config #{inspect(config)}; expected a table"
+  end
+
+  defp put_mobile_push(fields, nil), do: fields
+
+  defp put_mobile_push(fields, push) when is_map(push) or is_list(push) do
+    validate_mobile_keys!(push, @mobile_push_keys, "mobile.push")
+
+    normalized =
+      []
+      |> put_if_present(:enabled, normalize_mobile_boolean(push, :enabled, "mobile.push"))
+      |> put_if_present(:team_id, normalize_mobile_string(push, :team_id, "mobile.push"))
+      |> put_if_present(:key_id, normalize_mobile_string(push, :key_id, "mobile.push"))
+      |> put_if_present(:key, normalize_mobile_string(push, :key, "mobile.push"))
+      |> put_if_present(:topic, normalize_mobile_string(push, :topic, "mobile.push"))
+      |> put_if_present(
+        :environment,
+        normalize_mobile_environment(lookup(push, "environment", :environment))
+      )
+
+    Keyword.put(fields, :push, normalized)
+  end
+
+  defp put_mobile_push(_fields, push) do
+    raise ArgumentError, "invalid mobile.push #{inspect(push)}; expected a table"
+  end
+
+  defp validate_mobile_keys!(config, allowed, label) do
+    unknown = config |> section_keys() |> Enum.reject(&(&1 in allowed)) |> Enum.sort()
+
+    if unknown != [] do
+      raise ArgumentError,
+            "invalid #{label} config; unknown key(s): #{Enum.join(unknown, ", ")}"
+    end
+  end
+
+  defp normalize_mobile_boolean(config, key, label \\ "mobile") do
+    case lookup(config, Atom.to_string(key), key) do
+      nil -> nil
+      value when is_boolean(value) -> value
+      value -> raise ArgumentError, "invalid #{label}.#{key} #{inspect(value)}; expected boolean"
+    end
+  end
+
+  defp normalize_mobile_string(config, key, label \\ "mobile") do
+    case lookup(config, Atom.to_string(key), key) do
+      nil ->
+        nil
+
+      value when is_binary(value) ->
+        case String.trim(value) do
+          "" -> raise ArgumentError, "invalid #{label}.#{key} #{inspect(value)}; expected string"
+          normalized -> normalized
+        end
+
+      value ->
+        raise ArgumentError, "invalid #{label}.#{key} #{inspect(value)}; expected string"
+    end
+  end
+
+  defp normalize_mobile_positive_integer(config, key) do
+    case lookup(config, Atom.to_string(key), key) do
+      nil ->
+        nil
+
+      value when is_integer(value) and value > 0 ->
+        value
+
+      value ->
+        raise ArgumentError, "invalid mobile.#{key} #{inspect(value)}; expected positive integer"
+    end
+  end
+
+  # The listener parses `bind` as an IP literal, and it does that at boot inside
+  # a supervised child: a typo there is a daemon-killing stop on an install that
+  # is already paired. Reject it here, where every other mobile key is decided.
+  defp normalize_mobile_bind(config) do
+    case normalize_mobile_string(config, :bind) do
+      nil -> nil
+      value -> parsed_mobile_bind(value)
+    end
+  end
+
+  # Strict parsing on purpose: `:inet.parse_address/1` still accepts the
+  # inet_aton short forms, so a truncated "0.0.0" would sail through the gate
+  # and bind an address the operator never wrote.
+  defp parsed_mobile_bind(value) do
+    case :inet.parse_strict_address(String.to_charlist(value)) do
+      {:ok, _address} ->
+        value
+
+      {:error, _reason} ->
+        raise ArgumentError, "invalid mobile.bind #{inspect(value)}; expected an IP address"
+    end
+  end
+
+  defp normalize_mobile_port(nil), do: nil
+  defp normalize_mobile_port(value) when is_integer(value) and value in 1..65_535, do: value
+
+  defp normalize_mobile_port(value) do
+    raise ArgumentError, "invalid mobile.port #{inspect(value)}; expected integer 1..65535"
+  end
+
+  defp normalize_mobile_mode(nil), do: nil
+  defp normalize_mobile_mode(value) when value in [:listener, "listener"], do: :listener
+
+  defp normalize_mobile_mode(value) do
+    raise ArgumentError, "invalid mobile.mode #{inspect(value)}; expected listener"
+  end
+
+  defp normalize_mobile_environment(nil), do: nil
+
+  defp normalize_mobile_environment(value) when value in ["development", "production"],
+    do: value
+
+  defp normalize_mobile_environment(value) do
+    raise ArgumentError,
+          "invalid mobile.push.environment #{inspect(value)}; expected development or production"
+  end
+
   defp normalize_auth_mode(:api_key), do: :api_key
   defp normalize_auth_mode("api_key"), do: :api_key
   defp normalize_auth_mode(:oauth), do: :oauth
@@ -1824,10 +2302,12 @@ defmodule FermixCore.Setup.ConfigStore do
   defp normalize_mode(:webhook), do: :webhook
   defp normalize_mode(:gateway), do: :gateway
   defp normalize_mode(:subprocess), do: :subprocess
+  defp normalize_mode(:listener), do: :listener
   defp normalize_mode("polling"), do: :polling
   defp normalize_mode("webhook"), do: :webhook
   defp normalize_mode("gateway"), do: :gateway
   defp normalize_mode("subprocess"), do: :subprocess
+  defp normalize_mode("listener"), do: :listener
   defp normalize_mode(_value), do: nil
 
   # Channel streaming opt-in (docs/design/CHANNEL_STREAMING.md §7). Shared by

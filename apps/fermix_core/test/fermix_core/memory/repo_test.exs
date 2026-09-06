@@ -40,7 +40,36 @@ defmodule FermixCore.Memory.RepoTest do
   test "opens sqlite, enables wal mode, and runs the base migration", %{repo: repo} do
     assert {:ok, "wal"} = Repo.journal_mode(server: repo)
 
-    assert {:ok, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]} =
+    assert {:ok,
+            [
+              1,
+              2,
+              3,
+              4,
+              5,
+              6,
+              7,
+              8,
+              9,
+              10,
+              11,
+              12,
+              13,
+              14,
+              15,
+              16,
+              17,
+              18,
+              19,
+              20,
+              21,
+              22,
+              23,
+              24,
+              25,
+              26,
+              27
+            ]} =
              Repo.migration_versions(server: repo)
   end
 
@@ -55,13 +84,130 @@ defmodule FermixCore.Memory.RepoTest do
   test "rerunning migrations is idempotent", %{repo: repo} do
     assert :ok = Repo.migrate(server: repo)
 
-    assert {:ok, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]} =
+    assert {:ok,
+            [
+              1,
+              2,
+              3,
+              4,
+              5,
+              6,
+              7,
+              8,
+              9,
+              10,
+              11,
+              12,
+              13,
+              14,
+              15,
+              16,
+              17,
+              18,
+              19,
+              20,
+              21,
+              22,
+              23,
+              24,
+              25,
+              26,
+              27
+            ]} =
              Repo.migration_versions(server: repo)
 
     assert :ok = Repo.migrate(server: repo)
 
-    assert {:ok, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]} =
+    assert {:ok,
+            [
+              1,
+              2,
+              3,
+              4,
+              5,
+              6,
+              7,
+              8,
+              9,
+              10,
+              11,
+              12,
+              13,
+              14,
+              15,
+              16,
+              17,
+              18,
+              19,
+              20,
+              21,
+              22,
+              23,
+              24,
+              25,
+              26,
+              27
+            ]} =
              Repo.migration_versions(server: repo)
+  end
+
+  test "mobile client-message migration upgrades an existing v20 database", %{
+    db_path: db_path,
+    repo: repo
+  } do
+    with_raw_conn(db_path, fn conn ->
+      assert :ok =
+               Sqlite3.execute(conn, """
+               DROP INDEX IF EXISTS idx_mobile_timeline_client_message;
+               DELETE FROM schema_migrations WHERE version = 21;
+               """)
+    end)
+
+    assert :ok = Repo.migrate(server: repo)
+
+    with_raw_conn(db_path, fn conn ->
+      assert {:ok, indexes} = sqlite_index_names(conn, "mobile_timeline")
+      assert "idx_mobile_timeline_client_message" in indexes
+    end)
+
+    assert {:ok, versions} = Repo.migration_versions(server: repo)
+    assert 21 in versions
+  end
+
+  test "mobile attempt-fence migration upgrades an existing v21 database", %{
+    db_path: db_path,
+    repo: repo
+  } do
+    with_raw_conn(db_path, fn conn ->
+      assert :ok =
+               Sqlite3.execute(conn, """
+               DROP INDEX IF EXISTS idx_mobile_request_outputs;
+               DROP INDEX IF EXISTS idx_mobile_client_requests_recovery;
+               ALTER TABLE mobile_timeline DROP COLUMN request_client_msg_id;
+               ALTER TABLE mobile_timeline DROP COLUMN request_attempt;
+               ALTER TABLE mobile_timeline DROP COLUMN output_key;
+               ALTER TABLE mobile_client_requests DROP COLUMN authenticated_device_id;
+               ALTER TABLE mobile_client_requests DROP COLUMN runner_epoch;
+               ALTER TABLE mobile_client_requests DROP COLUMN attempt;
+               DELETE FROM schema_migrations WHERE version = 22;
+               """)
+    end)
+
+    assert :ok = Repo.migrate(server: repo)
+
+    with_raw_conn(db_path, fn conn ->
+      assert {:ok, request_columns} = sqlite_column_names(conn, "mobile_client_requests")
+      assert "authenticated_device_id" in request_columns
+      assert "runner_epoch" in request_columns
+      assert "attempt" in request_columns
+
+      assert {:ok, timeline_columns} = sqlite_column_names(conn, "mobile_timeline")
+      assert "request_attempt" in timeline_columns
+      assert "output_key" in timeline_columns
+    end)
+
+    assert {:ok, versions} = Repo.migration_versions(server: repo)
+    assert 22 in versions
   end
 
   test "fermix_md migration rewrites resource_path so rollback targets FERMIX.md", %{

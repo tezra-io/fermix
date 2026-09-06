@@ -1,6 +1,7 @@
 defmodule FermixWebWeb.HealthController do
   use FermixWebWeb, :controller
 
+  alias FermixCore.BuildInfo
   alias FermixCore.Health
 
   @spec index(Plug.Conn.t(), map()) :: Plug.Conn.t()
@@ -26,7 +27,7 @@ defmodule FermixWebWeb.HealthController do
     %{
       status: "ok",
       app: "fermix",
-      version: to_string(Application.spec(:fermix_core, :vsn) || "unknown"),
+      version: BuildInfo.product_version(),
       timestamp: DateTime.utc_now()
     }
   end

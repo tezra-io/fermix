@@ -7,21 +7,22 @@ defmodule FermixCore.Transcription.Registry do
   configured choice, looked up in a compile-time name→module map — never a
   runtime default-and-continue. An unknown name (or a missing `backend` setting)
   fails loud (Rule #12); every hosted backend is keyed and there is no keyless
-  degrade path. The on-device `local` backend is a real choice, but it ships in a
-  later phase of this milestone, so naming it fails loud with that fact rather
-  than pretending it exists.
+  degrade path. The on-device `local` backend is keyed like the rest; what it
+  needs instead of a key is an installed sidecar and model, which its own
+  `configured?/1` reports.
   """
 
   alias FermixCore.Transcription.Deepgram
+  alias FermixCore.Transcription.Local
   alias FermixCore.Transcription.OpenAI
   alias FermixCore.Transcription.XAI
 
-  # Compile-time backend name -> {name_atom, module}. No dynamic loading. The
-  # on-device `local` backend is intentionally absent here (see backend_module/1).
+  # Compile-time backend name -> {name_atom, module}. No dynamic loading.
   @backends %{
     "openai" => {:openai, OpenAI},
     "xai" => {:xai, XAI},
-    "deepgram" => {:deepgram, Deepgram}
+    "deepgram" => {:deepgram, Deepgram},
+    "local" => {:local, Local}
   }
 
   # Curated model ids the setup surface offers per backend, head = the backend's
@@ -29,22 +30,26 @@ defmodule FermixCore.Transcription.Registry do
   # `[fermix_core.transcription]` compile-time default). `model` is a single
   # shared key across backends, so the setup surface resets it to the selected
   # backend's default on a backend switch — otherwise e.g. Deepgram would inherit
-  # the OpenAI-shaped default model and 400 (M21 §5.4 coherence caveat). xai is
-  # modelless (its endpoint runs a single fixed model and takes no `model`
-  # param), represented by an empty list: a KNOWN-modelless backend, distinct from
-  # an unknown one — the setup surface hides the model field and never snaps a
-  # default for it.
+  # the OpenAI-shaped default model and 400 (M21 §5.4 coherence caveat). xai and
+  # local are modelless (xai's endpoint runs a single fixed model and takes no
+  # `model` param; local's checkpoint is an internal ModelStore catalog entry,
+  # never a user menu), represented by an empty list: a KNOWN-modelless backend,
+  # distinct from an unknown one — the setup surface hides the model field and
+  # never snaps a default for it. `gpt-transcribe` is OpenAI's newer full-size model; the
+  # default stays `gpt-4o-mini-transcribe` until the cheaper tier is retired,
+  # which is the trigger to revisit the head of this list.
   @models %{
-    "openai" => ["gpt-4o-mini-transcribe", "gpt-4o-transcribe", "whisper-1"],
+    "openai" => ["gpt-4o-mini-transcribe", "gpt-transcribe", "gpt-4o-transcribe", "whisper-1"],
     "xai" => [],
-    "deepgram" => ["nova-3", "nova-2"]
+    "deepgram" => ["nova-3", "nova-2"],
+    "local" => []
   }
 
   @doc """
-  Every shipped hosted backend as `{name_atom, module}`, in name order — the
-  enumeration the transcription eval sweeps over. The on-device `local` backend is
-  intentionally absent (it ships in a later phase; see `backend_module/1`), so this
-  is the full set of backends selectable today, config-independent.
+  Every shipped backend as `{name_atom, module}`, in name order — the enumeration
+  the transcription eval sweeps over, config-independent. `local` is in the set:
+  the eval filters on `configured?/1`, which for the on-device backend means an
+  installed sidecar and model rather than a resolvable key.
   """
   @spec backends() :: [{atom(), module()}]
   def backends do
@@ -65,11 +70,11 @@ defmodule FermixCore.Transcription.Registry do
 
   @doc """
   The curated model ids the setup surface offers for `backend` (head = default).
-  A modelless backend (xai) returns `{:ok, []}` — a known backend with no
+  A modelless backend (xai, local) returns `{:ok, []}` — a known backend with no
   selectable model, which the setup surface renders as a hidden model field. A
   backend name outside the shipped set fails loud with the supported list — the
-  setup UI never asks for `local` or an unknown backend, so a `{:error, _}` here
-  is a broken invariant to surface, not degrade.
+  setup UI never asks for an unknown backend, so a `{:error, _}` here is a broken
+  invariant to surface, not degrade.
   """
   @spec supported_models(String.t() | atom()) :: {:ok, [String.t()]} | {:error, String.t()}
   def supported_models(backend) do
@@ -81,8 +86,8 @@ defmodule FermixCore.Transcription.Registry do
 
   @doc """
   The default model id for `backend` (head of `supported_models/1`). A modelless
-  backend (xai) has no default and returns `{:error, :modelless}`, so callers drop
-  the shared `model` key rather than snapping a bogus id onto it.
+  backend (xai, local) has no default and returns `{:error, :modelless}`, so
+  callers drop the shared `model` key rather than snapping a bogus id onto it.
   """
   @spec default_model(String.t() | atom()) ::
           {:ok, String.t()} | {:error, :modelless | String.t()}
@@ -113,12 +118,6 @@ defmodule FermixCore.Transcription.Registry do
         {:error,
          "transcription has no configured backend. Run `fermix setup` to choose one (#{supported()})."}
     end
-  end
-
-  defp backend_module("local") do
-    {:error,
-     "The on-device transcription backend (fermix-stt) ships in a later phase of this milestone. " <>
-       "Supported backends today: #{supported()}."}
   end
 
   defp backend_module(name) do

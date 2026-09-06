@@ -39,6 +39,10 @@ defmodule FermixChannels.Gateway.Delivery do
       {:approval_prompt, text, token} when is_binary(text) and is_binary(token) ->
         deliver_approval(channel, message, text_reply, text, token)
 
+      {:approval_prompt, %{kind: kind, text: text, token: token} = spec}
+      when kind in [:sandbox, :soul] and is_binary(text) and is_binary(token) ->
+        deliver_structured_approval(channel, message, text_reply, spec)
+
       other ->
         {:error, {:invalid_reply_part, other}}
     end
@@ -49,10 +53,24 @@ defmodule FermixChannels.Gateway.Delivery do
   # channel delivers the same prompt text (which carries the tap-to-copy
   # `/confirm <token>` command) through the text closure already built above.
   defp deliver_approval(channel, message, text_reply, text, token) do
-    if function_exported?(channel, :send_approval, 3) do
-      observe_reply(fn -> channel.send_approval(message, text, token) end, :text, nil, message)
+    cond do
+      function_exported?(channel, :send_approval, 2) ->
+        spec = %{kind: :sandbox, text: text, token: token, ttl_s: 60}
+        observe_reply(fn -> channel.send_approval(message, spec) end, :text, nil, message)
+
+      function_exported?(channel, :send_approval, 3) ->
+        observe_reply(fn -> channel.send_approval(message, text, token) end, :text, nil, message)
+
+      true ->
+        observe_reply(fn -> text_reply.(text) end, :text, nil, message)
+    end
+  end
+
+  defp deliver_structured_approval(channel, message, text_reply, spec) do
+    if function_exported?(channel, :send_approval, 2) do
+      observe_reply(fn -> channel.send_approval(message, spec) end, :text, nil, message)
     else
-      observe_reply(fn -> text_reply.(text) end, :text, nil, message)
+      observe_reply(fn -> text_reply.(spec.text) end, :text, nil, message)
     end
   end
 
@@ -74,10 +92,25 @@ defmodule FermixChannels.Gateway.Delivery do
   """
   @spec build_deliver(ReplyContext.t(), Reply.reply_fn() | nil) :: Reply.reply_fn()
   def build_deliver(%ReplyContext{message: message}, override) when is_function(override, 1) do
-    fn part -> observe_reply(fn -> override.(part) end, :override, nil, message) end
+    fn part ->
+      observe_reply(fn -> override.(for_override(part)) end, :override, nil, message)
+    end
   end
 
   def build_deliver(%ReplyContext{} = reply_context, nil), do: build_deliver(reply_context)
+
+  # An override replaces the channel adapter entirely (CLI sync capture, bench
+  # runner), so the one-tap affordance a structured spec carries has nothing to
+  # render it. This is the single seam every override goes through, so the spec
+  # is flattened here: exactly one approval shape ever reaches an override,
+  # instead of each override growing its own second clause. An unknown `kind`
+  # passes through untouched and the override rejects it as an invalid part.
+  defp for_override({:approval_prompt, %{kind: kind, text: text, token: token}})
+       when kind in [:sandbox, :soul] and is_binary(text) and is_binary(token) do
+    {:approval_prompt, text, token}
+  end
+
+  defp for_override(part), do: part
 
   @doc "One-shot delivery of a single outbound part (used for system replies)."
   @spec deliver(ReplyContext.t(), Reply.outbound()) :: :ok | {:error, term()}

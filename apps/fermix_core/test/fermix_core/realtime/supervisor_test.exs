@@ -36,6 +36,40 @@ defmodule FermixCore.Realtime.SupervisorTest do
     assert SessionSupervisor.active_sessions(session_name) == 0
   end
 
+  test "supervisor shutdown removes the realtime socket path" do
+    socket_path =
+      Path.join(
+        System.tmp_dir!(),
+        "fermix-realtime-shutdown-#{System.unique_integer([:positive])}.sock"
+      )
+
+    name = :"rt_shutdown_supervisor_#{System.unique_integer([:positive])}"
+    socket_name = :"rt_shutdown_socket_#{System.unique_integer([:positive])}"
+    session_name = :"rt_shutdown_sessions_#{System.unique_integer([:positive])}"
+    task_name = :"rt_shutdown_tasks_#{System.unique_integer([:positive])}"
+
+    previous_trap_exit = Process.flag(:trap_exit, true)
+
+    on_exit(fn ->
+      Process.flag(:trap_exit, previous_trap_exit)
+      FermixTestSupport.SafeRm.rm(socket_path)
+    end)
+
+    {:ok, supervisor} =
+      Realtime.Supervisor.start_link(
+        name: name,
+        socket_path: socket_path,
+        socket_name: socket_name,
+        session_supervisor_name: session_name,
+        task_supervisor_name: task_name
+      )
+
+    assert File.exists?(socket_path)
+    :ok = Supervisor.stop(supervisor, :shutdown, 1_000)
+
+    refute File.exists?(socket_path)
+  end
+
   test "session children are not restarted after normal shutdown" do
     session_name = :"rt_sessions_#{System.unique_integer([:positive])}"
 

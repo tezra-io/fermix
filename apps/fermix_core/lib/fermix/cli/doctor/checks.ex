@@ -16,9 +16,15 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias Fermix.CLI.VersionSkew
   alias FermixCore.Acp.IdentityStore
   alias FermixCore.Auth.Store, as: AuthStore
+  alias FermixCore.Boot.PathBaseline
   alias FermixCore.Browser.ChromeLauncher
   alias FermixCore.Browser.Config, as: BrowserConfig
+  alias FermixCore.BuildInfo
+  alias FermixCore.Capabilities.MCP.RuntimeStatus
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.ComputerHistory
+  alias FermixCore.ComputerHistory.Config, as: ComputerHistoryConfig
+  alias FermixCore.Config, as: CoreConfig
   alias FermixCore.Harness.Artifacts, as: HarnessArtifacts
   alias FermixCore.Harness.Config, as: HarnessConfig
   alias FermixCore.Harness.Ledger, as: HarnessLedger
@@ -36,17 +42,21 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias FermixCore.Resource.Registry, as: ResourceRegistry
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Sandbox.Mode, as: SandboxMode
+  alias FermixCore.Setup.Coexistence
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.Doctor, as: ProviderProbe
+  alias FermixCore.Setup.RestartState
   alias FermixCore.Setup.SecretMigration
   alias FermixCore.SkillCuration.Config, as: SkillCurationConfig
   alias FermixCore.SkillCuration.Delivery, as: SkillCurationDelivery
 
-  @type status :: :ok | :warn | :fail
+  @type status :: :ok | :warn | :fail | :not_applicable
   @type result :: %{name: String.t(), status: status(), detail: String.t()}
 
   @sandbox_trace_days 7
   @sandbox_trace_limit 20
+  @mobile_health_candidate_limit 8
+  @mobile_health_timeout_ms 750
 
   # {vendor, run-tool name} pairs — the boot-registry vs current-PATH mismatch
   # (§7.3) compares each run tool's registration against its vendor's detection.
@@ -56,14 +66,110 @@ defmodule Fermix.CLI.Doctor.Checks do
   @spec readiness() :: result()
   def readiness do
     report = FermixCore.Readiness.report()
+    gating = FermixCore.Readiness.gating_failures(report.failures)
+    advisory = report.failures -- gating
 
-    case report.status do
-      :ready ->
-        ok("readiness", "all configured integrations are present")
+    # Keyed on the two failure sets rather than on `status`, which is derived
+    # from the gating set and would say nothing about the advisory one. There is
+    # deliberately no `:degraded` clause: `status_for/1` cannot return it, and a
+    # clause the compiler proves dead is a branch nothing can reach.
+    case {gating, advisory} do
+      {[], []} -> ok("readiness", "all configured integrations are present")
+      {[], [_ | _]} -> warn("readiness", readiness_summary(advisory))
+      {[_ | _], _advisory} -> fail("readiness", readiness_summary(report.failures))
+    end
+  end
 
-      :setup_required ->
-        actions = Enum.map_join(report.failures, "; ", & &1.action)
-        fail("readiness", actions)
+  # Names the components rather than discarding them: an app that renders
+  # Attention rows for exactly these failures must not also render a Doctor row
+  # calling them absent.
+  defp readiness_summary(failures) do
+    Enum.map_join(failures, "; ", fn failure -> "#{failure.component}: #{failure.action}" end)
+  end
+
+  @doc """
+  Whether settings were changed since the daemon started.
+
+  A pending restart warns rather than passes, and names *which* sections are
+  waiting: the saved settings are not the running ones until the restart
+  happens, and the row is what carries the restart remediation to the operator.
+  """
+  @spec restart_pending() :: result()
+  def restart_pending do
+    case RestartState.restart() do
+      %{required: false} ->
+        ok("restart_pending", "no restart is needed")
+
+      %{reasons: reasons} ->
+        warn("restart_pending", "restart to apply: #{Enum.map_join(reasons, ", ", & &1.section)}")
+    end
+  end
+
+  @doc """
+  Whether the settings file changed outside this daemon, or cannot be read.
+
+  Three states and three answers, because the remedies differ: a changed file is
+  read again, an unreadable one is repaired, and a clear one needs nothing. They
+  are deliberately not folded into one warning.
+  """
+  @spec external_config_change() :: result()
+  def external_config_change do
+    case RestartState.config_state() do
+      :clear ->
+        ok("external_config_change", "the settings file matches what Fermix last wrote")
+
+      {:external_change, sections} ->
+        warn(
+          "external_config_change",
+          "changed outside Fermix: #{Enum.join(sections, ", ")}. Reload settings from disk."
+        )
+
+      {:config_unreadable, sentence} ->
+        fail("external_config_change", sentence)
+    end
+  end
+
+  @doc "Whether a launchd unit this engine does not own is installed."
+  @spec legacy_service_unit() :: result()
+  def legacy_service_unit do
+    case Coexistence.legacy_service_unit() do
+      %{present: false} ->
+        ok("legacy_service_unit", "no other Fermix service is installed")
+
+      %{scope: scope, path: path} ->
+        warn(
+          "legacy_service_unit",
+          "another Fermix service is installed at #{scope} scope: #{path}"
+        )
+    end
+  end
+
+  @doc "Whether any stored key cannot be read without a keychain prompt."
+  @spec secret_acl_restricted() :: result()
+  def secret_acl_restricted do
+    case Coexistence.secret_acl_restricted() do
+      %{present: false} ->
+        ok("secret_acl_restricted", "every stored key is readable")
+
+      %{keys: keys} ->
+        warn("secret_acl_restricted", "stored keys need re-saving: #{Enum.join(keys, ", ")}")
+    end
+  end
+
+  @doc """
+  Whether the process PATH carries the baseline directories.
+
+  Names which world produced the PATH it prints, so a reader is never silently
+  comparing a daemon's environment with a shell's.
+  """
+  @spec engine_path_baseline() :: result()
+  def engine_path_baseline do
+    case PathBaseline.missing_dirs() do
+      [] ->
+        ok("engine_path_baseline", "PATH carries every baseline directory")
+
+      missing ->
+        warn("engine_path_baseline", "PATH is missing: #{Enum.join(missing, ", ")}")
     end
   end
 
@@ -82,13 +188,16 @@ defmodule Fermix.CLI.Doctor.Checks do
     end
   end
 
+  # Management v1 `hello` is the liveness answer: it carries the daemon's
+  # immutable identity and proves the protocol negotiated, which the retired
+  # unversioned `status` method could not.
   @spec daemon_socket(keyword()) :: result()
   def daemon_socket(opts \\ []) do
-    client = Keyword.get(opts, :client, &Client.status/0)
+    client = Keyword.get(opts, :client, fn -> Client.request_v1("hello") end)
 
     case client.() do
-      {:ok, %{"status" => "ok", "version" => version, "uptime_ms" => uptime_ms}} ->
-        daemon_socket_result(version, uptime_ms)
+      {:ok, %{"engine" => %{"product_version" => version}}} ->
+        daemon_socket_result(version)
 
       {:ok, other} ->
         warn("daemon socket", "unexpected reply: #{inspect(other)}")
@@ -97,15 +206,15 @@ defmodule Fermix.CLI.Doctor.Checks do
         warn("daemon socket", "not running (start with `fermix start`)")
 
       {:error, reason} ->
-        fail("daemon socket", inspect(reason))
+        fail("daemon socket", Client.describe_error(reason))
     end
   end
 
   # A daemon on a different version than this binary is the stale state a
   # package-manager upgrade leaves behind (brew swaps the binary on disk,
   # the service keeps running the old release) — warn, don't pass.
-  defp daemon_socket_result(version, uptime_ms) do
-    detail = "running, version #{version}, up #{format_uptime(uptime_ms)}"
+  defp daemon_socket_result(version) do
+    detail = "running, version #{version}"
 
     case VersionSkew.note(version) do
       nil -> ok("daemon socket", detail)
@@ -161,16 +270,30 @@ defmodule Fermix.CLI.Doctor.Checks do
   # Predicates are injectable for the same reason `daemon_socket/1` injects its
   # client: the real ones answer from THIS host, so neither branch below is
   # reachable from a test otherwise.
+  # An app-managed engine has no legacy unit by design: the background service
+  # is `SMAppService` registration, which lives app-side. Reporting its absence
+  # as a warning that names `fermix service install` — a verb this same engine
+  # refuses — makes a correct install look broken, and disagrees with
+  # `Diagnostics.default_service/0` about the same fact.
   @spec service_unit(keyword()) :: result()
   def service_unit(opts \\ []) when is_list(opts) do
     installed? = Keyword.get(opts, :installed?, &installed_safe?/1)
     drifted? = Keyword.get(opts, :drifted?, &drifted_safe?/1)
 
     cond do
+      app_engine?(opts) -> app_managed_service_row()
       installed?.(:user) -> unit_result(:user, drifted?)
       installed?.(:system) -> unit_result(:system, drifted?)
       true -> warn("service unit", "no unit installed (run `fermix service install`)")
     end
+  end
+
+  defp app_managed_service_row do
+    not_applicable(
+      "service unit",
+      "managed by Fermix.app; the background service is a login item the app registers, " <>
+        "not a launchd unit this engine installs"
+    )
   end
 
   # "Installed" was the whole check, so a unit written by an older version read
@@ -250,6 +373,12 @@ defmodule Fermix.CLI.Doctor.Checks do
     binary_path = Keyword.get(opts, :binary_path) || System.find_executable("fermix")
 
     cond do
+      app_engine?(opts) ->
+        not_applicable(
+          "binary integrity",
+          "managed by Fermix.app; the signed bundle is verified by macOS, not by the release feed"
+        )
+
       is_nil(binary_path) ->
         warn("binary integrity", "fermix not on PATH; skipping")
 
@@ -548,6 +677,216 @@ defmodule Fermix.CLI.Doctor.Checks do
     end
   end
 
+  @doc "Reports mobile identity permissions and daemon-owned listener state."
+  @spec mobile(keyword()) :: result()
+  def mobile(opts \\ []) when is_list(opts) do
+    config = Application.get_env(:fermix_channels, :mobile, [])
+
+    if Keyword.get(config, :enabled, false) == true do
+      check_mobile_enabled(config, opts)
+    else
+      ok("mobile companion", "disabled")
+    end
+  end
+
+  defp check_mobile_enabled(config, opts) do
+    mobile_dir = Keyword.get(opts, :mobile_dir, ConfigStore.workspace_paths().mobile)
+
+    case mobile_identity_files(mobile_dir) do
+      :ok ->
+        mobile_daemon_result(
+          config,
+          ProviderProbe.mobile_report(Keyword.take(opts, [:client])),
+          opts
+        )
+
+      :never_paired ->
+        warn(
+          "mobile companion",
+          "enabled but never paired — run `fermix pair` to create the gateway identity"
+        )
+
+      {:error, detail} ->
+        fail("mobile companion", detail)
+    end
+  end
+
+  # Design §0: an enabled install with NO identity at all is the normal dormant
+  # state — `fermix pair` is what creates the gateway key and TLS material, and
+  # the channel is only ever enabled by hand-editing config.toml. Only a
+  # partial, insecure, or unreadable identity is a failure, because those are
+  # refused rather than regenerated and the operator has to repair them by hand.
+  defp mobile_identity_files(mobile_dir) do
+    reports = Enum.map(~w(gateway_key tls.crt tls.key), &mobile_identity_file(mobile_dir, &1))
+    missing = for {:missing, name} <- reports, do: name
+    insecure = for {:insecure, name, mode} <- reports, do: "#{name}=#{mode}"
+    errors = for {:error, name, reason} <- reports, do: "#{name}=#{inspect(reason)}"
+
+    cond do
+      length(missing) == length(reports) ->
+        :never_paired
+
+      missing != [] ->
+        {:error,
+         "incomplete mobile identity, missing #{Enum.join(missing, ", ")} — Fermix never " <>
+           "regenerates identity files; remove the rest and run `fermix pair`"}
+
+      insecure != [] ->
+        {:error, "mobile identity files must be 0600: #{Enum.join(insecure, ", ")}"}
+
+      errors != [] ->
+        {:error, "could not inspect mobile identity files: #{Enum.join(errors, ", ")}"}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp mobile_identity_file(mobile_dir, name) do
+    case File.stat(Path.join(mobile_dir, name)) do
+      {:ok, %File.Stat{type: :regular, mode: mode}} ->
+        permissions = Bitwise.band(mode, 0o777)
+        if permissions == 0o600, do: :ok, else: {:insecure, name, octal(permissions)}
+
+      {:ok, _stat} ->
+        {:error, name, :not_regular}
+
+      {:error, :enoent} ->
+        {:missing, name}
+
+      {:error, reason} ->
+        {:error, name, reason}
+    end
+  end
+
+  defp mobile_daemon_result(_config, %{status: :daemon_not_running}, _opts) do
+    warn(
+      "mobile companion",
+      "identity files 0600; daemon not running (start with `fermix start`)"
+    )
+  end
+
+  defp mobile_daemon_result(_config, %{status: :error, error: error}, _opts) do
+    fail("mobile companion", "identity files 0600; daemon status failed: #{error}")
+  end
+
+  defp mobile_daemon_result(config, %{status: :reported, report: report}, opts) do
+    checks = [
+      mobile_listener(report, opts),
+      mobile_mdns(report, config),
+      mobile_tailnet(report),
+      mobile_apns(report, config),
+      mobile_device_count(report)
+    ]
+
+    detail = ["identity files 0600" | Enum.map(checks, &elem(&1, 1))] |> Enum.join("; ")
+
+    cond do
+      Enum.any?(checks, &(elem(&1, 0) == :fail)) -> fail("mobile companion", detail)
+      Enum.any?(checks, &(elem(&1, 0) == :warn)) -> warn("mobile companion", detail)
+      true -> ok("mobile companion", detail)
+    end
+  end
+
+  defp mobile_listener(
+         %{"listener" => %{"status" => "ready", "candidates" => candidates}},
+         opts
+       )
+       when is_list(candidates) do
+    probe = Keyword.get(opts, :health_probe, &mobile_health_probe/2)
+
+    if is_function(probe, 2) do
+      mobile_candidate_health(candidates, probe)
+    else
+      {:fail, "invalid mobile health probe"}
+    end
+  end
+
+  defp mobile_listener(_report, _opts), do: {:fail, "listener down"}
+
+  defp mobile_candidate_health([], _probe), do: {:fail, "no advertised candidates"}
+
+  defp mobile_candidate_health(candidates, probe) do
+    checked = Enum.take(candidates, @mobile_health_candidate_limit)
+
+    case Enum.find_value(checked, &healthy_mobile_candidate(&1, probe)) do
+      nil ->
+        {:fail, "no advertised candidate passed TLS /healthz (checked #{length(checked)})"}
+
+      candidate ->
+        {:ok, "listener reachable at #{candidate} (#{length(candidates)} candidates)"}
+    end
+  end
+
+  defp healthy_mobile_candidate(candidate, probe) when is_binary(candidate) do
+    with {:ok, health_url} <- mobile_health_url(candidate),
+         :ok <- probe.(health_url, @mobile_health_timeout_ms) do
+      candidate
+    else
+      {:error, _reason} -> nil
+    end
+  end
+
+  defp healthy_mobile_candidate(_candidate, _probe), do: nil
+
+  defp mobile_health_url(candidate) do
+    case URI.parse(candidate) do
+      %URI{scheme: "wss", host: host} = uri when is_binary(host) and host != "" ->
+        {:ok,
+         URI.to_string(%{uri | scheme: "https", path: "/healthz", query: nil, fragment: nil})}
+
+      _uri ->
+        {:error, :invalid_wss_candidate}
+    end
+  end
+
+  defp mobile_health_probe(url, timeout_ms) do
+    request_opts = [
+      retry: false,
+      receive_timeout: timeout_ms,
+      connect_options: [timeout: timeout_ms, transport_opts: [verify: :verify_none]]
+    ]
+
+    case Req.get(url, request_opts) do
+      {:ok, %Req.Response{status: 200, body: %{"fermix" => "mobile", "v" => 1}}} -> :ok
+      {:ok, %Req.Response{status: status}} -> {:error, {:unexpected_status, status}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp mobile_mdns(_report, config) when not is_list(config), do: {:fail, "invalid mDNS config"}
+
+  defp mobile_mdns(report, config) do
+    cond do
+      Keyword.get(config, :advertise_mdns, true) == false -> {:ok, "mDNS disabled"}
+      Map.get(report, "mdns") == "advertising" -> {:ok, "mDNS advertising"}
+      true -> {:fail, "mDNS down"}
+    end
+  end
+
+  defp mobile_tailnet(%{"tailnet" => %{"detected" => true}}), do: {:ok, "tailnet detected"}
+  defp mobile_tailnet(_report), do: {:ok, "tailnet not detected (LAN still available)"}
+
+  defp mobile_apns(report, config) do
+    push = Keyword.get(config, :push, [])
+
+    cond do
+      Keyword.get(push, :enabled, false) == false -> {:ok, "APNs disabled"}
+      get_in(report, ["apns", "credentials"]) == "ready" -> {:ok, "APNs ready"}
+      true -> {:fail, "APNs credentials missing"}
+    end
+  end
+
+  defp mobile_device_count(%{"paired_devices" => count}) when is_integer(count) and count > 0 do
+    suffix = if count == 1, do: "device", else: "devices"
+    {:ok, "#{count} paired #{suffix}"}
+  end
+
+  defp mobile_device_count(%{"paired_devices" => 0}), do: {:warn, "no paired devices"}
+  defp mobile_device_count(_report), do: {:fail, "paired-device count unavailable"}
+
+  defp octal(mode), do: mode |> Integer.to_string(8) |> String.pad_leading(4, "0")
+
   @doc """
   The ACP agent surface (M29 §9 item 5, §17.3): whether it is enabled, where its
   socket is, whether the listener is actually up, and which client identities the
@@ -691,6 +1030,14 @@ defmodule Fermix.CLI.Doctor.Checks do
     warn("transcription", error)
   end
 
+  # The on-device backend fails on installation state, not on a key, so the row
+  # names the missing half and carries the installer's own fix sentence — a
+  # "set a key" line would send the operator looking for a credential that does
+  # not exist.
+  defp format_transcription(%{status: :needs_install, missing: missing, remedy: remedy}) do
+    warn("transcription", "backend local #{missing_half(missing)} — #{remedy}")
+  end
+
   defp format_transcription(%{credential_present?: false} = report) do
     warn(
       "transcription",
@@ -701,6 +1048,67 @@ defmodule Fermix.CLI.Doctor.Checks do
   defp format_transcription(%{backend: backend}) do
     ok("transcription", "backend #{backend} configured")
   end
+
+  defp missing_half(missing) when missing in [:sidecar_not_installed, :no_release_pinned],
+    do: "needs its sidecar"
+
+  defp missing_half(missing) when missing in [:model_not_installed, :model_pins_missing],
+    do: "needs its speech model"
+
+  @doc """
+  Meeting-notetaker readiness (M21 Phase 3): which lane can place a bot, and the
+  Meet profile's sign-in custody. Offline — it never spawns the sidecar, so the
+  row costs nothing on a host that never uses meetings.
+  """
+  @spec meetings() :: result()
+  def meetings do
+    ProviderProbe.meetings_report()
+    |> format_meetings()
+  end
+
+  defp format_meetings(%{status: :disabled}), do: ok("meetings", "disabled")
+
+  # A half-installed Meet lane is a warning even when another lane carries
+  # readiness: the sidecar is present, so `sidecar_installed?` reads green, but
+  # it cannot launch Chromium and every Meet join is refused. `browser_note` is
+  # the only field that says so.
+  defp format_meetings(%{status: :enabled, ready?: true, browser_note: note} = report)
+       when is_binary(note) do
+    warn("meetings", meetings_lanes(report) <> "; " <> note <> "; " <> report.profile_note)
+  end
+
+  defp format_meetings(%{status: :enabled, ready?: true} = report) do
+    detail =
+      [meetings_lanes(report), Map.get(report, :browser_note), report.profile_note]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.join("; ")
+
+    ok("meetings", detail)
+  end
+
+  defp format_meetings(%{status: :enabled, ready?: false, remedy: remedy})
+       when is_binary(remedy) do
+    warn("meetings", "enabled but no lane is usable — " <> remedy)
+  end
+
+  defp meetings_lanes(%{
+         browser_installed?: false,
+         sidecar_installed?: true,
+         rtms_configured?: rtms
+       }),
+       do: "meet sidecar installed without its browser; " <> rtms_lane(rtms)
+
+  defp meetings_lanes(%{sidecar_installed?: true, rtms_configured?: true}),
+    do: "meet sidecar installed; zoom rtms configured"
+
+  defp meetings_lanes(%{sidecar_installed?: true}),
+    do: "meet sidecar installed; zoom rtms not configured"
+
+  defp meetings_lanes(%{rtms_configured?: true}),
+    do: "zoom rtms configured; meet sidecar not installed"
+
+  defp rtms_lane(true), do: "zoom rtms configured"
+  defp rtms_lane(false), do: "zoom rtms not configured"
 
   @doc """
   Computer-use OS-permission state (docs/design/COMPUTER_USE_V2.md, Phase A). The
@@ -886,6 +1294,58 @@ defmodule Fermix.CLI.Doctor.Checks do
   end
 
   @doc """
+  Computer history (MILESTONE_32 §15.3): a macOS-only, opt-in row. Tree-less —
+  reports config-level state (availability, on/off, summarizer posture,
+  allowlist sizes); runtime detail (spool size, grant, pause) integrates with
+  the capturer stage over the control socket. `:macos?`/`:config` are injectable
+  so the row is hermetic on non-macOS CI.
+  """
+  @spec computer_history(keyword()) :: result()
+  def computer_history(opts \\ []) when is_list(opts) do
+    macos? = Keyword.get_lazy(opts, :macos?, &ComputerHistory.macos?/0)
+
+    if macos? do
+      computer_history_result(opts)
+    else
+      ok("computer history", "macOS only; unavailable on this host")
+    end
+  end
+
+  defp computer_history_result(opts) do
+    config =
+      Keyword.get_lazy(opts, :config, fn ->
+        Application.get_env(:fermix_core, :computer_history, [])
+      end)
+
+    if ComputerHistoryConfig.enabled?(config) do
+      ok(
+        "computer history",
+        "on; summarizer #{summarizer_label(ComputerHistoryConfig.summarizer(config))}; " <>
+          "#{length(ComputerHistoryConfig.apps(config))} app(s), " <>
+          "#{length(ComputerHistoryConfig.sites(config))} site(s) allowlisted"
+      )
+    else
+      ok("computer history", "off (opt-in; enable in setup)")
+    end
+  end
+
+  defp summarizer_label(:local), do: "on-device"
+
+  # The shipped default (`summarizer` key absent or "default"). Resolved through
+  # the one shared resolver (§22.1) so this row never names a different vendor
+  # than the one raw activity actually reaches — and so doctor cannot die with a
+  # FunctionClauseError on a default-configured install.
+  defp summarizer_label(:default_provider) do
+    case ComputerHistoryConfig.default_summarizer_provider() do
+      {:ok, provider} -> "subagent/default (#{provider}; raw activity leaves this Mac)"
+      {:error, _reason} -> "default provider (none configured)"
+    end
+  end
+
+  defp summarizer_label({:provider, provider}),
+    do: "#{provider} (remote, raw activity leaves this Mac)"
+
+  @doc """
   Skill-curation delivery health (MILESTONE_26_SKILL_CURATION §6.6 rung 3):
   when the feature is on, name whether proposals have an owner-private
   delivery target — a CLI-only install would otherwise mine forever and
@@ -894,6 +1354,7 @@ defmodule Fermix.CLI.Doctor.Checks do
   `nil` to skip when curation is disabled.
   """
   @spec skill_curation(keyword()) :: result() | nil
+
   def skill_curation(opts \\ []) when is_list(opts) do
     enabled? = Keyword.get_lazy(opts, :skill_curation_enabled, &SkillCurationConfig.enabled?/0)
     memory? = Keyword.get_lazy(opts, :memory_enabled, &FermixCore.Memory.Config.enabled?/0)
@@ -1253,21 +1714,36 @@ defmodule Fermix.CLI.Doctor.Checks do
     end
   end
 
-  # Both fields come from the daemon's own serializer, so a row missing either is
-  # a broken or version-skewed build — reported as a failed query rather than
-  # rendered as a plugin whose runtime state is blank.
+  # The required fields come from the daemon's own serializer, so a row missing
+  # either is a broken or version-skewed build — reported as a failed query
+  # rather than rendered as a plugin whose runtime state is blank. `detail` and
+  # `subject` are optional (an older daemon omits `subject`), but when
+  # present they must be renderable, for the same reason.
   defp index_runtime_rows(rows) do
     if Enum.all?(rows, &valid_runtime_row?/1) do
-      {:ok, Map.new(rows, &{&1["source"], &1["status"]})}
+      {:ok, Map.new(rows, &{&1["source"], runtime_triple(&1)})}
     else
       {:error, "malformed runtime_status rows"}
     end
   end
 
-  defp valid_runtime_row?(%{"source" => source, "status" => status}),
-    do: is_binary(source) and is_binary(status)
+  defp valid_runtime_row?(%{"source" => source, "status" => status} = row) do
+    is_binary(source) and is_binary(status) and
+      optional_string?(Map.get(row, "detail")) and
+      optional_string?(Map.get(row, "subject"))
+  end
 
   defp valid_runtime_row?(_row), do: false
+
+  defp optional_string?(value), do: is_nil(value) or is_binary(value)
+
+  # A daemon predating either field simply omits it, which reads as "this
+  # refusal names nothing" — the same shape a `:ready` row has.
+  defp runtime_triple(row),
+    do: {row["status"], present(row["detail"]), present(row["subject"])}
+
+  defp present(value) when is_binary(value) and value != "", do: value
+  defp present(_value), do: nil
 
   defp render_plugins(entries, runtime) do
     details = Enum.map(entries, &plugin_detail(&1, runtime))
@@ -1285,7 +1761,7 @@ defmodule Fermix.CLI.Doctor.Checks do
 
   defp plugin_detail(%{remote?: true} = entry, {:ok, live}) do
     case Map.fetch(live, "plugin:#{entry.name}") do
-      {:ok, status} -> remote_live_detail(entry, status)
+      {:ok, triple} -> remote_live_detail(entry, triple)
       :error -> remote_absent_detail(entry)
     end
   end
@@ -1310,10 +1786,12 @@ defmodule Fermix.CLI.Doctor.Checks do
     }
   end
 
-  defp remote_live_detail(entry, status) do
+  # Rendered by the shared resolver, so this row, the daemon's log line, and the
+  # setup UI cannot describe the same refusal three different ways.
+  defp remote_live_detail(entry, {status, _detail, _subject} = triple) do
     %{
       status: worst_plugin_status([static_plugin_status(entry.status), runtime_status(status)]),
-      text: "#{entry.name}: #{entry.status} (remote; runtime #{status})"
+      text: "#{entry.name}: #{entry.status} (remote; runtime #{RuntimeStatus.describe(triple)})"
     }
   end
 
@@ -1362,7 +1840,7 @@ defmodule Fermix.CLI.Doctor.Checks do
 
     missing =
       report
-      |> Enum.filter(&(&1.enabled and is_nil(&1.owner_user_id)))
+      |> Enum.filter(&missing_command_owner?/1)
       |> Enum.map(& &1.channel)
 
     detail = Enum.map_join(report, ", ", &format_command_owner/1)
@@ -1377,6 +1855,11 @@ defmodule Fermix.CLI.Doctor.Checks do
           "missing command owner for enabled channels: #{Enum.join(channels, ", ")}; #{detail}"
         )
     end
+  end
+
+  defp missing_command_owner?(entry) do
+    entry.enabled and is_nil(entry.owner_user_id) and
+      CoreConfig.channel_ingress_authority(entry.channel) != :paired_device
   end
 
   @doc """
@@ -1564,23 +2047,48 @@ defmodule Fermix.CLI.Doctor.Checks do
 
   @spec plaintext_secrets() :: result()
   def plaintext_secrets do
-    with {:ok, snapshot} <- ConfigStore.load_runtime_config(resolve_secrets: false) do
-      case SecretMigration.plaintext_secrets(snapshot) do
-        [] ->
-          ok("setup secrets", "no plaintext setup secrets in config.toml")
-
-        secrets ->
-          names = Enum.map_join(secrets, ", ", & &1.env)
-
-          warn(
-            "setup secrets",
-            "plaintext setup secrets found in #{ConfigStore.path()}: #{names}; run `fermix setup --migrate-secrets`"
-          )
-      end
-    else
-      {:error, reason} ->
-        fail("setup secrets", "could not inspect config.toml: #{inspect(reason)}")
+    case runtime_config_snapshot() do
+      {:ok, snapshot} -> plaintext_secrets_result(snapshot)
+      {:error, detail} -> fail("setup secrets", "could not inspect config.toml: #{detail}")
     end
+  end
+
+  defp plaintext_secrets_result(snapshot) do
+    case SecretMigration.plaintext_secrets(snapshot) do
+      [] ->
+        ok("setup secrets", "no plaintext setup secrets in config.toml")
+
+      secrets ->
+        names = Enum.map_join(secrets, ", ", & &1.env)
+
+        warn(
+          "setup secrets",
+          "plaintext setup secrets found in #{ConfigStore.path()}: #{names}; run `fermix setup --migrate-secrets`"
+        )
+    end
+  end
+
+  # `load_runtime_config` RAISES on a config its normalizers refuse (an unknown
+  # section key, an invalid value) — the same refusal that stops the daemon's
+  # boot. The diagnostic verb must render that refusal as a failed row, not die
+  # of it with a stacktrace and zero output.
+  #
+  # Both exception kinds on that path have to be named: the normalizers raise
+  # ArgumentError, while the legacy provider-layout refusal
+  # (`raise_old_provider_layout!/0`) is a bare `raise`, i.e. a RuntimeError.
+  # Catching one and not the other still dies on the other.
+  #
+  # Reachability, recorded so this is not mistaken for operator-visible
+  # behaviour: in the shipped binary the release config provider evaluates the
+  # same load_runtime_config at boot and raises before Fermix.CLI dispatches,
+  # so this rescue fires only where that provider chain does not run.
+  defp runtime_config_snapshot do
+    case ConfigStore.load_runtime_config(resolve_secrets: false) do
+      {:ok, snapshot} -> {:ok, snapshot}
+      {:error, reason} -> {:error, inspect(reason)}
+    end
+  rescue
+    error in [ArgumentError, RuntimeError] -> {:error, Exception.message(error)}
   end
 
   defp recent_sandbox_events(trace_dir) do
@@ -1654,6 +2162,17 @@ defmodule Fermix.CLI.Doctor.Checks do
 
   @spec upgrade_available?(keyword()) :: result()
   def upgrade_available?(opts \\ []) do
+    if app_engine?(opts), do: app_managed_upgrade_row(), else: manifest_upgrade_row(opts)
+  end
+
+  defp app_managed_upgrade_row do
+    not_applicable(
+      "upgrade",
+      "managed by Fermix.app; updates ship as whole-app releases, not standalone binaries"
+    )
+  end
+
+  defp manifest_upgrade_row(opts) do
     case Manifest.fetch(opts) do
       {:ok, manifest} ->
         case Manifest.compare_versions(current_version(), manifest.latest) do
@@ -1773,18 +2292,6 @@ defmodule Fermix.CLI.Doctor.Checks do
     end
   end
 
-  defp format_uptime(ms) when is_integer(ms) and ms >= 0 do
-    seconds = div(ms, 1_000)
-
-    cond do
-      seconds < 60 -> "#{seconds}s"
-      seconds < 3_600 -> "#{div(seconds, 60)}m#{rem(seconds, 60)}s"
-      true -> "#{div(seconds, 3_600)}h#{div(rem(seconds, 3_600), 60)}m"
-    end
-  end
-
-  defp format_uptime(other), do: inspect(other)
-
   defp format_threshold(value) when is_float(value) do
     :erlang.float_to_binary(value, [:short])
   end
@@ -1795,14 +2302,22 @@ defmodule Fermix.CLI.Doctor.Checks do
          owner_user_id: owner_user_id,
          command_allowlist: allowlist
        }) do
-    owner_state =
-      if is_nil(owner_user_id) do
-        "owner missing"
-      else
-        "owner set"
-      end
+    owner_state = command_owner_state(channel, owner_user_id)
 
     "#{channel}=#{owner_state}, enabled=#{enabled}, allowlist=#{length(allowlist)}"
+  end
+
+  defp command_owner_state(channel, owner_user_id) do
+    cond do
+      CoreConfig.channel_ingress_authority(channel) == :paired_device ->
+        "paired-device authority"
+
+      is_nil(owner_user_id) ->
+        "owner missing"
+
+      true ->
+        "owner set"
+    end
   end
 
   defp auth_ok_result(path) do
@@ -1814,21 +2329,30 @@ defmodule Fermix.CLI.Doctor.Checks do
   end
 
   @doc """
-  Validates the `[fermix_core.routing]` `subagent_*`/`cron_*` model-routing keys.
-  A typo'd provider/effort — especially in the UI-less `cron_*` keys — is caught
-  here at the operator's desk rather than at the next unattended job fire.
-  (Whether a routing provider is actually authed is the `auth_probe` check's job.)
+  Validates the `[fermix_core.routing]` `subagent_*`/`cron_*`/`meeting_*`
+  model-routing keys. A typo'd provider/effort — especially in the UI-less
+  `cron_*` and `meeting_*` keys — is caught here at the operator's desk rather
+  than at the next unattended job fire or meeting summary. (Whether a routing
+  provider is actually authed is the `auth_probe` check's job.)
   """
   @spec routing_overrides() :: result()
   def routing_overrides do
     subagent = RoutingOverrides.subagent()
     cron = RoutingOverrides.cron()
+    meeting = RoutingOverrides.meeting()
 
-    case validate_routing_models([{"subagent_model", subagent}, {"cron_model", cron}]) do
+    entries = [
+      {"subagent_model", subagent},
+      {"cron_model", cron},
+      {"meeting_model", meeting}
+    ]
+
+    case validate_routing_models(entries) do
       :ok ->
         ok(
           "routing",
-          "subagent: #{describe_override(subagent)}; cron: #{describe_override(cron)}"
+          "subagent: #{describe_override(subagent)}; cron: #{describe_override(cron)}; " <>
+            "meeting: #{describe_override(meeting)}"
         )
 
       {:error, message} ->
@@ -1889,4 +2413,11 @@ defmodule Fermix.CLI.Doctor.Checks do
   defp ok(name, detail), do: %{name: name, status: :ok, detail: detail}
   defp warn(name, detail), do: %{name: name, status: :warn, detail: detail}
   defp fail(name, detail), do: %{name: name, status: :fail, detail: detail}
+
+  # A check the distribution does not have. Distinct from `ok` (nothing was
+  # verified) and from `warn` (there is nothing to act on).
+  defp not_applicable(name, detail),
+    do: %{name: name, status: :not_applicable, detail: detail}
+
+  defp app_engine?(opts), do: Keyword.get(opts, :build_info, BuildInfo).app_engine?()
 end

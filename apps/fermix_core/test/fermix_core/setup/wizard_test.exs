@@ -43,6 +43,7 @@ defmodule FermixCore.Setup.WizardTest do
     slack = Application.fetch_env(:fermix_channels, :slack)
     signal = Application.fetch_env(:fermix_channels, :signal)
     acp = Application.fetch_env(:fermix_channels, :acp)
+    mobile = Application.fetch_env(:fermix_channels, :mobile)
     personalization = Application.get_env(:fermix_core, :personalization, [])
     agent = Application.get_env(:fermix_core, :agent, [])
     realtime = Application.get_env(:fermix_core, :realtime, [])
@@ -64,6 +65,17 @@ defmodule FermixCore.Setup.WizardTest do
     # left in the global app env.
     Application.put_env(:fermix_channels, :acp, enabled: false, mode: :gateway)
 
+    Application.put_env(:fermix_channels, :mobile,
+      enabled: false,
+      mode: :listener,
+      port: 4031,
+      bind: "0.0.0.0",
+      advertise_mdns: true,
+      streaming: "draft",
+      max_media_bytes: 20_971_520,
+      push: [enabled: false, environment: "production"]
+    )
+
     Application.put_env(:fermix_core, :personalization,
       user_name: "Test User",
       timezone: "UTC",
@@ -80,6 +92,7 @@ defmodule FermixCore.Setup.WizardTest do
       restore_env(:fermix_channels, :slack, slack)
       restore_env(:fermix_channels, :signal, signal)
       restore_env(:fermix_channels, :acp, acp)
+      restore_env(:fermix_channels, :mobile, mobile)
       Application.put_env(:fermix_core, :personalization, personalization)
       Application.put_env(:fermix_core, :agent, agent)
       Application.put_env(:fermix_core, :realtime, realtime)
@@ -95,6 +108,113 @@ defmodule FermixCore.Setup.WizardTest do
     end)
 
     :ok
+  end
+
+  # The mobile channel ships feature-flagged with NO setup surface: hand-editing
+  # `[fermix_channels.mobile] enabled = true` in config.toml is the only enable
+  # path. These pin the absence, in both directions — setup never asks, and a
+  # hand-written section survives a save that knows nothing about it.
+  describe "mobile has no wizard surface" do
+    test "no setup or reconfigure prompt mentions mobile, on a fresh or enabled install" do
+      assert_no_mobile_prompts(Wizard.report().wizard)
+
+      # A hand-enabled channel must not resurrect the step either: the flag is
+      # the whole UI, so an enabled install is asked exactly as much as a
+      # dormant one — nothing.
+      Application.put_env(:fermix_channels, :mobile,
+        enabled: true,
+        mode: :listener,
+        port: 4_040,
+        push: [enabled: true, team_id: "ABCDE12345", environment: "production"]
+      )
+
+      assert_no_mobile_prompts(Wizard.report().wizard)
+    end
+
+    test "injected mobile answers are ignored and never reach config.toml" do
+      assert {:ok, _report} =
+               Wizard.save_answers(Wizard.report().wizard,
+                 mobile_enabled: "true",
+                 mobile_port: "4040",
+                 mobile_push_enabled: "true",
+                 mobile_push_team_id: "ABCDE12345",
+                 mobile_push_key_id: "KEY987",
+                 mobile_push_key: "private-key-must-not-persist",
+                 mobile_push_topic: "io.tezra.fermix.app",
+                 mobile_push_environment: "development"
+               )
+
+      contents = File.read!(ConfigStore.path())
+      refute contents =~ "private-key-must-not-persist"
+      refute contents =~ "ABCDE12345"
+      refute contents =~ "KEY987"
+      refute contents =~ "io.tezra.fermix.app"
+
+      assert {:ok, snapshot} = ConfigStore.load_runtime_config()
+      mobile = snapshot.fermix_channels |> Keyword.fetch!(:mobile)
+      assert Keyword.get(mobile, :enabled) == false
+      assert Keyword.get(mobile, :port) == 4031
+      assert Keyword.get(mobile, :push) |> Keyword.get(:team_id) == nil
+    end
+
+    # Web setup round-trips the live config to disk on every save, so a section
+    # the form does not own is only safe if the save pipeline preserves it. A
+    # hand-enabled mobile block that a telegram save silently reverted would
+    # un-enable the channel behind the operator's back.
+    test "a hand-written enabled mobile section survives an unrelated wizard save" do
+      File.write!(ConfigStore.path(), """
+      [fermix_channels.mobile]
+      enabled = true
+      mode = "listener"
+      port = 4040
+      bind = "127.0.0.1"
+      advertise_mdns = false
+
+      [fermix_channels.mobile.push]
+      enabled = true
+      team_id = "ABCDE12345"
+      key_id = "KEY987"
+      topic = "io.tezra.fermix.app"
+      environment = "development"
+      """)
+
+      # Boot hydrates app env from the persisted document; the wizard snapshot
+      # reads app env, so this is the state a running daemon saves from.
+      assert {:ok, persisted} = ConfigStore.load_runtime_config()
+
+      Application.put_env(
+        :fermix_channels,
+        :mobile,
+        Keyword.fetch!(persisted.fermix_channels, :mobile)
+      )
+
+      assert {:ok, _report} =
+               Wizard.save_answers(Wizard.report().wizard, telegram_owner_user_id: "owner-1")
+
+      assert {:ok, saved} = ConfigStore.load_runtime_config()
+      mobile = saved.fermix_channels |> Keyword.fetch!(:mobile)
+      push = Keyword.fetch!(mobile, :push)
+
+      assert Keyword.get(mobile, :enabled) == true
+      assert Keyword.get(mobile, :port) == 4040
+      assert Keyword.get(mobile, :bind) == "127.0.0.1"
+      assert Keyword.get(mobile, :advertise_mdns) == false
+      assert Keyword.get(push, :enabled) == true
+      assert Keyword.get(push, :team_id) == "ABCDE12345"
+      assert Keyword.get(push, :key_id) == "KEY987"
+      assert Keyword.get(push, :topic) == "io.tezra.fermix.app"
+      assert Keyword.get(push, :environment) == "development"
+    end
+  end
+
+  defp assert_no_mobile_prompts(state) do
+    Enum.each([Wizard.prompts(state), Wizard.reconfigure_prompts(state)], fn prompts ->
+      Enum.each(prompts, fn prompt ->
+        refute to_string(prompt.key) =~ "mobile"
+        refute String.downcase(Map.get(prompt, :label, "")) =~ "mobile"
+        refute String.downcase(Map.get(prompt, :label, "")) =~ "apns"
+      end)
+    end)
   end
 
   test "report returns deterministic wizard state for incomplete config" do
@@ -193,16 +313,19 @@ defmodule FermixCore.Setup.WizardTest do
     {:ok, snapshot} = ConfigStore.load_runtime_config(resolve_secrets: false)
     :ok = ConfigStore.apply_snapshot(snapshot)
 
-    refute Wizard.report().restart_required?
+    before = Wizard.report().restart_required?
 
-    # Disk stores `@keyring`; app env holds the boot-resolved value. The
-    # comparison must not depend on reading the OS keychain, so an
-    # unavailable backend must not flip the answer.
+    # Disk stores `@keyring`; app env holds the boot-resolved value. The answer
+    # must not depend on reading the OS keychain, so an unavailable backend must
+    # not flip it in either direction — which is the property this guards, and
+    # it is asserted as "unchanged" rather than as a fixed boolean because the
+    # answer now compares live application environment against what this VM
+    # booted with, not against the document on disk.
     Application.put_env(:fermix_core, :secret_writer, FermixTestSupport.UnavailableSecretWriter)
 
     {report, _log} = with_log(fn -> Wizard.report() end)
 
-    refute report.restart_required?
+    assert report.restart_required? == before
   end
 
   test "building reconfigure prompts does not resolve @keyring secrets from the keychain" do
@@ -245,7 +368,11 @@ defmodule FermixCore.Setup.WizardTest do
 
     report = Wizard.report()
 
-    assert report.status == :setup_required
+    # Channel failures are advisory: they stay in the list so every surface can
+    # render them, and they are not a reason to call setup unfinished. A
+    # personalization or provider failure is what gates.
+    assert report.status == :ready
+    assert Enum.all?(report.failures, &(&1.gating == false))
     assert :whatsapp in report.wizard.enabled_channels
     assert :discord in report.wizard.enabled_channels
     assert :slack in report.wizard.enabled_channels
@@ -1048,8 +1175,12 @@ defmodule FermixCore.Setup.WizardTest do
     refute contents =~ ~s([sandbox.env.TELEGRAM_BOT_TOKEN])
   end
 
-  test "save_answers does not add sandbox.env source when no secret writer is available" do
-    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-sandbox-env-no-writer")
+  # Design §7.4 drop one. A secret answer is persisted as the `@keyring`
+  # sentinel, which means nothing unless the value reached the OS keyring; with
+  # no writer the value used to be dropped with a log line while the save
+  # reported SUCCESS, so the operator saw a stored key and the runtime had none.
+  test "save_answers refuses rather than reporting success it cannot deliver" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-no-secret-writer")
 
     on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
 
@@ -1060,19 +1191,22 @@ defmodule FermixCore.Setup.WizardTest do
     Application.delete_env(:fermix_channels, :telegram)
     start_memory_repo!()
 
-    capture_log(fn ->
-      assert {:ok, _report} =
-               Wizard.report().wizard
-               |> Wizard.save_answers(openai_api_key: "sk-no-writer")
-    end)
+    assert {:error, {:secret_store_failed, :openai_api_key, sentence}} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(openai_api_key: "sk-no-helper")
 
-    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert sentence ==
+             "This machine has no secret store, so the credential could not be saved."
 
-    refute contents =~ ~s([sandbox.env.OPENAI_API_KEY])
+    # Nothing at all is written: a save either stores every secret in it or
+    # stores none of them, so a half-applied document cannot be left behind.
+    refute File.exists?(Path.join(tmp_home, "config.toml"))
   end
 
-  test "save_answers falls back without persisting secrets when no writer is available" do
-    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-no-secret-writer")
+  # The refusal is about a secret it was asked to store, not about the host: a
+  # save with no secret in it goes through on the same writer-less machine.
+  test "save_answers with no secret answer is unaffected by a missing writer" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-no-writer-no-secret")
 
     on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
 
@@ -1082,19 +1216,11 @@ defmodule FermixCore.Setup.WizardTest do
     Application.delete_env(:fermix_channels, :telegram)
     start_memory_repo!()
 
-    log =
-      capture_log(fn ->
-        assert {:ok, _report} =
-                 Wizard.report().wizard
-                 |> Wizard.save_answers(openai_api_key: "sk-no-helper")
-      end)
+    assert {:ok, _report} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(user_name: "Sujeeth")
 
-    contents = File.read!(Path.join(tmp_home, "config.toml"))
-
-    refute contents =~ "sk-no-helper"
-    refute contents =~ "@keyring"
-    assert log =~ "No OS secret writer available for OPENAI_API_KEY"
-    assert log =~ "shell rc, systemd unit, or launchd plist"
+    assert File.read!(Path.join(tmp_home, "config.toml")) =~ "Sujeeth"
   end
 
   test "save_answers persists realtime voice setup answers" do
@@ -1161,6 +1287,41 @@ defmodule FermixCore.Setup.WizardTest do
 
     assert persisted.fermix_core |> Keyword.get(:computer_use, []) |> Keyword.get(:enabled) ==
              false
+  end
+
+  test "save_answers persists the computer_history enable flag + app allowlist (§22.3)" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-ch-setup-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+    Application.put_env(:fermix_core, :providers, [])
+    Application.delete_env(:fermix_channels, :telegram)
+    start_memory_repo!()
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(
+        computer_history_enabled: "yes",
+        computer_history_apps: "com.apple.Safari, com.apple.mail"
+      )
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    ch = Keyword.get(persisted.fermix_core, :computer_history, [])
+    assert Keyword.get(ch, :enabled) == true
+    # The comma-separated string round-trips to a normalized bundle-id list.
+    assert Keyword.get(ch, :apps) == ["com.apple.Safari", "com.apple.mail"]
+
+    # Toggling enable alone leaves the allowlist untouched (absent answer).
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(computer_history_enabled: "no")
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    ch = Keyword.get(persisted.fermix_core, :computer_history, [])
+    assert Keyword.get(ch, :enabled) == false
+    assert Keyword.get(ch, :apps) == ["com.apple.Safari", "com.apple.mail"]
   end
 
   test "fresh setup asks for realtime opt-in before realtime details" do
@@ -2003,9 +2164,13 @@ defmodule FermixCore.Setup.WizardTest do
 
       System.put_env("FERMIX_HOME", tmp_home)
       Application.put_env(:fermix_core, :sandbox, SandboxConfig.default())
-      # Force readiness to :setup_required so commit_snapshot/1 skips
-      # prompt-file seeding — these tests do not exercise the memory repo.
+      # Establish a GATING readiness failure so commit_snapshot/1 skips
+      # prompt-file seeding — these tests do not exercise the memory repo. It
+      # has to be a gating one: seeding is keyed on the gating predicate, and an
+      # enabled-but-tokenless channel is advisory, so clearing the providers or
+      # the Telegram block no longer holds the precondition on its own.
       Application.put_env(:fermix_core, :providers, [])
+      Application.put_env(:fermix_core, :personalization, [])
       Application.delete_env(:fermix_channels, :telegram)
 
       on_exit(fn ->

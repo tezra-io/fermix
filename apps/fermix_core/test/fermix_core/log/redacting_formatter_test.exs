@@ -12,6 +12,26 @@ defmodule FermixCore.Log.RedactingFormatterTest do
   @fake_telegram "123456789:" <> String.duplicate("Gh4", 12)
   @fake_xai "xai-" <> String.duplicate("Jk5", 10)
   @fake_google "AIza" <> String.duplicate("Mn6", 12)
+  @fake_private_key """
+  -----BEGIN PRIVATE KEY-----
+  UExBTlRFRC1BUE5TLVNFQ1JFVA==
+  -----END PRIVATE KEY-----
+  """
+  @fake_ec_private_key """
+  -----BEGIN EC PRIVATE KEY-----
+  UExBTlRFRC1FQy1BUE5TLVNFQ1JFVA==
+  -----END EC PRIVATE KEY-----
+  """
+  @fake_openssh_private_key """
+  -----BEGIN OPENSSH PRIVATE KEY-----
+  UExBTlRFRC1PUEVOU1NILVNFQ1JFVA==
+  -----END OPENSSH PRIVATE KEY-----
+  """
+  @fake_pgp_private_key """
+  -----BEGIN PGP PRIVATE KEY BLOCK-----
+  UExBTlRFRC1QR1AtU0VDUkVU
+  -----END PGP PRIVATE KEY BLOCK-----
+  """
 
   describe "redact/1" do
     test "redacts every supported secret shape" do
@@ -45,13 +65,31 @@ defmodule FermixCore.Log.RedactingFormatterTest do
       assert redacted =~ "[REDACTED:telegram]"
     end
 
+    test "redacts literal and escaped multiline private-key PEM blocks" do
+      pems = [
+        @fake_private_key,
+        @fake_ec_private_key,
+        @fake_openssh_private_key,
+        @fake_pgp_private_key
+      ]
+
+      for pem <- pems, line <- [pem, inspect(pem)] do
+        redacted = RedactingFormatter.redact("before #{line} after")
+
+        refute redacted =~ "UExBTlRFRC"
+        refute redacted =~ "PRIVATE KEY"
+        assert redacted =~ "[REDACTED:private-key]"
+      end
+    end
+
     test "leaves ordinary log lines untouched" do
       for line <- [
             "12:30:01.123 [info] GET /setup 200 in 3ms",
             "risk-based-authentication-flow enabled for task-management-toolkit",
             "commit 41249c0f built at 2026-07-05 12:00:00",
             "Bearer of bad news",
-            "sk-short"
+            "sk-short",
+            "-----BEGIN CERTIFICATE----- public material -----END CERTIFICATE-----"
           ] do
         assert RedactingFormatter.redact(line) == line
       end

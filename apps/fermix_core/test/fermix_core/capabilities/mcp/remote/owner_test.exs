@@ -13,8 +13,11 @@ defmodule FermixCore.Capabilities.MCP.Remote.OwnerTest do
   # DNS answer, and no subprocess.
   defmodule FakeTransport do
     def open(endpoint, opts) do
+      agent = Keyword.fetch!(opts, :agent)
+      Agent.update(agent, &Map.update(&1, :opens, 1, fn n -> n + 1 end))
+
       case Keyword.get(opts, :open_error) do
-        nil -> {:ok, %{agent: Keyword.fetch!(opts, :agent), endpoint: endpoint}}
+        nil -> {:ok, %{agent: agent, endpoint: endpoint}}
         error -> {:error, error}
       end
     end
@@ -77,6 +80,11 @@ defmodule FermixCore.Capabilities.MCP.Remote.OwnerTest do
 
   defp requests(agent), do: Agent.get(agent, & &1.requests)
 
+  # Connect attempts, which a refused `open/2` makes without ever issuing a
+  # request — the only way to tell "retried" from "gave up" on a transport that
+  # never reaches the wire.
+  defp opens(agent), do: Agent.get(agent, &Map.get(&1, :opens, 0))
+
   defp json(status, body, headers \\ []) do
     {:ok,
      %{
@@ -105,6 +113,19 @@ defmodule FermixCore.Capabilities.MCP.Remote.OwnerTest do
   end
 
   defp tool(name), do: %{"name" => name, "description" => name, "inputSchema" => %{}}
+
+  # The same page, delivered the way Streamable HTTP actually delivers one: an
+  # SSE stream that also carries a server-initiated notification.
+  defp tools_page_with_notice(id, tools) do
+    messages = [
+      %{"jsonrpc" => "2.0", "method" => "notifications/tools/list_changed"},
+      rpc_result(id, %{"tools" => tools})
+    ]
+
+    events = Enum.map(messages, &%{data: Jason.encode!(&1), event: nil, id: nil})
+
+    {:ok, %{status: 200, headers: [{"content-type", "text/event-stream"}], body: {:sse, events}}}
+  end
 
   defp owner_opts(status, agent, overrides \\ %{}, connect_opts \\ []) do
     [
@@ -227,6 +248,68 @@ defmodule FermixCore.Capabilities.MCP.Remote.OwnerTest do
     end
   end
 
+  describe "upstream tool-list changes" do
+    test "forwards a session notice to the registered listener", %{status: status} do
+      agent = start_agent([initialize_ok(), accepted()])
+      owner = start_owner(owner_opts(status, agent))
+
+      assert :ok = Owner.watch_tools(owner, self())
+      send(owner, {:mcp_session, :tools_changed})
+
+      assert_receive {:mcp_owner, :tools_changed}, 1_000
+    end
+
+    # The registration owner re-arms the watch on every discovery pass, so
+    # registering twice must be a no-op with the last listener winning.
+    test "watching is idempotent and the latest listener wins", %{status: status} do
+      agent = start_agent([initialize_ok(), accepted()])
+      owner = start_owner(owner_opts(status, agent))
+      parent = self()
+      first = spawn(fn -> receive do: (message -> send(parent, {:first, message})) end)
+
+      assert :ok = Owner.watch_tools(owner, first)
+      assert :ok = Owner.watch_tools(owner, self())
+      send(owner, {:mcp_session, :tools_changed})
+
+      assert_receive {:mcp_owner, :tools_changed}, 1_000
+      refute_receive {:first, _message}, 200
+    end
+
+    # Before discovery there is no registration for the notice to invalidate,
+    # so dropping it is the whole correct action.
+    test "drops a notice that arrives before anything is watching", %{status: status} do
+      agent = start_agent([initialize_ok(), accepted()])
+      owner = start_owner(owner_opts(status, agent))
+
+      send(owner, {:mcp_session, :tools_changed})
+      # A system message drains the mailbox in order, so the drop is observed
+      # rather than raced past.
+      _ = :sys.get_state(owner)
+
+      refute_received {:mcp_owner, :tools_changed}
+    end
+
+    # END TO END through the real `Remote.Session` the owner starts: the notice
+    # rides the SSE body of the tools/list response, is decoded there, and comes
+    # out of the owner as the message the registration owner listens for.
+    test "a notice riding the tools/list response reaches the listener", %{status: status} do
+      agent =
+        start_agent([
+          initialize_ok(),
+          accepted(),
+          tools_page_with_notice(2, [tool("eden_search")])
+        ])
+
+      owner = start_owner(owner_opts(status, agent))
+
+      assert :ok = Owner.watch_tools(owner, self())
+      assert {:ok, [descriptor]} = Owner.list_tools(owner)
+      assert descriptor.name == "eden_search"
+
+      assert_receive {:mcp_owner, :tools_changed}, 1_000
+    end
+  end
+
   describe "refusals" do
     test "a rejected credential is terminal and is never retried", %{status: status} do
       agent = start_agent([json(401, %{}), initialize_ok(), accepted()])
@@ -253,6 +336,24 @@ defmodule FermixCore.Capabilities.MCP.Remote.OwnerTest do
 
       assert_receive {:DOWN, ^ref, :process, ^owner, :normal}, 5_000
       assert {:ok, %{status: :remote_unreachable}} = RuntimeStatus.fetch(status, @source)
+
+      # The retry DECISION, not just its end state: `transient?/1` classifies the
+      # reason, so a mis-shaped pattern there would silently reduce this to one
+      # attempt while the final status still read `remote_unreachable`.
+      assert opens(agent) > 1
+    end
+
+    # The other half of that decision. A terminal classification must not spend
+    # attempts, and asserting only the status cannot tell the two apart.
+    test "a terminal classification is not retried", %{status: status} do
+      agent = start_agent([json(401, %{})])
+
+      {:ok, owner} = Owner.start_link(owner_opts(status, agent))
+      ref = Process.monitor(owner)
+
+      assert_receive {:DOWN, ^ref, :process, ^owner, :normal}, 1_000
+      assert {:ok, %{status: :reauthorization_required}} = RuntimeStatus.fetch(status, @source)
+      assert opens(agent) == 1
     end
 
     test "a spec that is not remote is refused before anything connects", %{status: status} do

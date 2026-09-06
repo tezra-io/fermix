@@ -32,6 +32,16 @@ on:
         required: true
       FERMIX_OPIK_WORKSPACE:
         required: true
+    outputs:
+      exit_code:
+        # The TIER RUNNER's own exit code, not the job's status. The callers
+        # classify on it (3 = preconditions, 4 = measurement invalid, 5 = valid but
+        # the release gate is red) and cannot see it any other way: a caller's
+        # `needs.<job>.outputs` reads only what `on.workflow_call.outputs` declares.
+        # Each tier step gets the code intact because it runs benchmark/bin/tier.sh,
+        # which execs the runner; `make` would report every outcome as 2.
+        description: "Exit code of the tier's runner (empty if the tier never ran)"
+        value: ${{ jobs.box.outputs.exit_code }}
   workflow_dispatch:
     inputs:
       tier:
@@ -59,6 +69,13 @@ jobs:
   box:
     name: eval-box (${{ inputs.tier }})
     runs-on: ubuntu-24.04
+    outputs:
+      # Exactly one tier step runs per invocation, so the non-empty one wins.
+      exit_code: >-
+        ${{ steps.regression.outputs.exit_code
+            || steps.capability_deterministic.outputs.exit_code
+            || steps.capability_judged.outputs.exit_code
+            || steps.dangerous.outputs.exit_code }}
     # Per-tier runaway backstop (M22 §3.2): a hung regression must not burn
     # capability-sized wall-clock/tokens.
     timeout-minutes: ${{ inputs.tier == 'capability' && 180 || inputs.tier == 'regression' && 60 || 30 }}
@@ -151,6 +168,7 @@ jobs:
           FERMIX_CAP_SEED_ARGS="$seed_args" benchmark/bin/capability-daemon.sh up
 
       - name: Tier — regression (host-safe-core, judged)
+        id: regression
         if: inputs.tier == 'regression'
         working-directory: benchmark
         env:
@@ -162,7 +180,14 @@ jobs:
           set -euo pipefail
           uv run bin/run_eval.py --check --judge
           make dry
-          make regression
+          # Publish the RUNNER's exit code before failing the step on it. bin/tier.sh
+          # execs run_eval.py so the code survives; `make regression` would report
+          # every outcome as 2 and the callers have no other source. `|| rc=$?` keeps
+          # `set -e` from ending the step first.
+          rc=0
+          bin/tier.sh regression || rc=$?
+          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
+          exit $rc
 
       # The two capability axes are independent run_capability.py processes and
       # are kept in separate steps on purpose: folded into one `run:` under
@@ -185,11 +210,18 @@ jobs:
           CONFIRM_COST: "1"
         run: |
           set -euo pipefail
+          # Pre-checks spend nothing and are classified only as pass/fail, so make
+          # is fine for them; the tier itself goes through tier.sh, which execs
+          # run_capability.py and keeps 3/4/5 distinct all the way to the callers.
           make check
           make estimate
-          make capability
+          rc=0
+          bin/tier.sh capability || rc=$?
+          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
+          exit $rc
 
       - name: Tier — capability (judged axis)
+        id: capability_judged
         if: ${{ !cancelled() && inputs.tier == 'capability' }}
         working-directory: benchmark
         env:
@@ -199,9 +231,14 @@ jobs:
           OPIK_WORKSPACE: ${{ secrets.FERMIX_OPIK_WORKSPACE }}
         run: |
           set -euo pipefail
-          make capability-judged
+          # tier.sh, not make: the judged axis publishes its runner's code too.
+          rc=0
+          bin/tier.sh capability-judged || rc=$?
+          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
+          exit $rc
 
       - name: Tier — dangerous (sandbox_verify on a disposable box)
+        id: dangerous
         if: inputs.tier == 'dangerous'
         working-directory: benchmark
         env:
@@ -214,14 +251,26 @@ jobs:
         run: |
           set -euo pipefail
           uv run bin/run_eval.py --check
+          rc=0
           uv run bin/run_eval.py --dangerous --suite sandbox_verify \
             --scenario assistant_refuses_hardline_shell --profile destructive \
-            --confirm-daemon-isolated --confirm-isolated-env --confirm-private-data
+            --confirm-daemon-isolated --confirm-isolated-env --confirm-private-data || rc=$?
+          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
+          exit $rc
 
       - name: Save capability leaderboard
         # Keyed to the deterministic axis, which is what writes the board — a
         # judged-axis failure must not throw away a sweep that completed.
-        if: inputs.tier == 'capability' && steps.capability_deterministic.outcome == 'success'
+        #
+        # Exit 5 is "measurement valid and RECORDED, release gate red": the row is
+        # already on disk when the runner returns, and the step still fails under
+        # `set -e`. Keying on the step's outcome therefore discarded exactly the
+        # rows the next weekly restore needs. `!cancelled()` is required because an
+        # `if:` without a status function implicitly ANDs `success()`, which would
+        # skip this step the moment the tier step failed.
+        if: ${{ !cancelled() && inputs.tier == 'capability'
+                && (steps.capability_deterministic.outcome == 'success'
+                    || steps.capability_deterministic.outputs.exit_code == '5') }}
         uses: actions/cache/save@v4
         with:
           path: benchmark/reports/capability/leaderboard.json

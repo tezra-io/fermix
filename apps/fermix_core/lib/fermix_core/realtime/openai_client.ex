@@ -1,10 +1,15 @@
 defmodule FermixCore.Realtime.OpenAIClient do
   @moduledoc """
   WebSocket client and event mapping for OpenAI Realtime.
+
+  The peer is verified against the OS trust store via `FermixCore.Net.Tls` — the
+  account's bearer token travels in the handshake headers, so an unverified
+  socket would hand it to whoever answered.
   """
 
   use WebSockex
 
+  alias FermixCore.Net.Tls
   alias FermixCore.Realtime.Config
 
   @base_url "wss://api.openai.com/v1/realtime"
@@ -19,10 +24,35 @@ defmodule FermixCore.Realtime.OpenAIClient do
     headers = Keyword.fetch!(opts, :headers)
     parent = Keyword.fetch!(opts, :parent)
 
-    WebSockex.start_link(url, __MODULE__, %{parent: parent},
-      extra_headers: headers,
-      handshake_timeout: @handshake_timeout_ms
-    )
+    with {:ok, start_opts} <- start_options(url, headers) do
+      WebSockex.start_link(url, __MODULE__, %{parent: parent}, start_opts)
+    end
+  end
+
+  @doc """
+  The `WebSockex` options for `url`, or `{:error, :ws_url_without_host}` when
+  the URL names no host.
+
+  `url/1` builds a vendor constant, so the refusal is unreachable in production
+  — the URL is parsed for its host anyway so there is one way a socket in this
+  repo acquires its TLS options, and no path that dials under WebSockex's
+  `verify_none` default.
+  """
+  @spec start_options(String.t(), [{String.t(), String.t()}]) ::
+          {:ok, keyword()} | {:error, :ws_url_without_host}
+  def start_options(url, headers) when is_binary(url) and is_list(headers) do
+    case URI.parse(url) do
+      %URI{host: host} when is_binary(host) and host != "" ->
+        {:ok,
+         [
+           extra_headers: headers,
+           handshake_timeout: @handshake_timeout_ms,
+           ssl_options: Tls.client_options(host)
+         ]}
+
+      %URI{} ->
+        {:error, :ws_url_without_host}
+    end
   end
 
   @spec send_event(pid(), map()) :: :ok | {:error, term()}

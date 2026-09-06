@@ -6,6 +6,7 @@ defmodule FermixCore.Setup.SecretMigration do
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.SecretStore
+  alias FermixCore.Setup.SecretWriteLog
   alias FermixCore.Setup.SecretWriter
 
   @type io_opts :: [puts: (String.t() -> any()), prompt: (String.t() -> String.t())]
@@ -75,7 +76,7 @@ defmodule FermixCore.Setup.SecretMigration do
 
   defp migrate_one(secret, {:ok, snapshot, migrated}, puts, prompt) do
     if confirm?(prompt, "Migrate #{secret.env} to the OS keyring? [y/N]: ") do
-      case SecretWriter.put(secret.key, secret.value) do
+      case SecretWriteLog.put(secret.key, secret.value) do
         :ok ->
           puts.("Migrated #{secret.env}.")
 

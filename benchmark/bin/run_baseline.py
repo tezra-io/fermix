@@ -11,9 +11,11 @@ k trials each, scored with the SAME scoring.py. Writes a per-task results.json t
 run_uplift.py pairs against the Fermix arm's results.json (from run_capability.py)
 to compute the uplift (EVAL_CAPABILITY_SCORING.md §0/§4).
 
-This is the tools-OFF / raw-model arm: it isolates everything Fermix's scaffold and
-tools add. Only closed-form (`score:`) tasks are scored — a no-scaffold baseline
-has no judge. The key is operator-provided, NEVER extracted from the daemon:
+This is the WHOLE-SYSTEM comparison arm: pairing it with the Fermix arm measures the
+combined effect of Fermix's scaffold, memory, execution policy AND tools. It does NOT
+isolate the causal contribution of tools — the two arms differ in more than one thing.
+Only closed-form (`score:`) single-session tasks are scored: a no-scaffold baseline has
+no judge and no session. The key is operator-provided, NEVER extracted from the daemon:
 
     EVAL_BASELINE_API_KEY    (required)
     EVAL_BASELINE_MODEL      (required — the SAME model the Fermix arm served)
@@ -76,12 +78,17 @@ def score_case(case, trials: int, k: int, threshold: float, chat) -> aggregate.T
         try:
             reply, tokens = chat(case.turns[-1].query)
         except BaselineError:
-            results.append(aggregate.score_trial(case.id, task_success=0.0, safety_ok=True,
-                cost=0.0, duration_ms=0.0, tokens=0, tool_calls=0, status="api_error"))
+            results.append(aggregate.score_trial(case.id, task_success=0.0, safety_ok=None,
+                cost=0.0, duration_ms=0.0, tokens=0, tool_calls=0, status="api_error",
+                cost_known=False))
             continue
         succ = scoring.score_answer(reply, case.score_spec).score
-        results.append(aggregate.score_trial(case.id, task_success=succ, safety_ok=True,
-            cost=0.0, duration_ms=0.0, tokens=tokens, tool_calls=0, status="ok"))
+        # safety_ok=None: the raw arm grades NO safety gate, so its trials report
+        # "not evaluated" rather than a zero-violation column nobody measured. Cost is
+        # unknown too — this endpoint returns usage, not price.
+        results.append(aggregate.score_trial(case.id, task_success=succ, safety_ok=None,
+            cost=0.0, duration_ms=0.0, tokens=tokens, tool_calls=0, status="ok",
+            cost_known=False))
     return aggregate.aggregate_task(results, k=k, threshold=threshold)
 
 
@@ -97,6 +104,16 @@ def baseline_cases(suites, want_suites, want_tags, max_tasks):
                 if case.score_spec:        # closed-form only — no judge in the baseline
                     out.append((s, scn, case))
     return out[:max_tasks] if max_tasks else out
+
+
+def cross_session_ids(selected) -> list[str]:
+    """"<suite>/<case>" for every selected case that needs two sessions.
+
+    The baseline arm is one stateless chat call: it has no session identity and no
+    memory, so it cannot store a fact in turn 1 and recall it in turn 2. Driving one
+    anyway sent the store turn's unrendered "{token}" template to the model and scored
+    the answer as a real baseline number."""
+    return [f"{s.name}/{case.id}" for s, _scn, case in selected if case.cross_session]
 
 
 def build_args(argv):
@@ -123,6 +140,16 @@ def main(argv=None) -> int:
     if not 0 < args.threshold <= 1:
         print(f"--threshold must be in (0, 1], got {args.threshold}", file=sys.stderr)
         return 2
+    if args.trials < 1:
+        print(f"--trials must be at least 1, got {args.trials}", file=sys.stderr)
+        return 2
+    # Mirrors run_capability's up-front refusal. aggregate_task REFUSES k > n_trials
+    # rather than clamping, and it does so per task — so without this the baseline
+    # bills every trial of the first task and then dies on a traceback.
+    if args.k is not None and not 1 <= args.k <= args.trials:
+        print(f"--k {args.k} needs 1 <= k <= --trials ({args.trials}): pass^k over more "
+              "trials than were run is not measurable", file=sys.stderr)
+        return 2
 
     try:
         suites = load_all(CAP_DIR)
@@ -133,8 +160,15 @@ def main(argv=None) -> int:
     if not cases:
         print("no closed-form capability tasks selected", file=sys.stderr)
         return 2
+    blocked = cross_session_ids(cases)
+    if blocked:
+        print("the baseline arm cannot drive a two-session case (one stateless chat "
+              f"call, no session, no memory): {', '.join(blocked)}\n"
+              "deselect them with --suite/--tag; a cross-session task has no comparable "
+              "raw-model arm.", file=sys.stderr)
+        return 2
 
-    trials = max(1, args.trials)
+    trials = args.trials
     k = args.k or trials
     chat = make_chat(base, api_key, model)
     print(f"raw baseline · {len(cases)} task(s) × {trials} trial(s) · model={model} "
@@ -149,9 +183,12 @@ def main(argv=None) -> int:
     out = args.out or os.path.join(SKILL_DIR, "reports", "capability", "baseline",
                                    f"{model.replace('/', '_')}.json")
     os.makedirs(os.path.dirname(out), exist_ok=True)
+    # valid=True: the raw arm has no trace/evaluator evidence to go missing — a failed
+    # API call is recorded as a scored zero trial, which is an OUTCOME, not an
+    # unmeasured episode.
     uplift.write_arm(out, arm="baseline", config_id=model,
                      suite=",".join(sorted({s.name for s, _c, _o in cases})),
-                     k=k, threshold=args.threshold, tasks=tasks)
+                     k=k, threshold=args.threshold, tasks=tasks, valid=True)
     print(f"\nbaseline results: {out}\n"
           f"compare with the Fermix arm: uv run bin/run_uplift.py --fermix <results.json> --baseline {out}")
     return 0

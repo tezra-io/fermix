@@ -374,4 +374,99 @@ defmodule FermixCore.Providers.OpenAITest do
       assert_received {:auth_header, "Bearer sk-my-key"}
     end
   end
+
+  # -- chat/2: cache-aware token telemetry --
+
+  # This adapter parses its own completions body, so it never learned about
+  # `prompt_tokens_details.cached_tokens` at all. Without it every span it emits
+  # is priceable only at the uncached ceiling.
+  describe "chat/2 cache-aware token telemetry" do
+    test "parses the cached-read subset alongside the blended prompt total" do
+      stub_openai(self(), 200, cached_body(%{"cached_tokens" => 768}))
+
+      {:ok, resp} = chat([%{role: "user", content: "hi"}])
+
+      # `prompt_tokens` keeps its blended meaning; the cached count rides beside it.
+      assert resp.usage.prompt_tokens == 1_000
+      assert resp.usage.cached_input_tokens == 768
+    end
+
+    test "omits the cached key when the vendor reported no cache detail" do
+      stub_openai(self(), 200, cached_body(nil))
+
+      {:ok, resp} = chat([%{role: "user", content: "hi"}])
+
+      refute Map.has_key?(resp.usage, :cached_input_tokens)
+    end
+
+    test "keeps a reported zero, because the vendor measured it" do
+      stub_openai(self(), 200, cached_body(%{"cached_tokens" => 0}))
+
+      {:ok, resp} = chat([%{role: "user", content: "hi"}])
+
+      assert resp.usage.cached_input_tokens == 0
+    end
+
+    test "refuses a malformed cached count rather than reporting it as zero" do
+      stub_openai(self(), 200, cached_body(%{"cached_tokens" => -1}))
+
+      assert_raise ArgumentError, ~r/cached_tokens/, fn ->
+        chat([%{role: "user", content: "hi"}])
+      end
+    end
+
+    test "the provider call event carries the cached count into the llm span" do
+      metadata = cache_telemetry(%{"cached_tokens" => 768})
+
+      assert metadata.tokens == %{prompt: 1_000, completion: 40, cached: 768}
+    end
+
+    test "the cached key is absent on the event when the vendor reported none" do
+      metadata = cache_telemetry(nil)
+
+      assert metadata.tokens == %{prompt: 1_000, completion: 40}
+      refute Map.has_key?(metadata.tokens, :cached)
+    end
+  end
+
+  defp cached_body(nil), do: cached_body_with_usage(%{})
+
+  defp cached_body(details), do: cached_body_with_usage(%{"prompt_tokens_details" => details})
+
+  defp cached_body_with_usage(extra) do
+    usage =
+      Map.merge(
+        %{"prompt_tokens" => 1_000, "completion_tokens" => 40, "total_tokens" => 1_040},
+        extra
+      )
+
+    %{
+      "choices" => [
+        %{"message" => %{"content" => "hi", "tool_calls" => []}, "model" => "gpt-5.4-mini"}
+      ],
+      "usage" => usage
+    }
+  end
+
+  defp cache_telemetry(details) do
+    test_pid = self()
+    handler_id = "test-openai-base-cache-#{System.unique_integer([:positive])}"
+
+    :telemetry.attach(
+      handler_id,
+      [:fermix, :provider, :call],
+      fn event, measurements, metadata, _config ->
+        if self() == test_pid, do: send(test_pid, {:telemetry, event, measurements, metadata})
+      end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
+    stub_openai(test_pid, 200, cached_body(details))
+    {:ok, _resp} = chat([%{role: "user", content: "hi"}])
+
+    assert_receive {:telemetry, [:fermix, :provider, :call], _measurements, metadata}
+    metadata
+  end
 end

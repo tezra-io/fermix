@@ -6,6 +6,7 @@ defmodule FermixWebWeb.SetupLiveTest do
   alias Fermix.CLI.Upgrade.Manifest
   alias FermixCore.Auth.Store
   alias FermixCore.Capabilities.MCP.RuntimeStatus
+  alias FermixCore.Meetings.SidecarInstaller, as: MeetbotInstaller
   alias FermixCore.Plugins.CanonicalJson
   alias FermixCore.Plugins.Config, as: PluginConfig
   alias FermixCore.Plugins.Dist.Installer, as: DistInstaller
@@ -14,6 +15,10 @@ defmodule FermixWebWeb.SetupLiveTest do
   alias FermixCore.Plugins.Status, as: PluginStatus
   alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Setup.ConfigStore
+  alias FermixCore.Setup.RestartState
+  alias FermixCore.Transcription.Local.ModelStore, as: LocalModelStore
+  alias FermixCore.Transcription.Local.SidecarInstaller, as: LocalSttInstaller
+  alias FermixCore.Transcription.Registry, as: TranscriptionRegistry
   alias FermixTestSupport.DistFetcherStub
   alias FermixTestSupport.DistFixtures
   alias FermixTestSupport.DistVerifierStub
@@ -103,7 +108,8 @@ defmodule FermixWebWeb.SetupLiveTest do
           source_id,
           generation,
           :upstream_contract_mismatch,
-          :descriptor_changed
+          :descriptor_changed,
+          "eden_read_card"
         )
 
       {:ok, owner}
@@ -117,7 +123,9 @@ defmodule FermixWebWeb.SetupLiveTest do
     secret_writer = Application.get_env(:fermix_core, :secret_writer)
     tools = Application.get_env(:fermix_core, :tools, [])
     transcription = Application.get_env(:fermix_core, :transcription, [])
+    meetings = Application.get_env(:fermix_core, :meetings, [])
     plugins = Application.get_env(:fermix_core, :plugins, [])
+    computer_history = Application.get_env(:fermix_core, :computer_history)
     plugins_dist_opts = Application.get_env(:fermix_core, :plugins_dist_opts)
     oauth = Application.get_env(:fermix_core, :oauth, %{})
     plugin_auth_runner = Application.get_env(:fermix_web, :plugin_auth_runner)
@@ -127,8 +135,12 @@ defmodule FermixWebWeb.SetupLiveTest do
     anthropic_login_impl = Application.get_env(:fermix_web, :anthropic_login_impl)
     doctor_probe_opts = Application.get_env(:fermix_web, :doctor_probe_opts)
     computer_use_grant_impl = Application.get_env(:fermix_web, :computer_use_grant_impl)
+    local_installer = Application.get_env(:fermix_web, :local_installer)
+    meetbot_installer = Application.get_env(:fermix_web, :meetbot_installer)
+    meetbot_signin_runner = Application.get_env(:fermix_web, :meetbot_signin_runner)
     harness_detector = Application.get_env(:fermix_web, :harness_detector)
     harness = Application.get_env(:fermix_core, :harness, [])
+    mobile = Application.fetch_env(:fermix_channels, :mobile)
     fermix_home = System.get_env("FERMIX_HOME")
 
     tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-live")
@@ -140,6 +152,18 @@ defmodule FermixWebWeb.SetupLiveTest do
     Application.put_env(:fermix_core, :providers, [])
     Application.put_env(:fermix_core, :agent, name: "fermix", provider: :openai)
     Application.delete_env(:fermix_channels, :telegram)
+
+    Application.put_env(:fermix_channels, :mobile,
+      enabled: false,
+      mode: :listener,
+      port: 4031,
+      bind: "0.0.0.0",
+      advertise_mdns: true,
+      streaming: "draft",
+      max_media_bytes: 20_971_520,
+      push: [enabled: false, environment: "production"]
+    )
+
     Application.put_env(:fermix_core, :secret_writer, FermixTestSupport.SecretWriterStub)
     Application.put_env(:fermix_core, :tools, [])
     # Deterministic transcription baseline so the card's default backend/model
@@ -149,6 +173,9 @@ defmodule FermixWebWeb.SetupLiveTest do
       model: "gpt-4o-mini-transcribe",
       max_file_mb: 20
     )
+
+    # Meetings ships off; the card's own tests establish the posture they assert.
+    Application.put_env(:fermix_core, :meetings, enabled: false)
 
     # Clean harness baseline (the card reads `approved`/`default_vendor` from the
     # app-env snapshot): a persisted "approved = true" applies to app env, so reset
@@ -164,6 +191,9 @@ defmodule FermixWebWeb.SetupLiveTest do
     Application.delete_env(:fermix_web, :anthropic_login_impl)
     Application.delete_env(:fermix_web, :doctor_probe_opts)
     Application.delete_env(:fermix_web, :computer_use_grant_impl)
+    Application.delete_env(:fermix_web, :local_installer)
+    Application.delete_env(:fermix_web, :meetbot_installer)
+    Application.delete_env(:fermix_web, :meetbot_signin_runner)
     # Hermetic harness detection: never spawn the real codex/claude `--version`
     # subprocesses at mount. Tests that exercise the card override this seam.
     Application.put_env(:fermix_web, :harness_detector, fn -> harness_detections(false, false) end)
@@ -175,7 +205,9 @@ defmodule FermixWebWeb.SetupLiveTest do
       restore_env(:fermix_core, :secret_writer, secret_writer)
       Application.put_env(:fermix_core, :tools, tools)
       Application.put_env(:fermix_core, :transcription, transcription)
+      Application.put_env(:fermix_core, :meetings, meetings)
       Application.put_env(:fermix_core, :plugins, plugins)
+      restore_env(:fermix_core, :computer_history, computer_history)
       restore_env(:fermix_core, :plugins_dist_opts, plugins_dist_opts)
       Application.put_env(:fermix_core, :oauth, oauth)
       restore_env(:fermix_web, :plugin_auth_runner, plugin_auth_runner)
@@ -185,8 +217,12 @@ defmodule FermixWebWeb.SetupLiveTest do
       restore_env(:fermix_web, :anthropic_login_impl, anthropic_login_impl)
       restore_env(:fermix_web, :doctor_probe_opts, doctor_probe_opts)
       restore_env(:fermix_web, :computer_use_grant_impl, computer_use_grant_impl)
+      restore_env(:fermix_web, :local_installer, local_installer)
+      restore_env(:fermix_web, :meetbot_installer, meetbot_installer)
+      restore_env(:fermix_web, :meetbot_signin_runner, meetbot_signin_runner)
       restore_env(:fermix_web, :harness_detector, harness_detector)
       Application.put_env(:fermix_core, :harness, harness)
+      restore_env(:fermix_channels, :mobile, mobile)
 
       case fermix_home do
         nil -> System.delete_env("FERMIX_HOME")
@@ -197,6 +233,81 @@ defmodule FermixWebWeb.SetupLiveTest do
     end)
 
     %{conn: authorize_setup(conn), tmp_home: tmp_home}
+  end
+
+  describe "/setup embed presentation" do
+    # `?embed=1` is the macOS app's in-app dress: same LiveView, native read.
+    # The rail is label-only (the app chrome owns identity, theme, and origin),
+    # the pane is unboxed, and the ground is transparent so the app's palette
+    # shows through the WKWebView.
+    test "embed=1 renders the native presentation without browser chrome", %{conn: conn} do
+      {:ok, _view, html} = live(conn, "/setup?embed=1")
+
+      assert html =~ "data-embed"
+      assert html =~ "bg-transparent"
+
+      # Rail rows are label-only: every section is still reachable...
+      for label <- ["Provider", "Channels", "Plugins", "Doctor"] do
+        assert html =~ label
+      end
+
+      # ...but the website-sidebar chrome is gone: wordmark, step counter,
+      # progress, theme toggle, per-tab subtext, and the config-path line.
+      refute html =~ ~s(aria-label="Fermix")
+      refute html =~ "Step 1 of"
+      refute html =~ "data-phx-theme"
+      refute html =~ "Model and key"
+      refute html =~ ConfigStore.path()
+    end
+
+    test "a normal browser session renders none of the embed dress", %{conn: conn} do
+      {:ok, _view, html} = live(conn, "/setup")
+
+      refute html =~ ~r/<main[^>]+data-embed/
+      refute html =~ "Sign-in opens in your browser and returns here."
+      assert html =~ "Step 1 of"
+      assert html =~ "data-phx-theme"
+    end
+
+    test "embed persists in the socket across tab navigation", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup?embed=1")
+
+      html = view |> element("button[phx-value-tab=\"plugins\"]") |> render_click()
+
+      assert html =~ "data-embed"
+      refute html =~ "Step 1 of"
+    end
+
+    # The restart patch stamps `?tab=…&embed=1`, and the post-restart reload
+    # re-mounts from that url: both params must be honored together.
+    test "the post-restart url re-mounts embedded on the stamped tab", %{conn: conn} do
+      {:ok, _view, html} = live(conn, "/setup?embed=1&tab=doctor")
+
+      assert html =~ "data-embed"
+      assert html =~ "Readiness doctor"
+    end
+
+    test "embed explains the browser hand-off under the sign-in action", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup?embed=1")
+
+      html =
+        view
+        |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: "openai_codex"})
+        |> render_change()
+
+      assert html =~ "Sign-in opens in your browser and returns here."
+    end
+
+    test "the browser presentation never renders the hand-off caption", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      html =
+        view
+        |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: "openai_codex"})
+        |> render_change()
+
+      refute html =~ "Sign-in opens in your browser and returns here."
+    end
   end
 
   describe "/setup shell" do
@@ -384,7 +495,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       {:ok, view, _html} = live(conn, "/setup")
       view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
 
-      card = view |> element(~s|section[data-plugin-name="computer_use_sidecar"]|) |> render()
+      card = view |> element(~s|section[data-feature-name="computer_use_sidecar"]|) |> render()
 
       assert card =~ "Disable"
       assert card =~ "Needs setup"
@@ -397,9 +508,15 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert card =~ "Computer Use"
       refute card =~ "Sidecar"
       assert card =~ "data:image/svg+xml"
+      # No inline description: the details ride the info-icon tooltip (data-tip) and
+      # the icon links to the docs page. Asserted here because this card renders on
+      # every platform (the computer-history card is macOS-gated).
+      assert card =~ ~s(data-tip="Fermix sees your screen)
+      assert card =~ "Operator-only, off by default."
+      assert card =~ ~s(href="https://fermix.ai/docs/computer-use/")
     end
 
-    test "the computer-use catalog card shows the compux release version, not the catalog entry",
+    test "the computer-use native-driver card shows the compux release version, not the catalog entry",
          %{conn: conn} do
       # The sidecar ships via the pinned compux release; the bundled catalog
       # still carries the pre-compux 0.1.0 entry, whose version must not leak
@@ -407,7 +524,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       {:ok, view, _html} = live(conn, "/setup")
       view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
 
-      card = view |> element(~s|section[data-catalog-name="computer_use_sidecar"]|) |> render()
+      card = view |> element(~s|section[data-feature-name="computer_use_sidecar"]|) |> render()
 
       compux_vsn = to_string(Application.spec(:compux, :vsn))
       assert card =~ "v" <> compux_vsn
@@ -440,13 +557,341 @@ defmodule FermixWebWeb.SetupLiveTest do
       {:ok, view, _html} = live(conn, "/setup")
       view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
 
-      card = view |> element(~s|section[data-plugin-name="computer_use_sidecar"]|) |> render()
+      card = view |> element(~s|section[data-feature-name="computer_use_sidecar"]|) |> render()
 
       assert card =~ "Ready"
       assert card =~ "Disable"
       # The config-gated sidecar's registry status is :not_configured, so the
       # generic Check button would flash "not ready"; it must not render.
       refute card =~ ~s(phx-click="plugin_check")
+    end
+
+    # The computer-history card renders only on macOS (its AXObserver capture does
+    # not port). Compile the assertion in only there so Linux CI stays green.
+    if :os.type() == {:unix, :darwin} do
+      test "the computer-history native-driver card renders info tooltip + docs link + controls (§22.3)",
+           %{conn: conn} do
+        # The tooltip's summarizer clause reads the live config, so establish the
+        # shipped posture here rather than inheriting whatever ran before.
+        Application.put_env(:fermix_core, :computer_history, [])
+
+        {:ok, view, _html} = live(conn, "/setup")
+        view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+        card = view |> element(~s|section[data-feature-name="computer_history"]|) |> render()
+
+        assert card =~ "Computer History"
+        # No visible description paragraph: the privacy posture rides the info-icon
+        # tooltip (data-tip) — anchored to the attribute so a regression back to a
+        # visible <p> would fail — and the icon links to the docs page.
+        assert card =~
+                 ~r/data-tip="[^"]*Passwords and secure fields are never captured[^"]*off-device/
+
+        assert card =~ ~s(href="https://fermix.ai/docs/computer-history/")
+        # The allowlist is no longer an inline text field — Enable opens the app
+        # picker modal — and the Accessibility grant action is present.
+        refute card =~ ~s(name="computer_history_apps")
+        assert card =~ ~s(phx-click="open_computer_history_apps")
+        assert card =~ ~s(phx-click="computer_history_grant")
+      end
+
+      # The disclosure must name the destination raw activity actually reaches
+      # (§23.3): "off-device" is false when the summarizer runs on this Mac.
+      test "the tooltip says on-device, never off-device, for the local summarizer (§23.3)",
+           %{conn: conn} do
+        Application.put_env(:fermix_core, :computer_history, summarizer: :local)
+
+        {:ok, view, _html} = live(conn, "/setup")
+        view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+        card = view |> element(~s|section[data-feature-name="computer_history"]|) |> render()
+
+        assert card =~ "Summarized on-device (local model); off by default."
+        refute card =~ "off-device"
+      end
+
+      test "the tooltip names the pinned Tier-3 provider as the off-device summarizer (§23.3)",
+           %{conn: conn} do
+        Application.put_env(:fermix_core, :computer_history, summarizer: :anthropic)
+
+        {:ok, view, _html} = live(conn, "/setup")
+        view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+        card = view |> element(~s|section[data-feature-name="computer_history"]|) |> render()
+
+        assert card =~ "Summarized off-device by anthropic; off by default."
+      end
+
+      test "the default summarizer posture names the resolved subagent provider (§23.3)",
+           %{conn: conn} do
+        routing = Application.get_env(:fermix_core, :routing)
+        on_exit(fn -> restore_env(:fermix_core, :routing, routing) end)
+        Application.put_env(:fermix_core, :routing, subagent_provider: :anthropic)
+        Application.put_env(:fermix_core, :computer_history, [])
+
+        {:ok, view, _html} = live(conn, "/setup")
+        view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+        card = view |> element(~s|section[data-feature-name="computer_history"]|) |> render()
+
+        # The subagent tier, not a hardcoded string and not the primary provider
+        # (`:openai` in this suite's baseline agent config).
+        assert card =~ "Summarized off-device by anthropic; off by default."
+      end
+
+      # The pinned native driver withholds typed text inside browsers and captures
+      # no URLs, so the tooltip must not promise either (§23.3).
+      test "the tooltip claims window titles only inside browsers, never URLs (§23.3)",
+           %{conn: conn} do
+        Application.put_env(:fermix_core, :computer_history, [])
+
+        {:ok, view, _html} = live(conn, "/setup")
+        view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+        card = view |> element(~s|section[data-feature-name="computer_history"]|) |> render()
+
+        assert card =~
+                 "Opt-in activity memory from the apps you allow: window titles and typed " <>
+                   "text; inside browsers only window titles are captured today."
+
+        refute card =~ "URLs"
+      end
+    end
+
+    test "the app-picker modal lists installed apps by name, toggles a selection, and filters",
+         %{conn: conn} do
+      # Inject a fixed app list so the modal never scans the host (hermetic).
+      Application.put_env(:fermix_web, :installed_apps_impl, fn ->
+        [
+          %{name: "Safari", bundle_id: "com.apple.Safari"},
+          %{name: "Notes", bundle_id: "com.apple.Notes"}
+        ]
+      end)
+
+      on_exit(fn -> Application.delete_env(:fermix_web, :installed_apps_impl) end)
+
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+      # The card's Enable/Edit-apps button dispatches this; drive it directly so the
+      # modal flow runs on every platform, not only where the macOS card renders.
+      modal = render_hook(view, "open_computer_history_apps", %{})
+
+      assert modal =~ "Apps to record"
+      # The search form intercepts Enter (phx-submit) so a native submit can't reload
+      # the LiveView and wipe the transient picker selection.
+      assert modal =~ ~s(phx-submit="computer_history_apps_filter")
+      assert modal =~ "Safari"
+      assert modal =~ "com.apple.Safari"
+      assert modal =~ "Notes"
+      # Nothing selected yet → Save is disabled, and saving is refused with guidance.
+      assert modal =~ ~r/phx-click="save_computer_history_apps"[^>]*disabled/
+      assert render_hook(view, "save_computer_history_apps", %{}) =~ "Pick at least one app"
+
+      # Toggle Safari on → one selected.
+      assert render_hook(view, "toggle_computer_history_app", %{"bundle" => "com.apple.Safari"}) =~
+               "1 selected"
+
+      # Filtering to a non-match shows the empty state but keeps the selection.
+      filtered = render_hook(view, "computer_history_apps_filter", %{"q" => "zzz"})
+      assert filtered =~ "No app matches your search."
+      assert filtered =~ "1 selected"
+
+      # Cancelling closes the modal.
+      refute render_hook(view, "close_computer_history_picker", %{}) =~ "Apps to record"
+    end
+
+    # The core consent transaction: with the shared sidecar installed, saving the
+    # picker writes the chosen apps AND flips enabled in one act. Needs a resolvable
+    # sidecar target, so it is skipped on hosts compux ships no artifact for.
+    case Compux.Binary.target() do
+      {:ok, _target} ->
+        :ok
+
+      {:error, reason} ->
+        @tag skip: "compux sidecar unsupported on this host: #{inspect(reason)}"
+    end
+
+    test "saving the picker with the sidecar installed enables Computer History with the chosen apps",
+         %{conn: conn} do
+      checkout = FermixTestSupport.SafeRm.make_tmp_dir!("setup-live-ch-enable")
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf(checkout) end)
+      write_cu_dev_local(checkout)
+      write_cu_dev_local_binary(checkout)
+
+      prev_plugins = Application.get_env(:fermix_core, :plugins)
+      on_exit(fn -> restore_env(:fermix_core, :plugins, prev_plugins) end)
+      Application.put_env(:fermix_core, :plugins, dev_local: checkout)
+
+      Application.put_env(:fermix_web, :installed_apps_impl, fn ->
+        [%{name: "Safari", bundle_id: "com.apple.Safari"}]
+      end)
+
+      on_exit(fn -> Application.delete_env(:fermix_web, :installed_apps_impl) end)
+
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+      render_hook(view, "open_computer_history_apps", %{})
+      render_hook(view, "toggle_computer_history_app", %{"bundle" => "com.apple.Safari"})
+      saved = render_hook(view, "save_computer_history_apps", %{})
+
+      # Modal closes and the flash confirms the enable path (not the install path).
+      refute saved =~ "Apps to record"
+      assert saved =~ "Computer History enabled. Restart to apply."
+
+      # The apps + enabled flag are persisted together.
+      assert {:ok, persisted} = ConfigStore.load_runtime_config(resolve_secrets: false)
+      ch = persisted[:fermix_core][:computer_history]
+      assert ch[:enabled] == true
+      assert "com.apple.Safari" in ch[:apps]
+    end
+
+    # The other half of the consent transaction: driver absent → save persists the
+    # apps, installs the shared driver, and completion enables Computer History —
+    # the feature the operator consented to — never Computer Use.
+    test "saving the picker with the driver missing installs it, then enables Computer History, not Computer Use",
+         %{conn: conn} do
+      test_pid = self()
+
+      Application.put_env(:fermix_web, :computer_use_installer, fn ->
+        send(test_pid, :driver_install_ran)
+        {:ok, :installed}
+      end)
+
+      on_exit(fn -> Application.delete_env(:fermix_web, :computer_use_installer) end)
+
+      Application.put_env(:fermix_web, :installed_apps_impl, fn ->
+        [%{name: "Safari", bundle_id: "com.apple.Safari"}]
+      end)
+
+      on_exit(fn -> Application.delete_env(:fermix_web, :installed_apps_impl) end)
+
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+      render_hook(view, "open_computer_history_apps", %{})
+      render_hook(view, "toggle_computer_history_app", %{"bundle" => "com.apple.Safari"})
+      saved = render_hook(view, "save_computer_history_apps", %{})
+
+      # Save takes the install path (driver missing) and says which feature will
+      # turn on — not the generic Computer Use download flash.
+      assert saved =~ "Computer History will turn on when it finishes."
+      assert_receive :driver_install_ran
+
+      # Install completion flips Computer History on (the `on_done` routing).
+      render_until(view, "Computer History enabled. Restart to apply.")
+
+      assert {:ok, persisted} = ConfigStore.load_runtime_config(resolve_secrets: false)
+      ch = persisted[:fermix_core][:computer_history]
+      assert ch[:enabled] == true
+      assert "com.apple.Safari" in ch[:apps]
+      # The driver install must complete the feature that asked for it — a
+      # Computer History-initiated install never turns Computer Use on.
+      cu = persisted[:fermix_core][:computer_use] || []
+      refute Keyword.get(cu, :enabled, false)
+    end
+
+    test "the transcription tab is labelled Voice notes and there is no separate Meetings tab",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup")
+      html = render(view)
+
+      # The transcription tab kept its id but got a clearer label.
+      assert has_element?(view, ~s|button[phx-value-tab="transcription"]|)
+      assert html =~ "Voice notes"
+
+      # The Meetings tab is gone — its config lives in the card's panel now.
+      refute has_element?(view, ~s|button[phx-value-tab="meetings"]|)
+    end
+
+    test "the meeting notetaker renders as a native-driver card beside computer-use, on-device is not a card",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+      cu = view |> element(~s|section[data-feature-name="computer_use_sidecar"]|) |> render()
+      meetings = view |> element(~s|section[data-feature-name="meetings"]|) |> render()
+
+      assert cu =~ "Computer Use"
+      assert cu =~ "Let Fermix drive the screen"
+
+      # On-device speech lives in the Voice notes tab, not as its own card.
+      refute has_element?(view, ~s|section[data-feature-name="local_transcription"]|)
+
+      # Meeting notetaker: enable + a Configure button that opens the config panel.
+      assert meetings =~ "Meeting Notetaker"
+      assert meetings =~ "Joins Google Meet or Zoom on your ask"
+      assert meetings =~ ~s(href="https://fermix.ai/docs/meeting-notetaker/")
+      assert meetings =~ ~s(phx-click="enable_meetings")
+      assert meetings =~ ~s(phx-click="open_meetings_config")
+      refute meetings =~ ~s(phx-value-tab="meetings")
+    end
+
+    test "enabling the meeting notetaker from the card flips the config, asks for a restart, and installs",
+         %{conn: conn} do
+      parent = self()
+
+      Application.put_env(:fermix_web, :meetbot_installer, fn ->
+        send(parent, :meetbot_install_started)
+        {:error, :no_pinned_release}
+      end)
+
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+      html = view |> element(~s|button[phx-click="enable_meetings"]|) |> render_click()
+
+      assert html =~ "Restart to apply"
+      assert_receive :meetbot_install_started, 500
+      assert render_async(view) =~ escaped(MeetbotInstaller.error_message(:no_pinned_release))
+      assert Keyword.get(Application.get_env(:fermix_core, :meetings, []), :enabled) == true
+    end
+
+    test "opening the config while enabled-but-uninstalled resumes the install (version-bump heal)",
+         %{conn: conn} do
+      parent = self()
+      prev = Application.get_env(:fermix_core, :meetings)
+      on_exit(fn -> restore_env(:fermix_core, :meetings, prev) end)
+      # Enabled in config, but the pinned sidecar is not on disk (a fresh tmp
+      # home stands in for the version bump that stranded an older install).
+      Application.put_env(:fermix_core, :meetings, enabled: true)
+
+      Application.put_env(:fermix_web, :meetbot_installer, fn ->
+        send(parent, :meetbot_install_started)
+        {:error, :no_pinned_release}
+      end)
+
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+      html =
+        view
+        |> element(
+          ~s|section[data-feature-name="meetings"] button[phx-click="open_meetings_config"]|
+        )
+        |> render_click()
+
+      # Opening the config — not just enabling — kicks the install, and the hint
+      # under the still-disabled sign-in reads as installing, not "enable first".
+      assert_receive :meetbot_install_started, 500
+      assert html =~ "Installing the notetaker"
+      refute html =~ "Enable the notetaker above"
+    end
+
+    test "an enabled meeting-notetaker card offers Disable and Configure, not Enable", %{
+      conn: conn
+    } do
+      prev = Application.get_env(:fermix_core, :meetings)
+      on_exit(fn -> restore_env(:fermix_core, :meetings, prev) end)
+      Application.put_env(:fermix_core, :meetings, enabled: true)
+
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+      card = view |> element(~s|section[data-feature-name="meetings"]|) |> render()
+
+      assert card =~ ~s(phx-click="disable_meetings")
+      assert card =~ ~s(phx-click="open_meetings_config")
+      refute card =~ ~s(phx-click="enable_meetings")
     end
 
     test "oauth plugin connect requires Google client config before enabling", %{conn: conn} do
@@ -539,8 +984,8 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       assert html =~ "Opening Google Drive sign-in"
       assert_receive {:plugin_auth_started, "google_drive"}
-      html = render(view)
-      assert html =~ "Google Drive connected."
+      # The runner's completion lands async — poll rather than racing one render.
+      html = render_until(view, "Google Drive connected.")
       assert html =~ "Ready"
       refute html =~ "https://auth.example/google_drive"
 
@@ -554,8 +999,7 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       assert html =~ "Opening Google Calendar sign-in"
       assert_receive {:plugin_auth_started, "google_calendar"}
-      html = render(view)
-      assert html =~ "Google Calendar connected."
+      html = render_until(view, "Google Calendar connected.")
       assert html =~ "Ready"
       refute html =~ "https://auth.example/google_calendar"
 
@@ -656,7 +1100,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       # The compact row replaces the always-visible client form; the form only
       # exists once the modal is opened.
       refute html =~ ~s(id="oauth-client-form-google")
-      assert html =~ "Not set up — required to connect"
+      assert html =~ "Not set up · required to connect"
 
       modal_html =
         view
@@ -1508,6 +1952,470 @@ defmodule FermixWebWeb.SetupLiveTest do
     end
   end
 
+  describe "Transcription form — on-device backend (M21 2b)" do
+    # A release is pinned, so the real installer would download; every test here
+    # drives the UI, not the network, so default the seam to the fail-loud refusal
+    # (tests that assert a different outcome override it).
+    setup do
+      Application.put_env(:fermix_web, :local_installer, fn _opts ->
+        {:error, :no_release_pinned}
+      end)
+
+      :ok
+    end
+
+    test "the on-device option is modelless and installs on selection, refusing honestly",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      view |> element("button[phx-value-tab=\"transcription\"]") |> render_click()
+
+      html =
+        view
+        |> form("form[phx-submit=\"save_transcription\"]",
+          transcription_form: %{backend: "local"}
+        )
+        |> render_change()
+
+      assert html =~ "On-device"
+      assert html =~ "no audio leaves the host"
+      # Modelless like xai — the shared model dropdown is hidden.
+      refute html =~ ~r{<select[^>]*name="transcription_form\[model\]"}
+      # Neither half is installed on a fresh home, and the card says which.
+      assert html =~ "the speech engine is missing"
+
+      # Selecting it ran the installer, which refuses loud with no pinned release.
+      assert render_async(view) =~ escaped(LocalSttInstaller.error_message(:no_release_pinned))
+    end
+
+    test "an unpinned model renders the model-pins copy verbatim", %{conn: conn} do
+      Application.put_env(:fermix_web, :local_installer, fn _opts ->
+        {:error, :model_pins_missing}
+      end)
+
+      {:ok, view, _html} = live(conn, "/setup")
+
+      view |> element("button[phx-value-tab=\"transcription\"]") |> render_click()
+
+      view
+      |> form("form[phx-submit=\"save_transcription\"]", transcription_form: %{backend: "local"})
+      |> render_change()
+
+      assert render_async(view) =~ escaped(LocalModelStore.error_message(:model_pins_missing))
+    end
+
+    test "install progress is rendered as it arrives", %{conn: conn} do
+      # Selection starts a real install; the progress path is driven directly so
+      # the assertion does not race the installer's own outcome.
+      {:ok, view, _html} = live(conn, "/setup")
+
+      view |> element("button[phx-value-tab=\"transcription\"]") |> render_click()
+
+      view
+      |> form("form[phx-submit=\"save_transcription\"]", transcription_form: %{backend: "local"})
+      |> render_change()
+
+      render_async(view)
+      send(view.pid, {:local_install_progress, {:model, :downloading}})
+
+      assert render(view) =~ "Downloading the speech model…"
+    end
+
+    test "install shows transient progress, not a lingering installed line",
+         %{conn: conn} do
+      Application.put_env(:fermix_web, :local_installer, fn _opts -> :ok end)
+
+      {:ok, view, _html} = live(conn, "/setup")
+
+      view |> element("button[phx-value-tab=\"transcription\"]") |> render_click()
+
+      html =
+        view
+        |> form("form[phx-submit=\"save_transcription\"]",
+          transcription_form: %{backend: "local"}
+        )
+        |> render_change()
+
+      # Progress shows while installing; the finished state is the card itself,
+      # not a persistent success banner cluttering the page.
+      assert html =~ "Installing on-device speech…"
+      refute render_async(view) =~ "On-device speech is installed and ready."
+    end
+
+    test "saving the on-device backend persists it with no model key", %{
+      conn: conn,
+      tmp_home: tmp_home
+    } do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      view |> element("button[phx-value-tab=\"transcription\"]") |> render_click()
+
+      # Switch first, exactly as the browser does: the model <select> disappears
+      # with the backend, so the submit carries no model at all.
+      view
+      |> form("form[phx-submit=\"save_transcription\"]", transcription_form: %{backend: "local"})
+      |> render_change()
+
+      render_async(view)
+
+      view |> form("form[phx-submit=\"save_transcription\"]") |> render_submit()
+
+      assert render(view) =~ "Transcription saved."
+
+      transcription = Application.get_env(:fermix_core, :transcription, [])
+      assert Keyword.get(transcription, :backend) == "local"
+      # The on-device checkpoint is a ModelStore catalog entry, never a user menu,
+      # so the shared `model` key is dropped rather than left OpenAI-shaped.
+      refute Keyword.has_key?(transcription, :model)
+
+      contents = File.read!(Path.join(tmp_home, "config.toml"))
+      assert contents =~ ~s(backend = "local")
+      refute contents =~ "gpt-4o-mini-transcribe"
+    end
+  end
+
+  # The meetings config lives in a modal opened from the Plugins-tab card, not a
+  # tab. Navigate there and open it, returning the rendered html.
+  defp open_meetings_config(view) do
+    view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+    view |> element(~s|button[phx-click="open_meetings_config"]|) |> render_click()
+  end
+
+  # A dev_local meetbot binary makes `SidecarInstaller.installed?/0` true without
+  # a download. This is the intermediate state — binary present, browser not — so
+  # the Meet lane reads "Preparing browser" and sign-in stays gated.
+  defp install_dev_local_binary(home) do
+    {:ok, target} = FermixCore.Meetings.SidecarInstaller.target()
+    dev_local = Path.join(home, "dev-local")
+    binary = Path.join([dev_local, "meetbot_sidecar", "bin", target, "fermix-meetbot"])
+    File.mkdir_p!(Path.dirname(binary))
+    File.write!(binary, "#!/bin/sh\n")
+    File.chmod!(binary, 0o755)
+    Application.put_env(:fermix_core, :plugins, dev_local: dev_local)
+  end
+
+  # A dev_local binary plus its browser marker is the fully-provisioned notetaker:
+  # the sign-in button is enabled and the Meet lane leaves "Not installed" and
+  # "Preparing browser" behind. The binary-only in-between has its own tests.
+  defp install_dev_local_meetbot(home) do
+    install_dev_local_binary(home)
+    :ok = FermixCore.Meetings.SidecarInstaller.mark_browser_installed()
+  end
+
+  describe "Meetings form (M21 phase 3)" do
+    # A release is pinned, so enabling would download the meetbot binary; these
+    # tests drive the UI, so default the seam to the fail-loud refusal (tests that
+    # assert a different outcome override it).
+    setup do
+      Application.put_env(:fermix_web, :meetbot_installer, fn ->
+        {:error, :no_pinned_release}
+      end)
+
+      :ok
+    end
+
+    test "the card carries the notetaker, consent, backend and Zoom fields", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      html = open_meetings_config(view)
+
+      assert html =~ "Meeting Notetaker"
+      assert html =~ "meetings_form[enabled]"
+      assert html =~ "meetings_form[bot_name]"
+      assert html =~ "meetings_form[announce]"
+      assert html =~ "meetings_form[announce_message]"
+      assert html =~ "meetings_form[transcription_backend]"
+      assert html =~ "meetings_form[zoom_account_id]"
+      assert html =~ "meetings_form[zoom_client_id]"
+      assert html =~ "meetings_form[zoom_client_secret]"
+      assert html =~ "meetings_form[zoom_ws_subscription_id]"
+
+      # Blank = the Transcription tab's choice; every shipped backend is offered.
+      assert html =~ "Global default"
+
+      for {name, _module} <- TranscriptionRegistry.backends() do
+        assert html =~ ~s(value="#{name}")
+      end
+
+      # Zoom scope honesty and the consent posture are stated in the panel.
+      assert html =~ "RTMS reaches only meetings hosted by your Zoom account"
+      assert html =~ "Blank uses the built-in consent line"
+
+      # Bot sign-in is a real button. With no sidecar installed it is disabled and
+      # the Meet lane reads "Not installed" — never a green "installed = ready".
+      assert html =~ ~s(phx-click="meetbot_signin")
+      assert html =~ "Sign the bot in"
+      assert html =~ "Enable the notetaker above to install it"
+      assert html =~ "Not installed"
+      refute html =~ "Google Meet notetaker installed."
+    end
+
+    test "an installed-but-not-signed-in Meet lane shows Sign-in needed, not a green ready state",
+         %{conn: conn} do
+      home = System.get_env("FERMIX_HOME")
+      install_dev_local_meetbot(home)
+
+      {:ok, view, _html} = live(conn, "/setup")
+      html = open_meetings_config(view)
+
+      # The amber pill is the honest in-between state — installed is not ready.
+      assert html =~ "Sign-in needed"
+      assert html =~ "skips the waiting room"
+      # The sign-in button is enabled (no disabled attribute on it) once installed.
+      refute html =~ ~r/phx-click="meetbot_signin"[^>]*\sdisabled/
+    end
+
+    test "an installed-but-unsigned notetaker card wears the Sign-in needed pill, not Ready",
+         %{conn: conn} do
+      prev = Application.get_env(:fermix_core, :meetings)
+      on_exit(fn -> restore_env(:fermix_core, :meetings, prev) end)
+      Application.put_env(:fermix_core, :meetings, enabled: true)
+      install_dev_local_meetbot(System.get_env("FERMIX_HOME"))
+
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+      card = view |> element(~s|section[data-feature-name="meetings"]|) |> render()
+
+      # `Meetings.ready?/0` is true here (enabled + installed), but the bot cannot
+      # join until it signs in — the card must show the same amber state its own
+      # Configure modal does, never a green Ready.
+      assert card =~ "Sign-in needed"
+      refute card =~ ">Ready<"
+    end
+
+    test "clicking sign-in runs the flow and flips the Meet lane to ready", %{conn: conn} do
+      home = System.get_env("FERMIX_HOME")
+      install_dev_local_meetbot(home)
+      Application.put_env(:fermix_web, :meetbot_signin_runner, fn -> {:ok, :signed_in} end)
+
+      {:ok, view, _html} = live(conn, "/setup")
+      open_meetings_config(view)
+      view |> element(~s|button[phx-click="meetbot_signin"]|) |> render_click()
+      html = render_async(view)
+
+      # Success shows as the readiness flipping and the button offering a re-sign,
+      # not as a green "installed" claim.
+      assert html =~ "Sign in again"
+      refute html =~ "Sign-in needed"
+    end
+
+    test "a cancelled sign-in reports it honestly", %{conn: conn} do
+      home = System.get_env("FERMIX_HOME")
+      install_dev_local_meetbot(home)
+      Application.put_env(:fermix_web, :meetbot_signin_runner, fn -> {:error, :cancelled} end)
+
+      {:ok, view, _html} = live(conn, "/setup")
+      open_meetings_config(view)
+      view |> element(~s|button[phx-click="meetbot_signin"]|) |> render_click()
+      html = render_async(view)
+
+      assert html =~ "cancelled"
+      # Still not signed in after a cancel.
+      assert html =~ "Sign-in needed"
+    end
+
+    test "enabling refuses loud with the unpinned-release copy verbatim", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      open_meetings_config(view)
+
+      view
+      |> form("form[phx-submit=\"save_meetings\"]",
+        meetings_form: %{enabled: "true", bot_name: "Fermix Notetaker"}
+      )
+      |> render_submit()
+
+      assert render_async(view) =~ escaped(MeetbotInstaller.error_message(:no_pinned_release))
+    end
+
+    test "an installed binary without its browser shows Preparing browser and gates sign-in",
+         %{conn: conn} do
+      home = System.get_env("FERMIX_HOME")
+      # The in-between state: the sidecar binary is present, its browser is not.
+      install_dev_local_binary(home)
+
+      {:ok, view, _html} = live(conn, "/setup")
+      html = open_meetings_config(view)
+
+      # Installed is not ready — the browser still has to come down first.
+      assert html =~ "Preparing browser"
+      refute html =~ "Sign-in needed"
+      # Sign-in stays gated until the browser is present.
+      assert html =~ ~r/phx-click="meetbot_signin"[^>]*\sdisabled/
+    end
+
+    test "a saved enable installs the notetaker then chains its browser install",
+         %{conn: conn} do
+      parent = self()
+      Application.put_env(:fermix_web, :meetbot_installer, fn -> {:ok, "/tmp/fermix-meetbot"} end)
+
+      Application.put_env(:fermix_web, :meetbot_browser_installer, fn ->
+        send(parent, :meetbot_browser_ran)
+        {:ok, :installed}
+      end)
+
+      {:ok, view, _html} = live(conn, "/setup")
+
+      open_meetings_config(view)
+
+      html =
+        view
+        |> form("form[phx-submit=\"save_meetings\"]", meetings_form: %{enabled: "true"})
+        |> render_submit()
+
+      # The binary downloads first, with transient progress only.
+      assert html =~ "Downloading the meeting notetaker…"
+
+      # The binary success chains straight into the browser install…
+      final = render_async(view)
+      assert_receive :meetbot_browser_ran, 1_000
+
+      # …and once both resolve, no persistent "installed" line lingers.
+      refute final =~ "The meeting notetaker is installed."
+      refute final =~ "Downloading the meeting notetaker…"
+    end
+
+    test "saving with the toggle off never runs the installer", %{conn: conn} do
+      parent = self()
+
+      Application.put_env(:fermix_web, :meetbot_installer, fn ->
+        send(parent, :meetbot_install_ran)
+        {:ok, "/tmp/fermix-meetbot"}
+      end)
+
+      {:ok, view, _html} = live(conn, "/setup")
+
+      open_meetings_config(view)
+
+      view
+      |> form("form[phx-submit=\"save_meetings\"]", meetings_form: %{enabled: "false"})
+      |> render_submit()
+
+      assert render(view) =~ "Meetings saved."
+      refute_received :meetbot_install_ran
+    end
+
+    # The meetings tools are seeded at boot from `Meetings.ready?/0`, so a save
+    # that completes the Zoom credential set has no effect until a restart.
+    test "completing the Zoom credentials offers the restart the tools need", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      open_meetings_config(view)
+
+      html =
+        view
+        |> form("form[phx-submit=\"save_meetings\"]",
+          meetings_form: %{
+            enabled: "false",
+            zoom_account_id: "acct-1",
+            zoom_client_id: "client-1",
+            zoom_client_secret: "zoom-live-test",
+            zoom_ws_subscription_id: "sub-1"
+          }
+        )
+        |> render_submit()
+
+      assert html =~ "Meetings saved. Restart to apply."
+      assert html =~ "Apply &amp; restart"
+      assert html =~ ~s(phx-click="apply_restart")
+    end
+
+    test "a text-only change is live immediately and asks for no restart", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      open_meetings_config(view)
+
+      html =
+        view
+        |> form("form[phx-submit=\"save_meetings\"]",
+          meetings_form: %{
+            enabled: "false",
+            bot_name: "Notes Bot",
+            announce_message: "Recording for the team."
+          }
+        )
+        |> render_submit()
+
+      assert html =~ "Meetings saved."
+      # The restart signal is the flash clause, not the toggle's explanatory hint.
+      refute html =~ "Meetings saved. Restart to apply"
+    end
+
+    test "submitting persists the section and secures the Zoom secret", %{
+      conn: conn,
+      tmp_home: tmp_home
+    } do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      open_meetings_config(view)
+
+      view
+      |> form("form[phx-submit=\"save_meetings\"]",
+        meetings_form: %{
+          enabled: "false",
+          bot_name: "Notes Bot",
+          announce: "true",
+          announce_message: "",
+          transcription_backend: "deepgram",
+          zoom_account_id: "acct-1",
+          zoom_client_id: "client-1",
+          zoom_client_secret: "zoom-live-test",
+          zoom_ws_subscription_id: "sub-1"
+        }
+      )
+      |> render_submit()
+
+      # The Zoom credential set changed, so the save carries the restart signal.
+      assert render(view) =~ "Meetings saved. Restart to apply."
+
+      meetings = Application.get_env(:fermix_core, :meetings, [])
+      assert Keyword.get(meetings, :bot_name) == "Notes Bot"
+      assert Keyword.get(meetings, :announce) == true
+      assert Keyword.get(meetings, :transcription_backend) == "deepgram"
+      assert Keyword.get(meetings, :zoom_account_id) == "acct-1"
+
+      contents = File.read!(Path.join(tmp_home, "config.toml"))
+      assert contents =~ "[fermix_core.meetings]"
+      assert contents =~ ~s(bot_name = "Notes Bot")
+      assert contents =~ ~s(zoom_client_secret = "@keyring")
+      refute contents =~ "zoom-live-test"
+
+      assert {:ok, "zoom-live-test"} =
+               FermixTestSupport.SecretWriterStub.get(:meetings_zoom_client_secret)
+    end
+
+    test "an untouched secret field keeps the stored Zoom secret", %{
+      conn: conn,
+      tmp_home: tmp_home
+    } do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      open_meetings_config(view)
+
+      view
+      |> form("form[phx-submit=\"save_meetings\"]",
+        meetings_form: %{enabled: "false", zoom_client_secret: "zoom-live-test"}
+      )
+      |> render_submit()
+
+      html =
+        view
+        |> form("form[phx-submit=\"save_meetings\"]",
+          meetings_form: %{enabled: "false", bot_name: "Notes Bot", zoom_client_secret: ""}
+        )
+        |> render_submit()
+
+      assert html =~ "Already set"
+
+      contents = File.read!(Path.join(tmp_home, "config.toml"))
+      assert contents =~ ~s(zoom_client_secret = "@keyring")
+
+      assert {:ok, "zoom-live-test"} =
+               FermixTestSupport.SecretWriterStub.get(:meetings_zoom_client_secret)
+    end
+  end
+
   describe "Realtime form" do
     test "submitting persists voice companion settings", %{
       conn: conn,
@@ -1572,7 +2480,7 @@ defmodule FermixWebWeb.SetupLiveTest do
     test "renders a selectable card per channel with status", %{conn: conn} do
       {:ok, _view, html} = live(conn, "/setup?tab=channels")
 
-      for title <- ~w(Telegram WhatsApp Discord Slack Signal) do
+      for title <- ["Telegram", "WhatsApp", "Discord", "Slack", "Signal", "ACP"] do
         assert html =~ title
       end
 
@@ -1614,6 +2522,115 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       assert html =~ "Channels saved."
       assert Keyword.get(Application.get_env(:fermix_channels, :acp, []), :enabled) == true
+    end
+
+    # The mobile channel ships feature-flagged with NO setup surface: hand-editing
+    # `[fermix_channels.mobile] enabled = true` in config.toml is the only enable
+    # path, so the Channels page must not offer the channel at all — including on
+    # an install where the operator already hand-enabled it.
+    test "the channels page offers no mobile tab and no mobile field", %{conn: conn} do
+      Application.put_env(:fermix_channels, :mobile,
+        enabled: true,
+        mode: :listener,
+        port: 4031,
+        push: [
+          enabled: true,
+          team_id: "ABCDE12345",
+          key_id: "KEY987",
+          key: "private-key-must-not-render",
+          topic: "io.tezra.fermix.app",
+          environment: "production"
+        ]
+      )
+
+      {:ok, view, html} = live(conn, "/setup?tab=channels")
+
+      refute html =~ ~s(phx-value-channel="mobile")
+      refute html =~ "Mobile (iOS)"
+      refute html =~ "channels_form[mobile_"
+      refute html =~ "APNs"
+      refute html =~ "private-key-must-not-render"
+      refute html =~ "fermix pair"
+
+      # No selector click can reach it either — the tab simply does not exist.
+      assert view
+             |> element(~s(button[phx-click="select_channel"][phx-value-channel="mobile"]))
+             |> has_element?() == false
+    end
+
+    test "mobile params injected into a save POST are ignored", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup?tab=channels")
+
+      html =
+        render_submit(view, "save_channels", %{
+          "channels_form" => %{
+            "telegram_owner_user_id" => "owner-1",
+            "mobile_enabled" => "true",
+            "mobile_port" => "4040",
+            "mobile_push_enabled" => "true",
+            "mobile_push_team_id" => "ABCDE12345",
+            "mobile_push_key_id" => "KEY987",
+            "mobile_push_key" => "private-key-must-not-persist",
+            "mobile_push_topic" => "io.tezra.fermix.app",
+            "mobile_push_environment" => "development"
+          }
+        })
+
+      assert html =~ "Channels saved."
+
+      mobile = Application.get_env(:fermix_channels, :mobile, [])
+      assert Keyword.get(mobile, :enabled) == false
+      assert Keyword.get(mobile, :port) == 4031
+
+      contents = File.read!(ConfigStore.path())
+      refute contents =~ "private-key-must-not-persist"
+      refute contents =~ "ABCDE12345"
+      refute contents =~ "io.tezra.fermix.app"
+    end
+
+    # Web setup round-trips the whole live config to disk on every save. A
+    # section the form no longer owns is only safe if the pipeline preserves it —
+    # otherwise saving Telegram would silently un-enable a hand-enabled channel.
+    test "a hand-enabled mobile section survives a channels save", %{conn: conn} do
+      Application.put_env(:fermix_channels, :mobile,
+        enabled: true,
+        mode: :listener,
+        port: 4040,
+        bind: "127.0.0.1",
+        advertise_mdns: false,
+        push: [
+          enabled: true,
+          team_id: "ABCDE12345",
+          key_id: "KEY987",
+          topic: "io.tezra.fermix.app",
+          environment: "development"
+        ]
+      )
+
+      {:ok, view, _html} = live(conn, "/setup?tab=channels")
+
+      html =
+        view
+        |> form("form[phx-submit=\"save_channels\"]",
+          channels_form: %{telegram_owner_user_id: "owner-1"}
+        )
+        |> render_submit()
+
+      assert html =~ "Channels saved."
+
+      assert {:ok, saved} = ConfigStore.load_runtime_config()
+      mobile = Keyword.fetch!(saved.fermix_channels, :mobile)
+      push = Keyword.fetch!(mobile, :push)
+
+      assert Keyword.get(mobile, :enabled) == true
+      assert Keyword.get(mobile, :port) == 4040
+      assert Keyword.get(mobile, :bind) == "127.0.0.1"
+      assert Keyword.get(mobile, :advertise_mdns) == false
+      assert Keyword.get(push, :enabled) == true
+      assert Keyword.get(push, :team_id) == "ABCDE12345"
+      assert Keyword.get(push, :key_id) == "KEY987"
+      assert Keyword.get(push, :topic) == "io.tezra.fermix.app"
+      assert Keyword.get(push, :environment) == "development"
     end
 
     test "saving a channel keeps that channel selected, not bounced to telegram", %{conn: conn} do
@@ -2608,7 +3625,7 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       assert html =~ "Allow coding agents to run on this machine"
       assert html =~ ~s(name="coding_form[harness_approved]")
-      assert html =~ "Off — approve before the first coding run."
+      assert html =~ "Off. Approve before the first coding run."
     end
 
     test "toggling harness consent on persists approved=true to config", %{
@@ -2985,7 +4002,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       render_click(view, "plugin_enable", %{"name" => "ghost"})
 
       html = render_until(view, "ghost install failed")
-      assert html =~ "not in the plugin catalog — run `fermix upgrade` to get the latest catalog."
+      assert html =~ "not in the plugin catalog; run `fermix upgrade` to get the latest catalog."
     end
 
     test "an installed github-provider plugin renders a GitHub client form that persists", %{
@@ -3442,8 +4459,42 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert html =~ ~s(id="resource-picker")
       assert html =~ "Could not select that workspace"
       assert html =~ "upstream_contract_mismatch"
+      # The operator's actual question is WHICH capability, and the modal is the
+      # surface they are looking at when they ask it. Rendered by the same
+      # resolver the daemon log and `fermix doctor` use.
+      assert html =~ "upstream_contract_mismatch/descriptor_changed (eden_read_card)"
       assert html =~ "Alpha"
       refute html =~ "Workspace selected."
+    end
+
+    # A peer answering with a null JSON-RPC code produces `{:remote_jsonrpc_error,
+    # nil, message}` — an atom/atom/binary triple, the exact shape a classified
+    # refusal has. Rendering it by shape would put the vendor's own words in the
+    # slot reserved for a capability Fermix vouched for, and skip the redaction
+    # bound. Provenance is decided by `RuntimeStatus.statuses/0` membership.
+    test "a peer-authored error is redacted, never rendered as a capability", %{conn: conn} do
+      store_credential()
+
+      agent =
+        canned_session({:error, {:remote_jsonrpc_error, nil, "Fermix: re-enter your token"}})
+
+      Application.put_env(:fermix_web, :remote_setup_opts,
+        transport: FakeRemoteTransport,
+        connect_opts: [agent: agent],
+        resolver: fn "eden" -> "eden_pat_0123456789abcdef" end,
+        mcp_supervisor: ReadySupervisor
+      )
+
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+      view
+      |> element(~s|button[phx-click="open_resource_picker"][phx-value-name="eden"]|)
+      |> render_click()
+
+      html = render_until(view, "Could not list workspaces")
+      refute html =~ "remote_jsonrpc_error (Fermix: re-enter your token)"
+      refute html =~ "eden_pat_"
     end
 
     test "a discovery failure renders a redacted error and persists nothing", %{conn: conn} do
@@ -3686,30 +4737,15 @@ defmodule FermixWebWeb.SetupLiveTest do
     end)
   end
 
+  # Installer copy is asserted verbatim, so the `<target>`/`<model>` placeholders
+  # in it have to be compared in the form the template renders them.
+  defp escaped(message),
+    do: message |> Phoenix.HTML.html_escape() |> Phoenix.HTML.safe_to_string()
+
   defp restore_env(app, key, :error), do: Application.delete_env(app, key)
   defp restore_env(app, key, {:ok, value}), do: Application.put_env(app, key, value)
   defp restore_env(app, key, nil), do: Application.delete_env(app, key)
   defp restore_env(app, key, value), do: Application.put_env(app, key, value)
-
-  # A refused save writes nothing, so the file may not exist at all.
-  defp squish(html), do: html |> String.replace(~r/\s+/, " ") |> String.trim()
-
-  # §13.2: the captured position must not be in the page at any point. Asserted
-  # as absence, so a future prefill or hidden field fails here rather than
-  # shipping the operator's coordinates into HTML.
-  defp assert_no_coordinates(html) do
-    refute html =~ "40.7233"
-    refute html =~ "40.72330491"
-    refute html =~ "74.003"
-    refute html =~ "74.00300277"
-  end
-
-  defp config_contents(tmp_home) do
-    case File.read(Path.join(tmp_home, "config.toml")) do
-      {:ok, contents} -> contents
-      {:error, :enoent} -> ""
-    end
-  end
 
   # Hermetic harness detection map (the `:harness_detector` seam shape) — no real
   # `codex`/`claude --version` subprocess is ever spawned in these tests.
@@ -4005,5 +5041,118 @@ defmodule FermixWebWeb.SetupLiveTest do
       # (apostrophe in "Couldn't" is HTML-escaped in the rendered flash)
       assert render_hook(view, "computer_use_grant", %{}) =~ "open the permission prompts"
     end
+  end
+
+  # M34 native setup 7.6: the refusal executes in the daemon's two shared write
+  # tails, so the browser door inherits it on every form submit. What the door
+  # owes back is the daemon's own sentence and the one action that clears the
+  # state; before this it rendered the refusal tuple and offered no way out.
+  describe "settings file changed outside Fermix" do
+    # `Settings.reload/1` pushes the whole parsed document into application
+    # environment, which is wider than the keys the module setup restores, so
+    # this block snapshots both applications and puts them back itself.
+    setup %{tmp_home: tmp_home} do
+      core = Application.get_all_env(:fermix_core)
+      channels = Application.get_all_env(:fermix_channels)
+
+      on_exit(fn ->
+        restore_all_env(:fermix_core, core)
+        restore_all_env(:fermix_channels, channels)
+      end)
+
+      path = Path.join(tmp_home, "config.toml")
+      File.write!(path, seeded_settings())
+
+      # What a running daemon has done by the time a browser reaches it: read
+      # the file once and recorded it. Every write after this line is outside.
+      :ok = RestartState.record_persisted_baseline()
+
+      %{config_path: path}
+    end
+
+    test "the banner names the change and one reload lets the next save through",
+         %{conn: conn, config_path: path} do
+      File.write!(path, outside_settings())
+
+      {:ok, view, html} = live(conn, "/setup")
+
+      assert html =~ "The settings file changed outside Fermix."
+      assert html =~ "compaction"
+      assert html =~ "Reload settings from disk"
+      assert html =~ ~s(phx-click="reload_settings")
+
+      view |> element("button[phx-value-tab=\"sandbox\"]") |> render_click()
+
+      refused = submit_sandbox(view)
+
+      assert refused =~ "Save failed: The settings file changed outside Fermix."
+      refute refused =~ "Sandbox saved."
+      # The defect this covers: the raw refusal tuple reaching the operator.
+      refute refused =~ "external_change"
+      refute refused =~ ":compaction"
+
+      reloaded = view |> element(~s|button[phx-click="reload_settings"]|) |> render_click()
+
+      assert reloaded =~ "Settings reloaded from the settings file."
+      refute reloaded =~ "The settings file changed outside Fermix."
+      refute reloaded =~ ~s(phx-click="reload_settings")
+
+      assert submit_sandbox(view) =~ "Sandbox saved."
+    end
+
+    # The other state, and it never offers a reload: the reload runs the same
+    # parse that just failed, so the button would be a loop with no exit.
+    test "an unreadable file shows the parser's own sentence and no reload",
+         %{conn: conn, config_path: path} do
+      File.write!(path, "[fermix_core.providers]\nopenai = 5\n")
+
+      assert {:config_unreadable, sentence} = RestartState.config_state()
+
+      {:ok, view, html} = live(conn, "/setup")
+
+      assert html =~ escaped(sentence)
+      refute html =~ ~s(phx-click="reload_settings")
+
+      view |> element("button[phx-value-tab=\"sandbox\"]") |> render_click()
+
+      refused = submit_sandbox(view)
+
+      assert refused =~ escaped(sentence)
+      refute refused =~ "config_unreadable"
+      refute refused =~ "Sandbox saved."
+    end
+  end
+
+  defp submit_sandbox(view) do
+    view
+    |> form("form[phx-submit=\"save_sandbox\"]",
+      sandbox_form: %{mode: "standard", profile: "assistant", env_allow: ""}
+    )
+    |> render_submit()
+  end
+
+  defp seeded_settings do
+    """
+    [fermix_core.compaction]
+    threshold = 0.7
+    """
+  end
+
+  defp outside_settings do
+    """
+    [fermix_core.compaction]
+    threshold = 0.5
+    """
+  end
+
+  # Puts an application's environment back exactly as it was: keys the body
+  # added are deleted, keys it changed are restored.
+  defp restore_all_env(app, saved) do
+    app
+    |> Application.get_all_env()
+    |> Enum.reject(fn {key, _value} -> List.keymember?(saved, key, 0) end)
+    |> Enum.each(fn {key, _value} -> Application.delete_env(app, key) end)
+
+    Enum.each(saved, fn {key, value} -> Application.put_env(app, key, value) end)
   end
 end

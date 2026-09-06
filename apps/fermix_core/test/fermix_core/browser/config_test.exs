@@ -102,6 +102,43 @@ defmodule FermixCore.Browser.ConfigTest do
     assert error.message =~ "stop_grace_ms"
   end
 
+  # The enumeration above filters `is_integer/1`, so a LIST tunable is
+  # structurally invisible to it: `allowed_hosts` shipped validated nowhere.
+  # It is a string-equality membership test against a canonical host spelling, so
+  # an entry that is not canonical can never match anything — it must be refused
+  # by name, not dropped silently and left reading as if it were in force.
+  test "rejects an allowed_hosts entry that is not a canonical host spelling" do
+    for entry <- ["münchen.de", "metadata.google.%69nternal", "nas .local", "."] do
+      Application.put_env(:fermix_core, :browser, allowed_hosts: [entry])
+
+      assert {:error, error} = Config.current(), "expected #{inspect(entry)} to be rejected"
+      assert error.code == "invalid_config"
+      assert error.message =~ "allowed_hosts"
+      assert error.message =~ entry
+    end
+  end
+
+  test "rejects an allowed_hosts value that is not a list of strings" do
+    Application.put_env(:fermix_core, :browser, allowed_hosts: ["ok.example", :nas])
+
+    assert {:error, error} = Config.current()
+    assert error.code == "invalid_config"
+    assert error.message =~ "allowed_hosts"
+  end
+
+  test "accepts canonical allowed_hosts entries, including the shipped defaults" do
+    Application.delete_env(:fermix_core, :browser)
+    assert {:ok, defaults} = Config.current()
+    assert defaults.allowed_hosts == ["localhost", "127.0.0.1", "::1"]
+
+    Application.put_env(:fermix_core, :browser,
+      allowed_hosts: ["NAS.local.", "::1", "xn--mnchen-3ya.de", "a_b.example"]
+    )
+
+    assert {:ok, config} = Config.current()
+    assert "NAS.local." in config.allowed_hosts
+  end
+
   test "honors overridden system timeouts" do
     Application.put_env(:fermix_core, :browser, action_timeout_ms: 1234, wait_max_ms: 9999)
 

@@ -49,6 +49,8 @@ defmodule Fermix.CLI.ChatCommandTest do
         task_supervisor: task_sup
       )
 
+    Process.unlink(daemon)
+
     on_exit(fn ->
       # Restore global state FIRST, before the fallible daemon stop below. The
       # daemon can die between `Process.alive?` and `GenServer.stop` (a TOCTOU

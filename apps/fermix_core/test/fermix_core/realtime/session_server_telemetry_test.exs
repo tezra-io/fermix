@@ -141,10 +141,74 @@ defmodule FermixCore.Realtime.SessionServerTelemetryTest do
     assert_receive {:tele, [:fermix, :provider, :call], _m, meta}
     assert meta.provider == :openai
     assert meta.model == "gpt-realtime-2"
-    # `cached` rides with the totals so a call's cost is auditable from its trace.
-    assert meta.tokens == %{prompt: 12, completion: 8, total: 20, cached: 0}
+    # No `input_token_details` on the wire means nobody measured a cache read.
+    # A fabricated zero here would let a cold call be priced cache-aware.
+    assert meta.tokens == %{prompt: 12, completion: 8, total: 20}
+    refute Map.has_key?(meta.tokens, :cached)
     assert meta.session_id == @session_scope
     refute_receive {:tele, [:fermix, :provider, :call], _m2, _meta2}, 50
+  end
+
+  # `cached` rides with the totals so a call's cost is auditable from its trace:
+  # a cached token costs a tenth of an uncached one, and a realtime call re-sends
+  # its whole preamble every response.
+  test "response.done carries a reported cached count with the totals", %{server: server} do
+    assert :ok = SessionServer.call_start(server)
+    assert :ok = SessionServer.handle_provider_event(server, {:response_created, %{}})
+
+    response = %{
+      "usage" => %{
+        "input_tokens" => 12,
+        "output_tokens" => 8,
+        "input_token_details" => %{"cached_tokens" => 9}
+      }
+    }
+
+    assert :ok = SessionServer.handle_provider_event(server, {:response_done, response})
+
+    assert_receive {:tele, [:fermix, :provider, :call], _m, meta}
+    assert meta.tokens == %{prompt: 12, completion: 8, total: 20, cached: 9}
+  end
+
+  test "response.done keeps a reported zero, because the vendor measured it", %{server: server} do
+    assert :ok = SessionServer.call_start(server)
+    assert :ok = SessionServer.handle_provider_event(server, {:response_created, %{}})
+
+    response = %{
+      "usage" => %{
+        "input_tokens" => 12,
+        "output_tokens" => 8,
+        "input_token_details" => %{"cached_tokens" => 0}
+      }
+    }
+
+    assert :ok = SessionServer.handle_provider_event(server, {:response_done, response})
+
+    assert_receive {:tele, [:fermix, :provider, :call], _m, meta}
+    assert meta.tokens == %{prompt: 12, completion: 8, total: 20, cached: 0}
+  end
+
+  # A count that is not a non-negative integer is a vendor-contract break, and
+  # rounding it to 0 is exactly the fabricated measurement this split exists to
+  # prevent. Refuse loudly rather than emit a number nobody reported.
+  test "response.done refuses a malformed cached count", %{server: server} do
+    Process.flag(:trap_exit, true)
+    assert :ok = SessionServer.call_start(server)
+    assert :ok = SessionServer.handle_provider_event(server, {:response_created, %{}})
+
+    response = %{
+      "usage" => %{
+        "input_tokens" => 12,
+        "output_tokens" => 8,
+        "input_token_details" => %{"cached_tokens" => -1}
+      }
+    }
+
+    assert {{%ArgumentError{message: message}, _stack}, _call} =
+             catch_exit(SessionServer.handle_provider_event(server, {:response_done, response}))
+
+    assert message =~ "cached_tokens"
+    refute_receive {:tele, [:fermix, :provider, :call], _m, _meta}, 50
   end
 
   test "response.done carries the realtime transcripts as input/output when capture is on", %{

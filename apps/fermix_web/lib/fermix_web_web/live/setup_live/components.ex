@@ -17,6 +17,9 @@ defmodule FermixWebWeb.SetupLive.Components do
   ]
 
   attr :active_tab, :string, required: true
+  # The macOS app's in-app presentation (`?embed=1`): same components, native
+  # dress — transparent ground, label-only rail, unboxed pane, -sm controls.
+  attr :embed?, :boolean, default: false
   attr :channels_form, :map, required: true
   attr :codex_auth, :map, required: true
   attr :codex_auth_running?, :boolean, required: true
@@ -38,6 +41,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :plugin_summary, :map, required: true
   attr :oauth_modal, :map, default: nil
   attr :resource_picker, :map, default: nil
+  attr :computer_history_picker, :map, default: nil
   attr :installing_plugins, :list, default: []
   attr :realtime_form, :map, required: true
   attr :report, :map, required: true
@@ -46,6 +50,11 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :search_form, :map, required: true
   attr :image_form, :map, required: true
   attr :transcription_form, :map, required: true
+  attr :local_install, :map, default: nil
+  attr :meetings_form, :map, required: true
+  attr :meetbot_install, :map, default: nil
+  attr :meetbot_signin, :map, default: nil
+  attr :meetings_config_open?, :boolean, default: false
   attr :restarting, :boolean, default: false
   attr :saved_flash, :map, default: nil
   attr :skill_summary, :map, required: true
@@ -55,7 +64,13 @@ defmodule FermixWebWeb.SetupLive.Components do
 
   def page(assigns) do
     ~H"""
-    <main class="min-h-screen bg-base-200/40 text-base-content">
+    <main
+      class={[
+        "min-h-screen text-base-content",
+        if(@embed?, do: "bg-transparent", else: "bg-base-200/40")
+      ]}
+      data-embed={@embed?}
+    >
       <div
         :if={@restarting}
         id="restart-reconnect"
@@ -71,15 +86,24 @@ defmodule FermixWebWeb.SetupLive.Components do
         </div>
       </div>
 
-      <div class="mx-auto max-w-6xl gap-6 px-4 py-6 sm:px-6 lg:grid lg:grid-cols-[16rem_minmax(0,1fr)] lg:items-start lg:px-8">
+      <div class={
+        if @embed?,
+          do: "grid max-w-none grid-cols-[11rem_minmax(0,1fr)] items-start gap-5 px-5 py-4",
+          else:
+            "mx-auto max-w-6xl gap-6 px-4 py-6 sm:px-6 lg:grid lg:grid-cols-[16rem_minmax(0,1fr)] lg:items-start lg:px-8"
+      }>
         <.setup_sidebar
           active_tab={@active_tab}
+          embed?={@embed?}
           provider_form={@provider_form}
           report={@report}
           tabs={@tabs}
         />
 
-        <section class="mt-6 min-w-0 lg:mt-0">
+        <%!-- The content column is a size container: pane grids split into
+              columns by the width they actually get, not the viewport's, so the
+              narrow in-app pane and the browser page share one rule. --%>
+        <section class={if @embed?, do: "@container min-w-0", else: "@container mt-6 min-w-0 lg:mt-0"}>
           <div :if={@saved_flash} class="mb-4">
             <.flash_banner flash={@saved_flash} />
           </div>
@@ -87,7 +111,11 @@ defmodule FermixWebWeb.SetupLive.Components do
           <div
             id={"setup-pane-#{@active_tab}"}
             phx-hook="UnsavedHint"
-            class="relative rounded-box border border-base-300 bg-base-100 p-6 shadow-sm sm:p-8"
+            class={
+              if @embed?,
+                do: "relative border-0 bg-transparent p-0 text-[13px] shadow-none",
+                else: "relative rounded-box border border-base-300 bg-base-100 p-6 shadow-sm sm:p-8"
+            }
           >
             <%!-- Client-only dirty hint: the hook reveals this badge on the first
                   input edit and clears it on submit. The ignore island keeps
@@ -103,6 +131,7 @@ defmodule FermixWebWeb.SetupLive.Components do
             </div>
             <.active_pane
               active_tab={@active_tab}
+              embed?={@embed?}
               channels_form={@channels_form}
               codex_auth={@codex_auth}
               codex_auth_running?={@codex_auth_running?}
@@ -125,6 +154,7 @@ defmodule FermixWebWeb.SetupLive.Components do
               plugin_summary={@plugin_summary}
               oauth_modal={@oauth_modal}
               resource_picker={@resource_picker}
+              computer_history_picker={@computer_history_picker}
               installing_plugins={@installing_plugins}
               realtime_form={@realtime_form}
               report={@report}
@@ -133,6 +163,11 @@ defmodule FermixWebWeb.SetupLive.Components do
               search_form={@search_form}
               image_form={@image_form}
               transcription_form={@transcription_form}
+              local_install={@local_install}
+              meetings_form={@meetings_form}
+              meetbot_install={@meetbot_install}
+              meetbot_signin={@meetbot_signin}
+              meetings_config_open?={@meetings_config_open?}
               skill_summary={@skill_summary}
               tabs={@tabs}
               tool_summary={@tool_summary}
@@ -145,24 +180,27 @@ defmodule FermixWebWeb.SetupLive.Components do
   end
 
   attr :active_tab, :string, required: true
+  attr :embed?, :boolean, default: false
   attr :provider_form, :map, required: true
   attr :report, :map, required: true
   attr :tabs, :list, required: true
 
+  # One nav, two dresses. The browser card keeps its identity block, step
+  # counter, progress bar, theme toggle, and per-tab subtext. The embed rail is
+  # label-only: the app's own chrome carries identity and theme, and this rail
+  # navigates setup sections the way the app sidebar navigates surfaces —
+  # different jobs, so it must not look like a second website sidebar.
   defp setup_sidebar(assigns) do
     ~H"""
-    <aside class="lg:sticky lg:top-6">
-      <div class="rounded-box border border-base-300 bg-base-100 p-4 shadow-sm">
-        <div class="flex items-center gap-2.5 px-1">
-          <img
-            src={~p"/images/fermix-mascot.png"}
-            alt=""
-            class="size-9 shrink-0 [filter:drop-shadow(0_0_1px_rgba(0,0,0,0.28))]"
-          />
-          <.fermix_wordmark class="h-5 w-auto text-base-content" />
+    <aside class={if @embed?, do: "sticky top-4", else: "lg:sticky lg:top-6"}>
+      <div class={
+        if @embed?, do: nil, else: "rounded-box border border-base-300 bg-base-100 p-4 shadow-sm"
+      }>
+        <div :if={!@embed?} class="flex items-center gap-2.5 px-1">
+          <.fermix_wordmark class="h-6 w-auto text-base-content" />
         </div>
 
-        <div class="mt-4 px-1">
+        <div :if={!@embed?} class="mt-4 px-1">
           <div class="flex items-center justify-between text-xs">
             <span class="text-base-content/55">
               Step {current_step_number(@active_tab, @tabs)} of {length(@tabs)}
@@ -177,10 +215,26 @@ defmodule FermixWebWeb.SetupLive.Components do
           </div>
         </div>
 
-        <nav class="mt-4" aria-label="Setup steps">
+        <nav class={if @embed?, do: nil, else: "mt-4"} aria-label="Setup steps">
           <ol class="space-y-0.5">
             <li :for={{tab, index} <- Enum.with_index(@tabs)}>
               <button
+                :if={@embed?}
+                type="button"
+                phx-click="select_tab"
+                phx-value-tab={tab.id}
+                class={embed_nav_class(tab.id, @active_tab)}
+                aria-current={if tab.id == @active_tab, do: "step", else: "false"}
+              >
+                <.icon
+                  :if={step_done?(tab, @active_tab, @report)}
+                  name="hero-check"
+                  class="size-3.5 shrink-0"
+                />
+                <span class="truncate">{tab.label}</span>
+              </button>
+              <button
+                :if={!@embed?}
                 type="button"
                 phx-click="select_tab"
                 phx-value-tab={tab.id}
@@ -197,12 +251,15 @@ defmodule FermixWebWeb.SetupLive.Components do
           </ol>
         </nav>
 
-        <div class="mt-4 flex items-center justify-between gap-3 border-t border-base-300 px-1 pt-3">
+        <div
+          :if={!@embed?}
+          class="mt-4 flex items-center justify-between gap-3 border-t border-base-300 px-1 pt-3"
+        >
           <span class="text-xs font-medium text-base-content/55">Theme</span>
           <Layouts.theme_toggle />
         </div>
 
-        <div class="mt-3 px-1 text-xs text-base-content/55">
+        <div :if={!@embed?} class="mt-3 px-1 text-xs text-base-content/55">
           <p class="truncate">
             {provider_label(@provider_form.provider)} · {@provider_form.default_model}
           </p>
@@ -230,6 +287,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   end
 
   attr :active_tab, :string, required: true
+  attr :embed?, :boolean, default: false
   attr :channels_form, :map, required: true
   attr :codex_auth, :map, required: true
   attr :codex_auth_running?, :boolean, required: true
@@ -251,6 +309,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :plugin_summary, :map, required: true
   attr :oauth_modal, :map, default: nil
   attr :resource_picker, :map, default: nil
+  attr :computer_history_picker, :map, default: nil
   attr :installing_plugins, :list, default: []
   attr :realtime_form, :map, required: true
   attr :report, :map, required: true
@@ -259,6 +318,11 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :search_form, :map, required: true
   attr :image_form, :map, required: true
   attr :transcription_form, :map, required: true
+  attr :local_install, :map, default: nil
+  attr :meetings_form, :map, required: true
+  attr :meetbot_install, :map, default: nil
+  attr :meetbot_signin, :map, default: nil
+  attr :meetings_config_open?, :boolean, default: false
   attr :skill_summary, :map, required: true
   attr :tabs, :list, required: true
   attr :tool_summary, :map, required: true
@@ -363,17 +427,20 @@ defmodule FermixWebWeb.SetupLive.Components do
                 codex_auth={@codex_auth}
                 codex_auth_running?={@codex_auth_running?}
                 codex_auth_url={@codex_auth_url}
+                embed?={@embed?}
               />
               <.xai_auth_field
                 :if={@provider_form.provider == :xai and @provider_form.auth_mode == :oauth}
                 xai_auth={@xai_auth}
                 xai_auth_running?={@xai_auth_running?}
                 xai_auth_url={@xai_auth_url}
+                embed?={@embed?}
               />
               <.anthropic_auth_field
                 :if={@provider_form.provider == :anthropic and @provider_form.auth_mode == :oauth}
                 anthropic_auth={@anthropic_auth}
                 anthropic_import_available?={@anthropic_import_available?}
+                embed?={@embed?}
               />
               <p
                 :if={
@@ -401,7 +468,7 @@ defmodule FermixWebWeb.SetupLive.Components do
 
   defp provider_cards(assigns) do
     ~H"""
-    <div class="grid gap-2 sm:grid-cols-2">
+    <div class="grid gap-2 @xl:grid-cols-2">
       <div :for={status <- @provider_statuses} class={provider_card_class(status, @editing)}>
         <label class="flex min-w-0 flex-1 cursor-pointer items-start gap-3">
           <input
@@ -554,7 +621,7 @@ defmodule FermixWebWeb.SetupLive.Components do
         class="input input-bordered w-full bg-base-100 font-mono"
       />
       <p class="text-xs text-warning">
-        No models installed on this server — run <code>ollama pull &lt;model&gt;</code>.
+        No models installed on this server; run <code>ollama pull &lt;model&gt;</code>.
       </p>
     </div>
     """
@@ -572,7 +639,7 @@ defmodule FermixWebWeb.SetupLive.Components do
         class="input input-bordered w-full bg-base-100 font-mono"
       />
       <p class="text-xs text-warning">
-        Couldn't fetch the live model list ({@reason}) — enter a model id manually.
+        Couldn't fetch the live model list ({@reason}); enter a model id manually.
       </p>
     </div>
     """
@@ -599,7 +666,7 @@ defmodule FermixWebWeb.SetupLive.Components do
 
     ~H"""
     <p class="rounded-field border border-success/40 bg-success/10 p-3 text-xs">
-      Ollama server detected — {@count} installed model(s) listed below.
+      Ollama server detected; {@count} installed model(s) listed below.
     </p>
     """
   end
@@ -692,10 +759,26 @@ defmodule FermixWebWeb.SetupLive.Components do
     end
   end
 
+  # OAuth explained at the moment of sign-in, never as chrome: in the embedded
+  # presentation the pane reads native, so each external-auth action carries one
+  # line saying where the sign-in happens. Browser mode says nothing — the tab
+  # that opens is the world the user is already in.
+  attr :embed?, :boolean, required: true
+  attr :class, :any, default: nil
+
+  defp browser_signin_caption(assigns) do
+    ~H"""
+    <p :if={@embed?} class={["mt-1.5 text-xs text-base-content/55", @class]}>
+      Sign-in opens in your browser and returns here.
+    </p>
+    """
+  end
+
   attr :provider_form, :map, required: true
   attr :codex_auth, :map, required: true
   attr :codex_auth_running?, :boolean, required: true
   attr :codex_auth_url, :string, default: nil
+  attr :embed?, :boolean, default: false
 
   defp codex_auth_field(assigns) do
     ~H"""
@@ -736,6 +819,8 @@ defmodule FermixWebWeb.SetupLive.Components do
           {codex_auth_button_label(@codex_auth, @codex_auth_running?)}
         </button>
       </div>
+
+      <.browser_signin_caption embed?={@embed?} />
 
       <div
         :if={@codex_auth_url}
@@ -807,6 +892,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :xai_auth, :map, required: true
   attr :xai_auth_running?, :boolean, required: true
   attr :xai_auth_url, :string, default: nil
+  attr :embed?, :boolean, default: false
 
   defp xai_auth_field(assigns) do
     ~H"""
@@ -843,6 +929,8 @@ defmodule FermixWebWeb.SetupLive.Components do
         </button>
       </div>
 
+      <.browser_signin_caption embed?={@embed?} />
+
       <div
         :if={@xai_auth_url}
         class="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-field border border-base-300 bg-base-100/70 px-3 py-2 text-xs text-base-content/65"
@@ -862,6 +950,7 @@ defmodule FermixWebWeb.SetupLive.Components do
 
   attr :anthropic_auth, :map, required: true
   attr :anthropic_import_available?, :boolean, default: false
+  attr :embed?, :boolean, default: false
 
   defp anthropic_auth_field(assigns) do
     ~H"""
@@ -902,6 +991,8 @@ defmodule FermixWebWeb.SetupLive.Components do
           Import Claude Code login
         </button>
       </div>
+
+      <.browser_signin_caption embed?={@embed?} />
     </section>
     """
   end
@@ -1012,7 +1103,7 @@ defmodule FermixWebWeb.SetupLive.Components do
 
   defp realtime_primary_fields(assigns) do
     ~H"""
-    <div class="grid items-start gap-4 sm:grid-cols-2">
+    <div class="grid items-start gap-4 @xl:grid-cols-2">
       <label class="form-control w-full">
         <span class="label pb-1 text-sm font-medium">Realtime status</span>
         <select name="realtime_form[enabled]" class="select select-bordered w-full bg-base-100">
@@ -1128,10 +1219,10 @@ defmodule FermixWebWeb.SetupLive.Components do
 
       <section class="mt-6 space-y-3">
         <p class="text-xs text-base-content/60">
-          Pick a channel to add its tokens and owner ID. Each channel is independent — there is no
-          primary; configure as many as you need.
+          Pick a channel to add its tokens and owner ID. Each channel is independent; there is
+          no primary. Configure as many as you need.
         </p>
-        <div class="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+        <div class="grid gap-2 @xl:grid-cols-2 @3xl:grid-cols-3">
           <button
             :for={section <- @channel_sections}
             type="button"
@@ -1164,10 +1255,25 @@ defmodule FermixWebWeb.SetupLive.Components do
         subtitle="Connect an integration to sign in and enable its tools. Provider setup (like a Google OAuth client) sits with each group below."
       />
 
+      <div :if={@plugin_summary[:core_features] not in [nil, []]} class="mt-5">
+        <div class="space-y-2">
+          <.core_feature_card :for={card <- @plugin_summary.core_features} card={card} />
+        </div>
+        <div
+          :if={transient_status?(@local_install) or transient_status?(@meetbot_install)}
+          class="mt-2 space-y-1"
+        >
+          <.install_banner :if={transient_status?(@local_install)} state={@local_install} />
+          <.install_banner :if={transient_status?(@meetbot_install)} state={@meetbot_install} />
+        </div>
+        <hr class="my-6 border-base-300" />
+      </div>
+
       <.google_plugin_group
         :if={@plugin_summary.available}
         plugin_summary={@plugin_summary}
         plugin_auth_url={@plugin_auth_url}
+        embed?={@embed?}
       />
 
       <.provider_plugin_group
@@ -1177,13 +1283,18 @@ defmodule FermixWebWeb.SetupLive.Components do
         catalog={group.catalog}
         installing_plugins={@installing_plugins}
         plugin_auth_url={@plugin_auth_url}
+        embed?={@embed?}
       />
 
       <div
         :if={@plugin_summary.available && ungrouped_plugins(@plugin_summary) != []}
         class="mt-5 flex flex-col gap-2"
       >
-        <.plugin_card :for={plugin <- ungrouped_plugins(@plugin_summary)} plugin={plugin} />
+        <.plugin_card
+          :for={plugin <- ungrouped_plugins(@plugin_summary)}
+          plugin={plugin}
+          embed?={@embed?}
+        />
       </div>
 
       <section :if={@plugin_summary.available} class="mt-5">
@@ -1205,11 +1316,163 @@ defmodule FermixWebWeb.SetupLive.Components do
 
       <.oauth_client_modal oauth_modal={@oauth_modal} plugin_summary={@plugin_summary} />
       <.resource_picker_modal picker={@resource_picker} />
+      <.computer_history_apps_modal picker={@computer_history_picker} />
+      <.meetings_config_modal
+        open?={@meetings_config_open?}
+        meetings_form={@meetings_form}
+        meetbot_install={@meetbot_install}
+        meetbot_signin={@meetbot_signin}
+      />
 
       <.step_actions active_tab={@active_tab} tabs={@tabs} />
     </div>
     """
   end
+
+  # A native-driver feature card (computer-use / computer-history), §22.6/§22.7. One
+  # compact row like the plugin cards — logo, name, status, actions on the right — with
+  # no inline description (details ride the info-icon tooltip + docs link). Computer-
+  # history's app allowlist is chosen in a modal on Enable, never a visible text field.
+  attr :card, :map, required: true
+
+  defp core_feature_card(assigns) do
+    ~H"""
+    <section
+      data-feature-name={@card.name}
+      class="flex w-full items-center gap-3 rounded-box border border-base-300 bg-base-100/80 p-3 shadow-sm"
+    >
+      <img
+        :if={@card.logo}
+        src={@card.logo}
+        alt=""
+        class="size-8 shrink-0 object-contain"
+        loading="lazy"
+      />
+      <div
+        :if={!@card.logo}
+        class="grid size-8 shrink-0 place-items-center rounded-field border border-base-300 bg-base-100 text-sm font-semibold"
+      >
+        {String.first(@card.display_name)}
+      </div>
+
+      <div class="min-w-0 flex-1">
+        <div class="flex items-center gap-2">
+          <h4 class="truncate text-sm font-semibold">{@card.display_name}</h4>
+          <span :if={@card.version} class="shrink-0 text-xs text-base-content/45">
+            v{@card.version}
+          </span>
+          <.status_pill :if={@card.status != :not_configured} status={@card.status} />
+        </div>
+        <p
+          :if={@card.kind == :computer_history and @card.enabled?}
+          class="mt-0.5 truncate text-xs text-base-content/50"
+        >
+          {ch_recording_summary(@card.app_count)}
+        </p>
+        <p
+          :if={Map.get(@card, :description) && !(@card.kind == :computer_history and @card.enabled?)}
+          class="mt-0.5 truncate text-xs text-base-content/50"
+        >
+          {@card.description}
+        </p>
+      </div>
+
+      <div class="flex shrink-0 items-center gap-1">
+        <button
+          :if={!@card.enabled? and @card.kind == :computer_history}
+          type="button"
+          class="btn btn-primary btn-xs"
+          phx-click="open_computer_history_apps"
+        >
+          Enable
+        </button>
+        <button
+          :if={!@card.enabled? and @card.kind == :computer_use}
+          type="button"
+          class="btn btn-primary btn-xs"
+          phx-click="plugin_enable"
+          phx-value-name={@card.name}
+        >
+          Enable
+        </button>
+        <button
+          :if={@card.enabled? and @card.kind == :computer_history}
+          type="button"
+          class="btn btn-ghost btn-xs"
+          phx-click="open_computer_history_apps"
+        >
+          Edit apps
+        </button>
+        <button
+          :if={@card.enabled? and @card.kind in [:computer_use, :computer_history]}
+          type="button"
+          class="btn btn-ghost btn-xs"
+          phx-click="plugin_disable"
+          phx-value-name={@card.name}
+        >
+          Disable
+        </button>
+        <button
+          :if={!@card.enabled? and @card.kind == :meetings}
+          type="button"
+          class="btn btn-primary btn-xs"
+          phx-click="enable_meetings"
+        >
+          Enable
+        </button>
+        <button
+          :if={@card.kind == :meetings}
+          type="button"
+          class="btn btn-ghost btn-xs"
+          phx-click="open_meetings_config"
+        >
+          Configure
+        </button>
+        <button
+          :if={@card.enabled? and @card.kind == :meetings}
+          type="button"
+          class="btn btn-ghost btn-xs"
+          phx-click="disable_meetings"
+        >
+          Disable
+        </button>
+        <button
+          :if={@card.kind == :computer_history}
+          type="button"
+          class="btn btn-ghost btn-xs"
+          phx-click="computer_history_grant"
+        >
+          Grant
+        </button>
+        <button
+          :if={@card.kind == :computer_use}
+          type="button"
+          class="btn btn-ghost btn-xs"
+          phx-click="computer_use_grant"
+        >
+          Grant
+        </button>
+        <span class="tooltip tooltip-left z-10" data-tip={@card.tooltip}>
+          <a
+            href={@card.docs_url}
+            target="_blank"
+            rel="noopener noreferrer"
+            class="btn btn-ghost btn-xs btn-circle text-base-content/60 hover:text-base-content"
+            aria-describedby={"#{@card.name}-details"}
+            aria-label={"About #{@card.display_name}: open docs"}
+          >
+            <.icon name="hero-information-circle" class="size-4" />
+          </a>
+        </span>
+      </div>
+      <p id={"#{@card.name}-details"} class="sr-only">{@card.tooltip}</p>
+    </section>
+    """
+  end
+
+  defp ch_recording_summary(0), do: "No apps selected yet; Edit apps to choose."
+  defp ch_recording_summary(1), do: "Recording 1 app."
+  defp ch_recording_summary(n) when is_integer(n), do: "Recording #{n} apps."
 
   defp search_pane(assigns) do
     ~H"""
@@ -1222,7 +1485,7 @@ defmodule FermixWebWeb.SetupLive.Components do
       <form phx-change="search_changed" phx-submit="save_search" class="mt-6 space-y-6">
         <fieldset>
           <legend class="text-sm font-medium text-base-content/80">Provider</legend>
-          <div class="mt-2 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <div class="mt-2 grid gap-3 @xl:grid-cols-2 @5xl:grid-cols-4">
             <.search_backend_option
               value="duckduckgo"
               label="DuckDuckGo"
@@ -1335,7 +1598,7 @@ defmodule FermixWebWeb.SetupLive.Components do
     >
       <p>{place_search_status(@search_form.brave_api_key_set)}</p>
       <p class="pt-1 text-xs">
-        Each web and place call is metered separately. Place results are transient — only the
+        Each web and place call is metered separately. Place results are transient; only the
         final answer persists, as ordinary chat history.
         <a
           class="link"
@@ -1354,7 +1617,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   defp place_search_state(false), do: "unconfigured"
 
   defp place_search_status(true),
-    do: "place_search is ready — it uses the saved Brave Search API key."
+    do: "place_search is ready; it uses the saved Brave Search API key."
 
   defp place_search_status(false),
     do:
@@ -1372,29 +1635,29 @@ defmodule FermixWebWeb.SetupLive.Components do
       <form phx-change="image_changed" phx-submit="save_image" class="mt-6 space-y-6">
         <fieldset>
           <legend class="text-sm font-medium text-base-content/80">Backend</legend>
-          <div class="mt-2 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+          <div class="mt-2 grid gap-3 @xl:grid-cols-2 @4xl:grid-cols-3">
             <.image_backend_option
               value="openai"
               label="OpenAI"
-              description="gpt-image — reuses your OpenAI key"
+              description="gpt-image · reuses your OpenAI key"
               checked={@image_form.backend == :openai}
             />
             <.image_backend_option
               value="xai"
               label="SpaceXAI"
-              description="grok image — reuses your SpaceXAI key"
+              description="grok image · reuses your SpaceXAI key"
               checked={@image_form.backend == :xai}
             />
             <.image_backend_option
               value="google"
               label="Google"
-              description="Gemini image — needs a Gemini key"
+              description="Gemini image · needs a Gemini key"
               checked={@image_form.backend == :google}
             />
             <.image_backend_option
               value="openai_codex"
               label="OpenAI Codex (ChatGPT)"
-              description="gpt-image via your ChatGPT subscription — no API key"
+              description="gpt-image via your ChatGPT subscription · no API key"
               checked={@image_form.backend == :openai_codex}
             />
           </div>
@@ -1469,24 +1732,30 @@ defmodule FermixWebWeb.SetupLive.Components do
       <form phx-change="transcription_changed" phx-submit="save_transcription" class="mt-6 space-y-6">
         <fieldset>
           <legend class="text-sm font-medium text-base-content/80">Backend</legend>
-          <div class="mt-2 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+          <div class="mt-2 grid gap-3 @xl:grid-cols-2 @4xl:grid-cols-3">
             <.transcription_backend_option
               value="openai"
               label="OpenAI"
-              description="gpt-4o-mini-transcribe — reuses your OpenAI key"
+              description="gpt-4o-mini-transcribe · reuses your OpenAI key"
               checked={@transcription_form.backend == :openai}
             />
             <.transcription_backend_option
               value="xai"
               label="SpaceXAI"
-              description="Grok STT — reuses your SpaceXAI key"
+              description="Grok STT · reuses your SpaceXAI key"
               checked={@transcription_form.backend == :xai}
             />
             <.transcription_backend_option
               value="deepgram"
               label="Deepgram"
-              description="nova-3 — needs a Deepgram key"
+              description="nova-3 · needs a Deepgram key"
               checked={@transcription_form.backend == :deepgram}
+            />
+            <.transcription_backend_option
+              value="local"
+              label="On-device"
+              description="Parakeet on this machine · no key, no audio leaves the host"
+              checked={@transcription_form.backend == :local}
             />
           </div>
         </fieldset>
@@ -1531,6 +1800,17 @@ defmodule FermixWebWeb.SetupLive.Components do
             </p>
           </div>
 
+          <div :if={@transcription_form.backend == :local} class="space-y-2">
+            <p class="text-sm text-base-content/70">
+              No key needed. Selecting this backend installs the speech engine and its
+              model into your Fermix home; nothing is downloaded until you pick it.
+            </p>
+            <p class={local_state_class(@transcription_form.local_state)}>
+              {local_state_message(@transcription_form.local_state)}
+            </p>
+            <.install_banner :if={transient_status?(@local_install)} state={@local_install} />
+          </div>
+
           <div :if={@transcription_form.model_options != []} class="space-y-2">
             <.select_field
               label="Model"
@@ -1547,6 +1827,285 @@ defmodule FermixWebWeb.SetupLive.Components do
         <.form_actions active_tab={@active_tab} tabs={@tabs} save_label="Save transcription" />
       </form>
     </div>
+    """
+  end
+
+  attr :open?, :boolean, required: true
+  attr :meetings_form, :map, required: true
+  attr :meetbot_install, :map, default: nil
+  attr :meetbot_signin, :map, default: nil
+
+  defp meetings_config_modal(%{open?: false} = assigns), do: ~H""
+
+  defp meetings_config_modal(assigns) do
+    ~H"""
+    <div
+      id="meetings-config"
+      class="fixed inset-0 z-50 grid place-items-center bg-base-300/70 p-4 backdrop-blur-sm"
+      phx-window-keydown="close_meetings_config"
+      phx-key="Escape"
+    >
+      <form
+        phx-submit="save_meetings"
+        class="flex max-h-[86vh] w-full max-w-lg flex-col rounded-box border border-base-300 bg-base-100 shadow-lg"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Configure the meeting notetaker"
+        phx-click-away="close_meetings_config"
+        phx-mounted={JS.focus_first()}
+      >
+        <div class="flex items-center gap-3 border-b border-base-300 px-5 py-4">
+          <.meetings_logo />
+          <div class="min-w-0 flex-1">
+            <h3 class="text-base font-semibold">Meeting Notetaker</h3>
+            <p class="truncate text-xs text-base-content/55">
+              Attends only when you ask, one meeting at a time.
+            </p>
+          </div>
+          <button
+            type="button"
+            class="btn btn-ghost btn-xs btn-circle"
+            phx-click="close_meetings_config"
+            aria-label="Close"
+          >
+            <.icon name="hero-x-mark" class="size-4" />
+          </button>
+        </div>
+
+        <div class="flex-1 space-y-5 overflow-y-auto px-5 py-4">
+          <div class="space-y-3">
+            <.toggle_input
+              label="Enabled"
+              name="meetings_form[enabled]"
+              checked={@meetings_form.enabled}
+              hint="Installs the notetaker on first enable · restart to apply."
+            />
+            <.install_banner :if={transient_status?(@meetbot_install)} state={@meetbot_install} />
+
+            <.text_input
+              label="Display name"
+              name="meetings_form[bot_name]"
+              value={@meetings_form.bot_name}
+            />
+            <.toggle_input
+              label="Announce itself in the chat"
+              name="meetings_form[announce]"
+              checked={@meetings_form.announce}
+              hint="Posts one consent line on admit, then stays silent."
+            />
+            <.text_input
+              label="Announcement message"
+              name="meetings_form[announce_message]"
+              value={@meetings_form.announce_message}
+            />
+            <p class="text-xs text-base-content/55">
+              Blank uses the built-in consent line, which names the notetaker and you.
+            </p>
+          </div>
+
+          <div class="space-y-2">
+            <p class="text-xs font-semibold uppercase tracking-wide text-base-content/45">
+              Providers
+            </p>
+
+            <details class="group rounded-field border border-base-300">
+              <summary class="flex cursor-pointer list-none items-center gap-3 px-3 py-2.5">
+                <.meet_logo />
+                <span class="min-w-0 flex-1">
+                  <span class="block text-sm font-medium">Google Meet</span>
+                  <span class="block text-xs text-base-content/55">
+                    Joins as a signed-in bot account
+                  </span>
+                </span>
+                <.status_pill status={meet_readiness_status(@meetings_form)} />
+                <.icon
+                  name="hero-chevron-right"
+                  class="size-4 text-base-content/40 transition group-open:rotate-90"
+                />
+              </summary>
+              <div class="space-y-3 border-t border-base-300 px-3 pb-3 pt-3">
+                <p class="text-xs text-base-content/70">
+                  The bot signs in once with its own Google account, then joins by knocking like
+                  any guest; only the meeting URL crosses the wire. Add its email to a meeting's
+                  invite and it skips the waiting room. Google Meet won't work until the bot is
+                  signed in.
+                </p>
+                <button
+                  type="button"
+                  class="btn btn-outline btn-xs"
+                  phx-click="meetbot_signin"
+                  disabled={not meetbot_ready?(@meetings_form) or signin_running?(@meetbot_signin)}
+                >
+                  {if @meetings_form.signed_in?, do: "Sign in again", else: "Sign the bot in"}
+                </button>
+                <p :if={not meetbot_ready?(@meetings_form)} class="text-xs text-base-content/55">
+                  {meetbot_signin_hint(@meetings_form)}
+                </p>
+                <.install_banner :if={transient_status?(@meetbot_signin)} state={@meetbot_signin} />
+              </div>
+            </details>
+
+            <details
+              class="group rounded-field border border-base-300"
+              open={meetings_zoom_present?(@meetings_form)}
+            >
+              <summary class="flex cursor-pointer list-none items-center gap-3 px-3 py-2.5">
+                <.zoom_logo />
+                <span class="min-w-0 flex-1">
+                  <span class="block text-sm font-medium">Zoom</span>
+                  <span class="block text-xs text-base-content/55">
+                    Via Zoom RTMS: your own or a consenting host's meetings
+                  </span>
+                </span>
+                <.icon
+                  name="hero-chevron-right"
+                  class="size-4 text-base-content/40 transition group-open:rotate-90"
+                />
+              </summary>
+              <div class="space-y-3 border-t border-base-300 px-3 pb-3 pt-3">
+                <.text_input
+                  label="Account ID"
+                  name="meetings_form[zoom_account_id]"
+                  value={@meetings_form.zoom_account_id}
+                />
+                <.text_input
+                  label="Client ID"
+                  name="meetings_form[zoom_client_id]"
+                  value={@meetings_form.zoom_client_id}
+                />
+                <.secret_input
+                  label="Client secret"
+                  name="meetings_form[zoom_client_secret]"
+                  set={@meetings_form.zoom_client_secret_set}
+                />
+                <p :if={@meetings_form.zoom_client_secret_set} class="text-xs text-success">
+                  Already set. Leave blank to keep it, or paste a new secret to replace it.
+                </p>
+                <.text_input
+                  label="Webhook subscription ID"
+                  name="meetings_form[zoom_ws_subscription_id]"
+                  value={@meetings_form.zoom_ws_subscription_id}
+                />
+                <p class="text-xs text-base-content/55">
+                  RTMS reaches only meetings hosted by your Zoom account, or a host who enabled
+                  your app. That is a Zoom limit, not a missing key.
+                </p>
+              </div>
+            </details>
+          </div>
+
+          <label class="form-control w-full">
+            <span class="label pb-1 text-sm font-medium">Transcription</span>
+            <select
+              name="meetings_form[transcription_backend]"
+              class="select select-bordered w-full bg-base-100"
+            >
+              <option
+                :for={option <- @meetings_form.backend_options}
+                value={option}
+                selected={option == @meetings_form.transcription_backend}
+              >
+                {meetings_backend_label(option)}
+              </option>
+            </select>
+            <span class="label pt-1 text-xs text-base-content/60">
+              Blank uses whatever the Voice notes tab is set to.
+            </span>
+          </label>
+        </div>
+
+        <div class="flex items-center justify-end gap-2 border-t border-base-300 px-5 py-3">
+          <button type="button" class="btn btn-ghost btn-sm" phx-click="close_meetings_config">
+            Close
+          </button>
+          <button type="submit" class="btn btn-primary btn-sm">Save</button>
+        </div>
+      </form>
+    </div>
+    """
+  end
+
+  # Zoom pre-expands when it already carries config, so a configured operator sees
+  # their credentials without a click; Meet stays collapsed behind its sign-in step.
+  defp meetings_zoom_present?(form) do
+    form.zoom_account_id != "" or form.zoom_client_id != "" or form.zoom_client_secret_set or
+      form.zoom_ws_subscription_id != ""
+  end
+
+  defp signin_running?(%{running?: true}), do: true
+  defp signin_running?(_state), do: false
+
+  # The Meet lane's real readiness, in one place: installed alone is NOT ready —
+  # a signed-in bot account is what lets it join, so the honest in-between state
+  # is amber, never a green "installed".
+  defp meet_readiness_status(%{sidecar_installed?: false}), do: :not_installed
+  defp meet_readiness_status(%{browser_installed?: false}), do: :preparing_browser
+  defp meet_readiness_status(%{signed_in?: true}), do: :ready
+  defp meet_readiness_status(_form), do: :needs_signin
+
+  # An install/sign-in banner is transient: the spinner while it runs and the
+  # error if it fails, never a permanent success line — the readiness pill owns
+  # the at-rest state.
+  defp transient_status?(%{running?: true}), do: true
+  defp transient_status?(%{kind: :error}), do: true
+  defp transient_status?(_state), do: false
+
+  # The Meeting Notetaker mark in the Fermix logo language (blue screen + two
+  # participants) — mirrors setup_live/meetings_logo.svg for the modal header.
+  defp meetings_logo(assigns) do
+    ~H"""
+    <svg class="size-8 shrink-0" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <rect x="2" y="3" width="20" height="12.5" rx="2.4" fill="#2b5cff" />
+      <rect x="10.25" y="15.5" width="3.5" height="2.6" fill="#2b5cff" />
+      <rect x="6.5" y="18" width="11" height="2.2" rx="1.1" fill="#2b5cff" />
+      <circle cx="9.4" cy="8.2" r="1.75" fill="#fff" />
+      <circle cx="14.6" cy="8.6" r="1.4" fill="#fff" fill-opacity="0.82" />
+      <path d="M6.1 12.9 Q6.1 10.3 9.4 10.3 Q12.05 10.3 12.5 12.2 L6.1 12.9 Z" fill="#fff" />
+      <path
+        d="M11.7 12.4 Q11.7 9.7 14.6 9.7 Q17.2 9.7 17.2 12.1 L11.7 12.4 Z"
+        fill="#fff"
+        fill-opacity="0.82"
+      />
+    </svg>
+    """
+  end
+
+  # Google Meet's camera mark, in its own colors — a provider identifier, not a
+  # Fermix-owned logo.
+  defp meet_logo(assigns) do
+    ~H"""
+    <svg class="size-7 shrink-0" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <rect x="2.5" y="6" width="14" height="12" rx="2.4" fill="#00ac47" />
+      <path d="M16.5 10 L21 7.2 V16.8 L16.5 14 Z" fill="#00832d" />
+      <path d="M2.5 8.4 A2.4 2.4 0 0 1 4.9 6 H10.5 V12 H2.5 Z" fill="#0066da" />
+      <path d="M10.5 6 H14.1 A2.4 2.4 0 0 1 16.5 8.4 V10 L10.5 10 Z" fill="#e94235" />
+      <path d="M2.5 12 H10.5 V18 H4.9 A2.4 2.4 0 0 1 2.5 15.6 Z" fill="#ffba00" />
+    </svg>
+    """
+  end
+
+  # Zoom's video-camera mark on its blue tile.
+  defp zoom_logo(assigns) do
+    ~H"""
+    <svg class="size-7 shrink-0" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <rect x="2" y="3" width="20" height="18" rx="4.4" fill="#2D8CFF" />
+      <path
+        d="M7 9.6 A1.3 1.3 0 0 1 8.3 8.3 H12.4 A1.3 1.3 0 0 1 13.7 9.6 V14.4 A1.3 1.3 0 0 1 12.4 15.7 H8.3 A1.3 1.3 0 0 1 7 14.4 Z"
+        fill="#fff"
+      />
+      <path d="M14.3 10.7 L17 9 V15 L14.3 13.3 Z" fill="#fff" />
+    </svg>
+    """
+  end
+
+  attr :state, :map, default: nil
+
+  defp install_banner(assigns) do
+    ~H"""
+    <p :if={@state} class={["flex items-center gap-2 text-sm", install_banner_class(@state.kind)]}>
+      <span :if={@state.running?} class="loading loading-spinner loading-xs" />
+      <span>{@state.message}</span>
+    </p>
     """
   end
 
@@ -1671,7 +2230,7 @@ defmodule FermixWebWeb.SetupLive.Components do
             </span>
           </label>
           <p class="max-w-prose pt-1 text-xs leading-relaxed text-base-content/60">
-            Repeated tasks become skill proposals every couple of weeks — each needs your
+            Repeated tasks become skill proposals every couple of weeks; each needs your
             approval. {@personalization_form.skill_curation_destination} Applies after restart.
           </p>
         </div>
@@ -1686,7 +2245,7 @@ defmodule FermixWebWeb.SetupLive.Components do
     <div>
       <.pane_header
         title="Coding agents"
-        subtitle="Hand off repository work — reviewing PRs, fixing bugs, building features — to the Codex or Claude Code CLI on this machine."
+        subtitle="Hand off repository work (reviewing PRs, fixing bugs, building features) to the Codex or Claude Code CLI on this machine."
       />
       <form phx-submit="save_coding" class="mt-6 space-y-5">
         <.harness_card harness_setup={@harness_setup} />
@@ -1746,7 +2305,7 @@ defmodule FermixWebWeb.SetupLive.Components do
               selected={@harness_setup.default_vendor == vendor.vendor}
               disabled={not vendor.available?}
             >
-              {harness_vendor_label(vendor.vendor)} — {harness_vendor_status(vendor)}
+              {harness_vendor_label(vendor.vendor)} · {harness_vendor_status(vendor)}
             </option>
           </select>
           <span class="label pt-1 text-xs text-base-content/60">
@@ -1773,15 +2332,15 @@ defmodule FermixWebWeb.SetupLive.Components do
           Cloud runs (Codex cloud) are off in this release; only local repository runs are available.
         </p>
         <p class="text-xs text-base-content/50">
-          Each CLI keeps its own login — Fermix reads it, never changes it.
+          Each CLI keeps its own login; Fermix reads it, never changes it.
         </p>
       </div>
     </section>
     """
   end
 
-  defp harness_consent_status(true), do: "On — coding runs use your Codex / Claude Code logins."
-  defp harness_consent_status(_false), do: "Off — approve before the first coding run."
+  defp harness_consent_status(true), do: "On. Coding runs use your Codex / Claude Code logins."
+  defp harness_consent_status(_false), do: "Off. Approve before the first coding run."
 
   defp harness_vendor_label("codex"), do: "Codex"
   defp harness_vendor_label("claude"), do: "Claude Code"
@@ -1934,6 +2493,7 @@ defmodule FermixWebWeb.SetupLive.Components do
 
   attr :plugin_summary, :map, required: true
   attr :plugin_auth_url, :map, default: nil
+  attr :embed?, :boolean, default: false
 
   defp google_plugin_group(assigns) do
     assigns =
@@ -1967,6 +2527,7 @@ defmodule FermixWebWeb.SetupLive.Components do
           plugin={plugin}
           label={strip_google_prefix(plugin.display_name)}
           auth_preopen?={oauth_client_configured?(@oauth) && plugin.auth_type == :oauth2}
+          embed?={@embed?}
         />
       </div>
     </section>
@@ -1983,6 +2544,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :catalog, :list, default: []
   attr :installing_plugins, :list, default: []
   attr :plugin_auth_url, :map, default: nil
+  attr :embed?, :boolean, default: false
 
   defp provider_plugin_group(assigns) do
     assigns = assign(assigns, :card_count, length(assigns.plugins) + length(assigns.catalog))
@@ -1998,6 +2560,7 @@ defmodule FermixWebWeb.SetupLive.Components do
         plugin={plugin}
         oauth={@oauth}
         auth_preopen?={oauth_client_configured?(@oauth) && plugin.auth_type == :oauth2}
+        embed?={@embed?}
       />
       <.catalog_card
         :for={entry <- @catalog}
@@ -2034,6 +2597,7 @@ defmodule FermixWebWeb.SetupLive.Components do
           :for={plugin <- @plugins}
           plugin={plugin}
           auth_preopen?={oauth_client_configured?(@oauth) && plugin.auth_type == :oauth2}
+          embed?={@embed?}
         />
         <.catalog_card
           :for={entry <- @catalog}
@@ -2078,7 +2642,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   end
 
   defp oauth_help_content("notion") do
-    {"Notion → my integrations → New integration → Public. Set the redirect URI to http://localhost:1458/auth/callback (Notion forces https for 127.0.0.1 — use localhost), then paste the OAuth Client ID and secret.",
+    {"Notion → my integrations → New integration → Public. Set the redirect URI to http://localhost:1458/auth/callback (Notion forces https for 127.0.0.1, so use localhost), then paste the OAuth Client ID and secret.",
      "https://www.notion.so/my-integrations"}
   end
 
@@ -2111,8 +2675,8 @@ defmodule FermixWebWeb.SetupLive.Components do
         <p class="text-xs font-medium">OAuth client</p>
         <p class="truncate text-xs text-base-content/55">
           {if @configured?,
-            do: "Configured — credentials stored",
-            else: "Not set up — required to connect"}
+            do: "Configured · credentials stored",
+            else: "Not set up · required to connect"}
         </p>
       </div>
       <button
@@ -2179,6 +2743,152 @@ defmodule FermixWebWeb.SetupLive.Components do
     """
   end
 
+  attr :picker, :map, default: nil
+
+  # The computer-history app-allowlist picker (§22.7): a searchable checklist of the
+  # host's installed apps, opened on Enable / Edit apps. Reuses the resource-picker
+  # overlay shape; the search filter and per-app toggles are server-driven so the
+  # checked set survives filtering.
+  defp computer_history_apps_modal(%{picker: nil} = assigns), do: ~H""
+
+  defp computer_history_apps_modal(assigns) do
+    assigns = assign(assigns, :visible, ch_filtered_apps(assigns.picker))
+
+    ~H"""
+    <div
+      id="computer-history-apps-picker"
+      class="fixed inset-0 z-50 grid place-items-center bg-base-300/70 p-4 backdrop-blur-sm"
+      phx-window-keydown="close_computer_history_picker"
+      phx-key="Escape"
+    >
+      <div
+        class="flex max-h-[80vh] w-full max-w-md flex-col rounded-box border border-base-300 bg-base-100 p-5 shadow-lg"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Choose the apps Computer History records"
+        phx-click-away="close_computer_history_picker"
+        phx-mounted={JS.focus_first()}
+      >
+        <div class="flex items-center justify-between gap-3">
+          <h3 class="text-base font-semibold">Apps to record</h3>
+          <button
+            type="button"
+            class="btn btn-ghost btn-xs btn-circle"
+            phx-click="close_computer_history_picker"
+            aria-label="Close"
+          >
+            <.icon name="hero-x-mark" class="size-4" />
+          </button>
+        </div>
+        <p class="mt-1 text-xs text-base-content/55">
+          Computer History records only the apps you check here, nothing else. Pick them by name;
+          Fermix stores each app's identifier for you.
+        </p>
+
+        <form
+          phx-change="computer_history_apps_filter"
+          phx-submit="computer_history_apps_filter"
+          class="mt-3"
+        >
+          <label class="input input-bordered input-sm flex items-center gap-2 bg-base-100">
+            <.icon name="hero-magnifying-glass" class="size-4 text-base-content/40" />
+            <input
+              type="text"
+              name="q"
+              value={@picker.query}
+              placeholder="Search apps…"
+              class="grow"
+              autocomplete="off"
+              phx-debounce="120"
+            />
+          </label>
+        </form>
+
+        <p :if={@picker.apps == []} class="mt-3 text-xs text-base-content/55">
+          No applications were found on this Mac.
+        </p>
+        <p :if={@picker.apps != [] and @visible == []} class="mt-3 text-xs text-base-content/55">
+          No app matches your search.
+        </p>
+
+        <ul
+          :if={@visible != []}
+          class="mt-3 flex-1 divide-y divide-base-200 overflow-y-auto rounded-field border border-base-300"
+        >
+          <li :for={app <- @visible}>
+            <button
+              type="button"
+              phx-click="toggle_computer_history_app"
+              phx-value-bundle={app.bundle_id}
+              aria-pressed={to_string(MapSet.member?(@picker.selected, app.bundle_id))}
+              class={[
+                "flex w-full items-center gap-3 px-3 py-2 text-left",
+                MapSet.member?(@picker.selected, app.bundle_id) && "bg-primary/5",
+                !MapSet.member?(@picker.selected, app.bundle_id) && "hover:bg-base-200/60"
+              ]}
+            >
+              <.icon
+                name={
+                  if MapSet.member?(@picker.selected, app.bundle_id),
+                    do: "hero-check-circle-solid",
+                    else: "hero-plus-circle"
+                }
+                class={[
+                  "size-5 shrink-0",
+                  MapSet.member?(@picker.selected, app.bundle_id) && "text-primary",
+                  !MapSet.member?(@picker.selected, app.bundle_id) && "text-base-content/30"
+                ]}
+              />
+              <span class="min-w-0 flex-1">
+                <span class="block truncate text-sm font-medium">{app.name}</span>
+                <span class="block truncate font-mono text-xs text-base-content/45">
+                  {app.bundle_id}
+                </span>
+              </span>
+            </button>
+          </li>
+        </ul>
+
+        <div class="mt-4 flex items-center justify-between gap-3">
+          <span class="text-xs text-base-content/55">
+            {MapSet.size(@picker.selected)} selected
+          </span>
+          <div class="flex items-center gap-2">
+            <button
+              type="button"
+              class="btn btn-ghost btn-sm"
+              phx-click="close_computer_history_picker"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              class="btn btn-primary btn-sm"
+              phx-click="save_computer_history_apps"
+              disabled={MapSet.size(@picker.selected) == 0}
+            >
+              {@picker.save_label}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+    """
+  end
+
+  defp ch_filtered_apps(%{apps: apps, query: query}) do
+    q = query |> to_string() |> String.trim() |> String.downcase()
+
+    if q == "" do
+      apps
+    else
+      Enum.filter(apps, fn app ->
+        String.contains?(String.downcase(app.name), q) or
+          String.contains?(String.downcase(app.bundle_id), q)
+      end)
+    end
+  end
+
   attr :picker, :map, required: true
 
   defp access_profile_choice(assigns) do
@@ -2203,7 +2913,7 @@ defmodule FermixWebWeb.SetupLive.Components do
           <span class="min-w-0">
             <span class="block truncate text-sm font-medium">{profile.display_name}</span>
             <span :if={profile.default?} class="text-xs text-base-content/55">
-              Recommended — read-only.
+              Recommended · read-only.
             </span>
             <span :if={profile.write?} class="text-xs text-base-content/55">
               Needs a read/write token and exposes write tools.
@@ -2352,7 +3062,7 @@ defmodule FermixWebWeb.SetupLive.Components do
             <.icon name="hero-check-circle" class="size-5 shrink-0 text-success" />
             <span>
               {@oauth.display_name} OAuth client saved. Connect each {@oauth.display_name} integration
-              from the list below — re-open this anytime with <span class="font-medium">Edit</span>.
+              from the list below; re-open this anytime with <span class="font-medium">Edit</span>.
             </span>
           </div>
           <div class="mt-4 flex justify-end gap-2">
@@ -2444,14 +3154,16 @@ defmodule FermixWebWeb.SetupLive.Components do
   # client Connect/Edit in. Until the client is configured, configuring it is the
   # only action (the plugin can't sign in without it).
   attr :oauth, :map, default: nil
+  attr :embed?, :boolean, default: false
 
   defp plugin_card(assigns) do
     assigns =
-      assign(
-        assigns,
+      assigns
+      |> assign(
         :oauth_unset?,
         assigns.oauth != nil and not oauth_client_configured?(assigns.oauth)
       )
+      |> then(&assign(&1, :signin_action?, plugin_signin_action?(&1)))
 
     ~H"""
     <section
@@ -2478,7 +3190,7 @@ defmodule FermixWebWeb.SetupLive.Components do
         </div>
         <p :if={@plugin.account} class="truncate text-xs text-base-content/55">{@plugin.account}</p>
         <p :if={@plugin.yanked_version} class="text-xs text-error">
-          Version {@plugin.yanked_version} was yanked — run `fermix plugins upgrade {@plugin.name}`.
+          Version {@plugin.yanked_version} was yanked; run `fermix plugins upgrade {@plugin.name}`.
         </p>
         <form
           :if={@plugin.status == :needs_config && @plugin.missing_config != []}
@@ -2602,9 +3314,21 @@ defmodule FermixWebWeb.SetupLive.Components do
         >
           <.icon name="hero-pencil-square" class="size-3.5" /> Edit
         </button>
+        <.browser_signin_caption :if={@signin_action?} embed?={@embed?} class="basis-full text-right" />
       </div>
     </section>
     """
+  end
+
+  # The card actions that hand sign-in to a browser: the oauth2 Sign in /
+  # Reconnect button, or Enable when the configured OAuth client lets it
+  # pre-open the flow. API-key connects and modal-only actions stay silent.
+  defp plugin_signin_action?(%{oauth_unset?: true}), do: false
+
+  defp plugin_signin_action?(%{plugin: plugin, auth_preopen?: auth_preopen?}) do
+    plugin.auth_type == :oauth2 and
+      ((plugin.enabled? and plugin.status != :ready) or
+         (not plugin.enabled? and auth_preopen?))
   end
 
   # A not-yet-installed catalog entry (§6): index branding, Available/Installing/
@@ -2719,7 +3443,7 @@ defmodule FermixWebWeb.SetupLive.Components do
         </li>
         <li>It may require a paid plan, and some operations spend the vendor's own credits.</li>
         <li>
-          A read/write credential authorizes more upstream than Fermix exposes — prefer a read-only
+          A read/write credential authorizes more upstream than Fermix exposes; prefer a read-only
           one if you only need retrieval.
         </li>
         <li>The vendor's AI features may route that content on to third-party model providers.</li>
@@ -2744,7 +3468,7 @@ defmodule FermixWebWeb.SetupLive.Components do
         <h3 class="font-semibold">{@title}</h3>
         <.status_pill status={@status} />
       </div>
-      <div class="grid items-start gap-3 sm:grid-cols-2">{render_slot(@inner_block)}</div>
+      <div class="grid items-start gap-3 @xl:grid-cols-2">{render_slot(@inner_block)}</div>
     </section>
     """
   end
@@ -3284,7 +4008,43 @@ defmodule FermixWebWeb.SetupLive.Components do
   # Panes that persist via a single "Save" button — these get the unsaved-edits
   # hint. Plugins and Doctor act per item/probe, so a pane-level hint doesn't fit.
   defp form_pane?(tab_id),
-    do: tab_id in ~w(provider realtime channels search sandbox coding memory personalization)
+    do:
+      tab_id in ~w(provider realtime channels meetings search sandbox coding memory personalization)
+
+  defp install_banner_class(:error), do: "text-error"
+  defp install_banner_class(:info), do: "text-base-content/70"
+
+  # Each half of the on-device backend reports its own absence, so the card can
+  # print the one sentence that fixes what is actually missing.
+  defp local_state_message(:ok), do: "Installed and ready. Audio stays on this machine."
+
+  defp local_state_message({:error, :sidecar_not_installed}),
+    do: "Not installed yet; the speech engine is missing."
+
+  defp local_state_message({:error, :model_not_installed}),
+    do: "Speech engine installed; the model is still missing."
+
+  defp local_state_class(:ok), do: "text-sm text-success"
+  defp local_state_class({:error, _reason}), do: "text-sm text-warning"
+
+  defp meetings_backend_label(""), do: "Global default"
+  defp meetings_backend_label(name), do: name
+
+  # Shown under the disabled sign-in button when the sidecar is not installed.
+  # If the notetaker is already enabled, opening this panel starts (or resumes)
+  # the install, so the honest state is "installing", not "enable it first".
+  # The bot can be signed in only once both halves are on the machine: the
+  # sidecar binary and its matching browser.
+  defp meetbot_ready?(form), do: form.sidecar_installed? and form.browser_installed?
+
+  defp meetbot_signin_hint(%{enabled: false}),
+    do: "Enable the notetaker above to install it, then sign the bot in here."
+
+  defp meetbot_signin_hint(%{sidecar_installed?: false}),
+    do: "Installing the notetaker. Sign-in unlocks once it's ready."
+
+  defp meetbot_signin_hint(_form),
+    do: "Setting up the browser. Sign-in unlocks once it's ready."
 
   defp tab_status(%{component: nil}, _report), do: :ready
   defp tab_status(%{component: "provider:*"}, report), do: status_by_prefix(report, "provider:")
@@ -3317,6 +4077,17 @@ defmodule FermixWebWeb.SetupLive.Components do
       base <> " bg-primary/10 ring-1 ring-primary/30"
     else
       base <> " hover:bg-base-200"
+    end
+  end
+
+  # The embed rail row: label-only, native list density, tinted only by state.
+  defp embed_nav_class(tab_id, active_tab) do
+    base = "flex h-[30px] w-full items-center gap-1.5 rounded-md px-2.5 text-left text-[13px]"
+
+    if tab_id == active_tab do
+      base <> " bg-primary/12 font-medium text-primary"
+    else
+      base <> " text-base-content/70 hover:bg-base-content/6"
     end
   end
 
@@ -3368,6 +4139,8 @@ defmodule FermixWebWeb.SetupLive.Components do
   # rendering as a grey "Unknown". Warning, not error — each has a fix.
   def status_pill_class(:missing_host_runtime), do: "badge badge-warning badge-sm"
   def status_pill_class(:not_installed), do: "badge badge-warning badge-sm"
+  def status_pill_class(:preparing_browser), do: "badge badge-warning badge-sm"
+  def status_pill_class(:needs_signin), do: "badge badge-warning badge-sm"
   # Remote MCP runtimes (M27 §12 Stage 3). Warning where the operator can act,
   # error where the connection/contract is refused until something upstream or
   # in the artifact changes.
@@ -3398,6 +4171,8 @@ defmodule FermixWebWeb.SetupLive.Components do
   def status_pill_label(:incompatible), do: "Incompatible"
   def status_pill_label(:missing_host_runtime), do: "Needs runtime"
   def status_pill_label(:not_installed), do: "Not installed"
+  def status_pill_label(:preparing_browser), do: "Preparing browser"
+  def status_pill_label(:needs_signin), do: "Sign-in needed"
   def status_pill_label(:needs_workspace), do: "Needs workspace"
   def status_pill_label(:insufficient_credential_scope), do: "Insufficient scope"
   def status_pill_label(:invalid_remote_config), do: "Invalid config"
@@ -3470,13 +4245,13 @@ defmodule FermixWebWeb.SetupLive.Components do
   defp catalog_blocked_reason(_entry), do: nil
 
   defp compat_message({:needs_newer_core, :min_core_version, floor}),
-    do: "needs Fermix ≥ #{floor} — run `fermix upgrade`."
+    do: "needs Fermix ≥ #{floor}; run `fermix upgrade`."
 
   defp compat_message({:needs_newer_core, :plugin_api, api}),
-    do: "needs a newer Fermix (plugin API #{api}) — run `fermix upgrade`."
+    do: "needs a newer Fermix (plugin API #{api}); run `fermix upgrade`."
 
   defp compat_message({:plugin_too_old, :plugin_api, _api}),
-    do: "built for an older Fermix — awaiting a plugin update."
+    do: "built for an older Fermix; awaiting a plugin update."
 
   defp compat_message({:yanked, _name, version}), do: "version #{version} was yanked."
   defp compat_message({:version_not_found, _name, _version}), do: "no installable version yet."

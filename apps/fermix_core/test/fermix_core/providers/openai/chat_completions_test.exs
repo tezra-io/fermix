@@ -702,6 +702,132 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletionsTest do
     end
   end
 
+  describe "cache token detail" do
+    defp cached_response_body(details) do
+      %{
+        "model" => "gpt-5.4-mini",
+        "choices" => [%{"message" => %{"role" => "assistant", "content" => "hi"}}],
+        "usage" =>
+          Map.merge(
+            %{"prompt_tokens" => 1_000, "completion_tokens" => 40, "total_tokens" => 1_040},
+            details
+          )
+      }
+    end
+
+    test "parse_response carries the cached-input subset alongside unchanged totals" do
+      turn =
+        ChatCompletions.parse_response(
+          cached_response_body(%{"prompt_tokens_details" => %{"cached_tokens" => 768}})
+        )
+
+      assert turn.usage == %{
+               prompt_tokens: 1_000,
+               completion_tokens: 40,
+               total_tokens: 1_040,
+               cached_input_tokens: 768
+             }
+    end
+
+    test "parse_response omits the cached key when the vendor reported no details" do
+      turn = ChatCompletions.parse_response(cached_response_body(%{}))
+
+      assert turn.usage == %{prompt_tokens: 1_000, completion_tokens: 40, total_tokens: 1_040}
+    end
+
+    test "parse_response keeps a reported zero distinguishable from an unreported count" do
+      turn =
+        ChatCompletions.parse_response(
+          cached_response_body(%{"prompt_tokens_details" => %{"cached_tokens" => 0}})
+        )
+
+      assert turn.usage.cached_input_tokens == 0
+    end
+
+    test "parse_response refuses a malformed cached count rather than reporting zero" do
+      body = cached_response_body(%{"prompt_tokens_details" => %{"cached_tokens" => "768"}})
+
+      assert_raise ArgumentError, ~r/cached_tokens/, fn ->
+        ChatCompletions.parse_response(body)
+      end
+    end
+
+    test "the provider call event carries the cached count into the llm span" do
+      test_pid = self()
+      handler_id = "chat-completions-cached-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        handler_id,
+        [:fermix, :provider, :call],
+        fn event, measurements, metadata, _config ->
+          if self() == test_pid do
+            send(test_pid, {:telemetry, event, measurements, metadata})
+          end
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        Req.Test.json(
+          conn,
+          cached_response_body(%{"prompt_tokens_details" => %{"cached_tokens" => 768}})
+        )
+      end)
+
+      assert {:ok, _turn} =
+               ChatCompletions.chat(
+                 [%{role: "user", content: "hi"}],
+                 [],
+                 api_key: "sk-test",
+                 provider: :openai,
+                 model: "gpt-5.4-mini",
+                 base_url: "https://api.openai.com/v1",
+                 req_options: [plug: {Req.Test, __MODULE__}]
+               )
+
+      assert_receive {:telemetry, [:fermix, :provider, :call], _measurements, metadata}
+
+      assert metadata.tokens == %{prompt: 1_000, completion: 40, cached: 768}
+    end
+
+    test "the provider call event omits the cached key when the vendor reported none" do
+      test_pid = self()
+      handler_id = "chat-completions-uncached-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        handler_id,
+        [:fermix, :provider, :call],
+        fn event, measurements, metadata, _config ->
+          if self() == test_pid do
+            send(test_pid, {:telemetry, event, measurements, metadata})
+          end
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      Req.Test.stub(__MODULE__, fn conn -> Req.Test.json(conn, cached_response_body(%{})) end)
+
+      assert {:ok, _turn} =
+               ChatCompletions.chat(
+                 [%{role: "user", content: "hi"}],
+                 [],
+                 api_key: "sk-test",
+                 provider: :openai,
+                 model: "gpt-5.4-mini",
+                 base_url: "https://api.openai.com/v1",
+                 req_options: [plug: {Req.Test, __MODULE__}]
+               )
+
+      assert_receive {:telemetry, [:fermix, :provider, :call], _measurements, metadata}
+
+      assert metadata.tokens == %{prompt: 1_000, completion: 40}
+    end
+  end
+
   describe "supports_streaming?/0" do
     test "returns false" do
       refute ChatCompletions.supports_streaming?()

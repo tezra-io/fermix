@@ -15,7 +15,17 @@ defmodule FermixChannels.Gateway.Source do
   alias FermixChannels.Gateway.ChannelRegistry
 
   @enforce_keys [:channel]
-  defstruct [:channel, :channel_key, :sender_id, :sender_name, :chat_id, :thread_id]
+  defstruct [
+    :channel,
+    :channel_key,
+    :sender_id,
+    :sender_name,
+    :chat_id,
+    :thread_id,
+    :transport_auth
+  ]
+
+  @type transport_auth :: {:mobile_device, String.t()}
 
   @type t :: %__MODULE__{
           channel: String.t(),
@@ -23,11 +33,16 @@ defmodule FermixChannels.Gateway.Source do
           sender_id: String.t() | nil,
           sender_name: String.t() | nil,
           chat_id: String.t() | nil,
-          thread_id: String.t() | nil
+          thread_id: String.t() | nil,
+          transport_auth: transport_auth() | nil
         }
 
   @spec from_message(map()) :: t()
-  def from_message(message) when is_map(message) do
+  def from_message(message) when is_map(message), do: from_message(message, nil)
+
+  @doc "Build a source with process-owned ingress proof supplied by the transport."
+  @spec from_message(map(), map() | nil) :: t()
+  def from_message(message, ingress_context) when is_map(message) do
     channel = require_binary(message, :channel)
     metadata = Map.get(message, :metadata) || %{}
 
@@ -37,9 +52,23 @@ defmodule FermixChannels.Gateway.Source do
       sender_id: sender_id_from_metadata(metadata),
       sender_name: metadata_value(metadata, :sender_name),
       chat_id: optional_binary(message, :chat_id),
-      thread_id: optional_binary(message, :thread_ts) || metadata_value(metadata, :thread_id)
+      thread_id: optional_binary(message, :thread_ts) || metadata_value(metadata, :thread_id),
+      transport_auth: normalize_transport_auth(channel, ingress_context)
     }
   end
+
+  defp normalize_transport_auth(
+         "mobile",
+         %{transport: :mobile, authenticated_device_id: device_id}
+       )
+       when is_binary(device_id) do
+    case String.trim(device_id) do
+      "" -> nil
+      normalized -> {:mobile_device, normalized}
+    end
+  end
+
+  defp normalize_transport_auth(_channel, _ingress_context), do: nil
 
   defp sender_id_from_metadata(metadata) do
     case normalize(metadata_value(metadata, :user_id)) do
