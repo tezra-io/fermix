@@ -6,264 +6,686 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-09-06
+
 ### Added
 
 - **GPT-6 Astra is in the OpenAI and Codex catalogs, and is the new default
-  there.** `gpt-6-astra` is selectable in the setup wizard and the web pane on
-  both the OpenAI (API key) and Codex (ChatGPT subscription) providers, and is
-  what a fresh install resolves to on either, and it reaches `max` reasoning
-  effort. `gpt-5.6-sol` and every earlier model remain selectable. Astra's
-  Codex-only `ultra` effort level is a Codex-harness delegation mode rather than
-  a wire value, so Fermix's effort vocabulary is unchanged. Two things to know
-  before you upgrade. An install that pins `default_model` keeps what it pins,
-  but one that never pinned anything moves to Astra on the next upgrade without
-  being asked — and if your account is not yet entitled to GPT-6, nothing on the
-  upgrade path checks: the entitlement probe runs in the setup wizard's finalize
-  step and in `fermix doctor --full`, neither of which an upgrade re-runs, so the
-  first turn is where it would surface. Pin `default_model = "gpt-5.6-sol"` if
-  you would rather not move yet. And on the API-key provider Fermix compacts
-  Astra at 272k input tokens rather than at its full 1.05M window: above 272k
-  OpenAI reprices the whole request at 2x input and 1.5x output, so this keeps
-  long conversations inside standard pricing instead of silently doubling the
+  there.** `gpt-6-astra` is selectable in the setup wizard and the web pane
+  on both the OpenAI (API key) and Codex (ChatGPT subscription) providers,
+  and is what a fresh install resolves to on either, and it reaches `max`
+  reasoning effort. `gpt-5.6-sol` and every earlier model remain selectable.
+  Astra's Codex-only `ultra` effort level is a Codex-harness delegation mode
+  rather than a wire value, so Fermix's effort vocabulary is unchanged. Two
+  things to know before you upgrade. An install that pins `default_model`
+  keeps what it pins, but one that never pinned anything moves to Astra on
+  the next upgrade without being asked — and if your account is not yet
+  entitled to GPT-6, nothing on the upgrade path checks: the entitlement
+  probe runs in the setup wizard's finalize step and in `fermix doctor
+  --full`, neither of which an upgrade re-runs, so the first turn is where
+  it would surface. Pin `default_model = "gpt-5.6-sol"` if you would rather
+  not move yet. And on the API-key provider Fermix compacts Astra at 272k
+  input tokens rather than at its full 1.05M window: above 272k OpenAI
+  reprices the whole request at 2x input and 1.5x output, so this keeps long
+  conversations inside standard pricing instead of silently doubling the
   bill.
-- **Claude Fable 5.1 on the Anthropic provider.** `claude-fable-5-1` joins the
-  model catalog (1M context, 128k output ceiling) and is offered in both the CLI
-  wizard and web setup; set it with `[fermix_core.providers.anthropic]
-  default_model = "claude-fable-5-1"`. The Anthropic default is unchanged. It
-  rides the same adaptive-thinking, no-sampling wire shape as Fable 5. One
-  account-level caveat worth knowing before you chase a payload bug: Anthropic
-  treats this as a Covered Model requiring 30-day data retention, so an
-  organization on zero data retention gets a 400 on every request until
-  Anthropic authorizes it.
-- **A management surface the Fermix macOS app talks to, instead of reading your
-  files behind your back.** The daemon's local control socket now speaks a
-  versioned request/response protocol with one result or one structured error
-  per request: an identity handshake, the same overview and health projection
-  `fermix status` uses, one-use setup URLs, Doctor as a cancellable session with
-  a hard deadline (so a slow network check never holds the connection open),
-  bounded paged log queries, a short leased drain used for restart and shutdown,
-  and a field-allowlisted diagnostics bundle for export. Errors carry stable
-  codes and bounded details; no internal term crosses the boundary. The contract
-  ships beside the code as a document, a JSON schema, and golden fixtures the
-  app vendors by checksum, so the two sides cannot drift silently — and version
-  negotiation refuses an out-of-range client with an explicit
+
+- **Claude Fable 5.1 on the Anthropic provider.** `claude-fable-5-1` joins
+  the model catalog (1M context, 128k output ceiling) and is offered in both
+  the CLI wizard and web setup; set it with
+  `[fermix_core.providers.anthropic] default_model = "claude-fable-5-1"`.
+  The Anthropic default is unchanged. It rides the same adaptive-thinking,
+  no-sampling wire shape as Fable 5. One account-level caveat worth knowing
+  before you chase a payload bug: Anthropic treats this as a Covered Model
+  requiring 30-day data retention, so an organization on zero data retention
+  gets a 400 on every request until Anthropic authorizes it.
+
+- **A management surface the Fermix macOS app talks to, instead of reading
+  your files behind your back.** The daemon's local control socket now
+  speaks a versioned request/response protocol with one result or one
+  structured error per request: an identity handshake, the same overview and
+  health projection `fermix status` uses, one-use setup URLs, Doctor as a
+  cancellable session with a hard deadline (so a slow network check never
+  holds the connection open), bounded paged log queries, a short leased
+  drain used for restart and shutdown, and a field-allowlisted diagnostics
+  bundle for export. Errors carry stable codes and bounded details; no
+  internal term crosses the boundary. The contract ships beside the code as
+  a document, a JSON schema, and golden fixtures the app vendors by
+  checksum, so the two sides cannot drift silently — and version negotiation
+  refuses an out-of-range client with an explicit
   client-too-old/daemon-too-old answer rather than half-speaking to it. The
   existing socket, framing, and 4 MiB frame ceiling are unchanged.
-- **On a Mac where the app owns Fermix, the CLI says so instead of fighting it.**
-  An app-managed engine knows what it is from its own build identity, never from
-  where the binary sits, and splits the commands three ways. `fermix start`,
-  `fermix stop`, `fermix service install`, and `fermix service uninstall` exit
-  non-zero and point at the app's Enable and Disable background service controls
-  — the app deliberately does not call these Start and Stop, because the durable
-  state is the registration, not whether a process happens to be alive right
-  now. `fermix setup`, `fermix upgrade`, and `fermix uninstall` open the matching
-  screen in the app and report only that the hand-off was accepted, never that
-  the screen finished its work. `fermix status`, `fermix doctor`, and
-  `fermix logs` — and the overview the app itself shows — are answered by the
-  daemon over the management socket, and `fermix restart` follows the app-owned
-  restart contract — drain, commit, wait for a different daemon — instead of
-  reaching for a launchd unit it is not allowed to create. Three Doctor rows,
-  `upgrade`, `binary integrity`, and `service unit`, report not-applicable
-  there, because the app updates itself, the standalone in-place binary swap
-  would break a signed bundle, and the background service is a login item the
-  app registers rather than a unit this engine installs; that updater remains
-  for Linux and standalone installs, where nothing about it changes.
+
+- **That surface grew from eleven methods into the whole control plane, and
+  the browser setup page now goes through the same daemon.** The protocol
+  carries 42 methods over a `{1,2}` version window — 11 at v1, 31 added at
+  v2 — and the daemon, not the client, owns config, validation, secrets and
+  restart truth for both doors. That means one settings descriptor per
+  section (personality, memory, channels, providers, assistant, realtime,
+  tools, sandbox, computer, meetings, plugins) with typed rows, options and
+  restart flags; secrets that go in by id and are never read back out;
+  long-running work — provider sign-ins, capability installs, the notetaker
+  sign-in, the computer-use grant — modelled as cancellable jobs with phases
+  and byte progress; plugin rows whose actions come from a closed published
+  vocabulary, so a client never has to guess which method a verb runs; and
+  provider primary-setting, where the first provider you configure is
+  promoted to primary on both doors, so a sign-in clears the readiness gate
+  without a second step. Every published sentence is held to one copy
+  contract — sentence case, no em dashes, no exclamation marks, no version
+  numbers, no wire tokens — and a v1-declared request for a v2 method is
+  refused rather than served, so the wire's meaning never depends on the
+  client's honesty about what it speaks. Both doors render one descriptor:
+  the browser setup page and the app draw the same rows, so a label fixed in
+  one place is fixed in both. The app that consumes the v2 half ships from
+  its own repo, so this is the daemon half landing first, by design.
+
+- **The setup page has a second presentation, for the Mac app's in-app
+  pane.** When the daemon mints a setup URL with `embed=1`, the one LiveView
+  renders natively instead of drawing a website inside native chrome: no
+  card sidebar, no mascot, no step counter, no theme toggle, a transparent
+  background so the app's palette shows through, denser controls, and one
+  shared caption under every action that hands sign-in off to your browser.
+  Dark mode follows the app's appearance rather than a stored preference, so
+  the pane and the app can never disagree. Three of those changes reach the
+  browser page too: the header and the setup sidebar draw the Fermix
+  wordmark where the mascot used to stand in as a brand mark; every pane
+  grid splits on the width of its own column rather than the viewport's, so
+  a narrow window collapses to one column instead of cramming two provider
+  cards into it; and the renderable strings across setup and the dashboard
+  lost their em dashes to a copy gate that scans the live sources rather
+  than a hand-kept list. The pane itself is only reachable from the app,
+  which is not released yet.
+
+- **On a Mac where the app owns Fermix, the CLI says so instead of fighting
+  it.** An app-managed engine knows what it is from its own build identity,
+  never from where the binary sits, and splits the commands three ways.
+  `fermix start`, `fermix stop`, `fermix service install`, and `fermix
+  service uninstall` exit non-zero and point at the app's Enable and Disable
+  background service controls — the app deliberately does not call these
+  Start and Stop, because the durable state is the registration, not whether
+  a process happens to be alive right now. `fermix setup`, `fermix upgrade`,
+  and `fermix uninstall` open the matching screen in the app and report only
+  that the hand-off was accepted, never that the work is done. `fermix
+  status`, `fermix doctor`, and `fermix logs` are answered by the daemon
+  over the management socket. Doctor's `upgrade`, `binary integrity`, and
+  `service unit` checks report not-applicable there, because the app updates
+  itself, the standalone in-place binary swap would break a signed bundle,
+  and the background service is a login item the app registers rather than a
+  unit this engine installs; that updater remains for Linux and standalone
+  installs, where nothing about it changes.
+
 - **`fermix migrate-to-app` moves a Homebrew install to the Mac app in one
-  transaction.** `brew uninstall` on its own is not enough: the formula never
-  owned the launch agent `fermix setup` wrote, so uninstalling strands a
-  KeepAlive job pointing at a binary that no longer exists. The new command runs
-  in your own shell — the only place a custom `FERMIX_HOME` exported there is
-  visible — and with no arguments it inspects the account and prints the plan
-  without changing anything. `--yes` performs it: drain the daemon, boot out and
-  remove the launch agent it verified byte for byte, write an owner-only handoff
-  journal, uninstall the formula, install the cask, and launch the app, which
-  reads the journal, keeps the same Fermix home, registers its own background
-  service, and verifies the same data before clearing it. Every failure is loud
-  and quotes launchd or brew verbatim rather than degrading into printed advice,
-  and it refuses outright — naming the facts it inspected and what to do — for a
+  transaction.** `brew uninstall` on its own is not enough: the formula
+  never owned the launch agent `fermix setup` wrote, so uninstalling strands
+  a KeepAlive job pointing at a binary that no longer exists. The new
+  command runs in your own shell — the only place a custom `FERMIX_HOME`
+  exported there is visible — and with no arguments it inspects the account
+  and prints the plan without changing anything. `--yes` performs it: drain
+  the daemon, boot out and remove the launch agent it verified byte for
+  byte, write an owner-only handoff journal, uninstall the formula, install
+  the cask, and launch the app, which reads the journal, keeps the same
+  Fermix home, registers its own background service, and verifies the same
+  data before clearing it. Every failure is loud and quotes launchd or brew
+  verbatim rather than degrading into printed advice, and it refuses
+  outright — naming the facts it inspected and what to do — for a
   system-scope daemon, an unrecognised launch agent, a `Fermix.app` that is
-  already installed, duplicate app copies, a running `brew services` entry, a
-  daemon that does not answer, or a `fermix` on `PATH` owned by neither Homebrew
-  nor the app. No path in it deletes a Fermix home.
+  already installed, duplicate app copies, a running `brew services` entry,
+  a daemon that does not answer, or a `fermix` on `PATH` owned by neither
+  Homebrew nor the app. No path in it deletes a Fermix home. **Do not run it
+  yet.** `tezra-io/tap` publishes no `fermix` cask today — only `fermixpet`
+  — so the cask install cannot succeed until the Mac app is released, and
+  that step comes *after* the formula has already been uninstalled. There is
+  no path that skips it: the command refuses outright when a `Fermix.app` is
+  already installed, so an account that gets that far has no app to fall
+  back on. The command ships with the release that precedes the app, by
+  design; it becomes usable when the cask exists.
 
 - **The daemon half of an iPhone companion — the app itself is not released
-  yet.** A new `mobile` channel serves a first-party companion app over your own
-  network — LAN, or a tailnet when both devices are on one — with streaming
-  replies that edit in place, tool activity as it happens, photo and voice-note
-  attachments, the same slash commands the other channels have, and history that
-  re-syncs exactly after a reconnect rather than approximately. Every frame is
-  Noise-encrypted between a key on the phone and a key on your machine, so the
-  conversation is unreadable to anything on the path; nothing is relayed through
-  a server we run, because there is no server. This is the order FermixPet
-  shipped in: the daemon publishes the wire contract first and the app follows in
-  its own release, so until that release there is nothing to connect. Because of
-  that, this is groundwork shipped dormant behind a feature flag rather than a
-  feature you can use today: the channel is disabled by default and is offered
-  nowhere in setup — no wizard step, no CLI flag, no tab on the setup page. The
-  only way to turn it on is to hand-write `enabled = true` under
-  `[fermix_channels.mobile]` in `config.toml` and restart the daemon. Setup will
-  start offering it when the companion app ships.
-- **The pairing ceremony is in place, waiting for the app.** `fermix pair` mints
-  a one-time secret, renders the QR, and waits: the phone shows a six-digit code
-  derived from the handshake itself, your terminal shows the code it derived, and
-  you approve only if they match — so a QR photographed over your shoulder cannot
-  complete the pairing. Outside that window there is no pairing endpoint at all.
-  `fermix devices list` shows what is paired and when it was last seen; `fermix
-  devices revoke <id>` removes the device and drops its live socket in the same
-  breath. All three verbs need the channel flag on; with it off they refuse and
-  tell you which line of `config.toml` to write. There is nothing to scan the QR
-  with until the companion app ships.
-- **Push notifications Apple cannot read, for when the app arrives.** When a turn
+  yet.** A new `mobile` channel serves a first-party companion app over your
+  own network — LAN, or a tailnet when both devices are on one — with
+  streaming replies that edit in place, tool activity as it happens, photo
+  and voice-note attachments, the same slash commands the other channels
+  have, and history that re-syncs exactly after a reconnect rather than
+  approximately. Every frame is Noise-encrypted between a key on the phone
+  and a key on your machine, so the conversation is unreadable to anything
+  on the path; nothing is relayed through a server we run, because there is
+  no server. This is the order FermixPet shipped in: the daemon publishes
+  the wire contract first and the app follows in its own release, so until
+  that release there is nothing to connect. Because of that, this is
+  groundwork shipped dormant behind a feature flag rather than a feature you
+  can use today: the channel is disabled by default and is offered nowhere
+  in setup — no wizard step, no CLI flag, no tab on the setup page. The only
+  way to turn it on is to hand-write `enabled = true` under
+  `[fermix_channels.mobile]` in `config.toml` and restart the daemon. Setup
+  will start offering it when the companion app ships. The wire contract
+  ships beside the code the way the management one does — a document, a JSON
+  schema, Noise and push test vectors, and golden fixtures pinned by a
+  contract test — and `fermix doctor` gains one `mobile companion` row that
+  reads `disabled` and probes nothing until you turn the channel on.
+
+- **The pairing ceremony is in place, waiting for the app.** `fermix pair`
+  mints a one-time secret, renders the QR, and waits: the phone shows a
+  six-digit code derived from the handshake itself, your terminal shows the
+  code it derived, and you approve only if they match — so a QR photographed
+  over your shoulder cannot complete the pairing. Outside that window there
+  is no pairing endpoint at all. `fermix devices list` shows what is paired
+  and when it was last seen; `fermix devices revoke <id>` removes the device
+  and drops its live socket in the same breath. All three verbs need the
+  channel flag on; with it off they refuse and tell you which line of
+  `config.toml` to write. There is nothing to scan the QR with until the
+  companion app ships.
+
+- **Push previews Apple cannot read, for when the app arrives.** When a turn
   finishes and no phone is connected, Fermix sends one notification per
-  registered device with the preview encrypted under a key derived at pairing —
-  the phone decrypts it locally, and APNs carries ciphertext only. A message you
-  already read on another device does not notify you again. Push stays off until
-  you supply your own APNs credentials under `[fermix_channels.mobile.push]`, and
-  the signing key lives in the keychain or `FERMIX_APNS_KEY`, never as plaintext
-  in `config.toml`.
-- **Transcription now runs live, not just file by file.** Speech-to-text gained a
-  streaming session: audio is pushed in as it arrives and finished segments come
-  back with their timings while the speaker is still talking. Deepgram, SpaceXAI,
-  and the on-device backend speak a streaming protocol natively; a batch-only
-  backend (OpenAI) is driven by a chunked adapter that transcribes short spoken
-  spans in order, so every configured backend can feed a live listener rather
-  than only the ones with a socket. A stream speaks one audio format — 16 kHz
-  mono s16le PCM — and callers convert before pushing, which is what keeps the
-  meeting notetaker below and the existing voice-note path on one engine. The
-  default backend and model are unchanged; nothing about a voice note behaves
-  differently. OpenAI's newer `gpt-transcribe` is also selectable now, beside the
-  default mini model it does not replace.
+  registered device with the preview encrypted under a key derived at
+  pairing — the phone decrypts it locally, and APNs carries ciphertext only.
+  A message you already read on another device does not notify you again.
+  Push stays off until you supply your own APNs credentials under
+  `[fermix_channels.mobile.push]`, and the signing key lives in the keychain
+  or `FERMIX_APNS_KEY`, never as plaintext in `config.toml`.
+
+- **Transcription now runs live, not just file by file.** Speech-to-text
+  gained a streaming session: audio is pushed in as it arrives and finished
+  segments come back with their timings while the speaker is still talking.
+  Deepgram, SpaceXAI, and the on-device backend speak a streaming protocol
+  natively; a batch-only backend (OpenAI) is driven by a chunked adapter
+  that transcribes short spoken spans in order, so every configured backend
+  can feed a live listener rather than only the ones with a socket. A stream
+  speaks one audio format — 16 kHz mono s16le PCM — and callers convert
+  before pushing, which is what keeps the meeting notetaker below and the
+  existing voice-note path on one engine. The default backend and model are
+  unchanged; nothing about a voice note behaves differently. OpenAI's newer
+  `gpt-transcribe` is also selectable now, beside the default mini model it
+  does not replace. A backend that stops draining cannot silently eat your
+  audio: both native streams share one outbound window — five seconds of
+  audio in flight over a thirty-second buffer — and a socket that has not
+  acknowledged a full window within ten seconds is killed into the bounded
+  reconnect rather than blocking behind a single write, with overflow
+  dropped and counted instead of dropped quietly.
+
 - **A meeting notetaker that joins only when you ask — off by default,
-  installed on demand.** Fermix can sit in a Google
-  Meet or Zoom meeting, transcribe it with speaker attribution, and deliver a
-  summary when it ends. `join_meeting`, `leave_meeting`, and `list_meetings` are
-  owner-only and attended-only: it never joins on a schedule, off an invite it
-  read, or on an instruction embedded in content someone else wrote, and it
-  attends one meeting at a time. The two platforms work differently on purpose,
-  with no fallback between them: **Google Meet** is joined by a `meetbot` browser
+  installed on demand.** Fermix can sit in a Google Meet or Zoom meeting,
+  transcribe it with speaker attribution, and deliver a summary when it
+  ends. `join_meeting`, `leave_meeting`, and `list_meetings` are owner-only
+  and attended-only: it never joins on a schedule, off an invite it read, or
+  on an instruction embedded in content someone else wrote, and it attends
+  one meeting at a time. The two platforms work differently on purpose, with
+  no fallback between them: **Google Meet** is joined by a `meetbot` browser
   sidecar signed in as a dedicated bot account, so it knocks and waits for
-  admission like any participant and reports denial, a sign-in demand, or a block
-  honestly instead of pretending; **Zoom** is joined through Zoom RTMS, an
-  outbound audio subscription with no browser at all, which reaches only meetings
-  hosted by your own Zoom account or by a host who has enabled your RTMS app —
-  that is a Zoom platform limit, not a missing key, and no setting unlocks other
-  people's meetings. On Meet the notetaker announces itself once in the meeting
-  chat and never speaks again (`announce`/`announce_message`/`bot_name`); on Zoom
-  the platform's own recording indicator is what participants see; either way the
-  host can remove it and that ends the capture. Transcripts, a rendered
+  admission like any participant and reports denial, a sign-in demand, or a
+  block honestly instead of pretending; **Zoom** is joined through Zoom
+  RTMS, an outbound audio subscription with no browser at all, which reaches
+  only meetings hosted by your own Zoom account or by a host who has enabled
+  your RTMS app — that is a Zoom platform limit, not a missing key, and no
+  setting unlocks other people's meetings. On Meet the notetaker announces
+  itself once in the meeting chat and never speaks again
+  (`announce`/`announce_message`/`bot_name`); on Zoom the platform's own
+  recording indicator is what participants see; either way the host can
+  remove it and that ends the capture. Transcripts, a rendered
   `transcript.md`, and run metadata land under
-  `<FERMIX_HOME>/workspace/meetings/<id>/` where the file tools can read them
-  back, and audio is discarded unless `retain_audio` is set. A capture cut short
-  still delivers what was heard, labelled as partial rather than passed off as
-  the whole meeting. Turn it on from its native-driver card on the setup Plugins
-  page — beside computer use and computer history — with the detailed
-  configuration (bot name, announcement, transcription backend, Zoom RTMS
-  credentials) in the card's own Configure panel. Enabling installs the pinned
-  `meetbot` sidecar (`v0.3.0`) for your host, and the sidecar then installs the
-  exact Chromium build it was tested against — there is no browser to prepare
-  by hand, and a sidecar upgrade re-runs that install rather than trusting a
-  browser an older release left behind. Meet needs one more deliberate act
-  before the first join: signing the bot account in, from the Sign-in button in
-  that panel; until then the card says "Sign-in needed" rather than pretending
-  installed means ready. Only `macos-aarch64` is pinned in this build, so on
-  other hosts the Meet install refuses honestly and the Zoom RTMS lane is the one
-  a configured operator can use until that target is built. The macOS binary is
-  ad-hoc-signed rather than notarized — fine for the daemon that downloads it,
-  and notarization is the gate for distribution beyond your own machine. `fermix
-  doctor` gains a `meetings` row that reports the same state without joining
-  anything.
+  `<FERMIX_HOME>/workspace/meetings/<id>/` where the file tools can read
+  them back, and audio is discarded unless `retain_audio` is set. A capture
+  cut short still delivers what was heard, labelled as partial rather than
+  passed off as the whole meeting. Turn it on from its native-driver card on
+  the setup Plugins page — beside computer use and computer history — with
+  the detailed configuration (bot name, announcement, transcription backend,
+  Zoom RTMS credentials) in the card's own Configure panel. Enabling
+  installs the pinned `meetbot` sidecar (`v0.3.3`) for your host, and the
+  sidecar then installs the exact Chromium build it was tested against —
+  there is no browser to prepare by hand, and a sidecar upgrade re-runs that
+  install rather than trusting a browser an older release left behind. Meet
+  needs one more deliberate act before the first join: signing the bot
+  account in, from the Sign-in button in that panel; until then the card
+  says "Sign-in needed" rather than pretending installed means ready.
+  Apple-silicon macOS and both Linux architectures are pinned; Intel macOS
+  is not, because the meetbot release builds no such artifact, so there the
+  Meet install refuses honestly and the Zoom RTMS lane is the one a
+  configured operator can use. The macOS binary is ad-hoc-signed rather than
+  notarized — fine for the daemon that downloads it, and notarization is the
+  gate for distribution beyond your own machine. `fermix doctor` gains a
+  `meetings` row that reports the same state without joining anything.
+
+- **What the notetaker does in the room, and when it decides the meeting is
+  over.** It joins with its camera off and its microphone muted and never
+  turns either on. On Meet the participant list shows the bot Google
+  account's own profile name — Meet offers no name field to an account that
+  is already signed in — so `bot_name` names the notetaker in the
+  announcement line rather than in the roster, and that account is worth
+  naming for what it is. It leaves about a minute after the last other
+  participant does, which is when your notes arrive; a notetaker admitted to
+  a room nobody else has entered waits ten minutes for people to show up
+  instead, and on Zoom — where presence is only known from who is
+  transmitting — the ten-minute bound is the only one. A join that never
+  lands now says so in the conversation you asked from, naming the reason,
+  instead of going quiet after an optimistic "joining". On macOS the daemon
+  holds a sleep guard for the length of a capture, so the machine will not
+  sleep mid-meeting and cut the transcript at the moment the lid closed.
+
+- **The meeting summary can run on a model of its own.**
+  `[fermix_core.routing] meeting_provider`, `meeting_model` and
+  `meeting_reasoning_effort` point the notetaker's summarizer at a specific
+  provider and model, the same way `subagent_*` and `cron_*` already do;
+  leave them unset and the summary runs on your default. There is no setup
+  screen for them — like `cron_*`, they are hand-written in `config.toml` —
+  so `fermix doctor`'s `routing` row now validates and prints the meeting
+  override beside the other two, and a typo'd provider name or effort level
+  is caught at your desk rather than at the end of the meeting you wanted
+  notes from. Worth stating plainly for anyone reviewing the privacy
+  surface: the summarizer is a bounded, no-tools run that frames the
+  transcript and the participant roster as untrusted content, and it sends
+  both to whichever provider those keys resolve to — your default, unless
+  you say otherwise.
+
+- **The Zoom client secret is keychained, not left sitting in
+  `config.toml`.** Of the four Zoom RTMS credentials the notetaker needs,
+  `zoom_client_secret` is a managed secret: setup writes it to the keychain,
+  and `MEETINGS_ZOOM_CLIENT_SECRET` is the environment name if you would
+  rather supply it that way. It is deliberately not exported into the
+  sandbox environment, because the RTMS connection is made inside the daemon
+  and the meetbot sidecar never sees your Zoom credentials at all. The other
+  three — `zoom_account_id`, `zoom_client_id`, `zoom_ws_subscription_id` —
+  are ordinary config values.
+
 - **The on-device transcription backend — fermix's half of it.**
-  `[fermix_core.transcription] backend = "local"` selects a `fermix-stt` sidecar
-  running over a locally installed speech model: audio never leaves the machine
-  and there is no key to configure. What it needs instead is an installed binary
-  AND an installed model, and it says which half is missing rather than quietly
-  falling back to a hosted backend. Installing is a deliberate act — select
-  `local` as the backend in the setup page's Voice notes tab and both halves
-  install right there; writing the backend name into
-  `config.toml` by hand installs nothing, and boot never downloads. The
-  `fermix-stt` sidecar is released at `v0.1.0` (Parakeet TDT 0.6B v3 int8, both
-  the binary and every model checksum pinned), so on a pinned host enabling it
-  downloads and verifies both halves on-device; only `macos-aarch64` is pinned in
-  this build, so other hosts refuse honestly instead of fetching an unverified
-  binary or unverified weights. The binary is ad-hoc-signed, not notarized.
+  `[fermix_core.transcription] backend = "local"` selects a `fermix-stt`
+  sidecar running over a locally installed speech model: audio never leaves
+  the machine and there is no key to configure. What it needs instead is an
+  installed binary AND an installed model, and it says which half is missing
+  rather than quietly falling back to a hosted backend. Installing is a
+  deliberate act — select `local` as the backend in the setup page's Voice
+  notes tab and both halves install right there; writing the backend name
+  into `config.toml` by hand installs nothing, and boot never downloads. The
+  `fermix-stt` sidecar is released at `v0.1.0` (Parakeet TDT 0.6B v3 int8,
+  both the binary and every model checksum pinned), so on a pinned host
+  enabling it downloads and verifies both halves on-device; only
+  `macos-aarch64` is pinned in this build, so other hosts refuse honestly
+  instead of fetching an unverified binary or unverified weights. The binary
+  is ad-hoc-signed, not notarized.
+
 - **Computer History: an activity memory you switch on per app — off by
   default, macOS only.** When you enable it, Fermix remembers what you were
-  doing in exactly the apps you allowlist — window titles, page URLs, and the
-  text on screen, read from the accessibility tree — so you can ask "what was
-  that article I had open yesterday?" and get an answer. What it is **not** is
-  a surveillance suite: no screenshots, no audio, no keystroke logging, and
-  nothing outside the apps you picked. Password and secure fields are never
-  captured (suppressed at the capturer AND again at ingest), and a scrubber
-  drops secret-shaped text — tokens, JWTs, `password=` URL parameters — before
-  anything is stored. Raw activity lives in a local spool for at most 48 hours
-  (with a byte ceiling as a backstop) and is condensed into durable activity
-  memories by a summarizer that runs on one strict route — your default
-  provider unless you point it at the on-device model or one named provider —
-  and never fails over to a second vendor, because a failover would send
-  activity somewhere you never consented to. A summary that quotes raw field
-  text verbatim is rejected rather than stored. You stay in control from any
-  chat: `/history status`, `/history pause 10m|1h|24h`, `/history purge
-  10m|1h|24h|all` (erases both the spool and the derived memories for the
-  window), and `/history off`; turning it on is a setup-page act — pick the
-  apps in the Computer History card's picker, which also installs the shared
-  capture driver and asks for the Accessibility grant it needs. The model sees
-  a Recent Activity section and a recall tool only while every gate holds, and
-  replies built from activity are tainted so they are purgeable too. `fermix
-  doctor` reports the whole posture in one row.
-- **Declining an access request is now one tap, not a dangling prompt.** When
-  Fermix asks for sandbox access, the prompt on Telegram and Discord carries a
-  Deny button beside Approve — same single-use token, operator-only, same
-  origin — and `/deny <token>` is the typed equivalent on every channel.
-  Denying consumes the token and answers the request honestly instead of
-  leaving it to expire in silence.
+  doing in exactly the apps you allowlist — window titles and the text on
+  screen, read from the accessibility tree — so you can ask "what was that
+  article I had open yesterday?" and get an answer. Inside a browser it is
+  titles only: the pinned capture driver withholds browser content entirely
+  rather than site-filtering it, so no URLs and no typed page text are
+  captured, and the `sites` allowlist has nothing to match on until a later
+  driver emits navigation events. What it is **not** is a surveillance
+  suite: no screenshots, no audio, no keystroke logging, and nothing outside
+  the apps you picked. Password and secure fields are never captured
+  (suppressed at the capturer AND again at ingest), and a scrubber drops
+  secret-shaped text — tokens, JWTs, `password=` URL parameters — before
+  anything is stored. Raw activity lives in a local spool for at most 48
+  hours (with a byte ceiling as a backstop) and is condensed into durable
+  activity memories by a summarizer that runs on one strict route — your
+  subagent provider if you have one configured, else your primary, unless
+  you point it at the on-device model or one named provider — and never
+  fails over to a second vendor, because a failover would send activity
+  somewhere you never consented to. A summary that quotes raw field text
+  verbatim has the quoted run cut out and replaced with `[…]` rather than
+  being discarded whole, matched on a normalized letters-and-digits
+  projection so a reflowed or re-cased copy is still caught. You stay in
+  control from any chat: `/history status`, `/history pause 10m|1h|24h`,
+  `/history purge 10m|1h|24h|all` (erases both the spool and the derived
+  memories for the window), and `/history off`; turning it on is a
+  setup-page act — pick the apps in the Computer History card's picker,
+  which also installs the shared capture driver and asks for the
+  Accessibility grant it needs. The model sees a Recent Activity section and
+  a recall tool only while every gate holds, and replies built from activity
+  are tainted. That taint does two jobs, not one: it makes the reply
+  purgeable, and it decides where the reply may travel. `/compact` masks a
+  tainted turn exactly as automatic compaction does, a reply derived from
+  unmasked tainted replay is stamped tainted itself, and skill curation
+  drops tainted entries — counted as `dropped_history_tainted`, so a drop is
+  visible rather than silent — when the provider chain is not one you
+  granted history to. The rule holds after `/history off`, because taint is
+  a property of where the content came from, not of whether the feature is
+  on right now, and the gate is frozen once per turn so a mid-turn `/history
+  off` cannot make the Recent Activity section, the recall tool and the
+  taint stamp disagree. `fermix doctor` reports the whole posture in one
+  row.
+
+- **Activity recall dates every entry and tells you what it left out.** The
+  Recent Activity digest reads the last 24 hours only, up to 8 entries, each
+  stamped with its local time range in your timezone, and it spends its
+  budget in whole entries — an oversized old entry is skipped rather than
+  truncated mid-sentence. `recall_activity` returns newest first, also
+  bounded by whole entries, and its header states how many entries the
+  window actually held against how many it showed, so an omission is never
+  silent. Memories accrete: one per summarized batch, never superseded,
+  because the summarizer's cursor is an event-id high-water mark, so a later
+  note cannot hide an earlier one over a shared boundary millisecond.
+  `/history status` gained a line for how many spool events are still
+  unsummarized and how old the oldest is, so a summarizer falling behind is
+  visible before retention starts eating the backlog. One timezone resolver
+  serves both surfaces; an unusable zone is logged and both render UTC and
+  say so.
+
+- **`/history status` tells you what the agent has read from your history.**
+  Every successful agent read appends a metadata-only row — time, sink, the
+  resolved window, the result count, never content — to a dedicated audit
+  table, and status reports it as "Agent reads: N recorded (last: …)". That
+  covers the `recall_activity` tool, including reads that returned nothing,
+  and any non-empty Recent Activity section, so you can answer "what has it
+  read from my history" from the store itself rather than from traces that
+  rotate away. The table is capped at the newest 10,000 rows by the
+  retention tick, `/history purge` erases the audit rows recorded inside the
+  window it purges, and a failed audit write logs an error rather than
+  failing the read.
+
+- **Declining an access request is now one tap, not a dangling prompt.**
+  When Fermix asks for sandbox access, the prompt on Telegram and Discord
+  carries a Deny button beside Approve — same single-use token,
+  operator-only, same origin — and `/deny <token>` is the typed equivalent
+  on every channel. Denying consumes the token and answers the request
+  honestly instead of leaving it to expire in silence. `/soul deny <token>`
+  is the persona counterpart: a `/soul review` proposal, a `/soul revert N`,
+  or a `/soul reset` each mint a token you can now discard on purpose, and
+  the token is consumed with an answer rather than left to time out.
+
+- **A remote MCP server that changes its tool list no longer needs a daemon
+  restart.** Fermix listens for `notifications/tools/list_changed` on the
+  response stream and re-discovers that server's tools, so a tool an
+  upstream added or withdrew appears or disappears on the next turn instead
+  of at the next restart. A proxy suspended mid-reconnect holds the calls
+  that arrive during the gap and drains them on resume rather than failing
+  them, and rejects them only once the connection is terminally down. A
+  source whose discovery has no callback wired refuses the watch outright
+  instead of registering one that could never fire.
+
+- **Provider spans carry cached-input and cache-write token counts.** Every
+  adapter — Anthropic, OpenAI Responses and Chat Completions, Codex,
+  SpaceXAI, and the realtime session — parses the cache split the vendor
+  reports and forwards it through the shared emitter, and the Opik mapper
+  exports it as `cached_input_tokens` and `cache_creation_input_tokens`.
+  `prompt_tokens` keeps exactly the meaning it had, blended cache reads and
+  writes included, so nothing you already compute from a trace changes. A
+  count the vendor did not report is omitted rather than written as zero,
+  because a fabricated zero is indistinguishable from a measured one and a
+  cache-aware price has to tell them apart. You see this only with Opik
+  tracing on.
+
+### Changed
+
+- **A fresh install counts as ready once a provider and your personality
+  answers are in place.** Readiness used to treat every failure as blocking,
+  and Fermix ships with Telegram enabled — so a brand-new install with a
+  working provider still reported setup as incomplete, `/health` and
+  `/health/ready` answered 503, and `fermix doctor` failed. Only two things
+  gate now: one configured provider, and your name, time zone and
+  communication style. An enabled channel missing its token, and realtime
+  without an OpenAI key, are still reported — as a warning row naming each
+  component — but they no longer say your setup is unfinished. Every
+  readiness sentence was rewritten at the same time to name the control that
+  fixes it ("Add the Telegram bot token in Channels settings.") rather than
+  the environment variable behind it.
+
+- **`/health` judges a channel by the transport that is actually running,
+  not by what `config.toml` says its mode is.** The old check looked up a
+  process name by the configured `mode`; the default Telegram block carries
+  no `mode` key at all, so that lookup returned nothing and Telegram
+  reported ready on every install without the transport ever having been
+  examined. Health now keys on the supervised child itself, so a missing one
+  reads degraded. ACP is judged by its endpoint rather than its supervisor,
+  because an endpoint that cannot bind returns `:ignore` and the supervisor
+  starts around it. Telegram additionally reports degraded once its poller
+  has failed five times in a row — production once logged 27,394 consecutive
+  timeouts across two days with no signal anywhere — and clears on the first
+  success, and it never stops polling. `/health` also gained a
+  `restart_reasons` array and now takes `restart_required?` from the restart
+  state rather than the boot report, so an out-of-process config edit is
+  visible there.
+
+- **`fermix status` reports the protocol version and no longer prints the
+  Fermix home path.** `fermix status` is answered over the versioned
+  management protocol on every install now, not only on an app-managed one,
+  so the running line gains `protocol vN` beside the pid, version and
+  uptime. The daemon's public projection deliberately carries no filesystem
+  path and no raw failure term, so `--full` and `--json` no longer include
+  the `paths` block; both facts remain available from `fermix doctor` and
+  `fermix logs`. The old unversioned `status` and `overview` socket methods
+  were deleted rather than kept alive, so a new `fermix status` against a
+  daemon you have not restarted yet reports an error and exits 1 — it names
+  the condition and tells you to run `fermix restart` — until that daemon
+  comes back on the new engine. **`brew upgrade` does not restart the
+  daemon, so run `fermix restart` once after upgrading.**
+
+- **A Homebrew `fermix` pointed at a home the Mac app manages refuses the
+  verbs the app owns.** The existing CLI matrix keys on the binary's own
+  build identity, which answers false for a formula binary sitting beside an
+  installed app — so that binary would happily install, start or stop a
+  service the app owns. `fermix start`, `fermix stop` and `fermix service
+  install` now refuse and point at the app's background service controls,
+  and `fermix setup` and `fermix upgrade` open the matching screen in the
+  app. The question asked is about the home, not the disk: a running
+  daemon's identity handshake answers it, and with no daemon a marker
+  recording the app bundle answers it, and only while that bundle still
+  exists. It fails open — a machine with no app, no daemon and no marker
+  behaves exactly as it does today. `fermix service uninstall` is
+  deliberately not refused on this path, because it is the remedy for the
+  legacy-unit condition Doctor reports.
+
+- **Computer use and computer history are native-driver cards on the setup
+  page, not catalog entries.** Both now sit at the top of the setup Plugins
+  tab, above the third-party integrations, as compact one-row cards with a
+  status line, an info icon linking to their docs page and carrying the
+  privacy summary, and their own actions. Computer use is no longer listed
+  in the plugin catalog at all, so an existing computer-use operator looking
+  for it among the integrations will find it moved to the top of the page.
+  Enabling computer history opens a picker of the apps actually installed on
+  your Mac, listed by name — you check the ones it may record instead of
+  typing bundle ids — and saving writes the allowlist, enables the feature
+  and installs the shared capture driver in one act; an empty selection
+  cannot be saved, because consent to capture nothing is not consent. The
+  card names where summarization runs, so the posture is on the card rather
+  than buried in `config.toml`.
+
+- **The setup page's Transcription tab is now called Voice notes.** Same
+  tab, same job — picking the speech-to-text backend and its model — and it
+  is now where the on-device backend is selected too, so there is one home
+  for the single transcription setting. Nothing about the setting changed;
+  only its label. This is the one surface in the speech work that an
+  existing install meets on upgrade, because the tab already existed.
 
 ### Fixed
 
 - **Long conversations on the Codex provider now compact against the right
-  window.** The catalog recorded a 400k context window for GPT-5.5 and GPT-5.4
-  mini on the Codex path long after those models had moved to 272k, so Fermix
-  would not begin compacting until 340k — past the point the provider itself
-  refuses the request, which is how a long conversation could fail at the window
-  edge instead of being summarized. Both now read 272k. GPT-5.4, which has since
-  disappeared from the model catalog Codex publishes, is set to the same 272k on
-  the same conservative reasoning rather than on a measured value.
-- **Deep conversations on a ChatGPT subscription run much further before
-  compacting.** GPT-6 Astra and the GPT-5.6 family now read 872k on the Codex
-  path — the ceiling that path actually stretches to, rather than the smaller
-  working budget the `codex` CLI displays, which is the field the catalog had
-  been reading. Requests well past the old 272k figure have always been served,
-  so this stops Fermix compacting far earlier than it needed to.
+  window.** The catalog recorded a 400k context window for GPT-5.5 and
+  GPT-5.4 mini on the Codex path long after those models had moved to 272k,
+  so Fermix would not begin compacting until 340k — past the point the
+  provider itself refuses the request, which is how a long conversation
+  could fail at the window edge instead of being summarized. Both now read
+  272k. GPT-5.4, which has since disappeared from the model catalog Codex
+  publishes, is set to the same 272k on the same conservative reasoning
+  rather than on a measured value.
 
+- **Deep conversations on a ChatGPT subscription run much further before
+  compacting.** GPT-6 Astra and the GPT-5.6 family now read 872k on the
+  Codex path — the ceiling that path actually stretches to, rather than the
+  smaller working budget the `codex` CLI displays, which is the field the
+  catalog had been reading. Requests well past the old 272k figure have
+  always been served, so this stops Fermix compacting far earlier than it
+  needed to.
+
+- **Setup no longer tells you a credential is saved when it had nowhere to
+  put it.** Every secret typed into setup is persisted as a keyring
+  reference, which only means anything once the value is actually in the OS
+  keyring. On a host with no secret writer the value used to be dropped with
+  a log line while the save reported success — so you saw a stored key and
+  the runtime had none. A save that carries a secret is now refused before
+  the snapshot is built, with a sentence saying this machine has no secret
+  store, so a save either stores every secret in it or stores nothing. The
+  refusal reaches both the CLI wizard and the web setup page.
+
+- **Editing `config.toml` while Fermix is running no longer silently loses
+  your edit.** The daemon keeps two baselines — what it started from and
+  what it last wrote — so it can tell its own writes apart from yours. If
+  the settings file changed underneath it, the next save is refused with a
+  sentence naming the changed sections, the setup page shows a banner, and
+  the one action offered is Reload settings from disk; an unreadable file is
+  reported with the parser's own words and is deliberately offered no
+  reload, because the reload would re-run the read that just failed. Before
+  this, a save quietly overwrote whatever you had edited by hand. The two
+  in-tree writers that do not go through a setup screen — the model-routing
+  tool and the `/history` channel command — record the baseline themselves,
+  so they do not look like an outside edit and lock you out of every later
+  save.
+
+- **A long reply no longer takes seconds to render on its way out.** Both
+  outbound Markdown renderers hunted for a closing delimiter by walking the
+  rest of the message, so an unmatched opener — which is what a model emits
+  every time it means a literal asterisk — walked the entire remainder, once
+  per opener. Rendering went quadratic, and it paid that on the delivery
+  path of every message and again inside the outbound splitter's binary
+  search, which re-measures the same text repeatedly: 32 KB of stray bold
+  openers took over ten seconds on the development machine. The scan is now
+  indexed once per inline pass and shared by both renderers, and the same 32
+  KB renders in about 60 ms. Output is byte-identical, proven by a
+  differential oracle across both implementations rather than by inspection.
+
+- **A cancelled or killed plugin install no longer strands the plugin store
+  lock.** The lockfile was released by an `after` block in the process
+  holding it, which covers a return and a raise but not an exit signal — and
+  stopping a run is exactly an exit signal. One cancel left the lockfile
+  behind and refused every plugin operation on the machine until the stale
+  threshold expired ten minutes later. The lock is now owned by a linked
+  process that traps exits and removes the file in its own shutdown, so
+  there is one release path whether the critical section ended by returning,
+  by raising, or by being killed.
+
+- **A daemon that was not started by the service unit now finds the binaries
+  the unit's PATH used to give it.** launchd and systemd hand a daemon a
+  bare PATH, and `cosign`, Homebrew's `node` and `python`, and the `codex`
+  and `claude` CLIs in `~/.local/bin` are not on it. The service unit had
+  always written that list into its own environment; a daemon started any
+  other way inherited the bare one and reported those tools absent while
+  your shell resolved them fine. The engine now appends the same baseline to
+  its own PATH at boot, from one list the unit and the process both read. It
+  appends and never prepends, so it can make an unresolvable name resolvable
+  and can never shadow a binary your own PATH already chose, and a source
+  checkout gets none of it so a developer sees their real PATH.
+
+- **The daemon and voice sockets are removed when Fermix stops, and a
+  failure to remove them is logged instead of discarded.** Neither listener
+  trapped its parent's shutdown, so the cleanup that closes the listening
+  socket and unlinks the socket file never ran on an ordinary stop — the
+  file was left behind for the next boot to clear as stale. Both listeners
+  now trap the shutdown and clean up on the way out, and if either the close
+  or the unlink fails they say so in the log rather than swallowing the
+  result.
+
+- **Signing a provider out from the app drops the tokens the running daemon
+  is still holding.** A sign-out that only deleted the stored entry left the
+  live daemon holding the access and refresh tokens in memory, so Fermix
+  kept making calls as the account you had just removed until the token
+  expired. The sign-out path now invalidates the running token manager as
+  well as the store. This is wired into the app-facing `auth.logout` method;
+  `fermix auth logout` is unchanged and still removes the stored credentials
+  and tells you to restart the daemon.
+
+- **A remote MCP plugin that refuses a capability now tells you which
+  capability.** A contract refusal carried a class and no name, so `fermix
+  doctor` and the setup modal could say a plugin refused without saying what
+  it refused over. The runtime status table now holds the capability name
+  beside the class, bounded, and only where the name is a key of your own
+  signed manifest — it can never be a credential or a crash term. A plugins
+  row reads like `runtime refused/duplicate_tool (calendar_create_event)`.
+
+- **`fermix doctor` reports a refused `config.toml` as a failed row instead
+  of dying on it.** The diagnostic verb reads config through the same loader
+  the daemon boots with, and that loader raises — on an unknown section key,
+  on an invalid value, and, as a bare `raise` the first rescue missed, on
+  the legacy `provider = ...` layout under a provider section, whose
+  remediation text is the longest and most useful one doctor has. So the one
+  command meant to explain a broken install printed a stacktrace and nothing
+  else. Both kinds are caught now and rendered as a failed check carrying
+  the loader's own message. One caveat stated plainly: in the shipped binary
+  the release config provider evaluates that same load at boot and raises
+  there first, so what you actually see is the boot error, and this row
+  covers the paths where that provider chain does not run. Separately, the
+  Computer History doctor row stopped crashing on a default-configured
+  install, where the default summarizer route hit a clause that did not
+  exist.
 
 ### Security
 
-- **The browser tool refuses ambiguous host spellings and non-web documents.**
-  Fermix vetted the host `URI.parse/1` produced while Chrome fetched the host its
-  own parser produced, and the two agree only over ASCII: `%2e` decodes to a dot,
-  a backslash ends the authority (`169.254.169.254\.example.com` read as a
-  subdomain of `example.com` here and reached the metadata endpoint there), a
-  trailing dot is the DNS root anchor (`metadata.google.internal.` named exactly
-  what its undotted spelling names), and IDN mapping rewrites or deletes
-  characters outright. Every one of those was a way past the private-network and
-  internal-name blocks. A host is now accepted only as ASCII letters, digits,
-  `-`, `.` and `_`, or as an address literal, with the trailing root dot removed
-  before classification — so an internationalised domain must be given in its
-  punycode (`xn--`) spelling to navigate, and the refusal says so. Reading page
-  content became an allow-list on the same pass: the tool reads `http`, `https`
-  and `about:blank`, and refuses `file:`, `view-source:`, `filesystem:` and
-  `data:` documents with `read_origin_blocked` — a `blob:` URL is judged by the
-  document it wraps, so `blob:file:///…` and `blob:null/…` are refused with it.
-  The refusal points at the file tools instead of leaving the model to retry
-  against a `file://` tab.
-- **`[fermix_core.browser] allowed_hosts` is the way back in.** Every host the
-  policy refuses can be listed there and is matched before the localhost,
-  internal-suffix and private-range rules, so a refusal is never a dead end. It
-  is the only settable key in that section — the timeouts and caps beside it are
-  internal constants — and it is validated rather than assumed: an entry outside
-  the canonical host alphabet is refused by name (it could never have matched
-  anything), and any other key in the section stops the daemon from booting with
-  a message naming it, instead of sitting in `config.toml` reading as if it were
-  in force.
+- **The browser tool refuses ambiguous host spellings and non-web
+  documents.** Fermix vetted the host `URI.parse/1` produced while Chrome
+  fetched the host its own parser produced, and the two agree only over
+  ASCII: `%2e` decodes to a dot, a backslash ends the authority
+  (`169.254.169.254\.example.com` read as a subdomain of `example.com` here
+  and reached the metadata endpoint there), a trailing dot is the DNS root
+  anchor (`metadata.google.internal.` named exactly what its undotted
+  spelling names), and IDN mapping rewrites or deletes characters outright.
+  Every one of those was a way past the private-network and internal-name
+  blocks. A host is now accepted only as ASCII letters, digits, `-`, `.` and
+  `_`, or as an address literal, with the trailing root dot removed before
+  classification — so an internationalised domain must be given in its
+  punycode (`xn--`) spelling to navigate, and the refusal says so. Reading
+  page content became an allow-list on the same pass: the tool reads `http`,
+  `https` and `about:blank`, and refuses `file:`, `view-source:`,
+  `filesystem:` and `data:` documents with `read_origin_blocked` — a `blob:`
+  URL is judged by the document it wraps, so `blob:file:///…` and
+  `blob:null/…` are refused with it. The refusal points at the file tools
+  instead of leaving the model to retry against a `file://` tab.
+
+- **The browser tool vets what a download is fetching, not just what a page
+  navigates to.** Chrome performs a download as a navigation without the
+  private-network and CORS protections, and streams the bytes straight into
+  the workspace where the file tools can read them back — so an allowed
+  public page could pull `http://192.168.1.1/config.bin` past every host
+  rule the read gate enforces. The source URL is now checked the moment
+  Chrome announces the download: a refused one is cancelled, whatever had
+  already landed on disk is deleted, and the tool answers `download_blocked`
+  carrying the policy's own sentence. A download that announces no source
+  URL cannot be vetted, so it is refused rather than waved through, and a
+  cancel the browser itself refuses gets its own distinct error saying the
+  transfer may still be writing. Page-local sources (`blob:`, `data:`,
+  `filesystem:`) stay allowed, because their bytes come from a document the
+  navigation gate already admitted.
+
+- **`[fermix_core.browser] allowed_hosts` is the way back in.** Every host
+  the policy refuses can be listed there and is matched before the
+  localhost, internal-suffix and private-range rules, so a refusal is never
+  a dead end. It is the only settable key in that section — the timeouts and
+  caps beside it are internal constants — and it is validated rather than
+  assumed: an entry outside the canonical host alphabet is refused by name
+  (it could never have matched anything), and any other key in the section
+  stops the daemon from booting with a message naming it, instead of sitting
+  in `config.toml` reading as if it were in force. The refusals for an
+  internal hostname and for a private-network address now name that remedy
+  inline rather than ending at "blocked by browser policy", which is the
+  half that matters, since the model is the primary reader of those
+  sentences and a dead-end refusal sends it straight into a retry loop
+  against the same wall.
+
+- **Every outbound WebSocket that dials a vendor verifies the certificate it
+  is handed.** WebSockex opens a `wss://` socket with `insecure: true`
+  unless the call site passes explicit `:ssl_options`, and nothing at the
+  call site says so — no error, no log line — so the Discord gateway and the
+  OpenAI Realtime voice socket accepted any certificate an active attacker
+  on the path presented, along with the API key or bearer token sitting in
+  the handshake headers. All five now dial through one shared TLS posture:
+  peer verification against the OS trust store, with SNI and the hostname
+  check derived from the URL being dialled — Discord, OpenAI Realtime,
+  Deepgram and SpaceXAI transcription, and Zoom RTMS. A URL with no host is
+  refused before dialling and is never echoed back in the error, because the
+  RTMS event URL carries an OAuth token. There is deliberately no opt-out
+  flag.
+
+- **The daemon log redacts private keys instead of writing them out in
+  full.** The log formatter already masked provider keys and tokens by
+  shape; it now also matches a whole `-----BEGIN … PRIVATE KEY-----` block —
+  EC, RSA, DSA, encrypted, OpenSSH — and a PGP private key block, and
+  replaces it with `[REDACTED:private-key]`. This matters more than it
+  sounds: an APNs `.p8` signing key and the mobile listener's own TLS key
+  are both PEM, and `ssh-keygen` writes OpenSSH format by default, so any
+  error or config dump carrying one previously wrote the entire key into
+  `~/.fermix/logs` and straight out of `fermix logs`. It is a pattern match
+  over the already-formatted line, so it costs nothing when there is no key
+  to find, and the pattern list is hand-maintained — a key format nobody
+  wrote a pattern for is still not redacted. Nothing about how keys are
+  stored or read changes.
 
 ## [0.9.0] - 2026-08-13
 
