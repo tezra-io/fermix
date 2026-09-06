@@ -546,8 +546,23 @@ defmodule FermixCore.Management.ProtocolContractTest do
     [
       {"auth.start", %{"provider" => "openai_codex"},
        [operation_opts: [jobs: jobs(), login: blocking_login()]]},
+      # The route write and the token-manager reload are seams like every other
+      # one here, and leaving them live made this async case do two things to
+      # daemon-wide state: rewrite the suite's `config.toml` through the real
+      # `Wizard`, and start a permanent `anthropic_oauth` manager under
+      # `Auth.TokenSupervisor`'s dynamic supervisor, which nothing reaps. The
+      # golden result is the started view, so neither showed up here while the
+      # leaked manager failed `AuthCompletionTest` three cases at a time.
       {"auth.import.start", %{"source" => "claude_code"},
-       [operation_opts: [jobs: jobs(), importer: importer(), promote: fn _id -> :ok end]]},
+       [
+         operation_opts: [
+           jobs: jobs(),
+           importer: importer(),
+           set_auth_mode: fn :anthropic, :oauth -> {:ok, %{}} end,
+           reload: fn -> :ok end,
+           promote: fn _id -> :ok end
+         ]
+       ]},
       {"plugins.install.start", %{"name" => "obsidian"},
        [operation_opts: [jobs: jobs(), install: fn _name, _opts -> {:ok, :installed} end]]},
       {"plugins.check.start", %{"name" => "google_calendar"},
