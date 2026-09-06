@@ -4,6 +4,7 @@ defmodule FermixCore.TimeoutsTest do
   import ExUnit.CaptureLog
 
   alias FermixCore.Timeouts
+  alias FermixCore.Transcription.Outbox
 
   describe "expired/3" do
     test "returns the firing-site error shape" do
@@ -119,6 +120,17 @@ defmodule FermixCore.TimeoutsTest do
     test "the WS connect and close-drain budgets are named constants" do
       assert Timeouts.transcription_ws_connect() == 10_000
       assert Timeouts.transcription_ws_close_drain() == 10_000
+    end
+
+    test "the send-stall budget recovers a wedged socket inside the outbox buffer" do
+      # The deadline bounds a full in-flight window: audio cast to the socket
+      # process and never acknowledged. What arrives during the stall has to fit
+      # in the 30 s buffer alongside the window itself, or the recovery this
+      # deadline exists to trigger would drop audio on its way in.
+      assert Timeouts.transcription_ws_send_stall() == 10_000
+
+      stalled_bytes = div(Timeouts.transcription_ws_send_stall(), 1_000) * 32_000
+      assert stalled_bytes + Outbox.inflight_max_bytes() < Outbox.buffer_max_bytes()
     end
 
     test "the local STT sidecar deadlines bound spawn, one batch, and the flush" do

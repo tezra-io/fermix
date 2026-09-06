@@ -3,9 +3,11 @@ defmodule FermixChannels.Telemetry do
 
   @pair_statuses [:approved, :denied, :expired, :rate_limited]
   @push_statuses [:sent, :failed]
+  @transport_statuses [:degraded, :recovered]
 
   @type pair_status :: :approved | :denied | :expired | :rate_limited
   @type push_status :: :sent | :failed
+  @type transport_status :: :degraded | :recovered
 
   @spec emit_parse(atom(), term(), non_neg_integer()) :: :ok
   def emit_parse(channel, result, duration_us)
@@ -67,6 +69,29 @@ defmodule FermixChannels.Telemetry do
       [:fermix, :channel, :push],
       %{count: 1, duration_us: duration_us},
       %{channel: channel, status: status}
+    )
+  end
+
+  @doc """
+  A channel transport crossing into or out of a degraded posture.
+
+  Fires on transitions only — emitting per failure would rebuild in telemetry
+  the same flood the log de-duplication exists to prevent. Carries no
+  `duration_us`: a state transition times nothing, and a fabricated zero would
+  read as a real measurement.
+
+  `error_class` is classified by the caller and guarded to an atom here, so no
+  response body, URL, or credential can reach a trace field.
+  """
+  @spec emit_transport(atom(), transport_status(), non_neg_integer(), atom()) :: :ok
+  def emit_transport(channel, status, consecutive_failures, error_class)
+      when is_atom(channel) and status in @transport_statuses and
+             is_integer(consecutive_failures) and consecutive_failures >= 0 and
+             is_atom(error_class) do
+    :telemetry.execute(
+      [:fermix, :channel, :transport],
+      %{count: 1, consecutive_failures: consecutive_failures},
+      %{channel: channel, status: status, error_class: error_class}
     )
   end
 

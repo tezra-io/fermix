@@ -34,6 +34,15 @@ defmodule FermixChannels.Application do
       FermixChannels.Mobile.Management
     )
 
+    # `/health` reports the Telegram poller's degraded posture. Core must not
+    # compile-depend on channels, so the poller registers itself here; the
+    # provider is present iff this application runs.
+    Application.put_env(
+      :fermix_core,
+      :telegram_poll_health_provider,
+      FermixChannels.Channels.Telegram.Poller
+    )
+
     mobile_boot_epoch = mobile_boot_epoch()
 
     children =

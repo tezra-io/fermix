@@ -44,13 +44,54 @@ defmodule FermixCore.ComputerHistory.Taint do
   Mask every history-tainted assistant message in `messages` **iff** `routes`
   is not permitted to carry history (an ungranted-remote hop). On a permitted
   (all-local-or-granted) chain the messages pass through untouched.
+
+  Pass the turn's frozen Gate snapshot as `opts[:snapshot]` — the identical
+  seam `tainted_turn?/2` documents — so every mask in one turn decides against
+  one grant set and a mid-turn `/history off` cannot move it. Without a
+  snapshot the decision is re-derived live.
   """
-  @spec mask_for_chain([map()], term()) :: [map()]
-  def mask_for_chain(messages, routes) when is_list(messages) do
-    if Gate.chain_permits_history?(routes) do
+  @spec mask_for_chain([map()], term(), keyword()) :: [map()]
+  def mask_for_chain(messages, routes, opts \\ []) when is_list(messages) and is_list(opts) do
+    if chain_permits_history?(routes, opts) do
       messages
     else
       Enum.map(messages, &mask/1)
+    end
+  end
+
+  @doc """
+  Whether the model saw activity-derived content **unmasked** in `messages`:
+  the chain permits history (so `mask_for_chain/3` left it in place) *and* at
+  least one message carries the marker. A reply generated from that replay is
+  itself activity-derived, so it inherits the stamp — the same transitivity the
+  compactor already applies to a checkpoint summary distilled from a tainted
+  turn. Persisted checkpoints carry the marker through `ConversationStore`, so
+  a tainted checkpoint in the replay window counts too.
+  """
+  @spec carries_unmasked_taint?([map()], term(), keyword()) :: boolean()
+  def carries_unmasked_taint?(messages, routes, opts \\ [])
+      when is_list(messages) and is_list(opts) do
+    Enum.any?(messages, &tainted?/1) and chain_permits_history?(routes, opts)
+  end
+
+  @doc """
+  Whether one message (or history entry) carries the taint marker. The single
+  home of the marker predicate: rows read back through the Repo are
+  string-keyed, in-memory messages are atom-keyed, and both spell the same
+  fact.
+  """
+  @spec tainted?(map()) :: boolean()
+  def tainted?(message) when is_map(message),
+    do: Map.get(message, :history_tainted, Map.get(message, "history_tainted")) == true
+
+  # The chain decision, read from the turn's frozen grant set when the caller
+  # has one, else from the live config. Both spellings are the identical rule
+  # (`chain_permits_history?/1` is `{:history_replay, routes}` against the
+  # current grants); the snapshot form just pins the grants for the turn.
+  defp chain_permits_history?(routes, opts) do
+    case Keyword.get(opts, :snapshot) do
+      nil -> Gate.chain_permits_history?(routes)
+      snapshot -> Gate.allow?(snapshot, {:history_replay, routes})
     end
   end
 

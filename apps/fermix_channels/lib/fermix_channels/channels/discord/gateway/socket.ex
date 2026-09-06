@@ -4,6 +4,10 @@ defmodule FermixChannels.Channels.Discord.Gateway.Socket do
 
   Handles the minimal M3 protocol surface: Hello, Identify, heartbeat, reconnect
   requests, and MESSAGE_CREATE / INTERACTION_CREATE dispatch events.
+
+  The peer is verified against the OS trust store via `FermixCore.Net.Tls` — the
+  bot token goes out over this socket in the Identify frame, so an unverified
+  peer would be handed it.
   """
 
   use WebSockex
@@ -12,6 +16,7 @@ defmodule FermixChannels.Channels.Discord.Gateway.Socket do
   require Logger
 
   alias FermixChannels.Channels.Discord.Gateway
+  alias FermixCore.Net.Tls
 
   @guilds_intent 1 <<< 0
   @guild_messages_intent 1 <<< 9
@@ -24,8 +29,32 @@ defmodule FermixChannels.Channels.Discord.Gateway.Socket do
                       @message_content_intent
 
   @spec start_link(String.t(), map(), keyword()) :: {:ok, pid()} | {:error, term()}
-  def start_link(url, state, opts \\ []) when is_binary(url) and is_map(state) do
-    WebSockex.start(url, __MODULE__, state, opts)
+  def start_link(url, state, opts \\ [])
+      when is_binary(url) and is_map(state) and is_list(opts) do
+    with {:ok, start_opts} <- start_options(url, opts) do
+      WebSockex.start(url, __MODULE__, state, start_opts)
+    end
+  end
+
+  @doc """
+  `opts` with the TLS options for `url` added, or `{:error, :ws_url_without_host}`
+  when the URL names no host.
+
+  The gateway URL is fetched from Discord's REST API rather than being a
+  constant here, so a hostless answer is refused before the dial: there would be
+  nothing to verify the peer against, and dialing anyway means WebSockex's
+  `verify_none`. The TLS options are set last so a caller cannot weaken them.
+  """
+  @spec start_options(String.t(), keyword()) ::
+          {:ok, keyword()} | {:error, :ws_url_without_host}
+  def start_options(url, opts) when is_binary(url) and is_list(opts) do
+    case URI.parse(url) do
+      %URI{host: host} when is_binary(host) and host != "" ->
+        {:ok, Keyword.put(opts, :ssl_options, Tls.client_options(host))}
+
+      %URI{} ->
+        {:error, :ws_url_without_host}
+    end
   end
 
   @impl true

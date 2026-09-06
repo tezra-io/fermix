@@ -58,6 +58,12 @@ defmodule FermixCore.Trace.TelemetryHandler do
       trace_event: "channel_push"
     },
     %{
+      event: [:fermix, :channel, :transport],
+      trace_type: :agent_event,
+      agent_field: :channel,
+      trace_event: "channel_transport"
+    },
+    %{
       event: [:fermix, :agent, :message],
       trace_type: :agent_event,
       agent_field: :agent,

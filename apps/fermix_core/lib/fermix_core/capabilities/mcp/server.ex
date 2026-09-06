@@ -227,6 +227,11 @@ defmodule FermixCore.Capabilities.MCP.Server do
 
   def handle_info(:rediscover, state), do: rediscover(state)
 
+  # The connection owner read `notifications/tools/list_changed` off the wire.
+  # Identical to the `tools_changed/1` cast, and deliberately so: there is one
+  # drift path, whichever surface reported the change.
+  def handle_info({:mcp_owner, :tools_changed}, state), do: drift(state)
+
   # The proxy saw the bounded run of invalid results. Capabilities come down and
   # the session is terminal; only an explicit reconnect brings it back.
   def handle_info({:mcp_proxy, :protocol_error, class}, state) do
@@ -286,11 +291,23 @@ defmodule FermixCore.Capabilities.MCP.Server do
 
   defp discover_and_register(state) do
     with :ok <- maybe_register_client(state),
+         :ok <- watch_upstream(state),
          {:ok, descriptors} <- list_tools(state),
          {:ok, state} <- register_tools(descriptors, state) do
       {:ok, complete_registration(%{state | discovery_attempts: 0})}
     end
   end
+
+  # A stdio source carries no signed contract, so it has no registration for a
+  # `tools/list_changed` to invalidate and nothing to watch.
+  defp watch_upstream(%{contract: nil}), do: :ok
+
+  # Armed BEFORE the first `tools/list`, because the notification can ride the
+  # SSE response to that very request; a watch registered afterwards would miss
+  # it. Re-armed on every pass, which the discoverer answers idempotently. One
+  # that arrives mid-pass queues behind it in this mailbox and becomes the
+  # single coalesced follow-up pass §7.6 describes.
+  defp watch_upstream(state), do: state.discoverer.watch_tools(state.client, self())
 
   defp register_tools(descriptors, %{contract: nil} = state) do
     registered = Enum.flat_map(descriptors, &register_descriptor(&1, state))

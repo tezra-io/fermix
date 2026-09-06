@@ -371,6 +371,28 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
     refute Map.has_key?(entry, "content")
   end
 
+  test "channel:transport event creates a bounded channel_transport agent_event trace", %{
+    dir: dir,
+    server: server
+  } do
+    :telemetry.execute(
+      [:fermix, :channel, :transport],
+      %{count: 1, consecutive_failures: 312},
+      %{channel: :telegram, status: :degraded, error_class: :timeout}
+    )
+
+    sync(server)
+
+    entries = read_entries(dir, :agent_event)
+    entry = find_entry!(entries, &(&1["event"] == "channel_transport"))
+    assert entry["agent"] == "telegram"
+    assert entry["channel"] == "telegram"
+    assert entry["status"] == "degraded"
+    assert entry["error_class"] == "timeout"
+    assert entry["consecutive_failures"] == 312
+    refute Map.has_key?(entry, "content")
+  end
+
   test "memory:review event creates a memory_review agent_event trace", %{
     dir: dir,
     server: server

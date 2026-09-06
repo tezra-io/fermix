@@ -114,6 +114,19 @@ defmodule FermixCore.Capabilities.MCP.Remote.OwnerTest do
 
   defp tool(name), do: %{"name" => name, "description" => name, "inputSchema" => %{}}
 
+  # The same page, delivered the way Streamable HTTP actually delivers one: an
+  # SSE stream that also carries a server-initiated notification.
+  defp tools_page_with_notice(id, tools) do
+    messages = [
+      %{"jsonrpc" => "2.0", "method" => "notifications/tools/list_changed"},
+      rpc_result(id, %{"tools" => tools})
+    ]
+
+    events = Enum.map(messages, &%{data: Jason.encode!(&1), event: nil, id: nil})
+
+    {:ok, %{status: 200, headers: [{"content-type", "text/event-stream"}], body: {:sse, events}}}
+  end
+
   defp owner_opts(status, agent, overrides \\ %{}, connect_opts \\ []) do
     [
       spec: spec(overrides),
@@ -232,6 +245,68 @@ defmodule FermixCore.Capabilities.MCP.Remote.OwnerTest do
       owner = start_owner(owner_opts(status, agent))
 
       assert {:error, {:invalid_remote_result, :tools_not_a_list}} = Owner.list_tools(owner)
+    end
+  end
+
+  describe "upstream tool-list changes" do
+    test "forwards a session notice to the registered listener", %{status: status} do
+      agent = start_agent([initialize_ok(), accepted()])
+      owner = start_owner(owner_opts(status, agent))
+
+      assert :ok = Owner.watch_tools(owner, self())
+      send(owner, {:mcp_session, :tools_changed})
+
+      assert_receive {:mcp_owner, :tools_changed}, 1_000
+    end
+
+    # The registration owner re-arms the watch on every discovery pass, so
+    # registering twice must be a no-op with the last listener winning.
+    test "watching is idempotent and the latest listener wins", %{status: status} do
+      agent = start_agent([initialize_ok(), accepted()])
+      owner = start_owner(owner_opts(status, agent))
+      parent = self()
+      first = spawn(fn -> receive do: (message -> send(parent, {:first, message})) end)
+
+      assert :ok = Owner.watch_tools(owner, first)
+      assert :ok = Owner.watch_tools(owner, self())
+      send(owner, {:mcp_session, :tools_changed})
+
+      assert_receive {:mcp_owner, :tools_changed}, 1_000
+      refute_receive {:first, _message}, 200
+    end
+
+    # Before discovery there is no registration for the notice to invalidate,
+    # so dropping it is the whole correct action.
+    test "drops a notice that arrives before anything is watching", %{status: status} do
+      agent = start_agent([initialize_ok(), accepted()])
+      owner = start_owner(owner_opts(status, agent))
+
+      send(owner, {:mcp_session, :tools_changed})
+      # A system message drains the mailbox in order, so the drop is observed
+      # rather than raced past.
+      _ = :sys.get_state(owner)
+
+      refute_received {:mcp_owner, :tools_changed}
+    end
+
+    # END TO END through the real `Remote.Session` the owner starts: the notice
+    # rides the SSE body of the tools/list response, is decoded there, and comes
+    # out of the owner as the message the registration owner listens for.
+    test "a notice riding the tools/list response reaches the listener", %{status: status} do
+      agent =
+        start_agent([
+          initialize_ok(),
+          accepted(),
+          tools_page_with_notice(2, [tool("eden_search")])
+        ])
+
+      owner = start_owner(owner_opts(status, agent))
+
+      assert :ok = Owner.watch_tools(owner, self())
+      assert {:ok, [descriptor]} = Owner.list_tools(owner)
+      assert descriptor.name == "eden_search"
+
+      assert_receive {:mcp_owner, :tools_changed}, 1_000
     end
   end
 

@@ -441,6 +441,7 @@ defmodule FermixOpik.Aggregation do
           dropped_disposition: Map.get(meta, :dropped_disposition),
           dropped_grounding: Map.get(meta, :dropped_grounding),
           dropped_invalid_name: Map.get(meta, :dropped_invalid_name),
+          dropped_history_tainted: Map.get(meta, :dropped_history_tainted),
           dropped_overflow: Map.get(meta, :dropped_overflow),
           deferred: Map.get(meta, :deferred),
           delivered_deferred: Map.get(meta, :delivered_deferred),
