@@ -54,9 +54,14 @@ defmodule FermixCore.Meetings.Rtms.Transport.WebSockex do
   a dropped leg terminates the socket process after the owner has been told —
   which is the v1 posture for the whole lane (a dropped leg is terminal for the
   meeting, and the Session finalizes whatever was captured).
+
+  Every leg verifies its peer against the OS trust store via
+  `FermixCore.Net.Tls`.
   """
 
   use WebSockex
+
+  alias FermixCore.Net.Tls
 
   @behaviour FermixCore.Meetings.Rtms.Transport
 
@@ -68,10 +73,38 @@ defmodule FermixCore.Meetings.Rtms.Transport.WebSockex do
     tag = Keyword.fetch!(opts, :tag)
     timeout = Keyword.get(opts, :connect_timeout_ms, @default_connect_timeout_ms)
 
-    WebSockex.start_link(url, __MODULE__, %{owner: owner, tag: tag},
-      handshake_timeout: timeout,
-      async: false
-    )
+    with {:ok, start_opts} <- start_options(url, timeout) do
+      WebSockex.start_link(url, __MODULE__, %{owner: owner, tag: tag}, start_opts)
+    end
+  end
+
+  @doc """
+  The `WebSockex` options for `url`, or `{:error, :ws_url_without_host}` when
+  the URL names no host.
+
+  Zoom supplies these URLs at run time — the signaling leg's comes out of a
+  webhook payload and the media leg's out of the signaling response — so a host
+  is a fact to check, not a constant to trust. Without one there is nothing to
+  verify the peer against, and dialing anyway means WebSockex's `verify_none`.
+  The URL is deliberately absent from the error: the event leg carries its OAuth
+  access token in the query string.
+  """
+  @spec start_options(String.t(), pos_integer()) ::
+          {:ok, keyword()} | {:error, :ws_url_without_host}
+  def start_options(url, timeout_ms)
+      when is_binary(url) and is_integer(timeout_ms) and timeout_ms > 0 do
+    case URI.parse(url) do
+      %URI{host: host} when is_binary(host) and host != "" ->
+        {:ok,
+         [
+           handshake_timeout: timeout_ms,
+           async: false,
+           ssl_options: Tls.client_options(host)
+         ]}
+
+      %URI{} ->
+        {:error, :ws_url_without_host}
+    end
   end
 
   @impl FermixCore.Meetings.Rtms.Transport

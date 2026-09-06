@@ -46,13 +46,20 @@ defmodule FermixChannels.Channels.Telegram.Markdown do
       italic — `*a **b** c*` renders `<i>a <b>b</b> c</i>`, and the scan
       resumes past the whole run. A doubled marker's own run test is unchanged.
 
-  The pass does O(1) work per step and never rebuilds the text it walks over,
-  because it sits on the hot path of every send *and* inside the outbound
-  splitter's binary search, which re-measures the same text repeatedly.
+  The search is *indexed* once per inline pass rather than walked once per
+  opener: `FermixChannels.Outbound.CloserScan` classifies every candidate in
+  the text exactly once and answers each scan with a binary search, so an
+  unmatched opener no longer rescans the whole remainder and a paragraph of
+  stray delimiters costs O(n log n) instead of O(n²). That matters because the
+  search sits on the hot path of every send *and* inside the outbound
+  splitter's binary search, which re-measures the same text repeatedly. The
+  dialect renderer shares that module, so the two parsers cannot drift apart.
 
   Inline nesting is bounded; past the depth cap the remaining inner text is
   emitted as escaped literal text rather than parsed further.
   """
+
+  alias FermixChannels.Outbound.CloserScan
 
   @max_inline_depth 8
   @quote_expandable_lines 3
@@ -336,7 +343,11 @@ defmodule FermixChannels.Channels.Telegram.Markdown do
 
   defp inline(text, %{depth: depth}) when depth >= @max_inline_depth, do: escape(text)
 
-  defp inline(text, ctx), do: scan(text, nil, [], ctx)
+  # The closer index covers exactly the text this pass walks, so a nested pass
+  # over an inner substring builds its own rather than inheriting this one.
+  defp inline(text, ctx) do
+    scan(text, nil, [], Map.put(ctx, :scan, CloserScan.index(text, ctx.links)))
+  end
 
   defp scan("", _prev, acc, _ctx), do: acc |> Enum.reverse() |> IO.iodata_to_binary()
 
@@ -376,7 +387,7 @@ defmodule FermixChannels.Channels.Telegram.Markdown do
   defp link(text, ctx) do
     with [label, "(" <> target] <- :binary.split(text, "]"),
          {:ok, url, rest} <- split_url(target, "", 0),
-         true <- link_parts?(label, url) do
+         true <- CloserScan.link_parts?(label, url) do
       inner = inline(label, %{links: false, depth: ctx.depth + 1})
       {:ok, ~s(<a href="#{escape(url)}">#{inner}</a>), rest, ")"}
     else
@@ -395,11 +406,6 @@ defmodule FermixChannels.Channels.Telegram.Markdown do
     split_url(rest, url <> <<char::utf8>>, depth)
   end
 
-  defp link_parts?(label, url) do
-    label != "" and url != "" and not String.contains?(label, "\n") and
-      not Regex.match?(~r/\s/u, url)
-  end
-
   defp emphasis(text, marker, tag, prev, ctx) do
     if opener?(text, prev) do
       close_emphasis(text, marker, tag, ctx)
@@ -409,7 +415,7 @@ defmodule FermixChannels.Channels.Telegram.Markdown do
   end
 
   defp close_emphasis(text, marker, tag, ctx) do
-    case find_closer(text, marker, ctx) do
+    case CloserScan.find(ctx.scan, text, marker) do
       {:ok, inner, rest} ->
         rendered = inline(inner, %{ctx | depth: ctx.depth + 1})
         {:ok, "<#{tag}>#{rendered}</#{tag}>", rest, marker}
@@ -420,134 +426,6 @@ defmodule FermixChannels.Channels.Telegram.Markdown do
   end
 
   defp opener?(text, prev), do: not whitespace_start?(text) and not alnum?(prev)
-
-  # -- Closer search --
-  #
-  # One forward pass over byte offsets. Candidate positions come from
-  # `:binary.match/3` scoped over the original binary, which copies nothing, and
-  # every test below reads at most four bytes — every delimiter is ASCII, so a
-  # candidate offset is always a codepoint boundary. The predecessor rebuilt the
-  # inner text one codepoint at a time and called `String.last/1` on it at every
-  # step, which made an unmatched opener cubic: 4 kB of "**a " took ~25 s.
-
-  defp find_closer(text, marker, ctx) do
-    seek_closer(text, 0, marker, :binary.compile_pattern(candidate_bytes(marker, ctx)))
-  end
-
-  # The only bytes that can close the run or open a construct to step over.
-  defp candidate_bytes(marker, %{links: true}), do: [<<marker_byte(marker)>>, "`", "["]
-  defp candidate_bytes(marker, _ctx), do: [<<marker_byte(marker)>>, "`"]
-
-  defp seek_closer(text, pos, marker, candidates) do
-    case :binary.match(text, candidates, scope: {pos, byte_size(text) - pos}) do
-      :nomatch -> :none
-      {at, _len} -> take_closer(text, at, marker, candidates)
-    end
-  end
-
-  defp take_closer(text, at, marker, candidates) do
-    case classify_candidate(text, at, marker) do
-      {:closer, rest} -> {:ok, binary_part(text, 0, at), rest}
-      {:skip, next} -> seek_closer(text, advanced!(at, next), marker, candidates)
-    end
-  end
-
-  defp advanced!(at, next) when next > at, do: next
-
-  defp advanced!(at, next) do
-    raise "telegram markdown closer search made no progress at byte #{at} (next: #{next})"
-  end
-
-  defp classify_candidate(text, at, marker) do
-    case :binary.at(text, at) do
-      ?` -> skip_to(code_span_end(text, at), at)
-      ?[ -> skip_to(link_end(text, at), at)
-      _delimiter -> delimiter_candidate(text, at, marker)
-    end
-  end
-
-  defp skip_to({:ok, next}, _at), do: {:skip, next}
-  defp skip_to(:none, at), do: {:skip, at + 1}
-
-  defp delimiter_candidate(text, at, marker) do
-    run = run_length(text, at + 1, marker_byte(marker), 1)
-
-    cond do
-      run < byte_size(marker) -> {:skip, at + 1}
-      inner_run?(run, marker) -> {:skip, at + run}
-      closer?(text, at, marker) -> {:closer, tail_after(text, at, marker)}
-      true -> {:skip, at + 1}
-    end
-  end
-
-  # A doubled delimiter belongs to the bold/strikethrough construct nested
-  # inside, so it can never close a single-character italic.
-  defp inner_run?(run, marker), do: run > 1 and byte_size(marker) == 1
-
-  # Flanking, unchanged: a closer needs a non-empty body, sits immediately after
-  # non-whitespace, and is not followed by an alphanumeric.
-  defp closer?(text, at, marker) do
-    at > 0 and not whitespace_byte?(:binary.at(text, at - 1)) and
-      not alnum_start?(next_char(text, at, marker))
-  end
-
-  defp run_length(text, at, byte, run) when at < byte_size(text) do
-    if :binary.at(text, at) == byte, do: run_length(text, at + 1, byte, run + 1), else: run
-  end
-
-  defp run_length(_text, _at, _byte, run), do: run
-
-  # `code_span/1` accepts a body that is non-empty and ends at the next backtick.
-  defp code_span_end(text, at) do
-    case :binary.match(text, "`", scope: {at + 1, byte_size(text) - at - 1}) do
-      {close, 1} when close > at + 1 -> {:ok, close + 1}
-      _other -> :none
-    end
-  end
-
-  # `[label](url)` measured rather than rendered, admitting exactly what `link/2`
-  # admits: the first `]`, an immediate `(`, and a balanced-paren target.
-  defp link_end(text, at) do
-    with {close, 1} <- :binary.match(text, "]", scope: {at + 1, byte_size(text) - at - 1}),
-         ?( <- byte_at(text, close + 1),
-         {:ok, stop} <- url_end(text, close + 2, 0),
-         true <- link_parts?(slice(text, at + 1, close), slice(text, close + 2, stop - 1)) do
-      {:ok, stop}
-    else
-      _other -> :none
-    end
-  end
-
-  # Byte just past the `)` closing a link target, parentheses balanced.
-  defp url_end(text, at, _depth) when at >= byte_size(text), do: :none
-
-  defp url_end(text, at, depth) do
-    case {:binary.at(text, at), depth} do
-      {?), 0} -> {:ok, at + 1}
-      {?), _depth} -> url_end(text, at + 1, depth - 1)
-      {?(, _depth} -> url_end(text, at + 1, depth + 1)
-      {_byte, _depth} -> url_end(text, at + 1, depth)
-    end
-  end
-
-  defp marker_byte(marker), do: :binary.at(marker, 0)
-
-  defp byte_at(text, at) when at < byte_size(text), do: :binary.at(text, at)
-  defp byte_at(_text, _at), do: nil
-
-  defp slice(text, from, to), do: binary_part(text, from, to - from)
-
-  defp tail_after(text, at, marker) do
-    from = at + byte_size(marker)
-    binary_part(text, from, byte_size(text) - from)
-  end
-
-  # Four bytes always hold the whole next codepoint, so the alphanumeric test
-  # never has to copy the tail.
-  defp next_char(text, at, marker) do
-    from = at + byte_size(marker)
-    binary_part(text, from, min(4, byte_size(text) - from))
-  end
 
   # -- Text helpers --
 
@@ -590,15 +468,8 @@ defmodule FermixChannels.Channels.Telegram.Markdown do
   defp alnum?(nil), do: false
   defp alnum?(char), do: Regex.match?(@alnum_pattern, char)
 
-  defp alnum_start?(<<char::utf8, _::binary>>), do: alnum?(<<char::utf8>>)
-  defp alnum_start?(_text), do: false
-
   defp whitespace_start?(<<char::utf8, _::binary>>), do: char in [?\s, ?\t, ?\n, ?\r]
   defp whitespace_start?(_text), do: true
-
-  # Safe on a raw byte: every whitespace it tests is ASCII, and a UTF-8
-  # continuation byte can never equal one.
-  defp whitespace_byte?(byte), do: byte in [?\s, ?\t, ?\n, ?\r]
 
   # -- Oversized fence extraction --
 

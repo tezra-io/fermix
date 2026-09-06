@@ -82,6 +82,103 @@ defmodule FermixCore.ComputerHistory.TaintTest do
     end
   end
 
+  describe "mask_for_chain/3 — the turn's frozen grant set" do
+    test "the frozen snapshot masks a chain the live config would now permit" do
+      # A mid-turn grant edit must not retroactively un-mask the replay the
+      # turn already built: every mask in one turn reads one grant set.
+      enable([])
+      snapshot = Gate.snapshot(operator_ctx([local_route()]), macos?: true)
+
+      enable(remote_summaries: [:anthropic])
+
+      [masked] =
+        Taint.mask_for_chain([tainted_msg()], [remote_route(:anthropic)], snapshot: snapshot)
+
+      assert masked.content =~ "omitted"
+      assert Taint.mask_for_chain([tainted_msg()], [remote_route(:anthropic)]) == [tainted_msg()]
+    end
+
+    test "the frozen snapshot permits a chain the live config would now mask" do
+      enable(remote_summaries: [:anthropic])
+      snapshot = Gate.snapshot(operator_ctx([local_route()]), macos?: true)
+
+      Application.put_env(:fermix_core, :computer_history, enabled: false)
+
+      msgs = [tainted_msg()]
+      assert Taint.mask_for_chain(msgs, [remote_route(:anthropic)], snapshot: snapshot) == msgs
+      [live] = Taint.mask_for_chain(msgs, [remote_route(:anthropic)])
+      assert live.content =~ "omitted"
+    end
+
+    test "an empty opts list is byte-identical to the 2-arity call" do
+      enable([])
+      msgs = [clean_msg(), tainted_msg()]
+
+      for chain <- [[local_route()], [remote_route(:openai)], nil] do
+        assert Taint.mask_for_chain(msgs, chain, []) == Taint.mask_for_chain(msgs, chain)
+      end
+    end
+  end
+
+  describe "carries_unmasked_taint?/3" do
+    test "true when a permitted chain carries a tainted message unmasked" do
+      enable([])
+      assert Taint.carries_unmasked_taint?([clean_msg(), tainted_msg()], [local_route()])
+    end
+
+    test "false on an ungranted-remote chain (the message was masked)" do
+      enable([])
+      refute Taint.carries_unmasked_taint?([tainted_msg()], [remote_route(:openai)])
+    end
+
+    test "false when no message carries the marker" do
+      enable([])
+      refute Taint.carries_unmasked_taint?([clean_msg()], [local_route()])
+      refute Taint.carries_unmasked_taint?([], [local_route()])
+    end
+
+    test "a nil chain fails closed" do
+      enable([])
+      refute Taint.carries_unmasked_taint?([tainted_msg()], nil)
+    end
+
+    test "a disabled feature still sees the taint on a local chain" do
+      # The marker outlives `/history off`, so a reply paraphrasing it must
+      # still inherit the stamp.
+      Application.put_env(:fermix_core, :computer_history, enabled: false)
+      assert Taint.carries_unmasked_taint?([tainted_msg()], [local_route()])
+    end
+
+    test "reads the turn's frozen grant set when given a snapshot" do
+      enable(remote_summaries: [:anthropic])
+      snapshot = Gate.snapshot(operator_ctx([local_route()]), macos?: true)
+
+      Application.put_env(:fermix_core, :computer_history, enabled: false)
+
+      assert Taint.carries_unmasked_taint?([tainted_msg()], [remote_route(:anthropic)],
+               snapshot: snapshot
+             )
+
+      refute Taint.carries_unmasked_taint?([tainted_msg()], [remote_route(:anthropic)])
+    end
+
+    test "a string-keyed marker (a row straight off the Repo) counts" do
+      enable([])
+      row = %{"role" => "assistant", "content" => "…", "history_tainted" => true}
+      assert Taint.carries_unmasked_taint?([row], [local_route()])
+    end
+  end
+
+  describe "tainted?/1" do
+    test "recognises both marker spellings and nothing else" do
+      assert Taint.tainted?(tainted_msg())
+      assert Taint.tainted?(%{"history_tainted" => true})
+      refute Taint.tainted?(clean_msg())
+      refute Taint.tainted?(%{history_tainted: false})
+      refute Taint.tainted?(%{})
+    end
+  end
+
   describe "tainted_turn?/2" do
     test "an operator turn on an all-local permitted chain is tainted" do
       enable([])

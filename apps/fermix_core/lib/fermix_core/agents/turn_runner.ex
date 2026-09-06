@@ -112,13 +112,23 @@ defmodule FermixCore.Agents.TurnRunner do
   def commit(msg, turn_state, response, context_tokens) do
     conversation_key = ConversationKey.from(msg)
 
+    # Read the replayed conversation BEFORE persisting the reply: the stamp
+    # depends on what the model actually saw this turn (§13.6 transitivity).
+    # The re-read is deliberate — the per-turn `context` that knows what was
+    # injected never reaches `commit`, and threading a flag through the channels
+    # gateway was rejected (deviation 8). The conversation is single-flight, so
+    # what this reads is exactly what `run` replayed plus this turn's own
+    # (never-tainted) user message.
+    replayed =
+      ConversationStore.get_history(conversation_key, server: turn_state.conversation_store)
+
     add_message_opts =
       [
         server: turn_state.conversation_store,
         sender: "main",
         agent_id: turn_state.memory_agent_id,
         owner_id: turn_state.memory_owner_id
-      ] ++ history_taint_opt(msg, turn_state)
+      ] ++ history_taint_opt(msg, turn_state, replayed)
 
     ConversationStore.add_message(conversation_key, "assistant", response, add_message_opts)
 
@@ -139,14 +149,24 @@ defmodule FermixCore.Agents.TurnRunner do
     result
   end
 
-  # Stamp the assistant turn history-tainted (MILESTONE_32 §13.6) iff the Recent
-  # Activity section was Gate-permitted this turn. The decision reads the SAME
-  # frozen snapshot the section injection read (`turn_state.computer_history_gate`,
-  # built once by MainAgent), so a `/history off` or grant edit landing mid-turn
-  # can never make the stamp disagree with the section — the exact drift the
-  # live re-derivation had. The context re-derivation remains only as the
-  # fallback for callers without a frozen snapshot.
-  defp history_taint_opt(msg, turn_state) do
+  # Stamp the assistant turn history-tainted (MILESTONE_32 §13.6) on either of
+  # the two ways a reply becomes activity-derived:
+  #
+  #   * the Recent Activity section was Gate-permitted this turn (the section's
+  #     own predicate), or
+  #   * the replay carried an activity-derived message UNMASKED, so the model
+  #     could paraphrase it — the same transitivity the compactor applies to a
+  #     checkpoint summary distilled from a tainted turn. Without this, a
+  #     `/history off` turn on an all-local chain (which legitimately replays
+  #     tainted turns unmasked) persisted the paraphrase clean, and a later
+  #     ungranted-remote turn masked the original and sent the paraphrase.
+  #
+  # The decision reads the SAME frozen snapshot the section injection read
+  # (`turn_state.computer_history_gate`, built once by MainAgent), so a
+  # `/history off` or grant edit landing mid-turn can never make the stamp
+  # disagree with the section — the exact drift the live re-derivation had. The
+  # context re-derivation remains only for callers without a frozen snapshot.
+  defp history_taint_opt(msg, turn_state, replayed) do
     gate_context = %{
       source_trust: Map.get(msg, :source_trust),
       ordered_routes: Map.get(turn_state, :ordered_routes),
@@ -154,13 +174,24 @@ defmodule FermixCore.Agents.TurnRunner do
       harness_continuation_depth: harness_continuation_depth(msg)
     }
 
-    opts =
-      case Map.get(turn_state, :computer_history_gate) do
-        nil -> []
-        snapshot -> [snapshot: snapshot]
-      end
+    opts = history_gate_opts(turn_state)
+    routes = Map.get(turn_state, :ordered_routes)
 
-    if Taint.tainted_turn?(gate_context, opts), do: [metadata: Taint.metadata()], else: []
+    if Taint.tainted_turn?(gate_context, opts) or
+         Taint.carries_unmasked_taint?(replayed, routes, opts),
+       do: [metadata: Taint.metadata()],
+       else: []
+  end
+
+  # The turn's frozen Gate snapshot as taint opts, or `[]` for a caller that
+  # has none (the live derivation). Built once and shared by every taint
+  # decision in the turn — the replay mask, the compaction mask, and the commit
+  # stamp all read one grant set.
+  defp history_gate_opts(turn_state) do
+    case Map.get(turn_state, :computer_history_gate) do
+      nil -> []
+      snapshot -> [snapshot: snapshot]
+    end
   end
 
   @doc """
@@ -286,7 +317,9 @@ defmodule FermixCore.Agents.TurnRunner do
     # assistant turn is masked before it can ride this turn's route chain if any
     # hop is an ungranted remote. On a permitted (all-local-or-granted) chain it
     # passes through untouched.
-    masked_history = Taint.mask_for_chain(history, Map.get(state, :ordered_routes))
+    masked_history =
+      Taint.mask_for_chain(history, Map.get(state, :ordered_routes), history_gate_opts(state))
+
     messages = RuntimeContext.messages_for(ctx, profile, masked_history, user_message)
     accounting = RuntimeContext.accounting_for(ctx, profile)
     emit_prompt_context_telemetry(state.memory_agent_id, messages, accounting, cache_status)
@@ -1013,7 +1046,7 @@ defmodule FermixCore.Agents.TurnRunner do
     # Strict taint (MILESTONE_32 §13.6): mask any activity-derived assistant turn
     # before it is summarized on an ungranted-remote compaction chain. Both the
     # preflight and post-delivery compaction paths funnel through here.
-    history = Taint.mask_for_chain(history, routes)
+    history = Taint.mask_for_chain(history, routes, history_gate_opts(state))
     before_tokens = Compactor.estimate_tokens(history)
     attempt = compaction_attempt(history, adapter, config, conversation_key, state)
 

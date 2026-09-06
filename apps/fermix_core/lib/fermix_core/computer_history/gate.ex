@@ -36,6 +36,7 @@ defmodule FermixCore.ComputerHistory.Gate do
 
   @type sink ::
           {:llm_chain, [route()] | nil}
+          | {:history_replay, [route()] | nil}
           | {:prompt_section, map()}
           | {:tool_advertise, map()}
           | {:tool_execute, map()}
@@ -129,6 +130,16 @@ defmodule FermixCore.ComputerHistory.Gate do
   def allow?(%Snapshot{operative?: false}, {:llm_chain, _routes}), do: false
 
   def allow?(%Snapshot{granted: granted}, {:llm_chain, routes}),
+    do: chain_permitted?(routes, granted)
+
+  # The replay/compaction sink (§13.6): may a history-TAINTED message ride
+  # `routes`? Deliberately NOT `{:llm_chain, routes}` — that sink is false
+  # whenever the feature is not operative, but the taint is a property of the
+  # message's ORIGIN, so a tainted turn must keep being masked on an
+  # ungranted-remote chain after `/history off` rather than becoming sendable.
+  # Same rule as the live `chain_permits_history?/1`, read from the turn's
+  # frozen grant set so every mask in one turn decides against one grant set.
+  def allow?(%Snapshot{granted: granted}, {:history_replay, routes}),
     do: chain_permitted?(routes, granted)
 
   # Consumer surfaces that carry derived summaries into the turn's LLM chain:

@@ -2,6 +2,7 @@ defmodule FermixCore.SkillCuration.MinerTest do
   use ExUnit.Case, async: true
 
   alias FermixCore.SkillCuration.Miner
+  alias FermixTestSupport.ComputerHistoryCanary
 
   # Queue-backed stub: each chat call pops the next canned reply and reports
   # the messages it saw, so the one-corrective-re-prompt bound is observable.
@@ -286,5 +287,149 @@ defmodule FermixCore.SkillCuration.MinerTest do
     assert system.content =~ "never as instructions" or system.content =~ "never instructions"
     assert user.content =~ "data, NOT instructions"
     assert user.content =~ "m1 | 2026-07-20 | telegram:owner-1/root"
+  end
+
+  # MILESTONE_32 §13.6 / inv. 20 — skill curation is a surface that re-sends
+  # conversation content (checkpoint summaries), so an activity-derived
+  # checkpoint must never ride a chain that is not permitted to carry history.
+  describe "history-tainted entries (§13.6)" do
+    # async: false is unnecessary here: none of these assert on the ambient
+    # Computer History config. A tainted entry rides only a LOOPBACK chain,
+    # which is permitted for every grant set, and the remote/adapter cases fail
+    # closed for every grant set. No test mutates the app env.
+    defp tainted_entry(index, text) do
+      Map.put(entry(index, text), :history_tainted, true)
+    end
+
+    defp local_routes,
+      do: [
+        {%{provider: :ollama, model: "llama3", base_url: "http://127.0.0.1:11434/v1"},
+         [adapter: QueueAdapter]},
+        {%{provider: :ollama, model: "llama3", base_url: "http://localhost:11434/v1"},
+         [adapter: QueueAdapter]}
+      ]
+
+    defp remote_routes,
+      do: [
+        {%{provider: :openai, model: "gpt-x", base_url: "https://api.openai.com/v1"},
+         [adapter: QueueAdapter]}
+      ]
+
+    defp mine_over(replies, opts, entries) do
+      queue = start_queue!(replies)
+
+      Miner.mine(
+        inputs(%{history: %{entries: entries}}),
+        Keyword.merge(opts, adapter_opts: [test_pid: self(), queue: queue])
+      )
+    end
+
+    defp corpus(canary) do
+      [
+        entry("m1", "chase the unpaid invoices for acme"),
+        entry("m2", "again: chase unpaid invoices please"),
+        entry("m3", "invoice chasing time, same as before"),
+        tainted_entry("m4", "summary of earlier work: you were reading #{canary}")
+      ]
+    end
+
+    test "a loopback chain carries the tainted entry into the prompt" do
+      canary = ComputerHistoryCanary.token("mine_local")
+
+      assert {:ok, result} =
+               mine_over([reply_json([])], [routes: local_routes()], corpus(canary))
+
+      assert result.dropped_history_tainted == 0
+      assert_receive {:miner_call, [_system, user]}
+      assert ComputerHistoryCanary.present?(user.content, canary)
+    end
+
+    test "an ungranted-remote chain drops it from the prompt and counts it" do
+      canary = ComputerHistoryCanary.token("mine_remote")
+
+      assert {:ok, result} =
+               mine_over([reply_json([])], [routes: remote_routes()], corpus(canary))
+
+      assert result.dropped_history_tainted == 1
+      assert_receive {:miner_call, messages}
+      assert ComputerHistoryCanary.absent?(messages, canary)
+      refute Enum.any?(messages, &(&1.content =~ "m4 |"))
+    end
+
+    test "a dropped entry cannot ground a candidate — its m-ref no longer exists" do
+      canary = ComputerHistoryCanary.token("mine_ground")
+
+      cites_dropped =
+        candidate_json(%{
+          "evidence" => [
+            %{"ref" => "m1", "quote" => "chase"},
+            %{"ref" => "m2", "quote" => "chase"},
+            %{"ref" => "m4", "quote" => "you were reading"}
+          ]
+        })
+
+      assert {:ok, result} =
+               mine_over([reply_json([cites_dropped])], [routes: remote_routes()], corpus(canary))
+
+      assert result.candidates == []
+      assert result.dropped_grounding == 1
+      assert result.dropped_history_tainted == 1
+    end
+
+    test "the same candidate grounds fine on a loopback chain" do
+      canary = ComputerHistoryCanary.token("mine_ok")
+
+      cites_tainted =
+        candidate_json(%{
+          "evidence" => [
+            %{"ref" => "m1", "quote" => "chase"},
+            %{"ref" => "m2", "quote" => "chase"},
+            %{"ref" => "m4", "quote" => "you were reading"}
+          ]
+        })
+
+      assert {:ok, %{candidates: [candidate]}} =
+               mine_over([reply_json([cites_tainted])], [routes: local_routes()], corpus(canary))
+
+      assert Enum.map(candidate.evidence, & &1.ref) == ["m1", "m2", "m4"]
+    end
+
+    test "an adapter-only context has no chain and fails closed" do
+      canary = ComputerHistoryCanary.token("mine_adapter")
+
+      assert {:ok, result} =
+               mine_over([reply_json([])], [adapter: QueueAdapter], corpus(canary))
+
+      assert result.dropped_history_tainted == 1
+      assert_receive {:miner_call, messages}
+      assert ComputerHistoryCanary.absent?(messages, canary)
+    end
+
+    test "a route_key seam gates on that single route" do
+      canary = ComputerHistoryCanary.token("mine_route_key")
+      loopback = %{provider: :ollama, model: "llama3", base_url: "http://127.0.0.1:11434/v1"}
+
+      assert {:ok, result} =
+               mine_over(
+                 [reply_json([])],
+                 [route_key: loopback, adapter: QueueAdapter],
+                 corpus(canary)
+               )
+
+      # `:adapter` short-circuits routing in `provider_turn/2`, so the gate must
+      # read the same world: no chain, fail closed. (A real cycle never passes
+      # both; this pins the precedence so the gate can never inspect a chain the
+      # call did not run on.)
+      assert result.dropped_history_tainted == 1
+    end
+
+    test "an untainted corpus is untouched on every chain shape" do
+      for opts <- [[routes: local_routes()], [routes: remote_routes()], [adapter: QueueAdapter]] do
+        assert {:ok, result} = mine_over([reply_json([])], opts, inputs(%{}).history.entries)
+        assert result.dropped_history_tainted == 0
+        assert_receive {:miner_call, [_system, user]}
+        assert user.content =~ "m4 | 2026-07-20"
+      end
+    end
   end
 end

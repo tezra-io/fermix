@@ -152,8 +152,17 @@ defmodule FermixCore.Timeouts do
   # WS connect covers TCP+TLS+upgrade for a native STT stream; close-drain bounds
   # the window between CloseStream/audio.done and the vendor's final results +
   # server close. KeepAlive is a periodic timer and deliberately NOT here.
+  #
+  # send-stall bounds a FULL in-flight window — audio cast to the socket process
+  # and never acknowledged, which means it is blocked inside a send. 10 s is long
+  # enough that an ordinary uplink hiccup (a retransmit, a slow TLS write)
+  # recovers without costing the connection, and short enough that the audio
+  # arriving meanwhile still fits in the outbox buffer (30 s) alongside the 5 s
+  # window itself — so the kill-and-reconnect this deadline triggers never loses
+  # audio to the drop path.
   @transcription_ws_connect_ms 10_000
   @transcription_ws_close_drain_ms 10_000
+  @transcription_ws_send_stall_ms 10_000
 
   @doc "WS handshake budget for a native transcription stream (Deepgram/xAI)."
   @spec transcription_ws_connect() :: pos_integer()
@@ -162,6 +171,10 @@ defmodule FermixCore.Timeouts do
   @doc "Budget from CloseStream/audio.done to the vendor's final results + close."
   @spec transcription_ws_close_drain() :: pos_integer()
   def transcription_ws_close_drain, do: @transcription_ws_close_drain_ms
+
+  @doc "Budget for a full in-flight window before the socket counts as wedged."
+  @spec transcription_ws_send_stall() :: pos_integer()
+  def transcription_ws_send_stall, do: @transcription_ws_send_stall_ms
 
   # --- Local STT sidecar (M21 Phase 2b) -------------------------------------
   # hello is emitted before model load, so it bounds process start only. batch

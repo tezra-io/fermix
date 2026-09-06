@@ -49,11 +49,12 @@ defmodule FermixCore.SkillCuration do
   @owner_channels [:telegram, :whatsapp, :discord, :slack, :signal]
 
   @type history_entry :: %{
-          index: String.t(),
-          label: String.t(),
-          day: Date.t(),
-          kind: :message | :checkpoint,
-          text: String.t()
+          required(:index) => String.t(),
+          required(:label) => String.t(),
+          required(:day) => Date.t(),
+          required(:kind) => :message | :checkpoint,
+          required(:text) => String.t(),
+          optional(:history_tainted) => true
         }
 
   @type history :: %{
@@ -474,7 +475,8 @@ defmodule FermixCore.SkillCuration do
       candidates: [],
       dropped_disposition: 0,
       dropped_grounding: 0,
-      dropped_invalid_name: 0
+      dropped_invalid_name: 0,
+      dropped_history_tainted: 0
     }
   end
 
@@ -676,6 +678,10 @@ defmodule FermixCore.SkillCuration do
       dropped_disposition: mined.dropped_disposition,
       dropped_grounding: mined.dropped_grounding,
       dropped_invalid_name: mined.dropped_invalid_name,
+      # §13.6: activity-derived checkpoints the miner refused to send on a chain
+      # not permitted to carry history. Surfaced so a shrunken window has a
+      # visible cause instead of looking like a quiet under-mine.
+      dropped_history_tainted: mined.dropped_history_tainted,
       dropped_overflow: outcome.dropped_overflow,
       deferred: outcome.deferred,
       delivered_deferred: outcome.delivered_deferred,
@@ -878,14 +884,26 @@ defmodule FermixCore.SkillCuration do
   end
 
   defp entry_from_row(row, kind) do
-    %{
+    entry = %{
       label: "#{row.channel}:#{row.chat_id}/#{row.thread_scope}",
       day: DateTime.to_date(row.created_at),
       kind: kind,
       text: row.content,
       sort_key: {DateTime.to_unix(row.created_at, :millisecond), row.id}
     }
+
+    mark_history_tainted(entry, row)
   end
+
+  # MILESTONE_32 §13.6: a checkpoint distilled from activity-derived turns
+  # carries `history_tainted` in its row metadata (`Compactor.checkpoint_metadata/1`),
+  # string-keyed off the Repo. Preserve it here or the miner cannot keep it off
+  # a chain that is not permitted to carry history. Message rows read the same
+  # field uniformly; they are never tainted today.
+  defp mark_history_tainted(entry, %{metadata: %{"history_tainted" => true}}),
+    do: Map.put(entry, :history_tainted, true)
+
+  defp mark_history_tainted(entry, _row), do: entry
 
   defp entry_bytes(entry) do
     byte_size(entry.text) + byte_size(entry.label) + @entry_overhead_bytes

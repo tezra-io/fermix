@@ -62,6 +62,21 @@ defmodule FermixCore.Capabilities.MCP.Remote.SessionTest do
 
   defp rpc_result(id, result), do: %{"jsonrpc" => "2.0", "id" => id, "result" => result}
 
+  # A Streamable HTTP POST may be answered with a stream carrying several
+  # messages; only one of them is the result the caller asked for.
+  defp sse(messages) do
+    events = Enum.map(messages, &%{data: Jason.encode!(&1), event: nil, id: nil})
+
+    {:ok,
+     %{
+       status: 200,
+       headers: [{"content-type", "text/event-stream"}],
+       body: {:sse, events}
+     }}
+  end
+
+  defp tools_changed, do: %{"jsonrpc" => "2.0", "method" => "notifications/tools/list_changed"}
+
   defp initialize_ok(version \\ "2025-06-18", headers \\ [{"mcp-session-id", @session_id}]) do
     json(200, rpc_result(1, %{"protocolVersion" => version, "capabilities" => %{}}), headers)
   end
@@ -82,9 +97,9 @@ defmodule FermixCore.Capabilities.MCP.Remote.SessionTest do
     {agent, opts}
   end
 
-  defp start_session(extra_responses \\ []) do
+  defp start_session(extra_responses \\ [], extra_opts \\ []) do
     {agent, opts} = handshake(extra_responses)
-    {:ok, session} = start_supervised({Session, opts})
+    {:ok, session} = start_supervised({Session, Keyword.merge(opts, extra_opts)})
     {agent, session}
   end
 
@@ -213,6 +228,76 @@ defmodule FermixCore.Capabilities.MCP.Remote.SessionTest do
 
       assert {:error, {:invalid_remote_result, :id_mismatch}} =
                Session.request(session, "tools/list", %{}, 5_000)
+    end
+  end
+
+  describe "server-initiated notifications" do
+    # THE BUG THIS PINS: this rail opens no GET stream, so the SSE stream
+    # answering a POST is the ONLY place a server-initiated message can reach
+    # it — and every message that was not the matching result was silently
+    # discarded. `notifications/tools/list_changed` therefore never left this
+    # module, and the whole §7.6 suspend/rediscover path was unreachable from
+    # the wire even though every piece of it was implemented and tested.
+    test "forwards a tools-changed notice and still returns the result" do
+      response = sse([tools_changed(), rpc_result(2, %{"tools" => []}), tools_changed()])
+      {_agent, session} = start_session([response], notify: self())
+
+      assert {:ok, %{"tools" => []}} = Session.request(session, "tools/list", %{}, 5_000)
+
+      # One message per notification, whichever side of the result it arrived on.
+      assert_receive {:mcp_session, :tools_changed}
+      assert_receive {:mcp_session, :tools_changed}
+      refute_received {:mcp_session, :tools_changed}
+    end
+
+    # Unchanged, double wrap included: `sse_message/2` returns a classified
+    # error and `extract/2` classifies it again. Pinning the shape the caller
+    # actually sees is the point — forwarding the notice must not alter it.
+    test "a stream with no matching result still fails the way it always did" do
+      {_agent, session} = start_session([sse([tools_changed()])], notify: self())
+
+      assert {:error, {:invalid_remote_result, {:invalid_remote_result, :no_matching_message}}} =
+               Session.request(session, "tools/list", %{}, 5_000)
+
+      # The notice arrived on the wire; the missing result does not un-arrive it.
+      assert_receive {:mcp_session, :tools_changed}
+    end
+
+    test "a session nobody is watching notifies nobody" do
+      response = sse([tools_changed(), rpc_result(2, %{"tools" => []})])
+      {_agent, session} = start_session([response])
+
+      assert {:ok, %{"tools" => []}} = Session.request(session, "tools/list", %{}, 5_000)
+      refute_received {:mcp_session, :tools_changed}
+    end
+
+    test "a JSON response never notifies" do
+      json = json(200, rpc_result(2, %{"tools" => []}))
+      {_agent, session} = start_session([json], notify: self())
+
+      assert {:ok, %{"tools" => []}} = Session.request(session, "tools/list", %{}, 5_000)
+      refute_received {:mcp_session, :tools_changed}
+    end
+
+    test "every other notification stays ignored, as before" do
+      progress = %{"jsonrpc" => "2.0", "method" => "notifications/progress", "params" => %{}}
+      response = sse([progress, rpc_result(2, %{"tools" => []})])
+      {_agent, session} = start_session([response], notify: self())
+
+      assert {:ok, %{"tools" => []}} = Session.request(session, "tools/list", %{}, 5_000)
+      refute_received {:mcp_session, :tools_changed}
+    end
+
+    # An id is what makes a message a request or a response; a notification has
+    # none. A tools-changed message carrying one is not a notification, and this
+    # rail answers no server requests.
+    test "a tools-changed message carrying an id is not a notification" do
+      request = Map.put(tools_changed(), "id", 77)
+      response = sse([request, rpc_result(2, %{"tools" => []})])
+      {_agent, session} = start_session([response], notify: self())
+
+      assert {:ok, %{"tools" => []}} = Session.request(session, "tools/list", %{}, 5_000)
+      refute_received {:mcp_session, :tools_changed}
     end
   end
 

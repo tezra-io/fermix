@@ -57,7 +57,10 @@ defmodule FermixCore.MixProject do
       # Compile-time-embedded IANA tz database (no runtime network fetch, unlike
       # :tzdata) so scheduled-job cron timezones resolve in the Burrito binary.
       {:tz, "~> 0.28"},
-      {:websockex, "~> 0.4"}
+      {:websockex, "~> 0.4"},
+      # Test-only: `Net.Tls` is proved against a live loopback TLS listener, and
+      # minting that listener's throwaway certificate needs a cert builder.
+      {:x509, "~> 0.9", only: :test}
     ] ++ opik_dep()
   end
 

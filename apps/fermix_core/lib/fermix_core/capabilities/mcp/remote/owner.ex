@@ -116,6 +116,28 @@ defmodule FermixCore.Capabilities.MCP.Remote.Owner do
   end
 
   @doc """
+  Discoverer callback: report upstream tool-list changes to `listener`.
+
+  The listener is the registration owner (`MCP.Server`), and it re-arms the
+  watch on every discovery pass, so this simply records the latest one. The
+  notification travels back as a plain `{:mcp_owner, :tools_changed}` message:
+  the dependency direction is Server -> Owner, and naming `MCP.Server` here
+  would reverse it.
+  """
+  @impl Discoverer
+  def watch_tools(owner, listener) when is_pid(listener) do
+    # The same budget as `list_tools/1`, and for the same reason: this call runs
+    # BEFORE the first discovery, so it is the one that actually waits out a
+    # still-connecting owner.
+    GenServer.call(owner, {:watch_tools, listener}, Timeouts.mcp_remote_startup() + 5_000)
+  catch
+    # Same contract as `list_tools/1`: a torn-down owner reports a classified
+    # error rather than dying with a raw `:noproc` inside its caller.
+    :exit, {reason, {GenServer, :call, _args}} when reason in [:noproc, :normal, :shutdown] ->
+      {:error, :remote_owner_down}
+  end
+
+  @doc """
   Issue one allowlisted `tools/call` on the owned session.
 
   This is the dispatch target `Remote.Proxy` calls once a request has passed
@@ -167,6 +189,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.Owner do
       session_module: Keyword.get(opts, :session, Session),
       session_opts: Keyword.take(opts, [:transport, :connect_opts, :resolver, :client_info]),
       session: nil,
+      listener: nil,
       deadline: System.monotonic_time(:millisecond) + Timeouts.mcp_remote_startup()
     }
 
@@ -191,6 +214,10 @@ defmodule FermixCore.Capabilities.MCP.Remote.Owner do
 
   def handle_call(:list_tools, _from, state) do
     {:reply, discover(state), state}
+  end
+
+  def handle_call({:watch_tools, listener}, _from, state) do
+    {:reply, :ok, %{state | listener: listener}}
   end
 
   def handle_call({:call_tool, _tool, _args, _timeout}, _from, %{session: nil} = state) do
@@ -219,6 +246,20 @@ defmodule FermixCore.Capabilities.MCP.Remote.Owner do
     )
 
     {:stop, :normal, state}
+  end
+
+  # Discovery has not run yet, so no registration exists for the notification to
+  # invalidate — the watch is armed before the first `tools/list`, so this is
+  # only ever the pre-discovery window. Dropping it is the whole correct action,
+  # not a degraded one.
+  def handle_info({:mcp_session, :tools_changed}, %{listener: nil} = state) do
+    Logger.debug("remote MCP owner dropped a tools-changed notice: no listener registered yet")
+    {:noreply, state}
+  end
+
+  def handle_info({:mcp_session, :tools_changed}, state) do
+    send(state.listener, {:mcp_owner, :tools_changed})
+    {:noreply, state}
   end
 
   # An unmatched message must not kill a connection the operator depends on,
@@ -293,7 +334,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.Owner do
   defp start_session(state) do
     opts =
       state.session_opts ++
-        [endpoint: state.endpoint, auth_ref: state.auth_ref]
+        [endpoint: state.endpoint, auth_ref: state.auth_ref, notify: self()]
 
     case state.session_module.start_link(opts) do
       {:ok, session} -> {:ok, session}

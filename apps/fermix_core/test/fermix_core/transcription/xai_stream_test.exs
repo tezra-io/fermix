@@ -16,8 +16,11 @@ defmodule FermixCore.Transcription.XAIStreamTest do
   # fixture directory's README, along with the live capture still owed.
   @fixtures Path.join(__DIR__, "fixtures/xai_stream")
   @observer :xai_ws_observer
-  # 30s of s16le/16k/mono audio: exactly @pcm_buffer_max_bytes.
+  # 30s of s16le/16k/mono audio: exactly Outbox.buffer_max_bytes().
   @buffer_cap_bytes 960_000
+  # 5s of the same audio: exactly Outbox.inflight_max_bytes().
+  @inflight_cap_bytes 160_000
+  @second_bytes 32_000
 
   defmodule FakeWsSocket do
     @moduledoc false
@@ -38,7 +41,15 @@ defmodule FermixCore.Transcription.XAIStreamTest do
       {:ok, socket}
     end
 
-    def send_binary(socket, payload), do: notify({:ws_binary, socket, payload})
+    def send_binary(socket, payload) do
+      notify({:ws_binary, socket, payload})
+      # A healthy socket acknowledges every binary frame to its parent. Both
+      # `start/1` and `send_binary/2` run in the session process, so `self()`
+      # here is the same parent the real socket sends to.
+      send(self(), {:transcription_ws, socket, {:sent, byte_size(payload)}})
+      :ok
+    end
+
     def send_text(socket, payload), do: notify({:ws_text, socket, payload})
     def close(socket), do: notify({:ws_close, socket})
 
@@ -52,7 +63,7 @@ defmodule FermixCore.Transcription.XAIStreamTest do
       end
     end
 
-    defp notify(message) do
+    def notify(message) do
       case Process.whereis(@observer) do
         nil -> :ok
         observer -> send(observer, message)
@@ -60,6 +71,17 @@ defmodule FermixCore.Transcription.XAIStreamTest do
 
       :ok
     end
+  end
+
+  defmodule WedgedWsSocket do
+    @moduledoc false
+    # The vendor that stopped draining: it takes frames and never acknowledges
+    # them, exactly as a socket process blocked inside a send does.
+
+    def start(opts), do: FakeWsSocket.start(opts)
+    def send_binary(socket, payload), do: FakeWsSocket.notify({:ws_binary, socket, payload})
+    def send_text(socket, payload), do: FakeWsSocket.send_text(socket, payload)
+    def close(socket), do: FakeWsSocket.close(socket)
   end
 
   defmodule FailingWsSocket do
@@ -339,6 +361,109 @@ defmodule FermixCore.Transcription.XAIStreamTest do
     end
   end
 
+  # The buffer bounds what the session holds while the server is not ready for
+  # audio. The in-flight window bounds what it may hand to a server that said it
+  # was ready and then stopped draining — before it existed, every later chunk
+  # queued in the socket's mailbox, unbounded, with every counter reading zero.
+  describe "in-flight window" do
+    test "a socket that stops acknowledging stops being handed audio" do
+      {session, socket} = ready_session(socket_mod: WedgedWsSocket)
+
+      Enum.each(1..6, fn _second -> StreamSession.push_pcm(session, second_of_audio()) end)
+      Enum.each(1..5, fn _second -> assert_receive {:ws_binary, ^socket, _pcm} end)
+
+      :sys.get_state(session)
+      refute_received {:ws_binary, ^socket, _pcm}
+      assert buffered_bytes(session) == @second_bytes
+    end
+
+    test "an ack reopens the window and the held audio follows" do
+      {session, socket} = ready_session()
+
+      # Five seconds fill the window; the sixth waits for the first ack and then
+      # goes out as the flush of the buffer.
+      Enum.each(1..6, fn _second -> StreamSession.push_pcm(session, second_of_audio()) end)
+      Enum.each(1..6, fn _second -> assert_receive {:ws_binary, ^socket, _pcm} end)
+
+      assert buffered_bytes(session) == 0
+      assert dropped_bytes(session) == 0
+    end
+
+    test "audio past the buffer cap is dropped and logged once while the socket is wedged" do
+      {session, _socket} = ready_session(socket_mod: WedgedWsSocket)
+
+      log =
+        capture_log(fn ->
+          StreamSession.push_pcm(session, :binary.copy(<<0>>, @inflight_cap_bytes))
+          StreamSession.push_pcm(session, :binary.copy(<<1>>, @buffer_cap_bytes))
+          StreamSession.push_pcm(session, :binary.copy(<<2>>, @second_bytes))
+          :sys.get_state(session)
+        end)
+
+      # Distinct wording from the pre-readiness drop: the server said it was
+      # ready, which is a different failure and a different thing to look at.
+      assert log =~ "buffer full while the socket is not draining"
+      assert dropped_bytes(session) == @second_bytes
+    end
+
+    test "a window still full at the deadline kills the socket and reconnects" do
+      {session, socket} = ready_session(socket_mod: WedgedWsSocket)
+      socket_down = Process.monitor(socket)
+      held = second_of_audio()
+
+      StreamSession.push_pcm(session, :binary.copy(<<0>>, @inflight_cap_bytes))
+      assert_receive {:ws_binary, ^socket, _pcm}
+      StreamSession.push_pcm(session, held)
+
+      # `:send_stall` is the session's own timer message and part of its testable
+      # surface: the deadline value itself is fixed in Timeouts.
+      send(session, :send_stall)
+
+      # A cast cannot reach a process blocked inside a send, so the wedged socket
+      # is killed and the ordinary reconnect path takes it from there.
+      assert_receive {:DOWN, ^socket_down, :process, ^socket, :killed}
+      assert_receive {:ws_started, socket2, _url, _headers, ^session}, 1_000
+
+      inject(session, socket2, fixture("transcript_created"))
+      assert_receive {:ws_binary, ^socket2, ^held}
+    end
+
+    test "an ack from a socket the session has replaced is ignored" do
+      {session, socket} = ready_session(socket_mod: WedgedWsSocket)
+      chunk = second_of_audio()
+
+      StreamSession.push_pcm(session, chunk)
+      assert_receive {:ws_binary, ^socket, ^chunk}
+
+      send(session, {:transcription_ws, socket, {:disconnect, :closed}})
+      assert_receive {:ws_started, socket2, _url, _headers, ^session}, 1_000
+      inject(session, socket2, fixture("transcript_created"))
+
+      StreamSession.push_pcm(session, chunk)
+      assert_receive {:ws_binary, ^socket2, ^chunk}
+      inflight = inflight_bytes(session)
+
+      # The dead socket owes nothing: crediting its ack would open a window the
+      # live socket never emptied.
+      send(session, {:transcription_ws, socket, {:sent, byte_size(chunk)}})
+      assert inflight_bytes(session) == inflight
+    end
+
+    test "finish/1 during a stall still ends the stream on the drain deadline" do
+      {session, socket} = ready_session(socket_mod: WedgedWsSocket)
+
+      StreamSession.push_pcm(session, :binary.copy(<<0>>, @inflight_cap_bytes))
+      assert_receive {:ws_binary, ^socket, _pcm}
+      StreamSession.push_pcm(session, second_of_audio())
+
+      StreamSession.finish(session)
+      send(session, :drain_timeout)
+
+      assert_receive {:transcript_stream_error, ^session,
+                      {:timeout, :transcription_ws_close_drain, 10_000}}
+    end
+  end
+
   # The clean drain (a remote-normal close, and `transcript.done`) is pinned in
   # "session lifecycle"; these are its abnormal twins, which used to be
   # indistinguishable from it.
@@ -529,6 +654,12 @@ defmodule FermixCore.Transcription.XAIStreamTest do
   end
 
   defp socket_ref(session), do: :sys.get_state(session).socket_ref
+
+  defp buffered_bytes(session), do: :sys.get_state(session).outbox.buffer_bytes
+  defp dropped_bytes(session), do: :sys.get_state(session).outbox.dropped_bytes
+  defp inflight_bytes(session), do: :sys.get_state(session).outbox.inflight_bytes
+
+  defp second_of_audio, do: :binary.copy(<<0, 1>>, 16_000)
 
   defp inject(session, socket, payload),
     do: send(session, {:transcription_ws, socket, {:frame, {:text, payload}}})

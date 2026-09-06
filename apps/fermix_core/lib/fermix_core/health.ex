@@ -20,42 +20,59 @@ defmodule FermixCore.Health do
 
   require Logger
 
+  # `child:` names the supervised process whose liveness IS this channel's
+  # runtime health, and `nil` means the channel runs no supervised child (it is
+  # driven by an inbound webhook). Liveness is deliberately NOT keyed on the
+  # configured `mode`: `ChannelRegistry.mode_ok?/3` already tolerates a stale
+  # `mode = "webhook"` and starts the poller anyway, so keying on config made
+  # health report a channel whose transport it had never looked at.
+  #
+  # ACP is probed through its `Endpoint`, never its `Supervisor`: an Endpoint
+  # that cannot bind its socket returns `:ignore`, and the Supervisor starts
+  # around it by design. Keying on the Supervisor would report a healthy ACP
+  # with no bound socket.
   @channels [
     %{
       key: :telegram,
       name: "telegram",
       default_enabled: true,
-      runtime_modes: %{polling: FermixChannels.Channels.Telegram.Poller}
+      child: FermixChannels.Channels.Telegram.Poller,
+      health_provider_key: :telegram_poll_health_provider
     },
     %{
       key: :whatsapp,
       name: "whatsapp",
       default_enabled: false,
-      runtime_modes: %{}
+      child: nil,
+      health_provider_key: nil
     },
     %{
       key: :discord,
       name: "discord",
       default_enabled: false,
-      runtime_modes: %{gateway: FermixChannels.Channels.Discord.Gateway}
+      child: FermixChannels.Channels.Discord.Gateway,
+      health_provider_key: nil
     },
     %{
       key: :slack,
       name: "slack",
       default_enabled: false,
-      runtime_modes: %{}
+      child: nil,
+      health_provider_key: nil
     },
     %{
       key: :signal,
       name: "signal",
       default_enabled: false,
-      runtime_modes: %{subprocess: FermixChannels.Channels.Signal.Listener}
+      child: FermixChannels.Channels.Signal.Listener,
+      health_provider_key: nil
     },
     %{
       key: :acp,
       name: "acp",
       default_enabled: true,
-      runtime_modes: %{gateway: FermixChannels.Channels.Acp.Endpoint}
+      child: FermixChannels.Channels.Acp.Endpoint,
+      health_provider_key: nil
     }
   ]
 
@@ -63,6 +80,7 @@ defmodule FermixCore.Health do
   def report(opts \\ []) do
     boot_report = Keyword.get_lazy(opts, :boot_report, &BootReport.current/0)
     process_resolver = Keyword.get(opts, :process_resolver, &Process.whereis/1)
+    transport_health = Keyword.get(opts, :transport_health, &default_transport_health/1)
     timestamp = Keyword.get(opts, :timestamp, DateTime.utc_now())
     # Restart truth comes from `RestartState` and from nowhere else. The boot
     # report is recomputed only when something saves, so reading it here would
@@ -70,7 +88,7 @@ defmodule FermixCore.Health do
     # `overview.get` until the operator happened to save something.
     restart = Keyword.get_lazy(opts, :restart, &RestartState.restart/0)
 
-    channels = channel_statuses(boot_report.failures, process_resolver)
+    channels = channel_statuses(boot_report.failures, process_resolver, transport_health)
     memory = memory_status(process_resolver)
     realtime = realtime_status(boot_report.failures, process_resolver)
 
@@ -131,7 +149,7 @@ defmodule FermixCore.Health do
     end
   end
 
-  defp channel_statuses(failures, process_resolver) do
+  defp channel_statuses(failures, process_resolver, transport_health) do
     Enum.map(@channels, fn channel ->
       config =
         case Config.channel(channel.key) do
@@ -140,40 +158,57 @@ defmodule FermixCore.Health do
         end
 
       enabled = Keyword.get(config, :enabled, channel.default_enabled) == true
-      mode = Keyword.get(config, :mode)
-      process_alive = process_alive(channel.runtime_modes, mode, enabled, process_resolver)
-
-      status =
-        cond do
-          not enabled ->
-            :disabled
-
-          failure = failure_status(failures, "channel:#{channel.name}") ->
-            failure
-
-          process_alive == false ->
-            :degraded
-
-          true ->
-            :ready
-        end
-
-      %{
-        name: channel.name,
-        status: status,
-        enabled: enabled,
-        mode: mode,
-        process_alive: process_alive
-      }
+      channel_entry(channel, config, enabled, {failures, process_resolver, transport_health})
     end)
   end
 
-  defp process_alive(_runtime_modes, _mode, false, _resolver), do: nil
+  defp channel_entry(channel, config, enabled, resolvers) do
+    {failures, process_resolver, transport_health} = resolvers
+    process_alive = process_alive(channel.child, enabled, process_resolver)
+    transport = transport(channel.health_provider_key, enabled, transport_health)
 
-  defp process_alive(runtime_modes, mode, true, resolver) do
-    case Map.get(runtime_modes, mode) do
+    status =
+      cond do
+        not enabled -> :disabled
+        failure = failure_status(failures, "channel:#{channel.name}") -> failure
+        process_alive == false -> :degraded
+        match?(%{status: :degraded}, transport) -> :degraded
+        true -> :ready
+      end
+
+    %{
+      name: channel.name,
+      status: status,
+      enabled: enabled,
+      # The persisted config value, reported as such. It no longer gates
+      # liveness, but it is genuine information and consumers read it.
+      mode: Keyword.get(config, :mode),
+      process_alive: process_alive,
+      transport: transport
+    }
+  end
+
+  # `nil` means exactly one thing: disabled, or this channel runs no supervised
+  # child. It never means "unknown, assume fine".
+  defp process_alive(_child, false, _resolver), do: nil
+  defp process_alive(nil, true, _resolver), do: nil
+  defp process_alive(child, true, resolver) when is_atom(child), do: resolver.(child) != nil
+
+  defp transport(_provider_key, false, _transport_health), do: nil
+  defp transport(nil, true, _transport_health), do: nil
+
+  defp transport(provider_key, true, transport_health) when is_atom(provider_key) do
+    transport_health.(provider_key)
+  end
+
+  # The provider is registered by `FermixChannels.Application` iff that app runs;
+  # core must not compile-depend on channels, so it is resolved at runtime. The
+  # read is a pure `:persistent_term` lookup with no process involved — a
+  # `GenServer.call` here would block behind a 50-second long poll.
+  defp default_transport_health(provider_key) when is_atom(provider_key) do
+    case Application.get_env(:fermix_core, provider_key) do
       nil -> nil
-      process_name -> resolver.(process_name) != nil
+      provider when is_atom(provider) -> provider.poll_health()
     end
   end
 

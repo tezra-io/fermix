@@ -14,6 +14,10 @@ defmodule FermixCore.Transcription.WsSocket do
   the socket stops and the session's own bounded reconnect policy decides what
   happens next.
 
+  The peer is verified against the OS trust store via `FermixCore.Net.Tls` —
+  the vendor's API key travels in the handshake headers, so an unverified socket
+  would hand it to whoever answered.
+
   The connect deadline is `FermixCore.Timeouts.transcription_ws_connect/0`,
   enforced by WebSockex's own `handshake_timeout`. A blown handshake surfaces as
   `{:error, reason}` from `start/1`, which the session returns from its `open`
@@ -26,11 +30,21 @@ defmodule FermixCore.Transcription.WsSocket do
   |---|---|
   | `{:transcription_ws, socket, {:frame, {:text, payload}}}` | a text frame arrived |
   | `{:transcription_ws, socket, {:frame, {:binary, payload}}}` | a binary frame arrived (neither vendor sends these; sessions count them as malformed) |
+  | `{:transcription_ws, socket, {:sent, bytes}}` | a queued binary frame reached the wire (text frames are not acked) |
   | `{:transcription_ws, socket, {:disconnect, status}}` | the connection dropped; the socket stops right after |
+
+  The `:sent` acknowledgement is what bounds this process's mailbox. Sends are
+  casts, so a vendor that stops draining leaves this process blocked inside one
+  write while every later cast queues behind it — and because the process is
+  single-threaded, an ack for frame N proves every earlier send completed. Bytes
+  cast minus bytes acked is therefore the session's measure of that backlog, to
+  within the one frame being written; a wedged socket simply stops acking, which
+  is exactly the signal `FermixCore.Transcription.Outbox` watches.
   """
 
   use WebSockex
 
+  alias FermixCore.Net.Tls
   alias FermixCore.Timeouts
 
   @doc """
@@ -43,10 +57,35 @@ defmodule FermixCore.Transcription.WsSocket do
     headers = Keyword.fetch!(opts, :headers)
     parent = Keyword.fetch!(opts, :parent)
 
-    WebSockex.start(url, __MODULE__, %{parent: parent},
-      extra_headers: headers,
-      handshake_timeout: Timeouts.transcription_ws_connect()
-    )
+    with {:ok, start_opts} <- start_options(url, headers) do
+      WebSockex.start(url, __MODULE__, %{parent: parent}, start_opts)
+    end
+  end
+
+  @doc """
+  The `WebSockex` options for `url`, or `{:error, :ws_url_without_host}` when
+  the URL names no host.
+
+  A hostless URL is refused here, before the dial, because there would be
+  nothing to verify the peer against — and dialing anyway means WebSockex's
+  `verify_none`, which is exactly the posture `Tls.client_options/2` exists to
+  replace.
+  """
+  @spec start_options(String.t(), [{String.t(), String.t()}]) ::
+          {:ok, keyword()} | {:error, :ws_url_without_host}
+  def start_options(url, headers) when is_binary(url) and is_list(headers) do
+    case URI.parse(url) do
+      %URI{host: host} when is_binary(host) and host != "" ->
+        {:ok,
+         [
+           extra_headers: headers,
+           handshake_timeout: Timeouts.transcription_ws_connect(),
+           ssl_options: Tls.client_options(host)
+         ]}
+
+      %URI{} ->
+        {:error, :ws_url_without_host}
+    end
   end
 
   @doc "Queues a binary frame (audio) on the socket. Never blocks the caller."
@@ -72,6 +111,14 @@ defmodule FermixCore.Transcription.WsSocket do
   def handle_frame(_frame, state), do: {:ok, state}
 
   @impl true
+  def handle_cast({:send_frame, {:binary, payload}}, state) do
+    # Acked BEFORE the reply, because WebSockex performs the blocking send after
+    # this callback returns: the session must hear about the frame that is about
+    # to be written, and hear nothing at all once a send stops returning.
+    send(state.parent, {:transcription_ws, self(), {:sent, byte_size(payload)}})
+    {:reply, {:binary, payload}, state}
+  end
+
   def handle_cast({:send_frame, frame}, state), do: {:reply, frame, state}
 
   def handle_cast(:close, state), do: {:close, state}

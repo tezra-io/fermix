@@ -161,6 +161,52 @@ defmodule FermixCore.Capabilities.MCP.Remote.ProxyTest do
     end
   end
 
+  defp await_inflight(proxy) do
+    Enum.reduce_while(1..300, :timeout, fn _i, _acc ->
+      if Proxy.stats(proxy).inflight? do
+        {:halt, :ok}
+      else
+        Process.sleep(10)
+        {:cont, :timeout}
+      end
+    end)
+    |> case do
+      :ok -> :ok
+      :timeout -> flunk("proxy never dispatched: #{inspect(Proxy.stats(proxy))}")
+    end
+  end
+
+  defp eventually(fun) do
+    Enum.reduce_while(1..300, false, fn _i, _acc ->
+      if fun.() do
+        {:halt, true}
+      else
+        Process.sleep(10)
+        {:cont, false}
+      end
+    end)
+  end
+
+  # A queued entry's real deadline is a full call timeout. Rewriting it is what
+  # lets the expiry rule be asserted against the rule rather than the clock.
+  defp expire_queued_deadlines(proxy) do
+    :sys.replace_state(proxy, fn state ->
+      expired =
+        state.queue
+        |> :queue.to_list()
+        |> Enum.map(&%{&1 | deadline: System.monotonic_time(:millisecond) - 1})
+        |> :queue.from_list()
+
+      %{state | queue: expired}
+    end)
+
+    :ok
+  end
+
+  # The proxy's own record of who is waiting. An entry answered without its
+  # monitor released leaks one ref per abandoned call.
+  defp monitors(proxy), do: :sys.get_state(proxy).monitors
+
   defp start_proxy(overrides, budget) do
     {:ok, proxy} =
       Proxy.start_link(
@@ -389,6 +435,131 @@ defmodule FermixCore.Capabilities.MCP.Remote.ProxyTest do
 
       assert Proxy.state(proxy) == :ready
       assert {:ok, _text} = Proxy.call(proxy, context(), "eden_get_note", %{})
+    end
+
+    # THE BUG THIS PINS: suspension gated admission only. `dispatch_next/1` never
+    # looked at the gate, so the moment the in-flight call settled — or the pacing
+    # timer fired — an already-queued entry went out on the contract the drift had
+    # just invalidated. The old contract must not be served after a notification,
+    # and "already queued" is not an exemption.
+    test "a queued call is held, not dispatched, while the gate is suspended", %{budget: budget} do
+      proxy = start_proxy(%{}, budget)
+      FakeDispatch.set_delay(300)
+
+      spawn_callers(proxy, 2)
+      await_queue(proxy, 1)
+      assert %{inflight?: true} = Proxy.stats(proxy)
+
+      :ok = Proxy.tools_changed(proxy)
+
+      # Past the in-flight call's own duration AND the pacing interval: both of
+      # the events that used to release the queued entry have now happened.
+      Process.sleep(300 + Limits.min_call_interval_ms() + 300)
+
+      assert %{gate: :suspended, queued: 1, inflight?: false} = Proxy.stats(proxy)
+      assert length(FakeDispatch.calls()) == 1
+    end
+
+    test "the pacing timer dispatches nothing while suspended", %{budget: budget} do
+      proxy = start_proxy(%{}, budget)
+
+      # One completed call arms the pacing interval, so the next admission waits
+      # on a `:pace` timer instead of dispatching straight away.
+      assert {:ok, _text} = Proxy.call(proxy, context(), "eden_get_note", %{})
+      assert length(FakeDispatch.calls()) == 1
+
+      spawn_callers(proxy, 1)
+      await_queue(proxy, 1)
+      :ok = Proxy.tools_changed(proxy)
+
+      Process.sleep(Limits.min_call_interval_ms() + 300)
+
+      assert %{gate: :suspended, queued: 1, inflight?: false} = Proxy.stats(proxy)
+      assert length(FakeDispatch.calls()) == 1
+    end
+
+    test "resume/2 releases the work held during the drift", %{budget: budget} do
+      proxy = start_proxy(%{}, budget)
+      FakeDispatch.set_delay(200)
+
+      spawn_callers(proxy, 2)
+      await_queue(proxy, 1)
+      :ok = Proxy.tools_changed(proxy)
+
+      Process.sleep(200 + Limits.min_call_interval_ms() + 200)
+      assert %{queued: 1} = Proxy.stats(proxy)
+      assert length(FakeDispatch.calls()) == 1
+
+      :ok = Proxy.resume(proxy, contract())
+
+      assert eventually(fn -> length(FakeDispatch.calls()) == 2 end)
+      assert %{gate: :ready, queued: 0} = Proxy.stats(proxy)
+    end
+
+    # Holding is not parking: the deadline an entry was admitted with still
+    # governs, and it is settled on the way out rather than dispatched late.
+    test "an entry whose deadline passed while held is settled, never dispatched", %{
+      budget: budget
+    } do
+      proxy = start_proxy(%{}, budget)
+      FakeDispatch.set_delay(200)
+      parent = self()
+
+      spawn(fn -> Proxy.call(proxy, context(), "eden_get_note", %{}) end)
+      await_inflight(proxy)
+
+      spawn(fn ->
+        send(parent, {:queued_reply, Proxy.call(proxy, context(), "eden_get_note", %{})})
+      end)
+
+      await_queue(proxy, 1)
+
+      :ok = Proxy.tools_changed(proxy)
+      :ok = expire_queued_deadlines(proxy)
+      :ok = Proxy.resume(proxy, contract())
+
+      assert_receive {:queued_reply, {:error, :call_deadline_expired}}, 5_000
+      assert length(FakeDispatch.calls()) == 1
+      assert monitors(proxy) == %{}
+    end
+
+    # Terminal is the opposite of drift: this gate never reopens, so a held
+    # caller would wait out its whole call timeout for a dispatch that can never
+    # come. It is answered now, with the reason.
+    test "a terminal protocol error rejects the queue instead of holding it", %{budget: budget} do
+      proxy = start_proxy(%{}, budget)
+      FakeDispatch.set_response({:ok, %{"content" => [%{"type" => "image", "data" => "AA"}]}})
+      parent = self()
+
+      # Two invalid results; the third closes the gate for good.
+      assert {:error, {:invalid_remote_result, _}} =
+               Proxy.call(proxy, context(), "eden_get_note", %{})
+
+      assert {:error, {:invalid_remote_result, _}} =
+               Proxy.call(proxy, context(), "eden_get_note", %{})
+
+      FakeDispatch.set_delay(200)
+      spawn(fn -> Proxy.call(proxy, context(), "eden_get_note", %{}) end)
+      await_inflight(proxy)
+
+      spawn(fn ->
+        send(parent, {:queued_reply, Proxy.call(proxy, context(), "eden_get_note", %{})})
+      end)
+
+      await_queue(proxy, 1)
+
+      assert_receive {:queued_reply, {:error, {:remote_protocol_error, :unsupported_content}}},
+                     5_000
+
+      # Three calls reached the peer, not four: the queued entry was answered
+      # from the closed gate, never dispatched into a session already known to
+      # be broken. (Left queued it reached the same verdict — one round-trip
+      # later, against a peer this proxy had just given up on.)
+      assert length(FakeDispatch.calls()) == 3
+      assert Proxy.state(proxy) == :suspended
+      assert %{queued: 0} = Proxy.stats(proxy)
+      assert monitors(proxy) == %{}
+      assert Process.info(proxy, :monitors) == {:monitors, []}
     end
   end
 end

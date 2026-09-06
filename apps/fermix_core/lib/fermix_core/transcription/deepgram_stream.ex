@@ -13,17 +13,26 @@ defmodule FermixCore.Transcription.DeepgramStream do
   and a lost tail must never be reported as a clean close.
 
   Every unbounded thing is capped: `@max_reconnects` reconnects per stream
-  lifetime, `@pcm_buffer_max_bytes` of audio held across a reconnect gap
-  (overflow is dropped, logged once, and counted), and `@max_malformed_frames`
-  undecodable frames before the stream fails as `{:protocol_error, detail}`. A
-  failed reconnect is terminal — the bounded reconnect IS the single recovery
-  step, and there is no second mechanism behind it.
+  lifetime, `FermixCore.Transcription.Outbox`'s buffer of audio held across a
+  reconnect gap (overflow is dropped, logged once, and counted), its in-flight
+  window of audio cast to the socket and not yet acknowledged, and
+  `@max_malformed_frames` undecodable frames before the stream fails as
+  `{:protocol_error, detail}`. Sends are casts, so without that window a vendor
+  that stopped draining would queue every later chunk in the socket's mailbox
+  unbounded; a window still full after
+  `Timeouts.transcription_ws_send_stall/0` means the socket is wedged inside a
+  send, and it is killed so the reconnect can run. A failed reconnect is
+  terminal — the bounded reconnect IS the single recovery step, and there is no
+  second mechanism behind it.
 
   Timestamp caveat: Deepgram restarts its media clock on every connection, so
   the session carries an `offset_ms` base advanced by the audio it has actually
   sent. Audio buffered but not yet sent when a connection drops is not counted,
   which shifts post-reconnect timestamps by at most the buffer cap's worth of
-  audio. That imprecision is accepted in this phase and bounded by the cap.
+  audio. Audio in flight when a wedged socket is killed is the opposite error —
+  counted as sent but never delivered — and shifts them by at most the in-flight
+  cap's worth the other way. Both imprecisions are accepted in this phase and
+  bounded by their caps.
   """
 
   use GenServer
@@ -31,6 +40,7 @@ defmodule FermixCore.Transcription.DeepgramStream do
   require Logger
 
   alias FermixCore.Timeouts
+  alias FermixCore.Transcription.Outbox
   alias FermixCore.Transcription.Segment
   alias FermixCore.Transcription.Support
   alias FermixCore.Transcription.WsSocket
@@ -46,8 +56,6 @@ defmodule FermixCore.Transcription.DeepgramStream do
   # hammered — and so pushed audio lands in the bounded buffer rather than an
   # unbounded mailbox while we wait.
   @reconnect_delay_ms 250
-  # 30 s of audio held while reconnecting.
-  @pcm_buffer_max_bytes 960_000
   @max_malformed_frames 5
   @keepalive_interval_ms 5_000
   @stream_preview_chars 500
@@ -213,6 +221,9 @@ defmodule FermixCore.Transcription.DeepgramStream do
       ),
       do: malformed(s, "unexpected binary frame")
 
+  def handle_info({:transcription_ws, socket, {:sent, bytes}}, %{socket: socket} = state),
+    do: {:noreply, acked(state, bytes)}
+
   def handle_info({:transcription_ws, socket, {:disconnect, status}}, %{socket: socket} = state),
     do: disconnected(state, status)
 
@@ -240,6 +251,8 @@ defmodule FermixCore.Transcription.DeepgramStream do
     fail(state, reason)
   end
 
+  def handle_info(:send_stall, state), do: {:noreply, abort_stalled_socket(state)}
+
   def handle_info(_message, state), do: {:noreply, state}
 
   @impl true
@@ -260,65 +273,119 @@ defmodule FermixCore.Transcription.DeepgramStream do
       opts: opts,
       sent_samples: 0,
       offset_ms: 0,
-      buffer: [],
-      buffer_bytes: 0,
+      outbox: Outbox.new(),
       reconnects: 0,
       malformed: 0,
       phase: :streaming,
       started_at_ms: System.monotonic_time(:millisecond),
       segments: 0,
-      dropped_bytes: 0,
       preview: "",
       drain_timer: nil,
+      stall_timer: nil,
       keepalive_timer: Process.send_after(self(), :keepalive, @keepalive_interval_ms)
     }
   end
 
-  defp push(%{socket: nil} = state, pcm), do: buffer(state, pcm)
-
   defp push(state, pcm) do
+    sendable? = sendable?(state)
+
+    case Outbox.push(state.outbox, pcm, sendable?) do
+      {:cast, pcm, outbox} -> deliver(%{state | outbox: outbox}, pcm)
+      {:held, outbox} -> stall_watch(%{state | outbox: outbox}, sendable?)
+      {:dropped, outbox} -> stall_watch(drop(state, outbox, sendable?), sendable?)
+    end
+  end
+
+  defp sendable?(%{socket: nil}), do: false
+  defp sendable?(_state), do: true
+
+  defp deliver(state, pcm) do
     :ok = state.socket_mod.send_binary(state.socket, pcm)
     %{state | sent_samples: state.sent_samples + div(byte_size(pcm), 2)}
   end
 
-  defp buffer(state, pcm) do
-    case state.buffer_bytes + byte_size(pcm) > @pcm_buffer_max_bytes do
-      true -> drop(state, pcm)
-      false -> hold(state, pcm)
+  defp drop(state, outbox, sendable?) do
+    log_first_drop(state.outbox.dropped_bytes, sendable?)
+    %{state | outbox: outbox}
+  end
+
+  # One line per stream — the drop repeats many times a second — and the two
+  # causes read differently, because a full buffer with a live socket sends the
+  # operator to a stalled uplink, not to a reconnect loop.
+  defp log_first_drop(0, true) do
+    Logger.error(
+      "deepgram stream buffer full while the socket is not draining: dropping audio " <>
+        "(cap #{Outbox.buffer_max_bytes()} bytes)"
+    )
+  end
+
+  defp log_first_drop(0, false) do
+    Logger.error(
+      "deepgram stream buffer full while reconnecting: dropping audio " <>
+        "(cap #{Outbox.buffer_max_bytes()} bytes)"
+    )
+  end
+
+  defp log_first_drop(_dropped_bytes, _sendable?), do: :ok
+
+  defp flush_buffer(state) do
+    case Outbox.flush(state.outbox) do
+      {:empty, _outbox} -> state
+      {:flush, pcm, outbox} -> deliver(%{state | outbox: outbox}, pcm)
     end
   end
 
-  defp hold(state, pcm) do
-    %{
-      state
-      | buffer: [state.buffer, pcm],
-        buffer_bytes: state.buffer_bytes + byte_size(pcm)
-    }
+  defp acked(state, bytes) do
+    case Outbox.acked(state.outbox, bytes) do
+      {:ok, outbox} -> %{state | outbox: outbox}
+      {:flush, pcm, outbox} -> deliver(cancel_stall_timer(%{state | outbox: outbox}), pcm)
+    end
   end
 
-  defp drop(%{dropped_bytes: 0} = state, pcm) do
-    Logger.error(
-      "deepgram stream buffer full while reconnecting: dropping audio " <>
-        "(cap #{@pcm_buffer_max_bytes} bytes)"
-    )
+  # One deadline per contiguous stall: armed when a live socket first makes the
+  # session hold audio, cancelled by the ack that reopens the window.
+  defp stall_watch(state, false), do: state
 
-    %{state | dropped_bytes: byte_size(pcm)}
+  defp stall_watch(%{stall_timer: nil} = state, true) do
+    stall_timer =
+      Process.send_after(self(), :send_stall, Timeouts.transcription_ws_send_stall())
+
+    %{state | stall_timer: stall_timer}
   end
 
-  defp drop(state, pcm), do: %{state | dropped_bytes: state.dropped_bytes + byte_size(pcm)}
+  defp stall_watch(state, true), do: state
 
-  defp flush_buffer(%{buffer_bytes: 0} = state), do: state
+  defp cancel_stall_timer(%{stall_timer: nil} = state), do: state
 
-  defp flush_buffer(state) do
-    pcm = IO.iodata_to_binary(state.buffer)
-    :ok = state.socket_mod.send_binary(state.socket, pcm)
+  defp cancel_stall_timer(state) do
+    Process.cancel_timer(state.stall_timer)
+    # A deadline that fired while this ack was in flight has its message in the
+    # mailbox already; drop it, or a window that just reopened would be aborted
+    # by a stall that is over.
+    receive do
+      :send_stall -> :ok
+    after
+      0 -> :ok
+    end
 
-    %{
-      state
-      | buffer: [],
-        buffer_bytes: 0,
-        sent_samples: state.sent_samples + div(byte_size(pcm), 2)
-    }
+    %{state | stall_timer: nil}
+  end
+
+  # The socket has not acknowledged a frame for a whole deadline, so it is stuck
+  # inside a blocking send. `close/1` is a cast and would queue behind the very
+  # audio that is stuck; a kill is the only thing that lands. The session
+  # monitors the socket, so the `:DOWN` runs the ordinary disconnect path —
+  # bounded reconnect while streaming, `drain_interrupted` while draining.
+  defp abort_stalled_socket(%{socket: socket} = state) when is_pid(socket) do
+    {:error, _reason} =
+      Timeouts.expired(:transcription_ws_send_stall, Timeouts.transcription_ws_send_stall(), %{
+        session_id: Keyword.get(state.opts, :session_id)
+      })
+
+    Process.exit(socket, :kill)
+    # The window stays closed until that `:DOWN`: audio already queued behind
+    # the kill has to be held for the reconnect, not cast at a pid that is gone.
+    %{state | stall_timer: nil}
   end
 
   defp finish(%{phase: :draining} = state), do: {:noreply, state}
@@ -382,12 +449,14 @@ defmodule FermixCore.Transcription.DeepgramStream do
   defp disconnected(state, _status) do
     Process.demonitor(state.socket_ref, [:flush])
     Process.send_after(self(), :reconnect, @reconnect_delay_ms)
+    state = cancel_stall_timer(state)
 
     {:noreply,
      %{
        state
        | socket: nil,
          socket_ref: nil,
+         outbox: Outbox.disconnected(state.outbox),
          reconnects: state.reconnects + 1,
          offset_ms: state.offset_ms + samples_to_ms(state.sent_samples),
          sent_samples: 0
@@ -467,10 +536,10 @@ defmodule FermixCore.Transcription.DeepgramStream do
     close_socket(state)
   end
 
-  defp log_dropped_bytes(%{dropped_bytes: 0}), do: :ok
+  defp log_dropped_bytes(%{outbox: %Outbox{dropped_bytes: 0}}), do: :ok
 
   defp log_dropped_bytes(state),
-    do: Logger.error("deepgram stream dropped #{state.dropped_bytes} bytes of audio")
+    do: Logger.error("deepgram stream dropped #{state.outbox.dropped_bytes} bytes of audio")
 
   defp close_socket(%{socket: nil}), do: :ok
   defp close_socket(state), do: state.socket_mod.close(state.socket)

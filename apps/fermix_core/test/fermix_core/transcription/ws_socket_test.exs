@@ -3,6 +3,7 @@ defmodule FermixCore.Transcription.WsSocketTest do
   # own state; nothing here reads or writes global state.
   use ExUnit.Case, async: true
 
+  alias FermixCore.Timeouts
   alias FermixCore.Transcription.WsSocket
 
   # A live handshake needs a server, which no test in this suite may open. What
@@ -18,6 +19,30 @@ defmodule FermixCore.Transcription.WsSocketTest do
       assert_raise KeyError, fn ->
         WsSocket.start(url: "wss://example.test", headers: [])
       end
+    end
+  end
+
+  describe "start_options/2" do
+    test "verifies the vendor peer instead of taking WebSockex's insecure default" do
+      assert {:ok, opts} =
+               WsSocket.start_options("wss://api.deepgram.com/v1/listen?model=nova-3", [
+                 {"Authorization", "Token secret"}
+               ])
+
+      # Without :ssl_options WebSockex connects with verify: :verify_none, and
+      # the Authorization header below goes to whoever answered.
+      ssl_options = Keyword.fetch!(opts, :ssl_options)
+
+      assert ssl_options[:verify] == :verify_peer
+      assert ssl_options[:server_name_indication] == ~c"api.deepgram.com"
+
+      assert opts[:extra_headers] == [{"Authorization", "Token secret"}]
+      assert opts[:handshake_timeout] == Timeouts.transcription_ws_connect()
+    end
+
+    test "refuses a URL with no host rather than dialing a peer it cannot verify" do
+      assert WsSocket.start_options("not-a-url", []) == {:error, :ws_url_without_host}
+      assert WsSocket.start_options("wss:///v1/listen", []) == {:error, :ws_url_without_host}
     end
   end
 
@@ -50,6 +75,28 @@ defmodule FermixCore.Transcription.WsSocketTest do
 
       assert {:reply, {:text, "hi"}, ^state} =
                WsSocket.handle_cast({:send_frame, {:text, "hi"}}, state)
+    end
+
+    test "a binary frame is acknowledged to the parent before it goes on the wire" do
+      state = %{parent: self()}
+      socket = self()
+
+      assert {:reply, {:binary, <<0, 1, 2>>}, ^state} =
+               WsSocket.handle_cast({:send_frame, {:binary, <<0, 1, 2>>}}, state)
+
+      # This ack is the session's only view of this process's mailbox: it counts
+      # bytes cast minus bytes acked, and a socket wedged inside a blocking send
+      # stops acking altogether.
+      assert_receive {:transcription_ws, ^socket, {:sent, 3}}
+    end
+
+    test "a text frame is not acknowledged — only PCM rides the in-flight window" do
+      state = %{parent: self()}
+
+      assert {:reply, {:text, "hi"}, ^state} =
+               WsSocket.handle_cast({:send_frame, {:text, "hi"}}, state)
+
+      refute_received {:transcription_ws, _socket, {:sent, _bytes}}
     end
 
     test "close closes the connection" do

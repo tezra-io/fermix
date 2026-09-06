@@ -125,6 +125,76 @@ defmodule FermixCore.ComputerHistory.GateTest do
     end
   end
 
+  # --- the replay/compaction sink (§13.6) --------------------------------
+
+  describe "history_replay — the taint's replay sink" do
+    test "mirrors chain_permits_history?/1 for the same grants" do
+      enable(remote_summaries: [:anthropic])
+      s = snap(operator_ctx([local_route()]))
+
+      for chain <- [
+            [local_route()],
+            [remote_route(:anthropic)],
+            [remote_route(:openai)],
+            [local_route(), remote_route(:openai)],
+            [non_loopback_ollama()],
+            nil,
+            []
+          ] do
+        assert Gate.allow?(s, {:history_replay, chain}) == Gate.chain_permits_history?(chain),
+               "history_replay disagreed with chain_permits_history? on #{inspect(chain)}"
+      end
+    end
+
+    test "is independent of operative? — a disabled feature still permits a local chain" do
+      # The taint is a property of the message's ORIGIN, so masking must keep
+      # working after `/history off`: the sink answers "may a tainted message
+      # ride this chain", never "is the feature on". `{:llm_chain, _}` is false
+      # in that posture, which is exactly why the taint cannot reuse it.
+      enable([])
+      s = snap(operator_ctx([local_route()]))
+      Application.put_env(:fermix_core, :computer_history, enabled: false)
+      disabled = snap(operator_ctx([local_route()]))
+
+      assert Gate.allow?(s, {:history_replay, [local_route()]})
+      assert Gate.allow?(disabled, {:history_replay, [local_route()]})
+      refute Gate.allow?(disabled, {:llm_chain, [local_route()]})
+    end
+
+    test "an ungranted-remote hop denies; a granted one is permitted" do
+      enable(remote_summaries: [:anthropic])
+      s = snap(operator_ctx([local_route()]))
+
+      assert Gate.allow?(s, {:history_replay, [remote_route(:anthropic)]})
+      refute Gate.allow?(s, {:history_replay, [remote_route(:openai)]})
+      refute Gate.allow?(s, {:history_replay, [remote_route(:anthropic), remote_route(:openai)]})
+    end
+
+    test "a nil, empty, or malformed chain fails closed" do
+      enable([])
+      s = snap(operator_ctx([local_route()]))
+
+      refute Gate.allow?(s, {:history_replay, nil})
+      refute Gate.allow?(s, {:history_replay, []})
+      refute Gate.allow?(s, {:history_replay, [%{base_url: "http://localhost:11434/v1"}]})
+      refute Gate.allow?(s, {:history_replay, :not_a_chain})
+    end
+
+    test "the frozen grant set wins over a mid-turn grant edit" do
+      enable(remote_summaries: [:anthropic])
+      s = snap(operator_ctx([local_route()]))
+
+      Application.put_env(:fermix_core, :computer_history,
+        enabled: true,
+        summarizer: :local,
+        remote_summaries: []
+      )
+
+      assert Gate.allow?(s, {:history_replay, [remote_route(:anthropic)]})
+      refute Gate.chain_permits_history?([remote_route(:anthropic)])
+    end
+  end
+
   # --- the whole-chain rule (§9.2) ---------------------------------------
 
   describe "llm_chain — the whole-chain rule" do
