@@ -90,6 +90,10 @@ defmodule FermixCore.Tools.JoinMeeting do
       %{tag: "meetings_disabled", description: "the meetings subsystem is turned off"},
       %{tag: "unrecognized_meeting_url", description: "the link is not a Meet or Zoom meeting"},
       %{tag: "sidecar_not_installed", description: "the Google Meet notetaker is not installed"},
+      %{
+        tag: "meet_browser_not_installed",
+        description: "the Google Meet notetaker has no browser to drive"
+      },
       %{tag: "zoom_rtms_not_configured", description: "the Zoom RTMS credentials are incomplete"},
       %{tag: "max_concurrent", description: "the notetaker is already in another meeting"},
       %{tag: "not_attended", description: "the turn is not an attended top-level owner turn"}
@@ -142,6 +146,11 @@ defmodule FermixCore.Tools.JoinMeeting do
   def describe_error(:sidecar_not_installed) do
     "The Google Meet notetaker isn't installed yet. Enable the Meeting Notetaker card " <>
       "on fermix setup (web) → Plugins to install the meetbot sidecar."
+  end
+
+  def describe_error(:meet_browser_not_installed) do
+    "The Google Meet notetaker is installed but has no browser to drive, so it cannot join " <>
+      "a Meet call yet. Open fermix setup (web) → Meetings and it installs the browser."
   end
 
   def describe_error(:zoom_rtms_not_configured) do

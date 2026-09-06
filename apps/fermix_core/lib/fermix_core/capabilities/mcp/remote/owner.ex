@@ -210,9 +210,14 @@ defmodule FermixCore.Capabilities.MCP.Remote.Owner do
   @impl true
   def handle_info({:EXIT, session, reason}, %{session: session} = state) do
     state = %{state | session: nil}
-    {status, detail} = RuntimeStatus.classify(reason)
-    _ = put_status(state, status, detail, RuntimeStatus.capability_from(reason))
-    Logger.warning("remote MCP session for #{inspect(state.source_id)} exited: #{status}")
+    classified = RuntimeStatus.classify(reason)
+    _ = put_status(state, classified)
+
+    Logger.warning(
+      "remote MCP session for #{inspect(state.source_id)} exited: " <>
+        RuntimeStatus.describe(classified)
+    )
+
     {:stop, :normal, state}
   end
 
@@ -308,8 +313,8 @@ defmodule FermixCore.Capabilities.MCP.Remote.Owner do
 
   defp transient?(reason) do
     case RuntimeStatus.classify(reason) do
-      {:remote_unreachable, :rate_limited} -> false
-      {:remote_unreachable, _class} -> true
+      {:remote_unreachable, :rate_limited, _subject} -> false
+      {:remote_unreachable, _class, _subject} -> true
       _classified -> false
     end
   end
@@ -325,15 +330,13 @@ defmodule FermixCore.Capabilities.MCP.Remote.Owner do
   # Returns the classified reason so an `init/1` refusal can carry it into the
   # start error — the only report a process that never lived can produce.
   defp record_refusal(state, reason) do
-    {status, detail} = RuntimeStatus.classify(reason)
-    capability = RuntimeStatus.capability_from(reason)
-    _ = put_status(state, status, detail, capability)
+    {status, detail, _subject} = classified = RuntimeStatus.classify(reason)
+    _ = put_status(state, classified)
     maybe_emit_security_block(state, status, detail)
 
     Logger.error(
       "remote MCP client #{inspect(state.source_id)} refused " <>
-        "(#{RuntimeStatus.describe(status, detail, capability)}); " <>
-        "config=#{inspect(redacted(state.spec))}"
+        "(#{RuntimeStatus.describe(classified)}); config=#{inspect(redacted(state.spec))}"
     )
 
     {status, detail}
@@ -442,11 +445,9 @@ defmodule FermixCore.Capabilities.MCP.Remote.Owner do
   defp log_teardown(_state, :ok), do: :ok
 
   defp log_teardown(state, {:error, reason}) do
-    {status, detail} = RuntimeStatus.classify(reason)
-
     Logger.warning(
       "remote MCP teardown for #{inspect(state.source_id)} failed: " <>
-        RuntimeStatus.describe(status, detail)
+        RuntimeStatus.describe(RuntimeStatus.classify(reason))
     )
   end
 
@@ -467,16 +468,16 @@ defmodule FermixCore.Capabilities.MCP.Remote.Owner do
     generation
   end
 
-  defp put_status(%{generation: nil}, _status, _detail, _capability), do: :no_status_sink
+  defp put_status(%{generation: nil}, _classified), do: :no_status_sink
 
-  defp put_status(state, status, detail, capability) do
+  defp put_status(state, {status, detail, subject}) do
     case RuntimeStatus.put(
            state.runtime_status,
            state.source_id,
            state.generation,
            status,
            detail,
-           capability
+           subject
          ) do
       :ok ->
         :ok

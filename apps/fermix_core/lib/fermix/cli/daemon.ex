@@ -4,10 +4,17 @@ defmodule Fermix.CLI.Daemon do
 
   Listens on a Unix domain socket at `~/.fermix/daemon.sock` (user
   scope) or `/var/run/fermix.sock` (system scope) and serves a tiny
-  4-byte-length-prefixed JSON request/response protocol. Core methods include:
+  4-byte-length-prefixed JSON request/response protocol in two versions.
+  Management v1 (`FermixCore.Management.Protocol`) answers `hello`,
+  `overview.get`, `doctor.*`, `logs.query`, `lifecycle.*`, and
+  `diagnostics.build`. The historical unversioned protocol answers the
+  remaining introspection verbs plus:
 
-      {"method":"status"}    -> {"status":"ok","version":"...","uptime_ms":N}
       {"method":"shutdown"}  -> {"status":"shutting_down"}  then :init.stop()
+
+  `status` and `overview` were unversioned methods until `fermix status` moved
+  onto `hello` plus `overview.get`; they were deleted rather than kept, so one
+  answer never has two live paths.
 
   Mobile pairing and device-management methods are routed through an injected
   channels-side provider so this core application never compile-depends on
@@ -23,12 +30,15 @@ defmodule Fermix.CLI.Daemon do
 
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Agents.SkillRegistry
+  alias FermixCore.BuildInfo
   alias FermixCore.Capabilities.MCP.RuntimeStatus, as: McpRuntimeStatus
   alias FermixCore.Health
   alias FermixCore.Introspection.Agents
   alias FermixCore.Introspection.Capabilities
-  alias FermixCore.Introspection.Overview
   alias FermixCore.Introspection.Wire
+  alias FermixCore.Management.Lifecycle
+  alias FermixCore.Management.Protocol, as: ManagementProtocol
+  alias FermixCore.Management.Router, as: ManagementRouter
   alias FermixCore.Observability
   alias FermixCore.Plugins.Runtime, as: PluginsRuntime
   alias FermixCore.Trace
@@ -53,26 +63,30 @@ defmodule Fermix.CLI.Daemon do
     GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
   end
 
+  @doc """
+  The function that stops this daemon when a v0 `shutdown` is accepted.
+
+  It is `FermixCore.Management.Lifecycle`'s stopper, the same one a committed
+  `lifecycle.commit` runs — `fermix stop` and the app's drain transaction must
+  not be two different ways to stop one daemon.
+  """
+  @spec default_stopper() :: (-> :ok)
+  def default_stopper, do: Lifecycle.default_stopper()
+
   @impl true
   def init(opts) do
+    Process.flag(:trap_exit, true)
     socket_path = Keyword.get(opts, :socket_path, default_socket_path())
-    task_supervisor = Keyword.get(opts, :task_supervisor, FermixCore.TaskSupervisor)
-    plugins_runtime = Keyword.get(opts, :plugins_runtime, PluginsRuntime)
-    runtime_status = Keyword.get(opts, :runtime_status, McpRuntimeStatus)
-    mobile_provider = Keyword.get(opts, :mobile_provider)
 
     File.mkdir_p!(Path.dirname(socket_path))
 
     case clear_stale_socket(socket_path) do
-      :ok ->
-        do_listen(socket_path, task_supervisor, plugins_runtime, runtime_status, mobile_provider)
-
-      {:error, reason} ->
-        {:stop, reason}
+      :ok -> do_listen(socket_path, opts)
+      {:error, reason} -> {:stop, reason}
     end
   end
 
-  defp do_listen(socket_path, task_supervisor, plugins_runtime, runtime_status, mobile_provider) do
+  defp do_listen(socket_path, opts) do
     listen_opts = [
       :binary,
       {:active, false},
@@ -92,10 +106,12 @@ defmodule Fermix.CLI.Daemon do
          %{
            listen_socket: listen_socket,
            socket_path: socket_path,
-           task_supervisor: task_supervisor,
-           plugins_runtime: plugins_runtime,
-           runtime_status: runtime_status,
-           mobile_provider: mobile_provider,
+           task_supervisor: Keyword.get(opts, :task_supervisor, FermixCore.TaskSupervisor),
+           plugins_runtime: Keyword.get(opts, :plugins_runtime, PluginsRuntime),
+           runtime_status: Keyword.get(opts, :runtime_status, McpRuntimeStatus),
+           mobile_provider: Keyword.get(opts, :mobile_provider),
+           management_opts: Keyword.get(opts, :management_opts, []),
+           stopper: Keyword.get(opts, :stopper, default_stopper()),
            started_at_ms: System.monotonic_time(:millisecond)
          }}
 
@@ -164,8 +180,27 @@ defmodule Fermix.CLI.Daemon do
 
   @impl true
   def terminate(_reason, %{listen_socket: socket, socket_path: path}) do
-    _ = :gen_tcp.close(socket)
-    _ = File.rm(path)
+    close_result = :gen_tcp.close(socket)
+    unlink_result = unlink_socket(path)
+    report_cleanup(close_result, unlink_result)
+  end
+
+  defp unlink_socket(path) do
+    case File.rm(path) do
+      :ok -> :ok
+      {:error, :enoent} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp report_cleanup(:ok, :ok), do: :ok
+
+  defp report_cleanup(close_result, unlink_result) do
+    Logger.error(
+      "Daemon socket cleanup failed: " <>
+        "listener_close=#{inspect(close_result)} socket_unlink=#{inspect(unlink_result)}"
+    )
+
     :ok
   end
 
@@ -203,8 +238,10 @@ defmodule Fermix.CLI.Daemon do
 
   defp handle_connection(conn, state) do
     case receive_request(conn, @recv_timeout_ms) do
-      {:ok, request} -> handle_initial_request(conn, request, state)
-      {:error, :invalid_request} -> send_response(conn, invalid_request_reply())
+      {:ok, {:v0, request}} -> handle_v0_initial_request(conn, request, state)
+      {:ok, {:v1, request}} -> handle_v1_request(conn, request, state)
+      {:error, :invalid_v0_request} -> send_response(conn, invalid_request_reply())
+      {:error, {:v1, response}} -> send_response(conn, response)
       {:error, _reason} -> :ok
     end
   after
@@ -212,23 +249,15 @@ defmodule Fermix.CLI.Daemon do
   end
 
   defp receive_request(conn, timeout_ms) do
-    with {:ok, frame} <- :gen_tcp.recv(conn, 0, timeout_ms),
-         {:ok, request} <- decode_request(frame) do
-      {:ok, request}
+    with {:ok, frame} <- :gen_tcp.recv(conn, 0, timeout_ms) do
+      ManagementProtocol.decode_request(frame)
     end
   end
 
-  defp decode_request(frame) do
-    # The local control socket has no per-request auth; the trust boundary is
-    # the 0600 socket file under FERMIX_HOME. `agent_message` is a deliberate
-    # operator action from `fermix ask`, and can trigger LLM/tool work.
-    case Jason.decode(String.trim(frame)) do
-      {:ok, %{"method" => method} = request} when is_binary(method) -> {:ok, request}
-      _ -> {:error, :invalid_request}
-    end
-  end
-
-  defp handle_initial_request(conn, request, state) do
+  # The local control socket has no per-request auth; the trust boundary is the
+  # 0600 socket file under FERMIX_HOME. v0 `agent_message` remains a deliberate
+  # operator action from `fermix ask` and can trigger LLM or tool work.
+  defp handle_v0_initial_request(conn, request, state) do
     response = dispatch_request(request, state)
 
     case opened_pair_session(request, response) do
@@ -236,7 +265,56 @@ defmodule Fermix.CLI.Daemon do
       :none -> send_response(conn, response)
     end
 
-    maybe_finalize(response)
+    maybe_finalize(response, state)
+  end
+
+  defp handle_v1_request(conn, request, state) do
+    result = route_management_request(request, state)
+    response = management_response(request.request_id, result)
+    send_response(conn, response)
+  end
+
+  defp route_management_request(request, state) do
+    ManagementRouter.route(request, management_opts(state))
+  rescue
+    _exception ->
+      log_management_route_failure(request.method, :exception)
+      {:error, :internal_error, %{}}
+  catch
+    kind, _reason ->
+      log_management_route_failure(request.method, kind)
+      {:error, :internal_error, %{}}
+  end
+
+  defp log_management_route_failure(method, kind) do
+    Logger.error("Management route failed: method=#{method} failure=#{kind}")
+  end
+
+  defp management_response(request_id, result) do
+    case ManagementProtocol.respond(request_id, result) do
+      {:ok, response} ->
+        response
+
+      {:error, reason} ->
+        Logger.error("Management response rejected: #{inspect(reason)}")
+        internal_management_error(request_id)
+    end
+  end
+
+  defp internal_management_error(request_id) do
+    {:ok, response} =
+      ManagementProtocol.respond(request_id, {:error, :internal_error, %{}})
+
+    response
+  end
+
+  defp management_opts(state) do
+    overview_opts =
+      state.management_opts
+      |> Keyword.get(:overview_opts, [])
+      |> Keyword.put(:daemon, daemon_snapshot(state))
+
+    Keyword.put(state.management_opts, :overview_opts, overview_opts)
   end
 
   defp dispatch_request(%{"method" => method} = request, state),
@@ -268,10 +346,31 @@ defmodule Fermix.CLI.Daemon do
 
   defp pair_request_loop(conn, state, session_id, lease_key) do
     case receive_request(conn, @mobile_pair_wait_ms) do
-      {:ok, request} -> handle_pair_request(conn, request, state, session_id, lease_key)
-      {:error, :invalid_request} -> send_response(conn, invalid_request_reply())
-      {:error, _reason} -> :ok
+      {:ok, {:v0, request}} ->
+        handle_pair_request(conn, request, state, session_id, lease_key)
+
+      {:ok, {:v1, request}} ->
+        reject_v1_pair_request(conn, request)
+
+      {:error, :invalid_v0_request} ->
+        send_response(conn, invalid_request_reply())
+
+      {:error, {:v1, response}} ->
+        send_response(conn, response)
+
+      {:error, _reason} ->
+        :ok
     end
+  end
+
+  defp reject_v1_pair_request(conn, request) do
+    response =
+      management_response(
+        request.request_id,
+        {:error, :invalid_request, %{"field" => "method"}}
+      )
+
+    send_response(conn, response)
   end
 
   defp handle_pair_request(conn, %{"method" => method} = request, state, session_id, lease_key)
@@ -392,8 +491,6 @@ defmodule Fermix.CLI.Daemon do
   defp successful_reply?(_response), do: false
   defp map_value(map, key), do: Map.get(map, key, Map.get(map, Atom.to_string(key)))
 
-  defp handle_method("status", _request, state), do: status_reply(state)
-  defp handle_method("overview", _request, state), do: overview_reply(state)
   defp handle_method("health", _request, _state), do: health_reply()
   defp handle_method("agents", _request, _state), do: agents_reply()
   defp handle_method("capabilities", request, _state), do: capabilities_reply(request)
@@ -540,23 +637,6 @@ defmodule Fermix.CLI.Daemon do
   defp runtime_mobile_provider,
     do: Application.get_env(:fermix_core, :mobile_management_provider)
 
-  defp status_reply(state) do
-    %{
-      status: "ok",
-      version: to_string(Application.spec(:fermix_core, :vsn) || "unknown"),
-      uptime_ms: System.monotonic_time(:millisecond) - state.started_at_ms,
-      pid: System.pid()
-    }
-  end
-
-  defp overview_reply(state) do
-    with {:ok, overview} <- Overview.snapshot(daemon: daemon_snapshot(state)) do
-      %{status: "ok", overview: Wire.json_safe(overview)}
-    else
-      {:error, reason} -> %{status: "error", reason: inspect(reason)}
-    end
-  end
-
   defp health_reply do
     %{status: "ok", health: Health.report() |> Wire.json_safe()}
   end
@@ -685,7 +765,7 @@ defmodule Fermix.CLI.Daemon do
         plugin: Wire.json_safe(Map.get(entry, :plugin)),
         status: Wire.json_safe(Map.get(entry, :status)),
         detail: Wire.json_safe(Map.get(entry, :detail)),
-        capability: Wire.json_safe(Map.get(entry, :capability)),
+        subject: Wire.json_safe(Map.get(entry, :subject)),
         updated_at: Wire.json_safe(Map.get(entry, :updated_at))
       }
     end)
@@ -840,20 +920,14 @@ defmodule Fermix.CLI.Daemon do
   defp daemon_snapshot(state) do
     %{
       status: :running,
-      version: to_string(Application.spec(:fermix_core, :vsn) || "unknown"),
+      version: BuildInfo.product_version(),
       uptime_ms: System.monotonic_time(:millisecond) - state.started_at_ms,
       pid: System.pid()
     }
   end
 
-  defp maybe_finalize(%{status: "shutting_down"}) do
-    spawn(fn ->
-      Process.sleep(150)
-      :init.stop()
-    end)
-  end
-
-  defp maybe_finalize(_), do: :ok
+  defp maybe_finalize(%{status: "shutting_down"}, state), do: state.stopper.()
+  defp maybe_finalize(_response, _state), do: :ok
 
   defp default_socket_path do
     fermix_home = System.get_env("FERMIX_HOME") || Path.join(System.user_home!(), ".fermix")

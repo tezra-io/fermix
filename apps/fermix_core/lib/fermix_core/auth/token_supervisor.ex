@@ -47,6 +47,30 @@ defmodule FermixCore.Auth.TokenSupervisor do
     end
   end
 
+  @doc """
+  Drops one profile's tokens from the manager serving it, when one is running.
+
+  Never starts a manager: a profile with no live holder is already in the state
+  the caller asked for, and starting one to forget it would read the entry that
+  was just deleted.
+  """
+  @spec forget(String.t()) :: :ok
+  def forget(auth_profile) when is_binary(auth_profile) do
+    case running_manager(auth_profile) do
+      {:ok, server} -> TokenManager.forget(server)
+      :none -> :ok
+    end
+  end
+
+  defp running_manager(auth_profile) do
+    with pid when is_pid(pid) <- Process.whereis(@registry),
+         [{_pid, _value}] <- Registry.lookup(@registry, auth_profile) do
+      {:ok, via(auth_profile)}
+    else
+      _absent -> :none
+    end
+  end
+
   @spec stop_profile(String.t()) :: :ok
   def stop_profile(auth_profile) when is_binary(auth_profile) do
     if Process.whereis(@registry) && Process.whereis(@dynamic_supervisor) do

@@ -42,6 +42,7 @@ defmodule FermixCore.MeetingsTest do
   alias FermixCore.Meetings.Supervisor, as: MeetingsSupervisor
   alias FermixCore.MeetingsTest.IdleSource
   alias FermixCore.Memory.Repo
+  alias FermixCore.Setup.ConfigStore
 
   @meet_url "https://meet.google.com/abc-defg-hij"
   @zoom_url "https://zoom.us/j/123456789"
@@ -109,6 +110,21 @@ defmodule FermixCore.MeetingsTest do
     test "4. refuses each lane that is not installed or configured", %{repo: repo} do
       assert {:error, :sidecar_not_installed} = join(@meet_url, repo)
       assert {:error, :zoom_rtms_not_configured} = join(@zoom_url, repo)
+    end
+
+    # The sidecar launches Chromium; without it the session starts and then
+    # dies. The gate belongs before the session exists, with its own reason.
+    test "4b. refuses the Meet lane when the sidecar has no browser", %{
+      repo: repo,
+      dev_local: dev_local
+    } do
+      install_fake_sidecar(dev_local)
+      refute Meetings.meet_lane_ready?()
+
+      assert {:error, :meet_browser_not_installed} = join(@meet_url, repo)
+
+      install_fake_browser()
+      assert Meetings.meet_lane_ready?()
     end
 
     test "5. refuses a second meeting while one is running", %{repo: repo} do
@@ -235,6 +251,10 @@ defmodule FermixCore.MeetingsTest do
   end
 
   describe "ready?/0" do
+    # The Meet lane needs the sidecar AND its browser: the sidecar drives
+    # Chromium, so an installed binary with no browser cannot place a bot. It
+    # used to report ready, which made the session die mid-join instead of the
+    # join refusing.
     test "needs the toggle and at least one usable lane", %{dev_local: dev_local} do
       put_meetings(enabled: false)
       refute Meetings.ready?()
@@ -248,6 +268,9 @@ defmodule FermixCore.MeetingsTest do
 
       put_meetings(enabled: true)
       install_fake_sidecar(dev_local)
+      refute Meetings.ready?()
+
+      install_fake_browser()
       assert Meetings.ready?()
 
       put_meetings(enabled: false)
@@ -317,6 +340,23 @@ defmodule FermixCore.MeetingsTest do
 
     assert_receive :slot_held, 1_000
     on_exit(fn -> send(holder, :release) end)
+  end
+
+  # The browser marker lives under the shared test `FERMIX_HOME`, not under
+  # `dev_local`, so it has to be removed again or it leaks into every later test
+  # that asserts the Meet lane is not ready.
+  defp install_fake_browser do
+    :ok = SidecarInstaller.mark_browser_installed()
+
+    on_exit(fn ->
+      FermixTestSupport.SafeRm.rm(
+        Path.join([
+          ConfigStore.workspace_paths().plugins,
+          "meetbot",
+          "browser_installed"
+        ])
+      )
+    end)
   end
 
   defp install_fake_sidecar(dev_local) do

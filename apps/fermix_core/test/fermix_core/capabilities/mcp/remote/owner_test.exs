@@ -13,8 +13,11 @@ defmodule FermixCore.Capabilities.MCP.Remote.OwnerTest do
   # DNS answer, and no subprocess.
   defmodule FakeTransport do
     def open(endpoint, opts) do
+      agent = Keyword.fetch!(opts, :agent)
+      Agent.update(agent, &Map.update(&1, :opens, 1, fn n -> n + 1 end))
+
       case Keyword.get(opts, :open_error) do
-        nil -> {:ok, %{agent: Keyword.fetch!(opts, :agent), endpoint: endpoint}}
+        nil -> {:ok, %{agent: agent, endpoint: endpoint}}
         error -> {:error, error}
       end
     end
@@ -76,6 +79,11 @@ defmodule FermixCore.Capabilities.MCP.Remote.OwnerTest do
   end
 
   defp requests(agent), do: Agent.get(agent, & &1.requests)
+
+  # Connect attempts, which a refused `open/2` makes without ever issuing a
+  # request — the only way to tell "retried" from "gave up" on a transport that
+  # never reaches the wire.
+  defp opens(agent), do: Agent.get(agent, &Map.get(&1, :opens, 0))
 
   defp json(status, body, headers \\ []) do
     {:ok,
@@ -253,6 +261,24 @@ defmodule FermixCore.Capabilities.MCP.Remote.OwnerTest do
 
       assert_receive {:DOWN, ^ref, :process, ^owner, :normal}, 5_000
       assert {:ok, %{status: :remote_unreachable}} = RuntimeStatus.fetch(status, @source)
+
+      # The retry DECISION, not just its end state: `transient?/1` classifies the
+      # reason, so a mis-shaped pattern there would silently reduce this to one
+      # attempt while the final status still read `remote_unreachable`.
+      assert opens(agent) > 1
+    end
+
+    # The other half of that decision. A terminal classification must not spend
+    # attempts, and asserting only the status cannot tell the two apart.
+    test "a terminal classification is not retried", %{status: status} do
+      agent = start_agent([json(401, %{})])
+
+      {:ok, owner} = Owner.start_link(owner_opts(status, agent))
+      ref = Process.monitor(owner)
+
+      assert_receive {:DOWN, ^ref, :process, ^owner, :normal}, 1_000
+      assert {:ok, %{status: :reauthorization_required}} = RuntimeStatus.fetch(status, @source)
+      assert opens(agent) == 1
     end
 
     test "a spec that is not remote is refused before anything connects", %{status: status} do

@@ -13,11 +13,11 @@ defmodule FermixCore.Readiness do
   """
 
   alias FermixCore.Config
+  alias FermixCore.Management.Settings.Channels.Inventory
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Providers.Selection
   alias FermixCore.Realtime.Config, as: RealtimeConfig
-  alias FermixCore.Setup.SecretPaths
 
   @typedoc """
   Public readiness state.
@@ -28,8 +28,57 @@ defmodule FermixCore.Readiness do
   by this module's current setup validation.
   """
   @type status :: :ready | :setup_required | :degraded
-  @type failure :: %{component: String.t(), action: String.t()}
+
+  @typedoc """
+  One readiness failure.
+
+    * `:component` — the historical open-string identity, kept for `Health`
+    * `:action` — the operator-facing sentence
+    * `:gating` — whether this failure alone means setup is incomplete
+    * `:pane` — the settings pane (or assistant stage) that can clear it
+    * `:detail_key` — the closed-set copy key, minted by the failure
+      constructor so a reader can look one sentence up per cause rather than
+      collapsing three causes into one open `component`
+  """
+  @type failure :: %{
+          component: String.t(),
+          action: String.t(),
+          gating: boolean(),
+          pane: String.t(),
+          detail_key: String.t()
+        }
   @type report :: %{status: status(), failures: [failure()]}
+
+  # Every pane slug a failure may name. Kept beside the constructors so a new
+  # failure cannot invent a pane no surface routes to.
+  @panes ~w(providers personality channels voice)
+
+  # Credentials each channel needs, DERIVED from `Channels.Inventory` — the one
+  # channel table — rather than repeated here. The two copies had already
+  # drifted in shape, and a channel added to one would have been invisible to
+  # the other.
+  @channel_credentials Enum.map(Inventory.channels(), fn channel ->
+                         {channel, Inventory.credential_keys(channel)}
+                       end)
+  @channel_defaults [
+    telegram: true,
+    whatsapp: false,
+    discord: false,
+    slack: false,
+    signal: false
+  ]
+  # Each sentence names the CONTROL that fixes it, not the environment variable
+  # behind it: every failure carries the `pane` that owns the fix, and a native
+  # attention row renders this text verbatim beside a field the operator can
+  # type into. Naming a shell variable there tells them to leave the app.
+  @channel_actions [
+    telegram: "Add the Telegram bot token in Channels settings.",
+    whatsapp:
+      "Add the WhatsApp access token, phone number ID, verify token, and app secret in Channels settings.",
+    discord: "Add the Discord bot token and bot user ID in Channels settings.",
+    slack: "Add the Slack bot token and signing secret in Channels settings.",
+    signal: "Add the Signal account in Channels settings."
+  ]
 
   @spec report() :: report()
   def report do
@@ -54,6 +103,95 @@ defmodule FermixCore.Readiness do
     }
   end
 
+  @doc "Every pane slug a readiness failure can name."
+  @spec panes() :: [String.t()]
+  def panes, do: @panes
+
+  @doc """
+  Every operator-facing sentence this module can publish, keyed by detail key.
+
+  A native Doctor row and a Settings pane render these verbatim, so they are
+  held to the daemon copy rules (`FermixCore.Management.Copy`) exactly as a
+  descriptor row is. The gate reads this rather than a list beside it: each
+  sentence is built by the same constructor `report/0` calls, over the same
+  tables, so a channel or a provider added to those tables joins the gate on
+  the day it lands.
+  """
+  @spec published_actions() :: [{String.t(), String.t()}]
+  def published_actions do
+    channels =
+      Enum.map(@channel_credentials, fn {channel, _keys} ->
+        channel_failure(channel, Keyword.fetch!(@channel_actions, channel))
+      end)
+
+    providers = Enum.map(Descriptor.ids(), &missing_credentials_action(&1, []))
+
+    Enum.map(
+      channels ++
+        providers ++
+        [
+          personalization_row(),
+          unknown_provider_action(:not_a_provider),
+          multiple_primary_action(),
+          invalid_auth_mode_action("provider:anthropic", "subscription"),
+          realtime_provider_row(),
+          realtime_key_row()
+        ],
+      &{&1.detail_key, &1.action}
+    )
+  end
+
+  @doc """
+  The failures that alone mean setup is incomplete.
+
+  One configured provider plus the three personalization values. An enabled but
+  half-configured channel, and realtime without an OpenAI key, are real failures
+  the operator should see and are not reasons to call setup unfinished: the
+  shipped `telegram: [enabled: true]` default fires on every fresh install, and
+  realtime-without-a-key fires on every companion install.
+  """
+  @spec gating_failures([failure()]) :: [failure()]
+  def gating_failures(failures) when is_list(failures),
+    do: Enum.filter(failures, &(Map.get(&1, :gating, true) == true))
+
+  @doc "Whether no gating failure remains. The one definition of ready."
+  @spec ready?() :: boolean()
+  def ready?, do: report().status == :ready
+
+  @doc "The five messaging channels readiness knows about, in publication order."
+  @spec channels() :: [atom()]
+  def channels, do: Keyword.keys(@channel_credentials)
+
+  @doc """
+  The shipped `enabled` default per channel.
+
+  Published because the settings descriptor renders the same toggle readiness
+  reads, and a second copy of these defaults would let a channel readiness
+  treats as on render as off.
+  """
+  @spec channel_defaults() :: keyword(boolean())
+  def channel_defaults, do: @channel_defaults
+
+  @doc """
+  Whether `channel` is switched on, honouring the shipped default.
+
+  Telegram ships enabled, which is why a fresh install has an advisory Telegram
+  failure and not a gating one.
+  """
+  @spec channel_enabled?(atom()) :: boolean()
+  def channel_enabled?(channel) when is_atom(channel) do
+    channel
+    |> channel_block()
+    |> Keyword.get(:enabled, Keyword.fetch!(@channel_defaults, channel)) == true
+  end
+
+  @doc "Whether every credential `channel` needs is present."
+  @spec channel_configured?(atom()) :: boolean()
+  def channel_configured?(channel) when is_atom(channel) do
+    block = channel_block(channel)
+    Enum.all?(Keyword.fetch!(@channel_credentials, channel), &present?(Keyword.get(block, &1)))
+  end
+
   @spec personalization_failure() :: failure() | nil
   def personalization_failure do
     config = Application.get_env(:fermix_core, :personalization, [])
@@ -64,11 +202,21 @@ defmodule FermixCore.Readiness do
        ) do
       nil
     else
+      personalization_row()
+    end
+  end
+
+  defp personalization_row do
+    gating(
       %{
         component: "personalization",
-        action: "Run mix fermix.setup to provide your name, timezone, and communication style."
-      }
-    end
+        action:
+          "Add your name, time zone, and communication style in Personality settings, " <>
+            "or run `fermix setup`."
+      },
+      "personality",
+      "personalization"
+    )
   end
 
   # Eligibility (credential presence) is owned by Selection — readiness only
@@ -92,12 +240,16 @@ defmodule FermixCore.Readiness do
   # silent coercion to :openai (M12 §2.3-2 — same family as the
   # ConfigStore unknown-provider raise).
   defp unknown_provider_action(provider) do
-    %{
-      component: "provider:config",
-      action:
-        "Unknown provider #{inspect(provider)} configured — expected one of " <>
-          "#{Enum.map_join(Descriptor.ids(), ", ", &Atom.to_string/1)}."
-    }
+    gating(
+      %{
+        component: "provider:config",
+        action:
+          "The configured provider `#{provider}` is not one Fermix knows. Set it to one of " <>
+            "#{Enum.map_join(Descriptor.ids(), ", ", &"`#{&1}`")}."
+      },
+      "providers",
+      "provider:unknown_configured"
+    )
   end
 
   defp primary_provider_failure(provider) do
@@ -125,7 +277,7 @@ defmodule FermixCore.Readiness do
           failure
           | action:
               failure.action <>
-                " Configured fallback providers (#{Enum.map_join(fallbacks, ", ", &to_string/1)}) serve turns meanwhile."
+                " Configured fallback providers (#{Enum.map_join(fallbacks, ", ", &"`#{&1}`")}) serve turns meanwhile."
         }
 
       _none_or_error ->
@@ -153,186 +305,113 @@ defmodule FermixCore.Readiness do
   end
 
   defp missing_credentials_action(:openai, _block) do
-    %{component: "provider:openai", action: "Set OPENAI_API_KEY."}
+    missing_credentials(:openai, "Add the OpenAI API key in Providers settings.")
   end
 
   defp missing_credentials_action(:openai_codex, _block) do
-    %{
-      component: "provider:openai_codex",
-      action: "Run mix fermix.setup --import-codex to import Codex OAuth tokens."
-    }
+    missing_credentials(
+      :openai_codex,
+      "Import your Codex sign-in: run `fermix setup --import-codex`."
+    )
   end
 
   defp missing_credentials_action(:anthropic, block) do
     if oauth_mode?(block) do
-      %{
-        component: "provider:anthropic",
-        action: "Connect the Claude subscription: `fermix auth login --provider anthropic`."
-      }
+      missing_credentials(
+        :anthropic,
+        "Connect the Claude subscription: `fermix auth login --provider anthropic`."
+      )
     else
-      %{component: "provider:anthropic", action: "Set ANTHROPIC_API_KEY."}
+      missing_credentials(:anthropic, "Add the Anthropic API key in Providers settings.")
     end
   end
 
   defp missing_credentials_action(:xai, block) do
     if oauth_mode?(block) do
-      %{
-        component: "provider:xai",
-        action: "Connect SpaceXAI Grok: `fermix auth login --provider xai`."
-      }
+      missing_credentials(:xai, "Connect SpaceXAI Grok: `fermix auth login --provider xai`.")
     else
-      %{component: "provider:xai", action: "Set XAI_API_KEY."}
+      missing_credentials(:xai, "Add the SpaceXAI API key in Providers settings.")
     end
   end
 
-  # Descriptor providers without bespoke flows: the action names the
-  # secret's env var (api_key mode) or the missing base_url (keyless).
+  # Descriptor providers without bespoke flows. The action names the CONTROL
+  # that fixes it, not the environment variable behind it: the failure already
+  # carries the pane that owns the fix, and naming a shell variable in a native
+  # attention row tells the operator to leave the app.
   defp missing_credentials_action(provider, _block) do
     descriptor = Descriptor.fetch!(provider)
 
     action =
       case {Descriptor.default_auth_mode(descriptor), descriptor.secrets} do
-        {:api_key, [secret | _rest]} -> "Set #{SecretPaths.fetch!(secret).env}."
-        {:none, _secrets} -> "Set [fermix_core.providers.#{provider}] base_url."
-        _other -> "Configure the #{descriptor.label} provider in `fermix setup`."
+        {:api_key, [_secret | _rest]} ->
+          "Add the #{descriptor.label} API key in Providers settings."
+
+        {:none, _secrets} ->
+          "Set `base_url` for the #{descriptor.label} provider in config.toml."
+
+        _other ->
+          "Configure the #{descriptor.label} provider in Providers settings."
       end
 
-    %{component: "provider:#{provider}", action: action}
+    missing_credentials(provider, action)
   end
 
   defp oauth_mode?(block), do: Keyword.get(block, :auth_mode) in [:oauth, "oauth"]
 
   defp multiple_primary_action do
-    %{
-      component: "provider:config",
-      action:
-        "More than one provider has primary = true in config.toml — mark exactly one provider primary."
-    }
+    gating(
+      %{
+        component: "provider:config",
+        action:
+          "More than one provider is marked primary in config.toml. Mark exactly one primary."
+      },
+      "providers",
+      "provider:multiple_primary"
+    )
   end
 
   # An unrecognized auth_mode (e.g. a typo) must NOT report ready just because an
   # api_key happens to be set — RouteResolver.parse_auth_mode!/2 raises on it at
   # the first turn, so surface it as a setup failure instead.
   defp invalid_auth_mode_action(component, mode) do
-    %{
-      component: component,
-      action: "Invalid auth_mode #{inspect(mode)} — set it to \"api_key\" or \"oauth\"."
-    }
+    gating(
+      %{component: component, action: invalid_auth_mode_sentence(mode)},
+      "providers",
+      "provider:invalid_auth_mode"
+    )
   end
 
-  defp telegram_failure do
-    case Config.channel(:telegram) do
-      {:ok, config} when is_list(config) ->
-        cond do
-          not telegram_enabled?(config) ->
-            nil
-
-          present?(Keyword.get(config, :bot_token)) ->
-            nil
-
-          true ->
-            %{
-              component: "channel:telegram",
-              action:
-                "Set the Telegram bot token: run `fermix setup` or set bot_token in config.toml."
-            }
-        end
-
-      _ ->
-        %{
-          component: "channel:telegram",
-          action:
-            "Set the Telegram bot token: run `fermix setup` or set bot_token in config.toml."
-        }
-    end
+  # The value is the operator's own word, echoed as a backticked literal they
+  # can search the file for. `inspect/1` is never used here: this sentence
+  # crosses the management socket, and an inspected term reads as a typo to
+  # everyone who has not read the source. A value that is not a word is not
+  # echoed at all rather than rendered.
+  defp invalid_auth_mode_sentence(mode)
+       when (is_binary(mode) or is_atom(mode)) and mode not in [nil, true, false] do
+    "The sign-in mode `#{mode}` is not one Fermix knows. " <>
+      "Set `auth_mode` to `api_key` or `oauth`."
   end
 
-  defp whatsapp_failure do
-    case Config.channel(:whatsapp) do
-      {:ok, config} when is_list(config) ->
-        cond do
-          not channel_enabled?(config, false) ->
-            nil
-
-          configured?(config, [:access_token, :phone_number_id, :verify_token, :app_secret]) ->
-            nil
-
-          true ->
-            %{
-              component: "channel:whatsapp",
-              action:
-                "Set WHATSAPP_ACCESS_TOKEN, WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_VERIFY_TOKEN, and WHATSAPP_APP_SECRET."
-            }
-        end
-
-      _ ->
-        nil
-    end
+  defp invalid_auth_mode_sentence(_mode) do
+    "The sign-in mode set for this provider is not one Fermix knows. " <>
+      "Set `auth_mode` to `api_key` or `oauth`."
   end
 
-  defp discord_failure do
-    case Config.channel(:discord) do
-      {:ok, config} when is_list(config) ->
-        cond do
-          not channel_enabled?(config, false) ->
-            nil
+  # One table for the five channels, because three surfaces ask the same two
+  # questions about them (is it on, are its credentials present) and a second
+  # copy of this list is how a channel added later gets a readiness row and no
+  # setup row, or the reverse.
+  defp telegram_failure, do: channel_credentials_failure(:telegram)
+  defp whatsapp_failure, do: channel_credentials_failure(:whatsapp)
+  defp discord_failure, do: channel_credentials_failure(:discord)
+  defp slack_failure, do: channel_credentials_failure(:slack)
+  defp signal_failure, do: channel_credentials_failure(:signal)
 
-          configured?(config, [:bot_token, :bot_user_id]) ->
-            nil
-
-          true ->
-            %{
-              component: "channel:discord",
-              action: "Set DISCORD_BOT_TOKEN and DISCORD_BOT_USER_ID."
-            }
-        end
-
-      _ ->
-        nil
-    end
-  end
-
-  defp slack_failure do
-    case Config.channel(:slack) do
-      {:ok, config} when is_list(config) ->
-        cond do
-          not channel_enabled?(config, false) ->
-            nil
-
-          configured?(config, [:bot_token, :signing_secret]) ->
-            nil
-
-          true ->
-            %{
-              component: "channel:slack",
-              action: "Set SLACK_BOT_TOKEN and SLACK_SIGNING_SECRET."
-            }
-        end
-
-      _ ->
-        nil
-    end
-  end
-
-  defp signal_failure do
-    case Config.channel(:signal) do
-      {:ok, config} when is_list(config) ->
-        cond do
-          not channel_enabled?(config, false) ->
-            nil
-
-          configured?(config, [:account]) ->
-            nil
-
-          true ->
-            %{
-              component: "channel:signal",
-              action: "Set SIGNAL_ACCOUNT."
-            }
-        end
-
-      _ ->
-        nil
+  defp channel_credentials_failure(channel) do
+    cond do
+      not channel_enabled?(channel) -> nil
+      channel_configured?(channel) -> nil
+      true -> channel_failure(channel, Keyword.fetch!(@channel_actions, channel))
     end
   end
 
@@ -344,36 +423,33 @@ defmodule FermixCore.Readiness do
         nil
 
       config.provider != "openai" ->
-        %{
-          component: "realtime:openai",
-          action: "Set [fermix_core.realtime].provider to \"openai\" or disable realtime."
-        }
+        realtime_provider_row()
 
       regular_openai_api_key?() ->
         nil
 
       true ->
-        %{
-          component: "realtime:openai",
-          action: "Set OPENAI_API_KEY for OpenAI Realtime or disable realtime."
-        }
+        realtime_key_row()
     end
   end
 
-  defp telegram_enabled?(config) do
-    channel_enabled?(config, true)
+  defp realtime_provider_row do
+    realtime_failure_row("Set the voice provider to `openai` in config.toml, or turn voice off.")
+  end
+
+  defp realtime_key_row do
+    realtime_failure_row("Add the OpenAI API key in Providers settings, or turn voice off.")
+  end
+
+  defp channel_block(channel) do
+    case Config.channel(channel) do
+      {:ok, config} when is_list(config) -> config
+      _not_configured -> []
+    end
   end
 
   defp regular_openai_api_key? do
     Selection.configured?(:openai, provider_block(:openai))
-  end
-
-  defp configured?(config, keys) do
-    Enum.all?(keys, &present?(Keyword.get(config, &1)))
-  end
-
-  defp channel_enabled?(config, default) do
-    Keyword.get(config, :enabled, default) == true
   end
 
   defp present?(value) when is_binary(value), do: value != ""
@@ -382,6 +458,42 @@ defmodule FermixCore.Readiness do
   defp present?(nil), do: false
   defp present?(_value), do: true
 
-  defp status_for([]), do: :ready
-  defp status_for(failures) when is_list(failures), do: :setup_required
+  # One constructor per class, so `gating`, `pane` and `detail_key` are minted
+  # where the cause is known rather than inferred later from the open
+  # `component` string, which collapses three provider causes into one value.
+  defp gating(failure, pane, detail_key) when pane in @panes,
+    do: Map.merge(failure, %{gating: true, pane: pane, detail_key: detail_key})
+
+  defp advisory(failure, pane, detail_key) when pane in @panes,
+    do: Map.merge(failure, %{gating: false, pane: pane, detail_key: detail_key})
+
+  # Two causes share `provider:missing_credentials:anthropic` and two share the
+  # `:xai` key (api_key versus oauth), so each entry's sentence has to cover
+  # both. That collapse is deliberate and bounded; it is not the open-component
+  # collapse this key replaces.
+  defp missing_credentials(provider, action) when is_atom(provider) do
+    gating(
+      %{component: "provider:#{provider}", action: action},
+      "providers",
+      "provider:missing_credentials:#{provider}"
+    )
+  end
+
+  defp channel_failure(channel, action) when is_atom(channel) do
+    advisory(%{component: "channel:#{channel}", action: action}, "channels", "channel:#{channel}")
+  end
+
+  defp realtime_failure_row(action) do
+    advisory(%{component: "realtime:openai", action: action}, "voice", "realtime:openai")
+  end
+
+  # Ready is "no gating failure remains", never "no failure at all". Advisory
+  # failures stay in the list so every surface can render them; they simply do
+  # not mean setup is unfinished.
+  defp status_for(failures) when is_list(failures) do
+    case gating_failures(failures) do
+      [] -> :ready
+      [_ | _] -> :setup_required
+    end
+  end
 end

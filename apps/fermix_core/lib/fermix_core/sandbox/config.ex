@@ -106,6 +106,14 @@ defmodule FermixCore.Sandbox.Config do
     }
   end
 
+  @doc "Every sandbox mode, least to most permissive."
+  @spec modes() :: [atom()]
+  def modes, do: @modes
+
+  @doc "Every command profile, narrowest to widest."
+  @spec command_profiles() :: [atom()]
+  def command_profiles, do: @command_profiles
+
   @spec to_keyword(t() | map() | keyword()) :: keyword()
   def to_keyword(config) do
     config = normalize(config)

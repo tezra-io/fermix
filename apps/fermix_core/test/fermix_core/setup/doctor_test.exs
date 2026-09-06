@@ -1338,7 +1338,7 @@ defmodule FermixCore.Setup.DoctorTest do
                sidecar_installed?: false,
                browser_installed?: false,
                browser_note: nil,
-               pinned_tag: "v0.3.0",
+               pinned_tag: "v0.3.3",
                profile: :absent,
                rtms_configured?: false,
                remedy: remedy
@@ -1373,6 +1373,7 @@ defmodule FermixCore.Setup.DoctorTest do
     test "an installed sidecar with a profile but no sign-in is reported not signed in", ctx do
       Application.put_env(:fermix_core, :meetings, enabled: true)
       install_fake_meetbot_sidecar(ctx.home)
+      :ok = FermixCore.Meetings.SidecarInstaller.mark_browser_installed()
       File.mkdir_p!(FermixCore.Meetings.SidecarInstaller.profile_dir())
 
       assert %{
@@ -1398,18 +1399,24 @@ defmodule FermixCore.Setup.DoctorTest do
       assert note =~ "signed in ✓"
     end
 
+    # A sidecar with no browser cannot place a Meet bot, so it is not a usable
+    # lane and the remedy has to be the browser rather than "install the
+    # sidecar" the operator already did.
     test "an installed sidecar without its browser warns the browser is missing", ctx do
       Application.put_env(:fermix_core, :meetings, enabled: true)
       install_fake_meetbot_sidecar(ctx.home)
 
       assert %{
+               ready?: false,
                sidecar_installed?: true,
                browser_installed?: false,
-               browser_note: note
+               browser_note: note,
+               remedy: remedy
              } = Doctor.meetings_report()
 
       assert note =~ "browser not installed"
       assert note =~ "Google Meet can't launch"
+      assert remedy =~ "browser not installed"
     end
 
     test "an installed sidecar with its browser marker reports no browser warning", ctx do

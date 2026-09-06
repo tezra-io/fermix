@@ -30,20 +30,21 @@ jobs:
           - { os: ubuntu-24.04, leg: linux-x64, timeout: 30 }
           - { os: ubuntu-24.04-arm, leg: linux-arm64, timeout: 30 }
           - { os: macos-15, leg: macos-arm64, timeout: 45 }
+          - { os: macos-15-intel, leg: macos-x64, timeout: 45 }
     env:
       MIX_ENV: test
       ELIXIR_VERSION: "1.19.5"
       OTP_VERSION: "28"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: erlef/setup-beam@v1
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
         with:
           otp-version: ${{ env.OTP_VERSION }}
           elixir-version: ${{ env.ELIXIR_VERSION }}
 
       - name: Cache deps and _build
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             deps
@@ -76,7 +77,7 @@ jobs:
     name: catalog + compux checksum integrity
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Verify plugin catalog sha256s against published assets
         run: |
@@ -148,12 +149,21 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3f0fcb86 # v5.4.2
       - name: Harness developer tests
         run: make -C benchmark tests
       - name: Validate behavioral suites (no spend)
         run: make -C benchmark dry
+
+  release-scripts:
+    name: release script contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Run hermetic release tests
+        run: python3 -m unittest discover -s scripts/release -p 'test_*.py'
 
   disclaim-shim:
     # The macOS disclaim exec shim ships inside release payloads, cross-compiled
@@ -166,9 +176,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install Zig
-        uses: mlugg/setup-zig@v2
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: "0.15.2"
       - name: Cross-compile for both macOS targets
@@ -188,18 +198,21 @@ jobs:
   gate:
     name: compile · format · credo · test
     runs-on: ubuntu-24.04
-    needs: [check, harness, disclaim-shim]
+    needs: [check, harness, release-scripts, disclaim-shim]
     if: always()
     steps:
       - name: Require every matrix leg to have passed
         env:
           CHECK_RESULT: ${{ needs.check.result }}
           HARNESS_RESULT: ${{ needs.harness.result }}
+          RELEASE_SCRIPTS_RESULT: ${{ needs.release-scripts.result }}
           DISCLAIM_RESULT: ${{ needs.disclaim-shim.result }}
         run: |
           echo "check (matrix) result: $CHECK_RESULT"
           echo "harness result: $HARNESS_RESULT"
+          echo "release-scripts result: $RELEASE_SCRIPTS_RESULT"
           echo "disclaim-shim result: $DISCLAIM_RESULT"
           [ "$CHECK_RESULT" = "success" ] || exit 1
           [ "$HARNESS_RESULT" = "success" ] || exit 1
+          [ "$RELEASE_SCRIPTS_RESULT" = "success" ] || exit 1
           [ "$DISCLAIM_RESULT" = "success" ] || exit 1

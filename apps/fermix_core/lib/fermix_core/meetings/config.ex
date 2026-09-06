@@ -19,6 +19,9 @@ defmodule FermixCore.Meetings.Config do
     instead of failing deep inside the handshake.
   """
 
+  alias FermixCore.Setup.ConfigStore
+  alias FermixCore.Setup.Wizard
+
   @default_bot_name "Fermix Notetaker"
   @default_owner_name "the operator"
 
@@ -61,6 +64,10 @@ defmodule FermixCore.Meetings.Config do
           zoom_ws_subscription_id: String.t()
         }
 
+  @doc "The notetaker's shipped name, published so a settings row shows the same default."
+  @spec default_bot_name() :: String.t()
+  def default_bot_name, do: @default_bot_name
+
   @doc "Snapshots the whole `[fermix_core.meetings]` block, with `announce_message` resolved."
   @spec load() :: t()
   def load do
@@ -79,6 +86,31 @@ defmodule FermixCore.Meetings.Config do
       zoom_client_secret: string(config, :zoom_client_secret, ""),
       zoom_ws_subscription_id: string(config, :zoom_ws_subscription_id, "")
     }
+  end
+
+  @doc """
+  Persists a partial change to `[fermix_core.meetings]`.
+
+  The one writer for this block, and it commits through the wizard's shared
+  write tail rather than saving and applying on its own: that tail is where the
+  external-change refusal executes and where the persisted baseline is
+  re-recorded, and a second save-plus-apply beside it would revert an outside
+  edit silently and then leave every later write refusing against a file this
+  daemon had just written.
+
+  Values are validated where every other value of this block is validated, by
+  the normalizer `save_snapshot/2` runs, so a bad one raises `ArgumentError`
+  with its own sentence instead of landing.
+  """
+  @spec save(keyword()) :: {:ok, map()} | {:error, term()}
+  def save(changes) when is_list(changes) do
+    snapshot = ConfigStore.current_snapshot()
+    core = Map.get(snapshot, :fermix_core, [])
+    meetings = core |> Keyword.get(:meetings, []) |> Keyword.merge(changes)
+
+    snapshot
+    |> Map.put(:fermix_core, Keyword.put(core, :meetings, meetings))
+    |> Wizard.commit_snapshot()
   end
 
   @doc "Whether the meetings subsystem is enabled (the config toggle alone)."

@@ -8,6 +8,7 @@ defmodule FermixCore.Setup.SecretStore do
 
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.SecretPaths
+  alias FermixCore.Setup.SecretWriteLog
   alias FermixCore.Setup.SecretWriter
 
   require Logger
@@ -240,7 +241,7 @@ defmodule FermixCore.Setup.SecretStore do
   end
 
   defp write_secret(snapshot, secret, value, write_opts) do
-    case SecretWriter.put(secret.key, value, write_opts) do
+    case SecretWriteLog.put(secret.key, value, write_opts) do
       :ok ->
         {:ok, put_snapshot_value(snapshot, secret.path, SecretWriter.sentinel())}
 

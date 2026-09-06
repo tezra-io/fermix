@@ -108,25 +108,6 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatusTest do
       assert {:error, {:remote_security_blocked, :non_global_answer, nil}} = Task.await(waiter)
     end
 
-    test "a terminal outcome carries the capability the writer named", %{status: status} do
-      {:ok, generation} = RuntimeStatus.register_owner(status, @source, fake_owner())
-
-      :ok =
-        RuntimeStatus.put(
-          status,
-          @source,
-          generation,
-          :upstream_contract_mismatch,
-          :descriptor_changed,
-          "eden_read_card"
-        )
-
-      assert {:ok, %{capability: "eden_read_card"}} = RuntimeStatus.fetch(status, @source)
-
-      assert {:error, {:upstream_contract_mismatch, :descriptor_changed, "eden_read_card"}} =
-               RuntimeStatus.await(status, @source, generation, 1_000)
-    end
-
     test "a stale generation's :ready never satisfies the replacement's waiter", %{status: status} do
       {:ok, replaced} = RuntimeStatus.register_owner(status, @source, fake_owner())
       {:ok, current} = RuntimeStatus.register_owner(status, @source, fake_owner())
@@ -218,60 +199,37 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatusTest do
 
       assert {:error, {:remote_unreachable, _class, nil}} = Task.await(waiter, 1_000)
     end
-
-    test "a terminal capability survives the death that follows it", %{status: status} do
-      owner = fake_owner()
-      {:ok, generation} = RuntimeStatus.register_owner(status, @source, owner)
-
-      :ok =
-        RuntimeStatus.put(
-          status,
-          @source,
-          generation,
-          :upstream_contract_mismatch,
-          :missing_tool,
-          "eden_search"
-        )
-
-      Process.exit(owner, :kill)
-
-      assert eventually(fn ->
-               match?(
-                 {:ok, %{status: :upstream_contract_mismatch, capability: "eden_search"}},
-                 RuntimeStatus.fetch(status, @source)
-               )
-             end)
-    end
   end
 
   describe "classify/1" do
     test "maps the remote rail's reasons onto statuses with atom-only detail" do
-      assert {:needs_secret, nil} = RuntimeStatus.classify({:needs_secret, "eden"})
+      assert {:needs_secret, nil, nil} = RuntimeStatus.classify({:needs_secret, "eden"})
 
-      assert {:reauthorization_required, nil} =
+      assert {:reauthorization_required, nil, nil} =
                RuntimeStatus.classify({:reauthorization_required, "mcp.eden.so"})
 
-      assert {:remote_protocol_error, :session_expired} = RuntimeStatus.classify(:session_expired)
+      assert {:remote_protocol_error, :session_expired, nil} =
+               RuntimeStatus.classify(:session_expired)
 
-      assert {:remote_security_blocked, :endpoint_not_pinnable} =
+      assert {:remote_security_blocked, :endpoint_not_pinnable, nil} =
                RuntimeStatus.classify({:remote_security_blocked, :endpoint_not_pinnable})
 
-      assert {:remote_protocol_error, :unsupported_protocol_version} =
+      assert {:remote_protocol_error, :unsupported_protocol_version, nil} =
                RuntimeStatus.classify(
                  {:remote_protocol_error, {:unsupported_protocol_version, "2025-11-25"}}
                )
 
-      assert {:remote_unreachable, :transport} =
+      assert {:remote_unreachable, :transport, nil} =
                RuntimeStatus.classify({:transport, :econnrefused})
     end
 
     # A crash reason can carry the crashing process's state, and a session's
     # state holds a bearer credential. Only the class may survive.
     test "an unrecognized reason keeps only its class" do
-      assert {:remote_unreachable, :unclassified} =
+      assert {:remote_unreachable, :unclassified, nil} =
                RuntimeStatus.classify(%{secret: "eden_pat_do_not_leak"})
 
-      assert {:remote_unreachable, :badarg} =
+      assert {:remote_unreachable, :badarg, nil} =
                RuntimeStatus.classify({:badarg, %{credential: "eden_pat_do_not_leak"}})
     end
 
@@ -295,70 +253,152 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatusTest do
       ]
 
       for reason <- reasons do
-        {status, detail} = RuntimeStatus.classify(reason)
+        {status, detail, subject} = RuntimeStatus.classify(reason)
         assert status in RuntimeStatus.statuses()
         assert is_atom(detail)
+        assert is_nil(subject) or is_binary(subject)
       end
     end
   end
 
-  describe "capability_from/1" do
-    test "extracts the tool name a contract failure carries" do
-      assert RuntimeStatus.capability_from(
-               {:upstream_contract_mismatch, {:descriptor_changed, "eden_read_card"}}
-             ) == "eden_read_card"
+  describe "classify/1 subject" do
+    # The one question a contract refusal raises is WHICH capability, and before
+    # this the answer existed only inside the daemon's own memory.
+    test "a contract refusal carries the capability it names" do
+      assert {:upstream_contract_mismatch, :missing_tool, "eden_get_item_connections"} =
+               RuntimeStatus.classify(
+                 {:upstream_contract_mismatch, {:missing_tool, "eden_get_item_connections"}}
+               )
 
-      assert RuntimeStatus.capability_from({:capability_conflict, "eden_search"}) ==
-               "eden_search"
+      assert {:upstream_contract_mismatch, :descriptor_changed, "eden_read_card"} =
+               RuntimeStatus.classify(
+                 {:upstream_contract_mismatch, {:descriptor_changed, "eden_read_card"}}
+               )
+
+      assert {:capability_conflict, nil, "eden_search"} =
+               RuntimeStatus.classify({:capability_conflict, "eden_search"})
+
+      assert {:capability_conflict, :duplicate_name, "eden_search"} =
+               RuntimeStatus.classify({:capability_conflict, {:duplicate_name, "eden_search"}})
+
+      # A manifest key that failed the namespace rule is still a manifest key —
+      # `Contract.verify_one/2` fetches it out of the signed tool map before the
+      # namespace check can fire.
+      assert {:upstream_contract_mismatch, :name_outside_namespace, "get_note"} =
+               RuntimeStatus.classify(
+                 {:upstream_contract_mismatch, {:name_outside_namespace, "get_note"}}
+               )
     end
 
-    test "yields nothing for a reason that names no capability" do
-      assert RuntimeStatus.capability_from({:upstream_contract_mismatch, :rediscovery_cap}) == nil
-      assert RuntimeStatus.capability_from({:reauthorization_required, "mcp.eden.so"}) == nil
-      assert RuntimeStatus.capability_from({:remote_jsonrpc_error, -32_000, "nope"}) == nil
-      assert RuntimeStatus.capability_from(:session_expired) == nil
-      assert RuntimeStatus.capability_from(%{secret: "eden_pat_do_not_leak"}) == nil
+    # The moduledoc's boundary, as a test. A subject is a capability name this
+    # build already holds; a crash term and an unrecognized `{class, binary}`
+    # are the two ways a string could otherwise reach an operator's screen.
+    test "crash terms and unrecognized shapes never become a subject" do
+      assert {:remote_unreachable, :unclassified, nil} =
+               RuntimeStatus.classify(%{tokens: %{access_token: "eden_pat_do_not_leak"}})
+
+      assert {:remote_unreachable, :EXIT, nil} =
+               RuntimeStatus.classify({:EXIT, self(), {%RuntimeError{message: "boom"}, []}})
+
+      # Shape alone earns nothing: an unknown kind carrying a string is refused
+      # even though it looks exactly like a refusal this table would name.
+      assert {:upstream_contract_mismatch, :some_future_kind, nil} =
+               RuntimeStatus.classify(
+                 {:upstream_contract_mismatch, {:some_future_kind, "eden_pat_do_not_leak"}}
+               )
+
+      # A peer-authored JSON-RPC error is never a runtime status at all.
+      assert {:remote_protocol_error, :jsonrpc_error, nil} =
+               RuntimeStatus.classify({:remote_jsonrpc_error, nil, "peer authored text"})
     end
 
-    # The name comes from the remote's own descriptor; a hostile one must not
-    # ride an unbounded string into every status surface.
-    test "bounds the extracted name" do
-      long = String.duplicate("a", 4_000)
+    # Bounded in characters, so the truncation can never emit invalid UTF-8 and
+    # make `Jason` refuse the whole status reply.
+    test "a stored subject is bounded and stays valid UTF-8", %{status: status} do
+      {:ok, generation} = RuntimeStatus.register_owner(status, @source, fake_owner())
 
-      extracted =
-        RuntimeStatus.capability_from({:upstream_contract_mismatch, {:invalid_schema, long}})
+      for oversized <- [String.duplicate("x", 500), String.duplicate("é", 500)] do
+        :ok =
+          RuntimeStatus.put(
+            status,
+            @source,
+            generation,
+            :upstream_contract_mismatch,
+            :missing_tool,
+            oversized
+          )
 
-      assert String.length(extracted) == 128
+        {:ok, entry} = RuntimeStatus.fetch(status, @source)
+        assert String.length(entry.subject) == 128
+        assert String.valid?(entry.subject)
+        assert {:ok, _json} = Jason.encode(%{subject: entry.subject})
+      end
     end
   end
 
-  describe "describe/3" do
-    test "renders status, detail, and capability the way every surface shows them" do
-      assert RuntimeStatus.describe(:ready) == "ready"
+  describe "@subject_kinds vs its producers" do
+    @contract_source "lib/fermix_core/capabilities/mcp/remote/contract.ex"
+    @producer_sources [
+      @contract_source,
+      "lib/fermix_core/capabilities/mcp/server.ex",
+      "lib/fermix_core/capabilities/mcp/naming.ex"
+    ]
 
-      assert RuntimeStatus.describe(:upstream_contract_mismatch, :descriptor_changed) ==
-               "upstream_contract_mismatch/descriptor_changed"
+    # Derived from the constructing sources, never from a second hand-written
+    # list. `:schema_too_large` was missing from `@subject_kinds` for exactly the
+    # reason this test exists: it is built indirectly, so it does not appear as a
+    # literal refusal tuple anywhere, and a reviewer reading the list saw its
+    # sibling `:schema_too_deep` and assumed the pair was covered.
+    test "every kind a refusal can carry a manifest name under is declared" do
+      literal =
+        for path <- @producer_sources,
+            source = File.read!(Path.join(app_root(), path)),
+            [_, kind] <-
+              Regex.scan(
+                ~r/\{:(?:upstream_contract_mismatch|capability_conflict), \{:([a-z_]+),/,
+                source
+              ),
+            into: MapSet.new(),
+            do: String.to_existing_atom(kind)
 
-      assert RuntimeStatus.describe(
-               :upstream_contract_mismatch,
-               :descriptor_changed,
-               "eden_read_card"
-             ) == "upstream_contract_mismatch/descriptor_changed (eden_read_card)"
+      # The indirect producer: `bound_schema/2` wraps whatever class the schema
+      # walkers return into `{:upstream_contract_mismatch, {class, name}}`.
+      indirect =
+        for [_, kind] <-
+              Regex.scan(
+                ~r/\{:error, :(schema_[a-z_]+)\}/,
+                File.read!(Path.join(app_root(), @contract_source))
+              ),
+            into: MapSet.new(),
+            do: String.to_existing_atom(kind)
 
-      assert RuntimeStatus.describe(:capability_conflict, nil, "eden_search") ==
-               "capability_conflict (eden_search)"
+      # Anchors: a moved or renamed source must fail loudly here rather than
+      # quietly reduce this test to asserting nothing.
+      assert MapSet.size(literal) >= 6, "refusal tuples not found — did the sources move?"
+      assert MapSet.size(indirect) >= 2, "schema-bound classes not found — did they move?"
+
+      assert MapSet.union(literal, indirect) ==
+               MapSet.new(RuntimeStatus.subject_kinds()),
+             "@subject_kinds has drifted from the refusals its producers construct"
     end
 
-    # `fermix doctor` renders rows that crossed the control socket, where the
-    # atoms have already become strings; the shared resolver must not care.
-    test "renders wire strings identically" do
-      assert RuntimeStatus.describe(
-               "upstream_contract_mismatch",
-               "descriptor_changed",
-               "eden_read_card"
-             ) == "upstream_contract_mismatch/descriptor_changed (eden_read_card)"
+    defp app_root do
+      Path.expand("../../../..", __DIR__)
+    end
+  end
 
-      assert RuntimeStatus.describe("ready", nil, nil) == "ready"
+  describe "describe/1" do
+    test "renders the same refusal for every operator surface, atoms or wire strings" do
+      assert RuntimeStatus.describe({:ready, nil, nil}) == "ready"
+
+      assert RuntimeStatus.describe({:upstream_contract_mismatch, :missing_tool, "eden_x"}) ==
+               "upstream_contract_mismatch/missing_tool (eden_x)"
+
+      assert RuntimeStatus.describe({"upstream_contract_mismatch", "missing_tool", "eden_x"}) ==
+               "upstream_contract_mismatch/missing_tool (eden_x)"
+
+      assert RuntimeStatus.describe({:capability_conflict, nil, "eden_x"}) ==
+               "capability_conflict (eden_x)"
     end
   end
 

@@ -362,6 +362,39 @@ lockstep if either changes. Event **content** rides the summarizer's own
 consent gate (`Gate.allow?({:summarizer, route})`) before it ever reaches the
 provider emitter, so the content-capture switch below is the second gate, not
 the first.
+## Management socket runs (Doctor sessions and management jobs)
+
+The management wire has two **run kinds** and no others. A Doctor session mints
+`session_id = "doctor:<rand>"`; a management job mints `"job:<rand>"`. Both go
+through `FermixCore.Management.Telemetry` — never hand-rolled. Bookends are
+`[:fermix, :doctor, :session_start | :session_complete | :session_error]` and
+`[:fermix, :management_job, :start | :complete]`, with `agent: "doctor"` /
+`agent: "management_job"` and the whole-run `budget_ms` (the exporter's sweep
+floor for the root). A Doctor session also carries `scope` and the
+`parent_session` that asked for it; a job carries its `kind`. Terminal metadata
+is the run's own diagnosis word (`completed | cancelled | timed_out`, plus
+`failed` for a job), never a bare "ok".
+
+What rides and what does not: check **counts** per status ride the Doctor
+bookend, a check `summary` and its `evidence` never do (both can carry operator
+paths). A job's `failure_code` and its refusal `sentence` do ride, deliberately
+— they are the daemon's own bounded copy and they are the whole diagnosis — but
+no operation `result` ever does.
+
+A provider call made inside a job carries the **job's** id as its `session_id`
+through `Providers.Telemetry.emit_call/3`, so a metered probe nests under the run
+that issued it rather than floating as a root. `Trace.TelemetryHandler` registers
+all five events and `FermixOpik` binds them (`infer_kind("job:" <> _)`, root open
+and close in `Aggregation`, replay in `TraceFile`).
+
+Everything else on this socket is **deliberately sessionless**: `hello`,
+`overview.get`, `settings.*`, `secret.*`, `plugins.*`'s request verbs, `logs.query`,
+`lifecycle.*` and `diagnostics.build` are single bounded request/response calls
+with no run identity, no cancellation and no budget of their own, so they mint no
+`session_id` and emit nothing. Adding an event for one of them would create a
+root span per settings read with nothing nested under it. If a new management
+method has to *wait* on a network, a download or a person, it is a job — start
+one and inherit the bookends rather than minting a sixth event.
 
 ## Content (prompts / responses / tool IO)
 
