@@ -17,6 +17,9 @@ defmodule FermixWebWeb.SetupLive.Components do
   ]
 
   attr :active_tab, :string, required: true
+  # The macOS app's in-app presentation (`?embed=1`): same components, native
+  # dress — transparent ground, label-only rail, unboxed pane, -sm controls.
+  attr :embed?, :boolean, default: false
   attr :channels_form, :map, required: true
   attr :codex_auth, :map, required: true
   attr :codex_auth_running?, :boolean, required: true
@@ -61,7 +64,13 @@ defmodule FermixWebWeb.SetupLive.Components do
 
   def page(assigns) do
     ~H"""
-    <main class="min-h-screen bg-base-200/40 text-base-content">
+    <main
+      class={[
+        "min-h-screen text-base-content",
+        if(@embed?, do: "bg-transparent", else: "bg-base-200/40")
+      ]}
+      data-embed={@embed?}
+    >
       <div
         :if={@restarting}
         id="restart-reconnect"
@@ -77,15 +86,24 @@ defmodule FermixWebWeb.SetupLive.Components do
         </div>
       </div>
 
-      <div class="mx-auto max-w-6xl gap-6 px-4 py-6 sm:px-6 lg:grid lg:grid-cols-[16rem_minmax(0,1fr)] lg:items-start lg:px-8">
+      <div class={
+        if @embed?,
+          do: "grid max-w-none grid-cols-[11rem_minmax(0,1fr)] items-start gap-5 px-5 py-4",
+          else:
+            "mx-auto max-w-6xl gap-6 px-4 py-6 sm:px-6 lg:grid lg:grid-cols-[16rem_minmax(0,1fr)] lg:items-start lg:px-8"
+      }>
         <.setup_sidebar
           active_tab={@active_tab}
+          embed?={@embed?}
           provider_form={@provider_form}
           report={@report}
           tabs={@tabs}
         />
 
-        <section class="mt-6 min-w-0 lg:mt-0">
+        <%!-- The content column is a size container: pane grids split into
+              columns by the width they actually get, not the viewport's, so the
+              narrow in-app pane and the browser page share one rule. --%>
+        <section class={if @embed?, do: "@container min-w-0", else: "@container mt-6 min-w-0 lg:mt-0"}>
           <div :if={@saved_flash} class="mb-4">
             <.flash_banner flash={@saved_flash} />
           </div>
@@ -93,7 +111,11 @@ defmodule FermixWebWeb.SetupLive.Components do
           <div
             id={"setup-pane-#{@active_tab}"}
             phx-hook="UnsavedHint"
-            class="relative rounded-box border border-base-300 bg-base-100 p-6 shadow-sm sm:p-8"
+            class={
+              if @embed?,
+                do: "relative border-0 bg-transparent p-0 text-[13px] shadow-none",
+                else: "relative rounded-box border border-base-300 bg-base-100 p-6 shadow-sm sm:p-8"
+            }
           >
             <%!-- Client-only dirty hint: the hook reveals this badge on the first
                   input edit and clears it on submit. The ignore island keeps
@@ -109,6 +131,7 @@ defmodule FermixWebWeb.SetupLive.Components do
             </div>
             <.active_pane
               active_tab={@active_tab}
+              embed?={@embed?}
               channels_form={@channels_form}
               codex_auth={@codex_auth}
               codex_auth_running?={@codex_auth_running?}
@@ -157,24 +180,27 @@ defmodule FermixWebWeb.SetupLive.Components do
   end
 
   attr :active_tab, :string, required: true
+  attr :embed?, :boolean, default: false
   attr :provider_form, :map, required: true
   attr :report, :map, required: true
   attr :tabs, :list, required: true
 
+  # One nav, two dresses. The browser card keeps its identity block, step
+  # counter, progress bar, theme toggle, and per-tab subtext. The embed rail is
+  # label-only: the app's own chrome carries identity and theme, and this rail
+  # navigates setup sections the way the app sidebar navigates surfaces —
+  # different jobs, so it must not look like a second website sidebar.
   defp setup_sidebar(assigns) do
     ~H"""
-    <aside class="lg:sticky lg:top-6">
-      <div class="rounded-box border border-base-300 bg-base-100 p-4 shadow-sm">
-        <div class="flex items-center gap-2.5 px-1">
-          <img
-            src={~p"/images/fermix-mascot.png"}
-            alt=""
-            class="size-9 shrink-0 [filter:drop-shadow(0_0_1px_rgba(0,0,0,0.28))]"
-          />
-          <.fermix_wordmark class="h-5 w-auto text-base-content" />
+    <aside class={if @embed?, do: "sticky top-4", else: "lg:sticky lg:top-6"}>
+      <div class={
+        if @embed?, do: nil, else: "rounded-box border border-base-300 bg-base-100 p-4 shadow-sm"
+      }>
+        <div :if={!@embed?} class="flex items-center gap-2.5 px-1">
+          <.fermix_wordmark class="h-6 w-auto text-base-content" />
         </div>
 
-        <div class="mt-4 px-1">
+        <div :if={!@embed?} class="mt-4 px-1">
           <div class="flex items-center justify-between text-xs">
             <span class="text-base-content/55">
               Step {current_step_number(@active_tab, @tabs)} of {length(@tabs)}
@@ -189,10 +215,26 @@ defmodule FermixWebWeb.SetupLive.Components do
           </div>
         </div>
 
-        <nav class="mt-4" aria-label="Setup steps">
+        <nav class={if @embed?, do: nil, else: "mt-4"} aria-label="Setup steps">
           <ol class="space-y-0.5">
             <li :for={{tab, index} <- Enum.with_index(@tabs)}>
               <button
+                :if={@embed?}
+                type="button"
+                phx-click="select_tab"
+                phx-value-tab={tab.id}
+                class={embed_nav_class(tab.id, @active_tab)}
+                aria-current={if tab.id == @active_tab, do: "step", else: "false"}
+              >
+                <.icon
+                  :if={step_done?(tab, @active_tab, @report)}
+                  name="hero-check"
+                  class="size-3.5 shrink-0"
+                />
+                <span class="truncate">{tab.label}</span>
+              </button>
+              <button
+                :if={!@embed?}
                 type="button"
                 phx-click="select_tab"
                 phx-value-tab={tab.id}
@@ -209,12 +251,15 @@ defmodule FermixWebWeb.SetupLive.Components do
           </ol>
         </nav>
 
-        <div class="mt-4 flex items-center justify-between gap-3 border-t border-base-300 px-1 pt-3">
+        <div
+          :if={!@embed?}
+          class="mt-4 flex items-center justify-between gap-3 border-t border-base-300 px-1 pt-3"
+        >
           <span class="text-xs font-medium text-base-content/55">Theme</span>
           <Layouts.theme_toggle />
         </div>
 
-        <div class="mt-3 px-1 text-xs text-base-content/55">
+        <div :if={!@embed?} class="mt-3 px-1 text-xs text-base-content/55">
           <p class="truncate">
             {provider_label(@provider_form.provider)} · {@provider_form.default_model}
           </p>
@@ -242,6 +287,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   end
 
   attr :active_tab, :string, required: true
+  attr :embed?, :boolean, default: false
   attr :channels_form, :map, required: true
   attr :codex_auth, :map, required: true
   attr :codex_auth_running?, :boolean, required: true
@@ -381,17 +427,20 @@ defmodule FermixWebWeb.SetupLive.Components do
                 codex_auth={@codex_auth}
                 codex_auth_running?={@codex_auth_running?}
                 codex_auth_url={@codex_auth_url}
+                embed?={@embed?}
               />
               <.xai_auth_field
                 :if={@provider_form.provider == :xai and @provider_form.auth_mode == :oauth}
                 xai_auth={@xai_auth}
                 xai_auth_running?={@xai_auth_running?}
                 xai_auth_url={@xai_auth_url}
+                embed?={@embed?}
               />
               <.anthropic_auth_field
                 :if={@provider_form.provider == :anthropic and @provider_form.auth_mode == :oauth}
                 anthropic_auth={@anthropic_auth}
                 anthropic_import_available?={@anthropic_import_available?}
+                embed?={@embed?}
               />
               <p
                 :if={
@@ -419,7 +468,7 @@ defmodule FermixWebWeb.SetupLive.Components do
 
   defp provider_cards(assigns) do
     ~H"""
-    <div class="grid gap-2 sm:grid-cols-2">
+    <div class="grid gap-2 @xl:grid-cols-2">
       <div :for={status <- @provider_statuses} class={provider_card_class(status, @editing)}>
         <label class="flex min-w-0 flex-1 cursor-pointer items-start gap-3">
           <input
@@ -572,7 +621,7 @@ defmodule FermixWebWeb.SetupLive.Components do
         class="input input-bordered w-full bg-base-100 font-mono"
       />
       <p class="text-xs text-warning">
-        No models installed on this server — run <code>ollama pull &lt;model&gt;</code>.
+        No models installed on this server; run <code>ollama pull &lt;model&gt;</code>.
       </p>
     </div>
     """
@@ -590,7 +639,7 @@ defmodule FermixWebWeb.SetupLive.Components do
         class="input input-bordered w-full bg-base-100 font-mono"
       />
       <p class="text-xs text-warning">
-        Couldn't fetch the live model list ({@reason}) — enter a model id manually.
+        Couldn't fetch the live model list ({@reason}); enter a model id manually.
       </p>
     </div>
     """
@@ -617,7 +666,7 @@ defmodule FermixWebWeb.SetupLive.Components do
 
     ~H"""
     <p class="rounded-field border border-success/40 bg-success/10 p-3 text-xs">
-      Ollama server detected — {@count} installed model(s) listed below.
+      Ollama server detected; {@count} installed model(s) listed below.
     </p>
     """
   end
@@ -710,10 +759,26 @@ defmodule FermixWebWeb.SetupLive.Components do
     end
   end
 
+  # OAuth explained at the moment of sign-in, never as chrome: in the embedded
+  # presentation the pane reads native, so each external-auth action carries one
+  # line saying where the sign-in happens. Browser mode says nothing — the tab
+  # that opens is the world the user is already in.
+  attr :embed?, :boolean, required: true
+  attr :class, :any, default: nil
+
+  defp browser_signin_caption(assigns) do
+    ~H"""
+    <p :if={@embed?} class={["mt-1.5 text-xs text-base-content/55", @class]}>
+      Sign-in opens in your browser and returns here.
+    </p>
+    """
+  end
+
   attr :provider_form, :map, required: true
   attr :codex_auth, :map, required: true
   attr :codex_auth_running?, :boolean, required: true
   attr :codex_auth_url, :string, default: nil
+  attr :embed?, :boolean, default: false
 
   defp codex_auth_field(assigns) do
     ~H"""
@@ -754,6 +819,8 @@ defmodule FermixWebWeb.SetupLive.Components do
           {codex_auth_button_label(@codex_auth, @codex_auth_running?)}
         </button>
       </div>
+
+      <.browser_signin_caption embed?={@embed?} />
 
       <div
         :if={@codex_auth_url}
@@ -825,6 +892,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :xai_auth, :map, required: true
   attr :xai_auth_running?, :boolean, required: true
   attr :xai_auth_url, :string, default: nil
+  attr :embed?, :boolean, default: false
 
   defp xai_auth_field(assigns) do
     ~H"""
@@ -861,6 +929,8 @@ defmodule FermixWebWeb.SetupLive.Components do
         </button>
       </div>
 
+      <.browser_signin_caption embed?={@embed?} />
+
       <div
         :if={@xai_auth_url}
         class="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-field border border-base-300 bg-base-100/70 px-3 py-2 text-xs text-base-content/65"
@@ -880,6 +950,7 @@ defmodule FermixWebWeb.SetupLive.Components do
 
   attr :anthropic_auth, :map, required: true
   attr :anthropic_import_available?, :boolean, default: false
+  attr :embed?, :boolean, default: false
 
   defp anthropic_auth_field(assigns) do
     ~H"""
@@ -920,6 +991,8 @@ defmodule FermixWebWeb.SetupLive.Components do
           Import Claude Code login
         </button>
       </div>
+
+      <.browser_signin_caption embed?={@embed?} />
     </section>
     """
   end
@@ -1030,7 +1103,7 @@ defmodule FermixWebWeb.SetupLive.Components do
 
   defp realtime_primary_fields(assigns) do
     ~H"""
-    <div class="grid items-start gap-4 sm:grid-cols-2">
+    <div class="grid items-start gap-4 @xl:grid-cols-2">
       <label class="form-control w-full">
         <span class="label pb-1 text-sm font-medium">Realtime status</span>
         <select name="realtime_form[enabled]" class="select select-bordered w-full bg-base-100">
@@ -1146,10 +1219,10 @@ defmodule FermixWebWeb.SetupLive.Components do
 
       <section class="mt-6 space-y-3">
         <p class="text-xs text-base-content/60">
-          Pick a channel to add its tokens and owner ID. Each channel is independent — there is no
-          primary; configure as many as you need.
+          Pick a channel to add its tokens and owner ID. Each channel is independent; there is
+          no primary. Configure as many as you need.
         </p>
-        <div class="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+        <div class="grid gap-2 @xl:grid-cols-2 @3xl:grid-cols-3">
           <button
             :for={section <- @channel_sections}
             type="button"
@@ -1200,6 +1273,7 @@ defmodule FermixWebWeb.SetupLive.Components do
         :if={@plugin_summary.available}
         plugin_summary={@plugin_summary}
         plugin_auth_url={@plugin_auth_url}
+        embed?={@embed?}
       />
 
       <.provider_plugin_group
@@ -1209,13 +1283,18 @@ defmodule FermixWebWeb.SetupLive.Components do
         catalog={group.catalog}
         installing_plugins={@installing_plugins}
         plugin_auth_url={@plugin_auth_url}
+        embed?={@embed?}
       />
 
       <div
         :if={@plugin_summary.available && ungrouped_plugins(@plugin_summary) != []}
         class="mt-5 flex flex-col gap-2"
       >
-        <.plugin_card :for={plugin <- ungrouped_plugins(@plugin_summary)} plugin={plugin} />
+        <.plugin_card
+          :for={plugin <- ungrouped_plugins(@plugin_summary)}
+          plugin={plugin}
+          embed?={@embed?}
+        />
       </div>
 
       <section :if={@plugin_summary.available} class="mt-5">
@@ -1380,7 +1459,7 @@ defmodule FermixWebWeb.SetupLive.Components do
             rel="noopener noreferrer"
             class="btn btn-ghost btn-xs btn-circle text-base-content/60 hover:text-base-content"
             aria-describedby={"#{@card.name}-details"}
-            aria-label={"About #{@card.display_name} — open docs"}
+            aria-label={"About #{@card.display_name}: open docs"}
           >
             <.icon name="hero-information-circle" class="size-4" />
           </a>
@@ -1391,7 +1470,7 @@ defmodule FermixWebWeb.SetupLive.Components do
     """
   end
 
-  defp ch_recording_summary(0), do: "No apps selected yet — Edit apps to choose."
+  defp ch_recording_summary(0), do: "No apps selected yet; Edit apps to choose."
   defp ch_recording_summary(1), do: "Recording 1 app."
   defp ch_recording_summary(n) when is_integer(n), do: "Recording #{n} apps."
 
@@ -1406,7 +1485,7 @@ defmodule FermixWebWeb.SetupLive.Components do
       <form phx-change="search_changed" phx-submit="save_search" class="mt-6 space-y-6">
         <fieldset>
           <legend class="text-sm font-medium text-base-content/80">Provider</legend>
-          <div class="mt-2 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <div class="mt-2 grid gap-3 @xl:grid-cols-2 @5xl:grid-cols-4">
             <.search_backend_option
               value="duckduckgo"
               label="DuckDuckGo"
@@ -1519,7 +1598,7 @@ defmodule FermixWebWeb.SetupLive.Components do
     >
       <p>{place_search_status(@search_form.brave_api_key_set)}</p>
       <p class="pt-1 text-xs">
-        Each web and place call is metered separately. Place results are transient — only the
+        Each web and place call is metered separately. Place results are transient; only the
         final answer persists, as ordinary chat history.
         <a
           class="link"
@@ -1538,7 +1617,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   defp place_search_state(false), do: "unconfigured"
 
   defp place_search_status(true),
-    do: "place_search is ready — it uses the saved Brave Search API key."
+    do: "place_search is ready; it uses the saved Brave Search API key."
 
   defp place_search_status(false),
     do:
@@ -1556,29 +1635,29 @@ defmodule FermixWebWeb.SetupLive.Components do
       <form phx-change="image_changed" phx-submit="save_image" class="mt-6 space-y-6">
         <fieldset>
           <legend class="text-sm font-medium text-base-content/80">Backend</legend>
-          <div class="mt-2 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+          <div class="mt-2 grid gap-3 @xl:grid-cols-2 @4xl:grid-cols-3">
             <.image_backend_option
               value="openai"
               label="OpenAI"
-              description="gpt-image — reuses your OpenAI key"
+              description="gpt-image · reuses your OpenAI key"
               checked={@image_form.backend == :openai}
             />
             <.image_backend_option
               value="xai"
               label="SpaceXAI"
-              description="grok image — reuses your SpaceXAI key"
+              description="grok image · reuses your SpaceXAI key"
               checked={@image_form.backend == :xai}
             />
             <.image_backend_option
               value="google"
               label="Google"
-              description="Gemini image — needs a Gemini key"
+              description="Gemini image · needs a Gemini key"
               checked={@image_form.backend == :google}
             />
             <.image_backend_option
               value="openai_codex"
               label="OpenAI Codex (ChatGPT)"
-              description="gpt-image via your ChatGPT subscription — no API key"
+              description="gpt-image via your ChatGPT subscription · no API key"
               checked={@image_form.backend == :openai_codex}
             />
           </div>
@@ -1653,29 +1732,29 @@ defmodule FermixWebWeb.SetupLive.Components do
       <form phx-change="transcription_changed" phx-submit="save_transcription" class="mt-6 space-y-6">
         <fieldset>
           <legend class="text-sm font-medium text-base-content/80">Backend</legend>
-          <div class="mt-2 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+          <div class="mt-2 grid gap-3 @xl:grid-cols-2 @4xl:grid-cols-3">
             <.transcription_backend_option
               value="openai"
               label="OpenAI"
-              description="gpt-4o-mini-transcribe — reuses your OpenAI key"
+              description="gpt-4o-mini-transcribe · reuses your OpenAI key"
               checked={@transcription_form.backend == :openai}
             />
             <.transcription_backend_option
               value="xai"
               label="SpaceXAI"
-              description="Grok STT — reuses your SpaceXAI key"
+              description="Grok STT · reuses your SpaceXAI key"
               checked={@transcription_form.backend == :xai}
             />
             <.transcription_backend_option
               value="deepgram"
               label="Deepgram"
-              description="nova-3 — needs a Deepgram key"
+              description="nova-3 · needs a Deepgram key"
               checked={@transcription_form.backend == :deepgram}
             />
             <.transcription_backend_option
               value="local"
               label="On-device"
-              description="Parakeet on this machine — no key, no audio leaves the host"
+              description="Parakeet on this machine · no key, no audio leaves the host"
               checked={@transcription_form.backend == :local}
             />
           </div>
@@ -1847,7 +1926,7 @@ defmodule FermixWebWeb.SetupLive.Components do
               <div class="space-y-3 border-t border-base-300 px-3 pb-3 pt-3">
                 <p class="text-xs text-base-content/70">
                   The bot signs in once with its own Google account, then joins by knocking like
-                  any guest — only the meeting URL crosses the wire. Add its email to a meeting's
+                  any guest; only the meeting URL crosses the wire. Add its email to a meeting's
                   invite and it skips the waiting room. Google Meet won't work until the bot is
                   signed in.
                 </p>
@@ -1875,7 +1954,7 @@ defmodule FermixWebWeb.SetupLive.Components do
                 <span class="min-w-0 flex-1">
                   <span class="block text-sm font-medium">Zoom</span>
                   <span class="block text-xs text-base-content/55">
-                    Via Zoom RTMS — your own or a consenting host's meetings
+                    Via Zoom RTMS: your own or a consenting host's meetings
                   </span>
                 </span>
                 <.icon
@@ -1909,7 +1988,7 @@ defmodule FermixWebWeb.SetupLive.Components do
                 />
                 <p class="text-xs text-base-content/55">
                   RTMS reaches only meetings hosted by your Zoom account, or a host who enabled
-                  your app — a Zoom limit, not a missing key.
+                  your app. That is a Zoom limit, not a missing key.
                 </p>
               </div>
             </details>
@@ -2151,7 +2230,7 @@ defmodule FermixWebWeb.SetupLive.Components do
             </span>
           </label>
           <p class="max-w-prose pt-1 text-xs leading-relaxed text-base-content/60">
-            Repeated tasks become skill proposals every couple of weeks — each needs your
+            Repeated tasks become skill proposals every couple of weeks; each needs your
             approval. {@personalization_form.skill_curation_destination} Applies after restart.
           </p>
         </div>
@@ -2166,7 +2245,7 @@ defmodule FermixWebWeb.SetupLive.Components do
     <div>
       <.pane_header
         title="Coding agents"
-        subtitle="Hand off repository work — reviewing PRs, fixing bugs, building features — to the Codex or Claude Code CLI on this machine."
+        subtitle="Hand off repository work (reviewing PRs, fixing bugs, building features) to the Codex or Claude Code CLI on this machine."
       />
       <form phx-submit="save_coding" class="mt-6 space-y-5">
         <.harness_card harness_setup={@harness_setup} />
@@ -2226,7 +2305,7 @@ defmodule FermixWebWeb.SetupLive.Components do
               selected={@harness_setup.default_vendor == vendor.vendor}
               disabled={not vendor.available?}
             >
-              {harness_vendor_label(vendor.vendor)} — {harness_vendor_status(vendor)}
+              {harness_vendor_label(vendor.vendor)} · {harness_vendor_status(vendor)}
             </option>
           </select>
           <span class="label pt-1 text-xs text-base-content/60">
@@ -2253,15 +2332,15 @@ defmodule FermixWebWeb.SetupLive.Components do
           Cloud runs (Codex cloud) are off in this release; only local repository runs are available.
         </p>
         <p class="text-xs text-base-content/50">
-          Each CLI keeps its own login — Fermix reads it, never changes it.
+          Each CLI keeps its own login; Fermix reads it, never changes it.
         </p>
       </div>
     </section>
     """
   end
 
-  defp harness_consent_status(true), do: "On — coding runs use your Codex / Claude Code logins."
-  defp harness_consent_status(_false), do: "Off — approve before the first coding run."
+  defp harness_consent_status(true), do: "On. Coding runs use your Codex / Claude Code logins."
+  defp harness_consent_status(_false), do: "Off. Approve before the first coding run."
 
   defp harness_vendor_label("codex"), do: "Codex"
   defp harness_vendor_label("claude"), do: "Claude Code"
@@ -2414,6 +2493,7 @@ defmodule FermixWebWeb.SetupLive.Components do
 
   attr :plugin_summary, :map, required: true
   attr :plugin_auth_url, :map, default: nil
+  attr :embed?, :boolean, default: false
 
   defp google_plugin_group(assigns) do
     assigns =
@@ -2447,6 +2527,7 @@ defmodule FermixWebWeb.SetupLive.Components do
           plugin={plugin}
           label={strip_google_prefix(plugin.display_name)}
           auth_preopen?={oauth_client_configured?(@oauth) && plugin.auth_type == :oauth2}
+          embed?={@embed?}
         />
       </div>
     </section>
@@ -2463,6 +2544,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :catalog, :list, default: []
   attr :installing_plugins, :list, default: []
   attr :plugin_auth_url, :map, default: nil
+  attr :embed?, :boolean, default: false
 
   defp provider_plugin_group(assigns) do
     assigns = assign(assigns, :card_count, length(assigns.plugins) + length(assigns.catalog))
@@ -2478,6 +2560,7 @@ defmodule FermixWebWeb.SetupLive.Components do
         plugin={plugin}
         oauth={@oauth}
         auth_preopen?={oauth_client_configured?(@oauth) && plugin.auth_type == :oauth2}
+        embed?={@embed?}
       />
       <.catalog_card
         :for={entry <- @catalog}
@@ -2514,6 +2597,7 @@ defmodule FermixWebWeb.SetupLive.Components do
           :for={plugin <- @plugins}
           plugin={plugin}
           auth_preopen?={oauth_client_configured?(@oauth) && plugin.auth_type == :oauth2}
+          embed?={@embed?}
         />
         <.catalog_card
           :for={entry <- @catalog}
@@ -2558,7 +2642,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   end
 
   defp oauth_help_content("notion") do
-    {"Notion → my integrations → New integration → Public. Set the redirect URI to http://localhost:1458/auth/callback (Notion forces https for 127.0.0.1 — use localhost), then paste the OAuth Client ID and secret.",
+    {"Notion → my integrations → New integration → Public. Set the redirect URI to http://localhost:1458/auth/callback (Notion forces https for 127.0.0.1, so use localhost), then paste the OAuth Client ID and secret.",
      "https://www.notion.so/my-integrations"}
   end
 
@@ -2591,8 +2675,8 @@ defmodule FermixWebWeb.SetupLive.Components do
         <p class="text-xs font-medium">OAuth client</p>
         <p class="truncate text-xs text-base-content/55">
           {if @configured?,
-            do: "Configured — credentials stored",
-            else: "Not set up — required to connect"}
+            do: "Configured · credentials stored",
+            else: "Not set up · required to connect"}
         </p>
       </div>
       <button
@@ -2697,7 +2781,7 @@ defmodule FermixWebWeb.SetupLive.Components do
           </button>
         </div>
         <p class="mt-1 text-xs text-base-content/55">
-          Computer History records only the apps you check here — nothing else. Pick them by name;
+          Computer History records only the apps you check here, nothing else. Pick them by name;
           Fermix stores each app's identifier for you.
         </p>
 
@@ -2829,7 +2913,7 @@ defmodule FermixWebWeb.SetupLive.Components do
           <span class="min-w-0">
             <span class="block truncate text-sm font-medium">{profile.display_name}</span>
             <span :if={profile.default?} class="text-xs text-base-content/55">
-              Recommended — read-only.
+              Recommended · read-only.
             </span>
             <span :if={profile.write?} class="text-xs text-base-content/55">
               Needs a read/write token and exposes write tools.
@@ -2978,7 +3062,7 @@ defmodule FermixWebWeb.SetupLive.Components do
             <.icon name="hero-check-circle" class="size-5 shrink-0 text-success" />
             <span>
               {@oauth.display_name} OAuth client saved. Connect each {@oauth.display_name} integration
-              from the list below — re-open this anytime with <span class="font-medium">Edit</span>.
+              from the list below; re-open this anytime with <span class="font-medium">Edit</span>.
             </span>
           </div>
           <div class="mt-4 flex justify-end gap-2">
@@ -3070,14 +3154,16 @@ defmodule FermixWebWeb.SetupLive.Components do
   # client Connect/Edit in. Until the client is configured, configuring it is the
   # only action (the plugin can't sign in without it).
   attr :oauth, :map, default: nil
+  attr :embed?, :boolean, default: false
 
   defp plugin_card(assigns) do
     assigns =
-      assign(
-        assigns,
+      assigns
+      |> assign(
         :oauth_unset?,
         assigns.oauth != nil and not oauth_client_configured?(assigns.oauth)
       )
+      |> then(&assign(&1, :signin_action?, plugin_signin_action?(&1)))
 
     ~H"""
     <section
@@ -3104,7 +3190,7 @@ defmodule FermixWebWeb.SetupLive.Components do
         </div>
         <p :if={@plugin.account} class="truncate text-xs text-base-content/55">{@plugin.account}</p>
         <p :if={@plugin.yanked_version} class="text-xs text-error">
-          Version {@plugin.yanked_version} was yanked — run `fermix plugins upgrade {@plugin.name}`.
+          Version {@plugin.yanked_version} was yanked; run `fermix plugins upgrade {@plugin.name}`.
         </p>
         <form
           :if={@plugin.status == :needs_config && @plugin.missing_config != []}
@@ -3228,9 +3314,21 @@ defmodule FermixWebWeb.SetupLive.Components do
         >
           <.icon name="hero-pencil-square" class="size-3.5" /> Edit
         </button>
+        <.browser_signin_caption :if={@signin_action?} embed?={@embed?} class="basis-full text-right" />
       </div>
     </section>
     """
+  end
+
+  # The card actions that hand sign-in to a browser: the oauth2 Sign in /
+  # Reconnect button, or Enable when the configured OAuth client lets it
+  # pre-open the flow. API-key connects and modal-only actions stay silent.
+  defp plugin_signin_action?(%{oauth_unset?: true}), do: false
+
+  defp plugin_signin_action?(%{plugin: plugin, auth_preopen?: auth_preopen?}) do
+    plugin.auth_type == :oauth2 and
+      ((plugin.enabled? and plugin.status != :ready) or
+         (not plugin.enabled? and auth_preopen?))
   end
 
   # A not-yet-installed catalog entry (§6): index branding, Available/Installing/
@@ -3345,7 +3443,7 @@ defmodule FermixWebWeb.SetupLive.Components do
         </li>
         <li>It may require a paid plan, and some operations spend the vendor's own credits.</li>
         <li>
-          A read/write credential authorizes more upstream than Fermix exposes — prefer a read-only
+          A read/write credential authorizes more upstream than Fermix exposes; prefer a read-only
           one if you only need retrieval.
         </li>
         <li>The vendor's AI features may route that content on to third-party model providers.</li>
@@ -3370,7 +3468,7 @@ defmodule FermixWebWeb.SetupLive.Components do
         <h3 class="font-semibold">{@title}</h3>
         <.status_pill status={@status} />
       </div>
-      <div class="grid items-start gap-3 sm:grid-cols-2">{render_slot(@inner_block)}</div>
+      <div class="grid items-start gap-3 @xl:grid-cols-2">{render_slot(@inner_block)}</div>
     </section>
     """
   end
@@ -3918,10 +4016,10 @@ defmodule FermixWebWeb.SetupLive.Components do
 
   # Each half of the on-device backend reports its own absence, so the card can
   # print the one sentence that fixes what is actually missing.
-  defp local_state_message(:ok), do: "Installed and ready — audio stays on this machine."
+  defp local_state_message(:ok), do: "Installed and ready. Audio stays on this machine."
 
   defp local_state_message({:error, :sidecar_not_installed}),
-    do: "Not installed yet — the speech engine is missing."
+    do: "Not installed yet; the speech engine is missing."
 
   defp local_state_message({:error, :model_not_installed}),
     do: "Speech engine installed; the model is still missing."
@@ -3943,10 +4041,10 @@ defmodule FermixWebWeb.SetupLive.Components do
     do: "Enable the notetaker above to install it, then sign the bot in here."
 
   defp meetbot_signin_hint(%{sidecar_installed?: false}),
-    do: "Installing the notetaker — sign-in unlocks once it's ready."
+    do: "Installing the notetaker. Sign-in unlocks once it's ready."
 
   defp meetbot_signin_hint(_form),
-    do: "Setting up the browser — sign-in unlocks once it's ready."
+    do: "Setting up the browser. Sign-in unlocks once it's ready."
 
   defp tab_status(%{component: nil}, _report), do: :ready
   defp tab_status(%{component: "provider:*"}, report), do: status_by_prefix(report, "provider:")
@@ -3979,6 +4077,17 @@ defmodule FermixWebWeb.SetupLive.Components do
       base <> " bg-primary/10 ring-1 ring-primary/30"
     else
       base <> " hover:bg-base-200"
+    end
+  end
+
+  # The embed rail row: label-only, native list density, tinted only by state.
+  defp embed_nav_class(tab_id, active_tab) do
+    base = "flex h-[30px] w-full items-center gap-1.5 rounded-md px-2.5 text-left text-[13px]"
+
+    if tab_id == active_tab do
+      base <> " bg-primary/12 font-medium text-primary"
+    else
+      base <> " text-base-content/70 hover:bg-base-content/6"
     end
   end
 
@@ -4136,13 +4245,13 @@ defmodule FermixWebWeb.SetupLive.Components do
   defp catalog_blocked_reason(_entry), do: nil
 
   defp compat_message({:needs_newer_core, :min_core_version, floor}),
-    do: "needs Fermix ≥ #{floor} — run `fermix upgrade`."
+    do: "needs Fermix ≥ #{floor}; run `fermix upgrade`."
 
   defp compat_message({:needs_newer_core, :plugin_api, api}),
-    do: "needs a newer Fermix (plugin API #{api}) — run `fermix upgrade`."
+    do: "needs a newer Fermix (plugin API #{api}); run `fermix upgrade`."
 
   defp compat_message({:plugin_too_old, :plugin_api, _api}),
-    do: "built for an older Fermix — awaiting a plugin update."
+    do: "built for an older Fermix; awaiting a plugin update."
 
   defp compat_message({:yanked, _name, version}), do: "version #{version} was yanked."
   defp compat_message({:version_not_found, _name, _version}), do: "no installable version yet."

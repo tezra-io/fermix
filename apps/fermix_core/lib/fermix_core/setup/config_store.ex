@@ -18,6 +18,7 @@ defmodule FermixCore.Setup.ConfigStore do
   alias FermixCore.Providers.ReasoningEffort
   alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Sandbox.Config, as: SandboxConfig
+  alias FermixCore.Setup.RestartState
   alias FermixCore.Setup.SecretStore
   alias FermixCore.SkillCuration.Config, as: SkillCurationConfig
   alias FermixCore.Transcription.Registry, as: TranscriptionRegistry
@@ -160,13 +161,29 @@ defmodule FermixCore.Setup.ConfigStore do
     end
   end
 
+  @doc """
+  Writes the snapshot to the settings file and records it as this VM's baseline.
+
+  The baseline is recorded HERE, not in the callers, because every writer is a
+  write by this VM and the external-change comparison exists to name writes by
+  something else. Two in-tree writers reach this function without going through
+  a setup tail — the model-routing tool and the `/history` channel command — and
+  a baseline recorded only in the tails made both of them look like an outside
+  edit, which then refused every settings, secret, primary and plugin write in
+  both doors until a reload.
+
+  Recording is not gating: it changes what a later comparison is against, and
+  never decides whether this write may happen. In a tree-less process there is
+  no `RestartState` and the call is a no-op, so an out-of-process write is still
+  detected by the daemon that did not make it.
+  """
   @spec save_snapshot(runtime_config(), keyword()) :: :ok | {:error, term()}
   def save_snapshot(snapshot, opts \\ []) do
     with {:ok, persisted} <- persisted_snapshot(snapshot, opts),
          :ok <- File.mkdir_p(fermix_home()),
          :ok <- ensure_workspace(),
          :ok <- File.write(path(), dump_snapshot(persisted)) do
-      :ok
+      RestartState.record_persisted_baseline()
     end
   end
 
@@ -217,6 +234,23 @@ defmodule FermixCore.Setup.ConfigStore do
   end
 
   @doc """
+  Removes one value from live application environment.
+
+  `apply_snapshot/2` merges, so a key deleted from the document survives in
+  memory until the daemon restarts. That is right for a save (an absent key
+  means "unchanged"), and wrong for a deliberate forget: the runtime would keep
+  using a credential the operator removed while every surface reported it gone.
+  The path is a `SecretPaths` path, so this reaches the same value the snapshot
+  writers do.
+  """
+  @spec forget_value([atom() | String.t()]) :: :ok
+  def forget_value([app, key | rest]) when is_atom(app) and is_atom(key) and rest != [] do
+    current = Application.get_env(app, key, [])
+    Application.put_env(app, key, SecretStore.delete_snapshot_value(current, rest))
+    :ok
+  end
+
+  @doc """
   Hydrates Application env from the persisted runtime snapshot.
 
   Single entry point for boot-time config loading: `runtime.exs` calls this
@@ -234,7 +268,12 @@ defmodule FermixCore.Setup.ConfigStore do
   @spec bootstrap_runtime_config(keyword()) :: :ok | {:error, term()}
   def bootstrap_runtime_config(opts \\ []) do
     with {:ok, snapshot} <- load_runtime_config(Keyword.take(opts, [:supervised])),
-         :ok <- apply_snapshot(snapshot, opts) do
+         :ok <- apply_snapshot(snapshot, opts),
+         # This is the boot read of the file, which is what the external-change
+         # baseline means: the values in application environment now came from
+         # the document on disk. A no-op before the tree starts, and the whole
+         # point after a re-bootstrap.
+         :ok <- RestartState.record_persisted_baseline() do
       apply_mcp_config()
     end
   end

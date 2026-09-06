@@ -19,6 +19,7 @@ defmodule Fermix.CLI do
   alias Fermix.CLI.HealthCommand
   alias Fermix.CLI.LogsCommand
   alias Fermix.CLI.MemoryCommand
+  alias Fermix.CLI.MigrateToApp
   alias Fermix.CLI.PairCommand
   alias Fermix.CLI.PluginsCommand
   alias Fermix.CLI.RestartCommand
@@ -30,6 +31,7 @@ defmodule Fermix.CLI do
   alias Fermix.CLI.StartCommand
   alias Fermix.CLI.StatusCommand
   alias Fermix.CLI.StopCommand
+  alias Fermix.CLI.UninstallCommand
   alias Fermix.CLI.UpgradeCommand
   alias Fermix.CLI.Version
   alias Fermix.CLI.VoiceCommand
@@ -80,6 +82,8 @@ defmodule Fermix.CLI do
   defp dispatch("logs", rest), do: LogsCommand.run(rest)
   defp dispatch("memory", rest), do: MemoryCommand.run(rest)
   defp dispatch("upgrade", rest), do: UpgradeCommand.run(rest)
+  defp dispatch("uninstall", rest), do: UninstallCommand.run(rest)
+  defp dispatch("migrate-to-app", rest), do: MigrateToApp.run(rest)
   defp dispatch("doctor", rest), do: Doctor.run(rest)
   defp dispatch(unknown, _rest), do: unknown_command(unknown)
 
@@ -127,6 +131,8 @@ defmodule Fermix.CLI do
       fermix memory restore ID [--json]
       fermix logs   [-f] [-n LINES]                Show daemon log file
       fermix upgrade [--check]                     Self-update from signed releases
+      fermix uninstall                             Remove a Fermix.app-managed installation
+      fermix migrate-to-app [--yes]                Move a Homebrew formula install to Fermix.app
       fermix doctor  [--full]                      Run post-install diagnostics
       fermix version                               Print version
       fermix help                                  Show this message

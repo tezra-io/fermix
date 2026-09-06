@@ -208,6 +208,12 @@ defmodule FermixCore.Setup.Runtime do
           run_finalize_probe(authed_report, opts, puts, prompt)
         end
 
+      # A save that could not store a credential already carries the daemon's
+      # own sentence (design §7.4); the operator sees that rather than an
+      # inspected tuple naming an internal key.
+      {:error, {:secret_store_failed, _key, sentence}} when is_binary(sentence) ->
+        {:error, sentence}
+
       {:error, reason} ->
         {:error, "failed to save setup snapshot: #{inspect(reason)}"}
     end

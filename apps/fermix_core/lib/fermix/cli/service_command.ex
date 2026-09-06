@@ -8,22 +8,64 @@ defmodule Fermix.CLI.ServiceCommand do
   the failure verbatim instead of a silent partial install.
   """
 
+  alias Fermix.CLI.HomeOwner
   alias Fermix.CLI.Service
+  alias FermixCore.BuildInfo
 
   @switches [user: :boolean, system: :boolean]
 
   @spec run([String.t()]) :: non_neg_integer()
-  def run([]), do: usage(2)
-  def run([sub | rest]), do: dispatch(sub, rest)
+  def run(argv), do: run(argv, [])
 
-  defp dispatch("install", argv), do: with_scope(argv, &Service.install/1, "installed")
-  defp dispatch("uninstall", argv), do: with_scope(argv, &Service.uninstall/1, "uninstalled")
-  defp dispatch(unknown, _argv), do: unknown_subcommand(unknown)
+  @doc false
+  @spec run([String.t()], keyword()) :: non_neg_integer()
+  def run([], deps) when is_list(deps), do: usage(2)
+  def run([sub | rest], deps) when is_list(deps), do: dispatch(sub, rest, deps)
 
-  defp with_scope(argv, action, past_tense) do
+  defp dispatch("install", argv, deps), do: with_scope(argv, :install, "installed", deps)
+
+  defp dispatch("uninstall", argv, deps),
+    do: with_scope(argv, :uninstall, "uninstalled", deps)
+
+  defp dispatch(unknown, _argv, _deps), do: unknown_subcommand(unknown)
+
+  # The app-managed refusal precedes scope parsing: legacy unit scope is not a
+  # choice this engine has, so reporting a scope error first would answer a
+  # question the operator cannot act on and hide the one that matters.
+  defp with_scope(argv, action, past_tense, deps) do
+    build_info = Keyword.get(deps, :build_info, BuildInfo)
+    service = Keyword.get(deps, :service, Service)
+    home_owner = Keyword.get(deps, :home_owner, HomeOwner)
+
+    cond do
+      build_info.app_engine?() ->
+        abort("this engine is managed by Fermix.app. Use Fermix.app background service controls.")
+
+      # `install` only, and no wider: `uninstall` targets a unit the app does
+      # not own and is the supported remedy for exactly the condition the
+      # `legacy_service_unit` row reports, so refusing it would leave that row
+      # with no command behind it.
+      action == :install and
+          home_owner.app_managed?(Keyword.take(deps, [:hello, :marker?, :socket_path])) ->
+        abort(HomeOwner.refusal_sentence("fermix service install"))
+
+      true ->
+        dispatch_service(argv, action, past_tense, service)
+    end
+  end
+
+  defp dispatch_service(argv, action, past_tense, service) do
     case parse_scope(argv, @switches) do
-      {:ok, scope} -> run_action(action, scope, past_tense, "fermix service")
-      {:error, reason} -> abort(reason)
+      {:ok, scope} ->
+        run_action(
+          fn selected_scope -> apply(service, action, [selected_scope]) end,
+          scope,
+          past_tense,
+          "fermix service"
+        )
+
+      {:error, reason} ->
+        abort(reason)
     end
   end
 

@@ -14,6 +14,8 @@ defmodule FermixCore.Application do
   alias FermixCore.Auth.Store, as: AuthStore
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Auth.TokenSupervisor
+  alias FermixCore.BootProfile
+  alias FermixCore.BuildInfo
   alias FermixCore.Capabilities.BuiltinSeeder
   alias FermixCore.Capabilities.MCP.RuntimeStatus, as: McpRuntimeStatus
   alias FermixCore.Capabilities.MCP.Supervisor, as: McpSupervisor
@@ -28,6 +30,10 @@ defmodule FermixCore.Application do
   alias FermixCore.Jobs.RunnerSupervisor, as: JobRunnerSupervisor
   alias FermixCore.Jobs.Scheduler, as: JobScheduler
   alias FermixCore.Log.RedactingFormatter
+  alias FermixCore.Management.Doctor, as: ManagementDoctor
+  alias FermixCore.Management.Jobs, as: ManagementJobs
+  alias FermixCore.Management.Lifecycle, as: ManagementLifecycle
+  alias FermixCore.Management.Plugins.Discovery, as: ManagementPluginDiscovery
   alias FermixCore.Meetings.Supervisor, as: MeetingsSupervisor
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Repo
@@ -44,6 +50,10 @@ defmodule FermixCore.Application do
   alias FermixCore.Sandbox.DecisionTelemetry
   alias FermixCore.Setup.BootReport
   alias FermixCore.Setup.ConfigStore
+  alias FermixCore.Setup.EngineOwner
+  alias FermixCore.Setup.RestartState
+  alias FermixCore.Setup.SecretAclState
+  alias FermixCore.Setup.SecretWriteLog
   alias FermixCore.SkillCuration.Config, as: SkillCurationConfig
   alias FermixCore.SkillCuration.Scheduler, as: SkillCurationScheduler
   alias FermixCore.Temporal.DeliverySupervisor, as: TemporalDeliverySupervisor
@@ -57,29 +67,34 @@ defmodule FermixCore.Application do
 
   @impl true
   def start(_type, _args) do
-    if BurritoUtil.running_standalone?() do
-      cli_dispatch(BurritoArgs.argv())
-    else
-      # Dev (mix test, mix fermix.dev, iex -S mix phx.server) or plain
-      # release (`bin/fermix start`). All sibling apps are `:permanent`,
-      # so OTP auto-starts them after this returns; whether the Phoenix
-      # endpoint binds is governed by the existing PHX_SERVER convention
-      # in `config/runtime.exs`. `mix fermix.dev` sets the gating env
-      # flags before calling `Application.ensure_all_started/1`, so the
-      # daemon socket and Realtime supervisor start without going
-      # through `cli_dispatch/1`.
-      start_supervision_tree()
-    end
+    profile =
+      BootProfile.select(
+        BuildInfo.distribution_identity(),
+        &BurritoUtil.running_standalone?/0
+      )
+
+    start_profile(profile)
   end
+
+  defp start_profile(:app_engine) do
+    :ok = BootProfile.prepare(:app_engine)
+    start_supervision_tree()
+  end
+
+  defp start_profile(:standalone_cli), do: cli_dispatch(BurritoArgs.argv())
+
+  # Dev (mix test, mix fermix.dev, iex -S mix phx.server) or an ordinary
+  # plain release. `mix fermix.dev` sets the existing gates before starting
+  # the application; only the immutable app-engine profile opens all daemon
+  # surfaces here without going through the CLI.
+  defp start_profile(:source), do: start_supervision_tree()
 
   # `run`: enable the endpoint server now (before OTP proceeds to start
   # fermix_web), build the supervision tree, then spawn `Fermix.CLI.Run`
   # for log + block. The BEAM stays alive because all sibling apps are
   # `:permanent` — we do not call `System.halt`.
   defp cli_dispatch(["run" | _] = argv) do
-    enable_endpoint_server()
-    enable_daemon_socket()
-    enable_realtime_socket()
+    :ok = BootProfile.prepare(:standalone_cli)
 
     with {:ok, pid} <- start_supervision_tree() do
       spawn(fn -> run_cli(argv) end)
@@ -111,19 +126,6 @@ defmodule FermixCore.Application do
   # `Memory.Repo`, no `TokenManager`, and no port bind.
   defp cli_dispatch(argv) do
     System.halt(run_cli(argv))
-  end
-
-  defp enable_endpoint_server do
-    existing = Application.get_env(:fermix_web, FermixWebWeb.Endpoint, [])
-    Application.put_env(:fermix_web, FermixWebWeb.Endpoint, Keyword.put(existing, :server, true))
-  end
-
-  defp enable_daemon_socket do
-    Application.put_env(:fermix_core, :daemon_socket_enabled, true)
-  end
-
-  defp enable_realtime_socket do
-    Application.put_env(:fermix_core, :realtime_socket_enabled, true)
   end
 
   defp start_supervision_tree do
@@ -164,7 +166,20 @@ defmodule FermixCore.Application do
         Repo,
         ConversationStore,
         Store,
+        # Before the boot report and the restart state, because both of those
+        # start by reading state a secret write can change, and a write that
+        # landed before this process exists is a rotation nothing recorded.
+        SecretWriteLog,
+        # The record of the last keychain-ACL measurement. Measuring prompts,
+        # so only Doctor measures; `setup.state.get` publishes what is recorded
+        # here and never shells out.
+        SecretAclState,
         BootReport,
+        # Beside `BootReport` rather than inside it: the boot report is the boot
+        # artifact its name promises, while restart and external-change truth is
+        # read live by `/health`, `overview.get` and `setup.state.get`. One read
+        # path, no cache plus an invalidation rule.
+        RestartState,
         AgentSupervisor,
         MainAgent,
         JobRunnerSupervisor,
@@ -320,9 +335,27 @@ defmodule FermixCore.Application do
     end
   end
 
+  # The management operations the socket routes to are owned by long-lived
+  # processes (one drain lease, retained Doctor sessions, retained jobs), so
+  # they start with the socket and never independently of it: a management
+  # method whose owner is absent would answer `unavailable` for the life of the
+  # daemon.
   defp maybe_daemon_socket do
     if Application.get_env(:fermix_core, :daemon_socket_enabled, false) do
-      [Daemon]
+      # The ownership marker is rewritten by the engine that is actually serving
+      # this home, which is exactly the set of boots that can claim it. A source
+      # run or a test tree serves no socket and claims nothing.
+      :ok = EngineOwner.record()
+
+      [
+        ManagementLifecycle,
+        ManagementDoctor,
+        ManagementJobs,
+        # Beside the job family it serves: a workspace discovery is a job, and
+        # what it found is republished on the plugin row rather than in the job.
+        ManagementPluginDiscovery,
+        Daemon
+      ]
     else
       []
     end
@@ -448,7 +481,7 @@ defmodule FermixCore.Application do
     if Keyword.get(log_config, :enabled, true) do
       log_file = Keyword.get(log_config, :file, default_log_file())
       max_bytes = Keyword.get(log_config, :max_no_bytes, 10_485_760)
-      max_files = Keyword.get(log_config, :max_no_files, 10)
+      max_files = log_max_no_files()
 
       File.mkdir_p!(Path.dirname(log_file))
 
@@ -482,7 +515,30 @@ defmodule FermixCore.Application do
   end
 
   defp default_trace_dir, do: ConfigStore.workspace_paths().traces
-  defp default_log_file, do: Path.join(ConfigStore.workspace_paths().logs, "fermix.log")
+
+  @doc """
+  The log file `:logger_std_h` writes when `[:fermix_core, :log] :file` is unset.
+
+  Public so `FermixCore.Management.Logs` reads the same rotated set the handler
+  writes — one resolver for "where is the log", not two that can drift.
+  """
+  @spec default_log_file() :: Path.t()
+  def default_log_file, do: Path.join(ConfigStore.workspace_paths().logs, "fermix.log")
+
+  @doc """
+  How many rotated archives `:logger_std_h` retains beside the live log file.
+
+  One resolver, for the same reason `default_log_file/0` is one: the handler
+  writes the set and `FermixCore.Management.Logs` reads it, and two resolvers
+  with different defaults make the reader silently scan fewer files than the
+  handler keeps.
+  """
+  @spec log_max_no_files() :: non_neg_integer()
+  def log_max_no_files do
+    :fermix_core
+    |> Application.get_env(:log, [])
+    |> Keyword.get(:max_no_files, 10)
+  end
 
   defp remember_launch_cwd do
     Application.put_env(:fermix_core, :sandbox_launch_cwd, File.cwd!())

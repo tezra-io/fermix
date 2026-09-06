@@ -47,6 +47,31 @@ defmodule FermixCore.Plugins.Status do
 
   @sentinel FermixCore.Setup.SecretWriter.sentinel()
 
+  # Every atom the ladder below answers with, in ladder order. It is a published
+  # vocabulary: `FermixCore.Management.Plugins` carries one sentence per status
+  # and the management contract test asserts the two sets agree, so a status
+  # added to a clause here fails that test rather than reaching a surface with
+  # no words for it.
+  @statuses [
+    :not_configured,
+    :missing_host_runtime,
+    :needs_config,
+    :needs_secret,
+    :needs_workspace,
+    :invalid_remote_config,
+    :needs_client_config,
+    :needs_auth,
+    :reauthorization_required,
+    :ready,
+    :not_installed,
+    :incompatible,
+    :error
+  ]
+
+  @doc "Every status this ladder answers with, in ladder order."
+  @spec statuses() :: [atom()]
+  def statuses, do: @statuses
+
   @spec status(Plugin.t() | String.t()) :: atom()
   def status(plugin_or_name), do: status(plugin_or_name, [])
 

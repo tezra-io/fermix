@@ -35,6 +35,57 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   treats this as a Covered Model requiring 30-day data retention, so an
   organization on zero data retention gets a 400 on every request until
   Anthropic authorizes it.
+- **A management surface the Fermix macOS app talks to, instead of reading your
+  files behind your back.** The daemon's local control socket now speaks a
+  versioned request/response protocol with one result or one structured error
+  per request: an identity handshake, the same overview and health projection
+  `fermix status` uses, one-use setup URLs, Doctor as a cancellable session with
+  a hard deadline (so a slow network check never holds the connection open),
+  bounded paged log queries, a short leased drain used for restart and shutdown,
+  and a field-allowlisted diagnostics bundle for export. Errors carry stable
+  codes and bounded details; no internal term crosses the boundary. The contract
+  ships beside the code as a document, a JSON schema, and golden fixtures the
+  app vendors by checksum, so the two sides cannot drift silently — and version
+  negotiation refuses an out-of-range client with an explicit
+  client-too-old/daemon-too-old answer rather than half-speaking to it. The
+  existing socket, framing, and 4 MiB frame ceiling are unchanged.
+- **On a Mac where the app owns Fermix, the CLI says so instead of fighting it.**
+  An app-managed engine knows what it is from its own build identity, never from
+  where the binary sits, and splits the commands three ways. `fermix start`,
+  `fermix stop`, `fermix service install`, and `fermix service uninstall` exit
+  non-zero and point at the app's Enable and Disable background service controls
+  — the app deliberately does not call these Start and Stop, because the durable
+  state is the registration, not whether a process happens to be alive right
+  now. `fermix setup`, `fermix upgrade`, and `fermix uninstall` open the matching
+  screen in the app and report only that the hand-off was accepted, never that
+  the screen finished its work. `fermix status`, `fermix doctor`, and
+  `fermix logs` — and the overview the app itself shows — are answered by the
+  daemon over the management socket, and `fermix restart` follows the app-owned
+  restart contract — drain, commit, wait for a different daemon — instead of
+  reaching for a launchd unit it is not allowed to create. Three Doctor rows,
+  `upgrade`, `binary integrity`, and `service unit`, report not-applicable
+  there, because the app updates itself, the standalone in-place binary swap
+  would break a signed bundle, and the background service is a login item the
+  app registers rather than a unit this engine installs; that updater remains
+  for Linux and standalone installs, where nothing about it changes.
+- **`fermix migrate-to-app` moves a Homebrew install to the Mac app in one
+  transaction.** `brew uninstall` on its own is not enough: the formula never
+  owned the launch agent `fermix setup` wrote, so uninstalling strands a
+  KeepAlive job pointing at a binary that no longer exists. The new command runs
+  in your own shell — the only place a custom `FERMIX_HOME` exported there is
+  visible — and with no arguments it inspects the account and prints the plan
+  without changing anything. `--yes` performs it: drain the daemon, boot out and
+  remove the launch agent it verified byte for byte, write an owner-only handoff
+  journal, uninstall the formula, install the cask, and launch the app, which
+  reads the journal, keeps the same Fermix home, registers its own background
+  service, and verifies the same data before clearing it. Every failure is loud
+  and quotes launchd or brew verbatim rather than degrading into printed advice,
+  and it refuses outright — naming the facts it inspected and what to do — for a
+  system-scope daemon, an unrecognised launch agent, a `Fermix.app` that is
+  already installed, duplicate app copies, a running `brew services` entry, a
+  daemon that does not answer, or a `fermix` on `PATH` owned by neither Homebrew
+  nor the app. No path in it deletes a Fermix home.
+
 - **The daemon half of an iPhone companion — the app itself is not released
   yet.** A new `mobile` channel serves a first-party companion app over your own
   network — LAN, or a tailnet when both devices are on one — with streaming
@@ -304,6 +355,14 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   continuations arrive silently.
 
 ### Fixed
+
+- **The meeting notetaker no longer claims the Google Meet lane is ready when it
+  has no browser.** Installing the Meet sidecar and never running its browser
+  install left `fermix doctor` reporting the lane as fine and let a join start a
+  session that died the moment the sidecar tried to open Chromium. The lane now
+  counts as usable only when both halves are present: readiness, the join gate,
+  and the Doctor row all read the same answer, and a half-installed lane refuses
+  before a meeting starts, naming the browser install as the fix.
 
 - **Ending a computer-use session no longer risks the next one resuming the
   session that just ended.** Tearing a session down left its registry entry to

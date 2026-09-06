@@ -5,6 +5,7 @@ defmodule FermixCore.Setup.Wizard do
 
   alias FermixCore.ComputerHistory.Config, as: ComputerHistoryConfig
   alias FermixCore.ComputerUse.Config, as: ComputerUseConfig
+  alias FermixCore.Management.Settings.Channels.Inventory
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Prompt.SetupSeeder
   alias FermixCore.Providers.Descriptor
@@ -17,8 +18,10 @@ defmodule FermixCore.Setup.Wizard do
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Setup.BootReport
   alias FermixCore.Setup.ConfigStore
+  alias FermixCore.Setup.RestartState
   alias FermixCore.Setup.SecretPaths
   alias FermixCore.Setup.SecretStore
+  alias FermixCore.Setup.SecretWriteLog
   alias FermixCore.Setup.SecretWriter
   alias FermixCore.Setup.WizardState
   alias FermixCore.SkillCuration.Delivery, as: SkillCurationDelivery
@@ -82,6 +85,11 @@ defmodule FermixCore.Setup.Wizard do
           | {:slack_owner_user_id, String.t()}
           | {:signal_account, String.t()}
           | {:signal_owner_user_id, String.t()}
+          | {:telegram_enabled, boolean() | String.t()}
+          | {:whatsapp_enabled, boolean() | String.t()}
+          | {:discord_enabled, boolean() | String.t()}
+          | {:slack_enabled, boolean() | String.t()}
+          | {:signal_enabled, boolean() | String.t()}
           | {:acp_enabled, boolean() | String.t()}
           | {:user_name, String.t()}
           | {:timezone, String.t()}
@@ -116,6 +124,14 @@ defmodule FermixCore.Setup.Wizard do
     :computer_use_enabled,
     :computer_history_enabled
   ]
+
+  # The one sentence a save refuses with when this host has nowhere to put a
+  # credential. Published to both doors, so neither composes its own.
+  @no_secret_store_sentence "This machine has no secret store, so the credential could not be saved."
+
+  # Derived from `Channels.Inventory` — the one channel table — rather than a
+  # third list of the same five channels.
+  @channel_enable_keys Enum.map(Inventory.channels(), &{&1, Inventory.enabled_key(&1)})
 
   @channel_owner_reconfigure_keys %{
     telegram_owner_user_id: :telegram,
@@ -153,7 +169,7 @@ defmodule FermixCore.Setup.Wizard do
       failures: readiness.failures,
       wizard: build_state(snapshot, readiness),
       config_path: ConfigStore.path(),
-      restart_required?: restart_required?(snapshot),
+      restart_required?: RestartState.restart().required,
       seeding_results: seeding_results
     }
   end
@@ -610,6 +626,44 @@ defmodule FermixCore.Setup.Wizard do
 
   @spec save_answers(WizardState.t(), [answer()]) :: {:ok, report()} | {:error, term()}
   def save_answers(%WizardState{} = state, answers) when is_list(answers) do
+    with :ok <- refuse_unstorable_secrets(answers) do
+      commit_answers(state, answers)
+    end
+  end
+
+  # Design §7.4: a save that cannot store a secret says so. Every secret answer
+  # is persisted as the `@keyring` sentinel, which is only meaningful once the
+  # value is actually in the OS keyring; with no writer on this host the value
+  # used to be dropped with a log line while the save reported success, so the
+  # operator saw a stored key and the runtime had none. The refusal is here,
+  # before the snapshot is built, so a save either stores every secret in it or
+  # stores nothing.
+  defp refuse_unstorable_secrets(answers) do
+    case unstorable_secret_key(answers) do
+      nil -> :ok
+      key -> {:error, {:secret_store_failed, key, @no_secret_store_sentence}}
+    end
+  end
+
+  defp unstorable_secret_key(answers) do
+    if SecretWriter.available?(), do: nil, else: first_secret_answer(answers)
+  end
+
+  defp first_secret_answer(answers) do
+    keys = secret_answer_keys()
+
+    Enum.find_value(answers, fn {key, value} ->
+      if MapSet.member?(keys, key) and is_binary(value) and String.trim(value) != "", do: key
+    end)
+  end
+
+  # Derived from the registry, not hand-listed, plus the one answer key that is
+  # not its own secret key: the Realtime prompt writes the OpenAI provider key.
+  defp secret_answer_keys do
+    MapSet.new([:realtime_api_key | Enum.map(SecretPaths.all(), & &1.key)])
+  end
+
+  defp commit_answers(state, answers) do
     # Model/effort/fast writes target the provider being EDITED (the web pane's
     # `:edit_provider`), not the primary — so editing a fallback's settings doesn't
     # have to promote it. Falls back to the active/primary provider when unset (CLI).
@@ -645,6 +699,7 @@ defmodule FermixCore.Setup.Wizard do
       |> put_discord_config(answers)
       |> put_slack_config(answers)
       |> put_signal_config(answers)
+      |> put_channel_enabled(answers)
       |> put_acp_config(answers)
       |> put_channel_owner_user_ids(answers)
       |> put_personalization(answers)
@@ -734,8 +789,153 @@ defmodule FermixCore.Setup.Wizard do
     |> commit_snapshot()
   end
 
-  defp commit_snapshot(snapshot) do
-    with :ok <- ConfigStore.save_snapshot(snapshot),
+  @doc """
+  Stores one secret and persists its `@keyring` reference.
+
+  The fifth public entry into the shared write tail, and the only writer that
+  takes a plaintext value. Three steps, none of them optional:
+
+  1. the OS keyring write, through `SecretWriteLog` so a rotation is recorded
+     for the restart state (a sentinel written over a sentinel is invisible to
+     every snapshot comparison);
+  2. the `@keyring` sentinel at the key's own `SecretPaths` path, because
+     `SecretStore.resolve_sentinels/2` only reads a key back when a sentinel
+     sits there — a write that stored the item alone would report the secret
+     present and never load it;
+  3. the same env-only drop every sibling writer runs, so a value the shell or
+     the launchd unit supplied is not persisted into `config.toml` as plaintext
+     by a save that was about a different key.
+
+  A keyring failure is returned, never logged and swallowed: the operator typed
+  a new credential and has to be told it did not land.
+  """
+  @spec put_secret(atom(), String.t()) ::
+          {:ok, report()} | {:error, {:secret_store_failed, atom(), term()} | term()}
+  def put_secret(key, value) when is_atom(key) and is_binary(value) and value != "" do
+    secret = SecretPaths.fetch!(key)
+
+    case SecretWriteLog.put(key, value) do
+      :ok -> commit_secret_reference(secret, SecretWriter.sentinel())
+      {:error, reason} -> {:error, {:secret_store_failed, key, reason}}
+    end
+  end
+
+  @doc """
+  Makes `provider` primary when this home has no configured primary yet.
+
+  One mechanism, both doors. `save_answers/2` has promoted the first provider an
+  operator configures through the browser door since M12; a key or a sign-in
+  through the management door reached `config.toml` by other tails and skipped
+  it, so a fresh home kept the compiled-in `:openai` default as primary.
+  Readiness gates on the primary alone, so the operator connected a provider and
+  was told to connect a provider.
+
+  A home that already has a CONFIGURED primary is untouched: after the first
+  one, promotion is the explicit "Set primary" action.
+
+  For a caller with a snapshot in flight this is the wrong entry — a key write
+  promotes inside its own snapshot, one save — so this one exists for the sign-in
+  flows, whose credential never enters the snapshot at all.
+  """
+  @spec promote_if_first_configured(provider()) :: :ok | {:error, term()}
+  def promote_if_first_configured(provider) when is_atom(provider) do
+    snapshot = ConfigStore.current_snapshot()
+
+    if first_configured?(snapshot, provider) do
+      commit_primary(snapshot, provider)
+    else
+      :ok
+    end
+  end
+
+  defp commit_primary(snapshot, provider) do
+    result =
+      snapshot
+      |> mark_primary_provider(parse_provider!(provider))
+      |> drop_unanswered_env_only_secrets([])
+      |> commit_snapshot()
+
+    with {:ok, _report} <- result, do: :ok
+  end
+
+  # The one predicate behind every promotion: no configured primary yet, and
+  # this provider is configured now.
+  defp first_configured?(snapshot, provider) do
+    not primary_established?(snapshot) and
+      Selection.configured?(provider, provider_config(snapshot, provider))
+  end
+
+  # A provider key typed into the browser door is promoted by `save_answers/2`.
+  # The same key sent as `secret.set` promotes here, inside the same snapshot, so
+  # one write persists both the reference and the primary flag.
+  defp promote_secret_provider(snapshot, %{path: [:fermix_core, :providers, provider | _rest]}) do
+    if first_configured?(snapshot, provider) do
+      mark_primary_provider(snapshot, parse_provider!(provider))
+    else
+      snapshot
+    end
+  end
+
+  defp promote_secret_provider(snapshot, _secret), do: snapshot
+
+  @doc """
+  Forgets one secret: the keyring item first, then the reference that reads it.
+
+  Keyring first is the order that cannot orphan a credential. A helper failure
+  is reported rather than followed by dropping the reference, which would leave
+  the value on the machine with nothing naming it.
+  """
+  @spec clear_secret(atom()) ::
+          {:ok, report()} | {:error, {:secret_store_failed, atom(), term()} | term()}
+  def clear_secret(key) when is_atom(key) do
+    secret = SecretPaths.fetch!(key)
+
+    case SecretWriter.delete(key) do
+      :ok -> commit_secret_reference(secret, nil)
+      {:error, reason} -> {:error, {:secret_store_failed, key, reason}}
+    end
+  end
+
+  # The live value is dropped as well as the persisted one, because
+  # `apply_snapshot/2` merges: a key removed from the document survives in
+  # application environment until the daemon restarts, so a forget that only
+  # rewrote the file would leave the runtime using the credential while every
+  # surface reported it gone.
+  defp commit_secret_reference(secret, nil) do
+    result =
+      ConfigStore.current_snapshot()
+      |> SecretStore.delete_snapshot_value(secret.path)
+      |> drop_unanswered_env_only_secrets([{secret.key, true}])
+      |> commit_snapshot()
+
+    with {:ok, report} <- result do
+      :ok = ConfigStore.forget_value(secret.path)
+      {:ok, report}
+    end
+  end
+
+  defp commit_secret_reference(secret, sentinel) do
+    ConfigStore.current_snapshot()
+    |> SecretStore.put_snapshot_value(secret.path, sentinel)
+    |> promote_secret_provider(secret)
+    |> drop_unanswered_env_only_secrets([{secret.key, true}])
+    |> commit_snapshot()
+  end
+
+  @doc """
+  The shared write tail: refuse, save, apply, re-baseline, seed, report.
+
+  Public because it is where the external-change refusal executes, and four
+  public entries plus the management writers reach the file through it. Putting
+  the refusal in one of those entries instead would leave the other three able
+  to revert an outside edit silently, which is the exact defect it exists for.
+  """
+  @spec commit_snapshot(ConfigStore.runtime_config()) :: {:ok, report()} | {:error, term()}
+  def commit_snapshot(snapshot) when is_map(snapshot) do
+    # `save_snapshot/2` records the new baseline itself, so there is one
+    # recording site for every writer rather than one per tail.
+    with :ok <- RestartState.writable(),
+         :ok <- ConfigStore.save_snapshot(snapshot),
          :ok <- ConfigStore.apply_snapshot(snapshot),
          {:ok, seeding_results} <- maybe_seed_prompt_files(snapshot) do
       {:ok, BootReport.refresh_if_started(seeding_results) || report(seeding_results)}
@@ -973,10 +1173,17 @@ defmodule FermixCore.Setup.Wizard do
   # unresolved `@keyring` sentinel is already non-blank. Resolving here spawned
   # one `security` subprocess per secret on every setup-page load (the 0.5.x
   # setup-latency regression) for an answer the sentinel already gives.
+  # Through the shared loader, so a file the parser REFUSES is the same answer as
+  # a file it cannot read. `load_runtime_config/1` raises rather than returns for
+  # a poisoned document, and that raise reached here before the write tail's own
+  # gate could run, so a poisoned `config.toml` crashed every save and every
+  # prompt build instead of refusing with a sentence. Nothing is written from
+  # this degraded snapshot: `commit_snapshot/1` refuses `config_unreadable`
+  # before any save, and dropping every env-only secret is the safe direction.
   defp persisted_snapshot do
-    case ConfigStore.load_runtime_config(resolve_secrets: false) do
+    case RestartState.load_persisted() do
       {:ok, snapshot} -> ConfigStore.persistable_snapshot(snapshot)
-      {:error, _reason} -> ConfigStore.persistable_snapshot(empty_snapshot())
+      {:error, _sentence} -> ConfigStore.persistable_snapshot(empty_snapshot())
     end
   end
 
@@ -1002,21 +1209,6 @@ defmodule FermixCore.Setup.Wizard do
   defp blank?(nil), do: true
   defp blank?(""), do: true
   defp blank?(_), do: false
-
-  # Loads the persisted config WITHOUT resolving `@keyring` sentinels and
-  # masks the boot-resolved values back to the sentinel for the comparison.
-  # Resolving here would spawn one `security` subprocess per secret on every
-  # setup-page mount (the 0.5.x setup-latency regression).
-  defp restart_required?(snapshot) do
-    case ConfigStore.load_runtime_config(resolve_secrets: false) do
-      {:ok, persisted} ->
-        masked = SecretStore.mask_resolved_secrets(snapshot, persisted)
-        ConfigStore.persistable_snapshot(masked) != ConfigStore.persistable_snapshot(persisted)
-
-      {:error, _reason} ->
-        true
-    end
-  end
 
   # One writer per descriptor setup field: secrets route through the
   # OS keyring (sentinel in the snapshot), plain fields persist trimmed.
@@ -2005,6 +2197,26 @@ defmodule FermixCore.Setup.Wizard do
     end
   end
 
+  # A real enable switch, and it runs AFTER the credential writers on purpose:
+  # `put_channel_config/4` turns a channel on whenever a credential arrives, so
+  # an explicit answer has to be the last word or "save my token but leave this
+  # paused" would be impossible to express. An absent answer changes nothing.
+  defp put_channel_enabled(snapshot, answers) do
+    Enum.reduce(@channel_enable_keys, snapshot, fn {channel, answer_key}, acc ->
+      case normalize_realtime_bool(Keyword.get(answers, answer_key), answer_key) do
+        nil -> acc
+        enabled? -> put_channel_key(acc, channel, :enabled, enabled?)
+      end
+    end)
+  end
+
+  defp put_channel_key(snapshot, channel, key, value) do
+    channels = Map.get(snapshot, :fermix_channels, [])
+    config = channels |> Keyword.get(channel, []) |> Keyword.put(key, value)
+
+    Map.put(snapshot, :fermix_channels, Keyword.put(channels, channel, config))
+  end
+
   defp put_channel_owner_user_ids(snapshot, answers) do
     [
       telegram: :telegram_owner_user_id,
@@ -2047,30 +2259,18 @@ defmodule FermixCore.Setup.Wizard do
     Map.put(snapshot, :fermix_channels, Keyword.put(existing_channels, channel, config))
   end
 
+  # A writer-less host is refused by `refuse_unstorable_secrets/1` before this
+  # pipeline runs, so there is one path here and it stores the value.
   defp secret_snapshot_value(_key, value) when value in [nil, ""], do: nil
 
-  defp secret_snapshot_value(key, value) when is_atom(key) and is_binary(value) do
-    if SecretWriter.available?() do
-      write_secret_sentinel!(key, value)
-    else
-      log_manual_secret_fallback(key)
-      nil
-    end
-  end
+  defp secret_snapshot_value(key, value) when is_atom(key) and is_binary(value),
+    do: write_secret_sentinel!(key, value)
 
   defp write_secret_sentinel!(key, value) do
-    case SecretWriter.put(key, value) do
+    case SecretWriteLog.put(key, value) do
       :ok -> SecretWriter.sentinel()
       {:error, reason} -> raise ArgumentError, SecretWriter.format_error(key, reason)
     end
-  end
-
-  defp log_manual_secret_fallback(key) do
-    secret = SecretPaths.fetch!(key)
-
-    Logger.warning(
-      "No OS secret writer available for #{secret.env}; set it in shell rc, systemd unit, or launchd plist"
-    )
   end
 
   defp put_personalization(snapshot, answers) do
@@ -2126,8 +2326,14 @@ defmodule FermixCore.Setup.Wizard do
     end
   end
 
+  # Keyed on the GATING predicate, not on `status`. The seeder's only inputs are
+  # the personalization values, which are a gating component; a half-configured
+  # channel has nothing to do with prompt files, and gating a seed on it would
+  # withhold them from every home that ships `telegram: [enabled: true]`.
+  # `SetupSeeder.seed/1` is per-file idempotent and never overwrites, so running
+  # it on more saves is safe by construction.
   defp seeding_ready? do
-    Readiness.report().status == :ready
+    Readiness.report().failures |> Readiness.gating_failures() |> Enum.empty?()
   end
 
   defp personalization_map(snapshot) do

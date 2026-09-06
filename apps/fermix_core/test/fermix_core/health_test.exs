@@ -1,6 +1,7 @@
 defmodule FermixCore.HealthTest do
   use ExUnit.Case, async: false
 
+  alias FermixCore.BuildInfo
   alias FermixCore.Health
   alias FermixCore.Setup.ConfigStore
 
@@ -71,7 +72,7 @@ defmodule FermixCore.HealthTest do
       )
 
     assert report.status == :degraded
-    assert report.version == to_string(Application.spec(:fermix_core, :vsn))
+    assert report.version == BuildInfo.product_version()
     assert report.config.path == Path.join(tmp_home, "config.toml")
     assert report.config.home == tmp_home
 
@@ -222,5 +223,62 @@ defmodule FermixCore.HealthTest do
              %{name: "openai", auth_mode: :api_key, primary: false},
              %{name: "anthropic", auth_mode: :api_key, primary: true}
            ] = report.providers
+  end
+
+  # Restart truth has one owner. Reading it from the boot report would leave an
+  # out-of-process settings write invisible until someone happened to save.
+  test "restart_required? and restart_reasons come from the restart state" do
+    report =
+      Health.report(
+        boot_report: %{
+          status: :ready,
+          failures: [],
+          config_path: ConfigStore.path(),
+          restart_required?: false
+        },
+        restart: %{
+          required: true,
+          reasons: [
+            %{section: "providers", sentence: "Provider settings changed."},
+            %{section: "realtime", sentence: "Voice settings changed."}
+          ]
+        }
+      )
+
+    assert report.restart_required?
+    assert report.restart_reasons == ["providers", "realtime"]
+  end
+
+  # The nested combination the gating split creates, decided rather than left to
+  # emerge: an advisory failure is by definition not a reason to call the daemon
+  # unhealthy, and escalating it would rebuild the any-failure-is-setup_required
+  # behaviour the split exists to remove.
+  test "an advisory channel failure does not escalate the top-level verdict" do
+    Application.put_env(:fermix_channels, :telegram, enabled: true, mode: :webhook)
+
+    report =
+      Health.report(
+        boot_report: %{
+          status: :ready,
+          failures: [
+            %{
+              component: "channel:telegram",
+              action: "Set the Telegram bot token.",
+              gating: false,
+              pane: "channels",
+              detail_key: "channel:telegram"
+            }
+          ],
+          config_path: ConfigStore.path(),
+          restart_required?: false
+        },
+        restart: %{required: false, reasons: []}
+      )
+
+    assert report.status == :ready
+
+    assert Enum.any?(report.channels, fn channel ->
+             channel.name == "telegram" and channel.status == :setup_required
+           end)
   end
 end

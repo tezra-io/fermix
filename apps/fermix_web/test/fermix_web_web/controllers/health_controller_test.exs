@@ -1,6 +1,7 @@
 defmodule FermixWebWeb.HealthControllerTest do
   use FermixWebWeb.ConnCase
 
+  alias FermixCore.BuildInfo
   alias FermixCore.Setup.BootReport
 
   setup do
@@ -45,7 +46,7 @@ defmodule FermixWebWeb.HealthControllerTest do
 
       assert body["status"] == "ok"
       assert body["app"] == "fermix"
-      assert body["version"] == to_string(Application.spec(:fermix_core, :vsn))
+      assert body["version"] == BuildInfo.product_version()
       assert is_binary(body["timestamp"])
     end
 
@@ -82,13 +83,12 @@ defmodule FermixWebWeb.HealthControllerTest do
 
       assert Enum.any?(body["failures"], fn failure ->
                failure["component"] == "provider:openai" and
-                 failure["action"] == "Set OPENAI_API_KEY."
+                 failure["action"] == "Add the OpenAI API key in Providers settings."
              end)
 
       assert Enum.any?(body["failures"], fn failure ->
                failure["component"] == "channel:telegram" and
-                 failure["action"] ==
-                   "Set the Telegram bot token: run `fermix setup` or set bot_token in config.toml."
+                 failure["action"] == "Add the Telegram bot token in Channels settings."
              end)
 
       assert Enum.any?(body["providers"], fn provider ->

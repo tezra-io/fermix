@@ -27,19 +27,29 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatus do
   dying is the diagnosis; the death that follows it is a consequence, not a
   second, vaguer explanation.
 
-  ## Why `detail` is an atom
+  ## Why `detail` is an atom, and what `subject` may hold
 
   A crash reason can carry the crashing process's state, and a remote session's
   state holds a bearer credential. `put/6` therefore accepts only an atom
   class, so no reason term — however it was constructed — can reach a status a
   UI renders. Callers classify with `classify/1` first.
 
-  The one non-atom a write may carry is `capability`: the *name* of the tool a
-  contract failure is about, which is the operator's actual question on a
-  mismatch. It comes from the remote's own descriptor, so `capability_from/1`
-  extracts it only from the reason shapes known to hold one and bounds its
-  length. `describe/3` is the shared renderer — the setup modal, the daemon
-  log, and `fermix doctor` all show `status/detail (capability)` through it.
+  `subject` is the one string this table holds, and it exists because the class
+  alone cannot answer the only question a contract refusal raises: WHICH
+  capability. One rule, no exceptions: it is a **capability name**, and it is
+  set only where this build already holds one. Two producers qualify. Every kind
+  in `@subject_kinds` is raised by `Contract.verify_one/2`, which reaches
+  `Map.fetch!(contract.tools, name)` before any of them can fire, so the name is
+  a key of the operator's own signed manifest. `Naming.reserve/3` refuses a
+  collision with the name it was asked to reserve — a name this daemon already
+  advertises as a tool. Neither can be a credential or a process state, which is
+  what the atom rule above exists to keep out, and no crash term has either
+  shape, so every unrecognized reason falls to the catch-all with a `nil`
+  subject. `@subject_max_chars` bounds whatever arrives as defence-in-depth.
+
+  A caller rendering an arbitrary reason must NOT hand it to `describe/1` on
+  shape alone — gate on `statuses/0` membership first, or a peer-authored
+  3-tuple renders in the capability slot.
   """
 
   use GenServer
@@ -72,18 +82,51 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatus do
   @type entry :: %{
           status: status(),
           detail: atom() | nil,
-          capability: String.t() | nil,
+          subject: subject(),
           generation: generation(),
           owner: pid() | nil,
           plugin: String.t() | nil,
           updated_at: integer()
         }
 
-  # `capability_from/1` truncates here so a hostile descriptor's name cannot
-  # ride an unbounded string into every status surface.
-  @max_capability_chars 128
+  @typedoc "The capability a refusal names, when it names one."
+  @type subject :: String.t() | nil
+
+  @typedoc "A status, its class, and the capability it names."
+  @type classified :: {status(), atom() | nil, subject()}
+
+  @typedoc "One element of a classified refusal, as an atom or as the wire's string."
+  @type rendered :: atom() | String.t() | nil
+
+  # Every refusal kind whose payload is a manifest key. The companion test
+  # derives this set from the constructing sources rather than trusting the
+  # list: `:schema_too_large` was missed here precisely because it is built
+  # indirectly (`bound_schema/2` wraps whatever `walk_schema/3` returns), so a
+  # grep for literal tuples does not find it.
+  @subject_kinds [
+    :descriptor_changed,
+    :duplicate_name,
+    :duplicate_tool,
+    :invalid_schema,
+    :missing_tool,
+    :name_outside_namespace,
+    :schema_too_deep,
+    :schema_too_large,
+    :skill_name_collision,
+    :uncanonicalizable
+  ]
+
+  # Bounded in CHARACTERS, not bytes: a byte bound can split a multi-byte
+  # grapheme, and the invalid UTF-8 that produces would make `Jason` refuse the
+  # whole `plugins_runtime_status` reply — a truncation rule that breaks the one
+  # report explaining the truncated thing.
+  @subject_max_chars 128
 
   @type opt :: {:name, GenServer.name()}
+
+  @doc "Every refusal kind whose payload this table will name (see the moduledoc)."
+  @spec subject_kinds() :: [atom()]
+  def subject_kinds, do: @subject_kinds
 
   @doc "Every status this table can hold."
   @spec statuses() :: [status()]
@@ -116,23 +159,22 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatus do
   one. A stale generation returns `{:error, :stale_generation}` and changes
   nothing.
 
-  `capability` names the tool a contract failure is about — extract it with
-  `capability_from/1`, never from an unclassified reason term.
+  `subject` names the capability a contract failure is about. Take it from
+  `classify/1`'s third element, never from an unclassified reason term.
   """
-  @spec put(
-          GenServer.server(),
-          source_id(),
-          generation(),
-          status(),
-          atom() | nil,
-          String.t() | nil
-        ) :: :ok | {:error, :stale_generation}
-  def put(server, {kind, name} = source_id, generation, status, detail \\ nil, capability \\ nil)
+  @spec put(GenServer.server(), source_id(), generation(), status(), atom() | nil, subject()) ::
+          :ok | {:error, :stale_generation}
+  def put(server, {kind, name} = source_id, generation, status, detail \\ nil, subject \\ nil)
       when is_atom(kind) and is_binary(name) and is_reference(generation) and
              status in @statuses and is_atom(detail) and
-             (is_binary(capability) or is_nil(capability)) do
-    GenServer.call(server, {:put, source_id, generation, status, detail, capability})
+             (is_nil(subject) or is_binary(subject)) do
+    GenServer.call(server, {:put, source_id, generation, status, detail, bounded(subject)})
   end
+
+  # The guard admits any binary so a caller cannot crash the daemon by passing a
+  # long one; the bound is applied here, once, on the way in.
+  defp bounded(nil), do: nil
+  defp bounded(subject), do: String.slice(subject, 0, @subject_max_chars)
 
   @spec fetch(GenServer.server(), source_id()) :: {:ok, entry()} | :error
   def fetch(server, {kind, name} = source_id) when is_atom(kind) and is_binary(name) do
@@ -172,59 +214,75 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatus do
   end
 
   @doc """
-  Map a remote-rail failure reason onto `{status, detail}`.
+  Map a remote-rail failure reason onto `{status, detail, subject}` — the single
+  resolver every operator surface reads (the terminal log line, this table, the
+  daemon wire, `fermix doctor`, and the setup UI).
 
-  Both halves are atoms by construction (see the moduledoc): a reason's payload
-  can embed the endpoint, a credential, or a whole process state, so only its
-  class survives. This is the runtime-status half of the §7.9 classifier; the
-  tool-result half lives with the call proxy.
+  Status and detail are atoms by construction (see the moduledoc): a reason's
+  payload can embed the endpoint, a credential, or a whole process state, so
+  only its class survives. `subject` is the one exception and it is populated
+  for `@subject_kinds` alone. This is the runtime-status half of the §7.9
+  classifier; the tool-result half lives with the call proxy.
   """
-  @spec classify(term()) :: {status(), atom() | nil}
-  def classify({:needs_secret, _plugin}), do: {:needs_secret, nil}
-  def classify({:needs_workspace, _plugin}), do: {:needs_workspace, nil}
+  @spec classify(term()) :: classified()
+  def classify({:needs_secret, _plugin}), do: {:needs_secret, nil, nil}
+  def classify({:needs_workspace, _plugin}), do: {:needs_workspace, nil, nil}
 
   def classify({:insufficient_credential_scope, _detail}),
-    do: {:insufficient_credential_scope, nil}
+    do: {:insufficient_credential_scope, nil, nil}
 
-  def classify({:invalid_remote_config, detail}), do: {:invalid_remote_config, class(detail)}
-  def classify({:reauthorization_required, _host}), do: {:reauthorization_required, nil}
-  def classify({:remote_security_blocked, detail}), do: {:remote_security_blocked, class(detail)}
-  def classify({:remote_protocol_error, detail}), do: {:remote_protocol_error, class(detail)}
-  def classify({:invalid_remote_result, detail}), do: {:remote_protocol_error, class(detail)}
-  def classify(:session_expired), do: {:remote_protocol_error, :session_expired}
+  def classify({:invalid_remote_config, detail}), do: {:invalid_remote_config, class(detail), nil}
+  def classify({:reauthorization_required, _host}), do: {:reauthorization_required, nil, nil}
+
+  def classify({:remote_security_blocked, detail}),
+    do: {:remote_security_blocked, class(detail), nil}
+
+  def classify({:remote_protocol_error, detail}), do: {:remote_protocol_error, class(detail), nil}
+  def classify({:invalid_remote_result, detail}), do: {:remote_protocol_error, class(detail), nil}
+  def classify(:session_expired), do: {:remote_protocol_error, :session_expired, nil}
 
   def classify({:upstream_contract_mismatch, detail}),
-    do: {:upstream_contract_mismatch, class(detail)}
+    do: {:upstream_contract_mismatch, class(detail), subject(detail)}
 
-  def classify({:capability_conflict, _name}), do: {:capability_conflict, nil}
+  # `Naming.reserve/3` refuses with the bare name it was asked to reserve, so a
+  # conflict may carry no kind at all.
+  def classify({:capability_conflict, name}) when is_binary(name),
+    do: {:capability_conflict, nil, name}
+
+  def classify({:capability_conflict, detail}),
+    do: {:capability_conflict, class(detail), subject(detail)}
 
   def classify({:remote_jsonrpc_error, _code, _message}),
-    do: {:remote_protocol_error, :jsonrpc_error}
+    do: {:remote_protocol_error, :jsonrpc_error, nil}
 
-  def classify({:remote_http_error, _status}), do: {:remote_unreachable, :http_error}
-  def classify({:rate_limited, _ms}), do: {:remote_unreachable, :rate_limited}
+  def classify({:remote_http_error, _status}), do: {:remote_unreachable, :http_error, nil}
+  def classify({:rate_limited, _ms}), do: {:remote_unreachable, :rate_limited, nil}
 
   # Everything the transport could not deliver — DNS, TLS, connect, timeout,
   # a closed socket — is unreachability. The class stays visible so an
   # unrecognized reason is never mistaken for a diagnosed one.
-  def classify(reason), do: {:remote_unreachable, class(reason)}
+  def classify(reason), do: {:remote_unreachable, class(reason), nil}
 
   @doc """
-  The capability (tool) name a refusal reason carries, or nil.
+  Render a classified refusal as the one sentence fragment every operator
+  surface shows. Single renderer on purpose: the log line, `fermix doctor`, and
+  the setup UI disagreeing about the same refusal is how an operator ends up
+  probing a vendor for a fact the daemon already held.
 
-  `classify/1` keeps only atom classes; this is the deliberate exception for
-  the two reason shapes whose payload IS a tool name from the remote's own
-  descriptor — the fact the operator needs on a contract failure. Bounded, so
-  a hostile descriptor cannot ride an unbounded string into a status surface.
+  The daemon serializes the same triple to JSON, so each element arrives here as
+  either an atom or the string the wire carried; both render identically.
   """
-  @spec capability_from(term()) :: String.t() | nil
-  def capability_from({:upstream_contract_mismatch, {_class, name}}) when is_binary(name),
-    do: String.slice(name, 0, @max_capability_chars)
+  @spec describe({rendered(), rendered(), rendered()}) :: String.t()
+  def describe({status, nil, nil}), do: to_string(status)
+  def describe({status, detail, nil}), do: "#{status}/#{detail}"
+  def describe({status, nil, subject}), do: "#{status} (#{subject})"
+  def describe({status, detail, subject}), do: "#{status}/#{detail} (#{subject})"
 
-  def capability_from({:capability_conflict, name}) when is_binary(name),
-    do: String.slice(name, 0, @max_capability_chars)
-
-  def capability_from(_reason), do: nil
+  # The ONLY path that puts a manifest key in this table. Deliberately has no
+  # bare-binary clause: a `{class, binary}` shape this module does not recognise
+  # must yield nil rather than be trusted for its shape alone.
+  defp subject({kind, name}) when kind in @subject_kinds and is_binary(name), do: name
+  defp subject(_detail), do: nil
 
   @doc """
   The one rendering of a classified status every surface shares: the setup
@@ -269,10 +327,10 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatus do
     {:reply, {:ok, generation}, state}
   end
 
-  def handle_call({:put, source_id, generation, status, detail, capability}, _from, state) do
+  def handle_call({:put, source_id, generation, status, detail, subject}, _from, state) do
     case Map.fetch(state.entries, source_id) do
       {:ok, %{generation: ^generation} = entry} ->
-        {:reply, :ok, write(state, source_id, entry, status, detail, capability)}
+        {:reply, :ok, write(state, source_id, entry, status, detail, subject)}
 
       _replaced_or_absent ->
         {:reply, {:error, :stale_generation}, state}
@@ -325,7 +383,7 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatus do
     entry = %{
       status: :connecting,
       detail: nil,
-      capability: nil,
+      subject: nil,
       generation: generation,
       owner: owner,
       monitor: ref,
@@ -340,12 +398,12 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatus do
     }
   end
 
-  defp write(state, source_id, entry, status, detail, capability) do
+  defp write(state, source_id, entry, status, detail, subject) do
     entry = %{
       entry
       | status: status,
         detail: detail,
-        capability: capability,
+        subject: subject,
         updated_at: System.system_time(:millisecond)
     }
 
@@ -363,8 +421,8 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatus do
 
   defp outcome(%{status: :ready}), do: {:ok, :ready}
 
-  defp outcome(%{status: status, detail: detail, capability: capability}),
-    do: {:error, {status, detail, capability}}
+  defp outcome(%{status: status, detail: detail, subject: subject}),
+    do: {:error, {status, detail, subject}}
 
   defp await_entry(state, source_id, %{status: :connecting} = entry, from, timeout_ms) do
     waiter_id = make_ref()
@@ -386,9 +444,9 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatus do
   # A classified terminal status is the diagnosis the owner already wrote;
   # the death that followed must not overwrite it with a vaguer one.
   defp record_down(state, source_id, entry, reason) do
-    {status, detail, capability} =
+    {status, detail, subject} =
       if terminal?(entry.status),
-        do: {entry.status, entry.detail, entry.capability},
+        do: {entry.status, entry.detail, entry.subject},
         else: {:remote_unreachable, class(reason), nil}
 
     Telemetry.emit_lifecycle(
@@ -398,7 +456,7 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatus do
       0
     )
 
-    write(state, source_id, %{entry | owner: nil, monitor: nil}, status, detail, capability)
+    write(state, source_id, %{entry | owner: nil, monitor: nil}, status, detail, subject)
   end
 
   defp retire(state, source_id, reply) do

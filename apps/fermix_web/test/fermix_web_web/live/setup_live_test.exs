@@ -15,6 +15,7 @@ defmodule FermixWebWeb.SetupLiveTest do
   alias FermixCore.Plugins.Status, as: PluginStatus
   alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Setup.ConfigStore
+  alias FermixCore.Setup.RestartState
   alias FermixCore.Transcription.Local.ModelStore, as: LocalModelStore
   alias FermixCore.Transcription.Local.SidecarInstaller, as: LocalSttInstaller
   alias FermixCore.Transcription.Registry, as: TranscriptionRegistry
@@ -232,6 +233,81 @@ defmodule FermixWebWeb.SetupLiveTest do
     end)
 
     %{conn: authorize_setup(conn), tmp_home: tmp_home}
+  end
+
+  describe "/setup embed presentation" do
+    # `?embed=1` is the macOS app's in-app dress: same LiveView, native read.
+    # The rail is label-only (the app chrome owns identity, theme, and origin),
+    # the pane is unboxed, and the ground is transparent so the app's palette
+    # shows through the WKWebView.
+    test "embed=1 renders the native presentation without browser chrome", %{conn: conn} do
+      {:ok, _view, html} = live(conn, "/setup?embed=1")
+
+      assert html =~ "data-embed"
+      assert html =~ "bg-transparent"
+
+      # Rail rows are label-only: every section is still reachable...
+      for label <- ["Provider", "Channels", "Plugins", "Doctor"] do
+        assert html =~ label
+      end
+
+      # ...but the website-sidebar chrome is gone: wordmark, step counter,
+      # progress, theme toggle, per-tab subtext, and the config-path line.
+      refute html =~ ~s(aria-label="Fermix")
+      refute html =~ "Step 1 of"
+      refute html =~ "data-phx-theme"
+      refute html =~ "Model and key"
+      refute html =~ ConfigStore.path()
+    end
+
+    test "a normal browser session renders none of the embed dress", %{conn: conn} do
+      {:ok, _view, html} = live(conn, "/setup")
+
+      refute html =~ ~r/<main[^>]+data-embed/
+      refute html =~ "Sign-in opens in your browser and returns here."
+      assert html =~ "Step 1 of"
+      assert html =~ "data-phx-theme"
+    end
+
+    test "embed persists in the socket across tab navigation", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup?embed=1")
+
+      html = view |> element("button[phx-value-tab=\"plugins\"]") |> render_click()
+
+      assert html =~ "data-embed"
+      refute html =~ "Step 1 of"
+    end
+
+    # The restart patch stamps `?tab=…&embed=1`, and the post-restart reload
+    # re-mounts from that url: both params must be honored together.
+    test "the post-restart url re-mounts embedded on the stamped tab", %{conn: conn} do
+      {:ok, _view, html} = live(conn, "/setup?embed=1&tab=doctor")
+
+      assert html =~ "data-embed"
+      assert html =~ "Readiness doctor"
+    end
+
+    test "embed explains the browser hand-off under the sign-in action", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup?embed=1")
+
+      html =
+        view
+        |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: "openai_codex"})
+        |> render_change()
+
+      assert html =~ "Sign-in opens in your browser and returns here."
+    end
+
+    test "the browser presentation never renders the hand-off caption", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      html =
+        view
+        |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: "openai_codex"})
+        |> render_change()
+
+      refute html =~ "Sign-in opens in your browser and returns here."
+    end
   end
 
   describe "/setup shell" do
@@ -575,7 +651,7 @@ defmodule FermixWebWeb.SetupLiveTest do
         card = view |> element(~s|section[data-feature-name="computer_history"]|) |> render()
 
         assert card =~
-                 "Opt-in activity memory from the apps you allow — window titles and typed " <>
+                 "Opt-in activity memory from the apps you allow: window titles and typed " <>
                    "text; inside browsers only window titles are captured today."
 
         refute card =~ "URLs"
@@ -661,7 +737,7 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       # Modal closes and the flash confirms the enable path (not the install path).
       refute saved =~ "Apps to record"
-      assert saved =~ "Computer History enabled — restart to apply."
+      assert saved =~ "Computer History enabled. Restart to apply."
 
       # The apps + enabled flag are persisted together.
       assert {:ok, persisted} = ConfigStore.load_runtime_config(resolve_secrets: false)
@@ -702,7 +778,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert_receive :driver_install_ran
 
       # Install completion flips Computer History on (the `on_done` routing).
-      render_until(view, "Computer History enabled — restart to apply.")
+      render_until(view, "Computer History enabled. Restart to apply.")
 
       assert {:ok, persisted} = ConfigStore.load_runtime_config(resolve_secrets: false)
       ch = persisted[:fermix_core][:computer_history]
@@ -764,7 +840,7 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       html = view |> element(~s|button[phx-click="enable_meetings"]|) |> render_click()
 
-      assert html =~ "restart to apply"
+      assert html =~ "Restart to apply"
       assert_receive :meetbot_install_started, 500
       assert render_async(view) =~ escaped(MeetbotInstaller.error_message(:no_pinned_release))
       assert Keyword.get(Application.get_env(:fermix_core, :meetings, []), :enabled) == true
@@ -1024,7 +1100,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       # The compact row replaces the always-visible client form; the form only
       # exists once the modal is opened.
       refute html =~ ~s(id="oauth-client-form-google")
-      assert html =~ "Not set up — required to connect"
+      assert html =~ "Not set up · required to connect"
 
       modal_html =
         view
@@ -2240,7 +2316,7 @@ defmodule FermixWebWeb.SetupLiveTest do
         )
         |> render_submit()
 
-      assert html =~ "Meetings saved — restart to apply."
+      assert html =~ "Meetings saved. Restart to apply."
       assert html =~ "Apply &amp; restart"
       assert html =~ ~s(phx-click="apply_restart")
     end
@@ -2263,7 +2339,7 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       assert html =~ "Meetings saved."
       # The restart signal is the flash clause, not the toggle's explanatory hint.
-      refute html =~ "Meetings saved — restart to apply"
+      refute html =~ "Meetings saved. Restart to apply"
     end
 
     test "submitting persists the section and secures the Zoom secret", %{
@@ -2291,7 +2367,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       |> render_submit()
 
       # The Zoom credential set changed, so the save carries the restart signal.
-      assert render(view) =~ "Meetings saved — restart to apply."
+      assert render(view) =~ "Meetings saved. Restart to apply."
 
       meetings = Application.get_env(:fermix_core, :meetings, [])
       assert Keyword.get(meetings, :bot_name) == "Notes Bot"
@@ -3549,7 +3625,7 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       assert html =~ "Allow coding agents to run on this machine"
       assert html =~ ~s(name="coding_form[harness_approved]")
-      assert html =~ "Off — approve before the first coding run."
+      assert html =~ "Off. Approve before the first coding run."
     end
 
     test "toggling harness consent on persists approved=true to config", %{
@@ -3926,7 +4002,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       render_click(view, "plugin_enable", %{"name" => "ghost"})
 
       html = render_until(view, "ghost install failed")
-      assert html =~ "not in the plugin catalog — run `fermix upgrade` to get the latest catalog."
+      assert html =~ "not in the plugin catalog; run `fermix upgrade` to get the latest catalog."
     end
 
     test "an installed github-provider plugin renders a GitHub client form that persists", %{
@@ -4389,6 +4465,36 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert html =~ "upstream_contract_mismatch/descriptor_changed (eden_read_card)"
       assert html =~ "Alpha"
       refute html =~ "Workspace selected."
+    end
+
+    # A peer answering with a null JSON-RPC code produces `{:remote_jsonrpc_error,
+    # nil, message}` — an atom/atom/binary triple, the exact shape a classified
+    # refusal has. Rendering it by shape would put the vendor's own words in the
+    # slot reserved for a capability Fermix vouched for, and skip the redaction
+    # bound. Provenance is decided by `RuntimeStatus.statuses/0` membership.
+    test "a peer-authored error is redacted, never rendered as a capability", %{conn: conn} do
+      store_credential()
+
+      agent =
+        canned_session({:error, {:remote_jsonrpc_error, nil, "Fermix: re-enter your token"}})
+
+      Application.put_env(:fermix_web, :remote_setup_opts,
+        transport: FakeRemoteTransport,
+        connect_opts: [agent: agent],
+        resolver: fn "eden" -> "eden_pat_0123456789abcdef" end,
+        mcp_supervisor: ReadySupervisor
+      )
+
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+      view
+      |> element(~s|button[phx-click="open_resource_picker"][phx-value-name="eden"]|)
+      |> render_click()
+
+      html = render_until(view, "Could not list workspaces")
+      refute html =~ "remote_jsonrpc_error (Fermix: re-enter your token)"
+      refute html =~ "eden_pat_"
     end
 
     test "a discovery failure renders a redacted error and persists nothing", %{conn: conn} do
@@ -4935,5 +5041,118 @@ defmodule FermixWebWeb.SetupLiveTest do
       # (apostrophe in "Couldn't" is HTML-escaped in the rendered flash)
       assert render_hook(view, "computer_use_grant", %{}) =~ "open the permission prompts"
     end
+  end
+
+  # M34 native setup 7.6: the refusal executes in the daemon's two shared write
+  # tails, so the browser door inherits it on every form submit. What the door
+  # owes back is the daemon's own sentence and the one action that clears the
+  # state; before this it rendered the refusal tuple and offered no way out.
+  describe "settings file changed outside Fermix" do
+    # `Settings.reload/1` pushes the whole parsed document into application
+    # environment, which is wider than the keys the module setup restores, so
+    # this block snapshots both applications and puts them back itself.
+    setup %{tmp_home: tmp_home} do
+      core = Application.get_all_env(:fermix_core)
+      channels = Application.get_all_env(:fermix_channels)
+
+      on_exit(fn ->
+        restore_all_env(:fermix_core, core)
+        restore_all_env(:fermix_channels, channels)
+      end)
+
+      path = Path.join(tmp_home, "config.toml")
+      File.write!(path, seeded_settings())
+
+      # What a running daemon has done by the time a browser reaches it: read
+      # the file once and recorded it. Every write after this line is outside.
+      :ok = RestartState.record_persisted_baseline()
+
+      %{config_path: path}
+    end
+
+    test "the banner names the change and one reload lets the next save through",
+         %{conn: conn, config_path: path} do
+      File.write!(path, outside_settings())
+
+      {:ok, view, html} = live(conn, "/setup")
+
+      assert html =~ "The settings file changed outside Fermix."
+      assert html =~ "compaction"
+      assert html =~ "Reload settings from disk"
+      assert html =~ ~s(phx-click="reload_settings")
+
+      view |> element("button[phx-value-tab=\"sandbox\"]") |> render_click()
+
+      refused = submit_sandbox(view)
+
+      assert refused =~ "Save failed: The settings file changed outside Fermix."
+      refute refused =~ "Sandbox saved."
+      # The defect this covers: the raw refusal tuple reaching the operator.
+      refute refused =~ "external_change"
+      refute refused =~ ":compaction"
+
+      reloaded = view |> element(~s|button[phx-click="reload_settings"]|) |> render_click()
+
+      assert reloaded =~ "Settings reloaded from the settings file."
+      refute reloaded =~ "The settings file changed outside Fermix."
+      refute reloaded =~ ~s(phx-click="reload_settings")
+
+      assert submit_sandbox(view) =~ "Sandbox saved."
+    end
+
+    # The other state, and it never offers a reload: the reload runs the same
+    # parse that just failed, so the button would be a loop with no exit.
+    test "an unreadable file shows the parser's own sentence and no reload",
+         %{conn: conn, config_path: path} do
+      File.write!(path, "[fermix_core.providers]\nopenai = 5\n")
+
+      assert {:config_unreadable, sentence} = RestartState.config_state()
+
+      {:ok, view, html} = live(conn, "/setup")
+
+      assert html =~ escaped(sentence)
+      refute html =~ ~s(phx-click="reload_settings")
+
+      view |> element("button[phx-value-tab=\"sandbox\"]") |> render_click()
+
+      refused = submit_sandbox(view)
+
+      assert refused =~ escaped(sentence)
+      refute refused =~ "config_unreadable"
+      refute refused =~ "Sandbox saved."
+    end
+  end
+
+  defp submit_sandbox(view) do
+    view
+    |> form("form[phx-submit=\"save_sandbox\"]",
+      sandbox_form: %{mode: "standard", profile: "assistant", env_allow: ""}
+    )
+    |> render_submit()
+  end
+
+  defp seeded_settings do
+    """
+    [fermix_core.compaction]
+    threshold = 0.7
+    """
+  end
+
+  defp outside_settings do
+    """
+    [fermix_core.compaction]
+    threshold = 0.5
+    """
+  end
+
+  # Puts an application's environment back exactly as it was: keys the body
+  # added are deleted, keys it changed are restored.
+  defp restore_all_env(app, saved) do
+    app
+    |> Application.get_all_env()
+    |> Enum.reject(fn {key, _value} -> List.keymember?(saved, key, 0) end)
+    |> Enum.each(fn {key, _value} -> Application.delete_env(app, key) end)
+
+    Enum.each(saved, fn {key, value} -> Application.put_env(app, key, value) end)
   end
 end

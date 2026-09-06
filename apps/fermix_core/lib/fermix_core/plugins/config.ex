@@ -8,6 +8,7 @@ defmodule FermixCore.Plugins.Config do
   alias FermixCore.Plugins.Registry
   alias FermixCore.Plugins.Runtime
   alias FermixCore.Setup.ConfigStore
+  alias FermixCore.Setup.RestartState
   alias FermixCore.Setup.SecretPaths
   alias FermixCore.Setup.SecretStore
   alias FermixCore.Setup.SecretWriter
@@ -245,6 +246,41 @@ defmodule FermixCore.Plugins.Config do
       secrets when is_list(secrets) -> plugin_secret_from_keyword(secrets, name)
       _other -> nil
     end
+  end
+
+  @doc """
+  The operator's persisted workspace selection for one plugin (M27 §7.5), read
+  back in the shape `set_workspace_selection/2` writes.
+
+  Every field is `nil` on a plugin that binds no workspace or has not chosen
+  one yet, so a reader gets one record rather than three probes for keys. It is
+  the read half of `@selection_keys`, which is why it lives beside the writer.
+  """
+  @spec workspace_selection(String.t()) :: %{
+          access_profile: String.t() | nil,
+          workspace_id: String.t() | nil,
+          workspace_label: String.t() | nil
+        }
+  def workspace_selection(name) when is_binary(name) do
+    entry =
+      Application.get_env(:fermix_core, :plugins, [])
+      |> Keyword.get(:entries, %{})
+      |> Map.get(name, [])
+
+    %{
+      access_profile: selection_value(entry, :access_profile),
+      workspace_id: selection_value(entry, :workspace_id),
+      workspace_label: selection_value(entry, :workspace_label)
+    }
+  end
+
+  # A TOML reload brings these back as atoms and a fresh write uses atoms too,
+  # but a hand-edited file can spell them as strings; read by name for the same
+  # reason `put_selection/3` replaces by name.
+  defp selection_value(entry, key) do
+    Enum.find_value(entry, fn {entry_key, value} ->
+      if to_string(entry_key) == Atom.to_string(key) and is_binary(value), do: value
+    end)
   end
 
   @spec auth_profile(Plugin.t()) :: String.t()
@@ -504,7 +540,13 @@ defmodule FermixCore.Plugins.Config do
   # Save + apply only. The caller that owns a stronger reconciliation than the
   # generic fan-out (`set_workspace_selection/2`) uses this directly.
   defp persist(snapshot) do
-    with :ok <- ConfigStore.save_snapshot(snapshot),
+    # The second write tail, and it consults the SAME predicate as the wizard's
+    # — `RestartState.writable/0`, one owner: the `plugin:<name>` and
+    # `oauth_client:<provider>` families reach `config.toml` through here and
+    # never through the wizard, so a refusal in one tail alone would let a
+    # plugin write revert an outside edit silently.
+    with :ok <- RestartState.writable(),
+         :ok <- ConfigStore.save_snapshot(snapshot),
          :ok <- ConfigStore.apply_snapshot(snapshot) do
       {:ok, ConfigStore.current_snapshot()}
     end

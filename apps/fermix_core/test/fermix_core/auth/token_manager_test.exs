@@ -517,6 +517,64 @@ defmodule FermixCore.Auth.TokenManagerTest do
     end
   end
 
+  # The sign-out half. Deleting the stored entry leaves this process holding the
+  # access and refresh tokens, so without this the daemon keeps calling the
+  # vendor as the account the operator just signed out of.
+  describe "forget/1" do
+    test "drops the tokens and refuses to serve them again" do
+      dir = tmp_dir()
+
+      fermix_path =
+        write_auth_file(dir, "fermix_auth.json", %{
+          "version" => 1,
+          "providers" => %{
+            "openai_codex" => %{
+              "auth_mode" => "chatgpt",
+              "tokens" => %{"access_token" => "live_at", "refresh_token" => "live_rt"},
+              "expires_at" => future_iso8601(3600)
+            }
+          }
+        })
+
+      name = start_manager(fermix_auth_path: fermix_path)
+      assert {:ok, "live_at"} = TokenManager.get_token(name)
+
+      assert :ok = TokenManager.forget(name)
+
+      assert {:ok, %{loaded?: false, invalidated?: true}} = TokenManager.status(name)
+      assert {:error, :auth_invalidated} = TokenManager.get_token(name)
+      assert {:error, :auth_invalidated} = TokenManager.refresh(name)
+
+      FermixTestSupport.SafeRm.rm_rf!(dir)
+    end
+
+    # A fresh sign-in has to bring the manager back, or signing out once would
+    # leave the provider dead until the daemon restarted.
+    test "a reload after a fresh sign-in undoes it" do
+      dir = tmp_dir()
+
+      fermix_path =
+        write_auth_file(dir, "fermix_auth.json", %{
+          "version" => 1,
+          "providers" => %{
+            "openai_codex" => %{
+              "auth_mode" => "chatgpt",
+              "tokens" => %{"access_token" => "live_at", "refresh_token" => "live_rt"},
+              "expires_at" => future_iso8601(3600)
+            }
+          }
+        })
+
+      name = start_manager(fermix_auth_path: fermix_path)
+      assert :ok = TokenManager.forget(name)
+
+      assert {:ok, "live_at"} = TokenManager.reload(name)
+      assert {:ok, "live_at"} = TokenManager.get_token(name)
+
+      FermixTestSupport.SafeRm.rm_rf!(dir)
+    end
+  end
+
   describe "reload/1" do
     test "re-reads tokens from disk and replaces the in-memory access token" do
       dir = tmp_dir()

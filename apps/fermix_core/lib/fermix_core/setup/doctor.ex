@@ -623,18 +623,19 @@ defmodule FermixCore.Setup.Doctor do
     browser_installed? = MeetbotInstaller.browser_installed?()
     rtms_configured? = MeetingsConfig.rtms_configured?(config)
     profile = meet_profile_state()
+    browser_note = meet_browser_note(installed?, browser_installed?)
 
     %{
       status: :enabled,
       ready?: Meetings.ready?(),
       sidecar_installed?: installed?,
       browser_installed?: browser_installed?,
-      browser_note: meet_browser_note(installed?, browser_installed?),
+      browser_note: browser_note,
       pinned_tag: MeetbotInstaller.pinned_tag(),
       profile: profile,
       profile_note: meet_profile_note(profile),
       rtms_configured?: rtms_configured?,
-      remedy: meetings_remedy(installed?, rtms_configured?)
+      remedy: meetings_remedy(browser_note, rtms_configured?)
     }
   end
 
@@ -655,12 +656,18 @@ defmodule FermixCore.Setup.Doctor do
   defp meet_profile_note(:not_signed_in), do: @meet_not_signed_in
   defp meet_profile_note(:absent), do: @meet_profile_absent
 
-  # Neither lane is ready: install the meetbot from setup, or configure Zoom RTMS.
+  # Neither lane is ready. Which sentence depends on how far the Meet lane got:
+  # a sidecar with no browser is a half-installed lane, and telling that operator
+  # to "install the meetbot sidecar" names the step they already completed.
   # A meetbot release is pinned in this build, so the "no release at all" state is
   # unreachable; a host with no pinned artifact for its target surfaces the
   # installer's own error at enable time.
-  defp meetings_remedy(false, false), do: @meetings_no_lane
-  defp meetings_remedy(_installed?, _rtms_configured?), do: nil
+  defp meetings_remedy(_browser_note, true), do: nil
+  defp meetings_remedy(browser_note, false) when is_binary(browser_note), do: browser_note
+
+  defp meetings_remedy(nil, false) do
+    if Meetings.meet_lane_ready?(), do: nil, else: @meetings_no_lane
+  end
 
   defp credential_present?(module) do
     case module.configured?([]) do
@@ -856,7 +863,7 @@ defmodule FermixCore.Setup.Doctor do
       mode when mode in [:oauth, "oauth"] ->
         probe_xai_bearer(
           config,
-          require_oauth_token("xai_oauth", "xai", opts),
+          require_oauth_token(Store.profile(:xai), "xai", opts),
           "Grok subscription OAuth",
           opts
         )
@@ -1154,7 +1161,7 @@ defmodule FermixCore.Setup.Doctor do
   end
 
   defp require_anthropic_oauth_token(opts),
-    do: require_oauth_token("anthropic_oauth", "anthropic", opts)
+    do: require_oauth_token(Store.profile(:anthropic), "anthropic", opts)
 
   defp require_oauth_token(profile, label, opts) do
     cond do

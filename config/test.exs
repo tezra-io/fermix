@@ -1,5 +1,19 @@
 import Config
 
+# Build identity belongs to the artifact being compiled, not the operator shell.
+# A test build is always a standalone test artifact, even when the caller has
+# app-engine release inputs exported in their environment. Clear those inputs
+# before any application module is compiled so cached BEAM files are irrelevant.
+Enum.each(
+  ~w(
+    FERMIX_BUILD_ID
+    FERMIX_BUILD_SOURCE_COMMIT
+    FERMIX_BUILD_DISTRIBUTION
+    FERMIX_BUILD_TARGET
+  ),
+  &System.delete_env/1
+)
+
 # Hermetic boot. The umbrella starts before a single test runs: the config
 # provider hydrates `config.toml`, `SkillRegistry` loads the installed plugin
 # store, `ensure_workspace/0` creates directories. With `FERMIX_HOME` unset all

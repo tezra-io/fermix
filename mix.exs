@@ -41,15 +41,11 @@ defmodule Fermix.MixProject do
   end
 
   defp releases do
+    applications = release_applications()
+
     [
       fermix: [
-        applications: [
-          fermix_core: :permanent,
-          fermix_channels: :permanent,
-          fermix_web: :permanent,
-          fermix_nif: :temporary,
-          mdns_lite: :load
-        ],
+        applications: applications,
         include_executables_for: [:unix],
         steps: [:assemble, &Burrito.wrap/1],
         burrito: [
@@ -72,7 +68,82 @@ defmodule Fermix.MixProject do
             linux_x86_64: [os: :linux, cpu: :x86_64]
           ]
         ]
+      ],
+      fermix_app_engine: [
+        applications: applications,
+        include_executables_for: [:unix],
+        steps: [
+          &__MODULE__.validate_app_engine/1,
+          &__MODULE__.build_app_engine_assets/1,
+          :assemble,
+          &__MODULE__.write_app_engine_manifest/1
+        ]
       ]
+    ]
+  end
+
+  @doc false
+  @spec validate_app_engine(Mix.Release.t()) :: Mix.Release.t()
+  def validate_app_engine(release) do
+    case FermixCore.BuildInfo.validate_current_app_engine() do
+      :ok ->
+        release
+
+      {:error, {:invalid_build_info, field}} ->
+        Mix.raise(
+          "cannot assemble fermix_app_engine: invalid immutable build field #{field}; " <>
+            "recompile in a clean build path with the required FERMIX_BUILD_* inputs"
+        )
+    end
+  end
+
+  # The engine serves the setup UI's stylesheet and bundle from fermix_web's
+  # priv/static; a release assembled without `assets.deploy` 404s both and the
+  # app's embedded setup pane renders as raw unstyled HTML. Building here (not
+  # in each caller's build script) means every `mix release fermix_app_engine`
+  # ships working assets, including the first one from a clean worktree.
+  @doc false
+  @spec build_app_engine_assets(Mix.Release.t()) :: Mix.Release.t()
+  def build_app_engine_assets(release) do
+    Enum.each(["assets.setup", "assets.deploy"], &run_web_assets_task/1)
+    release
+  end
+
+  defp run_web_assets_task(task) do
+    opts = [
+      cd: Path.join(__DIR__, "apps/fermix_web"),
+      env: [{"MIX_ENV", "prod"}],
+      into: IO.stream()
+    ]
+
+    case System.cmd("mix", [task], opts) do
+      {_streamed, 0} ->
+        :ok
+
+      {_streamed, status} ->
+        Mix.raise("cannot assemble fermix_app_engine: `mix #{task}` exited #{status}")
+    end
+  end
+
+  @doc false
+  @spec write_app_engine_manifest(Mix.Release.t()) :: Mix.Release.t()
+  def write_app_engine_manifest(release) do
+    case FermixCore.Release.AppEngineManifest.write(release.path) do
+      {:ok, _manifest} ->
+        release
+
+      {:error, reason} ->
+        Mix.raise("cannot write fermix_app_engine manifest: #{inspect(reason)}")
+    end
+  end
+
+  defp release_applications do
+    [
+      fermix_core: :permanent,
+      fermix_channels: :permanent,
+      fermix_web: :permanent,
+      fermix_nif: :temporary,
+      mdns_lite: :load
     ]
   end
 end

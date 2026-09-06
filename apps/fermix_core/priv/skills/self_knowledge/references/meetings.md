@@ -23,8 +23,11 @@ already in progress instead of queueing.
 
 Turn the subsystem on with `[fermix_core.meetings] enabled`. That alone
 advertises nothing: no meetings tool is offered until a lane is actually usable
-(an installed Meet sidecar, or complete Zoom RTMS credentials), so a
-config-only enable is honest rather than a tool that fails on first use.
+(a Meet sidecar **with its browser installed**, or complete Zoom RTMS
+credentials), so a config-only enable is honest rather than a tool that fails on
+first use. A sidecar whose browser install never ran is a half-installed lane,
+not a usable one: it cannot launch the browser, so it is refused before a
+meeting starts rather than dying part-way through one.
 
 ## Two platforms, two mechanisms, no fallback
 
@@ -94,6 +97,8 @@ failure:
 
 - the Meet sidecar isn't installed — enable the notetaker from its card on the
   setup Plugins page, which installs it;
+- the Meet sidecar is installed but has no browser to drive — open the card's
+  Configure panel on the setup Plugins page and it installs automatically;
 - the bot account isn't signed in — the Sign-in button in the card's Configure
   panel is the fix;
 - Zoom RTMS isn't configured — set the four Zoom values above in setup;

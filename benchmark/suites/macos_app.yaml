@@ -1,0 +1,171 @@
+# App-managed macOS mode — M34 §4 (service ownership, CLI hand-offs, and the
+# Homebrew bridge), graded through the real agent path.
+#
+# WHAT ROTS HERE. M34 §4 splits the macOS CLI in three: verbs that refuse and
+# point at the GUI (`start`, `stop`, `service install|uninstall`), verbs that
+# open a `fermix://` app route and report only that the hand-off was accepted
+# (`setup`, `upgrade`, `uninstall`), and verbs the daemon still answers over
+# `daemon.sock` (`status`, `overview`, `doctor`, `logs`). None of that is
+# discoverable from the binary's own help — it lives in the `self-knowledge`
+# skill, which the model has to actually reach and read. ExUnit proves the
+# sentences are in the file; this suite proves the model finds them when an
+# owner asks in their own words.
+#
+# WHY BEHAVIORAL AND NOT CAPABILITY. There is no end state to check: the answer
+# is advice, and the capability runner scores ground truth. The question that
+# silently rots is whether an owner on the app gets the app's answer instead of
+# the standalone one.
+#
+# THE DAEMON UNDER TEST IS STANDALONE. `~/.fermix-dev` is a formula/dev install,
+# so every prompt here states the app-managed premise itself rather than relying
+# on the daemon to be in that mode. A reply that answers for a standalone
+# install is the exact failure this suite exists to catch, not a posture
+# mismatch to explain away.
+#
+# ROUTE ASSERTIONS. Exactly one — the labelled sanity case below. Everything
+# else gates on the outcome and lets the model reach it however it likes.
+#
+# WRONG-MODE GATES. `reply_not_matches` names service managers the app-managed
+# answer has no reason to mention in any polarity (`launchctl`, `systemctl`,
+# `brew services`), plus hand-rolled binary installs on the update cases. It
+# deliberately does NOT try to catch a negated sentence: a pattern tight enough
+# to reject "the update is complete" also fires on "this does not mean the
+# update is complete". Correctness of wording is the rubric's job.
+#
+# NO NEW CONSENT GATE. Nothing here is gated on a human decision, so
+# `bin/seed_capability_home.py` needs no pre-grant for this suite (and these are
+# `host_readonly` cases, which run against the development home anyway).
+suite: macos_app
+risk: host_readonly
+title: "macOS app-managed mode — service ownership, CLI hand-offs, and the Homebrew bridge"
+description: >
+  Ordinary owner questions about a Fermix.app-managed macOS install: why the
+  service verbs refuse, why `fermix upgrade` opens a window instead of swapping
+  a binary, why two `fermix doctor` rows read not-applicable, and how a Homebrew
+  formula install moves to the app. Each case gates on a phrasing-independent
+  floor plus the wrong-mode refusals; the rubric owns the wording. One labelled
+  sanity case pins that the answer comes from the self-knowledge skill rather
+  than from the model's own guess about how a macOS daemon is usually managed.
+defaults:
+  timeout_ms: 180000
+  judge: true
+  expect:
+    status: ok
+    no_tool_errors: true
+
+scenarios:
+  - id: app_managed_service_control
+    title: "The app owns the background service, so the service verbs refuse"
+    severity: normal
+    risk: host_readonly
+    tags: [macos-app, service, self-knowledge]
+    cases:
+      # SANITY CASE — the one route assertion in this suite. The answer is not
+      # in the binary's help output or in general macOS knowledge; it is in the
+      # self-knowledge skill, so this case pins that the model actually opened
+      # it. Every other case here lets the model get there however it likes.
+      - id: stop_background_service_sanity
+        query: >
+          I'm running the Fermix mac app and I want the background service off
+          for the rest of the afternoon. `fermix stop` just errors out at me.
+          What am I supposed to do instead?
+        expect:
+          tools_any: [skill_view]
+          reply_matches: '(?i)background service'
+          reply_not_matches: '(?i)\b(launchctl|systemctl|brew\s+services)\b'
+          max_tool_calls: 8
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Explains that on an app-managed macOS install the application owns the
+          background service, so `fermix stop` exits non-zero by design, and
+          points at the app's Disable background service control as the way to
+          do it. Does not suggest quitting or closing the app as a way to stop
+          the service, and does not tell the user to drive launchd by hand.
+      - id: service_install_refused
+        query: >
+          On my Mac `fermix service install` exits with an error telling me to
+          use the app. Did my install break somehow?
+        expect:
+          reply_matches: '(?i)\bapp\b'
+          reply_not_matches: '(?i)\b(launchctl|systemctl|brew\s+services)\b'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Says nothing is broken: on an app-managed engine the application owns
+          the background service, so `fermix service install` and
+          `service uninstall` refuse rather than creating a second launchd unit
+          alongside the app's. Points at the app's Enable/Disable background
+          service controls as where that state lives.
+
+  - id: app_managed_handoffs
+    title: "setup, upgrade, and uninstall hand off to the app; two doctor rows go not-applicable"
+    severity: normal
+    risk: host_readonly
+    tags: [macos-app, upgrade, doctor, self-knowledge]
+    cases:
+      - id: upgrade_opened_a_window
+        query: >
+          I ran `fermix upgrade` on my Mac and instead of downloading anything
+          it popped open a Fermix window. Why did it do that?
+        expect:
+          reply_matches: '(?i)\bapp\b'
+          reply_not_matches: '(?i)\b(launchctl|systemctl|brew\s+services|curl|wget)\b'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Explains that an app-managed install updates itself, so `fermix
+          upgrade` opens the application's update route instead of swapping a
+          binary in place, and that the command returning successfully means the
+          hand-off was accepted rather than that an update installed. Does not
+          treat the window as a bug or walk the user through a manual download.
+      - id: doctor_rows_not_applicable
+        query: >
+          `fermix doctor` on my Mac shows the binary integrity and update
+          checks as N/A. Everything else is green. Should I be worried?
+        expect:
+          reply_matches: '(?i)\b(n/?a|not[- ]applicable)\b'
+          reply_not_matches: '(?i)\b(launchctl|systemctl|brew\s+services|curl|wget)\b'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Says no: those two rows belong to the standalone updater, which an
+          app-managed install does not use because the app updates itself, so
+          they report not-applicable rather than failing. Does not tell the user
+          to reinstall, re-download, or verify the binary by hand.
+
+  - id: brew_formula_to_app_migration
+    title: "Moving a Homebrew formula install to the app"
+    severity: normal
+    risk: host_readonly
+    tags: [macos-app, homebrew, migration, self-knowledge]
+    cases:
+      - id: move_from_brew_to_app
+        query: >
+          I installed Fermix with Homebrew ages ago and now there's a proper Mac
+          app. How do I move over without losing my setup?
+        expect:
+          reply_matches: '(?i)fermix\s+migrate-to-app'
+          reply_not_matches: '(?i)\b(systemctl|brew\s+services)\b'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Names `fermix migrate-to-app` as the supported move, says it has to
+          run in the user's own shell, and that it keeps the existing Fermix
+          home and data. Mentions that running it with no arguments prints the
+          plan and changes nothing, so the user can look before committing.
+      - id: brew_uninstall_alone
+        query: >
+          Can I just `brew uninstall fermix` and then drag the new Fermix app
+          across from the DMG? Anything that would break if I do it that way?
+        expect:
+          reply_matches: '(?i)fermix\s+migrate-to-app'
+          reply_not_matches: '(?i)\b(systemctl|brew\s+services)\b'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Warns that uninstalling the formula on its own strands the launch
+          agent `fermix setup` wrote, which keeps trying to start a binary that
+          is no longer there, and points at `fermix migrate-to-app` as the path
+          that drains the daemon, removes that unit, preserves the Fermix home,
+          and installs the app. Does not present the manual route as equivalent.

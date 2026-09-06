@@ -158,28 +158,65 @@ defmodule Fermix.CLI.Doctor.PluginsCheckTest do
       assert result.detail =~ "eden: ready (remote; runtime upstream_contract_mismatch)"
     end
 
-    # The operator's actual question on a contract mismatch is WHICH capability,
-    # so a row that carries the classified detail and the tool name renders both
-    # — through the same resolver the modal and the daemon log use.
-    test "a mismatch row names the failing capability", ctx do
+    # The daemon already serializes the classified detail; dropping it here made
+    # `fermix doctor` print strictly less than the wire carried, so the operator
+    # could not tell a vanished tool from a changed descriptor.
+    test "the reported detail rides the runtime status when the daemon sends one", ctx do
       put_secret!("eden", "eden_pat_0123456789abcdef")
-
-      mismatch =
-        Map.merge(row("plugin:eden", "eden", "upstream_contract_mismatch"), %{
-          "detail" => "descriptor_changed",
-          "capability" => "eden_read_card"
-        })
 
       result =
         Checks.plugins(
           installed_root: ctx.installed_root,
-          client: runtime_client([mismatch])
+          client:
+            runtime_client([
+              row("plugin:eden", "eden", "upstream_contract_mismatch", "missing_tool")
+            ])
+        )
+
+      assert result.status == :fail
+      assert result.detail =~ "runtime upstream_contract_mismatch/missing_tool"
+    end
+
+    # The whole point of the chain: the operator reads the withdrawn tool's name
+    # off the doctor row instead of probing the vendor for it.
+    test "the row names the capability the upstream withdrew", ctx do
+      put_secret!("eden", "eden_pat_0123456789abcdef")
+
+      result =
+        Checks.plugins(
+          installed_root: ctx.installed_root,
+          client:
+            runtime_client([
+              row(
+                "plugin:eden",
+                "eden",
+                "upstream_contract_mismatch",
+                "missing_tool",
+                "eden_get_item_connections"
+              )
+            ])
         )
 
       assert result.status == :fail
 
       assert result.detail =~
-               "runtime upstream_contract_mismatch/descriptor_changed (eden_read_card)"
+               "runtime upstream_contract_mismatch/missing_tool (eden_get_item_connections)"
+    end
+
+    # A daemon that reports no detail (every :ready row, and any build predating
+    # the field) must render exactly as before — no trailing separator.
+    test "a row without a detail renders the bare status", ctx do
+      put_secret!("eden", "eden_pat_0123456789abcdef")
+
+      result =
+        Checks.plugins(
+          installed_root: ctx.installed_root,
+          client: runtime_client([Map.delete(row("plugin:eden", "eden", "ready"), "detail")])
+        )
+
+      assert result.status == :ok
+      assert result.detail =~ "(remote; runtime ready)"
+      refute result.detail =~ "runtime ready/"
     end
 
     test "a transient remote failure warns rather than fails", ctx do
@@ -366,12 +403,13 @@ defmodule Fermix.CLI.Doctor.PluginsCheckTest do
     fn "plugins_runtime_status" -> {:ok, %{"status" => "ok", "runtime_status" => rows}} end
   end
 
-  defp row(source, plugin, status) do
+  defp row(source, plugin, status, detail \\ nil, subject \\ nil) do
     %{
       "source" => source,
       "plugin" => plugin,
       "status" => status,
-      "detail" => nil,
+      "detail" => detail,
+      "subject" => subject,
       "updated_at" => 1
     }
   end

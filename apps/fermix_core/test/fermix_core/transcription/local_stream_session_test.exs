@@ -103,7 +103,9 @@ defmodule FermixCore.Transcription.Local.StreamSessionTest do
   end
 
   test "emits one provider-call span for the whole stream" do
-    handler = "stt-local-stream-#{System.unique_integer([:positive])}"
+    suffix = System.unique_integer([:positive])
+    handler = "stt-local-stream-#{suffix}"
+    session_id = "stt-local-stream-test-#{suffix}"
     test_pid = self()
 
     :telemetry.attach(
@@ -126,7 +128,7 @@ defmodule FermixCore.Transcription.Local.StreamSessionTest do
 
     on_exit(fn -> :telemetry.detach(handler) end)
 
-    {:ok, session} = StreamSession.open(self(), opts())
+    {:ok, session} = StreamSession.open(self(), Keyword.put(opts(), :session_id, session_id))
     Contract.push_pcm(session, @pcm)
     Contract.finish(session)
 
