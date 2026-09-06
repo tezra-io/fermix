@@ -34,6 +34,7 @@ defmodule FermixCore.Transcription.Local.StreamSessionTest do
 
   test "splits a push larger than one audio frame across frames" do
     {:ok, session} = StreamSession.open(self(), opts())
+    ref = Process.monitor(session)
 
     # 96 KB of audio is two frames at the 64 KB cap; the fake counts the decoded
     # bytes, so the segment's t1 proves every frame arrived.
@@ -42,6 +43,9 @@ defmodule FermixCore.Transcription.Local.StreamSessionTest do
 
     assert_receive {:transcript_segment, ^session, %Segment{t1_ms: 3_072}}, 2_000
     assert_receive {:transcript_stream_closed, ^session, %{segments: 1}}, 2_000
+    # The close message precedes the terminal span, so a case that returns here
+    # leaves its session still tracing into the next case's window.
+    assert_receive {:DOWN, ^ref, :process, ^session, :normal}, 2_000
   end
 
   test "a sidecar that dies mid-stream is terminal, never retried" do
@@ -112,14 +116,15 @@ defmodule FermixCore.Transcription.Local.StreamSessionTest do
       handler,
       [:fermix, :provider, :call],
       fn _event, measurements, metadata, _config ->
-        # [:fermix, :provider, :call] is global and every async module emits on
-        # it, so an unfiltered handler forwards other suites' spans and the
-        # assert_receive below races them (a media call on :openai_codex won
-        # this once). The module's async rationale covers the sidecar and the
-        # consumer mailbox, not a process-independent telemetry handler. This
-        # fixture's model is unique to this backend, and ExUnit serializes the
-        # cases within a module, so it selects exactly this test's span.
-        if metadata[:model] == @model do
+        # [:fermix, :provider, :call] is global and process-independent, so the
+        # selector has to name THIS stream and nothing else. The model does not:
+        # every local-backend span carries it, including one emitted by a case
+        # that has already finished — a stream tells its consumer it closed
+        # before it traces the close, so the previous case's session lands its
+        # :ok span inside this case's window. The correlation id passed to
+        # `open/2` is unique per case, and `Telemetry.correlation_from_opts/1`
+        # drops the key when no id was passed, so nothing else can match it.
+        if metadata[:session_id] == session_id do
           send(test_pid, {:span, measurements, metadata})
         end
       end,
@@ -136,7 +141,7 @@ defmodule FermixCore.Transcription.Local.StreamSessionTest do
     assert_receive {:span, measurements, metadata}, 2_000
 
     assert metadata.provider == :local
-    assert metadata.model == "parakeet-tdt-0.6b-v3-int8"
+    assert metadata.model == @model
     assert metadata.purpose == :transcription
     assert metadata.status == :ok
     assert metadata.tokens == %{}
@@ -147,21 +152,24 @@ defmodule FermixCore.Transcription.Local.StreamSessionTest do
   # most: nobody is left to report the stream, so only the span says why it
   # ended.
   test "a consumer death still reports the stream's terminal span" do
-    handler = "stt-local-consumer-down-#{System.unique_integer([:positive])}"
+    suffix = System.unique_integer([:positive])
+    handler = "stt-local-consumer-down-#{suffix}"
+    session_id = "stt-local-consumer-down-test-#{suffix}"
     test_pid = self()
 
     :telemetry.attach(
       handler,
       [:fermix, :provider, :call],
       fn _event, measurements, metadata, _config ->
-        # [:fermix, :provider, :call] is global and every async module emits on
-        # it, so an unfiltered handler forwards other suites' spans and the
-        # assert_receive below races them (a media call on :openai_codex won
-        # this once). The module's async rationale covers the sidecar and the
-        # consumer mailbox, not a process-independent telemetry handler. This
-        # fixture's model is unique to this backend, and ExUnit serializes the
-        # cases within a module, so it selects exactly this test's span.
-        if metadata[:model] == @model do
+        # [:fermix, :provider, :call] is global and process-independent, so the
+        # selector has to name THIS stream and nothing else. The model does not:
+        # every local-backend span carries it, including one emitted by a case
+        # that has already finished — a stream tells its consumer it closed
+        # before it traces the close, so the previous case's session lands its
+        # :ok span inside this case's window. The correlation id passed to
+        # `open/2` is unique per case, and `Telemetry.correlation_from_opts/1`
+        # drops the key when no id was passed, so nothing else can match it.
+        if metadata[:session_id] == session_id do
           send(test_pid, {:span, measurements, metadata})
         end
       end,
@@ -172,7 +180,7 @@ defmodule FermixCore.Transcription.Local.StreamSessionTest do
 
     consumer =
       spawn(fn ->
-        {:ok, session} = StreamSession.open(self(), opts())
+        {:ok, session} = StreamSession.open(self(), Keyword.put(opts(), :session_id, session_id))
         send(test_pid, {:session, session})
 
         receive do

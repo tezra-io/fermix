@@ -150,6 +150,42 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
     memory
   end
 
+  # 80 events whose values all clip to the same rendered line, so the batch
+  # renders to the same 62-line prompt at any size (measured 21_870 against
+  # 21_889 characters, a 0.09% difference): what scales is only the field bytes
+  # the verbatim guard projects behind those clipped lines.
+  defp sized_batch(per_event) do
+    Enum.map(1..80, fn seq ->
+      event(seq, 1_000 + seq, "#{seq}-#{String.duplicate("qwertyuiop asdfghjkl ", per_event)}")
+    end)
+  end
+
+  # One cycle on its own fresh spool, measured in REDUCTIONS — the BEAM's own
+  # unit of work — rather than microseconds. A cost property asserted in
+  # reductions holds on a runner of any speed and under any load.
+  defp cycle_cost(events, content) do
+    unique = System.unique_integer([:positive])
+    db_path = Path.join(System.tmp_dir!(), "fermix-ch-cost-#{unique}.db")
+    repo = :"ch_cost_repo_#{unique}"
+
+    start_supervised!(
+      Supervisor.child_spec({Repo, name: repo, enabled: true, database_path: db_path}, id: repo)
+    )
+
+    on_exit(fn ->
+      Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
+    end)
+
+    insert(repo, events)
+    Process.put(:ch_content, content)
+
+    {:reductions, before} = Process.info(self(), :reductions)
+    result = Summarizer.run_cycle(local_opts(repo))
+    {:reductions, spent} = Process.info(self(), :reductions)
+
+    %{reductions: spent - before, result: result}
+  end
+
   # --- inv. 1: local summarizer, raw reaches the loopback route -----------
 
   test "local summarizer sends raw events to the loopback route only (inv. 1)", %{repo: repo} do
@@ -417,32 +453,67 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
     assert length(String.split(summary, "[…]")) == 2
   end
 
-  test "the verbatim guard stays fast on a 5 MB batch", %{repo: repo} do
+  # The guard projects and scans every source byte once, so its cost is LINEAR in
+  # the field bytes behind a batch. That is the property. Microseconds are not:
+  # the same cycle measured 159 ms idle and 1_444 ms under load on one developer
+  # machine minutes apart, and 2.4-3.2 s on the Intel macOS CI leg, so a
+  # wall-clock bound grades the runner. Reductions do not move with the
+  # hardware: 8x the field bytes cost 7.42-7.51x the reductions on every sample,
+  # loaded or idle and under `+S 1:1` through `+S 8:8`, while the per-position
+  # scan this guard's design replaced costs ~63x for the same 8x — quadratic.
+  test "the verbatim guard's cost stays linear in the field bytes it scans" do
     enable(summarizer: :local)
+    summary = String.duplicate("The owner reviewed the plan. ", 40)
 
-    events =
-      Enum.map(1..80, fn seq ->
-        event(seq, 1_000 + seq, "#{seq}-#{String.duplicate("qwertyuiop asdfghjkl ", 3_200)}")
-      end)
+    # Same 80 events, same 62 rendered lines, 8x the field bytes: 0.67 MB
+    # against 5.4 MB.
+    small = cycle_cost(sized_batch(400), summary)
+    large = cycle_cost(sized_batch(3_200), summary)
 
-    insert(repo, events)
-    Process.put(:ch_content, String.duplicate("The owner reviewed the plan. ", 40))
+    assert {:ok, %{memory_written: true}} = small.result
+    assert {:ok, %{memory_written: true}} = large.result
 
-    {micros, result} = :timer.tc(fn -> Summarizer.run_cycle(local_opts(repo)) end)
+    growth = large.reductions / small.reductions
 
-    assert {:ok, %{memory_written: true}} = result
-    assert micros < 1_000_000, "run_cycle took #{div(micros, 1_000)} ms"
+    assert growth < 12,
+           "8x the field bytes cost #{Float.round(growth, 2)}x the work " <>
+             "(#{small.reductions} → #{large.reductions} reductions): the guard is superlinear"
+
+    # A floor under the slope, so a linear but costlier pure-BEAM pass is caught
+    # too: projecting each text twice measures 11.5 reductions per byte, three
+    # times 14.5, so this ceiling fires at roughly 5x pure-BEAM inflation —
+    # about the sensitivity the deleted 1 s wall-clock bound had on a fast
+    # machine, expressed machine-independently. What NO reduction gate sees is
+    # work moved into a NIF: reinstating a regex projection costs 2.8x the wall
+    # clock yet only 6.8 reductions per byte, UNDER the shipped guard's own
+    # 8.46, because reductions under-count NIF time. Measured 8.46-8.48 here.
+    per_byte = large.reductions / (80 * 3_200 * 21)
+
+    assert per_byte < 20,
+           "the guard spent #{Float.round(per_byte, 2)} reductions per source byte"
   end
 
-  test "the verbatim guard stays fast on a degenerate repeated field", %{repo: repo} do
+  # The degenerate shape: EVERY window matches, so this is the case that walks
+  # `extend/4`. Dropping the covered-span skip in `absorb_match/4` — one line —
+  # makes each match re-walk its run to the end of the field, and 8x the bytes
+  # then costs ~63x the work (measured against this module). That is what this
+  # ratio refuses; at this fixture size the regressed cycle is slow enough that
+  # ExUnit's own timeout may fire first, which is the same red.
+  test "the verbatim guard's cost stays linear on a degenerate repeated field" do
     enable(summarizer: :local)
-    insert(repo, [event(1, 1_000, String.duplicate("a", 65_536))])
-    Process.put(:ch_content, String.duplicate("a", 5_000))
+    summary = String.duplicate("a", 5_000)
 
-    {micros, result} = :timer.tc(fn -> Summarizer.run_cycle(local_opts(repo)) end)
+    small = cycle_cost([event(1, 1_000, String.duplicate("a", 65_536))], summary)
+    large = cycle_cost([event(1, 1_000, String.duplicate("a", 524_288))], summary)
 
-    assert {:ok, _cycle} = result
-    assert micros < 500_000, "run_cycle took #{div(micros, 1_000)} ms"
+    assert {:ok, _small_cycle} = small.result
+    assert {:ok, _large_cycle} = large.result
+
+    growth = large.reductions / small.reductions
+
+    assert growth < 12,
+           "8x the repeated field cost #{Float.round(growth, 2)}x the work " <>
+             "(#{small.reductions} → #{large.reductions} reductions): the guard is superlinear"
   end
 
   test "a summary that is nothing but an echoed field writes no memory", %{repo: repo} do

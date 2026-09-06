@@ -93,16 +93,29 @@ defmodule FermixCore.Transcription.ChunkedStreamTest do
 
   describe "bounded work" do
     test "at most @max_inflight transcribe calls run at once" do
+      chunk_count = 12
       session = open(mode: :block)
 
-      StreamSession.push_pcm(session, bursts(12))
+      StreamSession.push_pcm(session, bursts(chunk_count))
       StreamSession.finish(session)
 
       calls = collect_calls(@max_inflight)
       refute_receive {:transcribe, _path, _task}, 100
 
       Enum.each(calls, fn call -> send(call.task, {:release, {:ok, "text"}}) end)
-      assert_receive {:transcribe, _path, _task}
+
+      # The in-order gate reaches the eighth segment only once every one of the
+      # eight results has been folded in, and `dispatch/1` refills the freed
+      # slots inside that same message. Reading the session's own state with a
+      # call it can only answer afterwards is the synchronisation point: no
+      # wall-clock window decides whether the queued chunks made it into flight.
+      Enum.each(1..@max_inflight, fn _ ->
+        assert_receive {:transcript_segment, ^session, %Segment{}}, 5_000
+      end)
+
+      state = :sys.get_state(session)
+      assert map_size(state.inflight) == chunk_count - @max_inflight
+      assert :queue.is_empty(state.pending)
     end
 
     test "a failing segment is retried once, then dropped, logged, and counted" do
