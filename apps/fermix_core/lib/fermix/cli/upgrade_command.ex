@@ -10,6 +10,7 @@ defmodule Fermix.CLI.UpgradeCommand do
   """
 
   alias Fermix.CLI.AppRoute
+  alias Fermix.CLI.HomeOwner
   alias Fermix.CLI.Upgrade
 
   @switches [check: :boolean]
@@ -22,11 +23,22 @@ defmodule Fermix.CLI.UpgradeCommand do
     end
   end
 
+  # `Upgrade` already answers `{:error, {:app_managed, :update}}` on the app's
+  # own binary, which keys on the binary. A formula binary answers that
+  # predicate false, so the home-owner check routes it here instead, before the
+  # upgrade machinery decides anything about a binary the app owns.
   defp dispatch(parsed, upgrade, opts) do
-    if Keyword.get(parsed, :check, false) do
-      do_check(upgrade, opts)
-    else
-      do_run(upgrade, opts)
+    home_owner = Keyword.get(opts, :home_owner, HomeOwner)
+
+    cond do
+      home_owner.app_managed?(Keyword.take(opts, [:hello, :marker?, :socket_path])) ->
+        open_update_settings(opts)
+
+      Keyword.get(parsed, :check, false) ->
+        do_check(upgrade, opts)
+
+      true ->
+        do_run(upgrade, opts)
     end
   end
 

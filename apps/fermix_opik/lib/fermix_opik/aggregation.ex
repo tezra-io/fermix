@@ -795,6 +795,52 @@ defmodule FermixOpik.Aggregation do
     })
   end
 
+  # A management job (M34 native setup §7.3) is a bounded background run minted
+  # with its own `job:<rand>` session before its body executes. Like a Doctor
+  # run it is always a root: the app asks the daemon directly, so there is no
+  # originating turn to nest under. A provider call made inside the run carries
+  # the same session id and lands as its child.
+  def apply_event(state, [:fermix, :management_job, :start], _meas, meta, at) do
+    case Map.get(meta, :session_id) do
+      nil ->
+        {state, []}
+
+      session_id ->
+        ctx = %{
+          parent_session: nil,
+          kind: :management_job,
+          name: stringify(Map.get(meta, :kind)),
+          input: nil,
+          trace_metadata:
+            compact(%{
+              kind: stringify(Map.get(meta, :kind)),
+              budget_ms: Map.get(meta, :budget_ms)
+            }),
+          at: at.at,
+          mono: at.mono
+        }
+
+        {state, _ref} = ensure_session(state, session_id, ctx)
+        {state, []}
+    end
+  end
+
+  # `status` carries the run's TERMINAL word (`completed`, `failed`,
+  # `cancelled`, `timed_out`) rather than a generic "ok", and the failure
+  # sentence is the daemon's own operator copy — never an operation result.
+  def apply_event(state, [:fermix, :management_job, :complete], _meas, meta, at) do
+    close_root(state, meta, at, %{
+      output: Map.get(meta, :error),
+      status: Map.get(meta, :status, "completed"),
+      metadata:
+        compact(%{
+          kind: stringify(Map.get(meta, :kind)),
+          budget_ms: Map.get(meta, :budget_ms),
+          failure_code: Map.get(meta, :failure_code)
+        })
+    })
+  end
+
   def apply_event(state, _event, _meas, _meta, _at), do: {state, []}
 
   @doc """
@@ -1171,6 +1217,7 @@ defmodule FermixOpik.Aggregation do
   defp infer_kind("followup_" <> _), do: :reminder_followup
   defp infer_kind("meeting_" <> _), do: :meeting
   defp infer_kind("doctor:" <> _), do: :doctor
+  defp infer_kind("job:" <> _), do: :management_job
   defp infer_kind(_other), do: :subagent
 
   defp kind_from_role(role) when role in [:skill, "skill"], do: :skill

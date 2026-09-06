@@ -12,7 +12,7 @@ defmodule FermixCore.Management.Protocol do
   application vendors that export by checksum rather than hand-copying shapes.
   """
 
-  @protocol_version 1
+  @protocol_version 2
   @min_supported_version max(1, @protocol_version - 1)
   @request_id_pattern ~r/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
   @method_pattern ~r/^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*$/
@@ -31,19 +31,57 @@ defmodule FermixCore.Management.Protocol do
   # rather than a round number.
   @max_json_collection_items 500
 
-  @methods [
-    "hello",
-    "overview.get",
-    "setup.session.create",
-    "doctor.start",
-    "doctor.get",
-    "doctor.cancel",
-    "logs.query",
-    "lifecycle.prepare",
-    "lifecycle.commit",
-    "lifecycle.cancel",
-    "diagnostics.build"
+  # Ordered, and the single source for the catalog, the published minimum-version
+  # table, and the schema's method enum. The integer is the method's
+  # `min_protocol_version`: the lowest negotiated version that may call it. A
+  # v1-declared request for a v2 method is refused rather than served, so the
+  # wire's meaning never depends on the client's honesty about what it speaks.
+  @method_minimums [
+    {"hello", 1},
+    {"overview.get", 1},
+    {"setup.session.create", 1},
+    {"doctor.start", 1},
+    {"doctor.get", 1},
+    {"doctor.cancel", 1},
+    {"logs.query", 1},
+    {"lifecycle.prepare", 1},
+    {"lifecycle.commit", 1},
+    {"lifecycle.cancel", 1},
+    {"diagnostics.build", 1},
+    {"setup.state.get", 2},
+    {"setup.detect", 2},
+    {"settings.sections", 2},
+    {"settings.get", 2},
+    {"settings.apply", 2},
+    {"settings.reload", 2},
+    {"secret.set", 2},
+    {"secret.clear", 2},
+    {"providers.set_primary", 2},
+    {"providers.models.list", 2},
+    {"providers.probe.start", 2},
+    {"job.get", 2},
+    {"job.cancel", 2},
+    {"job.list", 2},
+    {"auth.start", 2},
+    {"auth.import.start", 2},
+    {"auth.logout", 2},
+    {"plugins.list", 2},
+    {"plugins.install.start", 2},
+    {"plugins.check.start", 2},
+    {"plugins.workspaces.discover.start", 2},
+    {"plugins.workspace.select.start", 2},
+    {"plugins.enable", 2},
+    {"plugins.disable", 2},
+    {"plugins.disconnect", 2},
+    {"plugins.oauth_client.set", 2},
+    {"plugins.setting.set", 2},
+    {"capabilities.install.start", 2},
+    {"meetings.signin.start", 2},
+    {"computer_use.grant.start", 2},
+    {"computer_use.permissions.get", 2}
   ]
+  @methods Enum.map(@method_minimums, fn {method, _minimum} -> method end)
+  @method_minimum_versions Map.new(@method_minimums)
 
   # Ordered, and the single source for both the catalog and the messages. A
   # keyword list keeps publication order without a second hand-maintained list
@@ -63,7 +101,11 @@ defmodule FermixCore.Management.Protocol do
     lease_expired: "The lifecycle lease expired and the daemon resumed.",
     unknown_lease: "The lifecycle lease is not held by this daemon.",
     unknown_session: "The Doctor session is not retained by this daemon.",
-    cursor_expired: "The log cursor predates a rotation and cannot be resumed."
+    cursor_expired: "The log cursor predates a rotation and cannot be resumed.",
+    secret_store_failed: "The secret could not be stored.",
+    unknown_job: "The job is not retained by this daemon.",
+    external_change: "The settings file changed outside Fermix.",
+    config_unreadable: "The settings file could not be read."
   ]
   @error_messages Map.new(@errors)
 
@@ -84,9 +126,26 @@ defmodule FermixCore.Management.Protocol do
   @spec supported_version_range() :: {pos_integer(), pos_integer()}
   def supported_version_range, do: {@min_supported_version, @protocol_version}
 
-  @doc "Ordered v1 management method catalog."
+  @doc "Ordered management method catalog for every version in the window."
   @spec methods() :: [String.t()]
   def methods, do: @methods
+
+  @doc """
+  The lowest negotiated protocol version each published method may be called at.
+
+  Published whole rather than per method: a client that decodes a partial table
+  cannot tell "this method needs a newer engine" from "this daemon does not
+  serve it", and those are two different states with two different remedies.
+  """
+  @spec method_minimum_versions() :: %{String.t() => pos_integer()}
+  def method_minimum_versions, do: @method_minimum_versions
+
+  @doc "The minimum negotiated version for one method, or `:error` when unknown."
+  @spec minimum_version(term()) :: {:ok, pos_integer()} | :error
+  def minimum_version(method) when is_binary(method),
+    do: Map.fetch(@method_minimum_versions, method)
+
+  def minimum_version(_method), do: :error
 
   @doc """
   Every bound this protocol publishes, in bytes or items.

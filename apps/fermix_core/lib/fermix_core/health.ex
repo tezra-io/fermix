@@ -16,6 +16,7 @@ defmodule FermixCore.Health do
   alias FermixCore.Realtime.SessionSupervisor
   alias FermixCore.Setup.BootReport
   alias FermixCore.Setup.ConfigStore
+  alias FermixCore.Setup.RestartState
 
   require Logger
 
@@ -63,6 +64,11 @@ defmodule FermixCore.Health do
     boot_report = Keyword.get_lazy(opts, :boot_report, &BootReport.current/0)
     process_resolver = Keyword.get(opts, :process_resolver, &Process.whereis/1)
     timestamp = Keyword.get(opts, :timestamp, DateTime.utc_now())
+    # Restart truth comes from `RestartState` and from nowhere else. The boot
+    # report is recomputed only when something saves, so reading it here would
+    # leave an out-of-process `config.toml` write invisible to `/health` and to
+    # `overview.get` until the operator happened to save something.
+    restart = Keyword.get_lazy(opts, :restart, &RestartState.restart/0)
 
     channels = channel_statuses(boot_report.failures, process_resolver)
     memory = memory_status(process_resolver)
@@ -75,7 +81,8 @@ defmodule FermixCore.Health do
       timestamp: timestamp,
       failures: Map.get(boot_report, :failures, []),
       config_path: boot_report.config_path,
-      restart_required?: Map.get(boot_report, :restart_required?, false),
+      restart_required?: Map.get(restart, :required, false) == true,
+      restart_reasons: Enum.map(Map.get(restart, :reasons, []), & &1.section),
       config: %{
         home: ConfigStore.fermix_home(),
         path: boot_report.config_path,

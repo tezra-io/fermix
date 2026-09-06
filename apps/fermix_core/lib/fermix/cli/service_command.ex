@@ -8,6 +8,7 @@ defmodule Fermix.CLI.ServiceCommand do
   the failure verbatim instead of a silent partial install.
   """
 
+  alias Fermix.CLI.HomeOwner
   alias Fermix.CLI.Service
   alias FermixCore.BuildInfo
 
@@ -34,11 +35,22 @@ defmodule Fermix.CLI.ServiceCommand do
   defp with_scope(argv, action, past_tense, deps) do
     build_info = Keyword.get(deps, :build_info, BuildInfo)
     service = Keyword.get(deps, :service, Service)
+    home_owner = Keyword.get(deps, :home_owner, HomeOwner)
 
-    if build_info.app_engine?() do
-      abort("this engine is managed by Fermix.app. Use Fermix.app background service controls.")
-    else
-      dispatch_service(argv, action, past_tense, service)
+    cond do
+      build_info.app_engine?() ->
+        abort("this engine is managed by Fermix.app. Use Fermix.app background service controls.")
+
+      # `install` only, and no wider: `uninstall` targets a unit the app does
+      # not own and is the supported remedy for exactly the condition the
+      # `legacy_service_unit` row reports, so refusing it would leave that row
+      # with no command behind it.
+      action == :install and
+          home_owner.app_managed?(Keyword.take(deps, [:hello, :marker?, :socket_path])) ->
+        abort(HomeOwner.refusal_sentence("fermix service install"))
+
+      true ->
+        dispatch_service(argv, action, past_tense, service)
     end
   end
 

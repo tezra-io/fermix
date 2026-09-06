@@ -23,17 +23,23 @@ defmodule FermixCore.Auth.AnthropicLogin do
   """
 
   alias FermixCore.Auth.Store
+  alias FermixCore.CommandRunner
 
   require Logger
 
-  @auth_profile "anthropic_oauth"
+  @auth_profile Store.profile(:anthropic)
   @keychain_service "Claude Code-credentials"
+  # The presence probe's own bound. It is a metadata lookup, not a network call
+  # and not a value read, so a second of wall clock is already generous.
+  @presence_timeout_ms 2_000
   # Tokens this close to expiry are treated as expired (Hermes parity).
   @expiry_buffer_ms 60_000
 
   @type opts :: [
           credentials_path: Path.t(),
           keychain_reader: (-> {:ok, String.t()} | :error),
+          keychain_present?: (-> boolean()),
+          security_path: Path.t() | nil,
           fermix_path: Path.t()
         ]
 
@@ -73,6 +79,25 @@ defmodule FermixCore.Auth.AnthropicLogin do
     match?({:ok, _credentials}, read_credentials(opts))
   end
 
+  @doc """
+  Whether a Claude Code login exists on this machine, without reading it.
+
+  `claude_code_available?/1` answers the same question by reading the
+  credential, which on macOS means `security ... -w`: that returns the token
+  itself and raises the keychain allow dialog, so a daemon asking it blocks
+  until a human answers a modal about another app's secret. A detection row
+  needs presence, not the value, so this asks the keychain whether the item
+  exists (no `-w`, exit code only) under an explicit timeout, and otherwise
+  whether the credentials file is there — the same two stores, in the same
+  order, that `read_credentials/1` consults.
+  """
+  @spec claude_code_present?(opts()) :: boolean()
+  def claude_code_present?(opts \\ []) when is_list(opts) do
+    present? = Keyword.get(opts, :keychain_present?, fn -> keychain_item_present?(opts) end)
+
+    present?.() or File.exists?(credentials_path(opts))
+  end
+
   defp persist(entry, fermix_path) do
     case Store.write(@auth_profile, entry, fermix_path) do
       :ok ->
@@ -95,7 +120,7 @@ defmodule FermixCore.Auth.AnthropicLogin do
   end
 
   defp read_credentials_file(opts) do
-    path = Keyword.get(opts, :credentials_path, default_credentials_path())
+    path = credentials_path(opts)
 
     case File.read(path) do
       {:ok, json} -> parse_credentials(json)
@@ -157,8 +182,39 @@ defmodule FermixCore.Auth.AnthropicLogin do
   defp nonempty(value) when is_binary(value) and value != "", do: value
   defp nonempty(_value), do: nil
 
+  defp credentials_path(opts),
+    do: Keyword.get(opts, :credentials_path, default_credentials_path())
+
   defp default_credentials_path,
     do: Path.join(System.user_home!(), ".claude/.credentials.json")
+
+  # `find-generic-password` WITHOUT `-w` prints the item's attributes and exits
+  # 0; it never returns the secret and never consults the item's ACL, so it
+  # cannot prompt. Exit 44 is "item not found"; every other non-zero exit and
+  # every runner error is reported as absent, because this row only claims a
+  # login it can see.
+  #
+  # There is no platform branch: `security` is the macOS keychain tool and a
+  # host without one resolves no executable, which is the same answer a branch
+  # would have given. One code path, and it is the one the test drives.
+  defp keychain_item_present?(opts) do
+    with security when is_binary(security) <- security_path(opts),
+         {:ok, %{exit: 0}} <-
+           CommandRunner.run(security, ["find-generic-password", "-s", @keychain_service],
+             timeout_ms: @presence_timeout_ms
+           ) do
+      true
+    else
+      _absent -> false
+    end
+  end
+
+  defp security_path(opts) do
+    case Keyword.fetch(opts, :security_path) do
+      {:ok, path} -> path
+      :error -> System.find_executable("security")
+    end
+  end
 
   defp default_keychain_read do
     with {:darwin, true} <- {:darwin, match?({:unix, :darwin}, :os.type())},

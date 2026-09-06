@@ -10,12 +10,52 @@ defmodule FermixCore.Management.ProtocolTest do
     "params" => %{}
   }
 
-  test "publishes the initial N/N-1 compatibility window" do
-    assert Protocol.protocol_version() == 1
-    assert Protocol.supported_version_range() == {1, 1}
+  # The whole of the v1 surface, named once as the promise itself. Every
+  # released client negotiates 1 and may call exactly these, so raising one of
+  # them to 2 breaks an app that already shipped. Derived nowhere: a list
+  # filtered back out of the same table it is checked against would agree with
+  # any change made to that table.
+  @v1_methods ~w(
+    hello overview.get setup.session.create doctor.start doctor.get doctor.cancel
+    logs.query lifecycle.prepare lifecycle.commit lifecycle.cancel diagnostics.build
+  )
+
+  test "publishes the N/N-1 compatibility window" do
+    assert Protocol.protocol_version() == 2
+    assert Protocol.supported_version_range() == {1, 2}
     assert Protocol.negotiate(1) == :ok
+    assert Protocol.negotiate(2) == :ok
     assert Protocol.negotiate(0) == {:error, :client_too_old}
-    assert Protocol.negotiate(2) == {:error, :daemon_too_old}
+    assert Protocol.negotiate(3) == {:error, :daemon_too_old}
+  end
+
+  # A client that cannot see a minimum for a method it knows cannot tell "needs
+  # a newer engine" from "not served here", so the table is published whole.
+  test "publishes a minimum version for every method it publishes" do
+    minimums = Protocol.method_minimum_versions()
+
+    assert minimums |> Map.keys() |> Enum.sort() == Enum.sort(Protocol.methods())
+    assert Protocol.minimum_version("nothing.here") == :error
+    assert Protocol.minimum_version(:hello) == :error
+
+    # The lookup the router gates on and the table the schema publishes are one
+    # answer, checked over every method rather than at three of them.
+    for {method, minimum} <- minimums do
+      assert Protocol.minimum_version(method) == {:ok, minimum}
+    end
+
+    {_minimum, maximum} = Protocol.supported_version_range()
+    assert Enum.all?(Map.values(minimums), &(&1 in 1..maximum))
+  end
+
+  # The load-bearing half of the N/N-1 window, and the one no other assertion
+  # covers: the table says which methods need version 2, but nothing said which
+  # ones a v1 client keeps. An equality, not a subset — a method quietly added
+  # at minimum 1 is as much a contract change as one raised to 2.
+  test "the methods a v1 client may call are exactly the eleven the window promises" do
+    served_at_v1 = for {method, 1} <- Protocol.method_minimum_versions(), do: method
+
+    assert Enum.sort(served_at_v1) == Enum.sort(@v1_methods)
   end
 
   test "publishes the management-operations method and error catalogs" do
@@ -30,7 +70,38 @@ defmodule FermixCore.Management.ProtocolTest do
              "lifecycle.prepare",
              "lifecycle.commit",
              "lifecycle.cancel",
-             "diagnostics.build"
+             "diagnostics.build",
+             "setup.state.get",
+             "setup.detect",
+             "settings.sections",
+             "settings.get",
+             "settings.apply",
+             "settings.reload",
+             "secret.set",
+             "secret.clear",
+             "providers.set_primary",
+             "providers.models.list",
+             "providers.probe.start",
+             "job.get",
+             "job.cancel",
+             "job.list",
+             "auth.start",
+             "auth.import.start",
+             "auth.logout",
+             "plugins.list",
+             "plugins.install.start",
+             "plugins.check.start",
+             "plugins.workspaces.discover.start",
+             "plugins.workspace.select.start",
+             "plugins.enable",
+             "plugins.disable",
+             "plugins.disconnect",
+             "plugins.oauth_client.set",
+             "plugins.setting.set",
+             "capabilities.install.start",
+             "meetings.signin.start",
+             "computer_use.grant.start",
+             "computer_use.permissions.get"
            ]
 
     assert Protocol.error_codes() == [
@@ -45,7 +116,11 @@ defmodule FermixCore.Management.ProtocolTest do
              "lease_expired",
              "unknown_lease",
              "unknown_session",
-             "cursor_expired"
+             "cursor_expired",
+             "secret_store_failed",
+             "unknown_job",
+             "external_change",
+             "config_unreadable"
            ]
   end
 
@@ -120,7 +195,7 @@ defmodule FermixCore.Management.ProtocolTest do
       {nil, "invalid_request"},
       {"1", "invalid_request"},
       {0, "client_too_old"},
-      {2, "daemon_too_old"}
+      {3, "daemon_too_old"}
     ]
 
     for {version, code} <- cases do
@@ -133,7 +208,7 @@ defmodule FermixCore.Management.ProtocolTest do
       if code in ["client_too_old", "daemon_too_old"] do
         assert response["error"]["details"] == %{
                  "minimum_version" => 1,
-                 "maximum_version" => 1
+                 "maximum_version" => 2
                }
       end
     end

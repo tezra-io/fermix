@@ -60,6 +60,20 @@ defmodule FermixCore.Tools.Media.Registry do
   end
 
   @doc """
+  Every provider wired for one modality, in catalog order.
+
+  Published so the settings descriptor offers exactly the backends this registry
+  can resolve.
+  """
+  @spec providers(Backend.modality()) :: [String.t()]
+  def providers(modality) when is_atom(modality) do
+    @backends
+    |> Map.keys()
+    |> Enum.filter(fn {registered, _provider} -> registered == modality end)
+    |> Enum.map(fn {_modality, provider} -> provider end)
+  end
+
+  @doc """
   The curated model ids the `{modality, provider}` backend supports (head =
   default). Resolves the backend module the same way `active_backend/2` does, so
   an unknown provider fails loud with the supported set (Rule #12). Used by the

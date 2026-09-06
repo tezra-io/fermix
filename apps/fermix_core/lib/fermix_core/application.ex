@@ -31,7 +31,9 @@ defmodule FermixCore.Application do
   alias FermixCore.Jobs.Scheduler, as: JobScheduler
   alias FermixCore.Log.RedactingFormatter
   alias FermixCore.Management.Doctor, as: ManagementDoctor
+  alias FermixCore.Management.Jobs, as: ManagementJobs
   alias FermixCore.Management.Lifecycle, as: ManagementLifecycle
+  alias FermixCore.Management.Plugins.Discovery, as: ManagementPluginDiscovery
   alias FermixCore.Meetings.Supervisor, as: MeetingsSupervisor
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Repo
@@ -48,6 +50,10 @@ defmodule FermixCore.Application do
   alias FermixCore.Sandbox.DecisionTelemetry
   alias FermixCore.Setup.BootReport
   alias FermixCore.Setup.ConfigStore
+  alias FermixCore.Setup.EngineOwner
+  alias FermixCore.Setup.RestartState
+  alias FermixCore.Setup.SecretAclState
+  alias FermixCore.Setup.SecretWriteLog
   alias FermixCore.SkillCuration.Config, as: SkillCurationConfig
   alias FermixCore.SkillCuration.Scheduler, as: SkillCurationScheduler
   alias FermixCore.Temporal.DeliverySupervisor, as: TemporalDeliverySupervisor
@@ -160,7 +166,20 @@ defmodule FermixCore.Application do
         Repo,
         ConversationStore,
         Store,
+        # Before the boot report and the restart state, because both of those
+        # start by reading state a secret write can change, and a write that
+        # landed before this process exists is a rotation nothing recorded.
+        SecretWriteLog,
+        # The record of the last keychain-ACL measurement. Measuring prompts,
+        # so only Doctor measures; `setup.state.get` publishes what is recorded
+        # here and never shells out.
+        SecretAclState,
         BootReport,
+        # Beside `BootReport` rather than inside it: the boot report is the boot
+        # artifact its name promises, while restart and external-change truth is
+        # read live by `/health`, `overview.get` and `setup.state.get`. One read
+        # path, no cache plus an invalidation rule.
+        RestartState,
         AgentSupervisor,
         MainAgent,
         JobRunnerSupervisor,
@@ -317,12 +336,26 @@ defmodule FermixCore.Application do
   end
 
   # The management operations the socket routes to are owned by long-lived
-  # processes (one drain lease, retained Doctor sessions), so they start with
-  # the socket and never independently of it: a management method whose owner is
-  # absent would answer `unavailable` for the life of the daemon.
+  # processes (one drain lease, retained Doctor sessions, retained jobs), so
+  # they start with the socket and never independently of it: a management
+  # method whose owner is absent would answer `unavailable` for the life of the
+  # daemon.
   defp maybe_daemon_socket do
     if Application.get_env(:fermix_core, :daemon_socket_enabled, false) do
-      [ManagementLifecycle, ManagementDoctor, Daemon]
+      # The ownership marker is rewritten by the engine that is actually serving
+      # this home, which is exactly the set of boots that can claim it. A source
+      # run or a test tree serves no socket and claims nothing.
+      :ok = EngineOwner.record()
+
+      [
+        ManagementLifecycle,
+        ManagementDoctor,
+        ManagementJobs,
+        # Beside the job family it serves: a workspace discovery is a job, and
+        # what it found is republished on the plugin row rather than in the job.
+        ManagementPluginDiscovery,
+        Daemon
+      ]
     else
       []
     end

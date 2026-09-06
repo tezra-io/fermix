@@ -313,16 +313,19 @@ defmodule FermixCore.Setup.WizardTest do
     {:ok, snapshot} = ConfigStore.load_runtime_config(resolve_secrets: false)
     :ok = ConfigStore.apply_snapshot(snapshot)
 
-    refute Wizard.report().restart_required?
+    before = Wizard.report().restart_required?
 
-    # Disk stores `@keyring`; app env holds the boot-resolved value. The
-    # comparison must not depend on reading the OS keychain, so an
-    # unavailable backend must not flip the answer.
+    # Disk stores `@keyring`; app env holds the boot-resolved value. The answer
+    # must not depend on reading the OS keychain, so an unavailable backend must
+    # not flip it in either direction — which is the property this guards, and
+    # it is asserted as "unchanged" rather than as a fixed boolean because the
+    # answer now compares live application environment against what this VM
+    # booted with, not against the document on disk.
     Application.put_env(:fermix_core, :secret_writer, FermixTestSupport.UnavailableSecretWriter)
 
     {report, _log} = with_log(fn -> Wizard.report() end)
 
-    refute report.restart_required?
+    assert report.restart_required? == before
   end
 
   test "building reconfigure prompts does not resolve @keyring secrets from the keychain" do
@@ -365,7 +368,11 @@ defmodule FermixCore.Setup.WizardTest do
 
     report = Wizard.report()
 
-    assert report.status == :setup_required
+    # Channel failures are advisory: they stay in the list so every surface can
+    # render them, and they are not a reason to call setup unfinished. A
+    # personalization or provider failure is what gates.
+    assert report.status == :ready
+    assert Enum.all?(report.failures, &(&1.gating == false))
     assert :whatsapp in report.wizard.enabled_channels
     assert :discord in report.wizard.enabled_channels
     assert :slack in report.wizard.enabled_channels
@@ -1168,8 +1175,12 @@ defmodule FermixCore.Setup.WizardTest do
     refute contents =~ ~s([sandbox.env.TELEGRAM_BOT_TOKEN])
   end
 
-  test "save_answers does not add sandbox.env source when no secret writer is available" do
-    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-sandbox-env-no-writer")
+  # Design §7.4 drop one. A secret answer is persisted as the `@keyring`
+  # sentinel, which means nothing unless the value reached the OS keyring; with
+  # no writer the value used to be dropped with a log line while the save
+  # reported SUCCESS, so the operator saw a stored key and the runtime had none.
+  test "save_answers refuses rather than reporting success it cannot deliver" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-no-secret-writer")
 
     on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
 
@@ -1180,19 +1191,22 @@ defmodule FermixCore.Setup.WizardTest do
     Application.delete_env(:fermix_channels, :telegram)
     start_memory_repo!()
 
-    capture_log(fn ->
-      assert {:ok, _report} =
-               Wizard.report().wizard
-               |> Wizard.save_answers(openai_api_key: "sk-no-writer")
-    end)
+    assert {:error, {:secret_store_failed, :openai_api_key, sentence}} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(openai_api_key: "sk-no-helper")
 
-    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert sentence ==
+             "This machine has no secret store, so the credential could not be saved."
 
-    refute contents =~ ~s([sandbox.env.OPENAI_API_KEY])
+    # Nothing at all is written: a save either stores every secret in it or
+    # stores none of them, so a half-applied document cannot be left behind.
+    refute File.exists?(Path.join(tmp_home, "config.toml"))
   end
 
-  test "save_answers falls back without persisting secrets when no writer is available" do
-    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-no-secret-writer")
+  # The refusal is about a secret it was asked to store, not about the host: a
+  # save with no secret in it goes through on the same writer-less machine.
+  test "save_answers with no secret answer is unaffected by a missing writer" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-no-writer-no-secret")
 
     on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
 
@@ -1202,19 +1216,11 @@ defmodule FermixCore.Setup.WizardTest do
     Application.delete_env(:fermix_channels, :telegram)
     start_memory_repo!()
 
-    log =
-      capture_log(fn ->
-        assert {:ok, _report} =
-                 Wizard.report().wizard
-                 |> Wizard.save_answers(openai_api_key: "sk-no-helper")
-      end)
+    assert {:ok, _report} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(user_name: "Sujeeth")
 
-    contents = File.read!(Path.join(tmp_home, "config.toml"))
-
-    refute contents =~ "sk-no-helper"
-    refute contents =~ "@keyring"
-    assert log =~ "No OS secret writer available for OPENAI_API_KEY"
-    assert log =~ "shell rc, systemd unit, or launchd plist"
+    assert File.read!(Path.join(tmp_home, "config.toml")) =~ "Sujeeth"
   end
 
   test "save_answers persists realtime voice setup answers" do
@@ -2158,9 +2164,13 @@ defmodule FermixCore.Setup.WizardTest do
 
       System.put_env("FERMIX_HOME", tmp_home)
       Application.put_env(:fermix_core, :sandbox, SandboxConfig.default())
-      # Force readiness to :setup_required so commit_snapshot/1 skips
-      # prompt-file seeding — these tests do not exercise the memory repo.
+      # Establish a GATING readiness failure so commit_snapshot/1 skips
+      # prompt-file seeding — these tests do not exercise the memory repo. It
+      # has to be a gating one: seeding is keyed on the gating predicate, and an
+      # enabled-but-tokenless channel is advisory, so clearing the providers or
+      # the Telegram block no longer holds the precondition on its own.
       Application.put_env(:fermix_core, :providers, [])
+      Application.put_env(:fermix_core, :personalization, [])
       Application.delete_env(:fermix_channels, :telegram)
 
       on_exit(fn ->

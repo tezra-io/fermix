@@ -3,8 +3,8 @@
   "$id": "https://fermix.sh/management/protocol.schema.json",
   "title": "Fermix management socket protocol",
   "description": "Packet-4 framed JSON wire contract between the Fermix daemon and the Fermix macOS application. Source of truth: FermixCore.Management.Protocol. See PROTOCOL.md.",
-  "x-protocol-version": 1,
-  "x-supported-version-range": { "min": 1, "max": 1 },
+  "x-protocol-version": 2,
+  "x-supported-version-range": { "min": 1, "max": 2 },
   "x-limits": {
     "max_frame_bytes": 4194304,
     "max_params_bytes": 65536,
@@ -13,6 +13,103 @@
     "max_json_depth": 6,
     "max_json_collection_items": 500
   },
+  "x-plugin-vocabulary": {
+    "description": "The closed sets a plugin row draws on. Published so a reader can enumerate them and a support log can be searched by status; a client renders `status_sentence` and `primary_verb` and never switches on those words — it switches on `primary_action` and `actions`, which name the method each button runs.",
+    "statuses": [
+      "not_configured",
+      "missing_host_runtime",
+      "needs_config",
+      "needs_secret",
+      "needs_workspace",
+      "invalid_remote_config",
+      "needs_client_config",
+      "needs_auth",
+      "reauthorization_required",
+      "ready",
+      "not_installed",
+      "incompatible",
+      "error",
+      "insufficient_credential_scope",
+      "connecting",
+      "remote_unreachable",
+      "upstream_contract_mismatch",
+      "capability_conflict",
+      "remote_security_blocked",
+      "remote_protocol_error",
+      "available"
+    ],
+    "verbs": [
+      "Install\u2026",
+      "Turn on",
+      "Turn off",
+      "Sign in",
+      "Sign in again",
+      "Add token\u2026",
+      "Replace the token",
+      "Set up the sign-in client",
+      "Choose workspace",
+      "Check again",
+      "Disconnect"
+    ],
+    "actions": [
+      "install",
+      "enable",
+      "disable",
+      "sign_in",
+      "add_token",
+      "replace_token",
+      "set_up_client",
+      "choose_workspace",
+      "check",
+      "disconnect"
+    ],
+    "runtime_kinds": ["local_stdio", "remote_mcp"],
+    "auth_kinds": ["oauth", "api_key"]
+  },
+  "x-method-minimum-versions": {
+    "hello": 1,
+    "overview.get": 1,
+    "setup.session.create": 1,
+    "doctor.start": 1,
+    "doctor.get": 1,
+    "doctor.cancel": 1,
+    "logs.query": 1,
+    "lifecycle.prepare": 1,
+    "lifecycle.commit": 1,
+    "lifecycle.cancel": 1,
+    "diagnostics.build": 1,
+    "setup.state.get": 2,
+    "setup.detect": 2,
+    "settings.sections": 2,
+    "settings.get": 2,
+    "settings.apply": 2,
+    "settings.reload": 2,
+    "secret.set": 2,
+    "secret.clear": 2,
+    "providers.set_primary": 2,
+    "providers.models.list": 2,
+    "providers.probe.start": 2,
+    "job.get": 2,
+    "job.cancel": 2,
+    "job.list": 2,
+    "auth.start": 2,
+    "auth.import.start": 2,
+    "auth.logout": 2,
+    "plugins.list": 2,
+    "plugins.install.start": 2,
+    "plugins.check.start": 2,
+    "plugins.workspaces.discover.start": 2,
+    "plugins.workspace.select.start": 2,
+    "plugins.enable": 2,
+    "plugins.disable": 2,
+    "plugins.disconnect": 2,
+    "plugins.oauth_client.set": 2,
+    "plugins.setting.set": 2,
+    "capabilities.install.start": 2,
+    "meetings.signin.start": 2,
+    "computer_use.grant.start": 2,
+    "computer_use.permissions.get": 2
+  },
   "$defs": {
     "request": {
       "type": "object",
@@ -20,7 +117,7 @@
       "additionalProperties": false,
       "properties": {
         "request_id": { "$ref": "#/$defs/requestId" },
-        "protocol_version": { "type": "integer", "minimum": 1, "maximum": 1 },
+        "protocol_version": { "type": "integer", "minimum": 1, "maximum": 2 },
         "method": {
           "enum": [
             "hello",
@@ -33,7 +130,38 @@
             "lifecycle.prepare",
             "lifecycle.commit",
             "lifecycle.cancel",
-            "diagnostics.build"
+            "diagnostics.build",
+            "setup.state.get",
+            "setup.detect",
+            "settings.sections",
+            "settings.get",
+            "settings.apply",
+            "settings.reload",
+            "secret.set",
+            "secret.clear",
+            "providers.set_primary",
+            "providers.models.list",
+            "providers.probe.start",
+            "job.get",
+            "job.cancel",
+            "job.list",
+            "auth.start",
+            "auth.import.start",
+            "auth.logout",
+            "plugins.list",
+            "plugins.install.start",
+            "plugins.check.start",
+            "plugins.workspaces.discover.start",
+            "plugins.workspace.select.start",
+            "plugins.enable",
+            "plugins.disable",
+            "plugins.disconnect",
+            "plugins.oauth_client.set",
+            "plugins.setting.set",
+            "capabilities.install.start",
+            "meetings.signin.start",
+            "computer_use.grant.start",
+            "computer_use.permissions.get"
           ]
         },
         "params": { "type": "object" }
@@ -97,6 +225,214 @@
             "properties": { "method": { "const": "diagnostics.build" } }
           },
           "then": { "properties": { "params": { "$ref": "#/$defs/diagnostics_build_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "setup.state.get" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/setup_state_get_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "settings.sections" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/settings_sections_params" } } }
+        },
+        {
+          "if": { "required": ["method"], "properties": { "method": { "const": "settings.get" } } },
+          "then": { "properties": { "params": { "$ref": "#/$defs/settings_get_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "settings.apply" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/settings_apply_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "settings.reload" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/settings_reload_params" } } }
+        },
+        {
+          "if": { "required": ["method"], "properties": { "method": { "const": "secret.set" } } },
+          "then": { "properties": { "params": { "$ref": "#/$defs/secret_set_params" } } }
+        },
+        {
+          "if": { "required": ["method"], "properties": { "method": { "const": "secret.clear" } } },
+          "then": { "properties": { "params": { "$ref": "#/$defs/secret_clear_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "setup.detect" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/setup_detect_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "providers.set_primary" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/providers_set_primary_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "providers.models.list" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/providers_models_list_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "providers.probe.start" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/providers_probe_start_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "job.get" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/job_get_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "job.cancel" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/job_cancel_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "job.list" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/job_list_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "auth.start" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/auth_start_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "auth.import.start" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/auth_import_start_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "auth.logout" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/auth_logout_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "plugins.list" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/plugins_list_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "plugins.install.start" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/plugins_install_start_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "plugins.check.start" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/plugins_check_start_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "plugins.workspaces.discover.start" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/plugins_workspaces_discover_start_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "plugins.workspace.select.start" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/plugins_workspace_select_start_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "plugins.enable" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/plugins_enable_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "plugins.disable" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/plugins_disable_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "plugins.disconnect" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/plugins_disconnect_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "plugins.oauth_client.set" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/plugins_oauth_client_set_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "plugins.setting.set" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/plugins_setting_set_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "capabilities.install.start" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/capabilities_install_start_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "meetings.signin.start" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/meetings_signin_start_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "computer_use.grant.start" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/computer_use_grant_start_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "computer_use.permissions.get" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/computer_use_permissions_get_params" } } }
         }
       ]
     },
@@ -135,7 +471,11 @@
                 "lease_expired",
                 "unknown_lease",
                 "unknown_session",
-                "cursor_expired"
+                "cursor_expired",
+                "secret_store_failed",
+                "unknown_job",
+                "external_change",
+                "config_unreadable"
               ]
             },
             "message": { "type": "string", "minLength": 1 },
@@ -164,7 +504,38 @@
         { "$ref": "#/$defs/lifecycle_prepare_result" },
         { "$ref": "#/$defs/lifecycle_commit_result" },
         { "$ref": "#/$defs/lifecycle_cancel_result" },
-        { "$ref": "#/$defs/diagnostics_build_result" }
+        { "$ref": "#/$defs/diagnostics_build_result" },
+        { "$ref": "#/$defs/setup_state_get_result" },
+        { "$ref": "#/$defs/settings_sections_result" },
+        { "$ref": "#/$defs/settings_get_result" },
+        { "$ref": "#/$defs/settings_apply_result" },
+        { "$ref": "#/$defs/settings_reload_result" },
+        { "$ref": "#/$defs/secret_set_result" },
+        { "$ref": "#/$defs/secret_clear_result" },
+        { "$ref": "#/$defs/setup_detect_result" },
+        { "$ref": "#/$defs/providers_set_primary_result" },
+        { "$ref": "#/$defs/providers_models_list_result" },
+        { "$ref": "#/$defs/providers_probe_start_result" },
+        { "$ref": "#/$defs/job_get_result" },
+        { "$ref": "#/$defs/job_cancel_result" },
+        { "$ref": "#/$defs/job_list_result" },
+        { "$ref": "#/$defs/auth_start_result" },
+        { "$ref": "#/$defs/auth_import_start_result" },
+        { "$ref": "#/$defs/auth_logout_result" },
+        { "$ref": "#/$defs/plugins_list_result" },
+        { "$ref": "#/$defs/plugins_install_start_result" },
+        { "$ref": "#/$defs/plugins_check_start_result" },
+        { "$ref": "#/$defs/plugins_workspaces_discover_start_result" },
+        { "$ref": "#/$defs/plugins_workspace_select_start_result" },
+        { "$ref": "#/$defs/plugins_enable_result" },
+        { "$ref": "#/$defs/plugins_disable_result" },
+        { "$ref": "#/$defs/plugins_disconnect_result" },
+        { "$ref": "#/$defs/plugins_oauth_client_set_result" },
+        { "$ref": "#/$defs/plugins_setting_set_result" },
+        { "$ref": "#/$defs/capabilities_install_start_result" },
+        { "$ref": "#/$defs/meetings_signin_start_result" },
+        { "$ref": "#/$defs/computer_use_grant_start_result" },
+        { "$ref": "#/$defs/computer_use_permissions_get_result" }
       ]
     },
     "hello_params": { "type": "object", "maxProperties": 0, "additionalProperties": false },
@@ -175,9 +546,15 @@
         "protocol": { "$ref": "#/$defs/protocolRange" },
         "capabilities": {
           "type": "object",
-          "required": ["methods"],
+          "required": ["methods", "minimum_versions"],
           "properties": {
-            "methods": { "type": "array", "items": { "type": "string" }, "maxItems": 500 }
+            "methods": { "type": "array", "items": { "type": "string" }, "maxItems": 500 },
+            "minimum_versions": {
+              "type": "object",
+              "description": "The minimum protocol version of every method this daemon serves, keyed by method name. Added in v2; absent on a v1 daemon, which serves every method it lists at version 1.",
+              "maxProperties": 500,
+              "additionalProperties": { "type": "integer", "minimum": 1 }
+            }
           }
         },
         "engine": { "$ref": "#/$defs/engineIdentity" },
@@ -216,6 +593,12 @@
           "properties": {
             "status": { "type": ["string", "null"] },
             "restart_required": { "type": "boolean" },
+            "restart_reasons": {
+              "description": "Boot-bound sections waiting on a restart, by name. Added in v2; absent on a v1 daemon, where the client renders the plain restart sentence with no reason list.",
+              "type": "array",
+              "maxItems": 500,
+              "items": { "type": "string" }
+            },
             "providers": {
               "type": "array",
               "maxItems": 500,
@@ -677,7 +1060,996 @@
         "evidence": { "type": "object", "maxProperties": 100 },
         "remediation_code": { "type": ["string", "null"] },
         "duration_ms": { "type": "integer", "minimum": 0 },
-        "finished_at": { "type": "string" }
+        "finished_at": { "type": "string" },
+        "remediation": {
+          "description": "What to do about this check, in the daemon's own words. Added in v2; absent or null on a v1 daemon, where the client renders the summary with no action button.",
+          "oneOf": [{ "$ref": "#/$defs/remediation" }, { "type": "null" }]
+        }
+      }
+    },
+    "remediationAction": {
+      "type": "object",
+      "required": ["kind", "target"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "settings_pane",
+            "system_settings",
+            "job",
+            "restart",
+            "reload",
+            "instructions",
+            "none"
+          ]
+        },
+        "target": { "type": ["string", "null"] }
+      }
+    },
+    "remediation": {
+      "type": "object",
+      "required": ["title", "body", "action"],
+      "additionalProperties": false,
+      "properties": {
+        "title": { "type": "string", "maxLength": 256 },
+        "body": { "type": "string", "maxLength": 256 },
+        "action": { "$ref": "#/$defs/remediationAction" }
+      }
+    },
+    "settingsPane": {
+      "enum": [
+        "providers",
+        "personality",
+        "memory",
+        "channels",
+        "integrations",
+        "voice",
+        "meetings",
+        "computer",
+        "coding",
+        "search",
+        "images",
+        "sandbox",
+        "permissions"
+      ]
+    },
+    "readinessFailure": {
+      "type": "object",
+      "required": ["component", "gating", "pane", "detail_key"],
+      "additionalProperties": false,
+      "properties": {
+        "component": { "type": "string" },
+        "gating": { "type": "boolean" },
+        "pane": { "$ref": "#/$defs/settingsPane" },
+        "detail_key": { "type": "string" }
+      }
+    },
+    "restartReason": {
+      "type": "object",
+      "required": ["section", "sentence"],
+      "additionalProperties": false,
+      "properties": {
+        "section": { "type": "string" },
+        "sentence": { "type": "string" }
+      }
+    },
+    "restartState": {
+      "type": "object",
+      "required": ["required", "reasons"],
+      "additionalProperties": false,
+      "properties": {
+        "required": { "type": "boolean" },
+        "reasons": {
+          "type": "array",
+          "maxItems": 500,
+          "items": { "$ref": "#/$defs/restartReason" }
+        }
+      }
+    },
+    "setupProviderRow": {
+      "type": "object",
+      "required": [
+        "id",
+        "label",
+        "auth_modes",
+        "auth_mode",
+        "configured",
+        "primary",
+        "present_key",
+        "default_model",
+        "reasoning_effort",
+        "fast",
+        "account_label",
+        "token_state"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string" },
+        "label": { "type": "string" },
+        "auth_modes": { "type": "array", "maxItems": 8, "items": { "type": "string" } },
+        "auth_mode": { "type": ["string", "null"] },
+        "configured": { "type": "boolean" },
+        "primary": { "type": "boolean" },
+        "present_key": { "type": "boolean" },
+        "default_model": { "type": ["string", "null"] },
+        "reasoning_effort": { "type": ["string", "null"] },
+        "fast": { "type": ["boolean", "null"] },
+        "account_label": { "type": ["string", "null"] },
+        "token_state": { "type": ["string", "null"] }
+      }
+    },
+    "setupChannelRow": {
+      "type": "object",
+      "required": ["name", "enabled", "configured", "status", "mode"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string" },
+        "enabled": { "type": "boolean" },
+        "configured": { "type": "boolean" },
+        "status": { "type": ["string", "null"] },
+        "mode": { "type": ["string", "null"] }
+      }
+    },
+    "setupPersonalization": {
+      "type": "object",
+      "required": ["present"],
+      "additionalProperties": false,
+      "properties": {
+        "present": {
+          "type": "object",
+          "required": ["user_name", "timezone", "communication_style"],
+          "additionalProperties": false,
+          "properties": {
+            "user_name": { "type": "boolean" },
+            "timezone": { "type": "boolean" },
+            "communication_style": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "setupFeatures": {
+      "type": "object",
+      "required": ["voice", "voice_notes", "meetings", "computer_use", "computer_history"],
+      "additionalProperties": false,
+      "properties": {
+        "voice": { "type": "boolean" },
+        "voice_notes": { "type": "boolean" },
+        "meetings": { "type": "boolean" },
+        "computer_use": { "type": "boolean" },
+        "computer_history": {
+          "type": "object",
+          "required": ["enabled", "installed", "ready"],
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "installed": { "type": "boolean" },
+            "ready": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "configState": { "enum": ["clear", "external_change", "config_unreadable"] },
+    "legacyServiceUnit": {
+      "type": "object",
+      "required": ["present", "scope", "path"],
+      "additionalProperties": false,
+      "properties": {
+        "present": { "type": "boolean" },
+        "scope": { "oneOf": [{ "enum": ["user", "system"] }, { "type": "null" }] },
+        "path": { "type": ["string", "null"] }
+      }
+    },
+    "setupCoexistence": {
+      "type": "object",
+      "required": ["legacy_service_unit", "config_state", "secret_acl_restricted"],
+      "additionalProperties": false,
+      "properties": {
+        "legacy_service_unit": { "$ref": "#/$defs/legacyServiceUnit" },
+        "config_state": { "$ref": "#/$defs/configState" },
+        "secret_acl_restricted": {
+          "type": "object",
+          "required": ["present", "keys"],
+          "additionalProperties": false,
+          "properties": {
+            "present": { "type": ["boolean", "null"] },
+            "keys": { "type": "array", "maxItems": 200, "items": { "type": "string" } }
+          }
+        }
+      }
+    },
+    "setup_state_get_params": {
+      "type": "object",
+      "maxProperties": 0,
+      "additionalProperties": false
+    },
+    "setup_state_get_result": {
+      "type": "object",
+      "required": [
+        "readiness",
+        "restart",
+        "providers",
+        "channels",
+        "personalization",
+        "features",
+        "profile",
+        "coexistence"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "readiness": {
+          "type": "object",
+          "required": ["status", "failures"],
+          "additionalProperties": false,
+          "properties": {
+            "status": { "type": ["string", "null"] },
+            "failures": {
+              "type": "array",
+              "maxItems": 500,
+              "items": { "$ref": "#/$defs/readinessFailure" }
+            }
+          }
+        },
+        "restart": { "$ref": "#/$defs/restartState" },
+        "providers": {
+          "type": "array",
+          "maxItems": 200,
+          "items": { "$ref": "#/$defs/setupProviderRow" }
+        },
+        "channels": {
+          "type": "array",
+          "maxItems": 200,
+          "items": { "$ref": "#/$defs/setupChannelRow" }
+        },
+        "personalization": { "$ref": "#/$defs/setupPersonalization" },
+        "features": { "$ref": "#/$defs/setupFeatures" },
+        "profile": { "type": ["string", "null"] },
+        "coexistence": { "$ref": "#/$defs/setupCoexistence" }
+      }
+    },
+    "settingValue": {
+      "description": "One row value: a public scalar, a list of strings, or null. Null is a value with a meaning rather than an absent field, so it is written rather than omitted.",
+      "oneOf": [
+        { "type": ["string", "number", "boolean", "null"] },
+        { "type": "array", "maxItems": 200, "items": { "type": "string" } }
+      ]
+    },
+    "settingsSection": {
+      "type": "object",
+      "required": ["id", "pane", "title"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string" },
+        "pane": { "$ref": "#/$defs/settingsPane" },
+        "title": { "type": "string" }
+      }
+    },
+    "settingsOption": {
+      "type": "object",
+      "required": ["value", "label", "hint", "disabled"],
+      "additionalProperties": false,
+      "properties": {
+        "value": { "type": "string" },
+        "label": { "type": "string" },
+        "hint": { "type": ["string", "null"] },
+        "disabled": { "type": "boolean" }
+      }
+    },
+    "settingsRow": {
+      "type": "object",
+      "description": "Every field is always present, null where it does not apply, so a client decodes a fixed record rather than probing for keys.",
+      "required": [
+        "key",
+        "kind",
+        "label",
+        "footer",
+        "value",
+        "present",
+        "options",
+        "min",
+        "max",
+        "step",
+        "restart",
+        "read_only",
+        "suggestions",
+        "unit",
+        "format"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "key": { "type": "string" },
+        "kind": { "enum": ["toggle", "choice", "text", "number", "secret", "list"] },
+        "label": { "type": "string" },
+        "footer": { "type": ["string", "null"] },
+        "value": { "$ref": "#/$defs/settingValue" },
+        "present": {
+          "description": "Whether a credential sits at this key's own path. Null on every kind but secret; a secret row never carries a value.",
+          "type": ["boolean", "null"]
+        },
+        "options": {
+          "description": "The value space of a choice row, unless `suggestions` is true, in which case it is only what a client may offer inline.",
+          "type": "array",
+          "maxItems": 200,
+          "items": { "$ref": "#/$defs/settingsOption" }
+        },
+        "min": { "type": ["number", "null"] },
+        "max": { "type": ["number", "null"] },
+        "step": { "type": ["number", "null"] },
+        "restart": { "type": "boolean" },
+        "read_only": {
+          "description": "A row this section publishes that settings.apply will not take, rendered as a plain labelled row rather than a control whose save always refuses.",
+          "type": "boolean"
+        },
+        "suggestions": {
+          "description": "Whether this choice row's options are only what a client may offer inline rather than its whole value space. True on the time zone and communication style rows, where a native picker may send any value the daemon validates; false everywhere else, and settings.apply then refuses a value that is not among the options. False on every non-choice kind.",
+          "type": "boolean"
+        },
+        "unit": {
+          "description": "What a number counts, rendered beside the field. Null where the number counts nothing but itself, and on every non-number row.",
+          "type": ["string", "null"]
+        },
+        "format": {
+          "description": "How a number reads: a plain count, a 0-1 fraction as a percentage, whole cents as money, or a duration. Null on every other kind.",
+          "enum": ["integer", "percent", "currency_cents", "minutes", "hours", null]
+        }
+      }
+    },
+    "readinessSummary": {
+      "type": "object",
+      "required": ["status", "failure_count"],
+      "additionalProperties": false,
+      "properties": {
+        "status": { "type": ["string", "null"] },
+        "failure_count": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "settings_sections_params": {
+      "type": "object",
+      "maxProperties": 0,
+      "additionalProperties": false
+    },
+    "settings_sections_result": {
+      "type": "object",
+      "required": ["sections"],
+      "additionalProperties": false,
+      "properties": {
+        "sections": {
+          "type": "array",
+          "maxItems": 30,
+          "items": { "$ref": "#/$defs/settingsSection" }
+        }
+      }
+    },
+    "settings_get_params": {
+      "type": "object",
+      "required": ["section"],
+      "additionalProperties": false,
+      "properties": { "section": { "type": "string", "minLength": 1, "maxLength": 128 } }
+    },
+    "settings_get_result": {
+      "type": "object",
+      "required": ["id", "title", "rows"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "rows": { "type": "array", "maxItems": 60, "items": { "$ref": "#/$defs/settingsRow" } }
+      }
+    },
+    "settings_apply_params": {
+      "type": "object",
+      "required": ["section", "values"],
+      "additionalProperties": false,
+      "properties": {
+        "section": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "values": {
+          "type": "object",
+          "maxProperties": 60,
+          "additionalProperties": { "$ref": "#/$defs/settingValue" }
+        }
+      }
+    },
+    "settings_apply_result": {
+      "type": "object",
+      "required": ["applied", "restart", "readiness", "side_effects"],
+      "additionalProperties": false,
+      "properties": {
+        "applied": { "type": "array", "maxItems": 60, "items": { "type": "string" } },
+        "restart": { "$ref": "#/$defs/restartState" },
+        "readiness": { "$ref": "#/$defs/readinessSummary" },
+        "side_effects": {
+          "description": "Changes the operator did not type, in the daemon's own sentences.",
+          "type": "array",
+          "maxItems": 60,
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "settings_reload_params": {
+      "type": "object",
+      "maxProperties": 0,
+      "additionalProperties": false
+    },
+    "settings_reload_result": {
+      "type": "object",
+      "required": ["reloaded", "restart", "readiness", "config_state"],
+      "additionalProperties": false,
+      "properties": {
+        "reloaded": { "type": "boolean" },
+        "restart": { "$ref": "#/$defs/restartState" },
+        "readiness": { "$ref": "#/$defs/readinessSummary" },
+        "config_state": { "$ref": "#/$defs/configState" }
+      }
+    },
+    "secret_set_params": {
+      "type": "object",
+      "required": ["id", "value"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "value": { "type": "string", "minLength": 1, "maxLength": 8192 }
+      }
+    },
+    "secret_set_result": {
+      "type": "object",
+      "required": ["id", "present", "restart"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string" },
+        "present": { "type": "boolean" },
+        "restart": { "$ref": "#/$defs/restartState" }
+      }
+    },
+    "secret_clear_params": {
+      "type": "object",
+      "required": ["id"],
+      "additionalProperties": false,
+      "properties": { "id": { "type": "string", "minLength": 1, "maxLength": 256 } }
+    },
+    "secret_clear_result": {
+      "type": "object",
+      "required": ["id", "present", "restart"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string" },
+        "present": { "type": "boolean" },
+        "restart": { "$ref": "#/$defs/restartState" }
+      }
+    },
+    "jobKind": {
+      "description": "The long operation a job runs. One shape covers every family, so a client writes one poller rather than one per operation.",
+      "enum": [
+        "provider_probe",
+        "auth",
+        "auth_import",
+        "plugin_install",
+        "plugin_check",
+        "plugin_workspaces_discover",
+        "plugin_workspace_select",
+        "capability_install",
+        "meetings_signin",
+        "computer_use_grant"
+      ]
+    },
+    "jobStatus": {
+      "description": "The job's state. `phase` is display copy for the current step and is never switched on; this is the state.",
+      "enum": ["running", "completed", "failed", "cancelled", "timed_out"]
+    },
+    "jobProgress": {
+      "type": "object",
+      "required": ["done", "total", "unit"],
+      "additionalProperties": false,
+      "properties": {
+        "done": { "type": "integer", "minimum": 0 },
+        "total": { "type": ["integer", "null"] },
+        "unit": { "type": ["string", "null"] }
+      }
+    },
+    "jobFailure": {
+      "type": "object",
+      "description": "Why a job ended badly, in the daemon's own words. The sentence is rendered; a client never composes one from the code.",
+      "required": ["code", "sentence"],
+      "additionalProperties": false,
+      "properties": {
+        "code": { "enum": ["unavailable", "refused", "timed_out", "internal_error"] },
+        "sentence": { "type": "string" }
+      }
+    },
+    "jobView": {
+      "type": "object",
+      "description": "Every field is always present, null where it does not apply. A terminal job clears `phase` unless it failed or timed out, where the step it stopped in is part of the diagnosis.",
+      "required": [
+        "job_id",
+        "kind",
+        "status",
+        "phase",
+        "progress",
+        "budget_ms",
+        "started_at",
+        "finished_at",
+        "result",
+        "failure"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "job_id": { "type": "string" },
+        "kind": { "$ref": "#/$defs/jobKind" },
+        "status": { "$ref": "#/$defs/jobStatus" },
+        "phase": { "type": ["string", "null"] },
+        "progress": { "oneOf": [{ "$ref": "#/$defs/jobProgress" }, { "type": "null" }] },
+        "budget_ms": { "type": "integer", "minimum": 0 },
+        "started_at": { "type": "string" },
+        "finished_at": { "type": ["string", "null"] },
+        "result": {
+          "description": "The job's own answer, flat and bounded: public scalars only.",
+          "type": ["object", "null"],
+          "maxProperties": 100,
+          "additionalProperties": { "type": ["string", "number", "boolean", "null"] }
+        },
+        "failure": { "oneOf": [{ "$ref": "#/$defs/jobFailure" }, { "type": "null" }] }
+      }
+    },
+    "detectTarget": {
+      "enum": ["existing_primary", "claude_code", "codex_cli", "ollama", "harness_vendors"]
+    },
+    "harnessVendor": {
+      "type": "object",
+      "required": ["vendor", "installed", "version", "auth"],
+      "additionalProperties": false,
+      "properties": {
+        "vendor": { "enum": ["claude", "codex"] },
+        "installed": { "type": "boolean" },
+        "version": { "type": ["string", "null"], "maxLength": 512 },
+        "auth": { "enum": ["authenticated", "unverified", "absent"] }
+      }
+    },
+    "detectResult": {
+      "type": "object",
+      "required": ["target", "present", "detail"],
+      "additionalProperties": false,
+      "properties": {
+        "target": { "$ref": "#/$defs/detectTarget" },
+        "present": { "type": "boolean" },
+        "detail": { "type": ["string", "null"] },
+        "vendors": {
+          "type": "array",
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/harnessVendor" },
+          "allOf": [
+            { "contains": { "properties": { "vendor": { "const": "claude" } } }, "minContains": 0, "maxContains": 1 },
+            { "contains": { "properties": { "vendor": { "const": "codex" } } }, "minContains": 0, "maxContains": 1 }
+          ]
+        },
+        "guidance": { "type": ["string", "null"], "maxLength": 512 }
+      },
+      "allOf": [{
+        "if": { "properties": { "target": { "const": "harness_vendors" } } },
+        "else": { "not": { "anyOf": [{ "required": ["vendors"] }, { "required": ["guidance"] }] } }
+      }]
+    },
+    "setup_detect_params": {
+      "type": "object",
+      "required": ["targets"],
+      "additionalProperties": false,
+      "properties": {
+        "targets": { "type": "array", "maxItems": 5, "items": { "$ref": "#/$defs/detectTarget" } }
+      }
+    },
+    "setup_detect_result": {
+      "type": "object",
+      "required": ["results"],
+      "additionalProperties": false,
+      "properties": {
+        "results": { "type": "array", "maxItems": 5, "items": { "$ref": "#/$defs/detectResult" } }
+      }
+    },
+    "providers_set_primary_params": {
+      "type": "object",
+      "required": ["provider"],
+      "additionalProperties": false,
+      "properties": { "provider": { "type": "string", "minLength": 1, "maxLength": 256 } }
+    },
+    "providers_set_primary_result": {
+      "type": "object",
+      "required": ["restart", "side_effects"],
+      "additionalProperties": false,
+      "properties": {
+        "restart": { "$ref": "#/$defs/restartState" },
+        "side_effects": { "type": "array", "maxItems": 60, "items": { "type": "string" } }
+      }
+    },
+    "providerModel": {
+      "type": "object",
+      "required": ["id", "label"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string" },
+        "label": { "type": "string" }
+      }
+    },
+    "providers_models_list_params": {
+      "type": "object",
+      "required": ["provider", "live"],
+      "additionalProperties": false,
+      "properties": {
+        "provider": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "live": { "type": "boolean" },
+        "query": { "type": "string", "maxLength": 256 },
+        "cursor": { "type": "string", "maxLength": 256 },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 200 }
+      }
+    },
+    "providers_models_list_result": {
+      "type": "object",
+      "description": "A live listing never degrades to the catalog: a live fetch that fails answers `unavailable`, so `source` always names where these rows came from.",
+      "required": ["models", "cursor", "source", "truncated"],
+      "additionalProperties": false,
+      "properties": {
+        "models": { "type": "array", "maxItems": 200, "items": { "$ref": "#/$defs/providerModel" } },
+        "cursor": { "type": ["string", "null"] },
+        "source": { "enum": ["catalog", "live"] },
+        "truncated": { "type": "boolean" }
+      }
+    },
+    "providers_probe_start_params": {
+      "type": "object",
+      "required": ["provider"],
+      "additionalProperties": false,
+      "properties": { "provider": { "type": "string", "minLength": 1, "maxLength": 256 } }
+    },
+    "providers_probe_start_result": { "$ref": "#/$defs/jobView" },
+    "job_get_params": {
+      "type": "object",
+      "required": ["job_id"],
+      "additionalProperties": false,
+      "properties": { "job_id": { "type": "string", "minLength": 1, "maxLength": 256 } }
+    },
+    "job_get_result": { "$ref": "#/$defs/jobView" },
+    "job_cancel_params": {
+      "type": "object",
+      "required": ["job_id"],
+      "additionalProperties": false,
+      "properties": { "job_id": { "type": "string", "minLength": 1, "maxLength": 256 } }
+    },
+    "job_cancel_result": { "$ref": "#/$defs/jobView" },
+    "job_list_params": { "type": "object", "required": [], "additionalProperties": false },
+    "job_list_result": {
+      "type": "object",
+      "required": ["jobs"],
+      "additionalProperties": false,
+      "properties": {
+        "jobs": { "type": "array", "maxItems": 16, "items": { "$ref": "#/$defs/jobView" } }
+      }
+    },
+    "auth_start_params": {
+      "type": "object",
+      "required": ["provider"],
+      "additionalProperties": false,
+      "properties": { "provider": { "type": "string", "minLength": 1, "maxLength": 256 } }
+    },
+    "auth_start_result": {
+      "type": "object",
+      "description": "The job view plus the authorize url the daemon minted. Both extra fields are returned once, on the call that starts the flow; a later read of the same job carries the job view alone.",
+      "required": [
+        "job_id",
+        "kind",
+        "status",
+        "phase",
+        "progress",
+        "budget_ms",
+        "started_at",
+        "finished_at",
+        "result",
+        "failure"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "job_id": { "type": "string" },
+        "kind": { "$ref": "#/$defs/jobKind" },
+        "status": { "$ref": "#/$defs/jobStatus" },
+        "phase": { "type": ["string", "null"] },
+        "progress": { "oneOf": [{ "$ref": "#/$defs/jobProgress" }, { "type": "null" }] },
+        "budget_ms": { "type": "integer", "minimum": 0 },
+        "started_at": { "type": "string" },
+        "finished_at": { "type": ["string", "null"] },
+        "result": {
+          "type": ["object", "null"],
+          "maxProperties": 100,
+          "additionalProperties": { "type": ["string", "number", "boolean", "null"] }
+        },
+        "failure": { "oneOf": [{ "$ref": "#/$defs/jobFailure" }, { "type": "null" }] },
+        "authorize_url": { "type": ["string", "null"] },
+        "expires_in_ms": { "type": ["integer", "null"] }
+      }
+    },
+    "auth_import_start_params": {
+      "type": "object",
+      "required": ["source"],
+      "additionalProperties": false,
+      "properties": { "source": { "enum": ["claude_code", "codex_cli"] } }
+    },
+    "auth_import_start_result": { "$ref": "#/$defs/jobView" },
+    "auth_logout_params": {
+      "type": "object",
+      "required": ["provider"],
+      "additionalProperties": false,
+      "properties": { "provider": { "type": "string", "minLength": 1, "maxLength": 256 } }
+    },
+    "auth_logout_result": {
+      "type": "object",
+      "required": ["restart"],
+      "additionalProperties": false,
+      "properties": { "restart": { "$ref": "#/$defs/restartState" } }
+    },
+    "pluginSetting": {
+      "type": "object",
+      "description": "One value the plugin's manifest declares, with the label the manifest wrote for it.",
+      "required": ["key", "label", "value", "required"],
+      "additionalProperties": false,
+      "properties": {
+        "key": { "type": "string" },
+        "label": { "type": "string" },
+        "value": { "type": ["string", "null"] },
+        "required": { "type": "boolean" }
+      }
+    },
+    "pluginAccessProfile": {
+      "type": "object",
+      "description": "One access level the manifest offers. `write` is the daemon's own flag: a client warns on it rather than reading a scope out of the label. The manifest validator requires a non-empty display name on every profile, so the label is never null.",
+      "required": ["id", "label", "write"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string" },
+        "label": { "type": "string" },
+        "write": { "type": "boolean" }
+      }
+    },
+    "pluginWorkspace": {
+      "type": "object",
+      "required": ["id", "label"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string" },
+        "label": { "type": "string" }
+      }
+    },
+    "pluginOAuthClient": {
+      "type": "object",
+      "description": "A sign-in client the operator registered. client_id is its public identifier; secret_present reports credential presence independently from configured. The secret value is never returned. The added fields are optional for older protocol-2 engines. A null redirect_port selects the daemon's default.",
+      "required": ["provider", "configured", "redirect_port"],
+      "additionalProperties": false,
+      "properties": {
+        "provider": { "type": "string" },
+        "configured": { "type": "boolean" },
+        "redirect_port": { "type": ["integer", "null"] },
+        "client_id": { "type": ["string", "null"] },
+        "secret_present": { "type": "boolean" }
+      }
+    },
+    "pluginAction": {
+      "description": "Which method a plugin row's button runs. Closed: a client that meets an unknown id draws no button rather than guessing one.",
+      "enum": [
+        "install",
+        "enable",
+        "disable",
+        "sign_in",
+        "add_token",
+        "replace_token",
+        "set_up_client",
+        "choose_workspace",
+        "check",
+        "disconnect"
+      ]
+    },
+    "pluginRow": {
+      "type": "object",
+      "description": "One integration, in the daemon's own words. Every field is always present, null where it does not apply, and both halves of the union (installed and not yet installed) publish this one shape. A null `runtime_kind` is the http rail, which runs inside Fermix itself; `consent_sentence` says so in words and is never absent.",
+      "required": [
+        "name",
+        "title",
+        "version",
+        "runtime_kind",
+        "auth_kind",
+        "auth_provider",
+        "installed",
+        "enabled",
+        "status",
+        "status_sentence",
+        "primary_verb",
+        "primary_action",
+        "verbs",
+        "actions",
+        "settings",
+        "account_label",
+        "credential_present",
+        "consent_sentence",
+        "remote_disclosure",
+        "summary",
+        "access_profiles",
+        "workspaces",
+        "workspace_id",
+        "workspace_label"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string" },
+        "title": { "type": "string" },
+        "version": { "type": ["string", "null"] },
+        "runtime_kind": {
+          "oneOf": [{ "enum": ["local_stdio", "remote_mcp"] }, { "type": "null" }]
+        },
+        "auth_kind": { "oneOf": [{ "enum": ["oauth", "api_key"] }, { "type": "null" }] },
+        "auth_provider": {
+          "description": "The sign-in family this plugin belongs to, which is the `oauth_clients` entry its detail carries. Null on a plugin that needs no client.",
+          "type": ["string", "null"]
+        },
+        "installed": { "type": "boolean" },
+        "enabled": { "type": "boolean" },
+        "status": { "type": "string" },
+        "status_sentence": { "type": "string" },
+        "primary_verb": {
+          "description": "The one verb the row leads with. Null where the next step is not a button this surface owns, so the client uses its own word rather than a daemon word naming something else.",
+          "type": ["string", "null"]
+        },
+        "primary_action": {
+          "description": "Which method the leading verb runs, from a closed set. A word is not a routing key: paint `primary_verb` and route on this. Null exactly when `primary_verb` is null.",
+          "oneOf": [{ "$ref": "#/$defs/pluginAction" }, { "type": "null" }]
+        },
+        "verbs": { "type": "array", "maxItems": 16, "items": { "type": "string" } },
+        "actions": {
+          "description": "One action id per entry in `verbs`, in the same order, saying which method that button runs.",
+          "type": "array",
+          "maxItems": 16,
+          "items": { "$ref": "#/$defs/pluginAction" }
+        },
+        "settings": {
+          "type": "array",
+          "maxItems": 30,
+          "items": { "$ref": "#/$defs/pluginSetting" }
+        },
+        "account_label": { "type": ["string", "null"] },
+        "credential_present": {
+          "description": "Whether a credential sits behind this plugin. Published rather than inferred from `account_label`, which a plugin authenticating with a typed token never has.",
+          "type": "boolean"
+        },
+        "consent_sentence": { "type": "string" },
+        "remote_disclosure": { "type": ["string", "null"] },
+        "summary": { "type": ["string", "null"] },
+        "access_profiles": {
+          "type": "array",
+          "maxItems": 10,
+          "items": { "$ref": "#/$defs/pluginAccessProfile" }
+        },
+        "workspaces": {
+          "description": "What the last discovery on this daemon found. Empty until one has run, and cleared by a restart.",
+          "type": "array",
+          "maxItems": 100,
+          "items": { "$ref": "#/$defs/pluginWorkspace" }
+        },
+        "workspace_id": { "type": ["string", "null"] },
+        "workspace_label": { "type": ["string", "null"] }
+      }
+    },
+    "pluginNameParams": {
+      "type": "object",
+      "required": ["name"],
+      "additionalProperties": false,
+      "properties": { "name": { "type": "string", "minLength": 1, "maxLength": 256 } }
+    },
+    "pluginRowResult": {
+      "type": "object",
+      "required": ["plugin"],
+      "additionalProperties": false,
+      "properties": { "plugin": { "$ref": "#/$defs/pluginRow" } }
+    },
+    "plugins_list_params": {
+      "type": "object",
+      "required": [],
+      "additionalProperties": false
+    },
+    "plugins_list_result": {
+      "type": "object",
+      "required": ["plugins", "oauth_clients"],
+      "additionalProperties": false,
+      "properties": {
+        "plugins": { "type": "array", "maxItems": 200, "items": { "$ref": "#/$defs/pluginRow" } },
+        "oauth_clients": {
+          "type": "array",
+          "maxItems": 30,
+          "items": { "$ref": "#/$defs/pluginOAuthClient" }
+        }
+      }
+    },
+    "plugins_install_start_params": { "$ref": "#/$defs/pluginNameParams" },
+    "plugins_install_start_result": { "$ref": "#/$defs/jobView" },
+    "plugins_check_start_params": { "$ref": "#/$defs/pluginNameParams" },
+    "plugins_check_start_result": { "$ref": "#/$defs/jobView" },
+    "plugins_workspaces_discover_start_params": { "$ref": "#/$defs/pluginNameParams" },
+    "plugins_workspaces_discover_start_result": { "$ref": "#/$defs/jobView" },
+    "plugins_workspace_select_start_params": {
+      "type": "object",
+      "description": "An unnamed workspace is a display problem rather than a configuration error, so the label may be empty; the identifier may not.",
+      "required": ["name", "profile", "workspace_id", "label"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "profile": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "workspace_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "label": { "type": "string", "maxLength": 256 }
+      }
+    },
+    "plugins_workspace_select_start_result": { "$ref": "#/$defs/jobView" },
+    "plugins_enable_params": { "$ref": "#/$defs/pluginNameParams" },
+    "plugins_enable_result": { "$ref": "#/$defs/pluginRowResult" },
+    "plugins_disable_params": { "$ref": "#/$defs/pluginNameParams" },
+    "plugins_disable_result": { "$ref": "#/$defs/pluginRowResult" },
+    "plugins_disconnect_params": { "$ref": "#/$defs/pluginNameParams" },
+    "plugins_disconnect_result": { "$ref": "#/$defs/pluginRowResult" },
+    "plugins_oauth_client_set_params": {
+      "type": "object",
+      "description": "The client secret is not a parameter: it arrives through `secret.set` under `oauth_client:<provider>`. An absent redirect port clears any override and leaves the daemon's own default in force.",
+      "required": ["provider", "client_id"],
+      "additionalProperties": false,
+      "properties": {
+        "provider": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "client_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "redirect_port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+      }
+    },
+    "plugins_oauth_client_set_result": {
+      "type": "object",
+      "required": ["oauth_client"],
+      "additionalProperties": false,
+      "properties": { "oauth_client": { "$ref": "#/$defs/pluginOAuthClient" } }
+    },
+    "plugins_setting_set_params": {
+      "type": "object",
+      "description": "A manifest-declared setting is text: the daemon refuses any other value rather than coercing one.",
+      "required": ["name", "key", "value"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "key": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "value": { "$ref": "#/$defs/settingValue" }
+      }
+    },
+    "plugins_setting_set_result": { "$ref": "#/$defs/pluginRowResult" },
+    "capabilities_install_start_params": {
+      "type": "object",
+      "required": ["target"],
+      "additionalProperties": false,
+      "properties": {
+        "target": { "enum": ["computer_use_sidecar", "meetbot", "local_stt"] }
+      }
+    },
+    "capabilities_install_start_result": { "$ref": "#/$defs/jobView" },
+    "meetings_signin_start_params": {
+      "type": "object",
+      "required": [],
+      "additionalProperties": false
+    },
+    "meetings_signin_start_result": { "$ref": "#/$defs/jobView" },
+    "computer_use_grant_start_params": {
+      "type": "object",
+      "required": [],
+      "additionalProperties": false
+    },
+    "computer_use_grant_start_result": { "$ref": "#/$defs/jobView" },
+    "computer_use_permissions_get_params": {
+      "type": "object",
+      "required": [],
+      "additionalProperties": false
+    },
+    "computer_use_permissions_get_result": {
+      "type": "object",
+      "description": "`installed` comes from the installer rather than from the probe: the feature being switched off says nothing about whether the helper is on disk.",
+      "required": ["installed", "screen_capture", "input_control", "probed_at"],
+      "additionalProperties": false,
+      "properties": {
+        "installed": { "type": "boolean" },
+        "screen_capture": { "type": "boolean" },
+        "input_control": { "type": "boolean" },
+        "probed_at": { "type": ["string", "null"] }
       }
     },
     "logEntry": {

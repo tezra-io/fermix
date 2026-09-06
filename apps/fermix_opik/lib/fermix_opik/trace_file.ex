@@ -238,7 +238,20 @@ defmodule FermixOpik.TraceFile do
      ])}
   end
 
+  # A management job (M34 native setup §7.3). The failure sentence is the
+  # daemon's own operator copy, so it replays; no operation result ever does.
+  defp normalize_agent_event("management_job_start", row) do
+    {[:fermix, :management_job, :start], %{count: 1}, management_job_meta(row)}
+  end
+
+  defp normalize_agent_event("management_job_complete", row) do
+    {[:fermix, :management_job, :complete], %{count: 1, duration_ms: int(row["duration_ms"])},
+     meta(row, [:session_id, :agent, :kind, :budget_ms, :status, :failure_code, :error])}
+  end
+
   defp normalize_agent_event(_other, _row), do: :skip
+
+  defp management_job_meta(row), do: meta(row, [:session_id, :agent, :kind, :budget_ms])
 
   defp doctor_meta(row) do
     meta(row, [:session_id, :agent, :parent_session, :scope, :budget_ms])

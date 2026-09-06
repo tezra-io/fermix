@@ -8,6 +8,7 @@ defmodule Fermix.CLI.StartCommand do
   uninstalled host.
   """
 
+  alias Fermix.CLI.HomeOwner
   alias Fermix.CLI.Service
   alias Fermix.CLI.ServiceCommand
   alias FermixCore.BuildInfo
@@ -22,11 +23,21 @@ defmodule Fermix.CLI.StartCommand do
   def run(argv, deps) when is_list(argv) and is_list(deps) do
     build_info = Keyword.get(deps, :build_info, BuildInfo)
     service = Keyword.get(deps, :service, Service)
+    home_owner = Keyword.get(deps, :home_owner, HomeOwner)
 
-    if build_info.app_engine?() do
-      abort(app_managed_message())
-    else
-      parse_and_dispatch(argv, service)
+    cond do
+      # This binary is the app engine: the existing refusal, unchanged.
+      build_info.app_engine?() ->
+        abort(app_managed_message())
+
+      # A formula binary pointed at an app-managed home. The predicate asks
+      # about the home, never about the disk, so a machine with no app answers
+      # false here and every verb behaves exactly as it did.
+      home_owner.app_managed?(Keyword.take(deps, [:hello, :marker?, :socket_path])) ->
+        abort(HomeOwner.refusal_sentence("fermix start"))
+
+      true ->
+        parse_and_dispatch(argv, service)
     end
   end
 

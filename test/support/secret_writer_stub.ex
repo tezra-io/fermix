@@ -118,3 +118,65 @@ defmodule FermixTestSupport.UnavailableSecretWriter do
   @impl true
   def command_source(_key, _opts \\ []), do: %{source: :command, command: "", args: []}
 end
+
+defmodule FermixTestSupport.CountingSecretWriter do
+  @moduledoc """
+  A secret writer that reports every read to a watching process.
+
+  Exists so a test can assert that a code path takes NO keychain read at all.
+  A stub that merely answers is not enough for that: the assertion has to be
+  about calls, not about answers.
+  """
+
+  @behaviour FermixCore.Setup.SecretWriter
+
+  @observer __MODULE__.Observer
+
+  @doc "Registers the calling process as the one told about every read."
+  @spec watch() :: :ok
+  def watch do
+    Process.register(self(), @observer)
+    :ok
+  end
+
+  @doc "Stops reporting. Safe to call when no process is registered."
+  @spec unwatch() :: :ok
+  def unwatch do
+    case Process.whereis(@observer) do
+      nil -> :ok
+      _pid -> unregister()
+    end
+  end
+
+  @impl true
+  def available?(_opts \\ []), do: true
+
+  @impl true
+  def put(key, _value, _opts \\ []) when is_atom(key), do: :ok
+
+  @impl true
+  def get(key, _opts \\ []) when is_atom(key) do
+    report({:secret_writer_get, key})
+    {:error, :missing_secret}
+  end
+
+  @impl true
+  def delete(key, _opts \\ []) when is_atom(key), do: :ok
+
+  @impl true
+  def command_source(key, _opts \\ []) when is_atom(key) do
+    %{source: :command, command: "counting-keyring", args: [Atom.to_string(key)]}
+  end
+
+  defp report(message) do
+    case Process.whereis(@observer) do
+      nil -> :ok
+      pid -> send(pid, message)
+    end
+  end
+
+  defp unregister do
+    Process.unregister(@observer)
+    :ok
+  end
+end

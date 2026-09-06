@@ -20,6 +20,7 @@ defmodule Fermix.CLI.Service do
   alias Fermix.CLI.Service.Launchd
   alias Fermix.CLI.Service.Systemd
   alias Fermix.CLI.Service.Templates
+  alias FermixCore.Boot.PathBaseline
   alias FermixCore.BuildInfo
   alias FermixCore.Setup.ConfigStore
 
@@ -281,29 +282,10 @@ defmodule Fermix.CLI.Service do
   # then the standard system locations. `Enum.uniq` collapses the common case
   # where that directory already is a standard bin dir (Homebrew = `…/bin`).
   defp service_path(os, fermix_path) do
-    ([Path.dirname(fermix_path) | standard_bindirs(os)] ++ [user_bindir()])
-    |> Enum.uniq()
+    [os: os, binary_dir: Path.dirname(fermix_path)]
+    |> PathBaseline.dirs()
     |> Enum.join(":")
   end
-
-  defp standard_bindirs(:darwin),
-    do: ~w(/opt/homebrew/bin /usr/local/bin /usr/bin /bin /usr/sbin /sbin)
-
-  defp standard_bindirs(:linux),
-    do: ~w(/usr/local/bin /usr/bin /bin /usr/sbin /sbin)
-
-  # `~/.local/bin` is where the official Codex and Claude Code installers put
-  # their binaries on both platforms, so a service PATH without it detects no
-  # coding-agent CLI on a machine that has both installed — the daemon reports
-  # them absent while the operator's own shell resolves them fine. It is the
-  # standard user-scope bin dir (XDG / systemd `user` convention), not a guess
-  # about one machine.
-  #
-  # Appended LAST on purpose. PATH is first-match-wins, so a tail entry can only
-  # make previously unresolvable names resolvable — it can never shadow the
-  # `cosign`/`node`/`python` this list was originally widened to reach. Leading
-  # with it would silently change resolution for every colliding binary.
-  defp user_bindir, do: Path.join(System.user_home!(), ".local/bin")
 
   defp system_observability_env do
     Map.new(@observability_env, fn key -> {key, System.get_env(key)} end)

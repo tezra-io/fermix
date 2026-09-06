@@ -7,6 +7,8 @@ defmodule FermixCore.BootProfile do
   identify an app engine.
   """
 
+  alias FermixCore.Boot.PathBaseline
+
   @type profile :: :app_engine | :standalone_cli | :source
 
   @doc "Selects a boot profile while giving app identity strict precedence."
@@ -17,9 +19,17 @@ defmodule FermixCore.BootProfile do
     if detector.(), do: :standalone_cli, else: :source
   end
 
-  @doc "Applies runtime gates required before sibling OTP applications start."
+  @doc """
+  Applies runtime gates required before sibling OTP applications start.
+
+  The `PATH` baseline is applied here and only here: an `SMAppService`-launched
+  engine inherits launchd's bare `PATH` and would otherwise resolve no `cosign`,
+  no brew `node` or `python`, and no `codex` or `claude` in `~/.local/bin`.
+  A `:source` run deliberately gets none, so a developer sees their own `PATH`.
+  """
   @spec prepare(profile()) :: :ok
   def prepare(profile) when profile in [:app_engine, :standalone_cli] do
+    PathBaseline.ensure!()
     enable_endpoint_server()
     Application.put_env(:fermix_core, :daemon_socket_enabled, true)
     Application.put_env(:fermix_core, :realtime_socket_enabled, true)
