@@ -63,6 +63,20 @@ defmodule FermixCore.Auth.TokenManager do
     GenServer.call(server, :reload, 5_000)
   end
 
+  @doc """
+  Drops the tokens this manager holds and refuses to serve them again.
+
+  A sign-out that only deletes the stored entry leaves the running daemon
+  holding the access and refresh tokens in memory, so Fermix keeps making calls
+  as the account the operator just removed until the token expires. The manager
+  is left invalidated rather than stopped: it is a supervised child, and a
+  `reload/1` after a fresh sign-in is what brings it back.
+  """
+  @spec forget(GenServer.server() | String.t()) :: :ok
+  def forget(server \\ __MODULE__)
+  def forget(auth_profile) when is_binary(auth_profile), do: TokenSupervisor.forget(auth_profile)
+  def forget(server), do: GenServer.call(server, :forget)
+
   @spec status(GenServer.server() | String.t()) :: {:ok, map()} | {:error, term()}
   def status(server \\ __MODULE__)
   def status(auth_profile) when is_binary(auth_profile), do: TokenSupervisor.status(auth_profile)
@@ -146,6 +160,23 @@ defmodule FermixCore.Auth.TokenManager do
       {:ok, state} -> {:reply, {:ok, state.access_token}, state}
       {:error, reason, state} -> {:reply, {:error, reason}, state}
     end
+  end
+
+  def handle_call(:forget, _from, state) do
+    if is_reference(state.refresh_timer), do: Process.cancel_timer(state.refresh_timer)
+
+    Logger.info("TokenManager: forgot tokens for #{inspect(state.auth_profile)}")
+
+    {:reply, :ok,
+     %{
+       state
+       | access_token: nil,
+         refresh_token: nil,
+         expires_at: nil,
+         entry: nil,
+         refresh_timer: nil,
+         invalidated: true
+     }}
   end
 
   def handle_call(:reload, _from, state) do

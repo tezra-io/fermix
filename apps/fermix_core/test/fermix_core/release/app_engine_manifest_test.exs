@@ -5,11 +5,13 @@ defmodule FermixCore.Release.AppEngineManifestTest do
   alias FermixCore.Release.ExecutableInventory
 
   setup do
-    root =
-      Path.join(
-        System.tmp_dir!(),
-        "fermix-app-engine-manifest-#{System.unique_integer([:positive, :monotonic])}"
-      )
+    # A per-run unique integer alone collides with a leftover directory from an
+    # earlier run, which then fails the inventory assertions. SafeRm's tmp dir
+    # carries a wall-clock component and its own cleanup floor. The tree under
+    # test is nested one level down so SafeRm's marker file stays out of the
+    # inventory and the digest.
+    tmp = FermixTestSupport.SafeRm.make_tmp_dir!("app-engine-manifest")
+    root = Path.join(tmp, "engine")
 
     File.mkdir_p!(Path.join(root, "bin"))
     File.mkdir_p!(Path.join(root, "lib"))
@@ -22,7 +24,7 @@ defmodule FermixCore.Release.AppEngineManifestTest do
     File.write!(Path.join(root, "data/runtime.txt"), "runtime-data")
     File.ln_s!("fermix_app_engine", Path.join(root, "bin/current"))
 
-    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf(root) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf(tmp) end)
     %{root: root}
   end
 
@@ -175,6 +177,31 @@ defmodule FermixCore.Release.AppEngineManifestTest do
     File.ln_s!(target, Path.join(root, "bin/absolute"))
 
     assert {:error, {:symlink_absolute_target, "bin/absolute"}} =
+             AppEngineManifest.build(root, opts())
+  end
+
+  # A release root that has been RUN carries the ERTS scratch the engine owns:
+  # `tmp/pipe/erlang.pipe.N.r` is a named pipe, not release content, and
+  # `--overwrite` does not clear it. Refusing it made the second release on
+  # every developer machine impossible.
+  test "skips a non-regular runtime scratch entry under tmp/", %{root: root} do
+    pipe = Path.join(root, "tmp/pipe/erlang.pipe.1.r")
+    File.mkdir_p!(Path.dirname(pipe))
+    assert {_output, 0} = System.cmd("mkfifo", [pipe])
+
+    assert {:ok, manifest} = AppEngineManifest.build(root, opts())
+
+    refute Enum.any?(manifest["inventory"]["entries"], &(&1["path"] =~ "erlang.pipe"))
+  end
+
+  # Only `tmp/` is scratch. Anywhere else a non-regular entry is content the
+  # manifest cannot describe, and the release still refuses rather than
+  # shipping a tree whose digest does not cover every entry.
+  test "still refuses a non-regular entry outside tmp/", %{root: root} do
+    pipe = Path.join(root, "data/erlang.pipe.1.r")
+    assert {_output, 0} = System.cmd("mkfifo", [pipe])
+
+    assert {:error, {:unsupported_tree_entry, "data/erlang.pipe.1.r", :other}} =
              AppEngineManifest.build(root, opts())
   end
 

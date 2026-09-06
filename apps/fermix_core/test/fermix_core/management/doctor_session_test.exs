@@ -303,15 +303,20 @@ defmodule FermixCore.Management.DoctorSessionTest do
       assert {:ok, %{"session_id" => session_id}} =
                Doctor.start(server: server, scope: :local, descriptors: specs)
 
-      assert_receive {:telemetry, [:fermix, :doctor, :session_start], _meas, start_meta}, 1_000
-      assert start_meta.session_id == session_id
+      # The handler is attached globally, so another module's doctor session can
+      # deliver its bookends into this mailbox first. Pinning the session id
+      # makes each assert_receive wait for *this* run's event.
+      assert_receive {:telemetry, [:fermix, :doctor, :session_start], _meas,
+                      %{session_id: ^session_id} = start_meta},
+                     1_000
+
       assert start_meta.agent == "doctor"
       assert start_meta.scope == :local
 
-      assert_receive {:telemetry, [:fermix, :doctor, :session_complete], meas, complete_meta},
+      assert_receive {:telemetry, [:fermix, :doctor, :session_complete], meas,
+                      %{session_id: ^session_id} = complete_meta},
                      1_000
 
-      assert complete_meta.session_id == session_id
       assert complete_meta.status == "completed"
       assert is_integer(meas.duration_ms)
     end

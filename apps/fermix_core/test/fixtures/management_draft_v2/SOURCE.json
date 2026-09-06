@@ -1,0 +1,121 @@
+{
+  "schema_version": 1,
+  "description": "Provenance of the vendored Fermix wire contracts. The canonical files live in the fermix repository under apps/fermix_core/priv/; this tree is a byte-identical copy pinned by CHECKSUMS.txt. scripts/verify_protocol_contract.sh asserts the two agree, and --source <fermix-checkout> byte-compares against upstream.",
+  "upstream": {
+    "repository": "tezra-io/fermix",
+    "commit": "d68d435028701fd1a38fa239fd3ff71d3ea77746",
+    "branch": "feat/m21-seamless-browser-install",
+    "working_tree": "dirty",
+    "retrieved_at": "2026-08-20"
+  },
+  "contracts": [
+    {
+      "name": "management",
+      "source_directory": "apps/fermix_core/priv/management",
+      "vendored_directory": "management",
+      "source_of_truth_module": "FermixCore.Management.Protocol",
+      "protocol_version": 1,
+      "supported_version_range": { "minimum": 1, "maximum": 1 },
+      "committed_upstream": false,
+      "provenance_note": "Untracked in the upstream working tree at the pinned commit: the engine change that publishes this contract has not landed. The daemon ships first (PROTOCOL.md, Rollout / rollback order), so this pin is provisional and must be re-taken from the commit that publishes priv/management before the app is released.",
+      "files": [
+        {
+          "path": "management/PROTOCOL.md",
+          "source_path": "apps/fermix_core/priv/management/PROTOCOL.md",
+          "sha256": "c5c1ee3b48870ee215267ec6f6a8b1f4bc5382f81fb87aaab46941866d105edc"
+        },
+        {
+          "path": "management/protocol.schema.json",
+          "source_path": "apps/fermix_core/priv/management/protocol.schema.json",
+          "sha256": "0632918349f17e29ffab1db93ffc7d84a9d5c92f7ab5d041f87b9f349ed271f5"
+        },
+        {
+          "path": "management/fixtures/compatibility.jsonl",
+          "source_path": "apps/fermix_core/priv/management/fixtures/compatibility.jsonl",
+          "sha256": "a2f933ebc382de6e018f1e6694c86e4687d288ae3b609e87c77b018189338085"
+        },
+        {
+          "path": "management/fixtures/errors.jsonl",
+          "source_path": "apps/fermix_core/priv/management/fixtures/errors.jsonl",
+          "sha256": "b09050a5a1a6224355b9ecc45a74eee4334800372b7299f2c0de89bfd2cad8eb"
+        },
+        {
+          "path": "management/fixtures/requests.jsonl",
+          "source_path": "apps/fermix_core/priv/management/fixtures/requests.jsonl",
+          "sha256": "6774229e0b3a0123cd62e3c0139386a7997b64b16937af862cb05f8ab75a1874"
+        },
+        {
+          "path": "management/fixtures/success.jsonl",
+          "source_path": "apps/fermix_core/priv/management/fixtures/success.jsonl",
+          "sha256": "50806f27c715c4ed6d02e7fe7cb1c098b802d97a99755d80290bf42617249493"
+        }
+      ]
+    },
+    {
+      "name": "realtime",
+      "source_directory": "apps/fermix_core/priv/realtime",
+      "vendored_directory": "realtime",
+      "source_of_truth_module": "FermixCore.Realtime.Protocol",
+      "protocol_version": 1,
+      "supported_version_range": { "minimum": 1, "maximum": 1 },
+      "committed_upstream": true,
+      "provenance_note": "Supersedes the previous vendored copy under docs/realtime-contract/, which pinned an older PROTOCOL.md (3f3f12fe) than upstream published (f9805b70) and verified only against its own checksums, so the drift was invisible.",
+      "files": [
+        {
+          "path": "realtime/PROTOCOL.md",
+          "source_path": "apps/fermix_core/priv/realtime/PROTOCOL.md",
+          "sha256": "f9805b70f39a618e6d547333881001aa484fb6ddbc4a923cc688dd8e52ddb166"
+        },
+        {
+          "path": "realtime/protocol.schema.json",
+          "source_path": "apps/fermix_core/priv/realtime/protocol.schema.json",
+          "sha256": "fd2aa7fc5d94cf4bc7db43fa62dce3889b9a324126d44e3f3a875f8dc11b17a7"
+        },
+        {
+          "path": "realtime/fixtures/client_events.jsonl",
+          "source_path": "apps/fermix_core/priv/realtime/fixtures/client_events.jsonl",
+          "sha256": "806f9306f7dc27bdf269058a812c171f49cebf5d56af2837b99f525d68878178"
+        },
+        {
+          "path": "realtime/fixtures/server_events.jsonl",
+          "source_path": "apps/fermix_core/priv/realtime/fixtures/server_events.jsonl",
+          "sha256": "dab4252bbff3ea9af429a320f80bd35c1ed951e1a4f40c7a9e2e58d89c42638d"
+        }
+      ]
+    },
+    {
+      "name": "management_draft_v2",
+      "draft": true,
+      "vendored_directory": "management-draft-v2",
+      "source_directory": "apps/fermix_core/priv/management",
+      "source_of_truth_module": "FermixCore.Management.Protocol",
+      "protocol_version": 2,
+      "supported_version_range": { "minimum": 1, "maximum": 2 },
+      "committed_upstream": false,
+      "authored_from": "fermix docs/design/MILESTONE_34_NATIVE_SETUP_DESIGN.md section 7.3, revision 8 (2026-09-02)",
+      "provenance_note": "Not vendored. Protocol v2 is engine work that has not started, so this artifact is authored in this repository from the design and the application is built against it while the engine publishes protocol 1. The pair is a designed transition with an expiry, never a fallback: when the engine publishes protocol 2, the vendored management/ tree is re-taken from that commit and this directory and this record are deleted in the same change. ManagementContractTests fails while a draft ships beside a vendored schema that already reports protocol 2 or more. The files carry no source_path because there is nothing upstream to compare them with; verify_protocol_contract.sh --source therefore skips draft contracts and pins them by digest only. The schema's v1 halves are structurally identical to management/protocol.schema.json rather than byte-identical: it is re-emitted by a formatter, so compare the two structurally (no definition is removed, and exactly six shared definitions are extended: request, result, error, hello_result, overview_get_result and doctorCheck) rather than with a textual diff.",
+      "files": [
+        {
+          "path": "management-draft-v2/protocol.schema.json",
+          "sha256": "b4b0506a25ff8cedb186c5851aef074d58871489c9a242b1bbcea21d2b8bf632"
+        },
+        {
+          "path": "management-draft-v2/fixtures/requests.jsonl",
+          "sha256": "0132a9428c58aef6e3f844cb84e9ab5cea376f27750967f42ef33eac3ec4df38"
+        },
+        {
+          "path": "management-draft-v2/fixtures/success.jsonl",
+          "sha256": "f9348b24fdf034af9eae1d213816c5e0b3ac3283f4620b4228ee50b896a68a63"
+        },
+        {
+          "path": "management-draft-v2/fixtures/errors.jsonl",
+          "sha256": "14f5f994cf029f3cf9a6727f7b0ca6f2592c037c3d02da819bd456c2edd3021e"
+        },
+        {
+          "path": "management-draft-v2/fixtures/compatibility.jsonl",
+          "sha256": "ab44b35faf83c512961e5529e9d98d3897548679de90a888036583200324e3c6"
+        }
+      ]
+    }
+  ]
+}

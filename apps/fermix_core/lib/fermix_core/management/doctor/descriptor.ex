@@ -24,6 +24,7 @@ defmodule FermixCore.Management.Doctor.Descriptor do
 
   alias Fermix.CLI.Doctor.Checks
   alias FermixCore.BuildInfo
+  alias FermixCore.Management.Doctor.Remediation
   alias FermixCore.Management.Text
 
   @max_summary_bytes 256
@@ -167,7 +168,21 @@ defmodule FermixCore.Management.Doctor.Descriptor do
       spec("plugins", :capability, :warning, :always, &Checks.plugins/0),
       spec("web_search_config", :capability, :info, :configured, fn ->
         Checks.web_search(false)
-      end)
+      end),
+      # The five coexistence and restart rows. Offline and prompt-free, so they
+      # belong in the local catalog plain `fermix doctor` runs, and each is the
+      # Doctor face of a fact `setup.state.get` already publishes.
+      spec("restart_pending", :runtime, :warning, :always, &Checks.restart_pending/0),
+      spec("external_config_change", :configuration, :warning, :always, fn ->
+        Checks.external_config_change()
+      end),
+      spec("legacy_service_unit", :distribution, :warning, :always, fn ->
+        Checks.legacy_service_unit()
+      end),
+      spec("secret_acl_restricted", :security, :warning, :always, fn ->
+        Checks.secret_acl_restricted()
+      end),
+      spec("engine_path_baseline", :runtime, :warning, :always, &Checks.engine_path_baseline/0)
     ]
   end
 
@@ -251,7 +266,8 @@ defmodule FermixCore.Management.Doctor.Descriptor do
       "status" => word,
       "summary" => summary(detail),
       "evidence" => %{"source_name" => name, "source_status" => Atom.to_string(status)},
-      "remediation_code" => remediation_code(spec.id, word)
+      "remediation_code" => remediation_code(spec.id, word),
+      "remediation" => Remediation.fetch(spec.id, word)
     }
   end
 
@@ -262,7 +278,8 @@ defmodule FermixCore.Management.Doctor.Descriptor do
       "status" => word,
       "summary" => pending_summary(status),
       "evidence" => %{},
-      "remediation_code" => remediation_code(spec.id, word)
+      "remediation_code" => remediation_code(spec.id, word),
+      "remediation" => Remediation.fetch(spec.id, word)
     }
   end
 
@@ -271,7 +288,8 @@ defmodule FermixCore.Management.Doctor.Descriptor do
       "status" => "unavailable",
       "summary" => summary(message),
       "evidence" => evidence,
-      "remediation_code" => remediation_code(spec.id, "unavailable")
+      "remediation_code" => remediation_code(spec.id, "unavailable"),
+      "remediation" => Remediation.fetch(spec.id, "unavailable")
     }
   end
 

@@ -7,6 +7,7 @@ defmodule Fermix.CLI.Setup do
   """
 
   alias Fermix.CLI.AppRoute
+  alias Fermix.CLI.HomeOwner
   alias Fermix.CLI.ServiceCommand
   alias Fermix.CLI.Setup.WebLauncher
   alias FermixCore.BuildInfo
@@ -100,8 +101,16 @@ defmodule Fermix.CLI.Setup do
   # refusal precedes argument parsing: no switch here selects a mode the CLI is
   # still allowed to run, and minting a launch token for a surface we will not
   # open would burn a one-use token.
+  #
+  # Two binaries reach this through two predicates. The app's own binary answers
+  # `app_engine?` true and routes on that. A formula binary answers it false, so
+  # it routes on the home-owner check instead; the order is what keeps exactly
+  # one of the two from firing, and a home with no app answers both false.
   defp app_managed?(run_opts) do
-    Keyword.get(run_opts, :build_info, BuildInfo).app_engine?()
+    Keyword.get(run_opts, :build_info, BuildInfo).app_engine?() or
+      Keyword.get(run_opts, :home_owner, HomeOwner).app_managed?(
+        Keyword.take(run_opts, [:hello, :marker?, :socket_path])
+      )
   end
 
   defp dispatch(opts, run_opts) do

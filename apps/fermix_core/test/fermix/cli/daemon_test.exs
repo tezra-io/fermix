@@ -185,10 +185,15 @@ defmodule Fermix.CLI.DaemonTest do
              )
 
     assert result["protocol"] == %{
-             "current_version" => 1,
+             "current_version" => 2,
              "minimum_version" => 1,
-             "maximum_version" => 1
+             "maximum_version" => 2
            }
+
+    # The window is wider than one version, so a single integer no longer tells
+    # a client what it may call. The table is published whole beside the list.
+    assert result["capabilities"]["minimum_versions"]["setup.state.get"] == 2
+    assert result["capabilities"]["minimum_versions"]["hello"] == 1
 
     assert result["engine"]["distribution_identity"] == "standalone"
     assert result["engine"]["engine_id"] == "fermix-engine-test"
@@ -245,12 +250,37 @@ defmodule Fermix.CLI.DaemonTest do
                timeout: 1_000
              )
 
-    assert details == %{"minimum_version" => 1, "maximum_version" => 1}
+    assert details == %{"minimum_version" => 1, "maximum_version" => 2}
 
     assert {:error, {:management_error, "daemon_too_old", _message, ^details}} =
              Client.request_v1("hello", %{},
                request_id: "req-new",
-               protocol_version: 2,
+               protocol_version: 3,
+               socket_path: socket_path,
+               timeout: 1_000
+             )
+  end
+
+  # The refusal a v1-declared client meets when it reaches for a v2 surface. It
+  # is not a boot failure: everything a client needs to read the state and
+  # restart the daemon stays available at version 1.
+  test "management refuses a v2 method on a v1 session and names the version", %{
+    socket_path: socket_path
+  } do
+    assert {:error, {:management_error, "method_not_found", _message, details}} =
+             Client.request_v1("setup.state.get", %{},
+               request_id: "req-v1-setup-state",
+               protocol_version: 1,
+               socket_path: socket_path,
+               timeout: 1_000
+             )
+
+    assert details == %{"method" => "setup.state.get", "requires" => 2}
+
+    assert {:ok, _hello} =
+             Client.request_v1("hello", %{},
+               request_id: "req-v1-hello",
+               protocol_version: 1,
                socket_path: socket_path,
                timeout: 1_000
              )

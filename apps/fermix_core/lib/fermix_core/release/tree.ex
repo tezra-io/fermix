@@ -90,10 +90,25 @@ defmodule FermixCore.Release.Tree do
         continue_symlink(path, rel, root, count, nodes, excluded)
 
       {:ok, %{type: type}} ->
-        {:halt, {:error, {:unsupported_tree_entry, rel, type}}}
+        skip_runtime_scratch(type, rel, count, nodes)
 
       {:error, reason} ->
         {:halt, {:error, {:entry_stat_failed, rel, reason}}}
+    end
+  end
+
+  # A release root that has been RUN carries the ERTS scratch the engine owns:
+  # `tmp/pipe/erlang.pipe.N.r` is a named pipe left by a previous boot, not
+  # release content, and `mix release --overwrite` does not clear it. Refusing
+  # it made every release after the first on a machine that had started the
+  # engine once impossible. Everywhere else a non-regular entry is still a
+  # refusal: nothing in an assembled tree may be one, and skipping it would
+  # leave the tree digest silently not covering an entry.
+  defp skip_runtime_scratch(type, rel, count, nodes) do
+    if String.starts_with?(rel, "tmp/") do
+      {:cont, {:ok, nodes, count}}
+    else
+      {:halt, {:error, {:unsupported_tree_entry, rel, type}}}
     end
   end
 

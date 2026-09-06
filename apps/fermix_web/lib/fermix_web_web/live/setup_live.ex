@@ -18,6 +18,8 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.ComputerUse
   alias FermixCore.ComputerUse.SidecarInstaller
   alias FermixCore.Harness.Vendors, as: HarnessVendors
+  alias FermixCore.Management.Protocol, as: ManagementProtocol
+  alias FermixCore.Management.Settings, as: ManagementSettings
   alias FermixCore.Meetings
   alias FermixCore.Meetings.BrowserInstall
   alias FermixCore.Meetings.Config, as: MeetingsConfig
@@ -41,8 +43,8 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Setup.AccessToken
-  alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.Doctor
+  alias FermixCore.Setup.RestartState
   alias FermixCore.Setup.Wizard
   alias FermixCore.SkillCuration.Delivery, as: SkillCurationDelivery
   alias FermixCore.Tools.Media.Registry, as: MediaRegistry
@@ -92,6 +94,8 @@ defmodule FermixWebWeb.SetupLive do
   ]
 
   @default_plugin_auth_url_timeout_ms 300_000
+  @reload_settings_action "Reload settings from disk"
+  @settings_reloaded_message "Settings reloaded from the settings file."
   @local_installing_message "Installing on-device speech…"
   @local_ready_message "On-device speech is installed and ready."
   @meetbot_installing_message "Downloading the meeting notetaker…"
@@ -622,7 +626,7 @@ defmodule FermixWebWeb.SetupLive do
         {:noreply, refresh_report(socket, "Plugin configuration saved.")}
 
       {:error, reason} ->
-        {:noreply, flash_error(socket, "Save failed: #{format_config_error(reason)}")}
+        {:noreply, save_refused(socket, reason)}
     end
   end
 
@@ -759,6 +763,17 @@ defmodule FermixWebWeb.SetupLive do
      save_answers(socket, answers, "Coding agents saved.", Map.get(root, "__nav"),
        restart_required?: runtime_restart_answers?(answers)
      )}
+  end
+
+  # The one action offered while the settings file has changed outside this
+  # VM. It re-reads the file, applies it, and re-records the baseline, which
+  # is what clears the refusal; an unreadable file is never offered it,
+  # because the reload runs the parse that just failed.
+  def handle_event("reload_settings", _params, socket) do
+    case ManagementSettings.reload() do
+      {:ok, _report} -> {:noreply, refresh_report(socket, @settings_reloaded_message)}
+      {:error, reason} -> {:noreply, reload_refused(socket, reason)}
+    end
   end
 
   def handle_event("run_doctor", _params, socket) do
@@ -971,6 +986,7 @@ defmodule FermixWebWeb.SetupLive do
   @impl true
   def render(assigns) do
     ~H"""
+    <.config_banner banner={@config_banner} />
     <Components.page
       active_tab={@active_tab}
       embed?={@embed?}
@@ -1019,6 +1035,34 @@ defmodule FermixWebWeb.SetupLive do
     """
   end
 
+  # One banner, one action (M34 native setup §15.1). The state is the daemon's
+  # and is re-read here rather than remembered: this is the render every save
+  # ends at, so a refusal raised by another door shows up on the next one.
+  attr :banner, :map, default: nil
+
+  defp config_banner(assigns) do
+    ~H"""
+    <div
+      :if={@banner}
+      class="border-b border-warning/40 bg-warning/10 px-4 py-3 text-sm text-warning"
+      role="alert"
+    >
+      <div class="mx-auto flex max-w-6xl items-center gap-2">
+        <.icon name="hero-exclamation-triangle" class="size-4 shrink-0" />
+        <span>{@banner.message}</span>
+        <button
+          :if={@banner.action}
+          type="button"
+          class="btn btn-warning btn-xs ml-auto"
+          phx-click="reload_settings"
+        >
+          {@banner.action}
+        </button>
+      </div>
+    </div>
+    """
+  end
+
   defp assign_report(socket, report) do
     snapshot = report.wizard.config_snapshot
     provider_form = build_provider_form(snapshot)
@@ -1026,6 +1070,7 @@ defmodule FermixWebWeb.SetupLive do
     socket
     |> assign(:report, report)
     |> assign(:tabs, @tabs)
+    |> assign_config_banner()
     |> assign(:provider_form, provider_form)
     |> assign_model_sources(provider_form)
     |> assign(:provider_statuses, build_provider_statuses(snapshot))
@@ -1048,6 +1093,19 @@ defmodule FermixWebWeb.SetupLive do
     |> assign(:plugin_summary, plugin_summary(snapshot))
   end
 
+  defp assign_config_banner(socket),
+    do: assign(socket, :config_banner, config_banner_state(RestartState.config_state()))
+
+  defp config_banner_state(:clear), do: nil
+
+  defp config_banner_state({:external_change, sections}),
+    do: %{message: external_change_message(sections), action: @reload_settings_action}
+
+  # An unreadable file is the other state and never offers the reload: the
+  # reload re-runs the read that failed, so the button would be a loop.
+  defp config_banner_state({:config_unreadable, sentence}),
+    do: %{message: sentence, action: nil}
+
   defp save_answers(socket, answers, message, nav, opts \\ []) do
     socket.assigns.report.wizard
     |> Wizard.save_answers(answers)
@@ -1065,13 +1123,13 @@ defmodule FermixWebWeb.SetupLive do
   end
 
   defp save_result({:error, reason}, socket, _message, _nav, _opts) do
-    flash_error(socket, "Save failed: #{format_config_error(reason)}")
+    save_refused(socket, reason)
   end
 
   defp save_config_result({:ok, _snapshot}, socket, message), do: refresh_report(socket, message)
 
   defp save_config_result({:error, reason}, socket, _message) do
-    flash_error(socket, "Save failed: #{format_config_error(reason)}")
+    save_refused(socket, reason)
   end
 
   # save_oauth_client's own {:ok}/{:error} handling, kept out of the shared
@@ -1102,7 +1160,39 @@ defmodule FermixWebWeb.SetupLive do
 
   defp format_config_error({:blank_config_value, key}), do: "#{key} requires a value."
 
+  # The two refusals the shared write tails raise. Both sentences are the
+  # daemon's: the external-change one is read from the error catalog both
+  # doors render from, and an unreadable file carries the parser's own.
+  defp format_config_error({:external_change, sections}),
+    do: "#{external_change_message(sections)} #{@reload_settings_action}, then save again."
+
+  defp format_config_error({:config_unreadable, sentence}), do: sentence
+
+  # A save that could not store a credential (design §7.4). The sentence is the
+  # daemon's; before this the value was dropped with a log line and the save
+  # reported success, so the operator saw a stored key and the runtime had none.
+  defp format_config_error({:secret_store_failed, _key, sentence}) when is_binary(sentence),
+    do: sentence
+
   defp format_config_error(reason), do: Redaction.format(reason)
+
+  defp external_change_message(sections) do
+    sentence = Map.fetch!(ManagementProtocol.error_messages(), :external_change)
+
+    "#{sentence} Changed sections: #{Enum.join(sections, ", ")}."
+  end
+
+  defp save_refused(socket, reason) do
+    socket
+    |> assign_config_banner()
+    |> flash_error("Save failed: #{format_config_error(reason)}")
+  end
+
+  defp reload_refused(socket, reason) do
+    socket
+    |> assign_config_banner()
+    |> flash_error("Reload failed: #{format_config_error(reason)}")
+  end
 
   # One commit per key — the form carries only the missing required entries,
   # typically one (e.g. a vault path). Any failure halts and surfaces loud.
@@ -1668,18 +1758,16 @@ defmodule FermixWebWeb.SetupLive do
   end
 
   # `[fermix_core.meetings]` is written as a section rather than through wizard
-  # answers: save then apply, the same two steps Wizard.commit_snapshot performs,
-  # so the keyring securing in save_snapshot/1 still owns the Zoom secret.
+  # answers, but through the same shared write tail every other setup writer
+  # uses: that tail is where the external-change refusal executes and where the
+  # persisted baseline is re-recorded, so a save-plus-apply of its own here
+  # would revert an outside edit silently and then leave every later write in
+  # both doors refusing against a file this daemon had just written.
   defp save_meetings(socket, changes, nav) do
-    snapshot = ConfigStore.current_snapshot()
-    meetings = snapshot |> get_fermix_core(:meetings) |> Keyword.merge(changes)
-    updated = put_fermix_core(snapshot, :meetings, meetings)
     restart? = meetings_restart_required?(MeetingsConfig.load(), changes)
 
-    case ConfigStore.save_snapshot(updated) do
-      :ok ->
-        :ok = ConfigStore.apply_snapshot(updated)
-
+    case MeetingsConfig.save(changes) do
+      {:ok, _report} ->
         socket
         |> assign(:restart_pending?, socket.assigns.restart_pending? or restart?)
         |> refresh_report(meetings_saved_message(restart?), restart_required?: restart?)
@@ -1687,7 +1775,7 @@ defmodule FermixWebWeb.SetupLive do
         |> maybe_advance(nav)
 
       {:error, reason} ->
-        flash_error(socket, "Save failed: #{format_config_error(reason)}")
+        save_refused(socket, reason)
     end
   end
 
@@ -1705,11 +1793,6 @@ defmodule FermixWebWeb.SetupLive do
     Enum.any?(@meetings_restart_keys, fn key ->
       Keyword.has_key?(changes, key) and Keyword.get(changes, key) != Map.fetch!(previous, key)
     end)
-  end
-
-  defp put_fermix_core(snapshot, key, value) do
-    fermix_core = snapshot |> Map.get(:fermix_core, []) |> Keyword.put(key, value)
-    Map.put(snapshot, :fermix_core, fermix_core)
   end
 
   # Enabling meetings is what fetches the Meet notetaker binary — the Zoom RTMS
@@ -3292,7 +3375,7 @@ defmodule FermixWebWeb.SetupLive do
     end
   end
 
-  defp xai_auth_summary, do: oauth_profile_summary("xai_oauth")
+  defp xai_auth_summary, do: oauth_profile_summary(Store.profile(:xai))
 
   # --- Anthropic setup-token / Claude Code import (synchronous, no loopback) -
 
@@ -3311,7 +3394,7 @@ defmodule FermixWebWeb.SetupLive do
     end
   end
 
-  defp anthropic_auth_summary, do: oauth_profile_summary("anthropic_oauth")
+  defp anthropic_auth_summary, do: oauth_profile_summary(Store.profile(:anthropic))
 
   defp anthropic_login_impl do
     Application.get_env(:fermix_web, :anthropic_login_impl, AnthropicLogin)

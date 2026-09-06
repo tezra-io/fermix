@@ -15,6 +15,7 @@ defmodule FermixWebWeb.SetupLiveTest do
   alias FermixCore.Plugins.Status, as: PluginStatus
   alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Setup.ConfigStore
+  alias FermixCore.Setup.RestartState
   alias FermixCore.Transcription.Local.ModelStore, as: LocalModelStore
   alias FermixCore.Transcription.Local.SidecarInstaller, as: LocalSttInstaller
   alias FermixCore.Transcription.Registry, as: TranscriptionRegistry
@@ -4912,5 +4913,118 @@ defmodule FermixWebWeb.SetupLiveTest do
       # (apostrophe in "Couldn't" is HTML-escaped in the rendered flash)
       assert render_hook(view, "computer_use_grant", %{}) =~ "open the permission prompts"
     end
+  end
+
+  # M34 native setup 7.6: the refusal executes in the daemon's two shared write
+  # tails, so the browser door inherits it on every form submit. What the door
+  # owes back is the daemon's own sentence and the one action that clears the
+  # state; before this it rendered the refusal tuple and offered no way out.
+  describe "settings file changed outside Fermix" do
+    # `Settings.reload/1` pushes the whole parsed document into application
+    # environment, which is wider than the keys the module setup restores, so
+    # this block snapshots both applications and puts them back itself.
+    setup %{tmp_home: tmp_home} do
+      core = Application.get_all_env(:fermix_core)
+      channels = Application.get_all_env(:fermix_channels)
+
+      on_exit(fn ->
+        restore_all_env(:fermix_core, core)
+        restore_all_env(:fermix_channels, channels)
+      end)
+
+      path = Path.join(tmp_home, "config.toml")
+      File.write!(path, seeded_settings())
+
+      # What a running daemon has done by the time a browser reaches it: read
+      # the file once and recorded it. Every write after this line is outside.
+      :ok = RestartState.record_persisted_baseline()
+
+      %{config_path: path}
+    end
+
+    test "the banner names the change and one reload lets the next save through",
+         %{conn: conn, config_path: path} do
+      File.write!(path, outside_settings())
+
+      {:ok, view, html} = live(conn, "/setup")
+
+      assert html =~ "The settings file changed outside Fermix."
+      assert html =~ "compaction"
+      assert html =~ "Reload settings from disk"
+      assert html =~ ~s(phx-click="reload_settings")
+
+      view |> element("button[phx-value-tab=\"sandbox\"]") |> render_click()
+
+      refused = submit_sandbox(view)
+
+      assert refused =~ "Save failed: The settings file changed outside Fermix."
+      refute refused =~ "Sandbox saved."
+      # The defect this covers: the raw refusal tuple reaching the operator.
+      refute refused =~ "external_change"
+      refute refused =~ ":compaction"
+
+      reloaded = view |> element(~s|button[phx-click="reload_settings"]|) |> render_click()
+
+      assert reloaded =~ "Settings reloaded from the settings file."
+      refute reloaded =~ "The settings file changed outside Fermix."
+      refute reloaded =~ ~s(phx-click="reload_settings")
+
+      assert submit_sandbox(view) =~ "Sandbox saved."
+    end
+
+    # The other state, and it never offers a reload: the reload runs the same
+    # parse that just failed, so the button would be a loop with no exit.
+    test "an unreadable file shows the parser's own sentence and no reload",
+         %{conn: conn, config_path: path} do
+      File.write!(path, "[fermix_core.providers]\nopenai = 5\n")
+
+      assert {:config_unreadable, sentence} = RestartState.config_state()
+
+      {:ok, view, html} = live(conn, "/setup")
+
+      assert html =~ escaped(sentence)
+      refute html =~ ~s(phx-click="reload_settings")
+
+      view |> element("button[phx-value-tab=\"sandbox\"]") |> render_click()
+
+      refused = submit_sandbox(view)
+
+      assert refused =~ escaped(sentence)
+      refute refused =~ "config_unreadable"
+      refute refused =~ "Sandbox saved."
+    end
+  end
+
+  defp submit_sandbox(view) do
+    view
+    |> form("form[phx-submit=\"save_sandbox\"]",
+      sandbox_form: %{mode: "standard", profile: "assistant", env_allow: ""}
+    )
+    |> render_submit()
+  end
+
+  defp seeded_settings do
+    """
+    [fermix_core.compaction]
+    threshold = 0.7
+    """
+  end
+
+  defp outside_settings do
+    """
+    [fermix_core.compaction]
+    threshold = 0.5
+    """
+  end
+
+  # Puts an application's environment back exactly as it was: keys the body
+  # added are deleted, keys it changed are restored.
+  defp restore_all_env(app, saved) do
+    app
+    |> Application.get_all_env()
+    |> Enum.reject(fn {key, _value} -> List.keymember?(saved, key, 0) end)
+    |> Enum.each(fn {key, _value} -> Application.delete_env(app, key) end)
+
+    Enum.each(saved, fn {key, value} -> Application.put_env(app, key, value) end)
   end
 end

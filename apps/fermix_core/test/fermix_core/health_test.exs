@@ -224,4 +224,61 @@ defmodule FermixCore.HealthTest do
              %{name: "anthropic", auth_mode: :api_key, primary: true}
            ] = report.providers
   end
+
+  # Restart truth has one owner. Reading it from the boot report would leave an
+  # out-of-process settings write invisible until someone happened to save.
+  test "restart_required? and restart_reasons come from the restart state" do
+    report =
+      Health.report(
+        boot_report: %{
+          status: :ready,
+          failures: [],
+          config_path: ConfigStore.path(),
+          restart_required?: false
+        },
+        restart: %{
+          required: true,
+          reasons: [
+            %{section: "providers", sentence: "Provider settings changed."},
+            %{section: "realtime", sentence: "Voice settings changed."}
+          ]
+        }
+      )
+
+    assert report.restart_required?
+    assert report.restart_reasons == ["providers", "realtime"]
+  end
+
+  # The nested combination the gating split creates, decided rather than left to
+  # emerge: an advisory failure is by definition not a reason to call the daemon
+  # unhealthy, and escalating it would rebuild the any-failure-is-setup_required
+  # behaviour the split exists to remove.
+  test "an advisory channel failure does not escalate the top-level verdict" do
+    Application.put_env(:fermix_channels, :telegram, enabled: true, mode: :webhook)
+
+    report =
+      Health.report(
+        boot_report: %{
+          status: :ready,
+          failures: [
+            %{
+              component: "channel:telegram",
+              action: "Set the Telegram bot token.",
+              gating: false,
+              pane: "channels",
+              detail_key: "channel:telegram"
+            }
+          ],
+          config_path: ConfigStore.path(),
+          restart_required?: false
+        },
+        restart: %{required: false, reasons: []}
+      )
+
+    assert report.status == :ready
+
+    assert Enum.any?(report.channels, fn channel ->
+             channel.name == "telegram" and channel.status == :setup_required
+           end)
+  end
 end

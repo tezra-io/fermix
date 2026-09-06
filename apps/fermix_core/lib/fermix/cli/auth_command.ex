@@ -30,8 +30,10 @@ defmodule Fermix.CLI.AuthCommand do
     import_claude_code: :boolean
   ]
   @provider_switches [provider: :string]
-  @anthropic_profile "anthropic_oauth"
-  @xai_profile "xai_oauth"
+  # `Auth.Store.profile/1` is the one provider-to-profile resolver; these are
+  # its answers, not a second table.
+  @anthropic_profile Store.profile(:anthropic)
+  @xai_profile Store.profile(:xai)
 
   @spec run([String.t()]) :: non_neg_integer()
   def run(argv) when is_list(argv) do

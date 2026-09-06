@@ -16,6 +16,7 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias Fermix.CLI.VersionSkew
   alias FermixCore.Acp.IdentityStore
   alias FermixCore.Auth.Store, as: AuthStore
+  alias FermixCore.Boot.PathBaseline
   alias FermixCore.Browser.ChromeLauncher
   alias FermixCore.Browser.Config, as: BrowserConfig
   alias FermixCore.BuildInfo
@@ -41,8 +42,10 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias FermixCore.Resource.Registry, as: ResourceRegistry
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Sandbox.Mode, as: SandboxMode
+  alias FermixCore.Setup.Coexistence
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.Doctor, as: ProviderProbe
+  alias FermixCore.Setup.RestartState
   alias FermixCore.Setup.SecretMigration
   alias FermixCore.SkillCuration.Config, as: SkillCurationConfig
   alias FermixCore.SkillCuration.Delivery, as: SkillCurationDelivery
@@ -63,14 +66,110 @@ defmodule Fermix.CLI.Doctor.Checks do
   @spec readiness() :: result()
   def readiness do
     report = FermixCore.Readiness.report()
+    gating = FermixCore.Readiness.gating_failures(report.failures)
+    advisory = report.failures -- gating
 
-    case report.status do
-      :ready ->
-        ok("readiness", "all configured integrations are present")
+    # Keyed on the two failure sets rather than on `status`, which is derived
+    # from the gating set and would say nothing about the advisory one. There is
+    # deliberately no `:degraded` clause: `status_for/1` cannot return it, and a
+    # clause the compiler proves dead is a branch nothing can reach.
+    case {gating, advisory} do
+      {[], []} -> ok("readiness", "all configured integrations are present")
+      {[], [_ | _]} -> warn("readiness", readiness_summary(advisory))
+      {[_ | _], _advisory} -> fail("readiness", readiness_summary(report.failures))
+    end
+  end
 
-      :setup_required ->
-        actions = Enum.map_join(report.failures, "; ", & &1.action)
-        fail("readiness", actions)
+  # Names the components rather than discarding them: an app that renders
+  # Attention rows for exactly these failures must not also render a Doctor row
+  # calling them absent.
+  defp readiness_summary(failures) do
+    Enum.map_join(failures, "; ", fn failure -> "#{failure.component}: #{failure.action}" end)
+  end
+
+  @doc """
+  Whether settings were changed since the daemon started.
+
+  A pending restart warns rather than passes, and names *which* sections are
+  waiting: the saved settings are not the running ones until the restart
+  happens, and the row is what carries the restart remediation to the operator.
+  """
+  @spec restart_pending() :: result()
+  def restart_pending do
+    case RestartState.restart() do
+      %{required: false} ->
+        ok("restart_pending", "no restart is needed")
+
+      %{reasons: reasons} ->
+        warn("restart_pending", "restart to apply: #{Enum.map_join(reasons, ", ", & &1.section)}")
+    end
+  end
+
+  @doc """
+  Whether the settings file changed outside this daemon, or cannot be read.
+
+  Three states and three answers, because the remedies differ: a changed file is
+  read again, an unreadable one is repaired, and a clear one needs nothing. They
+  are deliberately not folded into one warning.
+  """
+  @spec external_config_change() :: result()
+  def external_config_change do
+    case RestartState.config_state() do
+      :clear ->
+        ok("external_config_change", "the settings file matches what Fermix last wrote")
+
+      {:external_change, sections} ->
+        warn(
+          "external_config_change",
+          "changed outside Fermix: #{Enum.join(sections, ", ")}. Reload settings from disk."
+        )
+
+      {:config_unreadable, sentence} ->
+        fail("external_config_change", sentence)
+    end
+  end
+
+  @doc "Whether a launchd unit this engine does not own is installed."
+  @spec legacy_service_unit() :: result()
+  def legacy_service_unit do
+    case Coexistence.legacy_service_unit() do
+      %{present: false} ->
+        ok("legacy_service_unit", "no other Fermix service is installed")
+
+      %{scope: scope, path: path} ->
+        warn(
+          "legacy_service_unit",
+          "another Fermix service is installed at #{scope} scope: #{path}"
+        )
+    end
+  end
+
+  @doc "Whether any stored key cannot be read without a keychain prompt."
+  @spec secret_acl_restricted() :: result()
+  def secret_acl_restricted do
+    case Coexistence.secret_acl_restricted() do
+      %{present: false} ->
+        ok("secret_acl_restricted", "every stored key is readable")
+
+      %{keys: keys} ->
+        warn("secret_acl_restricted", "stored keys need re-saving: #{Enum.join(keys, ", ")}")
+    end
+  end
+
+  @doc """
+  Whether the process PATH carries the baseline directories.
+
+  Names which world produced the PATH it prints, so a reader is never silently
+  comparing a daemon's environment with a shell's.
+  """
+  @spec engine_path_baseline() :: result()
+  def engine_path_baseline do
+    case PathBaseline.missing_dirs() do
+      [] ->
+        ok("engine_path_baseline", "PATH carries every baseline directory")
+
+      missing ->
+        warn("engine_path_baseline", "PATH is missing: #{Enum.join(missing, ", ")}")
     end
   end
 

@@ -859,7 +859,7 @@ defmodule FermixCore.Setup.Doctor do
       mode when mode in [:oauth, "oauth"] ->
         probe_xai_bearer(
           config,
-          require_oauth_token("xai_oauth", "xai", opts),
+          require_oauth_token(Store.profile(:xai), "xai", opts),
           "Grok subscription OAuth",
           opts
         )
@@ -1157,7 +1157,7 @@ defmodule FermixCore.Setup.Doctor do
   end
 
   defp require_anthropic_oauth_token(opts),
-    do: require_oauth_token("anthropic_oauth", "anthropic", opts)
+    do: require_oauth_token(Store.profile(:anthropic), "anthropic", opts)
 
   defp require_oauth_token(profile, label, opts) do
     cond do
