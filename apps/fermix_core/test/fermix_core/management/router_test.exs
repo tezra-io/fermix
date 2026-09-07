@@ -674,15 +674,21 @@ defmodule FermixCore.Management.RouterTest do
     test "an import and a sign-out answer their own shapes", %{operation_opts: opts} do
       importer = fn -> {:ok, %{auth_mode: "oauth", tokens: %{}, expires_at: nil}} end
 
-      # `promote:` and `drop_live_tokens:` are injected because their real
-      # implementations reach beyond this case: the promotion writes the suite's
-      # `config.toml`, and the token drop invalidates the tree's own manager for
-      # every module that runs after this one.
+      # Every step the import runs after it answers is injected, because each
+      # one reaches beyond this case: the route write and the promotion rewrite
+      # the suite's `config.toml` through the real `Wizard`, the reload starts a
+      # permanent `anthropic_oauth` manager under `Auth.TokenSupervisor`'s
+      # dynamic supervisor that nothing reaps, and the token drop invalidates
+      # the tree's own manager for every module that runs after this one. The
+      # asserted view is the *started* one, so an uninjected step leaves no mark
+      # here and fails `AuthCompletionTest` three cases at a time instead.
       assert {:ok, imported} =
                Router.route(v2("auth.import.start", %{"source" => "claude_code"}),
                  operation_opts:
                    opts
                    |> Keyword.put(:importer, importer)
+                   |> Keyword.put(:set_auth_mode, fn :anthropic, :oauth -> {:ok, %{}} end)
+                   |> Keyword.put(:reload, fn -> :ok end)
                    |> Keyword.put(:promote, fn _provider -> :ok end)
                )
 

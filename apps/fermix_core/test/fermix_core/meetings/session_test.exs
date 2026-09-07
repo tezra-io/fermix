@@ -349,7 +349,7 @@ defmodule FermixCore.Meetings.SessionTest do
     test "resolves the sidecar and moves on", ctx do
       meeting = start!(ctx)
 
-      assert_receive {:source_started, _source, args}
+      %{args: args} = launched!(meeting)
       assert args.url == @meet_url
       assert args.meet_code == "abc-defg-hij"
       assert Session.status(meeting.pid) == :launching
@@ -368,7 +368,7 @@ defmodule FermixCore.Meetings.SessionTest do
     test "the zoom lane never enters installing", ctx do
       meeting = start!(ctx, platform: "zoom")
 
-      assert_receive {:source_started, _source, args}
+      %{args: args} = launched!(meeting)
       assert args.meeting_no == "123456789"
       assert phase_recorded?(meeting.id, "requested", "launching")
       refute phase_recorded?(meeting.id, "requested", "installing")
@@ -423,7 +423,7 @@ defmodule FermixCore.Meetings.SessionTest do
 
     test "an unanswered knock leaves and ends as knock_timeout", ctx do
       meeting = start!(ctx, timers: %{knock_ms: 30})
-      assert_receive {:source_started, source, _args}
+      %{source: source} = launched!(meeting)
       send(meeting.pid, {:meeting_phase, :joining, %{}})
       send(meeting.pid, {:meeting_phase, :knocking, %{}})
 
@@ -514,12 +514,15 @@ defmodule FermixCore.Meetings.SessionTest do
 
     test "an unknown transcription backend fails the meeting loudly", ctx do
       meeting = start!(ctx, config: config(transcription_backend: "wishful"))
-      assert_receive {:source_started, source, _args}
+      %{source: source} = launched!(meeting)
       send(meeting.pid, {:meeting_phase, :joining, %{}})
       send(meeting.pid, {:meeting_join_result, :admitted, %{}})
 
-      assert_receive {:source_leave, ^source}
+      # Failing the meeting tears the source down, and stopping it drains the
+      # leave cast first — so the notice has landed by the time the session is
+      # down. Reading it after that is the ordering; 100 ms is a guess at it.
       await_stop(meeting)
+      assert_received {:source_leave, ^source}
       assert %{status: "failed", error: error} = row(ctx, meeting.id)
       assert error =~ "stt_open_failed"
       assert error =~ "wishful"
@@ -527,12 +530,12 @@ defmodule FermixCore.Meetings.SessionTest do
 
     test "a stream that will not open leaves the meeting and fails", ctx do
       meeting = start!(ctx, transcription: FailingTranscription)
-      assert_receive {:source_started, source, _args}
+      %{source: source} = launched!(meeting)
       send(meeting.pid, {:meeting_phase, :joining, %{}})
       send(meeting.pid, {:meeting_join_result, :admitted, %{}})
 
-      assert_receive {:source_leave, ^source}
       await_stop(meeting)
+      assert_received {:source_leave, ^source}
       assert %{status: "failed", error: error} = row(ctx, meeting.id)
       assert error =~ "stt_open_failed"
       assert error =~ "missing_api_key"
@@ -706,7 +709,9 @@ defmodule FermixCore.Meetings.SessionTest do
       assert_receive {:stt_opened, stream}
 
       Session.leave(meeting.pid)
-      assert_receive {:source_leave, _source}
+      handled!(meeting.pid)
+      handled!(meeting.source)
+      assert_received {:source_leave, _source}
       send(meeting.pid, {:meeting_source_error, {:sidecar_error, "page_crash", "gone"}})
 
       assert_receive {:stt_finish, ^stream}, 2_000
@@ -718,11 +723,11 @@ defmodule FermixCore.Meetings.SessionTest do
 
     test "a leave before capture ends the meeting with the operator's reason", ctx do
       meeting = start!(ctx)
-      assert_receive {:source_started, source, _args}
+      %{source: source} = launched!(meeting)
 
       Session.leave(meeting.pid)
-      assert_receive {:source_leave, ^source}
       await_stop(meeting)
+      assert_received {:source_leave, ^source}
       assert %{status: "failed", error: ":operator_left"} = row(ctx, meeting.id)
 
       # The leave was the operator's own act: a "couldn't join" warning after
@@ -738,12 +743,14 @@ defmodule FermixCore.Meetings.SessionTest do
       assert_receive {:stt_opened, stream}
 
       send(meeting.pid, {:meeting_ended, :meeting_closed})
+      handled!(meeting.pid)
+      handled!(stream)
 
       # The source and the sleep guard stop first; the stream is finished, not
       # aborted, so the tail still arrives.
-      assert_receive {:source_stopped, ^source}
-      assert_receive {:caffeinate_stop, :stub_guard}
-      assert_receive {:stt_finish, ^stream}
+      assert_received {:source_stopped, ^source}
+      assert_received {:caffeinate_stop, :stub_guard}
+      assert_received {:stt_finish, ^stream}
 
       send(meeting.pid, {:transcript_segment, stream, segment(2_000, 4_000, "one last thing")})
       send(meeting.pid, {:transcript_stream_closed, stream, %{segments: 2, dropped: 0}})
@@ -782,7 +789,7 @@ defmodule FermixCore.Meetings.SessionTest do
     end
 
     test "a stalled drain keeps what was captured and moves on", ctx do
-      meeting = capturing_with_segment!(ctx, timers: %{summarize_ms: 40})
+      meeting = capturing_with_segment!(ctx, timers: %{drain_ms: 40})
       assert_receive {:stt_opened, stream}
 
       send(meeting.pid, {:meeting_ended, :meeting_closed})
@@ -862,7 +869,7 @@ defmodule FermixCore.Meetings.SessionTest do
     end
 
     test "a close that raced the drain watchdog still delivers the notes", ctx do
-      meeting = capturing_with_segment!(ctx, timers: %{summarize_ms: 60})
+      meeting = capturing_with_segment!(ctx, timers: %{drain_ms: 60})
       assert_receive {:stt_opened, stream}
 
       send(meeting.pid, {:meeting_ended, :meeting_closed})
@@ -1067,9 +1074,30 @@ defmodule FermixCore.Meetings.SessionTest do
   # itself under test only where two sessions are given the same key.
   defp capacity_key, do: {:capacity_slot, System.unique_integer([:positive])}
 
+  # `Session.init/1` returns `{:continue, :start}`, and a gen_server runs its
+  # continue before it receives anything at all — so by the time this state read
+  # is answered the source has been started and its stub has already reported.
+  # Reading the pid out of the session is that ordering made explicit; waiting
+  # for the report through `assert_receive` is the same claim through a 100 ms
+  # clock, and the launch it is timing — two status writes and a phase event
+  # apiece — has been measured at 80 ms on a runner shared with the whole async
+  # suite. Pinning the pid also makes a report leaked by an earlier test's still
+  # terminating session unmatchable rather than mistakable for this one's.
+  defp launched!(meeting) do
+    %{source: %{pid: source}} = :sys.get_state(meeting.pid)
+    assert_received {:source_started, ^source, args}
+
+    %{source: source, args: args}
+  end
+
+  # A gen_server answers a state read only after it has handled everything sent
+  # to it earlier, so this turns "has it acted on that message yet" from a
+  # 100 ms window into the ordering the runtime already guarantees.
+  defp handled!(server), do: :sys.get_state(server)
+
   defp admitted!(ctx, opts \\ []) do
     meeting = start!(ctx, opts)
-    assert_receive {:source_started, source, _args}
+    %{source: source} = launched!(meeting)
     send(meeting.pid, {:meeting_phase, :joining, %{}})
     send(meeting.pid, {:meeting_join_result, :admitted, %{}})
     assert Session.status(meeting.pid) == :capturing
