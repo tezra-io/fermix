@@ -1122,6 +1122,59 @@ def test_subagent_synthesis_accepts_one_paragraph_of_correct_sentences(tmp_path)
     assert _summary_score(tmp_path, scoped, PROSE_SUMMARY) == 1.0
 
 
+HEADING_SUMMARY = (
+    "Combined Subsystem Summary\n"
+    "\n"
+    "Gateway — FALCON-G7\n"
+    "Routes channel messages to the agent and serializes one FIFO turn per "
+    "conversation. Owned by Platform, with a weekly on-call rotation.\n"
+    "\n"
+    "Memory — OTTER-M3\n"
+    "Provides durable SQLite storage backed by an ETS cache and consolidates facts. "
+    "Owned by the Knowledge team.\n"
+    "\n"
+    "Scheduler — HERON-S9\n"
+    "Runs cron and interval jobs as isolated bounded agent loops that cannot see the "
+    "creating chat. Owned by Automation.\n"
+    "\n"
+    "Sandbox — BADGER-X2\n"
+    "Gates the shell, file and git built-ins with strict, standard and open modes; "
+    "protected paths are always denied. Owned by Security.\n")
+
+
+def test_subagent_synthesis_accepts_a_heading_per_subsystem(tmp_path):
+    # The layout every gpt-6-astra trial wrote on 2026-09-07: the codename on a
+    # heading line, the role and the team on the lines under it. Every codename, role
+    # and team was present and the checker scored 0/4 fifteen times, because the
+    # heading unit carried no team and the team unit carried no codename.
+    scoped = _seed(tmp_path, SUBSYSTEMS_SEED)
+    assert _summary_score(tmp_path, scoped, HEADING_SUMMARY) == 1.0
+
+
+def test_subagent_synthesis_accepts_headings_without_blank_lines(tmp_path):
+    # The next heading ends the previous attachment even with no paragraph break.
+    scoped = _seed(tmp_path, SUBSYSTEMS_SEED)
+    assert _summary_score(tmp_path, scoped, HEADING_SUMMARY.replace("\n\n", "\n")) == 1.0
+
+
+def test_subagent_synthesis_does_not_attach_a_closing_paragraph(tmp_path):
+    # A closing paragraph naming the other teams is not a claim about the last
+    # subsystem: the paragraph break ends the attachment.
+    scoped = _seed(tmp_path, SUBSYSTEMS_SEED)
+    closing = HEADING_SUMMARY + ("\nTogether the Platform, Knowledge, Automation and "
+                                "Security teams own one subsystem each.\n")
+    assert _summary_score(tmp_path, scoped, closing) == 1.0
+
+
+def test_subagent_synthesis_rejects_a_wrong_team_under_a_heading(tmp_path):
+    # The line under a heading is that subsystem's claim, so a foreign team there
+    # zeroes it exactly as it would inside one sentence.
+    scoped = _seed(tmp_path, SUBSYSTEMS_SEED)
+    wrong = HEADING_SUMMARY.replace("Owned by Platform, with a weekly on-call rotation.",
+                                    "Owned by Security.")
+    assert _summary_score(tmp_path, scoped, wrong) == 0.75
+
+
 NEGATIVE_ROLE_SUMMARY = (
     "Gateway (FALCON-G7) — owner team Platform; routes channel messages.\n"
     "Memory (OTTER-M3) — owner team Knowledge; a durable SQLite store.\n"

@@ -28,6 +28,15 @@ _WS_RE = re.compile(r"\s+")
 # physics constant written in sci-notation used to score 0 because the exponent was
 # grabbed as a separate number.
 _NUMBER_RE = re.compile(r"-?\d[\d,]*(?:\.\d+)?(?:[eE][+-]?\d+)?")
+# A citation is not part of the answer. A URL carries digits and words of its own — a
+# year in a newsroom slug, a document number, a query id — so a cited reply reads as a
+# hedge under `single`, puts the wrong number last under the plain numeric rule, and
+# pushes a proximity regex past its window. All three happened on every gpt-6-astra
+# web-research trial on 2026-09-07, each with the right answer stated first. Markdown
+# link targets and bare URLs are removed before any matcher sees the reply; the link
+# TEXT stays, because that is where an answer written as a link lives.
+_LINK_TARGET_RE = re.compile(r"\]\((?:https?://|www\.)[^)\s]*\)")
+_BARE_URL_RE = re.compile(r"(?:https?://|www\.)\S+")
 
 
 @dataclass
@@ -49,6 +58,10 @@ def score_answer(reply: str, spec: dict) -> AnswerScore:
     """
     method = spec.get("match")
     expected = spec.get("expected")
+    # One rule, before every matcher: a cited source is evidence for the answer, not a
+    # second answer. A spec that asks for a URL keeps them, so the rule cannot defeat
+    # the one kind of case it would be wrong for.
+    reply = reply if _expects_url(expected) else _without_urls(reply)
     if method == "exact":
         return _exact(reply, expected)
     if method == "numeric":
@@ -143,6 +156,17 @@ def _normalize(s: str) -> str:
 
 def _tokens(s: str) -> list[str]:
     return _normalize(s).split()
+
+
+def _without_urls(s: str) -> str:
+    """The reply with its citations removed: a Markdown link keeps its text and loses
+    its target, and a bare URL becomes whitespace."""
+    return _BARE_URL_RE.sub(" ", _LINK_TARGET_RE.sub("]", s or ""))
+
+
+def _expects_url(expected) -> bool:
+    """Whether the case is asking for a URL, in which case citations are the answer."""
+    return bool(_BARE_URL_RE.search(_as_text(expected)))
 
 
 def _all_numbers(s: str) -> list[float]:

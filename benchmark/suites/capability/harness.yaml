@@ -32,7 +32,7 @@ scenarios:
       - id: harness_delegated_bugfix
         query: >
           In {ws} there's a tiny Python project (greeter.py) with a failing test
-          — run `python -m pytest tests/` from {ws} to see it. First initialize
+          — run `python3 -m pytest tests/` from {ws} to see it. First initialize
           {ws} as a git repository and commit the current state. Then have one
           of your coding agents (codex or claude) fix the bug in
           {ws}/greeter.py so ALL tests pass and commit the fix in that repo —
@@ -52,7 +52,7 @@ scenarios:
           greet.py NAME` prints one greeting line. First initialize {ws} as a
           git repository and commit the current state. Then have one of your
           coding agents (codex or claude) add a `--repeat N` flag so that
-          `python greet.py NAME --repeat N` prints the greeting line exactly N
+          `python3 greet.py NAME --repeat N` prints the greeting line exactly N
           times, one per line, with the default remaining a single line — and
           commit the change in that repo. Delegate the implementation to a
           coding-agent run rather than writing it yourself. The run continues in

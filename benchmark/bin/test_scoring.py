@@ -71,6 +71,41 @@ def test_numeric_does_not_award_a_number_buried_before_a_trailing_figure():
                                            "tolerance": 0.1}).score == 1.0
 
 
+def test_numeric_ignores_the_digits_of_a_cited_url():
+    # Every gpt-6-astra web-research trial on 2026-09-07 answered with the right figure
+    # and then a source URL whose slug carried a year or a document number: the last
+    # number in the reply was the URL's, and `single` read the two as a hedge.
+    spec = {"match": "numeric", "expected": 16100, "tolerance": 0, "single": True}
+    cited = ("16100 Source: https://www.irs.gov/newsroom/irs-releases-tax-inflation-"
+             "adjustments-for-tax-year-2026-including-amendments")
+    assert scoring.score_answer(cited, spec).score == 1.0
+    assert scoring.score_answer("184500  https://www.ssa.gov/faqs/en/questions/KA-02387.html",
+                         {"match": "numeric", "expected": 184500, "single": True}).score == 1.0
+    # A Markdown link keeps its text (the committed answer) and drops its target: the
+    # figure inside the brackets is the answer, the 2026 in the slug is not.
+    linked = "[16100](https://www.irs.gov/newsroom/tax-inflation-adjustments-tax-year-2026)"
+    assert scoring.score_answer(linked, spec).score == 1.0
+    # A genuine hedge is still a hedge once the citation is gone.
+    hedged = "either 15750 or 16100, see https://www.irs.gov/newsroom/tax-year-2026"
+    assert scoring.score_answer(hedged, spec).score == 0.0
+
+def test_regex_proximity_survives_a_link_between_its_two_halves():
+    # The RAV4 case pairs the model name with its mpg inside a 40-character window; a
+    # link target between them is 44 characters of citation, not 44 characters of
+    # distance between the two facts.
+    spec = {"match": "regex",
+            "expected": r"(?i)(rav[\s-]?4[\s\S]{0,40}\b39\b|\b39\b[\s\S]{0,40}rav[\s-]?4)"}
+    cited = "[RAV4](https://www.fueleconomy.gov/feg/noframes/47392.shtml): 39"
+    assert scoring.score_answer(cited, spec).score == 1.0
+
+
+def test_a_case_that_asks_for_a_url_still_sees_one():
+    # The rule must not defeat the one kind of case it would be wrong for.
+    spec = {"match": "contains", "expected": "https://www.irs.gov/pub/irs-drop/rp-25-19.pdf"}
+    assert scoring.score_answer("Source: https://www.irs.gov/pub/irs-drop/rp-25-19.pdf",
+                                spec).score == 1.0
+
+
 def test_numeric_single_rejects_a_hedged_two_answer_reply():
     # A model that hedges between the trap value and the right one has not answered.
     hedged = "It is either 15750 or 16100 depending on the year."
