@@ -46,6 +46,14 @@ supports the [trace filters/exclusions](https://www.comet.com/docs/opik/referenc
 and [span filters/exclusions](https://www.comet.com/docs/opik/reference/rest-api/spans/get-spans-by-project)
 used here.
 
+`no trace found (CLI said ok)` can also mean the daemon's trace **upload** failed.
+Check its log for `Opik rejected /v1/private/traces/batch` or `Opik request` at the
+turn's completion time. ClickHouse memory pressure can reject inserts as well as
+reads. The exporter retries transient failures twice (500ms, then 1s) using the
+same IDs and payload; permanent or exhausted failures remain logged errors. This
+exporter change requires a daemon restart. A missing upload still makes the trial
+invalid; broader read filters cannot recover evidence that was never stored.
+
 ## Capability eval & cross-model ranking (`run_capability.py`)
 
 A second tier, distinct from the behavioral suites above. The behavioral runner
