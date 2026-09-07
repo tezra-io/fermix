@@ -22,12 +22,14 @@
 # it; an unsettable env read only advertises control that does not exist.
 WAIT_S=480
 POLL_S=10
+CHECKER_DIR=$(cd "$(dirname "$0")" && pwd)
+. "$CHECKER_DIR/_pytest_gate.sh"
 
 [ -d .git ] || { echo "no git repository in the scoped dir"; exit 1; }
 
-HIDDEN=$(mktemp -d) || { echo "cannot create hidden-test dir"; exit 1; }
+HIDDEN=$(mktemp -d) || { echo "cannot create hidden-test dir"; exit 2; }
 trap 'rm -rf "$HIDDEN"' EXIT
-cat > "$HIDDEN/test_hidden.py" <<'PYEOF'
+cat > "$HIDDEN/test_hidden.py" <<'PYEOF' || exit 2
 from greeter import greeting
 
 
@@ -44,8 +46,7 @@ def test_shout_multiword_name():
 PYEOF
 
 hidden_tests() {
-    env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$PWD" uv run --quiet --with pytest \
-        python -m pytest -q "$HIDDEN"
+    PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$PWD" pytest_verdict "$HIDDEN"
 }
 
 # Committed AND correct: at least one commit, a clean tree (ignoring the bytecode
@@ -55,12 +56,13 @@ committed_and_correct() {
     [ "$commits" -ge 1 ] || return 1
     dirty=$(git status --porcelain | grep -vE '(__pycache__|\.pyc$)' || true)
     [ -z "$dirty" ] || return 1
-    hidden_tests >/dev/null 2>&1
+    hidden_tests >/dev/null
 }
 
 deadline=$(( $(date +%s) + WAIT_S ))
 while :; do
-    if committed_and_correct; then exit 0; fi
+    if committed_and_correct; then exit 0; else result=$?; fi
+    if [ "$result" -ne 1 ]; then exit "$result"; fi
     [ "$(date +%s)" -ge "$deadline" ] && break
     sleep "$POLL_S"
 done

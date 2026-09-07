@@ -222,6 +222,10 @@ def _preflight(spec, fermix_home, evidence) -> str | None:
 
 
 def _result_of(mode: str, proc: subprocess.CompletedProcess) -> CheckerResult:
+    valid_codes = (0, 1) if mode == "exit" else (0,)
+    if proc.returncode not in valid_codes:
+        tail = (proc.stderr or proc.stdout or "").strip()[:200]
+        return CheckerResult(0.0, "", f"checker process failed: exit={proc.returncode} {tail}")
     if mode == "exit":
         tail = (proc.stdout or proc.stderr or "").strip()[:200]
         return CheckerResult(1.0 if proc.returncode == 0 else 0.0, f"exit={proc.returncode} {tail}")

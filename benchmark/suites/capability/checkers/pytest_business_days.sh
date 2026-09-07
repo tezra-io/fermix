@@ -8,11 +8,11 @@ CHECKER_DIR=$(cd "$(dirname "$0")" && pwd)
 . "$CHECKER_DIR/_pytest_gate.sh"
 
 FIXTURE_TESTS="$CHECKER_DIR/../fixtures/code/business_days/tests"
-gate_visible_tests "$FIXTURE_TESTS" || exit 1
+gate_visible_tests "$FIXTURE_TESTS" || exit "$?"
 
-HIDDEN=$(mktemp -d) || { echo "cannot create hidden-test dir"; exit 1; }
+HIDDEN=$(mktemp -d) || { echo "cannot create hidden-test dir"; exit 2; }
 trap 'rm -rf "$HIDDEN"' EXIT
-cat > "$HIDDEN/test_hidden.py" <<'EOF'
+cat > "$HIDDEN/test_hidden.py" <<'EOF' || exit 2
 from datetime import date
 from business_days import business_days_between
 

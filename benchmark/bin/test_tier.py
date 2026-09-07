@@ -13,6 +13,7 @@ keychain. Run: `uv run bin/test_tier.py`."""
 from __future__ import annotations
 
 import os
+from pathlib import Path
 import subprocess
 import sys
 
@@ -155,6 +156,30 @@ def test_print_only_refuses_extra_arguments(stub_path):
     p = run_print(None, stub_path, args=["--print", "capability", "--trials", "9"])
     assert p.returncode == 2
     assert "usage:" in p.stderr
+
+
+@pytest.mark.parametrize("check_exit,run_exit", [(0, 0), (0, 2), (0, 4), (0, 5), (3, 0)])
+def test_auto_run_preserves_exit_code_and_always_cleans_up(tmp_path, check_exit, run_exit):
+    # Exercise the real run function with startup/teardown stubbed: no daemon or home.
+    source = Path(HERE, "capability-daemon.sh").read_text()
+    body = source.split("\nrun() {\n", 1)[1].split("\n}\n", 1)[0]
+    uv = tmp_path / "uv"
+    uv.write_text('#!/bin/sh\ncase " $* " in\n'
+                  f'  *" --check "*) exit {check_exit} ;;\n'
+                  f'  *) exit {run_exit} ;;\nesac\n')
+    uv.chmod(0o755)
+    script = ('set -euo pipefail\n'
+              'log() { printf "%s\\n" "$*" >&2; }\n'
+              'up() { :; }\n'
+              'down() { printf "cleaned\\n"; }\n'
+              'run() {\n' + body + '\n}\nrun\n')
+    env = {**os.environ, "BENCH": BENCH, "BIN_DIR": HERE,
+           "HOME_DIR": str(tmp_path / "disposable-eval"), "PROJECT": "test-eval",
+           "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"]}
+    result = subprocess.run(["bash", "-c", script], env=env,
+                            capture_output=True, text=True, timeout=10)
+    assert result.returncode == (check_exit or run_exit), result.stderr
+    assert result.stdout.splitlines().count("cleaned") == 1
 
 
 if __name__ == "__main__":

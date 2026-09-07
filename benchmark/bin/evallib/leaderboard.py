@@ -46,7 +46,8 @@ STORE_VERSION = 2
 # runner stamps rows with this, and the board decides comparability from it. They were
 # two constants that happened to hold the same number, so bumping the hash scheme would
 # have left the newly-legacy rows flagged as current.
-CURRENT_HASH_VERSION = 2
+CURRENT_HASH_VERSION = 3
+# v2 omitted shared checker sources, so those older cohorts are also unranked.
 # v1 hashed only part of the episode definition (last query, score/rubric, tool
 # requirements), so two materially different task sets could share a hash. Rows carrying
 # it are NOT comparable with each other either — a shared v1 digest is not evidence of a
