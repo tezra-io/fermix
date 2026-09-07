@@ -30,11 +30,22 @@ scenarios:
       - id: bugfix_business_days
         query: >
           In {ws} there's a Python module business_days.py with a failing test — run
-          `python -m pytest tests/` from {ws} to see it. business_days_between(start,
+          `python3 -m pytest tests/` from {ws} to see it. business_days_between(start,
           end) should count Monday–Friday business days from start (inclusive) to end
           (exclusive). Fix the bug in {ws}/business_days.py so ALL tests pass. Do not
           edit the tests. Do this yourself with your own file and shell tools — do not
           delegate it to a coding agent.
+        # The prose cannot enforce itself. A daemon whose own prompt routes
+        # repository work to a coding harness overrides it, and the trial then
+        # reads as a coding failure when what happened was a delegation:
+        # gpt-6-astra delegated in all fifteen coding trials on 2026-09-07 and
+        # said why ("my operating rules require repository bug fixes to go
+        # through a coding harness"), scoring zero with the checker reporting
+        # only that the tests still failed. Declared here so the verdict names
+        # the constraint that was broken. An attempt counts: the span is there
+        # whether or not the run started.
+        expect:
+          tools_none: [codex_run, claude_code_run, codex_cloud_run]
         checker:
           script: "suites/capability/checkers/pytest_business_days.sh"
           mode: exit
@@ -57,11 +68,14 @@ scenarios:
       - id: invoice_discount_bug
         query: >
           In {ws} there's a small pricing module (invoice.py, discounts.py) with a
-          failing test — run `python -m pytest tests/` from {ws} to see it.
+          failing test — run `python3 -m pytest tests/` from {ws} to see it.
           invoice_total(lines, tax_pct) is supposed to return the sum of the DISCOUNTED
           line totals with tax applied, but it's dropping the per-line discounts. Fix the
           bug in {ws} so ALL tests pass. Do not edit the tests or the test file. Do this
           yourself with your own file and shell tools — do not delegate it to a coding agent.
+        # Graded, not merely asked: see bugfix_business_days above.
+        expect:
+          tools_none: [codex_run, claude_code_run, codex_cloud_run]
         checker:
           script: "suites/capability/checkers/pytest_invoice.sh"
           mode: exit
@@ -71,12 +85,15 @@ scenarios:
       - id: order_pipeline_boundary_bug
         query: >
           In {ws} there's an order-pricing package (catalog.py, pricing.py, report.py) with
-          a failing test — run `python -m pytest tests/` from {ws} to see it.
+          a failing test — run `python3 -m pytest tests/` from {ws} to see it.
           order_total_dollars is returning the wrong total for a 50-unit order: it's applying
           the wrong volume-discount tier. Trace the bug to its ROOT cause and fix it in {ws}
           so ALL tests pass. Do not edit the tests or the test file, and don't just special-case
           the failing input — fix the actual defect. Do this yourself with your own file and
           shell tools — do not delegate it to a coding agent.
+        # Graded, not merely asked: see bugfix_business_days above.
+        expect:
+          tools_none: [codex_run, claude_code_run, codex_cloud_run]
         # Root cause is a `>` vs `>=` off-by-one in catalog.bulk_tier (tier boundaries),
         # manifesting two modules away in report.order_total_dollars. Hidden tests exercise
         # the OTHER boundaries (10, 100) + tax, so a symptom-level patch in pricing/report

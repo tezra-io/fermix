@@ -19,10 +19,16 @@ sentence that carries its codename:
     if a correct sentence exists elsewhere — a summary that says both has established
     nothing.
 
-Only sentences naming exactly ONE codename are graded. A merged sentence naming two
-cannot attribute a team or a role to either of them, so it is evidence for neither
-rather than a contradiction against both; a subsystem that appears only inside such
-sentences scores 0 with that reason.
+A subsystem is graded on the units that speak about it: every sentence naming its
+codename alone, plus the codename-free sentences that follow such a sentence inside
+the same paragraph. That is what a heading layout is ("Gateway — FALCON-G7" on one
+line, the role and the team on the next): one claim about one subsystem, not a
+codename with nothing attached, which is how a summary that carried every codename,
+role and team scored 0/4 fifteen times on 2026-09-07. A paragraph break, or a
+sentence naming any other codename, ends the attachment. A merged sentence naming two
+codenames cannot attribute a team or a role to either of them, so it is evidence for
+neither rather than a contradiction against both, and it ends the attachment too; a
+subsystem that appears only inside such sentences scores 0 with that reason.
 
 Score = correct subsystems / 4.
 
@@ -98,6 +104,33 @@ def units(text):
     return [p.strip().lower() for p in parts if p.strip()]
 
 
+def paragraphs(text):
+    """Units grouped by paragraph (blank-line separated), so a heading's attachment
+    can end where the writer ended it."""
+    return [units(p) for p in re.split(r"\n\s*\n", text) if p.strip()]
+
+
+def attributed_units(paragraph_units, gold):
+    """Per subsystem, the units that speak about it: each unit naming its codename
+    alone, plus the codename-free units that follow such a unit within the same
+    paragraph. A unit naming another codename moves the attachment; a unit naming
+    two or more attributes nothing and ends it; a paragraph break ends it."""
+    codes = [g["code"].lower() for g in gold]
+    mine = [[] for _ in gold]
+    for paragraph in paragraph_units:
+        current = None
+        for unit in paragraph:
+            named = [i for i, code in enumerate(codes) if code in unit]
+            if len(named) == 1:
+                current = named[0]
+                mine[current].append(unit)
+            elif named:
+                current = None
+            elif current is not None:
+                mine[current].append(unit)
+    return mine
+
+
 def word(text):
     """A whole-word pattern, so "platform" doesn't match inside "platforms-team"."""
     return r"\b" + re.escape(text) + r"\b"
@@ -119,18 +152,8 @@ def team_mention(unit, team):
     return "denial" if has(before, NEGATIONS) else "claim"
 
 
-def sole_codename_units(summary_units, gold, index):
-    """Units naming THIS codename and no other. A merged sentence attributes nothing to
-    either subsystem, so it is not evidence and not a contradiction."""
+def score_subsystem(summary_units, mine, gold, terms, index):
     code = gold[index]["code"].lower()
-    others = [g["code"].lower() for i, g in enumerate(gold) if i != index]
-    return [u for u in summary_units
-            if code in u and not any(other in u for other in others)]
-
-
-def score_subsystem(summary_units, gold, terms, index):
-    code = gold[index]["code"].lower()
-    mine = sole_codename_units(summary_units, gold, index)
     if not mine:
         if any(code in u for u in summary_units):
             return 0, "only named alongside another subsystem"
@@ -156,9 +179,11 @@ if not os.path.isfile(summary_path):
     lib.refuse("no summary.txt")
 gold = load_gold(ws)
 terms = role_terms(gold)
-summary_units = units(lib.read_text(summary_path, "summary.txt"))
-
-results = [score_subsystem(summary_units, gold, terms, i) for i in range(len(gold))]
+summary_text = lib.read_text(summary_path, "summary.txt")
+summary_units = units(summary_text)
+attributed = attributed_units(paragraphs(summary_text), gold)
+results = [score_subsystem(summary_units, attributed[i], gold, terms, i)
+           for i in range(len(gold))]
 correct = sum(point for point, _why in results)
 detail = ", ".join(f"{gold[i]['code']}={results[i][1]}" for i in range(len(gold)))
 lib.emit(correct / float(len(gold)), f"{correct}/{len(gold)} subsystems: {detail}")

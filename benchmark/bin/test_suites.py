@@ -226,6 +226,25 @@ def test_multi_turn_behavioral_case_is_allowed(tmp_path):
     assert len(scn.cases[0].turns) == 2
 
 
+RUN_TOOLS = ("codex_run", "claude_code_run", "codex_cloud_run")
+
+
+def test_the_hand_coding_cases_forbid_delegation_by_a_declared_gate():
+    # A case that asks the model to do the coding itself cannot enforce that in
+    # prose: a daemon whose own prompt routes repository work to a coding harness
+    # overrides it, and the trial then reads as a coding failure when what happened
+    # was a delegation. The constraint is declared so the verdict names it.
+    doc = yaml.safe_load(open(os.path.join(CAP_DIR, "coding.yaml"), encoding="utf-8"))
+    cases = [c for scn in doc["scenarios"] for c in scn["cases"]]
+    hand = [c for c in cases
+            if "do not delegate" in " ".join(c["query"].split()).lower()]
+    assert hand, "the coding suite no longer asks for a case to be done by hand"
+    for case in hand:
+        forbidden = set((case.get("expect") or {}).get("tools_none", []))
+        assert set(RUN_TOOLS) <= forbidden, (
+            f"{case['id']} tells the model not to delegate but does not grade it")
+
+
 def test_shipped_suites_still_load():
     assert suites.load_all(SUITES_DIR, include_dangerous=True)
     assert suites.load_all(CAP_DIR, include_candidates=True)
