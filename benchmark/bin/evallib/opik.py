@@ -4,7 +4,7 @@ Fermix's `fermix_opik` plugin only POSTs traces; nothing reads them back. This i
 the read side the eval needs. Verified endpoints (Opik local, no auth):
 
     GET {base}/projects
-    GET {base}/traces?project_name=NAME&page=1&size=N      -> {content:[trace,...]}
+    GET {base}/traces?project_name=NAME&filters=JSON&size=N -> {content:[trace,...]}
     GET {base}/traces/{id}                                  -> trace
     GET {base}/spans?project_name=NAME&trace_id=ID&size=N   -> {content:[span,...]}
 
@@ -24,7 +24,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 class OpikError(Exception):
@@ -210,10 +210,64 @@ class OpikClient:
     def get_trace(self, trace_id: str) -> dict:
         return self._get(f"/traces/{trace_id}")
 
+    def _read_pages(self, path: str, params: dict, size: int, max_pages: int) -> list[dict]:
+        """Bound each response and refuse partial or inconsistent pagination."""
+        rows, seen = [], set()
+        for page in range(1, max_pages + 1):
+            data = self._get(path, {**params, "page": page, "size": size})
+            content = data.get("content")
+            if not isinstance(content, list):
+                raise OpikError(f"{path}: page {page} has no content list")
+            for row in content:
+                row_id = row.get("id") if isinstance(row, dict) else None
+                if not isinstance(row_id, str) or not row_id or row_id in seen:
+                    raise OpikError(f"{path}: missing or duplicate id on page {page}")
+                seen.add(row_id)
+            rows.extend(content)
+            # Opik counts before selecting; ingestion can make that total stale.
+            # Only a short page proves there are no more candidates to inspect.
+            if len(content) < size:
+                return rows
+        raise OpikError(f"{path}: page cap reached ({max_pages} pages of {size}); "
+                        "refusing partial evidence")
+
+    def _filtered_traces(self, filters: list[dict], after: datetime | None) -> list[dict]:
+        """Narrow the server's trace/span joins before transferring candidate inputs."""
+        if after is not None:
+            # Opik decodes filter values again; a literal +00:00 becomes a space.
+            # Round the server bound down to milliseconds, then compare exactly locally.
+            timestamp = after.astimezone(timezone.utc).isoformat(timespec="milliseconds")
+            filters = filters + [{"field": "start_time", "operator": ">=",
+                                  "value": timestamp.replace("+00:00", "Z")}]
+        params = {"project_name": self.project, "filters": json.dumps(filters),
+                  "truncate": "false",
+                  "exclude": json.dumps(["output", "feedback_scores", "span_feedback_scores",
+                                         "comments", "guardrails_validations", "experiment"])}
+        return self._read_pages("/traces", params, size=10, max_pages=10)
+
     def get_spans(self, trace_id: str, size: int = 200) -> list[dict]:
-        data = self._get("/spans", {"project_name": self.project, "trace_id": trace_id,
-                                     "page": 1, "size": size})
-        return data.get("content", [])
+        """Keep full tool evidence; omit unused repeated LLM/general input and output.
+
+        Each disjoint group is bounded to 20 pages of at most 200 spans. Exceeding
+        that cap is an explicit evidence error, never a partially graded trace.
+        """
+        if not isinstance(trace_id, str) or not trace_id:
+            raise ValueError("trace_id must be a non-empty string")
+        if type(size) is not int or not 1 <= size <= 200:
+            raise ValueError("span page size must be between 1 and 200")
+        spans = []
+        for operator in ("=", "!="):
+            excluded = ["feedback_scores", "comments"]
+            if operator == "!=":
+                excluded += ["input", "output"]
+            params = {"project_name": self.project, "trace_id": trace_id,
+                      "filters": json.dumps([{"field": "type", "operator": operator,
+                                              "value": "tool"}]),
+                      "truncate": "false", "exclude": json.dumps(excluded)}
+            spans.extend(self._read_pages("/spans", params, size=size, max_pages=20))
+        if len({span["id"] for span in spans}) != len(spans):
+            raise OpikError("/spans: duplicate id across type groups; refusing inconsistent evidence")
+        return spans
 
     # --- correlation ----------------------------------------------------------
 
@@ -232,7 +286,9 @@ class OpikClient:
         if not session or not qn:
             raise ValueError("session and query must be non-empty")
         candidates = []
-        for t in self.recent_traces():
+        filters = [{"field": "thread_id", "operator": "ends_with", "value": session},
+                   {"field": "name", "operator": "=", "value": "agent:main"}]
+        for t in self._filtered_traces(filters, after):
             if t.get("id") in seen_ids:
                 continue
             # Grade ONLY the main turn. Background sub-traces that share the
@@ -282,7 +338,8 @@ class OpikClient:
         if not thread_prefix or not mk:
             raise ValueError("thread_prefix and marker must be non-empty")
         candidates = []
-        for t in self.recent_traces():
+        filters = [{"field": "thread_id", "operator": "starts_with", "value": thread_prefix}]
+        for t in self._filtered_traces(filters, after):
             if t.get("id") in seen_ids:
                 continue
             if not (t.get("thread_id") or "").startswith(thread_prefix):
@@ -332,9 +389,10 @@ class OpikClient:
         full, spans = trace, []
         for _attempt in range(max_polls):
             full = self.get_trace(tid)
-            spans = self.get_spans(tid, size=2000)
             count = full.get("span_count")
-            stable = isinstance(count, int) and count == prev_count
+            stable = type(count) is int and count == prev_count
+            ready = stable and count > 0 and full.get("end_time") is not None
+            spans = self.get_spans(tid) if ready else []
             issues = _completion_issues(full, spans, stable)
             if not issues:
                 return _annotate_completion(full, True, []), spans

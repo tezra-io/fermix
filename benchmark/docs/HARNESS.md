@@ -20,6 +20,32 @@ YAML case  ──►  fermix ask --json --session <unique>   (FERMIX_HOME=~/.fer
 Correlation is exact: each case gets a unique `--session`, which becomes the Opik
 `thread_id` (`<channel>:<session>`). The runner polls Opik for that thread's trace.
 
+### Bounded Opik reads
+
+Turn polling filters on the server by session suffix, `agent:main`, and the turn's
+start-time lower bound. Operator-assisted polling filters by channel prefix and
+time. Python still verifies the exact session, input, metadata and unique match;
+filtering does not relax correlation. Candidate pages contain at most 10 traces
+and omit output and unused feedback/annotation fields. The full selected trace
+is read by ID for grading. Normal polling no longer downloads the project's
+latest 100 traces to find one turn.
+
+Settlement waits for a closed trace and a stable span count before fetching
+spans. Span reads use pages of at most 200, with separate tool and non-tool
+queries: tool inputs/outputs remain complete; unused LLM/general input/output
+bodies and feedback/comments are excluded. Usage, model, ancestry, status, and
+timing fields remain available. Missing or unfinished spans still make the
+measurement incomplete.
+
+Limits are 10 candidate pages and 20 pages per span group. Missing/duplicate IDs
+or a page cap produce an explicit error instead of partial evidence. The existing
+bounded GET retries remain. These changes reduce benchmark query work without
+changing Docker or ClickHouse settings; memory pressure from concurrent Opik UI
+or other queries can still cause a server error. The installed Opik 2.0.27 API
+supports the [trace filters/exclusions](https://www.comet.com/docs/opik/reference/rest-api/traces/get-traces-by-project)
+and [span filters/exclusions](https://www.comet.com/docs/opik/reference/rest-api/spans/get-spans-by-project)
+used here.
+
 ## Capability eval & cross-model ranking (`run_capability.py`)
 
 A second tier, distinct from the behavioral suites above. The behavioral runner
