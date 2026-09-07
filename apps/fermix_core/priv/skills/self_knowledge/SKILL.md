@@ -127,6 +127,8 @@ Traces are JSONL under `~/.fermix/traces/YYYY-MM-DD/<type>.jsonl`: `llm_call`, `
 
 Enabling Opik on the daemon: `fermix service install` snapshots a non-secret env allowlist (`FERMIX_OPIK_ENABLED`, `FERMIX_OPIK_BASE_URL`, `FERMIX_OPIK_PROJECT`, `FERMIX_TRACE_CONTENT`, plus the `FERMIX_HOME` baseline) into the launchd/systemd unit — a shell export alone never reaches the daemon, so reinstall after changing it; the API key is never written to the unit. `fermix doctor`'s "opik export" check asks the *daemon* over the control socket whether the exporter is off, enabled-but-not-bundled, or ready (with the resolved endpoint/project). Realtime voice calls are fully traced: `[:fermix, :realtime, :call_start|session_created|session_updated|provider_error|reconnect|call_stop]` lifecycle (→ `agent_event`), the model turn via `[:fermix, :provider, :call]`, and tool calls on the same `session_id` — so one call reassembles into one Opik trace.
 
+Opik batch uploads retry transient failures twice (500ms, 1s) with the same ids and payload; permanent or exhausted ones are logged errors. A turn can succeed while its upload fails, so read the daemon log before widening trace-lookup filters. Restart the daemon after exporter changes.
+
 ## Reference files
 
 This skill's overview stays in this file; deeper per-feature detail loads on demand as a named reference file:
