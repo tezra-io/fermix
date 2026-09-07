@@ -25,7 +25,7 @@ gate_visible_tests() {
     fixture_tests="$1"
     if [ ! -d "$fixture_tests" ]; then
         echo "checker bug: fixture tests not found at $fixture_tests"
-        return 1
+        return 2
     fi
     for seeded in "$fixture_tests"/*.py; do
         name=$(basename "$seeded")
@@ -44,12 +44,12 @@ run_pytest() {
     shift 2
     cp "$fixture_tests"/*.py "$hidden"/ || {
         echo "checker bug: cannot stage the fixture's visible tests"
-        return 1
+        return 2
     }
     # A dot-directory: pytest's default norecursedirs skips it, so the staged
     # modules are importable without being collected.
     stage="$hidden/.modules"
-    mkdir -p "$stage" || { echo "checker bug: cannot create the module stage"; return 1; }
+    mkdir -p "$stage" || { echo "checker bug: cannot create the module stage"; return 2; }
     for module in "$@"; do
         if [ ! -f "$FERMIX_EVAL_WORKSPACE/$module" ]; then
             echo "the module under test is missing from the workspace: $module"
@@ -57,10 +57,29 @@ run_pytest() {
         fi
         cp "$FERMIX_EVAL_WORKSPACE/$module" "$stage/$module" || {
             echo "checker bug: cannot stage $module"
-            return 1
+            return 2
         }
     done
-    ( cd "$hidden" && env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$stage" \
-        uv run --quiet --with pytest python -m pytest -q \
+    ( cd "$hidden" || exit 2
+      PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$stage" pytest_verdict \
         -p no:cacheprovider --noconftest --rootdir "$hidden" "$hidden" )
+}
+
+# Reserve child exit 10 for an observed pytest failure: uv's own startup failures
+# may exit 1, so forwarding that code would blame the candidate for broken tooling.
+# Collection errors from submitted code remain test failures through pytest's flag.
+pytest_verdict() {
+    if uv run --quiet --with pytest python -c '
+import sys
+import pytest
+result = pytest.main(sys.argv[1:])
+sys.exit(10 if result == pytest.ExitCode.TESTS_FAILED else result)
+' -q --continue-on-collection-errors "$@"; then
+        return 0
+    else
+        pytest_status=$?
+    fi
+    if [ "$pytest_status" -eq 10 ]; then return 1; fi
+    echo "pytest evaluator failed (exit=$pytest_status)" >&2
+    return 2
 }

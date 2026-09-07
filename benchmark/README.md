@@ -204,7 +204,7 @@ before treating the tier as red about the model.
 home, and cleans up after itself:
 
 ```sh
-make capability-auto     # seed -> start (background) -> make check -> full sweep -> stop
+make capability-auto     # seed -> start (background) -> preflight -> full sweep -> stop
 ```
 
 Under the hood (`bin/capability-daemon.sh` + `bin/seed_capability_home.py`) it:
@@ -240,8 +240,13 @@ Under the hood (`bin/capability-daemon.sh` + `bin/seed_capability_home.py`) it:
    collides with your `~/.fermix-dev` daemon (which owns a different home, a
    different control socket, and its own port); the two coexist untouched.
 3. **Waits for readiness** — polls the control socket until `fermix status` answers.
-4. **Runs `make check` then the full sweep**, and on exit **stops the daemon**
+4. **Runs the checker preflight and `bin/tier.sh capability` directly**, and on exit **stops the daemon**
    (SIGTERM the BEAM, SIGKILL fallback) and clears its socket.
+
+The lifecycle script preserves the preflight/runner exit code and prints it before
+teardown. GNU `make` still returns `2` when a recipe fails; automation that needs
+the distinct `3`/`4`/`5` statuses should invoke
+`benchmark/bin/capability-daemon.sh run` directly from the repo root.
 
 `make capability-auto` always scores the **current `~/.fermix-dev` primary** — the
 seed regenerates `config.toml` from it on every run. To rank *several* models, drive
@@ -280,6 +285,12 @@ absolute paths, symlink escapes, non-finite scores/timeouts, and unknown modes a
 rejected. Subprocesses receive an allowlisted environment. Checkers are still
 trusted tracked scripts, not a general untrusted-code sandbox.
 
+Checker exit codes are part of the grading contract: exit-mode `0` passes and `1`
+records a task failure; every other exit is an evaluator error. JSON-mode checkers
+must exit `0` with a valid score object, even for a zero score. A crash after printing
+a score invalidates the measurement. The pytest wrappers distinguish dependency
+startup failures from test failures, including syntax errors in submitted code.
+
 **The artifact alone proves nothing**, so a checker grades the artifact *and* the
 trace that produced it. Four surfaces make that possible:
 
@@ -316,6 +327,12 @@ the composite and cannot move a rank. A v1 file loads (migrated in memory, `hash
 never gains identity it did not record; its rows stay in their own legacy cohorts.
 A legacy row missing `tasks_hash`/`k`/`threshold` raises rather than being placed
 in an invented cohort.
+
+**Hash v3** includes the checker and all sibling `.py`/`.sh` source files, including
+shared helpers, plus the existing episode and fixture identity. Shared grading code
+must live beside its checkers. Changing any of those sources changes the cohort for
+that directory's checkers. Hash-v1/v2 rows remain visible but unranked; rerun them to
+obtain a current comparison. The JSON store format itself remains v2.
 
 Read the **safety column** literally. `✓ n/N` and `✗ v/N` both state the
 denominator: N trials actually had a safety gate graded. `n/e` means **not

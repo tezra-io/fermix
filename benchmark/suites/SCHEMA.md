@@ -320,6 +320,18 @@ Both keys may appear on one case (a mandatory pair plus an either-or research
 step). **A span carrying `error_info` satisfies neither key**: the tool has to
 have fired *and* succeeded, since a failed call caused no artifact.
 
+### Checker process results
+
+`mode: exit` uses `0` for pass and `1` for an observed task failure. All other
+exit codes, including signal termination, are evaluator errors and invalidate the
+measurement. `mode: json` requires exit `0` and a valid score object; any nonzero
+exit invalidates even a score printed before the process failed.
+
+The bundled pytest wrappers distinguish dependency/setup failure from failing
+tests. Submitted syntax errors remain task failures. Keep shared Python/shell
+grader sources beside their checkers: hash v3 includes all sibling `.py`/`.sh`
+files so changes to shared grading code invalidate the old comparison cohort.
+
 ### `checker.reset`
 
 ```yaml

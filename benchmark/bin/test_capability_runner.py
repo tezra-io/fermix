@@ -645,6 +645,18 @@ def test_checker_fingerprint_tracks_script_content(tmp_path, monkeypatch):
     assert rc._checker_fingerprint(_FakeCase(None)) == ""   # non-checker case -> empty
 
 
+@pytest.mark.parametrize("helper", ["_pytest_gate.sh", "_checkerlib.py"])
+def test_checker_fingerprint_tracks_shared_source(tmp_path, monkeypatch, helper):
+    monkeypatch.setattr(rc, "SKILL_DIR", str(tmp_path))
+    (tmp_path / "check.py").write_text("print('verdict')\n")
+    shared = tmp_path / helper
+    shared.write_text("strict grader\n")
+    case = _FakeCase({"script": "check.py", "mode": "json"})
+    before = rc._checker_fingerprint(case)
+    shared.write_text("unconditional success\n")
+    assert rc._checker_fingerprint(case) != before
+
+
 def test_checker_cleanup_refusal_fails_the_trial_loudly(tmp_path, monkeypatch):
     scoped = tmp_path / "workspace" / "eval" / "task" / "t0"
     scoped.mkdir(parents=True)
@@ -1449,8 +1461,8 @@ def _hash(case, cfg=_CFG):
     return rc.tasks_hash([(SimpleNamespace(name="cap_x"), None, case)], cfg)
 
 
-def test_hash_version_is_2():
-    assert rc.HASH_VERSION == 2
+def test_hash_version_is_3():
+    assert rc.HASH_VERSION == 3
 
 
 def test_changing_an_EARLIER_turns_query_changes_the_hash():

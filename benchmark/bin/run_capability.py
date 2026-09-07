@@ -74,9 +74,9 @@ from evallib.suites import UNCLASSIFIED_RISK, SuiteError, load_all
 # behavioral suites' typed-denial form: a tool that was blocked before execution
 # passes, a tool that merely errored does not.
 SAFETY_GATES = ("tools_none", "tools_none_succeeded", "reply_not_matches")
-# Version of the task-set hash. v2 covers the WHOLE episode definition (every turn's
-# query and expectations, provenance, scorer, checker + its reset list and fixture
-# tree, rubric + judge, limits); v1 covered only the last query and a little more,
+# Version of the task-set hash. v3 adds shared checker sources to v2's episode fields:
+# every turn's query and expectations, provenance, scorer, checker reset list and
+# fixture tree, rubric, judge, and limits. v1 covered only the last query and a little more,
 # so two materially different task sets could share a digest. Defined by the
 # leaderboard — the board decides what is comparable, and one constant must drive both
 # the stamping and that decision.
@@ -90,21 +90,25 @@ def now_utc() -> datetime:
 
 
 def _checker_fingerprint(case) -> str:
-    """Grading identity of a checker task: its spec PLUS a content hash of the checker
-    script, so editing a checker's grading LOGIC (not just its path) changes the task
-    hash — a re-graded run can't then silently compare as the same task set."""
+    """Hash the checker and its directory's Python/shell sources, including shared
+    helpers. Keeping them together avoids a dependency list that can silently drift.
+    Every checker in that directory changes cohort when shared grading code changes."""
     if not case.checker_spec:
         return ""
-    script = case.checker_spec.get("script") or ""
-    digest = "no-script"
-    if script:
-        # RAISES on an unreadable script, like `_fixture_digest` does on an unreadable
-        # seed. Folding the failure into the literal "no-script" made two different
-        # checkers hash identically, so a re-graded run compared as the same task set —
-        # exactly what hashing the script content exists to prevent.
-        with open(checker.resolve_script(SKILL_DIR, script), "rb") as fh:
-            digest = hashlib.sha256(fh.read()).hexdigest()[:12]
-    return f"{script}:{case.checker_spec.get('mode')}:{case.checker_spec.get('seed')}:{digest}"
+    script = case.checker_spec["script"]
+    resolved = checker.resolve_script(SKILL_DIR, script)
+    directory = os.path.dirname(resolved)
+    sources = {os.path.basename(resolved)}
+    sources.update(name for name in os.listdir(directory) if name.endswith((".py", ".sh")))
+    digest = hashlib.sha256()
+    for name in sorted(sources):
+        relative = os.path.relpath(os.path.join(directory, name), SKILL_DIR)
+        path = checker.resolve_script(SKILL_DIR, relative)
+        digest.update(name.encode("utf-8") + b"\0")
+        with open(path, "rb") as fh:
+            digest.update(hashlib.sha256(fh.read()).digest())
+    return (f"{script}:{case.checker_spec.get('mode')}:{case.checker_spec.get('seed')}:"
+            f"{digest.hexdigest()[:16]}")
 
 
 def _fixture_digest(case) -> str:
@@ -154,7 +158,7 @@ def _case_identity(suite_name: str, case, cfg) -> str:
 
 
 def tasks_hash(cases, cfg) -> str:
-    """Content hash of the SELECTED tasks — the reproducibility pin (v2, see
+    """Content hash of the SELECTED tasks — the reproducibility pin (v3, see
     HASH_VERSION). Any change to what is asked, what is required, or how it is graded
     yields a DISTINCT hash, so a `--max-tasks`/`--suite` subset or a re-graded run can
     never masquerade as a prior full run; a prose-only YAML edit leaves it unchanged.

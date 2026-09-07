@@ -42,7 +42,7 @@ def cfg(config_id, success, tok_per_success, n_succ=10, ci=None, n_tasks=5, **kw
         mean_task_success_ci_hi=(ci[1] if ci else None), **kw)
 
 
-def meta(tasks_hash="AAA", hash_version=2, k=5, threshold=1.0, **kw):
+def meta(tasks_hash="AAA", hash_version=lb.CURRENT_HASH_VERSION, k=5, threshold=1.0, **kw):
     return {"tasks_hash": tasks_hash, "hash_version": hash_version, "k": k,
             "threshold": threshold, **kw}
 
@@ -92,7 +92,7 @@ def test_a_subset_or_smaller_k_run_never_replaces_the_full_set_row():
     store = lb.upsert(store, cfg("m", 1.00, 100), meta(tasks_hash="SUBSET", k=5))
     store = lb.upsert(store, cfg("m", 1.00, 100), meta(tasks_hash="FULL", k=3))
     assert len(store["rows"]) == 3
-    full = store["rows"][f"m@{lb.cohort_key('FULL', 2, 5, 1.0)}"]
+    full = store["rows"][f"m@{lb.cohort_key('FULL', lb.CURRENT_HASH_VERSION, 5, 1.0)}"]
     assert full["score"]["mean_task_success"] == 0.80      # untouched by both
     data = lb.render_json(store)
     assert len(data["cohorts"]) == 3
@@ -178,6 +178,14 @@ def test_a_current_hash_cohort_is_still_ranked_head_to_head():
     assert all(row["efficiency_norm"] is not None for row in rows)
 
 
+def test_hash_v2_rows_remain_visible_but_unranked_after_shared_grader_fix():
+    store = lb.upsert({}, cfg("a", 0.9, 700), meta(hash_version=2))
+    store = lb.upsert(store, cfg("b", 0.5, 700), meta(hash_version=2))
+    rows = lb.render_json(store)["cohorts"][0]["rows"]
+    assert len(rows) == 2
+    assert all(row["rank"] is None and row["efficiency_norm"] is None for row in rows)
+
+
 def _meta_v2() -> dict:
     return {"tasks_hash": "AAA", "hash_version": lb.CURRENT_HASH_VERSION,
             "k": 5, "threshold": 1.0}
@@ -204,7 +212,8 @@ def test_render_json_has_no_global_rank_and_ranks_within_cohorts():
     assert [r["config_id"] for r in by_hash["AAA"]["rows"]] == ["strong", "weak"]
     assert [r["rank"] for r in by_hash["AAA"]["rows"]] == [1, 2]
     assert by_hash["BBB"]["rows"][0]["rank"] == 1        # its own cohort, its own rank 1
-    assert by_hash["AAA"]["k"] == 5 and by_hash["AAA"]["hash_version"] == 2
+    assert by_hash["AAA"]["k"] == 5
+    assert by_hash["AAA"]["hash_version"] == lb.CURRENT_HASH_VERSION
 
 
 def test_render_json_normalizes_efficiency_per_cohort():

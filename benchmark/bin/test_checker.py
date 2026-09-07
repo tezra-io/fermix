@@ -90,10 +90,22 @@ def test_checker_missing_fermix_home_is_a_recorded_error_not_a_zero(tmp_path):
 
 def test_checker_exit_mode_fail(tmp_path):
     os.makedirs(os.path.join(str(tmp_path), "checkers"), exist_ok=True)
-    _script(tmp_path, "checkers/no.sh", "#!/bin/sh\nexit 3\n")
+    _script(tmp_path, "checkers/no.sh", "#!/bin/sh\nexit 1\n")
     r = checker.run_checker(str(tmp_path), {"script": "checkers/no.sh", "mode": "exit"},
                             scoped_dir=str(tmp_path), fermix_home=str(tmp_path), reply="")
     assert r.score == 0.0 and r.error is None
+
+
+@pytest.mark.parametrize("mode,code", [("exit", 2), ("exit", 3), ("exit", 127),
+                                       ("json", 1), ("json", 2)])
+def test_checker_process_failure_is_an_error_even_after_a_passing_json(tmp_path, mode, code):
+    _script(tmp_path, "broken.sh",
+            '#!/bin/sh\necho \'{"score": 1.0, "detail": "printed before failure"}\'\n'
+            f'exit {code}\n')
+    result = checker.run_checker(str(tmp_path), {"script": "broken.sh", "mode": mode},
+                                 str(tmp_path), "", str(tmp_path))
+    assert result.score == 0.0
+    assert result.error is not None and f"exit={code}" in result.error
 
 
 def test_checker_json_mode_parses_score(tmp_path):
@@ -985,6 +997,41 @@ def _fix_business_days(scoped):
         fixed = fh.read().replace("cur.weekday() <= 5", "cur.weekday() <= 4")
     with open(mod, "w") as fh:
         fh.write(fixed)
+
+
+@pytest.mark.parametrize("code", [1, 2])
+def test_pytest_dependency_failure_invalidates_the_checker(tmp_path, monkeypatch, code):
+    scoped = _seed(tmp_path, "suites/capability/fixtures/code/business_days")
+    _fix_business_days(scoped)
+    stub = tmp_path / "stub-bin"
+    stub.mkdir()
+    _script(stub, "uv", f'#!/bin/sh\necho "dependency setup failed" >&2\nexit {code}\n')
+    monkeypatch.setenv("PATH", str(stub) + os.pathsep + os.environ["PATH"])
+    spec = {"script": "suites/capability/checkers/pytest_business_days.sh", "mode": "exit"}
+    result = checker.run_checker(BENCH, spec, scoped, "", str(tmp_path))
+    assert result.score == 0.0 and result.error is not None
+
+
+def test_pytest_submitted_syntax_error_is_a_task_failure(tmp_path):
+    scoped = _seed(tmp_path, "suites/capability/fixtures/code/business_days")
+    with open(os.path.join(scoped, "business_days.py"), "w") as fh:
+        fh.write("def broken(:\n")
+    spec = {"script": "suites/capability/checkers/pytest_business_days.sh", "mode": "exit"}
+    result = checker.run_checker(BENCH, spec, scoped, "", str(tmp_path))
+    assert result.score == 0.0 and result.error is None
+
+
+@pytest.mark.parametrize("name", ["harness_delegated_fix.sh", "harness_delegated_feature.sh"])
+def test_harness_checker_dependency_failure_stops_polling(tmp_path, monkeypatch, name):
+    (tmp_path / ".git").mkdir()
+    stub = tmp_path / "stub-bin"
+    stub.mkdir()
+    _script(stub, "uv", '#!/bin/sh\necho "dependency setup failed" >&2\nexit 1\n')
+    _script(stub, "git", '#!/bin/sh\ncase "$1" in rev-list) echo 1 ;; esac\n')
+    monkeypatch.setenv("PATH", str(stub) + os.pathsep + os.environ["PATH"])
+    spec = {"script": f"suites/capability/checkers/{name}", "mode": "exit"}
+    result = checker.run_checker(BENCH, spec, str(tmp_path), "", str(tmp_path), timeout_s=2)
+    assert result.error is not None and "exit=2" in result.error
 
 
 def test_pytest_checker_ignores_an_agent_authored_test_plugin(tmp_path):
