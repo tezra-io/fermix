@@ -356,6 +356,7 @@ defmodule FermixCore.Meetings.Session do
       leave_grace_ms: @leave_grace_ms,
       launch_ms: @rtms_start_timeout_ms,
       max_duration_ms: @max_duration_ms,
+      drain_ms: Timeouts.meeting_summarize(),
       summarize_ms: Timeouts.meeting_summarize()
     }
 
@@ -522,7 +523,7 @@ defmodule FermixCore.Meetings.Session do
   end
 
   defp enter(%{status: :summarizing} = state) do
-    state = state |> stop_source() |> stop_caffeinate() |> rearm_watchdog()
+    state = state |> stop_source() |> stop_caffeinate() |> arm_drain_watchdog()
     drain_or_finish(state)
   end
 
@@ -774,8 +775,8 @@ defmodule FermixCore.Meetings.Session do
   end
 
   # Still draining the transcription tail: the meeting keeps what it captured
-  # and moves on, and `finish_capture/1` re-arms the same bound for the
-  # summarizer itself.
+  # and moves on, and `finish_capture/1` arms the summarizer's own bound from
+  # zero.
   defp phase_expired(:summarizing, %{stt: stt} = state) when not is_nil(stt) do
     finish_capture(abort_stream(state))
   end
@@ -890,7 +891,19 @@ defmodule FermixCore.Meetings.Session do
     end
   end
 
-  defp rearm_watchdog(state) do
+  # `summarizing` runs two deadlines back to back and arms one at a time: the
+  # drain waits on the transcription tail and, when it expires, keeps what
+  # landed; the summarizer's bound then starts from zero and, when it expires,
+  # fails the meeting. They share one operator value (`Timeouts` documents it as
+  # "transcript drain plus map-reduce summarization") but never one armed timer,
+  # so a slow drain cannot spend the summarizer's budget — nor, in the suite,
+  # can a drain bound shortened to drive the watchdog row shorten the bound the
+  # summarizer that follows it runs under.
+  defp arm_drain_watchdog(state) do
+    arm_phase_timer(state, :summarizing, state.timers.drain_ms)
+  end
+
+  defp arm_summary_watchdog(state) do
     arm_phase_timer(state, :summarizing, state.timers.summarize_ms)
   end
 
@@ -1085,7 +1098,7 @@ defmodule FermixCore.Meetings.Session do
   end
 
   defp finish_capture(state) do
-    state = rearm_watchdog(state)
+    state = arm_summary_watchdog(state)
 
     case finalize_transcript(state) do
       {:ok, state} -> start_summary(state)
