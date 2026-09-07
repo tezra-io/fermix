@@ -33,6 +33,16 @@ class OpikError(Exception):
 
 _CORRELATION_KEYS = ("eval_run_id", "case_id", "turn_index")
 _GET_RETRY_DELAYS_S = (0.5, 1.0)
+
+# Server-side statuses that say nothing about THIS request, so repeating it is the
+# correct response. A self-hosted Opik sitting at its ClickHouse memory ceiling kills
+# whichever query next asks for a chunk (`Code: 241 ... OvercommitTracker decision:
+# Query was selected to stop`), so an innocuous 100-row trace read returns 500 because
+# of load someone else generated — an open Opik UI tab polling /optimizations costs
+# ~1 GiB per poll. Without a retry that collateral 500 loses a whole trial.
+# 4xx is excluded on purpose: it is a statement about this request and repeating it
+# only burns sweep time. GET only — see `_post`.
+RETRY_STATUSES = frozenset({500, 502, 503, 504})
 _RUN_ID_RE = re.compile(r"^\d{8}T\d{6}Z(?:[a-f0-9]{8})?$")
 
 
@@ -154,7 +164,12 @@ class OpikClient:
                 with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                     return json.load(resp)
             except urllib.error.HTTPError as exc:
-                raise OpikError(f"GET {url}: HTTP {exc.code}: {exc.reason}") from exc
+                if exc.code not in RETRY_STATUSES:
+                    raise OpikError(f"GET {url}: HTTP {exc.code}: {exc.reason}") from exc
+                if attempt + 1 == attempts:
+                    raise OpikError(f"GET {url}: HTTP {exc.code}: {exc.reason} "
+                                    f"({attempts} attempts)") from exc
+                time.sleep(_GET_RETRY_DELAYS_S[attempt])
             except (json.JSONDecodeError, UnicodeDecodeError) as exc:
                 raise OpikError(f"GET {url}: bad JSON: {exc}") from exc
             except (OSError, http.client.HTTPException) as exc:

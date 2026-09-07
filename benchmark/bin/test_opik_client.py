@@ -165,15 +165,57 @@ def test_get_retries_protocol_errors_until_exhausted(monkeypatch):
     assert sleeps == [0.5, 1.0]
 
 
-def test_get_does_not_retry_http_errors(monkeypatch):
-    http_error = opik_mod.urllib.error.HTTPError(
-        "https://example.test", 503, "service unavailable", None,
-        io.BytesIO(b"unavailable"))
-    calls, sleeps = _get_sequence(monkeypatch, http_error)
+def _http_error(status: str | int, reason: str):
+    return opik_mod.urllib.error.HTTPError(
+        "https://example.test", status, reason, None, io.BytesIO(b"body"))
+
+
+@pytest.mark.parametrize("status", sorted(opik_mod.RETRY_STATUSES))
+def test_get_retries_a_transient_server_error_then_succeeds(monkeypatch, status):
+    """A self-hosted Opik under memory pressure kills one query and serves the next.
+
+    ClickHouse's OvercommitTracker picks a victim when the server sits at its
+    memory ceiling, so the 500 says nothing about this request — a retry is the
+    correct response, and without one a whole trial is lost to someone else's query.
+    """
+    calls, sleeps = _get_sequence(
+        monkeypatch, _http_error(status, "server error"), _Resp(b'{"content": []}'))
 
     client = OpikClient("https://example.test/api/v1/private", "proj")
-    with pytest.raises(OpikError, match=r"GET .*: HTTP 503: service unavailable"):
+    assert client.recent_traces() == []
+    assert calls == [8.0, 8.0]
+    assert sleeps == [0.5]
+
+
+def test_get_gives_up_on_a_persistent_server_error_and_names_the_status(monkeypatch):
+    calls, sleeps = _get_sequence(monkeypatch, *[_http_error(500, "server error")] * 3)
+
+    client = OpikClient("https://example.test/api/v1/private", "proj")
+    with pytest.raises(OpikError, match=r"GET .*: HTTP 500: server error \(3 attempts\)"):
         client.recent_traces()
+    assert calls == [8.0, 8.0, 8.0]
+    assert sleeps == [0.5, 1.0]
+
+
+@pytest.mark.parametrize("status", (400, 401, 403, 404, 422))
+def test_get_does_not_retry_a_client_error(monkeypatch, status):
+    """A 4xx is a statement about this request; repeating it just wastes the sweep."""
+    calls, sleeps = _get_sequence(monkeypatch, _http_error(status, "client error"))
+
+    client = OpikClient("https://example.test/api/v1/private", "proj")
+    with pytest.raises(OpikError, match=rf"GET .*: HTTP {status}: client error"):
+        client.recent_traces()
+    assert calls == [8.0]
+    assert sleeps == []
+
+
+def test_post_never_retries_because_it_is_not_idempotent(monkeypatch):
+    """Only GET is safe to repeat. A retried delete could act twice."""
+    calls, sleeps = _get_sequence(monkeypatch, _http_error(500, "server error"))
+
+    client = OpikClient("https://example.test/api/v1/private", "proj")
+    with pytest.raises(OpikError, match=r"POST /traces/delete: HTTP 500"):
+        client.delete_traces(["t1"])
     assert calls == [8.0]
     assert sleeps == []
 
