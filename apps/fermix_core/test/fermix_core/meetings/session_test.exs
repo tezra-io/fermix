@@ -1065,7 +1065,15 @@ defmodule FermixCore.Meetings.SessionTest do
     {:ok, meeting} = Store.insert(attrs(platform), server: ctx.repo)
     {:ok, pid} = Session.start_link(Keyword.merge(defaults(ctx, meeting, platform), opts))
 
-    %{id: meeting.id, pid: pid}
+    # Monitored here, while the session is certainly alive, because
+    # `Process.monitor/1` on a process that has already exited answers
+    # immediately with reason `:noproc` — which no pinned exit reason can ever
+    # match. A monitor taken at await time therefore turns a session that
+    # stopped PROMPTLY into an unmatchable assertion, and reads on CI as the
+    # opposite of what happened: three reds across three tests, each filed as a
+    # slow chain, all of them sessions that had already delivered and exited
+    # normally.
+    %{id: meeting.id, pid: pid, ref: Process.monitor(pid)}
   end
 
   # The capacity slot is claimed in `init/1` against the application's meetings
@@ -1180,8 +1188,7 @@ defmodule FermixCore.Meetings.SessionTest do
     |> Enum.map(&Jason.decode!/1)
   end
 
-  defp await_stop(meeting, timeout \\ 1_000) do
-    ref = Process.monitor(meeting.pid)
+  defp await_stop(%{ref: ref}, timeout \\ 1_000) do
     assert_receive {:DOWN, ^ref, :process, _pid, :normal}, timeout
   end
 
