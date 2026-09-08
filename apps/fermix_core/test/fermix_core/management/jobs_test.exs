@@ -278,9 +278,18 @@ defmodule FermixCore.Management.JobsTest do
       on_exit(fn -> FermixTestSupport.SafeRm.rm_rf(tmp) end)
       lock = Path.join(tmp, ".lock")
 
-      run = fn _job_id, _report ->
+      # `await: true` is the handshake that makes "the run is inside the lock"
+      # a postcondition of the start call instead of a message the test has to
+      # out-wait: the reply is held until the run reports from inside the
+      # critical section. Getting there is a task spawn plus filesystem calls
+      # into the VM's single file server, which is not the 100 ms an
+      # `assert_receive` default allows on a loaded runner. The {:holding, _}
+      # send happens strictly before that report, so it is already in the
+      # mailbox by the time the reply arrives.
+      run = fn _job_id, report ->
         Lock.with_lock(lock, fn ->
           send(owner, {:holding, self()})
+          report.({:ready, %{}})
 
           receive do
             {:finish, outcome} -> outcome
@@ -288,7 +297,9 @@ defmodule FermixCore.Management.JobsTest do
         end)
       end
 
-      assert {:ok, started} = Jobs.start(:plugin_install, opts(server, name: "google", run: run))
+      assert {:ok, started} =
+               Jobs.start(:plugin_install, opts(server, name: "google", run: run, await: true))
+
       assert_receive {:holding, pid}
       ref = Process.monitor(pid)
       assert File.exists?(lock)

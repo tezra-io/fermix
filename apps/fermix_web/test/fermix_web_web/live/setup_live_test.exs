@@ -1047,48 +1047,75 @@ defmodule FermixWebWeb.SetupLiveTest do
       refute render(view) =~ "https://auth.example/google_calendar"
     end
 
-    test "oauth fallback sign-in link expires while auth is pending", %{conn: conn} do
+    test "the oauth fallback sign-in link is rendered, then dropped when it expires", %{
+      conn: conn
+    } do
+      parent = self()
+
+      # No timeout override, so the production expiry applies: nothing can
+      # retract the link while this test runs, and the runner parks until the
+      # test releases it, so "auth is pending" is a state the test holds open
+      # rather than a window it has to beat.
+      Application.put_env(:fermix_web, :plugin_auth_runner, fn name, opts ->
+        Keyword.fetch!(opts, :opener).("https://auth.example/#{name}")
+        send(parent, {:plugin_auth_started, name, self()})
+
+        receive do
+          :finish_auth -> {:error, :cancelled}
+        after
+          5_000 -> {:error, :runner_never_released}
+        end
+      end)
+
+      view = start_google_calendar_auth(conn)
+
+      assert_receive {:plugin_auth_started, "google_calendar", runner}
+      assert render(view) =~ "https://auth.example/google_calendar"
+
+      # Drive the expiry the LiveView schedules for itself rather than racing
+      # it. This message is in the LiveView's mailbox before render/1's sync
+      # ping is created, so no amount of host slowness reorders the two; that
+      # the LiveView schedules it at all is the next test's job.
+      send(
+        view.pid,
+        {:clear_plugin_auth_url, "google_calendar", "https://auth.example/google_calendar"}
+      )
+
+      refute render(view) =~ "https://auth.example/google_calendar"
+
+      send(runner, :finish_auth)
+    end
+
+    test "the fallback sign-in link expiry is scheduled from the configured timeout", %{
+      conn: conn
+    } do
       parent = self()
       Application.put_env(:fermix_web, :plugin_auth_url_timeout_ms, 20)
 
       Application.put_env(:fermix_web, :plugin_auth_runner, fn name, opts ->
         Keyword.fetch!(opts, :opener).("https://auth.example/#{name}")
-        send(parent, {:plugin_auth_started, name})
-        Process.sleep(200)
-        {:error, :cancelled}
+        send(parent, {:plugin_auth_started, name, self()})
+
+        receive do
+          :finish_auth -> {:error, :cancelled}
+        after
+          5_000 -> {:error, :runner_never_released}
+        end
       end)
 
-      {:ok, view, _html} = live(conn, "/setup")
+      view = start_google_calendar_auth(conn)
 
-      view |> element("button[phx-value-tab=\"plugins\"]") |> render_click()
+      assert_receive {:plugin_auth_started, "google_calendar", runner}
 
-      view
-      |> element(~s|button[phx-click="open_oauth_modal"][phx-value-provider="google"]|)
-      |> render_click()
-
-      view
-      |> form("#oauth-client-form-google",
-        oauth_client_form: %{
-          client_id: "123.apps.googleusercontent.com",
-          client_secret: "desktop-secret",
-          redirect_port: "1455"
-        }
-      )
-      |> render_submit()
-
-      view
-      |> element(~s|button[phx-click="plugin_enable"][phx-value-name="google_calendar"]|)
-      |> render_click()
-
-      assert_receive {:plugin_auth_started, "google_calendar"}
-      assert render(view) =~ "https://auth.example/google_calendar"
-
-      # The link is dropped by a 20 ms expiry timer. Sleeping a fixed 60 ms
-      # asserted that this host fired that timer AND re-rendered inside a 3x
-      # margin — on a loaded CI runner it does not, and the refute failed with
-      # the link still on screen. Poll the actual condition instead, bounded.
+      # Nothing asserts the link is still on screen here: at a 20 ms expiry it
+      # is transient by construction and catching it is the race this test used
+      # to lose. Waiting for a state to arrive is bounded-safe. The runner is
+      # parked, so the scheduled expiry is the only thing that can drop the
+      # link, and with no timer at all this poll runs out.
       assert render_until_missing(view, "https://auth.example/google_calendar"),
-             "the expired sign-in link is still rendered"
+             "the sign-in link outlived its configured expiry"
+
+      send(runner, :finish_auth)
     end
 
     test "the OAuth client modal stays closed until Connect, then opens on credentials", %{
@@ -4708,6 +4735,34 @@ defmodule FermixWebWeb.SetupLiveTest do
       last_refresh: nil,
       status: "ready"
     })
+  end
+
+  # The click-through that leaves a google_calendar sign-in in flight: plugins
+  # tab -> OAuth client modal -> saved client -> Connect.
+  defp start_google_calendar_auth(conn) do
+    {:ok, view, _html} = live(conn, "/setup")
+
+    view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+    view
+    |> element(~s|button[phx-click="open_oauth_modal"][phx-value-provider="google"]|)
+    |> render_click()
+
+    view
+    |> form("#oauth-client-form-google",
+      oauth_client_form: %{
+        client_id: "123.apps.googleusercontent.com",
+        client_secret: "desktop-secret",
+        redirect_port: "1455"
+      }
+    )
+    |> render_submit()
+
+    view
+    |> element(~s|button[phx-click="plugin_enable"][phx-value-name="google_calendar"]|)
+    |> render_click()
+
+    view
   end
 
   defp codex_auth_entry do
