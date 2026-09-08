@@ -960,8 +960,13 @@ defmodule FermixCore.Jobs.SchedulerTest do
 
       # Both are due, but the cap is 1: exactly one claims, the other is deferred
       # and stays scheduled (no run row).
+      # 5_000, not the 1_000 these waits used to carry: each one is a scheduler
+      # tick, a claim, a runner spawn and a real job run, and the last of them
+      # failed on the macos-x64 CI leg where the same suite runs about 2.8x
+      # slower. 5_000 is this repo's most common bound for waiting on spawned
+      # work (317 uses); the assertions are unchanged.
       assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:15:00Z])
-      assert_receive {:job_runner, :started, run_id1, _job1}, 1_000
+      assert_receive {:job_runner, :started, run_id1, _job1}, 5_000
       refute_receive {:job_runner, :started, _run_id, _job2}, 150
       assert total_runs(repo, [job_a.id, job_b.id]) == 1
 
@@ -970,12 +975,12 @@ defmodule FermixCore.Jobs.SchedulerTest do
       # child asynchronously after that exit — so gate the second tick on the
       # supervisor actually reporting a free slot (the same occupancy source
       # at_capacity? reads), never on :completed alone.
-      assert_receive {:job_runner, :completed, ^run_id1, _job1}, 1_000
+      assert_receive {:job_runner, :completed, ^run_id1, _job1}, 5_000
       assert eventually(fn -> DynamicSupervisor.count_children(runner_supervisor).active == 0 end)
       assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:15:00Z])
-      assert_receive {:job_runner, :started, run_id2, _job2}, 1_000
+      assert_receive {:job_runner, :started, run_id2, _job2}, 5_000
       assert run_id2 != run_id1
-      assert_receive {:job_runner, :completed, ^run_id2, _job2}, 1_000
+      assert_receive {:job_runner, :completed, ^run_id2, _job2}, 5_000
       assert total_runs(repo, [job_a.id, job_b.id]) == 2
     end
   end

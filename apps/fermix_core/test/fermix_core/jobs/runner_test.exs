@@ -1152,13 +1152,19 @@ defmodule FermixCore.Jobs.RunnerTest do
       capability_registry: capability_registry,
       output_base_dir: output_base_dir,
       delivery_adapter: RecordingDelivery,
-      delivery_opts: [test_pid: self(), sleep_ms: 200],
+      delivery_opts: [test_pid: self(), sleep_ms: 2_000],
       delivery_timeout_ms: 20,
       script: [%{content: "Digest ready."}]
     )
 
     duration_ms = System.monotonic_time(:millisecond) - started_at
-    assert duration_ms < 150
+
+    # The claim is that the 20 ms delivery timeout fired rather than the delivery
+    # running to completion, so the bound only has to separate those two outcomes.
+    # It used to sit 50 ms below a 200 ms sleep, which a loaded CI runner closes by
+    # scheduling alone; the same claim now has a 1 s gap under a 2 s sleep, so it
+    # discriminates better AND survives a starved runner.
+    assert duration_ms < 1_000
     assert_receive {:delivery_send, "123", "Digest ready.", _opts}, 1_000
 
     assert {:ok, delivered_run} = Repo.get_job_run(run.id, server: repo)
