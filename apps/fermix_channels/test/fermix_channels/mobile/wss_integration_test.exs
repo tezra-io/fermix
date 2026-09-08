@@ -8,7 +8,18 @@ defmodule FermixChannels.Mobile.WssIntegrationTest do
   alias FermixChannels.Mobile.Protocol
 
   @device_id "91d72be6-c253-4b73-8598-91c03f66b9d0"
-  @timeout_ms 2_000
+
+  # Two different jobs, so two names. `@setup_timeout_ms` is the transport's own
+  # budget for bringing a real loopback TLS socket up and getting the upgrade
+  # response back; `@timeout_ms` is this test's budget for waiting on an event
+  # once the socket exists. One constant used to serve both at 2_000, which is
+  # tighter than WebSockex's own 6_000 connect and 5_000 recv defaults for no
+  # stated reason, and on the macos-x64 CI leg the connect half expired:
+  # `start_supervised!` raised `%WebSockex.ConnError{original: :timeout}` before
+  # a single assertion ran. The error already names which half expired, so a
+  # slower setup budget costs nothing and stays diagnosable.
+  @setup_timeout_ms 10_000
+  @timeout_ms 5_000
 
   defmodule WssClient do
     @moduledoc false
@@ -122,8 +133,8 @@ defmodule FermixChannels.Mobile.WssIntegrationTest do
     assert %WebSockex.Conn{} =
              WebSockex.Conn.new(url,
                ssl_options: [verify: :verify_none],
-               socket_connect_timeout: @timeout_ms,
-               socket_recv_timeout: @timeout_ms
+               socket_connect_timeout: @setup_timeout_ms,
+               socket_recv_timeout: @setup_timeout_ms
              )
   end
 
