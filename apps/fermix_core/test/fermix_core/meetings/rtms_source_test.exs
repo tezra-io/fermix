@@ -280,21 +280,40 @@ defmodule FermixCore.Meetings.RtmsSourceTest do
 
       assert_receive {:meeting_roster, [%{id: "u-1001"}]}
 
+      # The audio callback forwards the roster BEFORE it stamps `advanced_at_ms`
+      # from the clock, so the roster message alone is not a barrier for that
+      # write. Moving the clock first would have the source stamp 60_000, leaving
+      # the sweep nothing to age and the roster never emptying — a hang no
+      # timeout can cure. `:sys.get_state/1` queues behind that same
+      # `handle_info`, and the assertion states the precondition rather than
+      # hoping for it.
+      assert %{advanced_at_ms: 0} = :sys.get_state(source)
+
       # Everyone stops transmitting; only wall time moves from here.
       :atomics.put(clock, 1, 60_000)
 
-      assert_receive {:meeting_roster, []}, 500
+      assert_receive {:meeting_roster, []}
     end
 
     test "each sweep re-arms exactly one timer" do
-      source = start_source(%{timers: %{roster_sweep_ms: 20}})
+      # A window long enough that no timer here can fire on its own, and the one
+      # sweep this test is about is delivered by hand. The old version armed 20 ms,
+      # slept 60 ms and then read the timer it had just snapshotted: on a loaded
+      # runner that timer fires between the snapshot and the read, and
+      # `read_timer/1` answers false for a timer that already fired, which reads
+      # as "it did not re-arm" when it did.
+      source = start_source(%{timers: %{roster_sweep_ms: 5_000}})
       admit(source)
 
       %{sweep_timer: first} = :sys.get_state(source)
-      Process.sleep(60)
+      assert is_integer(Process.read_timer(first))
+
+      send(source, :roster_sweep)
       %{sweep_timer: second} = :sys.get_state(source)
 
+      # Exactly one: the previous timer is cancelled and a live one replaces it.
       assert second != first
+      assert Process.read_timer(first) == false
       assert is_integer(Process.read_timer(second))
     end
 

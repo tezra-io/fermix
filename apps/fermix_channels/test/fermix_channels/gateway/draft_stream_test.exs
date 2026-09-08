@@ -1082,9 +1082,17 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
       assert rotate_meas.edit_index == 2
       refute_received {:stream_telemetry, :seal, _seal_meas}
 
+      # The rotation detaches the second paragraph and `mark_written` schedules
+      # its flush, so opening bubble 2 is a third legitimate write, not a stray
+      # one. The old test sealed without waiting for it and asserted a count of
+      # two, which held only while the final seal beat a 1 ms timer; on the
+      # macos-x64 CI leg it lost and the count read three. Waiting for the open
+      # makes the sequence the test claims to check an observed one.
+      assert_receive {:open, {:bubble, 2}, @para_two}, 1_000
+
       assert {:ok, _tail} = DraftStream.seal(pid, @two_paras)
       assert_receive {:stream_telemetry, :seal, seal_meas}
-      assert seal_meas.total_edits == 2
+      assert seal_meas.total_edits == 3
     end
 
     test "a spec with only half the rotation pair is refused at start" do
