@@ -70,8 +70,13 @@ defmodule FermixCore.Tools.Media.RegistryTest do
 
   describe "supported_models/2" do
     test "returns the OpenAI image models, default first" do
-      assert {:ok, ["gpt-image-2", "gpt-image-1.5"]} =
-               Registry.supported_models(:image, "openai")
+      assert {:ok,
+              [
+                "gpt-image-2",
+                "gpt-image-2.5-flare",
+                "gpt-image-2.5-sunburst",
+                "gpt-image-1.5"
+              ]} = Registry.supported_models(:image, "openai")
     end
 
     test "returns the xAI image model" do

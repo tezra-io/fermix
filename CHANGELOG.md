@@ -6,6 +6,23 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **GPT Image 2.5 is selectable on the OpenAI images backend.**
+  `gpt-image-2.5-flare` and `gpt-image-2.5-sunburst` join the image model
+  picker in the setup wizard, the web pane and the macOS app. Flare is
+  OpenAI's recommended tier for most work and generates faster than
+  `gpt-image-2`; Sunburst is the premium tier for edit-heavy workflows. Both
+  support generation and editing, including masked inpainting, so the whole
+  `generate_image` surface works on either. The default is unchanged:
+  `gpt-image-2` stays the head of the list, so an install that never picked
+  a model keeps generating exactly as it did — the 2.5 models roll out per
+  account, and a default that moved on upgrade would have broken every
+  install that is not yet entitled. Pick one in setup to move. These are API
+  models: the ChatGPT-subscription images backend (`openai_codex`) does not
+  offer them, because the hosted image tool it drives selects its own model
+  and ignores the one it is given.
+
 ## [0.10.0] - 2026-09-06
 
 ### Added
