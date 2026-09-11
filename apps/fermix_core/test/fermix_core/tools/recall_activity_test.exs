@@ -9,6 +9,7 @@ defmodule FermixCore.Tools.RecallActivityTest do
 
   alias FermixCore.Capabilities.Builtin
   alias FermixCore.Capabilities.BuiltinSeeder
+  alias FermixCore.ComputerHistory.Gate
   alias FermixCore.Memory.Repo
   alias FermixCore.Tools.RecallActivity
 
@@ -84,11 +85,24 @@ defmodule FermixCore.Tools.RecallActivityTest do
       Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
     end)
 
-    assert {:ok, result} =
-             RecallActivity.execute(%{"about" => "***"}, ctx(%{memory_repo: repo_name}))
+    context = ctx(%{memory_repo: repo_name})
+
+    # The platform is injected so the topic validation, not the macOS gate, is
+    # what answers — otherwise this case is a gate refusal on Linux CI.
+    permitted = Map.put(context, :computer_history_gate, Gate.snapshot(context, macos?: true))
+
+    assert {:ok, result} = RecallActivity.execute(%{"about" => "***"}, permitted)
 
     refute result.success
     assert result.error =~ "word"
+
+    # The paired fail-closed branch: same call, non-macOS snapshot, gate refusal.
+    refused = Map.put(context, :computer_history_gate, Gate.snapshot(context, macos?: false))
+
+    assert {:ok, off_platform} = RecallActivity.execute(%{"about" => "***"}, refused)
+
+    refute off_platform.success
+    assert off_platform.error =~ "not available on this turn"
   end
 
   describe "advertise?/1 fails closed" do
