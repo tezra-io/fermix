@@ -23,6 +23,20 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   offer them, because the hosted image tool it drives selects its own model
   and ignores the one it is given.
 
+### Fixed
+
+- **Meeting notetaker, transcription and jobs settings no longer reset on
+  restart of a release.** A packaged daemon (the Homebrew binary and the
+  macOS app engine) reads `config.toml` while its runtime configuration is
+  being evaluated, and Elixir then re-applies the compile-time defaults over
+  the environment. Any section that also had a compile-time default lost the
+  file's values on every boot: the notetaker read as disabled again, a
+  transcription backend chosen in setup reverted, and the reminders delivery
+  target vanished, while every save made through setup or the app worked
+  until the next restart. A daemon run from source never showed it. The
+  runtime configuration now restates every section the file hydrates, and a
+  test reproduces the boot merge so a new section cannot regress alone.
+
 ## [0.10.0] - 2026-09-06
 
 ### Added

@@ -92,6 +92,16 @@ if Code.ensure_loaded?(FermixCore.Setup.ConfigStore) and
       raise "FermixCore.Setup.ConfigStore.bootstrap_runtime_config failed: " <>
               inspect(reason)
   end
+
+  # The provider that reads this file re-applies sys.config over the environment
+  # afterwards (no reboot), so the hydration above survives only for keys
+  # sys.config does not carry. Restating every hydrated key as configuration is
+  # what makes the settings file win over a compile-time default on a release
+  # boot; the env-var overlays below still merge over these. A key with no
+  # compile-time default restates to itself.
+  for {key, value} <- FermixCore.Setup.ConfigStore.hydrated_environment() do
+    config :fermix_core, key, value
+  end
 end
 
 workspace_paths =

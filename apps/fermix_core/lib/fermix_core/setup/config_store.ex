@@ -278,6 +278,40 @@ defmodule FermixCore.Setup.ConfigStore do
     end
   end
 
+  @doc """
+  The `:fermix_core` environment the boot hydration wrote, as configuration.
+
+  `config/runtime.exs` restates every entry here as `config :fermix_core, key,
+  value` once `bootstrap_runtime_config/1` has run. The release's config
+  provider reads that file and then re-applies sys.config over the application
+  environment (`reboot_system_after_config` is false), so a value written with
+  `put_env` alone survives the boot only where sys.config carries no default for
+  its key. A section with a compile-time default and no restatement reset to that
+  default on every release boot while every runtime save applied it:
+  `[fermix_core.meetings] enabled = true` read back as false after each restart
+  of the app engine and the formula binary, and the same held for
+  `transcription` and `jobs`. Mix loads `runtime.exs` on its own, so a daemon
+  run from source never showed it.
+
+  The key set is the snapshot's own plus the two the boot writes beside it, so a
+  section added to `apply_snapshot/2` is restated without a second list to keep
+  in step. A key with no value in the environment is not restated.
+  """
+  @spec hydrated_environment() :: keyword()
+  def hydrated_environment do
+    for key <- hydrated_keys(),
+        value = Application.get_env(:fermix_core, key),
+        value != nil,
+        do: {key, value}
+  end
+
+  # Every `:fermix_core` key the boot writes: the snapshot's sections, the sandbox
+  # (carried at the snapshot's top level), and the two MCP keys `apply_mcp_config/0`
+  # reads straight from the file.
+  defp hydrated_keys do
+    Keyword.keys(empty_runtime_config().fermix_core) ++ [:sandbox, :mcp_servers, :mcp_inbound]
+  end
+
   @spec apply_mcp_config() :: :ok | {:error, term()}
   def apply_mcp_config do
     case File.read(path()) do
