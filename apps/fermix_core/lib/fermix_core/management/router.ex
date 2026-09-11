@@ -58,7 +58,7 @@ defmodule FermixCore.Management.Router do
   @max_text_bytes 256
   # The detection catalog is closed and small, so the ceiling is the catalog
   # rather than a round number: a longer list can only repeat targets.
-  @max_detect_targets 5
+  @max_detect_targets 6
   # One section per call, and a section id is a published name, so the bound is
   # the widest name this daemon can serve rather than a round number.
   @max_section_bytes 128

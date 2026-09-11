@@ -200,7 +200,7 @@ daemon onto anything else.
 | `settings.reload` | none | Re-reads the settings file, pushes it into the running configuration, and re-records the baseline. The one action behind `Reload settings from disk`. Minimum version `2`. |
 | `secret.set` | `id`, `value` | Stores one secret and answers with its presence, never its value. Minimum version `2`. |
 | `secret.clear` | `id` | Forgets one secret: the keyring item, the reference that reads it, and the value in force. Minimum version `2`. |
-| `setup.detect` | `targets` | One row per target asked for: whether this Mac already has it, and a short detail where there is one. The harness target also reports vendor installation, version and authentication status, with guidance. Never a credential value. Minimum version `2`. |
+| `setup.detect` | `targets` | One row per target asked for: whether this Mac already has it, and a short detail where there is one. The harness target also reports vendor installation, version and authentication status, with guidance. The `meetbot` target reports whether both halves of the meeting notetaker are installed, and its detail carries the state of the notetaker's Google sign-in. Never a credential value. Minimum version `2`. |
 | `providers.set_primary` | `provider` | Makes one configured provider the primary and answers with the restart state and any change the operator did not type. Minimum version `2`. |
 | `providers.models.list` | `provider`, `live`, `query`, `cursor`, `limit` | One page of models, from the catalog this build ships or from the provider's own live listing, with the cursor for the next page. Minimum version `2`. |
 | `providers.probe.start` | `provider` | Starts a metered call against the provider. A job; the result carries the model and the latency. Minimum version `2`. |
@@ -387,6 +387,14 @@ Notes that the shapes alone do not carry:
   most 512 characters; auth is `authenticated`, `unverified` or `absent`.
   Guidance is nullable and at most 512 characters. Neither binary paths nor
   credential values are returned.
+- **Notetaker detection is both halves plus the sign-in.** The `meetbot` target
+  is present only when the notetaker's sidecar and its browser are both
+  installed: half an install can neither sign in nor join a meeting. Its
+  `detail` is `Signed in to Google` or `Not signed in to Google`, which is the
+  one notetaker fact a client cannot read for itself — the marker lives beside a
+  browser profile nothing on the wire exposes. With the notetaker absent there
+  is nothing to be signed in to, so `detail` is null rather than a
+  not-signed-in sentence. No profile path and no credential is returned.
 - **`settings.reload` is the one write-family method allowed while an external
   change stands**, because it is the action that clears it. Every other write
   answers `external_change`; a file that cannot be parsed answers

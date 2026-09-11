@@ -1589,7 +1589,7 @@
       }
     },
     "detectTarget": {
-      "enum": ["existing_primary", "claude_code", "codex_cli", "ollama", "harness_vendors"]
+      "enum": ["existing_primary", "claude_code", "codex_cli", "ollama", "harness_vendors", "meetbot"]
     },
     "harnessVendor": {
       "type": "object",
@@ -1632,7 +1632,7 @@
       "required": ["targets"],
       "additionalProperties": false,
       "properties": {
-        "targets": { "type": "array", "maxItems": 5, "items": { "$ref": "#/$defs/detectTarget" } }
+        "targets": { "type": "array", "maxItems": 6, "items": { "$ref": "#/$defs/detectTarget" } }
       }
     },
     "setup_detect_result": {
@@ -1640,7 +1640,7 @@
       "required": ["results"],
       "additionalProperties": false,
       "properties": {
-        "results": { "type": "array", "maxItems": 5, "items": { "$ref": "#/$defs/detectResult" } }
+        "results": { "type": "array", "maxItems": 6, "items": { "$ref": "#/$defs/detectResult" } }
       }
     },
     "providers_set_primary_params": {

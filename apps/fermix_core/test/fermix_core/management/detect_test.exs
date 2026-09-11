@@ -10,6 +10,14 @@ defmodule FermixCore.Management.DetectTest do
       codex_cli: fn -> false end,
       ollama: fn -> {:error, :econnrefused} end,
       harness_vendors: fn -> vendors(true) end
+    ] ++ meetbot_probes(true, true, true)
+  end
+
+  defp meetbot_probes(installed?, browser?, signed_in?) do
+    [
+      meetbot_installed: fn -> installed? end,
+      meetbot_browser_installed: fn -> browser? end,
+      meetbot_signed_in: fn -> signed_in? end
     ]
   end
 
@@ -147,8 +155,63 @@ defmodule FermixCore.Management.DetectTest do
     end)
   end
 
+  # The notetaker's sign-in is the one fact the app cannot see for itself: the
+  # marker lives beside a browser profile nothing on the wire exposes. Without
+  # this row the Meetings pane keeps drawing the idle sign-in control over a
+  # notetaker that signed in yesterday.
+  describe "the meetbot row" do
+    test "both halves installed and signed in reports the sign-in" do
+      probes = Keyword.merge(probes(), meetbot_probes(true, true, true))
+
+      assert %{"results" => [row]} = Detect.run(["meetbot"], probes: probes)
+      assert row == %{"target" => "meetbot", "present" => true, "detail" => "Signed in to Google"}
+    end
+
+    test "installed but never signed in says so rather than saying nothing" do
+      probes = Keyword.merge(probes(), meetbot_probes(true, true, false))
+
+      assert %{"results" => [row]} = Detect.run(["meetbot"], probes: probes)
+
+      assert row == %{
+               "target" => "meetbot",
+               "present" => true,
+               "detail" => "Not signed in to Google"
+             }
+    end
+
+    # Absent the notetaker there is nothing to be signed in to, so the row says
+    # nothing rather than "not signed in", and the marker is never read.
+    test "a sidecar with no browser is absent and carries no sign-in detail" do
+      probes =
+        Keyword.merge(
+          probes(),
+          meetbot_installed: fn -> true end,
+          meetbot_browser_installed: fn -> false end,
+          meetbot_signed_in: fn -> flunk("the sign-in was read for an absent notetaker") end
+        )
+
+      assert %{"results" => [row]} = Detect.run(["meetbot"], probes: probes)
+      assert row == %{"target" => "meetbot", "present" => false, "detail" => nil}
+    end
+
+    test "no sidecar at all is absent" do
+      probes =
+        Keyword.merge(
+          probes(),
+          meetbot_installed: fn -> false end,
+          meetbot_browser_installed: fn -> flunk("the browser was read with no sidecar") end,
+          meetbot_signed_in: fn -> flunk("the sign-in was read with no sidecar") end
+        )
+
+      assert %{"results" => [row]} = Detect.run(["meetbot"], probes: probes)
+      assert row == %{"target" => "meetbot", "present" => false, "detail" => nil}
+    end
+  end
+
   test "the published target catalog is closed" do
-    assert Detect.targets() == ~w(existing_primary claude_code codex_cli ollama harness_vendors)
+    assert Detect.targets() ==
+             ~w(existing_primary claude_code codex_cli ollama harness_vendors meetbot)
+
     assert Enum.all?(Detect.targets(), &Detect.target?/1)
     refute Detect.target?("something_else")
     refute Detect.target?(:existing_primary)
