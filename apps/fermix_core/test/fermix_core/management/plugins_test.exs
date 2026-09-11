@@ -12,6 +12,8 @@ defmodule FermixCore.Management.PluginsTest do
 
   import ExUnit.CaptureLog
 
+  alias FermixCore.Auth.ClientRejection
+  alias FermixCore.Auth.Store, as: AuthStore
   alias FermixCore.Capabilities.MCP.RuntimeStatus
   alias FermixCore.ComputerUse.SidecarInstaller
   alias FermixCore.Management.Auth, as: ManagementAuth
@@ -23,6 +25,7 @@ defmodule FermixCore.Management.PluginsTest do
   alias FermixCore.Plugins.CanonicalJson
   alias FermixCore.Plugins.Config, as: PluginConfig
   alias FermixCore.Plugins.Dist.Store, as: DistStore
+  alias FermixCore.Plugins.Registry, as: PluginRegistry
   alias FermixCore.Plugins.Status
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.RestartState
@@ -272,6 +275,92 @@ defmodule FermixCore.Management.PluginsTest do
       for row <- rows, verb = row["primary_verb"], not is_nil(verb) do
         assert List.first(row["verbs"]) == verb
       end
+    end
+  end
+
+  # A grant the provider refused to renew because the saved sign-in client was
+  # refused keeps the published `reauthorization_required` status. What changes
+  # is the words and the lead: signing in again with the same client would be
+  # refused again, so the row leads with the client and keeps the sign-in one
+  # button away.
+  describe "a refused sign-in client" do
+    setup do
+      Application.put_env(:fermix_core, :plugins, enabled: [@bundled])
+
+      Application.put_env(:fermix_core, :oauth, %{
+        "google" => [client_id: "123.apps.googleusercontent.com", client_secret: "stale"]
+      })
+
+      :ok
+    end
+
+    defp store_grant(status) do
+      {:ok, plugin} = PluginRegistry.find(@bundled)
+
+      :ok =
+        AuthStore.write(PluginConfig.auth_profile(plugin), %{
+          auth_mode: "oauth2",
+          provider: "google",
+          account: %{email: "owner@example.com"},
+          granted_scopes: [],
+          tokens: %{access_token: "AT", refresh_token: "RT"},
+          expires_at: DateTime.add(DateTime.utc_now(), 3600, :second),
+          last_refresh: nil,
+          status: status
+        })
+    end
+
+    test "names the refusal and leads with the sign-in client" do
+      store_grant("client_rejected")
+      {:ok, %{"plugins" => rows}} = Plugins.list()
+      refused = row(rows, @bundled)
+
+      assert refused["status"] == "reauthorization_required"
+      assert refused["status_sentence"] == ClientRejection.grant_sentence("google")
+      assert refused["primary_verb"] == "Set up the sign-in client"
+      assert refused["primary_action"] == "set_up_client"
+      assert List.first(refused["verbs"]) == "Set up the sign-in client"
+
+      index = Enum.find_index(refused["verbs"], &(&1 == "Sign in again"))
+      assert is_integer(index), "Sign in again was taken off a refused-client row"
+      assert Enum.at(refused["actions"], index) == "sign_in"
+    end
+
+    test "a grant that merely expired keeps its own words and lead" do
+      store_grant("reauthorization_required")
+      {:ok, %{"plugins" => rows}} = Plugins.list()
+      expired = row(rows, @bundled)
+
+      assert expired["status"] == "reauthorization_required"
+      assert expired["status_sentence"] == "The sign-in expired and needs renewing."
+      assert expired["primary_verb"] == "Sign in again"
+      refute "Set up the sign-in client" in expired["verbs"]
+    end
+
+    # "Check again" sits on the same row, so its refusal must not undo the
+    # row's diagnosis by calling the refused client an expired sign-in.
+    test "a check on it is refused with the same cause" do
+      store_grant("client_rejected")
+      check = fn _name, _opts -> {:error, {:not_ready, :reauthorization_required}} end
+
+      assert {:ok, view} = Plugins.check_start(@bundled, jobs: jobs(), check: check)
+
+      finished = await(view, jobs())
+      assert finished["failure"]["code"] == "refused"
+
+      assert finished["failure"]["sentence"] ==
+               "The check needs a plugin that is ready. " <>
+                 ClientRejection.grant_sentence("google")
+    end
+
+    test "a check on a grant that merely expired keeps the expired words" do
+      store_grant("reauthorization_required")
+      check = fn _name, _opts -> {:error, {:not_ready, :reauthorization_required}} end
+
+      assert {:ok, view} = Plugins.check_start(@bundled, jobs: jobs(), check: check)
+
+      assert await(view, jobs())["failure"]["sentence"] ==
+               "The check needs a plugin that is ready. The sign-in expired and needs renewing."
     end
   end
 

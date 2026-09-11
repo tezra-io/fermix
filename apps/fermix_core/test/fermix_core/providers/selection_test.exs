@@ -139,6 +139,22 @@ defmodule FermixCore.Providers.SelectionTest do
       refute Selection.configured?(:xai, auth_mode: :oauth)
     end
 
+    # Every reader of the stored quarantine status treats a refused sign-in
+    # client as quarantined, never as ready.
+    test "a client_rejected oauth profile is not usable" do
+      assert :ok =
+               Store.write("xai_oauth", %{
+                 auth_mode: "oauth_pkce",
+                 provider: "xai",
+                 tokens: %{access_token: "xai-at", refresh_token: nil},
+                 expires_at: nil,
+                 last_refresh: nil,
+                 status: "client_rejected"
+               })
+
+      refute Selection.configured?(:xai, auth_mode: :oauth)
+    end
+
     test "openai_codex needs a stored codex profile" do
       refute Selection.configured?(:openai_codex, [])
 

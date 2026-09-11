@@ -1,6 +1,7 @@
 defmodule FermixCore.Management.AuthTest do
   use ExUnit.Case, async: true
 
+  alias FermixCore.Auth.ClientRejection
   alias FermixCore.Management.Auth
   alias FermixCore.Management.Jobs
 
@@ -344,6 +345,31 @@ defmodule FermixCore.Management.AuthTest do
                Auth.start("plugin:nope", jobs: jobs)
 
       assert sentence == "This daemon has no plugin by that name."
+    end
+
+    # The app used to collapse this into "See the daemon log", which is where
+    # the operator could not look. The provider refusing the saved sign-in client
+    # has a fix the sentence can name.
+    test "a refused sign-in client fails the job with the sentence that names the fix", %{
+      jobs: jobs
+    } do
+      detail = %{
+        provider: "google",
+        provider_name: "Google",
+        status: 401,
+        error: "invalid_client",
+        description: "Unauthorized"
+      }
+
+      login = fn _name, _opts -> {:error, {:oauth_client_rejected, detail}} end
+
+      assert {:ok, view} = Auth.start("plugin:gmail", jobs: jobs, plugin_login: login)
+      assert {:ok, done} = terminal(jobs, view["job_id"])
+
+      assert done["status"] == "failed"
+      assert done["failure"]["code"] == "unavailable"
+      assert done["failure"]["sentence"] == ClientRejection.sentence(detail)
+      refute done["failure"]["sentence"] =~ "daemon log"
     end
 
     test "one sign-in per plugin at a time", %{jobs: jobs} do

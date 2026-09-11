@@ -19,6 +19,7 @@ defmodule FermixCore.Auth.OAuthFlow do
   """
 
   alias FermixCore.Auth.Browser
+  alias FermixCore.Auth.ClientRejection
   alias FermixCore.Auth.JwtClaims
   alias FermixCore.Auth.OAuthProvider
   alias FermixCore.Auth.Redaction
@@ -232,16 +233,27 @@ defmodule FermixCore.Auth.OAuthFlow do
       )
 
     case request |> Req.merge(req_options) |> Req.request() do
-      {:ok, %{status: 200, body: body}} ->
-        parse_token_response(body)
-
       {:ok, %{status: status, body: body}} ->
-        {:error, "Token exchange failed (#{status}): #{Redaction.format(body)}"}
+        exchange_response(provider, status, body)
 
       {:error, reason} ->
         {:error, reason}
     end
   end
+
+  # A refused client is recognised whatever the status (GitHub and Slack refuse
+  # with a 200); every other response keeps its own handling.
+  defp exchange_response(provider, status, body) do
+    case ClientRejection.classify(provider, status, body) do
+      nil -> token_exchange_response(status, body)
+      rejection -> {:error, rejection}
+    end
+  end
+
+  defp token_exchange_response(200, body), do: parse_token_response(body)
+
+  defp token_exchange_response(status, body),
+    do: {:error, "Token exchange failed (#{status}): #{Redaction.format(body)}"}
 
   @spec fetch_userinfo(OAuthProvider.t(), String.t(), keyword()) ::
           {:ok, map() | nil} | {:error, term()}

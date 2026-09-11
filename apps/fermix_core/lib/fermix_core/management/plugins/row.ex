@@ -30,9 +30,11 @@ defmodule FermixCore.Management.Plugins.Row do
   absence of one.
   """
 
+  alias FermixCore.Auth.ClientRejection
   alias FermixCore.Capabilities.MCP.RuntimeStatus
   alias FermixCore.Plugins.Config
   alias FermixCore.Plugins.Plugin
+  alias FermixCore.Plugins.Registry
   alias FermixCore.Plugins.Status
 
   # The catalog half answers one status the registry ladder cannot: an entry
@@ -119,6 +121,17 @@ defmodule FermixCore.Management.Plugins.Row do
   end
 
   @doc """
+  `check_sentence/1` for the plugin named `name`, worded from its stored cause
+  where the status alone would misname it: a grant quarantined because the
+  provider refused the saved sign-in client reads as that refusal, the same
+  words as the row, not as an expired sign-in.
+  """
+  @spec check_sentence(atom(), String.t()) :: String.t()
+  def check_sentence(status, name) when is_atom(status) and is_binary(name) do
+    "The check needs a plugin that is ready. " <> sentence(status, cause_facts(name))
+  end
+
+  @doc """
   One installed plugin's row.
 
   `context` carries what the caller resolved once for the whole listing:
@@ -143,8 +156,8 @@ defmodule FermixCore.Management.Plugins.Row do
       "enabled" => facts.enabled,
       "status" => Atom.to_string(status),
       "status_sentence" => sentence(status, facts),
-      "primary_verb" => primary_verb(status),
-      "primary_action" => action(primary_verb(status)),
+      "primary_verb" => primary_verb(status, facts),
+      "primary_action" => action(primary_verb(status, facts)),
       "verbs" => verbs,
       "actions" => Enum.map(verbs, &action/1),
       "settings" => settings(plugin),
@@ -178,8 +191,8 @@ defmodule FermixCore.Management.Plugins.Row do
       "enabled" => false,
       "status" => Atom.to_string(status),
       "status_sentence" => sentence(status, empty_facts()),
-      "primary_verb" => primary_verb(status),
-      "primary_action" => action(primary_verb(status)),
+      "primary_verb" => primary_verb(status, empty_facts()),
+      "primary_action" => action(primary_verb(status, empty_facts())),
       "verbs" => verbs,
       "actions" => Enum.map(verbs, &action/1),
       "settings" => [],
@@ -204,7 +217,9 @@ defmodule FermixCore.Management.Plugins.Row do
       account_label: account,
       credential_present: credential_present?(plugin, account),
       workspace_id: selection.workspace_id,
-      workspace_label: selection.workspace_label
+      workspace_label: selection.workspace_label,
+      auth_provider: plugin.auth[:provider],
+      client_rejected: Status.client_rejected?(plugin)
     }
   end
 
@@ -214,8 +229,26 @@ defmodule FermixCore.Management.Plugins.Row do
       account_label: nil,
       credential_present: false,
       workspace_id: nil,
-      workspace_label: nil
+      workspace_label: nil,
+      auth_provider: nil,
+      client_rejected: false
     }
+  end
+
+  # Only the cause words a check refusal. A registry that cannot answer is no
+  # cause, the same reading `Status.client_rejected?/1` gives it.
+  defp cause_facts(name) do
+    case Registry.find(name) do
+      {:ok, %Plugin{} = plugin} ->
+        %{
+          empty_facts()
+          | auth_provider: plugin.auth[:provider],
+            client_rejected: Status.client_rejected?(plugin)
+        }
+
+      _unreadable ->
+        empty_facts()
+    end
   end
 
   # A credential sits behind this plugin. For an OAuth plugin the stored session
@@ -298,6 +331,12 @@ defmodule FermixCore.Management.Plugins.Row do
   defp sentence(:needs_client_config, _facts), do: "Turned on and waiting for a sign-in client."
   defp sentence(:needs_config, _facts), do: "Turned on and waiting for a setting."
   defp sentence(:needs_workspace, _facts), do: "Signed in and waiting for a workspace."
+
+  # The provider refused the saved sign-in client: the words are the one owner's,
+  # shared with the browser door.
+  defp sentence(:reauthorization_required, %{client_rejected: true, auth_provider: provider}),
+    do: ClientRejection.grant_sentence(provider)
+
   defp sentence(:reauthorization_required, _facts), do: "The sign-in expired and needs renewing."
   defp sentence(:not_installed, _facts), do: "Not installed."
   defp sentence(:available, _facts), do: "Not installed."
@@ -332,6 +371,13 @@ defmodule FermixCore.Management.Plugins.Row do
 
   defp sentence(:error, _facts), do: "Turned on, but its state could not be read."
 
+  # A sign-in under a refused client is refused again, so a refused-client row
+  # leads with the client; "Sign in again" stays one button away (`verb_list/2`).
+  defp primary_verb(:reauthorization_required, %{client_rejected: true}),
+    do: "Set up the sign-in client"
+
+  defp primary_verb(status, _facts), do: primary_verb(status)
+
   # The one verb the row leads with. `nil` where the next step is not a button
   # this surface owns (a manifest setting, a host runtime, an incompatible
   # build, a connection already in flight), so the client uses its own word for
@@ -355,9 +401,14 @@ defmodule FermixCore.Management.Plugins.Row do
   defp verb_list(:not_configured, _facts), do: ["Turn on"]
 
   defp verb_list(status, facts) do
-    lead = List.wrap(primary_verb(status))
+    lead = List.wrap(primary_verb(status, facts))
     disconnect = if facts.credential_present, do: ["Disconnect"], else: []
 
-    Enum.uniq(lead ++ ["Check again"] ++ disconnect ++ ["Turn off"])
+    Enum.uniq(lead ++ renewal(status, facts) ++ ["Check again"] ++ disconnect ++ ["Turn off"])
   end
+
+  # The second half of a refused client's fix: once the client is updated, the
+  # sign-in is renewed, so the row keeps offering it.
+  defp renewal(:reauthorization_required, %{client_rejected: true}), do: ["Sign in again"]
+  defp renewal(_status, _facts), do: []
 end

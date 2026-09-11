@@ -35,7 +35,9 @@ defmodule FermixCore.Plugins.Http.Interpreter do
   Run a tool. `tool` is the manifest tool map (`parameters`, `request`).
   `args` are the model-supplied arguments. Opts:
 
-    * `:http` — the request seam `(req_map -> {:ok, resp} | {:error, _})`
+    * `:http` — the request seam `(req_map -> {:ok, resp} | {:error, _})`;
+      `{:error, {:auth_error, message}}` is a failure the seam already worded
+      for a person, rendered verbatim
     * `:auth_header` — `{name, value} | nil`, injected after validation
     * `:auth_type` — `:oauth2 | :api_key | :none` (401 classification)
     * `:plugin` — plugin name (for `api_key` reauth guidance)
@@ -79,6 +81,9 @@ defmodule FermixCore.Plugins.Http.Interpreter do
         if status in request.success,
           do: ok_body(resp, extract_spec, opts),
           else: {:ok, classify_response(resp, opts)}
+
+      {:error, {:auth_error, message}} when is_binary(message) ->
+        {:ok, Tool.error(message)}
 
       {:error, reason} ->
         {:ok, Tool.error("request failed: #{inspect(reason)}")}
@@ -151,6 +156,9 @@ defmodule FermixCore.Plugins.Http.Interpreter do
 
       {:ok, resp} ->
         {:error, classify_response(resp, opts).error}
+
+      {:error, {:auth_error, message}} when is_binary(message) ->
+        {:error, message}
 
       {:error, reason} ->
         {:error, "request failed: #{inspect(reason)}"}

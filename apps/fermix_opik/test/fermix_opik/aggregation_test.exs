@@ -930,6 +930,76 @@ defmodule FermixOpik.AggregationTest do
     assert trace.metadata.reason == "{:verification_failed, :untrusted}"
   end
 
+  # Plugin auth ops ([:fermix, :plugin, :auth]) are sessionless point events, so
+  # each is its own self-closing trace, the plugin-dist shape.
+  #
+  # `@plugin_auth_ops` mirrors `FermixCore.Plugins.Auth.Telemetry.ops/0` by hand:
+  # this app declares no dependency on fermix_core. The emitter's own test pins
+  # `ops/0` against the same literal list, so a new op fails until both agree.
+  @plugin_auth_event [:fermix, :plugin, :auth]
+  @plugin_auth_ops [:login, :refresh, :logout, :set, :clear]
+
+  describe "plugin auth ops" do
+    test "the reporter subscribes to the event" do
+      assert @plugin_auth_event in FermixOpik.Reporter.events()
+    end
+
+    test "every op is its own self-closing trace, never the catch-all" do
+      for op <- @plugin_auth_ops do
+        {state, closed} =
+          run([
+            {@plugin_auth_event, %{duration_ms: 9},
+             %{op: op, plugin: "github", result: :logged_out}}
+          ])
+
+        assert [%{trace: trace, spans: []}] = closed,
+               "op #{inspect(op)} produced no trace — it fell to the catch-all"
+
+        assert trace.name == "auth:#{op}"
+        assert trace.tags == ["auth"]
+        assert state.traces == %{}
+      end
+    end
+
+    test "a refused sign-in client carries its class and the vendor's own words" do
+      {_state, closed} =
+        run([
+          {@plugin_auth_event, %{duration_ms: 240},
+           %{
+             op: :login,
+             plugin: "x",
+             result: :error,
+             error_class: :oauth_client_rejected,
+             vendor_error: "unauthorized_client",
+             vendor_description: "Missing valid authorization header"
+           }}
+        ])
+
+      assert [%{trace: trace, spans: []}] = closed
+      assert trace.name == "auth:login"
+
+      assert trace.metadata == %{
+               plugin: "x",
+               result: "error",
+               error_class: "oauth_client_rejected",
+               vendor_error: "unauthorized_client",
+               vendor_description: "Missing valid authorization header",
+               duration_ms: 240
+             }
+    end
+
+    test "a success exports its tag and nothing the emitter did not set" do
+      {_state, closed} =
+        run([
+          {@plugin_auth_event, %{duration_ms: 31},
+           %{op: :refresh, plugin: "github", result: :ready}}
+        ])
+
+      assert [%{trace: trace}] = closed
+      assert trace.metadata == %{plugin: "github", result: "ready", duration_ms: 31}
+    end
+  end
+
   test "a memory:write event becomes a tool span and the reviewer trace gets the conversation thread_id" do
     sid = "memory_review:main:cli:e2e-x:owner:42"
 

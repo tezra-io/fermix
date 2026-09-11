@@ -38,6 +38,7 @@ defmodule FermixOpik.Reporter do
     [:fermix, :skill_curation, :proposal_actioned],
     [:fermix, :channel, :stream],
     [:fermix, :plugin, :dist],
+    [:fermix, :plugin, :auth],
     [:fermix, :mcp_client, :lifecycle],
     [:fermix, :reminder, :lifecycle],
     [:fermix, :reminder, :followup_start],

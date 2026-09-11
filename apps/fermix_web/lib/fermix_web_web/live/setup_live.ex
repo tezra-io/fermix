@@ -4,7 +4,9 @@ defmodule FermixWebWeb.SetupLive do
   alias Fermix.CLI.Service
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Auth.AnthropicLogin
+  alias FermixCore.Auth.ClientRejection
   alias FermixCore.Auth.CodexLogin
+  alias FermixCore.Auth.OAuthProviders
   alias FermixCore.Auth.Redaction
   alias FermixCore.Auth.Store
   alias FermixCore.Auth.TokenExpiry
@@ -1206,11 +1208,7 @@ defmodule FermixWebWeb.SetupLive do
     end)
   end
 
-  defp oauth_display_name("google"), do: "Google"
-  defp oauth_display_name("github"), do: "GitHub"
-  defp oauth_display_name("notion"), do: "Notion"
-  defp oauth_display_name("x"), do: "X"
-  defp oauth_display_name("slack"), do: "Slack"
+  defp oauth_display_name(provider), do: OAuthProviders.display_name(provider)
 
   defp oauth_default_port("google"), do: 1455
   defp oauth_default_port("github"), do: 1457
@@ -2208,6 +2206,7 @@ defmodule FermixWebWeb.SetupLive do
       account: PluginStatus.account_label(plugin),
       enabled?: enabled?,
       status: status,
+      client_rejection: client_rejection(plugin, status),
       checkable?: not computer_use_plugin?(plugin.name),
       # Manifest data, not a plugin name: a `resource_scope` is what earns the
       # card its workspace step (M27 §8.1).
@@ -2238,6 +2237,16 @@ defmodule FermixWebWeb.SetupLive do
       true -> {true, :partial}
     end
   end
+
+  # The cause of a quarantined grant whose sign-in client the provider refused,
+  # in the one owner's words the app's row renders too; nil for every other card.
+  defp client_rejection(plugin, :reauthorization_required) do
+    if PluginStatus.client_rejected?(plugin),
+      do: ClientRejection.grant_sentence(plugin.auth.provider),
+      else: nil
+  end
+
+  defp client_rejection(_plugin, _status), do: nil
 
   # The card's config form (§4.4): one input per missing required manifest
   # config entry, labelled with the manifest prompt.
@@ -2962,8 +2971,16 @@ defmodule FermixWebWeb.SetupLive do
     socket
     |> assign(:plugin_auth_tasks, tasks)
     |> assign(:plugin_auth_url, nil)
-    |> flash_error("#{task.display_name} sign-in failed: #{Redaction.format(reason)}")
+    |> flash_error(plugin_auth_failure(task, reason))
   end
+
+  # The provider refused the saved sign-in client: the flash names the fix in
+  # the words every surface uses, never the vendor's body.
+  defp plugin_auth_failure(_task, {:oauth_client_rejected, detail}),
+    do: ClientRejection.sentence(detail)
+
+  defp plugin_auth_failure(task, reason),
+    do: "#{task.display_name} sign-in failed: #{Redaction.format(reason)}"
 
   defp maybe_clear_plugin_auth_url(socket, name, url) do
     case socket.assigns.plugin_auth_url do

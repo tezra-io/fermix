@@ -1,6 +1,8 @@
 defmodule FermixCore.Plugins.OAuthLoginTest do
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias FermixCore.Auth.OAuthFlow
   alias FermixCore.Auth.OAuthProviders
   alias FermixCore.Auth.Store
@@ -129,6 +131,164 @@ defmodule FermixCore.Plugins.OAuthLoginTest do
 
     assert {:error, :needs_client_config} =
              Auth.login("google_calendar")
+  end
+
+  # A failed sign-in used to leave no trace: the event carried a bare `:error`
+  # and nothing handled it. Every op now emits through one emitter, and the log
+  # names the failure once. The fidelity half proves the diagnosis arrives; the
+  # non-leak half proves the authorize url, the code, the tokens and the client
+  # secret never do.
+  describe "what a sign-in leaves behind" do
+    # `Auth.login/2` runs in the test process, and so does the handler it
+    # triggers: filtering on that pid keeps any other emitter out of the mailbox.
+    setup do
+      parent = self()
+      handler = "oauth-login-test-#{System.unique_integer([:positive])}"
+
+      :ok =
+        :telemetry.attach(
+          handler,
+          [:fermix, :plugin, :auth],
+          fn _event, measurements, metadata, _config ->
+            if self() == parent, do: send(parent, {:plugin_auth, measurements, metadata})
+          end,
+          nil
+        )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+      :ok
+    end
+
+    defp login_through(token_plug) do
+      port = pick_free_port()
+      parent = self()
+
+      opener = fn url ->
+        send(parent, {:authorize_url, url})
+
+        Task.start(fn ->
+          state =
+            url |> URI.parse() |> Map.fetch!(:query) |> URI.decode_query() |> Map.fetch!("state")
+
+          deliver_callback(port, "/auth/callback?code=AUTHCODE&state=#{state}")
+        end)
+
+        :ok
+      end
+
+      with_log(fn ->
+        Auth.login("google_calendar",
+          port: port,
+          opener: opener,
+          timeout_ms: 5_000,
+          req_options: [plug: token_plug],
+          userinfo_req_options: [plug: fn conn -> Plug.Conn.send_resp(conn, 500, "") end],
+          puts: fn _ -> :ok end
+        )
+      end)
+    end
+
+    defp leaked(text, url) do
+      Enum.filter([url, "AUTHCODE", "desktop-secret", "google_at", "google_rt"], &(text =~ &1))
+    end
+
+    test "a refused sign-in client is traced with its class and the vendor's words" do
+      refusing = fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(
+          401,
+          Jason.encode!(%{"error" => "invalid_client", "error_description" => "Unauthorized"})
+        )
+      end
+
+      {result, log} = login_through(refusing)
+
+      assert {:error, {:oauth_client_rejected, %{error: "invalid_client"}}} = result
+      assert_received {:authorize_url, url}
+      assert_received {:plugin_auth, %{duration_ms: _}, metadata}
+
+      assert metadata == %{
+               op: :login,
+               plugin: "google_calendar",
+               result: :error,
+               error_class: :oauth_client_rejected,
+               vendor_error: "invalid_client",
+               vendor_description: "Unauthorized"
+             }
+
+      assert log =~ "login google_calendar"
+      assert log =~ "oauth_client_rejected"
+      assert log =~ "Google answered HTTP 401 invalid_client: Unauthorized"
+      assert leaked(inspect(metadata), url) == []
+      assert leaked(log, url) == []
+    end
+
+    test "a completed sign-in is traced with its tag and nothing it holds" do
+      minting = fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(
+          200,
+          Jason.encode!(%{
+            "access_token" => "google_at",
+            "refresh_token" => "google_rt",
+            "expires_in" => 3600
+          })
+        )
+      end
+
+      {result, _log} = login_through(minting)
+
+      assert {:ok, %{status: "ready"}} = result
+      assert_received {:authorize_url, url}
+      assert_received {:plugin_auth, _measurements, metadata}
+      assert metadata == %{op: :login, plugin: "google_calendar", result: :ready}
+      assert leaked(inspect(metadata), url) == []
+    end
+
+    test "a sign-in refused before any browser still names its class" do
+      Application.put_env(:fermix_core, :oauth, %{})
+
+      {result, log} = with_log(fn -> Auth.login("google_calendar") end)
+
+      assert {:error, :needs_client_config} = result
+      assert_received {:plugin_auth, _measurements, metadata}
+      assert metadata.error_class == :needs_client_config
+      refute Map.has_key?(metadata, :vendor_error)
+      assert log =~ "needs_client_config"
+    end
+
+    # A name no plugin answers to is a typed failure reported once, the same as
+    # sign-in's, not a WithClauseError or a bare :error that skips the report.
+    test "a sign-out or refresh of an unknown plugin is one reported, typed failure" do
+      {results, log} =
+        with_log(fn -> {Auth.logout("no-such-plugin"), Auth.refresh("no-such-plugin")} end)
+
+      assert {{:error, {:unknown_plugin, "no-such-plugin"}},
+              {:error, {:unknown_plugin, "no-such-plugin"}}} = results
+
+      assert_received {:plugin_auth, _measurements, logout}
+
+      assert logout == %{
+               op: :logout,
+               plugin: "no-such-plugin",
+               result: :error,
+               error_class: :unknown_plugin
+             }
+
+      assert_received {:plugin_auth, _measurements, refresh}
+
+      assert refresh == %{
+               op: :refresh,
+               plugin: "no-such-plugin",
+               result: :error,
+               error_class: :unknown_plugin
+             }
+
+      assert log =~ "logout no-such-plugin failed (unknown_plugin)"
+      assert log =~ "refresh no-such-plugin failed (unknown_plugin)"
+    end
   end
 
   test "Google OAuth login requires the desktop secret" do

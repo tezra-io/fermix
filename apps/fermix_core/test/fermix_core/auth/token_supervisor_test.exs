@@ -265,6 +265,47 @@ defmodule FermixCore.Auth.TokenSupervisorTest do
       assert {:error, :needs_client_config} =
                TokenSupervisor.refresh_entry("github:primary", entry, [])
     end
+
+    # The tree-less direct path quarantines exactly as the supervised manager
+    # does: the grant cannot renew under this client, so it is stored under its
+    # true cause and the caller is handed the typed refusal to word.
+    test "a refused client is stored as client_rejected and answered typed" do
+      :ok = Store.write("x:primary", plugin_oauth_entry("x"))
+      {:ok, entry} = Store.read("x:primary")
+
+      refusing = fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(
+          401,
+          Jason.encode!(%{
+            "error" => "unauthorized_client",
+            "error_description" => "Missing valid authorization header"
+          })
+        )
+      end
+
+      assert {:error, {:oauth_client_rejected, detail}} =
+               TokenSupervisor.refresh_entry("x:primary", entry, plug: refusing)
+
+      assert detail.provider == "x"
+      assert detail.error == "unauthorized_client"
+
+      assert {:ok, stored} = Store.read("x:primary")
+      assert stored.status == "client_rejected"
+      assert stored.tokens.refresh_token == "old_rt"
+    end
+
+    test "a dead plugin grant is still quarantined as reauthorization_required" do
+      :ok = Store.write("github:primary", plugin_oauth_entry("github"))
+      {:ok, entry} = Store.read("github:primary")
+
+      assert {:error, :reauthorization_required} =
+               TokenSupervisor.refresh_entry("github:primary", entry, plug: &permanent_400_plug/1)
+
+      assert {:ok, stored} = Store.read("github:primary")
+      assert stored.status == "reauthorization_required"
+    end
   end
 
   describe "refresh_entry/3 — xai" do

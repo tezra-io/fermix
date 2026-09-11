@@ -163,6 +163,32 @@ the installer or a CLI VM with no agent session, so they carry no `session_id`:
 and the Opik exporter renders each op as its own self-closing `dist:<op>`
 trace.
 
+## Plugin auth ops
+
+Plugin `login`/`refresh`/`logout`/`set`/`clear` emit `[:fermix, :plugin, :auth]`
+through `FermixCore.Plugins.Auth.Telemetry.emit/4` (op, plugin, outcome +
+`duration_ms`) — never hand-roll the event. In the daemon they run in a setup
+flow or a management job with no agent session, so they carry no `session_id`:
+`Trace.TelemetryHandler` maps each to a `plugin_auth` row in `agent_event`
+keyed on `plugin`, and the Opik exporter renders each op as its own
+self-closing `auth:<op>` trace (tag `auth`). A `fermix plugins auth` CLI verb
+emits the same event from a tree-less VM where no handler is attached, so a
+CLI-run op reaches neither the JSONL trace nor Opik; the operator reads its
+sentence on stderr. A token manager's own background refresh is not one of
+these ops: its refusal reaches the daemon log (the `TokenManager` line, with
+the vendor's words) rather than this event.
+
+The metadata is a fixed allowlist: `op`, `plugin`, `result` (`ready` or
+`logged_out`, else `error`), a **derived** `error_class` (the reason's atom, or
+a tagged tuple's atom head, else `unclassified`), and — only when the provider
+refused the saved sign-in client (`Auth.ClientRejection`) — the vendor's own
+`vendor_error` code and `vendor_description` (redacted and bounded by the
+classifier). The raw reason never rides: a sign-in reason can carry the
+authorize URL, which must reach no log and no trace, and a vendor body can carry
+anything. `Plugins.Auth` logs each failed op once with the same class (plus the
+vendor's words for a refused client), so a failed sign-in the daemon ran is
+diagnosable from the trace, the daemon log and the operator's surface alike.
+
 ## Background memory writes
 
 The background memory **reviewer** persists facts outside the turn that
