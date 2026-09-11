@@ -141,6 +141,7 @@ defmodule FermixWebWeb.SetupLiveTest do
     meetbot_signin_runner = Application.get_env(:fermix_web, :meetbot_signin_runner)
     harness_detector = Application.get_env(:fermix_web, :harness_detector)
     harness = Application.get_env(:fermix_core, :harness, [])
+    routing = Application.get_env(:fermix_core, :routing)
     mobile = Application.fetch_env(:fermix_channels, :mobile)
     fermix_home = System.get_env("FERMIX_HOME")
 
@@ -182,6 +183,10 @@ defmodule FermixWebWeb.SetupLiveTest do
     # app-env snapshot): a persisted "approved = true" applies to app env, so reset
     # it here regardless of any leaked env, mirroring the transcription baseline.
     Application.put_env(:fermix_core, :harness, [])
+    # No routing overrides: the sub-agent select and the computer-history card
+    # both read `:routing`, and a leaked provider pin from another app's suite
+    # (one umbrella VM) makes the pane save a mis-paired override and raise.
+    Application.put_env(:fermix_core, :routing, [])
     Application.put_env(:fermix_core, :plugins, [])
     Application.put_env(:fermix_core, :plugins_dist_opts, [])
     Application.put_env(:fermix_core, :oauth, %{})
@@ -223,6 +228,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       restore_env(:fermix_web, :meetbot_signin_runner, meetbot_signin_runner)
       restore_env(:fermix_web, :harness_detector, harness_detector)
       Application.put_env(:fermix_core, :harness, harness)
+      restore_env(:fermix_core, :routing, routing)
       restore_env(:fermix_channels, :mobile, mobile)
 
       case fermix_home do
