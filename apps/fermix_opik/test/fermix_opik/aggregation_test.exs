@@ -693,6 +693,32 @@ defmodule FermixOpik.AggregationTest do
     assert trace.name == "computer_history_summarizer"
   end
 
+  test "a computer-history roll-up is its own kind, nested under its cycle" do
+    # The daily thread roll-up (§24.3) is a second headless call inside the
+    # summarizer cycle: its own session id (so it is not mistaken for a sitting
+    # summary) parented to the cycle's, and like the summarizer it has no bookend
+    # events, so the kind rides the id prefix.
+    {state, closed} =
+      run([
+        {[:fermix, :provider, :call], %{duration_ms: 1_200},
+         %{
+           provider: :openai,
+           model: "gpt-5.5",
+           status: :ok,
+           agent: "computer_history_rollup",
+           session_id: "computer_history_rollup:1755900000000",
+           parent_session: "computer_history_summarize:1755900000000",
+           tokens: %{prompt: 800, completion: 120}
+         }}
+      ])
+
+    assert closed == []
+    assert [{_id, trace}] = Map.to_list(state.traces)
+    assert trace.tags == ["computer_history_rollup"]
+    # The agent name already says what this is — no kind prefix on top.
+    assert trace.name == "computer_history_rollup"
+  end
+
   test "a soul-curation draft's synthetic command parent keeps it a standalone root" do
     # The draft's parent_session is the originating command id (never a registered
     # turn session), so it resolves to its own root trace — correlatable but

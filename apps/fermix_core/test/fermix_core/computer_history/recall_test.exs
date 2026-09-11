@@ -281,4 +281,201 @@ defmodule FermixCore.ComputerHistory.RecallTest do
       refute result =~ "…"
     end
   end
+
+  # --- §24.4: threads lead the digest, `current` and `about` read them --------
+
+  defp thread(repo, subject, state, last_touched, attrs \\ %{}) do
+    memory(
+      repo,
+      last_touched - 3_600_000,
+      last_touched,
+      Map.merge(
+        %{
+          kind: "thread",
+          subject: subject,
+          summary: state,
+          source_ids: Jason.encode!([1]),
+          last_touched_ts: last_touched
+        },
+        attrs
+      )
+    )
+  end
+
+  @yesterday DateTime.to_unix(~U[2026-08-14 17:00:00Z], :millisecond)
+
+  describe "recent_digest/1 with threads" do
+    test "current work leads, then today's sittings, under one frame", %{repo: repo} do
+      thread(repo, "Apollo migration", "Waiting on the restore check.", @yesterday)
+      memory(repo, @today_from, @today_to, %{summary: "read the quarterly report"})
+
+      text = digest(repo)
+
+      assert text =~ "untrusted data"
+      assert text =~ "current"
+      assert text =~ "recent"
+
+      assert text =~
+               "- [current, last touched Aug 14] Apollo migration: Waiting on the restore check."
+
+      assert text =~ "- [Aug 15 09:00–10:00] read the quarterly report"
+
+      # Threads first: the owner's current work frames the sittings, not the reverse.
+      assert index_of(text, "Apollo migration") < index_of(text, "read the quarterly report")
+    end
+
+    test "at most three threads, most recently touched first", %{repo: repo} do
+      for index <- 1..5 do
+        thread(repo, "Thread #{index}", "State #{index}.", @yesterday + index * 60_000)
+      end
+
+      text = digest(repo)
+      assert text =~ "Thread 5"
+      assert text =~ "Thread 3"
+      refute text =~ "Thread 2"
+    end
+
+    test "threads alone are a digest: no sitting today is not nothing to say", %{repo: repo} do
+      thread(repo, "Apollo migration", "Waiting on the restore check.", @yesterday)
+
+      assert digest(repo) =~ "Apollo migration"
+      assert {:ok, {1, _last_ts}} = Repo.computer_history_access_stats(server: repo)
+    end
+
+    test "a thread wider than the whole budget is skipped, not the sittings behind it", %{
+      repo: repo
+    } do
+      thread(repo, "Oversized", String.duplicate("o", 2_000), @yesterday + 60_000)
+      thread(repo, "Apollo migration", "Waiting on the restore check.", @yesterday)
+      memory(repo, @today_from, @today_to, %{summary: "read the quarterly report"})
+
+      text = digest(repo)
+      refute text =~ String.duplicate("o", 100)
+      assert text =~ "Apollo migration"
+      assert text =~ "read the quarterly report"
+    end
+
+    defp index_of(text, needle) do
+      [{index, _length}] = Regex.run(~r/#{Regex.escape(needle)}/, text, return: :index)
+      index
+    end
+  end
+
+  describe "query/2 current" do
+    test "returns the active threads, dated by last touched and counted", %{repo: repo} do
+      thread(repo, "Apollo migration", "Waiting on the restore check.", @yesterday, %{
+        titles: Jason.encode!(["Apollo migration plan"]),
+        urls: Jason.encode!(["https://docs.example.com/apollo"])
+      })
+
+      # A session note in the same window is NOT current work.
+      memory(repo, @today_from, @today_to, %{summary: "read the quarterly report"})
+
+      {:ok, result} = query(repo, "current")
+
+      assert result =~ "Current work (1 thread"
+
+      assert result =~
+               "- [current, last touched Aug 14] Apollo migration: Waiting on the restore check."
+
+      assert result =~ "(pages: Apollo migration plan)"
+      assert result =~ "(urls: https://docs.example.com/apollo)"
+      refute result =~ "read the quarterly report"
+    end
+
+    test "an empty active set says so plainly", %{repo: repo} do
+      memory(repo, @today_from, @today_to, %{summary: "read the quarterly report"})
+
+      {:ok, result} = query(repo, "current")
+      assert result =~ "No current work"
+      refute result =~ "read the quarterly report"
+    end
+
+    test "more threads than fit are counted honestly", %{repo: repo} do
+      for index <- 1..9 do
+        thread(repo, "Thread #{index}", "State #{index}.", @yesterday + index * 60_000)
+      end
+
+      {:ok, result} = query(repo, "current")
+      # The header states the true count, not the number that fitted.
+      assert result =~ "Current work (9 threads; showing 8 — the most recently touched):"
+      assert result =~ "Thread 9"
+      refute result =~ "Thread 1:"
+    end
+
+    test "records an access row like any other read", %{repo: repo} do
+      thread(repo, "Apollo migration", "Open.", @yesterday)
+      assert {:ok, _text} = query(repo, "current")
+      assert {:ok, {1, _last_ts}} = Repo.computer_history_access_stats(server: repo)
+    end
+  end
+
+  describe "search/2 about a topic" do
+    test "matches session notes and threads, newest first, framed and counted", %{repo: repo} do
+      memory(repo, @today_from, @today_to, %{
+        summary: "drafted the Apollo migration plan",
+        titles: Jason.encode!(["Apollo migration plan"])
+      })
+
+      memory(repo, @last_week, @last_week + 3_600_000, %{summary: "unrelated bicycle shopping"})
+      thread(repo, "Apollo migration", "Waiting on the restore check.", @yesterday)
+
+      {:ok, result} = Recall.search("apollo", repo: repo, now: @today, timezone: "Etc/UTC")
+
+      assert result =~ "untrusted data"
+      assert result =~ "Activity matching \"apollo\" (2 entries):"
+      assert result =~ "drafted the Apollo migration plan"
+      assert result =~ "- [current, last touched Aug 14] Apollo migration:"
+      refute result =~ "bicycle"
+    end
+
+    test "no match says so, and says what was searched for", %{repo: repo} do
+      memory(repo, @today_from, @today_to, %{summary: "read the quarterly report"})
+
+      {:ok, result} = Recall.search("bicycles", repo: repo, now: @today, timezone: "Etc/UTC")
+      assert result =~ "No recorded activity about \"bicycles\""
+    end
+
+    test "a query with nothing searchable in it is refused, not run", %{repo: repo} do
+      assert {:error, :empty_query} =
+               Recall.search("***", repo: repo, now: @today, timezone: "Etc/UTC")
+    end
+
+    test "the budget drops whole entries and the header counts what is shown", %{repo: repo} do
+      base = ms(~U[2026-08-15 08:00:00Z])
+
+      for index <- 1..12 do
+        from = base + index * 60_000
+        memory(repo, from, from + 1_000, %{summary: "apollo entry-#{index}. #{fat_summary()}"})
+      end
+
+      {:ok, result} = Recall.search("apollo", repo: repo, now: @today, timezone: "Etc/UTC")
+      assert result =~ "(12 entries; showing 9 —"
+      assert result =~ "entry-12."
+      refute result =~ "entry-3."
+      refute result =~ "…"
+    end
+
+    # S4: the header counts every match, so "nothing else matched" is never
+    # inferred from a page boundary.
+    test "the header names the true match count past the page cap", %{repo: repo} do
+      base = ms(~U[2026-08-15 08:00:00Z])
+
+      for index <- 1..45 do
+        from = base + index * 60_000
+        memory(repo, from, from + 1_000, %{summary: "apollo entry-#{index}."})
+      end
+
+      {:ok, result} = Recall.search("apollo", repo: repo, now: @today, timezone: "Etc/UTC")
+
+      assert result =~ "(45 entries; showing 40 — ask about a narrower topic for the rest):"
+      assert result =~ "entry-45."
+      refute result =~ "entry-5."
+    end
+
+    test "every search appends an access row, empty results included", %{repo: repo} do
+      assert {:ok, _empty} = Recall.search("apollo", repo: repo, now: @today, timezone: "Etc/UTC")
+      assert {:ok, {1, _last_ts}} = Repo.computer_history_access_stats(server: repo)
+    end
+  end
 end
