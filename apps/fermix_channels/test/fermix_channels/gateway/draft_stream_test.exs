@@ -907,11 +907,16 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
       assert_receive {:open, {:bubble, 1}, @two_paras}, 1_000
       assert_receive {:seal, {:bubble, 1}, @para_one}, 1_000
 
-      # The next flush opens a NEW bubble holding only the live slice — the
-      # sealed card is never re-rendered.
+      # Rotation detaches the second paragraph and `mark_written` schedules its
+      # flush, so the next flush opens a NEW bubble holding only the live slice
+      # — the sealed card is never re-rendered. That open lands whether or not
+      # more text has arrived, so waiting for it here makes both orderings (the
+      # push before or after the 1 ms timer) yield the same observed sequence.
+      assert_receive {:open, {:bubble, 2}, @para_two}, 1_000
+
       DraftStream.push(pid, {:text_delta, @two_paras <> " and finishes."})
-      assert_receive {:open, {:bubble, 2}, live}, 1_000
-      assert live == @para_two <> " and finishes."
+      assert_receive {:edit, {:bubble, 2}, final}, 1_000
+      assert final == @para_two <> " and finishes."
     end
 
     test "no rotation while the whole live slice still fits one card" do
