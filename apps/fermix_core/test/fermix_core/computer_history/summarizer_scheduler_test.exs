@@ -1,6 +1,10 @@
 defmodule FermixCore.ComputerHistory.Summarizer.SchedulerTest do
   @moduledoc "MILESTONE_32 §10 — the summarizer scheduler's claim/run/release loop."
-  use ExUnit.Case, async: true
+  # async: false — the cycle-line case lowers the global Logger level, which
+  # config/test.exs pins to :warning.
+  use ExUnit.Case, async: false
+
+  import ExUnit.CaptureLog
 
   alias FermixCore.ComputerHistory.Summarizer.Scheduler
   alias FermixCore.Memory.Repo
@@ -30,7 +34,7 @@ defmodule FermixCore.ComputerHistory.Summarizer.SchedulerTest do
 
     fun = fn opts ->
       send(test_pid, {:ran, opts[:repo]})
-      {:ok, %{memory_written: true, events: 1}}
+      {:ok, %{memory_written: true, events: 1, batches: 1, empty_batches: 0}}
     end
 
     pid = start_scheduler(repo, unique, fun)
@@ -42,6 +46,25 @@ defmodule FermixCore.ComputerHistory.Summarizer.SchedulerTest do
     # The claim was released — status is idle again.
     {:ok, state} = Repo.computer_history_fetch_state(server: repo)
     assert state.status == "idle"
+  end
+
+  # The cycle line reads every key of `Summarizer.cycle_result`, so a result shape
+  # that drifts must fail here rather than in a production daemon's debug log.
+  test "the cycle line names the batch and empty-batch counts", %{repo: repo, unique: unique} do
+    previous_level = Logger.level()
+    Logger.configure(level: :debug)
+    on_exit(fn -> Logger.configure(level: previous_level) end)
+
+    fun = fn _opts -> {:ok, %{memory_written: false, events: 7, batches: 3, empty_batches: 2}} end
+    pid = start_scheduler(repo, unique, fun)
+
+    log =
+      capture_log([level: :debug], fn ->
+        send(pid, :tick)
+        _ = :sys.get_state(pid)
+      end)
+
+    assert log =~ "7 events in 3 batch(es), 2 empty, memory=false"
   end
 
   test "a concurrent claim is not run twice", %{repo: repo, unique: unique} do

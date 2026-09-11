@@ -13,11 +13,28 @@ site (by host). Within an allowlisted surface: app switches/launches/quits,
 focused-window titles, focused-field role + settled value, and first-class
 `observer.gap` events so a capture gap is never mistaken for inactivity.
 
+Coverage is **per app, and reported**: when the recorder can only read titles in
+an app (or the app refuses to report changes) it records that as an app-scoped
+coverage gap, `/history status` names those apps, and the summarizer is told what
+the marker means — so "nothing typed there" is never read as "the owner typed
+nothing".
+
 **Inside browsers, only window titles are captured today.** The pinned native
 driver withholds browser field text and does not yet emit URLs or navigation
 events, so typed text and URLs inside a browser do not reach the spool at all;
 the site allowlist applies only when a frame carries a host, which that driver
 does not currently supply. Do not tell the owner Fermix has their browsing URLs.
+
+Window and page titles are **normalized at ingest**: the leading run of status
+glyphs an app paints into its title (a spinner frame such as `⠙ fermix — fermix`,
+a bullet marking unsaved work) is stripped, a title that is nothing but glyphs
+becomes empty, and a title-change event that repeats the previous kept event's
+app and normalized title inside the same batch is dropped. A spinner otherwise
+changes the title on every animation tick and one glyph is enough to defeat every
+downstream dedupe, which is how a live spool became almost entirely spinner
+frames. The stripped set is deliberately narrow — spaces, the Braille block and
+an enumerated list of circle/bullet frames — so a title that legitimately starts
+with `~`, `$`, `€`, `±`, `<` or `+` is stored exactly as the app wrote it.
 
 There is no historical backfill — macOS Accessibility is live-only, so capture
 begins at enable and only new events flow. The raw spool is double-bounded: 48h
@@ -42,8 +59,17 @@ Every reader — the turn's LLM chain, the Recent Activity prompt section, the
   the same messages to later hops and Ollama sits last as the fallback, a chain
   with any ungranted-remote hop hides the whole feature that turn (no section,
   no tool) — the failover-leak the gate exists to close.
+- **History-bearing owner turns are pinned to the granted hops.** While history
+  is on and the turn is an attended owner turn whose *lead* provider is granted,
+  the turn runs only on the granted hops, keeping their order: failover among
+  them still works, an ungranted fallback is dropped for that turn, and if none
+  of the granted hops answers the turn fails with the ordinary
+  provider-unavailable reply rather than reaching a provider the owner never
+  consented to. The lead is never replaced — if the primary itself is not
+  granted, nothing is pinned, history does not surface, and the status surfaces
+  say why. With history off, failover is untouched.
 - **Owner-only, attended, top-level turns only.** Guests, subagent workers, and
-  scheduled/background runs get nothing.
+  scheduled/background runs get nothing (and are never pinned).
 - **Locality is declared, never inferred.** A provider is local only if it
   declares `:local_loopback` AND its effective base URL resolves to loopback; an
   Ollama pointed at a non-loopback URL is remote.
@@ -59,17 +85,23 @@ empty allowlist is refused — consent to capture nothing is not consent.
   Reuses the tier the operator already picked for cheap delegated work instead of
   hard-coding a model here; the setup card names the resolved `provider · model`.
   Raw activity is sent to that provider off-device to produce each summary, and
-  the primary is auto-granted for history egress only while this route is in
-  force and history stays enabled (it lapses on disable). ~30-min cadence.
+  **both that provider and the primary** are auto-granted for history egress —
+  only while this route is in force and history stays enabled (the grant lapses
+  on disable). Granting both is what lets recall surface in chat when the
+  subagent tier differs from the primary the turn actually runs on. ~30-min
+  cadence.
 - **`summarizer = "local"`: on-device (opt-in).** On-device summarization via a
   local-loopback provider (Ollama); raw events never leave; derived summaries
-  only on all-local chains. For operators who run a local model.
+  only on all-local chains. For operators who run a local model. Nothing is
+  granted implicitly here: a remote primary must be named in `remote_summaries`
+  before recall can surface in chat.
 - **Tier 2 — `remote_summaries = ["anthropic"]`.** Named providers may see
   *derived summaries* (never raw events) in owner turns and voice. Grants name
   providers, not models.
 - **Tier 3 — `summarizer = "anthropic"`.** Pin one named provider for
   summarization: raw activity goes to exactly that vendor, pinned, never failing
-  over to another. A router (e.g. OpenRouter) is flagged as a sharper risk
+  over to another. Like Tier 1 this grants nothing implicitly — the primary still
+  needs a `remote_summaries` entry for recall to appear in chat. A router (e.g. OpenRouter) is flagged as a sharper risk
   (opaque downstream vendors).
 
 The summarizer is prompted for **importance extraction, not an app inventory**:
@@ -89,8 +121,13 @@ proposes:
   longer discards a whole window's information. A shorter fragment — a bare SSN,
   a nine-digit routing number — is below the floor and is **not** caught: the
   prompt forbids copying, and this is the backstop behind it, not the barrier.
-- **It may abstain.** A batch with nothing worth remembering returns a marker,
-  which is recorded as an empty window rather than stored as a memory.
+- **It may abstain, and says so in the log.** A batch with nothing worth
+  remembering returns a marker, which is recorded as an empty window rather than
+  stored as a memory. Every batch logs one line naming its outcome — `ok` (with
+  how many verbatim runs were redacted), `abstained`, or `empty` — plus the event
+  count and the batch's local time window, and each cycle logs how many batches
+  ran and how many wrote nothing. A summarizer that abstains on everything is
+  therefore visible instead of looking like a summarizer that never ran.
 - **Notes are bounded** — cut at the last sentence end within 900 characters, or
   hard-cut with `…` when there is none — and each memory's structured
   artifacts (apps/sites/titles/urls) are ranked by how much of the batch carried
@@ -133,7 +170,13 @@ never sees it.
 - Enabling is a **setup** act (the consent surface), never a chat command. The
   setup card's app picker lists installed apps by name; an empty allowlist
   cannot be saved.
-- `/history status` — capture/summarizer/allowlist/spool overview, plus an
+- `/history status` — capture/summarizer/allowlist/spool overview, a `Coverage:`
+  line naming the apps where only window titles are observable (nothing typed in
+  them can ever reach history) and the apps that refused to report changes —
+  omitted when the recorder reported no such state in the retention window — a `Chat:`
+  line naming which providers history turns run on and which failover hops are
+  off while history is on (or, when the primary is not granted, that history
+  cannot surface and the exact `remote_summaries` entry that would fix it), plus an
   "Agent reads" line: every agent read of history (the `recall_activity` tool
   and the Recent Activity section) appends a metadata-only audit row in the
   store itself — when, which surface, the window, and the result count, never
@@ -147,7 +190,9 @@ never sees it.
   it is logical deletion (bytes may linger until overwritten).
 - `/history off` — disable (un-advertises next turn); stored data stays until
   purged; re-enable in setup reuses the persisted allowlist.
-- `fermix doctor` shows a `computer history` row.
+- `fermix doctor`'s `computer history` row reports availability (macOS only),
+  on/off, the summarizer posture, the allowlist sizes, and the same chain
+  sentence — and **warns** when history is enabled but cannot surface in chat.
 
 ## Boundaries
 

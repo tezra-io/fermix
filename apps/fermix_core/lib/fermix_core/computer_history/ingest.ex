@@ -4,8 +4,9 @@ defmodule FermixCore.ComputerHistory.Ingest do
   arrive from the capturer as atom-keyed maps; Ingest runs each through the
   fixed pipeline before it touches disk:
 
-      default-deny allowlist  ▸  secure-role suppression  ▸  secret scrubber
-        ▸  injection-scan tagging  ▸  batched write
+      default-deny allowlist  ▸  title normalization  ▸  secure-role suppression
+        ▸  secret scrubber  ▸  injection-scan tagging  ▸  consecutive-repeat
+        collapse  ▸  batched write
 
   **Default-deny (§14 inv. 11):** an event in a non-allowlisted app, or a
   browser content/navigation event on a non-allowlisted site, is dropped
@@ -17,6 +18,17 @@ defmodule FermixCore.ComputerHistory.Ingest do
   The scrubber runs on every free-form column, and the injection scanner tags
   suspect free-form text with a `scan_flag` so a captured "ignore previous
   instructions…" is marked as data, never executed downstream (§13.3).
+
+  **Title noise:** a window title arrives with whatever status glyphs the app
+  paints into it — a spinner frame (`⠙ fermix — fermix`) changes the title on
+  every animation tick, and one Braille glyph is enough to defeat every
+  downstream dedupe, which is how a live spool became 99% spinner frames.
+  `normalize_title/1` strips the LEADING run of status glyphs from
+  `window_title`/`page_title`, and a `window.title_changed` whose app and
+  normalized title repeat the previous kept event of the same type is dropped and
+  counted as `collapsed`. Within-batch only: debouncing the source is the
+  recorder's job, and a cross-batch cursor here would be a second, drifting
+  memory of the last title.
 
   The live capturer's micro-batching (buffer + flush timer) and its
   write-failure gap policy live with the capturer (§7.1); this module is the
@@ -57,20 +69,41 @@ defmodule FermixCore.ComputerHistory.Ingest do
     user.switched
   )
 
-  @type stats :: %{written: non_neg_integer(), dropped: non_neg_integer()}
+  # The status-glyph run a title can be prefixed with: plain spaces, the Braille
+  # block every terminal spinner animates through, and the enumerated circle/bullet
+  # frames apps use for "unsaved", "loading" or "running". Deliberately NOT the
+  # whole `\p{S}`/`\p{Z}` properties: those swallow the leading `~`, `$`, `€`, `±`,
+  # `<`, `` ` ``, `©`, `+` and `→` of ordinary titles (`~/projects/fermix — zsh`
+  # became `/projects/fermix — zsh`), and a stripper that edits real titles is
+  # worse than the noise it removes. Leading only — a glyph inside a title is part
+  # of the title.
+  @leading_glyphs ~r/^[\p{Zs}\x{2800}-\x{28FF}•●○◐◓◑◒◴◵◶◷⣿]+/u
+
+  # The one event kind whose consecutive repeats are animation frames rather than
+  # activity. Every other kind is written as observed.
+  @collapsible_kind "window.title_changed"
+
+  @title_columns [:window_title, :page_title]
+
+  @type stats :: %{
+          written: non_neg_integer(),
+          dropped: non_neg_integer(),
+          collapsed: non_neg_integer()
+        }
 
   @doc """
   Run a batch of raw events through the pipeline and write the survivors.
-  Returns `{:ok, %{written, dropped}}` (written excludes idempotent-duplicate
-  rows) or the write error. `opts`: `:repo`, `:apps`, `:sites` (each defaults
-  to the configured value) for hermetic testing.
+  Returns `{:ok, %{written, dropped, collapsed}}` (written excludes
+  idempotent-duplicate rows, `collapsed` counts repeated title frames dropped
+  inside this batch) or the write error. `opts`: `:repo`, `:apps`, `:sites` (each
+  defaults to the configured value) for hermetic testing.
   """
   @spec ingest([map()], keyword()) :: {:ok, stats()} | {:error, term()}
   def ingest(events, opts \\ []) when is_list(events) do
     repo = Keyword.get(opts, :repo, Repo)
 
     if capture_paused?(repo, opts) do
-      {:ok, %{written: 0, dropped: length(events)}}
+      {:ok, %{written: 0, dropped: length(events), collapsed: 0}}
     else
       write_batch(events, repo, opts)
     end
@@ -81,11 +114,11 @@ defmodule FermixCore.ComputerHistory.Ingest do
     sites = Keyword.get_lazy(opts, :sites, &Config.sites/0)
 
     {kept, dropped} = Enum.split_with(events, &allowed?(&1, apps, sites))
-    processed = Enum.map(kept, &process/1)
+    {processed, collapsed} = kept |> Enum.map(&process/1) |> collapse_title_frames()
 
     case Repo.computer_history_insert_events(processed, server: repo) do
       {:ok, written} ->
-        {:ok, %{written: written, dropped: length(dropped)}}
+        {:ok, %{written: written, dropped: length(dropped), collapsed: collapsed}}
 
       {:error, reason} = error ->
         Logger.error("computer_history ingest write failed: #{inspect(reason)}")
@@ -168,10 +201,52 @@ defmodule FermixCore.ComputerHistory.Ingest do
 
   defp process(event) do
     event
+    |> normalize_titles()
     |> suppress_secure_text()
     |> scrub_free_form()
     |> tag_injection()
   end
+
+  defp normalize_titles(event) do
+    Enum.reduce(@title_columns, event, fn column, acc ->
+      case Map.get(acc, column) do
+        value when is_binary(value) -> Map.put(acc, column, normalize_title(value))
+        _absent_or_nil -> acc
+      end
+    end)
+  end
+
+  # A title that is nothing but status glyphs names no document, so it becomes
+  # nil rather than a row of decoration the summarizer has to reason about.
+  defp normalize_title(value) do
+    case value |> String.replace(@leading_glyphs, "") |> String.trim() do
+      "" -> nil
+      normalized -> normalized
+    end
+  end
+
+  # --- consecutive-repeat collapse ---------------------------------------
+
+  defp collapse_title_frames(events) do
+    {kept, _previous, collapsed} = Enum.reduce(events, {[], nil, 0}, &collapse_step/2)
+    {Enum.reverse(kept), collapsed}
+  end
+
+  defp collapse_step(event, {kept, previous, collapsed}) do
+    if repeated_title?(event, previous),
+      do: {kept, previous, collapsed + 1},
+      else: {[event | kept], event, collapsed}
+  end
+
+  # Compared against the previous KEPT event, and only when both are title
+  # changes: an intervening focus change or app switch makes the next identical
+  # title a real re-entry, not another frame of the same animation.
+  defp repeated_title?(%{type: @collapsible_kind} = event, %{type: @collapsible_kind} = previous),
+    do: title_identity(event) == title_identity(previous)
+
+  defp repeated_title?(_event, _previous), do: false
+
+  defp title_identity(event), do: {Map.get(event, :bundle_id), Map.get(event, :window_title)}
 
   defp suppress_secure_text(%{role: role} = event) when role in @secure_roles,
     do: Map.put(event, :text, nil)
