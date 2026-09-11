@@ -84,7 +84,7 @@ jobs:
           set -euo pipefail
           fail=0
           while IFS=$'\t' read -r name version url sha; do
-            if ! curl -fsSL --retry 3 "$url" -o /tmp/artifact; then
+            if ! curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 "$url" -o /tmp/artifact; then
               echo "::error title=Catalog artifact unreachable::$name@$version $url"
               fail=1
               continue
@@ -103,8 +103,8 @@ jobs:
         run: |
           set -euo pipefail
           ref=$(grep '"compux"' mix.lock | grep -oE '[a-f0-9]{40}' | head -1)
-          curl -fsSL --retry 3 "https://raw.githubusercontent.com/tezra-io/compux/$ref/checksum-compux.exs" -o /tmp/checksum-compux.exs
-          curl -fsSL --retry 3 "https://raw.githubusercontent.com/tezra-io/compux/$ref/mix.exs" -o /tmp/compux-mix.exs
+          curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 "https://raw.githubusercontent.com/tezra-io/compux/$ref/checksum-compux.exs" -o /tmp/checksum-compux.exs
+          curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 "https://raw.githubusercontent.com/tezra-io/compux/$ref/mix.exs" -o /tmp/compux-mix.exs
           version=$(grep -oE '@version "[0-9.]+"' /tmp/compux-mix.exs | grep -oE '[0-9.]+')
           fail=0
           found=0
@@ -118,7 +118,7 @@ jobs:
               *) ext="tar.gz" ;;
             esac
             url="https://github.com/tezra-io/compux/releases/download/v${version}/compux-${version}-${target}.${ext}"
-            if ! curl -fsSL --retry 3 "$url" -o /tmp/compux-artifact; then
+            if ! curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 "$url" -o /tmp/compux-artifact; then
               echo "::error title=compux artifact unreachable::$target $url"
               fail=1
               continue
