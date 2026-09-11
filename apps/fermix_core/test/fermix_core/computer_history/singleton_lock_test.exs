@@ -74,11 +74,15 @@ defmodule FermixCore.ComputerHistory.SingletonLockTest do
     end
 
     test "a live (heartbeated) lock is NOT broken", %{path: path} do
-      # Fresh mtime → not stale → the contender yields even with a short window.
+      # Fresh mtime → not stale → the contender yields. Staleness is judged from
+      # the file's mtime at one-second resolution, so a window under a second is
+      # not "short", it is a coin flip on where the wall clock's second boundary
+      # falls between the write and the check (it failed that way on the Intel
+      # macOS CI leg). Two seconds is the smallest window that is deterministic.
       assert :ok = SingletonLock.acquire(path, home: "/tmp/home-a")
 
       assert {:error, {:held_by, _}} =
-               SingletonLock.acquire(path, stale_after_ms: 1, home: "/tmp/home-b")
+               SingletonLock.acquire(path, stale_after_ms: 2_000, home: "/tmp/home-b")
     end
   end
 
