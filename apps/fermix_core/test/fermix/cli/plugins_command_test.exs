@@ -2,9 +2,12 @@ defmodule Fermix.CLI.PluginsCommandTest do
   use ExUnit.Case, async: false
 
   import ExUnit.CaptureIO
+  import ExUnit.CaptureLog
 
   alias Fermix.CLI.PluginsCommand
+  alias FermixCore.Auth.ClientRejection
   alias FermixCore.Auth.Store
+  alias FermixCore.Auth.TokenManager
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Plugins.Dist.Store, as: DistStore
   alias FermixCore.Plugins.Runtime
@@ -142,6 +145,65 @@ defmodule Fermix.CLI.PluginsCommandTest do
 
     assert output =~ "google_calendar"
     assert output =~ "missing"
+  end
+
+  # The refusal used to print as the vendor's raw body with "Token" redacted to
+  # "[REDACTED]". Every auth verb shares one error renderer, so the refresh verb
+  # proves it hermetically: the manager serving the profile is the test's own,
+  # registered where the supervisor looks, answering through a plug.
+  test "a refused sign-in client prints the sentence that names the fix" do
+    profile = "google_calendar:cli-refused"
+
+    Application.put_env(:fermix_core, :plugins,
+      enabled: ["google_calendar"],
+      entries: %{"google_calendar" => [auth_profile: profile]}
+    )
+
+    Application.put_env(:fermix_core, :oauth, %{
+      "google" => [client_id: "123.apps.googleusercontent.com", client_secret: "stale"]
+    })
+
+    :ok =
+      Store.write(profile, %{
+        auth_mode: "oauth2",
+        provider: "google",
+        granted_scopes: [],
+        tokens: %{access_token: "AT", refresh_token: "RT"},
+        expires_at: DateTime.add(DateTime.utc_now(), 3600, :second),
+        last_refresh: nil,
+        status: "ready"
+      })
+
+    refusing = fn conn ->
+      conn
+      |> Plug.Conn.put_resp_content_type("application/json")
+      |> Plug.Conn.send_resp(401, Jason.encode!(%{"error" => "invalid_client"}))
+    end
+
+    start_supervised!(
+      {TokenManager,
+       name: {:via, Registry, {FermixCore.Auth.TokenRegistry, profile}},
+       auth_profile: profile,
+       req_options: [plug: refusing]}
+    )
+
+    detail = %{
+      provider: "google",
+      provider_name: "Google",
+      status: 401,
+      error: "invalid_client",
+      description: nil
+    }
+
+    stderr =
+      capture_io(:stderr, fn ->
+        capture_log(fn ->
+          assert PluginsCommand.run(["auth", "refresh", "google_calendar"]) == 1
+        end)
+      end)
+
+    assert stderr =~ "fermix plugins: " <> ClientRejection.sentence(detail)
+    refute stderr =~ "[REDACTED]"
   end
 
   # M27 §7.1: the secret reaches `auth set` through a masked terminal read or

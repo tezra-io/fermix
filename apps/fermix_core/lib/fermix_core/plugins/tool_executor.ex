@@ -3,6 +3,7 @@ defmodule FermixCore.Plugins.ToolExecutor do
   Executes first-party plugin tools with tokens resolved outside model input.
   """
 
+  alias FermixCore.Auth.ClientRejection
   alias FermixCore.Auth.Redaction
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Capabilities.Builtin.Tool
@@ -336,6 +337,11 @@ defmodule FermixCore.Plugins.ToolExecutor do
               auth_profile,
               tool
             )
+
+          # A refused client has one fix the owner must make, so it reaches the
+          # model already worded rather than as an inspected term.
+          {:error, {:oauth_client_rejected, _detail} = reason} ->
+            {:error, {:auth_error, format_auth_error(plugin_name, reason)}}
 
           {:error, reason} ->
             # Surface the refresh failure itself (network vs revoked grant)
@@ -938,6 +944,11 @@ defmodule FermixCore.Plugins.ToolExecutor do
   defp format_auth_error(plugin_name, {:provider_missing, _profile}) do
     format_auth_error(plugin_name, :no_auth_profile)
   end
+
+  # Reconnecting under the refused client would be refused again, so the error
+  # names the owner's fix instead of a reauthorize command.
+  defp format_auth_error(_plugin_name, {:oauth_client_rejected, detail}),
+    do: ClientRejection.sentence(detail)
 
   defp format_auth_error(_plugin_name, reason),
     do: "plugin auth unavailable: #{Redaction.format(reason)}"

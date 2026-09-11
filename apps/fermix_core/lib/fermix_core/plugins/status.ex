@@ -131,6 +131,32 @@ defmodule FermixCore.Plugins.Status do
     end
   end
 
+  @doc """
+  Whether the plugin's stored grant is quarantined because its provider refused
+  the saved sign-in client (`Auth.ClientRejection`).
+
+  The ladder publishes such a grant as `:reauthorization_required`, the status
+  vocabulary having no word of its own for it; this predicate is how the
+  surfaces that word the cause tell it apart. It reads the auth store and
+  nothing else, so it answers identically in a tree-less CLI VM. An unreadable
+  store or registry is not a refused client: `status/1` reports those itself.
+  """
+  @spec client_rejected?(Plugin.t() | String.t()) :: boolean()
+  def client_rejected?(%Plugin{} = plugin) do
+    case Store.read(Config.auth_profile(plugin)) do
+      {:ok, entry} -> Map.get(entry, :status) == "client_rejected"
+      {:error, _reason} -> false
+    end
+  end
+
+  def client_rejected?(name) when is_binary(name) do
+    case Registry.find(name) do
+      {:ok, plugin} -> client_rejected?(plugin)
+      :error -> false
+      {:error, _reason} -> false
+    end
+  end
+
   @spec granted_scopes(Plugin.t()) :: [String.t()]
   def granted_scopes(%Plugin{} = plugin) do
     case Store.read(Config.auth_profile(plugin)) do
@@ -208,6 +234,11 @@ defmodule FermixCore.Plugins.Status do
         :reauthorization_required
 
       {:ok, %{status: "invalidated"}} ->
+        :reauthorization_required
+
+      # The provider refused the saved sign-in client, so the grant cannot
+      # renew. `client_rejected?/1` tells the cause apart for the surfaces.
+      {:ok, %{status: "client_rejected"}} ->
         :reauthorization_required
 
       {:ok, _entry} ->

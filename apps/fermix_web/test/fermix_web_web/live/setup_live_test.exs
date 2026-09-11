@@ -4,6 +4,7 @@ defmodule FermixWebWeb.SetupLiveTest do
   import Phoenix.LiveViewTest
 
   alias Fermix.CLI.Upgrade.Manifest
+  alias FermixCore.Auth.ClientRejection
   alias FermixCore.Auth.Store
   alias FermixCore.Capabilities.MCP.RuntimeStatus
   alias FermixCore.Meetings.SidecarInstaller, as: MeetbotInstaller
@@ -1040,6 +1041,78 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert contents =~ ~s(client_id = "123.apps.googleusercontent.com")
       assert contents =~ "[fermix_core.plugins.google_drive]"
       assert contents =~ ~s(enabled = ["google_drive", "google_calendar"])
+    end
+
+    # The flash used to be the vendor's raw body, in which the redactor had
+    # turned "Token" into "[REDACTED]". A refused sign-in client has a fix, and
+    # the flash names it in the words every surface uses.
+    test "a refused sign-in client flashes the sentence that names the fix", %{conn: conn} do
+      detail = %{
+        provider: "google",
+        provider_name: "Google",
+        status: 401,
+        error: "invalid_client",
+        description: "Unauthorized"
+      }
+
+      Application.put_env(:fermix_web, :plugin_auth_runner, fn _name, _opts ->
+        {:error, {:oauth_client_rejected, detail}}
+      end)
+
+      view = start_google_calendar_auth(conn)
+
+      html = render_until(view, ClientRejection.sentence(detail))
+      refute html =~ "[REDACTED]"
+      refute html =~ "oauth_client_rejected"
+    end
+
+    test "a refused sign-in client card names the cause and points at the client form", %{
+      conn: conn
+    } do
+      Application.put_env(:fermix_core, :plugins, enabled: ["google_calendar"])
+
+      Application.put_env(:fermix_core, :oauth, %{
+        "google" => [client_id: "123.apps.googleusercontent.com", client_secret: "stale"]
+      })
+
+      :ok = write_plugin_grant("google_calendar", "client_rejected")
+
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+      card = view |> element(~s|section[data-plugin-name="google_calendar"]|) |> render()
+
+      assert card =~ ClientRejection.grant_sentence("google")
+      # Signing in again stays available: it is the second half of the fix.
+      assert card =~ ~s(phx-click="plugin_connect")
+      assert card =~ "Reauthorize"
+
+      view
+      |> element(
+        ~s|section[data-plugin-name="google_calendar"] button[phx-click="open_oauth_modal"]|
+      )
+      |> render_click()
+
+      assert has_element?(view, "#oauth-client-form-google")
+    end
+
+    test "a grant that merely expired names no refused client", %{conn: conn} do
+      Application.put_env(:fermix_core, :plugins, enabled: ["google_calendar"])
+
+      Application.put_env(:fermix_core, :oauth, %{
+        "google" => [client_id: "123.apps.googleusercontent.com", client_secret: "desktop"]
+      })
+
+      :ok = write_plugin_grant("google_calendar", "reauthorization_required")
+
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+      card = view |> element(~s|section[data-plugin-name="google_calendar"]|) |> render()
+
+      assert card =~ "Reauthorize"
+      refute card =~ ClientRejection.grant_sentence("google")
+      refute card =~ ~s(phx-click="open_oauth_modal")
     end
 
     test "oauth plugin enable clears the fallback URL after auth completes", %{
@@ -4756,7 +4829,9 @@ defmodule FermixWebWeb.SetupLiveTest do
     dist_opts
   end
 
-  defp write_ready_plugin_auth(name) do
+  defp write_ready_plugin_auth(name), do: write_plugin_grant(name, "ready")
+
+  defp write_plugin_grant(name, status) do
     {:ok, plugin} = PluginRegistry.find(name)
 
     Store.write(PluginConfig.default_auth_profile(plugin), %{
@@ -4768,7 +4843,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       tokens: %{access_token: "AT", refresh_token: "RT"},
       expires_at: DateTime.utc_now() |> DateTime.add(3600),
       last_refresh: nil,
-      status: "ready"
+      status: status
     })
   end
 

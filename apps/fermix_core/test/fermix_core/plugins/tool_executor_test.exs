@@ -4,6 +4,7 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
   # establishes explicitly per the hermetic-config rule.
   use ExUnit.Case, async: false
 
+  alias FermixCore.Auth.ClientRejection
   alias FermixCore.Plugins.Http.Interpreter
   alias FermixCore.Plugins.ToolExecutor
 
@@ -346,6 +347,36 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
     assert result.success == false
     assert result.error =~ "enabled but not connected"
     assert result.error =~ "fermix plugins auth login google_calendar"
+  end
+
+  # Reconnecting with the same saved client would be refused again, so the tool
+  # error carries the one fix: the owner updates the client, then signs in.
+  test "a refused sign-in client answers with the sentence that names the fix" do
+    detail = %{
+      provider: "google",
+      provider_name: "Google",
+      status: 401,
+      error: "invalid_client",
+      description: "Unauthorized"
+    }
+
+    context = %{
+      plugin_token_getter: fn "google_calendar:primary" ->
+        {:error, {:oauth_client_rejected, detail}}
+      end
+    }
+
+    assert {:ok, result} =
+             ToolExecutor.execute(
+               %{"query" => "standup"},
+               context,
+               "google_calendar",
+               %{"name" => "google_calendar_search_events", "read_only" => true}
+             )
+
+    assert result.success == false
+    assert result.error == ClientRejection.sentence(detail)
+    refute result.error =~ "fermix plugins auth"
   end
 
   test "enriches Gmail search results with sender, subject, and snippet" do
@@ -1187,6 +1218,43 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
       assert result.success == false
       assert result.error =~ "token_refresh_failed"
       assert result.error =~ "network_unreachable"
+    end
+
+    # The X, GitHub and Notion catalog plugins run on this rail, so a refused
+    # client met on the 401 retry must read as the fix, not an inspected term.
+    test "a refresh refused for its client answers with the fix sentence" do
+      plug = fn conn -> Plug.Conn.send_resp(conn, 401, "") end
+
+      detail = %{
+        provider: "google",
+        provider_name: "Google",
+        status: 401,
+        error: "invalid_client",
+        description: "Unauthorized"
+      }
+
+      context = %{
+        plugin_url_guard: fn _ -> :ok end,
+        plugin_req_options: [plug: plug],
+        plugin_token_getter: fn "google_calendar:primary" -> {:ok, "old"} end,
+        plugin_token_refresher: fn "google_calendar:primary" ->
+          {:error, {:oauth_client_rejected, detail}}
+        end,
+        plugin_granted_scopes_getter: fn _ ->
+          ["https://www.googleapis.com/auth/calendar.readonly"]
+        end
+      }
+
+      assert {:ok, result} =
+               ToolExecutor.execute(
+                 %{"query" => "x"},
+                 context,
+                 "google_calendar",
+                 declarative_tool()
+               )
+
+      assert result.success == false
+      assert result.error == ClientRejection.sentence(detail)
     end
   end
 

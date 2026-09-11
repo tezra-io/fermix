@@ -216,6 +216,42 @@ defmodule FermixCore.Plugins.Http.InterpreterTest do
     end
   end
 
+  describe "a failure the seam already worded" do
+    @worded "Google refused the sign-in client saved in Fermix."
+
+    test "a single request renders it verbatim" do
+      t = tool(%{"method" => "GET", "url" => "https://api.example.com/items"})
+      http = fn _req -> {:error, {:auth_error, @worded}} end
+
+      assert {:ok, %{success: false, error: @worded}} = Interpreter.run(t, %{}, http: http)
+    end
+
+    test "a paginated request renders it verbatim" do
+      t =
+        tool(%{
+          "method" => "GET",
+          "url" => "https://api.example.com/items",
+          "paginate" => %{
+            "cursor_path" => "next",
+            "cursor_param" => "cursor",
+            "items_path" => "items"
+          }
+        })
+
+      http = fn _req -> {:error, {:auth_error, @worded}} end
+
+      assert {:ok, %{success: false, error: @worded}} = Interpreter.run(t, %{}, http: http)
+    end
+
+    test "any other seam error still reads as the failed request" do
+      t = tool(%{"method" => "GET", "url" => "https://api.example.com/items"})
+      http = fn _req -> {:error, {:token_refresh_failed, :network_unreachable}} end
+
+      assert {:ok, %{success: false, error: error}} = Interpreter.run(t, %{}, http: http)
+      assert error == "request failed: {:token_refresh_failed, :network_unreachable}"
+    end
+  end
+
   describe "pagination (body cursor)" do
     test "accumulates items across pages until the cursor runs out" do
       t =

@@ -11,6 +11,8 @@ defmodule FermixCore.Management.CopyTest do
 
   use ExUnit.Case, async: true
 
+  alias FermixCore.Auth.ClientRejection
+  alias FermixCore.Auth.OAuthProviders
   alias FermixCore.Auth.Redaction
   alias FermixCore.Management.Copy
   alias FermixCore.Management.Doctor.Remediation
@@ -179,6 +181,29 @@ defmodule FermixCore.Management.CopyTest do
         assert_clean(PluginRow.check_sentence(status), :prose, [], "check sentence #{status}")
       end
     end
+
+    # The refused-client sentences are written once in `Auth.ClientRejection`
+    # and rendered verbatim by the app, the browser door and the CLI. The case
+    # set is every plugin provider and every refusal code it declares, read
+    # from the provider registry rather than listed here.
+    test "every refused sign-in client sentence obeys the rules" do
+      refusals =
+        Enum.flat_map(OAuthProviders.providers(), fn id ->
+          {:ok, provider} = OAuthProviders.definition(id, client_id: "id", client_secret: "s")
+          Enum.map(provider.client_rejection_errors, &refusal(provider, &1))
+        end)
+
+      assert length(refusals) >= length(OAuthProviders.providers())
+
+      for detail <- refusals do
+        names = [detail.provider_name]
+        where = "#{detail.provider} #{detail.error}"
+
+        assert_clean(ClientRejection.sentence(detail), :prose, names, "refusal #{where}")
+        assert_clean(ClientRejection.grant_sentence(detail.provider), :prose, names, where)
+        assert internal_terms(ClientRejection.sentence(detail)) == []
+      end
+    end
   end
 
   # A refusal sentence is only produced by the failure it names, so no live call
@@ -316,6 +341,12 @@ defmodule FermixCore.Management.CopyTest do
   defp plugin_rows do
     {:ok, %{"plugins" => rows}} = Plugins.list()
     rows
+  end
+
+  defp refusal(provider, error) do
+    body = %{"error" => error, "error_description" => "The vendor's own words."}
+    {:oauth_client_rejected, detail} = ClientRejection.classify(provider, 401, body)
+    detail
   end
 
   @lib Path.expand("../../../lib/fermix_core", __DIR__)

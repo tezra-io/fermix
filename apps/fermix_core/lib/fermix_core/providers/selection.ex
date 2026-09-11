@@ -182,7 +182,7 @@ defmodule FermixCore.Providers.Selection do
     case Store.read(profile) do
       {:ok, entry} ->
         present?(entry.tokens.access_token) and
-          Map.get(entry, :status) != "reauthorization_required"
+          Map.get(entry, :status) not in ["reauthorization_required", "client_rejected"]
 
       {:error, _reason} ->
         false

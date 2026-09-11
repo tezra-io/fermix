@@ -584,6 +584,38 @@ defmodule FermixOpik.Aggregation do
     {state, [%{trace: trace, spans: []}]}
   end
 
+  # Plugin auth ops ([:fermix, :plugin, :auth]): login/refresh/logout/set/clear
+  # run in a setup flow or a management job with no agent session, so
+  # each op is a point event that becomes its own self-closing trace, built
+  # exactly like the dist trace and never tracked in state. The emitter's
+  # allowlist is the whole metadata: a class, and for a refused sign-in client
+  # the vendor's own code and description, never the raw reason.
+  def apply_event(state, [:fermix, :plugin, :auth], meas, meta, at) do
+    duration_ms = Map.get(meas, :duration_ms, 0)
+    started = Mapper.start_of(at.at, duration_ms)
+
+    trace =
+      Mapper.drop_nil(%{
+        id: Mapper.new_id(started),
+        project_name: state.project,
+        name: "auth:#{stringify(Map.get(meta, :op))}",
+        start_time: Mapper.iso(started),
+        end_time: Mapper.iso(at.at),
+        metadata:
+          compact(%{
+            plugin: Map.get(meta, :plugin),
+            result: stringify(Map.get(meta, :result)),
+            error_class: stringify(Map.get(meta, :error_class)),
+            vendor_error: Map.get(meta, :vendor_error),
+            vendor_description: Map.get(meta, :vendor_description),
+            duration_ms: duration_ms
+          }),
+        tags: ["auth"]
+      })
+
+    {state, [%{trace: trace, spans: []}]}
+  end
+
   # Outbound MCP client lifecycle ([:fermix, :mcp_client, :lifecycle]). Routing
   # is decided by ONE classifier — "did this phase happen inside an agent turn?"
   # — not by a fallback: the two shapes are two distinct situations, not two

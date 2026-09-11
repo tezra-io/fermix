@@ -3,6 +3,7 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
 
   alias FermixCore.Agents.LifecycleTelemetry
   alias FermixCore.Capabilities.MCP.Telemetry, as: MCPClientTelemetry
+  alias FermixCore.Plugins.Auth.Telemetry, as: PluginAuthTelemetry
   alias FermixCore.Trace
   alias FermixCore.Trace.TelemetryHandler
 
@@ -274,6 +275,40 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
     assert entry["version"] == "1.2.0"
     assert entry["result"] == "installed"
     assert entry["duration_ms"] == 87
+  end
+
+  # A failed plugin sign-in was invisible: nothing handled the event. It is now a
+  # plugin_auth row keyed on the plugin, carrying the class and, for a refused
+  # sign-in client, the vendor's own words.
+  test "plugin:auth event creates a plugin_auth agent_event trace", %{dir: dir, server: server} do
+    refused = %{
+      provider: "x",
+      provider_name: "X",
+      status: 401,
+      error: "unauthorized_client",
+      description: "Missing valid authorization header"
+    }
+
+    :ok =
+      PluginAuthTelemetry.emit(
+        :login,
+        "x",
+        {:error, {:oauth_client_rejected, refused}},
+        PluginAuthTelemetry.start()
+      )
+
+    sync(server)
+
+    entries = read_entries(dir, :agent_event)
+    entry = find_entry!(entries, &(&1["event"] == "plugin_auth" and &1["plugin"] == "x"))
+    assert entry["agent"] == "x"
+    assert entry["plugin"] == "x"
+    assert entry["op"] == "login"
+    assert entry["result"] == "error"
+    assert entry["error_class"] == "oauth_client_rejected"
+    assert entry["vendor_error"] == "unauthorized_client"
+    assert entry["vendor_description"] == "Missing valid authorization header"
+    assert is_integer(entry["duration_ms"])
   end
 
   test "timeout:expired event creates a timeout agent_event trace", %{dir: dir, server: server} do

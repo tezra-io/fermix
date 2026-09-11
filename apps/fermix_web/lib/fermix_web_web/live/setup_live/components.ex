@@ -3189,6 +3189,7 @@ defmodule FermixWebWeb.SetupLive.Components do
           <.status_pill :if={@plugin.status != :not_configured} status={@plugin.status} />
         </div>
         <p :if={@plugin.account} class="truncate text-xs text-base-content/55">{@plugin.account}</p>
+        <p :if={@plugin.client_rejection} class="text-xs text-error">{@plugin.client_rejection}</p>
         <p :if={@plugin.yanked_version} class="text-xs text-error">
           Version {@plugin.yanked_version} was yanked; run `fermix plugins upgrade {@plugin.name}`.
         </p>
@@ -3249,6 +3250,17 @@ defmodule FermixWebWeb.SetupLive.Components do
           data-plugin-auth-trigger={if @auth_preopen?, do: "true", else: nil}
         >
           <.icon name="hero-plus" class="size-3.5" /> {plugin_primary_action(@plugin)}
+        </button>
+        <%!-- A refused sign-in client is fixed in the client form first, so the
+        card points there; Reauthorize below stays for the sign-in that follows. --%>
+        <button
+          :if={!@oauth_unset? && @plugin.client_rejection}
+          type="button"
+          class="btn btn-primary btn-xs"
+          phx-click="open_oauth_modal"
+          phx-value-provider={@plugin.provider}
+        >
+          <.icon name="hero-key" class="size-3.5" /> Update client
         </button>
         <button
           :if={

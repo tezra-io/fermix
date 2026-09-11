@@ -7,6 +7,7 @@ defmodule FermixCore.Auth.RefreshClient do
 
   require Logger
 
+  alias FermixCore.Auth.ClientRejection
   alias FermixCore.Auth.JwtClaims
   alias FermixCore.Auth.OAuthProvider
   alias FermixCore.Auth.Redaction
@@ -94,7 +95,25 @@ defmodule FermixCore.Auth.RefreshClient do
         headers: OAuthProvider.token_request_headers(provider)
       )
 
-    case request |> Req.merge(req_options) |> Req.request() do
+    response = request |> Req.merge(req_options) |> Req.request()
+
+    case client_rejection(provider, response) do
+      nil -> refresh_response(provider, refresh_token, req_options, attempt, response)
+      rejection -> {:error, rejection}
+    end
+  end
+
+  # A refused client is refused on every attempt and is no dead grant, so it is
+  # recognised before the permanent-4xx clause and before a 200 is read as
+  # tokens (GitHub and Slack refuse with a 200). Never retried.
+  defp client_rejection(provider, {:ok, %{status: status, body: body}})
+       when status == 200 or (status >= 400 and status < 500),
+       do: ClientRejection.classify(provider, status, body)
+
+  defp client_rejection(_provider, _response), do: nil
+
+  defp refresh_response(provider, refresh_token, req_options, attempt, response) do
+    case response do
       {:ok, %{status: 200, body: body}} ->
         parse_token_response(body)
 

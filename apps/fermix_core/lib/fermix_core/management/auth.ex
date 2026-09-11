@@ -21,6 +21,7 @@ defmodule FermixCore.Management.Auth do
   """
 
   alias FermixCore.Auth.AnthropicLogin
+  alias FermixCore.Auth.ClientRejection
   alias FermixCore.Auth.CodexImport
   alias FermixCore.Auth.CodexLogin
   alias FermixCore.Auth.Redaction
@@ -415,6 +416,11 @@ defmodule FermixCore.Management.Auth do
 
   defp plugin_sentence({:unsupported_oauth_provider, _provider}),
     do: "This daemon cannot sign in to that plugin's provider."
+
+  # The provider refused the saved sign-in client. The fix is the operator's to
+  # make, so the sentence names it rather than pointing at the daemon log; the
+  # vendor's own words were logged by the sign-in itself.
+  defp plugin_sentence({:oauth_client_rejected, detail}), do: ClientRejection.sentence(detail)
 
   defp plugin_sentence(reason), do: sign_in_sentence(reason)
 

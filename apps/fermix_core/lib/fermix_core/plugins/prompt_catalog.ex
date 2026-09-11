@@ -91,8 +91,18 @@ defmodule FermixCore.Plugins.PromptCatalog do
 
   defp remediation(:ready, _name), do: nil
 
-  defp remediation(status, name) when status in [:needs_auth, :reauthorization_required],
-    do: "connect it: run `fermix plugins auth login #{name}`"
+  # A grant quarantined because the provider refused the saved sign-in client:
+  # signing in again under that client is refused again, so the owner fixes the
+  # client first.
+  defp remediation(:reauthorization_required, name) do
+    if Status.client_rejected?(name),
+      do:
+        "its provider refused the saved sign-in client — have the owner update that " <>
+          "client's ID and secret in setup, then sign in again",
+      else: connect_remediation(name)
+  end
+
+  defp remediation(:needs_auth, name), do: connect_remediation(name)
 
   defp remediation(:needs_client_config, name),
     do: "its OAuth client is not configured — set it up on the setup page (plugin #{name})"
@@ -112,6 +122,8 @@ defmodule FermixCore.Plugins.PromptCatalog do
       "incompatible with this Fermix version — run `fermix plugins upgrade #{name}` or upgrade Fermix"
 
   defp remediation(_status, name), do: "run `fermix plugins doctor #{name}`"
+
+  defp connect_remediation(name), do: "connect it: run `fermix plugins auth login #{name}`"
 
   defp plugin_owned?(%Capability{metadata: metadata}),
     do: Map.get(metadata, :plugin_owned?) == true

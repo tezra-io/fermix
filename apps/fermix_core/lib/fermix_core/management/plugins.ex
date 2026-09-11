@@ -394,8 +394,8 @@ defmodule FermixCore.Management.Plugins do
      }}
   end
 
-  defp finish_check(_name, {:error, {:not_ready, status}}),
-    do: {:error, {:refused, Row.check_sentence(status)}}
+  defp finish_check(name, {:error, {:not_ready, status}}),
+    do: {:error, {:refused, Row.check_sentence(status, name)}}
 
   # A reason that gets this far is the probe's own internal term: it names files
   # on the operator's disk, so it goes to the daemon log and the sentence a

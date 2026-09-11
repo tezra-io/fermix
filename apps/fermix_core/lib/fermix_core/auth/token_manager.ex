@@ -11,6 +11,7 @@ defmodule FermixCore.Auth.TokenManager do
 
   use GenServer
 
+  alias FermixCore.Auth.ClientRejection
   alias FermixCore.Auth.CodexToken
   alias FermixCore.Auth.OAuthProvider
   alias FermixCore.Auth.OAuthProviders
@@ -101,7 +102,11 @@ defmodule FermixCore.Auth.TokenManager do
       entry: nil,
       fermix_path: fermix_path,
       req_options: req_options,
-      invalidated: false,
+      # nil while this manager serves tokens. Once a grant is invalidated it is
+      # the reason every caller is answered with, until a reload brings a fresh
+      # sign-in in: the generic one for a dead grant or a forget, the typed
+      # `{:oauth_client_rejected, detail}` when the provider refused the client.
+      refusal: nil,
       refresh_timer: nil,
       refresh_margin_ms:
         Keyword.get(opts, :proactive_refresh_margin_ms, @default_proactive_refresh_margin_ms)
@@ -120,8 +125,8 @@ defmodule FermixCore.Auth.TokenManager do
   end
 
   @impl true
-  def handle_call(:get_token, _from, %{invalidated: true} = state) do
-    {:reply, {:error, permanent_reason(state.auth_profile)}, state}
+  def handle_call(:get_token, _from, %{refusal: reason} = state) when not is_nil(reason) do
+    {:reply, {:error, reason}, state}
   end
 
   def handle_call(:get_token, _from, %{access_token: nil} = state) do
@@ -145,14 +150,14 @@ defmodule FermixCore.Auth.TokenManager do
         auth_profile: state.auth_profile,
         loaded?: not is_nil(state.access_token),
         expires_at: state.expires_at,
-        invalidated?: state.invalidated
+        invalidated?: not is_nil(state.refusal)
       }
 
     {:reply, {:ok, status}, state}
   end
 
-  def handle_call(:refresh, _from, %{invalidated: true} = state) do
-    {:reply, {:error, permanent_reason(state.auth_profile)}, state}
+  def handle_call(:refresh, _from, %{refusal: reason} = state) when not is_nil(reason) do
+    {:reply, {:error, reason}, state}
   end
 
   def handle_call(:refresh, _from, state) do
@@ -175,7 +180,7 @@ defmodule FermixCore.Auth.TokenManager do
          expires_at: nil,
          entry: nil,
          refresh_timer: nil,
-         invalidated: true
+         refusal: permanent_reason(state.auth_profile)
      }}
   end
 
@@ -184,7 +189,7 @@ defmodule FermixCore.Auth.TokenManager do
       {:ok, entry} ->
         state =
           state
-          |> Map.put(:invalidated, false)
+          |> Map.put(:refusal, nil)
           |> apply_entry(entry)
 
         Logger.info("TokenManager: reloaded tokens, expires #{inspect(state.expires_at)}")
@@ -197,7 +202,9 @@ defmodule FermixCore.Auth.TokenManager do
   end
 
   @impl true
-  def handle_info(:proactive_refresh, %{invalidated: true} = state), do: {:noreply, state}
+  def handle_info(:proactive_refresh, %{refusal: reason} = state) when not is_nil(reason),
+    do: {:noreply, state}
+
   def handle_info(:proactive_refresh, %{refresh_token: nil} = state), do: {:noreply, state}
 
   def handle_info(:proactive_refresh, state) do
@@ -236,6 +243,17 @@ defmodule FermixCore.Auth.TokenManager do
       {:ok, entry} ->
         {:ok, apply_entry(state, entry)}
 
+      # The grant cannot renew under this client, so it is quarantined under its
+      # true cause. A sign-in with the same client, or a restart, cannot fix it.
+      {:error, {:oauth_client_rejected, detail} = reason} ->
+        Logger.error(
+          "TokenManager: #{state.auth_profile} cannot renew " <>
+            "(#{ClientRejection.vendor_words(detail)}). #{ClientRejection.sentence(detail)}"
+        )
+
+        mark_client_rejected(state.auth_profile, entry, state.fermix_path)
+        {:error, reason, %{state | refusal: reason}}
+
       {:error, {:permanent, status, body}} ->
         Logger.error(
           "TokenManager: refresh permanently failed (HTTP #{status}: #{Redaction.format(body)}). " <>
@@ -244,7 +262,7 @@ defmodule FermixCore.Auth.TokenManager do
 
         reason = permanent_reason(state.auth_profile)
         mark_reauthorization_required(state.auth_profile, entry, state.fermix_path)
-        {:error, reason, %{state | invalidated: true}}
+        {:error, reason, %{state | refusal: reason}}
 
       {:error, reason} ->
         {:error, reason, state}
@@ -387,5 +405,20 @@ defmodule FermixCore.Auth.TokenManager do
   defp mark_reauthorization_required(auth_profile, entry, path) do
     _ = Store.write(auth_profile, %{entry | status: "reauthorization_required"}, path)
     :ok
+  end
+
+  # A successful sign-in or refresh rewrites the status to "ready", which is
+  # what lifts this quarantine.
+  defp mark_client_rejected(auth_profile, entry, path) do
+    case Store.write(auth_profile, %{entry | status: "client_rejected"}, path) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error(
+          "TokenManager: could not record the refused sign-in client for #{auth_profile}: " <>
+            Redaction.format(reason)
+        )
+    end
   end
 end
