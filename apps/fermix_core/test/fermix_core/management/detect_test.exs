@@ -44,7 +44,9 @@ defmodule FermixCore.Management.DetectTest do
     assert %{"results" => results} = Detect.run(Detect.targets(), probes: probes())
 
     for row <- results do
-      assert row |> Map.drop(~w(vendors guidance)) |> Map.keys() |> Enum.sort() ==
+      # The per-target extras beside the three fields every row carries: the
+      # harness row's vendors and guidance, the notetaker row's sign-in fact.
+      assert row |> Map.drop(~w(vendors guidance signed_in)) |> Map.keys() |> Enum.sort() ==
                ~w(detail present target)
 
       assert is_boolean(row["present"])
@@ -164,7 +166,13 @@ defmodule FermixCore.Management.DetectTest do
       probes = Keyword.merge(probes(), meetbot_probes(true, true, true))
 
       assert %{"results" => [row]} = Detect.run(["meetbot"], probes: probes)
-      assert row == %{"target" => "meetbot", "present" => true, "detail" => "Signed in to Google"}
+
+      assert row == %{
+               "target" => "meetbot",
+               "present" => true,
+               "detail" => "Signed in to Google",
+               "signed_in" => true
+             }
     end
 
     test "installed but never signed in says so rather than saying nothing" do
@@ -175,7 +183,8 @@ defmodule FermixCore.Management.DetectTest do
       assert row == %{
                "target" => "meetbot",
                "present" => true,
-               "detail" => "Not signed in to Google"
+               "detail" => "Not signed in to Google",
+               "signed_in" => false
              }
     end
 
@@ -191,7 +200,13 @@ defmodule FermixCore.Management.DetectTest do
         )
 
       assert %{"results" => [row]} = Detect.run(["meetbot"], probes: probes)
-      assert row == %{"target" => "meetbot", "present" => false, "detail" => nil}
+
+      assert row == %{
+               "target" => "meetbot",
+               "present" => false,
+               "detail" => nil,
+               "signed_in" => nil
+             }
     end
 
     test "no sidecar at all is absent" do
@@ -204,7 +219,13 @@ defmodule FermixCore.Management.DetectTest do
         )
 
       assert %{"results" => [row]} = Detect.run(["meetbot"], probes: probes)
-      assert row == %{"target" => "meetbot", "present" => false, "detail" => nil}
+
+      assert row == %{
+               "target" => "meetbot",
+               "present" => false,
+               "detail" => nil,
+               "signed_in" => nil
+             }
     end
   end
 

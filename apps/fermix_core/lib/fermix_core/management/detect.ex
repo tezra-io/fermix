@@ -66,6 +66,20 @@ defmodule FermixCore.Management.Detect do
     }
   end
 
+  # The sign-in is published as a fact beside its sentence: a client that hides
+  # the sign-in control once the account is in place switches on the boolean,
+  # never on the words of the sentence it renders.
+  defp row("meetbot", opts) do
+    {present?, signed_in?} = probe("meetbot", opts)
+
+    %{
+      "target" => "meetbot",
+      "present" => present?,
+      "detail" => meetbot_detail(signed_in?),
+      "signed_in" => signed_in?
+    }
+  end
+
   defp row(target, opts) do
     {present?, detail} = probe(target, opts)
 
@@ -107,7 +121,7 @@ defmodule FermixCore.Management.Detect do
       source(opts, :meetbot_installed, &SidecarInstaller.installed?/0) and
         source(opts, :meetbot_browser_installed, &SidecarInstaller.browser_installed?/0)
 
-    {present?, meetbot_detail(present?, opts)}
+    {present?, meetbot_signed_in(present?, opts)}
   end
 
   defp chosen_primary do
@@ -156,15 +170,16 @@ defmodule FermixCore.Management.Detect do
   # pane draws the idle sign-in control until it is told otherwise. Absent the
   # notetaker there is nothing to be signed in to, so the row says nothing
   # rather than "not signed in".
-  defp meetbot_detail(false, _opts), do: nil
+  # Absent the notetaker there is nothing to be signed in to, so the marker is
+  # never read and the fact is null rather than false.
+  defp meetbot_signed_in(false, _opts), do: nil
 
-  defp meetbot_detail(true, opts) do
-    if source(opts, :meetbot_signed_in, &SidecarInstaller.signed_in?/0) do
-      "Signed in to Google"
-    else
-      "Not signed in to Google"
-    end
-  end
+  defp meetbot_signed_in(true, opts),
+    do: source(opts, :meetbot_signed_in, &SidecarInstaller.signed_in?/0)
+
+  defp meetbot_detail(nil), do: nil
+  defp meetbot_detail(true), do: "Signed in to Google"
+  defp meetbot_detail(false), do: "Not signed in to Google"
 
   defp source(opts, key, default) when is_atom(key) do
     opts |> Keyword.get(:probes, []) |> Keyword.get(key, default) |> then(& &1.())

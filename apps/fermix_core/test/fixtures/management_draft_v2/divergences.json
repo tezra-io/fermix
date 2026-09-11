@@ -497,6 +497,12 @@
       "field": "results[].vendors[].version",
       "kind": "engine_only",
       "why": "Each harness row includes a bounded nullable version string for native readiness details; no binary path is returned."
+    },
+    {
+      "method": "setup.detect",
+      "field": "results[].signed_in",
+      "kind": "engine_only",
+      "why": "The meetbot row publishes its Google sign-in as a boolean beside the sentence it also carries, null while the notetaker is absent. A client that hides the sign-in control once the account is in place switches on this fact rather than on the words of the sentence it renders, which the app's rules forbid. The draft predates the row; the app adds the field when it re-vendors."
     }
   ]
 }
