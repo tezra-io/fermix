@@ -1221,6 +1221,10 @@ defmodule FermixOpik.Aggregation do
   # no bookend events: its provider span creates the session, so the kind must
   # come from the id prefix or the root would read as a :subagent of nothing.
   defp infer_kind("computer_history_summarize:" <> _), do: :computer_history_summary
+  # The daily thread roll-up (§24.3) is a second headless call inside the same
+  # cycle, parented to it: its own kind, so a rewrite of current work is never
+  # read as one more window summary.
+  defp infer_kind("computer_history_rollup:" <> _), do: :computer_history_rollup
   defp infer_kind("doctor:" <> _), do: :doctor
   defp infer_kind("job:" <> _), do: :management_job
   defp infer_kind(_other), do: :subagent
@@ -1243,6 +1247,9 @@ defmodule FermixOpik.Aggregation do
   # session id starts "computer_history_summarize:" — prefixing the kind would
   # say "computer history" twice.
   defp wrapper_name(:computer_history_summary, name, session), do: name || session
+  # Same shape: the agent name is "computer_history_rollup" and so is the session
+  # prefix — the generic "<kind>:<name>" would say it twice.
+  defp wrapper_name(:computer_history_rollup, name, session), do: name || session
   defp wrapper_name(kind, nil, session), do: "#{kind}:#{session}"
   defp wrapper_name(kind, name, _session), do: "#{kind}:#{name}"
 

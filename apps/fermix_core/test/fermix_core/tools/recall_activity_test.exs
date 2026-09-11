@@ -9,6 +9,7 @@ defmodule FermixCore.Tools.RecallActivityTest do
 
   alias FermixCore.Capabilities.Builtin
   alias FermixCore.Capabilities.BuiltinSeeder
+  alias FermixCore.Memory.Repo
   alias FermixCore.Tools.RecallActivity
 
   defp local_route, do: {%{provider: :ollama, base_url: "http://localhost:11434/v1"}, []}
@@ -54,6 +55,40 @@ defmodule FermixCore.Tools.RecallActivityTest do
     description = RecallActivity.description()
     assert description =~ "newest first"
     assert description =~ "omitted"
+  end
+
+  # §24.4: both layers are reachable from the one tool, and the schema is where
+  # the model learns they exist.
+  test "the schema offers the current window and a topic, and the description says so" do
+    %{properties: properties} = RecallActivity.parameters()
+
+    assert "current" in properties.window.enum
+    assert properties.window.description =~ "current"
+
+    assert properties.about.type == "string"
+    assert properties.about.description =~ "topic"
+    assert properties.about.description =~ "window"
+
+    description = RecallActivity.description()
+    assert description =~ "working on"
+    assert description =~ "topic"
+  end
+
+  test "a topic is refused with a sentence, never a raw error, when nothing is searchable" do
+    unique = System.unique_integer([:positive])
+    db_path = Path.join(System.tmp_dir!(), "fermix-recall-activity-#{unique}.db")
+    repo_name = :"recall_activity_repo_#{unique}"
+    start_supervised!({Repo, name: repo_name, enabled: true, database_path: db_path})
+
+    on_exit(fn ->
+      Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
+    end)
+
+    assert {:ok, result} =
+             RecallActivity.execute(%{"about" => "***"}, ctx(%{memory_repo: repo_name}))
+
+    refute result.success
+    assert result.error =~ "word"
   end
 
   describe "advertise?/1 fails closed" do

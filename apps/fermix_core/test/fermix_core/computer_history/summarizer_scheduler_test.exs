@@ -34,7 +34,7 @@ defmodule FermixCore.ComputerHistory.Summarizer.SchedulerTest do
 
     fun = fn opts ->
       send(test_pid, {:ran, opts[:repo]})
-      {:ok, %{memory_written: true, events: 1, batches: 1, empty_batches: 0}}
+      {:ok, %{memory_written: true, events: 1, sessions: 1, empty_batches: 0}}
     end
 
     pid = start_scheduler(repo, unique, fun)
@@ -50,12 +50,15 @@ defmodule FermixCore.ComputerHistory.Summarizer.SchedulerTest do
 
   # The cycle line reads every key of `Summarizer.cycle_result`, so a result shape
   # that drifts must fail here rather than in a production daemon's debug log.
-  test "the cycle line names the batch and empty-batch counts", %{repo: repo, unique: unique} do
+  test "the cycle line names the sitting and empty counts", %{repo: repo, unique: unique} do
     previous_level = Logger.level()
     Logger.configure(level: :debug)
     on_exit(fn -> Logger.configure(level: previous_level) end)
 
-    fun = fn _opts -> {:ok, %{memory_written: false, events: 7, batches: 3, empty_batches: 2}} end
+    fun = fn _opts ->
+      {:ok, %{memory_written: false, events: 7, sessions: 3, empty_batches: 2}}
+    end
+
     pid = start_scheduler(repo, unique, fun)
 
     log =
@@ -64,7 +67,20 @@ defmodule FermixCore.ComputerHistory.Summarizer.SchedulerTest do
         _ = :sys.get_state(pid)
       end)
 
-    assert log =~ "7 events in 3 batch(es), 2 empty, memory=false"
+    assert log =~ "7 events in 3 session(s), 2 empty, memory=false"
+  end
+
+  # A tick is cheap when nothing closed, and 5 minutes is what makes "summarized
+  # when the sitting ends" feel immediate rather than half-hourly (§24.2). The
+  # claim window and the cycle timeout must stay well above it so a running cycle
+  # can never be overtaken by the next tick.
+  test "the default cadence is five minutes, inside the claim and timeout windows" do
+    pid = start_supervised!({Scheduler, name: :ch_sched_cadence, timer_enabled: false})
+    state = :sys.get_state(pid)
+
+    assert state.tick_interval_ms == :timer.minutes(5)
+    assert state.claim_stale_after_ms == :timer.minutes(30)
+    assert state.cycle_timeout_ms == :timer.minutes(15)
   end
 
   test "a concurrent claim is not run twice", %{repo: repo, unique: unique} do
