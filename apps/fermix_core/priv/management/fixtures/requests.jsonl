@@ -14,7 +14,7 @@
 {"name":"lifecycle_cancel","expect":"v1","method":"lifecycle.cancel","frame":{"request_id":"req-lifecycle-3","protocol_version":1,"method":"lifecycle.cancel","params":{"lease_id":"lease_Qm5xR2t7Vd9pLk3A"}}}
 {"name":"diagnostics_build","expect":"v1","method":"diagnostics.build","frame":{"request_id":"req-diagnostics-1","protocol_version":1,"method":"diagnostics.build","params":{}}}
 {"name":"setup_state_get","method":"setup.state.get","expect":"v1","frame":{"request_id":"req-setup-state-get-1","protocol_version":2,"method":"setup.state.get","params":{}}}
-{"name": "setup_detect", "expect": "v1", "method": "setup.detect", "frame": {"request_id": "req-setup-detect-1", "protocol_version": 2, "method": "setup.detect", "params": {"targets": ["existing_primary", "claude_code", "codex_cli", "ollama", "harness_vendors"]}}}
+{"name": "setup_detect", "expect": "v1", "method": "setup.detect", "frame": {"request_id": "req-setup-detect-1", "protocol_version": 2, "method": "setup.detect", "params": {"targets": ["existing_primary", "claude_code", "codex_cli", "ollama", "harness_vendors", "meetbot"]}}}
 {"name": "settings_sections", "expect": "v1", "method": "settings.sections", "frame": {"request_id": "req-settings-sections-1", "protocol_version": 2, "method": "settings.sections", "params": {}}}
 {"name": "settings_get", "expect": "v1", "method": "settings.get", "frame": {"request_id": "req-settings-get-1", "protocol_version": 2, "method": "settings.get", "params": {"section": "realtime"}}}
 {"name": "settings_apply", "expect": "v1", "method": "settings.apply", "frame": {"request_id": "req-settings-apply-1", "protocol_version": 2, "method": "settings.apply", "params": {"section": "realtime", "values": {"realtime_enabled": true}}}}

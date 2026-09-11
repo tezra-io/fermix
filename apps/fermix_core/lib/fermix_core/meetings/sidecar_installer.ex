@@ -80,6 +80,12 @@ defmodule FermixCore.Meetings.SidecarInstaller do
   Downloads the pinned sidecar for this host, verifies its sha256, and installs
   it atomically.
 
+  Idempotent: the pinned artifact is content-addressed, so when the install
+  path already holds a regular, executable file whose digest is the pin, that
+  file IS the install and nothing is fetched. The app starts this install every
+  time the notetaker is switched on, so a download per call would spend the
+  network writing bytes already on disk.
+
   `opts` is a dependency-injection seam for tests only — `releases:`,
   `pinned_tag:`, and `req_options:` (passed through to `StreamDownload`). The
   shipped call is `install/0`, which uses the baked pins.
@@ -202,8 +208,28 @@ defmodule FermixCore.Meetings.SidecarInstaller do
   defp install_pinned(tag, releases, opts) do
     with {:ok, target} <- target(),
          {:ok, sha256} <- expected_sha256(releases, tag, target) do
-      download(tag, target, sha256, Keyword.get(opts, :req_options, []))
+      verify_then_fetch(tag, target, sha256, Keyword.get(opts, :req_options, []))
     end
+  end
+
+  # One path: verify what is there, fetch only what is missing. A present file
+  # that fails the pin is not this artifact, so it is discarded before the
+  # download rather than left where `installed?/0` would answer for it.
+  defp verify_then_fetch(tag, target, sha256, req_options) do
+    dest = install_path(tag)
+
+    if pinned_artifact?(dest, sha256) do
+      {:ok, dest}
+    else
+      :ok = discard(dest)
+      download(tag, target, sha256, req_options)
+    end
+  end
+
+  # `File.regular?/1` first: `verify/2` streams the file and raises on a missing
+  # one. The exec bit is part of the install, so a file without it is not one.
+  defp pinned_artifact?(dest, sha256) do
+    File.regular?(dest) and executable?(dest) and verify(dest, sha256) == :ok
   end
 
   defp expected_sha256(releases, tag, target) do
@@ -245,8 +271,9 @@ defmodule FermixCore.Meetings.SidecarInstaller do
     end
   end
 
-  # A partial download is worthless and must never be mistaken for an install;
-  # a missing file here is the same outcome, so only the removal matters.
+  # A partial download, or a file that failed its pin, is worthless and must
+  # never be mistaken for an install; a missing file here is the same outcome,
+  # so only the removal matters.
   defp discard(path) do
     _ = File.rm(path)
     :ok

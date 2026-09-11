@@ -13,16 +13,19 @@ defmodule FermixCore.Management.Detect do
   time out after two seconds each. Ollama has its own loopback HTTP timeout.
   The `claude_code` probe asks the macOS keychain whether
   an item exists — a bounded `security` call with no `-w`, so it reads no value
-  and cannot raise the allow dialog.
+  and cannot raise the allow dialog. The `meetbot` probe is three local reads —
+  the sidecar binary, the browser marker and the sign-in marker — and never
+  reads inside the notetaker's browser profile.
   """
 
   alias FermixCore.Auth.AnthropicLogin
   alias FermixCore.Auth.CodexImport
   alias FermixCore.Harness.Vendors
+  alias FermixCore.Meetings.SidecarInstaller
   alias FermixCore.Providers.ModelListing
   alias FermixCore.Providers.PrimaryConfig
 
-  @targets ~w(existing_primary claude_code codex_cli ollama harness_vendors)
+  @targets ~w(existing_primary claude_code codex_cli ollama harness_vendors meetbot)
 
   @doc "Every detection target this daemon answers, ordered."
   @spec targets() :: [String.t()]
@@ -97,6 +100,16 @@ defmodule FermixCore.Management.Detect do
     end
   end
 
+  # Both halves or nothing: a sidecar with no browser cannot sign in and cannot
+  # join a meeting, so half an install is not the notetaker being present.
+  defp probe("meetbot", opts) do
+    present? =
+      source(opts, :meetbot_installed, &SidecarInstaller.installed?/0) and
+        source(opts, :meetbot_browser_installed, &SidecarInstaller.browser_installed?/0)
+
+    {present?, meetbot_detail(present?, opts)}
+  end
+
   defp chosen_primary do
     PrimaryConfig.chosen_in(
       Application.get_env(:fermix_core, :providers, []),
@@ -137,6 +150,21 @@ defmodule FermixCore.Management.Detect do
 
   defp model_count([_single]), do: "1 model"
   defp model_count(models), do: "#{length(models)} models"
+
+  # The sign-in is the one notetaker fact a client cannot see for itself: the
+  # marker lives beside a browser profile nothing on the wire exposes, and the
+  # pane draws the idle sign-in control until it is told otherwise. Absent the
+  # notetaker there is nothing to be signed in to, so the row says nothing
+  # rather than "not signed in".
+  defp meetbot_detail(false, _opts), do: nil
+
+  defp meetbot_detail(true, opts) do
+    if source(opts, :meetbot_signed_in, &SidecarInstaller.signed_in?/0) do
+      "Signed in to Google"
+    else
+      "Not signed in to Google"
+    end
+  end
 
   defp source(opts, key, default) when is_atom(key) do
     opts |> Keyword.get(:probes, []) |> Keyword.get(key, default) |> then(& &1.())

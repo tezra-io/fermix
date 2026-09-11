@@ -111,6 +111,68 @@ defmodule FermixCore.Meetings.SidecarInstallerTest do
                releases: %{"v0.1.0" => %{"solaris-sparc" => @artifact_sha256}}
              ) == {:error, {:no_pinned_artifact, "v0.1.0", target}}
     end
+
+    # The app starts this install every time the notetaker is switched on, so a
+    # download per call spends the network writing bytes already on disk. The
+    # artifact is content-addressed, so the verified file IS the install.
+    test "a second install of the same pin downloads nothing", %{home: home, target: target} do
+      counter = :counters.new(1, [:atomics])
+      opts = install_opts(target, @artifact_sha256, counting_plug(counter))
+
+      assert {:ok, path} = SidecarInstaller.install(opts)
+      assert path == Path.join([home, "plugins", "meetbot", "bin", "v0.1.0", "fermix-meetbot"])
+      assert :counters.get(counter, 1) == 1
+
+      assert SidecarInstaller.install(opts) == {:ok, path}
+      assert :counters.get(counter, 1) == 1, "the second install downloaded the artifact again"
+      assert File.read!(path) == @artifact
+    end
+
+    # A cached file that fails the pin is not this artifact, so it is discarded
+    # and fetched again: one path, verify then fetch, never a refusal.
+    test "a cached file that fails the pinned checksum is replaced", %{target: target} do
+      counter = :counters.new(1, [:atomics])
+      opts = install_opts(target, @artifact_sha256, counting_plug(counter))
+
+      assert {:ok, path} = SidecarInstaller.install(opts)
+      File.write!(path, "tampered\n")
+
+      assert SidecarInstaller.install(opts) == {:ok, path}
+      assert File.read!(path) == @artifact
+      assert :counters.get(counter, 1) == 2
+    end
+
+    # `installed?/0` requires the exec bit, so a cached file without it would
+    # otherwise be answered as an install nothing can spawn.
+    test "a cached file without the exec bit is replaced", %{target: target} do
+      counter = :counters.new(1, [:atomics])
+      opts = install_opts(target, @artifact_sha256, counting_plug(counter))
+
+      assert {:ok, path} = SidecarInstaller.install(opts)
+      File.chmod!(path, 0o644)
+
+      assert SidecarInstaller.install(opts) == {:ok, path}
+      assert :counters.get(counter, 1) == 2
+      assert {:ok, %File.Stat{mode: mode}} = File.stat(path)
+      assert Bitwise.band(mode, 0o111) != 0
+    end
+  end
+
+  defp install_opts(target, sha256, plug) do
+    [
+      pinned_tag: "v0.1.0",
+      releases: %{"v0.1.0" => %{target => sha256}},
+      req_options: [plug: plug]
+    ]
+  end
+
+  # Counted rather than messaged: the count is read after the call returns, so
+  # the assertion needs no timeout and cannot flake on a slow leg.
+  defp counting_plug(counter) do
+    fn %Plug.Conn{} = conn ->
+      :counters.add(counter, 1, 1)
+      Plug.Conn.send_resp(conn, 200, @artifact)
+    end
   end
 
   describe "resolution without downloading" do

@@ -20,6 +20,12 @@
     },
     {
       "method": "(schema)",
+      "field": "detect_targets:meetbot",
+      "kind": "engine_only",
+      "why": "The daemon answers a sixth detection target, meetbot, which reports whether both halves of the meeting notetaker are installed and whether its Google sign-in has completed. The draft was authored before the notetaker had a detection row, so the Meetings pane it draws has no way to tell a signed-in notetaker from one waiting on its one-time sign-in. A closed decoder that has never heard the word refuses the row rather than ignoring it, so the app adds it when it re-vendors."
+    },
+    {
+      "method": "(schema)",
       "field": "job_failure_codes:open",
       "kind": "engine_only",
       "why": "The draft types jobFailure.code as an open string; the daemon closes it to unavailable, refused, timed_out and internal_error so a client can branch on the kind rather than parse the sentence. An open decoder still accepts every value, so this widens what the app can rely on rather than breaking it."

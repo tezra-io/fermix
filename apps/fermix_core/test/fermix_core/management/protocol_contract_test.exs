@@ -633,7 +633,10 @@ defmodule FermixCore.Management.ProtocolContractTest do
             },
             "codex" => %{vendor: "codex", available?: true, version: "0.100.0", auth: :unverified}
           }
-        end
+        end,
+        meetbot_installed: fn -> true end,
+        meetbot_browser_installed: fn -> true end,
+        meetbot_signed_in: fn -> true end
       ]
     ]
   end
