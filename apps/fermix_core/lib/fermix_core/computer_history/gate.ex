@@ -19,9 +19,25 @@ defmodule FermixCore.ComputerHistory.Gate do
   route chain**, never the resolved head. `Failover.run_chain/3` re-sends the
   identical message list to later hops, and the descriptor convention puts
   Ollama *last* — so a chain that begins remote and a chain that ends remote
-  both exist. If **any** hop is ungranted-remote, the whole turn is denied:
-  the section is absent and the tools are un-advertised. It never strips hops
-  or builds a second prompt variant (one prompt per turn, Code Rule 12).
+  both exist. The all-hops rule therefore decides the turn: if **any** hop is
+  ungranted-remote, the section is absent and the tools are un-advertised. One
+  prompt per turn — it never builds a second prompt variant (Code Rule 12).
+
+  What that rule is applied to is the **effective** chain (§9.4 pinning), which
+  `snapshot/2` resolves once:
+
+    * an attended owner turn whose LEAD hop is granted runs on the granted
+      subset — `routes` keeps the lead plus the granted fallbacks in order,
+      `dropped_hops` names the rest, and failover can no longer reach a provider
+      the owner did not consent to. This is a narrowing of the chain, not a
+      per-hop relaxation of the rule: the effective chain still has to pass it.
+    * every other turn — a guest, a subagent worker, an unattended run, an
+      ungranted lead (the lead is never replaced), a chain carrying a hop with no
+      provider id, or history switched off — keeps the **full** chain and is
+      denied exactly as before, with `dropped_hops` empty.
+
+  A denial is no longer silent: `chain_posture/1` names the state on all three
+  operator surfaces (`/history status`, the doctor row, the setup card).
   """
 
   alias FermixCore.ComputerHistory
@@ -29,6 +45,8 @@ defmodule FermixCore.ComputerHistory.Gate do
   alias FermixCore.ComputerHistory.Gate.Snapshot
   alias FermixCore.ComputerHistory.Locality
   alias FermixCore.Providers.Descriptor
+  alias FermixCore.Providers.PrimaryConfig
+  alias FermixCore.Providers.Selection
   alias FermixCore.Temporal.Access
 
   @type route_key :: %{required(:provider) => atom(), optional(:base_url) => String.t() | nil}
@@ -43,38 +61,91 @@ defmodule FermixCore.ComputerHistory.Gate do
           | {:summarizer, route()}
           | {:realtime_session, atom()}
 
+  @type posture :: %{
+          state: :pinned | :unsurfaceable | :unclassifiable_chain | :off | :no_chain,
+          lead: atom() | nil,
+          routes: [atom()],
+          dropped: [atom()],
+          summarizer: Config.summarizer()
+        }
+
   @doc """
-  Build the per-turn snapshot. `context` is the turn's plain context map;
-  `opts` carries only `:macos?` (defaults to `ComputerHistory.macos?/0`), so
-  tests inject the platform explicitly instead of depending on the host OS.
+  Build the per-turn snapshot. `context` is the turn's plain context map; `opts`
+  carries `:macos?` (defaults to `ComputerHistory.macos?/0`) and `:config` (the
+  history config block, defaults to `Config.current/0`), so tests and the status
+  surfaces inject the platform and the consent posture explicitly instead of
+  depending on the host OS and on live app env.
   """
   @spec snapshot(map(), keyword()) :: Snapshot.t()
   def snapshot(context, opts \\ []) when is_map(context) and is_list(opts) do
     macos? = Keyword.get(opts, :macos?, ComputerHistory.macos?())
-    config = Config.current()
+    config = Keyword.get_lazy(opts, :config, &Config.current/0)
     operative? = macos? and Config.enabled?(config)
+    attended? = Access.attended_operator_turn?(context)
 
     chain = Map.get(context, :ordered_routes)
 
-    # `granted` and `summarizer_target` both fold in the default-summarizer's
-    # primary (§22.1). This is the only IO-bearing resolution; `allow?/2` stays
-    # pure on the result.
+    # `granted` and `summarizer_target` both fold in the default summarizer's
+    # provider and the primary (§22.1). This is the only IO-bearing resolution;
+    # `allow?/2` stays pure on the result.
     granted = effective_history_granted(config)
+    {routes, dropped_hops} = pin_chain(chain, granted, operative? and attended?)
 
     %Snapshot{
       operative?: operative?,
-      attended_operator?: Access.attended_operator_turn?(context),
+      attended_operator?: attended?,
       granted: granted,
       summarizer_target: default_summarizer_target(config),
       chain: chain,
-      chain_ok?: operative? and chain_permitted?(chain, granted)
+      routes: routes,
+      dropped_hops: dropped_hops,
+      chain_ok?: operative? and chain_permitted?(routes, granted)
     }
   end
 
+  # §9.4 chain pinning: on an attended owner turn with history operative, the
+  # turn runs ONLY on the hops granted for history, keeping their order —
+  # failover among granted hops still works, and if none of them is up the turn
+  # fails with the ordinary "provider unavailable" reply rather than reaching a
+  # hop the owner never consented to. The lead is never replaced: an ungranted
+  # lead leaves the chain exactly as it arrived (history then does not surface).
+  # A chain carrying a hop no reader can name is left alone too — pinning must
+  # never silently remove a hop it cannot report — and stays unpermitted anyway.
+  defp pin_chain([lead | rest] = chain, granted, true) do
+    if pinnable?(chain, granted) do
+      {kept, dropped} = Enum.split_with(rest, &hop_permitted?(&1, granted))
+      # Deduplicated: a chain can carry one provider twice (two models, two base
+      # URLs), and "failover to openai, openai" reads like a bug.
+      {[lead | kept], dropped |> Enum.map(&hop_provider/1) |> Enum.uniq()}
+    else
+      {chain, []}
+    end
+  end
+
+  defp pin_chain(chain, _granted, _pinning?), do: {chain, []}
+
+  defp pinnable?([lead | _rest] = chain, granted),
+    do: hop_permitted?(lead, granted) and Enum.all?(chain, &classifiable?/1)
+
+  defp classifiable?(hop) do
+    case hop_provider(hop) do
+      provider when is_atom(provider) and not is_nil(provider) -> true
+      _unclassifiable -> false
+    end
+  end
+
+  defp hop_provider(hop), do: hop |> route_key() |> Map.get(:provider)
+
   # The provider set trusted for HISTORY egress: the Tier-2 grants PLUS — when the
-  # default summarizer is in force (§22.1) — the primary provider (the enable act's
-  # consent). One resolver so recall (the snapshot), the turn chain, and taint
-  # masking (`chain_permits_history?/1`) never disagree about that provider.
+  # default summarizer is in force (§22.1) — BOTH the summarizer's provider (the
+  # subagent tier, which reads raw activity) and the PRIMARY provider (the chain
+  # a recall turn actually runs on). The enable act discloses both; granting only
+  # the summarizer's provider left every owner turn unsurfaceable whenever a
+  # `subagent_provider` differed from the primary. Tier 1 (`:local`) and Tier 3
+  # (`{:provider, _}`) keep explicit grants only — the primary must be named in
+  # `remote_summaries` for history to surface in chat. One resolver so recall (the
+  # snapshot), the turn chain (pinning) and taint masking
+  # (`chain_permits_history?/1`) never disagree about those providers.
   defp effective_history_granted(config) do
     base = Config.granted_providers(config)
 
@@ -83,13 +154,20 @@ defmodule FermixCore.ComputerHistory.Gate do
     # disabled, reverting taint masking to the explicit Tier-2 grants only (§13.6:
     # a tainted turn must not reach an ungranted-remote provider after disabling).
     with true <- Config.enabled?(config),
-         :default_provider <- Config.summarizer(config),
-         {:ok, provider} <- Config.default_summarizer_provider() do
-      MapSet.put(base, provider)
+         :default_provider <- Config.summarizer(config) do
+      base
+      |> put_resolved(Config.default_summarizer_provider())
+      |> put_resolved(PrimaryConfig.primary())
     else
       _ -> base
     end
   end
+
+  # An unresolved provider (no primary, or an ambiguous one) adds nothing.
+  defp put_resolved(granted, {:ok, provider}) when is_atom(provider) and not is_nil(provider),
+    do: MapSet.put(granted, provider)
+
+  defp put_resolved(granted, {:error, _reason}), do: granted
 
   # `:default_provider` resolves to the summarizer's provider (subagent → primary,
   # §22.1). An unresolved provider stays `:default_provider`, which no
@@ -115,6 +193,119 @@ defmodule FermixCore.ComputerHistory.Gate do
   @spec chain_permits_history?([route()] | nil) :: boolean()
   def chain_permits_history?(routes),
     do: chain_permitted?(routes, effective_history_granted(Config.current()))
+
+  @doc """
+  The chain posture the operator surfaces render — `/history status`, the
+  `computer history` doctor row and the setup card (§9.4 "enabled but
+  unsurfaceable", the failure that used to be silent). Builds the snapshot an
+  attended owner turn would get and reduces it to one state:
+
+    * `:pinned` — history surfaces; `routes` is the effective chain and
+      `dropped` the failover hops that are off while history is on;
+    * `:unsurfaceable` — the chain's LEAD is not granted, so nothing surfaces in
+      chat (the lead may be a fallback: `Selection` skips an unconfigured primary);
+    * `:unclassifiable_chain` — a hop names no provider id, so the chain cannot be
+      classified at all; a grant would not fix it;
+    * `:off` — history is disabled, or the host is not macOS;
+    * `:no_chain` — the provider chain could not be built (a config error).
+
+  `opts` carries `snapshot/2`'s `:macos?`/`:config` seams plus `:routes`, which
+  takes `Selection.ordered_routes/0`'s own return shape so a tree-less CLI verb
+  or a test passes a chain instead of resolving one.
+  """
+  @spec chain_posture(keyword()) :: posture()
+  def chain_posture(opts \\ []) when is_list(opts) do
+    config = Keyword.get_lazy(opts, :config, &Config.current/0)
+    routes = Keyword.get_lazy(opts, :routes, &Selection.ordered_routes/0)
+
+    %{
+      source_trust: :operator,
+      computer_use_origin: :interactive,
+      ordered_routes: resolved_chain(routes)
+    }
+    |> snapshot(Keyword.take(opts, [:macos?]) ++ [config: config])
+    |> posture(Config.summarizer(config))
+  end
+
+  @doc """
+  The one sentence for a posture, so `/history status` and the doctor row never
+  describe the same state in two different ways.
+  """
+  @spec chain_posture_sentence(posture()) :: String.t()
+  def chain_posture_sentence(%{state: :off}),
+    do: "Chat: nothing surfaces in replies while history is off."
+
+  def chain_posture_sentence(%{state: :no_chain}),
+    do:
+      "Chat: the provider chain could not be built, so history cannot surface; " <>
+        "fix the provider configuration."
+
+  def chain_posture_sentence(%{state: :pinned, routes: routes, dropped: []}),
+    do: "Chat: history turns run on #{provider_list(routes)}."
+
+  def chain_posture_sentence(%{state: :pinned, routes: routes, dropped: dropped}),
+    do:
+      "Chat: history turns run on #{provider_list(routes)}; failover to " <>
+        "#{provider_list(dropped)} is off while history is on."
+
+  def chain_posture_sentence(%{state: :unclassifiable_chain}),
+    do:
+      "Chat: history cannot surface — the chat chain has a hop without a provider " <>
+        "id; check [fermix_core.providers]."
+
+  def chain_posture_sentence(%{state: :unsurfaceable} = posture),
+    do:
+      ~s(Chat: history cannot surface — the lead of your chat chain #{posture.lead} ) <>
+        ~s(is not granted; add remote_summaries = ["#{posture.lead}"]) <>
+        summarizer_advice(posture.summarizer)
+
+  # Only worth saying when it would change something: under the default summarizer
+  # that posture is already in force (and already grants its provider and the
+  # primary), so repeating it as a remedy sends the operator in a circle.
+  defp summarizer_advice(:default_provider), do: "."
+  defp summarizer_advice(_other), do: ~s( or use summarizer = "default".)
+
+  defp resolved_chain({:ok, routes}), do: routes
+  defp resolved_chain({:error, _reason}), do: nil
+
+  defp posture(%Snapshot{} = snapshot, summarizer) do
+    %{
+      state: posture_state(snapshot),
+      lead: hop_provider_or_nil(snapshot.chain),
+      routes: chain_providers(snapshot.routes),
+      dropped: snapshot.dropped_hops,
+      summarizer: summarizer
+    }
+  end
+
+  defp posture_state(%Snapshot{operative?: false}), do: :off
+
+  defp posture_state(%Snapshot{chain: [_hop | _rest] = chain} = snapshot) do
+    cond do
+      not Enum.all?(chain, &classifiable?/1) -> :unclassifiable_chain
+      snapshot.chain_ok? -> :pinned
+      true -> :unsurfaceable
+    end
+  end
+
+  defp posture_state(%Snapshot{}), do: :no_chain
+
+  defp hop_provider_or_nil([lead | _rest]), do: hop_provider(lead)
+  defp hop_provider_or_nil(_absent), do: nil
+
+  # `posture.routes` is a provider list the surfaces render, so a hop that names
+  # no provider id is `:unknown` rather than a stray string in an atom list.
+  defp chain_providers(routes) when is_list(routes), do: Enum.map(routes, &named_provider/1)
+  defp chain_providers(_absent), do: []
+
+  defp named_provider(hop) do
+    case hop_provider(hop) do
+      provider when is_atom(provider) and not is_nil(provider) -> provider
+      _unclassifiable -> :unknown
+    end
+  end
+
+  defp provider_list(providers), do: Enum.map_join(providers, ", ", &to_string/1)
 
   @doc "Whether history may flow into `sink` under `snapshot`. Pure and total."
   @spec allow?(Snapshot.t(), sink()) :: boolean()

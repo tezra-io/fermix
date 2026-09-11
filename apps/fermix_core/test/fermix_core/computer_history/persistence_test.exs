@@ -56,6 +56,63 @@ defmodule FermixCore.ComputerHistory.PersistenceTest do
     end
   end
 
+  # Per-app coverage states (§8.4a, paired with the native driver): the distinct
+  # {app, reason} pairs the operator has to be told about, so `/history status` can
+  # name the apps where only titles are observable.
+  describe "coverage gaps" do
+    test "returns the distinct app/reason pairs inside the window", %{repo: repo} do
+      events = [
+        event("b1", 1, 1_000, %{
+          type: "observer.gap",
+          bundle_id: "com.microsoft.VSCode",
+          gap_reason: "title_only"
+        }),
+        event("b1", 2, 1_500, %{
+          type: "observer.gap",
+          bundle_id: "com.microsoft.VSCode",
+          gap_reason: "title_only"
+        }),
+        event("b1", 3, 2_000, %{
+          type: "observer.gap",
+          bundle_id: "com.docker.docker",
+          gap_reason: "ax_refused:AXValueChanged,AXFocusedUIElementChanged"
+        }),
+        # A machine-wide gap is not a per-app coverage state.
+        event("b1", 4, 2_100, %{type: "observer.gap", gap_reason: "sleep"}),
+        # A plain event of the same app is not a coverage state either.
+        event("b1", 5, 2_200, %{bundle_id: "com.microsoft.VSCode"})
+      ]
+
+      assert {:ok, 5} = Repo.computer_history_insert_events(events, server: repo)
+
+      assert {:ok, pairs} = Repo.computer_history_coverage_gaps(0, server: repo)
+
+      assert Enum.sort(pairs) == [
+               {"com.docker.docker", "ax_refused:AXValueChanged,AXFocusedUIElementChanged"},
+               {"com.microsoft.VSCode", "title_only"}
+             ]
+    end
+
+    test "excludes rows older than the window", %{repo: repo} do
+      events = [
+        event("b1", 1, 1_000, %{
+          type: "observer.gap",
+          bundle_id: "com.microsoft.VSCode",
+          gap_reason: "title_only"
+        })
+      ]
+
+      assert {:ok, 1} = Repo.computer_history_insert_events(events, server: repo)
+
+      assert {:ok, []} = Repo.computer_history_coverage_gaps(1_001, server: repo)
+      assert {:ok, [_pair]} = Repo.computer_history_coverage_gaps(1_000, server: repo)
+    end
+
+    test "an empty spool reports no coverage gaps", %{repo: repo} do
+      assert {:ok, []} = Repo.computer_history_coverage_gaps(0, server: repo)
+    end
+  end
+
   describe "retention sweep" do
     test "deletes events strictly older than the cutoff, keeps the rest", %{repo: repo} do
       events = [

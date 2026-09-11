@@ -1613,6 +1613,16 @@ defmodule FermixCore.Memory.Repo do
     call(:computer_history_unsummarized_stats, opts)
   end
 
+  @doc """
+  Per-app coverage states since `since_ts`: the distinct `{bundle_id, reason}`
+  pairs of app-scoped `observer.gap` rows (`title_only`, `ax_refused:<names>`).
+  """
+  @spec computer_history_coverage_gaps(integer(), keyword()) ::
+          {:ok, [{String.t(), String.t()}]} | {:error, term()}
+  def computer_history_coverage_gaps(since_ts, opts \\ []) when is_integer(since_ts) do
+    call({:computer_history_coverage_gaps, since_ts}, opts)
+  end
+
   @doc "Count of durable activity memories (excluding superseded)."
   @spec computer_history_count_memories(keyword()) :: {:ok, non_neg_integer()} | {:error, term()}
   def computer_history_count_memories(opts \\ []) do
@@ -3020,6 +3030,11 @@ defmodule FermixCore.Memory.Repo do
 
   def handle_call({:computer_history_cap_access_rows, max_rows}, _from, state) do
     reply = with_connection(state, &ComputerHistorySql.cap_access_rows(&1, max_rows))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:computer_history_coverage_gaps, since_ts}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.coverage_gaps(&1, since_ts))
     {:reply, reply, state}
   end
 

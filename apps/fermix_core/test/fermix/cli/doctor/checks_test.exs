@@ -1852,10 +1852,13 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     end
 
     test "macOS + enabled local summarizer reports on-device + allowlist sizes" do
+      # The chain is injected because the row now reports the chain posture too:
+      # without it this case would read whatever provider config ran before it.
       result =
         Checks.computer_history(
           macos?: true,
-          config: [enabled: true, apps: ["com.apple.Safari"], sites: [], summarizer: :local]
+          config: [enabled: true, apps: ["com.apple.Safari"], sites: [], summarizer: :local],
+          routes: {:ok, [loopback_route()]}
         )
 
       assert result.status == :ok
@@ -1866,10 +1869,59 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
 
     test "macOS + Tier-3 summarizer flags the remote egress" do
       result =
-        Checks.computer_history(macos?: true, config: [enabled: true, summarizer: :anthropic])
+        Checks.computer_history(
+          macos?: true,
+          config: [enabled: true, summarizer: :anthropic],
+          routes: {:ok, [route(:anthropic)]}
+        )
 
       assert result.detail =~ "anthropic (remote"
     end
+
+    # §9.4: "enabled but unsurfaceable" was designed and never surfaced anywhere.
+    # This row is one of the three places that now says it.
+    test "an enabled rail names the pinned chain and the failover it turns off" do
+      result =
+        Checks.computer_history(
+          macos?: true,
+          config: [enabled: true, summarizer: :local, remote_summaries: [:openai]],
+          routes: {:ok, [route(:openai), route(:anthropic)]}
+        )
+
+      assert result.status == :ok
+      assert result.detail =~ "history turns run on openai"
+      assert result.detail =~ "failover to anthropic is off while history is on"
+    end
+
+    test "an ungranted primary is a WARN naming the grant that would surface it" do
+      result =
+        Checks.computer_history(
+          macos?: true,
+          config: [enabled: true, summarizer: :local],
+          routes: {:ok, [route(:anthropic)]}
+        )
+
+      assert result.status == :warn
+      assert result.detail =~ "history cannot surface"
+      assert result.detail =~ ~s(remote_summaries = ["anthropic"])
+    end
+
+    test "a chain that could not be built is reported, never raised" do
+      result =
+        Checks.computer_history(
+          macos?: true,
+          config: [enabled: true, summarizer: :local],
+          routes: {:error, :multiple_primary}
+        )
+
+      assert result.status == :ok
+      assert result.detail =~ "provider chain could not be built"
+    end
+
+    defp route(provider),
+      do: {%{provider: provider, base_url: "https://api.#{provider}.example/v1"}, []}
+
+    defp loopback_route, do: {%{provider: :ollama, base_url: "http://localhost:11434/v1"}, []}
   end
 
   describe "skill_curation/1" do

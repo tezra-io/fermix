@@ -1,11 +1,14 @@
 defmodule FermixCore.Prompt.RuntimeSectionsTest do
-  use ExUnit.Case, async: true
+  # async: false — one case unloads a module from the global code table.
+  use ExUnit.Case, async: false
 
   alias FermixCore.Agents.AgentDefinition
   alias FermixCore.Capabilities.Builtin
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry
   alias FermixCore.Prompt.RuntimeSections
+  alias FermixTestSupport.LazyTool
+  alias FermixTestSupport.LazyTool.Unloader
 
   # Two executor doubles for the credential-gate tests: readiness is the whole
   # difference, and neither reads config, so the assertions carry no global state.
@@ -17,6 +20,11 @@ defmodule FermixCore.Prompt.RuntimeSectionsTest do
   defmodule UnreadyGatedTool do
     def execute(_args, _context), do: {:ok, %{}}
     def advertise?(_context), do: false
+  end
+
+  setup do
+    on_exit(&Unloader.reload!/0)
+    :ok
   end
 
   test "build/1 renders runtime guidance and an empty skill snapshot" do
@@ -108,6 +116,21 @@ defmodule FermixCore.Prompt.RuntimeSectionsTest do
 
     assert summary =~ "`ready_tool`"
     refute summary =~ "`unready_tool`"
+  end
+
+  # The same lazy-load trap as `Advertisement`: on a running daemon the catalog is
+  # rendered before anything has called the tool, so `function_exported?/3` sees
+  # no `advertise?/1` on an unloaded module and the credential-gated tool is named
+  # in the prompt while the wire withholds it (2026-09-10).
+  test "capability_summary/1 drops a credential-gated built-in whose module is not loaded yet" do
+    :ok = Unloader.unload!()
+    refute function_exported?(LazyTool, :advertise?, 1)
+
+    name = :"runtime_unloaded_#{System.unique_integer([:positive])}"
+    start_supervised!({Registry, name: name})
+    Registry.register(name, gated_capability("unloaded_tool", LazyTool))
+
+    refute RuntimeSections.capability_summary(name) =~ "`unloaded_tool`"
   end
 
   test "capability_summary/1 keeps a keyless built-in that declares no setup" do

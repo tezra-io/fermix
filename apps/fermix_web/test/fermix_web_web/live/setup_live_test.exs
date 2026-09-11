@@ -639,6 +639,38 @@ defmodule FermixWebWeb.SetupLiveTest do
         assert card =~ "Summarized off-device by anthropic; off by default."
       end
 
+      # §9.4: recall runs on the chain the turn runs on, so the card discloses
+      # WHERE it will surface — and, when it cannot, the one grant that fixes it.
+      test "the tooltip names the provider recall surfaces through (§9.4)", %{conn: conn} do
+        Application.put_env(:fermix_core, :providers, openai: [api_key: "sk-test", primary: true])
+        Application.put_env(:fermix_core, :computer_history, [])
+
+        {:ok, view, _html} = live(conn, "/setup")
+        view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+        card = view |> element(~s|section[data-feature-name="computer_history"]|) |> render()
+
+        # The card renders the Gate's own sentence, so the tooltip, `/history
+        # status` and the doctor row cannot describe one chain three ways.
+        assert card =~ "Chat: history turns run on openai."
+      end
+
+      test "the tooltip names the grant recall needs when the primary is ungranted (§9.4)", %{
+        conn: conn
+      } do
+        Application.put_env(:fermix_core, :providers, openai: [api_key: "sk-test", primary: true])
+        Application.put_env(:fermix_core, :computer_history, summarizer: :local)
+
+        {:ok, view, _html} = live(conn, "/setup")
+        view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+        card = view |> element(~s|section[data-feature-name="computer_history"]|) |> render()
+
+        assert card =~ "Chat: history cannot surface"
+        assert card =~ "the lead of your chat chain openai is not granted"
+        assert card =~ "remote_summaries = [&quot;openai&quot;]"
+      end
+
       # The pinned native driver withholds typed text inside browsers and captures
       # no URLs, so the tooltip must not promise either (§23.3).
       test "the tooltip claims window titles only inside browsers, never URLs (§23.3)",

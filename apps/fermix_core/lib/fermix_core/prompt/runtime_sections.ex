@@ -235,12 +235,16 @@ defmodule FermixCore.Prompt.RuntimeSections do
   # family rather than one tool name, so a second credential-gated built-in joins
   # the invariant instead of quietly reintroducing the dead end. Readiness is a
   # config fact, not a per-turn one, which is why the empty context answers it.
+  # `Code.ensure_loaded?/1` first, for the same reason `Advertisement` needs it:
+  # BEAM code loading is lazy, so an unloaded tool module exports nothing and the
+  # catalog would name a tool the wire withholds (2026-09-10).
   defp credential_gated_when_unready?(%{
          metadata: %{requires_setup: %{}},
          executor: {mod, _fun, _args}
        })
        when is_atom(mod) do
-    function_exported?(mod, :advertise?, 1) and not mod.advertise?(%{})
+    Code.ensure_loaded?(mod) and function_exported?(mod, :advertise?, 1) and
+      not mod.advertise?(%{})
   end
 
   defp credential_gated_when_unready?(_capability), do: false

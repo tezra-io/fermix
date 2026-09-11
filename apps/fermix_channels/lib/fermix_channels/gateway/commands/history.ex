@@ -20,9 +20,14 @@ defmodule FermixChannels.Gateway.Commands.History do
   alias FermixCore.ComputerHistory
   alias FermixCore.ComputerHistory.Capturer
   alias FermixCore.ComputerHistory.Config
+  alias FermixCore.ComputerHistory.Gate
   alias FermixCore.ComputerHistory.Purge
   alias FermixCore.Memory.Repo
   alias FermixCore.Setup.ConfigStore
+
+  # The spool's own retention horizon: a coverage state older than the events it
+  # describes is not current information.
+  @coverage_window_ms :timer.hours(48)
 
   @impl true
   def name, do: "history"
@@ -77,10 +82,13 @@ defmodule FermixChannels.Gateway.Commands.History do
         enabled_line(),
         capture_line(),
         allowlist_line(),
+        coverage_line(repo),
         summarizer_line(),
+        chain_line(),
         spool_line(repo),
         access_line(repo)
       ]
+      |> Enum.reject(&is_nil/1)
       |> Enum.join("\n")
     else
       "Computer history is macOS only; unavailable on this host."
@@ -126,6 +134,48 @@ defmodule FermixChannels.Gateway.Commands.History do
     "Apps allowlisted: #{count(apps)}; sites: #{count(sites)}."
   end
 
+  # Per-app coverage states the recorder reported in the retention window (§8.4a):
+  # an app it can only read titles in observes no typed text at all, which changes
+  # what history can answer about that app — and it is otherwise visible only as a
+  # gap row nobody reads. Omitted entirely when there is nothing to report.
+  defp coverage_line(repo) do
+    case Repo.computer_history_coverage_gaps(coverage_since(), server: repo) do
+      {:ok, []} ->
+        nil
+
+      {:ok, pairs} ->
+        "Coverage: #{coverage_clauses(pairs)}"
+
+      {:error, reason} ->
+        Logger.warning("computer_history coverage gaps unavailable: #{inspect(reason)}")
+        nil
+    end
+  end
+
+  defp coverage_since, do: System.system_time(:millisecond) - @coverage_window_ms
+
+  defp coverage_clauses(pairs) do
+    {title_only, ax_refused} =
+      Enum.split_with(pairs, fn {_app, reason} -> reason == "title_only" end)
+
+    [title_only_clause(apps(title_only)), ax_refused_clause(apps(ax_refused))]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join("; ")
+    |> Kernel.<>(".")
+  end
+
+  defp apps(pairs), do: pairs |> Enum.map(fn {app, _reason} -> app end) |> Enum.uniq()
+
+  defp title_only_clause([]), do: nil
+
+  defp title_only_clause(apps),
+    do: "title-only for #{Enum.join(apps, ", ")} (no typed text is observable there)"
+
+  defp ax_refused_clause([]), do: nil
+
+  defp ax_refused_clause(apps),
+    do: "AX refused for #{Enum.join(apps, ", ")} (the app declined to report changes)"
+
   defp summarizer_line do
     case Config.summarizer() do
       :local ->
@@ -138,6 +188,14 @@ defmodule FermixChannels.Gateway.Commands.History do
         "Summarizer: #{provider} (raw activity leaves this Mac)."
     end
   end
+
+  # Whether recall can surface in chat at all, and on which providers (§9.4). The
+  # chain rule can deny every owner turn — a configured, capturing, summarizing
+  # rail that never appears in a reply — and this is the line that says so, from
+  # the same resolver the doctor row and the setup card read. Reached only inside
+  # the macOS branch, so the posture is resolved for the platform the rest of this
+  # status body already describes.
+  defp chain_line, do: Gate.chain_posture_sentence(Gate.chain_posture(macos?: true))
 
   # The one shared resolver (§22.1): subagent provider else primary — the same
   # answer the Gate and the summarizer use, so this privacy line never names a

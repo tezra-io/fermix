@@ -93,8 +93,17 @@ defmodule FermixCore.ComputerHistory.Summarizer.Scheduler do
     end
   end
 
-  defp log_result({:ok, %{memory_written: written?, events: events}}),
-    do: Logger.debug("computer_history summarizer cycle: #{events} events, memory=#{written?}")
+  # The whole cycle in one line: how many batches actually ran and how many of
+  # them wrote nothing, so "drained" and "called the model six times for nothing"
+  # are not the same log entry. The per-batch outcome lines (Summarizer) carry the
+  # reason at :info.
+  defp log_result({:ok, %{} = cycle}),
+    do:
+      Logger.debug(
+        "computer_history summarizer cycle: #{cycle.events} events in " <>
+          "#{cycle.batches} batch(es), #{cycle.empty_batches} empty, " <>
+          "memory=#{cycle.memory_written}"
+      )
 
   defp log_result({:paused, reason}),
     do: Logger.info("computer_history summarizer paused: #{inspect(reason)}")

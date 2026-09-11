@@ -13,6 +13,8 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
   """
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias FermixCore.ComputerHistory.Ingest
   alias FermixCore.ComputerHistory.Locality
   alias FermixCore.ComputerHistory.Recall
@@ -684,6 +686,34 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
       assert input =~ "gap=sleep 00:00:01→00:00:01"
     end
 
+    # An app-scoped coverage gap renders with its app and an UNQUOTED reason — the
+    # reason carries a colon and a comma-separated notification list, and quoting
+    # it would make it read like captured content.
+    test "a per-app coverage gap renders its app and its unquoted reason", %{repo: repo} do
+      enable(summarizer: :local)
+
+      insert(repo, [
+        raw_event(1, 1_000, %{
+          type: "observer.gap",
+          bundle_id: "com.microsoft.VSCode",
+          gap_reason: "ax_refused:AXValueChanged,AXFocusedUIElementChanged"
+        }),
+        raw_event(2, 2_000, %{
+          type: "observer.gap",
+          bundle_id: "com.docker.docker",
+          gap_reason: "title_only"
+        })
+      ])
+
+      assert {:ok, %{memory_written: true}} = Summarizer.run_cycle(local_opts(repo))
+
+      input = calls() |> hd() |> user_message()
+      assert input =~ "app=com.microsoft.VSCode"
+      assert input =~ "gap=ax_refused:AXValueChanged,AXFocusedUIElementChanged"
+      assert input =~ "gap=title_only"
+      refute input =~ ~s(gap="title_only")
+    end
+
     test "long_field_tail: the end of a long value survives the clip", %{repo: repo} do
       enable(summarizer: :local)
       text = String.duplicate("x", 5_600) <> " The decision is to postpone the migration."
@@ -1002,6 +1032,169 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
       {:ok, state} = Repo.computer_history_fetch_state(server: repo)
       assert state.last_summarized_id == 2
       assert state.paused_reason == "route_down"
+    end
+  end
+
+  # The renderer's markers only mean something if the prompt says what they mean;
+  # `gap=title_only` in particular is the difference between "the owner typed
+  # nothing there" and "nothing typed there is observable".
+  test "the prompt explains what a per-app coverage gap means", %{repo: repo} do
+    enable(summarizer: :local)
+    insert(repo, [event(1, 1_000, "some text")])
+
+    assert {:ok, %{memory_written: true}} = Summarizer.run_cycle(local_opts(repo))
+
+    system = calls() |> hd() |> Map.fetch!(:messages) |> hd() |> Map.fetch!(:content)
+    assert system =~ "gap=title_only"
+    assert system =~ "only window titles"
+  end
+
+  # --- per-batch observability --------------------------------------------
+
+  # The abstention path was silent: with no memories since Sep 6 there was no way
+  # to tell "the model abstains on every batch" from "the summarizer never ran".
+  describe "batch outcome logging" do
+    setup do
+      # The outcome line is Logger.info and config/test.exs pins the primary level
+      # to :warning, which drops it before any capture handler sees it. Establish
+      # the precondition here rather than assuming it, and put it back after.
+      previous_level = Logger.level()
+      Logger.configure(level: :info)
+      on_exit(fn -> Logger.configure(level: previous_level) end)
+      :ok
+    end
+
+    test "an ok batch names the outcome, the event count and the batch window", %{repo: repo} do
+      enable(summarizer: :local)
+      insert(repo, [event(1, ms(~U[2026-09-10 09:15:00Z]), "typed a note")])
+
+      log =
+        capture_log([level: :info], fn ->
+          assert {:ok, %{memory_written: true, batches: 1, empty_batches: 0}} =
+                   Summarizer.run_cycle(local_opts(repo))
+        end)
+
+      assert log =~ "computer_history summarizer batch: ok"
+      assert log =~ "1 event(s)"
+      assert log =~ "Sep 10 09:15"
+      assert log =~ "Etc/UTC"
+      refute log =~ "redacted"
+    end
+
+    test "a redacted batch names how many runs were cut", %{repo: repo} do
+      enable(summarizer: :local)
+      echoed = "my-private-note-abcdefghijklmnop"
+      insert(repo, [event(1, 1_000, echoed)])
+      Process.put(:ch_content, "The owner typed #{echoed} into a field.")
+
+      log =
+        capture_log([level: :info], fn ->
+          assert {:ok, %{memory_written: true}} = Summarizer.run_cycle(local_opts(repo))
+        end)
+
+      assert log =~ "computer_history summarizer batch: ok"
+      assert log =~ "redacted 1"
+    end
+
+    test "an abstention is logged as abstained, distinctly from empty", %{repo: repo} do
+      enable(summarizer: :local)
+      insert(repo, [event(1, 1_000, "idle noise")])
+      Process.put(:ch_content, "NO_MEANINGFUL_ACTIVITY")
+
+      log =
+        capture_log([level: :info], fn ->
+          assert {:ok, %{memory_written: false, batches: 1, empty_batches: 1}} =
+                   Summarizer.run_cycle(local_opts(repo))
+        end)
+
+      assert log =~ "computer_history summarizer batch: abstained"
+    end
+
+    test "a blank reply is logged as empty", %{repo: repo} do
+      enable(summarizer: :local)
+      insert(repo, [event(1, 1_000, "some text here")])
+      Process.put(:ch_content, "   \n  ")
+
+      log =
+        capture_log([level: :info], fn ->
+          assert {:ok, %{memory_written: false, empty_batches: 1}} =
+                   Summarizer.run_cycle(local_opts(repo))
+        end)
+
+      assert log =~ "computer_history summarizer batch: empty"
+    end
+
+    test "a redaction-only reply is logged as empty", %{repo: repo} do
+      enable(summarizer: :local)
+      echoed = "the quarterly revenue projection deck for next year"
+      insert(repo, [event(1, 1_000, echoed)])
+      Process.put(:ch_content, echoed)
+
+      log =
+        capture_log([level: :info], fn ->
+          assert {:ok, %{memory_written: false}} = Summarizer.run_cycle(local_opts(repo))
+        end)
+
+      assert log =~ "computer_history summarizer batch: empty"
+    end
+
+    # A cycle that dies on batch four is a different event from one that dies on
+    # batch one, and the returned tuple carries only the reason.
+    test "a cycle that stops early reports what it did before it stopped", %{repo: repo} do
+      enable(summarizer: :local)
+      insert(repo, Enum.map(1..4, fn seq -> event(seq, 1_000 + seq, "text-#{seq}") end))
+      Process.put(:ch_behavior, {:error_after, 1})
+
+      log =
+        capture_log([level: :info], fn ->
+          assert {:error, :provider_unavailable} =
+                   Summarizer.run_cycle(local_opts(repo, limit: 2))
+        end)
+
+      assert log =~ "computer_history summarizer cycle stopped after 1 batch(es) (0 empty)"
+      assert log =~ "provider_unavailable"
+    end
+
+    test "a cycle that never ran a batch logs no stopped line", %{repo: repo} do
+      enable(summarizer: :local)
+      insert(repo, [event(1, 1_000, "text")])
+      Process.put(:ch_behavior, :error)
+
+      log =
+        capture_log([level: :info], fn ->
+          assert {:error, :provider_unavailable} = Summarizer.run_cycle(local_opts(repo))
+        end)
+
+      refute log =~ "cycle stopped after"
+    end
+
+    # The outcome word has to describe what the store actually holds: a memory the
+    # purge watermark refused is not an `ok` batch.
+    test "a memory the repo refuses is never logged as ok", %{repo: repo} do
+      enable(summarizer: :local)
+      # A purge issued for everything up to now sets the watermark; events inserted
+      # afterwards still fall inside it, so the write refuses the memory.
+      assert {:ok, _counts} = Repo.computer_history_purge_window(0, 5_000, server: repo)
+      insert(repo, [event(1, 1_000, "typed a note")])
+
+      log =
+        capture_log([level: :info], fn ->
+          assert {:ok, %{memory_written: false, empty_batches: 1}} =
+                   Summarizer.run_cycle(local_opts(repo))
+        end)
+
+      assert {:ok, 0} = Repo.computer_history_count_memories(server: repo)
+      assert log =~ "computer_history summarizer batch: not_written"
+      refute log =~ "batch: ok"
+    end
+
+    test "the cycle result counts every batch it ran and every empty one", %{repo: repo} do
+      enable(summarizer: :local)
+      insert(repo, [event(1, 1_000, "first note"), event(2, 2_000, "second note")])
+      Process.put(:ch_content, "NO_MEANINGFUL_ACTIVITY")
+
+      assert {:ok, %{batches: 2, empty_batches: 2, events: 2, memory_written: false}} =
+               Summarizer.run_cycle(local_opts(repo, limit: 1))
     end
   end
 end

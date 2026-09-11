@@ -24,6 +24,7 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.ComputerHistory
   alias FermixCore.ComputerHistory.Config, as: ComputerHistoryConfig
+  alias FermixCore.ComputerHistory.Gate, as: ComputerHistoryGate
   alias FermixCore.Config, as: CoreConfig
   alias FermixCore.Harness.Artifacts, as: HarnessArtifacts
   alias FermixCore.Harness.Config, as: HarnessConfig
@@ -1295,10 +1296,13 @@ defmodule Fermix.CLI.Doctor.Checks do
 
   @doc """
   Computer history (MILESTONE_32 §15.3): a macOS-only, opt-in row. Tree-less —
-  reports config-level state (availability, on/off, summarizer posture,
-  allowlist sizes); runtime detail (spool size, grant, pause) integrates with
-  the capturer stage over the control socket. `:macos?`/`:config` are injectable
-  so the row is hermetic on non-macOS CI.
+  reports config-level state (availability, on/off, summarizer posture, allowlist
+  sizes) plus the chain posture (§9.4): an enabled rail whose primary is not
+  granted for history captures and summarizes but never appears in a reply, which
+  is a **warn** here, with the grant that would fix it named. Runtime detail
+  (spool size, pause) integrates with the capturer stage over the control socket.
+  `:macos?`/`:config`/`:routes` are injectable so the row is hermetic on non-macOS
+  CI; `:routes` takes `Selection.ordered_routes/0`'s own shape.
   """
   @spec computer_history(keyword()) :: result()
   def computer_history(opts \\ []) when is_list(opts) do
@@ -1318,16 +1322,32 @@ defmodule Fermix.CLI.Doctor.Checks do
       end)
 
     if ComputerHistoryConfig.enabled?(config) do
-      ok(
-        "computer history",
-        "on; summarizer #{summarizer_label(ComputerHistoryConfig.summarizer(config))}; " <>
-          "#{length(ComputerHistoryConfig.apps(config))} app(s), " <>
-          "#{length(ComputerHistoryConfig.sites(config))} site(s) allowlisted"
-      )
+      enabled_history_result(config, opts)
     else
       ok("computer history", "off (opt-in; enable in setup)")
     end
   end
+
+  defp enabled_history_result(config, opts) do
+    posture =
+      ComputerHistoryGate.chain_posture(
+        [macos?: true, config: config] ++ Keyword.take(opts, [:routes])
+      )
+
+    detail =
+      "on; summarizer #{summarizer_label(ComputerHistoryConfig.summarizer(config))}; " <>
+        "#{length(ComputerHistoryConfig.apps(config))} app(s), " <>
+        "#{length(ComputerHistoryConfig.sites(config))} site(s) allowlisted. " <>
+        ComputerHistoryGate.chain_posture_sentence(posture)
+
+    history_row(posture.state, detail)
+  end
+
+  # Only "unsurfaceable" is this row's own warning: capture is working and the
+  # operator has one config line to add. A broken provider chain is reported here
+  # but owned by the provider rows.
+  defp history_row(:unsurfaceable, detail), do: warn("computer history", detail)
+  defp history_row(_state, detail), do: ok("computer history", detail)
 
   defp summarizer_label(:local), do: "on-device"
 

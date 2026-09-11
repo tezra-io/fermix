@@ -354,7 +354,8 @@ defmodule FermixCore.ComputerHistory.Capturer do
 
   defp do_flush(state, writable, held) do
     case Ingest.ingest(writable, repo: state.repo, apps: state.apps, sites: state.sites) do
-      {:ok, _stats} ->
+      {:ok, stats} ->
+        log_ingest_stats(stats)
         %{state | buffer: held, overflow_pending?: false}
 
       {:error, reason} ->
@@ -362,6 +363,18 @@ defmodule FermixCore.ComputerHistory.Capturer do
         # Drop the failed batch (bounded — never re-buffer/retry forever) and gap it.
         buffer_gap(%{state | buffer: held, overflow_pending?: false}, "write_failure")
     end
+  end
+
+  # Counts only, never content (§15.1). A flush that silently loses rows to the
+  # allowlist or to the title collapse is indistinguishable from a capture gap —
+  # the live spool ran at 99% collapsed frames with nothing anywhere to say so.
+  # A flush that wrote everything it was given says nothing.
+  defp log_ingest_stats(%{dropped: 0, collapsed: 0}), do: :ok
+
+  defp log_ingest_stats(%{written: written, dropped: dropped, collapsed: collapsed}) do
+    Logger.debug(
+      "computer_history ingest: written #{written}, dropped #{dropped}, collapsed #{collapsed}"
+    )
   end
 
   # A self-generated gap, bounded like the event path: at `max_queue` it coalesces

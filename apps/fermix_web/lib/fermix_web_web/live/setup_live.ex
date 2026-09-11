@@ -14,6 +14,7 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.ComputerHistory
   alias FermixCore.ComputerHistory.Config, as: ComputerHistoryConfig
+  alias FermixCore.ComputerHistory.Gate, as: ComputerHistoryGate
   alias FermixCore.ComputerHistory.InstalledApps
   alias FermixCore.ComputerUse
   alias FermixCore.ComputerUse.SidecarInstaller
@@ -2848,11 +2849,27 @@ defmodule FermixWebWeb.SetupLive do
   defp computer_history_summarizer_sentence do
     case ComputerHistoryConfig.summarizer() do
       :local ->
-        "Summarized #{computer_history_summarizer_label(:local)}; off by default."
+        "Summarized #{computer_history_summarizer_label(:local)}; off by default." <>
+          computer_history_recall_sentence()
 
       remote ->
-        "Summarized off-device by #{computer_history_summarizer_label(remote)}; off by default."
+        "Summarized off-device by #{computer_history_summarizer_label(remote)}; off by default." <>
+          computer_history_recall_sentence()
     end
+  end
+
+  # Where recall will actually surface once enabled (§9.4), in the Gate's own
+  # words — no second wording, so this card, `/history status` and the doctor row
+  # cannot describe one chain three ways (including which failover hops go quiet).
+  # The posture is resolved against an ENABLED copy of the config because the card
+  # is read BEFORE the enable act: the live posture would read "off" and disclose
+  # nothing about chat.
+  defp computer_history_recall_sentence do
+    ComputerHistoryConfig.current()
+    |> Keyword.put(:enabled, true)
+    |> then(&ComputerHistoryGate.chain_posture(config: &1))
+    |> ComputerHistoryGate.chain_posture_sentence()
+    |> then(&" #{&1}")
   end
 
   # Where summarization runs, shown on the card so the operator sees exactly which
