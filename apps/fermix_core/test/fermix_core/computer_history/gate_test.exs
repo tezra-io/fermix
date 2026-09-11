@@ -211,15 +211,27 @@ defmodule FermixCore.ComputerHistory.GateTest do
       refute Gate.allow?(s, {:llm_chain, [remote_route(:anthropic), local_route()]})
     end
 
-    test "a LOCAL lead with an ungranted-remote TAIL is denied (the resolved-head trap)" do
+    test "the raw chain of a LOCAL lead with an ungranted-remote TAIL is denied (the resolved-head trap)" do
       # The realistic dangerous config: Ollama PRIMARY, remote fallback. The
-      # resolved head is local, but failover re-sends to the remote tail, so the
-      # whole turn must be denied. A regression that trusted the head would pass
-      # every other test in this file — this is the one that catches it.
+      # resolved head is local, but failover re-sends to the identical messages
+      # to the remote tail, so the chain AS GIVEN is denied. A regression that
+      # trusted the head would pass every other test in this file — this is the
+      # one that catches it. On an attended owner turn the ungranted tail is
+      # pinned away instead (below), which is what makes the section legal there;
+      # the sink itself never softens.
       enable([])
       chain = [local_route(), remote_route(:openai)]
       s = snap(operator_ctx(chain))
       refute Gate.allow?(s, {:llm_chain, chain})
+    end
+
+    test "an ungranted-remote TAIL keeps the section absent on a turn that cannot be pinned" do
+      # A guest turn is never pinned (§9.4), so the whole-chain rule decides and
+      # the consumer surfaces stay closed even though the lead is local.
+      enable([])
+      chain = [local_route(), remote_route(:openai)]
+      s = snap(guest_ctx(chain))
+      refute s.chain_ok?
       refute Gate.allow?(s, {:prompt_section, %{}})
       refute Gate.allow?(s, {:tool_advertise, %{}})
     end
@@ -364,6 +376,259 @@ defmodule FermixCore.ComputerHistory.GateTest do
       enable(remote_summaries: [:openai])
       s = snap(guest_ctx([local_route()]))
       refute Gate.allow?(s, {:realtime_session, :openai})
+    end
+  end
+
+  # --- chain pinning for history-bearing owner turns (§9.4) ---------------
+
+  describe "chain pinning" do
+    test "an owner turn keeps the lead and the granted fallbacks, in order" do
+      enable(remote_summaries: [:anthropic])
+
+      chain = [
+        remote_route(:anthropic),
+        remote_route(:openai),
+        local_route(),
+        remote_route(:mistral)
+      ]
+
+      s = snap(operator_ctx(chain))
+
+      assert s.routes == [remote_route(:anthropic), local_route()]
+      assert s.dropped_hops == [:openai, :mistral]
+      assert s.chain_ok?
+      # `chain` stays the INPUT chain the taint/replay readers were handed.
+      assert s.chain == chain
+    end
+
+    test "a chain that is already fully granted is left alone with no dropped hops" do
+      enable(remote_summaries: [:anthropic])
+      chain = [remote_route(:anthropic), local_route()]
+      s = snap(operator_ctx(chain))
+
+      assert s.routes == chain
+      assert s.dropped_hops == []
+      assert s.chain_ok?
+    end
+
+    test "a lead the grant set does not cover is never replaced" do
+      # The load-bearing half of the rule: pinning narrows a permitted lead's
+      # failover, it never promotes a granted fallback over the owner's primary.
+      enable(remote_summaries: [:anthropic])
+      chain = [remote_route(:openai), remote_route(:anthropic)]
+      s = snap(operator_ctx(chain))
+
+      assert s.routes == chain
+      assert s.dropped_hops == []
+      refute s.chain_ok?
+    end
+
+    test "history disabled leaves an ungranted chain untouched (failover semantics intact)" do
+      Application.put_env(:fermix_core, :computer_history, enabled: false)
+      chain = [remote_route(:anthropic), remote_route(:openai)]
+      s = snap(operator_ctx(chain))
+
+      assert s.routes == chain
+      assert s.dropped_hops == []
+      refute s.chain_ok?
+    end
+
+    test "a guest turn is never pinned" do
+      enable(remote_summaries: [:anthropic])
+      chain = [remote_route(:anthropic), remote_route(:openai)]
+      s = snap(guest_ctx(chain))
+
+      assert s.routes == chain
+      assert s.dropped_hops == []
+    end
+
+    test "an unattended owner turn is never pinned" do
+      enable(remote_summaries: [:anthropic])
+      chain = [remote_route(:anthropic), remote_route(:openai)]
+      s = snap(unattended_ctx(chain))
+
+      assert s.routes == chain
+      assert s.dropped_hops == []
+    end
+
+    test "a worker turn is never pinned" do
+      enable(remote_summaries: [:anthropic])
+      chain = [remote_route(:anthropic), remote_route(:openai)]
+      s = snap(worker_ctx(chain))
+
+      assert s.routes == chain
+      assert s.dropped_hops == []
+    end
+
+    test "two ungranted hops on one provider are named once" do
+      # A chain can carry the same provider twice (two models, two base URLs); the
+      # sentence must read "failover to openai" once, not "openai, openai".
+      enable(remote_summaries: [:anthropic])
+
+      chain = [
+        remote_route(:anthropic),
+        remote_route(:openai),
+        {%{provider: :openai, base_url: "https://api.openai.example/v2"}, []}
+      ]
+
+      s = snap(operator_ctx(chain))
+
+      assert s.dropped_hops == [:openai]
+    end
+
+    test "a nil chain pins nothing (MainAgent's boot config-error path)" do
+      enable(remote_summaries: [:anthropic])
+      s = snap(operator_ctx(nil))
+
+      assert s.routes == nil
+      assert s.dropped_hops == []
+      refute s.chain_ok?
+    end
+
+    test "a chain carrying an unclassifiable hop is never pinned and never surfaces" do
+      # Fail closed rather than silently dropping a hop nobody can name: the
+      # chain is left exactly as it is and history does not surface.
+      enable(remote_summaries: [:anthropic])
+      chain = [remote_route(:anthropic), %{provider: "openai"}]
+      s = snap(operator_ctx(chain))
+
+      assert s.routes == chain
+      assert s.dropped_hops == []
+      refute s.chain_ok?
+    end
+  end
+
+  # --- the history grant set (§22.1) --------------------------------------
+
+  describe "effective grant set" do
+    test "the default summarizer grants BOTH the subagent provider and the primary" do
+      # §22.1 folds the primary into the grant set; with a subagent provider
+      # configured, the summarizer's provider and the primary differ, and a turn
+      # runs on the primary — so granting only the summarizer's provider leaves
+      # every owner turn unsurfaceable (the 2026-09-10 incident).
+      establish_primary_openai()
+      Application.put_env(:fermix_core, :routing, subagent_provider: :anthropic)
+      enable(summarizer: :default_provider)
+
+      s = snap(operator_ctx([remote_route(:openai)]))
+
+      assert MapSet.member?(s.granted, :anthropic)
+      assert MapSet.member?(s.granted, :openai)
+      assert s.chain_ok?
+    end
+
+    test "Tier 1 (local summarizer) grants nothing implicitly" do
+      establish_primary_openai()
+      enable(summarizer: :local)
+
+      s = snap(operator_ctx([remote_route(:openai)]))
+
+      assert MapSet.size(s.granted) == 0
+      refute s.chain_ok?
+    end
+
+    test "Tier 3 (a pinned provider) grants nothing implicitly" do
+      establish_primary_openai()
+      enable(summarizer: :anthropic)
+
+      s = snap(operator_ctx([remote_route(:anthropic)]))
+
+      assert MapSet.size(s.granted) == 0
+      refute s.chain_ok?
+    end
+  end
+
+  # --- chain posture, the status surfaces' one resolver (§9.4) ------------
+
+  describe "chain_posture/1" do
+    test "pinned names the lead, the effective chain, and the dropped hops" do
+      enable(remote_summaries: [:openai_codex])
+      chain = [remote_route(:openai_codex), remote_route(:openai), remote_route(:mistral)]
+
+      posture = Gate.chain_posture(macos?: true, routes: {:ok, chain})
+
+      assert posture.state == :pinned
+      assert posture.lead == :openai_codex
+      assert posture.routes == [:openai_codex]
+      assert posture.dropped == [:openai, :mistral]
+
+      sentence = Gate.chain_posture_sentence(posture)
+      assert sentence =~ "history turns run on openai_codex"
+      assert sentence =~ "failover to openai, mistral is off while history is on"
+    end
+
+    test "unsurfaceable names the LEAD of the chat chain and the grant that would surface it" do
+      # "your primary" was wrong: `Selection` skips an unconfigured primary, so the
+      # lead of the chain the turn actually runs on can be a fallback provider.
+      enable(summarizer: :local)
+      posture = Gate.chain_posture(macos?: true, routes: {:ok, [remote_route(:anthropic)]})
+
+      assert posture.state == :unsurfaceable
+      assert posture.lead == :anthropic
+
+      sentence = Gate.chain_posture_sentence(posture)
+      assert sentence =~ "history cannot surface"
+      assert sentence =~ "the lead of your chat chain anthropic"
+      refute sentence =~ "your primary anthropic"
+      assert sentence =~ ~s(remote_summaries = ["anthropic"])
+      assert sentence =~ ~s(summarizer = "default")
+    end
+
+    test "unsurfaceable omits the summarizer advice when the default summarizer is already on" do
+      # Under `summarizer = "default"` the advice is a no-op: that posture already
+      # grants the summarizer's provider and the primary, and the lead is neither.
+      establish_primary_openai()
+      enable(summarizer: :default_provider)
+      posture = Gate.chain_posture(macos?: true, routes: {:ok, [remote_route(:mistral)]})
+
+      assert posture.state == :unsurfaceable
+      sentence = Gate.chain_posture_sentence(posture)
+
+      assert sentence =~ "the lead of your chat chain mistral"
+      assert sentence =~ ~s(remote_summaries = ["mistral"])
+      refute sentence =~ ~s(summarizer = "default")
+    end
+
+    test "a hop with no provider id is its own posture, not a grant problem" do
+      # Telling the operator to add a `remote_summaries` grant for a chain that
+      # carries an unnameable hop sends them after the wrong config line.
+      enable(remote_summaries: [:anthropic])
+      chain = [remote_route(:anthropic), %{provider: "openai"}]
+
+      posture = Gate.chain_posture(macos?: true, routes: {:ok, chain})
+
+      assert posture.state == :unclassifiable_chain
+      assert posture.lead == :anthropic
+      assert posture.routes == [:anthropic, :unknown]
+
+      sentence = Gate.chain_posture_sentence(posture)
+      assert sentence =~ "a hop without a provider id"
+      assert sentence =~ "[fermix_core.providers]"
+      refute sentence =~ "remote_summaries"
+    end
+
+    test "off when history is disabled" do
+      Application.put_env(:fermix_core, :computer_history, enabled: false)
+      posture = Gate.chain_posture(macos?: true, routes: {:ok, [remote_route(:anthropic)]})
+
+      assert posture.state == :off
+      assert Gate.chain_posture_sentence(posture) =~ "history is off"
+    end
+
+    test "no_chain when the route chain could not be built" do
+      enable(remote_summaries: [:anthropic])
+      posture = Gate.chain_posture(macos?: true, routes: {:error, :multiple_primary})
+
+      assert posture.state == :no_chain
+      assert posture.lead == nil
+      assert Gate.chain_posture_sentence(posture) =~ "provider chain"
+    end
+
+    test "off on a non-macOS host" do
+      enable(remote_summaries: [:anthropic])
+      posture = Gate.chain_posture(macos?: false, routes: {:ok, [remote_route(:anthropic)]})
+
+      assert posture.state == :off
     end
   end
 end

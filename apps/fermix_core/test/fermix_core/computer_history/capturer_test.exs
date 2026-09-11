@@ -7,7 +7,11 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
   malformed frame becomes a gap rather than a crash — all with an injected repo
   and an injected lock path so the suite never touches the real machine lock.
   """
-  use ExUnit.Case, async: true
+  # async: false — the flush-accounting case lowers the global Logger level, which
+  # config/test.exs pins to :warning.
+  use ExUnit.Case, async: false
+
+  import ExUnit.CaptureLog
 
   alias FermixCore.ComputerHistory.Capturer
   alias FermixCore.Memory.Repo
@@ -149,6 +153,39 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
 
       assert rows |> Enum.map(& &1.source_seq) |> Enum.sort() == [1, 2]
     end
+  end
+
+  # `collapsed` (and `dropped`) were computed and thrown away: a spool that quietly
+  # loses 99% of its frames to the allowlist or the title collapse looked exactly
+  # like a capture gap. Counts only — never a title, never any content (§15.1).
+  test "a flush that dropped or collapsed rows accounts for it, without content", ctx do
+    previous_level = Logger.level()
+    Logger.configure(level: :debug)
+    on_exit(fn -> Logger.configure(level: previous_level) end)
+
+    frames = [
+      app_event(1),
+      app_event(2, %{
+        "kind" => "window.title_changed",
+        "app" => %{"bundle_id" => "com.evil.Keylogger", "name" => "K", "pid" => 11},
+        "window_title" => "secret-window-title"
+      })
+    ]
+
+    events = events_file(ctx, frames)
+
+    log =
+      capture_log([level: :debug], fn ->
+        start_capturer(ctx, sidecar_env: [{~c"FAKE_EVENTS_FILE", String.to_charlist(events)}])
+
+        eventually(fn ->
+          if stored(ctx.repo) == [], do: :retry, else: {:ok, :written}
+        end)
+      end)
+
+    assert log =~ "computer_history ingest:"
+    assert log =~ "dropped 1"
+    refute log =~ "secret-window-title"
   end
 
   describe "degradation (fail loud, no crash loop)" do

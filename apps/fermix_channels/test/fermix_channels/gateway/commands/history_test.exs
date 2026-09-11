@@ -88,6 +88,113 @@ defmodule FermixChannels.Gateway.Commands.HistoryTest do
     assert text =~ "Spool: 0 event(s), 0 unsummarized. Last summarization:"
   end
 
+  # Per-app coverage states (§8.4a): an app the driver can only see titles in
+  # observes no typed text at all, which silently changes what history can answer.
+  test "status names the apps only titles are observable in", %{ctx: ctx, repo: repo} do
+    now = System.system_time(:millisecond)
+
+    events = [
+      %{
+        boot_id: "b1",
+        source_seq: 1,
+        ts: now - 1_000,
+        type: "observer.gap",
+        bundle_id: "com.microsoft.VSCode",
+        gap_reason: "title_only"
+      },
+      %{
+        boot_id: "b1",
+        source_seq: 2,
+        ts: now - 500,
+        type: "observer.gap",
+        bundle_id: "com.docker.docker",
+        gap_reason: "ax_refused:AXValueChanged"
+      }
+    ]
+
+    assert {:ok, 2} = Repo.computer_history_insert_events(events, server: repo)
+
+    assert :ok = History.execute(message("status"), reply_fn(self()), macos_ctx(ctx))
+    assert_receive {:reply, text}
+
+    assert text =~ "Coverage: title-only for com.microsoft.VSCode"
+    assert text =~ "no typed text is observable there"
+    assert text =~ "AX refused for com.docker.docker"
+  end
+
+  test "status omits the coverage line when there are no coverage gaps", %{ctx: ctx} do
+    assert :ok = History.execute(message("status"), reply_fn(self()), macos_ctx(ctx))
+    assert_receive {:reply, text}
+
+    refute text =~ "Coverage:"
+  end
+
+  test "status ignores coverage gaps older than the retention window", %{ctx: ctx, repo: repo} do
+    stale = System.system_time(:millisecond) - :timer.hours(49)
+
+    events = [
+      %{
+        boot_id: "b1",
+        source_seq: 1,
+        ts: stale,
+        type: "observer.gap",
+        bundle_id: "com.microsoft.VSCode",
+        gap_reason: "title_only"
+      }
+    ]
+
+    assert {:ok, 1} = Repo.computer_history_insert_events(events, server: repo)
+
+    assert :ok = History.execute(message("status"), reply_fn(self()), macos_ctx(ctx))
+    assert_receive {:reply, text}
+
+    refute text =~ "Coverage:"
+  end
+
+  # §9.4: the chain rule could deny every owner turn with nothing to read it from —
+  # the incident that made a 53-tool turn refuse `recall_activity`. The chat line
+  # is the surface that says so.
+  test "status names the pinned chain and the failover it turns off", %{ctx: ctx} do
+    establish_chain(openai: [api_key: "sk-test", primary: true], anthropic: [api_key: "sk-ant"])
+
+    Application.put_env(:fermix_core, :computer_history,
+      enabled: true,
+      summarizer: :local,
+      remote_summaries: [:openai]
+    )
+
+    assert :ok = History.execute(message("status"), reply_fn(self()), macos_ctx(ctx))
+    assert_receive {:reply, text}
+
+    assert text =~ "Chat: history turns run on openai;"
+    assert text =~ "failover to"
+    assert text =~ "anthropic"
+  end
+
+  test "status says why history cannot surface when the primary is not granted", %{ctx: ctx} do
+    establish_chain(anthropic: [api_key: "sk-ant", primary: true])
+    Application.put_env(:fermix_core, :computer_history, enabled: true, summarizer: :local)
+
+    assert :ok = History.execute(message("status"), reply_fn(self()), macos_ctx(ctx))
+    assert_receive {:reply, text}
+
+    assert text =~ "Chat: history cannot surface"
+    assert text =~ ~s(remote_summaries = ["anthropic"])
+  end
+
+  # The chain is resolved from three global env keys; a test that asserts a
+  # resolved chain establishes all of them rather than reading what ran before.
+  defp establish_chain(providers) do
+    for {key, value} <- [providers: providers, agent: [], routing: []] do
+      original = Application.get_env(:fermix_core, key)
+      Application.put_env(:fermix_core, key, value)
+      on_exit(fn -> restore_env(key, original) end)
+    end
+  end
+
+  defp restore_env(key, nil), do: Application.delete_env(:fermix_core, key)
+  defp restore_env(key, value), do: Application.put_env(:fermix_core, key, value)
+
   test "pause persists a pause horizon", %{ctx: ctx, repo: repo} do
     assert :ok = History.execute(message("pause 30m"), reply_fn(self()), ctx)
     assert_receive {:reply, text}

@@ -173,6 +173,53 @@ defmodule FermixCore.ComputerHistory.IngestTest do
     end
   end
 
+  # The native driver reports per-app coverage states as `observer.gap` frames that
+  # CARRY an app (`title_only`, `ax_refused:<names>`), while machine-wide gaps stay
+  # app-less. An app-scoped gap is about an attached app, so it is allowlisted like
+  # any other event of that app — the app-less exemption stays for system gaps only.
+  describe "app-scoped coverage gaps" do
+    test "a coverage gap for an allowlisted app is written", %{repo: repo} do
+      events = [
+        base(1, %{
+          type: "observer.gap",
+          bundle_id: "com.microsoft.VSCode",
+          gap_reason: "title_only",
+          gap_from_ts: 1_000,
+          gap_to_ts: 2_000
+        })
+      ]
+
+      assert {:ok, %{written: 1, dropped: 0}} =
+               Ingest.ingest(events, repo: repo, apps: ["com.microsoft.VSCode"], sites: [])
+
+      assert [row] = stored(repo)
+      assert row.gap_reason == "title_only"
+      assert row.bundle_id == "com.microsoft.VSCode"
+    end
+
+    test "a coverage gap for a non-allowlisted app is dropped", %{repo: repo} do
+      events = [
+        base(1, %{
+          type: "observer.gap",
+          bundle_id: "com.evil.Keylogger",
+          gap_reason: "ax_refused:AXValueChanged"
+        })
+      ]
+
+      assert {:ok, %{written: 0, dropped: 1}} =
+               Ingest.ingest(events, repo: repo, apps: ["com.microsoft.VSCode"], sites: [])
+
+      assert stored(repo) == []
+    end
+
+    test "a machine-wide gap still needs no app", %{repo: repo} do
+      events = [base(1, %{type: "observer.gap", gap_reason: "sleep"})]
+
+      assert {:ok, %{written: 1, dropped: 0}} =
+               Ingest.ingest(events, repo: repo, apps: [], sites: [])
+    end
+  end
+
   describe "injection tagging (inv. 13)" do
     test "an injection amplifier in a title is tagged, not executed", %{repo: repo} do
       events = [
@@ -198,6 +245,136 @@ defmodule FermixCore.ComputerHistory.IngestTest do
 
       [row] = stored(repo)
       assert row.scan_flag == nil
+    end
+  end
+
+  # The live spool was 99% VS Code spinner frames one Braille glyph apart
+  # (`⠙ fermix — fermix`, `⠹ fermix — fermix`, …), which defeated the renderer's
+  # identical-line dedupe and starved the summarizer of real signal.
+  describe "title normalization and consecutive-repeat collapse" do
+    defp title(seq, bundle, window_title),
+      do:
+        base(seq, %{type: "window.title_changed", bundle_id: bundle, window_title: window_title})
+
+    test "spinner frames of one title collapse to a single normalized row", %{repo: repo} do
+      events = [
+        title(1, "com.microsoft.VSCode", "⠙ fermix — fermix"),
+        title(2, "com.microsoft.VSCode", "⠹ fermix — fermix"),
+        title(3, "com.microsoft.VSCode", "fermix — fermix")
+      ]
+
+      assert {:ok, %{written: 1, dropped: 0, collapsed: 2}} =
+               Ingest.ingest(events, repo: repo, apps: ["com.microsoft.VSCode"], sites: [])
+
+      assert [row] = stored(repo)
+      assert row.window_title == "fermix — fermix"
+    end
+
+    # The first cut of the normalizer stripped `\p{S}`, which swallowed the
+    # leading `~`, `$`, `€`, `±`, `<`, `` ` ``, `©`, `+` and `→` of ordinary
+    # titles — `~/projects/fermix — zsh` was stored as `/projects/fermix — zsh`.
+    # A status-glyph stripper that edits real titles is worse than the noise.
+    test "a leading symbol that is part of the title is never stripped", %{repo: repo} do
+      titles = [
+        "~/projects/fermix — zsh",
+        "$1,200 invoice — Numbers",
+        "€ pricing — Sheets",
+        "±0.5 tolerance — CAD",
+        "<untitled> — Editor",
+        "`code` — Editor",
+        "©2026 report.pdf — Preview",
+        "+ New tab",
+        "→ next steps"
+      ]
+
+      events = titles |> Enum.with_index(1) |> Enum.map(fn {t, i} -> title(i, "com.x", t) end)
+
+      assert {:ok, %{written: 9, collapsed: 0}} =
+               Ingest.ingest(events, repo: repo, apps: ["com.x"], sites: [])
+
+      assert repo |> stored() |> Enum.map(& &1.window_title) == titles
+    end
+
+    test "a leading bullet glyph is stripped", %{repo: repo} do
+      events = [title(1, "com.microsoft.VSCode", "● SKILL.md — obai")]
+
+      assert {:ok, %{written: 1, collapsed: 0}} =
+               Ingest.ingest(events, repo: repo, apps: ["com.microsoft.VSCode"], sites: [])
+
+      assert [row] = stored(repo)
+      assert row.window_title == "SKILL.md — obai"
+    end
+
+    test "a title that is only status glyphs normalizes to nil", %{repo: repo} do
+      events = [title(1, "com.microsoft.VSCode", "⠙  ")]
+
+      assert {:ok, %{written: 1}} =
+               Ingest.ingest(events, repo: repo, apps: ["com.microsoft.VSCode"], sites: [])
+
+      assert [row] = stored(repo)
+      assert row.window_title == nil
+    end
+
+    test "the same title in two different apps is kept twice", %{repo: repo} do
+      events = [
+        title(1, "com.microsoft.VSCode", "⠙ fermix — fermix"),
+        title(2, "com.apple.Terminal", "⠹ fermix — fermix")
+      ]
+
+      assert {:ok, %{written: 2, collapsed: 0}} =
+               Ingest.ingest(events,
+                 repo: repo,
+                 apps: ["com.microsoft.VSCode", "com.apple.Terminal"],
+                 sites: []
+               )
+
+      assert length(stored(repo)) == 2
+    end
+
+    test "a repeat separated by another event kind is kept", %{repo: repo} do
+      # The comparison is against the previous KEPT event of the same type: a
+      # focus change between two identical titles is a real re-entry, not a frame.
+      events = [
+        title(1, "com.microsoft.VSCode", "⠙ fermix — fermix"),
+        base(2, %{type: "focus.changed", bundle_id: "com.microsoft.VSCode"}),
+        title(3, "com.microsoft.VSCode", "fermix — fermix")
+      ]
+
+      assert {:ok, %{written: 3, collapsed: 0}} =
+               Ingest.ingest(events, repo: repo, apps: ["com.microsoft.VSCode"], sites: [])
+
+      assert length(stored(repo)) == 3
+    end
+
+    test "page_title is normalized too", %{repo: repo} do
+      events = [
+        base(1, %{
+          type: "browser.navigated",
+          bundle_id: "com.apple.Safari",
+          host: "example.com",
+          page_title: "◐ Loading — Example"
+        })
+      ]
+
+      assert {:ok, %{written: 1}} =
+               Ingest.ingest(events,
+                 repo: repo,
+                 apps: ["com.apple.Safari"],
+                 sites: ["example.com"]
+               )
+
+      assert [row] = stored(repo)
+      assert row.page_title == "Loading — Example"
+    end
+
+    test "a non-title event kind is never collapsed", %{repo: repo} do
+      events = [
+        base(1, %{type: "app.activated", bundle_id: "com.microsoft.VSCode"}),
+        base(2, %{type: "app.activated", bundle_id: "com.microsoft.VSCode"})
+      ]
+
+      assert {:ok, %{written: 2, collapsed: 0}} =
+               Ingest.ingest(events, repo: repo, apps: ["com.microsoft.VSCode"], sites: [])
     end
   end
 end

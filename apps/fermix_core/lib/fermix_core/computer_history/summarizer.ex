@@ -76,7 +76,12 @@ defmodule FermixCore.ComputerHistory.Summarizer do
   # event line; the renderer's own slack absorbs its header reserve.
   @min_event_budget EventRender.max_line_chars() + 1
 
-  @type cycle_result :: %{memory_written: boolean(), events: non_neg_integer()}
+  @type cycle_result :: %{
+          memory_written: boolean(),
+          events: non_neg_integer(),
+          batches: non_neg_integer(),
+          empty_batches: non_neg_integer()
+        }
 
   @doc """
   Run one summarization cycle. `opts`: `:repo`, `:now` (DateTime), `:macos?`,
@@ -111,7 +116,7 @@ defmodule FermixCore.ComputerHistory.Summarizer do
   defp run_batches(route, repo, opts) do
     Enum.reduce_while(
       1..@max_batches_per_cycle//1,
-      {:ok, %{memory_written: false, events: 0}},
+      {:ok, %{memory_written: false, events: 0, batches: 0, empty_batches: 0}},
       fn _batch, {:ok, acc} -> run_batch(route, repo, opts, acc) end
     )
   end
@@ -123,7 +128,7 @@ defmodule FermixCore.ComputerHistory.Summarizer do
          {:ok, events} <- read_events(repo, cursor, limit) do
       summarize_batch(route, events, repo, opts, acc, limit)
     else
-      {:error, _reason} = error -> {:halt, error}
+      {:error, _reason} = error -> {:halt, stopped(error, acc)}
     end
   end
 
@@ -133,9 +138,24 @@ defmodule FermixCore.ComputerHistory.Summarizer do
   defp summarize_batch(route, events, repo, opts, acc, limit) do
     case summarize(route, events, repo, opts) do
       {:ok, batch} -> {step(batch, length(events), limit), {:ok, merge(acc, batch)}}
-      {:paused, _reason} = paused -> {:halt, paused}
-      {:error, _reason} = error -> {:halt, error}
+      {:paused, _reason} = paused -> {:halt, stopped(paused, acc)}
+      {:error, _reason} = error -> {:halt, stopped(error, acc)}
     end
+  end
+
+  # A cycle that stops early still has to say what it did first: the returned
+  # tuple carries only the reason, so "route down" alone cannot distinguish a
+  # cycle that wrote three memories and then lost the route from one that never
+  # got a reply. The result itself is returned unchanged.
+  defp stopped(result, %{batches: 0}), do: result
+
+  defp stopped({_tag, reason} = result, acc) do
+    Logger.info(
+      "computer_history summarizer cycle stopped after #{acc.batches} batch(es) " <>
+        "(#{acc.empty_batches} empty): #{inspect(reason)}"
+    )
+
+    result
   end
 
   # More work is waiting only if the read filled its limit or the input budget
@@ -144,12 +164,20 @@ defmodule FermixCore.ComputerHistory.Summarizer do
     if read == limit or batch.events < read, do: :cont, else: :halt
   end
 
+  # `batches`/`empty_batches` make a drained cycle distinguishable from a cycle
+  # that called the model six times and wrote nothing — the posture the live
+  # daemon sat in for four days with no visible difference.
   defp merge(acc, batch) do
     %{
       memory_written: acc.memory_written or batch.memory_written,
-      events: acc.events + batch.events
+      events: acc.events + batch.events,
+      batches: acc.batches + 1,
+      empty_batches: acc.empty_batches + empty_batch_count(batch.memory_written)
     }
   end
+
+  defp empty_batch_count(true), do: 0
+  defp empty_batch_count(false), do: 1
 
   # --- route resolution (re-resolved every cycle, inv. 17) ---------------
 
@@ -302,7 +330,7 @@ defmodule FermixCore.ComputerHistory.Summarizer do
 
   defp write_result({route_key, _opts}, events, content, repo, opts) do
     now = summarize_now(opts)
-    {memory, last_status} = validate_and_build(events, content, route_key.model, now)
+    {memory, last_status, outcome} = validate_and_build(events, content, route_key.model, now)
     last_id = events |> Enum.map(& &1.id) |> Enum.max()
 
     with {:ok, %{memory_written: written?}} <-
@@ -310,9 +338,54 @@ defmodule FermixCore.ComputerHistory.Summarizer do
              server: repo
            ),
          :ok <- clear_pause_if_ok(repo, last_status) do
+      log_outcome(outcome, written?, events, Config.timezone(opts))
       {:ok, %{memory_written: written?, events: length(events)}}
     end
   end
+
+  # --- per-batch outcome line ---------------------------------------------
+
+  # One line per batch, naming the outcome in the model's own terms: `ok` (a
+  # memory, plus how many verbatim runs were cut), `abstained` (the marker), or
+  # `empty` (a blank reply, or one that was nothing but redactions). Abstention
+  # was previously indistinguishable from "the summarizer never ran", which is
+  # what turned four days of empty batches into an invisible failure.
+  #
+  # Emitted AFTER the persist, with the repo's own `memory_written`: the line
+  # describes what the store holds, never what the model proposed. A failed write
+  # logs its error and no outcome at all.
+  defp log_outcome(outcome, written?, events, tz) do
+    Logger.info(
+      "computer_history summarizer batch: #{outcome_word(outcome, written?)}, " <>
+        "#{length(events)} event(s), #{batch_window(events, tz)} (#{tz})" <>
+        redaction_note(outcome)
+    )
+  end
+
+  defp outcome_word({:ok, _redactions}, true), do: "ok"
+
+  # A validated note the store refused: today only the purge watermark does that
+  # (§12, the read-infer-write race), and calling it `ok` would claim a memory
+  # that does not exist.
+  defp outcome_word({:ok, _redactions}, false), do: "not_written"
+  defp outcome_word(:abstained, _written?), do: "abstained"
+  defp outcome_word(:empty, _written?), do: "empty"
+
+  defp redaction_note({:ok, redactions}) when redactions > 0, do: ", redacted #{redactions}"
+  defp redaction_note(_outcome), do: ""
+
+  # The batch's own local time span (earliest to latest `ts`, not first to last
+  # id — a late-flushed event reaches back), in the operator's zone, so a log line
+  # and a stored memory name the same window.
+  defp batch_window(events, tz) do
+    stamps = Enum.map(events, & &1.ts)
+    from = stamps |> Enum.min() |> local_time(tz)
+    to = stamps |> Enum.max() |> local_time(tz)
+    "#{Calendar.strftime(from, "%b %-d %H:%M")}–#{Calendar.strftime(to, "%H:%M")}"
+  end
+
+  defp local_time(ts, tz),
+    do: ts |> DateTime.from_unix!(:millisecond) |> DateTime.shift_zone!(tz)
 
   # --- output contract (§9.4) ---------------------------------------------
 
@@ -322,8 +395,14 @@ defmodule FermixCore.ComputerHistory.Summarizer do
   # reprocessed forever).
   defp validate_and_build(events, content, model, now) do
     case build_summary(content, events) do
-      {:ok, summary} -> {build_memory(events, summary, model, now), "ok"}
-      :empty -> {nil, "summarized_empty"}
+      {:ok, summary, redactions} ->
+        {build_memory(events, summary, model, now), "ok", {:ok, redactions}}
+
+      {:empty, :abstained} ->
+        {nil, "summarized_empty", :abstained}
+
+      {:empty, _blank_or_redacted} ->
+        {nil, "summarized_empty", :empty}
     end
   end
 
@@ -341,7 +420,7 @@ defmodule FermixCore.ComputerHistory.Summarizer do
   # match them. The NFC form IS the summary from here on: it is what is stored.
   defp normalize_summary(content) do
     case content |> to_nfc() |> String.trim() do
-      "" -> :empty
+      "" -> {:empty, :blank}
       trimmed -> {:ok, trimmed}
     end
   end
@@ -359,10 +438,15 @@ defmodule FermixCore.ComputerHistory.Summarizer do
             inspect(original, printable_limit: 64)
   end
 
-  defp reject_abstention(:empty), do: :empty
+  # The three empty kinds stay distinct all the way to the log line: `:blank`,
+  # `:abstained` and `:redacted_only` record the same `summarized_empty` window
+  # but mean very different things about the model.
+  defp reject_abstention({:empty, _reason} = empty), do: empty
 
   defp reject_abstention({:ok, text}) do
-    if strip_trailing_period(text) == @abstention_marker, do: :empty, else: {:ok, text}
+    if strip_trailing_period(text) == @abstention_marker,
+      do: {:empty, :abstained},
+      else: {:ok, text}
   end
 
   defp strip_trailing_period(text) do
@@ -371,7 +455,7 @@ defmodule FermixCore.ComputerHistory.Summarizer do
       else: text
   end
 
-  defp bound_length(:empty), do: :empty
+  defp bound_length({:empty, _reason} = empty), do: empty
 
   defp bound_length({:ok, text}) do
     length = String.length(text)
@@ -406,14 +490,14 @@ defmodule FermixCore.ComputerHistory.Summarizer do
   # least @verbatim_floor projected characters; anything shorter (a bare SSN, a
   # nine-digit routing number) is below the floor and is NOT caught. The prompt
   # forbids copying; this is the backstop, not the barrier.
-  defp redact_verbatim(:empty, _events), do: :empty
+  defp redact_verbatim({:empty, _reason} = empty, _events), do: empty
 
   defp redact_verbatim({:ok, summary}, events) do
     {projected, table} = project_summary(summary)
     windows = summary_windows(projected)
 
     case matched_ranges(events, windows) do
-      [] -> {:ok, summary}
+      [] -> {:ok, summary, 0}
       ranges -> apply_redactions(summary, original_ranges(ranges, table))
     end
   end
@@ -564,16 +648,22 @@ defmodule FermixCore.ComputerHistory.Summarizer do
     {chunks, cursor} = Enum.reduce(ranges, {[], 0}, &cut_range(&1, &2, summary))
     tail = binary_part(summary, cursor, byte_size(summary) - cursor)
 
-    [tail | chunks] |> Enum.reverse() |> Enum.join() |> redacted_result()
+    [tail | chunks]
+    |> Enum.reverse()
+    |> Enum.join()
+    |> redacted_result(length(ranges))
   end
 
   # A note that is nothing but markers carries no information — record the window
   # empty rather than storing punctuation.
-  defp redacted_result(text) do
+  defp redacted_result(text, redactions) do
     if text |> String.replace(@redaction, "") |> String.trim() == "",
-      do: :empty,
-      else: normalize_summary(text)
+      do: {:empty, :redacted_only},
+      else: text |> normalize_summary() |> with_redactions(redactions)
   end
+
+  defp with_redactions({:ok, text}, redactions), do: {:ok, text, redactions}
+  defp with_redactions({:empty, _reason} = empty, _redactions), do: empty
 
   # Cuts land on codepoint boundaries: a matched run can begin or end inside a
   # multi-byte character, and half a character is not a string.
@@ -740,8 +830,11 @@ defmodule FermixCore.ComputerHistory.Summarizer do
     `text(unchanged first P chars)=` marks an edit to a value already seen, whose
     first P characters did not change; `withheld`, `chars=N` and
     `gap=<reason> <from>→<to>` mark coverage that was not observed rather than
-    activity that did not happen; `flag=<kind>` marks text the ingest scanner
-    considered suspicious; and a `Previous note` line is the note written for the
+    activity that did not happen; a gap that names an app describes that app's
+    coverage — `gap=title_only` means only window titles are observable there, so
+    nothing typed in it can ever appear, and `gap=ax_refused:<names>` means the app
+    declined to report the listed changes; `flag=<kind>` marks text the ingest
+    scanner considered suspicious; and a `Previous note` line is the note written for the
     preceding batch, given for continuity only — it is context, not evidence.
     """
   end
