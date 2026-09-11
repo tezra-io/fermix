@@ -1610,6 +1610,7 @@
         "target": { "$ref": "#/$defs/detectTarget" },
         "present": { "type": "boolean" },
         "detail": { "type": ["string", "null"] },
+        "signed_in": { "type": ["boolean", "null"] },
         "vendors": {
           "type": "array",
           "maxItems": 2,
