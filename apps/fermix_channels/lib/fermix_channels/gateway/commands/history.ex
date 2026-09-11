@@ -86,6 +86,7 @@ defmodule FermixChannels.Gateway.Commands.History do
         summarizer_line(),
         chain_line(),
         spool_line(repo),
+        memory_line(repo),
         access_line(repo)
       ]
       |> Enum.reject(&is_nil/1)
@@ -226,6 +227,38 @@ defmodule FermixChannels.Gateway.Commands.History do
     end
   end
 
+  # The two derived layers (§24.4): how much journal there is, how much current
+  # work, when the roll-up last ran, and whether a sitting is still open. A
+  # roll-up that stopped happening is otherwise invisible until "what am I working
+  # on" goes stale.
+  defp memory_line(repo) do
+    with {:ok, notes} <- Repo.computer_history_count_memories(server: repo, kind: :session),
+         {:ok, threads} <- Repo.computer_history_count_memories(server: repo, kind: :thread),
+         {:ok, state} <- Repo.computer_history_ensure_state(server: repo) do
+      "Memory: #{quantity(notes, "session note")}, #{quantity(threads, "active thread")}" <>
+        rollup_clause(state.last_rollup_ts) <> open_clause(state.session_open_since_ts) <> "."
+    else
+      {:error, reason} ->
+        Logger.warning("computer_history memory status unavailable: #{inspect(reason)}")
+        "Memory: unavailable."
+    end
+  end
+
+  defp quantity(1, noun), do: "1 #{noun}"
+  defp quantity(count, noun), do: "#{count} #{noun}s"
+
+  defp rollup_clause(nil), do: ""
+
+  defp rollup_clause(ts) when is_integer(ts),
+    do: " (last roll-up #{age_phrase(System.system_time(:millisecond) - ts)} old)"
+
+  defp open_clause(nil), do: ""
+
+  # How long it has been going, not when it started: the owner asks "am I in the
+  # middle of something", and a duration answers that without a clock reading.
+  defp open_clause(ts) when is_integer(ts),
+    do: "; open sitting for #{age_phrase(System.system_time(:millisecond) - ts)}"
+
   defp lag_display(0, _oldest_ts), do: ""
 
   defp lag_display(_unsummarized, oldest_ts) when is_integer(oldest_ts) do
@@ -332,10 +365,12 @@ defmodule FermixChannels.Gateway.Commands.History do
   defp run_purge(window, repo) do
     case Purge.purge(window, repo: repo) do
       {:ok, %{events: events, memories: memories}} ->
-        "Purged #{events} event(s) and #{memories} activity memory(ies). This cannot reach: " <>
-          "replies already delivered, any summaries already sent to a remote provider, backups " <>
-          "you keep yourself, or another daemon's store on the same Mac. Purge is logical deletion — " <>
-          "rows leave every query, but raw bytes may linger in the database until overwritten."
+        "Purged #{events} event(s) and #{memories} activity memory(ies). Threads that drew on " <>
+          "that window were removed too; they are rebuilt at the next roll-up from what remains. " <>
+          "This cannot reach: replies already delivered, any summaries already sent to a remote " <>
+          "provider, backups you keep yourself, or another daemon's store on the same Mac. Purge " <>
+          "is logical deletion — rows leave every query, but raw bytes may linger in the database " <>
+          "until overwritten."
 
       {:error, reason} ->
         "Purge failed: #{inspect(reason)}."

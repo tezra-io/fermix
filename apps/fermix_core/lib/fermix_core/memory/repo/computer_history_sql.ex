@@ -5,7 +5,7 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
   # only from Repo's `handle_call`s, so the single-writer architecture is
   # unchanged; the split keeps `repo.ex` bounded (the TemporalSql precedent).
   #
-  # Four tables, four additive migrations (23/24/25/27):
+  # Four tables, five additive migrations (23/24/25/27/28):
   #   * computer_history_events   — the <=48h raw interaction-event spool
   #   * computer_history_memories — durable, derived activity summaries
   #   * computer_history_state    — the summarizer singleton (claim + cursor)
@@ -23,8 +23,22 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
   # events — a ts-intersection supersede could only destroy information (a
   # late-flushed event whose `ts` reaches back, or a shared boundary millisecond,
   # hid a whole earlier memory). The `superseded_at` column and every
-  # `WHERE superseded_at IS NULL` filter stay: the schema is additive and a
-  # future EXPLICIT roll-up (many memories into one) is the case that needs them.
+  # `WHERE superseded_at IS NULL` filter stay: the schema is additive and the
+  # EXPLICIT roll-up (§24.3) is the one case that needs them.
+  #
+  # Two KINDS share the memories table (§24.1). `kind = 'session'` is the
+  # immutable journal — one note per closed sitting, still accreting, never
+  # superseded. `kind = 'thread'` is the mutable current-work layer: each daily
+  # roll-up supersedes exactly the previous thread rows and inserts the new set,
+  # so a thread the model stops re-emitting retires while the journal underneath
+  # is untouched. Every windowed reader takes a kind so today's callers keep
+  # reading sessions; purge is kind-blind and intersects both by provenance.
+  #
+  # `computer_history_memories_fts` is an FTS5 external-content companion over
+  # summary/subject/titles/urls, mirroring the `memories_fts` trigger pattern in
+  # `repo.ex`. Its only reader is `search_memories/3` (Recall's "about" query),
+  # deliberately NOT wired into `Memory.Search`, so a general memory search can
+  # never return activity.
 
   require Logger
 
@@ -79,7 +93,13 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
     :urls,
     :event_count,
     :model,
-    :superseded_at
+    :superseded_at,
+    # Migration 28, APPENDED so a migrated store and a fresh one share column
+    # order (the reminder-snooze precedent).
+    :kind,
+    :subject,
+    :source_ids,
+    :last_touched_ts
   ]
 
   @memory_insert_columns Enum.map_join(@memory_columns, ", ", &Atom.to_string/1)
@@ -102,7 +122,12 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
     :pause_until,
     :summarizer_route,
     :summarizer_model,
-    :updated_at
+    :updated_at,
+    # Migration 28: the roll-up clock, its attempt clock (what rate-limits a
+    # roll-up whose reply was unusable), and the open-sitting diagnostic (§24.1).
+    :last_rollup_ts,
+    :last_rollup_attempt_ts,
+    :session_open_since_ts
   ]
 
   @state_select Enum.map_join(@state_columns, ", ", &Atom.to_string/1)
@@ -199,6 +224,60 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
     ON computer_history_access(ts);
   """
 
+  # Migration 28 (§24.1), additive in three parts: the four thread columns on
+  # the memories table, the two marks on the state row, and the FTS5 companion
+  # with its insert/update/delete triggers — the `memories_fts` pattern, rebuilt
+  # once so rows written before it are searchable.
+  @sessions_schema_sql """
+  ALTER TABLE computer_history_memories
+    ADD COLUMN kind TEXT NOT NULL DEFAULT 'session';
+  ALTER TABLE computer_history_memories ADD COLUMN subject TEXT;
+  ALTER TABLE computer_history_memories ADD COLUMN source_ids TEXT;
+  ALTER TABLE computer_history_memories ADD COLUMN last_touched_ts INTEGER;
+
+  CREATE INDEX IF NOT EXISTS idx_computer_history_memories_kind
+    ON computer_history_memories(kind, superseded_at, last_touched_ts);
+
+  ALTER TABLE computer_history_state ADD COLUMN last_rollup_ts INTEGER;
+  ALTER TABLE computer_history_state ADD COLUMN last_rollup_attempt_ts INTEGER;
+  ALTER TABLE computer_history_state ADD COLUMN session_open_since_ts INTEGER;
+
+  CREATE VIRTUAL TABLE IF NOT EXISTS computer_history_memories_fts
+  USING fts5(summary, subject, titles, urls,
+             content=computer_history_memories, content_rowid=id);
+
+  CREATE TRIGGER IF NOT EXISTS computer_history_memories_ai
+  AFTER INSERT ON computer_history_memories BEGIN
+    INSERT INTO computer_history_memories_fts(rowid, summary, subject, titles, urls)
+    VALUES (new.id, new.summary, new.subject, new.titles, new.urls);
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS computer_history_memories_ad
+  AFTER DELETE ON computer_history_memories BEGIN
+    INSERT INTO computer_history_memories_fts(
+      computer_history_memories_fts, rowid, summary, subject, titles, urls)
+    VALUES('delete', old.id, old.summary, old.subject, old.titles, old.urls);
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS computer_history_memories_au
+  AFTER UPDATE ON computer_history_memories BEGIN
+    INSERT INTO computer_history_memories_fts(
+      computer_history_memories_fts, rowid, summary, subject, titles, urls)
+    VALUES('delete', old.id, old.summary, old.subject, old.titles, old.urls);
+    INSERT INTO computer_history_memories_fts(rowid, summary, subject, titles, urls)
+    VALUES (new.id, new.summary, new.subject, new.titles, new.urls);
+  END;
+
+  INSERT INTO computer_history_memories_fts(computer_history_memories_fts) VALUES('rebuild');
+  """
+
+  # The two kinds, as stored. `:all` is the kind-blind read (counts and purge).
+  @kinds %{session: "session", thread: "thread"}
+  @default_kind "session"
+  # Code Rule 2: an id lookup is built from caller-supplied ids, so the SQL it
+  # generates has to have a ceiling.
+  @max_ids_per_lookup 500
+
   @doc "Schema for migration 23 — the raw event spool."
   @spec events_schema_sql() :: String.t()
   def events_schema_sql, do: @events_schema_sql
@@ -214,6 +293,10 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
   @doc "Schema for migration 27 — the agent-read access audit."
   @spec access_schema_sql() :: String.t()
   def access_schema_sql, do: @access_schema_sql
+
+  @doc "Schema for migration 28 — memory kinds, threads, state marks, the FTS companion."
+  @spec sessions_schema_sql() :: String.t()
+  def sessions_schema_sql, do: @sessions_schema_sql
 
   # --- events -------------------------------------------------------------
 
@@ -336,6 +419,23 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
   defp event_row(row), do: Map.new(Enum.zip(@event_read_columns, row))
 
   @doc """
+  The `text` of the newest `limit` spool events that carry any — the source side
+  of the verbatim guard when the guarded prose was NOT built from one batch (the
+  roll-up, §24.3, reasons over notes and must still be checked against whatever
+  spool text is still present). Newest first: a thread describes current work.
+  """
+  @spec recent_event_texts(term(), pos_integer()) :: {:ok, [String.t()]} | {:error, term()}
+  def recent_event_texts(conn, limit) when is_integer(limit) and limit > 0 do
+    sql =
+      "SELECT text FROM computer_history_events " <>
+        "WHERE text IS NOT NULL AND text != '' ORDER BY id DESC LIMIT ?"
+
+    with {:ok, rows} <- query_all(conn, sql, [limit]) do
+      {:ok, Enum.map(rows, fn [text] -> text end)}
+    end
+  end
+
+  @doc """
   Summarizer lag: `{count, oldest_ts | nil}` over the spool events the cursor has
   not reached (`id > last_summarized_id`). The cursor is read here, in the same
   call, so the two halves can never be read a batch apart; an absent state row
@@ -448,15 +548,31 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
 
   # --- memories -----------------------------------------------------------
 
-  @doc "Count of durable activity memories (excluding superseded)."
-  @spec count_memories(term()) :: {:ok, non_neg_integer()} | {:error, term()}
-  def count_memories(conn) do
-    sql = "SELECT count(*) FROM computer_history_memories WHERE superseded_at IS NULL"
+  @doc """
+  Count of durable activity memories. `kind` is `:all` (both kinds — the
+  store-wide count), `:session` or `:thread`; `scope` is `:active` (the default —
+  non-superseded) or `:all`, which counts retired thread rows too and is how
+  "retired, never deleted" (§24.3, inv. 23) is checked at all.
+  """
+  @spec count_memories(term(), :all | :session | :thread, :active | :all) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def count_memories(conn, kind \\ :all, scope \\ :active)
+      when kind in [:all, :session, :thread] and scope in [:active, :all] do
+    {kind_sql, kind_params} = kind_clause(kind)
+    sql = "SELECT count(*) FROM computer_history_memories WHERE #{scope_clause(scope)}#{kind_sql}"
 
-    with {:ok, [[count]]} <- query_all(conn, sql, []) do
+    with {:ok, [[count]]} <- query_all(conn, sql, kind_params) do
       {:ok, count}
     end
   end
+
+  defp scope_clause(:active), do: "superseded_at IS NULL"
+  defp scope_clause(:all), do: "1 = 1"
+
+  # The kind filter every windowed reader carries, so today's callers keep
+  # reading the journal and nothing has to guess which layer it is looking at.
+  defp kind_clause(:all), do: {"", []}
+  defp kind_clause(kind), do: {" AND kind = ?", [Map.fetch!(@kinds, kind)]}
 
   @doc """
   The most recent (non-superseded) activity memories whose provenance ends at or
@@ -465,15 +581,19 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
   old window is not "recent activity". Reads only derived summaries, never the
   raw spool.
   """
-  @spec recent_memories(term(), integer(), pos_integer()) :: {:ok, [map()]} | {:error, term()}
-  def recent_memories(conn, since_ts, limit)
-      when is_integer(since_ts) and is_integer(limit) and limit > 0 do
+  @spec recent_memories(term(), integer(), pos_integer(), :all | :session | :thread) ::
+          {:ok, [map()]} | {:error, term()}
+  def recent_memories(conn, since_ts, limit, kind \\ :session)
+      when is_integer(since_ts) and is_integer(limit) and limit > 0 and
+             kind in [:all, :session, :thread] do
+    {kind_sql, kind_params} = kind_clause(kind)
+
     sql =
       "SELECT #{@memory_read_select} FROM computer_history_memories " <>
-        "WHERE superseded_at IS NULL AND provenance_to_ts >= ? " <>
+        "WHERE superseded_at IS NULL AND provenance_to_ts >= ?#{kind_sql} " <>
         "ORDER BY provenance_to_ts DESC, id DESC LIMIT ?"
 
-    with {:ok, rows} <- query_all(conn, sql, [since_ts, limit]) do
+    with {:ok, rows} <- query_all(conn, sql, [since_ts] ++ kind_params ++ [limit]) do
       {:ok, Enum.map(rows, &memory_row/1)}
     end
   end
@@ -483,16 +603,19 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
   `[from_ts, to_ts]` (epoch ms), newest first — the `recall_activity` query
   (§11.2). Derived summaries only.
   """
-  @spec memories_in_window(term(), integer(), integer(), pos_integer()) ::
+  @spec memories_in_window(term(), integer(), integer(), pos_integer(), :all | :session | :thread) ::
           {:ok, [map()]} | {:error, term()}
-  def memories_in_window(conn, from_ts, to_ts, limit)
-      when is_integer(from_ts) and is_integer(to_ts) and is_integer(limit) and limit > 0 do
+  def memories_in_window(conn, from_ts, to_ts, limit, kind \\ :session)
+      when is_integer(from_ts) and is_integer(to_ts) and is_integer(limit) and limit > 0 and
+             kind in [:all, :session, :thread] do
+    {kind_sql, kind_params} = kind_clause(kind)
+
     sql =
       "SELECT #{@memory_read_select} FROM computer_history_memories " <>
-        "WHERE superseded_at IS NULL AND provenance_from_ts <= ? AND provenance_to_ts >= ? " <>
-        "ORDER BY provenance_to_ts DESC, id DESC LIMIT ?"
+        "WHERE superseded_at IS NULL AND provenance_from_ts <= ? AND provenance_to_ts >= ?" <>
+        "#{kind_sql} ORDER BY provenance_to_ts DESC, id DESC LIMIT ?"
 
-    with {:ok, rows} <- query_all(conn, sql, [to_ts, from_ts, limit]) do
+    with {:ok, rows} <- query_all(conn, sql, [to_ts, from_ts] ++ kind_params ++ [limit]) do
       {:ok, Enum.map(rows, &memory_row/1)}
     end
   end
@@ -502,18 +625,193 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
   denominator behind `memories_in_window/4`'s limited page, so recall can say
   when older entries were omitted instead of truncating silently (§11.2).
   """
-  @spec count_memories_in_window(term(), integer(), integer()) ::
+  @spec count_memories_in_window(term(), integer(), integer(), :all | :session | :thread) ::
           {:ok, non_neg_integer()} | {:error, term()}
-  def count_memories_in_window(conn, from_ts, to_ts)
-      when is_integer(from_ts) and is_integer(to_ts) do
+  def count_memories_in_window(conn, from_ts, to_ts, kind \\ :session)
+      when is_integer(from_ts) and is_integer(to_ts) and kind in [:all, :session, :thread] do
+    {kind_sql, kind_params} = kind_clause(kind)
+
     sql =
       "SELECT count(*) FROM computer_history_memories " <>
-        "WHERE superseded_at IS NULL AND provenance_from_ts <= ? AND provenance_to_ts >= ?"
+        "WHERE superseded_at IS NULL AND provenance_from_ts <= ? AND provenance_to_ts >= ?" <>
+        kind_sql
 
-    with {:ok, [[count]]} <- query_all(conn, sql, [to_ts, from_ts]) do
+    with {:ok, [[count]]} <- query_all(conn, sql, [to_ts, from_ts] ++ kind_params) do
       {:ok, count}
     end
   end
+
+  @doc """
+  The active thread set (§24.3): non-superseded `kind = 'thread'` rows, most
+  recently touched first, bounded by `limit`. This is what "what am I working
+  on" reads; the journal is read by the windowed queries above.
+  """
+  @spec active_threads(term(), pos_integer()) :: {:ok, [map()]} | {:error, term()}
+  def active_threads(conn, limit) when is_integer(limit) and limit > 0 do
+    sql =
+      "SELECT #{@memory_read_select} FROM computer_history_memories " <>
+        "WHERE superseded_at IS NULL AND kind = 'thread' " <>
+        "ORDER BY last_touched_ts DESC, id DESC LIMIT ?"
+
+    with {:ok, rows} <- query_all(conn, sql, [limit]) do
+      {:ok, Enum.map(rows, &memory_row/1)}
+    end
+  end
+
+  @doc """
+  Session notes written after `since_ts` (`created_at`, epoch ms), **newest first**
+  and bounded — the roll-up's input (§24.3). Ordered by write time, not by the
+  window they cover: the roll-up reasons about what has been learned since the last
+  one. Newest first is what makes the bound safe — when a day produced more notes
+  than one call can carry, the ones most likely to describe current work are the
+  ones that reach it, and the rest stay in the journal. The caller re-orders for
+  rendering.
+  """
+  @spec session_notes_since(term(), integer(), pos_integer()) ::
+          {:ok, [map()]} | {:error, term()}
+  def session_notes_since(conn, since_ts, limit)
+      when is_integer(since_ts) and is_integer(limit) and limit > 0 do
+    sql =
+      "SELECT #{@memory_read_select} FROM computer_history_memories " <>
+        "WHERE superseded_at IS NULL AND kind = 'session' AND created_at > ? " <>
+        "ORDER BY created_at DESC, id DESC LIMIT ?"
+
+    with {:ok, rows} <- query_all(conn, sql, [since_ts, limit]) do
+      {:ok, Enum.map(rows, &memory_row/1)}
+    end
+  end
+
+  @doc """
+  How many session notes exist after `since_ts` — the honest denominator behind
+  `session_notes_since/3`'s bounded page, so the roll-up can say it read the newest
+  N of M instead of implying it read everything.
+  """
+  @spec count_session_notes_since(term(), integer()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def count_session_notes_since(conn, since_ts) when is_integer(since_ts) do
+    sql =
+      "SELECT count(*) FROM computer_history_memories " <>
+        "WHERE superseded_at IS NULL AND kind = 'session' AND created_at > ?"
+
+    with {:ok, [[count]]} <- query_all(conn, sql, [since_ts]) do
+      {:ok, count}
+    end
+  end
+
+  @doc """
+  Memories of `kind` with these ids, in the order given, **regardless of
+  supersession** — existence is the question (§24.3): the roll-up resolves a
+  thread's stored citations against the store, so a note the owner purged or an id
+  the model invented simply is not found. A session note is never superseded, so
+  for the session kind this is an existence lookup; for threads it is also how a
+  retired row is read back.
+  """
+  @spec memories_by_ids(term(), [integer()], :all | :session | :thread) ::
+          {:ok, [map()]} | {:error, term()}
+  def memories_by_ids(conn, ids, kind \\ :session)
+      when is_list(ids) and kind in [:all, :session, :thread] do
+    ids
+    |> Enum.filter(&is_integer/1)
+    |> Enum.uniq()
+    |> Enum.take(@max_ids_per_lookup)
+    |> fetch_by_ids(conn, kind)
+  end
+
+  defp fetch_by_ids([], _conn, _kind), do: {:ok, []}
+
+  defp fetch_by_ids(ids, conn, kind) do
+    {kind_sql, kind_params} = kind_clause(kind)
+    placeholders = Enum.map_join(ids, ", ", fn _id -> "?" end)
+
+    sql =
+      "SELECT #{@memory_read_select} FROM computer_history_memories " <>
+        "WHERE id IN (#{placeholders})#{kind_sql}"
+
+    with {:ok, rows} <- query_all(conn, sql, ids ++ kind_params) do
+      {:ok, order_by_ids(Enum.map(rows, &memory_row/1), ids)}
+    end
+  end
+
+  # The caller asked in citation order and reads the result in citation order.
+  defp order_by_ids(rows, ids) do
+    by_id = Map.new(rows, &{&1.id, &1})
+    ids |> Enum.map(&Map.get(by_id, &1)) |> Enum.reject(&is_nil/1)
+  end
+
+  @doc """
+  Topic search (§24.1): the FTS5 companion, non-superseded rows of BOTH kinds,
+  newest first. `query` is user text, never FTS syntax — it is split on
+  whitespace and each token is passed as a quoted phrase, so `OR`, `NEAR(`, a
+  column filter or a stray quote are all literal words. A query with no
+  searchable token is refused rather than run as an empty MATCH.
+  """
+  @spec search_memories(term(), String.t(), pos_integer()) ::
+          {:ok, [map()]} | {:error, :empty_query | term()}
+  def search_memories(conn, query, limit)
+      when is_binary(query) and is_integer(limit) and limit > 0 do
+    case match_expression(query) do
+      {:ok, match} -> search_memories_matching(conn, match, limit)
+      {:error, :empty_query} -> {:error, :empty_query}
+    end
+  end
+
+  @doc """
+  How many non-superseded memories of either kind match `query` — the honest
+  denominator behind `search_memories/3`'s bounded page (§24.4). Same sanitizing as
+  the search itself, so the count and the page can never disagree about what the
+  query meant.
+  """
+  @spec count_search_memories(term(), String.t()) ::
+          {:ok, non_neg_integer()} | {:error, :empty_query | term()}
+  def count_search_memories(conn, query) when is_binary(query) do
+    case match_expression(query) do
+      {:ok, match} -> count_matching(conn, match)
+      {:error, :empty_query} -> {:error, :empty_query}
+    end
+  end
+
+  defp count_matching(conn, match) do
+    sql =
+      "SELECT count(*) FROM computer_history_memories_fts f " <>
+        "JOIN computer_history_memories m ON m.id = f.rowid " <>
+        "WHERE computer_history_memories_fts MATCH ? AND m.superseded_at IS NULL"
+
+    with {:ok, [[count]]} <- query_all(conn, sql, [match]) do
+      {:ok, count}
+    end
+  end
+
+  defp search_memories_matching(conn, match, limit) do
+    sql =
+      "SELECT #{Enum.map_join(@memory_read_columns, ", ", &("m." <> Atom.to_string(&1)))} " <>
+        "FROM computer_history_memories_fts f " <>
+        "JOIN computer_history_memories m ON m.id = f.rowid " <>
+        "WHERE computer_history_memories_fts MATCH ? AND m.superseded_at IS NULL " <>
+        "ORDER BY m.provenance_to_ts DESC, m.id DESC LIMIT ?"
+
+    with {:ok, rows} <- query_all(conn, sql, [match, limit]) do
+      {:ok, Enum.map(rows, &memory_row/1)}
+    end
+  end
+
+  # One quoted phrase per whitespace-separated token, ANDed: quoting is what
+  # makes user text data. A token with no letter or digit cannot be tokenized by
+  # FTS5 and would make the phrase a syntax error, so it is dropped.
+  defp match_expression(query) do
+    tokens =
+      query
+      |> String.split(~r/\s+/u, trim: true)
+      |> Enum.filter(&searchable_token?/1)
+
+    case tokens do
+      [] -> {:error, :empty_query}
+      tokens -> {:ok, Enum.map_join(tokens, " AND ", &quoted_token/1)}
+    end
+  end
+
+  defp searchable_token?(token), do: Regex.match?(~r/[\p{L}\p{N}]/u, token)
+
+  defp quoted_token(token), do: ~s("#{String.replace(token, ~s("), ~s(""))}")
 
   defp memory_row(row), do: Map.new(Enum.zip(@memory_read_columns, row))
 
@@ -528,12 +826,21 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
       "INSERT INTO computer_history_memories (#{@memory_insert_columns}) " <>
         "VALUES (#{@memory_insert_placeholders})"
 
-    params = Enum.map(@memory_columns, fn column -> to_param(Map.get(memory, column)) end)
-
-    with :ok <- execute(conn, sql, params),
+    with :ok <- execute(conn, sql, memory_params(memory)),
          {:ok, [[rowid]]} <- query_all(conn, "SELECT last_insert_rowid()", []) do
       {:ok, rowid}
     end
+  end
+
+  # `kind` is NOT NULL with a schema default, but this INSERT names every column,
+  # so an absent key would bind NULL and be refused: the writer supplies the
+  # default. Every other new column is nullable (a session note has no subject,
+  # no sources and no last-touched).
+  defp memory_params(memory) do
+    Enum.map(@memory_columns, fn
+      :kind -> to_param(Map.get(memory, :kind, @default_kind))
+      column -> to_param(Map.get(memory, column))
+    end)
   end
 
   # --- access audit (§22.8) -----------------------------------------------
@@ -665,19 +972,23 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
   end
 
   @doc """
-  Write a batch's result atomically (§10, §12): if a memory was produced and its
+  Write a sitting's result atomically (§10, §12): if a note was produced and its
   provenance does not intersect a purge issued during the cycle (the watermark
   guard), insert it beside the existing memories; then advance the
   `last_summarized_id` cursor to the last summarized event. A `nil` memory
   (empty/abstained output) only advances the cursor. Nothing is superseded here
   — see the module comment.
+
+  A `nil` `last_status` advances the cursor and **keeps** the recorded outcome: it
+  is how consuming a boundary marker — which is not a sitting and has no outcome —
+  avoids overwriting the last real one (§24.2).
   """
   @spec write_cycle_result(
           term(),
           non_neg_integer(),
           map() | nil,
           DateTime.t(),
-          String.t()
+          String.t() | nil
         ) ::
           {:ok, %{memory_written: boolean()}} | {:error, term()}
   def write_cycle_result(conn, last_id, memory, %DateTime{} = now, last_status) do
@@ -736,9 +1047,133 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
     execute(
       conn,
       "UPDATE computer_history_state SET last_summarized_id = ?, last_run_at = ?, " <>
-        "last_status = ?, updated_at = ? WHERE id = 1",
+        "last_status = COALESCE(?, last_status), updated_at = ? WHERE id = 1",
       [last_id, now_iso, last_status, now_iso]
     )
+  end
+
+  @doc """
+  Write one roll-up atomically (§24.3): supersede every current thread row at
+  `now_ts`, insert the new set, and stamp `last_rollup_ts`. Session notes are
+  never touched — the journal under the threads is what makes retirement safe.
+  An empty set is REFUSED rather than superseding the whole active set: "the
+  model returned nothing" must not read as "the owner is working on nothing".
+
+  The **purge watermark is re-read here**, inside the transaction, and a thread
+  whose provenance reaches into a purge issued while the roll-up call was in
+  flight is dropped — the same read-infer-write race `write_cycle_result` closes
+  for notes (§12). A roll-up whose every thread was purged supersedes nothing and
+  does not stamp the mark: the erased window must not come back as a thread
+  citing a deleted row.
+
+  Returns how many rows were written, how many retired, how many the watermark
+  dropped, and the subjects actually stored (so the caller's log names what the
+  store holds, not what the model proposed).
+  """
+  @spec write_rollup(term(), [map()], integer()) ::
+          {:ok,
+           %{
+             written: non_neg_integer(),
+             retired: non_neg_integer(),
+             purged: non_neg_integer(),
+             subjects: [String.t()]
+           }}
+          | {:error, term()}
+  def write_rollup(conn, threads, now_ts) when is_list(threads) and is_integer(now_ts) do
+    cond do
+      threads == [] -> {:error, :no_threads}
+      not Enum.all?(threads, &is_map/1) -> {:error, :invalid_threads}
+      true -> in_transaction(conn, fn -> write_rollup_in_tx(conn, threads, now_ts) end)
+    end
+  end
+
+  defp write_rollup_in_tx(conn, threads, now_ts) do
+    with {:ok, _row} <- ensure_state(conn),
+         {:ok, watermark} <- read_watermark(conn) do
+      threads
+      |> Enum.reject(&purged?(&1, watermark))
+      |> write_surviving_threads(conn, now_ts, length(threads))
+    end
+  end
+
+  # Every proposed thread drew on a purged window: nothing is superseded and the
+  # mark stays put, so the next roll-up rebuilds from what survived.
+  defp write_surviving_threads([], _conn, _now_ts, proposed),
+    do: {:ok, %{written: 0, retired: 0, purged: proposed, subjects: []}}
+
+  defp write_surviving_threads(threads, conn, now_ts, proposed) do
+    with :ok <- supersede_threads(conn, now_ts),
+         retired <- changed(conn),
+         {:ok, written} <- insert_threads(conn, threads),
+         :ok <- stamp_rollup(conn, now_ts) do
+      {:ok,
+       %{
+         written: written,
+         retired: retired,
+         purged: proposed - length(threads),
+         subjects: Enum.map(threads, &Map.get(&1, :subject))
+       }}
+    end
+  end
+
+  defp supersede_threads(conn, now_ts) do
+    execute(
+      conn,
+      "UPDATE computer_history_memories SET superseded_at = ? " <>
+        "WHERE kind = 'thread' AND superseded_at IS NULL",
+      [now_ts]
+    )
+  end
+
+  defp insert_threads(conn, threads) do
+    Enum.reduce_while(threads, {:ok, 0}, fn thread, {:ok, written} ->
+      case insert_memory(conn, Map.put(thread, :kind, "thread")) do
+        {:ok, _id} -> {:cont, {:ok, written + 1}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp stamp_rollup(conn, now_ts) do
+    execute(
+      conn,
+      "UPDATE computer_history_state SET last_rollup_ts = ?, updated_at = " <>
+        "strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = 1",
+      [now_ts]
+    )
+  end
+
+  @doc """
+  Record that a roll-up CALL was made at `ts`, whatever came back (§24.3). This is
+  what bounds a broken reply to one attempt a day; `last_rollup_ts` is a different
+  mark that moves only on a real write, because it is also the notes cursor.
+  """
+  @spec stamp_rollup_attempt(term(), integer()) :: :ok | {:error, term()}
+  def stamp_rollup_attempt(conn, ts) when is_integer(ts) do
+    with {:ok, _row} <- ensure_state(conn) do
+      execute(
+        conn,
+        "UPDATE computer_history_state SET last_rollup_attempt_ts = ?, updated_at = " <>
+          "strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = 1",
+        [ts]
+      )
+    end
+  end
+
+  @doc """
+  Set (or clear, with nil) the first `ts` of the sitting the summarizer is still
+  waiting on — a diagnostic for `/history status`, never a cursor (§24.1).
+  """
+  @spec set_session_open_since(term(), integer() | nil) :: :ok | {:error, term()}
+  def set_session_open_since(conn, ts) when is_integer(ts) or is_nil(ts) do
+    with {:ok, _row} <- ensure_state(conn) do
+      execute(
+        conn,
+        "UPDATE computer_history_state SET session_open_since_ts = ?, updated_at = " <>
+          "strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = 1",
+        [ts]
+      )
+    end
   end
 
   @doc "Release a claimed cycle: `running -> idle` (the scheduler's finalize)."

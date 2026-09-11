@@ -100,7 +100,7 @@ The OpenAI Realtime voice companion (FermixPet) is local and off by default (`[f
 Two separate opt-in features share one native driver binary — each with its own consent, permission, and on/off — enabled from their own cards atop setup's Plugins page:
 
 - **Computer use** (experimental; Apple Silicon macOS + Linux x86_64) — `computer_use` drives the host desktop GUI by screenshot plus mouse/keyboard; its safety `access` posture derives 1:1 from `[sandbox] mode`; operator-only, never delegated to subagents or started by an unattended run. Full detail: skill_view(name: "self-knowledge", file: "computer_use").
-- **Computer history** (macOS only) — passive, allowlisted activity memory: Fermix records what the operator does in allowed apps and turns it into durable memories the `recall_activity` tool surfaces. It summarizes on the operator's subagent model by default (raw activity off-device; `summarizer = "local"` stays on-device), gated so summaries never reach a turn whose model chain touches an ungranted-remote provider. Full detail: skill_view(name: "self-knowledge", file: "computer_history").
+- **Computer history** (macOS only) — passive, allowlisted activity memory: what the operator does in allowed apps becomes durable memories the `recall_activity` tool surfaces — sessions summarized when they close, rolled up daily into current-work threads. Summarizes on the operator's subagent model by default (raw activity off-device; `summarizer = "local"` stays on-device), gated so summaries never reach a turn whose model chain touches an ungranted-remote provider. Full detail: skill_view(name: "self-knowledge", file: "computer_history").
 
 ## Coding harness
 

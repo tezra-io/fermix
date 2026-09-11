@@ -20,13 +20,16 @@ defmodule FermixCore.ComputerHistory.Summarizer.Scheduler do
   alias FermixCore.ComputerHistory.Summarizer
   alias FermixCore.Memory.Repo
 
-  @tick_interval_ms :timer.minutes(30)
+  # Sittings are summarized when they CLOSE, not on the clock (§24.2), so the tick
+  # is only a poll: it is cheap when nothing closed, and five minutes is what
+  # makes "summarized when I stopped" feel immediate.
+  @tick_interval_ms :timer.minutes(5)
   @initial_tick_ms :timer.seconds(10)
   @claim_stale_after_ms :timer.minutes(30)
-  # A cycle is a bounded CATCH-UP now: up to @max_batches_per_cycle (6) provider
-  # calls, each with its own render and write, so the old single-call budget
-  # would kill a healthy drain mid-way. Still well under the tick interval and
-  # the stale-claim window, so a wedged cycle cannot outlive its own claim.
+  # A cycle is bounded work: up to @max_sessions_per_cycle (6) provider calls,
+  # each with its own render and write, plus at most one roll-up call. Still well
+  # under the stale-claim window, so a wedged cycle cannot outlive its own claim,
+  # and the claim is what keeps a five-minute tick from overtaking a running one.
   @cycle_timeout_ms :timer.minutes(15)
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -93,15 +96,15 @@ defmodule FermixCore.ComputerHistory.Summarizer.Scheduler do
     end
   end
 
-  # The whole cycle in one line: how many batches actually ran and how many of
+  # The whole cycle in one line: how many sittings actually ran and how many of
   # them wrote nothing, so "drained" and "called the model six times for nothing"
-  # are not the same log entry. The per-batch outcome lines (Summarizer) carry the
-  # reason at :info.
+  # are not the same log entry. The per-sitting outcome lines (Summarizer) carry
+  # the reason at :info.
   defp log_result({:ok, %{} = cycle}),
     do:
       Logger.debug(
         "computer_history summarizer cycle: #{cycle.events} events in " <>
-          "#{cycle.batches} batch(es), #{cycle.empty_batches} empty, " <>
+          "#{cycle.sessions} session(s), #{cycle.empty_batches} empty, " <>
           "memory=#{cycle.memory_written}"
       )
 

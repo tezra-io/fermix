@@ -262,6 +262,66 @@ defmodule FermixChannels.Gateway.Commands.HistoryTest do
     refute text =~ "resumes automatically"
   end
 
+  # §24.4: the two derived layers are what the owner actually asks about, and a
+  # stalled roll-up or a sitting that never closed is invisible otherwise.
+  test "status counts session notes and threads, the roll-up age and the open sitting", %{
+    ctx: ctx,
+    repo: repo
+  } do
+    now = System.system_time(:millisecond)
+
+    {:ok, note_id} =
+      Repo.computer_history_insert_memory(
+        %{
+          created_at: now - 7_200_000,
+          provenance_from_ts: now - 7_200_000,
+          provenance_to_ts: now - 7_000_000,
+          summary: "drafted the plan",
+          model: "llama3",
+          event_count: 3
+        },
+        server: repo
+      )
+
+    assert {:ok, _counts} =
+             Repo.computer_history_write_rollup(
+               [
+                 %{
+                   subject: "Apollo migration",
+                   summary: "Waiting on the restore check.",
+                   source_ids: Jason.encode!([note_id]),
+                   last_touched_ts: now - 7_000_000,
+                   created_at: now - 3_600_000,
+                   provenance_from_ts: now - 7_200_000,
+                   provenance_to_ts: now - 7_000_000,
+                   model: "llama3",
+                   event_count: 3
+                 }
+               ],
+               now - 3_600_000,
+               server: repo
+             )
+
+    assert :ok = Repo.computer_history_set_session_open_since(now - 600_000, server: repo)
+
+    assert :ok = History.execute(message("status"), reply_fn(self()), macos_ctx(ctx))
+    assert_receive {:reply, text}
+
+    assert text =~
+             "Memory: 1 session note, 1 active thread (last roll-up 1h 0m old); " <>
+               "open sitting for 10m."
+  end
+
+  test "status omits the roll-up and open-sitting clauses when there is nothing to say", %{
+    ctx: ctx
+  } do
+    assert :ok = History.execute(message("status"), reply_fn(self()), macos_ctx(ctx))
+    assert_receive {:reply, text}
+    assert text =~ "Memory: 0 session notes, 0 active threads."
+    refute text =~ "last roll-up"
+    refute text =~ "open sitting"
+  end
+
   test "purge erases the spool and acknowledges what it cannot reach", %{ctx: ctx, repo: repo} do
     events = [%{boot_id: "b1", source_seq: 1, ts: 1_000, type: "app.activated"}]
     {:ok, 1} = Repo.computer_history_insert_events(events, server: repo)
@@ -270,6 +330,8 @@ defmodule FermixChannels.Gateway.Commands.HistoryTest do
     assert_receive {:reply, text}
     assert text =~ "Purged"
     assert text =~ "cannot reach"
+    # Threads drew on the purged window, so they go too — and come back rebuilt.
+    assert text =~ "rebuilt at the next roll-up"
 
     assert {:ok, 0} = Repo.computer_history_count_events(server: repo)
   end

@@ -41,6 +41,7 @@ defmodule FermixCore.Memory.Repo do
   @computer_history_state_migration_version 25
   @meetings_migration_version 26
   @computer_history_access_migration_version 27
+  @computer_history_sessions_migration_version 28
   @sqlite_open_intent :readwritecreate
 
   @base_schema_sql """
@@ -1623,10 +1624,36 @@ defmodule FermixCore.Memory.Repo do
     call({:computer_history_coverage_gaps, since_ts}, opts)
   end
 
-  @doc "Count of durable activity memories (excluding superseded)."
+  @doc """
+  Count of durable activity memories. `:kind` is `:all` (the default — both
+  layers), `:session` or `:thread`; `:scope` is `:active` (the default) or `:all`,
+  which counts retired thread rows too.
+  """
   @spec computer_history_count_memories(keyword()) :: {:ok, non_neg_integer()} | {:error, term()}
   def computer_history_count_memories(opts \\ []) do
-    call(:computer_history_count_memories, opts)
+    call({:computer_history_count_memories, memory_kind(opts, :all), memory_scope(opts)}, opts)
+  end
+
+  defp memory_scope(opts) do
+    scope = Keyword.get(opts, :scope, :active)
+
+    if scope in [:active, :all] do
+      scope
+    else
+      raise ArgumentError, "computer_history: unknown memory scope #{inspect(scope)}"
+    end
+  end
+
+  # One place decides which layer a read means, and it refuses anything else
+  # rather than silently reading both (§24.1).
+  defp memory_kind(opts, default) do
+    kind = Keyword.get(opts, :kind, default)
+
+    if kind in [:all, :session, :thread] do
+      kind
+    else
+      raise ArgumentError, "computer_history: unknown memory kind #{inspect(kind)}"
+    end
   end
 
   @doc "Insert one durable activity memory. Returns the new row id."
@@ -1635,28 +1662,139 @@ defmodule FermixCore.Memory.Repo do
     call({:computer_history_insert_memory, memory}, opts)
   end
 
-  @doc "The newest non-superseded memories ending at/after `since_ts` (Recent Activity source)."
+  @doc """
+  The newest non-superseded memories ending at/after `since_ts` (Recent Activity
+  source). `:kind` defaults to `:session` — the journal.
+  """
   @spec computer_history_recent_memories(integer(), pos_integer(), keyword()) ::
           {:ok, [map()]} | {:error, term()}
   def computer_history_recent_memories(since_ts, limit, opts \\ [])
       when is_integer(since_ts) and is_integer(limit) and limit > 0 do
-    call({:computer_history_recent_memories, since_ts, limit}, opts)
+    call(
+      {:computer_history_recent_memories, since_ts, limit, memory_kind(opts, :session)},
+      opts
+    )
   end
 
-  @doc "Non-superseded activity memories intersecting [from_ts, to_ts] (recall_activity query)."
+  @doc """
+  Non-superseded activity memories intersecting [from_ts, to_ts] (recall_activity
+  query). `:kind` defaults to `:session`.
+  """
   @spec computer_history_memories_in_window(integer(), integer(), pos_integer(), keyword()) ::
           {:ok, [map()]} | {:error, term()}
   def computer_history_memories_in_window(from_ts, to_ts, limit, opts \\ [])
       when is_integer(from_ts) and is_integer(to_ts) and is_integer(limit) and limit > 0 do
-    call({:computer_history_memories_in_window, from_ts, to_ts, limit}, opts)
+    call(
+      {:computer_history_memories_in_window, from_ts, to_ts, limit, memory_kind(opts, :session)},
+      opts
+    )
   end
 
-  @doc "How many non-superseded activity memories intersect [from_ts, to_ts]."
+  @doc "How many non-superseded memories of `:kind` (default `:session`) intersect the window."
   @spec computer_history_count_memories_in_window(integer(), integer(), keyword()) ::
           {:ok, non_neg_integer()} | {:error, term()}
   def computer_history_count_memories_in_window(from_ts, to_ts, opts \\ [])
       when is_integer(from_ts) and is_integer(to_ts) do
-    call({:computer_history_count_memories_in_window, from_ts, to_ts}, opts)
+    call(
+      {:computer_history_count_memories_in_window, from_ts, to_ts, memory_kind(opts, :session)},
+      opts
+    )
+  end
+
+  @doc "The active thread set (§24.3): non-superseded threads, most recently touched first."
+  @spec computer_history_active_threads(pos_integer(), keyword()) ::
+          {:ok, [map()]} | {:error, term()}
+  def computer_history_active_threads(limit, opts \\ [])
+      when is_integer(limit) and limit > 0 do
+    call({:computer_history_active_threads, limit}, opts)
+  end
+
+  @doc """
+  Activity memories of `:kind` (default `:session`) with these ids, in the order
+  given, regardless of supersession — the roll-up's citation lookup (§24.3).
+  """
+  @spec computer_history_memories_by_ids([integer()], keyword()) ::
+          {:ok, [map()]} | {:error, term()}
+  def computer_history_memories_by_ids(ids, opts \\ []) when is_list(ids) do
+    call({:computer_history_memories_by_ids, ids, memory_kind(opts, :session)}, opts)
+  end
+
+  @doc "Session notes written after `since_ts` (the roll-up's input), newest first."
+  @spec computer_history_session_notes_since(integer(), pos_integer(), keyword()) ::
+          {:ok, [map()]} | {:error, term()}
+  def computer_history_session_notes_since(since_ts, limit, opts \\ [])
+      when is_integer(since_ts) and is_integer(limit) and limit > 0 do
+    call({:computer_history_session_notes_since, since_ts, limit}, opts)
+  end
+
+  @doc "How many session notes exist after `since_ts` (the roll-up's denominator)."
+  @spec computer_history_count_session_notes_since(integer(), keyword()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def computer_history_count_session_notes_since(since_ts, opts \\ [])
+      when is_integer(since_ts) do
+    call({:computer_history_count_session_notes_since, since_ts}, opts)
+  end
+
+  @doc """
+  How many activity memories match `query` — the honest total behind
+  `computer_history_search_memories/3`'s bounded page.
+  """
+  @spec computer_history_count_search_memories(String.t(), keyword()) ::
+          {:ok, non_neg_integer()} | {:error, :empty_query | term()}
+  def computer_history_count_search_memories(query, opts \\ []) when is_binary(query) do
+    call({:computer_history_count_search_memories, query}, opts)
+  end
+
+  @doc """
+  Topic search over activity memories of both kinds (§24.1). `query` is user
+  text, quoted token by token — never FTS syntax. Returns `{:error, :empty_query}`
+  when nothing searchable remains.
+  """
+  @spec computer_history_search_memories(String.t(), pos_integer(), keyword()) ::
+          {:ok, [map()]} | {:error, :empty_query | term()}
+  def computer_history_search_memories(query, limit, opts \\ [])
+      when is_binary(query) and is_integer(limit) and limit > 0 do
+    call({:computer_history_search_memories, query, limit}, opts)
+  end
+
+  @doc """
+  Write one roll-up: supersede the current threads, insert the new set, stamp the
+  mark — dropping any thread the purge watermark caught mid-call (§24.3, §12).
+  """
+  @spec computer_history_write_rollup([map()], integer(), keyword()) ::
+          {:ok,
+           %{
+             written: non_neg_integer(),
+             retired: non_neg_integer(),
+             purged: non_neg_integer(),
+             subjects: [String.t()]
+           }}
+          | {:error, term()}
+  def computer_history_write_rollup(threads, now_ts, opts \\ [])
+      when is_list(threads) and is_integer(now_ts) do
+    call({:computer_history_write_rollup, threads, now_ts}, opts)
+  end
+
+  @doc "Record that a roll-up call was made at `ts`, whatever it returned (the daily bound)."
+  @spec computer_history_stamp_rollup_attempt(integer(), keyword()) :: :ok | {:error, term()}
+  def computer_history_stamp_rollup_attempt(ts, opts \\ []) when is_integer(ts) do
+    call({:computer_history_stamp_rollup_attempt, ts}, opts)
+  end
+
+  @doc "Set/clear the first `ts` of the sitting the summarizer is still waiting on."
+  @spec computer_history_set_session_open_since(integer() | nil, keyword()) ::
+          :ok | {:error, term()}
+  def computer_history_set_session_open_since(ts, opts \\ [])
+      when is_integer(ts) or is_nil(ts) do
+    call({:computer_history_set_session_open_since, ts}, opts)
+  end
+
+  @doc "The `text` of the newest spool events that carry any (the roll-up's verbatim guard)."
+  @spec computer_history_recent_event_texts(pos_integer(), keyword()) ::
+          {:ok, [String.t()]} | {:error, term()}
+  def computer_history_recent_event_texts(limit, opts \\ [])
+      when is_integer(limit) and limit > 0 do
+    call({:computer_history_recent_event_texts, limit}, opts)
   end
 
   @doc "Purge the [from_ts, to_ts] window: events + intersecting memories + watermark."
@@ -1687,12 +1825,15 @@ defmodule FermixCore.Memory.Repo do
     call({:computer_history_claim_cycle, now, stale_after_ms}, opts)
   end
 
-  @doc "Write a summarizer batch result (insert under the purge guard, advance cursor)."
+  @doc """
+  Write a summarizer sitting result (insert under the purge guard, advance cursor).
+  A `nil` `last_status` advances the cursor and keeps the recorded outcome.
+  """
   @spec computer_history_write_cycle_result(
           non_neg_integer(),
           map() | nil,
           DateTime.t(),
-          String.t(),
+          String.t() | nil,
           keyword()
         ) :: {:ok, %{memory_written: boolean()}} | {:error, term()}
   def computer_history_write_cycle_result(
@@ -1702,7 +1843,8 @@ defmodule FermixCore.Memory.Repo do
         last_status,
         opts \\ []
       )
-      when is_integer(last_id) and (is_map(memory) or is_nil(memory)) and is_binary(last_status) do
+      when is_integer(last_id) and (is_map(memory) or is_nil(memory)) and
+             (is_binary(last_status) or is_nil(last_status)) do
     call({:computer_history_write_cycle_result, last_id, memory, now, last_status}, opts)
   end
 
@@ -3038,8 +3180,8 @@ defmodule FermixCore.Memory.Repo do
     {:reply, reply, state}
   end
 
-  def handle_call(:computer_history_count_memories, _from, state) do
-    reply = with_connection(state, &ComputerHistorySql.count_memories/1)
+  def handle_call({:computer_history_count_memories, kind, scope}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.count_memories(&1, kind, scope))
     {:reply, reply, state}
   end
 
@@ -3048,22 +3190,86 @@ defmodule FermixCore.Memory.Repo do
     {:reply, reply, state}
   end
 
-  def handle_call({:computer_history_recent_memories, since_ts, limit}, _from, state) do
-    reply = with_connection(state, &ComputerHistorySql.recent_memories(&1, since_ts, limit))
+  def handle_call({:computer_history_recent_memories, since_ts, limit, kind}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.recent_memories(&1, since_ts, limit, kind))
     {:reply, reply, state}
   end
 
-  def handle_call({:computer_history_memories_in_window, from_ts, to_ts, limit}, _from, state) do
+  def handle_call(
+        {:computer_history_memories_in_window, from_ts, to_ts, limit, kind},
+        _from,
+        state
+      ) do
     reply =
-      with_connection(state, &ComputerHistorySql.memories_in_window(&1, from_ts, to_ts, limit))
+      with_connection(
+        state,
+        &ComputerHistorySql.memories_in_window(&1, from_ts, to_ts, limit, kind)
+      )
 
     {:reply, reply, state}
   end
 
-  def handle_call({:computer_history_count_memories_in_window, from_ts, to_ts}, _from, state) do
+  def handle_call(
+        {:computer_history_count_memories_in_window, from_ts, to_ts, kind},
+        _from,
+        state
+      ) do
     reply =
-      with_connection(state, &ComputerHistorySql.count_memories_in_window(&1, from_ts, to_ts))
+      with_connection(
+        state,
+        &ComputerHistorySql.count_memories_in_window(&1, from_ts, to_ts, kind)
+      )
 
+    {:reply, reply, state}
+  end
+
+  def handle_call({:computer_history_active_threads, limit}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.active_threads(&1, limit))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:computer_history_memories_by_ids, ids, kind}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.memories_by_ids(&1, ids, kind))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:computer_history_session_notes_since, since_ts, limit}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.session_notes_since(&1, since_ts, limit))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:computer_history_count_session_notes_since, since_ts}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.count_session_notes_since(&1, since_ts))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:computer_history_count_search_memories, query}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.count_search_memories(&1, query))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:computer_history_search_memories, query, limit}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.search_memories(&1, query, limit))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:computer_history_write_rollup, threads, now_ts}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.write_rollup(&1, threads, now_ts))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:computer_history_stamp_rollup_attempt, ts}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.stamp_rollup_attempt(&1, ts))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:computer_history_set_session_open_since, ts}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.set_session_open_since(&1, ts))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:computer_history_recent_event_texts, limit}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.recent_event_texts(&1, limit))
     {:reply, reply, state}
   end
 
@@ -3462,8 +3668,29 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_computer_history_memories_migration(conn, versions),
          :ok <- apply_computer_history_state_migration(conn, versions),
          :ok <- apply_meetings_migration(conn, versions),
-         :ok <- apply_computer_history_access_migration(conn, versions) do
+         :ok <- apply_computer_history_access_migration(conn, versions),
+         :ok <- apply_computer_history_sessions_migration(conn, versions) do
       :ok
+    end
+  end
+
+  # MILESTONE_32 §24.1, additive: memory kinds + thread columns, the two state
+  # marks, and the FTS5 companion with its triggers. Every column arrives by
+  # ALTER (not idempotent), so the version check above is what makes a second
+  # open safe.
+  defp apply_computer_history_sessions_migration(conn, versions) do
+    if Enum.member?(versions, @computer_history_sessions_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{ComputerHistorySql.sessions_schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@computer_history_sessions_migration_version});
+        COMMIT;
+        """
+      )
     end
   end
 
