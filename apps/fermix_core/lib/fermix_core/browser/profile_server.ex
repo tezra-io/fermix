@@ -503,9 +503,16 @@ defmodule FermixCore.Browser.ProfileServer do
     end
   end
 
+  # The read gate asks ONE question — may this document be returned — and
+  # `Policy.read_verdict/2` is where that question lives: an explicit scheme
+  # allow-list (http/https, `about:blank`, and a `blob:` whose inner origin is
+  # allowed) and then the host rules on the host it already holds. Reusing
+  # `Policy.validate_url/2` whole is a NAVIGATION policy and would refuse a page
+  # that legitimately committed to a `blob:` URL, naming a navigation the model
+  # never made.
   defp live_page(tab, state) do
     with {:ok, tab} <- live_meta(tab, state),
-         :ok <- read_url_allowed(tab.url, state.config) do
+         :ok <- Policy.read_verdict(tab.url, state.config) do
       {:ok, tab}
     end
   end
@@ -554,59 +561,6 @@ defmodule FermixCore.Browser.ProfileServer do
   end
 
   defp bounded_inspect(value), do: inspect(value, limit: 5, printable_limit: 120)
-
-  # The read gate asks ONE question — did this content come from a host the
-  # policy refuses — so it validates the document's HOST, not the document's
-  # URL. `Policy.validate_url/2` whole is a NAVIGATION policy: its scheme rules
-  # would refuse a page that legitimately committed to a `blob:` URL (the
-  # in-page PDF/print-preview pattern) with "Unsupported URL scheme: blob",
-  # naming a navigation the model never made. Re-validating the host on its own
-  # runs exactly the host rules — `allowed_hosts`, localhost, the `.internal`
-  # suffixes, IPv4-in-IPv6 folding, the private ranges — and nothing else.
-  defp read_url_allowed(url, %Config{} = config) when is_binary(url) do
-    case read_host(url) do
-      nil -> :ok
-      host -> read_host_allowed(host, config)
-    end
-  end
-
-  # A blob URL carries its creator's origin immediately after the scheme, so it
-  # is unwrapped once (the URL spec nests exactly one): `blob:http://169.254.
-  # 169.254/<uuid>` is still the metadata host and is still refused. A document
-  # with no host at all — `about:blank`, `data:` — was not fetched from a
-  # network origin and has no host to judge.
-  defp read_host("blob:" <> inner), do: parse_host(inner)
-  defp read_host(url), do: parse_host(url)
-
-  defp parse_host(url) do
-    case URI.parse(url) do
-      %URI{host: host} when is_binary(host) and host != "" -> host
-      _other -> nil
-    end
-  end
-
-  defp read_host_allowed(host, config) do
-    case Policy.validate_url(host_probe_url(host), config) do
-      {:ok, _uri} -> :ok
-      {:error, %Error{} = error} -> {:error, read_blocked(host, error)}
-    end
-  end
-
-  # `URI.parse/1` strips the brackets off an IPv6 authority, so they have to go
-  # back on: `URI.parse("https://::1")` yields host `nil`, which would fail the
-  # gate OPEN on every IPv6 private address.
-  defp host_probe_url(host) do
-    if String.contains?(host, ":"), do: "https://[#{host}]", else: "https://#{host}"
-  end
-
-  defp read_blocked(host, %Error{} = error) do
-    Error.new(
-      "read_blocked",
-      "Refused to return page content: the page is on #{host}, which the browser " <>
-        "policy blocks (#{error.message}). Navigate somewhere allowed and read again.",
-      error.details
-    )
-  end
 
   # The Accessibility domain is CYCLED (disable → enable) so getFullAXTree is
   # built from the CURRENT document: Chrome otherwise serves the domain's cached
@@ -1238,6 +1192,8 @@ defmodule FermixCore.Browser.ProfileServer do
   defp terminal_download?(%{"state" => "completed"}), do: true
   defp terminal_download?(%{"reason" => "download_too_large"}), do: true
   defp terminal_download?(%{"reason" => "download_too_large_cancel_failed"}), do: true
+  defp terminal_download?(%{"reason" => "download_blocked"}), do: true
+  defp terminal_download?(%{"reason" => "download_blocked_cancel_failed"}), do: true
   defp terminal_download?(_download), do: false
 
   defp download_reply(%{"reason" => "download_too_large"} = download, state) do
@@ -1248,7 +1204,36 @@ defmodule FermixCore.Browser.ProfileServer do
     {:error, cancel_failed_error(download, state.config), state}
   end
 
+  defp download_reply(%{"reason" => "download_blocked"} = download, state) do
+    {:error, download_blocked_error(download), state}
+  end
+
+  defp download_reply(%{"reason" => "download_blocked_cancel_failed"} = download, state) do
+    {:error, download_blocked_cancel_failed_error(download), state}
+  end
+
   defp download_reply(download, state), do: {:ok, download_result(download), state}
+
+  defp download_blocked_error(download) do
+    Error.new(
+      "download_blocked",
+      "Download refused by browser policy (#{download["policy_message"]}); " <>
+        "whatever had landed was deleted",
+      download_error_details(download)
+    )
+  end
+
+  # Same distinction the byte ceiling draws: a refused cancel means the
+  # transfer may still be writing the file that was just deleted.
+  defp download_blocked_cancel_failed_error(download) do
+    Error.new(
+      "download_blocked_cancel_failed",
+      "Download refused by browser policy (#{download["policy_message"]}) but the browser " <>
+        "refused to cancel it; it may still be writing to disk. Close the tab or restart " <>
+        "the browser profile",
+      download_error_details(download)
+    )
+  end
 
   # Distinct from the clean refusal on purpose: here the ceiling did NOT hold.
   # Chrome rejected the cancel (or there was no live connection), so the
@@ -1773,6 +1758,7 @@ defmodule FermixCore.Browser.ProfileServer do
       "state" => "in_progress"
     }
 
+    download = vet_download_source(download, state)
     %{state | downloads: Map.put(state.downloads, guid, download)}
   end
 
@@ -1823,7 +1809,9 @@ defmodule FermixCore.Browser.ProfileServer do
   # re-entered the cancel path, re-issuing a BLOCKING CDP command (up to
   # `action_timeout_ms` + grace) from inside `handle_info/2` and re-running
   # `File.rm`. Nothing in the progress params carries "reason".
-  defp enforce_download_cap(%{"reason" => "download_too_large"} = download, _state), do: download
+  # Any recorded reason means a terminal verdict already stands — the cap's
+  # own, or the source-policy block — and must not be re-entered or rewritten.
+  defp enforce_download_cap(%{"reason" => _terminal} = download, _state), do: download
 
   defp enforce_download_cap(download, state) do
     if over_download_cap?(download, state.config) do
@@ -1844,6 +1832,58 @@ defmodule FermixCore.Browser.ProfileServer do
   # Cancel, delete the partial, and rewrite the record so the waiter reports the
   # cap hit instead of blocking until its timeout on a download that will never
   # complete. `completed_at` is the terminal-state stamp the waiter sorts on.
+  # The read gate's one side door: Chrome performs a download NAVIGATION
+  # without PNA/CORS protections and streams the bytes into the workspace,
+  # where file tools read them — so an allowed public page could otherwise
+  # pull `http://192.168.1.1/config.bin` past every host rule. The source URL
+  # is vetted the moment Chrome announces it. Page-local schemes (blob:,
+  # data:, filesystem:) stay allowed: their bytes come from a document the
+  # navigation gate already admitted, not from a new network fetch.
+  defp vet_download_source(download, state) do
+    case download_source_verdict(Map.get(download, "url"), state.config) do
+      :ok -> download
+      {:error, %Error{} = policy_error} -> block_refused_download(download, policy_error, state)
+    end
+  end
+
+  defp download_source_verdict(url, config) when is_binary(url) do
+    case URI.parse(url).scheme do
+      scheme when scheme in ["blob", "data", "filesystem"] -> :ok
+      _network -> network_download_verdict(url, config)
+    end
+  end
+
+  # CDP always names the source; a download without one cannot be vetted, and
+  # unvettable means refused, not waved through.
+  defp download_source_verdict(_missing, _config) do
+    {:error, Error.new("navigation_blocked", "Download announced no source URL to vet")}
+  end
+
+  defp network_download_verdict(url, config) do
+    case Policy.validate_url(url, config) do
+      {:ok, _uri} -> :ok
+      {:error, %Error{} = error} -> {:error, error}
+    end
+  end
+
+  # Mirrors `cancel_oversized_download/2`: cancel, delete whatever landed, and
+  # mark the record terminal under a sticky "reason" so later progress ticks
+  # cannot re-enter this path and the waiter reports the policy refusal.
+  defp block_refused_download(download, %Error{} = policy_error, state) do
+    outcome = send_cancel_download(Map.get(download, "guid"), state)
+    delete_partial_download(Map.get(download, "path"))
+
+    download
+    |> Map.merge(blocked_outcome(outcome))
+    |> Map.put("policy_message", policy_error.message)
+    |> Map.put("completed_at", System.monotonic_time(:millisecond))
+  end
+
+  defp blocked_outcome(:ok), do: %{"state" => "canceled", "reason" => "download_blocked"}
+
+  defp blocked_outcome({:error, _reason}),
+    do: %{"state" => "canceled", "reason" => "download_blocked_cancel_failed"}
+
   defp cancel_oversized_download(download, state) do
     outcome = send_cancel_download(Map.get(download, "guid"), state)
     delete_partial_download(Map.get(download, "path"))

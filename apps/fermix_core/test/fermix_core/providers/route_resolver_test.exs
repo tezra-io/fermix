@@ -59,15 +59,15 @@ defmodule FermixCore.Providers.RouteResolverTest do
       assert Adapter.for_route(route_key) == Codex
     end
 
-    test ":openai_codex defaults to gpt-5.6-sol when no model is configured" do
+    test ":openai_codex defaults to gpt-6-astra when no model is configured" do
       {route_key, opts} =
         RouteResolver.resolve!(
           provider: :openai_codex,
           access_token: "tok"
         )
 
-      assert route_key.model == "gpt-5.6-sol"
-      assert opts[:model] == "gpt-5.6-sol"
+      assert route_key.model == "gpt-6-astra"
+      assert opts[:model] == "gpt-6-astra"
     end
 
     test "caps :max to gpt-5.5's :xhigh ceiling but keeps :max for gpt-5.6-sol" do

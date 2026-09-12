@@ -89,8 +89,11 @@ defmodule FermixCore.Providers.Selection do
   @spec configured?(ModelCatalog.provider(), keyword()) :: boolean()
   def configured?(:openai, block), do: present?(Keyword.get(block, :api_key))
   def configured?(:openai_codex, _block), do: codex_profile_usable?()
-  def configured?(:anthropic, block), do: key_or_oauth_configured?(block, "anthropic_oauth")
-  def configured?(:xai, block), do: key_or_oauth_configured?(block, "xai_oauth")
+
+  def configured?(:anthropic, block),
+    do: key_or_oauth_configured?(block, Store.profile(:anthropic))
+
+  def configured?(:xai, block), do: key_or_oauth_configured?(block, Store.profile(:xai))
 
   # Descriptor providers without bespoke OAuth handling: configured? keys on
   # the credential their single auth mode needs — api_key presence for
@@ -179,7 +182,7 @@ defmodule FermixCore.Providers.Selection do
     case Store.read(profile) do
       {:ok, entry} ->
         present?(entry.tokens.access_token) and
-          Map.get(entry, :status) != "reauthorization_required"
+          Map.get(entry, :status) not in ["reauthorization_required", "client_rejected"]
 
       {:error, _reason} ->
         false

@@ -55,6 +55,43 @@ defmodule FermixCore.Providers.RoutingOverridesTest do
       end
     end
 
+    test "the meeting prefix reads the same three keys" do
+      routing = [
+        meeting_provider: "anthropic",
+        meeting_model: "claude-haiku-4-5",
+        meeting_reasoning_effort: "low",
+        subagent_model: "gpt-5.4-mini"
+      ]
+
+      assert RoutingOverrides.parse(routing, :meeting) == %{
+               provider: :anthropic,
+               model: "claude-haiku-4-5",
+               reasoning_effort: :low
+             }
+
+      # Prefixes stay independent: the subagent pin is invisible to :meeting.
+      assert RoutingOverrides.parse([subagent_model: "gpt-5.4-mini"], :meeting) == @empty
+    end
+
+    test "the meeting prefix gets the same validation" do
+      assert_raise ArgumentError, ~r/\[fermix_core.routing\] meeting_provider = "nope"/, fn ->
+        RoutingOverrides.parse([meeting_provider: "nope"], :meeting)
+      end
+
+      assert_raise ArgumentError, ~r/qwen3:32b/, fn ->
+        RoutingOverrides.parse(
+          [meeting_provider: "openrouter", meeting_model: "qwen3:32b"],
+          :meeting
+        )
+      end
+
+      assert_raise ArgumentError,
+                   ~r/\[fermix_core.routing\] meeting_reasoning_effort = "turbo"/,
+                   fn ->
+                     RoutingOverrides.parse([meeting_reasoning_effort: "turbo"], :meeting)
+                   end
+    end
+
     test "an invalid effort raises naming the key and value" do
       assert_raise ArgumentError,
                    ~r/\[fermix_core.routing\] cron_reasoning_effort = "turbo"/,
@@ -253,11 +290,12 @@ defmodule FermixCore.Providers.RoutingOverridesTest do
     end
   end
 
-  describe "subagent/0 and cron/0 (read app env)" do
+  describe "subagent/0, cron/0 and meeting/0 (read app env)" do
     test "read the live routing config" do
       Application.put_env(:fermix_core, :routing,
         subagent_model: "gpt-5.4-mini",
-        cron_reasoning_effort: "low"
+        cron_reasoning_effort: "low",
+        meeting_model: "claude-haiku-4-5"
       )
 
       assert RoutingOverrides.subagent() == %{
@@ -267,12 +305,19 @@ defmodule FermixCore.Providers.RoutingOverridesTest do
              }
 
       assert RoutingOverrides.cron() == %{provider: nil, model: nil, reasoning_effort: :low}
+
+      assert RoutingOverrides.meeting() == %{
+               provider: nil,
+               model: "claude-haiku-4-5",
+               reasoning_effort: nil
+             }
     end
 
     test "absent routing config yields all-nil" do
       Application.put_env(:fermix_core, :routing, [])
       assert RoutingOverrides.subagent() == @empty
       assert RoutingOverrides.cron() == @empty
+      assert RoutingOverrides.meeting() == @empty
     end
   end
 end

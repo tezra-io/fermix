@@ -7,9 +7,9 @@ defmodule Fermix.CLI.Setup.WebLauncher do
   alias Fermix.CLI.ServiceCommand
   alias FermixCore.Auth.Browser
   alias FermixCore.Setup.AccessToken
+  alias FermixCore.Setup.Endpoint
   alias FermixCore.Setup.ServiceActivation
 
-  @default_port 4030
   @default_attempts 120
   @default_interval_ms 500
 
@@ -19,8 +19,8 @@ defmodule Fermix.CLI.Setup.WebLauncher do
 
     with {:ok, _summary} <- activate(opts),
          {:ok, launch} <- mint_launch(opts),
-         {:ok, port} <- setup_port(opts),
-         url <- setup_url(port, launch.token),
+         {:ok, port} <- Endpoint.port(opts),
+         {:ok, url} <- Endpoint.launch_url(port, launch.token),
          :ok <- announce_url(url, port, opts, puts) do
       finish_launch(wait_for_live(opts), url, opts, puts)
     else
@@ -94,8 +94,8 @@ defmodule Fermix.CLI.Setup.WebLauncher do
   end
 
   defp default_live_probe(opts) do
-    with {:ok, port} <- setup_port(opts),
-         {:ok, %{"status" => "ok"}} <- Client.status(timeout: 500),
+    with {:ok, port} <- Endpoint.port(opts),
+         {:ok, %{"engine" => _engine}} <- Client.request_v1("hello", %{}, timeout: 500),
          :ok <- tcp_reachable?(port) do
       :ok
     else
@@ -155,39 +155,6 @@ defmodule Fermix.CLI.Setup.WebLauncher do
     puts.("Use `fermix status` to check the daemon, or `fermix stop` to stop it.")
   end
 
-  defp setup_url(port, token) do
-    "http://127.0.0.1:#{port}/setup?t=#{URI.encode_www_form(token)}"
-  end
-
-  defp setup_port(opts) do
-    cond do
-      valid_port?(Keyword.get(opts, :port)) ->
-        {:ok, Keyword.fetch!(opts, :port)}
-
-      not is_nil(Keyword.get(opts, :port)) ->
-        {:error, "invalid --port #{inspect(Keyword.get(opts, :port))}; expected 1..65535"}
-
-      true ->
-        env_or_default_port(System.get_env("PORT"))
-    end
-  end
-
-  defp env_or_default_port(nil), do: {:ok, @default_port}
-  defp env_or_default_port(""), do: {:ok, @default_port}
-
-  defp env_or_default_port(value) when is_binary(value) do
-    case Integer.parse(String.trim(value)) do
-      {port, ""} when port > 0 and port <= 65_535 ->
-        {:ok, port}
-
-      _invalid ->
-        {:error, "invalid PORT=#{inspect(value)}; expected 1..65535"}
-    end
-  end
-
-  defp valid_port?(port) when is_integer(port), do: port > 0 and port <= 65_535
-  defp valid_port?(_port), do: false
-
   defp token_opts(opts), do: Keyword.get(opts, :token_opts, [])
 
   defp format_error({:install_failed, reason}),
@@ -202,6 +169,12 @@ defmodule Fermix.CLI.Setup.WebLauncher do
 
   defp format_error({:restart_failed, reason}),
     do: "service restart failed: #{format_reason(reason)}"
+
+  defp format_error({:invalid_port, :explicit, value}),
+    do: "invalid --port #{inspect(value)}; expected 1..65535"
+
+  defp format_error({:invalid_port, :environment, value}),
+    do: "invalid PORT=#{inspect(value)}; expected 1..65535"
 
   defp format_error(reason), do: inspect(reason)
 

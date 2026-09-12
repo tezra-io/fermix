@@ -1,6 +1,7 @@
 defmodule FermixCore.Plugins.PromptCatalogTest do
   use ExUnit.Case, async: false
 
+  alias FermixCore.Auth.Store
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Plugins.PromptCatalog
 
@@ -96,6 +97,52 @@ defmodule FermixCore.Plugins.PromptCatalogTest do
     assert entry.name == "ghost"
     assert entry.status == :not_installed
     assert entry.remediation =~ "fermix plugins install ghost"
+  end
+
+  describe "a quarantined grant" do
+    setup do
+      Application.put_env(:fermix_core, :plugins, enabled: ["gmail"])
+
+      Application.put_env(:fermix_core, :oauth, %{
+        "google" => [client_id: "123.apps.googleusercontent.com", client_secret: "stale"]
+      })
+
+      :ok
+    end
+
+    defp store_gmail_grant(status) do
+      :ok =
+        Store.write("gmail:primary", %{
+          auth_mode: "oauth2",
+          provider: "google",
+          granted_scopes: [],
+          tokens: %{access_token: "AT", refresh_token: "RT"},
+          expires_at: DateTime.add(DateTime.utc_now(), 3600, :second),
+          last_refresh: nil,
+          status: status
+        })
+    end
+
+    # Signing in again under the same refused client cannot work, so the agent
+    # is told to have the owner fix the client first.
+    test "a refused sign-in client sends the owner to the client, then the sign-in" do
+      store_gmail_grant("client_rejected")
+
+      assert [entry] = PromptCatalog.entries([], [])
+      assert entry.status == :reauthorization_required
+      assert entry.remediation =~ "refused the saved sign-in client"
+      assert entry.remediation =~ "ID and secret in setup"
+      assert entry.remediation =~ "sign in again"
+      refute entry.remediation =~ "fermix plugins auth login"
+    end
+
+    test "a grant that merely expired still points at the sign-in" do
+      store_gmail_grant("reauthorization_required")
+
+      assert [entry] = PromptCatalog.entries([], [])
+      assert entry.status == :reauthorization_required
+      assert entry.remediation =~ "fermix plugins auth login gmail"
+    end
   end
 
   test "a plugin with registered capabilities yields no extra status entry" do

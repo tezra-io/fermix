@@ -2,8 +2,13 @@ defmodule FermixCore.Transcription.OpenAI do
   @moduledoc """
   OpenAI transcription backend (`gpt-4o-mini-transcribe` by default).
 
-  Multipart `POST /v1/audio/transcriptions`, model from
-  `[fermix_core.transcription] model`. The key resolves in a deterministic order
+  Multipart `POST /v1/audio/transcriptions`, model from the caller's `model:`
+  opt when it carries one (a caller that selected this backend explicitly — a
+  per-meeting override — brings its own id, because the shared
+  `[fermix_core.transcription] model` key is snapped to the GLOBAL backend's
+  family and a cross-family id 400s), else that shared key.
+
+  The key resolves in a deterministic order
   (two valid setups of one credential source, not a Rule #12 fallback): the
   transcription-specific `[fermix_core.transcription] openai_api_key` override if
   set, else the OpenAI chat-provider key. Both are `api_key` auth only; a
@@ -44,12 +49,12 @@ defmodule FermixCore.Transcription.OpenAI do
   @impl true
   @spec transcribe(String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
   def transcribe(path, opts \\ []) when is_binary(path) do
-    model = model()
+    model = model(opts)
 
     case resolve_token(opts) do
       {:ok, token} ->
         Support.with_provider_call(@provider, model, opts, fn ->
-          post_transcription(path, token, opts)
+          post_transcription(path, model, token, opts)
         end)
 
       {:error, reason} ->
@@ -57,8 +62,8 @@ defmodule FermixCore.Transcription.OpenAI do
     end
   end
 
-  defp post_transcription(path, token, opts) do
-    case Support.multipart_fields(path, model(), opts) do
+  defp post_transcription(path, model, token, opts) do
+    case Support.multipart_fields(path, model, opts) do
       {:ok, fields} ->
         Req.new(
           url: "#{base_url()}/audio/transcriptions",
@@ -127,7 +132,19 @@ defmodule FermixCore.Transcription.OpenAI do
     end
   end
 
-  defp model do
+  # The caller's `model:` wins over the shared `[fermix_core.transcription]`
+  # key: that key is snapped to whichever backend is the GLOBAL choice, so a
+  # caller that selected this backend for one job must carry the matching id.
+  # A non-binary `model:` matches no clause and raises rather than reaching the
+  # API as a bogus id.
+  defp model(opts) do
+    case Keyword.get(opts, :model) do
+      nil -> configured_model()
+      model when is_binary(model) -> model
+    end
+  end
+
+  defp configured_model do
     :fermix_core
     |> Application.get_env(:transcription, [])
     |> Keyword.get(:model, @default_model)

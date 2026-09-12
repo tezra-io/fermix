@@ -6,6 +6,8 @@ defmodule FermixCore.TranscriptionTest do
   alias FermixCore.Transcription
 
   defmodule FakeBackend do
+    def name, do: :fake
+
     def transcribe(path, opts) do
       send(Keyword.fetch!(opts, :test_pid), {:engine_transcribe, path, opts})
       {:ok, "engine transcript"}
@@ -58,7 +60,7 @@ defmodule FermixCore.TranscriptionTest do
 
       assert {:error, message} = Transcription.active_backend()
       assert message =~ "Unknown transcription backend"
-      assert message =~ "deepgram | openai | xai"
+      assert message =~ "deepgram | local | openai | xai"
     end
   end
 end

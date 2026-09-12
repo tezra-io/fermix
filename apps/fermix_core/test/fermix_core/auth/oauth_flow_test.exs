@@ -4,6 +4,7 @@ defmodule FermixCore.Auth.OAuthFlowTest do
   alias FermixCore.Auth.OAuthFlow
   alias FermixCore.Auth.OAuthProvider
   alias FermixCore.Auth.OAuthProviders
+  alias FermixCore.Auth.Redaction
 
   describe "generate_pkce/0" do
     test "produces verifier, challenge, and state" do
@@ -266,6 +267,83 @@ defmodule FermixCore.Auth.OAuthFlowTest do
 
       assert tokens.access_token == "n_at"
       assert tokens.refresh_token == "n_rt"
+    end
+  end
+
+  # The provider refusing the operator's saved client is its own diagnosis: the
+  # vendor body used to come back as a raw string whose "Token" the redactor
+  # turned into "[REDACTED]", so no surface could say what to fix.
+  describe "exchange_code/5 — a refused client" do
+    @x_redirect "http://127.0.0.1:1459/auth/callback"
+
+    defp x_provider do
+      {:ok, provider} =
+        OAuthProviders.definition("x",
+          client_id: "x-id",
+          client_secret: "stale-secret",
+          scopes: ["tweet.read"]
+        )
+
+      provider
+    end
+
+    defp json_plug(status, body) do
+      fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(status, Jason.encode!(body))
+      end
+    end
+
+    test "X answering 401 unauthorized_client is the typed refusal" do
+      plug =
+        json_plug(401, %{
+          "error" => "unauthorized_client",
+          "error_description" => "Missing valid authorization header"
+        })
+
+      assert {:error, {:oauth_client_rejected, detail}} =
+               OAuthFlow.exchange_code(x_provider(), "the-code", "the-verifier", @x_redirect,
+                 plug: plug
+               )
+
+      assert detail.provider == "x"
+      assert detail.status == 401
+      assert detail.error == "unauthorized_client"
+      assert detail.description == "Missing valid authorization header"
+    end
+
+    test "GitHub answering 200 incorrect_client_credentials is the typed refusal" do
+      {:ok, provider} =
+        OAuthProviders.definition("github", client_id: "gh-id", client_secret: "gh-sec")
+
+      plug = json_plug(200, %{"error" => "incorrect_client_credentials"})
+
+      assert {:error, {:oauth_client_rejected, %{provider: "github", status: 200}}} =
+               OAuthFlow.exchange_code(provider, "c", "v", "http://127.0.0.1:1457/auth/callback",
+                 plug: plug
+               )
+    end
+
+    test "any other refusal keeps the vendor string, byte for byte" do
+      body = %{"error" => "invalid_grant"}
+
+      assert {:error, "Token exchange failed (400): " <> rest} =
+               OAuthFlow.exchange_code(x_provider(), "c", "v", @x_redirect,
+                 plug: json_plug(400, body)
+               )
+
+      assert rest == Redaction.format(body)
+    end
+
+    test "a 200 without tokens that is no refusal stays an invalid token response" do
+      {:ok, provider} =
+        OAuthProviders.definition("github", client_id: "gh-id", client_secret: "gh-sec")
+
+      assert {:error, :invalid_token_response} =
+               OAuthFlow.exchange_code(provider, "c", "v", "http://127.0.0.1:1457/auth/callback",
+                 plug: json_plug(200, %{"error" => "bad_verification_code"})
+               )
     end
   end
 

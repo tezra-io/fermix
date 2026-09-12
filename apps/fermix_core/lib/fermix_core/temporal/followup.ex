@@ -269,7 +269,13 @@ defmodule FermixCore.Temporal.Followup do
   # Exactly one attempt: the §11.4 retry ladder is the reminder's, never the
   # flourish's.
   defp deliver(state, text, started) do
-    case Delivery.attempt(state.reminder, text, @send_timeout_ms, state.delivery_opts) do
+    case Delivery.attempt(
+           state.reminder,
+           text,
+           @send_timeout_ms,
+           state.delivery_opts,
+           :followup
+         ) do
       :ok -> close(state, "sent", text, started)
       {:error, reason} -> close_delivery_failure(state, reason, started)
     end

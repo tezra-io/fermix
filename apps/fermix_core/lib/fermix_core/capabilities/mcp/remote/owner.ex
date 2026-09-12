@@ -116,6 +116,28 @@ defmodule FermixCore.Capabilities.MCP.Remote.Owner do
   end
 
   @doc """
+  Discoverer callback: report upstream tool-list changes to `listener`.
+
+  The listener is the registration owner (`MCP.Server`), and it re-arms the
+  watch on every discovery pass, so this simply records the latest one. The
+  notification travels back as a plain `{:mcp_owner, :tools_changed}` message:
+  the dependency direction is Server -> Owner, and naming `MCP.Server` here
+  would reverse it.
+  """
+  @impl Discoverer
+  def watch_tools(owner, listener) when is_pid(listener) do
+    # The same budget as `list_tools/1`, and for the same reason: this call runs
+    # BEFORE the first discovery, so it is the one that actually waits out a
+    # still-connecting owner.
+    GenServer.call(owner, {:watch_tools, listener}, Timeouts.mcp_remote_startup() + 5_000)
+  catch
+    # Same contract as `list_tools/1`: a torn-down owner reports a classified
+    # error rather than dying with a raw `:noproc` inside its caller.
+    :exit, {reason, {GenServer, :call, _args}} when reason in [:noproc, :normal, :shutdown] ->
+      {:error, :remote_owner_down}
+  end
+
+  @doc """
   Issue one allowlisted `tools/call` on the owned session.
 
   This is the dispatch target `Remote.Proxy` calls once a request has passed
@@ -167,6 +189,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.Owner do
       session_module: Keyword.get(opts, :session, Session),
       session_opts: Keyword.take(opts, [:transport, :connect_opts, :resolver, :client_info]),
       session: nil,
+      listener: nil,
       deadline: System.monotonic_time(:millisecond) + Timeouts.mcp_remote_startup()
     }
 
@@ -193,6 +216,10 @@ defmodule FermixCore.Capabilities.MCP.Remote.Owner do
     {:reply, discover(state), state}
   end
 
+  def handle_call({:watch_tools, listener}, _from, state) do
+    {:reply, :ok, %{state | listener: listener}}
+  end
+
   def handle_call({:call_tool, _tool, _args, _timeout}, _from, %{session: nil} = state) do
     {:reply, {:error, :remote_not_connected}, state}
   end
@@ -210,10 +237,29 @@ defmodule FermixCore.Capabilities.MCP.Remote.Owner do
   @impl true
   def handle_info({:EXIT, session, reason}, %{session: session} = state) do
     state = %{state | session: nil}
-    {status, detail} = RuntimeStatus.classify(reason)
-    _ = put_status(state, status, detail)
-    Logger.warning("remote MCP session for #{inspect(state.source_id)} exited: #{status}")
+    classified = RuntimeStatus.classify(reason)
+    _ = put_status(state, classified)
+
+    Logger.warning(
+      "remote MCP session for #{inspect(state.source_id)} exited: " <>
+        RuntimeStatus.describe(classified)
+    )
+
     {:stop, :normal, state}
+  end
+
+  # Discovery has not run yet, so no registration exists for the notification to
+  # invalidate — the watch is armed before the first `tools/list`, so this is
+  # only ever the pre-discovery window. Dropping it is the whole correct action,
+  # not a degraded one.
+  def handle_info({:mcp_session, :tools_changed}, %{listener: nil} = state) do
+    Logger.debug("remote MCP owner dropped a tools-changed notice: no listener registered yet")
+    {:noreply, state}
+  end
+
+  def handle_info({:mcp_session, :tools_changed}, state) do
+    send(state.listener, {:mcp_owner, :tools_changed})
+    {:noreply, state}
   end
 
   # An unmatched message must not kill a connection the operator depends on,
@@ -288,7 +334,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.Owner do
   defp start_session(state) do
     opts =
       state.session_opts ++
-        [endpoint: state.endpoint, auth_ref: state.auth_ref]
+        [endpoint: state.endpoint, auth_ref: state.auth_ref, notify: self()]
 
     case state.session_module.start_link(opts) do
       {:ok, session} -> {:ok, session}
@@ -308,8 +354,8 @@ defmodule FermixCore.Capabilities.MCP.Remote.Owner do
 
   defp transient?(reason) do
     case RuntimeStatus.classify(reason) do
-      {:remote_unreachable, :rate_limited} -> false
-      {:remote_unreachable, _class} -> true
+      {:remote_unreachable, :rate_limited, _subject} -> false
+      {:remote_unreachable, _class, _subject} -> true
       _classified -> false
     end
   end
@@ -325,13 +371,13 @@ defmodule FermixCore.Capabilities.MCP.Remote.Owner do
   # Returns the classified reason so an `init/1` refusal can carry it into the
   # start error — the only report a process that never lived can produce.
   defp record_refusal(state, reason) do
-    {status, detail} = RuntimeStatus.classify(reason)
-    _ = put_status(state, status, detail)
+    {status, detail, _subject} = classified = RuntimeStatus.classify(reason)
+    _ = put_status(state, classified)
     maybe_emit_security_block(state, status, detail)
 
     Logger.error(
-      "remote MCP client #{inspect(state.source_id)} refused (#{status}/#{inspect(detail)}); " <>
-        "config=#{inspect(redacted(state.spec))}"
+      "remote MCP client #{inspect(state.source_id)} refused " <>
+        "(#{RuntimeStatus.describe(classified)}); config=#{inspect(redacted(state.spec))}"
     )
 
     {status, detail}
@@ -440,10 +486,9 @@ defmodule FermixCore.Capabilities.MCP.Remote.Owner do
   defp log_teardown(_state, :ok), do: :ok
 
   defp log_teardown(state, {:error, reason}) do
-    {status, detail} = RuntimeStatus.classify(reason)
-
     Logger.warning(
-      "remote MCP teardown for #{inspect(state.source_id)} failed: #{status}/#{inspect(detail)}"
+      "remote MCP teardown for #{inspect(state.source_id)} failed: " <>
+        RuntimeStatus.describe(RuntimeStatus.classify(reason))
     )
   end
 
@@ -464,15 +509,16 @@ defmodule FermixCore.Capabilities.MCP.Remote.Owner do
     generation
   end
 
-  defp put_status(%{generation: nil}, _status, _detail), do: :no_status_sink
+  defp put_status(%{generation: nil}, _classified), do: :no_status_sink
 
-  defp put_status(state, status, detail) do
+  defp put_status(state, {status, detail, subject}) do
     case RuntimeStatus.put(
            state.runtime_status,
            state.source_id,
            state.generation,
            status,
-           detail
+           detail,
+           subject
          ) do
       :ok ->
         :ok

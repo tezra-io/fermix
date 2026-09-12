@@ -15,7 +15,7 @@ defmodule FermixCore.Net.TimeoutPolicy do
   """
 
   @typedoc "A request kind with its own timeout ceiling."
-  @type kind :: :llm_buffered | :image_generation | :media_download | :transcription
+  @type kind :: :llm_buffered | :image_generation | :media_download | :transcription | :unfurl
 
   # Buffered LLM: whole-turn response budget (the full body lands at once).
   # Fermix consumes every LLM adapter except Codex in buffered mode; Codex
@@ -31,6 +31,9 @@ defmodule FermixCore.Net.TimeoutPolicy do
   # Audio transcription: a buffered multipart upload whose latency tracks the
   # audio length — a multi-minute voice note far exceeds Req's 15s default.
   @transcription_ms 120_000
+  # Link previews are auxiliary and must never hold a turn open. The one MiB
+  # streaming cap bounds bytes; this bounds idle network time.
+  @unfurl_ms 15_000
 
   @doc """
   Returns the `receive_timeout` (ms) for a request `kind`.
@@ -43,4 +46,5 @@ defmodule FermixCore.Net.TimeoutPolicy do
   def receive_timeout_for(:image_generation), do: @image_generation_ms
   def receive_timeout_for(:media_download), do: @media_download_ms
   def receive_timeout_for(:transcription), do: @transcription_ms
+  def receive_timeout_for(:unfurl), do: @unfurl_ms
 end

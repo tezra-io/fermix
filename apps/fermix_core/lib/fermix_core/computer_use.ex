@@ -30,26 +30,30 @@ defmodule FermixCore.ComputerUse do
   def enabled?, do: Config.enabled?()
 
   @doc """
-  Ensure the OS-driver sidecar matching the COMPILED-IN compux version is
-  installed, so a `computer_use`-enabled daemon that just upgraded (new compux
-  ref -> new sidecar version) downloads the matching sidecar at boot instead of
-  silently losing computer-use until the operator re-runs the setup enable flow.
+  Ensure the compux OS-driver sidecar matching the COMPILED-IN version is
+  installed, so a daemon that just upgraded (new compux ref -> new sidecar
+  version) downloads the matching sidecar at boot instead of silently losing the
+  features that need it until the operator re-runs setup. The one binary is
+  shared by computer-use AND computer-history, so `:wanted?` decides whether the
+  sidecar is needed at all (default: computer-use enabled); the boot caller ORs
+  in computer-history so either feature triggers the download.
 
-  Returns `:ok` immediately with NO network when computer-use is disabled or the
-  matching sidecar is already installed, so the common boot path is untouched.
-  Otherwise it downloads once, BOUNDED by `:timeout_ms` and FAIL-SOFT: a slow,
-  failed, or crashing download is logged and leaves computer-use off (the
-  existing fail-closed state, retried on the next boot or via the setup card) —
-  it never blocks or crashes boot. `:installer` (default `SidecarInstaller`) is
-  injectable for tests.
+  Returns `:ok` immediately with NO network when the sidecar is not wanted or is
+  already installed, so the common boot path is untouched. Otherwise it downloads
+  once, BOUNDED by `:timeout_ms` and FAIL-SOFT: a slow, failed, or crashing
+  download is logged and leaves the dependent features off (the existing
+  fail-closed state, retried on the next boot or via the setup card) — it never
+  blocks or crashes boot. `:installer` (default `SidecarInstaller`) is injectable
+  for tests.
   """
   @spec ensure_sidecar_installed(keyword()) :: :ok
   def ensure_sidecar_installed(opts \\ []) when is_list(opts) do
     installer = Keyword.get(opts, :installer, SidecarInstaller)
     timeout = Keyword.get(opts, :timeout_ms, @sidecar_boot_ensure_timeout_ms)
+    wanted? = Keyword.get_lazy(opts, :wanted?, fn -> Config.current().enabled? end)
 
     cond do
-      not Config.current().enabled? -> :ok
+      not wanted? -> :ok
       installer.installed?() -> :ok
       true -> download_sidecar(installer, timeout)
     end
@@ -75,31 +79,31 @@ defmodule FermixCore.ComputerUse do
   end
 
   defp log_ensure_result({:ok, {:ok, path}}),
-    do: Logger.info("computer-use: sidecar ensured at boot (#{path})")
+    do: Logger.info("compux sidecar ensured at boot (#{path})")
 
   defp log_ensure_result({:ok, {:error, reason}}),
     do:
       Logger.warning(
-        "computer-use: sidecar ensure failed at boot (#{inspect(reason)}); " <>
-          "computer-use stays off until the next boot or re-enable"
+        "compux sidecar ensure failed at boot (#{inspect(reason)}); " <>
+          "features needing it stay off until the next boot or re-enable"
       )
 
   defp log_ensure_result({:exit, reason}),
     do:
       Logger.warning(
-        "computer-use: sidecar ensure crashed at boot (#{inspect(reason)}); computer-use stays off"
+        "compux sidecar ensure crashed at boot (#{inspect(reason)}); features needing it stay off"
       )
 
   defp log_ensure_result(nil),
-    do: Logger.warning("computer-use: sidecar ensure timed out at boot; computer-use stays off")
+    do: Logger.warning("compux sidecar ensure timed out at boot; features needing it stay off")
 
   # Catch-all so an unexpected install return can never raise a FunctionClauseError
   # in the boot process — the never-crash-boot guarantee holds even off-contract.
   defp log_ensure_result(other),
     do:
       Logger.warning(
-        "computer-use: sidecar ensure returned an unexpected result at boot " <>
-          "(#{inspect(other)}); computer-use stays off"
+        "compux sidecar ensure returned an unexpected result at boot " <>
+          "(#{inspect(other)}); features needing it stay off"
       )
 
   @doc """

@@ -25,6 +25,9 @@ defmodule FermixCore.Agents.MainAgent do
   alias FermixCore.Agents.ConversationKey
   alias FermixCore.Agents.RuntimeContext
   alias FermixCore.Agents.SkillRegistry
+  alias FermixCore.Agents.TurnRunner
+  alias FermixCore.ComputerHistory
+  alias FermixCore.ComputerHistory.Gate.Snapshot
   alias FermixCore.Memory.Config
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Reviewer
@@ -137,6 +140,11 @@ defmodule FermixCore.Agents.MainAgent do
         Keyword.get(opts, :capability_registry, FermixCore.Capabilities.Registry),
       adapter_overrides: adapter_overrides,
       ordered_routes: resolved_ordered_routes(opts, adapter_overrides),
+      # The platform half of the Computer History gate, resolved once (the OS
+      # does not change under a running daemon) and injectable so the pinning
+      # seam is provable on every CI leg, not only on macOS.
+      computer_history_macos?:
+        Keyword.get_lazy(opts, :computer_history_macos?, &ComputerHistory.macos?/0),
       adapter: Keyword.get(opts, :adapter),
       adapter_opts: Keyword.get(opts, :adapter_opts, []),
       agent_supervisor: Keyword.get(opts, :agent_supervisor, AgentSupervisor),
@@ -337,11 +345,18 @@ defmodule FermixCore.Agents.MainAgent do
   # under the GenServer (so the runtime context is the freshly-cached one) and
   # handed to the gateway, which runs the turn in a supervised task.
   defp turn_state(state, msg) do
+    # The gate is built BEFORE the rest of the snapshot because it decides the
+    # chain the turn runs on (§9.4 pinning): a history-bearing owner turn keeps
+    # only the hops granted for history, and every downstream reader (the loop's
+    # routes, the taint masks, a subagent's inherited chain) takes that one value
+    # from here.
+    gate = TurnRunner.computer_history_gate(msg, state.ordered_routes, gate_opts(state))
+
     %{
       provider: state.provider,
       capability_registry: state.capability_registry,
       adapter_overrides: state.adapter_overrides,
-      ordered_routes: state.ordered_routes,
+      ordered_routes: turn_routes(gate, state.ordered_routes),
       adapter: state.adapter,
       adapter_opts: state.adapter_opts,
       skill_registry: state.skill_registry,
@@ -362,9 +377,44 @@ defmodule FermixCore.Agents.MainAgent do
       runtime_context: state.runtime_context,
       main_agent_server: self(),
       compaction_failures: state.compaction_failures,
-      last_context_tokens: Map.get(state.context_tokens, ConversationKey.from(msg), 0)
+      last_context_tokens: Map.get(state.context_tokens, ConversationKey.from(msg), 0),
+      # The Computer History gate, frozen with the rest of the turn snapshot
+      # (MILESTONE_32 "snapshotted once per turn"): the section injection, the
+      # recall tool gates, and the commit-time taint stamp all read this one
+      # decision, so a mid-turn config flip cannot split them.
+      computer_history_gate: gate
     }
   end
+
+  defp gate_opts(state), do: [macos?: state.computer_history_macos?]
+
+  # The turn's effective chain: the Gate's pinned list, or the boot snapshot when
+  # the Gate pinned nothing (history off, a non-owner turn, or the boot
+  # config-error path where there is no chain to pin).
+  defp turn_routes(%Snapshot{} = gate, boot_routes) do
+    log_pinned_chain(gate)
+    gate.routes || boot_routes
+  end
+
+  # One line per pinned turn: the operator's failover really is narrower while
+  # history is on, and a chain that silently lost a hop is undiagnosable.
+  defp log_pinned_chain(%Snapshot{dropped_hops: []}), do: :ok
+
+  defp log_pinned_chain(%Snapshot{routes: routes, dropped_hops: dropped}) do
+    Logger.info(
+      "computer_history: owner turn pinned to #{provider_names(routes)}; " <>
+        "failover to #{Enum.map_join(dropped, ", ", &to_string/1)} disabled while history is on"
+    )
+  end
+
+  # Only ever called on a PINNED chain, which the Gate builds only when every hop
+  # names an atom provider — so both route shapes below are exhaustive here.
+  defp provider_names(routes) do
+    Enum.map_join(routes, ", ", fn route -> to_string(route_provider(route)) end)
+  end
+
+  defp route_provider({route_key, _opts}), do: Map.get(route_key, :provider)
+  defp route_provider(route_key) when is_map(route_key), do: Map.get(route_key, :provider)
 
   defp ensure_runtime_context(state) do
     case state.runtime_context do

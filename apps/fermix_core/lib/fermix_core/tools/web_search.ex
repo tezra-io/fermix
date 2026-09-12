@@ -36,6 +36,15 @@ defmodule FermixCore.Tools.WebSearch do
   # get fixed, not be masked behind a different provider.
   @degradable_error_prefixes ["provider_error", "rate_limited", "network", "parser_changed"]
 
+  @doc """
+  Every shipped backend name, in catalog order.
+
+  Published so the settings descriptor offers exactly the backends this tool can
+  route to, rather than a second list that drifts when one is added.
+  """
+  @spec backend_names() :: [atom()]
+  def backend_names, do: @backend_names
+
   @impl true
   def name, do: "web_search"
 

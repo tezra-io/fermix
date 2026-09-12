@@ -28,6 +28,113 @@ defmodule FermixCore.ReadinessTest do
     :ok
   end
 
+  describe "the gating and advisory split" do
+    # These two populations are the reason the split exists: the shipped
+    # `telegram: [enabled: true]` default fires on every fresh install, and
+    # realtime-without-an-OpenAI-key fires on every companion install. Gating
+    # setup completion on either means onboarding can never finish for them.
+    test "a fresh install with a provider and personalization is ready despite Telegram" do
+      seed_ready_home()
+      Application.put_env(:fermix_channels, :telegram, enabled: true)
+
+      report = Readiness.report()
+
+      assert report.status == :ready
+      assert Enum.any?(report.failures, &(&1.detail_key == "channel:telegram"))
+      assert Readiness.gating_failures(report.failures) == []
+    end
+
+    test "realtime enabled with no OpenAI key is advisory, not gating" do
+      # Anthropic rather than OpenAI on purpose: an OpenAI key would satisfy
+      # realtime as well, and the population this covers is the companion user
+      # whose provider is a subscription with no Realtime-capable key.
+      Application.put_env(:fermix_core, :providers, anthropic: [api_key: "sk-a", primary: true])
+      Application.put_env(:fermix_core, :personalization, seeded_personalization())
+      Application.put_env(:fermix_core, :realtime, enabled: true, provider: "openai")
+
+      report = Readiness.report()
+
+      assert report.status == :ready
+      assert Enum.any?(report.failures, &(&1.detail_key == "realtime:openai" and not &1.gating))
+    end
+
+    test "a missing provider credential gates" do
+      Application.put_env(:fermix_core, :providers, anthropic: [primary: true])
+      Application.put_env(:fermix_core, :personalization, seeded_personalization())
+
+      report = Readiness.report()
+
+      assert report.status == :setup_required
+
+      assert Enum.any?(
+               report.failures,
+               &(&1.detail_key == "provider:missing_credentials:anthropic" and &1.gating)
+             )
+    end
+
+    test "missing personalization gates" do
+      seed_ready_home()
+      Application.put_env(:fermix_core, :personalization, [])
+
+      report = Readiness.report()
+
+      assert report.status == :setup_required
+      assert Enum.any?(report.failures, &(&1.detail_key == "personalization" and &1.gating))
+    end
+
+    # Ready is "no gating failure remains", and every advisory failure stays in
+    # the list, so no surface needs a second definition of ready and nothing is
+    # hidden to make the status word come out right.
+    test "every failure carries gating, a known pane and a detail key" do
+      Application.put_env(:fermix_core, :providers, [])
+      Application.put_env(:fermix_core, :personalization, [])
+      Application.put_env(:fermix_channels, :telegram, enabled: true)
+      Application.put_env(:fermix_core, :realtime, enabled: true, provider: "openai")
+
+      report = Readiness.report()
+
+      assert report.failures != []
+
+      for failure <- report.failures do
+        assert is_boolean(failure.gating), "#{failure.component} has no gating flag"
+        assert failure.pane in Readiness.panes(), "#{failure.component} names an unknown pane"
+        assert is_binary(failure.detail_key) and failure.detail_key != ""
+        assert is_binary(failure.action) and failure.action != ""
+      end
+    end
+
+    test "a detail key is unique per cause across one report" do
+      Application.put_env(:fermix_core, :providers, [])
+      Application.put_env(:fermix_core, :personalization, [])
+      Application.put_env(:fermix_channels, :telegram, enabled: true)
+
+      keys = Enum.map(Readiness.report().failures, & &1.detail_key)
+
+      assert keys == Enum.uniq(keys)
+    end
+  end
+
+  describe "the channel table" do
+    test "publishes the five channels readiness knows about" do
+      assert Readiness.channels() == [:telegram, :whatsapp, :discord, :slack, :signal]
+    end
+
+    test "telegram is the one channel enabled by default" do
+      Application.put_env(:fermix_channels, :telegram, [])
+
+      assert Readiness.channel_enabled?(:telegram)
+      refute Readiness.channel_enabled?(:discord)
+    end
+
+    test "configured follows the credentials the channel actually needs" do
+      Application.put_env(:fermix_channels, :telegram, enabled: true)
+      refute Readiness.channel_configured?(:telegram)
+
+      Application.put_env(:fermix_channels, :telegram, enabled: true, bot_token: "t")
+      assert Readiness.channel_configured?(:telegram)
+    end
+  end
+
   describe "personalization_failure/0" do
     test "returns failure when any personalization key is blank" do
       Application.put_env(:fermix_core, :personalization,
@@ -37,7 +144,7 @@ defmodule FermixCore.ReadinessTest do
       )
 
       assert %{component: "personalization", action: action} = Readiness.personalization_failure()
-      assert action =~ "mix fermix.setup"
+      assert action =~ "communication style"
     end
 
     test "returns failure when personalization is empty" do
@@ -103,7 +210,7 @@ defmodule FermixCore.ReadinessTest do
 
       assert Enum.any?(report.failures, fn failure ->
                failure.component == "provider:anthropic" and
-                 failure.action =~ "fallback providers (openai)"
+                 failure.action =~ "fallback providers (`openai`)"
              end)
     end
 
@@ -117,7 +224,7 @@ defmodule FermixCore.ReadinessTest do
 
       assert Enum.any?(report.failures, fn failure ->
                failure.component == "provider:config" and
-                 failure.action =~ "Unknown provider :bogus_provider"
+                 failure.action =~ "configured provider `bogus_provider` is not one Fermix knows"
              end)
     end
 
@@ -131,7 +238,7 @@ defmodule FermixCore.ReadinessTest do
 
       assert Enum.any?(report.failures, fn failure ->
                failure.component == "provider:config" and
-                 failure.action =~ "exactly one provider primary"
+                 failure.action =~ "Mark exactly one primary"
              end)
     end
   end
@@ -235,7 +342,7 @@ defmodule FermixCore.ReadinessTest do
       report = Readiness.report()
 
       assert Enum.any?(report.failures, fn failure ->
-               failure.component == "provider:anthropic" and failure.action =~ "Invalid auth_mode"
+               failure.component == "provider:anthropic" and failure.action =~ "sign-in mode"
              end)
     end
 
@@ -253,7 +360,7 @@ defmodule FermixCore.ReadinessTest do
       report = Readiness.report()
 
       assert Enum.any?(report.failures, fn failure ->
-               failure.component == "provider:xai" and failure.action =~ "Invalid auth_mode"
+               failure.component == "provider:xai" and failure.action =~ "sign-in mode"
              end)
     end
 
@@ -328,7 +435,8 @@ defmodule FermixCore.ReadinessTest do
       report = Readiness.report()
 
       assert Enum.any?(report.failures, fn failure ->
-               failure.component == "provider:xai" and failure.action =~ "XAI_API_KEY"
+               failure.component == "provider:xai" and
+                 failure.action == "Add the SpaceXAI API key in Providers settings."
              end)
 
       Application.put_env(:fermix_core, :providers, xai: [api_key: "xai-key"])
@@ -352,7 +460,7 @@ defmodule FermixCore.ReadinessTest do
 
       assert Enum.any?(report.failures, fn failure ->
                failure.component == "provider:anthropic" and
-                 failure.action =~ "ANTHROPIC_API_KEY"
+                 failure.action == "Add the Anthropic API key in Providers settings."
              end)
     end
 
@@ -435,7 +543,9 @@ defmodule FermixCore.ReadinessTest do
       report = Readiness.report()
 
       assert Enum.any?(report.failures, fn failure ->
-               failure.component == "realtime:openai" and failure.action =~ "OPENAI_API_KEY"
+               failure.component == "realtime:openai" and
+                 failure.action ==
+                   "Add the OpenAI API key in Providers settings, or turn voice off."
              end)
     end
   end
@@ -486,5 +596,14 @@ defmodule FermixCore.ReadinessTest do
       assert report.status == :ready
       refute Enum.any?(report.failures, &(&1.component == "channel:acp"))
     end
+  end
+
+  defp seed_ready_home do
+    Application.put_env(:fermix_core, :providers, openai: [api_key: "sk-test", primary: true])
+    Application.put_env(:fermix_core, :personalization, seeded_personalization())
+  end
+
+  defp seeded_personalization do
+    [user_name: "Sam", timezone: "Asia/Singapore", communication_style: "concise"]
   end
 end

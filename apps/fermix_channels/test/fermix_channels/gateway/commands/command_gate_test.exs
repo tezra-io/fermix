@@ -22,8 +22,9 @@ defmodule FermixChannels.Gateway.Commands.CommandGateTest do
   # `/background` spends the owner's provider budget outside the single-flight
   # queue; `/ultra` is conversation-scoped but multiplies one turn into a wide
   # subagent fan-out on the owner's account, so cost puts it here even though
-  # scope would not; the sandbox mutation subcommands were already strict.
-  @operator_only ~w(soul skills stop background bg grant revoke confirm ultra)
+  # scope would not; the sandbox mutation subcommands were already strict, and
+  # `/deny` resolves the same origin-bound token `/confirm` does.
+  @operator_only ~w(soul skills stop background bg grant revoke confirm deny ultra history)
 
   # Conversation-scoped lifecycle (plus the two unauthenticated informational
   # commands): this is what the `command_allowlist` guest branch exists for.

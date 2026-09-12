@@ -5,6 +5,7 @@ defmodule FermixCore.Auth.OAuthProvider do
 
   @type t :: %__MODULE__{
           id: atom(),
+          display_name: String.t() | nil,
           authorize_url: String.t(),
           token_url: String.t(),
           userinfo_url: String.t() | nil,
@@ -19,7 +20,8 @@ defmodule FermixCore.Auth.OAuthProvider do
           token_headers: [{String.t(), String.t()}],
           token_auth: :body | :basic,
           scope_delimiter: String.t(),
-          fixed_port?: boolean()
+          fixed_port?: boolean(),
+          client_rejection_errors: [String.t()]
         }
 
   @enforce_keys [
@@ -37,6 +39,10 @@ defmodule FermixCore.Auth.OAuthProvider do
   @derive {Inspect, except: [:client_secret]}
   defstruct [
     :id,
+    # The provider's name as operators know it ("X", "Google"). Plugin providers
+    # carry it for the refused-client sentences; the built-in providers leave it
+    # nil because none of their refusals is classified.
+    :display_name,
     :authorize_url,
     :token_url,
     :userinfo_url,
@@ -60,7 +66,12 @@ defmodule FermixCore.Auth.OAuthProvider do
     scope_delimiter: " ",
     # Providers with exact-match registered redirect URIs (Notion) must bind
     # the configured port exactly — no port fallback.
-    fixed_port?: false
+    fixed_port?: false,
+    # Token-endpoint `error` codes meaning the provider refused the client (id
+    # and secret) the operator saved for it — see `Auth.ClientRejection`. Empty
+    # for the built-in providers: their clients are Fermix's own, not the
+    # operator's, so no refusal of theirs is reclassified.
+    client_rejection_errors: []
   ]
 
   @doc """

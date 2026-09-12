@@ -36,6 +36,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
 
   @impl true
   def init(opts) do
+    Process.flag(:trap_exit, true)
     socket_path = Keyword.get(opts, :socket_path, Config.socket_path())
     File.mkdir_p!(Path.dirname(socket_path))
 
@@ -125,8 +126,27 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
 
   @impl true
   def terminate(_reason, state) do
-    _ = :gen_tcp.close(state.listen_socket)
-    _ = File.rm(state.socket_path)
+    close_result = :gen_tcp.close(state.listen_socket)
+    unlink_result = unlink_socket(state.socket_path)
+    report_cleanup(close_result, unlink_result)
+  end
+
+  defp unlink_socket(path) do
+    case File.rm(path) do
+      :ok -> :ok
+      {:error, :enoent} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp report_cleanup(:ok, :ok), do: :ok
+
+  defp report_cleanup(close_result, unlink_result) do
+    Logger.error(
+      "Realtime socket cleanup failed: " <>
+        "listener_close=#{inspect(close_result)} socket_unlink=#{inspect(unlink_result)}"
+    )
+
     :ok
   end
 

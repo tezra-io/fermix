@@ -1,12 +1,20 @@
 defmodule Fermix.CLI.StatusCommand do
   @moduledoc """
-  `fermix status` — print the running daemon's status by talking to
-  its control socket.
+  `fermix status` — print the running daemon's status from the management
+  socket.
 
-  Returns `0` when the daemon answers, `1` when the socket exists but
-  the daemon is unhealthy, and `3` when nothing is listening (the
-  conventional "service not running" exit so monitoring scripts can
-  branch on it).
+  M34 §2 defines no v1 `status` method, so the plain line is projected from two
+  calls: `hello` carries identity and the negotiated protocol range, and
+  `overview.get` carries the daemon's own status and uptime. `--json` and
+  `--full` render `overview.get` alone.
+
+  Returns `0` when the daemon answers, `1` when it answers but cannot report,
+  and `3` when nothing is listening (the conventional "service not running"
+  exit so monitoring scripts can branch on it).
+
+  `overview.get` is the daemon's public projection: it carries no filesystem
+  path and no raw failure term, so `--full` reports neither. Both remain
+  available through `fermix doctor` and `fermix logs`.
   """
 
   alias Fermix.CLI.Daemon.Client
@@ -31,21 +39,18 @@ defmodule Fermix.CLI.StatusCommand do
   end
 
   defp print_daemon_status do
-    case Client.status() do
-      {:ok, %{"status" => "ok"} = reply} -> print_ok(reply)
-      {:ok, other} -> print_unexpected(other)
-      {:error, :not_running} -> print_not_running()
-      {:error, reason} -> print_error(reason)
+    with {:ok, hello} <- Client.request_v1("hello"),
+         {:ok, overview} <- Client.request_v1("overview.get") do
+      print_running(hello, overview)
+    else
+      {:error, reason} -> print_failure(reason)
     end
   end
 
   defp print_overview(mode) when mode in [:json, :full] do
-    case Client.request("overview") do
-      {:ok, %{"status" => "ok", "overview" => overview}} -> print_overview(mode, overview)
-      {:ok, %{"status" => "error", "reason" => reason}} -> print_error(reason)
-      {:ok, other} -> print_unexpected(other)
-      {:error, :not_running} -> print_not_running()
-      {:error, reason} -> print_error(reason)
+    case Client.request_v1("overview.get") do
+      {:ok, overview} -> print_overview(mode, overview)
+      {:error, reason} -> print_failure(reason)
     end
   end
 
@@ -63,13 +68,20 @@ defmodule Fermix.CLI.StatusCommand do
     IO.puts("workers: #{Map.get(overview["agents"] || %{}, "skill_workers", 0)}")
     IO.puts("jobs: #{format_jobs(Map.get(overview, "jobs", %{}))}")
     IO.puts("capabilities: #{format_capabilities(Map.get(overview, "capabilities", %{}))}")
-    IO.puts("paths: #{get_in(overview, ["paths", "home"]) || "unknown"}")
     0
   end
 
-  defp print_ok(%{"version" => version, "uptime_ms" => uptime_ms} = reply) do
-    pid = Map.get(reply, "pid", "?")
-    IO.puts("fermix: running (pid #{pid}, version #{version}, up #{format_uptime(uptime_ms)})")
+  defp print_running(hello, overview) do
+    daemon = Map.get(overview, "daemon", %{})
+    version = get_in(hello, ["engine", "product_version"])
+    pid = get_in(hello, ["engine", "pid"]) || "?"
+    protocol = get_in(hello, ["protocol", "current_version"])
+
+    IO.puts(
+      "fermix: running (pid #{pid}, version #{version}, " <>
+        "up #{format_uptime(Map.get(daemon, "uptime_ms"))}, protocol v#{protocol})"
+    )
+
     print_skew_warning(VersionSkew.note(version))
     0
   end
@@ -77,18 +89,15 @@ defmodule Fermix.CLI.StatusCommand do
   defp print_skew_warning(nil), do: :ok
   defp print_skew_warning(note), do: IO.puts("warning: #{note}")
 
-  defp print_unexpected(reply) do
-    IO.puts(:stderr, "fermix status: unexpected reply: #{inspect(reply)}")
-    1
-  end
-
   defp print_not_running do
     IO.puts(:stderr, "fermix: not running")
     @not_running_exit
   end
 
-  defp print_error(reason) do
-    IO.puts(:stderr, "fermix status: #{inspect(reason)}")
+  defp print_failure(:not_running), do: print_not_running()
+
+  defp print_failure(reason) do
+    IO.puts(:stderr, "fermix status: #{Client.describe_error(reason)}")
     1
   end
 
@@ -97,10 +106,12 @@ defmodule Fermix.CLI.StatusCommand do
     2
   end
 
+  # The projection publishes the unavailability but not the raw registry term
+  # behind it, which `fermix doctor` and the daemon log still carry.
   defp format_jobs(jobs) do
     case Map.get(jobs, "status") do
       "unavailable" ->
-        "unavailable (#{Map.get(jobs, "error", "unknown")})"
+        "unavailable (see `fermix doctor`)"
 
       _status ->
         "scheduled #{Map.get(jobs, "scheduled", 0)}, running #{Map.get(jobs, "running", 0)}, " <>

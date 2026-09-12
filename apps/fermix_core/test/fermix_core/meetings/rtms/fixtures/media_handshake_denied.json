@@ -1,0 +1,7 @@
+{
+  "_synthesized": "synthesized from docs 2026-08-16 — revalidate against a live RTMS capture before release",
+  "msg_type": "DATA_HAND_SHAKE_RESP",
+  "protocol_version": 1,
+  "reason": "multi-channel audio not enabled for this app",
+  "status_code": "STATUS_INVALID_MESSAGE"
+}

@@ -190,4 +190,66 @@ defmodule FermixCore.Auth.AnthropicLoginTest do
              )
     end
   end
+
+  # The presence probe exists because reading the value prompts. A `-w` here
+  # would put a macOS allow dialog in front of a daemon request that nobody is
+  # watching, so the argv is asserted, not just the answer.
+  describe "claude_code_present?/1" do
+    test "asks the keychain whether the item exists and never for its value" do
+      dir = tmp_dir()
+      log = Path.join(dir, "argv.log")
+
+      assert AnthropicLogin.claude_code_present?(
+               security_path: fake_security(dir, log, 0),
+               credentials_path: Path.join(dir, "missing.json")
+             )
+
+      argv = File.read!(log) |> String.split("\n", trim: true)
+
+      assert argv == ["find-generic-password", "-s", "Claude Code-credentials"]
+      refute "-w" in argv
+    end
+
+    test "an item the keychain does not hold is not present" do
+      dir = tmp_dir()
+
+      refute AnthropicLogin.claude_code_present?(
+               security_path: fake_security(dir, Path.join(dir, "argv.log"), 44),
+               credentials_path: Path.join(dir, "missing.json")
+             )
+    end
+
+    # The credentials file is the second store Claude Code itself uses, so a
+    # Linux host with no keychain still answers truthfully.
+    test "the credentials file alone is presence" do
+      dir = tmp_dir()
+
+      assert AnthropicLogin.claude_code_present?(
+               keychain_present?: fn -> false end,
+               credentials_path: write_credentials(dir, claude_code_json())
+             )
+    end
+
+    test "no security binary on this host is not presence" do
+      dir = tmp_dir()
+
+      refute AnthropicLogin.claude_code_present?(
+               security_path: nil,
+               credentials_path: Path.join(dir, "missing.json")
+             )
+    end
+  end
+
+  defp fake_security(dir, log, exit_status) do
+    path = Path.join(dir, "security")
+
+    File.write!(path, """
+    #!/bin/sh
+    for arg in "$@"; do printf '%s\\n' "$arg" >> #{log}; done
+    exit #{exit_status}
+    """)
+
+    File.chmod!(path, 0o755)
+    path
+  end
 end

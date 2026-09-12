@@ -36,6 +36,10 @@ defmodule FermixCore.Net.TimeoutPolicyTest do
       assert timeout > @req_default_ms
     end
 
+    test "mobile link unfurling has one centralized bounded timeout" do
+      assert TimeoutPolicy.receive_timeout_for(:unfurl) == 15_000
+    end
+
     test "an unknown request kind fails loud — no silent default (Rule #12)" do
       # apply/3 keeps the kind opaque to the typechecker; a bare literal call here
       # is a provable type violation (zero overlap with the 3 known kinds) and

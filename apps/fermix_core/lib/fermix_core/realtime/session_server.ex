@@ -1433,11 +1433,34 @@ defmodule FermixCore.Realtime.SessionServer do
   defp tokens_from_usage(usage) do
     prompt = non_neg_int(Map.get(usage, "input_tokens"))
     completion = non_neg_int(Map.get(usage, "output_tokens"))
+    base = %{prompt: prompt, completion: completion, total: prompt + completion}
 
-    cached =
-      usage |> Map.get("input_token_details", %{}) |> Map.get("cached_tokens") |> non_neg_int()
+    case cached_tokens(usage) do
+      nil -> base
+      cached -> Map.put(base, :cached, cached)
+    end
+  end
 
-    %{prompt: prompt, completion: completion, total: prompt + completion, cached: cached}
+  # Absent stays absent. A reported 0 means "the vendor served nothing from
+  # cache"; a missing key means "the vendor reported nothing", and a cache-aware
+  # price may only be claimed on a count somebody measured — a fabricated 0 would
+  # let a cold call be priced as if its preamble had been cached. A present count
+  # that is not a non-negative integer is a vendor-contract break, not a value to
+  # quietly round off.
+  defp cached_tokens(usage) do
+    usage
+    |> Map.get("input_token_details", %{})
+    |> Map.get("cached_tokens")
+    |> cache_count!()
+  end
+
+  defp cache_count!(nil), do: nil
+  defp cache_count!(value) when is_integer(value) and value >= 0, do: value
+
+  defp cache_count!(value) do
+    raise ArgumentError,
+          "input_token_details.cached_tokens must be a non-negative integer, " <>
+            "got: #{inspect(value)}"
   end
 
   defp non_neg_int(value) when is_integer(value) and value >= 0, do: value

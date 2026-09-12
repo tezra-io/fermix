@@ -131,6 +131,16 @@ defmodule FermixCore.Setup.SecretPaths do
       sandbox_env: false
     },
     %{
+      key: :meetings_zoom_client_secret,
+      env: "MEETINGS_ZOOM_CLIENT_SECRET",
+      path: [:fermix_core, :meetings, :zoom_client_secret],
+      functionality: "Zoom RTMS meeting notetaker",
+      optional?: true,
+      # BEAM-internal HTTP/WebSocket (no subprocess), so it is not exposed via
+      # [sandbox.env] — the meetbot sidecar never sees the Zoom credentials.
+      sandbox_env: false
+    },
+    %{
       key: :google_oauth_client_secret,
       env: "GOOGLE_OAUTH_CLIENT_SECRET",
       path: [:fermix_core, :oauth, "google", :client_secret]
@@ -189,6 +199,14 @@ defmodule FermixCore.Setup.SecretPaths do
       key: :slack_signing_secret,
       env: "SLACK_SIGNING_SECRET",
       path: [:fermix_channels, :slack, :signing_secret]
+    },
+    %{
+      key: :mobile_apns_key,
+      env: "FERMIX_APNS_KEY",
+      path: [:fermix_channels, :mobile, :push, :key],
+      functionality: "Mobile APNs push",
+      optional?: true,
+      sandbox_env: false
     },
     # api_key-plugin secrets (M16): the static credential an `auth: api_key`
     # plugin authenticates with (e.g. a Discord bot token). Plugin-namespaced

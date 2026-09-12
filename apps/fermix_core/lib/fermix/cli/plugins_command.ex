@@ -5,6 +5,7 @@ defmodule Fermix.CLI.PluginsCommand do
 
   alias Fermix.CLI.Daemon.Client, as: DaemonClient
   alias Fermix.CLI.SecretInput
+  alias FermixCore.Auth.ClientRejection
   alias FermixCore.Auth.Redaction
   alias FermixCore.Auth.Store
   alias FermixCore.Plugins.Auth
@@ -677,6 +678,13 @@ defmodule Fermix.CLI.PluginsCommand do
 
   defp error({:blank_config_value, key}) do
     IO.puts(:stderr, "fermix plugins: #{key} requires a non-empty value")
+    1
+  end
+
+  # auth login, reauthorize and refresh: the provider refused the saved sign-in
+  # client, which signing in again cannot fix until the client is updated.
+  defp error({:oauth_client_rejected, detail}) do
+    IO.puts(:stderr, "fermix plugins: #{ClientRejection.sentence(detail)}")
     1
   end
 

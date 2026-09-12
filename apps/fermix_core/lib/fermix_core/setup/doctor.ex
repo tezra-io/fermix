@@ -16,6 +16,7 @@ defmodule FermixCore.Setup.Doctor do
   Inject `req_options: [plug: ...]` to stub HTTP in tests.
   """
 
+  alias Fermix.CLI.Daemon.Client, as: DaemonClient
   alias FermixCore.Auth.CodexToken
   alias FermixCore.Auth.Redaction
   alias FermixCore.Auth.Store
@@ -25,6 +26,9 @@ defmodule FermixCore.Setup.Doctor do
   alias FermixCore.ComputerUse
   alias FermixCore.ComputerUse.Probe, as: ComputerUseProbe
   alias FermixCore.ComputerUse.SidecarInstaller
+  alias FermixCore.Meetings
+  alias FermixCore.Meetings.Config, as: MeetingsConfig
+  alias FermixCore.Meetings.SidecarInstaller, as: MeetbotInstaller
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.PrimaryConfig
@@ -34,6 +38,8 @@ defmodule FermixCore.Setup.Doctor do
   alias FermixCore.Tools.SearchCredential
   alias FermixCore.Tools.WebSearch
   alias FermixCore.Transcription
+  alias FermixCore.Transcription.Local.ModelStore
+  alias FermixCore.Transcription.Local.SidecarInstaller, as: SttInstaller
 
   @type provider ::
           :openai | :openai_codex | :anthropic | :xai | :openrouter | :ollama | :mistral
@@ -82,9 +88,31 @@ defmodule FermixCore.Setup.Doctor do
           %{:status => :configured, :backend => atom(), :credential_present? => boolean()}
           | %{status: :unconfigured}
           | %{status: :error, error: String.t()}
+  @type local_missing ::
+          :sidecar_not_installed | :no_release_pinned | :model_not_installed | :model_pins_missing
   @type transcription_report ::
           %{:status => :configured, :backend => atom(), :credential_present? => boolean()}
+          | %{
+              :status => :needs_install,
+              :backend => :local,
+              :missing => local_missing(),
+              :remedy => String.t()
+            }
           | %{status: :error, error: String.t()}
+  @type meetings_report ::
+          %{status: :disabled}
+          | %{
+              :status => :enabled,
+              :ready? => boolean(),
+              :sidecar_installed? => boolean(),
+              :browser_installed? => boolean(),
+              :browser_note => String.t() | nil,
+              :pinned_tag => String.t() | nil,
+              :profile => :signed_in | :not_signed_in | :absent,
+              :profile_note => String.t(),
+              :rtms_configured? => boolean(),
+              :remedy => String.t() | nil
+            }
   @type model_window :: %{
           provider: provider(),
           model: String.t(),
@@ -106,7 +134,7 @@ defmodule FermixCore.Setup.Doctor do
   @xai_default_base_url "https://api.x.ai/v1"
   @openrouter_default_base_url "https://openrouter.ai/api/v1"
   @mistral_default_base_url "https://api.mistral.ai/v1"
-  @command_channels [:telegram, :whatsapp, :discord, :slack, :signal]
+  @command_channels [:telegram, :whatsapp, :discord, :slack, :signal, :mobile]
   @web_search_probe_query "fermix web search health check"
   # A landmark, not a category: the place probe is never anchored (it must not
   # read the owner's saved location), and an unanchored category query can
@@ -123,6 +151,30 @@ defmodule FermixCore.Setup.Doctor do
     {"network", :network}
   ]
   @default_probe_timeout_ms 5_000
+  # Operator-facing remedies for the on-device transcription backend. The
+  # "cannot be installed yet" sentences belong to the installer modules (they
+  # own the reason) and are rendered verbatim; these two cover the ordinary
+  # "nothing has been installed yet" case.
+  @local_sidecar_remedy "The on-device speech sidecar is not installed. " <>
+                          "Install it from fermix setup → Transcription."
+  @local_model_remedy "The on-device speech model is not installed. " <>
+                        "Install it from fermix setup → Voice notes (the on-device backend)."
+  # The daemon never reads inside the profile; it knows only whether a sign-in
+  # finished (a marker `SidecarInstaller` writes) and whether the profile it
+  # wrote still exists. The named surface is the Meeting Notetaker card's
+  # Configure modal on the setup Plugins page — the Meetings tab it replaced
+  # (7ec3a33) no longer exists.
+  @meet_signed_in "bot signed in ✓ — Google Meet joins use the bot account"
+  @meet_not_signed_in "bot not signed in — Google Meet joins are denied until you sign " <>
+                        "the bot in from fermix setup → Plugins → Meeting Notetaker → Configure"
+  @meet_profile_absent "bot not signed in — Google Meet joins will be denied; sign the " <>
+                         "bot account in from fermix setup → Plugins → Meeting Notetaker → Configure"
+  @meet_browser_absent "browser not installed — Google Meet can't launch until it is; open " <>
+                         "fermix setup → Plugins → Meeting Notetaker → Configure and it " <>
+                         "installs automatically."
+  @meetings_no_lane "No meeting lane is usable. Enable the Meeting Notetaker on the " <>
+                      "fermix setup Plugins page (this installs the sidecar), or complete " <>
+                      "the Zoom RTMS credentials in its Configure."
 
   @spec probe_provider(provider(), keyword()) :: {:ok, probe_ok()} | {:error, probe_error()}
   def probe_provider(provider, opts \\ [])
@@ -199,6 +251,42 @@ defmodule FermixCore.Setup.Doctor do
       channels: probe_channels(opts)
     }
   end
+
+  @doc "Returns mobile listener state from the running daemon without probing locally."
+  @spec mobile_report(keyword()) :: map()
+  def mobile_report(opts \\ []) when is_list(opts) do
+    config = Application.get_env(:fermix_channels, :mobile, [])
+
+    if Keyword.get(config, :enabled, false) == true do
+      request_mobile_report(Keyword.get(opts, :client, &default_mobile_client/1))
+    else
+      %{enabled: false, status: :disabled}
+    end
+  end
+
+  defp request_mobile_report(client) when is_function(client, 1) do
+    case client.("mobile_status") do
+      {:ok, %{"status" => "ok", "result" => report}} when is_map(report) ->
+        %{enabled: true, status: :reported, report: report}
+
+      {:error, :not_running} ->
+        %{enabled: true, status: :daemon_not_running}
+
+      # A daemon that answers "error" is reporting a real mobile fault — a
+      # refused trust store, a dormant listener. Quote its reason instead of
+      # labelling the answer malformed, which reads as a protocol bug.
+      {:ok, %{"status" => "error", "reason" => reason}} ->
+        %{enabled: true, status: :error, error: Redaction.format(reason)}
+
+      {:ok, other} ->
+        %{enabled: true, status: :error, error: "unexpected daemon reply: #{inspect(other)}"}
+
+      {:error, reason} ->
+        %{enabled: true, status: :error, error: Redaction.format(reason)}
+    end
+  end
+
+  defp default_mobile_client(method), do: DaemonClient.request(method)
 
   @spec probe_channels(keyword()) :: [channel_probe()]
   def probe_channels(opts \\ []) do
@@ -457,16 +545,128 @@ defmodule FermixCore.Setup.Doctor do
   key) without transcribing anything. Unlike `image_report/1` there is no
   `:unconfigured` state: `[fermix_core.transcription]` always carries a
   compile-time default backend, so an absent/unknown backend is an `:error`.
+
+  The on-device `local` backend has no credential at all — what it needs is an
+  installed sidecar and an installed model — so it answers `:needs_install` with
+  the missing half named and the one sentence that fixes it. `release_pinned?:`
+  and `pins_pinned?:` are test seams for the far side of the pin gates.
   """
   @spec transcription_report(keyword()) :: transcription_report()
-  def transcription_report(_opts \\ []) do
+  def transcription_report(opts \\ []) do
     case Transcription.active_backend() do
+      {:ok, {:local, module}} ->
+        local_transcription_report(module, opts)
+
       {:ok, {name, module}} ->
         %{status: :configured, backend: name, credential_present?: credential_present?(module)}
 
       {:error, message} ->
         %{status: :error, error: message}
     end
+  end
+
+  # "Not installed" and "this build cannot install it yet" are different
+  # problems with different fixes, so they stay distinct states rather than
+  # collapsing into one "not configured" line.
+  defp local_transcription_report(module, opts) do
+    case module.configured?([]) do
+      :ok -> %{status: :configured, backend: :local, credential_present?: true}
+      {:error, :sidecar_not_installed} -> local_sidecar_missing(opts)
+      {:error, :model_not_installed} -> local_model_missing(opts)
+    end
+  end
+
+  defp local_sidecar_missing(opts) do
+    if Keyword.get(opts, :release_pinned?, SttInstaller.release_pinned?()) do
+      needs_install(:sidecar_not_installed, @local_sidecar_remedy)
+    else
+      needs_install(:no_release_pinned, SttInstaller.error_message(:no_release_pinned))
+    end
+  end
+
+  defp local_model_missing(opts) do
+    if Keyword.get(opts, :pins_pinned?, ModelStore.pins_pinned?()) do
+      needs_install(:model_not_installed, @local_model_remedy)
+    else
+      needs_install(:model_pins_missing, ModelStore.error_message(:model_pins_missing))
+    end
+  end
+
+  defp needs_install(missing, remedy) do
+    %{status: :needs_install, backend: :local, missing: missing, remedy: remedy}
+  end
+
+  @doc """
+  Reports the meeting notetaker's readiness: whether either lane can actually
+  place a bot (Meet sidecar installed / Zoom RTMS credentials complete), whether
+  the Meet profile directory exists, and the one thing to do when the subsystem
+  is enabled with no usable lane.
+
+  Offline, like `transcription_report/1`: it never spawns the sidecar. Launching
+  a Playwright browser to answer a doctor row is not a diagnostic, and the
+  sidecar offers no cheaper identity call — so this reports installed state, not
+  a live handshake.
+  """
+  @spec meetings_report(keyword()) :: meetings_report()
+  def meetings_report(_opts \\ []) do
+    config = MeetingsConfig.load()
+
+    if config.enabled do
+      enabled_meetings_report(config)
+    else
+      %{status: :disabled}
+    end
+  end
+
+  defp enabled_meetings_report(config) do
+    installed? = MeetbotInstaller.installed?()
+    browser_installed? = MeetbotInstaller.browser_installed?()
+    rtms_configured? = MeetingsConfig.rtms_configured?(config)
+    profile = meet_profile_state()
+    browser_note = meet_browser_note(installed?, browser_installed?)
+
+    %{
+      status: :enabled,
+      ready?: Meetings.ready?(),
+      sidecar_installed?: installed?,
+      browser_installed?: browser_installed?,
+      browser_note: browser_note,
+      pinned_tag: MeetbotInstaller.pinned_tag(),
+      profile: profile,
+      profile_note: meet_profile_note(profile),
+      rtms_configured?: rtms_configured?,
+      remedy: meetings_remedy(browser_note, rtms_configured?)
+    }
+  end
+
+  # Only meaningful once the binary is present: the browser installs right after
+  # it, so a missing browser on an installed sidecar is the state to name.
+  defp meet_browser_note(true, false), do: @meet_browser_absent
+  defp meet_browser_note(_installed?, _browser_installed?), do: nil
+
+  defp meet_profile_state do
+    cond do
+      MeetbotInstaller.signed_in?() -> :signed_in
+      File.dir?(MeetbotInstaller.profile_dir()) -> :not_signed_in
+      true -> :absent
+    end
+  end
+
+  defp meet_profile_note(:signed_in), do: @meet_signed_in
+  defp meet_profile_note(:not_signed_in), do: @meet_not_signed_in
+  defp meet_profile_note(:absent), do: @meet_profile_absent
+
+  # Neither lane is ready. Which sentence depends on how far the Meet lane got:
+  # a sidecar with no browser is a half-installed lane, and telling that operator
+  # to "install the meetbot sidecar" names the step they already completed.
+  # A meetbot release is pinned in this build, so the "no release at all" state is
+  # unreachable; a host with no pinned artifact for its target surfaces the
+  # installer's own error at enable time.
+  defp meetings_remedy(_browser_note, true), do: nil
+  defp meetings_remedy(browser_note, false) when is_binary(browser_note), do: browser_note
+
+  defp meetings_remedy(nil, false) do
+    if Meetings.meet_lane_ready?(), do: nil, else: @meetings_no_lane
   end
 
   defp credential_present?(module) do
@@ -494,6 +694,15 @@ defmodule FermixCore.Setup.Doctor do
   # control socket; probing here would only add a "no live health probe" warning
   # next to that answer.
   defp enabled_probe_channel?(%{trust: :local_operator}), do: false
+
+  # A `transport: :listener` channel (the mobile companion) is a daemon-owned
+  # socket, not a remote service. Its adapter's health check `GenServer.call`s
+  # named processes that exist only inside the daemon supervision tree, so
+  # probing it from the tree-less `fermix doctor` VM answers `:noproc` and
+  # red-fails a perfectly healthy host with a phantom listener failure.
+  # `Fermix.CLI.Doctor.Checks.mobile/1` owns that answer: it asks the running
+  # daemon over the control socket, which is the only world that can answer it.
+  defp enabled_probe_channel?(%{transport: :listener}), do: false
 
   defp enabled_probe_channel?(%{config_key: key} = channel) when is_atom(key) do
     case FermixCore.Config.channel(key) do
@@ -654,7 +863,7 @@ defmodule FermixCore.Setup.Doctor do
       mode when mode in [:oauth, "oauth"] ->
         probe_xai_bearer(
           config,
-          require_oauth_token("xai_oauth", "xai", opts),
+          require_oauth_token(Store.profile(:xai), "xai", opts),
           "Grok subscription OAuth",
           opts
         )
@@ -952,7 +1161,7 @@ defmodule FermixCore.Setup.Doctor do
   end
 
   defp require_anthropic_oauth_token(opts),
-    do: require_oauth_token("anthropic_oauth", "anthropic", opts)
+    do: require_oauth_token(Store.profile(:anthropic), "anthropic", opts)
 
   defp require_oauth_token(profile, label, opts) do
     cond do

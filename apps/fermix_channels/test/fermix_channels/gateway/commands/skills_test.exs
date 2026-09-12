@@ -73,24 +73,29 @@ defmodule FermixChannels.Gateway.Commands.SkillsTest do
   defp dispatch(content, ctx, opts \\ []) do
     test_pid = self()
 
-    context = %{
-      conversation_key: {"telegram", "chat-1", :root},
-      authorization: authorization(Keyword.get(opts, :role, :operator)),
-      skill_curation_opts:
-        [
-          repo: ctx.repo,
-          skills_root: ctx.skills_root,
-          main_agent_server: nil,
-          adapter: Keyword.get(opts, :adapter, DraftStub),
-          configured_owners: %{"telegram" => "owner-1"},
-          jobs_config: []
-        ] ++ registry_opt(opts)
-    }
+    context =
+      %{
+        conversation_key: {"telegram", "chat-1", :root},
+        authorization: authorization(Keyword.get(opts, :role, :operator)),
+        skill_curation_opts:
+          [
+            repo: ctx.repo,
+            skills_root: ctx.skills_root,
+            main_agent_server: nil,
+            adapter: Keyword.get(opts, :adapter, DraftStub),
+            configured_owners: %{"telegram" => "owner-1"},
+            jobs_config: []
+          ] ++ registry_opt(opts)
+      }
+      |> maybe_put_defer(Keyword.get(opts, :defer_command_fn))
 
     message = message(content, opts)
     reply_fn = fn {:text, text} -> send(test_pid, {:skills_reply, text}) end
     Commands.dispatch(Commands.parse(message), reply_fn, context)
   end
+
+  defp maybe_put_defer(context, nil), do: context
+  defp maybe_put_defer(context, defer), do: Map.put(context, :defer_command_fn, defer)
 
   # Present only when a test provides one: a `skill_registry: nil` entry would
   # override the facade's module default.
@@ -283,6 +288,29 @@ defmodule FermixChannels.Gateway.Commands.SkillsTest do
 
     assert_receive {:skills_reply, outcome}, 2_000
     assert outcome =~ "Nothing new"
+  end
+
+  test "review defers the command and settles after its final outcome reply", ctx do
+    test_pid = self()
+
+    defer = fn ->
+      send(test_pid, :command_deferred)
+      fn outcome -> send(test_pid, {:command_terminal, outcome}) end
+    end
+
+    assert :ok =
+             dispatch("/skills review", ctx,
+               chat_id: "owner-1",
+               adapter: MinerStub,
+               defer_command_fn: defer
+             )
+
+    assert_receive :command_deferred
+    assert_receive {:skills_reply, ack}
+    assert ack =~ "results will land here"
+    assert_receive {:skills_reply, outcome}, 2_000
+    assert outcome =~ "Nothing new"
+    assert_receive {:command_terminal, :completed}
   end
 
   test "content-bearing subcommands refuse non-private conversations", ctx do

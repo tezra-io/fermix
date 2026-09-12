@@ -19,6 +19,25 @@ defmodule FermixCore.Capabilities.MCP.Discoverer do
               {:ok, [tool_descriptor()]} | {:error, term()}
 
   @doc """
+  Ask this discoverer to report upstream tool-list changes to `listener`.
+
+  REQUIRED for any discoverer serving a signed contract: a contract-bearing
+  source has a registration that a `notifications/tools/list_changed`
+  invalidates, and the registration owner is the only process that can rebuild
+  it (M27 §7.6). Without this the notification has nowhere to go and the whole
+  suspension/rediscovery path is unreachable from the wire.
+
+  Optional because a stdio source carries no contract, so there is no signed
+  registration to invalidate — `Discoverer.Anubis` need not implement it.
+
+  Idempotent: the registration owner re-arms the watch on every discovery pass,
+  and the last listener wins.
+  """
+  @callback watch_tools(client :: term(), listener :: pid()) :: :ok | {:error, term()}
+
+  @optional_callbacks watch_tools: 2
+
+  @doc """
   The ONE definition of a normalized tool descriptor, shared by every discovery
   path (stdio via `Discoverer.Anubis`, remote via `Remote.Owner`).
 

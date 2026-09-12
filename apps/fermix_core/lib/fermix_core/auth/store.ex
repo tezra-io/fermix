@@ -92,6 +92,38 @@ defmodule FermixCore.Auth.Store do
   @spec path() :: Path.t()
   def path, do: default_path()
 
+  # The one provider -> auth-profile table. A profile name is not the provider
+  # id: anthropic and xai store their OAuth entries under their own profile,
+  # so reading `auth.json` under the provider id finds nothing and reports a
+  # signed-in account as absent.
+  @auth_profiles %{openai_codex: "openai_codex", anthropic: "anthropic_oauth", xai: "xai_oauth"}
+
+  @doc """
+  The auth profile a provider's credentials live under, or `nil` for a provider
+  that has no OAuth profile at all.
+  """
+  @spec profile(atom()) :: String.t() | nil
+  def profile(provider) when is_atom(provider), do: Map.get(@auth_profiles, provider)
+
+  @doc "Every provider that stores credentials under an auth profile, ordered."
+  @spec profiled_providers() :: [atom()]
+  def profiled_providers, do: @auth_profiles |> Map.keys() |> Enum.sort()
+
+  @doc """
+  The operator-facing account name on an entry, or `nil` when the provider gave
+  none. One reader, so two surfaces cannot label the same account differently.
+  """
+  @spec account_label(entry()) :: String.t() | nil
+  def account_label(%{} = entry) do
+    case Map.get(entry, :account) do
+      %{} = account -> label_value(Map.get(account, :email) || Map.get(account, :label))
+      _absent -> nil
+    end
+  end
+
+  defp label_value(value) when is_binary(value) and value != "", do: value
+  defp label_value(_value), do: nil
+
   @spec validate_permissions(Path.t()) ::
           :ok | {:error, {:insecure_permissions, Path.t(), non_neg_integer()}} | {:error, term()}
   def validate_permissions(path \\ default_path()) when is_binary(path) do

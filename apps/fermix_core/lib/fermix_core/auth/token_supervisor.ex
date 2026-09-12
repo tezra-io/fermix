@@ -8,10 +8,13 @@ defmodule FermixCore.Auth.TokenSupervisor do
   alias FermixCore.Auth.CodexToken
   alias FermixCore.Auth.OAuthProvider
   alias FermixCore.Auth.OAuthProviders
+  alias FermixCore.Auth.Redaction
   alias FermixCore.Auth.RefreshClient
   alias FermixCore.Auth.Store
   alias FermixCore.Auth.TokenExpiry
   alias FermixCore.Auth.TokenManager
+
+  require Logger
 
   @registry FermixCore.Auth.TokenRegistry
   @dynamic_supervisor FermixCore.Auth.TokenDynamicSupervisor
@@ -44,6 +47,30 @@ defmodule FermixCore.Auth.TokenSupervisor do
       {:ok, server} -> TokenManager.status(server)
       {:error, :not_started} -> direct_status(auth_profile)
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  Drops one profile's tokens from the manager serving it, when one is running.
+
+  Never starts a manager: a profile with no live holder is already in the state
+  the caller asked for, and starting one to forget it would read the entry that
+  was just deleted.
+  """
+  @spec forget(String.t()) :: :ok
+  def forget(auth_profile) when is_binary(auth_profile) do
+    case running_manager(auth_profile) do
+      {:ok, server} -> TokenManager.forget(server)
+      :none -> :ok
+    end
+  end
+
+  defp running_manager(auth_profile) do
+    with pid when is_pid(pid) <- Process.whereis(@registry),
+         [{_pid, _value}] <- Registry.lookup(@registry, auth_profile) do
+      {:ok, via(auth_profile)}
+    else
+      _absent -> :none
     end
   end
 
@@ -248,6 +275,9 @@ defmodule FermixCore.Auth.TokenSupervisor do
       {:error, {:unsupported_oauth_provider, _provider}} ->
         {:error, :unsupported_provider}
 
+      {:error, {:oauth_client_rejected, _detail} = reason} ->
+        mark_client_rejected(auth_profile, entry, reason)
+
       {:error, {:permanent, _status, _body}} ->
         mark_reauthorization_required(auth_profile, entry)
 
@@ -274,5 +304,23 @@ defmodule FermixCore.Auth.TokenSupervisor do
   defp mark_reauthorization_required(auth_profile, entry) do
     _ = Store.write(auth_profile, %{entry | status: "reauthorization_required"})
     {:error, :reauthorization_required}
+  end
+
+  # The grant cannot renew under the refused client, so it is quarantined under
+  # its true cause, exactly as the supervised manager does; a successful sign-in
+  # or refresh rewrites the status to "ready". The caller words the refusal.
+  defp mark_client_rejected(auth_profile, entry, reason) do
+    case Store.write(auth_profile, %{entry | status: "client_rejected"}) do
+      :ok ->
+        {:error, reason}
+
+      {:error, write_reason} ->
+        Logger.error(
+          "TokenSupervisor: could not record the refused sign-in client for #{auth_profile}: " <>
+            Redaction.format(write_reason)
+        )
+
+        {:error, reason}
+    end
   end
 end

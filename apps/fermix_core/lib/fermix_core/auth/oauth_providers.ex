@@ -14,10 +14,29 @@ defmodule FermixCore.Auth.OAuthProviders do
 
   @supported_providers ~w(google github notion x slack)
 
+  # The one table of operator-facing provider names: the setup page's client
+  # forms and every refused-client sentence read it here.
+  @display_names %{
+    "google" => "Google",
+    "github" => "GitHub",
+    "notion" => "Notion",
+    "x" => "X",
+    "slack" => "Slack"
+  }
+
   @type error ::
           {:unsupported_oauth_provider, term()}
           | {:invalid_oauth_client_type, String.t(), term()}
           | :needs_client_config
+
+  @doc "Every plugin OAuth provider this registry defines, ordered."
+  @spec providers() :: [String.t()]
+  def providers, do: @supported_providers
+
+  @doc "The operator-facing name of one plugin OAuth provider."
+  @spec display_name(String.t()) :: String.t()
+  def display_name(provider) when provider in @supported_providers,
+    do: Map.fetch!(@display_names, provider)
 
   @doc """
   Builds the `OAuthProvider` definition for `provider` from the given client
@@ -64,9 +83,15 @@ defmodule FermixCore.Auth.OAuthProviders do
   defp present?(value) when is_binary(value), do: String.trim(value) != ""
   defp present?(_value), do: false
 
+  # Google refuses the saved client with `invalid_client`, "The OAuth client
+  # secret is incorrect" (https://developers.google.com/identity/protocols/oauth2/web-server,
+  # Errors: invalid_client). `unauthorized_client` is deliberately absent:
+  # Google answers it when a refresh token was minted for a different client,
+  # where signing in again is the fix, not the secret.
   defp build("google", config) do
     %OAuthProvider{
       id: :google,
+      display_name: display_name("google"),
       authorize_url: "https://accounts.google.com/o/oauth2/v2/auth",
       token_url: "https://oauth2.googleapis.com/token",
       userinfo_url: "https://openidconnect.googleapis.com/v1/userinfo",
@@ -76,16 +101,20 @@ defmodule FermixCore.Auth.OAuthProviders do
       redirect_port: Keyword.get(config, :redirect_port, 1455),
       redirect_path: "/auth/callback",
       scopes: Keyword.get(config, :scopes, []),
-      extra_authorize_params: %{"access_type" => "offline", "prompt" => "consent"}
+      extra_authorize_params: %{"access_type" => "offline", "prompt" => "consent"},
+      client_rejection_errors: ["invalid_client"]
     }
   end
 
   # GitHub answers form-encoded at the token endpoint unless asked for JSON,
   # and joins granted scopes with commas. Loopback redirect URIs are
-  # port-wildcarded, so the engine's port fallback stays available.
+  # port-wildcarded, so the engine's port fallback stays available. It refuses
+  # the saved client with HTTP 200 and `incorrect_client_credentials`
+  # (https://docs.github.com/en/apps/oauth-apps/maintaining-oauth-apps/troubleshooting-oauth-app-access-token-request-errors).
   defp build("github", config) do
     %OAuthProvider{
       id: :github,
+      display_name: display_name("github"),
       authorize_url: "https://github.com/login/oauth/authorize",
       token_url: "https://github.com/login/oauth/access_token",
       userinfo_url: "https://api.github.com/user",
@@ -96,17 +125,21 @@ defmodule FermixCore.Auth.OAuthProviders do
       redirect_path: "/auth/callback",
       scopes: Keyword.get(config, :scopes, []),
       token_headers: [{"accept", "application/json"}],
-      scope_delimiter: ","
+      scope_delimiter: ",",
+      client_rejection_errors: ["incorrect_client_credentials"]
     }
   end
 
   # Notion requires HTTP Basic client auth at the token endpoint and
   # registers exact-match redirect URIs (port included) — fixed port, no
   # fallback. Its /v1/users/me needs a Notion-Version header the engine does
-  # not send, so the best-effort userinfo fetch is skipped (nil URL).
+  # not send, so the best-effort userinfo fetch is skipped (nil URL). A refused
+  # client is 401 `invalid_client`
+  # (https://developers.notion.com/reference/create-a-token).
   defp build("notion", config) do
     %OAuthProvider{
       id: :notion,
+      display_name: display_name("notion"),
       authorize_url: "https://api.notion.com/v1/oauth/authorize",
       token_url: "https://api.notion.com/v1/oauth/token",
       userinfo_url: nil,
@@ -121,7 +154,8 @@ defmodule FermixCore.Auth.OAuthProviders do
       scopes: Keyword.get(config, :scopes, []),
       extra_authorize_params: %{"owner" => "user"},
       token_auth: :basic,
-      fixed_port?: true
+      fixed_port?: true,
+      client_rejection_errors: ["invalid_client"]
     }
   end
 
@@ -133,10 +167,15 @@ defmodule FermixCore.Auth.OAuthProviders do
   # single-use and rotated on every refresh; the token managers already persist
   # the rotated pair. /2/users/me returns a `{"data": ...}` envelope the engine's
   # best-effort userinfo fetch does not parse, so it is skipped (the x_whoami
-  # tool covers identity).
+  # tool covers identity). X answers a present but rejected Basic credential
+  # (a secret regenerated in its console) with 401 `unauthorized_client`,
+  # "Missing valid authorization header", verified live 2026-09-10; a truly
+  # absent header is a 400 instead. `invalid_client` is RFC 6749 §5.2's code
+  # for the same failed client authentication.
   defp build("x", config) do
     %OAuthProvider{
       id: :x,
+      display_name: display_name("x"),
       authorize_url: "https://x.com/i/oauth2/authorize",
       token_url: "https://api.x.com/2/oauth2/token",
       userinfo_url: nil,
@@ -147,7 +186,8 @@ defmodule FermixCore.Auth.OAuthProviders do
       redirect_path: "/auth/callback",
       scopes: Keyword.get(config, :scopes, []),
       token_auth: :basic,
-      fixed_port?: true
+      fixed_port?: true,
+      client_rejection_errors: ["invalid_client", "unauthorized_client"]
     }
   end
 
@@ -155,10 +195,13 @@ defmodule FermixCore.Auth.OAuthProviders do
   # endpoint (`oauth.v2.access`) returns JSON with the bot token at
   # `access_token`. Confidential client (client_secret) with an exact-match
   # fixed redirect URI. User-token methods (search.messages) need a separate
-  # `user_scope`/token and are deferred — see M16 §7.1.
+  # `user_scope`/token and are deferred — see M16 §7.1. Slack refuses the saved
+  # client with `ok: false` and `invalid_client_id` or `bad_client_secret`
+  # (https://docs.slack.dev/reference/methods/oauth.v2.access).
   defp build("slack", config) do
     %OAuthProvider{
       id: :slack,
+      display_name: display_name("slack"),
       authorize_url: "https://slack.com/oauth/v2/authorize",
       token_url: "https://slack.com/api/oauth.v2.access",
       userinfo_url: nil,
@@ -169,7 +212,8 @@ defmodule FermixCore.Auth.OAuthProviders do
       redirect_path: "/auth/callback",
       scopes: Keyword.get(config, :scopes, []),
       scope_delimiter: ",",
-      fixed_port?: true
+      fixed_port?: true,
+      client_rejection_errors: ["invalid_client_id", "bad_client_secret"]
     }
   end
 end

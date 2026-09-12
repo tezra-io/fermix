@@ -1,0 +1,34 @@
+{
+  "source": "Fermix mobile APNs push payload (fx)",
+  "reference": "Independent RFC 7748 X25519, RFC 5869 HKDF-SHA256, and RFC 8439 ChaCha20-Poly1305 implementation, each validated against its published test vectors",
+  "kdf": "HKDF-SHA256(salt: apns_key_salt, ikm: X25519(gateway_static_private, device_static_public), info: 'fermix-push-v1', L: 32)",
+  "aead": "ChaCha20-Poly1305 with a 12-byte nonce, empty associated data, and the 16-byte tag appended to the ciphertext",
+  "payload": "aps.alert plus aps.mutable-content = 1; fx.n = base64(nonce); fx.c = base64(ciphertext || tag)",
+  "vector": {
+    "gateway_static_private": "5151515151515151515151515151515151515151515151515151515151515151",
+    "gateway_static_public": "ad908a8a708aca07588cda7c4ed3e44d4966a80a9abb2f1e4bbac53c67414e34",
+    "device_static_private": "6262626262626262626262626262626262626262626262626262626262626262",
+    "device_static_public": "4a4f8ccde198d66e99b4c014418a3223ce256c98900ae4a6811fd10f7eb84c2c",
+    "apns_key_salt": "7373737373737373737373737373737373737373737373737373737373737373",
+    "shared_secret": "c38e8f05b91c9aa4392172e187d6ba47faeb8fc6f570399fb6c31dd3ab373c63",
+    "push_key": "4bd1fb3fd4bcfb197a41a133b9887fbc345b8649c870f5ca9d98c9dfddeca17f",
+    "nonce": "101112131415161718191a1b",
+    "profile_id": "main",
+    "preview_text": "hello from fermix",
+    "inner_plaintext": "{\"preview_text\":\"hello from fermix\",\"profile_id\":\"main\"}",
+    "sealed": "31bff44ef9fca0b4e757b6b2e0699df3e10da4d85a36ee4da7531d37dcf8cffa277bcf509c8afd9feca25751a0986edebe834c54d5ed47e0767e2dfb8c916c9298e6f2ea38c5e2ad",
+    "payload": {
+      "aps": {
+        "alert": {
+          "title": "Fermix",
+          "body": "New message"
+        },
+        "mutable-content": 1
+      },
+      "fx": {
+        "n": "EBESExQVFhcYGRob",
+        "c": "Mb/0Tvn8oLTnV7ay4Gmd8+ENpNhaNu5Np1MdN9z4z/one89QnIr9n+yiV1GgmG7evoNMVNXtR+B2fi37jJFskpjm8uo4xeKt"
+      }
+    }
+  }
+}

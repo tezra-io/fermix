@@ -16,6 +16,7 @@ defmodule FermixCore.Providers.RouteResolver do
   Codex OAuth is **only** selected via explicit `provider: :openai_codex`.
   """
 
+  alias FermixCore.Auth.Store
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Auth.TokenSupervisor
   alias FermixCore.Config
@@ -268,7 +269,7 @@ defmodule FermixCore.Providers.RouteResolver do
       model: model,
       base_url: base_url,
       token_server: Keyword.get(opts, :token_server, TokenSupervisor),
-      auth_profile: "anthropic_oauth"
+      auth_profile: Store.profile(:anthropic)
     ]
     |> maybe_put(:access_token, Keyword.get(opts, :access_token))
     |> maybe_put(:temperature, Keyword.get(opts, :temperature))
@@ -316,7 +317,7 @@ defmodule FermixCore.Providers.RouteResolver do
       model: model,
       base_url: base_url,
       token_server: Keyword.get(opts, :token_server, TokenSupervisor),
-      auth_profile: "xai_oauth"
+      auth_profile: Store.profile(:xai)
     ]
     |> maybe_put(:access_token, Keyword.get(opts, :access_token))
     |> maybe_put(:temperature, Keyword.get(opts, :temperature))

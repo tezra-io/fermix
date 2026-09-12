@@ -679,7 +679,7 @@ defmodule FermixChannels.Channels.DiscordTest do
     end
   end
 
-  # -- send_approval/3 (one-tap Approve button) --
+  # -- send_approval/3 (Approve/Deny buttons) --
 
   describe "send_approval/3" do
     defp approval_message(chat_id) do
@@ -693,7 +693,7 @@ defmodule FermixChannels.Channels.DiscordTest do
       })
     end
 
-    test "attaches an action-row button whose custom_id is the grant-namespaced token" do
+    test "attaches Approve and Deny buttons with namespaced tokens" do
       test_pid = self()
 
       Req.Test.stub(:discord, fn conn ->
@@ -725,6 +725,12 @@ defmodule FermixChannels.Channels.DiscordTest do
                      "style" => 3,
                      "label" => "Approve",
                      "custom_id" => "grant:TOK12345"
+                   },
+                   %{
+                     "type" => 2,
+                     "style" => 4,
+                     "label" => "Deny",
+                     "custom_id" => "deny:TOK12345"
                    }
                  ]
                }
@@ -833,6 +839,14 @@ defmodule FermixChannels.Channels.DiscordTest do
 
       assert interaction.message.metadata.user_id == "111"
       assert interaction.message.chat_id == "dm-channel-1"
+    end
+
+    test "synthesizes a /deny message from a denial tap" do
+      assert {:ok, interaction} =
+               Discord.parse_interaction(interaction_event("deny:TOK12345", guild: false))
+
+      assert interaction.message.content == "/deny TOK12345"
+      assert interaction.message.metadata.user_id == "111"
     end
 
     test "ignores a non-grant custom_id" do

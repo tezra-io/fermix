@@ -1,20 +1,71 @@
 #!/usr/bin/env python3
 """Checker (json) for the seeded-file order-extraction task. The agent must READ
-order.txt and write ONE line to answer.txt in <order_id>|<total>|<item_count>|<date>.
-Traps: total_charged (94.74) not subtotal (80.50); item_count = 2+1+3 = 6 (sum of
-quantities) not 3 line items; date normalized to 2026-03-03."""
-import json
+order.txt and write EXACTLY one line to answer.txt as
+<order_id>|<total>|<item_count>|<date>.
+
+The gold is PARSED from the seeded order at check time (not hardcoded), so it follows a
+changed fixture and cannot be memorized: total_charged rather than the subtotal,
+item_count as the sum of quantities rather than the number of lines, and the delivery
+date normalized to YYYY-MM-DD.
+
+The prompt says EXACTLY one line and nothing else, and that is graded as written (the
+shared ONLY/EXACTLY contract in _checkerlib.sole_line): a preamble, a second line, or a
+trailing "Done." fails, because the artifact is meant to be machine-readable. Inside the
+line, a leading "$" on the total is tolerated although the prompt asks for a bare number —
+graded slightly in the model's favour, like expense_total.
+"""
 import os
 import re
 import sys
 
-ws = os.environ["FERMIX_EVAL_WORKSPACE"]
-try:
-    with open(os.path.join(ws, "answer.txt")) as fh:
-        text = fh.read().strip()
-except OSError as exc:
-    print(json.dumps({"score": 0.0, "detail": f"no answer.txt: {exc}"}))
-    sys.exit(0)
+sys.dont_write_bytecode = True          # never drop __pycache__ into the repo checkout
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-ok = re.search(r"(?i)\bNW-48213\s*\|\s*\$?\s*94\.74\s*\|\s*6\s*\|\s*2026-03-03\b", text) is not None
-print(json.dumps({"score": 1.0 if ok else 0.0, "detail": f"answer={text[:120]!r}"}))
+import _checkerlib as lib  # noqa: E402
+
+MONTHS = ("january", "february", "march", "april", "may", "june", "july",
+          "august", "september", "october", "november", "december")
+
+
+def gold(text):
+    """Order id, charged total, item count and ISO delivery date from the seeded
+    order confirmation."""
+    order = re.search(r"#([A-Z]{2}-\d+)", text)
+    total = re.search(r"(?i)total charged:\s*\$?\s*([\d,]+\.\d{2})", text)
+    delivery = re.search(r"(?i)delivery:.*?([A-Za-z]+)\s+(\d{1,2}),\s*(\d{4})", text)
+    quantities = re.findall(r"(?m)^\s*(\d+)x\s", text)
+    if not (order and total and delivery and quantities):
+        lib.refuse("seeded order.txt is not an order confirmation (missing id/total/"
+                   "delivery/quantities)")
+    month = delivery.group(1).lower()
+    if month not in MONTHS:
+        lib.refuse(f"seeded order.txt has an unparseable delivery month: {month!r}")
+    date = f"{delivery.group(3)}-{MONTHS.index(month) + 1:02d}-{int(delivery.group(2)):02d}"
+    return (order.group(1), float(total.group(1).replace(",", "")),
+            sum(int(q) for q in quantities), date)
+
+
+ws = lib.workspace()
+order_path = os.path.join(ws, "order.txt")
+if not os.path.isfile(order_path):
+    lib.refuse("seeded order.txt is missing — the answer cannot be graded")
+want_id, want_total, want_count, want_date = gold(lib.read_text(order_path, "order.txt"))
+
+answer_path = os.path.join(ws, "answer.txt")
+if not os.path.isfile(answer_path):
+    lib.refuse("no answer.txt")
+fields = [f.strip() for f in lib.sole_line(answer_path, "answer.txt").split("|")]
+if len(fields) != 4:
+    lib.refuse(f"answer.txt must hold 4 pipe-separated fields, got {len(fields)}: {fields!r}")
+
+want = f"{want_id}|{want_total}|{want_count}|{want_date}"
+if fields[0].upper() != want_id.upper():
+    lib.refuse(f"order id {fields[0]!r}, want {want_id} (line: {want})")
+if not re.match(r"^\$?\d+(\.\d+)?$", fields[1]) \
+        or abs(float(fields[1].lstrip("$")) - want_total) >= 0.01:
+    lib.refuse(f"total {fields[1]!r}, want {want_total} (line: {want})")
+if fields[2] != str(want_count):
+    lib.refuse(f"item count {fields[2]!r}, want {want_count} (line: {want})")
+if fields[3] != want_date:
+    lib.refuse(f"delivery date {fields[3]!r}, want {want_date} (line: {want})")
+lib.emit(1.0, f"answer matches the seeded order: {want}")

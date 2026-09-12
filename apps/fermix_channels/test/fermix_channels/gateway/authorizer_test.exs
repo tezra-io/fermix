@@ -123,6 +123,29 @@ defmodule FermixChannels.Gateway.AuthorizerTest do
       assert {:error, :unauthorized} = Authorizer.resolve(stranger)
     end
 
+    test "an authenticated mobile transport resolves to operator without sender metadata" do
+      source = %Source{
+        channel: "mobile",
+        channel_key: :mobile,
+        transport_auth: {:mobile_device, "device-1"}
+      }
+
+      assert {:ok, %Authorization{role: :operator, trust: :operator}} =
+               Authorizer.resolve(source)
+    end
+
+    test "mobile fails closed when transport authentication is absent or malformed" do
+      assert {:error, :unauthorized} =
+               Authorizer.resolve(%Source{channel: "mobile", channel_key: :mobile})
+
+      assert {:error, :unauthorized} =
+               Authorizer.resolve(%Source{
+                 channel: "mobile",
+                 channel_key: :mobile,
+                 transport_auth: {:mobile_device, ""}
+               })
+    end
+
     test "a sole allowed user without explicit owner_user_id stays :guest (P1)" do
       previous = Application.get_env(:fermix_channels, :slack, [])
       Application.put_env(:fermix_channels, :slack, allowed_user_ids: ["alice"])
@@ -184,6 +207,19 @@ defmodule FermixChannels.Gateway.AuthorizerTest do
 
     test "raises when channel field is missing or non-binary" do
       assert_raise ArgumentError, fn -> Source.from_message(%{chat_id: "c"}) end
+    end
+
+    test "transport authentication is accepted only as an explicit argument" do
+      forged = %{
+        channel: "mobile",
+        chat_id: "main",
+        metadata: %{transport_auth: %{transport: :mobile, device_id: "forged"}}
+      }
+
+      assert Source.from_message(forged).transport_auth == nil
+
+      context = %{transport: :mobile, authenticated_device_id: "device-1"}
+      assert Source.from_message(forged, context).transport_auth == {:mobile_device, "device-1"}
     end
   end
 

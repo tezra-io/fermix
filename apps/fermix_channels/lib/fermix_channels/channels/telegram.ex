@@ -109,18 +109,15 @@ defmodule FermixChannels.Channels.Telegram do
     end
   end
 
-  # An inline-button tap (SANDBOX_ACCESS_APPROVAL_FLOW) synthesizes the exact
-  # inbound message a typed `/confirm <token>` would produce, so the tap funnels
-  # through the unchanged Gateway.ingest -> Commands.parse -> Sandbox.confirm path
-  # (single-use take, owner-only + same-origin validation, auto-resume). The
-  # payload is namespaced `grant:<token>`; a payload without that prefix is not a
-  # confirmation tap and is ignored. The origin fields are taken from the
+  # An approval-button tap synthesizes the exact inbound command an owner could
+  # type, so both actions funnel through Gateway authorization and the shared
+  # peek -> validate -> take path. The origin fields are taken from the
   # callback: `from.id` is Telegram-authenticated, and chat/thread come from the
   # message the button rides on. The callback ids are stashed so the poller can
   # answer the query and strip the used button.
   defp parse_callback_query(%{"data" => data} = callback) when is_binary(data) do
-    case ApprovalButton.parse_payload(data) do
-      {:ok, token} -> {:ok, [synthesize_confirm(callback, token)]}
+    case ApprovalButton.parse_action(data) do
+      {:ok, action, token} -> {:ok, [synthesize_approval_action(callback, action, token)]}
       :ignore -> parse_proposal_callback(callback, data)
     end
   end
@@ -137,8 +134,12 @@ defmodule FermixChannels.Channels.Telegram do
     end
   end
 
-  defp synthesize_confirm(callback, token) do
-    ApprovalButton.confirm_message(Map.put(callback_origin(callback), :token, token))
+  defp synthesize_approval_action(callback, action, token) do
+    ApprovalButton.action_message(
+      callback
+      |> callback_origin()
+      |> Map.merge(%{action: action, token: token})
+    )
   end
 
   defp synthesize_skills_action(callback, action, token) do
@@ -227,11 +228,15 @@ defmodule FermixChannels.Channels.Telegram do
     # The prompt rides the normal send path (markdown->HTML, so the backticked
     # `/confirm <token>` fallback still renders as a tap-to-copy code span); the
     # inline keyboard is the additive one-tap affordance. callback_data carries
-    # the `grant:<token>` payload (the callback handler strips the prefix and
-    # prepends `/confirm `); an 8-char token is far under Telegram's 64-byte
+    # namespaced token payloads; an 8-char token is far under Telegram's 64-byte
     # callback_data cap.
     markup = %{
-      inline_keyboard: [[%{text: "✅ Approve", callback_data: ApprovalButton.payload(token)}]]
+      inline_keyboard: [
+        [
+          %{text: "✅ Approve", callback_data: ApprovalButton.approve_payload(token)},
+          %{text: "❌ Deny", callback_data: ApprovalButton.deny_payload(token)}
+        ]
+      ]
     }
 
     opts = [reply_markup: markup]
