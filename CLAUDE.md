@@ -68,6 +68,17 @@ mix format --check-formatted
 ## Docs
 Design docs live in **`docs/design/`** — one file per milestone/feature, named for its subject. List the directory and read the relevant file; do not assume a doc's status from its name (many are drafts, some are gitignored). `docs/TELEMETRY_CONTRACT.md` is the one contract doc outside that directory.
 
+## Releasing across the four repos
+
+An engine change reaches a Mac user only after four repos move, in this order. Skipping one leaves the fix unshipped while every gate stays green.
+
+1. **Engine (`tezra-io/fermix`).** Land the change by PR to `main`. A release is its own chore PR: version in `mix.exs` and the four release apps (`fermix_core`, `fermix_channels`, `fermix_web`, `fermix_nif`; `fermix_opik` keeps its own), plus a dated `CHANGELOG.md` entry that names every user-facing fix since the last tag. Tag `vX.Y.Z` on the merge commit only when the owner says so, and only when that commit's tree is proven green. `release.yml` publishes the formula binaries and the app-engine tarballs, cosign-signed, and bumps the tap formula on its own. Walk `docs/RELEASING.md` before announcing.
+2. **App (`tezra-io/fermix-macos`).** The app runs the engine it pins, not the newest tag: an engine fix reaches app users only through a pin bump and an app release. The bump is one PR: `engine/PIN.json` (tag, `source_commit`, `certificate_identity`, both `sha256` from the release's `.sha256` sidecars, all together), `Resources/Contracts/SOURCE.json` provenance (re-vendor first if anything under `priv/management` or `priv/realtime` changed between the tags; `scripts/verify_protocol_contract.sh --source <engine checkout at the tag>` must say byte-identical), and the version in `Product.json`, `project.yml` and the linked `Info.plist` (`scripts/render_info_plist.sh`). Prove it with `scripts/check_product_config.sh`, then `scripts/fetch_engine.sh` and `scripts/verify_engine.sh` against the published release. Tag `vX.Y.Z` on the merge; the rail pauses at the `release-macos` environment for the owner's approval, then publishes the DMG, the cumulative `appcast.xml`, the cask file, and opens the tap's cask PR.
+3. **Tap (`tezra-io/homebrew-tap`).** The formula bump lands from the engine rail; the cask bump arrives as a PR the owner merges.
+4. **Site (`tezra-io/fermix-site`).** Copy the app release's `appcast.xml` over `public/appcast.xml` in a PR to `dev`. The download and verify pages derive the DMG link, size, checksum and cosign identity from that file at build time, so nothing else changes. The owner deploys; the feed is served at `https://fermix.ai/appcast.xml` with a five-minute cache, and an installed app finds the new version through its own update check only once that file carries the new item.
+
+Standing rules for all four: never push to `main` without a PR; never push a tag the owner has not asked for; no AI attribution in commits, PRs, or docs; the version a user sees in the app is the pinned engine's, so say "pinned" rather than "latest" when reporting it.
+
 ## Known Pitfalls
 Update this section every time the repo teaches you the same lesson twice. Every mistake is a rule waiting to be written.
 
