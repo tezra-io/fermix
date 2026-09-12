@@ -477,5 +477,48 @@ class VerifyAppEngineTest(unittest.TestCase):
         )
 
 
+class RuntimeIdentityTest(unittest.TestCase):
+    """The hello the verifier accepts is the one protocol v2 publishes.
+
+    The check had no test, which is how it went on demanding a v1 hello
+    (capabilities carrying only the method catalog) after v2 added the
+    per-method minimum versions beside it, and refused the first release
+    built after that change.
+    """
+
+    MANIFEST = {
+        "protocols": {"management": {"minimum": 1, "maximum": 2}},
+        "identity": {"engine_id": "fermix-core", "build_id": "b1"},
+    }
+    ENVIRONMENT = {"PORT": "4030"}
+
+    def _hello(self, capabilities):
+        return {
+            "protocol": {"minimum": 1, "maximum": 2},
+            "capabilities": capabilities,
+            "engine": {"engine_id": "fermix-core", "build_id": "b1", "pid": "42"},
+            "setup": {"origin": "http://127.0.0.1:4030", "path": "/setup"},
+        }
+
+    def _validate(self, capabilities):
+        return verify._validate_runtime_identity(self._hello(capabilities), self.MANIFEST, 42, self.ENVIRONMENT)
+
+    def test_accepts_the_v2_hello_with_minimum_versions(self):
+        engine = self._validate({"methods": ["hello", "setup.detect"], "minimum_versions": {"hello": 1, "setup.detect": 2}})
+        self.assertEqual(engine["pid"], "42")
+
+    def test_refuses_a_hello_without_minimum_versions(self):
+        with self.assertRaisesRegex(verify.VerificationError, "invalid capabilities"):
+            self._validate({"methods": ["hello"]})
+
+    def test_refuses_a_minimum_for_a_method_the_catalog_does_not_carry(self):
+        with self.assertRaisesRegex(verify.VerificationError, "unknown method"):
+            self._validate({"methods": ["hello"], "minimum_versions": {"hello": 1, "settings.get": 2}})
+
+    def test_refuses_a_minimum_below_the_window(self):
+        with self.assertRaisesRegex(verify.VerificationError, "invalid minimum version"):
+            self._validate({"methods": ["hello"], "minimum_versions": {"hello": 0}})
+
+
 if __name__ == "__main__":
     unittest.main()

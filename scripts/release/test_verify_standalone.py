@@ -125,7 +125,7 @@ class VerifyStandaloneTest(unittest.TestCase):
         version=VERSION,
         marker=None,
     ):
-        setup = self._disclaim_setup(create_disclaim, disclaim_executable, disclaim_exit)
+        setup = self._disclaim_setup(create_disclaim, disclaim_executable, disclaim_exit, version)
         marker_line = "" if marker is None else f"touch '{marker}'\n"
         self.artifact.write_text(
             "#!/bin/sh\n"
@@ -137,12 +137,15 @@ class VerifyStandaloneTest(unittest.TestCase):
         )
         self.artifact.chmod(0o755)
 
-    def _disclaim_setup(self, create_disclaim, executable, exit_code):
+    def _disclaim_setup(self, create_disclaim, executable, exit_code, version):
         if not create_disclaim:
             return ""
 
+        # The unpacked release's layout, with the application directory
+        # versioned as a release names it; the source tree's unversioned
+        # apps/fermix_nif/priv is not what a release carries.
         mode = "chmod +x \"$cache/disclaim\"" if executable else "chmod -x \"$cache/disclaim\""
-        return f'''cache="$HOME/Library/Application Support/.burrito/release/lib/fermix_nif/priv"
+        return f'''cache="$HOME/Library/Application Support/.burrito/release/lib/fermix_nif-{version}/priv"
 mkdir -p "$cache"
 cat > "$cache/disclaim" <<'SHIM'
 #!/bin/sh
