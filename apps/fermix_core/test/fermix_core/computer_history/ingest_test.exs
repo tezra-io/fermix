@@ -264,7 +264,9 @@ defmodule FermixCore.ComputerHistory.IngestTest do
     end
 
     test "an empty-string url or host reads as absent", %{repo: repo} do
-      events = [base(1, %{type: "focus.changed", bundle_id: "com.apple.Safari", url: "", host: ""})]
+      events = [
+        base(1, %{type: "focus.changed", bundle_id: "com.apple.Safari", url: "", host: ""})
+      ]
 
       assert {:ok, %{written: 1, dropped: 0, refused: %{url: 0}}} =
                Ingest.ingest(events, repo: repo, apps: ["com.apple.Safari"])
@@ -272,6 +274,35 @@ defmodule FermixCore.ComputerHistory.IngestTest do
       assert [row] = stored(repo)
       assert row.url == nil
       assert row.host == nil
+    end
+
+    test "a dated slug URL is kept whole while a token in typed text is redacted (M32.1)",
+         %{repo: repo} do
+      url =
+        "https://www.formula1.com/en/latest/article/" <>
+          "2026-spanish-grand-prix-qualifying-report-and-highlights-as-norris"
+
+      token = "aB3dEf9GhJkLmN0p-aB3dEf9GhJkLmN0p_aB3dEf9GhJkLmN0p"
+
+      events = [
+        navigation(1, %{url: url}),
+        base(2, %{
+          type: "field.value",
+          bundle_id: "com.apple.Safari",
+          browser_id: "com.apple.Safari",
+          private_state: "not_private",
+          text: "pasted #{token} here"
+        })
+      ]
+
+      assert {:ok, %{written: 2}} =
+               Ingest.ingest(events, repo: repo, apps: ["com.apple.Safari"])
+
+      rows = Enum.sort_by(stored(repo), & &1.source_seq)
+      # The url column keeps its full path (scrub_url omits the opaque-run heuristics),
+      # while the typed-text column still redacts the opaque token.
+      assert Enum.at(rows, 0).url == url
+      refute String.contains?(Enum.at(rows, 1).text, token)
     end
   end
 
@@ -385,7 +416,12 @@ defmodule FermixCore.ComputerHistory.IngestTest do
       end
 
       # A navigation with no private_state key at all is the same refusal.
-      bare = base(9, %{type: "browser.navigated", bundle_id: "com.apple.Safari", url: "https://example.com/y"})
+      bare =
+        base(9, %{
+          type: "browser.navigated",
+          bundle_id: "com.apple.Safari",
+          url: "https://example.com/y"
+        })
 
       assert {:ok, %{written: 0, refused: %{state: 1}}} =
                Ingest.ingest([bare], repo: repo, apps: ["com.apple.Safari"])

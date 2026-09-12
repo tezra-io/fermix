@@ -448,11 +448,18 @@ defmodule FermixCore.ComputerHistory.Ingest do
   defp scrub_free_form(event) do
     Enum.reduce(@free_form_columns, event, fn column, acc ->
       case Map.get(acc, column) do
-        value when is_binary(value) -> Map.put(acc, column, Scrubber.scrub(value))
+        value when is_binary(value) -> Map.put(acc, column, scrub_column(column, value))
         _absent_or_nil -> acc
       end
     end)
   end
+
+  # The url column is a normalised address (query already stripped), so it is
+  # scrubbed of named secrets but NOT run through the opaque-entropy heuristics
+  # that would eat a legitimate path (`Scrubber.scrub_url/1`). Every other free-form
+  # column is natural language and gets the full scrub.
+  defp scrub_column(:url, value), do: Scrubber.scrub_url(value)
+  defp scrub_column(_column, value), do: Scrubber.scrub(value)
 
   defp tag_injection(event) do
     matches = @scan_columns |> Enum.flat_map(&scan_column(event, &1)) |> Enum.uniq()

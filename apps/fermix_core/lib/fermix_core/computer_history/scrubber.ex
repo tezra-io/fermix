@@ -16,6 +16,14 @@ defmodule FermixCore.ComputerHistory.Scrubber do
   near a "code"/"verification" keyword, and high-entropy base64/hex runs above a
   length floor.
 
+  **The `url` column is scrubbed differently** (`scrub_url/1`): the named-secret
+  patterns run, but the opaque-entropy base64/hex run detectors do not. A
+  normalised URL is structured — its query string is already stripped, so its
+  secret-bearing part is gone — and those heuristics cannot distinguish a dated
+  or hyphenated path slug from a token, so on a URL they would eat the path
+  itself. Typed text and titles routinely carry a full URL with its token and
+  are natural language, so they keep both detectors.
+
   The two checksummed patterns exist because browser capture brings the web's
   plain-text secrets into the spool: a card number and an IBAN are typed in the
   clear into ordinary fields, and neither has a prefix or an entropy signature to
@@ -180,14 +188,38 @@ defmodule FermixCore.ComputerHistory.Scrubber do
 
   def scrub(value) when is_binary(value) do
     value
+    |> structured_secrets()
+    |> replace(@hex_run, @marker)
+    |> replace_high_entropy_b64()
+  end
+
+  @doc """
+  Scrub a normalised URL column (scheme + host + path). The named-secret patterns
+  run — a JWT or a prefixed key can sit in a path — but the opaque-entropy run
+  detectors (`@hex_run`, `@b64_run`) do NOT. A path is structured data whose query
+  string (where tokens live) is already stripped at normalisation, and those
+  length-plus-class heuristics cannot tell a dated, hyphenated or underscored slug
+  (`.../2026-spanish-grand-prix-...`, `/2026/races/1234/`, `/2026_FIFA_World_Cup_...`)
+  from an opaque secret — so on a URL they redact the very path recall exists to
+  keep. The natural-language columns (`text`, titles, labels) are not structured
+  and keep both detectors at full strength through `scrub/1`.
+  """
+  def scrub_url(nil), do: nil
+  def scrub_url(value) when is_binary(value), do: structured_secrets(value)
+
+  # The secrets recognised by a prefix, a structure or a checksum — the maintained
+  # corpus, JWTs, query-param values, cards, IBANs, keyword-anchored OTPs. These
+  # never fire on a path segment that is not actually one of those shapes, so they
+  # are safe on a URL; the opaque-run heuristics that recognise a secret only by
+  # length and class mix are what `scrub/1` layers on top for free-form text.
+  defp structured_secrets(value) do
+    value
     |> RedactingFormatter.redact()
     |> replace(@jwt, @marker)
     |> replace_url_params()
     |> replace_cards()
     |> replace_ibans()
     |> replace(@otp, "\\1#{@marker}")
-    |> replace(@hex_run, @marker)
-    |> replace_high_entropy_b64()
   end
 
   @doc "The redaction marker, exposed for tests."

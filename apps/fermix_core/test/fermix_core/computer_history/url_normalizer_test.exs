@@ -41,7 +41,8 @@ defmodule FermixCore.ComputerHistory.UrlNormalizerTest do
   # contract violation the parser refuses rather than repairs.
   describe "the ASCII input contract" do
     test "a punycoded host and a percent-encoded path normalize unchanged" do
-      assert {:ok, %{url: "https://xn--bcher-kva.example/%E6%97%A5", host: "xn--bcher-kva.example"}} =
+      assert {:ok,
+              %{url: "https://xn--bcher-kva.example/%E6%97%A5", host: "xn--bcher-kva.example"}} =
                Url.normalize("https://xn--bcher-kva.example/%E6%97%A5")
     end
 
