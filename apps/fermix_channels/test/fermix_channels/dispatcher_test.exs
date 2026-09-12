@@ -1,5 +1,7 @@
 defmodule FermixChannels.DispatcherTest do
-  use ExUnit.Case, async: true
+  # async: false — this module writes the global `:fermix_channels, :telegram`
+  # and `:whatsapp` app env throughout, which the Authorizer reads live.
+  use ExUnit.Case, async: false
 
   import ExUnit.CaptureLog
 
@@ -170,18 +172,23 @@ defmodule FermixChannels.DispatcherTest do
   # whichever remote channel they pretend to come from. The CLI channel
   # path stays auto-authorized as `:local`.
   setup do
-    previous_telegram = Application.get_env(:fermix_channels, :telegram, [])
-    previous_whatsapp = Application.get_env(:fermix_channels, :whatsapp, [])
+    # Snapshot without a default and restore exactly: defaulting to [] turns an
+    # absent key into a configured-empty one for every later module in the VM.
+    previous_telegram = Application.get_env(:fermix_channels, :telegram)
+    previous_whatsapp = Application.get_env(:fermix_channels, :whatsapp)
     Application.put_env(:fermix_channels, :telegram, owner_user_id: "test-sender")
     Application.put_env(:fermix_channels, :whatsapp, owner_user_id: "test-sender")
 
     on_exit(fn ->
-      Application.put_env(:fermix_channels, :telegram, previous_telegram)
-      Application.put_env(:fermix_channels, :whatsapp, previous_whatsapp)
+      restore_channel(:telegram, previous_telegram)
+      restore_channel(:whatsapp, previous_whatsapp)
     end)
 
     :ok
   end
+
+  defp restore_channel(key, nil), do: Application.delete_env(:fermix_channels, key)
+  defp restore_channel(key, value), do: Application.put_env(:fermix_channels, key, value)
 
   test "injects an approval_fn on an operator agent message, bound to the message origin" do
     message = %Message{

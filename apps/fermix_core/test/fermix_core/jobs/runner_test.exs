@@ -97,7 +97,7 @@ defmodule FermixCore.Jobs.RunnerTest do
   defmodule RecordingDelivery do
     def send_message(target, text, opts) do
       send(Keyword.fetch!(opts, :test_pid), {:delivery_send, target, text, opts})
-      maybe_sleep(opts)
+      maybe_block(opts)
 
       case Keyword.get(opts, :result, :ok) do
         :ok -> :ok
@@ -105,10 +105,24 @@ defmodule FermixCore.Jobs.RunnerTest do
       end
     end
 
-    defp maybe_sleep(opts) do
-      case Keyword.get(opts, :sleep_ms, 0) do
-        ms when is_integer(ms) and ms > 0 -> Process.sleep(ms)
-        _ms -> :ok
+    # `block_until_release: true` parks the send until the test releases it, so
+    # a runner that waits for the delivery cannot reach its own exit at all. A
+    # sleep only made that outcome slower than the bound, which a loaded host
+    # closes; a parked send makes it impossible.
+    defp maybe_block(opts) do
+      if Keyword.get(opts, :block_until_release, false) do
+        send(Keyword.fetch!(opts, :test_pid), {:delivery_blocked, self()})
+        await_release()
+      else
+        :ok
+      end
+    end
+
+    defp await_release do
+      receive do
+        :release_delivery -> :ok
+      after
+        30_000 -> raise "the blocked delivery was never released"
       end
     end
   end
@@ -661,6 +675,9 @@ defmodule FermixCore.Jobs.RunnerTest do
 
     parent = self()
 
+    # Own the exit observation from the spawn: see assert_runner_exits_normally.
+    Process.flag(:trap_exit, true)
+
     {:ok, pid} =
       Runner.start_link(
         repo: repo,
@@ -675,11 +692,9 @@ defmodule FermixCore.Jobs.RunnerTest do
         network_readiness_enabled: false
       )
 
-    ref = Process.monitor(pid)
-
     assert_receive {:tool_then_silent, :chat}
     assert_receive {:tool_then_silent, :continue}
-    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+    assert_receive {:EXIT, ^pid, :normal}, 2_000
 
     assert {:ok, timed_out_run} = Repo.get_job_run(run.id, server: repo)
     assert timed_out_run.status == "timeout"
@@ -1141,8 +1156,6 @@ defmodule FermixCore.Jobs.RunnerTest do
                delivery_target: %{"platform" => "telegram", "chat_id" => "123"}
              )
 
-    started_at = System.monotonic_time(:millisecond)
-
     assert_runner_exits_normally(
       job,
       run,
@@ -1150,20 +1163,19 @@ defmodule FermixCore.Jobs.RunnerTest do
       capability_registry: capability_registry,
       output_base_dir: output_base_dir,
       delivery_adapter: RecordingDelivery,
-      delivery_opts: [test_pid: self(), sleep_ms: 2_000],
+      delivery_opts: [test_pid: self(), block_until_release: true],
       delivery_timeout_ms: 20,
       script: [%{content: "Digest ready."}]
     )
 
-    duration_ms = System.monotonic_time(:millisecond) - started_at
-
-    # The claim is that the 20 ms delivery timeout fired rather than the delivery
-    # running to completion, so the bound only has to separate those two outcomes.
-    # It used to sit 50 ms below a 200 ms sleep, which a loaded CI runner closes by
-    # scheduling alone; the same claim now has a 1 s gap under a 2 s sleep, so it
-    # discriminates better AND survives a starved runner.
-    assert duration_ms < 1_000
+    # The send is parked inside the adapter and only this test can release it, so
+    # the exit asserted above proves directly that the runner did not join the
+    # delivery — a runner that waited would never exit at all. The old stopwatch
+    # inferred the same thing from a wall-clock gap, which a starved host closes.
     assert_receive {:delivery_send, "123", "Digest ready.", _opts}
+    assert_receive {:delivery_blocked, delivery_pid}
+    send(delivery_pid, :release_delivery)
+
     assert {:ok, delivered_run} = Repo.get_job_run(run.id, server: repo)
     assert delivered_run.status == "ok"
     assert delivered_run.delivery_status == "failed"
@@ -1210,6 +1222,9 @@ defmodule FermixCore.Jobs.RunnerTest do
     assert {:ok, {job, run}} =
              create_claimed_job(repo, name: "Labelled Run", task_prompt: "Run and be found.")
 
+    # Own the exit observation from the spawn: see assert_runner_exits_normally.
+    Process.flag(:trap_exit, true)
+
     {:ok, pid} =
       Runner.start_link(
         repo: repo,
@@ -1223,8 +1238,6 @@ defmodule FermixCore.Jobs.RunnerTest do
         network_readiness_enabled: false
       )
 
-    ref = Process.monitor(pid)
-
     # Held inside the provider call (AgentLoop runs it in a task the runner then
     # awaits): the runner cannot answer a message here, which is exactly the
     # state the scheduler's reconciliation has to resolve.
@@ -1232,7 +1245,7 @@ defmodule FermixCore.Jobs.RunnerTest do
     assert Runner.run_id(pid) == run.id
 
     send(held, :release)
-    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+    assert_receive {:EXIT, ^pid, :normal}, 2_000
 
     # A dead runner has no label, which is what makes an orphaned run detectable.
     assert Runner.run_id(pid) == nil
@@ -1246,6 +1259,13 @@ defmodule FermixCore.Jobs.RunnerTest do
     parent = self()
     script = Keyword.fetch!(opts, :script)
     adapter_opts = Keyword.get(opts, :adapter_opts, [])
+
+    # A short run can be over before a monitor placed after start_link exists,
+    # and a monitor on a dead process answers :noproc, which a pinned :normal can
+    # never match. start_link installs the link at spawn, so trapping exits first
+    # makes the runner's exit reason observable at every scheduling. The pid stays
+    # pinned so a sibling linked process's exit cannot satisfy the assertion.
+    Process.flag(:trap_exit, true)
 
     {:ok, pid} =
       Runner.start_link(
@@ -1266,10 +1286,7 @@ defmodule FermixCore.Jobs.RunnerTest do
         delivery_timeout_ms: Keyword.get(opts, :delivery_timeout_ms)
       )
 
-    ref = Process.monitor(pid)
-
-    assert_receive {:DOWN, ^ref, :process, ^pid, :normal},
-                   Keyword.get(opts, :exit_timeout_ms, 1_000)
+    assert_receive {:EXIT, ^pid, :normal}, Keyword.get(opts, :exit_timeout_ms, 1_000)
   end
 
   defp create_claimed_job(repo, attrs) do
@@ -1626,6 +1643,9 @@ defmodule FermixCore.Jobs.RunnerTest do
     defp start_fanout_runner(job, run, opts) do
       parent = self()
 
+      # Own the exit observation from the spawn: see assert_runner_exits_normally.
+      Process.flag(:trap_exit, true)
+
       {:ok, pid} =
         Runner.start_link(
           repo: Keyword.fetch!(opts, :repo),
@@ -1639,8 +1659,7 @@ defmodule FermixCore.Jobs.RunnerTest do
           output_base_dir: Keyword.fetch!(opts, :output_base_dir)
         )
 
-      ref = Process.monitor(pid)
-      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 3_000
+      assert_receive {:EXIT, ^pid, :normal}, 3_000
     end
 
     defp route_probe_call do
@@ -1839,6 +1858,9 @@ defmodule FermixCore.Jobs.RunnerTest do
     defp start_readiness_runner(job, run, opts) do
       parent = self()
 
+      # Own the exit observation from the spawn: see assert_runner_exits_normally.
+      Process.flag(:trap_exit, true)
+
       {:ok, pid} =
         Runner.start_link(
           repo: Keyword.fetch!(opts, :repo),
@@ -1856,8 +1878,7 @@ defmodule FermixCore.Jobs.RunnerTest do
           readiness_opts: Keyword.get(opts, :readiness_opts, [])
         )
 
-      ref = Process.monitor(pid)
-      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+      assert_receive {:EXIT, ^pid, :normal}, 2_000
     end
   end
 
@@ -1981,6 +2002,9 @@ defmodule FermixCore.Jobs.RunnerTest do
       assert {:ok, {job, run}} =
                create_claimed_job(repo, name: "Stagger", task_prompt: "Run.")
 
+      # Own the exit observation from the spawn: see assert_runner_exits_normally.
+      Process.flag(:trap_exit, true)
+
       {:ok, pid} =
         Runner.start_link(
           repo: repo,
@@ -1996,12 +2020,10 @@ defmodule FermixCore.Jobs.RunnerTest do
           delay_fn: fn ms -> send(parent, {:delay, ms}) end
         )
 
-      ref = Process.monitor(pid)
-
       # The startup stagger is slept (via delay_fn) BEFORE the first chat call.
       assert_receive {:delay, 750}
       assert_receive {:transient_chat, 1}
-      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+      assert_receive {:EXIT, ^pid, :normal}, 2_000
     end
 
     test "fails the run after the bounded retry ceiling without looping forever", %{
@@ -2080,6 +2102,9 @@ defmodule FermixCore.Jobs.RunnerTest do
 
       parent = self()
 
+      # Own the exit observation from the spawn: see assert_runner_exits_normally.
+      Process.flag(:trap_exit, true)
+
       {:ok, pid} =
         Runner.start_link(
           repo: repo,
@@ -2094,8 +2119,6 @@ defmodule FermixCore.Jobs.RunnerTest do
           delay_fn: fn _ms -> :ok end
         )
 
-      ref = Process.monitor(pid)
-
       # A tool ran, then the follow-up call lost its connection. The AgentLoop
       # retries that continuation IN PLACE (a pool checkout fails before the
       # request is sent, so nothing is duplicated and no tool is replayed) —
@@ -2103,13 +2126,13 @@ defmodule FermixCore.Jobs.RunnerTest do
       # stops the WHOLE-LOOP retry, so the loop is never replayed: no second
       # chat, and the tool never runs again. The in-place backoff is real time
       # here (the runner's `delay_fn` is its own seam, not the loop's), hence
-      # the wider DOWN window.
+      # the wider exit window.
       assert_receive {:tool_then_transient, :chat}
       assert_receive {:tool_then_transient, :continue}
       assert_receive {:tool_then_transient, :continue}, 5_000
       assert_receive {:tool_then_transient, :continue}, 10_000
       refute_receive {:tool_then_transient, :chat}, 200
-      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 5_000
+      assert_receive {:EXIT, ^pid, :normal}, 5_000
 
       assert {:ok, stored_run} = Repo.get_job_run(run.id, server: repo)
       assert stored_run.status == "error"
@@ -2144,9 +2167,11 @@ defmodule FermixCore.Jobs.RunnerTest do
           :max_transient_retry_ms
         ])
 
+      # Own the exit observation from the spawn: see assert_runner_exits_normally.
+      Process.flag(:trap_exit, true)
+
       {:ok, pid} = Runner.start_link(base ++ overrides)
-      ref = Process.monitor(pid)
-      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+      assert_receive {:EXIT, ^pid, :normal}, 2_000
     end
   end
 end

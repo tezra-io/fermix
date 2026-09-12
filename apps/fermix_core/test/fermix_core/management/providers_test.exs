@@ -214,9 +214,14 @@ defmodule FermixCore.Management.ProvidersTest do
 
       probe = fn :anthropic, _opts -> {:ok, %{model: "claude-opus-5", latency_ms: 3}} end
       assert {:ok, started} = Providers.probe_start("anthropic", jobs: jobs, probe: probe)
+      job_id = started["job_id"]
 
-      assert_receive {:provider_call, measurements, metadata}
-      assert metadata.session_id == started["job_id"]
+      # The handler is unfiltered on the busiest event in the suite, so the
+      # receive must carry the identity itself: any concurrent module's provider
+      # span would otherwise satisfy it and the session-id claim would be made
+      # about a foreign call. Pinned in a map pattern, not by dot access —
+      # correlation keys are dropped from metadata when nil.
+      assert_receive {:provider_call, measurements, %{session_id: ^job_id} = metadata}
       assert metadata.provider == :anthropic
       assert metadata.model == "claude-opus-5"
       assert metadata.status == "ok"

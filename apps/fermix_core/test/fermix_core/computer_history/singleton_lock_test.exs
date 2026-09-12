@@ -74,21 +74,24 @@ defmodule FermixCore.ComputerHistory.SingletonLockTest do
     end
 
     test "a live (heartbeated) lock is NOT broken", %{path: path} do
-      # Fresh mtime → not stale → the contender yields even with a short window.
+      # Fresh mtime → not stale → the contender yields.
       #
-      # The window is short but not sub-second on purpose: `stale?/2` reads the
-      # lock's mtime in SECONDS, so it compares `(now_sec - mtime_sec) * 1000`
-      # against the window. Under 1000 ms that arithmetic cannot express "fresh"
-      # at all — the two acquires only have to straddle a wall-clock second
-      # boundary for a lock written microseconds ago to read as stale, which is
-      # how this passed everywhere and failed on the loaded macos-x64 CI leg.
-      # 5_000 tolerates several seconds of scheduling delay and is still 6x
-      # shorter than the module's own 30_000 ms default, so the assertion keeps
-      # its meaning: a live lock is not broken even by a contender in a hurry.
+      # The window cannot be sub-second: `stale?/2` reads the lock's mtime in
+      # SECONDS, so it compares `(now_sec - mtime_sec) * 1000` against the
+      # window. Under 1000 ms that arithmetic cannot express "fresh" at all —
+      # the two acquires only have to straddle a wall-clock second boundary for
+      # a lock written microseconds ago to read as stale, which is how this
+      # passed everywhere and failed on the loaded macos-x64 CI leg. 5_000 only
+      # widened that race rather than removing it: five real seconds between the
+      # two acquires still flips the verdict and reds a correct lock. Ten
+      # minutes is far beyond this test's own life, so a delay long enough to
+      # reach it blows the ExUnit timeout first — the failure mode is a timeout,
+      # never a wrong verdict. The assertion keeps its meaning: a lock written
+      # moments ago is fresh, and a contender must yield to it.
       assert :ok = SingletonLock.acquire(path, home: "/tmp/home-a")
 
       assert {:error, {:held_by, _}} =
-               SingletonLock.acquire(path, stale_after_ms: 5_000, home: "/tmp/home-b")
+               SingletonLock.acquire(path, stale_after_ms: 600_000, home: "/tmp/home-b")
     end
   end
 

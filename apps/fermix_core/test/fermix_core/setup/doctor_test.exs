@@ -1332,13 +1332,18 @@ defmodule FermixCore.Setup.DoctorTest do
     test "enabled with no usable lane names the one thing to do" do
       Application.put_env(:fermix_core, :meetings, enabled: true)
 
+      # Bind the pin from the installer instead of restating the tag: what this
+      # proves is that the report RENDERS the canonical pin, and a second literal
+      # here only goes stale (silently red) on the next meetbot bump.
+      pinned_tag = FermixCore.Meetings.SidecarInstaller.pinned_tag()
+
       assert %{
                status: :enabled,
                ready?: false,
                sidecar_installed?: false,
                browser_installed?: false,
                browser_note: nil,
-               pinned_tag: "v0.3.3",
+               pinned_tag: ^pinned_tag,
                profile: :absent,
                rtms_configured?: false,
                remedy: remedy

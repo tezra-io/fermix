@@ -490,11 +490,17 @@ defmodule FermixCore.Capabilities.MCP.Remote.OwnerTest do
       handler = :"owner_lifecycle_#{unique()}"
       parent = self()
 
+      # Every MCP client in the suite emits this event, and the phase atom alone
+      # does not say whose span it was — so filter on the source id, which is
+      # known here at attach time. Bracket access, not dot: the emitter compacts
+      # nil fields out of the metadata, and a missing key must not raise inside
+      # a foreign process.
       :telemetry.attach(
         handler,
         [:fermix, :mcp_client, :lifecycle],
         fn _event, measurements, metadata, _config ->
-          send(parent, {:lifecycle, metadata.phase, metadata, measurements})
+          if metadata[:source_id] == "plugin:eden",
+            do: send(parent, {:lifecycle, metadata[:phase], metadata, measurements})
         end,
         nil
       )

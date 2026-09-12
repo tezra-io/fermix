@@ -99,12 +99,30 @@ defmodule FermixCore.Temporal.TelemetryTest do
     @moduledoc false
 
     def send_message(destination, text, opts) do
-      destination
-      |> String.to_existing_atom()
-      |> Agent.get_and_update(fn state ->
+      channel = String.to_existing_atom(destination)
+      await_release(channel)
+
+      Agent.get_and_update(channel, fn state ->
         {result, rest} = next(state.script)
         {result, %{state | script: rest, calls: state.calls ++ [%{text: text, opts: opts}]}}
       end)
+    end
+
+    # The worker's whole job is this one send, so it can already be gone when a
+    # monitor placed after start_child runs — and a monitor on a dead process
+    # answers :noproc, which a pinned :normal can never match. DynamicSupervisor
+    # gives the test no link to trap, so the barrier lives here: parking before
+    # the script runs holds the worker provably alive until the test says its
+    # monitor is in place. The channel agent carries the test pid so no test-only
+    # option has to be smuggled through the real send path.
+    defp await_release(channel) do
+      send(Agent.get(channel, & &1.test_pid), {:adapter_entered, self()})
+
+      receive do
+        :release_adapter -> :ok
+      after
+        5_000 -> raise "the scripted delivery adapter was never released"
+      end
     end
 
     defp next([]), do: {:ok, []}
@@ -600,9 +618,11 @@ defmodule FermixCore.Temporal.TelemetryTest do
       channel = :"temporal_tel_channel_#{ctx.unique}"
       start_supervised!({DeliverySupervisor, name: supervisor})
 
+      channel_state = %{script: [:ok], calls: [], test_pid: self()}
+
       start_supervised!(%{
         id: {:channel, channel},
-        start: {Agent, :start_link, [fn -> %{script: [:ok], calls: []} end, [name: channel]]},
+        start: {Agent, :start_link, [fn -> channel_state end, [name: channel]]},
         restart: :temporary
       })
 
@@ -619,7 +639,9 @@ defmodule FermixCore.Temporal.TelemetryTest do
           delivery_opts: [adapter: ScriptedAdapter]
         })
 
+      assert_receive {:adapter_entered, sender}
       ref = Process.monitor(pid)
+      send(sender, :release_adapter)
       assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
 
       {measurements, metadata} = await(:delivered)
@@ -636,14 +658,15 @@ defmodule FermixCore.Temporal.TelemetryTest do
       channel = :"temporal_tel_channel_#{ctx.unique}"
       start_supervised!({DeliverySupervisor, name: supervisor})
 
+      channel_state = %{
+        script: [{:error, {:permanent, :authentication}}],
+        calls: [],
+        test_pid: self()
+      }
+
       start_supervised!(%{
         id: {:channel, channel},
-        start:
-          {Agent, :start_link,
-           [
-             fn -> %{script: [{:error, {:permanent, :authentication}}], calls: []} end,
-             [name: channel]
-           ]},
+        start: {Agent, :start_link, [fn -> channel_state end, [name: channel]]},
         restart: :temporary
       })
 
@@ -661,7 +684,9 @@ defmodule FermixCore.Temporal.TelemetryTest do
             delivery_opts: [adapter: ScriptedAdapter]
           })
 
+        assert_receive {:adapter_entered, sender}
         ref = Process.monitor(pid)
+        send(sender, :release_adapter)
         assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
       end)
 
@@ -677,14 +702,15 @@ defmodule FermixCore.Temporal.TelemetryTest do
       channel = :"temporal_tel_channel_#{ctx.unique}"
       start_supervised!({DeliverySupervisor, name: supervisor})
 
+      channel_state = %{
+        script: [{:error, %Req.TransportError{reason: :closed}}],
+        calls: [],
+        test_pid: self()
+      }
+
       start_supervised!(%{
         id: {:channel, channel},
-        start:
-          {Agent, :start_link,
-           [
-             fn -> %{script: [{:error, %Req.TransportError{reason: :closed}}], calls: []} end,
-             [name: channel]
-           ]},
+        start: {Agent, :start_link, [fn -> channel_state end, [name: channel]]},
         restart: :temporary
       })
 
@@ -702,7 +728,9 @@ defmodule FermixCore.Temporal.TelemetryTest do
             delivery_opts: [adapter: ScriptedAdapter]
           })
 
+        assert_receive {:adapter_entered, sender}
         ref = Process.monitor(pid)
+        send(sender, :release_adapter)
         assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
       end)
 

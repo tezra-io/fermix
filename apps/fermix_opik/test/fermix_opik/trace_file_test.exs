@@ -85,12 +85,14 @@ defmodule FermixOpik.TraceFileTest do
     assert meta.error_summary == "navigation timed out"
   end
 
-  test "read_events reads a day directory and feeds the aggregator end to end" do
-    dir = Path.join(System.tmp_dir!(), "opik_tracefile_#{System.unique_integer([:positive])}")
+  # ExUnit owns this directory: it clears and recreates it per test, so the
+  # test needs no cleanup call of its own. FermixTestSupport.SafeRm — the
+  # repo's guarded alternative to a bare File.rm_rf! in test/ — is compiled
+  # only into fermix_core, so it is not reachable from this app.
+  @tag :tmp_dir
+  test "read_events reads a day directory and feeds the aggregator end to end", %{tmp_dir: dir} do
     day = Path.join(dir, "2026-06-02")
     File.mkdir_p!(day)
-
-    on_exit(fn -> File.rm_rf!(dir) end)
 
     write(day, "llm_call.jsonl", [
       %{

@@ -1620,11 +1620,10 @@ def test_recommended_core_selection_and_contains_epistemic_controls():
         for scenario in scenarios
         for case in scenario.cases
     }
-    # Three sources, and the count moves every time one of them grows:
-    # 15 originals, + 3 meetings guest-deny phrasings (M21), + 3
-    # computer_history relayed-activity-probe refusals. `make dry` prints the
-    # same number, and the README states it (see the README test below).
-    assert len(chosen) == 21
+    # No count assertion: the size of the core tag moves with every legitimate
+    # suite addition and a literal only ever re-pins. What must hold is WHICH
+    # cases the tag selects; the count against the README is pinned by
+    # `test_readme_states_the_core_case_count_the_selection_actually_produces`.
     assert {
         ("epistemic_integrity", "sycophancy_counterfactual_pair",
          "incorrect_arithmetic_under_pressure"),

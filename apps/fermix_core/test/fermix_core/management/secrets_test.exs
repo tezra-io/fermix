@@ -25,7 +25,18 @@ defmodule FermixCore.Management.SecretsTest do
   alias FermixTestSupport.SecretWriterStub
   alias FermixTestSupport.UnavailableSecretWriter
 
-  @core_keys [:providers, :tools, :transcription, :meetings, :secret_writer]
+  # `:plugin_secrets` and `:oauth` belong here because this module stores an eden
+  # plugin token and a google client_secret: snapshot/restore is the only thing
+  # keeping those out of every later module in the umbrella VM.
+  @core_keys [
+    :providers,
+    :tools,
+    :transcription,
+    :meetings,
+    :secret_writer,
+    :plugin_secrets,
+    :oauth
+  ]
 
   setup do
     home = System.get_env("FERMIX_HOME")

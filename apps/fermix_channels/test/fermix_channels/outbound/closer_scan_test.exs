@@ -231,11 +231,14 @@ defmodule FermixChannels.Outbound.CloserScanTest do
     {"`a` *b* `c`", "<code>a</code> <i>b</i> <code>c</code>", "`a` _b_ `c`"}
   ]
 
-  # Measured on the development machine: 32 kB of stray bold openers rendered in
-  # 10.8 s before the index and under 60 ms after, so a second is more than an
-  # order of magnitude of headroom and cannot flake.
-  @max_render_ms 1_000
-  @attempts 3
+  # The ceiling is in reductions, not milliseconds, for the same reason the ratio
+  # below is: four renderers run this case concurrently with the rest of an async
+  # suite, and 1_000 ms was only ~16x the measured 28 ms — a perturbation the slow
+  # CI leg reaches. Reductions count work, so they are immune to load. Measured
+  # on the development machine: 2.32–2.60 M reductions for 32 kB after the index,
+  # against 10.8 s of rendering (two orders of magnitude more work) before it, so
+  # 25 M is ~10x headroom over linear and still far under a quadratic scan.
+  @max_render_work 25_000_000
 
   # The shape is asserted in reductions rather than wall-clock, because a
   # wall-clock ratio is not deterministic: a GC pause inside the renderer's own
@@ -280,13 +283,15 @@ defmodule FermixChannels.Outbound.CloserScanTest do
 
   describe "cost of a paragraph of unmatched openers" do
     @tag timeout: 120_000
-    test "32 kB of stray bold openers renders well inside a second" do
+    test "32 kB of stray bold openers renders well inside its work budget" do
       text = String.duplicate("**a ", 8_000)
       assert byte_size(text) == 32_000
 
       for {name, render} <- renderers() do
-        elapsed = best_ms(fn -> render.(text) end)
-        assert elapsed < @max_render_ms, "#{name} took #{elapsed} ms on 32 kB of stray openers"
+        used = work(fn -> render.(text) end)
+
+        assert used < @max_render_work,
+               "#{name} did #{used} reductions rendering 32 kB of stray openers"
       end
     end
 
@@ -311,15 +316,6 @@ defmodule FermixChannels.Outbound.CloserScanTest do
       {"entity_count/1", &Markdown.entity_count/1},
       {"Dialect.render/2", &Dialect.render(&1, spec())}
     ]
-  end
-
-  # Best of a few attempts: a render that is fast enough sometimes is fast
-  # enough, and the minimum is the statistic a loaded CI box perturbs least.
-  defp best_ms(fun) do
-    1..@attempts
-    |> Enum.map(fn _attempt -> fun |> :timer.tc() |> elem(0) end)
-    |> Enum.min()
-    |> Kernel./(1_000)
   end
 
   # Reductions consumed by one render, measured in a process of its own so the

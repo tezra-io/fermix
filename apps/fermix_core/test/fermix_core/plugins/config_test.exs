@@ -45,6 +45,9 @@ defmodule FermixCore.Plugins.ConfigTest do
     telegram = Application.get_env(:fermix_channels, :telegram, [])
     plugins = Application.get_env(:fermix_core, :plugins, [])
     oauth = Application.get_env(:fermix_core, :oauth, %{})
+    # This module keychains plugin credentials, so it establishes and restores
+    # :plugin_secrets too — a setup that establishes the world establishes all of it.
+    plugin_secrets = Application.get_env(:fermix_core, :plugin_secrets, %{})
     secret_writer = Application.get_env(:fermix_core, :secret_writer)
 
     System.put_env("FERMIX_HOME", home)
@@ -53,13 +56,16 @@ defmodule FermixCore.Plugins.ConfigTest do
     Application.put_env(:fermix_channels, :telegram, [])
     Application.put_env(:fermix_core, :plugins, [])
     Application.put_env(:fermix_core, :oauth, %{})
+    Application.put_env(:fermix_core, :plugin_secrets, %{})
     FermixTestSupport.SecretWriterStub.reset()
     Application.put_env(:fermix_core, :secret_writer, FermixTestSupport.SecretWriterStub)
     TokenSupervisor.stop_profile("google_calendar:primary")
 
+    # Two separate callbacks, restoration registered FIRST so it runs LAST:
+    # ExUnit wraps each registered on_exit on its own, so a `stop_profile` that
+    # exits can no longer strand this module's tmp FERMIX_HOME, its six app-env
+    # keys and its stub writer on every later module in the VM.
     on_exit(fn ->
-      TokenSupervisor.stop_profile("google_calendar:primary")
-
       case old_home do
         nil -> System.delete_env("FERMIX_HOME")
         value -> System.put_env("FERMIX_HOME", value)
@@ -70,10 +76,13 @@ defmodule FermixCore.Plugins.ConfigTest do
       Application.put_env(:fermix_channels, :telegram, telegram)
       Application.put_env(:fermix_core, :plugins, plugins)
       Application.put_env(:fermix_core, :oauth, oauth)
+      Application.put_env(:fermix_core, :plugin_secrets, plugin_secrets)
       restore_secret_writer(secret_writer)
       FermixTestSupport.SecretWriterStub.reset()
       FermixTestSupport.SafeRm.rm_rf!(home)
     end)
+
+    on_exit(fn -> TokenSupervisor.stop_profile("google_calendar:primary") end)
 
     %{home: home}
   end
@@ -189,7 +198,9 @@ defmodule FermixCore.Plugins.ConfigTest do
 
     assert Config.plugin_secret("discord") == nil
     # No dangling `@keyring` sentinel pointing at an item that no longer exists.
-    refute File.read!(Path.join(home, "config.toml")) =~ "@keyring"
+    # Scoped to the discord row: a whole-file scan also fails on any unrelated
+    # credential another module leaked, which says nothing about this deletion.
+    refute File.read!(Path.join(home, "config.toml")) =~ ~r/^discord = .*@keyring/m
   end
 
   test "a failed keychain delete leaves the reference intact and reports the error" do

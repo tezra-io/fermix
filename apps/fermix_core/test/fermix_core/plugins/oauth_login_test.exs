@@ -30,9 +30,11 @@ defmodule FermixCore.Plugins.OAuthLoginTest do
     Application.put_env(:fermix_core, :plugins, [])
     TokenSupervisor.stop_profile("google_calendar:primary")
 
+    # Two separate callbacks, restoration registered FIRST so it runs LAST:
+    # ExUnit wraps each registered on_exit on its own, so a `stop_profile` that
+    # exits can no longer strand this module's tmp FERMIX_HOME and app env on
+    # every later module in the VM.
     on_exit(fn ->
-      TokenSupervisor.stop_profile("google_calendar:primary")
-
       case old_home do
         nil -> System.delete_env("FERMIX_HOME")
         value -> System.put_env("FERMIX_HOME", value)
@@ -42,6 +44,8 @@ defmodule FermixCore.Plugins.OAuthLoginTest do
       Application.put_env(:fermix_core, :oauth, oauth)
       FermixTestSupport.SafeRm.rm_rf!(home)
     end)
+
+    on_exit(fn -> TokenSupervisor.stop_profile("google_calendar:primary") end)
 
     :ok
   end

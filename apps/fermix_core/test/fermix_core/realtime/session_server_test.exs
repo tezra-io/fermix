@@ -101,10 +101,21 @@ defmodule FermixCore.Realtime.SessionServerTest do
     end
   end
 
-  defmodule SleepyTool do
-    def execute(%{"sleep_ms" => ms}, _context) when is_integer(ms) do
-      Process.sleep(ms)
-      {:ok, %{success: true, output: "slept #{ms}", error: nil}}
+  defmodule BlockingTool do
+    @moduledoc """
+    Announces itself and then blocks until the test releases it. A tool that
+    merely sleeps makes inline execution slow; a tool the test holds open makes
+    "the session served me while a tool was running" a fact rather than a window
+    the test hopes to win.
+    """
+    def execute(_args, _context, test_pid) do
+      send(test_pid, {:blocking_tool_running, self()})
+
+      receive do
+        :release -> {:ok, %{success: true, output: "released", error: nil}}
+      after
+        30_000 -> raise "the test never released the blocking tool"
+      end
     end
   end
 
@@ -876,7 +887,7 @@ defmodule FermixCore.Realtime.SessionServerTest do
   end
 
   test "a slow tool runs off the session loop so audio and interrupt are never blocked" do
-    task_supervisor = start_supervised!({Task.Supervisor, []}, id: :sleepy_task_sup)
+    task_supervisor = start_supervised!({Task.Supervisor, []}, id: :blocking_task_sup)
 
     {:ok, server} =
       SessionServer.start_link(
@@ -885,7 +896,7 @@ defmodule FermixCore.Realtime.SessionServerTest do
         openai_client: FakeOpenAIClient,
         api_key: "sk-test",
         safety_identifier: "safe-id",
-        capabilities: [sleepy_capability()],
+        capabilities: [blocking_capability(self())],
         task_supervisor: task_supervisor,
         prompt_loader: fn _opts -> {:ok, %{messages: [], parts: [], accounting: []}} end
       )
@@ -895,37 +906,48 @@ defmodule FermixCore.Realtime.SessionServerTest do
     # Deliver the function call via the production provider path (an async
     # handle_info, exactly how OpenAIClient forwards events), NOT the synchronous
     # `handle_provider_event` GenServer.call. Under the old inline design that
-    # call absorbed the full 2s tool sleep before returning, so the interrupt
-    # timer below started AFTER the tool was already done and could never trip.
-    # The async send lets a still-running tool block the mailbox if it is inline.
+    # call absorbed the whole tool execution before returning, so the verbs below
+    # would have been issued AFTER the tool was already done, against a session
+    # that had nothing left to be blocked by.
     send(
       server,
       {:openai_realtime_event,
        {:function_call,
         %{
           "call_id" => "call-slow",
-          "name" => "sleepy",
-          "arguments" => ~s({"sleep_ms":2000})
+          "name" => "blocking",
+          "arguments" => "{}"
         }}}
     )
 
-    assert_receive {:realtime, %{type: "tool_event", status: "running", name: "sleepy"}}
+    assert_receive {:realtime, %{type: "tool_event", status: "running", name: "blocking"}}
+    assert_receive {:blocking_tool_running, tool}
 
-    # While the tool sleeps, an audio cast is absorbed and an interrupt call
-    # round-trips promptly. Under the old inline design the tool blocked the
-    # session mailbox for its full ~2s, so BOTH of these would have queued behind
-    # it — time the whole window so any inline execution trips the bound.
-    started = System.monotonic_time(:millisecond)
+    # The tool is parked inside `execute/3` and only this process can let it out,
+    # so both verbs below provably run WHILE a tool is running. That is the
+    # contract, and it is what the stopwatch here could only approximate: an
+    # inline tool would make `interrupt/1` wait on a tool that waits on this
+    # test, which the call timeout turns into a loud failure instead of a
+    # millisecond budget that a loaded CI box can blow on its own.
     assert :ok = SessionServer.audio_chunk(server, "mid-tool-audio")
     assert :ok = SessionServer.interrupt(server)
-    elapsed = System.monotonic_time(:millisecond) - started
-    assert elapsed < 1_000, "audio+interrupt were blocked #{elapsed}ms behind the running tool"
-
-    # When the tool finishes, its function output reaches OpenAI and the
-    # companion sees completion.
-    assert_receive {:realtime, %{type: "tool_event", status: "completed", name: "sleepy"}}, 5_000
 
     openai = SessionServer.openai_pid(server)
+    appended = Base.encode64("mid-tool-audio")
+
+    # The cast was enqueued before the call, so a returned interrupt proves the
+    # session had already handled the audio — the cast was absorbed mid-tool
+    # rather than merely returning, which a cast does either way.
+    assert Enum.any?(FakeOpenAIClient.events(openai), fn event ->
+             match?(%{type: "input_audio_buffer.append", audio: ^appended}, event)
+           end)
+
+    # Released, the tool finishes: its function output reaches OpenAI and the
+    # companion sees completion.
+    send(tool, :release)
+
+    assert_receive {:realtime, %{type: "tool_event", status: "completed", name: "blocking"}}
+
     events = FakeOpenAIClient.events(openai)
 
     assert Enum.any?(events, fn
@@ -1041,7 +1063,7 @@ defmodule FermixCore.Realtime.SessionServerTest do
       original = SessionServer.openai_pid(server)
       send(server, {:openai_realtime_disconnect, :network})
 
-      assert_receive {:realtime, %{type: "state", state: "reconnecting"}}, 100
+      assert_receive {:realtime, %{type: "state", state: "reconnecting"}}
       assert_receive {:start_link_called, _opts}
       assert :ok = SessionServer.handle_provider_event(server, {:session_updated, %{}})
       assert_receive {:realtime, %{type: "state", state: "listening"}}
@@ -1078,7 +1100,7 @@ defmodule FermixCore.Realtime.SessionServerTest do
       assert :ok = SessionServer.call_start(server)
       send(server, {:openai_realtime_disconnect, :network})
 
-      assert_receive {:realtime, %{type: "state", state: "reconnecting"}}, 100
+      assert_receive {:realtime, %{type: "state", state: "reconnecting"}}
       assert_receive {:realtime, %{type: "state", state: "reconnecting"}}
       # Exhausted reconnect is terminal: the session ENDS rather than lingering with
       # no provider and no timer, which is unrecoverable by construction.
@@ -1109,7 +1131,7 @@ defmodule FermixCore.Realtime.SessionServerTest do
       assert_receive {:start_link_called, _opts}
       send(server, {:openai_realtime_disconnect, :network})
 
-      assert_receive {:realtime, %{type: "state", state: "reconnecting"}}, 100
+      assert_receive {:realtime, %{type: "state", state: "reconnecting"}}
 
       assert :ok = SessionServer.call_stop(server)
       assert_receive {:realtime, %{type: "state", state: "idle"}}
@@ -1185,13 +1207,13 @@ defmodule FermixCore.Realtime.SessionServerTest do
   defp restore_app_env(key, nil), do: Application.delete_env(:fermix_core, key)
   defp restore_app_env(key, value), do: Application.put_env(:fermix_core, key, value)
 
-  defp sleepy_capability do
+  defp blocking_capability(test_pid) do
     Capability.new(%{
-      name: "sleepy",
-      description: "Sleeps, then returns.",
+      name: "blocking",
+      description: "Blocks until the test releases it.",
       parameters: %{"type" => "object"},
       kind: :builtin,
-      executor: {SleepyTool, :execute, []},
+      executor: {BlockingTool, :execute, [test_pid]},
       policy_class: :read_only
     })
   end
