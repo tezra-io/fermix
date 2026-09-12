@@ -1,6 +1,12 @@
 #!/bin/sh
 set -e
-mix format --check-formatted
-mix compile --warnings-as-errors
-mix credo --strict
-mix test
+
+# MIX_ENV=test on every step, because that is the tree CI checks: its `check`
+# job sets MIX_ENV: test for the whole job, while a bare `mix` here runs in
+# :dev where elixirc_paths is only ["lib"] — so test/support and every .exs
+# helper go unchecked locally and first fail on the runner. The test flag
+# matches CI too: warnings raised loading the suite reach no other gate.
+MIX_ENV=test mix format --check-formatted
+MIX_ENV=test mix compile --warnings-as-errors
+MIX_ENV=test mix credo --strict
+mix test --warnings-as-errors

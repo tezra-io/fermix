@@ -18,8 +18,9 @@ jobs:
     # One leg per shipped-and-executed platform (M22 T0): the release builds
     # macos_aarch64 / macos_x86_64 / linux_aarch64 / linux_x86_64, and before
     # this matrix only linux_x86_64 ever ran the suite. The `gate` job below
-    # aggregates these legs into the single branch-protection required check, so
-    # legs can be renamed/added/removed without touching branch protection.
+    # aggregates these legs so legs can be renamed/added/removed without
+    # touching branch protection — but only once protection actually requires
+    # `gate`. See the note on that job for what is required today.
     name: compile · format · credo · test (${{ matrix.leg }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ matrix.timeout }}
@@ -66,7 +67,44 @@ jobs:
         run: mix credo --strict
 
       - name: Test
-        run: mix test
+        # `mix compile --warnings-as-errors` above covers lib/ only; warnings
+        # raised while loading the .exs suite (a drifted test double, an
+        # unimplemented behaviour callback) reach no gate without the flag here.
+        # tee keeps the ExUnit banner — seed and max_cases are the two facts
+        # every ordering investigation starts from, and a red run whose seed
+        # lives only in scrolled Actions output cannot be replayed at all.
+        run: |
+          set -euo pipefail
+          mix test --warnings-as-errors 2>&1 | tee "${RUNNER_TEMP}/mix-test.log"
+
+      - name: Record failure evidence
+        if: failure()
+        run: |
+          set -uo pipefail
+          {
+            echo "leg: ${{ matrix.leg }} (${{ matrix.os }})"
+            echo "image: ${ImageOS:-unknown} ${ImageVersion:-unknown}"
+            echo "arch: ${RUNNER_ARCH:-unknown}"
+            echo "elixir: ${{ env.ELIXIR_VERSION }}  otp: ${{ env.OTP_VERSION }}"
+            echo "workflow sha: ${{ github.sha }}"
+            echo "pr head sha: ${{ github.event.pull_request.head.sha }}"
+            echo "checked out: $(git rev-parse HEAD)"
+            echo "run attempt: ${{ github.run_attempt }}"
+            grep -E "Running ExUnit with seed" "${RUNNER_TEMP}/mix-test.log" 2>/dev/null \
+              || echo "seed: not reached (failed before the test step)"
+          } > "${RUNNER_TEMP}/ci-evidence.txt"
+          cat "${RUNNER_TEMP}/ci-evidence.txt"
+
+      - name: Upload failure evidence
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ci-evidence-${{ matrix.leg }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/ci-evidence.txt
+            ${{ runner.temp }}/mix-test.log
+          retention-days: 14
+          if-no-files-found: warn
 
   checksum-integrity:
     # The baked checksums are the trust root for everything Fermix downloads
@@ -190,29 +228,38 @@ jobs:
             echo "built ${target}"
           done
 
-  # Aggregate gate: the SINGLE stable check name that branch protection requires
-  # (`compile · format · credo · test`), decoupled from the OS-matrix leg names.
-  # Green iff every `check` leg passed; `if: always()` so a failed/skipped matrix
-  # still produces a definitive RED here rather than a skipped required check that
-  # would itself wedge the merge.
+  # Aggregate gate: one stable check name (`compile · format · credo · test`),
+  # green iff every job it needs passed, decoupled from the OS-matrix leg names.
+  # `if: always()` so a failed/skipped matrix still produces a definitive RED
+  # here rather than a skipped required check that would itself wedge the merge.
+  #
+  # This job gates nothing until branch protection requires IT. As of
+  # 2026-09-12 `main` required the three leg contexts directly — linux-x64,
+  # linux-arm64, macos-arm64 — so macos-x64, checksum-integrity, harness,
+  # release-scripts and disclaim-shim were all advisory, and `dev` required
+  # nothing at all. Point protection at this one context on both branches, or
+  # this job documents an intent the repository does not enforce.
   gate:
     name: compile · format · credo · test
     runs-on: ubuntu-24.04
-    needs: [check, harness, release-scripts, disclaim-shim]
+    needs: [check, checksum-integrity, harness, release-scripts, disclaim-shim]
     if: always()
     steps:
       - name: Require every matrix leg to have passed
         env:
           CHECK_RESULT: ${{ needs.check.result }}
+          CHECKSUM_RESULT: ${{ needs.checksum-integrity.result }}
           HARNESS_RESULT: ${{ needs.harness.result }}
           RELEASE_SCRIPTS_RESULT: ${{ needs.release-scripts.result }}
           DISCLAIM_RESULT: ${{ needs.disclaim-shim.result }}
         run: |
           echo "check (matrix) result: $CHECK_RESULT"
+          echo "checksum-integrity result: $CHECKSUM_RESULT"
           echo "harness result: $HARNESS_RESULT"
           echo "release-scripts result: $RELEASE_SCRIPTS_RESULT"
           echo "disclaim-shim result: $DISCLAIM_RESULT"
           [ "$CHECK_RESULT" = "success" ] || exit 1
+          [ "$CHECKSUM_RESULT" = "success" ] || exit 1
           [ "$HARNESS_RESULT" = "success" ] || exit 1
           [ "$RELEASE_SCRIPTS_RESULT" = "success" ] || exit 1
           [ "$DISCLAIM_RESULT" = "success" ] || exit 1
