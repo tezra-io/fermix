@@ -61,6 +61,66 @@ defmodule FermixChannels.Gateway.Commands.HistoryTest do
   # host (the feature's own platform check is covered by ComputerHistory).
   defp macos_ctx(ctx), do: Map.put(ctx, :computer_history_macos?, true)
 
+  # Stand-in for the capture rail: the status line reads the live `Capturer` by
+  # its module name, and these are the two dead ends an operator has to be told
+  # about — a recorder that never answered, and one too old to have the verb.
+  defmodule CapturerStub do
+    @moduledoc false
+    use GenServer
+
+    def start_link(status),
+      do: GenServer.start_link(__MODULE__, status, name: FermixCore.ComputerHistory.Capturer)
+
+    @impl true
+    def init(status), do: {:ok, status}
+
+    @impl true
+    def handle_call(:status, _from, status), do: {:reply, status, status}
+  end
+
+  defp capturer(mode, reason) do
+    start_supervised!({CapturerStub, %{mode: mode, reason: reason, lock_holder: nil}})
+  end
+
+  defp status_reply(ctx) do
+    assert :ok = History.execute(message("status"), reply_fn(self()), macos_ctx(ctx))
+    assert_receive {:reply, text}
+    text
+  end
+
+  test "status says the recorder never answered the start request", %{ctx: ctx} do
+    capturer(:degraded, :handshake_timeout)
+
+    assert status_reply(ctx) =~
+             "Capture: degraded — the recorder never answered the start request " <>
+               "(a compux upgrade or reinstall is needed)."
+  end
+
+  test "status names a pre-v6 recorder as the protocol mismatch it is", %{ctx: ctx} do
+    capturer(:degraded, {:protocol_mismatch, %{required: 6, sidecar: :pre_v6}})
+
+    assert status_reply(ctx) =~
+             "Capture: degraded — recorder speaks a pre-v6 protocol ≠ required v6 " <>
+               "(a compux upgrade is needed)."
+
+    # A sidecar with no observe_start verb has no version to name, so the numeric
+    # clause must not render "vpre_v6".
+    refute status_reply(ctx) =~ "vpre_v6"
+  end
+
+  test "status says a recorder still handshaking is starting, not running", %{ctx: ctx} do
+    capturer(:handshaking, nil)
+
+    assert status_reply(ctx) =~ "Capture: starting the recorder."
+  end
+
+  test "status keeps naming the version a numeric mismatch reported", %{ctx: ctx} do
+    capturer(:degraded, {:protocol_mismatch, %{required: 6, sidecar: 5}})
+
+    assert status_reply(ctx) =~
+             "Capture: degraded — recorder protocol v5 ≠ required v6 (a compux upgrade is needed)."
+  end
+
   test "status reports the unsummarized backlog and how old it is", %{ctx: ctx, repo: repo} do
     now = System.system_time(:millisecond)
 

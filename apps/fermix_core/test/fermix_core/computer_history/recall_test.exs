@@ -4,10 +4,39 @@ defmodule FermixCore.ComputerHistory.RecallTest do
   dates every entry, spends its budget in whole entries, and says out loud when
   older entries were omitted.
   """
-  use ExUnit.Case, async: true
+  # async: false — the digest-accounting case lowers the global Logger level,
+  # which config/test.exs pins to :warning.
+  use ExUnit.Case, async: false
+
+  import ExUnit.CaptureLog
 
   alias FermixCore.ComputerHistory.Recall
   alias FermixCore.Memory.Repo
+
+  # A pass-through in front of the store that reports the access row it was asked
+  # to write: `result_count` has no reader anywhere, and a digest that renders
+  # seven entries while auditing two would be an invisible lie about what the
+  # agent read.
+  defmodule AuditSpy do
+    @moduledoc false
+    use GenServer
+
+    def start_link({repo, test_pid}), do: GenServer.start_link(__MODULE__, {repo, test_pid})
+
+    @impl true
+    def init(state), do: {:ok, state}
+
+    @impl true
+    def handle_call({:computer_history_record_access, access} = request, _from, state) do
+      {repo, test_pid} = state
+      send(test_pid, {:access, access})
+      {:reply, GenServer.call(repo, request), state}
+    end
+
+    def handle_call(request, _from, {repo, _test_pid} = state) do
+      {:reply, GenServer.call(repo, request), state}
+    end
+  end
 
   setup do
     unique = System.unique_integer([:positive])
@@ -353,6 +382,62 @@ defmodule FermixCore.ComputerHistory.RecallTest do
       refute text =~ String.duplicate("o", 100)
       assert text =~ "Apollo migration"
       assert text =~ "read the quarterly report"
+    end
+
+    # The incident: three thread entries rendered first spent nearly the whole
+    # 1,500-char section, seven ordinary session notes (99-288 chars) never
+    # reached the turn, and the log called them oversized. Threads and sittings
+    # now fold against their own budgets, so current work cannot starve today.
+    test "three full threads never starve the session notes", %{repo: repo} do
+      for index <- 1..3 do
+        thread(repo, "Thread #{index}", String.duplicate("t", 330), @yesterday + index * 60_000)
+      end
+
+      for index <- 1..4 do
+        from = @today_from + index * 60_000
+
+        memory(repo, from, from + 1_000, %{
+          summary: "note-#{index}. #{String.duplicate("n", 110)}"
+        })
+      end
+
+      spy = start_supervised!({AuditSpy, {repo, self()}})
+      text = Recall.recent_digest(repo: spy, now: @today, timezone: "Etc/UTC")
+
+      for index <- 1..3, do: assert(text =~ "Thread #{index}:")
+      for index <- 1..4, do: assert(text =~ "note-#{index}.")
+
+      # Threads still lead, and the audit names the true rendered total.
+      assert index_of(text, "Thread 3:") < index_of(text, "note-4.")
+      assert_receive {:access, %{sink: "recent_activity", result_count: 7}}
+    end
+
+    # "Oversized" is a property of the entry, never of a budget the entries ahead
+    # of it had already spent: calling a 300-char note oversized sent a reader
+    # hunting a defect in rows that had nothing wrong with them.
+    test "only an entry wider than its own section is reported oversized", %{repo: repo} do
+      previous_level = Logger.level()
+      Logger.configure(level: :debug)
+      on_exit(fn -> Logger.configure(level: previous_level) end)
+
+      # A pre-cap legacy row, newest, then four ordinary notes that spend the
+      # section between them.
+      {:ok, legacy_id} =
+        memory(repo, @today_from + 540_000, @today_to + 540_000, %{
+          summary: String.duplicate("o", 2_000)
+        })
+
+      for index <- 1..4 do
+        from = @today_from + index * 60_000
+        memory(repo, from, from + 1_000, %{summary: "note-#{index}. #{fat_summary()}"})
+      end
+
+      log = capture_log([level: :debug], fn -> digest(repo) end)
+
+      assert log =~ "computer_history digest: 0 thread(s) and 2 session note(s) shown"
+      assert log =~ "2 session note(s) did not fit the budget"
+      # Exactly one entry earns the word: the legacy row, alone wider than the cap.
+      assert log =~ "computer_history digest skipped oversized memories: [#{legacy_id}]"
     end
 
     defp index_of(text, needle) do

@@ -226,7 +226,9 @@ section injects a short digest under the same gate: up to three current threads
 first, then the **last 24 hours** of sittings, up to 8 dated entries with up to
 three pages each, dropping the oldest entry rather than cutting one mid-sentence —
 a summary from last year is not recent activity, and the frame says which lines
-are current work and which are recent sittings. Both frame activity as untrusted
+are current work and which are recent sittings. The two layers hold **separate
+character budgets**, so a few wide threads can never crowd the day's sittings out
+of the section. Both frame activity as untrusted
 data (a captured "ignore previous instructions…" is tagged at ingest and never
 executed). Verbatim field-value text is contract-barred: the summarizer's prose
 is validated code-side against the source spool before a memory is written and
@@ -244,10 +246,18 @@ search can never return activity.
 - Enabling is a **setup** act (the consent surface), never a chat command. The
   setup card's app picker lists installed apps by name; an empty allowlist
   cannot be saved.
-- `/history status` — capture/summarizer/allowlist/spool overview, a `Coverage:`
-  line naming the apps where only window titles are observable (nothing typed in
-  them can ever reach history) and the apps that refused to report changes —
-  omitted when the recorder reported no such state in the retention window — a `Chat:`
+- `/history status` — capture/summarizer/allowlist/spool overview. Its `Capture:`
+  line is the live state of the recorder: running, starting (the start request is
+  sent and the recorder has not answered yet), restarting, standing down because
+  another daemon on this Mac holds capture, or degraded with the reason — the
+  recorder never answered the start request, it speaks a protocol older than the
+  one capture requires, it refused to start observing, it kept exiting, or its
+  binary is missing. A degraded recorder releases the machine-wide hold, so the
+  other daemon on the Mac can take over instead of standing down for good. Also a
+  `Coverage:` line naming the apps where only window titles are observable
+  (nothing typed in them can ever reach history) and the apps that refused to
+  report changes — omitted when the recorder reported no such state in the
+  retention window — a `Chat:`
   line naming which providers history turns run on and which failover hops are
   off while history is on (or, when the primary is not granted, that history
   cannot surface and the exact `remote_summaries` entry that would fix it), plus an

@@ -9,6 +9,11 @@
 #   FAKE_PRE_ACK_FILE NDJSON frames to stream BEFORE the ack (buffer-before-handshake)
 #   FAKE_EVENTS_FILE  NDJSON frames to stream AFTER a successful ack
 #   FAKE_EXIT_AFTER   "1" to exit once the post-ack stream is drained (sidecar-exit gap)
+#   FAKE_TYPELESS_ACK "1" to answer observe_start with a POSITIONAL, typeless frame —
+#                     what a pre-v6 sidecar (no observe_start verb) actually replies
+#   FAKE_SILENT       "1" to never answer observe_start at all (handshake deadline)
+#   FAKE_DIE_FIRST    "1" (with FAKE_STATE_FILE) to exit before acking on the FIRST
+#                     incarnation only, then behave normally (supersedes its deadline)
 use strict;
 use warnings;
 $| = 1;
@@ -33,6 +38,26 @@ while (my $line = <STDIN>) {
         # Die before acking — models a sidecar that crashes on startup and never
         # completes a handshake, so the capturer's restart budget is not reset.
         exit(1) if ($ENV{FAKE_EXIT_BEFORE_ACK} // "") eq "1";
+
+        # A pre-v6 sidecar has no observe_start verb: it answers the unknown
+        # action with a positional frame that carries no "type" discriminator.
+        if (($ENV{FAKE_TYPELESS_ACK} // "") eq "1") {
+            print qq({"ok":false,"error":"unknown action"}\n);
+            next;
+        }
+
+        # Never answer at all — the handshake the capturer would wait on forever.
+        next if ($ENV{FAKE_SILENT} // "") eq "1";
+
+        # Die before acking on the FIRST incarnation only; every later one acks
+        # normally, so the first open's handshake deadline is superseded.
+        if (($ENV{FAKE_DIE_FIRST} // "") eq "1") {
+            my $first = $ENV{FAKE_STATE_FILE};
+            if (defined $first and !-f $first) {
+                if (open(my $m, ">", $first)) { close($m); }
+                exit(1);
+            }
+        }
 
         # Ack + stream + exit on the FIRST incarnation, then die before acking on
         # every later one — a sidecar that ran and produced verified events, then

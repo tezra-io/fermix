@@ -105,6 +105,7 @@ defmodule FermixChannels.Gateway.Commands.History do
   defp capture_line, do: "Capture: #{capture_phrase(Capturer.status())}."
 
   defp capture_phrase(%{mode: :capturing}), do: "running"
+  defp capture_phrase(%{mode: :handshaking}), do: "starting the recorder"
   defp capture_phrase(%{mode: :restarting}), do: "restarting the recorder"
 
   defp capture_phrase(%{mode: :standing_down}),
@@ -117,8 +118,16 @@ defmodule FermixChannels.Gateway.Commands.History do
 
   defp capture_phrase(%{mode: mode}), do: to_string(mode)
 
+  # A pre-v6 recorder has no observe_start verb at all — it answers with a
+  # positional frame rather than a version — so there is no number to name.
+  defp degrade_phrase({:protocol_mismatch, %{required: required, sidecar: :pre_v6}}),
+    do: "recorder speaks a pre-v6 protocol ≠ required v#{required} (a compux upgrade is needed)"
+
   defp degrade_phrase({:protocol_mismatch, %{required: required, sidecar: sidecar}}),
     do: "recorder protocol v#{sidecar} ≠ required v#{required} (a compux upgrade is needed)"
+
+  defp degrade_phrase(:handshake_timeout),
+    do: "the recorder never answered the start request (a compux upgrade or reinstall is needed)"
 
   defp degrade_phrase(:observe_start_refused), do: "the recorder refused to start observing"
 

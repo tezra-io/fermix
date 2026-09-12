@@ -13,8 +13,10 @@ defmodule FermixCore.ComputerHistory.Capturer do
       daemon on the same Mac **stands down** and re-acquires on a tick when the
       holder exits (§8.6). The holder heartbeats the lock to prove liveness.
     * **handshake** — `observe_start`'s ack must report `protocol_version` 6
-      (the capture-mode compux); a mismatch or a refused start **degrades**
-      loudly (doctor-visible) rather than crash-looping.
+      (the capture-mode compux); a mismatch, a refused start, or **no ack at all
+      within `@handshake_timeout_ms`** **degrades** loudly (doctor-visible)
+      rather than crash-looping. The handshake is a mode of its own
+      (`:handshaking`): capture does not read as running until the ack lands.
     * **backpressure** — events micro-batch to `Ingest` (which owns
       allowlist ▸ scrub ▸ tag ▸ write); a bounded queue drops to an
       `observer.gap{overflow}` rather than growing the mailbox.
@@ -47,6 +49,12 @@ defmodule FermixCore.ComputerHistory.Capturer do
   @capture_protocol_version 6
   @gap_boot_id "fermix-capturer"
 
+  # An unacked handshake is bounded: a sidecar that answers `observe_start` with
+  # nothing at all (or with a frame this wire cannot read) used to leave the
+  # capturer waiting forever while it heartbeat the machine-wide lock — so the
+  # other daemon on the Mac stood down for good and NOBODY captured (§8.6).
+  @handshake_timeout_ms 10_000
+
   @batch_size 25
   @max_queue 1_000
   @max_frame_bytes 1_048_576
@@ -61,7 +69,8 @@ defmodule FermixCore.ComputerHistory.Capturer do
   @max_restart_attempts 5
   @restart_backoff_ms 1_000
 
-  @type mode :: :bootstrapping | :capturing | :restarting | :standing_down | :degraded
+  @type mode ::
+          :bootstrapping | :handshaking | :capturing | :restarting | :standing_down | :degraded
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
@@ -70,7 +79,12 @@ defmodule FermixCore.ComputerHistory.Capturer do
   end
 
   @doc "Introspection for `/history status` and the doctor row."
-  @spec status(GenServer.server()) :: %{mode: mode(), reason: term(), lock_holder: term()}
+  @spec status(GenServer.server()) :: %{
+          mode: mode(),
+          reason: term(),
+          lock_holder: term(),
+          stale_deadlines_ignored: non_neg_integer()
+        }
   def status(server \\ __MODULE__) do
     GenServer.call(server, :status)
   catch
@@ -108,11 +122,17 @@ defmodule FermixCore.ComputerHistory.Capturer do
       gap_seq: 0,
       overflow_pending?: false,
       protocol_ok?: false,
+      # Bumped on every sidecar open, and carried by that open's handshake
+      # deadline, so a deadline armed for a sidecar that is already gone can
+      # never tear down the incarnation that replaced it.
+      generation: 0,
+      stale_deadlines_ignored: 0,
       restart_attempts: 0,
       degraded_reason: nil,
       batch_size: Keyword.get(opts, :batch_size, @batch_size),
       max_queue: Keyword.get(opts, :max_queue, @max_queue),
       flush_interval_ms: Keyword.get(opts, :flush_interval_ms, @flush_interval_ms),
+      handshake_timeout_ms: Keyword.get(opts, :handshake_timeout_ms, @handshake_timeout_ms),
       heartbeat_interval_ms:
         Keyword.get(opts, :heartbeat_interval_ms, SingletonLock.heartbeat_interval_ms()),
       reacquire_interval_ms: Keyword.get(opts, :reacquire_interval_ms, 30_000),
@@ -153,10 +173,13 @@ defmodule FermixCore.ComputerHistory.Capturer do
   end
 
   defp open_sidecar(state) do
+    state = %{state | generation: state.generation + 1}
+
     with {:ok, path} <- resolve_binary(state.binary_path),
          {:ok, driver_state} <- Compux.PortDriver.start(binary_path: path, env: state.sidecar_env),
          :ok <- send_observe_start(driver_state, state) do
-      %{state | mode: :capturing, driver_state: driver_state, protocol_ok?: false}
+      schedule({:handshake_deadline, state.generation}, state.handshake_timeout_ms)
+      %{state | mode: :handshaking, driver_state: driver_state, protocol_ok?: false}
     else
       {:error, reason} -> degrade(state, reason)
     end
@@ -240,13 +263,36 @@ defmodule FermixCore.ComputerHistory.Capturer do
     {:noreply, open_sidecar(state)}
   end
 
+  # The ack never came. Degrade (which stops the sidecar and RELEASES the lock)
+  # instead of waiting on it forever.
+  def handle_info(
+        {:handshake_deadline, generation},
+        %{mode: :handshaking, generation: generation} = state
+      ) do
+    {:noreply, degrade(state, :handshake_timeout)}
+  end
+
+  # A deadline armed for a sidecar open that has since been acked, restarted or
+  # degraded: the incarnation it belonged to is gone, so it decides nothing. The
+  # count is a status fact (and the test's observable): "ignored" must be
+  # provable, not inferred from a wait.
+  def handle_info({:handshake_deadline, generation}, state) do
+    Logger.debug(
+      "computer_history capturer ignored a stale handshake deadline (gen #{generation})"
+    )
+
+    {:noreply, %{state | stale_deadlines_ignored: state.stale_deadlines_ignored + 1}}
+  end
+
   def handle_info(:flush, state) do
     flushed = flush(state)
     # Only the periodic tick reschedules itself; size- and ack-triggered flushes
     # do not (which is what keeps a single flush timer, never a proliferating one).
     # The timer perpetuates through a transient `:restarting` window so buffered
     # gaps/events still drain while the sidecar is being reopened.
-    if flushed.mode in [:capturing, :restarting], do: schedule(:flush, flushed.flush_interval_ms)
+    if flushed.mode in [:handshaking, :capturing, :restarting],
+      do: schedule(:flush, flushed.flush_interval_ms)
+
     {:noreply, flushed}
   end
 
@@ -275,7 +321,13 @@ defmodule FermixCore.ComputerHistory.Capturer do
 
   @impl true
   def handle_call(:status, _from, state) do
-    reply = %{mode: state.mode, reason: state.degraded_reason, lock_holder: state.lock_holder}
+    reply = %{
+      mode: state.mode,
+      reason: state.degraded_reason,
+      lock_holder: state.lock_holder,
+      stale_deadlines_ignored: state.stale_deadlines_ignored
+    }
+
     {:reply, reply, state}
   end
 
@@ -285,9 +337,20 @@ defmodule FermixCore.ComputerHistory.Capturer do
     case Wire.decode(line) do
       {:event, event} -> ingest_event(state, event)
       {:ack, ack} -> handle_ack(state, ack)
-      {:error, reason} -> buffer_gap(state, "malformed:#{gap_label(reason)}")
+      {:error, reason} -> handle_decode_error(state, reason)
     end
   end
+
+  # A pre-v6 sidecar has no `observe_start` verb and answers the unknown action
+  # with a POSITIONAL frame — no `"type"` — so a typeless line while the
+  # handshake is still outstanding IS the protocol mismatch, and gapping it left
+  # the rail waiting on an ack that could never come. Once the handshake has
+  # verified the wire, a typeless line is an ordinary hole in the record.
+  defp handle_decode_error(%{protocol_ok?: false} = state, :missing_frame_type) do
+    degrade(state, {:protocol_mismatch, %{required: @capture_protocol_version, sidecar: :pre_v6}})
+  end
+
+  defp handle_decode_error(state, reason), do: buffer_gap(state, "malformed:#{gap_label(reason)}")
 
   defp handle_ack(%{protocol_ok?: true} = state, _ack), do: state
 
@@ -298,7 +361,7 @@ defmodule FermixCore.ComputerHistory.Capturer do
        }) do
     Logger.info("computer_history capture started (protocol v#{@capture_protocol_version})")
     # A clean handshake proves the sidecar is healthy — reset the restart budget.
-    flush(%{state | protocol_ok?: true, restart_attempts: 0})
+    flush(%{state | mode: :capturing, protocol_ok?: true, restart_attempts: 0})
   end
 
   defp handle_ack(state, %{action: "observe_start", protocol_version: version})
