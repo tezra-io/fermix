@@ -138,7 +138,11 @@ defmodule FermixCore.Sandbox.CommandToolTest do
       command: "false",
       args: [],
       pass_env: [],
-      timeout_ms: 1_000,
+      # Every test here asserts what the command printed and saw, never how
+      # fast it was spawned, so the budget only has to outlast a loaded host:
+      # a second was not enough for two spawns while the suite ran beside
+      # other work on the same Mac.
+      timeout_ms: 30_000,
       description: "test command"
     }
   end
