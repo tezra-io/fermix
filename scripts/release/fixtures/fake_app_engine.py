@@ -82,7 +82,16 @@ def management_response(request, manifest, port, stopping):
                     "setup.session.create",
                     "lifecycle.prepare",
                     "lifecycle.commit",
-                ]
+                ],
+                # Protocol v2 publishes each method's minimum version beside
+                # the catalog; the verifier refuses a hello without it.
+                "minimum_versions": {
+                    "hello": 1,
+                    "overview.get": 1,
+                    "setup.session.create": 1,
+                    "lifecycle.prepare": 1,
+                    "lifecycle.commit": 1,
+                },
             },
             "engine": engine,
             "setup": {"origin": f"http://127.0.0.1:{port}", "path": "/setup"},

@@ -612,11 +612,12 @@ def _validate_runtime_identity(result, manifest, process_pid, environment):
         raise VerificationError("management protocol range contradicts the engine manifest")
 
     capabilities = result["capabilities"]
-    if not isinstance(capabilities, dict) or set(capabilities) != {"methods"}:
+    if not isinstance(capabilities, dict) or set(capabilities) != {"methods", "minimum_versions"}:
         raise VerificationError("management hello returned invalid capabilities")
     methods = capabilities["methods"]
     if not isinstance(methods, list) or "hello" not in methods or not all(isinstance(item, str) for item in methods):
         raise VerificationError("management hello does not advertise hello")
+    _validate_minimum_versions(capabilities["minimum_versions"], methods)
 
     engine = result["engine"]
     expected_identity = manifest["identity"]
@@ -634,6 +635,22 @@ def _validate_runtime_identity(result, manifest, process_pid, environment):
         raise VerificationError("management setup endpoint contradicts the smoke runtime")
     return engine
 
+
+
+def _validate_minimum_versions(minimum_versions, methods):
+    """Protocol v2 publishes the minimum version of every method beside the catalog.
+
+    A client reads it to degrade an older engine to a sentence instead of a
+    crash, so a version that names a method the catalog does not carry, or a
+    version below the window, would be advertising a door that is not there.
+    """
+    if not isinstance(minimum_versions, dict):
+        raise VerificationError("management hello returned invalid minimum versions")
+    for method, minimum in minimum_versions.items():
+        if method not in methods:
+            raise VerificationError(f"management hello pins a minimum version for an unknown method: {method}")
+        if not isinstance(minimum, int) or isinstance(minimum, bool) or minimum < 1:
+            raise VerificationError(f"management hello pins an invalid minimum version for {method}")
 
 
 def _await_exit(process, timeouts, log_path):

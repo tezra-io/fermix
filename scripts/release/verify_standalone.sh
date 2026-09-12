@@ -59,7 +59,11 @@ disclaim=""
 while IFS= read -r -d '' candidate; do
   disclaim="$candidate"
   break
-done < <(find "$home" -type f -path '*/fermix_nif/priv/disclaim' -print0)
+# The unpacked release names each application directory with its version
+# (lib/fermix_nif-<version>/priv), which is not the source tree's
+# apps/fermix_nif/priv; a pattern written to the source layout matched no
+# release at all.
+done < <(find "$home" -type f -path '*/fermix_nif-*/priv/disclaim' -print0)
 
 [ -n "$disclaim" ] || fail "packaged disclaim shim not found in the isolated smoke home"
 [ -x "$disclaim" ] || fail "packaged disclaim shim is not executable"
