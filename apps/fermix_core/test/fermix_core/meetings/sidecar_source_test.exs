@@ -79,16 +79,21 @@ defmodule FermixCore.Meetings.SidecarSourceTest do
     end
 
     test "a handshake timeout is reported through the shared expiry emitter" do
+      # The refusal lands in the launch continuation, immediately after
+      # start_link returns, so the source can be gone before a monitor placed
+      # here exists; a monitor on a dead process answers :noproc, never
+      # :normal. The link is there from the spawn, so its exit signal is the
+      # one signal that cannot be missed.
+      Process.flag(:trap_exit, true)
+
       {:ok, source} =
         start_source(
           sidecar_module: RefusingSidecar,
           sidecar_opts: [refusal: {:handshake_timeout, 300}]
         )
 
-      ref = Process.monitor(source)
-
       assert_receive {:meeting_source_error, {:timeout, :meetbot_handshake, 300}}
-      assert_receive {:DOWN, ^ref, :process, ^source, :normal}
+      assert_receive {:EXIT, ^source, :normal}
     end
 
     test "any other launch failure is reported verbatim" do
