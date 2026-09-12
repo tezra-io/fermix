@@ -4,6 +4,23 @@ All notable changes to Fermix are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.4] - 2026-09-12
+
+### Fixed
+
+- **The app's Logs pane no longer goes blank on a log line that is not valid
+  UTF-8.** The daemon's console output is redirected into the same file as
+  its log handler and flattens text bytewise, so a line such as a Phoenix
+  timing in microseconds lands on disk with a byte the JSON encoder refuses.
+  One such byte anywhere in the newest page failed the whole `logs.query`
+  answer, and the pane showed nothing. Every message is now repaired before
+  it is redacted, so the page is delivered with a replacement character in
+  that spot.
+- **A management route failure names its cause in the daemon log.** The
+  route wrapper logged `failure=exception` and dropped the exception, which
+  is how the blank pane went undiagnosed. It now logs the message and the
+  first stack frames, bounded.
+
 ## [0.10.3] - 2026-09-12
 
 ### Fixed

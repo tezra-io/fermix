@@ -339,8 +339,9 @@ defmodule FermixCore.Temporal.SchedulerTest do
       assert reminder(ctx, row.id).status == "pending"
       assert reminder(ctx, row.id).attempt_count == 0
 
-      remaining = Process.read_timer(sync(scheduler).due_timer)
-      assert remaining > 4_000 and remaining <= 5_000
+      state = sync(scheduler)
+      assert is_reference(state.due_timer)
+      assert state.due_delay_ms == 5_000
     end
   end
 
@@ -412,9 +413,10 @@ defmodule FermixCore.Temporal.SchedulerTest do
       create!(ctx, reminder_spec("Submit the report", due))
 
       :ok = GenServer.cast(scheduler, :event_changed)
-      remaining = Process.read_timer(sync(scheduler).due_timer)
+      state = sync(scheduler)
 
-      assert remaining > 1_799_000 and remaining <= 1_800_000
+      assert is_reference(state.due_timer)
+      assert state.due_delay_ms == 1_800_000
     end
 
     test "a reminder sixty days out arms a bounded recheck instead of a months-long timer", ctx do
@@ -430,9 +432,10 @@ defmodule FermixCore.Temporal.SchedulerTest do
       )
 
       :ok = GenServer.cast(scheduler, :event_changed)
-      remaining = Process.read_timer(sync(scheduler).due_timer)
+      state = sync(scheduler)
 
-      assert remaining > 86_399_000 and remaining <= 86_400_000
+      assert is_reference(state.due_timer)
+      assert state.due_delay_ms == 86_400_000
     end
 
     test "a pending row past its validity boundary never arms a zero-delay timer", ctx do
@@ -452,15 +455,17 @@ defmodule FermixCore.Temporal.SchedulerTest do
       scheduler = start_scheduler(ctx, timer_enabled: true)
 
       assert reminder(ctx, stale.id).status == "pending"
-      remaining = Process.read_timer(sync(scheduler).due_timer)
-      assert remaining > 1_799_000 and remaining <= 1_800_000
+      armed = sync(scheduler)
+      assert is_reference(armed.due_timer)
+      assert armed.due_delay_ms == 1_800_000
 
       :ok = Scheduler.tick(scheduler, now: boot)
       refute_receive {:worker_started, _id, _pid}, 100
       assert reminder(ctx, live.id).status == "pending"
 
-      after_tick = Process.read_timer(sync(scheduler).due_timer)
-      assert after_tick > 1_799_000 and after_tick <= 1_800_000
+      after_tick = sync(scheduler)
+      assert is_reference(after_tick.due_timer)
+      assert after_tick.due_delay_ms == 1_800_000
     end
 
     test "no claimable row at all arms no timer instead of spinning", ctx do
@@ -473,9 +478,11 @@ defmodule FermixCore.Temporal.SchedulerTest do
 
       assert reminder(ctx, stale.id).status == "pending"
       assert is_nil(sync(scheduler).due_timer)
+      assert is_nil(sync(scheduler).due_delay_ms)
 
       :ok = Scheduler.tick(scheduler, now: boot)
       assert is_nil(sync(scheduler).due_timer)
+      assert is_nil(sync(scheduler).due_delay_ms)
     end
   end
 
@@ -718,8 +725,9 @@ defmodule FermixCore.Temporal.SchedulerTest do
           :ok = Scheduler.tick(scheduler, now: @created_at)
           :ok = Scheduler.reconcile(scheduler, now: @created_at)
 
-          remaining = Process.read_timer(sync(scheduler).due_timer)
-          assert remaining > 4_000 and remaining <= 5_000
+          state = sync(scheduler)
+          assert is_reference(state.due_timer)
+          assert state.due_delay_ms == 5_000
         end)
 
       assert log =~ "boot sweep failed"

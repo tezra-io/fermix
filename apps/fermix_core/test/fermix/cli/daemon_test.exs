@@ -330,12 +330,22 @@ defmodule Fermix.CLI.DaemonTest do
       FermixTestSupport.SafeRm.rm_rf(socket_dir)
     end)
 
-    assert {:error, {:management_error, "internal_error", _message, %{}}} =
-             Client.request_v1("overview.get", %{},
-               request_id: "req-provider-fault",
-               socket_path: socket_path,
-               timeout: 1_000
-             )
+    # The reply is deliberately opaque, so the log is the only place the fault is
+    # explained. `failure=exception` on its own left an operator with a line
+    # repeating every few seconds and nothing to search for.
+    logged =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:error, {:management_error, "internal_error", _message, %{}}} =
+                 Client.request_v1("overview.get", %{},
+                   request_id: "req-provider-fault",
+                   socket_path: socket_path,
+                   timeout: 1_000
+                 )
+      end)
+
+    assert logged =~ "Management route failed: method=overview.get failure=exception"
+    assert logged =~ "reason=provider failure"
+    assert logged =~ "daemon_test.exs"
 
     assert Process.alive?(daemon)
   end

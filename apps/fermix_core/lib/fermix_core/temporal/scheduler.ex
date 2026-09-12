@@ -12,7 +12,9 @@ defmodule FermixCore.Temporal.Scheduler do
     * a **nearest-due timer**. `event_changed/1` and every settled delivery
       re-query the earliest *claimable* `ready_at` — validity included, so a row
       the daemon slept past cannot set an alarm the due scan then refuses — and
-      arm exactly one timer for it.
+      arm exactly one timer for it. State keeps the delay it chose beside the
+      timer reference (`due_delay_ms`), so the decision is readable without
+      reading the wall clock back off the reference.
       The delay is clamped to 24 hours: not an OTP range fix (modern
       `Process.send_after/3` accepts far longer), but bounded-timer hygiene, so a
       birthday months away never rides one armed timer through host suspends and
@@ -85,6 +87,7 @@ defmodule FermixCore.Temporal.Scheduler do
           max_workers: pos_integer(),
           reconciliation_interval_ms: pos_integer(),
           due_timer: reference() | nil,
+          due_delay_ms: non_neg_integer() | nil,
           reconciliation_timer: reference() | nil,
           monitors: %{reference() => String.t()},
           boundary_cursor: Repo.temporal_cursor() | nil,
@@ -178,6 +181,7 @@ defmodule FermixCore.Temporal.Scheduler do
       reconciliation_interval_ms:
         Keyword.get(opts, :reconciliation_interval_ms, @default_reconciliation_interval_ms),
       due_timer: nil,
+      due_delay_ms: nil,
       reconciliation_timer: nil,
       monitors: %{},
       boundary_cursor: nil,
@@ -542,15 +546,19 @@ defmodule FermixCore.Temporal.Scheduler do
     cancel_timer(state.due_timer)
 
     if state.enabled? and state.timer_enabled? do
-      %{state | due_timer: next_due_timer(state, outcome)}
+      {timer, delay_ms} = next_due_timer(state, outcome)
+      %{state | due_timer: timer, due_delay_ms: delay_ms}
     else
-      %{state | due_timer: nil}
+      %{state | due_timer: nil, due_delay_ms: nil}
     end
   end
 
   # The timer query asks for the earliest *claimable* row, validity included: a
   # row the due scan would refuse must never set the alarm, or the tick it wakes
   # claims nothing and re-arms at 0ms for as long as the row survives.
+  #
+  # Returns the armed reference paired with the delay it was armed at; `{nil,
+  # nil}` when nothing is due and the tick was clean.
   defp next_due_timer(state, outcome) do
     now = state.now_fn.()
 
@@ -566,7 +574,7 @@ defmodule FermixCore.Temporal.Scheduler do
     arm(@error_backoff_ms)
   end
 
-  defp backoff_timer(:ok), do: nil
+  defp backoff_timer(:ok), do: {nil, nil}
   defp backoff_timer(_outcome), do: arm(@error_backoff_ms)
 
   # A clean tick fires at the next `ready_at` (0ms floor for a past-due row). A
@@ -593,7 +601,7 @@ defmodule FermixCore.Temporal.Scheduler do
     end
   end
 
-  defp arm(delay_ms), do: Process.send_after(self(), :due_tick, delay_ms)
+  defp arm(delay_ms), do: {Process.send_after(self(), :due_tick, delay_ms), delay_ms}
 
   defp cancel_timer(nil), do: :ok
   defp cancel_timer(timer), do: Process.cancel_timer(timer)
