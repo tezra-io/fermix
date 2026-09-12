@@ -276,7 +276,8 @@ one `Fermix.app` copy, a single copy installed outside the Applications folder
 (the app registers its background service only from there) or one whose bundle
 identifier is not the app's, a running `brew services` entry for fermix, a launch
 agent whose daemon does not answer, another `fermix` on `PATH` owned by neither
-Homebrew nor the app, or no Homebrew formula install at all. It is macOS-only — the Linux `fermix` formula continues
+Homebrew, the app, nor the release the command is itself running from, or no
+Homebrew formula install at all. It is macOS-only — the Linux `fermix` formula continues
 unchanged — and an engine that is already app-managed has nothing to migrate.
 
 **No path here ever deletes a Fermix home** — not the migration, not

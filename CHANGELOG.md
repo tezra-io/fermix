@@ -4,6 +4,19 @@ All notable changes to Fermix are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.3] - 2026-09-12
+
+### Fixed
+
+- **`fermix migrate-to-app` no longer refuses its own installed release as a
+  foreign `fermix` on `PATH`.** Every Homebrew install on macOS was refused:
+  the standalone unpacks itself and runs out of that copy, and the unpacked
+  copy's own launcher is on the `PATH` of the processes the command spawns, so
+  the check for a stray `fermix` that would shadow the one the cask installs
+  found the installation doing the migrating and stopped there. The command now
+  recognizes the release it is running from as its own, and still refuses any
+  other `fermix` that belongs to neither Homebrew nor the app.
+
 ## [0.10.2] - 2026-09-12
 
 ### Fixed

@@ -22,10 +22,11 @@ defmodule Fermix.CLI.Migrate.Discovery do
   formula's launch agent is installed and points back at this command.
 
   Every world this module reads is injected: the OS, the account home, the
-  Fermix home, the management client, and one command runner for `which`,
-  `brew`, and `kill`. `Upgrade.InstallMethod` answers a different question — how
-  the *running* binary was installed — and shells out uninjectably, so PATH
-  ownership is classified here against the brew prefix this run actually read.
+  Fermix home, the release root this command is running from, the management
+  client, and one command runner for `which`, `brew`, and `kill`.
+  `Upgrade.InstallMethod` answers a different question — how the *running*
+  binary was installed — and shells out uninjectably, so PATH ownership is
+  classified here against the brew prefix this run actually read.
   """
 
   alias Fermix.CLI.Daemon.Client
@@ -302,8 +303,17 @@ defmodule Fermix.CLI.Migrate.Discovery do
     end
   end
 
+  # The release this command is running from is one of the recognized roots: the
+  # standalone unpacks itself and boots ERTS out of that copy, and `erlexec`
+  # prepends `$ROOTDIR/bin` to the PATH every process it spawns inherits, so
+  # `which -a fermix` answers with the release's own launcher on every Homebrew
+  # install. That file is this installation, not a launcher that would shadow
+  # the cask's. The root is the one the VM actually booted from, so a source
+  # checkout and any future packager are covered by the same invariant.
   defp classify_targets(deps, prefix, targets) do
-    case Enum.reject(targets, &recognized_target?(&1, prefix, app_paths(deps))) do
+    roots = [release_root(deps) | app_paths(deps)]
+
+    case Enum.reject(targets, &recognized_target?(&1, prefix, roots)) do
       [] ->
         {:ok, targets}
 
@@ -317,9 +327,9 @@ defmodule Fermix.CLI.Migrate.Discovery do
     end
   end
 
-  defp recognized_target?(path, prefix, app_paths) do
+  defp recognized_target?(path, prefix, roots) do
     String.contains?(path, "/Cellar/") or under?(path, prefix) or
-      Enum.any?(app_paths, &under?(path, &1))
+      Enum.any?(roots, &under?(path, &1))
   end
 
   defp under?(_path, nil), do: false
@@ -470,6 +480,10 @@ defmodule Fermix.CLI.Migrate.Discovery do
   end
 
   defp home(deps), do: Keyword.get_lazy(deps, :home, &System.user_home!/0)
+
+  defp release_root(deps) do
+    Keyword.get_lazy(deps, :release_root, fn -> to_string(:code.root_dir()) end)
+  end
 
   defp app_paths(deps) do
     Keyword.get_lazy(deps, :app_paths, fn ->
