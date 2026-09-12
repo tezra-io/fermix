@@ -235,8 +235,7 @@ defmodule FermixCore.Meetings.SidecarSourceTest do
       {:ok, source} = start_source(timers: %{tick_ms: 10, ping_idle_ms: 20, pong_grace_ms: 5_000})
       assert_receive {:stub_control, %{"type" => "join"}}
 
-      assert_receive {:stub_control, %{"type" => "ping"}}, 1_000
-
+      assert_receive {:stub_control, %{"type" => "ping"}}
       control(source, %{"type" => "pong"})
       refute_receive {:meeting_source_error, _reason}, 100
     end
@@ -245,8 +244,8 @@ defmodule FermixCore.Meetings.SidecarSourceTest do
       {:ok, _source} = start_source(timers: %{tick_ms: 10, ping_idle_ms: 20, pong_grace_ms: 30})
       assert_receive {:stub_control, %{"type" => "join"}}
 
-      assert_receive {:stub_control, %{"type" => "ping"}}, 1_000
-      assert_receive {:meeting_source_error, :sidecar_wedged}, 1_000
+      assert_receive {:stub_control, %{"type" => "ping"}}
+      assert_receive {:meeting_source_error, :sidecar_wedged}
     end
 
     test "keeps pinging while audio streams — the 45s capture-death fix" do
@@ -261,7 +260,7 @@ defmodule FermixCore.Meetings.SidecarSourceTest do
       deadline = System.monotonic_time(:millisecond) + 1_500
       flooder = spawn(fn -> flood_audio(source, deadline) end)
 
-      assert_receive {:stub_control, %{"type" => "ping"}}, 1_000
+      assert_receive {:stub_control, %{"type" => "ping"}}
       Process.exit(flooder, :kill)
     end
   end

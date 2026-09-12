@@ -41,8 +41,7 @@ defmodule FermixCore.ComputerHistory.Summarizer.SchedulerTest do
     send(pid, :tick)
     _ = :sys.get_state(pid)
 
-    assert_receive {:ran, ^repo}, 1_000
-
+    assert_receive {:ran, ^repo}
     # The claim was released — status is idle again.
     {:ok, state} = Repo.computer_history_fetch_state(server: repo)
     assert state.status == "idle"

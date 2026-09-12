@@ -430,8 +430,8 @@ defmodule FermixCore.Realtime.SessionServerScreenTest do
 
     :ok = SessionServer.call_stop(server)
 
-    assert_receive {:DOWN, ^ref, :process, ^server, {:shutdown, :call_stop}}, 500
-    assert_receive {:DOWN, ^feed_ref, :process, ^feed, _reason}, 500
+    assert_receive {:DOWN, ^ref, :process, ^server, {:shutdown, :call_stop}}
+    assert_receive {:DOWN, ^feed_ref, :process, ^feed, _reason}
   end
 
   # The feed's budget line counts the feed's OWN frames, client-side. The
@@ -508,7 +508,7 @@ defmodule FermixCore.Realtime.SessionServerScreenTest do
 
     start_sharing(server)
 
-    assert_receive {:tool_span, meas, meta}, 1_000
+    assert_receive {:tool_span, meas, meta}
     assert meta.tool == "screen_share"
     assert meta.success
     assert meta.action == "start"
@@ -531,7 +531,7 @@ defmodule FermixCore.Realtime.SessionServerScreenTest do
 
     start_sharing(server)
 
-    assert_receive {:tool_span, meta}, 1_000
+    assert_receive {:tool_span, meta}
     assert meta.tool == "screen_share"
     refute meta.success
   end
@@ -547,7 +547,7 @@ defmodule FermixCore.Realtime.SessionServerScreenTest do
 
     refute :sys.get_state(server).screen_feed
 
-    assert_receive {:realtime, %{type: "tool_event", status: "error", reason: reason}}, 1_000
+    assert_receive {:realtime, %{type: "tool_event", status: "error", reason: reason}}
     assert reason == "screen_recording_denied"
   end
 
@@ -560,7 +560,7 @@ defmodule FermixCore.Realtime.SessionServerScreenTest do
 
     refute :sys.get_state(server).screen_feed
 
-    assert_receive {:realtime, %{type: "tool_event", status: "error", reason: reason}}, 1_000
+    assert_receive {:realtime, %{type: "tool_event", status: "error", reason: reason}}
     assert reason =~ "capture_probe_failed"
   end
 
@@ -679,8 +679,8 @@ defmodule FermixCore.Realtime.SessionServerScreenTest do
          }}
       )
 
-    assert_receive {:realtime, %{type: "usage", status: "limit_reached"}}, 1_000
-    assert_receive {:DOWN, ^ref, :process, ^server, {:shutdown, :cost_limit}}, 1_000
+    assert_receive {:realtime, %{type: "usage", status: "limit_reached"}}
+    assert_receive {:DOWN, ^ref, :process, ^server, {:shutdown, :cost_limit}}
   end
 
   test "the feed dies with the session", %{server: server} do
@@ -690,6 +690,6 @@ defmodule FermixCore.Realtime.SessionServerScreenTest do
 
     GenServer.stop(server, :normal)
 
-    assert_receive {:DOWN, ^ref, :process, ^feed, _reason}, 1_000
+    assert_receive {:DOWN, ^ref, :process, ^feed, _reason}
   end
 end

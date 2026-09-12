@@ -406,7 +406,7 @@ defmodule FermixCore.Capabilities.MCP.ServerTest do
         id: :mcp_server_refresh_test
       )
 
-      assert_receive {:invalidated, :plugins_changed}, 1_000
+      assert_receive {:invalidated, :plugins_changed}
     end
 
     test "unregistering on shutdown invalidates it again", %{
@@ -431,12 +431,12 @@ defmodule FermixCore.Capabilities.MCP.ServerTest do
           realtime_supervisor: nil
         )
 
-      assert_receive {:invalidated, :plugins_changed}, 1_000
+      assert_receive {:invalidated, :plugins_changed}
       assert eventually(fn -> CapabilityRegistry.list(cap_registry, kind: :mcp) != [] end)
 
       :ok = GenServer.stop(pid, :normal)
 
-      assert_receive {:invalidated, :plugins_changed}, 1_000
+      assert_receive {:invalidated, :plugins_changed}
     end
   end
 

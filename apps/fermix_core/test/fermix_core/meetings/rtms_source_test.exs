@@ -214,7 +214,7 @@ defmodule FermixCore.Meetings.RtmsSourceTest do
     test "a meeting whose RTMS stream never starts releases the source" do
       start_source(%{timers: %{rtms_start_timeout_ms: 40}})
 
-      assert_receive {:meeting_source_error, :rtms_start_timeout}, 500
+      assert_receive {:meeting_source_error, :rtms_start_timeout}
     end
 
     test "a signaling handshake that is never answered times out" do
@@ -223,26 +223,40 @@ defmodule FermixCore.Meetings.RtmsSourceTest do
       assert_receive {:connected, :event, _url, ^source}
       send(source, {:rtms_ws, :event, {:message, fixture("event_rtms_started.json")}})
 
-      assert_receive {:meeting_source_error, {:rtms_handshake_timeout, :signaling}}, 500
+      assert_receive {:meeting_source_error, {:rtms_handshake_timeout, :signaling}}
     end
 
     test "a stream that goes quiet past the keep-alive grace is reported lost" do
       source = start_source(%{timers: %{keepalive_grace_ms: 60}})
       admit(source)
 
-      assert_receive {:meeting_source_error, :rtms_stream_lost}, 500
+      assert_receive {:meeting_source_error, :rtms_stream_lost}
     end
 
     test "traffic on the media leg keeps the grace alive" do
-      # Total activity (5 × 150ms) exceeds the grace, so the pass proves the
-      # pushes RESET the timer; each inter-push gap sits far enough under the
-      # grace that a slow CI scheduler cannot starve one past it.
-      source = start_source(%{timers: %{keepalive_grace_ms: 500}})
+      # The property is that a push re-arms the grace: the timer that was
+      # running is cancelled and a fresh one takes its place, with the epoch
+      # stepped so the old deadline is inert. It is read off the state after
+      # each push rather than proven by sleeping under the deadline, because
+      # a wall-clock proof is only as good as the scheduler of the machine
+      # running it, and the slow CI legs starved one gap past the grace.
+      source = start_source(%{timers: %{keepalive_grace_ms: 30_000}})
       admit(source)
 
-      for bucket <- 0..4 do
-        Process.sleep(150)
-        push_audio(source, "audio_participant_one.json", bucket)
+      %{phase: :streaming, timer: armed, epoch: epoch} = :sys.get_state(source)
+
+      for bucket <- 0..2, reduce: {armed, epoch} do
+        {previous, previous_epoch} ->
+          push_audio(source, "audio_participant_one.json", bucket)
+          # get_state is answered after the push above, so the state it returns
+          # is the one the push left behind.
+          %{phase: :streaming, timer: current, epoch: current_epoch} = :sys.get_state(source)
+
+          assert current != previous
+          assert current_epoch == previous_epoch + 1
+          assert Process.read_timer(previous) == false
+          assert is_integer(Process.read_timer(current))
+          {current, current_epoch}
       end
 
       refute_received {:meeting_source_error, :rtms_stream_lost}

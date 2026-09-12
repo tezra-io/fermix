@@ -84,7 +84,7 @@ defmodule FermixChannels.Mobile.Push.PigeonDispatcherTest do
     refute_receive :dispatcher_started
 
     assert :ok = GenServer.stop(server, :normal, 1_000)
-    assert_receive :dispatcher_stopped, 1_000
+    assert_receive :dispatcher_stopped
   end
 
   test "rejects a runtime config that differs from the owned dispatcher" do

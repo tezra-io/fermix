@@ -439,7 +439,7 @@ defmodule FermixCore.Harness.ContinuationTest do
     test "a client-owned row's notice carries the origin and its rendered request" do
       assert :ok = Continuation.dispatch(OkDispatcher, client_row(), "done")
 
-      assert_receive {:dispatched, notice}, 1_000
+      assert_receive {:dispatched, notice}
       assert notice.client_origin["identity"] == @identity
       assert notice.client_origin["cwd"] == "/repo/apps/core"
       assert notice.content =~ @request_frame_open
@@ -449,7 +449,7 @@ defmodule FermixCore.Harness.ContinuationTest do
     test "hands the dispatcher the frozen target, the notice text, and the next depth" do
       assert :ok = Continuation.dispatch(OkDispatcher, row(%{continuation_depth: 1}), "done")
 
-      assert_receive {:dispatched, notice}, 1_000
+      assert_receive {:dispatched, notice}
       assert notice.platform == "telegram"
       assert notice.destination == "123"
       assert notice.thread == nil

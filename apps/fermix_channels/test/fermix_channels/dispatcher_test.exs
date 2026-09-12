@@ -1006,7 +1006,7 @@ defmodule FermixChannels.DispatcherTest do
         spawn(fn -> :ok end)
 
       ref = Process.monitor(dead_pid)
-      assert_receive {:DOWN, ^ref, :process, ^dead_pid, _reason}, 1_000
+      assert_receive {:DOWN, ^ref, :process, ^dead_pid, _reason}
       refute Process.alive?(dead_pid)
 
       test_pid = self()

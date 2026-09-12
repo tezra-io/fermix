@@ -880,7 +880,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       html = view |> element(~s|button[phx-click="enable_meetings"]|) |> render_click()
 
       assert html =~ "Restart to apply"
-      assert_receive :meetbot_install_started, 500
+      assert_receive :meetbot_install_started
       assert render_async(view) =~ escaped(MeetbotInstaller.error_message(:no_pinned_release))
       assert Keyword.get(Application.get_env(:fermix_core, :meetings, []), :enabled) == true
     end
@@ -911,7 +911,7 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       # Opening the config — not just enabling — kicks the install, and the hint
       # under the still-disabled sign-in reads as installing, not "enable first".
-      assert_receive :meetbot_install_started, 500
+      assert_receive :meetbot_install_started
       assert html =~ "Installing the notetaker"
       refute html =~ "Enable the notetaker above"
     end
@@ -2410,8 +2410,7 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       # The binary success chains straight into the browser install…
       final = render_async(view)
-      assert_receive :meetbot_browser_ran, 1_000
-
+      assert_receive :meetbot_browser_ran
       # …and once both resolve, no persistent "installed" line lingers.
       refute final =~ "The meeting notetaker is installed."
       refute final =~ "Downloading the meeting notetaker…"

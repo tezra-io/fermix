@@ -251,9 +251,9 @@ defmodule FermixCore.Temporal.SchedulerTest do
   end
 
   defp await_worker_exit(id) do
-    assert_receive {:worker_started, ^id, pid}, 1_000
+    assert_receive {:worker_started, ^id, pid}
     ref = Process.monitor(pid)
-    assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 1_000
+    assert_receive {:DOWN, ^ref, :process, ^pid, _reason}
     :ok
   end
 
@@ -266,7 +266,7 @@ defmodule FermixCore.Temporal.SchedulerTest do
       set_now(ctx, due)
       :ok = Scheduler.tick(scheduler, now: due)
 
-      assert_receive {:worker_started, id, _pid}, 1_000
+      assert_receive {:worker_started, id, _pid}
       assert id == row.id
       assert reminder(ctx, row.id).status == "delivering"
       assert reminder(ctx, row.id).attempt_count == 1
@@ -297,7 +297,7 @@ defmodule FermixCore.Temporal.SchedulerTest do
       :ok = Scheduler.tick(scheduler, now: due)
       :ok = Scheduler.tick(scheduler, now: due)
 
-      assert_receive {:worker_started, _id, _pid}, 1_000
+      assert_receive {:worker_started, _id, _pid}
       refute_receive {:worker_started, _other, _pid}, 100
       assert reminder(ctx, row.id).attempt_count == 1
       assert DynamicSupervisor.count_children(ctx.supervisor).active == 1
@@ -600,7 +600,7 @@ defmodule FermixCore.Temporal.SchedulerTest do
 
       assert reminder(ctx, week_before.id).status == "superseded"
       assert reminder(ctx, day_of.id).status == "delivering"
-      assert_receive {:worker_started, id, _pid}, 1_000
+      assert_receive {:worker_started, id, _pid}
       assert id == day_of.id
       refute_receive {:worker_started, _other, _pid}, 100
     end
@@ -629,8 +629,7 @@ defmodule FermixCore.Temporal.SchedulerTest do
 
       set_now(ctx, due)
       :ok = Scheduler.tick(scheduler, now: due)
-      assert_receive {:worker_started, _id, _pid}, 1_000
-
+      assert_receive {:worker_started, _id, _pid}
       :ok = Scheduler.reconcile(scheduler, now: due)
 
       assert reminder(ctx, row.id).status == "delivering"

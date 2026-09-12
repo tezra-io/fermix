@@ -577,7 +577,7 @@ defmodule FermixCore.Realtime.SessionServerTest do
 
     assert :ok = SessionServer.handle_provider_event(server, {:input_audio_committed, %{}})
 
-    assert_receive {:realtime, %{type: "playback_stop"}}, 200
+    assert_receive {:realtime, %{type: "playback_stop"}}
   end
 
   test "active-response race from provider is nonfatal", %{server: server} do
@@ -658,8 +658,8 @@ defmodule FermixCore.Realtime.SessionServerTest do
     # The next audio chunk is what notices; it must end the call, not be discarded.
     SessionServer.audio_chunk(server, <<0, 0, 0, 0>>)
 
-    assert_receive {:realtime, %{type: "usage", status: "limit_reached"}}, 500
-    assert_receive {:DOWN, ^ref, :process, ^server, {:shutdown, :cost_limit}}, 500
+    assert_receive {:realtime, %{type: "usage", status: "limit_reached"}}
+    assert_receive {:DOWN, ^ref, :process, ^server, {:shutdown, :cost_limit}}
   end
 
   # The invariant, not one bug: `openai_pid == nil` is legal ONLY inside the
@@ -673,7 +673,7 @@ defmodule FermixCore.Realtime.SessionServerTest do
     :sys.replace_state(server, &%{&1 | openai_pid: nil, reconnect_timer: nil})
     SessionServer.audio_chunk(server, <<0, 0, 0, 0>>)
 
-    assert_receive {:DOWN, ^ref, :process, ^server, {:shutdown, :provider_session_missing}}, 500
+    assert_receive {:DOWN, ^ref, :process, ^server, {:shutdown, :provider_session_missing}}
   end
 
   # A failed send must not disarm the one connection owner. Before the fix it ran
@@ -690,7 +690,7 @@ defmodule FermixCore.Realtime.SessionServerTest do
     assert Process.alive?(server), "one dropped event must not end a live call"
 
     send(server, {:openai_realtime_disconnect, :network})
-    assert_receive {:realtime, %{type: "state", state: "reconnecting"}}, 500
+    assert_receive {:realtime, %{type: "state", state: "reconnecting"}}
   end
 
   test "call_stop ends the session process and releases the socket", %{server: server} do
@@ -702,7 +702,7 @@ defmodule FermixCore.Realtime.SessionServerTest do
     assert :ok = SessionServer.call_stop(server)
 
     assert_receive {:realtime, %{type: "state", state: "idle"}}
-    assert_receive {:DOWN, ^ref, :process, ^server, {:shutdown, :call_stop}}, 500
+    assert_receive {:DOWN, ^ref, :process, ^server, {:shutdown, :call_stop}}
     refute Process.alive?(openai), "the provider socket is released with the call"
   end
 
@@ -1034,7 +1034,7 @@ defmodule FermixCore.Realtime.SessionServerTest do
         )
 
       assert :ok = SessionServer.call_start(server)
-      assert_receive {:start_link_called, _opts}, 200
+      assert_receive {:start_link_called, _opts}
       assert :ok = SessionServer.handle_provider_event(server, {:session_updated, %{}})
       assert_receive {:realtime, %{type: "state", state: "listening"}}
 
@@ -1042,10 +1042,9 @@ defmodule FermixCore.Realtime.SessionServerTest do
       send(server, {:openai_realtime_disconnect, :network})
 
       assert_receive {:realtime, %{type: "state", state: "reconnecting"}}, 100
-      assert_receive {:start_link_called, _opts}, 500
+      assert_receive {:start_link_called, _opts}
       assert :ok = SessionServer.handle_provider_event(server, {:session_updated, %{}})
-      assert_receive {:realtime, %{type: "state", state: "listening"}}, 500
-
+      assert_receive {:realtime, %{type: "state", state: "listening"}}
       reconnected = SessionServer.openai_pid(server)
       assert is_pid(reconnected)
       assert reconnected != original
@@ -1080,12 +1079,11 @@ defmodule FermixCore.Realtime.SessionServerTest do
       send(server, {:openai_realtime_disconnect, :network})
 
       assert_receive {:realtime, %{type: "state", state: "reconnecting"}}, 100
-      assert_receive {:realtime, %{type: "state", state: "reconnecting"}}, 500
+      assert_receive {:realtime, %{type: "state", state: "reconnecting"}}
       # Exhausted reconnect is terminal: the session ENDS rather than lingering with
       # no provider and no timer, which is unrecoverable by construction.
-      assert_receive {:realtime, %{type: "error", reason: "provider_disconnected"}}, 500
-      assert_receive {:DOWN, ^ref, :process, ^server, {:shutdown, :provider_disconnected}}, 500
-
+      assert_receive {:realtime, %{type: "error", reason: "provider_disconnected"}}
+      assert_receive {:DOWN, ^ref, :process, ^server, {:shutdown, :provider_disconnected}}
       assert ProgrammableOpenAIClient.attempts() == 3
     end
 
@@ -1108,15 +1106,14 @@ defmodule FermixCore.Realtime.SessionServerTest do
       Process.unlink(server)
       ref = Process.monitor(server)
       assert :ok = SessionServer.call_start(server)
-      assert_receive {:start_link_called, _opts}, 200
+      assert_receive {:start_link_called, _opts}
       send(server, {:openai_realtime_disconnect, :network})
 
       assert_receive {:realtime, %{type: "state", state: "reconnecting"}}, 100
 
       assert :ok = SessionServer.call_stop(server)
       assert_receive {:realtime, %{type: "state", state: "idle"}}
-      assert_receive {:DOWN, ^ref, :process, ^server, {:shutdown, :call_stop}}, 500
-
+      assert_receive {:DOWN, ^ref, :process, ^server, {:shutdown, :call_stop}}
       # The pending reconnect died with the session — no attempt fires afterwards.
       refute_receive {:start_link_called, _opts}, 200
     end

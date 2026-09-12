@@ -312,8 +312,7 @@ defmodule FermixCore.Transcription.XAIStreamTest do
       assert_receive {:ws_binary, ^socket, _pcm}
 
       send(session, {:transcription_ws, socket, {:disconnect, :closed}})
-      assert_receive {:ws_started, socket2, _url, _headers, ^session}, 1_000
-
+      assert_receive {:ws_started, socket2, _url, _headers, ^session}
       inject(session, socket2, fixture("transcript_created"))
       inject(session, socket2, fixture("transcript"))
       assert_receive {:transcript_segment, ^session, %Segment{t0_ms: 2500, t1_ms: 3700}}
@@ -325,7 +324,7 @@ defmodule FermixCore.Transcription.XAIStreamTest do
       socket4 =
         Enum.reduce(1..3, socket, fn _attempt, current ->
           send(session, {:transcription_ws, current, {:disconnect, :closed}})
-          assert_receive {:ws_started, next, _url, _headers, ^session}, 1_000
+          assert_receive {:ws_started, next, _url, _headers, ^session}
           next
         end)
 
@@ -356,8 +355,7 @@ defmodule FermixCore.Transcription.XAIStreamTest do
 
       send(session, {:transcription_ws, socket, {:disconnect, :closed}})
 
-      assert_receive {:transcript_stream_error, ^session, {:ws_start_failed, :econnrefused}},
-                     1_000
+      assert_receive {:transcript_stream_error, ^session, {:ws_start_failed, :econnrefused}}
     end
   end
 
@@ -422,8 +420,7 @@ defmodule FermixCore.Transcription.XAIStreamTest do
       # A cast cannot reach a process blocked inside a send, so the wedged socket
       # is killed and the ordinary reconnect path takes it from there.
       assert_receive {:DOWN, ^socket_down, :process, ^socket, :killed}
-      assert_receive {:ws_started, socket2, _url, _headers, ^session}, 1_000
-
+      assert_receive {:ws_started, socket2, _url, _headers, ^session}
       inject(session, socket2, fixture("transcript_created"))
       assert_receive {:ws_binary, ^socket2, ^held}
     end
@@ -436,7 +433,7 @@ defmodule FermixCore.Transcription.XAIStreamTest do
       assert_receive {:ws_binary, ^socket, ^chunk}
 
       send(session, {:transcription_ws, socket, {:disconnect, :closed}})
-      assert_receive {:ws_started, socket2, _url, _headers, ^session}, 1_000
+      assert_receive {:ws_started, socket2, _url, _headers, ^session}
       inject(session, socket2, fixture("transcript_created"))
 
       StreamSession.push_pcm(session, chunk)

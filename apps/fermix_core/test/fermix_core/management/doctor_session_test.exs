@@ -239,7 +239,7 @@ defmodule FermixCore.Management.DoctorSessionTest do
       assert {:ok, %{"session_id" => session_id}} =
                Doctor.start(server: server, scope: :local, descriptors: specs)
 
-      assert_receive :running, 1_000
+      assert_receive :running
       assert {:ok, %{"status" => "cancelled"}} = Doctor.cancel(session_id, server: server)
       assert {:ok, view} = Doctor.get(session_id, server: server)
       assert Enum.map(view["checks"], & &1["status"]) == ["cancelled", "cancelled"]

@@ -147,8 +147,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
       )
 
     # call_start dispatched (not rejected by the hello gate) → session started.
-    assert_receive {:session_started, _session, _opts}, 1_000
-
+    assert_receive {:session_started, _session, _opts}
     # The first server frame is the handshake reply, not a handshake_required error.
     assert {:ok, line} = recv_line(conn)
     assert %{"type" => "server_hello"} = Jason.decode!(String.trim(line))
@@ -209,7 +208,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     :ok = handshake(conn)
     :ok = :gen_tcp.send(conn, ~s({"type":"call_start"}\n))
 
-    assert_receive {:silent_session_started, _session}, 1_000
+    assert_receive {:silent_session_started, _session}
     assert {:error, :timeout} = recv_line(conn, 50)
 
     :gen_tcp.close(conn)
@@ -229,7 +228,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     :ok = handshake(conn)
     :ok = :gen_tcp.send(conn, ~s({"type":"call_start"}\n))
 
-    assert_receive {:session_started, session, _opts}, 1_000
+    assert_receive {:session_started, session, _opts}
     assert {:ok, line} = recv_line(conn)
     assert %{"type" => "state", "state" => "listening"} = Jason.decode!(String.trim(line))
     assert {:error, :timeout} = recv_line(conn, 50)
@@ -252,7 +251,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     :ok = handshake(conn)
     :ok = :gen_tcp.send(conn, ~s({"type":"call_start"}\n))
 
-    assert_receive {:session_started, session, _opts}, 1_000
+    assert_receive {:session_started, session, _opts}
     assert {:ok, _line} = recv_line(conn)
 
     :ok = :gen_tcp.send(conn, ~s({"type":"interrupt","audio_end_ms":1750}\n))
@@ -281,7 +280,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     :ok = handshake(conn)
     :ok = :gen_tcp.send(conn, ~s({"type":"call_start"}\n))
 
-    assert_receive {:session_started, session, _opts}, 1_000
+    assert_receive {:session_started, session, _opts}
     assert {:ok, _line} = recv_line(conn)
 
     audio = :binary.copy(<<1>>, 12_000)
@@ -319,7 +318,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     :ok = handshake(conn)
     :ok = :gen_tcp.send(conn, ~s({"type":"call_start"}\n))
 
-    assert_receive {:session_started, session, _opts}, 1_000
+    assert_receive {:session_started, session, _opts}
     assert {:ok, _line} = recv_line(conn)
 
     :ok = :gen_tcp.send(conn, ~s({"type":"call_stop"}\n))
@@ -335,7 +334,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     :ok = handshake(conn)
     :ok = :gen_tcp.send(conn, ~s({"type":"call_start"}\n))
 
-    assert_receive {:session_started, session, _opts}, 1_000
+    assert_receive {:session_started, session, _opts}
     assert {:ok, _line} = recv_line(conn)
 
     :gen_tcp.close(conn)
@@ -526,7 +525,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     :ok = handshake(conn)
     :ok = :gen_tcp.send(conn, ~s({"type":"call_start"}\n))
 
-    assert_receive {:session_started, session, _opts}, 1_000
+    assert_receive {:session_started, session, _opts}
     # Reading the listening frame proves the handler is past bind (the session is
     # monitored) and back in its loop.
     assert {:ok, line} = recv_line(conn)
@@ -552,7 +551,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     :ok = handshake(conn)
     :ok = :gen_tcp.send(conn, ~s({"type":"call_start"}\n))
 
-    assert_receive {:session_started, session, opts}, 1_000
+    assert_receive {:session_started, session, opts}
     handler = Keyword.fetch!(opts, :companion)
     # Listening frame → the handler is past bind and looping.
     assert {:ok, _line} = recv_line(conn)

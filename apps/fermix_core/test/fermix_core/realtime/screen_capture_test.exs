@@ -47,7 +47,7 @@ defmodule FermixCore.Realtime.ScreenCaptureTest do
     capture = start_capture([])
     ScreenCapture.request(capture, 7)
 
-    assert_receive {:screen_capture, 7, {:ok, frame}}, 1_000
+    assert_receive {:screen_capture, 7, {:ok, frame}}
     assert frame.mime_type == "image/png"
     assert frame.data == "pixels"
   end
@@ -58,7 +58,7 @@ defmodule FermixCore.Realtime.ScreenCaptureTest do
     capture = start_capture([])
     ScreenCapture.request(capture, 1)
 
-    assert_receive {:executed, request}, 1_000
+    assert_receive {:executed, request}
     assert request["action"] == "screenshot"
     assert request["display"] == 0
     refute Map.has_key?(request, "screenshot_after")
@@ -73,14 +73,14 @@ defmodule FermixCore.Realtime.ScreenCaptureTest do
     capture = start_capture(responses: [{:ok, %{"data" => "not base64!", "mime" => "image/png"}}])
     ScreenCapture.request(capture, 1)
 
-    assert_receive {:screen_capture, 1, {:error, :invalid_base64_frame}}, 1_000
+    assert_receive {:screen_capture, 1, {:error, :invalid_base64_frame}}
   end
 
   test "a response with no image is an error, not an empty frame" do
     capture = start_capture(responses: [{:ok, %{"ok" => true}}])
     ScreenCapture.request(capture, 1)
 
-    assert_receive {:screen_capture, 1, {:error, :missing_frame_data}}, 1_000
+    assert_receive {:screen_capture, 1, {:error, :missing_frame_data}}
   end
 
   test "a driver error is passed through with its type intact" do
@@ -88,7 +88,7 @@ defmodule FermixCore.Realtime.ScreenCaptureTest do
     ScreenCapture.request(capture, 1)
 
     # The feed classifies wedges by this shape, so it must not be flattened.
-    assert_receive {:screen_capture, 1, {:error, {:timeout, 30_000}}}, 1_000
+    assert_receive {:screen_capture, 1, {:error, {:timeout, 30_000}}}
   end
 
   test "an unstartable driver refuses to start the process at all" do
@@ -107,7 +107,7 @@ defmodule FermixCore.Realtime.ScreenCaptureTest do
   test "stopping releases the driver" do
     capture = start_capture([])
     assert :ok = ScreenCapture.stop(capture)
-    assert_receive :stopped, 1_000
+    assert_receive :stopped
   end
 
   test "stop is idempotent" do

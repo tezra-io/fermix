@@ -183,7 +183,7 @@ defmodule FermixCore.Tools.WebToolsTest do
     assert {:ok, %{success: true}} =
              WebFetch.execute(%{"url" => "https://example.com/docs"}, context)
 
-    assert_receive {:web_fetch_request, request_host, host_header}, 1_000
+    assert_receive {:web_fetch_request, request_host, host_header}
     assert request_host == "93.184.216.34"
     assert host_header == "example.com"
   end

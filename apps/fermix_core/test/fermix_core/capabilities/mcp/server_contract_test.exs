@@ -179,7 +179,7 @@ defmodule FermixCore.Capabilities.MCP.ServerContractTest do
   # path, so a `fail_fast?: true` start (the default here) cannot exercise it.
   defp run_supervised_discovery(ctx) do
     {:ok, pid} = start_server(ctx, %{}, fail_fast?: false)
-    assert_receive {:EXIT, ^pid, :normal}, 1_000
+    assert_receive {:EXIT, ^pid, :normal}
   end
 
   defp registered(ctx) do

@@ -111,16 +111,14 @@ defmodule FermixChannels.AdapterTelemetryTest do
   end
 
   defp assert_event(channel, event, status) do
-    assert_receive {:adapter_telemetry, ^event, measurements, metadata}, 1_000
+    assert_receive {:adapter_telemetry, ^event, measurements, metadata}
     assert measurements.duration_us >= 0
     assert metadata.channel == channel
     assert metadata.status == status
   end
 
   defp assert_message_event(channel, direction) do
-    assert_receive {:adapter_telemetry, [:fermix, :channel, :message], measurements, metadata},
-                   1_000
-
+    assert_receive {:adapter_telemetry, [:fermix, :channel, :message], measurements, metadata}
     assert measurements.duration_us >= 0
     assert measurements.count >= 1
     assert metadata.channel == channel

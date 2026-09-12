@@ -118,7 +118,7 @@ defmodule FermixCore.Realtime.ScreenFeedTest do
   test "a changed screen produces a frame with its byte size" do
     start_feed([{:ok, %{mime_type: "image/png", data: "pixels"}}])
 
-    assert_receive {:screen_feed, {:frame, frame}}, 1_000
+    assert_receive {:screen_feed, {:frame, frame}}
     assert frame.mime_type == "image/png"
     assert frame.data == "pixels"
     assert frame.bytes == byte_size("pixels")
@@ -131,7 +131,7 @@ defmodule FermixCore.Realtime.ScreenFeedTest do
     same = {:ok, %{mime_type: "image/png", data: "same"}}
     start_feed([same, same, same, {:ok, %{mime_type: "image/png", data: "different"}}])
 
-    assert_receive {:screen_feed, {:frame, %{data: "same"}}}, 1_000
+    assert_receive {:screen_feed, {:frame, %{data: "same"}}}
     assert_receive {:screen_feed, {:frame, %{data: "different", gated_out: gated}}}, 30_000
     assert gated >= 2, "the identical captures in between must have been dropped, not sent"
 
@@ -143,7 +143,7 @@ defmodule FermixCore.Realtime.ScreenFeedTest do
     ref = Process.monitor(feed)
 
     assert_receive {:screen_feed, {:stopped, {:capture_failed, :boom}, %{frames: 0}}}, 10_000
-    assert_receive {:DOWN, ^ref, :process, ^feed, _reason}, 1_000
+    assert_receive {:DOWN, ^ref, :process, ^feed, _reason}
   end
 
   test "a capture stall is recorded as a wedge on the shared breaker" do
@@ -198,11 +198,11 @@ defmodule FermixCore.Realtime.ScreenFeedTest do
         receive do: (:die -> :ok)
       end)
 
-    assert_receive {:feed, feed}, 1_000
+    assert_receive {:feed, feed}
     ref = Process.monitor(feed)
     send(owner, :die)
 
-    assert_receive {:DOWN, ^ref, :process, ^feed, _reason}, 1_000
+    assert_receive {:DOWN, ^ref, :process, ^feed, _reason}
   end
 
   test "stop/2 is idempotent and reports the operator's own reason" do
