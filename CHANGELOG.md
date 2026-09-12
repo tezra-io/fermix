@@ -6,6 +6,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-09-11
+
 ### Added
 
 - **GPT Image 2.5 is selectable on the OpenAI images backend.**
@@ -22,24 +24,6 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   models: the ChatGPT-subscription images backend (`openai_codex`) does not
   offer them, because the hosted image tool it drives selects its own model
   and ignores the one it is given.
-
-### Fixed
-
-- **Meeting notetaker, transcription and jobs settings no longer reset on
-  restart of a release.** A packaged daemon (the Homebrew binary and the
-  macOS app engine) reads `config.toml` while its runtime configuration is
-  being evaluated, and Elixir then re-applies the compile-time defaults over
-  the environment. Any section that also had a compile-time default lost the
-  file's values on every boot: the notetaker read as disabled again, a
-  transcription backend chosen in setup reverted, and the reminders delivery
-  target vanished, while every save made through setup or the app worked
-  until the next restart. A daemon run from source never showed it. The
-  runtime configuration now restates every section the file hydrates, and a
-  test reproduces the boot merge so a new section cannot regress alone.
-
-## [0.10.0] - 2026-09-06
-
-### Added
 
 - **GPT-6 Astra is in the OpenAI and Codex catalogs, and is the new default
   there.** `gpt-6-astra` is selectable in the setup wizard and the web pane
@@ -519,6 +503,25 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   existing install meets on upgrade, because the tab already existed.
 
 ### Fixed
+
+- **Meeting notetaker, transcription and jobs settings no longer reset on
+  restart of a release.** A packaged daemon (the Homebrew binary and the
+  macOS app engine) reads `config.toml` while its runtime configuration is
+  being evaluated, and Elixir then re-applies the compile-time defaults over
+  the environment. Any section that also had a compile-time default lost the
+  file's values on every boot: the notetaker read as disabled again, a
+  transcription backend chosen in setup reverted, and the reminders delivery
+  target vanished, while every save made through setup or the app worked
+  until the next restart. A daemon run from source never showed it. The
+  runtime configuration now restates every section the file hydrates, and a
+  test reproduces the boot merge so a new section cannot regress alone.
+- **The meeting notetaker installs once, and the app knows when it is signed
+  in.** Enabling the notetaker downloaded the pinned release every time; a
+  present, verified binary is now the install and nothing is fetched again.
+  The one-time Google sign-in is also published on the management wire, so
+  the macOS app's Meetings pane shows the signed-in account and offers a
+  sign-in again, instead of the idle sign-in control after a sign-in that
+  succeeded.
 
 - **Long conversations on the Codex provider now compact against the right
   window.** The catalog recorded a 400k context window for GPT-5.5 and
