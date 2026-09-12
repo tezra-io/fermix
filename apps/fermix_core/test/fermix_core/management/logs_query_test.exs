@@ -196,6 +196,34 @@ defmodule FermixCore.Management.LogsQueryTest do
     assert Enum.at(entries, 1)["message"] == "[daemon] recovered"
   end
 
+  # Not every byte in the live log is valid UTF-8. The daemon's console handler
+  # flattens its own chardata bytewise, so `\u00b5` reaches the file as the bare byte
+  # 0xB5 (Phoenix writes "connected in 872\u00b5s" on every LiveView mount). One such
+  # byte made `Jason.encode!` raise inside the page cap, the router answered
+  # `internal_error`, and the whole pane went empty for a line the operator can
+  # still read.
+  test "a line with an invalid UTF-8 byte is delivered rather than raised on", %{log: log} do
+    File.write!(log, [
+      line(1, "info", "web", "connected in 872"),
+      <<0xB5>>,
+      "s\n",
+      "  12:43:18.337 [info] replied in 58",
+      <<0xB5>>,
+      "s\n",
+      line(2, "info", "web", "ready"),
+      "\n"
+    ])
+
+    assert {:ok, %{"entries" => entries}} = Logs.query(%{}, log_file: log)
+    assert length(entries) == 2
+
+    assert Enum.at(entries, 0)["message"] =~ "connected in 872\uFFFDs"
+    assert Enum.at(entries, 0)["message"] =~ "replied in 58\uFFFDs"
+    assert Enum.at(entries, 1)["message"] == "[web] ready"
+    assert Enum.all?(entries, &String.valid?(&1["message"]))
+    assert is_binary(Jason.encode!(entries))
+  end
+
   test "a missing log set returns an empty page, not an error", %{dir: dir} do
     assert {:ok, result} = Logs.query(%{}, log_file: Path.join(dir, "absent.log"))
     assert result["entries"] == []
