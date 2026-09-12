@@ -129,7 +129,11 @@ jobs:
     env:
       ELIXIR_VERSION: "1.19.5"
       OTP_VERSION: "28.4.1"
-      FERMIX_BUILD_ID: release-${{ github.run_id }}-${{ matrix.target }}
+      # One build identity per release run, shared by both targets: the app
+      # ships a universal DMG with one engine build in two slices and verifies
+      # the engine it boots after an update against the one build id the feed
+      # carries. The target is already its own immutable field in the manifest.
+      FERMIX_BUILD_ID: release-${{ github.run_id }}
       FERMIX_BUILD_SOURCE_COMMIT: ${{ github.sha }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0

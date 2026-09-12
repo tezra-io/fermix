@@ -6,6 +6,18 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-09-12
+
+### Fixed
+
+- **The macOS app engine carries one build identity per release.** The two
+  architecture trees of an engine release were stamped with build ids that
+  differed by target, and the app verifies the engine it boots after an
+  update against the single build id its update feed carries, so a
+  universal update could never verify on both kinds of Mac. A release now
+  stamps one id shared by both trees; the target remains its own field in
+  the engine manifest. Nothing else changed.
+
 ## [0.10.0] - 2026-09-11
 
 ### Added
