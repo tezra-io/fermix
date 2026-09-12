@@ -3,19 +3,23 @@ defmodule FermixCore.Plugins.Auth do
   OAuth login, refresh, and disconnect operations for plugins.
   """
 
+  alias FermixCore.Auth.ClientRejection
   alias FermixCore.Auth.OAuthFlow
   alias FermixCore.Auth.OAuthProviders
   alias FermixCore.Auth.Store
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Auth.TokenSupervisor
+  alias FermixCore.Plugins.Auth.Telemetry, as: AuthTelemetry
   alias FermixCore.Plugins.Config
   alias FermixCore.Plugins.Plugin
   alias FermixCore.Plugins.Registry
   alias FermixCore.Plugins.Runtime
 
+  require Logger
+
   @spec login(String.t(), keyword()) :: {:ok, Store.entry()} | {:error, term()}
   def login(name, opts \\ []) when is_binary(name) and is_list(opts) do
-    started_at = System.monotonic_time(:millisecond)
+    started_at = AuthTelemetry.start()
 
     with {:ok, plugin} <- fetch_oauth_plugin(name),
          {:ok, provider} <- oauth_provider(plugin, opts),
@@ -24,11 +28,11 @@ defmodule FermixCore.Plugins.Auth do
          :ok <- Store.write(Config.default_auth_profile(plugin), entry),
          {:ok, _snapshot} <- Config.enable(plugin.name) do
       reload_token_manager(plugin)
-      emit_auth_event(:login, plugin.name, entry.status, started_at)
+      report(:login, plugin.name, {:ok, :ready}, started_at)
       {:ok, entry}
     else
-      {:error, reason} = err ->
-        emit_auth_event(:login, name, {:error, reason}, started_at)
+      {:error, _reason} = err ->
+        report(:login, name, err, started_at)
         err
     end
   end
@@ -38,42 +42,40 @@ defmodule FermixCore.Plugins.Auth do
 
   @spec refresh(String.t()) :: {:ok, String.t()} | {:error, term()}
   def refresh(name) when is_binary(name) do
-    started_at = System.monotonic_time(:millisecond)
+    started_at = AuthTelemetry.start()
 
-    with {:ok, plugin} <- Registry.find(name) do
-      case TokenManager.refresh(Config.auth_profile(plugin)) do
-        {:ok, token} ->
-          emit_auth_event(:refresh, plugin.name, "ready", started_at)
-          {:ok, token}
-
-        {:error, reason} = err ->
-          emit_auth_event(:refresh, plugin.name, {:error, reason}, started_at)
-          err
-      end
+    with {:ok, plugin} <- fetch_plugin(name),
+         {:ok, token} <- TokenManager.refresh(Config.auth_profile(plugin)) do
+      report(:refresh, plugin.name, {:ok, :ready}, started_at)
+      {:ok, token}
+    else
+      {:error, _reason} = err ->
+        report(:refresh, name, err, started_at)
+        err
     end
   end
 
   @spec logout(String.t()) :: :ok | {:error, term()}
   def logout(name) when is_binary(name) do
-    started_at = System.monotonic_time(:millisecond)
+    started_at = AuthTelemetry.start()
 
-    with {:ok, plugin} <- Registry.find(name),
+    with {:ok, plugin} <- fetch_plugin(name),
          auth_profile <- Config.auth_profile(plugin),
          :ok <- Store.delete_provider(auth_profile) do
       TokenSupervisor.stop_profile(auth_profile)
 
       case reload_runtime() do
         :ok ->
-          emit_auth_event(:logout, plugin.name, "logged_out", started_at)
+          report(:logout, plugin.name, {:ok, :logged_out}, started_at)
           :ok
 
-        {:error, reason} = err ->
-          emit_auth_event(:logout, plugin.name, {:error, reason}, started_at)
+        {:error, _reason} = err ->
+          report(:logout, plugin.name, err, started_at)
           err
       end
     else
-      {:error, reason} = err ->
-        emit_auth_event(:logout, name, {:error, reason}, started_at)
+      {:error, _reason} = err ->
+        report(:logout, name, err, started_at)
         err
     end
   end
@@ -84,15 +86,15 @@ defmodule FermixCore.Plugins.Auth do
   """
   @spec set_secret(String.t(), String.t()) :: {:ok, String.t()} | {:error, term()}
   def set_secret(name, value) when is_binary(name) and is_binary(value) do
-    started_at = System.monotonic_time(:millisecond)
+    started_at = AuthTelemetry.start()
 
     case Config.set_plugin_secret(name, value) do
       {:ok, _snapshot} ->
-        emit_auth_event(:set, name, "ready", started_at)
+        report(:set, name, {:ok, :ready}, started_at)
         {:ok, name}
 
-      {:error, reason} = err ->
-        emit_auth_event(:set, name, {:error, reason}, started_at)
+      {:error, _reason} = err ->
+        report(:set, name, err, started_at)
         err
     end
   end
@@ -104,23 +106,32 @@ defmodule FermixCore.Plugins.Auth do
   """
   @spec forget_secret(String.t()) :: :ok | {:error, term()}
   def forget_secret(name) when is_binary(name) do
-    started_at = System.monotonic_time(:millisecond)
+    started_at = AuthTelemetry.start()
 
     case Config.forget_plugin_secret(name) do
       {:ok, _snapshot} ->
-        emit_auth_event(:clear, name, "logged_out", started_at)
+        report(:clear, name, {:ok, :logged_out}, started_at)
         :ok
 
-      {:error, reason} = err ->
-        emit_auth_event(:clear, name, {:error, reason}, started_at)
+      {:error, _reason} = err ->
+        report(:clear, name, err, started_at)
         err
     end
   end
 
   defp fetch_oauth_plugin(name) do
-    case Registry.find(name) do
+    case fetch_plugin(name) do
       {:ok, %Plugin{auth: %{type: :oauth2}} = plugin} -> {:ok, plugin}
       {:ok, %Plugin{}} -> {:error, {:auth_not_required, name}}
+      {:error, _reason} = err -> err
+    end
+  end
+
+  # The registry answers a name no plugin carries with a bare `:error`; every op
+  # here turns it into the one typed failure it reports and returns.
+  defp fetch_plugin(name) do
+    case Registry.find(name) do
+      {:ok, %Plugin{} = plugin} -> {:ok, plugin}
       :error -> {:error, {:unknown_plugin, name}}
       {:error, reason} -> {:error, reason}
     end
@@ -220,16 +231,23 @@ defmodule FermixCore.Plugins.Auth do
   defp maybe_put(opts, _key, nil), do: opts
   defp maybe_put(opts, key, value), do: Keyword.put(opts, key, value)
 
-  defp emit_auth_event(event, plugin, status, started_at) do
-    duration = System.monotonic_time(:millisecond) - started_at
-
-    :telemetry.execute(
-      [:fermix, :plugin, :auth],
-      %{duration_ms: duration},
-      %{event: event, plugin: plugin, status: telemetry_status(status)}
+  # Every op reports once: the event for the trace and, when it failed, one log
+  # line with its class. Neither carries the raw reason, which can hold the
+  # authorize url; a refused sign-in client adds the vendor's own words.
+  defp report(op, plugin, {:error, reason} = outcome, started_at) do
+    Logger.warning(
+      "Plugins.Auth: #{op} #{plugin} failed (#{AuthTelemetry.error_class(reason)})" <>
+        vendor_words(reason)
     )
+
+    AuthTelemetry.emit(op, plugin, outcome, started_at)
   end
 
-  defp telemetry_status({:error, _reason}), do: :error
-  defp telemetry_status(status) when is_binary(status), do: status
+  defp report(op, plugin, {:ok, _tag} = outcome, started_at),
+    do: AuthTelemetry.emit(op, plugin, outcome, started_at)
+
+  defp vendor_words({:oauth_client_rejected, detail}),
+    do: ": " <> ClientRejection.vendor_words(detail)
+
+  defp vendor_words(_reason), do: ""
 end

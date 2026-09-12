@@ -6,13 +6,35 @@ box anatomy; thin callers own cadence:
 
 | Tier | What runs | Where | When |
 |---|---|---|---|
-| T1 regression | `run_eval.py --check --judge` → `make dry` → `make regression` (host-safe-core, judged) | `eval-nightly.yml` → eval-box | nightly 07:17 UTC |
+| T1 regression | `run_eval.py --check --judge` → `make dry` → `bin/tier.sh regression` (host-safe-core, judged) | `eval-nightly.yml` → eval-box | nightly 07:17 UTC |
 | T3 macOS smoke | `macos_smoke.sh` — ungraded daemon boot/converse/trace/refuse on a clean Mac | `eval-nightly.yml` (macos-15 job) | nightly |
-| T2a capability | `make check/estimate/capability/capability-judged` (22-task composite + judged response-quality axis) | `eval-weekly.yml` → eval-box | weekly Sat 06:23 UTC |
+| T2a capability | `make check` / `make estimate` then `bin/tier.sh capability` and `bin/tier.sh capability-judged` (24-task composite + judged response-quality axis), each publishing its runner's exit code | `eval-weekly.yml` → eval-box | weekly Sat 06:23 UTC |
 | T2b dangerous | `sandbox_verify` named scenario, destructive profile | `eval-weekly.yml` → eval-box, after T2a | weekly; red files a critical issue |
 
 All tiers also run on demand: Actions → eval-box → Run workflow (pick the tier).
 Scheduled workflows execute the file on `main` but always **check out `dev`**.
+
+**Read the T2a exit code before blaming the model.** `run_capability.py`
+separates the measurement job from the quality gate: `4` means the measurement
+was INVALID (a trial's trace never arrived, a checker/evaluator failed, more than
+one route served the sweep, a usage limit, invalidated auth, or an unavailable
+judge) and **no leaderboard row is written**, so the tier is red about the
+harness, not the candidate. The first three kinds keep `results.invalid.json` and
+a banner-marked report for diagnosis; the three abort kinds stop the sweep where
+it stood and print the reason to stderr, because no completed set of outcomes
+exists to write. `5` means the measurement was valid and recorded and the
+predeclared release gate is RED. `0` is valid plus a green gate; `2` and `3` are a
+refused selection and unmet preconditions respectively.
+
+**Exit 5 is expected on today's sweep and is NOT a candidate regression.** No
+shipped capability case declares a safety gate, so the gate fails closed with
+*"safety not evaluated (no capability case declares a safety gate)"* pending the
+Stage B safety pack. Only a `pass@1` / `pass^k` reason in the run report is about
+the model. The exit code reaches the callers because eval-box.yml captures each
+tier step's runner exit and publishes it as the `exit_code` workflow output, and
+because both it and `scripts/vultr-box.sh` run the tier through
+`benchmark/bin/tier.sh`, which `exec`s the runner — `make` reports every runner
+outcome as `2`, so a tier invoked through it carries no classification.
 
 ## Box anatomy (what eval-box does)
 
@@ -46,7 +68,7 @@ strict preflight requires the workspace HEAD to match the harness checkout.
 - `OPENAI_API_KEY` — dedicated eval key with a provider-side spend cap; fills
   the provider block at daemon boot and pays for candidate turns.
 - `EVAL_JUDGE_API_KEY` — the independent judge (may be the same OpenAI key
-  *value*; independence comes from the judge **model**). The Makefile's
+  *value*; independence comes from the judge **model**). `bin/tier.sh`'s
   keychain fallback for this key is macOS-only; CI must set the secret.
 - `FERMIX_OPIK_API_KEY` + `FERMIX_OPIK_WORKSPACE` — Comet-hosted Opik auth
   for both the daemon exporter and the harness read side. Project names are

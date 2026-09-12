@@ -20,6 +20,24 @@ defmodule Fermix.CLI.Service.Launchd do
     bootout_if_loaded(scope, path)
   end
 
+  @doc """
+  Boots out `unit_path` and reports launchd's own failure.
+
+  `install/1` and `uninstall/1` go through `bootout_if_loaded/2`, which treats
+  every non-zero exit as success — correct there, because an install may be
+  booting out a unit that was never loaded and an uninstall's job is done
+  either way. The `fermix migrate-to-app` transaction cannot inherit that: it
+  proceeds to delete the plist and hand ownership to Fermix.app, so a bootout
+  that did not actually retire the job would strand a live KeepAlive daemon on
+  a home the app is about to claim. This variant is the strict one and its
+  caller fails the whole migration on `{:error, {:launchctl_failed, …}}`.
+  """
+  @spec bootout(:user | :system, Path.t()) ::
+          :ok | {:error, {:launchctl_failed, integer(), String.t()}}
+  def bootout(scope, unit_path) when scope in [:user, :system] and is_binary(unit_path) do
+    launchctl(["bootout", domain(scope), unit_path])
+  end
+
   # Plain `kickstart` (no `-k`): `-k` SIGKILLs the running instance, which under
   # `fermix restart`/`upgrade` killed the daemon mid-drain (launchctl last-exit
   # -9) and, with KeepAlive=true, produced a relaunch loop. Without `-k`,

@@ -174,6 +174,33 @@ defmodule FermixCore.Auth.OAuthProvidersTest do
     end
   end
 
+  # One table of operator-facing provider names: the setup page's client forms
+  # and every refused-client sentence read it here, never a copy of their own.
+  describe "display names" do
+    test "every plugin provider has one, and its built definition carries it" do
+      assert OAuthProviders.providers() == ~w(google github notion x slack)
+
+      names =
+        Map.new(OAuthProviders.providers(), fn id ->
+          {:ok, provider} = OAuthProviders.definition(id, @client)
+          assert provider.display_name == OAuthProviders.display_name(id)
+          {id, provider.display_name}
+        end)
+
+      assert names == %{
+               "google" => "Google",
+               "github" => "GitHub",
+               "notion" => "Notion",
+               "x" => "X",
+               "slack" => "Slack"
+             }
+    end
+
+    test "a provider this registry does not define has no name to lend" do
+      assert_raise FunctionClauseError, fn -> OAuthProviders.display_name("linear") end
+    end
+  end
+
   describe "definition_from_env/2" do
     setup do
       previous = Application.get_env(:fermix_core, :oauth)

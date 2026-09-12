@@ -1,0 +1,22 @@
+{"dir":"s2d","frame":{"type":"hello","protocol_version":1,"sidecar_version":"0.1.0","platforms":["meet"]}}
+{"dir":"s2d","frame":{"type":"state","phase":"joining"}}
+{"dir":"s2d","frame":{"type":"state","phase":"knocking"}}
+{"dir":"s2d","frame":{"type":"state","phase":"leaving"}}
+{"dir":"s2d","frame":{"type":"join_result","status":"admitted"}}
+{"dir":"s2d","frame":{"type":"join_result","status":"denied"}}
+{"dir":"s2d","frame":{"type":"join_result","status":"login_required"}}
+{"dir":"s2d","frame":{"type":"join_result","status":"signin_required"}}
+{"dir":"s2d","frame":{"type":"join_result","status":"bot_blocked"}}
+{"dir":"s2d","frame":{"type":"join_result","status":"knock_timeout"}}
+{"dir":"s2d","frame":{"type":"roster","participants":[{"id":"p_ab12","name":"Ada Lovelace"},{"id":"p_cd34","name":"Fermix Notetaker"}]}}
+{"dir":"s2d","frame":{"type":"active_speaker","id":"p_ab12","t_ms":123456}}
+{"dir":"s2d","frame":{"type":"chat_posted"}}
+{"dir":"s2d","frame":{"type":"meeting_ended","reason":"host_removed"}}
+{"dir":"s2d","frame":{"type":"meeting_ended","reason":"meeting_closed"}}
+{"dir":"s2d","frame":{"type":"meeting_ended","reason":"left"}}
+{"dir":"s2d","frame":{"type":"error","code":"page_crash","message":"the meeting tab crashed while joining"}}
+{"dir":"s2d","frame":{"type":"log","level":"info","message":"navigating to the meeting"}}
+{"dir":"s2d","frame":{"type":"pong"}}
+{"dir":"d2s","frame":{"type":"join","platform":"meet","url":"https://meet.google.com/abc-defg-hij","passcode":null,"bot_name":"Fermix Notetaker","announce":true,"announce_message":"👋 Fermix Notetaker here — Ada's AI notetaker. Taking text notes only (no audio kept); the host can remove me anytime.","profile_dir":"/Users/ada/.fermix/plugins/meetbot/profile"}}
+{"dir":"d2s","frame":{"type":"leave"}}
+{"dir":"d2s","frame":{"type":"ping"}}

@@ -10,7 +10,7 @@
 #
 #   capability-daemon.sh up     seed + start (background) + wait ready
 #   capability-daemon.sh down    stop + clean the control socket
-#   capability-daemon.sh run     up, run the full `make capability` sweep, down
+#   capability-daemon.sh run     up, run the capability tier, down; preserve its exit code
 #
 # Override the home with FERMIX_CAP_HOME (leaf must contain 'eval' or 'e2e').
 # CI knobs: FERMIX_CAP_PROJECT overrides the Opik project; FERMIX_CAP_SEED_ARGS
@@ -108,10 +108,19 @@ run() {
   trap down EXIT
   up
   log "verifying preconditions (Opik + daemon)"
-  ( cd "$BENCH" && FERMIX_EVAL_HOME="$HOME_DIR" OPIK_PROJECT="$PROJECT" make check )
+  local result=0
+  ( cd "$BENCH" && FERMIX_EVAL_HOME="$HOME_DIR" OPIK_PROJECT="$PROJECT" \
+      uv run bin/run_capability.py --check ) || result=$?
+  if [ "$result" -ne 0 ]; then
+    log "capability preflight exited with code $result"
+    return "$result"
+  fi
   log "running the full capability sweep against the disposable daemon"
   ( cd "$BENCH" && FERMIX_EVAL_HOME="$HOME_DIR" OPIK_PROJECT="$PROJECT" \
-      CONFIRM_DAEMON_ISOLATED=1 CONFIRM_ISOLATED_ENV=1 CONFIRM_COST=1 make capability )
+      CONFIRM_DAEMON_ISOLATED=1 CONFIRM_ISOLATED_ENV=1 CONFIRM_COST=1 \
+      "$BIN_DIR/tier.sh" capability ) || result=$?
+  log "capability runner exited with code $result (0=green, 2=selection, 3=preconditions, 4=invalid, 5=release gate red)"
+  return "$result"
 }
 
 case "${1:-run}" in

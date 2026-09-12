@@ -152,6 +152,44 @@ defmodule FermixChannels.Channels.Discord.Gateway.SocketTest do
     Process.cancel_timer(state.heartbeat_ref)
   end
 
+  describe "start_options/2" do
+    test "verifies the gateway peer instead of taking WebSockex's insecure default" do
+      assert {:ok, opts} =
+               Socket.start_options("wss://gateway.discord.gg/?v=10&encoding=json",
+                 handshake_timeout: 5_000
+               )
+
+      # Without :ssl_options WebSockex connects with verify: :verify_none, and
+      # the Identify frame hands the bot token to whoever answered.
+      ssl_options = Keyword.fetch!(opts, :ssl_options)
+
+      assert ssl_options[:verify] == :verify_peer
+      assert ssl_options[:server_name_indication] == ~c"gateway.discord.gg"
+
+      assert opts[:handshake_timeout] == 5_000
+    end
+
+    test "the caller cannot weaken the TLS options it passes through" do
+      assert {:ok, opts} =
+               Socket.start_options("wss://gateway.discord.gg/",
+                 ssl_options: [verify: :verify_none]
+               )
+
+      assert opts[:ssl_options][:verify] == :verify_peer
+    end
+
+    test "refuses a URL with no host rather than dialing a peer it cannot verify" do
+      # The gateway URL is whatever Discord's REST API answered, not a constant.
+      assert Socket.start_options("gateway.discord.gg", []) == {:error, :ws_url_without_host}
+      assert Socket.start_options("wss:///?v=10", []) == {:error, :ws_url_without_host}
+    end
+
+    test "start_link/3 refuses a hostless URL without opening a socket" do
+      assert Socket.start_link("wss:///?v=10", socket_state(self())) ==
+               {:error, :ws_url_without_host}
+    end
+  end
+
   defp socket_state(gateway) do
     %{
       gateway: gateway,

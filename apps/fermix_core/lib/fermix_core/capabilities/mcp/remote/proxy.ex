@@ -37,6 +37,19 @@ defmodule FermixCore.Capabilities.MCP.Remote.Proxy do
   rediscovers and re-registers; `resume/1` reopens the gate. Notifications that
   arrive while suspended coalesce — the proxy holds one boolean, not a queue of
   pending passes. The old contract is never served after a drift notification.
+
+  Suspension covers already-queued work too, not just admission. Dispatch is
+  driven by the in-flight call settling and by the pacing timer, so without that
+  a queued entry went out on the old contract moments after the gate closed.
+
+  Drift **holds** and terminal **rejects**. A drift suspension is transient and
+  `resume/2` hands back the same compiled signed contract, so a held entry's
+  policy is unchanged and its caller is still inside its own deadline; entries
+  whose deadline passed while held are settled `:call_deadline_expired` on the
+  way out rather than dispatched. The gate a terminal protocol error closes
+  never reopens, so holding there would leave every queued caller waiting out a
+  full call timeout for a dispatch that can never come — they are rejected with
+  `{:remote_protocol_error, class}` and their monitors released instead.
   """
 
   use GenServer
@@ -160,8 +173,11 @@ defmodule FermixCore.Capabilities.MCP.Remote.Proxy do
 
   def handle_call(:suspend, _from, state), do: {:reply, :ok, %{state | gate: :suspended}}
 
+  # Reopening also releases the work held during the drift: it drains under the
+  # same pacing as anything else, and an entry whose deadline passed while held
+  # is settled by `pop_live/1` before it can reach the peer.
   def handle_call({:resume, contract}, _from, state),
-    do: {:reply, :ok, %{state | gate: :ready, contract: contract}}
+    do: {:reply, :ok, dispatch_next(%{state | gate: :ready, contract: contract})}
 
   def handle_call(:tools_changed, _from, state), do: {:reply, :ok, %{state | gate: :suspended}}
 
@@ -301,6 +317,13 @@ defmodule FermixCore.Capabilities.MCP.Remote.Proxy do
     kept = state.queue |> :queue.to_list() |> Enum.reject(&(&1.from == from))
     %{state | queue: :queue.from_list(kept), queued: length(kept)}
   end
+
+  # A suspended gate holds the queue as well as admission. Every other caller of
+  # this function is an event the drift did not cause — the in-flight call
+  # settling, the pacing timer, a refusal — and each of them would otherwise put
+  # a queued entry on the wire under the contract the drift just invalidated.
+  # Entries keep their monitors and absolute deadlines while held.
+  defp dispatch_next(%{gate: :suspended} = state), do: state
 
   # Pacing and single-flight are one decision: dispatch only when nothing is in
   # flight AND the interval since the last dispatch has elapsed.
@@ -477,9 +500,24 @@ defmodule FermixCore.Capabilities.MCP.Remote.Proxy do
 
   # The gate closes here; unregistering the capabilities and closing the session
   # belong to the registration owner, which is told exactly once.
+  #
+  # This gate never reopens, so — unlike a drift suspension — the queue cannot be
+  # held: every waiting caller would sit out its full call timeout for a dispatch
+  # that can never come. They are answered now, with the reason.
   defp terminal(state, class) do
     if is_pid(state.notify), do: send(state.notify, {:mcp_proxy, :protocol_error, class})
-    %{state | gate: :suspended}
+
+    state
+    |> reject_queued({:remote_protocol_error, class})
+    |> Map.put(:gate, :suspended)
+  end
+
+  defp reject_queued(state, reason) do
+    entries = :queue.to_list(state.queue)
+    Enum.each(entries, &reply(&1, {:error, reason}))
+
+    state = Enum.reduce(entries, state, fn entry, acc -> release(acc, entry) end)
+    %{state | queue: :queue.new(), queued: 0}
   end
 
   defp reset_invalid(state), do: %{state | invalid_results: 0}

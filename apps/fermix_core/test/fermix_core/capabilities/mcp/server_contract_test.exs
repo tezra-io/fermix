@@ -1,6 +1,8 @@
 defmodule FermixCore.Capabilities.MCP.ServerContractTest do
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.MCP.Naming
   alias FermixCore.Capabilities.MCP.Registry, as: McpRegistry
@@ -22,8 +24,12 @@ defmodule FermixCore.Capabilities.MCP.ServerContractTest do
 
     def set_tools(tools), do: :persistent_term.put({__MODULE__, :tools}, tools)
 
+    @doc "The listener the registration owner armed, so a test can drive it."
+    def listener, do: :persistent_term.get({__MODULE__, :listener}, nil)
+
     def clear do
       :persistent_term.erase({__MODULE__, :tools})
+      :persistent_term.erase({__MODULE__, :listener})
     catch
       _kind, _reason -> :ok
     end
@@ -34,6 +40,15 @@ defmodule FermixCore.Capabilities.MCP.ServerContractTest do
         {:error, reason} -> {:error, reason}
         tools when is_list(tools) -> {:ok, tools}
       end
+    end
+
+    # The contract-bearing half of the behaviour. A signed registration is
+    # exactly what a `tools/list_changed` invalidates, so a discoverer serving
+    # one must be able to report the change back.
+    @impl true
+    def watch_tools(_client, listener) do
+      :persistent_term.put({__MODULE__, :listener}, listener)
+      :ok
     end
   end
 
@@ -158,6 +173,15 @@ defmodule FermixCore.Capabilities.MCP.ServerContractTest do
     McpServer.start_link(opts)
   end
 
+  # `fail_fast?: false` is the DAEMON's posture: discovery runs in
+  # `handle_continue(:discover)` and a terminal reason stops the subtree rather
+  # than failing the child start. The log line under test only exists on that
+  # path, so a `fail_fast?: true` start (the default here) cannot exercise it.
+  defp run_supervised_discovery(ctx) do
+    {:ok, pid} = start_server(ctx, %{}, fail_fast?: false)
+    assert_receive {:EXIT, ^pid, :normal}, 1_000
+  end
+
   defp registered(ctx) do
     ctx.cap_registry |> CapabilityRegistry.list() |> Enum.map(& &1.name) |> Enum.sort()
   end
@@ -202,6 +226,31 @@ defmodule FermixCore.Capabilities.MCP.ServerContractTest do
       assert {:upstream_contract_mismatch, {:missing_tool, "eden_search"}} = reason
       assert registered(ctx) == []
       assert Naming.lookup("eden_get_note") == :error
+    end
+
+    # The log line is the ONLY surface that can name which tool broke the
+    # contract: `RuntimeStatus` stores an atom class by design (§11.1), so a name
+    # dropped here is a name no operator can recover. A bare
+    # `:upstream_contract_mismatch` sent one operator on a live-probe hunt for a
+    # fact the daemon already held.
+    test "the terminal log line names the tool that broke the contract", ctx do
+      StubDiscoverer.set_tools([descriptor("eden_get_note")])
+
+      log = capture_log(fn -> run_supervised_discovery(ctx) end)
+
+      assert log =~ "upstream_contract_mismatch"
+      assert log =~ "missing_tool"
+      assert log =~ "eden_search"
+    end
+
+    test "a name collision names the colliding capability in the terminal log", ctx do
+      {:ok, _name} = Naming.reserve("other", "get_note", "eden_search")
+      StubDiscoverer.set_tools([descriptor("eden_get_note"), descriptor("eden_search")])
+
+      log = capture_log(fn -> run_supervised_discovery(ctx) end)
+
+      assert log =~ "capability_conflict"
+      assert log =~ "eden_search"
     end
   end
 
@@ -306,6 +355,48 @@ defmodule FermixCore.Capabilities.MCP.ServerContractTest do
       assert_receive {:DOWN, ^ref, :process, ^server, :normal}, 5_000
       assert registered(ctx) == []
       assert Naming.lookup("eden_get_note") == :error
+    end
+
+    # THE BUG THIS PINS: `tools_changed/1` was called only from tests. No
+    # production code forwarded an incoming `notifications/tools/list_changed`,
+    # so everything below — suspend, unregister, bounded rediscovery, atomic
+    # re-registration — was unreachable from the wire. The watch is what closes
+    # that gap, and it is armed on every discovery pass.
+    test "the registration owner arms the upstream watch with itself", ctx do
+      StubDiscoverer.set_tools([descriptor("eden_get_note"), descriptor("eden_search")])
+      {:ok, server} = start_server(ctx)
+
+      assert StubDiscoverer.listener() == server
+      GenServer.stop(server)
+    end
+
+    # A stdio source carries no signed contract, so it has no registration for a
+    # notification to invalidate and nothing to watch.
+    test "a contract-less server arms no watch", ctx do
+      StubDiscoverer.set_tools([descriptor("eden_get_note")])
+      {:ok, server} = start_server(ctx, %{}, contract: nil, client: nil)
+
+      assert StubDiscoverer.listener() == nil
+      GenServer.stop(server)
+    end
+
+    test "an owner-reported change drives the same drift as the cast", ctx do
+      StubDiscoverer.set_tools([descriptor("eden_get_note"), descriptor("eden_search")])
+      {:ok, server} = start_server(ctx)
+      assert {:ok, proxy} = McpRegistry.lookup_proxy(ctx.mcp_registry, @source)
+      assert registered(ctx) == ["eden_get_note", "eden_search"]
+
+      send(server, {:mcp_owner, :tools_changed})
+
+      # A system message drains the mailbox in order, so the suspension below is
+      # observed, never raced past.
+      _ = :sys.get_state(server)
+      assert Proxy.state(proxy) == :suspended
+      assert registered(ctx) == []
+
+      assert eventually(fn -> Proxy.state(proxy) == :ready end)
+      assert registered(ctx) == ["eden_get_note", "eden_search"]
+      GenServer.stop(server)
     end
 
     test "a drift storm is capped per session and requires an explicit reconnect", ctx do

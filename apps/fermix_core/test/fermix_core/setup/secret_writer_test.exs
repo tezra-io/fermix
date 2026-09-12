@@ -2,6 +2,7 @@ defmodule FermixCore.Setup.SecretWriterTest do
   use ExUnit.Case, async: false
 
   alias FermixCore.Setup.SecretWriter
+  alias FermixTestSupport.SecretWriterStub
 
   defmodule UnavailableCandidate do
     @behaviour FermixCore.Setup.SecretWriter
@@ -70,6 +71,48 @@ defmodule FermixCore.Setup.SecretWriterTest do
   test "stub round-trips setup secret values through the facade" do
     assert :ok = SecretWriter.put(:openai_api_key, "sk-test")
     assert {:ok, "sk-test"} = SecretWriter.get(:openai_api_key)
+  end
+
+  # A `:named_table` belongs to whichever process created it, and under
+  # `Task.async_stream` that is a task that exits seconds later — taking the
+  # table with it, so a sibling's lookup dies with an ArgumentError. The owner
+  # has to be a process that outlives every caller.
+  test "the stub table is owned by a durable process, not by its first caller" do
+    :ok = SecretWriterStub.put(:openai_api_key, "sk-owner")
+    owner = :ets.info(SecretWriterStub, :owner)
+
+    assert is_pid(owner)
+    assert Process.alive?(owner)
+    refute owner == self()
+
+    task = Task.async(fn -> SecretWriterStub.put(:openai_api_key, "sk-task") end)
+    assert :ok = Task.await(task)
+    refute Process.alive?(task.pid)
+
+    assert :ets.info(SecretWriterStub, :owner) == owner
+    assert {:ok, "sk-task"} = SecretWriterStub.get(:openai_api_key)
+  end
+
+  test "concurrent short-lived tasks resolve the stub without an ArgumentError" do
+    owner = :ets.info(SecretWriterStub, :owner)
+
+    resolved =
+      1..64
+      |> Task.async_stream(
+        fn n ->
+          profile = "concurrent-#{n}"
+          :ok = SecretWriterStub.put(:openai_api_key, "sk-#{n}", profile: profile)
+          SecretWriterStub.get(:openai_api_key, profile: profile)
+        end,
+        max_concurrency: 16,
+        ordered: false,
+        timeout: 5_000
+      )
+      |> Enum.map(fn {:ok, result} -> result end)
+
+    assert length(resolved) == 64
+    assert Enum.all?(resolved, &match?({:ok, "sk-" <> _digits}, &1))
+    assert :ets.info(SecretWriterStub, :owner) == owner
   end
 
   test "put raises under test rather than reaching the OS keychain when no writer is configured" do

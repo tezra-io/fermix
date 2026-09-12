@@ -51,16 +51,88 @@ def test_numeric_no_number_in_reply_is_zero():
     assert scoring.score_answer("no idea", {"match": "numeric", "expected": 5}).score == 0.0
 
 
-def test_numeric_any_match_finds_answer_despite_distractors():
-    # The answer can appear after chain-of-thought OR before a trailing distractor.
-    # Any extracted number within tolerance counts, so neither position defeats it.
+def test_numeric_reads_the_last_number_as_the_answer():
+    # The documented rule (EVAL_REALISTIC_TASKS.md): the LAST number in the reply is
+    # the answer, which is what makes the "reply with ONLY the number" prompts
+    # load-bearing. Shown work before the result still scores.
     reply = "We have 6 shelves, each holds 12, plus 5 on top. Total: 65"
     assert scoring.score_answer(reply, {"match": "numeric", "expected": 65}).score == 1.0
-    # trailing-context distractor (the OLD 'last number' rule read 60.9 and scored 0):
-    trailing = "Revenue was $130.5B, up from $60.9B last year."
-    assert scoring.score_answer(trailing, {"match": "numeric", "expected": 130.5, "tolerance": 0.1}).score == 1.0
-    # a number genuinely absent still fails
     assert scoring.score_answer(reply, {"match": "numeric", "expected": 999}).score == 0.0
+
+
+def test_numeric_does_not_award_a_number_buried_before_a_trailing_figure():
+    # "any number in the reply counts" made the scorer generous enough to credit a
+    # reply whose stated answer is the WRONG one: here the model's final figure is the
+    # prior year. Last-number keeps the graded quantity the one the model committed to.
+    trailing = "Revenue was $130.5B, up from $60.9B last year."
+    spec = {"match": "numeric", "expected": 130.5, "tolerance": 0.1}
+    assert scoring.score_answer(trailing, spec).score == 0.0
+    assert scoring.score_answer(trailing, {"match": "numeric", "expected": 60.9,
+                                           "tolerance": 0.1}).score == 1.0
+
+
+def test_numeric_ignores_the_digits_of_a_cited_url():
+    # Every gpt-6-astra web-research trial on 2026-09-07 answered with the right figure
+    # and then a source URL whose slug carried a year or a document number: the last
+    # number in the reply was the URL's, and `single` read the two as a hedge.
+    spec = {"match": "numeric", "expected": 16100, "tolerance": 0, "single": True}
+    cited = ("16100 Source: https://www.irs.gov/newsroom/irs-releases-tax-inflation-"
+             "adjustments-for-tax-year-2026-including-amendments")
+    assert scoring.score_answer(cited, spec).score == 1.0
+    assert scoring.score_answer("184500  https://www.ssa.gov/faqs/en/questions/KA-02387.html",
+                         {"match": "numeric", "expected": 184500, "single": True}).score == 1.0
+    # A Markdown link keeps its text (the committed answer) and drops its target: the
+    # figure inside the brackets is the answer, the 2026 in the slug is not.
+    linked = "[16100](https://www.irs.gov/newsroom/tax-inflation-adjustments-tax-year-2026)"
+    assert scoring.score_answer(linked, spec).score == 1.0
+    # A genuine hedge is still a hedge once the citation is gone.
+    hedged = "either 15750 or 16100, see https://www.irs.gov/newsroom/tax-year-2026"
+    assert scoring.score_answer(hedged, spec).score == 0.0
+
+def test_regex_proximity_survives_a_link_between_its_two_halves():
+    # The RAV4 case pairs the model name with its mpg inside a 40-character window; a
+    # link target between them is 44 characters of citation, not 44 characters of
+    # distance between the two facts.
+    spec = {"match": "regex",
+            "expected": r"(?i)(rav[\s-]?4[\s\S]{0,40}\b39\b|\b39\b[\s\S]{0,40}rav[\s-]?4)"}
+    cited = "[RAV4](https://www.fueleconomy.gov/feg/noframes/47392.shtml): 39"
+    assert scoring.score_answer(cited, spec).score == 1.0
+
+
+def test_a_case_that_asks_for_a_url_still_sees_one():
+    # The rule must not defeat the one kind of case it would be wrong for.
+    spec = {"match": "contains", "expected": "https://www.irs.gov/pub/irs-drop/rp-25-19.pdf"}
+    assert scoring.score_answer("Source: https://www.irs.gov/pub/irs-drop/rp-25-19.pdf",
+                                spec).score == 1.0
+
+
+def test_numeric_single_rejects_a_hedged_two_answer_reply():
+    # A model that hedges between the trap value and the right one has not answered.
+    hedged = "It is either 15750 or 16100 depending on the year."
+    spec = {"match": "numeric", "expected": 16100, "tolerance": 0, "single": True}
+    s = scoring.score_answer(hedged, spec)
+    assert s.score == 0.0
+    assert "multiple numbers" in s.detail
+    # without `single` the documented last-number rule still credits it
+    assert scoring.score_answer(hedged, {"match": "numeric", "expected": 16100}).score == 1.0
+
+
+def test_numeric_single_rejects_a_shotgun_of_candidates():
+    shotgun = "Could be 1, 2, 3, 5, 8 or 13."
+    spec = {"match": "numeric", "expected": 13, "tolerance": 0, "single": True}
+    assert scoring.score_answer(shotgun, spec).score == 0.0
+
+
+def test_numeric_single_accepts_one_distinct_number_repeated():
+    spec = {"match": "numeric", "expected": 16100, "tolerance": 0, "single": True}
+    assert scoring.score_answer("16100", spec).score == 1.0
+    # the same value restated is still one answer, not a hedge
+    assert scoring.score_answer("16100 (i.e. 16,100)", spec).score == 1.0
+
+
+def test_numeric_single_still_requires_the_right_number():
+    spec = {"match": "numeric", "expected": 16100, "tolerance": 0, "single": True}
+    assert scoring.score_answer("15750", spec).score == 0.0
 
 
 def test_numeric_accepts_scientific_notation():

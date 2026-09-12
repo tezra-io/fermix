@@ -1,0 +1,96 @@
+{
+  "source": "Noise Protocol Framework vectors plus Fermix prologue/prelude",
+  "reference": "Independent RFC 7748 X25519, RFC 8439 ChaCha20-Poly1305, and Noise state-machine implementation",
+  "suite": "Noise_{IK,IKpsk2}_25519_ChaChaPoly_SHA256",
+  "sas": "HMAC-SHA256(handshake_hash, 'fermix-mobile-sas-v1'); first BE u32 modulo 1000000; zero-pad to 6 digits",
+  "vectors": [
+    {
+      "pattern": "ik",
+      "init_static_private": "1111111111111111111111111111111111111111111111111111111111111111",
+      "init_static_public": "7b4e909bbe7ffe44c465a220037d608ee35897d31ef972f07f74892cb0f73f13",
+      "resp_static_private": "2222222222222222222222222222222222222222222222222222222222222222",
+      "resp_static_public": "0faa684ed28867b97f4a6a2dee5df8ce974e76b7018e3f22a1c4cf2678570f20",
+      "init_ephemeral_private": "3333333333333333333333333333333333333333333333333333333333333333",
+      "init_ephemeral_public": "7b0d47d93427f8311160781c7c733fd89f88970aef490d8aa0ee19a4cb8a1b14",
+      "resp_ephemeral_private": "4444444444444444444444444444444444444444444444444444444444444444",
+      "resp_ephemeral_public": "ff2ee45601ec1b67310c7790404585ae697331eee1c1f8cf2419731c1fff3e6b",
+      "psk": null,
+      "handshake_messages": [
+        {
+          "payload": "68656c6c6f2d66726f6d2d70686f6e65",
+          "wire": "46584d31017b0d47d93427f8311160781c7c733fd89f88970aef490d8aa0ee19a4cb8a1b14180209d22e6c95bf3b198efd0e3af2c121a6a3464ded18bd60a996a63e55b8698210c1c0e6cd270c8da11296167a5dd97c9c908410c3735545b9fd1ee9991676489ad37a3fdd9d7ef4c5b755b43ec841"
+        },
+        {
+          "payload": "68656c6c6f2d66726f6d2d6461656d6f6e",
+          "wire": "ff2ee45601ec1b67310c7790404585ae697331eee1c1f8cf2419731c1fff3e6b36c2a110d31d89c4c1dbe9fe12ed8e2a9994298b5f389d4e960033b691dbc216ad"
+        }
+      ],
+      "handshake_hash": "595624126ecab8f04803c4d2b7bbf9cdbb390157ccc5a5dd3db5432589c45834",
+      "sas": "077362",
+      "transport_messages": [
+        {
+          "plaintext": "6d6f62696c652d6d657373616765",
+          "ciphertext": "db9e39a60bc39256f9e465006e1cca863ba183f1cad8a053a281950bdc5a",
+          "nonce": 0
+        },
+        {
+          "nonce": 1,
+          "plaintext": "7365636f6e642d6672616d65",
+          "ciphertext": "7dbb46ced6704f7ff7b2a821f4683af505b1a11e5f8c724ca9ff8b83"
+        }
+      ],
+      "rekey": {
+        "direction": "initiator_to_responder",
+        "nonce": 2,
+        "key": "7b4693c298ac347c5c1fd90a943506f1fa0317af62c8c11f56fbd89c7d398b00",
+        "plaintext": "61667465722d72656b6579",
+        "ciphertext": "d36996053e1f9737abe7e5941bb2e9433c276282e56332352509e3"
+      }
+    },
+    {
+      "pattern": "ikpsk2",
+      "init_static_private": "1111111111111111111111111111111111111111111111111111111111111111",
+      "init_static_public": "7b4e909bbe7ffe44c465a220037d608ee35897d31ef972f07f74892cb0f73f13",
+      "resp_static_private": "2222222222222222222222222222222222222222222222222222222222222222",
+      "resp_static_public": "0faa684ed28867b97f4a6a2dee5df8ce974e76b7018e3f22a1c4cf2678570f20",
+      "init_ephemeral_private": "3333333333333333333333333333333333333333333333333333333333333333",
+      "init_ephemeral_public": "7b0d47d93427f8311160781c7c733fd89f88970aef490d8aa0ee19a4cb8a1b14",
+      "resp_ephemeral_private": "4444444444444444444444444444444444444444444444444444444444444444",
+      "resp_ephemeral_public": "ff2ee45601ec1b67310c7790404585ae697331eee1c1f8cf2419731c1fff3e6b",
+      "psk": "5555555555555555555555555555555555555555555555555555555555555555",
+      "handshake_messages": [
+        {
+          "payload": "68656c6c6f2d66726f6d2d70686f6e65",
+          "wire": "46584d31027b0d47d93427f8311160781c7c733fd89f88970aef490d8aa0ee19a4cb8a1b144b3944efabe6dbf0bbf813c9a6b1fd373da6585a9d41e0f4d219fb69bd0be9355e880c6280b6b66cd2efaaa9dc1a0156eb9e02541ef92949e50690b02314eb3584a4486341812dcbc52cb01d201ae5af",
+          "note": "clear FXM1/2 prelude followed by the standard Noise first message"
+        },
+        {
+          "payload": "68656c6c6f2d66726f6d2d6461656d6f6e",
+          "wire": "ff2ee45601ec1b67310c7790404585ae697331eee1c1f8cf2419731c1fff3e6b3be9bd605d47ac64c7900e6d154c8ba838f7a57f6d5b66f50828cc453c3955a2e0"
+        }
+      ],
+      "handshake_hash": "89ac9b21852cc86e62189504d9ab359132fedb9c2e3fd5a2c12415138476093b",
+      "sas": "669979",
+      "transport_messages": [
+        {
+          "plaintext": "6d6f62696c652d6d657373616765",
+          "ciphertext": "f37cc5974aec8dbad38e8e98d58f88675729bd724400fd8ee5404a0385a3",
+          "nonce": 0
+        },
+        {
+          "nonce": 1,
+          "plaintext": "7365636f6e642d6672616d65",
+          "ciphertext": "4faa00ef553157d115fc48afd01b5a4ae3359eb3c834eef65b1f7b98"
+        }
+      ],
+      "rekey": {
+        "direction": "initiator_to_responder",
+        "nonce": 2,
+        "key": "febfd245af8e95261708c571a32867e0c048c21cb81e300679f0c390fb885a2b",
+        "plaintext": "61667465722d72656b6579",
+        "ciphertext": "bf37af341b83057d21fce9041ef7d32ab058c2c737143c7770f4e0"
+      }
+    }
+  ],
+  "rekey": "Noise rev 34 s11.3 REKEY: ChaCha20-Poly1305 of 32 zero bytes at nonce 2^64-1, first 32 bytes become the new key; the direction's nonce is preserved, not reset"
+}

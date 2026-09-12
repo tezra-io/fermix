@@ -19,6 +19,10 @@ defmodule FermixCore.Log.RedactingFormatter do
   # e.g. "risk-based" or "task-management" never match) and requires the
   # long random tail real credentials have.
   @patterns [
+    {"private-key",
+     ~r/-----BEGIN (?:(?:EC|RSA|DSA|ENCRYPTED|OPENSSH) )?PRIVATE KEY-----.*?-----END (?:(?:EC|RSA|DSA|ENCRYPTED|OPENSSH) )?PRIVATE KEY-----/s},
+    {"private-key",
+     ~r/-----BEGIN PGP PRIVATE KEY BLOCK-----.*?-----END PGP PRIVATE KEY BLOCK-----/s},
     {"openai", ~r/\bsk-[A-Za-z0-9_-]{16,}/},
     {"github", ~r/\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}/},
     {"github", ~r/\bgithub_pat_[A-Za-z0-9_]{20,}/},

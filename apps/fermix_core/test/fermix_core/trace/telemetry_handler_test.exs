@@ -3,6 +3,7 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
 
   alias FermixCore.Agents.LifecycleTelemetry
   alias FermixCore.Capabilities.MCP.Telemetry, as: MCPClientTelemetry
+  alias FermixCore.Plugins.Auth.Telemetry, as: PluginAuthTelemetry
   alias FermixCore.Trace
   alias FermixCore.Trace.TelemetryHandler
 
@@ -276,6 +277,40 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
     assert entry["duration_ms"] == 87
   end
 
+  # A failed plugin sign-in was invisible: nothing handled the event. It is now a
+  # plugin_auth row keyed on the plugin, carrying the class and, for a refused
+  # sign-in client, the vendor's own words.
+  test "plugin:auth event creates a plugin_auth agent_event trace", %{dir: dir, server: server} do
+    refused = %{
+      provider: "x",
+      provider_name: "X",
+      status: 401,
+      error: "unauthorized_client",
+      description: "Missing valid authorization header"
+    }
+
+    :ok =
+      PluginAuthTelemetry.emit(
+        :login,
+        "x",
+        {:error, {:oauth_client_rejected, refused}},
+        PluginAuthTelemetry.start()
+      )
+
+    sync(server)
+
+    entries = read_entries(dir, :agent_event)
+    entry = find_entry!(entries, &(&1["event"] == "plugin_auth" and &1["plugin"] == "x"))
+    assert entry["agent"] == "x"
+    assert entry["plugin"] == "x"
+    assert entry["op"] == "login"
+    assert entry["result"] == "error"
+    assert entry["error_class"] == "oauth_client_rejected"
+    assert entry["vendor_error"] == "unauthorized_client"
+    assert entry["vendor_description"] == "Missing valid authorization header"
+    assert is_integer(entry["duration_ms"])
+  end
+
   test "timeout:expired event creates a timeout agent_event trace", %{dir: dir, server: server} do
     :telemetry.execute(
       [:fermix, :timeout, :expired],
@@ -325,6 +360,72 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
     assert entry["reply_type"] == "text"
     assert entry["status"] == "ok"
     assert entry["duration_us"] == 1200
+  end
+
+  test "channel:pair event creates a bounded channel_pair agent_event trace", %{
+    dir: dir,
+    server: server
+  } do
+    :telemetry.execute(
+      [:fermix, :channel, :pair],
+      %{count: 1, duration_us: 42},
+      %{channel: :mobile, status: :approved}
+    )
+
+    sync(server)
+
+    entries = read_entries(dir, :agent_event)
+    entry = find_entry!(entries, &(&1["event"] == "channel_pair"))
+    assert entry["agent"] == "mobile"
+    assert entry["channel"] == "mobile"
+    assert entry["status"] == "approved"
+    assert entry["count"] == 1
+    assert entry["duration_us"] == 42
+    refute Map.has_key?(entry, "content")
+  end
+
+  test "channel:push event creates a bounded channel_push agent_event trace", %{
+    dir: dir,
+    server: server
+  } do
+    :telemetry.execute(
+      [:fermix, :channel, :push],
+      %{count: 1, duration_us: 73},
+      %{channel: :mobile, status: :failed}
+    )
+
+    sync(server)
+
+    entries = read_entries(dir, :agent_event)
+    entry = find_entry!(entries, &(&1["event"] == "channel_push"))
+    assert entry["agent"] == "mobile"
+    assert entry["channel"] == "mobile"
+    assert entry["status"] == "failed"
+    assert entry["count"] == 1
+    assert entry["duration_us"] == 73
+    refute Map.has_key?(entry, "content")
+  end
+
+  test "channel:transport event creates a bounded channel_transport agent_event trace", %{
+    dir: dir,
+    server: server
+  } do
+    :telemetry.execute(
+      [:fermix, :channel, :transport],
+      %{count: 1, consecutive_failures: 312},
+      %{channel: :telegram, status: :degraded, error_class: :timeout}
+    )
+
+    sync(server)
+
+    entries = read_entries(dir, :agent_event)
+    entry = find_entry!(entries, &(&1["event"] == "channel_transport"))
+    assert entry["agent"] == "telegram"
+    assert entry["channel"] == "telegram"
+    assert entry["status"] == "degraded"
+    assert entry["error_class"] == "timeout"
+    assert entry["consecutive_failures"] == 312
+    refute Map.has_key?(entry, "content")
   end
 
   test "memory:review event creates a memory_review agent_event trace", %{

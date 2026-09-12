@@ -60,7 +60,7 @@ defmodule FermixCore.Setup.SecretMigrationTest do
       assert value == Map.fetch!(secret_values(), secret.key)
     end)
 
-    assert_received {:puts, "Migrated 31 secret(s) to keyring."}
+    assert_received {:puts, "Migrated 33 secret(s) to keyring."}
   end
 
   test "run writes a sandbox.env source for migrated AI-provider secrets", %{home: home} do
@@ -149,6 +149,13 @@ defmodule FermixCore.Setup.SecretMigrationTest do
     xai_api_key = "transcription-xai-old"
     deepgram_api_key = "deepgram-old"
 
+    [fermix_core.meetings]
+    enabled = true
+    zoom_account_id = "zoom-account"
+    zoom_client_id = "zoom-client"
+    zoom_client_secret = "zoom-secret-old"
+    zoom_ws_subscription_id = "zoom-sub"
+
     [fermix_core.oauth.google]
     client_type = "desktop_public_pkce"
     client_id = "123.apps.googleusercontent.com"
@@ -190,6 +197,14 @@ defmodule FermixCore.Setup.SecretMigrationTest do
     client_id = "slack-client-id"
     client_secret = "slack-oauth-old"
 
+    [fermix_channels.mobile.push]
+    enabled = true
+    team_id = "TEAM123456"
+    key_id = "KEY1234567"
+    key = "apns-old"
+    topic = "io.tezra.FermixApp"
+    environment = "development"
+
     [fermix_core.plugin_secrets]
     discord = "discord-plugin-old"
     agentmail = "agentmail-plugin-old"
@@ -215,6 +230,7 @@ defmodule FermixCore.Setup.SecretMigrationTest do
       transcription_openai_api_key: "transcription-openai-old",
       transcription_xai_api_key: "transcription-xai-old",
       deepgram_api_key: "deepgram-old",
+      meetings_zoom_client_secret: "zoom-secret-old",
       google_oauth_client_secret: "google-oauth-old",
       github_oauth_client_secret: "github-oauth-old",
       notion_oauth_client_secret: "notion-oauth-old",
@@ -227,6 +243,7 @@ defmodule FermixCore.Setup.SecretMigrationTest do
       slack_bot_token: "slack-old",
       slack_signing_secret: "slack-signing-old",
       slack_oauth_client_secret: "slack-oauth-old",
+      mobile_apns_key: "apns-old",
       discord_plugin_secret: "discord-plugin-old",
       agentmail_plugin_secret: "agentmail-plugin-old",
       slack_plugin_secret: "slack-plugin-old",

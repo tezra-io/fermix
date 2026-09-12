@@ -6,6 +6,9 @@ defmodule FermixOpik.Client do
   trace is upserted by id, so re-sending is idempotent. For a default local
   docker-compose Opik no auth is needed; Opik Cloud needs `api_key` +
   `workspace`, sent as headers.
+
+  Each batch gets at most three attempts on transient HTTP/transport failures,
+  with 500ms and 1s backoff. Exhaustion returns an error and is logged.
   """
 
   require Logger
@@ -40,7 +43,10 @@ defmodule FermixOpik.Client do
     case req.post(url,
            json: sanitize(body),
            headers: headers(config),
-           retry: false,
+           # These batch POSTs upsert the same ids and payload on every attempt.
+           retry: :transient,
+           max_retries: 2,
+           retry_delay: fn attempt -> 500 * (attempt + 1) end,
            receive_timeout: 10_000
          ) do
       {:ok, %{status: status}} when status in 200..299 ->

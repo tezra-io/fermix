@@ -350,4 +350,60 @@ defmodule FermixCore.Providers.OpenAI.ResponsesSharedTest do
       refute ResponsesShared.context_length_error?(nil)
     end
   end
+
+  describe "build_turn/6 — cache token detail" do
+    defp usage_body(usage), do: %{"model" => "gpt-5.6-sol", "output" => [], "usage" => usage}
+
+    test "carries the cached-input subset alongside unchanged totals" do
+      body =
+        usage_body(%{
+          "input_tokens" => 1_000,
+          "output_tokens" => 40,
+          "input_tokens_details" => %{"cached_tokens" => 768}
+        })
+
+      {:ok, turn} = ResponsesShared.build_turn(body, "fallback", [], [], [])
+
+      assert turn.usage == %{
+               prompt_tokens: 1_000,
+               completion_tokens: 40,
+               total_tokens: 1_040,
+               cached_input_tokens: 768
+             }
+    end
+
+    test "omits the cached key when the surface reported no details" do
+      body = usage_body(%{"input_tokens" => 9, "output_tokens" => 3})
+
+      {:ok, turn} = ResponsesShared.build_turn(body, "fallback", [], [], [])
+
+      assert turn.usage == %{prompt_tokens: 9, completion_tokens: 3, total_tokens: 12}
+    end
+
+    test "keeps a reported zero distinguishable from an unreported count" do
+      body =
+        usage_body(%{
+          "input_tokens" => 9,
+          "output_tokens" => 3,
+          "input_tokens_details" => %{"cached_tokens" => 0}
+        })
+
+      {:ok, turn} = ResponsesShared.build_turn(body, "fallback", [], [], [])
+
+      assert turn.usage.cached_input_tokens == 0
+    end
+
+    test "refuses a malformed cached count rather than reporting it as zero" do
+      body =
+        usage_body(%{
+          "input_tokens" => 9,
+          "output_tokens" => 3,
+          "input_tokens_details" => %{"cached_tokens" => -1}
+        })
+
+      assert_raise ArgumentError, ~r/cached_tokens/, fn ->
+        ResponsesShared.build_turn(body, "fallback", [], [], [])
+      end
+    end
+  end
 end

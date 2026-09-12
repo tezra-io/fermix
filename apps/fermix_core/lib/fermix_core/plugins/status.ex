@@ -47,6 +47,31 @@ defmodule FermixCore.Plugins.Status do
 
   @sentinel FermixCore.Setup.SecretWriter.sentinel()
 
+  # Every atom the ladder below answers with, in ladder order. It is a published
+  # vocabulary: `FermixCore.Management.Plugins` carries one sentence per status
+  # and the management contract test asserts the two sets agree, so a status
+  # added to a clause here fails that test rather than reaching a surface with
+  # no words for it.
+  @statuses [
+    :not_configured,
+    :missing_host_runtime,
+    :needs_config,
+    :needs_secret,
+    :needs_workspace,
+    :invalid_remote_config,
+    :needs_client_config,
+    :needs_auth,
+    :reauthorization_required,
+    :ready,
+    :not_installed,
+    :incompatible,
+    :error
+  ]
+
+  @doc "Every status this ladder answers with, in ladder order."
+  @spec statuses() :: [atom()]
+  def statuses, do: @statuses
+
   @spec status(Plugin.t() | String.t()) :: atom()
   def status(plugin_or_name), do: status(plugin_or_name, [])
 
@@ -103,6 +128,32 @@ defmodule FermixCore.Plugins.Status do
       email
     else
       _other -> nil
+    end
+  end
+
+  @doc """
+  Whether the plugin's stored grant is quarantined because its provider refused
+  the saved sign-in client (`Auth.ClientRejection`).
+
+  The ladder publishes such a grant as `:reauthorization_required`, the status
+  vocabulary having no word of its own for it; this predicate is how the
+  surfaces that word the cause tell it apart. It reads the auth store and
+  nothing else, so it answers identically in a tree-less CLI VM. An unreadable
+  store or registry is not a refused client: `status/1` reports those itself.
+  """
+  @spec client_rejected?(Plugin.t() | String.t()) :: boolean()
+  def client_rejected?(%Plugin{} = plugin) do
+    case Store.read(Config.auth_profile(plugin)) do
+      {:ok, entry} -> Map.get(entry, :status) == "client_rejected"
+      {:error, _reason} -> false
+    end
+  end
+
+  def client_rejected?(name) when is_binary(name) do
+    case Registry.find(name) do
+      {:ok, plugin} -> client_rejected?(plugin)
+      :error -> false
+      {:error, _reason} -> false
     end
   end
 
@@ -183,6 +234,11 @@ defmodule FermixCore.Plugins.Status do
         :reauthorization_required
 
       {:ok, %{status: "invalidated"}} ->
+        :reauthorization_required
+
+      # The provider refused the saved sign-in client, so the grant cannot
+      # renew. `client_rejected?/1` tells the cause apart for the surfaces.
+      {:ok, %{status: "client_rejected"}} ->
         :reauthorization_required
 
       {:ok, _entry} ->

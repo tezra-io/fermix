@@ -17,10 +17,13 @@ defmodule FermixCore.Setup.RuntimeTest do
     transcription = Application.get_env(:fermix_core, :transcription, [])
     fermix_home = System.get_env("FERMIX_HOME")
     openai_api_key = System.get_env("OPENAI_API_KEY")
+    apns_key = System.get_env("FERMIX_APNS_KEY")
+    mobile = Application.fetch_env(:fermix_channels, :mobile)
 
     on_exit(fn ->
       restore(:fermix_core, :providers, providers)
       restore(:fermix_channels, :telegram, telegram)
+      restore(:fermix_channels, :mobile, mobile)
       Application.put_env(:fermix_core, :personalization, personalization)
       Application.put_env(:fermix_core, :agent, agent)
       Application.put_env(:fermix_core, :memory, memory)
@@ -36,6 +39,11 @@ defmodule FermixCore.Setup.RuntimeTest do
       case openai_api_key do
         nil -> System.delete_env("OPENAI_API_KEY")
         value -> System.put_env("OPENAI_API_KEY", value)
+      end
+
+      case apns_key do
+        nil -> System.delete_env("FERMIX_APNS_KEY")
+        value -> System.put_env("FERMIX_APNS_KEY", value)
       end
     end)
 
@@ -178,6 +186,55 @@ defmodule FermixCore.Setup.RuntimeTest do
     path
   end
 
+  # The mobile channel ships feature-flagged: `[fermix_channels.mobile] enabled
+  # = true` in config.toml is the only enable path, so a terminal setup run must
+  # ask nothing about it and must never turn it on or write APNs credentials —
+  # not even when a caller injects the withdrawn answer keys.
+  test "terminal setup asks nothing mobile and never enables the channel" do
+    home = tmp_home()
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
+    FermixTestSupport.SecretWriterStub.reset()
+    prepare(home, openai_api_key: "sk-test")
+    {:ok, prompt_log} = Agent.start_link(fn -> [] end)
+
+    prompt = fn label ->
+      Agent.update(prompt_log, &[label | &1])
+
+      if String.starts_with?(label, "Enable local voice companion"), do: "no", else: ""
+    end
+
+    {puts, _collector} = puts_collector()
+
+    assert :ok =
+             Runtime.run(
+               [
+                 mobile_enabled: true,
+                 mobile_port: 4_555,
+                 mobile_push_enabled: true,
+                 mobile_push_team_id: "ABCDE12345",
+                 mobile_push_key: "p8-fixture",
+                 mobile_push_topic: "io.tezra.fermix.app",
+                 skip_probe: true
+               ],
+               puts: puts,
+               prompt: prompt
+             )
+
+    labels = Agent.get(prompt_log, &Enum.reverse/1)
+    refute Enum.any?(labels, &(String.downcase(&1) =~ "mobile"))
+    refute Enum.any?(labels, &(String.downcase(&1) =~ "apns"))
+
+    assert {:ok, snapshot} = ConfigStore.load_runtime_config()
+    mobile = snapshot.fermix_channels |> Keyword.fetch!(:mobile)
+    assert Keyword.get(mobile, :enabled) == false
+    refute Keyword.get(mobile, :port) == 4_555
+
+    contents = File.read!(ConfigStore.path())
+    refute contents =~ "ABCDE12345"
+    refute contents =~ "p8-fixture"
+    refute contents =~ "io.tezra.fermix.app"
+  end
+
   test "runtime config file raises when bootstrap returns an error" do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-runtime-file-#{System.unique_integer([:positive])}")
@@ -206,6 +263,52 @@ defmodule FermixCore.Setup.RuntimeTest do
     assert_raise RuntimeError, ~r/bootstrap_runtime_config failed.*:enotdir/s, fn ->
       read_runtime_config!(runtime_exs)
     end
+  end
+
+  test "runtime config overlays only the nested APNs credential from FERMIX_APNS_KEY" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("fermix-runtime-mobile-apns")
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    System.put_env(
+      "FERMIX_APNS_KEY",
+      "-----BEGIN PRIVATE KEY-----\nenv-key\n-----END PRIVATE KEY-----"
+    )
+
+    Application.put_env(:fermix_channels, :mobile,
+      enabled: true,
+      port: 4_444,
+      push: [enabled: true, topic: "io.tezra.fermix", key: "hydrated-key"]
+    )
+
+    runtime_exs = Path.expand("../../../../../config/runtime.exs", __DIR__)
+    config = read_runtime_config!(runtime_exs)
+    mobile = config[:fermix_channels][:mobile]
+
+    assert Keyword.get(mobile, :enabled) == true
+    assert Keyword.get(mobile, :port) == 4_444
+    assert get_in(mobile, [:push, :topic]) == "io.tezra.fermix"
+
+    assert get_in(mobile, [:push, :key]) ==
+             "-----BEGIN PRIVATE KEY-----\nenv-key\n-----END PRIVATE KEY-----"
+
+    FermixTestSupport.SafeRm.rm_rf!(tmp_home)
+  end
+
+  test "blank APNs credential preserves the ConfigStore-hydrated key" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("fermix-runtime-mobile-apns-blank")
+    System.put_env("FERMIX_HOME", tmp_home)
+    System.put_env("FERMIX_APNS_KEY", "")
+
+    Application.put_env(:fermix_channels, :mobile,
+      enabled: true,
+      push: [enabled: true, key: "hydrated-key"]
+    )
+
+    runtime_exs = Path.expand("../../../../../config/runtime.exs", __DIR__)
+    config = read_runtime_config!(runtime_exs)
+
+    assert get_in(config, [:fermix_channels, :mobile, :push, :key]) == "hydrated-key"
+    FermixTestSupport.SafeRm.rm_rf!(tmp_home)
   end
 
   defp pick_free_port do
@@ -1203,7 +1306,7 @@ defmodule FermixCore.Setup.RuntimeTest do
       codex_block = Keyword.get(providers, :openai_codex, [])
 
       assert Keyword.get(codex_block, :primary) == true
-      assert Keyword.get(codex_block, :default_model) == "gpt-5.6-sol"
+      assert Keyword.get(codex_block, :default_model) == "gpt-6-astra"
       assert Keyword.get(codex_block, :reasoning_effort) == :high
     end
 

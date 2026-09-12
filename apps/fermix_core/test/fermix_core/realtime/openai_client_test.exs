@@ -215,4 +215,34 @@ defmodule FermixCore.Realtime.OpenAIClientTest do
                "response" => %{"status" => "completed"}
              })
   end
+
+  describe "start_options/2" do
+    test "verifies the OpenAI peer instead of taking WebSockex's insecure default" do
+      config = Config.normalize(model: "gpt-realtime-2")
+
+      assert {:ok, opts} =
+               OpenAIClient.start_options(
+                 OpenAIClient.url(config),
+                 OpenAIClient.headers("sk-test", "safety-id")
+               )
+
+      # Without :ssl_options WebSockex connects with verify: :verify_none, and
+      # the bearer token in the headers below goes to whoever answered.
+      ssl_options = Keyword.fetch!(opts, :ssl_options)
+
+      assert ssl_options[:verify] == :verify_peer
+      assert ssl_options[:server_name_indication] == ~c"api.openai.com"
+
+      assert {"Authorization", "Bearer sk-test"} in opts[:extra_headers]
+      assert opts[:handshake_timeout] == OpenAIClient.handshake_timeout_ms()
+    end
+
+    test "refuses a URL with no host rather than dialing a peer it cannot verify" do
+      assert OpenAIClient.start_options("api.openai.com/v1/realtime", []) ==
+               {:error, :ws_url_without_host}
+
+      assert OpenAIClient.start_options("wss:///v1/realtime", []) ==
+               {:error, :ws_url_without_host}
+    end
+  end
 end

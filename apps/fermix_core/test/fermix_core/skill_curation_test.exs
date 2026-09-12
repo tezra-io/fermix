@@ -186,6 +186,39 @@ defmodule FermixCore.SkillCurationTest do
       assert history.checkpoints_included == 1
       assert history.dropped_guest_checkpoints == 1
     end
+
+    test "preserves the history_tainted marker from a checkpoint row", %{repo: repo} do
+      # MILESTONE_32 §13.6: `Compactor.checkpoint_metadata/1` stamps a checkpoint
+      # distilled from activity-derived turns. Curation must carry that marker
+      # onto the entry or the miner cannot keep it off an ungranted-remote chain.
+      insert_message!(repo, %{
+        kind: "checkpoint_summary",
+        role: "system",
+        sender: "compactor",
+        metadata: %{source: "agent_loop_compaction", history_tainted: true},
+        content: "summary that folded activity context"
+      })
+
+      insert_message!(repo, %{
+        kind: "checkpoint_summary",
+        role: "system",
+        sender: "compactor",
+        created_at: ~U[2026-07-21 10:00:00Z],
+        metadata: %{source: "agent_loop_compaction"},
+        content: "an ordinary summary"
+      })
+
+      assert [tainted, clean] = assemble!(repo).entries
+      assert tainted.history_tainted == true
+      refute Map.has_key?(clean, :history_tainted)
+    end
+
+    test "an owner message row carries no marker", %{repo: repo} do
+      insert_message!(repo, %{content: "an ordinary owner turn"})
+
+      assert [entry] = assemble!(repo).entries
+      refute Map.has_key?(entry, :history_tainted)
+    end
   end
 
   describe "assemble_history/2 caps" do

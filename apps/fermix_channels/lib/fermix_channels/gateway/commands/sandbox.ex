@@ -18,6 +18,7 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
 
   @typedoc "Where an agent-initiated grant request came from — binds the pending record to the owner's conversation."
   @type grant_origin :: %{
+          optional(:ingress_context) => map(),
           channel: String.t(),
           chat_id: String.t(),
           thread_ts: term(),
@@ -35,7 +36,7 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
   def name, do: "sandbox"
 
   @impl true
-  def aliases, do: ["grant", "revoke", "confirm"]
+  def aliases, do: ["grant", "revoke", "confirm", "deny"]
 
   @impl true
   def description, do: "Inspect or update sandbox policy."
@@ -46,7 +47,7 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
   # to their origin, so `same_origin?` would otherwise let them self-approve
   # (SANDBOX_ACCESS_APPROVAL_FLOW). Read-only /sandbox status|explain and the
   # remaining /sandbox subcommands keep the owner-or-allowlist gate.
-  @operator_subcommands ["grant", "revoke", "confirm"]
+  @operator_subcommands ["grant", "revoke", "confirm", "deny"]
 
   @impl true
   def authorize(message, metadata, context) do
@@ -113,6 +114,9 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
   defp dispatch("confirm", [token], message, reply_fn, context),
     do: confirm(token, message, reply_fn, context)
 
+  defp dispatch("deny", [token], message, reply_fn, context),
+    do: deny(token, message, reply_fn, context)
+
   defp dispatch(_name, _args, _message, reply_fn, _context),
     do:
       reply(
@@ -120,7 +124,8 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
         "Usage: /sandbox status, /sandbox explain, /sandbox mode MODE, " <>
           "/sandbox env allow NAME, /sandbox env deny NAME, /sandbox env set NAME -- CMD [ARGS...], " <>
           "/sandbox env unset NAME, /sandbox commands enable PRESET, " <>
-          "/sandbox commands disable PRESET, /grant path PATH, /revoke path PATH, /confirm TOKEN"
+          "/sandbox commands disable PRESET, /grant path PATH, /revoke path PATH, " <>
+          "/confirm TOKEN, /deny TOKEN"
       )
 
   defp propose(mutation, message, reply_fn) do
@@ -129,10 +134,17 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
     with {:ok, proposed} <- ConfigMutation.apply(current, mutation, dry_run: true) do
       if ConfigMutation.requires_confirmation?(current, proposed) do
         token = store_pending(mutation, message)
+        diff = ConfigMutation.diff(current, proposed)
 
-        reply(
+        reply_approval(
           reply_fn,
-          "Confirm sandbox change with /confirm #{token}\n#{ConfigMutation.diff(current, proposed)}"
+          %{
+            kind: :sandbox,
+            text: "Confirm sandbox change with /confirm #{token}\n#{diff}",
+            detail: diff,
+            token: token,
+            ttl_s: div(@ttl_ms, 1_000)
+          }
         )
       else
         persist(proposed, reply_fn)
@@ -191,7 +203,8 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
   defp live_match?(record, mutation, origin, now) do
     Map.get(record, :mutation) == mutation and record.expires_at >= now and
       record.channel == origin.channel and record.chat_id == origin.chat_id and
-      record.thread_ts == origin.thread_ts and record.user_id == origin.user_id
+      record.thread_ts == origin.thread_ts and record.user_id == origin.user_id and
+      Map.get(record, :ingress_context) == Map.get(origin, :ingress_context)
   end
 
   defp grant_pending_record(mutation, origin) do
@@ -204,12 +217,28 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
       resume: Map.get(origin, :resume),
       expires_at: now_ms() + @ttl_ms
     }
+    |> maybe_put(:ingress_context, Map.get(origin, :ingress_context))
   end
 
   defp confirm(token, message, reply_fn, context) do
     case take_pending(token, message) do
-      {:ok, record} -> apply_confirmed(record, token, reply_fn, context)
-      {:error, reason} -> reply(reply_fn, "Confirmation failed: #{inspect(reason)}")
+      {:ok, record} ->
+        :ok = notify_approval(context, :sandbox, token, :approved)
+        apply_confirmed(record, token, reply_fn, context)
+
+      {:error, reason} ->
+        reply(reply_fn, "Confirmation failed: #{inspect(reason)}")
+    end
+  end
+
+  defp deny(token, message, reply_fn, context) do
+    case take_pending(token, message) do
+      {:ok, _record} ->
+        :ok = notify_approval(context, :sandbox, token, :denied)
+        reply(reply_fn, "Sandbox change denied — the pending grant was discarded.")
+
+      {:error, reason} ->
+        reply(reply_fn, "Denial failed: #{inspect(reason)}")
     end
   end
 
@@ -224,6 +253,37 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
     else
       {:error, reason} -> reply(reply_fn, "Sandbox change rejected: #{format_error(reason)}")
     end
+  end
+
+  defp notify_approval(context, kind, token, outcome) do
+    case Map.get(context, :approval_resolution_fn) do
+      nil ->
+        :ok
+
+      callback when is_function(callback, 1) ->
+        run_approval_callback(callback, kind, token, outcome)
+    end
+  end
+
+  defp run_approval_callback(callback, kind, token, outcome) do
+    case callback.(%{kind: kind, token: token, outcome: outcome}) do
+      :ok -> :ok
+      other -> log_approval_callback_failure(kind, outcome, other)
+    end
+  rescue
+    error -> log_approval_callback_failure(kind, outcome, error)
+  catch
+    caught_kind, reason -> log_approval_callback_failure(kind, outcome, {caught_kind, reason})
+  end
+
+  # The failure itself must reach the log: "callback failed" with no reason is
+  # undiagnosable when an approval card sticks un-resolved.
+  defp log_approval_callback_failure(kind, outcome, error) do
+    Logger.error(
+      "#{kind} approval resolution callback failed after #{outcome}: #{inspect(error)}"
+    )
+
+    :ok
   end
 
   # Three shapes: an owner-typed `/grant` record has no `:resume` key (unchanged
@@ -259,11 +319,13 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
         )
 
       adapter ->
-        opts = [
-          channel: adapter,
-          agent: Map.fetch!(context, :agent),
-          agent_server: Map.fetch!(context, :agent_server)
-        ]
+        opts =
+          [
+            channel: adapter,
+            agent: Map.fetch!(context, :agent),
+            agent_server: Map.fetch!(context, :agent_server)
+          ]
+          |> maybe_put(:ingress_context, Map.get(record, :ingress_context))
 
         spawn_resume(synthesize_resume_message(record, resume, token), opts)
     end
@@ -292,6 +354,10 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
       metadata: %{user_id: record.user_id, resumed_from_grant: token}
     })
   end
+
+  defp maybe_put(values, _key, nil), do: values
+  defp maybe_put(values, key, value) when is_map(values), do: Map.put(values, key, value)
+  defp maybe_put(values, key, value) when is_list(values), do: Keyword.put(values, key, value)
 
   defp persist(config, reply_fn) do
     case ConfigMutation.persist(config) do
@@ -382,6 +448,11 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
 
   defp reply(reply_fn, text) do
     reply_fn.({:text, text})
+    :ok
+  end
+
+  defp reply_approval(reply_fn, spec) do
+    reply_fn.({:approval_prompt, spec})
     :ok
   end
 end

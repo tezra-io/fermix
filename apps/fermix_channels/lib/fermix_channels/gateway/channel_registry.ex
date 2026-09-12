@@ -31,15 +31,17 @@ defmodule FermixChannels.Gateway.ChannelRegistry do
   alias FermixCore.Config
 
   @type trust :: :local_operator
+  @type ingress_auth :: :paired_device
 
   @type channel :: %{
           :name => String.t(),
           :config_key => atom() | nil,
           :adapter => module() | nil,
           :remote? => boolean(),
-          :transport => :polling | :gateway | :subprocess | :webhook | :loopback,
+          :transport => :polling | :gateway | :subprocess | :webhook | :loopback | :listener,
           :child => module() | nil,
           optional(:trust) => trust(),
+          optional(:ingress_auth) => ingress_auth(),
           optional(:commands?) => boolean()
         }
 
@@ -98,6 +100,15 @@ defmodule FermixChannels.Gateway.ChannelRegistry do
       commands?: false,
       transport: :gateway,
       child: FermixChannels.Channels.Acp.Supervisor
+    },
+    %{
+      name: "mobile",
+      config_key: :mobile,
+      adapter: FermixChannels.Channels.Mobile,
+      remote?: true,
+      ingress_auth: :paired_device,
+      transport: :listener,
+      child: FermixChannels.Mobile.Supervisor
     },
     %{
       name: "cli",
@@ -162,6 +173,15 @@ defmodule FermixChannels.Gateway.ChannelRegistry do
     end
   end
 
+  @doc "Connection-authenticated ingress required by a channel, if any."
+  @spec ingress_auth(String.t()) :: ingress_auth() | nil
+  def ingress_auth(name) when is_binary(name) do
+    case find(name) do
+      nil -> nil
+      channel -> Map.get(channel, :ingress_auth)
+    end
+  end
+
   @doc """
   Whether the gateway runs the slash-command pipeline for this channel.
   Unknown channels and entries without the key answer `true` — opting out is
@@ -213,7 +233,9 @@ defmodule FermixChannels.Gateway.ChannelRegistry do
 
   # A `:local_operator` transport has no inbox — nobody can address it but the
   # operator running it — so an ingress allow-list is not a thing it can have.
-  defp needs_ingress?(channel), do: trust_of(channel) != :local_operator
+  defp needs_ingress?(channel) do
+    trust_of(channel) != :local_operator and Map.get(channel, :ingress_auth) == nil
+  end
 
   defp startable?(%{child: nil}), do: false
 

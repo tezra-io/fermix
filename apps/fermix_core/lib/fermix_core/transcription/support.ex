@@ -21,7 +21,9 @@ defmodule FermixCore.Transcription.Support do
      cost, `purpose: :transcription`, and the transcript preview only under
      `capture_content?/0`. A missing-key preflight emits the same errored span via
      `provider_call_error/4`, so the two auth-failure modes are symmetric in the
-     trace.
+     trace. A native streaming session is one call in the same vocabulary:
+     `emit_stream_call/5` reports it once at its terminal, spanning the whole
+     stream.
   """
 
   require Logger
@@ -90,6 +92,31 @@ defmodule FermixCore.Transcription.Support do
   def provider_call_error(provider, model, opts, reason)
       when is_atom(provider) and is_binary(model) and is_list(opts) do
     with_provider_call(provider, model, opts, fn -> {:error, reason} end)
+  end
+
+  @doc """
+  Emits the single provider-call span a native streaming session reports at its
+  terminal (closed, error, or abort).
+
+  Same metadata shape as `with_provider_call/4` — one span per stream lifetime,
+  `duration_ms` being the stream's wall time and `result` being
+  `{:ok, preview}` (the bounded concatenation of its segment texts) or
+  `{:error, reason}`. A stream is one provider call as far as cost and latency
+  are concerned; the chunked adapter emits nothing at this level because its
+  per-segment batch spans already account for every call it makes.
+  """
+  @spec emit_stream_call(
+          atom(),
+          String.t(),
+          keyword(),
+          {:ok, String.t()} | {:error, term()},
+          non_neg_integer()
+        ) :: :ok
+  def emit_stream_call(provider, model, opts, result, duration_ms)
+      when is_atom(provider) and is_binary(model) and is_list(opts) and is_integer(duration_ms) and
+             duration_ms >= 0 do
+    emit(provider, model, opts, result, duration_ms)
+    :ok
   end
 
   defp emit(provider, model, opts, result, duration_ms) do

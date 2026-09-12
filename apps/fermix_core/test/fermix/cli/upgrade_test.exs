@@ -3,12 +3,37 @@ defmodule Fermix.CLI.UpgradeTest do
 
   alias Fermix.CLI.Upgrade
 
+  defmodule AppBuildInfo do
+    def app_engine?, do: true
+  end
+
+  # The standalone updater's two mutating collaborators. Inside a signed
+  # Fermix.app bundle neither may run at all: `InstallMethod` would classify the
+  # sealed bundle as `{:unmanaged, path}` and `Swapper` would rename over it,
+  # breaking the code signature. Raising doubles turn "the gate happens to fire
+  # first" into "reaching either module is a test failure".
+  defmodule RaisingInstallMethod do
+    def detect(_binary_path), do: raise("install-method detection must not run")
+  end
+
+  defmodule RaisingSwapper do
+    def stage_artifact(_artifact, _opts), do: raise("artifact staging must not run")
+    def verify(_staged, _opts), do: raise("artifact verification must not run")
+    def swap(_staged, _installed, _opts), do: raise("binary swap must not run")
+    def rollback(_previous, _installed), do: raise("binary rollback must not run")
+    def default_previous_path, do: raise("previous-binary path must not be resolved")
+  end
+
   # The origin `Fermix.CLI.Upgrade.Manifest` pins artifact URLs to — the exact
   # base `scripts/release/build_releases_json.sh` emits for tag v99.0.0, the
   # version these plugs advertise. An off-origin fixture is refused at parse
   # time, so nothing below would reach the download/verify/swap under test.
   @release_base "https://github.com/tezra-io/fermix/releases/download/v99.0.0"
   @off_origin_base "https://evil.example.invalid/releases"
+
+  # A path inside a sealed signed bundle — exactly what `InstallMethod` would
+  # classify as `{:unmanaged, path}` and hand to the swapper if the gate slipped.
+  @app_engine_binary "/Applications/Fermix.app/Contents/Resources/Engine/bin/fermix"
 
   setup do
     tmp =
@@ -23,6 +48,27 @@ defmodule Fermix.CLI.UpgradeTest do
   end
 
   describe "check/1" do
+    test "app engines refuse before fetching the standalone release manifest" do
+      raising_plug = fn _conn -> raise "standalone manifest fetch must not run" end
+
+      assert {:error, {:app_managed, :update}} =
+               Upgrade.check(
+                 build_info: AppBuildInfo,
+                 req_options: [plug: raising_plug]
+               )
+    end
+
+    test "app engines reach neither install-method detection nor the swapper" do
+      assert {:error, {:app_managed, :update}} =
+               Upgrade.check(
+                 build_info: AppBuildInfo,
+                 install_method: RaisingInstallMethod,
+                 swapper: RaisingSwapper,
+                 req_options: [plug: fn _conn -> raise "manifest fetch must not run" end],
+                 binary_path: @app_engine_binary
+               )
+    end
+
     test "reports available when manifest latest > current" do
       assert {:ok, %{available: true, latest: latest, current: current}} =
                Upgrade.check(req_options: [plug: &__MODULE__.future_manifest_plug/1])
@@ -38,6 +84,46 @@ defmodule Fermix.CLI.UpgradeTest do
   end
 
   describe "run/1" do
+    test "app engines never reach install-method detection or the binary swapper" do
+      assert {:error, {:app_managed, :update}} =
+               Upgrade.run(
+                 build_info: AppBuildInfo,
+                 install_method: RaisingInstallMethod,
+                 swapper: RaisingSwapper,
+                 req_options: [plug: fn _conn -> raise "manifest fetch must not run" end],
+                 binary_path: @app_engine_binary
+               )
+    end
+
+    # Without this, the case above could pass because the doubles are wired to
+    # nothing at all. A standalone engine must reach both of them.
+    test "the raising doubles are wired to the seams the gate protects", %{tmp: tmp} do
+      installed = Path.join(tmp, "fermix")
+      File.write!(installed, "currently-running")
+
+      blob = "the new fermix binary content"
+      Process.put({__MODULE__, :stub_blob}, blob)
+
+      Process.put(
+        {__MODULE__, :stub_sha},
+        :sha256 |> :crypto.hash(blob) |> Base.encode16(case: :lower)
+      )
+
+      assert_raise RuntimeError, "install-method detection must not run", fn ->
+        Upgrade.run(install_method: RaisingInstallMethod, binary_path: installed)
+      end
+
+      assert_raise RuntimeError, "artifact staging must not run", fn ->
+        Upgrade.run(
+          swapper: RaisingSwapper,
+          binary_path: installed,
+          req_options: [plug: &__MODULE__.upgrade_plug/1],
+          staging_dir: Path.join(tmp, "staging"),
+          audit_path: Path.join(tmp, "upgrades.jsonl")
+        )
+      end
+    end
+
     test "refuses managed installs with the right hint", %{tmp: tmp} do
       File.mkdir_p!(Path.join(tmp, "Cellar/fermix/0.1.0/bin"))
       managed_path = Path.join(tmp, "Cellar/fermix/0.1.0/bin/fermix")
@@ -126,7 +212,7 @@ defmodule Fermix.CLI.UpgradeTest do
             Agent.update(restarts, &(&1 + 1))
             :ok
           end,
-          status_fun: fn _ -> {:ok, %{"status" => "ok", "version" => "0.0.1"}} end,
+          status_fun: fn _ -> {:ok, hello("0.0.1")} end,
           health_timeout_ms: 20,
           health_poll_ms: 1,
           socket_path: "unused"
@@ -307,28 +393,28 @@ defmodule Fermix.CLI.UpgradeTest do
     end
 
     test "returns :ok when the daemon reports the expected (new) version" do
-      status = fn _ -> {:ok, %{"status" => "ok", "version" => "0.5.6"}} end
+      status = fn _ -> {:ok, hello("0.5.6")} end
       assert :ok = Upgrade.wait_for_health(health_opts(status, expected_version: "0.5.6"))
     end
 
     test "times out when only the OLD version keeps answering (stale daemon survived)" do
       # A wedged old daemon still answers the socket 'ok' — but at the old version, so
       # the gate must NOT go green (it triggers rollback upstream).
-      status = fn _ -> {:ok, %{"status" => "ok", "version" => "0.5.5"}} end
+      status = fn _ -> {:ok, hello("0.5.5")} end
 
       assert {:error, :health_check_timeout} =
                Upgrade.wait_for_health(health_opts(status, expected_version: "0.5.6"))
     end
 
-    test "times out when the status carries no version and one is expected" do
-      status = fn _ -> {:ok, %{"status" => "ok"}} end
+    test "times out when hello carries no version and one is expected" do
+      status = fn _ -> {:ok, %{"engine" => %{"pid" => "1"}}} end
 
       assert {:error, :health_check_timeout} =
                Upgrade.wait_for_health(health_opts(status, expected_version: "0.5.6"))
     end
 
     test "without an expected version, any healthy status passes (bare restart)" do
-      status = fn _ -> {:ok, %{"status" => "ok", "version" => "anything"}} end
+      status = fn _ -> {:ok, hello("anything")} end
       assert :ok = Upgrade.wait_for_health(health_opts(status))
     end
 
@@ -337,6 +423,15 @@ defmodule Fermix.CLI.UpgradeTest do
 
       assert {:error, :health_check_timeout} =
                Upgrade.wait_for_health(health_opts(status, expected_version: "0.5.6"))
+    end
+
+    # The health gate reads management v1 `hello`; a pre-v1 daemon that survived
+    # the restart cannot answer it, which is the same "not healthy yet".
+    defp hello(version) do
+      %{
+        "protocol" => %{"current_version" => 1, "minimum_version" => 1, "maximum_version" => 1},
+        "engine" => %{"product_version" => version, "pid" => "1"}
+      }
     end
   end
 end

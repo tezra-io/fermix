@@ -5,9 +5,11 @@ defmodule FermixCore.Agents.TurnRunnerTest do
   alias FermixCore.Agents.TurnRunner
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.ComputerHistory.Taint
   alias FermixCore.ComputerUse.Safety
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Providers.Error, as: ProviderError
+  alias FermixTestSupport.ComputerHistoryCanary
 
   defmodule NoopReviewer do
     def start_background(_opts), do: :ok
@@ -143,6 +145,43 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       {:ok,
        %{
          content: "captured",
+         tool_calls: [],
+         provider_state: %{},
+         usage: %{prompt_tokens: 10, completion_tokens: 1, total_tokens: 11},
+         model: "mock-model"
+       }}
+    end
+
+    @impl true
+    def continue(_provider_state, _tool_results, _opts), do: {:error, :unexpected_continue}
+
+    @impl true
+    def to_provider_tools(capabilities), do: capabilities
+
+    @impl true
+    def parse_tool_calls(_response), do: []
+
+    @impl true
+    def parse_response(response), do: response
+
+    @impl true
+    def supports_streaming?, do: false
+  end
+
+  # Replies with whatever the replay actually showed it, so the reply carries
+  # activity bytes exactly when the history reached the model unmasked — the
+  # model-paraphrase path MILESTONE_32 §13.6 has to taint transitively.
+  defmodule ParaphraseAdapter do
+    @behaviour FermixCore.Providers.Adapter
+
+    @impl true
+    def chat(messages, _capabilities, opts) do
+      send(Keyword.fetch!(opts, :test_pid), {:captured_prompt, messages})
+
+      {:ok,
+       %{
+         content:
+           "Recapping what I saw: " <> Enum.map_join(messages, " ", &Map.get(&1, :content, "")),
          tool_calls: [],
          provider_state: %{},
          usage: %{prompt_tokens: 10, completion_tokens: 1, total_tokens: 11},
@@ -478,6 +517,136 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       assert List.last(history).content == "assistant reply"
       refute Enum.any?(history, &(&1.content == older_content))
     end
+  end
+
+  # MILESTONE_32 §13.6 / inv. 20 — a reply the model generated from an UNMASKED
+  # tainted replay is itself activity-derived and must inherit the stamp. Before
+  # this, `/history off` on an all-local chain left the earlier tainted turns
+  # unmasked (local chains may carry history), the model paraphrased them, and
+  # the new reply was persisted clean — so a later switch to an ungranted-remote
+  # provider masked the original and sent the paraphrase.
+  describe "commit/4 — the reply inherits the taint of what it replayed" do
+    setup do
+      original = Application.get_env(:fermix_core, :computer_history)
+      # History DISABLED: the reproduction posture. The stamp must NOT depend on
+      # the feature being on — the taint is a property of the message's origin.
+      Application.put_env(:fermix_core, :computer_history, enabled: false)
+      Application.put_env(:fermix_core, :compaction, enabled: false)
+
+      on_exit(fn ->
+        case original do
+          nil -> Application.delete_env(:fermix_core, :computer_history)
+          value -> Application.put_env(:fermix_core, :computer_history, value)
+        end
+      end)
+
+      :ok
+    end
+
+    test "a reply generated from an unmasked tainted replay is stamped (local chain)" do
+      canary = ComputerHistoryCanary.token("replay")
+      {history, prompt} = taint_turn(local_routes(), prior: canary)
+
+      # The replay reached the model unmasked, so the reply carries the bytes.
+      assert ComputerHistoryCanary.present?(prompt, canary)
+      assert ComputerHistoryCanary.present?(List.last(history).content, canary)
+      assert List.last(history).history_tainted == true
+    end
+
+    test "an ungranted-remote chain masks the prior, so the reply is NOT stamped" do
+      canary = ComputerHistoryCanary.token("masked")
+      {history, prompt} = taint_turn(remote_routes(), prior: canary)
+
+      assert ComputerHistoryCanary.absent?(prompt, canary)
+      assert ComputerHistoryCanary.absent?(List.last(history).content, canary)
+      refute Map.has_key?(List.last(history), :history_tainted)
+    end
+
+    test "no tainted history and no section — the reply is not stamped" do
+      {history, _prompt} = taint_turn(local_routes(), prior: nil)
+      assert List.last(history).role == "assistant"
+      refute Enum.any?(history, &Map.has_key?(&1, :history_tainted))
+    end
+
+    # Drives one real turn (run + commit) on `routes`, optionally seeding a
+    # prior activity-derived assistant message carrying `prior`. Returns the
+    # persisted history and the message list the adapter actually received.
+    defp taint_turn(routes, prior: prior) do
+      suffix = System.unique_integer([:positive])
+      registry_name = :"tr_taint_reg_#{suffix}"
+      store_name = :"tr_taint_store_#{suffix}"
+
+      start_supervised!(
+        Supervisor.child_spec({CapabilityRegistry, name: registry_name}, id: registry_name)
+      )
+
+      store =
+        start_supervised!(
+          Supervisor.child_spec(
+            {ConversationStore, name: store_name, max_messages: :infinity, repo: nil},
+            id: store_name
+          )
+        )
+
+      main_agent =
+        start_supervised!(
+          Supervisor.child_spec({MainAgentStub, test_pid: self()},
+            id: :"tr_taint_agent_#{suffix}"
+          )
+        )
+
+      chat_id = "taint_#{suffix}"
+      conversation_key = {"telegram", chat_id, :root}
+      seed_prior_activity_reply(conversation_key, store, prior)
+
+      msg = %{
+        channel: "telegram",
+        chat_id: chat_id,
+        sender: "user",
+        content: "what was I doing?",
+        source_trust: :operator
+      }
+
+      turn_state =
+        turn_state(
+          adapter: ParaphraseAdapter,
+          adapter_opts: [model: "mock-model", test_pid: self()],
+          capability_registry: registry_name,
+          conversation_store: store,
+          ordered_routes: routes,
+          main_agent_server: main_agent,
+          memory_reviewer: NoopReviewer,
+          review_interval_hours: 24,
+          review_max_messages: 50,
+          review_input_token_budget: 4_000,
+          review_failure_backoff_ms: 60_000,
+          compaction_failures: %{}
+        )
+
+      assert {:ok, reply, tokens} = TurnRunner.run(msg, turn_state, fn _part -> :ok end)
+      assert :ok = TurnRunner.commit(msg, turn_state, reply, tokens)
+      assert_receive {:captured_prompt, prompt}, 5_000
+
+      {ConversationStore.get_history(conversation_key, server: store), prompt}
+    end
+
+    defp seed_prior_activity_reply(_key, _store, nil), do: :ok
+
+    defp seed_prior_activity_reply(conversation_key, store, canary) do
+      ConversationStore.add_message(
+        conversation_key,
+        "assistant",
+        "You were reading #{canary} in Numbers.",
+        server: store,
+        metadata: Taint.metadata()
+      )
+    end
+
+    defp local_routes,
+      do: [{%{provider: :ollama, model: "llama3", base_url: "http://127.0.0.1:11434/v1"}, []}]
+
+    defp remote_routes,
+      do: [{%{provider: :openai, model: "gpt-x", base_url: "https://api.openai.com/v1"}, []}]
   end
 
   describe "run/3" do

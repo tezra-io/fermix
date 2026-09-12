@@ -25,6 +25,26 @@ defmodule FermixChannels.Application do
     # dependency). Registered here so the provider is present iff the queue runs.
     Application.put_env(:fermix_core, :queue_status_provider, FermixChannels.Gateway.Queue)
 
+    # Core's daemon control socket must not compile-depend on channels. Register
+    # the mobile management facade only while this application is running; CLI
+    # pair/devices requests resolve it dynamically through the daemon.
+    Application.put_env(
+      :fermix_core,
+      :mobile_management_provider,
+      FermixChannels.Mobile.Management
+    )
+
+    # `/health` reports the Telegram poller's degraded posture. Core must not
+    # compile-depend on channels, so the poller registers itself here; the
+    # provider is present iff this application runs.
+    Application.put_env(
+      :fermix_core,
+      :telegram_poll_health_provider,
+      FermixChannels.Channels.Telegram.Poller
+    )
+
+    mobile_boot_epoch = mobile_boot_epoch()
+
     children =
       [
         FermixChannels.Gateway.Queue,
@@ -32,7 +52,7 @@ defmodule FermixChannels.Application do
         FermixChannels.Gateway.Commands.Sandbox.Confirmations,
         FermixChannels.Gateway.Commands.Soul.Confirmations,
         FermixChannels.Gateway.Idempotency
-      ] ++ album_buffers() ++ ChannelRegistry.transport_children(readiness)
+      ] ++ album_buffers() ++ transport_children(readiness, mobile_boot_epoch)
 
     opts = [strategy: :one_for_one, name: FermixChannels.Supervisor]
     Supervisor.start_link(children, opts)
@@ -58,6 +78,22 @@ defmodule FermixChannels.Application do
         id: {AlbumBuffer, WhatsApp}
       )
     ]
+  end
+
+  defp transport_children(readiness, mobile_boot_epoch) do
+    readiness
+    |> ChannelRegistry.transport_children()
+    |> Enum.map(fn
+      {FermixChannels.Mobile.Supervisor, opts} ->
+        {FermixChannels.Mobile.Supervisor, Keyword.put(opts, :boot_epoch, mobile_boot_epoch)}
+
+      child ->
+        child
+    end)
+  end
+
+  defp mobile_boot_epoch do
+    32 |> :crypto.strong_rand_bytes() |> Base.url_encode64(padding: false)
   end
 
   @doc false

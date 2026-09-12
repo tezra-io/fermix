@@ -16,10 +16,16 @@ defmodule FermixCore.Tools.AdminToolsTest do
     previous_home = System.get_env("FERMIX_HOME")
     System.put_env("FERMIX_HOME", home)
 
+    previous_routing = Application.get_env(:fermix_core, :routing)
+
     on_exit(fn ->
       if previous_home,
         do: System.put_env("FERMIX_HOME", previous_home),
         else: System.delete_env("FERMIX_HOME")
+
+      if previous_routing,
+        do: Application.put_env(:fermix_core, :routing, previous_routing),
+        else: Application.delete_env(:fermix_core, :routing)
 
       FermixTestSupport.SafeRm.rm_rf!(home)
     end)

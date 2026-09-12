@@ -32,12 +32,19 @@ defmodule FermixWebWeb.SetupAuth do
       {:ok, fingerprint} ->
         conn
         |> put_session(:setup_authorized, fingerprint)
-        |> redirect(to: "/setup")
+        |> redirect(to: post_launch_path(conn))
         |> halt()
 
       {:error, _reason} ->
         forbidden(conn)
     end
+  end
+
+  # The launch url may also carry `embed=1` — the macOS app's in-app
+  # presentation. The redirect that spends the token must re-state it, or the
+  # LiveView mounts in the browser presentation inside the app's web view.
+  defp post_launch_path(conn) do
+    if conn.query_params["embed"] == "1", do: "/setup?embed=1", else: "/setup"
   end
 
   defp forbidden(conn) do

@@ -92,6 +92,16 @@ if Code.ensure_loaded?(FermixCore.Setup.ConfigStore) and
       raise "FermixCore.Setup.ConfigStore.bootstrap_runtime_config failed: " <>
               inspect(reason)
   end
+
+  # The provider that reads this file re-applies sys.config over the environment
+  # afterwards (no reboot), so the hydration above survives only for keys
+  # sys.config does not carry. Restating every hydrated key as configuration is
+  # what makes the settings file win over a compile-time default on a release
+  # boot; the env-var overlays below still merge over these. A key with no
+  # compile-time default restates to itself.
+  for {key, value} <- FermixCore.Setup.ConfigStore.hydrated_environment() do
+    config :fermix_core, key, value
+  end
 end
 
 workspace_paths =
@@ -508,6 +518,20 @@ config :fermix_channels, signal: merged_signal
 # operator's persisted `enabled = false`. Re-declaring the hydrated value is
 # what makes the TOML win.
 config :fermix_channels, acp: Application.get_env(:fermix_channels, :acp, [])
+
+# Mobile settings are owned by config.toml. The APNs credential is the one
+# exception: SecretPaths declares FERMIX_APNS_KEY as a credential source, so a
+# nonblank value overlays only the nested secret after ConfigStore hydration.
+existing_mobile = Application.get_env(:fermix_channels, :mobile, [])
+existing_mobile_push = Keyword.get(existing_mobile, :push, [])
+
+mobile_push =
+  case System.get_env("FERMIX_APNS_KEY") do
+    value when is_binary(value) and value != "" -> Keyword.put(existing_mobile_push, :key, value)
+    _unset_or_blank -> existing_mobile_push
+  end
+
+config :fermix_channels, mobile: Keyword.put(existing_mobile, :push, mobile_push)
 
 if config_env() == :prod do
   # The secret key base signs Phoenix session cookies. The daemon restarts

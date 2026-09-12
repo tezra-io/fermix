@@ -4,6 +4,7 @@ defmodule Fermix.CLI.DaemonTest do
   alias Fermix.CLI.Daemon
   alias Fermix.CLI.Daemon.Client
   alias FermixCore.Capabilities.MCP.RuntimeStatus
+  alias FermixCore.Management.Lifecycle
 
   defmodule TestPluginsRuntime do
     def apply_persisted do
@@ -66,42 +67,315 @@ defmodule Fermix.CLI.DaemonTest do
     end
   end
 
+  defmodule TestMobileProvider do
+    def begin_pairing do
+      call(:begin_pairing, [])
+    end
+
+    def await_pairing(session_id, timeout_ms) do
+      call(:await_pairing, [session_id, timeout_ms])
+    end
+
+    def decide_pairing(session_id, approved?) do
+      call(:decide_pairing, [session_id, approved?])
+    end
+
+    def cancel_pairing(session_id), do: call(:cancel_pairing, [session_id])
+
+    def list_devices, do: call(:list_devices, [])
+    def revoke_device(device_id), do: call(:revoke_device, [device_id])
+    def status, do: call(:status, [])
+
+    defp call(operation, args) do
+      test_pid = Application.fetch_env!(:fermix_core, :daemon_test_pid)
+      send(test_pid, {:mobile_provider_call, operation, args})
+
+      result =
+        :fermix_core
+        |> Application.fetch_env!(:daemon_mobile_results)
+        |> Map.fetch!(operation)
+
+      if is_function(result, 1), do: result.(args), else: result
+    end
+  end
+
   setup do
     previous_bridge = Application.get_env(:fermix_core, :cli_channel_bridge)
     previous_pid = Application.get_env(:fermix_core, :daemon_test_pid)
     previous_result = Application.get_env(:fermix_core, :daemon_bridge_result)
+    previous_mobile_results = Application.get_env(:fermix_core, :daemon_mobile_results)
+    previous_mobile_provider = Application.get_env(:fermix_core, :mobile_management_provider)
     {:ok, _sup} = Task.Supervisor.start_link(name: __MODULE__.TaskSup)
     socket_dir = mkdir!()
     socket_path = Path.join(socket_dir, "fermix.sock")
     Application.put_env(:fermix_core, :cli_channel_bridge, TestCLIBridge)
     Application.put_env(:fermix_core, :daemon_test_pid, self())
     Application.put_env(:fermix_core, :daemon_bridge_result, :ok)
+    Application.delete_env(:fermix_core, :mobile_management_provider)
+
+    Application.put_env(:fermix_core, :daemon_mobile_results, %{
+      begin_pairing:
+        {:ok,
+         %{
+           session_id: "pair-session-1",
+           uri: "fermix://pair?v=1",
+           qr: "QR",
+           expires_in_s: 120
+         }},
+      await_pairing:
+        {:ok,
+         %{
+           device_id: "3f4a1a55-69a0-4f8a-9132-17d6ac728f84",
+           name: "Sujeeth",
+           model: "iPhone 16 Pro",
+           sas: "047291"
+         }},
+      decide_pairing:
+        {:ok,
+         %{
+           approved: true,
+           device_id: "3f4a1a55-69a0-4f8a-9132-17d6ac728f84",
+           name: "Sujeeth"
+         }},
+      cancel_pairing: {:ok, %{cancelled: true}},
+      list_devices: {:ok, %{devices: []}},
+      revoke_device: {:ok, %{device_id: "3f4a1a55-69a0-4f8a-9132-17d6ac728f84"}},
+      status: {:ok, %{enabled: true, listener: :ready, paired_devices: 1}}
+    })
 
     {:ok, daemon} =
       Daemon.start_link(
         name: :"daemon_#{System.unique_integer([:positive, :monotonic])}",
         socket_path: socket_path,
-        task_supervisor: __MODULE__.TaskSup
+        task_supervisor: __MODULE__.TaskSup,
+        management_opts: management_opts()
       )
 
+    Application.put_env(:fermix_core, :mobile_management_provider, TestMobileProvider)
+
     on_exit(fn ->
-      if Process.alive?(daemon), do: GenServer.stop(daemon, :normal, 1_000)
+      await_process_exit(daemon)
       restore_app_env(:cli_channel_bridge, previous_bridge)
       restore_app_env(:daemon_test_pid, previous_pid)
       restore_app_env(:daemon_bridge_result, previous_result)
+      restore_app_env(:daemon_mobile_results, previous_mobile_results)
+      restore_app_env(:mobile_management_provider, previous_mobile_provider)
       FermixTestSupport.SafeRm.rm_rf(socket_dir)
     end)
 
     %{socket_path: socket_path, daemon: daemon}
   end
 
-  test "status returns ok with version + uptime", %{socket_path: socket_path} do
-    Process.sleep(50)
-    assert {:ok, reply} = Client.status(socket_path: socket_path, timeout: 1_000)
-    assert reply["status"] == "ok"
-    assert is_binary(reply["version"])
-    assert is_integer(reply["uptime_ms"])
-    assert reply["uptime_ms"] >= 0
+  # M34 §4 moved `fermix status` and `fermix status --full` onto management v1.
+  # Serving the retired unversioned methods as well would leave two live paths
+  # to one answer, which is exactly what deleting v0 exists to prevent.
+  test "the v0 status and overview methods are deleted", %{socket_path: socket_path} do
+    for method <- ["status", "overview"] do
+      assert {:ok, reply} = Client.request(method, socket_path: socket_path, timeout: 1_000)
+      assert reply == %{"status" => "error", "reason" => "unknown method", "method" => method}
+    end
+  end
+
+  test "management v1 hello returns the negotiated daemon contract", %{socket_path: socket_path} do
+    assert {:ok, result} =
+             Client.request_v1("hello", %{},
+               request_id: "req-hello",
+               socket_path: socket_path,
+               timeout: 1_000
+             )
+
+    assert result["protocol"] == %{
+             "current_version" => 2,
+             "minimum_version" => 1,
+             "maximum_version" => 2
+           }
+
+    # The window is wider than one version, so a single integer no longer tells
+    # a client what it may call. The table is published whole beside the list.
+    assert result["capabilities"]["minimum_versions"]["setup.state.get"] == 2
+    assert result["capabilities"]["minimum_versions"]["hello"] == 1
+
+    assert result["engine"]["distribution_identity"] == "standalone"
+    assert result["engine"]["engine_id"] == "fermix-engine-test"
+    assert result["setup"] == %{"origin" => "http://127.0.0.1:4041", "path" => "/setup"}
+  end
+
+  test "management v1 overview returns the allowlisted projection", %{socket_path: socket_path} do
+    assert {:ok, result} =
+             Client.request_v1("overview.get", %{},
+               request_id: "req-overview",
+               socket_path: socket_path,
+               timeout: 1_000
+             )
+
+    assert result["readiness"] == %{"status" => "ready", "failure_count" => 0}
+    assert result["daemon"]["status"] == "running"
+
+    assert result["memory"] == %{
+             "repo" => "ready",
+             "conversation_store" => "ready",
+             "store" => "ready"
+           }
+
+    encoded = Jason.encode!(result)
+    refute encoded =~ "/Users/"
+    refute encoded =~ "database_path"
+    refute encoded =~ "socket_path"
+  end
+
+  test "management v1 setup session exposes only the one-use URL and expiration", %{
+    socket_path: socket_path
+  } do
+    assert {:ok, result} =
+             Client.request_v1("setup.session.create", %{},
+               request_id: "req-setup",
+               socket_path: socket_path,
+               timeout: 1_000
+             )
+
+    assert result == %{
+             "url" => "http://127.0.0.1:4041/setup?t=daemon-launch-token",
+             "expires_at_ms" => 1_800_000
+           }
+  end
+
+  test "management v1 reports both version incompatibility directions", %{
+    socket_path: socket_path
+  } do
+    assert {:error, {:management_error, "client_too_old", _message, details}} =
+             Client.request_v1("hello", %{},
+               request_id: "req-old",
+               protocol_version: 0,
+               socket_path: socket_path,
+               timeout: 1_000
+             )
+
+    assert details == %{"minimum_version" => 1, "maximum_version" => 2}
+
+    assert {:error, {:management_error, "daemon_too_old", _message, ^details}} =
+             Client.request_v1("hello", %{},
+               request_id: "req-new",
+               protocol_version: 3,
+               socket_path: socket_path,
+               timeout: 1_000
+             )
+  end
+
+  # The refusal a v1-declared client meets when it reaches for a v2 surface. It
+  # is not a boot failure: everything a client needs to read the state and
+  # restart the daemon stays available at version 1.
+  test "management refuses a v2 method on a v1 session and names the version", %{
+    socket_path: socket_path
+  } do
+    assert {:error, {:management_error, "method_not_found", _message, details}} =
+             Client.request_v1("setup.state.get", %{},
+               request_id: "req-v1-setup-state",
+               protocol_version: 1,
+               socket_path: socket_path,
+               timeout: 1_000
+             )
+
+    assert details == %{"method" => "setup.state.get", "requires" => 2}
+
+    assert {:ok, _hello} =
+             Client.request_v1("hello", %{},
+               request_id: "req-v1-hello",
+               protocol_version: 1,
+               socket_path: socket_path,
+               timeout: 1_000
+             )
+  end
+
+  test "an attempted v1 request never falls through to the v0 dispatcher", %{
+    socket_path: socket_path
+  } do
+    response = raw_request(socket_path, %{"request_id" => "req-invalid", "method" => "status"})
+
+    assert response["request_id"] == "req-invalid"
+    assert response["error"]["code"] == "invalid_request"
+    refute Map.has_key?(response, "status")
+    refute Map.has_key?(response, "result")
+  end
+
+  test "management v1 returns a stable unknown-method error", %{socket_path: socket_path} do
+    assert {:error, {:management_error, "method_not_found", _message, details}} =
+             Client.request_v1("missing.method", %{},
+               request_id: "req-missing",
+               socket_path: socket_path,
+               timeout: 1_000
+             )
+
+    assert details == %{"method" => "missing.method"}
+  end
+
+  test "management v1 provider faults return a correlated internal error" do
+    socket_dir = mkdir!()
+    socket_path = Path.join(socket_dir, "management-fault.sock")
+
+    management_opts =
+      Keyword.put(management_opts(), :health_reporter, fn -> raise "provider failure" end)
+
+    {:ok, daemon} =
+      Daemon.start_link(
+        name: :"fault_daemon_#{System.unique_integer([:positive, :monotonic])}",
+        socket_path: socket_path,
+        task_supervisor: __MODULE__.TaskSup,
+        management_opts: management_opts
+      )
+
+    Process.unlink(daemon)
+
+    on_exit(fn ->
+      if Process.alive?(daemon), do: GenServer.stop(daemon)
+      FermixTestSupport.SafeRm.rm_rf(socket_dir)
+    end)
+
+    assert {:error, {:management_error, "internal_error", _message, %{}}} =
+             Client.request_v1("overview.get", %{},
+               request_id: "req-provider-fault",
+               socket_path: socket_path,
+               timeout: 1_000
+             )
+
+    assert Process.alive?(daemon)
+  end
+
+  test "management v1 client rejects a mismatched response request ID" do
+    result =
+      request_v1_against_reply(%{
+        "request_id" => "req-other",
+        "result" => %{"ready" => true}
+      })
+
+    assert result == {:error, :response_request_id_mismatch}
+  end
+
+  test "management v1 client rejects malformed response envelopes" do
+    invalid_responses = [
+      %{"request_id" => "req-client", "result" => %{}, "extra" => true},
+      %{"request_id" => "req-client", "result" => %{}, "error" => %{}},
+      %{
+        "request_id" => "req-client",
+        "error" => %{
+          "code" => "unavailable",
+          "message" => "Unavailable.",
+          "details" => %{},
+          "extra" => true
+        }
+      },
+      %{
+        "request_id" => "req-client",
+        "error" => %{
+          "code" => "not_allowlisted",
+          "message" => "Unknown.",
+          "details" => %{}
+        }
+      }
+    ]
+
+    for response <- invalid_responses do
+      assert {:error, :invalid_management_response} = request_v1_against_reply(response)
+    end
   end
 
   test "unknown method returns error", %{socket_path: socket_path} do
@@ -115,13 +389,178 @@ defmodule Fermix.CLI.DaemonTest do
     assert reply["method"] == "does-not-exist"
   end
 
+  test "mobile pairing RPCs share one leased control connection", %{
+    socket_path: socket_path
+  } do
+    result =
+      Client.with_connection(
+        fn request ->
+          assert {:ok, begin_reply} = request.("mobile_pair_begin", %{}, 1_000)
+          assert begin_reply["result"]["session_id"] == "pair-session-1"
+
+          assert {:ok, wait_reply} =
+                   request.("mobile_pair_wait", %{"session_id" => "pair-session-1"}, 1_000)
+
+          assert wait_reply["result"]["sas"] == "047291"
+
+          assert {:ok, decide_reply} =
+                   request.(
+                     "mobile_pair_decide",
+                     %{"session_id" => "pair-session-1", "approved" => true},
+                     1_000
+                   )
+
+          assert decide_reply["result"]["approved"] == true
+          :paired
+        end,
+        socket_path: socket_path,
+        timeout: 1_000
+      )
+
+    assert result == :paired
+    assert_received {:mobile_provider_call, :begin_pairing, []}
+
+    assert_received {:mobile_provider_call, :await_pairing, ["pair-session-1", wait_timeout_ms]}
+    assert wait_timeout_ms == 120_000
+    assert_received {:mobile_provider_call, :decide_pairing, ["pair-session-1", true]}
+    refute_received {:mobile_provider_call, :cancel_pairing, _args}
+  end
+
+  test "a dead pair CLI cancels its exact window while wait is still blocked", %{
+    socket_path: socket_path
+  } do
+    test_pid = self()
+
+    await = fn ["pair-session-1", 120_000] ->
+      send(test_pid, :pair_wait_started)
+      receive do: (:never -> {:error, :unexpected})
+    end
+
+    results = Application.fetch_env!(:fermix_core, :daemon_mobile_results)
+
+    Application.put_env(
+      :fermix_core,
+      :daemon_mobile_results,
+      Map.put(results, :await_pairing, await)
+    )
+
+    cli =
+      spawn(fn ->
+        Client.with_connection(
+          fn request ->
+            {:ok, _window} = request.("mobile_pair_begin", %{}, 1_000)
+
+            request.("mobile_pair_wait", %{"session_id" => "pair-session-1"}, 125_000)
+          end,
+          socket_path: socket_path,
+          timeout: 1_000
+        )
+      end)
+
+    assert_receive :pair_wait_started, 1_000
+    Process.exit(cli, :kill)
+
+    assert_receive {:mobile_provider_call, :cancel_pairing, ["pair-session-1"]}, 1_000
+  end
+
+  test "normal explicit pairing cancellation stays terminal and is not repeated", %{
+    socket_path: socket_path
+  } do
+    result =
+      Client.with_connection(
+        fn request ->
+          assert {:ok, _window} = request.("mobile_pair_begin", %{}, 1_000)
+
+          request.("mobile_pair_cancel", %{"session_id" => "pair-session-1"}, 1_000)
+        end,
+        socket_path: socket_path,
+        timeout: 1_000
+      )
+
+    assert {:ok, cancel_reply} = result
+    assert cancel_reply["result"]["cancelled"] == true
+    assert_received {:mobile_provider_call, :cancel_pairing, ["pair-session-1"]}
+    refute_receive {:mobile_provider_call, :cancel_pairing, ["pair-session-1"]}, 100
+  end
+
+  test "mobile device management and status RPCs return JSON-safe results", %{
+    socket_path: socket_path
+  } do
+    for {method, operation, result_key} <- [
+          {"mobile_devices_list", :list_devices, "devices"},
+          {"mobile_status", :status, "listener"}
+        ] do
+      assert {:ok, reply} =
+               Client.request(method, socket_path: socket_path, timeout: 1_000)
+
+      assert reply["status"] == "ok"
+      assert Map.has_key?(reply["result"], result_key)
+      assert_received {:mobile_provider_call, ^operation, []}
+    end
+
+    device_id = "3f4a1a55-69a0-4f8a-9132-17d6ac728f84"
+
+    assert {:ok, reply} =
+             Client.request("mobile_device_revoke",
+               socket_path: socket_path,
+               timeout: 1_000,
+               params: %{"device_id" => device_id}
+             )
+
+    assert reply["result"]["device_id"] == device_id
+    assert_received {:mobile_provider_call, :revoke_device, [^device_id]}
+  end
+
+  test "mobile RPC validates parameters before invoking the provider", %{socket_path: socket_path} do
+    assert {:ok, wait_reply} =
+             Client.request("mobile_pair_wait",
+               socket_path: socket_path,
+               timeout: 1_000,
+               params: %{"session_id" => "../../bad"}
+             )
+
+    assert wait_reply == %{"status" => "error", "reason" => "invalid session_id"}
+    refute_received {:mobile_provider_call, :await_pairing, _args}
+
+    assert {:ok, revoke_reply} =
+             Client.request("mobile_device_revoke",
+               socket_path: socket_path,
+               timeout: 1_000,
+               params: %{"device_id" => "not-a-uuid"}
+             )
+
+    assert revoke_reply == %{"status" => "error", "reason" => "invalid device_id"}
+    refute_received {:mobile_provider_call, :revoke_device, _args}
+  end
+
+  test "mobile provider failures remain structured and do not crash the daemon", %{
+    socket_path: socket_path
+  } do
+    Application.put_env(
+      :fermix_core,
+      :daemon_mobile_results,
+      Map.put(
+        Application.fetch_env!(:fermix_core, :daemon_mobile_results),
+        :begin_pairing,
+        {:error, :pairing_already_active}
+      )
+    )
+
+    assert {:ok, reply} =
+             Client.request("mobile_pair_begin", socket_path: socket_path, timeout: 1_000)
+
+    assert reply == %{"status" => "error", "reason" => "pairing_already_active"}
+
+    assert {:ok, %{"engine" => _engine}} = hello(socket_path)
+  end
+
   test "no daemon listening returns :not_running" do
     socket_dir = mkdir!()
     socket_path = Path.join(socket_dir, "missing.sock")
     on_exit(fn -> FermixTestSupport.SafeRm.rm_rf(socket_dir) end)
 
     assert {:error, :not_running} =
-             Client.status(socket_path: socket_path, timeout: 500)
+             Client.request_v1("hello", %{}, socket_path: socket_path, timeout: 500)
   end
 
   test "socket file is created with 0600 permissions", %{socket_path: socket_path} do
@@ -144,10 +583,107 @@ defmodule Fermix.CLI.DaemonTest do
       )
 
     Process.sleep(50)
-    assert {:ok, %{"status" => "ok"}} = Client.status(socket_path: socket_path, timeout: 1_000)
+    assert {:ok, %{"engine" => _engine}} = hello(socket_path)
 
     GenServer.stop(daemon, :normal, 1_000)
     FermixTestSupport.SafeRm.rm_rf(socket_dir)
+  end
+
+  test "supervisor shutdown removes the daemon socket" do
+    socket_dir = mkdir!()
+    socket_path = Path.join(socket_dir, "supervised.sock")
+    task_supervisor = unique_name(:shutdown_task_supervisor)
+    daemon_name = unique_name(:shutdown_daemon)
+    {:ok, _task_supervisor} = Task.Supervisor.start_link(name: task_supervisor)
+
+    child =
+      {Daemon,
+       name: daemon_name,
+       socket_path: socket_path,
+       task_supervisor: task_supervisor,
+       management_opts: management_opts()}
+
+    {:ok, supervisor} = Supervisor.start_link([child], strategy: :one_for_one)
+
+    on_exit(fn ->
+      await_process_exit(supervisor)
+      FermixTestSupport.SafeRm.rm_rf(socket_dir)
+    end)
+
+    assert File.exists?(socket_path)
+    assert {:ok, %{"engine" => _engine}} = hello(socket_path)
+
+    :ok = Supervisor.stop(supervisor, :normal, 1_000)
+
+    refute File.exists?(socket_path)
+  end
+
+  # M34 §2/§4: the app drains through `lifecycle.*` while `fermix stop` still
+  # speaks v0 `shutdown`. Both must reach the SAME stop path — two stoppers is
+  # how one of them quietly stops verifying the PID actually exits.
+  test "the v0 shutdown method and a committed lifecycle lease share one stop path" do
+    parent = self()
+    socket_dir = mkdir!()
+    socket_path = Path.join(socket_dir, "lifecycle.sock")
+    task_supervisor = unique_name(:lifecycle_task_supervisor)
+    {:ok, _task_supervisor} = Task.Supervisor.start_link(name: task_supervisor)
+
+    lifecycle_name = unique_name(:lifecycle_server)
+
+    {:ok, lifecycle} =
+      Lifecycle.start_link(
+        name: lifecycle_name,
+        shutdown: fn -> send(parent, {:stopped, :lifecycle}) end
+      )
+
+    {:ok, daemon} =
+      Daemon.start_link(
+        name: unique_name(:lifecycle_daemon),
+        socket_path: socket_path,
+        task_supervisor: task_supervisor,
+        stopper: fn -> send(parent, {:stopped, :v0}) end,
+        management_opts: management_opts() ++ [lifecycle_server: lifecycle]
+      )
+
+    on_exit(fn ->
+      await_process_exit(daemon)
+      FermixTestSupport.SafeRm.rm_rf(socket_dir)
+    end)
+
+    assert {:ok, %{"lease_id" => lease_id, "ttl_ms" => _ttl}} =
+             Client.request_v1("lifecycle.prepare", %{},
+               request_id: "req-prepare",
+               socket_path: socket_path,
+               timeout: 1_000
+             )
+
+    assert {:error, {:management_error, "busy", _message, %{"operation" => "lifecycle"}}} =
+             Client.request_v1("lifecycle.prepare", %{},
+               request_id: "req-prepare-2",
+               socket_path: socket_path,
+               timeout: 1_000
+             )
+
+    assert {:ok, %{"status" => "committed"}} =
+             Client.request_v1("lifecycle.commit", %{"lease_id" => lease_id},
+               request_id: "req-commit",
+               socket_path: socket_path,
+               timeout: 1_000
+             )
+
+    assert_receive {:stopped, :lifecycle}, 1_000
+
+    assert {:ok, %{"status" => "shutting_down"}} =
+             Client.request("shutdown", socket_path: socket_path, timeout: 1_000)
+
+    assert_receive {:stopped, :v0}, 1_000
+
+    # Both seams default to the same function, so production has one stop path
+    # rather than two implementations that can drift.
+    assert Daemon.default_stopper() == Lifecycle.default_stopper()
+    assert Daemon.default_stopper() == (&Lifecycle.stop_daemon/0)
+
+    GenServer.stop(daemon, :normal, 1_000)
   end
 
   test "second daemon refuses to bind over a live socket", %{socket_path: socket_path} do
@@ -167,8 +703,7 @@ defmodule Fermix.CLI.DaemonTest do
 
     # The original daemon must still answer; the second one didn't unlink
     # the socket out from under it.
-    assert {:ok, %{"status" => "ok"}} =
-             Client.status(socket_path: socket_path, timeout: 1_000)
+    assert {:ok, %{"engine" => _engine}} = hello(socket_path)
   end
 
   test "agent_message routes the prompt through the configured CLI bridge", %{
@@ -265,7 +800,7 @@ defmodule Fermix.CLI.DaemonTest do
       )
 
     on_exit(fn ->
-      if Process.alive?(daemon), do: GenServer.stop(daemon, :normal, 1_000)
+      await_process_exit(daemon)
       FermixTestSupport.SafeRm.rm_rf(socket_dir)
     end)
 
@@ -292,7 +827,7 @@ defmodule Fermix.CLI.DaemonTest do
       )
 
     on_exit(fn ->
-      if Process.alive?(daemon), do: GenServer.stop(daemon, :normal, 1_000)
+      await_process_exit(daemon)
       FermixTestSupport.SafeRm.rm_rf(socket_dir)
     end)
 
@@ -331,7 +866,8 @@ defmodule Fermix.CLI.DaemonTest do
         source_id,
         generation,
         :upstream_contract_mismatch,
-        :tool_missing
+        :missing_tool,
+        "eden_get_item_connections"
       )
 
     {:ok, daemon} =
@@ -343,7 +879,7 @@ defmodule Fermix.CLI.DaemonTest do
       )
 
     on_exit(fn ->
-      if Process.alive?(daemon), do: GenServer.stop(daemon, :normal, 1_000)
+      await_process_exit(daemon)
       Process.exit(owner, :kill)
       FermixTestSupport.SafeRm.rm_rf(socket_dir)
     end)
@@ -356,7 +892,10 @@ defmodule Fermix.CLI.DaemonTest do
     assert row["source"] == "plugin:eden"
     assert row["plugin"] == "eden"
     assert row["status"] == "upstream_contract_mismatch"
-    assert row["detail"] == "tool_missing"
+    assert row["detail"] == "missing_tool"
+    # The capability the upstream withdrew: the fact a one-shot CLI has no other
+    # way to learn, and the reason this row exists at all.
+    assert row["subject"] == "eden_get_item_connections"
     assert is_integer(row["updated_at"])
     # The generation ref and owner pid are runtime bookkeeping, not operator
     # facts — §11.1 forbids exporting generation references at all.
@@ -378,7 +917,7 @@ defmodule Fermix.CLI.DaemonTest do
       )
 
     on_exit(fn ->
-      if Process.alive?(daemon), do: GenServer.stop(daemon, :normal, 1_000)
+      await_process_exit(daemon)
       FermixTestSupport.SafeRm.rm_rf(socket_dir)
     end)
 
@@ -496,6 +1035,157 @@ defmodule Fermix.CLI.DaemonTest do
              Client.agent_message(%{"content" => big}, socket_path: socket_path, timeout: 2_000)
 
     assert size > 4_194_304
+  end
+
+  defp management_opts do
+    health = %{
+      status: :ready,
+      restart_required?: false,
+      providers: [],
+      failures: []
+    }
+
+    [
+      identity_provider: fn -> {:ok, management_identity()} end,
+      endpoint_opts: [port: 4041],
+      health_reporter: fn -> health end,
+      overview_provider: fn ^health -> {:ok, management_overview()} end,
+      launch_token_provider: fn ->
+        {:ok, %{token: "daemon-launch-token", expires_at_ms: 1_800_000}}
+      end
+    ]
+  end
+
+  defp management_identity do
+    %{
+      "engine_id" => "fermix-engine-test",
+      "product_version" => "1.2.3",
+      "build_id" => nil,
+      "source_commit" => nil,
+      "distribution_identity" => "standalone",
+      "artifact_target" => nil,
+      "architecture" => "arm64",
+      "pid" => "4321"
+    }
+  end
+
+  defp management_overview do
+    %{
+      generated_at: ~U[2026-08-19 10:30:00Z],
+      readiness: %{status: :ready, failures: []},
+      daemon: %{status: :running, version: "1.2.3", uptime_ms: 5_000, pid: "4321"},
+      provider: %{active: nil, model: nil, auth_mode: nil, reasoning_effort: nil},
+      channels: [],
+      memory: %{
+        database_path: "/Users/private/.fermix/memory.db",
+        repo: :ready,
+        conversation_store: :ready,
+        store: :ready,
+        paths: %{skills: "/Users/private/.fermix/workspace/skills"}
+      },
+      jobs: %{
+        scheduled: 0,
+        running: 0,
+        paused: 0,
+        failed_recent: 0,
+        next: nil,
+        status: :ready,
+        error: nil
+      },
+      agents: %{
+        main: %{
+          health: :online,
+          activity: :idle,
+          status: :idle,
+          active_conversations: 0,
+          pending_conversations: 0
+        },
+        skill_workers: 0,
+        running_skill_workers: 0
+      },
+      realtime: %{
+        enabled: false,
+        status: :disabled,
+        provider: nil,
+        model: nil,
+        socket_path: "/Users/private/.fermix/realtime.sock",
+        socket_alive: nil,
+        active_sessions: 0,
+        active_clients: 0,
+        companion_connected?: false
+      },
+      capabilities: %{builtin: 0, skill: 0, mcp: 0, total: 0},
+      paths: %{home: "/Users/private/.fermix"}
+    }
+  end
+
+  defp request_v1_against_reply(response) do
+    dir = mkdir!()
+    socket_path = Path.join(dir, "management-client.sock")
+
+    {:ok, listener} =
+      :gen_tcp.listen(0, [
+        :binary,
+        {:active, false},
+        {:packet, 4},
+        {:ifaddr, {:local, to_charlist(socket_path)}}
+      ])
+
+    task =
+      Task.async(fn ->
+        {:ok, conn} = :gen_tcp.accept(listener, 1_000)
+        {:ok, _request} = :gen_tcp.recv(conn, 0, 1_000)
+        :ok = :gen_tcp.send(conn, Jason.encode!(response))
+        :gen_tcp.close(conn)
+      end)
+
+    try do
+      Client.request_v1("hello", %{},
+        request_id: "req-client",
+        socket_path: socket_path,
+        timeout: 1_000
+      )
+    after
+      Task.await(task, 1_000)
+      :gen_tcp.close(listener)
+      FermixTestSupport.SafeRm.rm_rf(dir)
+    end
+  end
+
+  defp raw_request(socket_path, request) do
+    {:ok, conn} =
+      :gen_tcp.connect(
+        {:local, to_charlist(socket_path)},
+        0,
+        [:binary, {:active, false}, {:packet, 4}, {:packet_size, 4_194_304}],
+        1_000
+      )
+
+    try do
+      :ok = :gen_tcp.send(conn, Jason.encode!(request))
+      {:ok, frame} = :gen_tcp.recv(conn, 0, 1_000)
+      Jason.decode!(frame)
+    after
+      :gen_tcp.close(conn)
+    end
+  end
+
+  defp await_process_exit(pid) do
+    ref = Process.monitor(pid)
+
+    receive do
+      {:DOWN, ^ref, :process, ^pid, _reason} -> :ok
+    after
+      1_000 -> raise "supervised daemon did not exit with its parent"
+    end
+  end
+
+  defp hello(socket_path) do
+    Client.request_v1("hello", %{}, socket_path: socket_path, timeout: 1_000)
+  end
+
+  defp unique_name(prefix) do
+    String.to_atom("#{prefix}_#{System.unique_integer([:positive, :monotonic])}")
   end
 
   defp mkdir! do

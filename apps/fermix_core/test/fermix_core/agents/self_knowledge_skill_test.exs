@@ -61,12 +61,138 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     end
   end
 
+  test "documents the mobile companion setup and its v1 boundaries" do
+    body = File.read!(self_knowledge_path())
+    reference = File.read!(mobile_reference_path())
+
+    assert body =~ ~s(file: "mobile")
+
+    for required <- [
+          "fermix pair",
+          "fermix devices list",
+          "fermix devices revoke",
+          "FERMIX_APNS_KEY",
+          "media_store_max_bytes",
+          "2 GiB",
+          "Noise",
+          "voice notes",
+          "realtime voice",
+          "fermix doctor"
+        ] do
+      assert reference =~ required, "mobile self-knowledge does not mention #{required}"
+    end
+  end
+
+  # The channel is feature-flagged with no setup surface, so the runtime
+  # self-reference must name the one enable path (the config flag) and must not
+  # point an owner at surfaces that no longer exist. The refutations name
+  # concrete withdrawn artifacts rather than a phrasing allowlist, so a true
+  # sentence that happens to mention setup (e.g. `--migrate-secrets`) stays
+  # legal while a re-added mobile step or flag fails here.
+  test "documents mobile as a config-flag-only channel, never a setup step" do
+    reference = File.read!(mobile_reference_path())
+    paragraph = mobile_paragraph()
+
+    for text <- [reference, paragraph] do
+      assert text =~ "[fermix_channels.mobile]"
+      assert text =~ "enabled = true"
+      refute text =~ "Channels page"
+      refute text =~ "Channels tab"
+      refute text =~ "--mobile-enabled"
+      refute text =~ "--mobile-push"
+    end
+
+    assert reference =~ "config.toml"
+    assert reference =~ "restart"
+    assert reference =~ "no setup surface"
+  end
+
+  # M34 §4 changes what a whole family of CLI verbs does on an app-managed
+  # engine, so the always-loaded body — not only the reference — has to name the
+  # mode, the surface the app drives it over, each hand-off, and the migration
+  # verb. A body that only says "several verbs behave differently" cannot answer
+  # "why did `fermix upgrade` open a window".
+  test "documents app-managed macOS mode, its management surface, and migrate-to-app" do
+    body = File.read!(self_knowledge_path())
+    paragraph = app_managed_paragraph()
+
+    assert paragraph != "", "self-knowledge never mentions the app-managed macOS engine"
+    assert body =~ ~s(file: "macos_app")
+
+    for required <- [
+          "management protocol",
+          "daemon.sock",
+          "fermix://",
+          "fermix migrate-to-app",
+          "not-applicable",
+          "Enable/Disable background service",
+          "service install|uninstall",
+          "exit non-zero"
+        ] do
+      assert paragraph =~ required, "app-managed self-knowledge does not mention #{required}"
+    end
+  end
+
+  # The reference carries the per-verb detail. Assert the three verb families
+  # M34 §4 splits the CLI into are each named there, plus the one promise every
+  # path in that section makes.
+  test "the macos_app reference names every app-managed verb family and the home promise" do
+    reference = File.read!(macos_app_reference_path())
+
+    for required <- [
+          "fermix start",
+          "fermix stop",
+          "fermix service install",
+          "fermix setup",
+          "fermix upgrade",
+          "fermix uninstall",
+          "fermix status",
+          "fermix doctor",
+          "fermix logs",
+          "fermix migrate-to-app",
+          "brew install --cask"
+        ] do
+      assert reference =~ required, "macos_app reference does not mention #{required}"
+    end
+
+    assert reference =~ "never deletes a Fermix home" or
+             reference =~ "ever deletes a Fermix home"
+  end
+
+  defp app_managed_paragraph do
+    self_knowledge_path()
+    |> File.read!()
+    |> String.split("\n\n")
+    |> Enum.flat_map(&String.split(&1, "\n"))
+    |> Enum.filter(&String.contains?(&1, "Fermix.app-managed"))
+    |> Enum.join("\n")
+  end
+
+  defp macos_app_reference_path do
+    Path.expand("../../../priv/skills/self_knowledge/references/macos_app.md", __DIR__)
+  end
+
+  defp mobile_paragraph do
+    self_knowledge_path()
+    |> File.read!()
+    |> String.split("\n\n")
+    |> Enum.filter(&String.contains?(&1, "Mobile companion"))
+    |> Enum.join("\n\n")
+  end
+
   defp acp_paragraph do
-    Path.expand("../../../priv/skills/self_knowledge/SKILL.md", __DIR__)
+    self_knowledge_path()
     |> File.read!()
     |> String.split("\n\n")
     |> Enum.filter(&String.contains?(&1, "ACP"))
     |> Enum.join("\n\n")
+  end
+
+  defp self_knowledge_path,
+    do: Path.expand("../../../priv/skills/self_knowledge/SKILL.md", __DIR__)
+
+  defp mobile_reference_path do
+    Path.expand("../../../priv/skills/self_knowledge/references/mobile.md", __DIR__)
   end
 
   test "stays decomposed: main body has headroom, references are bounded, pointers resolve" do
@@ -123,8 +249,17 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     end
 
     # Each externalized feature keeps a stub + loader in the main body.
-    for name <- ~w(coding_harness computer_use plugins voice) do
+    for name <- ~w(coding_harness computer_use mobile plugins voice) do
       assert body =~ ~s(file: "#{name}"), "missing stub loader for #{name}"
+    end
+
+    # The other half of that invariant, derived from the live reference
+    # directory rather than a hand-maintained list: a reference the body never
+    # offers is unreachable detail, and decomposing a section without leaving a
+    # loader behind is exactly how it goes missing.
+    for ref <- ref_files do
+      name = Path.basename(ref, ".md")
+      assert name in pointers, "reference with no loader in the main body: #{name}"
     end
   end
 end

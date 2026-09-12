@@ -8,6 +8,9 @@ defmodule FermixCore.Memory.Repo do
   alias Exqlite.Sqlite3
   alias FermixCore.Agents.IterationLimits
   alias FermixCore.Memory.Config
+  alias FermixCore.Memory.Repo.ComputerHistorySql
+  alias FermixCore.Memory.Repo.MeetingsSql
+  alias FermixCore.Memory.Repo.MobileSql
   alias FermixCore.Memory.Repo.TemporalSql
   alias FermixCore.Memory.Scope
 
@@ -30,6 +33,15 @@ defmodule FermixCore.Memory.Repo do
   @temporal_events_migration_version 17
   @reminder_snooze_migration_version 18
   @event_followup_migration_version 19
+  @mobile_store_migration_version 20
+  @mobile_client_message_migration_version 21
+  @mobile_attempt_fence_migration_version 22
+  @computer_history_events_migration_version 23
+  @computer_history_memories_migration_version 24
+  @computer_history_state_migration_version 25
+  @meetings_migration_version 26
+  @computer_history_access_migration_version 27
+  @computer_history_sessions_migration_version 28
   @sqlite_open_intent :readwritecreate
 
   @base_schema_sql """
@@ -621,6 +633,76 @@ defmodule FermixCore.Memory.Repo do
           optional(:kind) => String.t()
         }
 
+  @type mobile_profile_selector :: %{
+          required(:agent_id) => String.t(),
+          required(:owner_id) => String.t(),
+          required(:profile_id) => String.t()
+        }
+
+  @type mobile_owner_selector :: %{
+          required(:agent_id) => String.t(),
+          required(:owner_id) => String.t()
+        }
+
+  @type mobile_timeline_attrs :: %{
+          required(:agent_id) => String.t(),
+          required(:owner_id) => String.t(),
+          required(:profile_id) => String.t(),
+          required(:role) => String.t(),
+          required(:content) => String.t(),
+          optional(:kind) => String.t(),
+          optional(:client_msg_id) => String.t() | nil,
+          optional(:in_reply_to) => String.t() | nil,
+          optional(:media_refs) => [map()],
+          optional(:metadata) => map() | nil,
+          optional(:proactive_key) => String.t() | nil,
+          optional(:created_at) => DateTime.t()
+        }
+
+  @type mobile_timeline_row :: %{
+          agent_id: String.t(),
+          owner_id: String.t(),
+          profile_id: String.t(),
+          server_seq: pos_integer(),
+          kind: String.t(),
+          role: String.t(),
+          content: String.t(),
+          client_msg_id: String.t() | nil,
+          in_reply_to: String.t() | nil,
+          media_refs: [map()],
+          metadata: map() | nil,
+          proactive_key: String.t() | nil,
+          request_client_msg_id: String.t() | nil,
+          request_attempt: non_neg_integer() | nil,
+          output_key: String.t() | nil,
+          created_at: DateTime.t()
+        }
+
+  @type mobile_media_descriptor :: %{
+          server_seq: pos_integer(),
+          media: map()
+        }
+
+  @type mobile_client_request_row :: %{
+          agent_id: String.t(),
+          owner_id: String.t(),
+          profile_id: String.t(),
+          client_msg_id: String.t(),
+          request_type: String.t(),
+          status: String.t(),
+          payload_digest: String.t(),
+          payload: term(),
+          turn_id: String.t() | nil,
+          result_server_seq: pos_integer() | nil,
+          error: term() | nil,
+          authenticated_device_id: String.t() | nil,
+          runner_epoch: String.t() | nil,
+          attempt: non_neg_integer(),
+          claimed_at: DateTime.t(),
+          expires_at: DateTime.t(),
+          updated_at: DateTime.t()
+        }
+
   @type memory_attrs :: %{
           required(:agent_id) => String.t(),
           required(:owner_id) => String.t(),
@@ -966,6 +1048,7 @@ defmodule FermixCore.Memory.Repo do
 
   @type scheduled_job_row :: map()
   @type job_run_row :: map()
+  @type meeting_row :: map()
   @type memory_source_row :: map()
   @type harness_run_attrs :: map()
   @type harness_run_row :: map()
@@ -1024,6 +1107,251 @@ defmodule FermixCore.Memory.Repo do
   @spec delete_messages(message_selector(), keyword()) :: :ok | {:error, term()}
   def delete_messages(selector, opts \\ []) when is_map(selector) do
     call({:delete_messages, selector}, opts)
+  end
+
+  @spec append_mobile_timeline(mobile_timeline_attrs(), keyword()) ::
+          {:ok, mobile_timeline_row()} | {:error, term()}
+  def append_mobile_timeline(attrs, opts \\ []) when is_map(attrs) do
+    call({:append_mobile_timeline, attrs}, opts)
+  end
+
+  @spec append_mobile_client_message(mobile_timeline_attrs(), keyword()) ::
+          {:ok, {:created | :existing, mobile_timeline_row()}} | {:error, term()}
+  def append_mobile_client_message(attrs, opts \\ []) when is_map(attrs) do
+    call({:append_mobile_client_message, attrs}, opts)
+  end
+
+  @spec append_mobile_proactive(mobile_timeline_attrs(), keyword()) ::
+          {:ok, {:created | :existing, mobile_timeline_row()}} | {:error, term()}
+  def append_mobile_proactive(attrs, opts \\ []) when is_map(attrs) do
+    call({:append_mobile_proactive, attrs}, opts)
+  end
+
+  @spec get_mobile_history(
+          mobile_profile_selector(),
+          non_neg_integer(),
+          1..200,
+          keyword()
+        ) :: {:ok, map()} | {:error, term()}
+  def get_mobile_history(selector, after_seq, limit, opts \\ [])
+      when is_map(selector) and is_integer(after_seq) and after_seq >= 0 and
+             is_integer(limit) and limit > 0 and limit <= 200 do
+    call({:get_mobile_history, selector, after_seq, limit}, opts)
+  end
+
+  @spec mobile_history_head(mobile_profile_selector(), keyword()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def mobile_history_head(selector, opts \\ []) when is_map(selector) do
+    call({:mobile_history_head, selector}, opts)
+  end
+
+  @spec get_mobile_media_descriptor(mobile_profile_selector(), String.t(), keyword()) ::
+          {:ok, mobile_media_descriptor()}
+          | {:error, :not_found | {:malformed_media_descriptor, term()} | term()}
+  def get_mobile_media_descriptor(selector, ref, opts \\ [])
+      when is_map(selector) and is_binary(ref) do
+    call({:get_mobile_media_descriptor, selector, ref}, opts)
+  end
+
+  @spec attach_mobile_timeline_media(
+          mobile_profile_selector(),
+          pos_integer(),
+          map(),
+          keyword()
+        ) :: {:ok, mobile_timeline_row()} | {:error, term()}
+  def attach_mobile_timeline_media(selector, server_seq, media_ref, opts \\ [])
+      when is_map(selector) and is_integer(server_seq) and server_seq > 0 and is_map(media_ref) do
+    call({:attach_mobile_timeline_media, selector, server_seq, media_ref}, opts)
+  end
+
+  @spec advance_mobile_read_frontier(
+          mobile_profile_selector(),
+          non_neg_integer(),
+          DateTime.t(),
+          keyword()
+        ) :: {:ok, non_neg_integer()} | {:error, term()}
+  def advance_mobile_read_frontier(selector, reported_seq, %DateTime{} = now, opts \\ [])
+      when is_map(selector) and is_integer(reported_seq) and reported_seq >= 0 do
+    call({:advance_mobile_read_frontier, selector, reported_seq, now}, opts)
+  end
+
+  @spec get_mobile_read_frontier(mobile_profile_selector(), keyword()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def get_mobile_read_frontier(selector, opts \\ []) when is_map(selector) do
+    call({:get_mobile_read_frontier, selector}, opts)
+  end
+
+  @spec claim_mobile_client_request(mobile_profile_selector(), map(), keyword()) ::
+          {:ok, {:claimed | :duplicate | :conflict, mobile_client_request_row()}}
+          | {:error, term()}
+  def claim_mobile_client_request(selector, attrs, opts \\ [])
+      when is_map(selector) and is_map(attrs) do
+    call({:claim_mobile_client_request, selector, attrs}, opts)
+  end
+
+  @spec get_mobile_client_request(mobile_profile_selector(), String.t(), keyword()) ::
+          {:ok, mobile_client_request_row()} | {:error, :not_found | term()}
+  def get_mobile_client_request(selector, client_msg_id, opts \\ [])
+      when is_map(selector) and is_binary(client_msg_id) do
+    call({:get_mobile_client_request, selector, client_msg_id}, opts)
+  end
+
+  @spec start_mobile_client_request(
+          mobile_profile_selector(),
+          String.t(),
+          String.t(),
+          DateTime.t(),
+          keyword()
+        ) ::
+          {:ok, {:started | :active | :completed | :failed, mobile_client_request_row()}}
+          | {:error, term()}
+  def start_mobile_client_request(
+        selector,
+        client_msg_id,
+        runner_epoch,
+        %DateTime{} = now,
+        opts \\ []
+      )
+      when is_map(selector) and is_binary(client_msg_id) and is_binary(runner_epoch) do
+    call({:start_mobile_client_request, selector, client_msg_id, runner_epoch, now}, opts)
+  end
+
+  @spec get_recoverable_mobile_client_requests(
+          mobile_owner_selector(),
+          String.t(),
+          1..200,
+          DateTime.t(),
+          keyword()
+        ) :: {:ok, [mobile_client_request_row()]} | {:error, term()}
+  def get_recoverable_mobile_client_requests(
+        selector,
+        runner_epoch,
+        limit,
+        %DateTime{} = now,
+        opts \\ []
+      )
+      when is_map(selector) and is_binary(runner_epoch) and is_integer(limit) and limit > 0 and
+             limit <= 200 do
+    call({:get_recoverable_mobile_client_requests, selector, runner_epoch, limit, now}, opts)
+  end
+
+  @spec settle_mobile_client_request(
+          mobile_profile_selector(),
+          String.t(),
+          String.t(),
+          map(),
+          DateTime.t(),
+          keyword()
+        ) :: {:ok, mobile_client_request_row()} | {:error, term()}
+  def settle_mobile_client_request(
+        selector,
+        client_msg_id,
+        status,
+        fields,
+        %DateTime{} = now,
+        opts \\ []
+      )
+      when is_map(selector) and is_binary(client_msg_id) and is_binary(status) and is_map(fields) do
+    call({:settle_mobile_client_request, selector, client_msg_id, status, fields, now}, opts)
+  end
+
+  @spec abandon_mobile_client_request(
+          mobile_profile_selector(),
+          String.t(),
+          non_neg_integer(),
+          DateTime.t(),
+          keyword()
+        ) :: {:ok, mobile_client_request_row()} | {:error, term()}
+  def abandon_mobile_client_request(
+        selector,
+        client_msg_id,
+        attempt,
+        %DateTime{} = now,
+        opts \\ []
+      )
+      when is_map(selector) and is_binary(client_msg_id) and is_integer(attempt) and attempt >= 0 do
+    call({:abandon_mobile_client_request, selector, client_msg_id, attempt, now}, opts)
+  end
+
+  @spec append_mobile_client_output(
+          mobile_profile_selector(),
+          String.t(),
+          non_neg_integer(),
+          String.t(),
+          map(),
+          DateTime.t(),
+          keyword()
+        ) :: {:ok, {:created | :existing, mobile_timeline_row()}} | {:error, term()}
+  def append_mobile_client_output(
+        selector,
+        client_msg_id,
+        attempt,
+        output_key,
+        attrs,
+        %DateTime{} = now,
+        opts \\ []
+      )
+      when is_map(selector) and is_binary(client_msg_id) and is_integer(attempt) and attempt >= 0 and
+             is_binary(output_key) and is_map(attrs) do
+    call(
+      {:append_mobile_client_output, selector, client_msg_id, attempt, output_key, attrs, now},
+      opts
+    )
+  end
+
+  @spec complete_mobile_client_request(
+          mobile_profile_selector(),
+          String.t(),
+          non_neg_integer(),
+          map(),
+          DateTime.t(),
+          keyword()
+        ) :: {:ok, mobile_client_request_row()} | {:error, term()}
+  def complete_mobile_client_request(
+        selector,
+        client_msg_id,
+        attempt,
+        fields,
+        %DateTime{} = now,
+        opts \\ []
+      )
+      when is_map(selector) and is_binary(client_msg_id) and is_integer(attempt) and attempt >= 0 and
+             is_map(fields) do
+    call({:complete_mobile_client_request, selector, client_msg_id, attempt, fields, now}, opts)
+  end
+
+  @spec append_mobile_client_response(
+          mobile_profile_selector(),
+          String.t(),
+          non_neg_integer(),
+          map(),
+          DateTime.t(),
+          keyword()
+        ) :: {:ok, {:created | :existing, mobile_timeline_row()}} | {:error, term()}
+  def append_mobile_client_response(
+        selector,
+        client_msg_id,
+        attempt,
+        attrs,
+        %DateTime{} = now,
+        opts \\ []
+      )
+      when is_map(selector) and is_binary(client_msg_id) and is_integer(attempt) and attempt >= 0 and
+             is_map(attrs) do
+    call({:append_mobile_client_response, selector, client_msg_id, attempt, attrs, now}, opts)
+  end
+
+  @spec update_mobile_client_message(
+          mobile_profile_selector(),
+          String.t(),
+          non_neg_integer(),
+          map(),
+          keyword()
+        ) :: {:ok, mobile_timeline_row()} | {:error, term()}
+  def update_mobile_client_message(selector, client_msg_id, attempt, attrs, opts \\ [])
+      when is_map(selector) and is_binary(client_msg_id) and is_integer(attempt) and attempt >= 0 and
+             is_map(attrs) do
+    call({:update_mobile_client_message, selector, client_msg_id, attempt, attrs}, opts)
   end
 
   @spec upsert_memory(memory_attrs(), keyword()) :: {:ok, memory_row()} | {:error, term()}
@@ -1211,6 +1539,333 @@ defmodule FermixCore.Memory.Repo do
   def claim_skill_curation_cycle(%DateTime{} = now, stale_after_ms, opts \\ [])
       when is_integer(stale_after_ms) and stale_after_ms >= 0 do
     call({:claim_skill_curation_cycle, now, stale_after_ms}, opts)
+  end
+
+  # --- computer history (MILESTONE_32 §7) ---------------------------------
+
+  @doc "Idempotently insert a batch of computer-history spool events. Returns the inserted count."
+  @spec computer_history_insert_events([map()], keyword()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def computer_history_insert_events(events, opts \\ []) when is_list(events) do
+    call({:computer_history_insert_events, events}, opts)
+  end
+
+  @doc "Sweep spool events older than `cutoff_ts` (epoch ms). Returns the deleted count."
+  @spec computer_history_sweep_expired_events(integer(), keyword()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def computer_history_sweep_expired_events(cutoff_ts, opts \\ []) when is_integer(cutoff_ts) do
+    call({:computer_history_sweep_expired_events, cutoff_ts}, opts)
+  end
+
+  @doc "Byte-ceiling backstop: keep the newest spool events fitting `ceiling_bytes`, delete the rest."
+  @spec computer_history_sweep_spool_over_bytes(pos_integer(), keyword()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def computer_history_sweep_spool_over_bytes(ceiling_bytes, opts \\ [])
+      when is_integer(ceiling_bytes) and ceiling_bytes > 0 do
+    call({:computer_history_sweep_spool_over_bytes, ceiling_bytes}, opts)
+  end
+
+  @doc "Record one agent read of history (metadata only — sink, window, count)."
+  @spec computer_history_record_access(map(), keyword()) :: :ok | {:error, term()}
+  def computer_history_record_access(access, opts \\ []) when is_map(access) do
+    call({:computer_history_record_access, access}, opts)
+  end
+
+  @doc "Access-audit stats: `{count, last_read_ts | nil}`."
+  @spec computer_history_access_stats(keyword()) ::
+          {:ok, {non_neg_integer(), integer() | nil}} | {:error, term()}
+  def computer_history_access_stats(opts \\ []) do
+    call(:computer_history_access_stats, opts)
+  end
+
+  @doc "Keep the newest `max_rows` access rows, delete the rest. Returns the deleted count."
+  @spec computer_history_cap_access_rows(pos_integer(), keyword()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def computer_history_cap_access_rows(max_rows, opts \\ [])
+      when is_integer(max_rows) and max_rows > 0 do
+    call({:computer_history_cap_access_rows, max_rows}, opts)
+  end
+
+  @doc "Count of computer-history spool events."
+  @spec computer_history_count_events(keyword()) :: {:ok, non_neg_integer()} | {:error, term()}
+  def computer_history_count_events(opts \\ []) do
+    call(:computer_history_count_events, opts)
+  end
+
+  @doc "The oldest spool event's `ts` (epoch ms), or nil when empty."
+  @spec computer_history_oldest_event_ts(keyword()) ::
+          {:ok, integer() | nil} | {:error, term()}
+  def computer_history_oldest_event_ts(opts \\ []) do
+    call(:computer_history_oldest_event_ts, opts)
+  end
+
+  @doc "Read up to `limit` spool events with `id > after_id`, oldest first (summarizer cursor)."
+  @spec computer_history_events_after_id(non_neg_integer(), pos_integer(), keyword()) ::
+          {:ok, [map()]} | {:error, term()}
+  def computer_history_events_after_id(after_id, limit, opts \\ [])
+      when is_integer(after_id) and after_id >= 0 and is_integer(limit) and limit > 0 do
+    call({:computer_history_events_after_id, after_id, limit}, opts)
+  end
+
+  @doc "Summarizer lag: `{count, oldest_ts | nil}` for spool events past the cursor."
+  @spec computer_history_unsummarized_stats(keyword()) ::
+          {:ok, {non_neg_integer(), integer() | nil}} | {:error, term()}
+  def computer_history_unsummarized_stats(opts \\ []) do
+    call(:computer_history_unsummarized_stats, opts)
+  end
+
+  @doc """
+  Per-app coverage states since `since_ts`: the distinct `{bundle_id, reason}`
+  pairs of app-scoped `observer.gap` rows (`title_only`, `ax_refused:<names>`).
+  """
+  @spec computer_history_coverage_gaps(integer(), keyword()) ::
+          {:ok, [{String.t(), String.t()}]} | {:error, term()}
+  def computer_history_coverage_gaps(since_ts, opts \\ []) when is_integer(since_ts) do
+    call({:computer_history_coverage_gaps, since_ts}, opts)
+  end
+
+  @doc """
+  Count of durable activity memories. `:kind` is `:all` (the default — both
+  layers), `:session` or `:thread`; `:scope` is `:active` (the default) or `:all`,
+  which counts retired thread rows too.
+  """
+  @spec computer_history_count_memories(keyword()) :: {:ok, non_neg_integer()} | {:error, term()}
+  def computer_history_count_memories(opts \\ []) do
+    call({:computer_history_count_memories, memory_kind(opts, :all), memory_scope(opts)}, opts)
+  end
+
+  defp memory_scope(opts) do
+    scope = Keyword.get(opts, :scope, :active)
+
+    if scope in [:active, :all] do
+      scope
+    else
+      raise ArgumentError, "computer_history: unknown memory scope #{inspect(scope)}"
+    end
+  end
+
+  # One place decides which layer a read means, and it refuses anything else
+  # rather than silently reading both (§24.1).
+  defp memory_kind(opts, default) do
+    kind = Keyword.get(opts, :kind, default)
+
+    if kind in [:all, :session, :thread] do
+      kind
+    else
+      raise ArgumentError, "computer_history: unknown memory kind #{inspect(kind)}"
+    end
+  end
+
+  @doc "Insert one durable activity memory. Returns the new row id."
+  @spec computer_history_insert_memory(map(), keyword()) :: {:ok, integer()} | {:error, term()}
+  def computer_history_insert_memory(memory, opts \\ []) when is_map(memory) do
+    call({:computer_history_insert_memory, memory}, opts)
+  end
+
+  @doc """
+  The newest non-superseded memories ending at/after `since_ts` (Recent Activity
+  source). `:kind` defaults to `:session` — the journal.
+  """
+  @spec computer_history_recent_memories(integer(), pos_integer(), keyword()) ::
+          {:ok, [map()]} | {:error, term()}
+  def computer_history_recent_memories(since_ts, limit, opts \\ [])
+      when is_integer(since_ts) and is_integer(limit) and limit > 0 do
+    call(
+      {:computer_history_recent_memories, since_ts, limit, memory_kind(opts, :session)},
+      opts
+    )
+  end
+
+  @doc """
+  Non-superseded activity memories intersecting [from_ts, to_ts] (recall_activity
+  query). `:kind` defaults to `:session`.
+  """
+  @spec computer_history_memories_in_window(integer(), integer(), pos_integer(), keyword()) ::
+          {:ok, [map()]} | {:error, term()}
+  def computer_history_memories_in_window(from_ts, to_ts, limit, opts \\ [])
+      when is_integer(from_ts) and is_integer(to_ts) and is_integer(limit) and limit > 0 do
+    call(
+      {:computer_history_memories_in_window, from_ts, to_ts, limit, memory_kind(opts, :session)},
+      opts
+    )
+  end
+
+  @doc "How many non-superseded memories of `:kind` (default `:session`) intersect the window."
+  @spec computer_history_count_memories_in_window(integer(), integer(), keyword()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def computer_history_count_memories_in_window(from_ts, to_ts, opts \\ [])
+      when is_integer(from_ts) and is_integer(to_ts) do
+    call(
+      {:computer_history_count_memories_in_window, from_ts, to_ts, memory_kind(opts, :session)},
+      opts
+    )
+  end
+
+  @doc "The active thread set (§24.3): non-superseded threads, most recently touched first."
+  @spec computer_history_active_threads(pos_integer(), keyword()) ::
+          {:ok, [map()]} | {:error, term()}
+  def computer_history_active_threads(limit, opts \\ [])
+      when is_integer(limit) and limit > 0 do
+    call({:computer_history_active_threads, limit}, opts)
+  end
+
+  @doc """
+  Activity memories of `:kind` (default `:session`) with these ids, in the order
+  given, regardless of supersession — the roll-up's citation lookup (§24.3).
+  """
+  @spec computer_history_memories_by_ids([integer()], keyword()) ::
+          {:ok, [map()]} | {:error, term()}
+  def computer_history_memories_by_ids(ids, opts \\ []) when is_list(ids) do
+    call({:computer_history_memories_by_ids, ids, memory_kind(opts, :session)}, opts)
+  end
+
+  @doc "Session notes written after `since_ts` (the roll-up's input), newest first."
+  @spec computer_history_session_notes_since(integer(), pos_integer(), keyword()) ::
+          {:ok, [map()]} | {:error, term()}
+  def computer_history_session_notes_since(since_ts, limit, opts \\ [])
+      when is_integer(since_ts) and is_integer(limit) and limit > 0 do
+    call({:computer_history_session_notes_since, since_ts, limit}, opts)
+  end
+
+  @doc "How many session notes exist after `since_ts` (the roll-up's denominator)."
+  @spec computer_history_count_session_notes_since(integer(), keyword()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def computer_history_count_session_notes_since(since_ts, opts \\ [])
+      when is_integer(since_ts) do
+    call({:computer_history_count_session_notes_since, since_ts}, opts)
+  end
+
+  @doc """
+  How many activity memories match `query` — the honest total behind
+  `computer_history_search_memories/3`'s bounded page.
+  """
+  @spec computer_history_count_search_memories(String.t(), keyword()) ::
+          {:ok, non_neg_integer()} | {:error, :empty_query | term()}
+  def computer_history_count_search_memories(query, opts \\ []) when is_binary(query) do
+    call({:computer_history_count_search_memories, query}, opts)
+  end
+
+  @doc """
+  Topic search over activity memories of both kinds (§24.1). `query` is user
+  text, quoted token by token — never FTS syntax. Returns `{:error, :empty_query}`
+  when nothing searchable remains.
+  """
+  @spec computer_history_search_memories(String.t(), pos_integer(), keyword()) ::
+          {:ok, [map()]} | {:error, :empty_query | term()}
+  def computer_history_search_memories(query, limit, opts \\ [])
+      when is_binary(query) and is_integer(limit) and limit > 0 do
+    call({:computer_history_search_memories, query, limit}, opts)
+  end
+
+  @doc """
+  Write one roll-up: supersede the current threads, insert the new set, stamp the
+  mark — dropping any thread the purge watermark caught mid-call (§24.3, §12).
+  """
+  @spec computer_history_write_rollup([map()], integer(), keyword()) ::
+          {:ok,
+           %{
+             written: non_neg_integer(),
+             retired: non_neg_integer(),
+             purged: non_neg_integer(),
+             subjects: [String.t()]
+           }}
+          | {:error, term()}
+  def computer_history_write_rollup(threads, now_ts, opts \\ [])
+      when is_list(threads) and is_integer(now_ts) do
+    call({:computer_history_write_rollup, threads, now_ts}, opts)
+  end
+
+  @doc "Record that a roll-up call was made at `ts`, whatever it returned (the daily bound)."
+  @spec computer_history_stamp_rollup_attempt(integer(), keyword()) :: :ok | {:error, term()}
+  def computer_history_stamp_rollup_attempt(ts, opts \\ []) when is_integer(ts) do
+    call({:computer_history_stamp_rollup_attempt, ts}, opts)
+  end
+
+  @doc "Set/clear the first `ts` of the sitting the summarizer is still waiting on."
+  @spec computer_history_set_session_open_since(integer() | nil, keyword()) ::
+          :ok | {:error, term()}
+  def computer_history_set_session_open_since(ts, opts \\ [])
+      when is_integer(ts) or is_nil(ts) do
+    call({:computer_history_set_session_open_since, ts}, opts)
+  end
+
+  @doc "The `text` of the newest spool events that carry any (the roll-up's verbatim guard)."
+  @spec computer_history_recent_event_texts(pos_integer(), keyword()) ::
+          {:ok, [String.t()]} | {:error, term()}
+  def computer_history_recent_event_texts(limit, opts \\ [])
+      when is_integer(limit) and limit > 0 do
+    call({:computer_history_recent_event_texts, limit}, opts)
+  end
+
+  @doc "Purge the [from_ts, to_ts] window: events + intersecting memories + watermark."
+  @spec computer_history_purge_window(integer(), integer(), keyword()) ::
+          {:ok, %{events: non_neg_integer(), memories: non_neg_integer()}} | {:error, term()}
+  def computer_history_purge_window(from_ts, to_ts, opts \\ [])
+      when is_integer(from_ts) and is_integer(to_ts) do
+    call({:computer_history_purge_window, from_ts, to_ts}, opts)
+  end
+
+  @doc "Ensure the summarizer singleton state row exists, then return it."
+  @spec computer_history_ensure_state(keyword()) :: {:ok, map()} | {:error, term()}
+  def computer_history_ensure_state(opts \\ []) do
+    call(:computer_history_ensure_state, opts)
+  end
+
+  @doc "Read the summarizer singleton state row."
+  @spec computer_history_fetch_state(keyword()) :: {:ok, map()} | {:error, :not_found | term()}
+  def computer_history_fetch_state(opts \\ []) do
+    call(:computer_history_fetch_state, opts)
+  end
+
+  @doc "Atomically claim a summarizer cycle (idle -> running), reclaiming a stale one."
+  @spec computer_history_claim_cycle(DateTime.t(), non_neg_integer(), keyword()) ::
+          {:ok, map()} | {:error, :concurrent_run | term()}
+  def computer_history_claim_cycle(%DateTime{} = now, stale_after_ms, opts \\ [])
+      when is_integer(stale_after_ms) and stale_after_ms >= 0 do
+    call({:computer_history_claim_cycle, now, stale_after_ms}, opts)
+  end
+
+  @doc """
+  Write a summarizer sitting result (insert under the purge guard, advance cursor).
+  A `nil` `last_status` advances the cursor and keeps the recorded outcome.
+  """
+  @spec computer_history_write_cycle_result(
+          non_neg_integer(),
+          map() | nil,
+          DateTime.t(),
+          String.t() | nil,
+          keyword()
+        ) :: {:ok, %{memory_written: boolean()}} | {:error, term()}
+  def computer_history_write_cycle_result(
+        last_id,
+        memory,
+        %DateTime{} = now,
+        last_status,
+        opts \\ []
+      )
+      when is_integer(last_id) and (is_map(memory) or is_nil(memory)) and
+             (is_binary(last_status) or is_nil(last_status)) do
+    call({:computer_history_write_cycle_result, last_id, memory, now, last_status}, opts)
+  end
+
+  @doc "Record the summarizer's paused reason (surfaced to status)."
+  @spec computer_history_set_paused_reason(String.t() | nil, keyword()) :: :ok | {:error, term()}
+  def computer_history_set_paused_reason(reason, opts \\ [])
+      when is_binary(reason) or is_nil(reason) do
+    call({:computer_history_set_paused_reason, reason}, opts)
+  end
+
+  @doc "Set/clear the capture pause horizon (ISO8601 string, or nil to resume)."
+  @spec computer_history_set_pause_until(String.t() | nil, keyword()) :: :ok | {:error, term()}
+  def computer_history_set_pause_until(pause_until, opts \\ [])
+      when is_binary(pause_until) or is_nil(pause_until) do
+    call({:computer_history_set_pause_until, pause_until}, opts)
+  end
+
+  @doc "Release a claimed summarizer cycle (running -> idle)."
+  @spec computer_history_release_claim(DateTime.t(), keyword()) :: :ok | {:error, term()}
+  def computer_history_release_claim(%DateTime{} = now, opts \\ []) do
+    call({:computer_history_release_claim, now}, opts)
   end
 
   @doc """
@@ -1950,6 +2605,63 @@ defmodule FermixCore.Memory.Repo do
     end
   end
 
+  @doc """
+  Records a requested meeting (M21 §8.2).
+
+  The row starts at status `requested`; the Session owns every later status.
+  Byte caps, the `mtg_<11>` id shape, and the fixed-width UTC timestamp form are
+  enforced in the caller, so invalid input never reaches the single writer.
+  """
+  @spec create_meeting(map(), keyword()) :: {:ok, meeting_row()} | {:error, term()}
+  def create_meeting(attrs, opts \\ []) when is_map(attrs) do
+    with {:ok, row} <- MeetingsSql.normalize_insert(attrs) do
+      call({:create_meeting, row}, opts)
+    end
+  end
+
+  @doc """
+  Writes one meeting state transition.
+
+  `fields` may carry only `started_at`, `ended_at`, `artifact_dir`, and `error`;
+  any other key is refused rather than dropped.
+  """
+  @spec update_meeting_status(String.t(), String.t(), map(), keyword()) ::
+          {:ok, meeting_row()} | {:error, :not_found | term()}
+  def update_meeting_status(id, status, fields \\ %{}, opts \\ [])
+      when is_binary(id) and is_binary(status) and is_map(fields) do
+    with {:ok, {checked, updates}} <- MeetingsSql.normalize_status_update(status, fields) do
+      call({:update_meeting_status, id, checked, updates}, opts)
+    end
+  end
+
+  @spec get_meeting(String.t(), keyword()) ::
+          {:ok, meeting_row()} | {:error, :not_found | term()}
+  def get_meeting(id, opts \\ []) when is_binary(id) do
+    call({:get_meeting, id}, opts)
+  end
+
+  @doc "Lists meetings newest first: `scope: :active` for live rows, `:recent` for all."
+  @spec list_meetings(map(), keyword()) :: {:ok, [meeting_row()]} | {:error, term()}
+  def list_meetings(filter \\ %{}, opts \\ []) when is_map(filter) do
+    with {:ok, normalized} <- MeetingsSql.normalize_list_filter(filter) do
+      call({:list_meetings, normalized}, opts)
+    end
+  end
+
+  @doc """
+  Fails every meeting still in a live status and returns the ids it named.
+
+  Boot reconciliation: a live row after a restart has no Session behind it, so
+  it is a stranded record, not a running meeting.
+  """
+  @spec sweep_live_meetings(String.t(), DateTime.t(), keyword()) ::
+          {:ok, [String.t()]} | {:error, term()}
+  def sweep_live_meetings(error_text, %DateTime{} = now, opts \\ []) when is_binary(error_text) do
+    with {:ok, {text, stamp}} <- MeetingsSql.normalize_sweep(error_text, now) do
+      call({:sweep_live_meetings, text, stamp}, opts)
+    end
+  end
+
   @spec migrate(keyword()) :: :ok | {:error, term()}
   def migrate(opts \\ []) do
     call(:migrate, opts)
@@ -2126,6 +2838,181 @@ defmodule FermixCore.Memory.Repo do
     {:reply, reply, state}
   end
 
+  def handle_call({:append_mobile_timeline, attrs}, _from, state) do
+    reply = with_connection(state, &MobileSql.append(&1, attrs))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:append_mobile_client_message, attrs}, _from, state) do
+    reply = with_connection(state, &MobileSql.append_client_message(&1, attrs))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:append_mobile_proactive, attrs}, _from, state) do
+    reply = with_connection(state, &MobileSql.append_proactive(&1, attrs))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:get_mobile_history, selector, after_seq, limit}, _from, state) do
+    reply = with_connection(state, &MobileSql.history(&1, selector, after_seq, limit))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:mobile_history_head, selector}, _from, state) do
+    reply = with_connection(state, &MobileSql.history_head(&1, selector))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:get_mobile_media_descriptor, selector, ref}, _from, state) do
+    reply = with_connection(state, &MobileSql.media_descriptor(&1, selector, ref))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:attach_mobile_timeline_media, selector, server_seq, media_ref}, _from, state) do
+    reply =
+      with_connection(
+        state,
+        &MobileSql.attach_timeline_media(&1, selector, server_seq, media_ref)
+      )
+
+    {:reply, reply, state}
+  end
+
+  def handle_call({:advance_mobile_read_frontier, selector, reported_seq, now}, _from, state) do
+    reply =
+      with_connection(state, &MobileSql.advance_read_frontier(&1, selector, reported_seq, now))
+
+    {:reply, reply, state}
+  end
+
+  def handle_call({:get_mobile_read_frontier, selector}, _from, state) do
+    reply = with_connection(state, &MobileSql.read_frontier(&1, selector))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:claim_mobile_client_request, selector, attrs}, _from, state) do
+    reply = with_connection(state, &MobileSql.claim_request(&1, selector, attrs))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:get_mobile_client_request, selector, client_msg_id}, _from, state) do
+    reply = with_connection(state, &MobileSql.get_request(&1, selector, client_msg_id))
+    {:reply, reply, state}
+  end
+
+  def handle_call(
+        {:start_mobile_client_request, selector, client_msg_id, epoch, now},
+        _from,
+        state
+      ) do
+    reply =
+      with_connection(state, fn conn ->
+        MobileSql.start_request(conn, selector, client_msg_id, epoch, now)
+      end)
+
+    {:reply, reply, state}
+  end
+
+  def handle_call(
+        {:get_recoverable_mobile_client_requests, selector, epoch, limit, now},
+        _from,
+        state
+      ) do
+    reply =
+      with_connection(state, &MobileSql.recoverable_requests(&1, selector, epoch, limit, now))
+
+    {:reply, reply, state}
+  end
+
+  def handle_call(
+        {:settle_mobile_client_request, selector, client_msg_id, status, fields, now},
+        _from,
+        state
+      ) do
+    reply =
+      with_connection(state, fn conn ->
+        MobileSql.settle_request(conn, selector, client_msg_id, status, fields, now)
+      end)
+
+    {:reply, reply, state}
+  end
+
+  def handle_call(
+        {:abandon_mobile_client_request, selector, client_msg_id, attempt, now},
+        _from,
+        state
+      ) do
+    reply =
+      with_connection(state, fn conn ->
+        MobileSql.abandon_request(conn, selector, client_msg_id, attempt, now)
+      end)
+
+    {:reply, reply, state}
+  end
+
+  def handle_call(
+        {:append_mobile_client_output, selector, client_msg_id, attempt, output_key, attrs, now},
+        _from,
+        state
+      ) do
+    reply =
+      with_connection(state, fn conn ->
+        MobileSql.append_client_output(
+          conn,
+          selector,
+          client_msg_id,
+          attempt,
+          output_key,
+          attrs,
+          now
+        )
+      end)
+
+    {:reply, reply, state}
+  end
+
+  def handle_call(
+        {:complete_mobile_client_request, selector, client_msg_id, attempt, fields, now},
+        _from,
+        state
+      ) do
+    reply =
+      with_connection(
+        state,
+        &MobileSql.complete_request(&1, selector, client_msg_id, attempt, fields, now)
+      )
+
+    {:reply, reply, state}
+  end
+
+  def handle_call(
+        {:append_mobile_client_response, selector, client_msg_id, attempt, attrs, now},
+        _from,
+        state
+      ) do
+    reply =
+      with_connection(
+        state,
+        &MobileSql.append_client_response(&1, selector, client_msg_id, attempt, attrs, now)
+      )
+
+    {:reply, reply, state}
+  end
+
+  def handle_call(
+        {:update_mobile_client_message, selector, client_msg_id, attempt, attrs},
+        _from,
+        state
+      ) do
+    reply =
+      with_connection(
+        state,
+        &MobileSql.update_client_message(&1, selector, client_msg_id, attempt, attrs)
+      )
+
+    {:reply, reply, state}
+  end
+
   def handle_call({:upsert_memory, attrs}, _from, state) do
     reply = with_connection(state, &upsert_memory_row(&1, attrs))
     {:reply, reply, state}
@@ -2235,6 +3122,203 @@ defmodule FermixCore.Memory.Repo do
 
   def handle_call({:claim_skill_curation_cycle, now, stale_after_ms}, _from, state) do
     reply = with_connection(state, &claim_skill_curation_cycle_row(&1, now, stale_after_ms))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:computer_history_insert_events, events}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.insert_events(&1, events))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:computer_history_sweep_expired_events, cutoff_ts}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.sweep_expired_events(&1, cutoff_ts))
+    {:reply, reply, state}
+  end
+
+  def handle_call(:computer_history_count_events, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.count_events/1)
+    {:reply, reply, state}
+  end
+
+  def handle_call(:computer_history_oldest_event_ts, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.oldest_event_ts/1)
+    {:reply, reply, state}
+  end
+
+  def handle_call({:computer_history_events_after_id, after_id, limit}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.events_after_id(&1, after_id, limit))
+    {:reply, reply, state}
+  end
+
+  def handle_call(:computer_history_unsummarized_stats, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.unsummarized_stats/1)
+    {:reply, reply, state}
+  end
+
+  def handle_call({:computer_history_sweep_spool_over_bytes, ceiling_bytes}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.sweep_spool_over_bytes(&1, ceiling_bytes))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:computer_history_record_access, access}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.record_access(&1, access))
+    {:reply, reply, state}
+  end
+
+  def handle_call(:computer_history_access_stats, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.access_stats/1)
+    {:reply, reply, state}
+  end
+
+  def handle_call({:computer_history_cap_access_rows, max_rows}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.cap_access_rows(&1, max_rows))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:computer_history_coverage_gaps, since_ts}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.coverage_gaps(&1, since_ts))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:computer_history_count_memories, kind, scope}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.count_memories(&1, kind, scope))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:computer_history_insert_memory, memory}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.insert_memory(&1, memory))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:computer_history_recent_memories, since_ts, limit, kind}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.recent_memories(&1, since_ts, limit, kind))
+    {:reply, reply, state}
+  end
+
+  def handle_call(
+        {:computer_history_memories_in_window, from_ts, to_ts, limit, kind},
+        _from,
+        state
+      ) do
+    reply =
+      with_connection(
+        state,
+        &ComputerHistorySql.memories_in_window(&1, from_ts, to_ts, limit, kind)
+      )
+
+    {:reply, reply, state}
+  end
+
+  def handle_call(
+        {:computer_history_count_memories_in_window, from_ts, to_ts, kind},
+        _from,
+        state
+      ) do
+    reply =
+      with_connection(
+        state,
+        &ComputerHistorySql.count_memories_in_window(&1, from_ts, to_ts, kind)
+      )
+
+    {:reply, reply, state}
+  end
+
+  def handle_call({:computer_history_active_threads, limit}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.active_threads(&1, limit))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:computer_history_memories_by_ids, ids, kind}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.memories_by_ids(&1, ids, kind))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:computer_history_session_notes_since, since_ts, limit}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.session_notes_since(&1, since_ts, limit))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:computer_history_count_session_notes_since, since_ts}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.count_session_notes_since(&1, since_ts))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:computer_history_count_search_memories, query}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.count_search_memories(&1, query))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:computer_history_search_memories, query, limit}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.search_memories(&1, query, limit))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:computer_history_write_rollup, threads, now_ts}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.write_rollup(&1, threads, now_ts))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:computer_history_stamp_rollup_attempt, ts}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.stamp_rollup_attempt(&1, ts))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:computer_history_set_session_open_since, ts}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.set_session_open_since(&1, ts))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:computer_history_recent_event_texts, limit}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.recent_event_texts(&1, limit))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:computer_history_purge_window, from_ts, to_ts}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.purge_window(&1, from_ts, to_ts))
+    {:reply, reply, state}
+  end
+
+  def handle_call(:computer_history_ensure_state, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.ensure_state/1)
+    {:reply, reply, state}
+  end
+
+  def handle_call(:computer_history_fetch_state, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.fetch_state/1)
+    {:reply, reply, state}
+  end
+
+  def handle_call({:computer_history_claim_cycle, now, stale_after_ms}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.claim_cycle(&1, now, stale_after_ms))
+    {:reply, reply, state}
+  end
+
+  def handle_call(
+        {:computer_history_write_cycle_result, last_id, memory, now, last_status},
+        _from,
+        state
+      ) do
+    reply =
+      with_connection(
+        state,
+        &ComputerHistorySql.write_cycle_result(&1, last_id, memory, now, last_status)
+      )
+
+    {:reply, reply, state}
+  end
+
+  def handle_call({:computer_history_set_paused_reason, reason}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.set_paused_reason(&1, reason))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:computer_history_set_pause_until, pause_until}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.set_pause_until(&1, pause_until))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:computer_history_release_claim, now}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.release_claim(&1, now))
     {:reply, reply, state}
   end
 
@@ -2491,6 +3575,31 @@ defmodule FermixCore.Memory.Repo do
     {:reply, reply, state}
   end
 
+  def handle_call({:create_meeting, row}, _from, state) do
+    reply = with_connection(state, &MeetingsSql.insert(&1, row))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:update_meeting_status, id, status, updates}, _from, state) do
+    reply = with_connection(state, &MeetingsSql.update_status(&1, id, status, updates))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:get_meeting, id}, _from, state) do
+    reply = with_connection(state, &MeetingsSql.fetch(&1, id))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:list_meetings, filter}, _from, state) do
+    reply = with_connection(state, &MeetingsSql.list(&1, filter))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:sweep_live_meetings, error_text, stamp}, _from, state) do
+    reply = with_connection(state, &MeetingsSql.sweep_live(&1, error_text, stamp))
+    {:reply, reply, state}
+  end
+
   defp call(request, opts) do
     server = Keyword.get(opts, :server, __MODULE__)
     GenServer.call(server, request)
@@ -2551,8 +3660,101 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_skill_curation_migration(conn, versions),
          :ok <- apply_temporal_events_migration(conn, versions),
          :ok <- apply_reminder_snooze_migration(conn, versions),
-         :ok <- apply_event_followup_migration(conn, versions) do
+         :ok <- apply_event_followup_migration(conn, versions),
+         :ok <- apply_mobile_store_migration(conn, versions),
+         :ok <- apply_mobile_client_message_migration(conn, versions),
+         :ok <- apply_mobile_attempt_fence_migration(conn, versions),
+         :ok <- apply_computer_history_events_migration(conn, versions),
+         :ok <- apply_computer_history_memories_migration(conn, versions),
+         :ok <- apply_computer_history_state_migration(conn, versions),
+         :ok <- apply_meetings_migration(conn, versions),
+         :ok <- apply_computer_history_access_migration(conn, versions),
+         :ok <- apply_computer_history_sessions_migration(conn, versions) do
       :ok
+    end
+  end
+
+  # MILESTONE_32 §24.1, additive: memory kinds + thread columns, the two state
+  # marks, and the FTS5 companion with its triggers. Every column arrives by
+  # ALTER (not idempotent), so the version check above is what makes a second
+  # open safe.
+  defp apply_computer_history_sessions_migration(conn, versions) do
+    if Enum.member?(versions, @computer_history_sessions_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{ComputerHistorySql.sessions_schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@computer_history_sessions_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  defp apply_computer_history_access_migration(conn, versions) do
+    if Enum.member?(versions, @computer_history_access_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{ComputerHistorySql.access_schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@computer_history_access_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  defp apply_computer_history_events_migration(conn, versions) do
+    if Enum.member?(versions, @computer_history_events_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{ComputerHistorySql.events_schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@computer_history_events_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  defp apply_computer_history_memories_migration(conn, versions) do
+    if Enum.member?(versions, @computer_history_memories_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{ComputerHistorySql.memories_schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@computer_history_memories_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  defp apply_computer_history_state_migration(conn, versions) do
+    if Enum.member?(versions, @computer_history_state_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{ComputerHistorySql.state_schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@computer_history_state_migration_version});
+        COMMIT;
+        """
+      )
     end
   end
 
@@ -2897,6 +4099,70 @@ defmodule FermixCore.Memory.Repo do
         BEGIN;
         #{TemporalSql.followup_schema_sql()}
         INSERT INTO schema_migrations(version) VALUES (#{@event_followup_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  defp apply_mobile_store_migration(conn, versions) do
+    if Enum.member?(versions, @mobile_store_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{MobileSql.schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@mobile_store_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  defp apply_mobile_client_message_migration(conn, versions) do
+    if Enum.member?(versions, @mobile_client_message_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{MobileSql.client_message_schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@mobile_client_message_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  defp apply_mobile_attempt_fence_migration(conn, versions) do
+    if Enum.member?(versions, @mobile_attempt_fence_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{MobileSql.attempt_fence_schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@mobile_attempt_fence_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  defp apply_meetings_migration(conn, versions) do
+    if Enum.member?(versions, @meetings_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{MeetingsSql.schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@meetings_migration_version});
         COMMIT;
         """
       )

@@ -19,7 +19,7 @@ defmodule FermixCore.Auth.XAILogin do
 
   require Logger
 
-  @auth_profile "xai_oauth"
+  @auth_profile Store.profile(:xai)
 
   @type opts :: [
           provider: OAuthProvider.t(),

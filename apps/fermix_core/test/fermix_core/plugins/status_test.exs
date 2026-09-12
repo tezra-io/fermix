@@ -1,7 +1,9 @@
 defmodule FermixCore.Plugins.StatusTest do
   use ExUnit.Case, async: false
 
+  alias FermixCore.Auth.Store
   alias FermixCore.Plugins.CanonicalJson
+  alias FermixCore.Plugins.Config
   alias FermixCore.Plugins.Dist.McpSource
   alias FermixCore.Plugins.Dist.Store, as: DistStore
   alias FermixCore.Plugins.Registry
@@ -385,5 +387,69 @@ defmodule FermixCore.Plugins.StatusTest do
     plugin = load_plugin(checkout, "notes")
 
     assert Status.ready?(plugin)
+  end
+
+  # A grant quarantined because the provider refused the saved sign-in client
+  # publishes the existing `:reauthorization_required` status (the vocabulary,
+  # the verbs and the action ids do not grow), and one predicate lets the
+  # surfaces that word the cause tell it apart.
+  describe "a grant whose sign-in client was refused" do
+    setup do
+      put_plugins_env(["google_calendar"], %{})
+
+      Application.put_env(:fermix_core, :oauth, %{
+        "google" => [client_id: "123.apps.googleusercontent.com", client_secret: "stale"]
+      })
+
+      {:ok, plugin} = Registry.find("google_calendar")
+      %{plugin: plugin}
+    end
+
+    defp store_grant(plugin, status) do
+      :ok =
+        Store.write(Config.auth_profile(plugin), %{
+          auth_mode: "oauth2",
+          provider: "google",
+          granted_scopes: [],
+          tokens: %{access_token: "AT", refresh_token: "RT"},
+          expires_at: DateTime.add(DateTime.utc_now(), 3600, :second),
+          last_refresh: nil,
+          status: status
+        })
+    end
+
+    test "is quarantined as :reauthorization_required", %{plugin: plugin} do
+      store_grant(plugin, "client_rejected")
+
+      assert Status.status(plugin) == :reauthorization_required
+      assert Status.status("google_calendar") == :reauthorization_required
+      refute Status.ready?(plugin)
+    end
+
+    test "is told apart by client_rejected?/1, and only it is", %{plugin: plugin} do
+      store_grant(plugin, "client_rejected")
+      assert Status.client_rejected?(plugin)
+      assert Status.client_rejected?("google_calendar")
+
+      for other <- ["ready", "reauthorization_required", "invalidated"] do
+        store_grant(plugin, other)
+        refute Status.client_rejected?(plugin), "#{other} read as a refused client"
+      end
+    end
+
+    test "a plugin with no stored grant, or no such plugin, is not a refused client" do
+      refute Status.client_rejected?("google_calendar")
+      refute Status.client_rejected?("ghost")
+    end
+
+    # The predicate must answer identically in a tree-less CLI VM, so it reads
+    # the auth store and nothing else: no token manager is asked, or started.
+    test "reads the store alone, starting no token manager", %{plugin: plugin} do
+      store_grant(plugin, "client_rejected")
+      profile = Config.auth_profile(plugin)
+
+      assert Status.client_rejected?(plugin)
+      assert Elixir.Registry.lookup(FermixCore.Auth.TokenRegistry, profile) == []
+    end
   end
 end

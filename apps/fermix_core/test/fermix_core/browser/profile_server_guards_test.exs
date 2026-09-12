@@ -197,7 +197,9 @@ defmodule FermixCore.Browser.ProfileServerGuardsTest do
     "console" => "browser-scoped event buffer, not a read of the addressed tab",
     "dialog" => "answers or lists a JS dialog; needed to unblock a stuck page",
     "upload" => "a write into a file input; confined by confined_upload_path/1 instead",
-    "download" => "returns a file Chrome fetched; bounded by the byte ceiling, not the tab URL",
+    "download" =>
+      "returns a file Chrome fetched; its SOURCE URL is vetted at downloadWillBegin and " <>
+        "the bytes are bounded by the byte ceiling — the addressed tab's URL is not re-read",
     "act" => "one action, nine kinds — driven kind by kind in the next test"
   }
 
@@ -347,9 +349,55 @@ defmodule FermixCore.Browser.ProfileServerGuardsTest do
     assert error.details["value"] == "169.254.169.254"
   end
 
+  # ── the scheme allow-list (spec §3) ────────────────────────────────────────
+
+  # Driven end-to-end, because the read gate is the only consumer: FakePage is
+  # parameterized by the live href, so each row below is a real tab sitting on
+  # that document when `snapshot` asks to read it.
+  #
+  # Stated as the invariant rather than as a denylist — NO document outside the
+  # allow-list yields content. The old gate asked "does this URL have a host?"
+  # and allowed everything that did not, which is a deny-list on the host
+  # dimension with no opinion at all on the scheme dimension.
+  @refused_origins [
+    {"file:///etc/passwd", :origin_file, "a local file, hostless spelling"},
+    {"file://localhost/etc/passwd", :origin_file_host, "the same file, host spelling"},
+    {"view-source:http://169.254.169.254/", :origin_view_source, "source of a private page"},
+    {"filesystem:http://169.254.169.254/temporary/x", :origin_filesystem, "sandboxed fs"},
+    {"data:text/html,secret", :origin_data, "the canonical laundering channel"},
+    {"blob:null/9d1a-3f", :origin_blob_null, "an opaque origin: iframe, data:, or file:"},
+    {"blob:file:///9d1a-3f", :origin_blob_file, "file: re-entered through the blob door"}
+  ]
+
+  test "NO document outside the scheme allow-list is readable" do
+    for {href, id, why} <- @refused_origins do
+      pid = start_page(href, public_config(), id)
+      assert {:ok, _} = req(pid, "start")
+
+      assert {:error, %Error{code: "read_origin_blocked"} = error} = req(pid, "snapshot"),
+             "`#{href}` was readable (#{why})"
+
+      # The recovery has to be the one that works. Telling the model to navigate
+      # somewhere allowed is how it burns iterations on a file:// tab.
+      assert error.message =~ "file tools"
+    end
+  end
+
+  # The allow-list must not over-block the two host-less documents that are
+  # legitimately readable: Chrome's startup page (a managed profile opens on it,
+  # so refusing breaks the first snapshot after `start`) and a blob minted by an
+  # allowed origin.
+  test "about:blank still reads" do
+    pid = start_page("about:blank", public_config(), :guards_about_blank)
+
+    assert {:ok, _} = req(pid, "start")
+    assert {:ok, %{"url" => "about:blank"}} = req(pid, "snapshot")
+  end
+
   # `URI.parse/1` strips the brackets off an IPv6 authority, so the gate has to
-  # put them back before re-validating the host — otherwise the metadata address
-  # in its IPv4-mapped form is judged as something else entirely.
+  # judge the host string it was handed rather than re-serialising it into a URL
+  # — otherwise the metadata address in its IPv4-mapped form is judged as
+  # something else entirely.
   test "an IPv4-in-IPv6 metadata host is refused as the address it embeds" do
     pid = start_page("http://[::ffff:169.254.169.254]/latest/", public_config(), :guards_ipv6)
 
@@ -490,6 +538,67 @@ defmodule FermixCore.Browser.ProfileServerGuardsTest do
 
     assert {:error, %Error{code: "download_too_large"}} =
              req(pid, "download", %{"timeout_ms" => 50})
+  end
+
+  # ── download source policy ─────────────────────────────────────────────────
+
+  # The read gate's one side door: Chrome performs a download NAVIGATION
+  # without PNA/CORS protections and streams the bytes into the workspace,
+  # where file tools read them — so an allowed public page could otherwise
+  # pull `http://192.168.1.1/config.bin` past every host rule. The source URL
+  # is vetted the moment Chrome announces it.
+  test "a download from a private host is blocked, canceled, and its file deleted" do
+    {:ok, config} = Config.current(allow_private_network: false, download_max_bytes: 1_000_000)
+    pid = start_page("https://example.com", config, :guards_download_private)
+    assert {:ok, _} = req(pid, "start")
+
+    partial = download_path("G5")
+    File.mkdir_p!(Path.dirname(partial))
+    File.write!(partial, "router-config-bytes")
+
+    begin_download(pid, "G5", "http://192.168.1.1/config.bin", "config.bin")
+
+    assert_receive {:cdp, _owner, "Browser.cancelDownload", %{guid: "G5"}}
+    refute File.exists?(partial)
+
+    assert {:error, %Error{code: "download_blocked"} = error} =
+             req(pid, "download", %{"timeout_ms" => 50})
+
+    assert error.details["url"] == "http://192.168.1.1/config.bin"
+    assert error.message =~ "browser policy"
+
+    # One verdict, exactly once.
+    assert {:error, %Error{code: "timeout"}} = req(pid, "download", %{"timeout_ms" => 50})
+  end
+
+  test "a metadata download is blocked in its inet_aton spellings too" do
+    {:ok, config} = Config.current(allow_private_network: false, download_max_bytes: 1_000_000)
+    pid = start_page("https://example.com", config, :guards_download_aton)
+    assert {:ok, _} = req(pid, "start")
+
+    begin_download(pid, "G6", "http://0xa9.0xfe.0xa9.0xfe/latest/meta-data/", "meta")
+
+    assert_receive {:cdp, _owner, "Browser.cancelDownload", %{guid: "G6"}}
+
+    assert {:error, %Error{code: "download_blocked"}} =
+             req(pid, "download", %{"timeout_ms" => 50})
+  end
+
+  # Page-local bytes, not a network fetch: a blob: download comes from a
+  # document the navigation gate already admitted (a page-generated CSV
+  # export), and refusing it would break the legitimate case for no gain.
+  test "a blob download from an admitted page stays allowed" do
+    {:ok, config} = Config.current(allow_private_network: false, download_max_bytes: 1_000_000)
+    pid = start_page("https://example.com", config, :guards_download_blob)
+    assert {:ok, _} = req(pid, "start")
+
+    begin_download(pid, "G7", "blob:https://example.com/33e2a1f0", "export.csv")
+    progress(pid, "G7", "completed", 120, 120)
+
+    assert {:ok, %{"guid" => "G7", "suggested_filename" => "export.csv"}} =
+             req(pid, "download", %{"timeout_ms" => 500})
+
+    refute_receive {:cdp, _owner, "Browser.cancelDownload", _params}, 50
   end
 
   test "a download under the ceiling completes and is reported normally" do

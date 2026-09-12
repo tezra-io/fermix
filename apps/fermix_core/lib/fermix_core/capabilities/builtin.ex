@@ -25,6 +25,9 @@ defmodule FermixCore.Capabilities.Builtin do
     # only ever an outbound request parameter and never appears in the result
     # (MILESTONE_31 §13.2). Seeded always; `advertise?/1` hides it without a key.
     "place_search" => %{policy_class: :network, hidden_from_agent?: false, owner_only?: false},
+    # Owner-only on-device activity recall (MILESTONE_32 §11.2); the Gate is the
+    # real barrier, this pins the guest filter and classification.
+    "recall_activity" => %{policy_class: :read_only, hidden_from_agent?: false, owner_only?: true},
     "skill_create" => %{policy_class: :read_write, hidden_from_agent?: false, owner_only?: false},
     "skill_reload" => %{policy_class: :read_write, hidden_from_agent?: false, owner_only?: false},
     "skill_view" => %{policy_class: :exec, hidden_from_agent?: false, owner_only?: false},
@@ -116,6 +119,28 @@ defmodule FermixCore.Capabilities.Builtin do
     "event_remove" => %{policy_class: :read_write, hidden_from_agent?: false, owner_only?: true},
     "reminder_snooze" => %{
       policy_class: :read_write,
+      hidden_from_agent?: false,
+      owner_only?: true
+    },
+    # Meetings notetaker (MILESTONE_21 C2 §14.1). `:external_api` sits in the
+    # operator's default policy and the guest deny-list, and owner-only keeps
+    # the owner's own meetings out of a guest's surface; the attended-operator
+    # advertise?/execute gate these three share with the temporal family — and
+    # `Meetings.join/2` repeats — is the hard barrier. Only seeded when
+    # `Meetings.ready?()` (BuiltinSeeder), so a disabled or lane-less daemon
+    # never advertises them.
+    "join_meeting" => %{
+      policy_class: :external_api,
+      hidden_from_agent?: false,
+      owner_only?: true
+    },
+    "leave_meeting" => %{
+      policy_class: :external_api,
+      hidden_from_agent?: false,
+      owner_only?: true
+    },
+    "list_meetings" => %{
+      policy_class: :external_api,
       hidden_from_agent?: false,
       owner_only?: true
     }
