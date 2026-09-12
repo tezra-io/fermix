@@ -14,6 +14,13 @@ defmodule Fermix.CLI.Migrate.Discovery do
   is running" when the truth is "`brew services list` did not answer" would send
   the operator after a phantom, so those stay apart.
 
+  It also decides, once and up front, which of the transaction's two valid
+  configurations applies: `app_source: :cask` installs the application, and
+  `app_source: :existing` adopts the copy this account already has. An operator
+  who took the disk image before retiring the formula used to be refused here
+  and told to use the application's onboarding, which itself refuses while the
+  formula's launch agent is installed and points back at this command.
+
   Every world this module reads is injected: the OS, the account home, the
   Fermix home, the management client, and one command runner for `which`,
   `brew`, and `kill`. `Upgrade.InstallMethod` answers a different question — how
@@ -28,13 +35,15 @@ defmodule Fermix.CLI.Migrate.Discovery do
   @label "io.tezra.fermix"
   @system_unit_path "/Library/LaunchDaemons/io.tezra.fermix.plist"
   @canonical_app "/Applications/Fermix.app"
+  @app_identifier "io.tezra.FermixPet"
   @formula "fermix"
 
   @type refusal_code ::
           :not_macos
           | :app_managed
           | :duplicate_app
-          | :app_already_installed
+          | :app_outside_applications
+          | :foreign_app
           | :system_scope
           | :no_formula_install
           | :brew_service_running
@@ -52,7 +61,8 @@ defmodule Fermix.CLI.Migrate.Discovery do
           daemon_version: String.t(),
           cli_targets: [Path.t()],
           formula_versions: [String.t()],
-          app_path: Path.t()
+          app_path: Path.t(),
+          app_source: :existing | :cask
         }
 
   @type error ::
@@ -70,7 +80,7 @@ defmodule Fermix.CLI.Migrate.Discovery do
   def capture(deps) when is_list(deps) do
     with :ok <- macos_only(deps),
          :ok <- standalone_only(deps),
-         :ok <- single_absent_app(deps),
+         {:ok, app} <- app_target(deps),
          :ok <- user_scope_only(deps),
          {:ok, prefix} <- brew_prefix(deps),
          {:ok, versions} <- formula_install(deps),
@@ -78,7 +88,7 @@ defmodule Fermix.CLI.Migrate.Discovery do
          {:ok, targets} <- cli_targets(deps, prefix),
          {:ok, unit} <- recognized_unit(deps, prefix, targets),
          {:ok, daemon} <- live_daemon(deps) do
-      {:ok, assemble(deps, unit, daemon, targets, versions)}
+      {:ok, assemble(deps, app, unit, daemon, targets, versions)}
     end
   end
 
@@ -88,11 +98,16 @@ defmodule Fermix.CLI.Migrate.Discovery do
     Path.join(home(deps), "Library/LaunchAgents/#{@label}.plist")
   end
 
-  @doc "The canonical installed application path this migration installs into."
+  @doc """
+  The canonical application path on this account.
+
+  Where the cask installs, and the one location the application activates from,
+  so it is also the location a copy that is already installed must sit at.
+  """
   @spec app_path(keyword()) :: Path.t()
   def app_path(deps) when is_list(deps), do: hd(app_paths(deps))
 
-  defp assemble(deps, unit, daemon, targets, versions) do
+  defp assemble(deps, app, unit, daemon, targets, versions) do
     %{
       fermix_home: fermix_home(deps),
       unit_path: unit_path(deps),
@@ -103,7 +118,8 @@ defmodule Fermix.CLI.Migrate.Discovery do
       daemon_version: daemon.version,
       cli_targets: targets,
       formula_versions: versions,
-      app_path: app_path(deps)
+      app_path: app.path,
+      app_source: app.source
     }
   end
 
@@ -139,18 +155,17 @@ defmodule Fermix.CLI.Migrate.Discovery do
     end
   end
 
-  defp single_absent_app(deps) do
+  # Zero copies and one copy are both valid starting states, and only the
+  # transaction's last two steps differ between them: a copy that is already
+  # installed is opened rather than installed again. Two copies stay refused,
+  # because nothing here can tell which one the operator meant.
+  defp app_target(deps) do
     case Enum.filter(app_paths(deps), &File.exists?/1) do
       [] ->
-        :ok
+        {:ok, %{source: :cask, path: app_path(deps)}}
 
-      [only] ->
-        refuse(
-          :app_already_installed,
-          ["installed app: #{only}"],
-          "Fermix.app is already installed. Open it and use its onboarding to adopt this home, " <>
-            "or remove that copy first if it is stale."
-        )
+      [installed] ->
+        installed_app(deps, installed)
 
       copies ->
         refuse(
@@ -158,6 +173,47 @@ defmodule Fermix.CLI.Migrate.Discovery do
           Enum.map(copies, &"app copy: #{&1}"),
           "Keep exactly one Fermix.app and remove the others, then re-run this command."
         )
+    end
+  end
+
+  # Fermix.app registers its background service only when it runs from the
+  # canonical application folder, so a copy anywhere else is refused here,
+  # before anything is retired, rather than at the end of a transaction that
+  # has already uninstalled the formula.
+  defp installed_app(deps, path) do
+    canonical = app_path(deps)
+
+    if path == canonical do
+      verified_app(deps, path)
+    else
+      refuse(
+        :app_outside_applications,
+        ["app copy: #{path}", "required location: #{canonical}"],
+        "Fermix.app activates only from #{Path.dirname(canonical)}. Move that copy there, " <>
+          "then re-run this command."
+      )
+    end
+  end
+
+  # The bundle identifier is the proof, not the directory name. This step is
+  # about to drain the daemon, retire the formula and hand the home over to
+  # whatever that bundle is, and the unified application keeps the pet's
+  # identifier by design, so that is the one value accepted.
+  defp verified_app(deps, path) do
+    case bundle_identifier(deps, path) do
+      {:ok, @app_identifier} ->
+        {:ok, %{source: :existing, path: path}}
+
+      {:ok, other} ->
+        refuse(
+          :foreign_app,
+          ["app copy: #{path}", "bundle identifier: #{other}", "expected: #{@app_identifier}"],
+          "That bundle is called Fermix.app but is not Fermix. Remove or rename it, then " <>
+            "re-run this command."
+        )
+
+      {:error, error} ->
+        {:error, error}
     end
   end
 
@@ -360,6 +416,21 @@ defmodule Fermix.CLI.Migrate.Discovery do
   end
 
   # ── probes ─────────────────────────────────────────────────────────────────
+
+  # `plutil` reads a binary Info.plist as happily as an XML one, which a
+  # hand-rolled parser would not, and an identifier this command cannot read is
+  # a probe failure rather than a verdict about the bundle.
+  defp bundle_identifier(deps, path) do
+    plist = Path.join(path, "Contents/Info.plist")
+
+    case run(deps, "plutil", ["-extract", "CFBundleIdentifier", "raw", "-o", "-", plist]) do
+      {output, 0} ->
+        {:ok, trim(output)}
+
+      {output, code} ->
+        {:error, {:probe_failed, "plutil #{plist}: exit #{code} #{trim(output)}"}}
+    end
+  end
 
   defp brew_prefix(deps) do
     case run(deps, "brew", ["--prefix"]) do

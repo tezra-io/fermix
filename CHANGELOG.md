@@ -6,6 +6,23 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`fermix migrate-to-app` no longer refuses an account that already has
+  the Mac app.** Downloading the disk image before retiring the Homebrew
+  formula left the two halves pointing at each other: the command refused
+  because `Fermix.app` was installed and sent the operator to the app's
+  onboarding, while the app refused to activate under the formula's launch
+  agent and sent them back to the command. One installed copy in the
+  Applications folder is now a valid starting state. The migration runs
+  exactly as before except that the cask install is skipped and the last
+  step opens the copy that is already there, and running it without
+  arguments says which of the two it will do. The copy is accepted only
+  once its bundle identifier proves it is Fermix: a bundle called
+  `Fermix.app` that is something else, and a single copy installed
+  outside the Applications folder, are each refused with what to do about
+  it, and two copies stay refused as before.
+
 ## [0.10.1] - 2026-09-12
 
 ### Fixed

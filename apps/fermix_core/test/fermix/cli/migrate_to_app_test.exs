@@ -12,6 +12,7 @@ defmodule Fermix.CLI.MigrateToAppTest do
 
   @unit_relative "Library/LaunchAgents/io.tezra.fermix.plist"
   @brew_program "/opt/homebrew/bin/fermix"
+  @app_identifier "io.tezra.FermixPet"
 
   defmodule AppBuildInfo do
     def app_engine?, do: true
@@ -80,14 +81,56 @@ defmodule Fermix.CLI.MigrateToAppTest do
       assert stderr =~ world.user_app
     end
 
-    test "an installed Fermix.app refuses as app_already_installed" do
+    # The bundle identifier is the only proof that the copy about to be handed
+    # the operator's home is Fermix at all; a directory called Fermix.app is not.
+    test "a single Fermix.app with a foreign bundle identifier refuses as foreign_app" do
       world = new_world()
       File.mkdir_p!(world.canonical_app)
 
+      runner =
+        scripted_runner(%{identifier_args(world.canonical_app) => {"com.example.Fermix\n", 0}})
+
+      stderr = refused(world, command_runner: runner)
+
+      assert stderr =~ "foreign_app"
+      assert stderr =~ "com.example.Fermix"
+      assert stderr =~ world.canonical_app
+      refute_received {:ran, "brew", ["uninstall" | _rest]}
+    end
+
+    # Fermix.app registers its background service only from the canonical
+    # application folder, so a copy elsewhere is refused before the formula is
+    # retired rather than after, when there is no `fermix` left to re-run.
+    test "a single Fermix.app outside the canonical location refuses before any mutation" do
+      world = new_world()
+      File.mkdir_p!(world.user_app)
+
       stderr = refused(world, command_runner: raising_runner())
 
-      assert stderr =~ "app_already_installed"
-      assert stderr =~ world.canonical_app
+      assert stderr =~ "app_outside_applications"
+      assert stderr =~ world.user_app
+      assert stderr =~ Path.dirname(world.canonical_app)
+      assert File.exists?(world.unit_path)
+    end
+
+    # An identifier this command cannot read is a probe failure, not a verdict
+    # about the bundle: refusing it as foreign would name a state nobody
+    # inspected, and accepting it would hand the home to an unread bundle.
+    test "an unreadable bundle identifier is a probe failure, not a refusal" do
+      world = new_world()
+      File.mkdir_p!(world.canonical_app)
+
+      runner =
+        scripted_runner(%{
+          identifier_args(world.canonical_app) => {"No value at that key path", 1}
+        })
+
+      stderr = refused(world, command_runner: runner)
+
+      assert stderr =~ "could not inspect this account"
+      assert stderr =~ "plutil"
+      refute stderr =~ "refused ("
+      refute_received {:ran, "brew", ["uninstall" | _rest]}
     end
 
     test "a system LaunchDaemon refuses as system_scope and never touches it" do
@@ -182,9 +225,28 @@ defmodule Fermix.CLI.MigrateToAppTest do
       assert status == 2
       assert stdout =~ "--yes"
       assert stdout =~ world.unit_path
+      assert stdout =~ "brew install --cask tezra-io/tap/fermix"
+      assert stdout =~ "the cask installs it"
       assert File.exists?(world.unit_path)
       refute_received {:launchctl, _args}
       refute_received {:ran, "brew", ["uninstall" | _rest]}
+    end
+
+    # The plan is where the operator learns which of the two configurations
+    # they are in, so it names the copy it found and the step it will skip.
+    test "with a Fermix.app already installed the plan says the cask is skipped" do
+      world = new_world()
+      File.mkdir_p!(world.canonical_app)
+      install_launchctl(world, {"", 0})
+
+      {status, stdout, _stderr} = run(world, [], [])
+
+      assert status == 2
+      assert stdout =~ "already installed"
+      assert stdout =~ world.canonical_app
+      assert stdout =~ "the cask install is skipped"
+      refute stdout =~ "brew install --cask"
+      refute_received {:launchctl, _args}
     end
   end
 
@@ -210,6 +272,8 @@ defmodule Fermix.CLI.MigrateToAppTest do
       assert record["schema_version"] == 1
       assert record["phase"] == "app_launched"
       assert record["fermix_home"] == world.fermix_home
+      assert record["app_source"] == "cask"
+      assert record["app_path"] == world.canonical_app
       assert record["source"]["unit_path"] == world.unit_path
       assert stdout =~ "Fermix.app"
     end
@@ -316,6 +380,58 @@ defmodule Fermix.CLI.MigrateToAppTest do
       assert status == 1
       assert stderr =~ "download failed"
       assert stderr =~ "brew install --cask tezra-io/tap/fermix"
+      refute stderr =~ "re-run `fermix migrate-to-app"
+
+      assert {:ok, record} = Journal.read(journal_opts(world))
+      assert record["phase"] == "formula_uninstalled"
+    end
+  end
+
+  # An operator who took the disk image before retiring the formula was bounced
+  # between two refusals: this command refused because Fermix.app existed, and
+  # the app refuses to activate while the formula's launch agent does. One
+  # installed copy is a valid starting state, and only the last two steps differ.
+  describe "the installed-app configuration" do
+    test "migrates without installing the cask and opens the copy that is there" do
+      world = new_world()
+      File.mkdir_p!(world.canonical_app)
+      install_launchctl(world, {"", 0})
+
+      {status, stdout, _stderr} = run(world, ["--yes"], [])
+
+      assert status == 0
+      assert_received {:launchctl, ["bootout", _domain, _unit]}
+      refute File.exists?(world.unit_path)
+      assert_received {:ran, "brew", ["uninstall", "--formula", "fermix"]}
+      refute_received {:ran, "brew", ["install" | _rest]}
+      assert_received {:ran, "open", ["-a", app_path]}
+      assert app_path == world.canonical_app
+      assert stdout =~ "Fermix.app"
+
+      assert {:ok, record} = Journal.read(journal_opts(world))
+      assert record["phase"] == "app_launched"
+      assert record["app_source"] == "existing"
+      assert record["app_path"] == world.canonical_app
+      assert record["fermix_home"] == world.fermix_home
+    end
+
+    # `brew uninstall --formula` has already deleted the binary, and there is no
+    # cask to install: naming one would send the operator to download a second
+    # copy of the app sitting in their Applications folder.
+    test "a failed launch names the installed copy, never a cask install" do
+      world = new_world()
+      File.mkdir_p!(world.canonical_app)
+      install_launchctl(world, {"", 0})
+
+      runner =
+        scripted_runner(%{["-a", world.canonical_app] => {"Unable to find application", 1}})
+
+      {status, _stdout, stderr} = run(world, ["--yes"], command_runner: runner)
+
+      assert status == 1
+      assert stderr =~ "Unable to find application"
+      assert stderr =~ world.canonical_app
+      refute stderr =~ "brew install --cask"
       refute stderr =~ "re-run `fermix migrate-to-app"
 
       assert {:ok, record} = Journal.read(journal_opts(world))
@@ -448,6 +564,19 @@ defmodule Fermix.CLI.MigrateToAppTest do
 
   defp journal_opts(world), do: [home: world.home]
 
+  # The exact argv the identifier probe runs, so a scripted override keys on the
+  # same list the runner is handed.
+  defp identifier_args(app_path) do
+    [
+      "-extract",
+      "CFBundleIdentifier",
+      "raw",
+      "-o",
+      "-",
+      Path.join(app_path, "Contents/Info.plist")
+    ]
+  end
+
   # ── seams ────────────────────────────────────────────────────────────────
 
   # `hello` names a live daemon under pid 4242; `lifecycle.prepare` hands back
@@ -487,6 +616,9 @@ defmodule Fermix.CLI.MigrateToAppTest do
       Map.get_lazy(overrides, args, fn -> default_command(args) end)
     end
   end
+
+  defp default_command(["-extract", "CFBundleIdentifier", "raw", "-o", "-", _plist]),
+    do: {"#{@app_identifier}\n", 0}
 
   defp default_command(["-a", "fermix"]), do: {"#{@brew_program}\n", 0}
   defp default_command(["--prefix"]), do: {"/opt/homebrew\n", 0}
