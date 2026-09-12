@@ -214,9 +214,13 @@ defmodule FermixCore.Management.ProvidersTest do
 
       probe = fn :anthropic, _opts -> {:ok, %{model: "claude-opus-5", latency_ms: 3}} end
       assert {:ok, started} = Providers.probe_start("anthropic", jobs: jobs, probe: probe)
+      job_id = started["job_id"]
 
-      assert_receive {:provider_call, measurements, metadata}
-      assert metadata.session_id == started["job_id"]
+      # The handler is attached to the global provider stream, so another
+      # module's call lands in this mailbox first. Pinning the job id makes the
+      # receive wait for *this* probe's event rather than asserting against a
+      # foreign one, whose correlation keys need not even be present.
+      assert_receive {:provider_call, measurements, %{session_id: ^job_id} = metadata}
       assert metadata.provider == :anthropic
       assert metadata.model == "claude-opus-5"
       assert metadata.status == "ok"

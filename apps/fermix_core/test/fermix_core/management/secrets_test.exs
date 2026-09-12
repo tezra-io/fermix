@@ -25,7 +25,19 @@ defmodule FermixCore.Management.SecretsTest do
   alias FermixTestSupport.SecretWriterStub
   alias FermixTestSupport.UnavailableSecretWriter
 
-  @core_keys [:providers, :tools, :transcription, :meetings, :secret_writer]
+  # Every app-env key a test here can dirty. `plugin_secrets` and `oauth` are on
+  # the list because the prefixed-id family writes through to them: a stored
+  # `plugin:eden` token that outlives this module reaches every later module
+  # that asks whether a plugin is credentialed.
+  @core_keys [
+    :providers,
+    :tools,
+    :transcription,
+    :meetings,
+    :secret_writer,
+    :plugin_secrets,
+    :oauth
+  ]
 
   setup do
     home = System.get_env("FERMIX_HOME")
