@@ -871,11 +871,11 @@ defmodule FermixCore.Jobs.SchedulerTest do
     end
   end
 
-  # These assert the timer re-arm, which reads the wall clock (Process.send_after
-  # + Process.read_timer), so the due times are real-clock-relative: the seeded
-  # job is genuinely past-due now. That keeps the scheduler's own init auto-tick
-  # (fired at the real now) and the explicit tick on the SAME branch, so every
-  # tick errors and floors the next timer at @due_error_backoff_ms.
+  # These assert the timer re-arm. The scheduler computes its delay against the
+  # real clock, so the due times are real-clock-relative: the seeded job is
+  # genuinely past-due now. That keeps the scheduler's own init auto-tick (fired
+  # at the real now) and the explicit tick on the SAME branch, so every tick
+  # errors and floors the next timer at @due_error_backoff_ms.
   describe "due-tick failure backoff" do
     test "a scan failure re-arms the due timer at the backoff floor", %{
       repo: repo,
@@ -1001,10 +1001,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
 
       state = :sys.get_state(scheduler)
       assert is_reference(state.due_timer)
-      remaining = Process.read_timer(state.due_timer)
-      assert is_integer(remaining)
-      assert remaining <= 86_400_000
-      assert remaining > 86_000_000
+      assert state.due_delay_ms == 86_400_000
     end
   end
 
@@ -1208,9 +1205,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
   defp assert_due_timer_backoff(scheduler) do
     state = :sys.get_state(scheduler)
     assert is_reference(state.due_timer)
-    remaining = Process.read_timer(state.due_timer)
-    assert is_integer(remaining)
-    assert remaining > 4_000 and remaining <= 5_000
+    assert state.due_delay_ms == 5_000
   end
 
   defp total_runs(repo, job_ids) do
