@@ -177,6 +177,59 @@ defmodule Fermix.CLI.MigrateToAppTest do
       assert stderr =~ "/usr/bin/fermix"
     end
 
+    # The standalone unpacks itself and boots ERTS out of that copy, and
+    # `erlexec` prepends `$ROOTDIR/bin` to the PATH every process this command
+    # spawns inherits, so `which -a fermix` answers with the running release's
+    # own launcher on every Homebrew install. That file is this installation,
+    # not a launcher that would shadow the cask's.
+    test "the release this command runs from is its own target, not a foreign one" do
+      world = new_world()
+
+      runner =
+        scripted_runner(%{
+          ["-a", "fermix"] => {"#{@brew_program}\n#{world.release_program}\n", 0}
+        })
+
+      {status, stdout, _stderr} = run(world, [], command_runner: runner)
+
+      assert status == 2
+      assert stdout =~ world.release_program
+    end
+
+    test "a fermix outside the release root is still foreign" do
+      world = new_world()
+      elsewhere = Path.join(world.root, "elsewhere/bin/fermix")
+
+      runner =
+        scripted_runner(%{
+          ["-a", "fermix"] => {"#{@brew_program}\n#{world.release_program}\n#{elsewhere}\n", 0}
+        })
+
+      stderr = refused(world, command_runner: runner)
+
+      assert stderr =~ "foreign_cli_target"
+      assert stderr =~ elsewhere
+      refute stderr =~ world.release_program
+    end
+
+    # Without a release root there is nothing extra to recognize, so the same
+    # answer is refused rather than silently accepted.
+    test "a nil or empty release root recognizes nothing extra" do
+      world = new_world()
+
+      runner =
+        scripted_runner(%{
+          ["-a", "fermix"] => {"#{@brew_program}\n#{world.release_program}\n", 0}
+        })
+
+      for release_root <- [nil, ""] do
+        stderr = refused(world, command_runner: runner, release_root: release_root)
+
+        assert stderr =~ "foreign_cli_target"
+        assert stderr =~ world.release_program
+      end
+    end
+
     test "a launch agent whose program is not the brew binary refuses as foreign_service" do
       world = new_world(program: "/opt/other/bin/fermix")
 
@@ -488,6 +541,7 @@ defmodule Fermix.CLI.MigrateToAppTest do
 
     home = Path.join(root, "home")
     fermix_home = Path.join(root, "fermix")
+    release_root = Path.join(root, "release")
     unit_path = Path.join(home, @unit_relative)
     socket_path = Path.join(fermix_home, "daemon.sock")
 
@@ -505,7 +559,9 @@ defmodule Fermix.CLI.MigrateToAppTest do
       socket_path: socket_path,
       system_plist: Path.join(root, "LaunchDaemons-io.tezra.fermix.plist"),
       canonical_app: Path.join(root, "Applications/Fermix.app"),
-      user_app: Path.join(home, "Applications/Fermix.app")
+      user_app: Path.join(home, "Applications/Fermix.app"),
+      release_root: release_root,
+      release_program: Path.join(release_root, "bin/fermix")
     }
   end
 
@@ -528,6 +584,7 @@ defmodule Fermix.CLI.MigrateToAppTest do
       fermix_home: world.fermix_home,
       system_unit_path: world.system_plist,
       app_paths: [world.canonical_app, world.user_app],
+      release_root: world.release_root,
       client: default_client(),
       command_runner: scripted_runner(%{}),
       sleep: fn _ms -> :ok end,
