@@ -39,6 +39,7 @@ defmodule Fermix.CLI.Daemon do
   alias FermixCore.Management.Lifecycle
   alias FermixCore.Management.Protocol, as: ManagementProtocol
   alias FermixCore.Management.Router, as: ManagementRouter
+  alias FermixCore.Management.Text
   alias FermixCore.Observability
   alias FermixCore.Plugins.Runtime, as: PluginsRuntime
   alias FermixCore.Trace
@@ -57,6 +58,8 @@ defmodule Fermix.CLI.Daemon do
   # (e.g. an old line-framed client's JSON read as a ~2 GB length) fails
   # immediately with :emsgsize instead of buffering until timeout.
   @max_frame_bytes 4_194_304
+  @route_failure_frames 5
+  @route_failure_reason_bytes 512
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
@@ -277,18 +280,37 @@ defmodule Fermix.CLI.Daemon do
   defp route_management_request(request, state) do
     ManagementRouter.route(request, management_opts(state))
   rescue
-    _exception ->
-      log_management_route_failure(request.method, :exception)
+    exception ->
+      log_management_route_failure(request.method, :exception, exception, __STACKTRACE__)
       {:error, :internal_error, %{}}
   catch
-    kind, _reason ->
-      log_management_route_failure(request.method, kind)
+    kind, reason ->
+      log_management_route_failure(request.method, kind, reason, __STACKTRACE__)
       {:error, :internal_error, %{}}
   end
 
-  defp log_management_route_failure(method, kind) do
-    Logger.error("Management route failed: method=#{method} failure=#{kind}")
+  # A failure kind is not a diagnosis. `failure=exception` alone gave the
+  # operator nothing to search for and nothing to report, so a management fault
+  # could repeat every few seconds and still be un-debuggable. The raiser's own
+  # words and the frames that produced them are logged with it; both are bounded
+  # so one oversized reason cannot flood the log it is written to.
+  defp log_management_route_failure(method, kind, reason, stacktrace) do
+    frames =
+      stacktrace
+      |> Enum.take(@route_failure_frames)
+      |> Exception.format_stacktrace()
+
+    Logger.error(
+      "Management route failed: method=#{method} failure=#{kind} " <>
+        "reason=#{describe_route_failure(reason)}\n#{frames}"
+    )
   end
+
+  defp describe_route_failure(reason) when is_exception(reason),
+    do: Text.truncate(Exception.message(reason), @route_failure_reason_bytes)
+
+  defp describe_route_failure(reason),
+    do: Text.truncate(inspect(reason), @route_failure_reason_bytes)
 
   defp management_response(request_id, result) do
     case ManagementProtocol.respond(request_id, result) do

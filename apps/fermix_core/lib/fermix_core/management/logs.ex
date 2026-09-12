@@ -33,6 +33,10 @@ defmodule FermixCore.Management.Logs do
     bounded to a tail of each file and a full scan of the rotated set is not.
     Entries appended between two pages therefore shift the window by that many
     entries; rotation, the case M34 names, is detected exactly.
+  - **A line is bytes, not text.** The daemon's own console handler writes into
+    the same file and flattens its chardata bytewise, so a line can hold a byte
+    that is not valid UTF-8. Every message is repaired before it is redacted,
+    because a single such byte otherwise fails the encoder for the whole page.
 
   An unreadable file is `{:error, :unreadable}`, never an empty page. "The
   daemon has written nothing" is a normal state this module reports as an empty
@@ -341,9 +345,17 @@ defmodule FermixCore.Management.Logs do
     ]
   end
 
+  # `String.replace_invalid/1` runs first because not every byte on disk is valid
+  # UTF-8: the daemon's console handler flattens its own chardata bytewise, so
+  # `µ` lands in the file as the bare byte 0xB5. The encoder that renders this
+  # page refuses such a byte, and one of them raised the whole query into
+  # `internal_error` — an empty pane for lines the operator can still read. The
+  # byte is replaced and the line is delivered; dropping it would hide log
+  # content behind something that looks like silence.
   defp finish_entry(entry) do
     message =
       entry.message
+      |> String.replace_invalid()
       |> RedactingFormatter.redact()
       |> Text.truncate(@max_message_bytes)
 
