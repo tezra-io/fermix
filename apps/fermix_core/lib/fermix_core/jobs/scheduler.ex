@@ -81,6 +81,7 @@ defmodule FermixCore.Jobs.Scheduler do
           due_limit: pos_integer(),
           max_active_runs: pos_integer(),
           due_timer: reference() | nil,
+          due_delay_ms: non_neg_integer() | nil,
           reconciliation_timer: reference() | nil,
           run_monitors: map()
         }
@@ -156,6 +157,7 @@ defmodule FermixCore.Jobs.Scheduler do
       due_limit: Keyword.get(opts, :due_limit, @default_due_limit),
       max_active_runs: Keyword.get(opts, :max_active_runs, @max_active_runs),
       due_timer: nil,
+      due_delay_ms: nil,
       reconciliation_timer: nil,
       run_monitors: %{}
     }
@@ -856,12 +858,16 @@ defmodule FermixCore.Jobs.Scheduler do
     cancel_timer(state.due_timer)
 
     if state.enabled? and state.timer_enabled? do
-      %{state | due_timer: next_due_timer(state, outcome)}
+      {timer, delay_ms} = next_due_timer(state, outcome)
+      %{state | due_timer: timer, due_delay_ms: delay_ms}
     else
-      %{state | due_timer: nil}
+      %{state | due_timer: nil, due_delay_ms: nil}
     end
   end
 
+  # Returns the armed reference paired with the delay it was armed at, so state
+  # records the delay the scheduler chose rather than the wall clock left on the
+  # reference. `{nil, nil}` when nothing is scheduled and the tick was clean.
   defp next_due_timer(state, outcome) do
     case Repo.next_scheduled_job(server: state.repo) do
       {:ok, job} when is_map(job) ->
@@ -874,18 +880,20 @@ defmodule FermixCore.Jobs.Scheduler do
       # so the scheduler retries rather than going dark until reconciliation.
       {:error, reason} ->
         Logger.error("Scheduled job timer lookup failed: #{inspect(reason)}")
-        Process.send_after(self(), :due_tick, @due_error_backoff_ms)
+        arm(@due_error_backoff_ms)
     end
   end
 
   defp arm_due_timer(%DateTime{} = wakeup_at, outcome) do
-    Process.send_after(self(), :due_tick, due_delay_ms(wakeup_at, outcome))
+    arm(due_delay_ms(wakeup_at, outcome))
   end
 
   defp arm_due_timer(nil, outcome), do: backoff_timer(outcome)
 
-  defp backoff_timer(:ok), do: nil
-  defp backoff_timer(_outcome), do: Process.send_after(self(), :due_tick, @due_error_backoff_ms)
+  defp backoff_timer(:ok), do: {nil, nil}
+  defp backoff_timer(_outcome), do: arm(@due_error_backoff_ms)
+
+  defp arm(delay_ms), do: {Process.send_after(self(), :due_tick, delay_ms), delay_ms}
 
   defp next_wakeup_at(%{next_run_at: nil, expires_at: nil}), do: nil
   defp next_wakeup_at(%{next_run_at: nil, expires_at: expires_at}), do: expires_at
