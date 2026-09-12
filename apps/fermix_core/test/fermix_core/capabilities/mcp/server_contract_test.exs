@@ -22,23 +22,62 @@ defmodule FermixCore.Capabilities.MCP.ServerContractTest do
   defmodule StubDiscoverer do
     @behaviour FermixCore.Capabilities.MCP.Discoverer
 
+    # A hold nobody releases is a broken test, not a suite that hangs.
+    @hold_timeout 5_000
+
     def set_tools(tools), do: :persistent_term.put({__MODULE__, :tools}, tools)
 
     @doc "The listener the registration owner armed, so a test can drive it."
     def listener, do: :persistent_term.get({__MODULE__, :listener}, nil)
 
+    @doc """
+    Park the NEXT `list_tools/1` until `release_hold/1`, announcing itself to
+    the calling test first.
+
+    `drift/1` schedules its rediscovery with `Process.send_after(self(),
+    :rediscover, 0)` on the first pass, so a test that reads the capability
+    registry after a `:sys.get_state/1` barrier is racing that timer: the
+    barrier proves the cast was handled, not that rediscovery has not already
+    re-registered the first tool behind it. Holding the discoverer makes
+    "suspended, with nothing registered" a state the test owns for as long as
+    it likes, instead of a moment it hopes to catch.
+
+    One-shot and opt-in: a test that never arms it, and every pass after the
+    release, gets the immediate answer.
+    """
+    def hold_next_list_tools, do: :persistent_term.put({__MODULE__, :hold}, self())
+
+    @doc "Let the parked `list_tools/1` return."
+    def release_hold(server), do: send(server, {__MODULE__, :release})
+
     def clear do
       :persistent_term.erase({__MODULE__, :tools})
       :persistent_term.erase({__MODULE__, :listener})
+      :persistent_term.erase({__MODULE__, :hold})
     catch
       _kind, _reason -> :ok
     end
 
     @impl true
     def list_tools(_client) do
+      :ok = await_release(:persistent_term.get({__MODULE__, :hold}, nil))
+
       case :persistent_term.get({__MODULE__, :tools}, []) do
         {:error, reason} -> {:error, reason}
         tools when is_list(tools) -> {:ok, tools}
+      end
+    end
+
+    defp await_release(nil), do: :ok
+
+    defp await_release(test) when is_pid(test) do
+      :persistent_term.erase({__MODULE__, :hold})
+      send(test, {__MODULE__, :holding, self()})
+
+      receive do
+        {__MODULE__, :release} -> :ok
+      after
+        @hold_timeout -> raise "StubDiscoverer held list_tools/1 and was never released"
       end
     end
 
@@ -329,13 +368,20 @@ defmodule FermixCore.Capabilities.MCP.ServerContractTest do
       assert registered(ctx) == ["eden_get_note", "eden_search"]
 
       assert {:ok, proxy} = McpRegistry.lookup_proxy(ctx.mcp_registry, @source)
+      StubDiscoverer.hold_next_list_tools()
       :ok = McpServer.tools_changed(server)
 
-      # `tools_changed/1` is a cast; a system message drains the mailbox in order,
-      # so the suspension below is observed, never raced past.
-      _ = :sys.get_state(server)
+      # The hold IS the barrier, and a stronger one than `:sys.get_state/1`:
+      # `drift/1` suspends the proxy and unregisters every tool before it
+      # schedules the zero-delay `:rediscover`, and that pass reaches
+      # `list_tools/1` in the same process, so this message proves both halves
+      # happened AND parks rediscovery where it cannot re-register anything
+      # between the two assertions below.
+      assert_receive {StubDiscoverer, :holding, ^server}, 5_000
       assert Proxy.state(proxy) == :suspended
       assert registered(ctx) == []
+
+      StubDiscoverer.release_hold(server)
 
       # The gate reopens only after the same profile re-registered atomically.
       assert eventually(fn -> Proxy.state(proxy) == :ready end)
@@ -386,13 +432,15 @@ defmodule FermixCore.Capabilities.MCP.ServerContractTest do
       assert {:ok, proxy} = McpRegistry.lookup_proxy(ctx.mcp_registry, @source)
       assert registered(ctx) == ["eden_get_note", "eden_search"]
 
+      StubDiscoverer.hold_next_list_tools()
       send(server, {:mcp_owner, :tools_changed})
 
-      # A system message drains the mailbox in order, so the suspension below is
-      # observed, never raced past.
-      _ = :sys.get_state(server)
+      # Same zero-delay rediscovery, same hold: see the cast case above.
+      assert_receive {StubDiscoverer, :holding, ^server}, 5_000
       assert Proxy.state(proxy) == :suspended
       assert registered(ctx) == []
+
+      StubDiscoverer.release_hold(server)
 
       assert eventually(fn -> Proxy.state(proxy) == :ready end)
       assert registered(ctx) == ["eden_get_note", "eden_search"]
