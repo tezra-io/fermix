@@ -46,7 +46,7 @@ defmodule FermixCore.Management.LifecycleTest do
     assert {:ok, %{lease_id: ^lease_id, status: :committed}} =
              Lifecycle.commit(lease_id, server: server)
 
-    assert_receive :shutdown_invoked, 500
+    assert_receive :shutdown_invoked
     refute Lifecycle.prepared?(server: server)
 
     assert {:error, :unknown_lease} = Lifecycle.commit(lease_id, server: server)

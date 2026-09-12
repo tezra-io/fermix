@@ -66,8 +66,7 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
       pid = DraftStream.start_link(spec(self()), @fast)
 
       DraftStream.push(pid, {:text_delta, "same text"})
-      assert_receive {:open, "same text"}, 1_000
-
+      assert_receive {:open, "same text"}
       DraftStream.push(pid, {:text_delta, "same text"})
       Process.sleep(80)
       refute_received {:edit, _handle, _text}
@@ -84,10 +83,10 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
         )
 
       DraftStream.push(pid, {:text_delta, "a"})
-      assert_receive {:open, "a"}, 1_000
+      assert_receive {:open, "a"}
       Process.sleep(10)
       DraftStream.push(pid, {:text_delta, "ab"})
-      assert_receive {:edit, :handle_1, "ab"}, 1_000
+      assert_receive {:edit, :handle_1, "ab"}
       Process.sleep(10)
       DraftStream.push(pid, {:text_delta, "abc"})
       Process.sleep(50)
@@ -126,16 +125,14 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
       pid = DraftStream.start_link(spec(self()), @fast)
 
       DraftStream.push(pid, {:text_delta, "tool-round preamble"})
-      assert_receive {:open, "tool-round preamble"}, 1_000
-
+      assert_receive {:open, "tool-round preamble"}
       DraftStream.push(pid, {:iteration_started, 2})
       Process.sleep(80)
       # No edit fired by the reset itself — the draft keeps its last text.
       refute_received {:edit, _handle, _text}
 
       DraftStream.push(pid, {:text_delta, "the actual answer"})
-      assert_receive {:edit, :handle_1, "the actual answer"}, 1_000
-
+      assert_receive {:edit, :handle_1, "the actual answer"}
       assert {:ok, nil} = DraftStream.seal(pid, "the actual answer, final")
     end
   end
@@ -157,16 +154,13 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
         )
 
       DraftStream.push(pid, {:text_delta, "aaaa"})
-      assert_receive {:open, "aaaa"}, 1_000
-
+      assert_receive {:open, "aaaa"}
       Process.sleep(10)
       DraftStream.push(pid, {:text_delta, "bbbb"})
-      assert_receive {:edit, :handle_1, "bbbb"}, 1_000
-
+      assert_receive {:edit, :handle_1, "bbbb"}
       Process.sleep(10)
       DraftStream.push(pid, {:text_delta, "cccc"})
-      assert_receive {:edit, :handle_1, "cccc"}, 1_000
-
+      assert_receive {:edit, :handle_1, "cccc"}
       Process.sleep(10)
       DraftStream.push(pid, {:text_delta, "dddd"})
       Process.sleep(50)
@@ -184,8 +178,7 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
         )
 
       DraftStream.push(pid, {:text_delta, "draft text"})
-      assert_receive {:open, "draft text"}, 1_000
-
+      assert_receive {:open, "draft text"}
       assert {:error, :seal_boom} = DraftStream.seal(pid, "final")
       assert_received {:discard, :handle_1}
     end
@@ -198,8 +191,7 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
         )
 
       DraftStream.push(pid, {:text_delta, "draft text"})
-      assert_receive {:open, "draft text"}, 1_000
-
+      assert_receive {:open, "draft text"}
       assert {:error, :draft_stream_timeout} = DraftStream.seal(pid, "final", 100)
 
       # The engine was unlinked and killed — caller survives, engine doesn't.
@@ -217,8 +209,7 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
       pid = DraftStream.start_link(spec(self()), @fast)
 
       DraftStream.push(pid, {:text_delta, "the final text"})
-      assert_receive {:open, "the final text"}, 1_000
-
+      assert_receive {:open, "the final text"}
       assert {:ok, nil} = DraftStream.seal(pid, "the final text")
       refute_received {:seal, _handle, _text}
     end
@@ -231,8 +222,7 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
         )
 
       DraftStream.push(pid, {:text_delta, "long draft"})
-      assert_receive {:open, "long draft"}, 1_000
-
+      assert_receive {:open, "long draft"}
       assert {:ok, "remainder chunk"} = DraftStream.seal(pid, "very long final")
     end
   end
@@ -254,11 +244,10 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
       assert_receive {:engine, pid}
 
       DraftStream.push(pid, {:text_delta, "draft to orphan"})
-      assert_receive {:open, "draft to orphan"}, 1_000
-
+      assert_receive {:open, "draft to orphan"}
       Process.exit(parent, :kill)
 
-      assert_receive {:discard, :handle_1}, 1_000
+      assert_receive {:discard, :handle_1}
       refute eventually_alive?(pid)
     end
 
@@ -266,8 +255,7 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
       pid = DraftStream.start_link(spec(self()), @fast)
 
       DraftStream.push(pid, {:text_delta, "to be discarded"})
-      assert_receive {:open, "to be discarded"}, 1_000
-
+      assert_receive {:open, "to be discarded"}
       assert :ok = DraftStream.discard(pid)
       assert_received {:discard, :handle_1}
     end
@@ -309,7 +297,7 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
 
       DraftStream.push(pid, {:session_started, session_id})
       DraftStream.push(pid, {:text_delta, "a"})
-      assert_receive {:open, "a"}, 1_000
+      assert_receive {:open, "a"}
 
       for text <- ["ab", "abc", "abcd", "abcde"] do
         DraftStream.push(pid, {:text_delta, text})
@@ -387,8 +375,7 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
 
       full = "First paragraph of the answer.\n\nSecond paragraph still streaming"
       DraftStream.push(pid, {:text_delta, full})
-      assert_receive {:block_sent, "First paragraph of the answer."}, 1_000
-
+      assert_receive {:block_sent, "First paragraph of the answer."}
       final = "First paragraph of the answer.\n\nSecond paragraph still streaming, now done."
       assert {:ok, tail} = DraftStream.seal(pid, final)
       assert tail == "Second paragraph still streaming, now done."
@@ -412,7 +399,7 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
 
       DraftStream.push(pid, {:text_delta, text})
 
-      assert_receive {:block_sent, "alpha bravo charlie delta echo foxtrot"}, 1_000
+      assert_receive {:block_sent, "alpha bravo charlie delta echo foxtrot"}
     end
 
     test "an open code fence is never split mid-fence" do
@@ -435,7 +422,7 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
 
       closed = open_fence <> "\n```\n\nAfter the fence, a normal closing paragraph arrives."
       DraftStream.push(pid, {:text_delta, closed})
-      assert_receive {:block_sent, sent}, 1_000
+      assert_receive {:block_sent, sent}
       assert sent =~ "```"
       assert rem(length(String.split(sent, "```")) - 1, 2) == 0
     end
@@ -448,8 +435,7 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
         {:text_delta, "Tool-round commentary paragraph.\n\nUnsent trailing bit"}
       )
 
-      assert_receive {:block_sent, "Tool-round commentary paragraph."}, 1_000
-
+      assert_receive {:block_sent, "Tool-round commentary paragraph."}
       DraftStream.push(pid, {:iteration_started, 2})
       final = "The actual final answer from the last iteration."
       DraftStream.push(pid, {:text_delta, final})
@@ -463,8 +449,7 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
       pid = DraftStream.start_link(block_spec(self()), @block_fast)
 
       DraftStream.push(pid, {:text_delta, "Streamed paragraph one.\n\nmore text coming here"})
-      assert_receive {:block_sent, "Streamed paragraph one."}, 1_000
-
+      assert_receive {:block_sent, "Streamed paragraph one."}
       assert {:ok, :no_draft} = DraftStream.seal(pid, "A completely different final response.")
     end
 
@@ -479,7 +464,7 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
         )
 
       DraftStream.push(pid, {:text_delta, "A short standalone note before running tools."})
-      assert_receive {:block_sent, "A short standalone note before running tools."}, 1_000
+      assert_receive {:block_sent, "A short standalone note before running tools."}
     end
 
     test "a mid-stream provider retry (cumulative restarts shorter) never crashes the engine" do
@@ -490,8 +475,7 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
         {:text_delta, "First paragraph fully streamed.\n\nSecond part begins"}
       )
 
-      assert_receive {:block_sent, "First paragraph fully streamed."}, 1_000
-
+      assert_receive {:block_sent, "First paragraph fully streamed."}
       # Transport drop → HttpClient retries with a FRESH SSE parser: the
       # cumulative restarts from a short prefix. Must not binary_part-crash.
       DraftStream.push(pid, {:text_delta, "First par"})
@@ -503,8 +487,7 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
       regrown = "First paragraph fully streamed.\n\nSecond part begins, and finishes properly."
       DraftStream.push(pid, {:text_delta, regrown})
       DraftStream.push(pid, {:text_done, regrown})
-      assert_receive {:block_sent, "Second part begins, and finishes properly."}, 1_000
-
+      assert_receive {:block_sent, "Second part begins, and finishes properly."}
       assert {:ok, nil} = DraftStream.seal(pid, regrown)
     end
 
@@ -512,8 +495,7 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
       pid = DraftStream.start_link(block_spec(self()), @block_fast)
 
       DraftStream.push(pid, {:text_delta, "First paragraph here padded.\n\nSecond one"})
-      assert_receive {:block_sent, _text}, 1_000
-
+      assert_receive {:block_sent, _text}
       assert :ok = DraftStream.discard(pid)
       refute_received {:block_sent, _more}
     end
@@ -533,8 +515,7 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
       refute_received {:block_sent, _text}
 
       DraftStream.push(pid, {:text_done, "Let me check the calendar first."})
-      assert_receive {:block_sent, "Let me check the calendar first."}, 1_000
-
+      assert_receive {:block_sent, "Let me check the calendar first."}
       # Everything streamed ⇒ nothing left to deliver at seal.
       assert {:ok, nil} = DraftStream.seal(pid, "Let me check the calendar first.")
     end
@@ -548,12 +529,10 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
           "tool for Singapore first and then summarize the precipitation forecast."
 
       DraftStream.push(pid, {:reasoning_done, summary})
-      assert_receive {:thought_sent, "💭 Checking the weather tool", _ids}, 1_000
-
+      assert_receive {:thought_sent, "💭 Checking the weather tool", _ids}
       DraftStream.push(pid, {:text_delta, "Checking the weather now, one moment please."})
       DraftStream.push(pid, {:text_done, "Checking the weather now, one moment please."})
-      assert_receive {:block_sent, "Checking the weather now, one moment please."}, 1_000
-
+      assert_receive {:block_sent, "Checking the weather now, one moment please."}
       assert {:ok, nil} = DraftStream.seal(pid, "Checking the weather now, one moment please.")
     end
 
@@ -565,7 +544,7 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
           "**Planning the edit**\n\nThen I'll apply the change."
 
       DraftStream.push(pid, {:reasoning_done, summary})
-      assert_receive {:thought_sent, "💭 Reading the config · Planning the edit", _ids}, 1_000
+      assert_receive {:thought_sent, "💭 Reading the config · Planning the edit", _ids}
     end
 
     test "a headingless reasoning summary falls back to a truncated first line" do
@@ -577,7 +556,7 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
 
       DraftStream.push(pid, {:reasoning_done, long_first_line <> "\nsecond line"})
 
-      assert_receive {:thought_sent, "💭 " <> shown, _ids}, 1_000
+      assert_receive {:thought_sent, "💭 " <> shown, _ids}
       assert String.length(shown) <= 80
       assert String.ends_with?(shown, "…")
       assert String.starts_with?(long_first_line, String.trim_trailing(shown, "…"))
@@ -589,11 +568,9 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
       pid = DraftStream.start_link(spec(self()), @fast)
 
       DraftStream.push(pid, {:reasoning_done, "thinking about it"})
-      assert_receive {:open, "💭 thinking about it"}, 1_000
-
+      assert_receive {:open, "💭 thinking about it"}
       DraftStream.push(pid, {:text_done, "the full final answer text"})
-      assert_receive {:open, "the full final answer text"}, 1_000
-
+      assert_receive {:open, "the full final answer text"}
       assert {:ok, nil} = DraftStream.seal(pid, "the full final answer text")
     end
 
@@ -624,9 +601,8 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
       two_paras = "Paragraph number one, padded.\n\nParagraph number two, padded!\n\ntrailing"
       DraftStream.push(pid, {:text_delta, two_paras})
 
-      assert_receive {:block_sent, "Paragraph number one, padded."}, 1_000
-      assert_receive {:block_sent, "Paragraph number two, padded!"}, 1_000
-
+      assert_receive {:block_sent, "Paragraph number one, padded."}
+      assert_receive {:block_sent, "Paragraph number two, padded!"}
       assert_receive {:stream_telemetry, :open, open_meas}
       assert open_meas.ttfd_ms >= 0
       assert_receive {:stream_telemetry, :block, block_meas}
@@ -651,10 +627,9 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
       DraftStream.push(pid, {:text_delta, text})
       DraftStream.push(pid, {:text_done, text})
 
-      assert_receive {:block_sent, "Paragraph one, padded out."}, 1_000
-      assert_receive {:block_sent, "Paragraph two, also padded out here."}, 1_000
-      assert_receive {:block_sent, "Paragraph three, the tail of the answer."}, 1_000
-
+      assert_receive {:block_sent, "Paragraph one, padded out."}
+      assert_receive {:block_sent, "Paragraph two, also padded out here."}
+      assert_receive {:block_sent, "Paragraph three, the tail of the answer."}
       assert {:ok, nil} = DraftStream.seal(pid, text)
     end
 
@@ -673,7 +648,7 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
       DraftStream.push(pid, {:text_done, text})
 
       # One send, the whole remainder — the adapter ladder-splits it safely.
-      assert_receive {:block_sent, sent}, 1_000
+      assert_receive {:block_sent, sent}
       assert sent == text
       refute_received {:block_sent, _more}
 
@@ -697,8 +672,7 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
       # The first send opens the throttle window, so the next two events both
       # sit pending for the same tick.
       DraftStream.push(pid, {:text_delta, "Paragraph one, padded out.\n\n"})
-      assert_receive {:block_sent, "Paragraph one, padded out."}, 1_000
-
+      assert_receive {:block_sent, "Paragraph one, padded out."}
       DraftStream.push(pid, {:reasoning_done, "**Checking the calendar**\n\nbody text"})
 
       DraftStream.push(
@@ -706,9 +680,9 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
         {:text_delta, "Paragraph one, padded out.\n\nParagraph two, padded out.\n\n"}
       )
 
-      assert_receive next, 1_000
+      assert_receive next
       assert {:block_sent, "Paragraph two, padded out."} = next
-      assert_receive {:thought_sent, "💭 Checking the calendar", _ids}, 1_000
+      assert_receive {:thought_sent, "💭 Checking the calendar", _ids}
     end
 
     test "queued thoughts coalesce into exactly one 💭 message with one prefix" do
@@ -723,13 +697,13 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
 
       # The first thought drains alone and opens the throttle window.
       DraftStream.push(pid, {:reasoning_done, "**First thought**\n\nbody text"})
-      assert_receive {:thought_sent, "💭 First thought", _first_ids}, 1_000
+      assert_receive {:thought_sent, "💭 First thought", _first_ids}
 
       for heading <- ["**Alpha**", "**Beta**", "**Gamma**"] do
         DraftStream.push(pid, {:reasoning_done, heading <> "\n\nbody text"})
       end
 
-      assert_receive {:thought_sent, coalesced, _ids}, 1_000
+      assert_receive {:thought_sent, coalesced, _ids}
       assert coalesced == "💭 Alpha\nBeta\nGamma"
       refute_received {:thought_sent, _more, _more_ids}
     end
@@ -742,16 +716,14 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
       pid = DraftStream.start_link(ephemeral_block_spec(self()), @block_fast)
 
       DraftStream.push(pid, {:reasoning_done, "**First thought**\n\nbody"})
-      assert_receive {:thought_sent, "💭 First thought", ["id-1"]}, 1_000
-
+      assert_receive {:thought_sent, "💭 First thought", ["id-1"]}
       DraftStream.push(pid, {:reasoning_done, "**Second thought**\n\nbody"})
-      assert_receive {:thought_sent, "💭 Second thought", ["id-2"]}, 1_000
-
+      assert_receive {:thought_sent, "💭 Second thought", ["id-2"]}
       assert {:ok, :no_draft} = DraftStream.seal(pid, "the answer")
 
       # The sweep runs after the seal reply lands — wait for it.
-      assert_receive {:thought_deleted, "id-1"}, 1_000
-      assert_receive {:thought_deleted, "id-2"}, 1_000
+      assert_receive {:thought_deleted, "id-1"}
+      assert_receive {:thought_deleted, "id-2"}
       refute_received {:thought_deleted, _again}
     end
 
@@ -759,10 +731,9 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
       pid = DraftStream.start_link(ephemeral_block_spec(self()), @block_fast)
 
       DraftStream.push(pid, {:reasoning_done, "**Only thought**\n\nbody"})
-      assert_receive {:thought_sent, "💭 Only thought", ["id-1"]}, 1_000
-
+      assert_receive {:thought_sent, "💭 Only thought", ["id-1"]}
       assert :ok = DraftStream.discard(pid)
-      assert_receive {:thought_deleted, "id-1"}, 1_000
+      assert_receive {:thought_deleted, "id-1"}
     end
 
     test "a failed delete is logged, never retried, and the seal still returns" do
@@ -780,18 +751,17 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
         )
 
       DraftStream.push(pid, {:reasoning_done, "**First thought**\n\nbody"})
-      assert_receive {:thought_sent, _first, ["id-1"]}, 1_000
-
+      assert_receive {:thought_sent, _first, ["id-1"]}
       DraftStream.push(pid, {:reasoning_done, "**Second thought**\n\nbody"})
-      assert_receive {:thought_sent, _second, ["id-2"]}, 1_000
+      assert_receive {:thought_sent, _second, ["id-2"]}
 
       log =
         capture_log(fn ->
           assert {:ok, :no_draft} = DraftStream.seal(pid, "the answer")
           # Sweep (and its warning) happens after the reply — hold the capture
           # open until both deletes have run.
-          assert_receive {:thought_deleted, "id-1"}, 1_000
-          assert_receive {:thought_deleted, "id-2"}, 1_000
+          assert_receive {:thought_deleted, "id-1"}
+          assert_receive {:thought_deleted, "id-2"}
         end)
 
       assert log =~ "gone"
@@ -814,8 +784,7 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
         )
 
       DraftStream.push(pid, {:reasoning_done, "**Only thought**\n\nbody"})
-      assert_receive {:thought_sent, _text, ["id-1"]}, 1_000
-
+      assert_receive {:thought_sent, _text, ["id-1"]}
       # Sync window (200 ms) shorter than one delete (400 ms): before the
       # ordering fix this returned {:error, :draft_stream_timeout} and the
       # queue re-delivered the full reply — a duplicated message in chat.
@@ -844,7 +813,7 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
       assert Process.alive?(pid)
 
       DraftStream.push(pid, {:text_delta, "The answer paragraph, padded.\n\n"})
-      assert_receive {:block_sent, "The answer paragraph, padded."}, 1_000
+      assert_receive {:block_sent, "The answer paragraph, padded."}
     end
 
     test "a half-wired thought sweep is refused at spec build" do
@@ -904,18 +873,16 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
 
       DraftStream.push(pid, {:text_delta, @two_paras})
 
-      assert_receive {:open, {:bubble, 1}, @two_paras}, 1_000
-      assert_receive {:seal, {:bubble, 1}, @para_one}, 1_000
-
+      assert_receive {:open, {:bubble, 1}, @two_paras}
+      assert_receive {:seal, {:bubble, 1}, @para_one}
       # Rotation detaches the second paragraph and `mark_written` schedules its
       # flush, so the next flush opens a NEW bubble holding only the live slice
       # — the sealed card is never re-rendered. That open lands whether or not
       # more text has arrived, so waiting for it here makes both orderings (the
       # push before or after the 1 ms timer) yield the same observed sequence.
-      assert_receive {:open, {:bubble, 2}, @para_two}, 1_000
-
+      assert_receive {:open, {:bubble, 2}, @para_two}
       DraftStream.push(pid, {:text_delta, @two_paras <> " and finishes."})
-      assert_receive {:edit, {:bubble, 2}, final}, 1_000
+      assert_receive {:edit, {:bubble, 2}, final}
       assert final == @para_two <> " and finishes."
     end
 
@@ -923,8 +890,7 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
       pid = DraftStream.start_link(rotating_spec(self()), @rotate_fast)
 
       DraftStream.push(pid, {:text_delta, "Short enough to stay one bubble."})
-      assert_receive {:open, {:bubble, 1}, _text}, 1_000
-
+      assert_receive {:open, {:bubble, 1}, _text}
       Process.sleep(30)
       refute_received {:seal, _handle, _text}
     end
@@ -938,8 +904,7 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
       pid = DraftStream.start_link(rotating_spec(self()), @rotate_fast)
 
       DraftStream.push(pid, {:text_delta, fence})
-      assert_receive {:open, {:bubble, 1}, _text}, 1_000
-
+      assert_receive {:open, {:bubble, 1}, _text}
       Process.sleep(30)
       refute_received {:seal, _handle, _text}
     end
@@ -948,9 +913,8 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
       pid = DraftStream.start_link(rotating_spec(self()), @rotate_fast)
 
       DraftStream.push(pid, {:text_delta, @two_paras})
-      assert_receive {:open, {:bubble, 1}, @two_paras}, 1_000
-      assert_receive {:seal, {:bubble, 1}, @para_one}, 1_000
-
+      assert_receive {:open, {:bubble, 1}, @two_paras}
+      assert_receive {:seal, {:bubble, 1}, @para_one}
       # Mid-stream provider retry: the SSE cumulative restarts from scratch,
       # shorter than the already-sealed prefix. The engine clamps — no write
       # for the empty live slice, no crash.
@@ -962,12 +926,12 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
       # resumes rendering from there.
       full = @two_paras <> " and now it finishes."
       DraftStream.push(pid, {:text_delta, full})
-      assert_receive {:open, {:bubble, 2}, live}, 1_000
+      assert_receive {:open, {:bubble, 2}, live}
       assert live == @para_two <> " and now it finishes."
 
       final = full <> " Done."
       assert {:ok, nil} = DraftStream.seal(pid, final)
-      assert_receive {:seal, {:bubble, 2}, tail_text}, 1_000
+      assert_receive {:seal, {:bubble, 2}, tail_text}
       assert tail_text == @para_two <> " and now it finishes. Done."
     end
 
@@ -979,13 +943,12 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
       pid = DraftStream.start_link(rotating_spec(self()), @rotate_fast)
 
       DraftStream.push(pid, {:text_delta, text})
-      assert_receive {:open, {:bubble, 1}, ^text}, 1_000
-      assert_receive {:seal, {:bubble, 1}, ^head}, 1_000
-
+      assert_receive {:open, {:bubble, 1}, ^text}
+      assert_receive {:seal, {:bubble, 1}, ^head}
       # A grapheme-counted offset would slice mid-word here (the head measures
       # 45 characters but 51 bytes).
       DraftStream.push(pid, {:text_delta, text <> " Done."})
-      assert_receive {:open, {:bubble, 2}, live}, 1_000
+      assert_receive {:open, {:bubble, 2}, live}
       assert live == tail <> " Done."
     end
 
@@ -993,13 +956,11 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
       pid = DraftStream.start_link(rotating_spec(self()), @rotate_fast)
 
       DraftStream.push(pid, {:text_delta, @two_paras})
-      assert_receive {:seal, {:bubble, 1}, @para_one}, 1_000
-
+      assert_receive {:seal, {:bubble, 1}, @para_one}
       DraftStream.push(pid, {:text_delta, @two_paras <> " more"})
-      assert_receive {:open, {:bubble, 2}, _live}, 1_000
-
+      assert_receive {:open, {:bubble, 2}, _live}
       DraftStream.push(pid, {:text_delta, @two_paras <> " more and more"})
-      assert_receive {:edit, {:bubble, 2}, edited}, 1_000
+      assert_receive {:edit, {:bubble, 2}, edited}
       assert edited == @para_two <> " more and more"
       refute edited =~ "Paragraph one"
     end
@@ -1018,15 +979,13 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
           pid = DraftStream.start_link(rotating_spec(self(), seal: picky_seal), @rotate_fast)
 
           DraftStream.push(pid, {:text_delta, @two_paras})
-          assert_receive {:seal, {:bubble, 1}, @para_one}, 1_000
-
+          assert_receive {:seal, {:bubble, 1}, @para_one}
           DraftStream.push(pid, {:text_delta, @two_paras <> " x"})
-          assert_receive {:seal, {:bubble, 1}, _second_try}, 1_000
-
+          assert_receive {:seal, {:bubble, 1}, _second_try}
           # Cap reached: the draft degrades to one growing bubble — still
           # edited, never rotated again.
           DraftStream.push(pid, {:text_delta, @two_paras <> " xy"})
-          assert_receive {:edit, {:bubble, 1}, _grown}, 1_000
+          assert_receive {:edit, {:bubble, 1}, _grown}
           refute_received {:seal, {:bubble, 1}, _third_try}
 
           assert {:ok, nil} = DraftStream.seal(pid, final)
@@ -1047,9 +1006,8 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
 
       # Write 1 = the open, write 2 = the rotation seal ⇒ the cap is spent.
       DraftStream.push(pid, {:text_delta, @two_paras})
-      assert_receive {:open, {:bubble, 1}, _text}, 1_000
-      assert_receive {:seal, {:bubble, 1}, @para_one}, 1_000
-
+      assert_receive {:open, {:bubble, 1}, _text}
+      assert_receive {:seal, {:bubble, 1}, @para_one}
       DraftStream.push(pid, {:text_delta, @two_paras <> " and more text here."})
       Process.sleep(40)
       refute_received {:open, {:bubble, 2}, _live}
@@ -1080,8 +1038,7 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
 
       DraftStream.push(pid, {:session_started, session_id})
       DraftStream.push(pid, {:text_delta, @two_paras})
-      assert_receive {:seal, {:bubble, 1}, @para_one}, 1_000
-
+      assert_receive {:seal, {:bubble, 1}, @para_one}
       assert_receive {:stream_telemetry, :open, _open_meas}
       assert_receive {:stream_telemetry, :rotate, rotate_meas}
       assert rotate_meas.edit_index == 2
@@ -1093,8 +1050,7 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
       # two, which held only while the final seal beat a 1 ms timer; on the
       # macos-x64 CI leg it lost and the count read three. Waiting for the open
       # makes the sequence the test claims to check an observed one.
-      assert_receive {:open, {:bubble, 2}, @para_two}, 1_000
-
+      assert_receive {:open, {:bubble, 2}, @para_two}
       assert {:ok, _tail} = DraftStream.seal(pid, @two_paras)
       assert_receive {:stream_telemetry, :seal, seal_meas}
       assert seal_meas.total_edits == 3
@@ -1117,19 +1073,17 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
         DraftStream.start_link(rotating_spec(self()), edit_interval_ms: 300, min_draft_chars: 1)
 
       DraftStream.push(pid, {:text_delta, "First round commentary."})
-      assert_receive {:open, {:bubble, 1}, "First round commentary."}, 1_000
-
+      assert_receive {:open, {:bubble, 1}, "First round commentary."}
       # Arrives inside the throttle window, so it is still unwritten when the
       # iteration ends — the reset seal is what puts it on screen.
       DraftStream.push(pid, {:text_delta, "First round commentary. Extended."})
       DraftStream.push(pid, {:iteration_started, 2})
 
-      assert_receive {:seal, {:bubble, 1}, "First round commentary. Extended."}, 1_000
+      assert_receive {:seal, {:bubble, 1}, "First round commentary. Extended."}
       refute_received {:discard, {:bubble, 1}}
 
       DraftStream.push(pid, {:text_delta, "The actual answer of the final round."})
-      assert_receive {:open, {:bubble, 2}, "The actual answer of the final round."}, 1_000
-
+      assert_receive {:open, {:bubble, 2}, "The actual answer of the final round."}
       assert {:ok, nil} = DraftStream.seal(pid, "The actual answer of the final round.")
     end
   end
@@ -1139,11 +1093,9 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
       pid = DraftStream.start_link(rotating_spec(self()), @rotate_fast)
 
       DraftStream.push(pid, {:text_delta, @two_paras})
-      assert_receive {:seal, {:bubble, 1}, @para_one}, 1_000
-
+      assert_receive {:seal, {:bubble, 1}, @para_one}
       DraftStream.push(pid, {:text_delta, @two_paras})
-      assert_receive {:open, {:bubble, 2}, _live}, 1_000
-
+      assert_receive {:open, {:bubble, 2}, _live}
       final = @two_paras <> " and it ends right here."
       assert {:ok, nil} = DraftStream.seal(pid, final)
 
@@ -1159,8 +1111,7 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
 
       DraftStream.push(pid, {:text_delta, @two_paras})
       # The rotation self-schedules the next tick, which opens the new bubble.
-      assert_receive {:open, {:bubble, 2}, _live}, 1_000
-
+      assert_receive {:open, {:bubble, 2}, _live}
       assert {:ok, "the remainder chunk"} = DraftStream.seal(pid, @two_paras <> " tail")
     end
 
@@ -1173,8 +1124,7 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
         )
 
       DraftStream.push(pid, {:text_delta, @two_paras})
-      assert_receive {:seal, {:bubble, 1}, @para_one}, 1_000
-
+      assert_receive {:seal, {:bubble, 1}, @para_one}
       # The throttle keeps the next bubble from opening, so the remainder has
       # no live bubble to land in.
       assert {:ok, tail} = DraftStream.seal(pid, @two_paras <> " done.")
@@ -1188,10 +1138,9 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
           pid = DraftStream.start_link(rotating_spec(self()), @rotate_fast)
 
           DraftStream.push(pid, {:text_delta, @two_paras})
-          assert_receive {:seal, {:bubble, 1}, @para_one}, 1_000
-
+          assert_receive {:seal, {:bubble, 1}, @para_one}
           DraftStream.push(pid, {:text_delta, @two_paras})
-          assert_receive {:open, {:bubble, 2}, _live}, 1_000
+          assert_receive {:open, {:bubble, 2}, _live}
 
           assert {:ok, :no_draft} =
                    DraftStream.seal(pid, "A completely different final response.")
@@ -1217,16 +1166,14 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
           pid = DraftStream.start_link(rotating_spec(self()), @rotate_fast)
 
           DraftStream.push(pid, {:text_delta, @two_paras})
-          assert_receive {:seal, {:bubble, 1}, @para_one}, 1_000
-
+          assert_receive {:seal, {:bubble, 1}, @para_one}
           # The connection dropped; the provider regenerated a different answer,
           # longer than the sealed prefix so the live slice is non-empty.
           regenerated =
             "A different answer entirely, regenerated after the connection dropped mid-stream."
 
           DraftStream.push(pid, {:text_delta, regenerated})
-          assert_receive {:open, {:bubble, 2}, _live}, 1_000
-
+          assert_receive {:open, {:bubble, 2}, _live}
           assert {:ok, :no_draft} = DraftStream.seal(pid, regenerated)
 
           assert_received {:discard, {:bubble, 2}}
@@ -1240,11 +1187,9 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
       pid = DraftStream.start_link(rotating_spec(self()), @rotate_fast)
 
       DraftStream.push(pid, {:text_delta, @two_paras})
-      assert_receive {:seal, {:bubble, 1}, @para_one}, 1_000
-
+      assert_receive {:seal, {:bubble, 1}, @para_one}
       DraftStream.push(pid, {:text_delta, @two_paras})
-      assert_receive {:open, {:bubble, 2}, _live}, 1_000
-
+      assert_receive {:open, {:bubble, 2}, _live}
       assert :ok = DraftStream.discard(pid)
       assert_received {:discard, {:bubble, 2}}
       refute_received {:discard, {:bubble, 1}}
@@ -1258,16 +1203,14 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
       pid = DraftStream.start_link(rotating_spec(self()), @rotate_fast)
 
       DraftStream.push(pid, {:text_delta, "Working on it now."})
-      assert_receive {:open, {:bubble, 1}, "Working on it now."}, 1_000
+      assert_receive {:open, {:bubble, 1}, "Working on it now."}
       refute_received {:open, _handle, "💭" <> _rest}
 
       DraftStream.push(pid, {:reasoning_done, "**Comparing operators**\n\nbody text"})
-      assert_receive {:open, {:bubble, 2}, "💭 Comparing operators"}, 1_000
-
+      assert_receive {:open, {:bubble, 2}, "💭 Comparing operators"}
       DraftStream.push(pid, {:reasoning_done, "**Checking night dives**\n\nbody text"})
 
-      assert_receive {:edit, {:bubble, 2}, "💭 Comparing operators\nChecking night dives"},
-                     1_000
+      assert_receive {:edit, {:bubble, 2}, "💭 Comparing operators\nChecking night dives"}
     end
 
     test "the rolling join keeps the newest headings and marks the trim" do
@@ -1283,7 +1226,7 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
         Process.sleep(10)
       end
 
-      assert_receive {:edit, _handle, "💭 …\n" <> kept}, 1_000
+      assert_receive {:edit, _handle, "💭 …\n" <> kept}
       assert String.contains?(kept, "Delta four")
       refute String.contains?(kept, "Alpha one")
       assert String.length("💭 …\n" <> kept) <= 40
@@ -1294,28 +1237,25 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
         DraftStream.start_link(rotating_spec(self()), edit_interval_ms: 60, min_draft_chars: 1)
 
       DraftStream.push(pid, {:text_delta, "First snapshot of the answer."})
-      assert_receive {:open, {:bubble, 1}, "First snapshot of the answer."}, 1_000
-
+      assert_receive {:open, {:bubble, 1}, "First snapshot of the answer."}
       DraftStream.push(pid, {:reasoning_done, "**Deferred thought**\n\nbody"})
       DraftStream.push(pid, {:text_delta, "First snapshot of the answer. Second half."})
 
-      assert_receive {:edit, {:bubble, 1}, "First snapshot of the answer. Second half."}, 1_000
+      assert_receive {:edit, {:bubble, 1}, "First snapshot of the answer. Second half."}
       # Answer beat the thought on that tick; the bubble only opens later.
       refute_received {:open, _handle, "💭" <> _rest}
-      assert_receive {:open, {:bubble, 2}, "💭 Deferred thought"}, 1_000
+      assert_receive {:open, {:bubble, 2}, "💭 Deferred thought"}
     end
 
     test "the status bubble is deleted when the answer is sealed" do
       pid = DraftStream.start_link(rotating_spec(self()), @rotate_fast)
 
       DraftStream.push(pid, {:reasoning_done, "**Only thought**\n\nbody"})
-      assert_receive {:open, {:bubble, 1}, "💭 Only thought"}, 1_000
-
+      assert_receive {:open, {:bubble, 1}, "💭 Only thought"}
       DraftStream.push(pid, {:text_delta, "The answer text arrives."})
-      assert_receive {:open, {:bubble, 2}, "The answer text arrives."}, 1_000
-
+      assert_receive {:open, {:bubble, 2}, "The answer text arrives."}
       assert {:ok, nil} = DraftStream.seal(pid, "The answer text arrives.")
-      assert_receive {:discard, {:bubble, 1}}, 1_000
+      assert_receive {:discard, {:bubble, 1}}
       refute_received {:discard, {:bubble, 2}}
     end
 
@@ -1323,14 +1263,12 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
       pid = DraftStream.start_link(rotating_spec(self()), @rotate_fast)
 
       DraftStream.push(pid, {:reasoning_done, "**Only thought**\n\nbody"})
-      assert_receive {:open, {:bubble, 1}, "💭 Only thought"}, 1_000
-
+      assert_receive {:open, {:bubble, 1}, "💭 Only thought"}
       DraftStream.push(pid, {:text_delta, "Half an answer."})
-      assert_receive {:open, {:bubble, 2}, "Half an answer."}, 1_000
-
+      assert_receive {:open, {:bubble, 2}, "Half an answer."}
       assert :ok = DraftStream.discard(pid)
       assert_received {:discard, {:bubble, 2}}
-      assert_receive {:discard, {:bubble, 1}}, 1_000
+      assert_receive {:discard, {:bubble, 1}}
     end
 
     test "a failed status write is logged and never fails the seal" do
@@ -1380,13 +1318,11 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
           pid = DraftStream.start_link(rotating_spec(test_pid, open: picky_open), @rotate_fast)
 
           DraftStream.push(pid, {:reasoning_done, "**First thought**\n\nbody"})
-          assert_receive {:status_refused, _first}, 1_000
-
+          assert_receive {:status_refused, _first}
           DraftStream.push(pid, {:reasoning_done, "**Second thought**\n\nbody"})
-          assert_receive {:status_refused, _second}, 1_000
-
+          assert_receive {:status_refused, _second}
           DraftStream.push(pid, {:text_delta, "The answer still opens."})
-          assert_receive {:open, {:bubble, 1}, "The answer still opens."}, 1_000
+          assert_receive {:open, {:bubble, 1}, "The answer still opens."}
         end)
 
       assert log =~ "status_boom"

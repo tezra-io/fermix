@@ -62,7 +62,7 @@ defmodule FermixCore.SkillCuration.SchedulerTest do
     scheduler = start_scheduler!(ctx, [])
     send(scheduler, :tick)
 
-    assert_receive {:cycle_fired, opts}, 1_000
+    assert_receive {:cycle_fired, opts}
     assert Keyword.get(opts, :trigger) == :scheduled
     assert Keyword.get(opts, :repo) == ctx.repo
   end
@@ -81,7 +81,7 @@ defmodule FermixCore.SkillCuration.SchedulerTest do
     scheduler = start_scheduler!(ctx, [])
     send(scheduler, :tick)
 
-    assert_receive {:cycle_fired, _opts}, 1_000
+    assert_receive {:cycle_fired, _opts}
   end
 
   test "does not fire inside the cadence period", ctx do

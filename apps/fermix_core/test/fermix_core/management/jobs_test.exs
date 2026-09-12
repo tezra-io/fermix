@@ -414,7 +414,7 @@ defmodule FermixCore.Management.JobsTest do
     assert {:ok, view} = Jobs.cancel(started["job_id"], opts(server))
     assert view["status"] == "cancelled"
 
-    assert_receive {:DOWN, ^ref, :process, ^pid, :killed}, 1_000
+    assert_receive {:DOWN, ^ref, :process, ^pid, :killed}
   end
 
   # Retention is a promise about age, so a job past the window must be gone to

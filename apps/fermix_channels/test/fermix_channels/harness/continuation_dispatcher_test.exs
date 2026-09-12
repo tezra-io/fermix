@@ -51,7 +51,7 @@ defmodule FermixChannels.Harness.ContinuationDispatcherTest do
     test "re-ingests the notice as the channel owner through the resolved adapter", ctx do
       assert :ok = ContinuationDispatcher.dispatch(notice(), opts(ctx))
 
-      assert_receive {:ingested, [message], ingest_opts}, 1_000
+      assert_receive {:ingested, [message], ingest_opts}
       assert message.channel == "telegram"
       assert message.chat_id == "123"
       assert message.reply_target == "123"
@@ -66,7 +66,7 @@ defmodule FermixChannels.Harness.ContinuationDispatcherTest do
     test "the synthesized message authorizes as the owner through the real authorizer", ctx do
       assert :ok = ContinuationDispatcher.dispatch(notice(), opts(ctx))
 
-      assert_receive {:ingested, [message], _opts}, 1_000
+      assert_receive {:ingested, [message], _opts}
 
       assert {:ok, authorization} =
                message |> Source.from_message() |> Authorizer.resolve()
@@ -77,7 +77,7 @@ defmodule FermixChannels.Harness.ContinuationDispatcherTest do
     test "carries a thread through as the message thread", ctx do
       assert :ok = ContinuationDispatcher.dispatch(notice(%{thread: "77"}), opts(ctx))
 
-      assert_receive {:ingested, [message], _opts}, 1_000
+      assert_receive {:ingested, [message], _opts}
       assert message.thread_ts == "77"
       assert message.thread_scope == :thread
     end
@@ -88,8 +88,7 @@ defmodule FermixChannels.Harness.ContinuationDispatcherTest do
     test "keys the same conversation as the origin turn for an integer thread id", ctx do
       assert :ok = ContinuationDispatcher.dispatch(notice(%{thread: "456"}), opts(ctx))
 
-      assert_receive {:ingested, [message], _opts}, 1_000
-
+      assert_receive {:ingested, [message], _opts}
       origin = %{channel: "telegram", chat_id: "123", thread_ts: 456}
       assert ConversationKey.from(message) == ConversationKey.from(origin)
     end
@@ -141,7 +140,7 @@ defmodule FermixChannels.Harness.ContinuationDispatcherTest do
     test "a framework-delivered origin carries no env, no cwd and no acp sentinel", ctx do
       assert :ok = ContinuationDispatcher.dispatch(notice(), opts(ctx))
 
-      assert_receive {:ingested, [message], _opts}, 1_000
+      assert_receive {:ingested, [message], _opts}
       assert message.session_env == nil
       assert message.request_cwd == nil
       refute Map.has_key?(message.metadata, Acp.turn_opt())
@@ -157,7 +156,7 @@ defmodule FermixChannels.Harness.ContinuationDispatcherTest do
 
       assert :ok = ContinuationDispatcher.dispatch(acp_notice(), opts(ctx))
 
-      assert_receive {:ingested, [message], ingest_opts}, 1_000
+      assert_receive {:ingested, [message], ingest_opts}
       assert message.channel == "acp"
       assert message.chat_id == "sess-gone"
       # Trust is the transport's, so no sender id is stamped and none is needed.
@@ -175,8 +174,7 @@ defmodule FermixChannels.Harness.ContinuationDispatcherTest do
       persist_identity()
 
       assert :ok = ContinuationDispatcher.dispatch(acp_notice(), opts(ctx))
-      assert_receive {:ingested, [message], _opts}, 1_000
-
+      assert_receive {:ingested, [message], _opts}
       assert {:ok, authorization} = message |> Source.from_message() |> Authorizer.resolve()
       assert authorization.trust == :operator
     end
@@ -226,7 +224,7 @@ defmodule FermixChannels.Harness.ContinuationDispatcherTest do
       persist_identity()
 
       assert :ok = ContinuationDispatcher.dispatch(acp_notice(), opts(ctx))
-      assert_receive {:ingested, [message], _opts}, 1_000
+      assert_receive {:ingested, [message], _opts}
       assert message.metadata[Acp.turn_opt()] == :detached
 
       log =

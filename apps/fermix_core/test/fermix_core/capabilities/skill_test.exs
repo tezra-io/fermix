@@ -295,9 +295,7 @@ defmodule FermixCore.Capabilities.SkillTest do
       refute result.success
       assert result.error =~ "Max skill depth"
 
-      assert_receive {:recursion_capped, %{count: 1}, %{skill: "alpha", depth: depth, cap: cap}},
-                     200
-
+      assert_receive {:recursion_capped, %{count: 1}, %{skill: "alpha", depth: depth, cap: cap}}
       assert depth == Skill.max_skill_depth()
       assert cap == Skill.max_skill_depth()
     end

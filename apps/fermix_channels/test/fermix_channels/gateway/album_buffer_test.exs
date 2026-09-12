@@ -111,7 +111,7 @@ defmodule FermixChannels.Gateway.AlbumBufferTest do
       AlbumBuffer.ingest(image_message("1", "wa-1", "look at this"), pid)
       AlbumBuffer.ingest(image_message("2", "wa-1", "and this"), pid)
 
-      assert_receive {:dispatched, [merged]}, 1_000
+      assert_receive {:dispatched, [merged]}
       assert merged.content == "look at this\nand this"
       assert length(merged.attachments) == 2
       refute_received {:dispatched, _}
@@ -138,10 +138,10 @@ defmodule FermixChannels.Gateway.AlbumBufferTest do
       AlbumBuffer.ingest(image_message("2", "wa-1", ""), pid)
       AlbumBuffer.ingest(text_message("3", "wa-1", "what are these?"), pid)
 
-      assert_receive {:dispatched, [album]}, 1_000
+      assert_receive {:dispatched, [album]}
       assert length(album.attachments) == 2
 
-      assert_receive {:dispatched, [text]}, 1_000
+      assert_receive {:dispatched, [text]}
       assert text.content == "what are these?"
       assert text.attachments == []
     end
@@ -151,7 +151,7 @@ defmodule FermixChannels.Gateway.AlbumBufferTest do
 
       AlbumBuffer.ingest(text_message("1", "wa-1", "hi"), pid)
 
-      assert_receive {:dispatched, [msg]}, 1_000
+      assert_receive {:dispatched, [msg]}
       assert msg.content == "hi"
       assert buffers(pid) == %{}
     end
@@ -190,7 +190,7 @@ defmodule FermixChannels.Gateway.AlbumBufferTest do
       # :sys.get_state returns only after the flush handler completes, and the
       # post-dispatch forget/2 (a synchronous call into Idempotency) runs inside
       # that handler — so the ids are guaranteed forgotten before we probe.
-      assert_receive :flush_dispatched, 1_000
+      assert_receive :flush_dispatched
       :sys.get_state(pid)
 
       assert Idempotency.check_and_record(:whatsapp, "wa-err-1") == :fresh
@@ -205,7 +205,7 @@ defmodule FermixChannels.Gateway.AlbumBufferTest do
       AlbumBuffer.ingest(telegram_album_part("1", "alb-1"), pid)
       AlbumBuffer.ingest(telegram_album_part("2", "alb-1"), pid)
 
-      assert_receive {:dispatched, [merged]}, 1_000
+      assert_receive {:dispatched, [merged]}
       assert length(merged.attachments) == 2
       refute_received {:dispatched, _}
     end
@@ -215,7 +215,7 @@ defmodule FermixChannels.Gateway.AlbumBufferTest do
 
       AlbumBuffer.ingest(telegram_single("1", "hello"), pid)
 
-      assert_receive {:dispatched, [msg]}, 1_000
+      assert_receive {:dispatched, [msg]}
       assert msg.content == "hello"
       assert buffers(pid) == %{}
     end
@@ -228,7 +228,7 @@ defmodule FermixChannels.Gateway.AlbumBufferTest do
       AlbumBuffer.ingest(image_message("1", "wa-1", ""), pid)
       AlbumBuffer.ingest(image_message("2", "wa-2", ""), pid)
 
-      assert_receive {:dispatched, [overflow]}, 1_000
+      assert_receive {:dispatched, [overflow]}
       assert overflow.id == "2"
       assert map_size(buffers(pid)) == 1
     end
@@ -238,7 +238,7 @@ defmodule FermixChannels.Gateway.AlbumBufferTest do
 
       AlbumBuffer.ingest(image_message("1", "wa-1", "solo"), pid)
 
-      assert_receive {:dispatched, [msg]}, 1_000
+      assert_receive {:dispatched, [msg]}
       assert msg.id == "1"
       assert buffers(pid) == %{}
     end

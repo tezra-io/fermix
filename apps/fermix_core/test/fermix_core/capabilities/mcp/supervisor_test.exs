@@ -393,7 +393,7 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
     on_exit(fn -> if Process.alive?(sup_pid), do: Process.exit(sup_pid, :shutdown) end)
 
     # Exactly one discovery cycle runs, then silence — no respawn re-attempts.
-    assert_receive :broken_discovery_attempt, 500
+    assert_receive :broken_discovery_attempt
     refute_receive :broken_discovery_attempt, 300
 
     # The broken subtree is gone; the healthy peer and top supervisor are intact.
@@ -429,12 +429,12 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
         id: :mcp_supervisor_anubis_test
       )
 
-    assert_receive {:anubis_starter_invoked, server}, 500
+    assert_receive {:anubis_starter_invoked, server}
     assert server.command == "npx"
     assert server.args == ["-y", "@modelcontextprotocol/server-github"]
     assert server.env["TOKEN"] == "secret"
 
-    assert_receive {:fake_anubis_started, opts}, 500
+    assert_receive {:fake_anubis_started, opts}
     assert opts[:command] == "npx"
     assert opts[:env]["TOKEN"] == "secret"
   end
@@ -474,7 +474,7 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
         id: :mcp_supervisor_pass_env_test
       )
 
-    assert_receive {:fake_anubis_started, opts}, 500
+    assert_receive {:fake_anubis_started, opts}
     assert opts[:env]["FERMIX_MCP_PASS_TOKEN"] == "from-env"
     assert opts[:env]["PATH"] == "/opt/custom/bin"
   end
@@ -508,7 +508,7 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
         id: :mcp_supervisor_pass_env_all_test
       )
 
-    assert_receive {:fake_anubis_started, opts}, 500
+    assert_receive {:fake_anubis_started, opts}
     assert opts[:env]["FERMIX_MCP_PASS_TOKEN"] == "from-env"
   end
 

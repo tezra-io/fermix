@@ -60,8 +60,8 @@ defmodule FermixChannels.Gateway.TypingTest do
         send(test_pid, {:typing_result, result})
       end)
 
-    assert_receive :typing_started, 500
-    assert_receive {:DOWN, ^ref, :process, ^pid, reason}, 1_000
+    assert_receive :typing_started
+    assert_receive {:DOWN, ^ref, :process, ^pid, reason}
     assert reason == :normal
     assert_received {:typing_result, :work_done}
   end
@@ -95,7 +95,7 @@ defmodule FermixChannels.Gateway.TypingTest do
           )
         end)
 
-      assert_receive :typing_called, 500
+      assert_receive :typing_called
       assert_receive {:DOWN, ^ref, :process, ^pid, reason}, 2_000
       refute reason == :normal
     end)

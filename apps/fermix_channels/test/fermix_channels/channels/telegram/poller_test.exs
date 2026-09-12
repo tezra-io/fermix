@@ -208,7 +208,7 @@ defmodule FermixChannels.Channels.Telegram.PollerTest do
       pid = start_poller()
       send(pid, :poll)
 
-      assert_receive {:get_updates, startup_body}, 1_000
+      assert_receive {:get_updates, startup_body}
       assert startup_body["offset"] == 0
       assert startup_body["timeout"] == 0
       assert startup_body["allowed_updates"] == ["message", "callback_query"]
@@ -216,7 +216,7 @@ defmodule FermixChannels.Channels.Telegram.PollerTest do
 
       send(pid, :poll)
 
-      assert_receive {:get_updates, poll_body}, 1_000
+      assert_receive {:get_updates, poll_body}
       assert poll_body["offset"] == 0
       assert poll_body["timeout"] == 50
       assert poll_body["allowed_updates"] == ["message", "callback_query"]
@@ -232,11 +232,11 @@ defmodule FermixChannels.Channels.Telegram.PollerTest do
 
       pid = start_poller()
       send(pid, :poll)
-      assert_receive {:get_updates, startup_body}, 1_000
+      assert_receive {:get_updates, startup_body}
       assert startup_body["timeout"] == 0
 
       send(pid, :poll)
-      assert_receive {:get_updates, body}, 1_000
+      assert_receive {:get_updates, body}
       assert body["offset"] == 0
       assert body["timeout"] == 50
 
@@ -248,11 +248,11 @@ defmodule FermixChannels.Channels.Telegram.PollerTest do
 
       pid = start_poller()
       send(pid, :poll)
-      assert_receive {:get_updates, startup_body}, 1_000
+      assert_receive {:get_updates, startup_body}
       assert startup_body["timeout"] == 0
 
       send(pid, :poll)
-      assert_receive {:get_updates, body}, 1_000
+      assert_receive {:get_updates, body}
       assert body["offset"] == 0
       assert body["timeout"] == 50
 
@@ -270,7 +270,7 @@ defmodule FermixChannels.Channels.Telegram.PollerTest do
       pid = start_poller()
       send(pid, :poll)
 
-      assert_receive {:get_updates, startup_body}, 1_000
+      assert_receive {:get_updates, startup_body}
       assert startup_body["offset"] == 0
       assert startup_body["timeout"] == 0
       refute_receive {:telemetry, [:fermix, :channel, :message], _, _}, 100
@@ -278,11 +278,11 @@ defmodule FermixChannels.Channels.Telegram.PollerTest do
 
       send(pid, :poll)
 
-      assert_receive {:get_updates, poll_body}, 1_000
+      assert_receive {:get_updates, poll_body}
       assert poll_body["offset"] == 201
       assert poll_body["timeout"] == 50
 
-      assert_receive {:telemetry, [:fermix, :channel, :message], measurements, metadata}, 1_000
+      assert_receive {:telemetry, [:fermix, :channel, :message], measurements, metadata}
       assert measurements.count == 1
       assert metadata.channel == :telegram
       assert metadata.direction == :inbound
@@ -308,14 +308,14 @@ defmodule FermixChannels.Channels.Telegram.PollerTest do
 
       pid = start_poller(poll_interval: :manual, transient_backoff_ms: 10)
       send(pid, :poll)
-      assert_receive {:get_updates, startup_body}, 1_000
+      assert_receive {:get_updates, startup_body}
       assert startup_body["timeout"] == 0
 
       send(pid, :poll)
-      assert_receive {:get_updates, poll_body}, 1_000
+      assert_receive {:get_updates, poll_body}
       assert poll_body["timeout"] == 50
 
-      assert_receive {:get_updates, retry_body}, 1_000
+      assert_receive {:get_updates, retry_body}
       assert retry_body["timeout"] == 50
       assert Process.alive?(pid)
     end
@@ -330,14 +330,13 @@ defmodule FermixChannels.Channels.Telegram.PollerTest do
 
       pid = start_poller()
       send(pid, :poll)
-      assert_receive {:get_updates, startup_body}, 1_000
+      assert_receive {:get_updates, startup_body}
       assert startup_body["timeout"] == 0
 
       send(pid, :poll)
-      assert_receive {:get_updates, _poll_body}, 1_000
-
-      assert_receive {:"$gen_cast", {:ingest, %{content: "hello"}}}, 1_000
-      assert_receive {:"$gen_cast", {:ingest, %{content: "world"}}}, 1_000
+      assert_receive {:get_updates, _poll_body}
+      assert_receive {:"$gen_cast", {:ingest, %{content: "hello"}}}
+      assert_receive {:"$gen_cast", {:ingest, %{content: "world"}}}
       assert_offset(pid, 102)
     end
   end
@@ -383,19 +382,17 @@ defmodule FermixChannels.Channels.Telegram.PollerTest do
 
       pid = start_poller()
       send(pid, :poll)
-      assert_receive {:tg_call, startup_path, _}, 1_000
+      assert_receive {:tg_call, startup_path, _}
       assert String.ends_with?(startup_path, "/getUpdates")
 
       send(pid, :poll)
 
       # The tap funnels through as the synthesized /confirm inbound message.
-      assert_receive {:"$gen_cast", {:ingest, %{content: "/confirm TOK98765", chat_id: "42"}}},
-                     1_000
-
+      assert_receive {:"$gen_cast", {:ingest, %{content: "/confirm TOK98765", chat_id: "42"}}}
       # ...and the poller clears the spinner and strips the used button.
-      assert_receive {:tg_call, "/bottest-bot-token/answerCallbackQuery", ack}, 1_000
+      assert_receive {:tg_call, "/bottest-bot-token/answerCallbackQuery", ack}
       assert ack["callback_query_id"] == "cbq-1"
-      assert_receive {:tg_call, "/bottest-bot-token/editMessageReplyMarkup", edit}, 1_000
+      assert_receive {:tg_call, "/bottest-bot-token/editMessageReplyMarkup", edit}
       assert edit["message_id"] == 55
 
       assert_offset(pid, 301)
@@ -495,7 +492,7 @@ defmodule FermixChannels.Channels.Telegram.PollerTest do
 
       poll_once(pid)
 
-      assert_receive {:telemetry, [:fermix, :channel, :transport], measurements, metadata}, 1_000
+      assert_receive {:telemetry, [:fermix, :channel, :transport], measurements, metadata}
       assert measurements == %{count: 1, consecutive_failures: 3}
       assert metadata == %{channel: :telegram, status: :degraded, error_class: :api_error}
 
@@ -522,11 +519,10 @@ defmodule FermixChannels.Channels.Telegram.PollerTest do
 
       pid = start_escalating_poller(name)
       poll_times(pid, 4)
-      assert_receive {:telemetry, [:fermix, :channel, :transport], _, %{status: :degraded}}, 1_000
-
+      assert_receive {:telemetry, [:fermix, :channel, :transport], _, %{status: :degraded}}
       poll_once(pid)
 
-      assert_receive {:telemetry, [:fermix, :channel, :transport], measurements, metadata}, 1_000
+      assert_receive {:telemetry, [:fermix, :channel, :transport], measurements, metadata}
       assert measurements == %{count: 1, consecutive_failures: 3}
       assert metadata == %{channel: :telegram, status: :recovered, error_class: :none}
     end
@@ -566,7 +562,7 @@ defmodule FermixChannels.Channels.Telegram.PollerTest do
 
       # Escalation is bounded; the poll loop is not. A degraded poller that
       # stopped re-arming could never observe its own recovery.
-      assert_receive {:get_updates, _body}, 1_000
+      assert_receive {:get_updates, _body}
       assert Process.alive?(pid)
     end
 

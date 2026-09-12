@@ -120,7 +120,7 @@ defmodule FermixCore.Browser.ProfileServerTest do
     # connect/1 fails (closed port) -> finish_runtime must reap the spawned runtime.
     assert {:error, %Error{code: "cdp_connect_failed"}} = request(pid, "start")
     assert_received :launch_attempt
-    assert_receive {:stopped, 4242}, 1_000
+    assert_receive {:stopped, 4242}
   end
 
   defp console_event(type, text) do

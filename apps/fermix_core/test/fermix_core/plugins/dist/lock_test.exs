@@ -66,8 +66,7 @@ defmodule FermixCore.Plugins.Dist.LockTest do
         end)
       end)
 
-    assert_receive :first_in, 1_000
-
+    assert_receive :first_in
     # second contends while first holds; with a budget that outlasts the 50ms hold it succeeds
     second =
       Task.async(fn ->
@@ -112,7 +111,7 @@ defmodule FermixCore.Plugins.Dist.LockTest do
         end)
       end)
 
-    assert_receive :holding, 1_000
+    assert_receive :holding
     assert File.exists?(lock)
     holder
   end

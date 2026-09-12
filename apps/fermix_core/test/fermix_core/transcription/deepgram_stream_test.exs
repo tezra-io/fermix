@@ -291,8 +291,7 @@ defmodule FermixCore.Transcription.DeepgramStreamTest do
       assert_receive {:ws_binary, ^socket, _pcm}
 
       send(session, {:transcription_ws, socket, {:disconnect, :closed}})
-      assert_receive {:ws_started, socket2, _url, _headers, ^session}, 1_000
-
+      assert_receive {:ws_started, socket2, _url, _headers, ^session}
       inject(session, socket2, fixture("results_final"))
       assert_receive {:transcript_segment, ^session, %Segment{t0_ms: 2500, t1_ms: 4750}}
     end
@@ -303,7 +302,7 @@ defmodule FermixCore.Transcription.DeepgramStreamTest do
       socket4 =
         Enum.reduce(1..3, socket, fn _attempt, current ->
           send(session, {:transcription_ws, current, {:disconnect, :closed}})
-          assert_receive {:ws_started, next, _url, _headers, ^session}, 1_000
+          assert_receive {:ws_started, next, _url, _headers, ^session}
           next
         end)
 
@@ -325,7 +324,7 @@ defmodule FermixCore.Transcription.DeepgramStreamTest do
 
       assert log =~ "buffer full while reconnecting"
 
-      assert_receive {:ws_started, socket2, _url, _headers, ^session}, 1_000
+      assert_receive {:ws_started, socket2, _url, _headers, ^session}
       assert_receive {:ws_binary, ^socket2, flushed}
       assert byte_size(flushed) == @buffer_cap_bytes
     end
@@ -335,8 +334,7 @@ defmodule FermixCore.Transcription.DeepgramStreamTest do
 
       send(session, {:transcription_ws, socket, {:disconnect, :closed}})
 
-      assert_receive {:transcript_stream_error, ^session, {:ws_start_failed, :econnrefused}},
-                     1_000
+      assert_receive {:transcript_stream_error, ^session, {:ws_start_failed, :econnrefused}}
     end
   end
 
@@ -401,7 +399,7 @@ defmodule FermixCore.Transcription.DeepgramStreamTest do
       # A cast cannot reach a process blocked inside a send, so the wedged socket
       # is killed and the ordinary reconnect path takes it from there.
       assert_receive {:DOWN, ^socket_down, :process, ^socket, :killed}
-      assert_receive {:ws_started, socket2, _url, _headers, ^session}, 1_000
+      assert_receive {:ws_started, socket2, _url, _headers, ^session}
       assert_receive {:ws_binary, ^socket2, ^held}
     end
 
@@ -413,8 +411,7 @@ defmodule FermixCore.Transcription.DeepgramStreamTest do
       assert_receive {:ws_binary, ^socket, ^chunk}
 
       send(session, {:transcription_ws, socket, {:disconnect, :closed}})
-      assert_receive {:ws_started, socket2, _url, _headers, ^session}, 1_000
-
+      assert_receive {:ws_started, socket2, _url, _headers, ^session}
       StreamSession.push_pcm(session, chunk)
       assert_receive {:ws_binary, ^socket2, ^chunk}
       inflight = inflight_bytes(session)

@@ -256,7 +256,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.OwnerTest do
       assert :ok = Owner.watch_tools(owner, self())
       send(owner, {:mcp_session, :tools_changed})
 
-      assert_receive {:mcp_owner, :tools_changed}, 1_000
+      assert_receive {:mcp_owner, :tools_changed}
     end
 
     # The registration owner re-arms the watch on every discovery pass, so
@@ -271,7 +271,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.OwnerTest do
       assert :ok = Owner.watch_tools(owner, self())
       send(owner, {:mcp_session, :tools_changed})
 
-      assert_receive {:mcp_owner, :tools_changed}, 1_000
+      assert_receive {:mcp_owner, :tools_changed}
       refute_receive {:first, _message}, 200
     end
 
@@ -306,7 +306,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.OwnerTest do
       assert {:ok, [descriptor]} = Owner.list_tools(owner)
       assert descriptor.name == "eden_search"
 
-      assert_receive {:mcp_owner, :tools_changed}, 1_000
+      assert_receive {:mcp_owner, :tools_changed}
     end
   end
 
@@ -320,7 +320,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.OwnerTest do
 
       {:ok, owner} = Owner.start_link(owner_opts(status, agent))
 
-      assert_receive {:EXIT, ^owner, :normal}, 1_000
+      assert_receive {:EXIT, ^owner, :normal}
 
       assert {:ok, %{status: :reauthorization_required, owner: nil}} =
                RuntimeStatus.fetch(status, @source)
@@ -354,7 +354,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.OwnerTest do
 
       {:ok, owner} = Owner.start_link(owner_opts(status, agent))
 
-      assert_receive {:EXIT, ^owner, :normal}, 1_000
+      assert_receive {:EXIT, ^owner, :normal}
       assert {:ok, %{status: :reauthorization_required}} = RuntimeStatus.fetch(status, @source)
       assert opens(agent) == 1
     end
@@ -390,7 +390,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.OwnerTest do
 
       {:ok, owner} = Owner.start_link(opts)
 
-      assert_receive {:EXIT, ^owner, :normal}, 1_000
+      assert_receive {:EXIT, ^owner, :normal}
       assert {:ok, %{status: :needs_secret}} = RuntimeStatus.fetch(status, @source)
     end
 
@@ -505,13 +505,13 @@ defmodule FermixCore.Capabilities.MCP.Remote.OwnerTest do
       owner = start_owner(owner_opts(status, agent))
       {:ok, _descriptors} = Owner.list_tools(owner)
 
-      assert_receive {:lifecycle, :initialize, initialize_meta, _m}, 1_000
+      assert_receive {:lifecycle, :initialize, initialize_meta, _m}
       assert initialize_meta.source_id == "plugin:eden"
       assert initialize_meta.plugin == "eden"
       assert initialize_meta.result == :ok
       assert initialize_meta.attempt == 1
 
-      assert_receive {:lifecycle, :discover, discover_meta, _m2}, 1_000
+      assert_receive {:lifecycle, :discover, discover_meta, _m2}
       assert discover_meta.result == :ok
     end
   end

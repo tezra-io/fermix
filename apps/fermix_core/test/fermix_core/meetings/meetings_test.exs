@@ -319,7 +319,7 @@ defmodule FermixCore.MeetingsTest do
         end
       end)
 
-    assert_receive :slot_held, 1_000
+    assert_receive :slot_held
     on_exit(fn -> send(holder, :release) end)
   end
 
@@ -338,7 +338,7 @@ defmodule FermixCore.MeetingsTest do
         end
       end)
 
-    assert_receive :slot_held, 1_000
+    assert_receive :slot_held
     on_exit(fn -> send(holder, :release) end)
   end
 

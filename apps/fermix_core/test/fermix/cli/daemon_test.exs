@@ -457,10 +457,10 @@ defmodule Fermix.CLI.DaemonTest do
         )
       end)
 
-    assert_receive :pair_wait_started, 1_000
+    assert_receive :pair_wait_started
     Process.exit(cli, :kill)
 
-    assert_receive {:mobile_provider_call, :cancel_pairing, ["pair-session-1"]}, 1_000
+    assert_receive {:mobile_provider_call, :cancel_pairing, ["pair-session-1"]}
   end
 
   test "normal explicit pairing cancellation stays terminal and is not repeated", %{
@@ -671,13 +671,12 @@ defmodule Fermix.CLI.DaemonTest do
                timeout: 1_000
              )
 
-    assert_receive {:stopped, :lifecycle}, 1_000
+    assert_receive {:stopped, :lifecycle}
 
     assert {:ok, %{"status" => "shutting_down"}} =
              Client.request("shutdown", socket_path: socket_path, timeout: 1_000)
 
-    assert_receive {:stopped, :v0}, 1_000
-
+    assert_receive {:stopped, :v0}
     # Both seams default to the same function, so production has one stop path
     # rather than two implementations that can drift.
     assert Daemon.default_stopper() == Lifecycle.default_stopper()

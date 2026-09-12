@@ -472,7 +472,7 @@ defmodule FermixCore.Jobs.RunnerTest do
       ]
     )
 
-    assert_receive {:adapter_chat, messages, []}, 1_000
+    assert_receive {:adapter_chat, messages, []}
 
     assert Enum.any?(
              messages,
@@ -598,8 +598,7 @@ defmodule FermixCore.Jobs.RunnerTest do
       ]
     )
 
-    assert_receive {:adapter_chat, _messages, ["stage3_echo"]}, 1_000
-
+    assert_receive {:adapter_chat, _messages, ["stage3_echo"]}
     assert {:ok, failed_run} = Repo.get_job_run(run.id, server: repo)
     assert failed_run.status == "error"
     assert failed_run.error =~ "Maximum iterations (1) reached"
@@ -678,8 +677,8 @@ defmodule FermixCore.Jobs.RunnerTest do
 
     ref = Process.monitor(pid)
 
-    assert_receive {:tool_then_silent, :chat}, 1_000
-    assert_receive {:tool_then_silent, :continue}, 1_000
+    assert_receive {:tool_then_silent, :chat}
+    assert_receive {:tool_then_silent, :continue}
     assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
 
     assert {:ok, timed_out_run} = Repo.get_job_run(run.id, server: repo)
@@ -839,7 +838,7 @@ defmodule FermixCore.Jobs.RunnerTest do
       script: [%{content: "done"}]
     )
 
-    assert_receive {:adapter_chat, _messages, ["stage3_read"]}, 1_000
+    assert_receive {:adapter_chat, _messages, ["stage3_read"]}
   end
 
   test "operator-created scheduled runs preserve the operator capability surface", %{
@@ -873,7 +872,7 @@ defmodule FermixCore.Jobs.RunnerTest do
       script: [%{content: "done"}]
     )
 
-    assert_receive {:adapter_chat, _messages, tool_names}, 1_000
+    assert_receive {:adapter_chat, _messages, tool_names}
     assert "owner_read" in tool_names
     assert "owner_external" in tool_names
   end
@@ -912,7 +911,7 @@ defmodule FermixCore.Jobs.RunnerTest do
       script: [%{content: "done"}]
     )
 
-    assert_receive {:adapter_chat, _messages, ["skill_read"]}, 1_000
+    assert_receive {:adapter_chat, _messages, ["skill_read"]}
   end
 
   test "a scheduled job inherits its skill's capability policy", %{
@@ -951,7 +950,7 @@ defmodule FermixCore.Jobs.RunnerTest do
       script: [%{content: "done"}]
     )
 
-    assert_receive {:adapter_chat, _messages, ["policy_read"]}, 1_000
+    assert_receive {:adapter_chat, _messages, ["policy_read"]}
   end
 
   test "a skill narrows a guest job below its own trust default", %{
@@ -991,7 +990,7 @@ defmodule FermixCore.Jobs.RunnerTest do
       script: [%{content: "done"}]
     )
 
-    assert_receive {:adapter_chat, _messages, ["guest_read"]}, 1_000
+    assert_receive {:adapter_chat, _messages, ["guest_read"]}
   end
 
   test "a guest job naming a skill that demands only forbidden classes fails loudly", %{
@@ -1053,7 +1052,7 @@ defmodule FermixCore.Jobs.RunnerTest do
       script: [%{content: "Digest ready."}]
     )
 
-    assert_receive {:delivery_send, "123", "Digest ready.", opts}, 1_000
+    assert_receive {:delivery_send, "123", "Digest ready.", opts}
     assert Keyword.fetch!(opts, :proactive_key) == "job:#{run.id}"
 
     assert {:ok, delivered_run} = Repo.get_job_run(run.id, server: repo)
@@ -1121,8 +1120,7 @@ defmodule FermixCore.Jobs.RunnerTest do
       script: [%{content: "Digest ready."}]
     )
 
-    assert_receive {:delivery_send, "123", "Digest ready.", _opts}, 1_000
-
+    assert_receive {:delivery_send, "123", "Digest ready.", _opts}
     assert {:ok, delivered_run} = Repo.get_job_run(run.id, server: repo)
     assert delivered_run.status == "ok"
     assert delivered_run.delivery_status == "failed"
@@ -1165,8 +1163,7 @@ defmodule FermixCore.Jobs.RunnerTest do
     # scheduling alone; the same claim now has a 1 s gap under a 2 s sleep, so it
     # discriminates better AND survives a starved runner.
     assert duration_ms < 1_000
-    assert_receive {:delivery_send, "123", "Digest ready.", _opts}, 1_000
-
+    assert_receive {:delivery_send, "123", "Digest ready.", _opts}
     assert {:ok, delivered_run} = Repo.get_job_run(run.id, server: repo)
     assert delivered_run.status == "ok"
     assert delivered_run.delivery_status == "failed"
@@ -1231,7 +1228,7 @@ defmodule FermixCore.Jobs.RunnerTest do
     # Held inside the provider call (AgentLoop runs it in a task the runner then
     # awaits): the runner cannot answer a message here, which is exactly the
     # state the scheduler's reconciliation has to resolve.
-    assert_receive {:held, held}, 1_000
+    assert_receive {:held, held}
     assert Runner.run_id(pid) == run.id
 
     send(held, :release)
@@ -1424,7 +1421,7 @@ defmodule FermixCore.Jobs.RunnerTest do
       )
 
       # subagents is both advertised (operator, depth 0) and executable now.
-      assert_receive {:main_caps, main_names}, 1_000
+      assert_receive {:main_caps, main_names}
       assert "subagents" in main_names
 
       # Both workers nest under the run's session_id (cron_<job>_<ts>), not an
@@ -1480,7 +1477,7 @@ defmodule FermixCore.Jobs.RunnerTest do
         output_base_dir: output_base_dir
       )
 
-      assert_receive {:main_caps, main_names}, 1_000
+      assert_receive {:main_caps, main_names}
       assert "subagents" in main_names
       assert "web_like" in main_names
       refute "blocked_tool" in main_names
@@ -1538,7 +1535,7 @@ defmodule FermixCore.Jobs.RunnerTest do
         output_base_dir: output_base_dir
       )
 
-      assert_receive {:main_caps, main_names}, 1_000
+      assert_receive {:main_caps, main_names}
       assert "subagents" in main_names
       assert "web_like" in main_names
       refute "blocked_tool" in main_names
@@ -1581,7 +1578,7 @@ defmodule FermixCore.Jobs.RunnerTest do
 
       # subagents is policy class :external_api, which the guest surface excludes
       # — asserted at the cron seam, so guest cron fan-out is impossible.
-      assert_receive {:main_caps, names}, 1_000
+      assert_receive {:main_caps, names}
       refute "subagents" in names
       assert "guest_read" in names
 
@@ -1795,9 +1792,9 @@ defmodule FermixCore.Jobs.RunnerTest do
       )
 
       # Two failed probes, then the third succeeds and the run starts.
-      assert_receive {:readiness_probe, 1}, 1_000
-      assert_receive {:readiness_probe, 2}, 1_000
-      assert_receive {:readiness_probe, 3}, 1_000
+      assert_receive {:readiness_probe, 1}
+      assert_receive {:readiness_probe, 2}
+      assert_receive {:readiness_probe, 3}
       refute_receive {:readiness_probe, 4}, 100
 
       assert {:ok, stored_run} = Repo.get_job_run(run.id, server: repo)
@@ -1883,9 +1880,9 @@ defmodule FermixCore.Jobs.RunnerTest do
       )
 
       # First whole-loop attempt + two retries: the third attempt succeeds.
-      assert_receive {:transient_chat, 1}, 1_000
-      assert_receive {:transient_chat, 2}, 1_000
-      assert_receive {:transient_chat, 3}, 1_000
+      assert_receive {:transient_chat, 1}
+      assert_receive {:transient_chat, 2}
+      assert_receive {:transient_chat, 3}
       refute_receive {:transient_chat, 4}, 100
 
       assert {:ok, stored_run} = Repo.get_job_run(run.id, server: repo)
@@ -1922,9 +1919,9 @@ defmodule FermixCore.Jobs.RunnerTest do
         adapter_opts: [counter: counter, fail_until: 2, transient_error: bare]
       )
 
-      assert_receive {:transient_chat, 1}, 1_000
-      assert_receive {:transient_chat, 2}, 1_000
-      assert_receive {:transient_chat, 3}, 1_000
+      assert_receive {:transient_chat, 1}
+      assert_receive {:transient_chat, 2}
+      assert_receive {:transient_chat, 3}
       refute_receive {:transient_chat, 4}, 100
 
       assert {:ok, stored_run} = Repo.get_job_run(run.id, server: repo)
@@ -1966,7 +1963,7 @@ defmodule FermixCore.Jobs.RunnerTest do
         adapter_opts: [counter: counter, fail_until: 1, transient_error: provider_timeout]
       )
 
-      assert_receive {:transient_chat, 1}, 1_000
+      assert_receive {:transient_chat, 1}
       refute_receive {:transient_chat, 2}, 200
 
       assert {:ok, stored_run} = Repo.get_job_run(run.id, server: repo)
@@ -2002,8 +1999,8 @@ defmodule FermixCore.Jobs.RunnerTest do
       ref = Process.monitor(pid)
 
       # The startup stagger is slept (via delay_fn) BEFORE the first chat call.
-      assert_receive {:delay, 750}, 1_000
-      assert_receive {:transient_chat, 1}, 1_000
+      assert_receive {:delay, 750}
+      assert_receive {:transient_chat, 1}
       assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
     end
 
@@ -2029,9 +2026,9 @@ defmodule FermixCore.Jobs.RunnerTest do
         end)
 
       # 1 initial attempt + exactly 2 retries, then the run fails — bounded.
-      assert_receive {:transient_chat, 1}, 1_000
-      assert_receive {:transient_chat, 2}, 1_000
-      assert_receive {:transient_chat, 3}, 1_000
+      assert_receive {:transient_chat, 1}
+      assert_receive {:transient_chat, 2}
+      assert_receive {:transient_chat, 3}
       refute_receive {:transient_chat, 4}, 100
 
       assert log =~ "exhausted transient-infrastructure retries"
@@ -2059,7 +2056,7 @@ defmodule FermixCore.Jobs.RunnerTest do
       )
 
       # Exactly one attempt — a non-transient error must not enter the backoff.
-      assert_receive {:transient_chat, 1}, 1_000
+      assert_receive {:transient_chat, 1}
       refute_receive {:transient_chat, 2}, 100
 
       assert {:ok, stored_run} = Repo.get_job_run(run.id, server: repo)
@@ -2107,8 +2104,8 @@ defmodule FermixCore.Jobs.RunnerTest do
       # chat, and the tool never runs again. The in-place backoff is real time
       # here (the runner's `delay_fn` is its own seam, not the loop's), hence
       # the wider DOWN window.
-      assert_receive {:tool_then_transient, :chat}, 1_000
-      assert_receive {:tool_then_transient, :continue}, 1_000
+      assert_receive {:tool_then_transient, :chat}
+      assert_receive {:tool_then_transient, :continue}
       assert_receive {:tool_then_transient, :continue}, 5_000
       assert_receive {:tool_then_transient, :continue}, 10_000
       refute_receive {:tool_then_transient, :chat}, 200

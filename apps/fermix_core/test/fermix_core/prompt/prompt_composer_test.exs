@@ -240,7 +240,7 @@ defmodule FermixCore.Prompt.PromptComposerTest do
 
     # Observability only: memory is flagged, bootstrap is not scanned.
     assert log =~ "prompt part flagged by injection scan"
-    assert_receive {:injection_scan, %{match_count: 1}, %{name: :memory}}, 1_000
+    assert_receive {:injection_scan, %{match_count: 1}, %{name: :memory}}
     refute_receive {:injection_scan, _measurements, %{name: :fermix}}, 200
   end
 

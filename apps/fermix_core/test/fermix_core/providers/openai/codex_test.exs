@@ -419,8 +419,8 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
         )
 
       assert turn.content == "refreshed"
-      assert_receive {:attempt, 1, ["Bearer " <> ^old_token]}, 500
-      assert_receive {:attempt, 2, ["Bearer " <> ^new_token]}, 500
+      assert_receive {:attempt, 1, ["Bearer " <> ^old_token]}
+      assert_receive {:attempt, 2, ["Bearer " <> ^new_token]}
     end
 
     test "surfaces a recovery message when TokenManager reports auth_invalidated" do
@@ -584,7 +584,7 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
           req_options: [plug: {Req.Test, test_id}]
         )
 
-      assert_receive {:captured_body, decoded}, 500
+      assert_receive {:captured_body, decoded}
       assert decoded["reasoning"] == %{"effort" => "high", "summary" => "auto"}
       assert decoded["include"] == ["reasoning.encrypted_content"]
     end
