@@ -311,13 +311,16 @@ defmodule FermixCore.Capabilities.MCP.Remote.OwnerTest do
   end
 
   describe "refusals" do
+    # The link `start_link` establishes at spawn is the barrier, not a monitor:
+    # a refusal that does no I/O can finish before a monitor is ever installed,
+    # and a monitor on an already-dead pid reports `:noproc`, not `:normal`.
     test "a rejected credential is terminal and is never retried", %{status: status} do
+      Process.flag(:trap_exit, true)
       agent = start_agent([json(401, %{}), initialize_ok(), accepted()])
 
       {:ok, owner} = Owner.start_link(owner_opts(status, agent))
-      ref = Process.monitor(owner)
 
-      assert_receive {:DOWN, ^ref, :process, ^owner, :normal}, 1_000
+      assert_receive {:EXIT, ^owner, :normal}, 1_000
 
       assert {:ok, %{status: :reauthorization_required, owner: nil}} =
                RuntimeStatus.fetch(status, @source)
@@ -328,13 +331,13 @@ defmodule FermixCore.Capabilities.MCP.Remote.OwnerTest do
     end
 
     test "unreachability is retried up to the bounded attempt cap", %{status: status} do
+      Process.flag(:trap_exit, true)
       agent = start_agent([])
       opts = owner_opts(status, agent, %{}, open_error: :nxdomain)
 
       {:ok, owner} = Owner.start_link(opts)
-      ref = Process.monitor(owner)
 
-      assert_receive {:DOWN, ^ref, :process, ^owner, :normal}, 5_000
+      assert_receive {:EXIT, ^owner, :normal}, 5_000
       assert {:ok, %{status: :remote_unreachable}} = RuntimeStatus.fetch(status, @source)
 
       # The retry DECISION, not just its end state: `transient?/1` classifies the
@@ -346,12 +349,12 @@ defmodule FermixCore.Capabilities.MCP.Remote.OwnerTest do
     # The other half of that decision. A terminal classification must not spend
     # attempts, and asserting only the status cannot tell the two apart.
     test "a terminal classification is not retried", %{status: status} do
+      Process.flag(:trap_exit, true)
       agent = start_agent([json(401, %{})])
 
       {:ok, owner} = Owner.start_link(owner_opts(status, agent))
-      ref = Process.monitor(owner)
 
-      assert_receive {:DOWN, ^ref, :process, ^owner, :normal}, 1_000
+      assert_receive {:EXIT, ^owner, :normal}, 1_000
       assert {:ok, %{status: :reauthorization_required}} = RuntimeStatus.fetch(status, @source)
       assert opens(agent) == 1
     end
@@ -377,6 +380,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.OwnerTest do
     test "an absent credential is :needs_secret, not a client that starts and 401s", %{
       status: status
     } do
+      Process.flag(:trap_exit, true)
       agent = start_agent([])
 
       opts =
@@ -385,9 +389,8 @@ defmodule FermixCore.Capabilities.MCP.Remote.OwnerTest do
         |> Keyword.put(:resolver, fn "eden" -> nil end)
 
       {:ok, owner} = Owner.start_link(opts)
-      ref = Process.monitor(owner)
 
-      assert_receive {:DOWN, ^ref, :process, ^owner, :normal}, 1_000
+      assert_receive {:EXIT, ^owner, :normal}, 1_000
       assert {:ok, %{status: :needs_secret}} = RuntimeStatus.fetch(status, @source)
     end
 
