@@ -48,6 +48,25 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   stamps one id shared by both trees; the target remains its own field in
   the engine manifest. Nothing else changed.
 
+### Added
+
+- **Computer History records every site you visit in the browsers you
+  allow.** Alongside window titles, the recorder now reports each page's
+  address and title for every site inside an allowlisted browser, so
+  "which page was I reading about X" is answerable through `recall_activity`
+  and the daily threads. Addresses are kept as scheme, host and path only:
+  the query string and fragment, where session ids and tokens live, are
+  dropped in the recorder and again at the store. Typed text inside a
+  browser is recorded only from windows the recorder can positively classify
+  as not private; today that is the Chrome family, whose incognito windows
+  carry a marker the live check pins. Safari, Edge and Firefox report an
+  unknown private state, so their addresses are recorded, their typed text
+  is withheld, and `/history status` names them. The per-site allowlist
+  (`sites`) is retired: an existing `config.toml` still boots, logs one
+  retirement line, and the key disappears on the next save. The scrubber
+  also redacts payment-card numbers and IBANs before anything is stored.
+  Pairs with compux 0.9.0.
+
 ## [0.10.0] - 2026-09-11
 
 ### Added

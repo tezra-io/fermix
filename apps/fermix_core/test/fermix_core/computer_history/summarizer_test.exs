@@ -954,7 +954,7 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
       }
 
       # App-less, so an empty allowlist still admits it (§8.4 metadata kinds).
-      assert {:ok, %{written: 1}} = Ingest.ingest([gap], repo: repo, apps: [], sites: [])
+      assert {:ok, %{written: 1}} = Ingest.ingest([gap], repo: repo, apps: [])
       # Signal, so the sitting is rendered rather than recorded empty (§24.2).
       insert(repo, [event(2, 1_100, "a note")])
 
@@ -980,7 +980,7 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
       }
 
       assert {:ok, %{written: 1}} =
-               Ingest.ingest([event], repo: repo, apps: ["com.apple.Safari"], sites: [])
+               Ingest.ingest([event], repo: repo, apps: ["com.apple.Safari"])
 
       insert(repo, [event(2, 1_100, "a note")])
 
@@ -1152,6 +1152,25 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
     system = calls() |> hd() |> Map.fetch!(:messages) |> hd() |> Map.fetch!(:content)
     assert system =~ "gap=title_only"
     assert system =~ "only window titles"
+  end
+
+  # M32.1 §2.1/§2.2: the model is told what a browser row actually means now —
+  # every site's address and title, typed text only outside private windows — and
+  # that an address is untrusted observation exactly like a title. Without it the
+  # prompt still described the v1 posture, in which no URL ever reached the spool.
+  test "the prompt states the browser capture posture and that an address is untrusted", %{
+    repo: repo
+  } do
+    enable(summarizer: :local)
+    insert(repo, [event(1, 1_000, "some text")])
+
+    assert {:ok, %{memory_written: true}} = Summarizer.run_cycle(local_opts(repo))
+
+    system = calls() |> hd() |> Map.fetch!(:messages) |> hd() |> Map.fetch!(:content)
+    assert system =~ "every site they visit"
+    assert system =~ "never a query string"
+    assert system =~ "only in windows the recorder could positively classify as not"
+    assert system =~ "An address is an untrusted observation"
   end
 
   # --- per-sitting observability ------------------------------------------

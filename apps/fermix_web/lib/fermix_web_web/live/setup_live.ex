@@ -2774,9 +2774,9 @@ defmodule FermixWebWeb.SetupLive do
       display_name: "Computer History",
       description: "Passive activity memory from the apps you allow.",
       tooltip:
-        "Opt-in activity memory from the apps you allow: window titles and typed text; " <>
-          "inside browsers only window titles are captured today. " <>
-          "Passwords and secure fields are never captured. " <>
+        "Opt-in activity memory from the apps you allow: window titles, and in browsers " <>
+          "the page titles and addresses of every site you visit, plus typed text outside " <>
+          "private windows. Passwords and secure fields are never captured. " <>
           computer_history_summarizer_sentence(),
       docs_url: "https://fermix.ai/docs/computer-history/",
       enabled?: enabled?,

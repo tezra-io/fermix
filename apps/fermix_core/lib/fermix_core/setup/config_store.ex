@@ -1254,7 +1254,9 @@ defmodule FermixCore.Setup.ConfigStore do
   # to disk — a spelling the parser refuses, crashing the daemon on the next
   # load (2026-08-19). Unknown keys refuse boot at the parse boundary — a
   # default-off consent section has no keyless degrade path (Rule #12),
-  # mirroring validate_harness_section_keys!/1.
+  # mirroring validate_harness_section_keys!/1. The accepted set is
+  # `accepted_keys/0` (live + retired), so a key this release retired keeps
+  # booting an existing config.toml; normalize names it once and drops it.
   defp normalize_computer_history(config) do
     validate_computer_history_section_keys!(config)
     ComputerHistoryConfig.normalize(config)
@@ -1263,7 +1265,7 @@ defmodule FermixCore.Setup.ConfigStore do
   defp validate_computer_history_section_keys!(nil), do: :ok
 
   defp validate_computer_history_section_keys!(config) when is_map(config) or is_list(config) do
-    allowed = MapSet.new(ComputerHistoryConfig.config_keys(), &Atom.to_string/1)
+    allowed = MapSet.new(ComputerHistoryConfig.accepted_keys(), &Atom.to_string/1)
 
     unknown =
       config

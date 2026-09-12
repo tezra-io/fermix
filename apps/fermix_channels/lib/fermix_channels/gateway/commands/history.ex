@@ -138,11 +138,9 @@ defmodule FermixChannels.Gateway.Commands.History do
   defp degrade_phrase({:sidecar_missing, _path}), do: "the recorder binary is not installed"
   defp degrade_phrase(other), do: inspect(other)
 
-  defp allowlist_line do
-    apps = Config.apps()
-    sites = Config.sites()
-    "Apps allowlisted: #{count(apps)}; sites: #{count(sites)}."
-  end
+  # Consent is per app, and only per app (M32.1 §2.1): allowlisting a browser is
+  # consent to record every site visited inside it, so there is no site count.
+  defp allowlist_line, do: "Apps allowlisted: #{count(Config.apps())}."
 
   # Per-app coverage states the recorder reported in the retention window (§8.4a):
   # an app it can only read titles in observes no typed text at all, which changes
@@ -164,22 +162,50 @@ defmodule FermixChannels.Gateway.Commands.History do
 
   defp coverage_since, do: System.system_time(:millisecond) - @coverage_window_ms
 
+  # The SQL filter (`Repo.computer_history_coverage_gaps/2`) is the contract for
+  # which reasons arrive here, so a reason with no bucket is a code defect, not
+  # input to absorb: it RAISES rather than landing in whichever clause happens to
+  # be last (an unbucketed reason silently rendering as "AX refused" would tell
+  # the owner the wrong thing about their own coverage).
   defp coverage_clauses(pairs) do
-    {title_only, ax_refused} =
-      Enum.split_with(pairs, fn {_app, reason} -> reason == "title_only" end)
+    buckets = Enum.group_by(pairs, &bucket!/1, fn {app, _reason} -> app end)
 
-    [title_only_clause(apps(title_only)), ax_refused_clause(apps(ax_refused))]
+    [
+      title_only_clause(apps(buckets, :title_only)),
+      private_unknown_clause(apps(buckets, :private_unknown)),
+      ax_refused_clause(apps(buckets, :ax_refused))
+    ]
     |> Enum.reject(&is_nil/1)
     |> Enum.join("; ")
     |> Kernel.<>(".")
   end
 
-  defp apps(pairs), do: pairs |> Enum.map(fn {app, _reason} -> app end) |> Enum.uniq()
+  defp bucket!({_app, "title_only"}), do: :title_only
+  defp bucket!({_app, "private_unknown"}), do: :private_unknown
+  defp bucket!({_app, "ax_refused" <> _names}), do: :ax_refused
+
+  defp bucket!({app, reason}) do
+    raise ArgumentError,
+          "computer_history coverage gap #{inspect(reason)} for #{inspect(app)} has no status " <>
+            "clause; the coverage_gaps SQL filter and these buckets are one contract"
+  end
+
+  defp apps(buckets, bucket), do: buckets |> Map.get(bucket, []) |> Enum.uniq()
 
   defp title_only_clause([]), do: nil
 
   defp title_only_clause(apps),
     do: "title-only for #{Enum.join(apps, ", ")} (no typed text is observable there)"
+
+  # Browsers whose private-window state the recorder cannot positively classify:
+  # consent is per app so page addresses still flow, but typed text needs a
+  # positive not-private signal and there is none, so it is withheld (inv. 26).
+  defp private_unknown_clause([]), do: nil
+
+  defp private_unknown_clause(apps),
+    do:
+      "private-window state unknown for #{Enum.join(apps, ", ")} " <>
+        "(page URLs are recorded there; typed text is not)"
 
   defp ax_refused_clause([]), do: nil
 

@@ -1851,20 +1851,22 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.detail =~ "off"
     end
 
-    test "macOS + enabled local summarizer reports on-device + allowlist sizes" do
+    test "macOS + enabled local summarizer reports on-device + the app allowlist size" do
       # The chain is injected because the row now reports the chain posture too:
       # without it this case would read whatever provider config ran before it.
       result =
         Checks.computer_history(
           macos?: true,
-          config: [enabled: true, apps: ["com.apple.Safari"], sites: [], summarizer: :local],
+          config: [enabled: true, apps: ["com.apple.Safari"], summarizer: :local],
           routes: {:ok, [loopback_route()]}
         )
 
       assert result.status == :ok
       assert result.detail =~ "on"
       assert result.detail =~ "on-device"
-      assert result.detail =~ "1 app(s)"
+      assert result.detail =~ "1 app(s) allowlisted"
+      # M32.1 §2.1: there is no per-site filter to count any more.
+      refute result.detail =~ "site"
     end
 
     test "macOS + Tier-3 summarizer flags the remote egress" do

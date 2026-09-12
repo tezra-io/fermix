@@ -182,6 +182,65 @@ defmodule FermixChannels.Gateway.Commands.HistoryTest do
     assert text =~ "AX refused for com.docker.docker"
   end
 
+  # M32.1 §2.1: consent is per app and only per app, so the line has no site
+  # count to report — a site clause here would contradict "every site in an
+  # allowlisted browser is recorded".
+  test "status counts allowlisted apps and never sites", %{ctx: ctx} do
+    # The module setup establishes this key and restores it in its own on_exit.
+    Application.put_env(:fermix_core, :computer_history,
+      enabled: true,
+      apps: ["com.apple.Safari", "com.microsoft.VSCode"]
+    )
+
+    text = status_reply(ctx)
+
+    assert text =~ "Apps allowlisted: 2."
+    refute text =~ "sites"
+  end
+
+  # M32.1 §2.2: a browser whose private-window state the recorder cannot classify
+  # is a THIRD coverage state, and the owner has to be told that its addresses are
+  # recorded while its typed text is not.
+  test "status names all three coverage states distinctly", %{ctx: ctx, repo: repo} do
+    now = System.system_time(:millisecond)
+
+    events = [
+      %{
+        boot_id: "b1",
+        source_seq: 1,
+        ts: now - 1_000,
+        type: "observer.gap",
+        bundle_id: "com.microsoft.VSCode",
+        gap_reason: "title_only"
+      },
+      %{
+        boot_id: "b1",
+        source_seq: 2,
+        ts: now - 900,
+        type: "observer.gap",
+        bundle_id: "com.apple.Safari",
+        gap_reason: "private_unknown"
+      },
+      %{
+        boot_id: "b1",
+        source_seq: 3,
+        ts: now - 800,
+        type: "observer.gap",
+        bundle_id: "com.docker.docker",
+        gap_reason: "ax_refused:AXValueChanged"
+      }
+    ]
+
+    assert {:ok, 3} = Repo.computer_history_insert_events(events, server: repo)
+
+    text = status_reply(ctx)
+
+    assert text =~ "title-only for com.microsoft.VSCode"
+    assert text =~ "private-window state unknown for com.apple.Safari"
+    assert text =~ "page URLs are recorded there; typed text is not"
+    assert text =~ "AX refused for com.docker.docker"
+  end
+
   test "status omits the coverage line when there are no coverage gaps", %{ctx: ctx} do
     assert :ok = History.execute(message("status"), reply_fn(self()), macos_ctx(ctx))
     assert_receive {:reply, text}
@@ -279,7 +338,7 @@ defmodule FermixChannels.Gateway.Commands.HistoryTest do
     event = %{boot_id: "b1", source_seq: 1, ts: 1_000, type: "app.activated", bundle_id: "com.a"}
 
     assert {:ok, %{written: 0, dropped: 1}} =
-             Ingest.ingest([event], repo: repo, apps: ["com.a"], sites: [])
+             Ingest.ingest([event], repo: repo, apps: ["com.a"])
 
     assert {:ok, 0} = Repo.computer_history_count_events(server: repo)
 
@@ -289,7 +348,7 @@ defmodule FermixChannels.Gateway.Commands.HistoryTest do
     assert :ok = Repo.computer_history_set_pause_until(past, server: repo)
 
     assert {:ok, %{written: 1, dropped: 0}} =
-             Ingest.ingest([event], repo: repo, apps: ["com.a"], sites: [])
+             Ingest.ingest([event], repo: repo, apps: ["com.a"])
 
     assert {:ok, 1} = Repo.computer_history_count_events(server: repo)
   end
@@ -300,7 +359,7 @@ defmodule FermixChannels.Gateway.Commands.HistoryTest do
     event = %{boot_id: "b1", source_seq: 1, ts: 1_000, type: "app.activated", bundle_id: "com.a"}
 
     assert {:ok, %{written: 0, dropped: 1}} =
-             Ingest.ingest([event], repo: repo, apps: ["com.a"], sites: [])
+             Ingest.ingest([event], repo: repo, apps: ["com.a"])
 
     assert {:ok, 0} = Repo.computer_history_count_events(server: repo)
   end

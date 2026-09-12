@@ -105,7 +105,6 @@ defmodule FermixCore.ComputerHistory.Capturer do
       mode: :bootstrapping,
       repo: Keyword.get(opts, :repo, Repo),
       apps: Keyword.get_lazy(opts, :apps, &Config.apps/0),
-      sites: Keyword.get_lazy(opts, :sites, &Config.sites/0),
       binary_path: Keyword.get(opts, :binary_path),
       sidecar_env: Keyword.get(opts, :sidecar_env, []),
       lock_path: Keyword.get_lazy(opts, :lock_path, &SingletonLock.default_path/0),
@@ -191,7 +190,7 @@ defmodule FermixCore.ComputerHistory.Capturer do
   defp send_observe_start(driver_state, state) do
     request = %{
       "action" => "observe_start",
-      "params" => %{"apps" => state.apps, "sites" => state.sites}
+      "params" => %{"apps" => state.apps}
     }
 
     Port.command(driver_state.port, Compux.Protocol.encode_request(request))
@@ -416,7 +415,7 @@ defmodule FermixCore.ComputerHistory.Capturer do
   defp do_flush(state, [], held), do: %{state | buffer: held}
 
   defp do_flush(state, writable, held) do
-    case Ingest.ingest(writable, repo: state.repo, apps: state.apps, sites: state.sites) do
+    case Ingest.ingest(writable, repo: state.repo, apps: state.apps) do
       {:ok, stats} ->
         log_ingest_stats(stats)
         %{state | buffer: held, overflow_pending?: false}
@@ -429,15 +428,31 @@ defmodule FermixCore.ComputerHistory.Capturer do
   end
 
   # Counts only, never content (§15.1). A flush that silently loses rows to the
-  # allowlist or to the title collapse is indistinguishable from a capture gap —
-  # the live spool ran at 99% collapsed frames with nothing anywhere to say so.
-  # A flush that wrote everything it was given says nothing.
-  defp log_ingest_stats(%{dropped: 0, collapsed: 0}), do: :ok
+  # allowlist, to the title collapse or to the private/URL gates is
+  # indistinguishable from a capture gap — the live spool ran at 99% collapsed
+  # frames with nothing anywhere to say so. A flush that wrote everything it was
+  # given says nothing. Refusals print BY KIND so "the recorder is sending private
+  # frames" and "the recorder is sending unusable addresses" stay distinguishable.
+  defp log_ingest_stats(%{dropped: 0, collapsed: 0, refused: refused} = stats) do
+    if refusals?(refused), do: log_stats(stats), else: :ok
+  end
 
-  defp log_ingest_stats(%{written: written, dropped: dropped, collapsed: collapsed}) do
+  defp log_ingest_stats(stats), do: log_stats(stats)
+
+  defp refusals?(refused), do: Enum.any?(refused, fn {_kind, count} -> count > 0 end)
+
+  defp log_stats(%{written: written, dropped: dropped, collapsed: collapsed, refused: refused}) do
     Logger.debug(
-      "computer_history ingest: written #{written}, dropped #{dropped}, collapsed #{collapsed}"
+      "computer_history ingest: written #{written}, dropped #{dropped}, " <>
+        "collapsed #{collapsed}#{refused_clause(refused)}"
     )
+  end
+
+  defp refused_clause(refused) do
+    case Enum.filter(refused, fn {_kind, count} -> count > 0 end) do
+      [] -> ""
+      kinds -> ", refused " <> Enum.map_join(kinds, " ", fn {k, n} -> "#{k} #{n}" end)
+    end
   end
 
   # A self-generated gap, bounded like the event path: at `max_queue` it coalesces

@@ -673,6 +673,33 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert second == first
   end
 
+  # v1.1 decision 1: `sites` is retired. An operator's existing config.toml still
+  # carries it, so the parse boundary must ACCEPT it (never the boot refusal below),
+  # and the save must not write it back.
+  test "a retired computer_history key loads and is dropped on the next save (M32.1)" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.computer_history]
+    enabled = true
+    apps = ["com.apple.Safari"]
+    sites = ["github.com"]
+    """)
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+    computer_history = Keyword.get(loaded.fermix_core, :computer_history, [])
+    assert Keyword.get(computer_history, :apps) == ["com.apple.Safari"]
+    refute Keyword.has_key?(computer_history, :sites)
+
+    assert :ok = ConfigStore.save_snapshot(loaded)
+    refute File.read!(Path.join(tmp_home, "config.toml")) =~ "sites"
+  end
+
   test "load refuses to boot on an unknown computer_history key (M32)" do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")

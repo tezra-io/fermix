@@ -1336,8 +1336,7 @@ defmodule Fermix.CLI.Doctor.Checks do
 
     detail =
       "on; summarizer #{summarizer_label(ComputerHistoryConfig.summarizer(config))}; " <>
-        "#{length(ComputerHistoryConfig.apps(config))} app(s), " <>
-        "#{length(ComputerHistoryConfig.sites(config))} site(s) allowlisted. " <>
+        "#{length(ComputerHistoryConfig.apps(config))} app(s) allowlisted. " <>
         ComputerHistoryGate.chain_posture_sentence(posture)
 
     history_row(posture.state, detail)

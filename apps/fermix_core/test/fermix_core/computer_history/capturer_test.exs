@@ -59,7 +59,6 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
       binary_path: @fake,
       lock_path: ctx.lock_path,
       apps: ["com.apple.Safari"],
-      sites: [],
       flush_interval_ms: 25,
       batch_size: 50
     ]
@@ -135,6 +134,84 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
       assert Enum.any?(rows, &(&1.type == "field.value" and &1.text == "hello"))
     end
 
+    # M32.1 §2.1/§2.2 end to end, through the real Port: the recorder's browser
+    # frames land under the app allowlist alone, the URL arrives stripped, a private
+    # navigation never lands, and a browser value the recorder could not classify
+    # keeps its row without its text. The unknown-state field frame is deliberately
+    # HOSTILE — the sidecar contract says it never sends text for a non-not_private
+    # window, and the store must prove that rather than trust it.
+    test "browser frames land stripped, gated and accounted for", ctx do
+      browser = fn seq, extra ->
+        app_event(
+          seq,
+          Map.merge(
+            %{"app" => %{"bundle_id" => "com.apple.Safari", "name" => "Safari", "pid" => 10}},
+            extra
+          )
+        )
+      end
+
+      frames = [
+        browser.(1, %{
+          "kind" => "browser.navigated",
+          "url" => "https://mail.example.com/u/0/inbox?token=abc#t9",
+          "host" => "mail.example.com",
+          "page_title" => "Inbox",
+          "window_ref" => "11",
+          "tab_ref" => "21",
+          "private_state" => "not_private"
+        }),
+        browser.(2, %{
+          "kind" => "browser.navigated",
+          "url" => "https://private.example/secret",
+          "host" => "private.example",
+          "window_ref" => "12",
+          "tab_ref" => "22",
+          "private_state" => "private"
+        }),
+        browser.(3, %{
+          "kind" => "field.value",
+          "browser_id" => "com.apple.Safari",
+          "window_ref" => "11",
+          "tab_ref" => "21",
+          "private_state" => "unknown",
+          "text" => "typed-into-an-unclassified-window",
+          "char_len" => 33
+        }),
+        browser.(4, %{
+          "kind" => "observer.gap",
+          "gap_reason" => "private_unknown",
+          "gap_from_ts" => 1_770_000_000_000,
+          "gap_to_ts" => 1_770_000_001_000
+        })
+      ]
+
+      events = events_file(ctx, frames)
+      start_capturer(ctx, sidecar_env: [{~c"FAKE_EVENTS_FILE", String.to_charlist(events)}])
+
+      rows =
+        eventually(fn ->
+          if length(stored(ctx.repo)) >= 3, do: {:ok, stored(ctx.repo)}, else: :retry
+        end)
+
+      by_seq = Map.new(rows, &{&1.source_seq, &1})
+      assert map_size(by_seq) == 3
+
+      assert by_seq[1].url == "https://mail.example.com/u/0/inbox"
+      assert by_seq[1].page_title == "Inbox"
+
+      # The private navigation is absent from the store, not filtered on read.
+      refute Map.has_key?(by_seq, 2)
+      refute Enum.any?(rows, &(&1.host == "private.example"))
+
+      assert by_seq[3].text == nil
+      assert by_seq[3].content_withheld == 1
+      assert by_seq[3].char_len == 33
+
+      assert by_seq[4].gap_reason == "private_unknown"
+      assert by_seq[4].bundle_id == "com.apple.Safari"
+    end
+
     test "frames arriving before the ack are buffered, then flushed after the handshake", ctx do
       pre = events_file(ctx, [app_event(1)])
       post = events_file(ctx, [app_event(2)])
@@ -158,7 +235,10 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
   # `collapsed` (and `dropped`) were computed and thrown away: a spool that quietly
   # loses 99% of its frames to the allowlist or the title collapse looked exactly
   # like a capture gap. Counts only — never a title, never any content (§15.1).
-  test "a flush that dropped or collapsed rows accounts for it, without content", ctx do
+  # An admission refusal prints BY KIND: "the recorder keeps sending private
+  # frames" and "the recorder keeps sending unusable addresses" are different
+  # problems, and one total would hide which.
+  test "a flush that dropped, collapsed or refused rows accounts for it, without content", ctx do
     previous_level = Logger.level()
     Logger.configure(level: :debug)
     on_exit(fn -> Logger.configure(level: previous_level) end)
@@ -169,6 +249,11 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
         "kind" => "window.title_changed",
         "app" => %{"bundle_id" => "com.evil.Keylogger", "name" => "K", "pid" => 11},
         "window_title" => "secret-window-title"
+      }),
+      app_event(3, %{
+        "kind" => "browser.navigated",
+        "url" => "https://private.example/secret-page",
+        "private_state" => "private"
       })
     ]
 
@@ -185,7 +270,9 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
 
     assert log =~ "computer_history ingest:"
     assert log =~ "dropped 1"
+    assert log =~ "refused private 1"
     refute log =~ "secret-window-title"
+    refute log =~ "secret-page"
   end
 
   describe "degradation (fail loud, no crash loop)" do

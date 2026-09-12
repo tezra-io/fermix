@@ -18,11 +18,13 @@ Derived memory has **two layers**, in one store, behind one gate:
 
 ## What it captures
 
-Capture is **allowlist-scoped, default-deny**: nothing is recorded unless the
-operator lists the app (by bundle id) and, inside allowlisted browsers, the
-site (by host). Within an allowlisted surface: app switches/launches/quits,
-focused-window titles, focused-field role + settled value, and first-class
-`observer.gap` events so a capture gap is never mistaken for inactivity.
+Capture is **allowlist-scoped, default-deny, and the allowlist is apps only**:
+nothing is recorded unless the operator lists the app by bundle id. There is no
+per-site filter — allowing a browser *is* consent to record where the operator
+goes in it, so **every site visited inside an allowlisted browser is recorded**.
+Within an allowlisted app: app switches/launches/quits, focused-window titles,
+focused-field role + settled value, and first-class `observer.gap` events so a
+capture gap is never mistaken for inactivity.
 
 Coverage is **per app, and reported**: when the recorder can only read titles in
 an app (or the app refuses to report changes) it records that as an app-scoped
@@ -30,11 +32,33 @@ coverage gap, `/history status` names those apps, and the summarizer is told wha
 the marker means — so "nothing typed there" is never read as "the owner typed
 nothing".
 
-**Inside browsers, only window titles are captured today.** The pinned native
-driver withholds browser field text and does not yet emit URLs or navigation
-events, so typed text and URLs inside a browser do not reach the spool at all;
-the site allowlist applies only when a frame carries a host, which that driver
-does not currently supply. Do not tell the owner Fermix has their browsing URLs.
+**Inside an allowlisted browser:** the page **title** and the page **address**
+of every site visited, plus the operator's **typed text** — but only in windows
+the recorder can positively classify as *not* private. The stored address is
+scheme + host + path and **never a query string or fragment** (that is where
+session ids, tokens and tracking parameters live; a page whose query carried the
+meaning is recalled by its title). A navigation in a private window is never
+recorded at all.
+
+Private-window detection is **definitive for the browser families it pins**, and
+only the **Chromium family** is pinned today: Chrome and its channels (Canary,
+Beta, Dev) and Chromium itself, recognized by the Incognito marker. Typed text in
+those browsers is captured in ordinary windows and withheld in incognito ones. In
+a pinned browser whose window the recorder could not read, the value arrives with
+`private_state = unknown` (so its text is withheld) and **no** navigation is sent
+at all — there is no coverage gap for that case, because it is a per-window
+failure, not a per-app one.
+
+Every other browser — **Safari, Edge, Firefox** and anything else — is unpinned:
+addresses still flow, because consent is per app, but typed text there is always
+withheld, and the browser announces itself once with an `observer.gap`
+(`private_unknown`) so `/history status` can name it. An `observer.gap`
+naming a browser is therefore strictly a statement about an **unpinned family**,
+never about a pinned browser having a bad moment. Typed text is withheld by
+*withholding*, not by dropping the row: the event survives with its character
+count and a withheld marker, so "nothing typed" and "text not observable" stay
+distinguishable — and in a private window the row keeps neither its address nor
+its host, because those are themselves the observation the owner excluded.
 
 Window and page titles are **normalized at ingest**: the leading run of status
 glyphs an app paints into its title (a spinner frame such as `⠙ fermix — fermix`,
@@ -87,9 +111,11 @@ Every reader — the turn's LLM chain, the Recent Activity prompt section, the
 
 ## Provider tiers (the `[fermix_core.computer_history]` block)
 
-`enabled` (the consent act), `apps`/`sites` (default-deny allowlists),
+`enabled` (the consent act), `apps` (the default-deny allowlist — the only one),
 `remote_summaries` (Tier 2 grants), `summarizer` (the route). Enabling with an
-empty allowlist is refused — consent to capture nothing is not consent.
+empty allowlist is refused — consent to capture nothing is not consent. `sites`
+is **retired**: a config.toml that still carries it keeps booting, the key is
+named once at warning and dropped, and it is never written back.
 
 - **Default — `summarizer` unset (`"default"`): the subagent tier.** Summarize on
   the operator's subagent model/provider (else the primary + its default model).
@@ -255,9 +281,11 @@ search can never return activity.
   binary is missing. A degraded recorder releases the machine-wide hold, so the
   other daemon on the Mac can take over instead of standing down for good. Also a
   `Coverage:` line naming the apps where only window titles are observable
-  (nothing typed in them can ever reach history) and the apps that refused to
-  report changes — omitted when the recorder reported no such state in the
-  retention window — a `Chat:`
+  (nothing typed in them can ever reach history), the browsers whose
+  private-window state the recorder cannot classify (their page addresses are
+  recorded; their typed text is not) and the apps that refused to report changes
+  — omitted when the recorder reported no such state in the retention window — a
+  `Chat:`
   line naming which providers history turns run on and which failover hops are
   off while history is on (or, when the primary is not granted, that history
   cannot surface and the exact `remote_summaries` entry that would fix it), plus an
@@ -281,7 +309,7 @@ search can never return activity.
 - `/history off` — disable (un-advertises next turn); stored data stays until
   purged; re-enable in setup reuses the persisted allowlist.
 - `fermix doctor`'s `computer history` row reports availability (macOS only),
-  on/off, the summarizer posture, the allowlist sizes, and the same chain
+  on/off, the summarizer posture, the app-allowlist size, and the same chain
   sentence — and **warns** when history is enabled but cannot surface in chat.
 
 ## Boundaries
@@ -289,8 +317,12 @@ search can never return activity.
 macOS only — the capture layer *is* macOS (Accessibility TCC, NSWorkspace,
 AXObserver) and does not port; on any other host the feature is unavailable.
 The scrubber and secure-field suppression reduce but cannot close the
-secret-capture risk (codes and tokens pasted into allowlisted apps can be seen);
-purge is bounded against an offline attacker by FileVault, not zeroed. Excluding
+secret-capture risk (codes and tokens pasted into allowlisted apps can be seen;
+card numbers and IBANs are caught by their own checksums, a low-entropy or
+novel secret is not). Private-browsing exclusion is **not** best-effort — it is
+definitive for the pinned Chromium family, and every browser outside it (Safari,
+Edge and Firefox today) is treated as unclassifiable rather than assumed safe:
+its typed text is withheld, never guessed at. Purge is bounded against an offline attacker by FileVault, not zeroed. Excluding
 Fermix's own automation (the driven browser, any Computer-Use action) from
 capture is **designed but not yet enforced** — there is no driven-pid exclusion
 today, so activity the agent itself caused can appear in history as if it were

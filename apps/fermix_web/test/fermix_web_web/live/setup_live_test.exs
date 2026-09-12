@@ -678,9 +678,11 @@ defmodule FermixWebWeb.SetupLiveTest do
         assert card =~ "remote_summaries = [&quot;openai&quot;]"
       end
 
-      # The pinned native driver withholds typed text inside browsers and captures
-      # no URLs, so the tooltip must not promise either (§23.3).
-      test "the tooltip claims window titles only inside browsers, never URLs (§23.3)",
+      # M32.1 §2.1/§2.2: consent is per app, so the card must say that allowing a
+      # browser records the address of EVERY site visited in it — and that typed
+      # text is captured only outside private windows, which is the only gate left
+      # on browser content.
+      test "the tooltip claims every site and typed text outside private windows",
            %{conn: conn} do
         Application.put_env(:fermix_core, :computer_history, [])
 
@@ -690,10 +692,12 @@ defmodule FermixWebWeb.SetupLiveTest do
         card = view |> element(~s|section[data-feature-name="computer_history"]|) |> render()
 
         assert card =~
-                 "Opt-in activity memory from the apps you allow: window titles and typed " <>
-                   "text; inside browsers only window titles are captured today."
+                 "Opt-in activity memory from the apps you allow: window titles, and in " <>
+                   "browsers the page titles and addresses of every site you visit, plus " <>
+                   "typed text outside private windows."
 
-        refute card =~ "URLs"
+        assert card =~ "Passwords and secure fields are never captured."
+        refute card =~ "only window titles"
       end
     end
 
