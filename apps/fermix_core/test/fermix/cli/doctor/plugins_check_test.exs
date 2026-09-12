@@ -29,6 +29,11 @@ defmodule Fermix.CLI.Doctor.PluginsCheckTest do
   setup do
     previous_plugins = Application.get_env(:fermix_core, :plugins)
     previous_secrets = Application.get_env(:fermix_core, :plugin_secrets)
+    # The ladder assertions here read "no credential" as their precondition, so
+    # the module establishes it instead of inheriting whatever an earlier module
+    # left in app env: a leaked token renders `needs_secret` as `ready`, and the
+    # test then reports a passing doctor row for an unusable plugin.
+    Application.put_env(:fermix_core, :plugin_secrets, %{})
     dev_local = FermixTestSupport.SafeRm.make_tmp_dir!("doctor-plugins-dev")
     installed_root = FermixTestSupport.SafeRm.make_tmp_dir!("doctor-plugins-store")
     fixtures = Path.join(installed_root, "fixtures")
