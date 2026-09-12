@@ -257,6 +257,13 @@ owner-only handoff journal under `~/Library/Application Support/Fermix/`,
 launch the app, which reads the journal, keeps the same Fermix home, registers
 its own background service, and verifies the same data before clearing it.
 
+An account that already has `Fermix.app` in the Applications folder — someone who
+took the disk image before retiring the formula — is a valid starting state, not
+a refusal. The transaction is identical except that the cask install is skipped
+and the last step opens the copy that is already there; running it without
+arguments says which of the two it would perform. That copy is accepted only
+once its bundle identifier proves it is Fermix.
+
 Every step is executed and every failure is loud: a `launchctl bootout` the
 system refused fails the whole migration with launchd's own words and leaves the
 launch agent in place, and a failing `brew` step stops the transaction quoting
@@ -265,10 +272,11 @@ brew's output rather than degrading into printed advice.
 It refuses, with the exact facts it inspected and what to do about them, when the
 account is in a state it must not resolve on its own: a system-scope
 LaunchDaemon, a launch agent that is not the one `fermix setup` wrote, more than
-one `Fermix.app` copy, an already-installed `Fermix.app`, a running
-`brew services` entry for fermix, a launch agent whose daemon does not answer,
-another `fermix` on `PATH` owned by neither Homebrew nor the app, or no Homebrew
-formula install at all. It is macOS-only — the Linux `fermix` formula continues
+one `Fermix.app` copy, a single copy installed outside the Applications folder
+(the app registers its background service only from there) or one whose bundle
+identifier is not the app's, a running `brew services` entry for fermix, a launch
+agent whose daemon does not answer, another `fermix` on `PATH` owned by neither
+Homebrew nor the app, or no Homebrew formula install at all. It is macOS-only — the Linux `fermix` formula continues
 unchanged — and an engine that is already app-managed has nothing to migrate.
 
 **No path here ever deletes a Fermix home** — not the migration, not

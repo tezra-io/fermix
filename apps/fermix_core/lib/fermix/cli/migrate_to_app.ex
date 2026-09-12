@@ -18,7 +18,7 @@ defmodule Fermix.CLI.MigrateToApp do
         → remove the byte-verified plist
         → write the owner-only handoff journal
         → brew uninstall --formula
-        → brew install --cask
+        → brew install --cask (only when no Fermix.app is installed yet)
         → launch Fermix.app
 
   Two rules hold the whole thing together. A failure inside the drain window
@@ -29,6 +29,11 @@ defmodule Fermix.CLI.MigrateToApp do
   as advice: a non-zero exit is reported with brew's own words and stops the
   transaction, because a half-migrated account with a hint in the scrollback is
   the state this command exists to prevent. No path removes a Fermix home.
+
+  Preflight decides which of two configurations the last two steps run in. An
+  account with no Fermix.app gets the cask; an account that already has one at
+  the canonical location keeps it, the cask step is skipped, and the launch step
+  opens that copy. The plan says which one it would perform.
   """
 
   alias Fermix.CLI.Daemon.Client
@@ -72,7 +77,7 @@ defmodule Fermix.CLI.MigrateToApp do
          :ok <- drain(facts, lease, deps),
          :ok <- remove_unit(facts),
          {:ok, _record} <- write_handoff(facts, deps),
-         :ok <- swap_package(deps),
+         :ok <- swap_package(facts, deps),
          :ok <- launch(facts, deps) do
       report_success(facts, deps)
     else
@@ -198,6 +203,8 @@ defmodule Fermix.CLI.MigrateToApp do
     Journal.write(
       %{
         "fermix_home" => facts.fermix_home,
+        "app_source" => Atom.to_string(facts.app_source),
+        "app_path" => facts.app_path,
         "source" => %{
           "product_version" => facts.daemon_version,
           "daemon_pid" => facts.daemon_pid,
@@ -213,11 +220,19 @@ defmodule Fermix.CLI.MigrateToApp do
     )
   end
 
-  defp swap_package(deps) do
+  defp swap_package(facts, deps) do
     with :ok <- brew(deps, ["uninstall", "--formula", @formula], "formula_uninstalled") do
-      brew(deps, ["install", "--cask", @cask], "cask_installed")
+      install_app(facts, deps)
     end
   end
+
+  # The configuration preflight decided. An account that already has the
+  # application installs no cask, so the journal never records that phase and
+  # the launch step opens the copy discovery inspected.
+  defp install_app(%{app_source: :existing}, _deps), do: :ok
+
+  defp install_app(%{app_source: :cask}, deps),
+    do: brew(deps, ["install", "--cask", @cask], "cask_installed")
 
   defp brew(deps, args, phase) do
     case Discovery.run(deps, "brew", args) do
@@ -243,12 +258,27 @@ defmodule Fermix.CLI.MigrateToApp do
     IO.puts("fermix migrate-to-app would perform this transaction:")
     Enum.each(inspected(facts), &IO.puts("  " <> &1))
     IO.puts("")
-    IO.puts("Steps: drain the daemon, boot out and remove the launch agent, write the handoff")
-    IO.puts("journal, `brew uninstall --formula #{@formula}`, `brew install --cask #{@cask}`,")
-    IO.puts("then launch Fermix.app. Your Fermix home is never removed.")
+    Enum.each(steps(facts), &IO.puts/1)
     IO.puts("")
     IO.puts("Nothing has changed. Re-run as `fermix migrate-to-app --yes` to perform it.")
     2
+  end
+
+  defp steps(%{app_source: :cask}) do
+    [
+      "Steps: drain the daemon, boot out and remove the launch agent, write the handoff",
+      "journal, `brew uninstall --formula #{@formula}`, `brew install --cask #{@cask}`,",
+      "then launch Fermix.app. Your Fermix home is never removed."
+    ]
+  end
+
+  defp steps(%{app_source: :existing} = facts) do
+    [
+      "Steps: drain the daemon, boot out and remove the launch agent, write the handoff",
+      "journal, `brew uninstall --formula #{@formula}`, then launch Fermix.app.",
+      "Fermix.app is already installed at #{facts.app_path}, so the cask install is skipped.",
+      "Your Fermix home is never removed."
+    ]
   end
 
   defp report_success(facts, deps) do
@@ -346,6 +376,16 @@ defmodule Fermix.CLI.MigrateToApp do
   defp next_step({:ok, %{"phase" => "handoff_written"}}),
     do: ["The Homebrew formula is still installed, so re-run `fermix migrate-to-app --yes`."]
 
+  # The two configurations part company here. With no cask to install, naming
+  # one would send the operator to download a second copy of the application
+  # they already have, and there is no `fermix` left on PATH to correct them.
+  defp next_step({:ok, %{"phase" => "formula_uninstalled", "app_source" => "existing"} = record}) do
+    [
+      "The formula is gone, so there is no `fermix` on your PATH to re-run. Open",
+      "#{record["app_path"]} to finish: it reads the journal and keeps your existing home."
+    ]
+  end
+
   defp next_step({:ok, %{"phase" => "formula_uninstalled"}}) do
     [
       "The formula is gone, so there is no `fermix` on your PATH to re-run. Finish with:",
@@ -370,9 +410,12 @@ defmodule Fermix.CLI.MigrateToApp do
       "daemon: #{daemon_line(facts)}",
       "`fermix` on PATH: #{list(facts.cli_targets)}",
       "Homebrew formula: #{list(facts.formula_versions)}",
-      "application: #{facts.app_path}"
+      "application: #{app_line(facts)}"
     ]
   end
+
+  defp app_line(%{app_source: :existing} = facts), do: "#{facts.app_path} (already installed)"
+  defp app_line(%{app_source: :cask} = facts), do: "#{facts.app_path} (the cask installs it)"
 
   defp unit_line(%{unit_sha256: nil} = facts), do: "#{facts.unit_path} (none installed)"
   defp unit_line(facts), do: "#{facts.unit_path} running #{facts.unit_program}"

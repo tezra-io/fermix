@@ -1723,6 +1723,11 @@ def test_macos_app_wrong_mode_gates_accept_a_correct_app_managed_reply():
         cases["move_from_brew_to_app"], 0,
         "Run `fermix migrate-to-app` in your own shell to see the plan, then "
         "`fermix migrate-to-app --yes`. It keeps the same Fermix home and data.")
+    assert _reply_regexes_pass(
+        cases["app_already_dragged_from_dmg"], 0,
+        "The app will not start while the Homebrew launch agent is there. Run "
+        "`fermix migrate-to-app --yes`: it retires the formula and that agent, "
+        "keeps your home, and opens the copy already in Applications.")
 
 
 def test_macos_app_wrong_mode_gates_reject_the_standalone_answer():

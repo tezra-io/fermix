@@ -169,3 +169,23 @@ scenarios:
           is no longer there, and points at `fermix migrate-to-app` as the path
           that drains the daemon, removes that unit, preserves the Fermix home,
           and installs the app. Does not present the manual route as equivalent.
+      - id: app_already_dragged_from_dmg
+        query: >
+          I downloaded the Fermix app from the DMG and dragged it into
+          Applications, but it says a Homebrew Fermix service already exists and
+          won't start. I did install Fermix with brew a while back. Now what?
+        expect:
+          reply_matches: '(?i)fermix\s+migrate-to-app'
+          reply_not_matches: '(?i)\b(systemctl|brew\s+services)\b'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Explains that the app will not activate while the launch agent the
+          Homebrew install wrote is still there, and that `fermix
+          migrate-to-app`, run in the user's own shell, is the way through: it
+          drains the daemon, retires that launch agent and the formula, and
+          keeps the existing Fermix home. Says the copy already in Applications
+          is used as it is, so nothing is downloaded or installed again. Does
+          not tell the user to delete, move or re-download the app, and does not
+          present dragging the app or uninstalling the formula by hand as an
+          equivalent route.
