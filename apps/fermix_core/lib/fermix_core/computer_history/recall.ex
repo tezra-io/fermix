@@ -13,11 +13,14 @@ defmodule FermixCore.ComputerHistory.Recall do
 
   Both surfaces are **dated and honest about what they left out**. Every entry
   carries its window as a local time range, the section reads only the last
-  `@digest_horizon_ms`, and both budgets are spent in WHOLE entries, newest
+  `@digest_horizon_ms`, and every budget is spent in WHOLE entries, newest
   first — a cut inside a summary would present half a sentence as the whole
-  note. When the query's window holds more memories than were rendered, the
-  header says so and names how many, so "nothing else happened" is never
-  inferred from a silent truncation.
+  note. In the digest the two layers hold **separate** budgets
+  (`@thread_section_cap` for threads, `@section_char_cap` for sittings): one
+  shared budget let three wide threads render first and starve every session
+  note of the day. When the query's window holds more memories than were
+  rendered, the header says so and names how many, so "nothing else happened" is
+  never inferred from a silent truncation.
 
   Relative windows ("this morning", "yesterday") resolve to concrete epoch-ms
   ranges in the operator's configured timezone (`[fermix_core.personalization]
@@ -35,6 +38,11 @@ defmodule FermixCore.ComputerHistory.Recall do
   # rest of the budget stays with today's activity.
   @section_threads 3
   @thread_limit 8
+  # Current work leads the digest, so it folds against its OWN budget: sharing
+  # one cap with the sittings meant three wide threads could spend the section
+  # before today's first note was even considered.
+  @thread_section_cap 1_200
+  # The sittings' budget, spent after (and independently of) the threads'.
   @section_char_cap 1_500
   # "Recent" is the last day, not "the newest rows, whenever they happened".
   @digest_horizon_ms :timer.hours(24)
@@ -51,10 +59,11 @@ defmodule FermixCore.ComputerHistory.Recall do
 
   @doc """
   A bounded digest for the per-turn Recent Activity section — up to
-  #{@section_threads} current threads, then the last
-  #{div(@digest_horizon_ms, 3_600_000)} hours of sittings — or `nil` when there is
-  nothing to show. Framed as untrusted data. A non-empty read appends an
-  access-audit row (§22.8). `opts`: `:repo`, `:now` (UTC DateTime), `:timezone`.
+  #{@section_threads} current threads (within #{@thread_section_cap} chars), then
+  the last #{div(@digest_horizon_ms, 3_600_000)} hours of sittings (within
+  #{@section_char_cap} of their own) — or `nil` when there is nothing to show.
+  Framed as untrusted data. A non-empty read appends an access-audit row (§22.8).
+  `opts`: `:repo`, `:now` (UTC DateTime), `:timezone`.
   """
   @spec recent_digest(keyword()) :: String.t() | nil
   def recent_digest(opts \\ []) when is_list(opts) do
@@ -66,7 +75,7 @@ defmodule FermixCore.ComputerHistory.Recall do
     with {:ok, threads} <- Repo.computer_history_active_threads(@section_threads, server: repo),
          {:ok, memories} <-
            Repo.computer_history_recent_memories(since_ts, @section_limit, server: repo) do
-      render_digest(threads ++ memories, tz, repo)
+      render_digest(threads, memories, tz, repo)
     else
       {:error, reason} -> log_unavailable(reason)
     end
@@ -167,23 +176,52 @@ defmodule FermixCore.ComputerHistory.Recall do
 
   # --- rendering ----------------------------------------------------------
 
-  defp render_digest([], _tz, _repo), do: nil
+  defp render_digest([], [], _tz, _repo), do: nil
 
-  defp render_digest(rows, tz, repo) do
-    {entries, skipped} =
-      rows
-      |> Enum.map(&{&1.id, digest_entry(&1, tz)})
-      |> whole_entries_within(@section_char_cap)
+  defp render_digest(threads, memories, tz, repo) do
+    {thread_entries, thread_skipped} = fold_section(threads, tz, @thread_section_cap)
+    {note_entries, note_skipped} = fold_section(memories, tz, @section_char_cap)
 
-    log_skipped(skipped)
-    digest_text(entries, tz, repo)
+    log_digest(length(thread_entries), length(note_entries), thread_skipped, note_skipped)
+    log_oversized(oversized_ids(thread_skipped) ++ oversized_ids(note_skipped))
+    digest_text(thread_entries ++ note_entries, tz, repo)
   end
 
-  # A pre-cap legacy row can be wider than the whole section; it is dropped on
-  # its own so the entries behind it still reach the turn.
-  defp log_skipped([]), do: :ok
+  defp fold_section(rows, tz, cap) do
+    rows
+    |> Enum.map(&{&1.id, digest_entry(&1, tz)})
+    |> whole_entries_within(cap)
+  end
 
-  defp log_skipped(ids),
+  # What reached the turn, and what a spent budget pushed out. An entry that did
+  # not fit is NOT oversized — the entries ahead of it had simply spent the
+  # section — and reporting seven ordinary notes as oversized sent a reader
+  # hunting a defect in rows that had nothing wrong with them.
+  defp log_digest(threads, notes, thread_skipped, note_skipped) do
+    Logger.debug(
+      "computer_history digest: #{threads} thread(s) and #{notes} session note(s) shown" <>
+        unfitted_clauses([{"thread", thread_skipped}, {"session note", note_skipped}])
+    )
+  end
+
+  defp unfitted_clauses(sections) do
+    sections
+    |> Enum.map(fn {kind, skipped} -> {kind, unfitted_ids(skipped)} end)
+    |> Enum.reject(fn {_kind, ids} -> ids == [] end)
+    |> Enum.map_join("", fn {kind, ids} ->
+      "; #{length(ids)} #{kind}(s) did not fit the budget (ids #{inspect(ids)})"
+    end)
+  end
+
+  defp unfitted_ids(skipped), do: for({id, :budget} <- skipped, do: id)
+  defp oversized_ids(skipped), do: for({id, :oversized} <- skipped, do: id)
+
+  # The one kind that earns the word: a pre-cap legacy row wider than its whole
+  # section. It is dropped on its own so the entries behind it still reach the
+  # turn.
+  defp log_oversized([]), do: :ok
+
+  defp log_oversized(ids),
     do: Logger.debug("computer_history digest skipped oversized memories: #{inspect(ids)}")
 
   # A summary written before the length cap can be wider than the whole section
@@ -314,8 +352,9 @@ defmodule FermixCore.ComputerHistory.Recall do
 
   # Whole entries only: an entry that does not fit is skipped whole — never cut
   # mid-sentence — and the older entries behind it are still considered, so one
-  # wide row cannot silence everything after it. Returns the kept texts and the
-  # keys of what was skipped.
+  # wide row cannot silence everything after it. Returns the kept texts and, for
+  # each skipped entry, its key tagged with WHY: `:oversized` (the entry alone is
+  # wider than the cap) or `:budget` (the entries ahead of it had spent it).
   defp whole_entries_within(entries, cap) do
     {kept, _chars, skipped} = Enum.reduce(entries, {[], 0, []}, &fit_entry(&1, &2, cap))
     {Enum.reverse(kept), Enum.reverse(skipped)}
@@ -325,8 +364,12 @@ defmodule FermixCore.ComputerHistory.Recall do
     cost = String.length(text) + separator_chars(kept)
 
     if chars + cost > cap,
-      do: {kept, chars, [key | skipped]},
+      do: {kept, chars, [{key, skip_reason(text, cap)} | skipped]},
       else: {[text | kept], chars + cost, skipped}
+  end
+
+  defp skip_reason(text, cap) do
+    if String.length(text) > cap, do: :oversized, else: :budget
   end
 
   defp separator_chars([]), do: 0

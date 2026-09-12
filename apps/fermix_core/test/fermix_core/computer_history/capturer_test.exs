@@ -209,6 +209,91 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
       assert stored(ctx.repo) == []
     end
 
+    # The cached release sidecar (compux 0.7.3, protocol 5) has no `observe_start`
+    # verb: it answers the unknown action with a POSITIONAL frame carrying no
+    # "type", which the decoder refuses. Filed as a gap, the capturer waited
+    # forever for an ack that can never come — heartbeating the machine-wide lock
+    # the whole time, so the other daemon on the Mac stood down for good.
+    test "a typeless reply to observe_start is a pre-v6 mismatch, not a gap", ctx do
+      pid = start_capturer(ctx, sidecar_env: [{~c"FAKE_TYPELESS_ACK", ~c"1"}])
+
+      status =
+        eventually(fn ->
+          if Capturer.status(pid).mode == :degraded, do: {:ok, Capturer.status(pid)}, else: :retry
+        end)
+
+      assert status.reason == {:protocol_mismatch, %{required: 6, sidecar: :pre_v6}}
+      # Released, so a healthy daemon on this Mac can take over.
+      refute File.exists?(ctx.lock_path)
+      # The wire was never verified, so there is no captured discontinuity to
+      # record: a mismatch is a degrade, never an observer.gap.
+      assert stored(ctx.repo) == []
+      assert Process.alive?(pid)
+    end
+
+    test "a sidecar that never answers observe_start degrades at the handshake deadline", ctx do
+      pid =
+        start_capturer(ctx,
+          handshake_timeout_ms: 400,
+          sidecar_env: [{~c"FAKE_SILENT", ~c"1"}]
+        )
+
+      # Not "running": an unacked wire is a handshake in progress, and /history
+      # status has to say so rather than claim capture is live.
+      assert Capturer.status(pid).mode == :handshaking
+
+      status =
+        eventually(fn ->
+          if Capturer.status(pid).mode == :degraded, do: {:ok, Capturer.status(pid)}, else: :retry
+        end)
+
+      assert status.reason == :handshake_timeout
+      refute File.exists?(ctx.lock_path)
+      assert Process.alive?(pid)
+    end
+
+    test "a handshake deadline from a superseded sidecar open is ignored", ctx do
+      # The first sidecar dies before acking and the retry acks cleanly. The first
+      # open's deadline still fires afterwards, and it must not tear down a
+      # healthy, capturing rail — it belongs to an incarnation that is gone.
+      events = events_file(ctx, [app_event(1)])
+
+      first =
+        Path.join(
+          System.tmp_dir!(),
+          "fermix-ch-first-#{ctx.tmp}-#{System.unique_integer([:positive])}"
+        )
+
+      on_exit(fn -> FermixTestSupport.SafeRm.rm(first) end)
+
+      pid =
+        start_capturer(ctx,
+          handshake_timeout_ms: 400,
+          restart_backoff_ms: 15,
+          sidecar_env: [
+            {~c"FAKE_DIE_FIRST", ~c"1"},
+            {~c"FAKE_STATE_FILE", String.to_charlist(first)},
+            {~c"FAKE_EVENTS_FILE", String.to_charlist(events)}
+          ]
+        )
+
+      _ =
+        eventually(fn ->
+          if Capturer.status(pid).mode == :capturing, do: {:ok, :done}, else: :retry
+        end)
+
+      # The stale timer firing IS the subject: wait for the capturer to report
+      # that it ignored one (an observable count, never a fixed sleep), then
+      # prove the healthy rail survived it.
+      _ =
+        eventually(fn ->
+          if Capturer.status(pid).stale_deadlines_ignored >= 1, do: {:ok, :done}, else: :retry
+        end)
+
+      assert Capturer.status(pid).mode == :capturing
+      assert Enum.any?(stored(ctx.repo), &(&1.source_seq == 1))
+    end
+
     test "a refused observe_start degrades", ctx do
       pid = start_capturer(ctx, sidecar_env: [{~c"FAKE_ACK_OK", ~c"false"}])
 
@@ -331,6 +416,30 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
       assert Enum.count(rows, &(&1.type == "app.activated")) == 2
     end
 
+    test "a typeless frame AFTER a clean handshake is still a gap", ctx do
+      # Once the handshake verified the wire, an unrecognized line is a hole in
+      # the record — not a verdict on the protocol. Gap it and keep capturing.
+      events =
+        events_file(ctx, [
+          app_event(1),
+          %{"ok" => false, "error" => "unknown action"},
+          app_event(2)
+        ])
+
+      pid = start_capturer(ctx, sidecar_env: [{~c"FAKE_EVENTS_FILE", String.to_charlist(events)}])
+
+      rows =
+        eventually(fn ->
+          rows = stored(ctx.repo)
+          if Enum.any?(rows, &(&1.type == "observer.gap")), do: {:ok, rows}, else: :retry
+        end)
+
+      assert Capturer.status(pid).mode == :capturing
+      gap = Enum.find(rows, &(&1.type == "observer.gap"))
+      assert gap.gap_reason =~ "missing_frame_type"
+      assert Enum.count(rows, &(&1.type == "app.activated")) == 2
+    end
+
     test "an out-of-range ts becomes a gap with a readable reason", ctx do
       # The decoder refuses the stamp; the gap reason has to name the field, not
       # print Elixir tuple syntax into a stored column.
@@ -354,14 +463,60 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
   describe "machine-wide singleton" do
     test "a second capturer on the same lock stands down", ctx do
       first = start_capturer(ctx, id: :capturer_a)
-      # Force the first's bootstrap (lock acquire) to complete before the second starts.
-      assert Capturer.status(first).mode == :capturing
+
+      # Force the first's bootstrap (lock acquire) to complete before the second
+      # starts; the mode reads :capturing only once the handshake is acked.
+      _ =
+        eventually(fn ->
+          if Capturer.status(first).mode == :capturing, do: {:ok, :done}, else: :retry
+        end)
 
       second = start_capturer(ctx, id: :capturer_b)
       status = Capturer.status(second)
 
       assert status.mode == :standing_down
       assert status.lock_holder != nil
+    end
+
+    test "a standee takes over once the holder degrades and releases the lock", ctx do
+      # §8.6 end to end: the holder's sidecar never answers, so it degrades and
+      # releases; the daemon standing down acquires on its next tick. Without a
+      # bounded handshake the holder held the lock forever and NOBODY captured.
+      events = events_file(ctx, [app_event(1)])
+
+      holder =
+        start_capturer(ctx,
+          id: :capturer_holder,
+          handshake_timeout_ms: 300,
+          sidecar_env: [{~c"FAKE_SILENT", ~c"1"}]
+        )
+
+      assert Capturer.status(holder).mode == :handshaking
+
+      standee =
+        start_capturer(ctx,
+          id: :capturer_standee,
+          reacquire_interval_ms: 25,
+          sidecar_env: [{~c"FAKE_EVENTS_FILE", String.to_charlist(events)}]
+        )
+
+      assert Capturer.status(standee).mode == :standing_down
+
+      _ =
+        eventually(
+          fn ->
+            if Capturer.status(standee).mode == :capturing, do: {:ok, :done}, else: :retry
+          end,
+          5_000
+        )
+
+      assert Capturer.status(holder).mode == :degraded
+
+      # And it is really capturing: the standee's own sidecar events land.
+      _ =
+        eventually(fn ->
+          if Enum.any?(stored(ctx.repo), &(&1.source_seq == 1)), do: {:ok, :done}, else: :retry
+        end)
     end
   end
 end
