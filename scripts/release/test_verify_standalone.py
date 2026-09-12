@@ -108,13 +108,29 @@ class VerifyStandaloneTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("usage:", result.stderr)
 
-    def _run(self, target):
+    def _run(self, target, artifact=None):
         return subprocess.run(
-            [str(SCRIPT), str(self.artifact), target, VERSION],
+            [str(SCRIPT), artifact or str(self.artifact), target, VERSION],
             text=True,
             capture_output=True,
             check=False,
         )
+
+    # The staged-asset stage passes the bare downloaded file name from the
+    # working directory; a name with no slash must not be looked up on PATH.
+    def test_accepts_a_bare_artifact_name_in_the_working_directory(self):
+        self._write_artifact(create_disclaim=True)
+
+        result = subprocess.run(
+            [str(SCRIPT), self.artifact.name, "macos_aarch64", VERSION],
+            cwd=self.artifact.parent,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"fermix {VERSION}", result.stdout)
 
     def _write_artifact(
         self,

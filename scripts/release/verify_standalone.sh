@@ -26,6 +26,10 @@ esac
 
 [ -n "$version" ] || fail "expected version must not be empty"
 [ ! -L "$artifact" ] && [ -f "$artifact" ] || fail "standalone artifact must be a regular file, not a symlink: $artifact"
+# The staged-asset stage hands over the bare downloaded file name. Executed as
+# is, a name with no slash is looked up on PATH rather than in the working
+# directory, so the artifact is anchored to its directory before it is run.
+artifact="$(cd "$(dirname "$artifact")" && pwd)/$(basename "$artifact")"
 
 runtime_parent="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
 [ -d "$runtime_parent" ] || fail "standalone verification temporary directory does not exist"
