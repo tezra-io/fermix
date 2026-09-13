@@ -93,6 +93,7 @@ defmodule FermixCore.Prompt.SetupSeederTest do
                :fermix,
                :soul,
                :realtime,
+               :live,
                :user,
                :memory
              ]
@@ -104,6 +105,7 @@ defmodule FermixCore.Prompt.SetupSeederTest do
       fermix_path = BootstrapPaths.fermix_path(agent_id)
       soul_path = BootstrapPaths.soul_path(agent_id)
       realtime_path = BootstrapPaths.realtime_path(agent_id)
+      live_path = BootstrapPaths.live_path(agent_id)
       user_path = PromptFiles.user_path(agent_id)
       memory_path = PromptFiles.memory_path(agent_id)
 
@@ -111,6 +113,7 @@ defmodule FermixCore.Prompt.SetupSeederTest do
       assert File.read!(fermix_path) == Defaults.fermix_md()
       assert File.read!(soul_path) == Defaults.soul_md()
       assert File.read!(realtime_path) == Defaults.realtime_md()
+      assert File.read!(live_path) == Defaults.live_md()
 
       user_content = File.read!(user_path)
       assert user_content =~ "name: Sujeeth"
@@ -126,7 +129,8 @@ defmodule FermixCore.Prompt.SetupSeederTest do
             {:identity_md, Defaults.identity_md()},
             {:fermix_md, Defaults.fermix_md()},
             {:soul_md, Defaults.soul_md()},
-            {:realtime_md, Defaults.realtime_md()}
+            {:realtime_md, Defaults.realtime_md()},
+            {:live_md, Defaults.live_md()}
           ] do
         assert {:ok, [revision]} =
                  Registry.list_revisions(agent_id, resource_type, "global", repo: repo)
@@ -176,6 +180,22 @@ defmodule FermixCore.Prompt.SetupSeederTest do
   end
 
   describe "seed/2 idempotency" do
+    test "seeds LIVE.md on a fresh install and preserves an existing one", %{
+      agent_id: agent_id,
+      repo: repo
+    } do
+      File.mkdir_p!(BootstrapPaths.agent_dir(agent_id))
+      File.write!(BootstrapPaths.live_path(agent_id), "operator live rules")
+
+      assert {:ok, results} = SetupSeeder.seed(%{user_name: "Aira"}, repo: repo)
+
+      assert %{name: :live, outcome: :skipped_exists, revision_id: nil} =
+               Enum.find(results, &(&1.name == :live))
+
+      assert File.read!(BootstrapPaths.live_path(agent_id)) == "operator live rules"
+      assert File.read!(BootstrapPaths.realtime_path(agent_id)) == Defaults.realtime_md()
+    end
+
     test "skips files that already exist and emits skipped_exists telemetry", %{
       agent_id: agent_id,
       repo: repo
@@ -207,6 +227,7 @@ defmodule FermixCore.Prompt.SetupSeederTest do
       assert_received {:seed, %{name: :fermix, outcome: :skipped_exists}}
       assert_received {:seed, %{name: :soul, outcome: :skipped_exists}}
       assert_received {:seed, %{name: :realtime, outcome: :skipped_exists}}
+      assert_received {:seed, %{name: :live, outcome: :skipped_exists}}
       assert_received {:seed, %{name: :user, outcome: :skipped_exists}}
       assert_received {:seed, %{name: :memory, outcome: :skipped_exists}}
     end

@@ -555,6 +555,87 @@ defmodule FermixOpik.Aggregation do
     })
   end
 
+  # A GPT-Live voice call (M41 §7) is its own run kind, and always a ROOT: the
+  # provider session owns the microphone while every tool, memory lookup and
+  # model answer runs in a SEPARATE Fermix turn the call delegated to. Those
+  # turns mint `voice_delegation_<n>` with `parent_session` = the call id, which
+  # is the only link between the two — so they nest here through the ordinary
+  # `resolve_trace` path and need no clause of their own.
+  def apply_event(state, [:fermix, :voice_live, :call_start], _meas, meta, at) do
+    case Map.get(meta, :session_id) do
+      nil ->
+        {state, []}
+
+      session_id ->
+        ctx = %{
+          # A call opened from a turn carries `parent_session` as correlation
+          # only (the meeting precedent): the call outlives the turn that asked
+          # for it, so nesting would drop every later span into the tombstone.
+          parent_session: nil,
+          kind: :voice_live,
+          name: nil,
+          input: nil,
+          # A Live call is silent between delegations for minutes at a time; the
+          # idle TTL would force-close it mid-call and the ledger-bearing
+          # call_stop would then mint a second, empty root.
+          max_duration_ms: Map.get(meta, :max_duration_ms),
+          trace_metadata:
+            compact(%{
+              device_id: Map.get(meta, :device_id),
+              model: Map.get(meta, :model),
+              voice: Map.get(meta, :voice),
+              engine: Map.get(meta, :engine)
+            }),
+          at: at.at,
+          mono: at.mono
+        }
+
+        {state, _ref} = ensure_session(state, session_id, ctx)
+        {state, []}
+    end
+  end
+
+  # Point spans for the call's lifecycle. A `provider_error` is deliberately NOT
+  # terminal: a Live moderation refusal cuts the audio and the session keeps
+  # running, so closing the trace here would truncate the rest of the call.
+  def apply_event(state, [:fermix, :voice_live, phase], meas, meta, at)
+      when phase in [:session_started, :delegation_start, :delegation_stop, :provider_error] do
+    add_child_span(
+      state,
+      meta,
+      at,
+      &Mapper.voice_live_span(meta, meas, Keyword.put(&1, :phase, phase))
+    )
+  end
+
+  # Voice is DURATION-priced: the ledger folds into the trace metadata as
+  # seconds plus integer millicents, never as tokens — a Live minute is billed
+  # by the clock and there is no token count to express it with. The nested
+  # delegation turns keep their own token usage on their own llm spans, so the
+  # two costs stay separately attributed rather than double-counted.
+  def apply_event(state, [:fermix, :voice_live, :call_stop], meas, meta, at) do
+    close_root(state, meta, at, %{
+      status: "ok",
+      metadata:
+        compact(%{
+          device_id: Map.get(meta, :device_id),
+          model: Map.get(meta, :model),
+          voice: Map.get(meta, :voice),
+          engine: Map.get(meta, :engine),
+          provider_session_id: Map.get(meta, :provider_session_id),
+          # WHY the call ended (call_stop / cost_limit / max_session_duration /
+          # provider_disconnected / session_expired).
+          reason: Map.get(meta, :reason),
+          voice_seconds: Map.get(meas, :voice_seconds),
+          voice_cost_millicents: Map.get(meas, :voice_cost_millicents),
+          backend_turns: Map.get(meas, :backend_turns),
+          # 0/1: an incomplete finalization must stay visible rather than read
+          # as a measured zero-cost call.
+          accounting_complete: Map.get(meas, :accounting_complete)
+        })
+    })
+  end
+
   # Plugin distribution ops ([:fermix, :plugin, :dist]): install/uninstall/gc
   # run in the installer or a CLI VM with no agent session, so each
   # op is a point event that becomes its own self-closing trace — emitted
@@ -1249,6 +1330,12 @@ defmodule FermixOpik.Aggregation do
   defp infer_kind("memory_review:" <> _), do: :memory_review
   defp infer_kind("followup_" <> _), do: :reminder_followup
   defp infer_kind("meeting_" <> _), do: :meeting
+  # A Live voice call and the backend turns it delegates to. Both prefixes are
+  # minted outside this app (LocalVoiceSocket / LiveSessionServer); keep them in
+  # lockstep with those, or a call_stop arriving without its opener reads as a
+  # `:subagent` phantom root.
+  defp infer_kind("voice_live:" <> _), do: :voice_live
+  defp infer_kind("voice_delegation_" <> _), do: :voice_delegation
   # The computer-history summarizer (§22.4) is a headless single-call run with
   # no bookend events: its provider span creates the session, so the kind must
   # come from the id prefix or the root would read as a :subagent of nothing.
@@ -1275,6 +1362,12 @@ defmodule FermixOpik.Aggregation do
   # id ("meeting_<id>_<ts>") is its own fallback — the generic "<kind>:<name>"
   # would only say "meeting" twice.
   defp wrapper_name(:meeting, name, session), do: name || session
+  # Both voice ids already carry their kind ("voice_live:1",
+  # "voice_delegation_7"), and a delegation's `agent` is the turn's own name
+  # ("main"), which says nothing about which delegation it was — so the session
+  # id is the name in both cases.
+  defp wrapper_name(:voice_live, _name, session), do: session
+  defp wrapper_name(:voice_delegation, _name, session), do: session
   # Same shape again: the agent name is "computer_history_summarizer" and the
   # session id starts "computer_history_summarize:" — prefixing the kind would
   # say "computer history" twice.

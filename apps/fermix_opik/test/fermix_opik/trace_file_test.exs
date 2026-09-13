@@ -197,6 +197,110 @@ defmodule FermixOpik.TraceFileTest do
     assert meta.session_id == "session:1"
   end
 
+  # A Live call's whole record in the JSONL is these six rows: replay has to
+  # rebuild every one of them, including the `parent_session` that is the only
+  # link between a call and the backend turns it delegated.
+  test "normalizes every voice_live agent_event row back into its event" do
+    base = %{"ts" => "2026-09-12T12:00:00.000Z", "type" => "agent_event"}
+
+    phases = [
+      {"voice_live_call_start", :call_start},
+      {"voice_live_session_started", :session_started},
+      {"voice_live_delegation_start", :delegation_start},
+      {"voice_live_delegation_stop", :delegation_stop},
+      {"voice_live_provider_error", :provider_error},
+      {"voice_live_call_stop", :call_stop}
+    ]
+
+    for {row_event, phase} <- phases do
+      row =
+        Map.merge(base, %{
+          "event" => row_event,
+          "session_id" => "voice_live:1",
+          "parent_session" => "main-4",
+          "agent" => "voice_live",
+          "engine" => "openai_live",
+          "device_id" => "dev-1",
+          "model" => "gpt-live-1",
+          "voice" => "marin",
+          "provider_session_id" => "sess_live_abc",
+          "delegation_id" => "dlg_1",
+          "revision" => 1,
+          "turn_session_id" => "voice_delegation_7",
+          "status" => "completed",
+          "reason" => "call_stop"
+        })
+
+      assert {[:fermix, :voice_live, ^phase], _meas, meta} =
+               TraceFile.normalize("agent_event", row)
+
+      assert meta.session_id == "voice_live:1"
+      assert meta.parent_session == "main-4"
+      assert meta.engine == "openai_live"
+      assert meta.turn_session_id == "voice_delegation_7"
+    end
+  end
+
+  test "voice_live_call_stop normalize reconstructs the numeric ledger" do
+    base = %{"ts" => "2026-09-12T12:00:00.000Z", "type" => "agent_event"}
+
+    assert {[:fermix, :voice_live, :call_stop], measurements, meta} =
+             TraceFile.normalize(
+               "agent_event",
+               Map.merge(base, %{
+                 "event" => "voice_live_call_stop",
+                 "session_id" => "voice_live:1",
+                 "voice_seconds" => 62,
+                 "voice_cost_millicents" => 5_167,
+                 "backend_turns" => 2,
+                 "accounting_complete" => 1,
+                 "reason" => "cost_limit"
+               })
+             )
+
+    assert measurements == %{
+             voice_seconds: 62,
+             voice_cost_millicents: 5_167,
+             backend_turns: 2,
+             accounting_complete: 1
+           }
+
+    assert meta.reason == "cost_limit"
+  end
+
+  # A pre-ledger row replays with no measurements rather than fabricated zeros:
+  # a measured 0 cent call and an unaccounted one price differently.
+  test "a voice_live row without the ledger replays with empty measurements" do
+    base = %{"ts" => "2026-09-12T12:00:00.000Z", "type" => "agent_event"}
+
+    assert {[:fermix, :voice_live, :call_stop], %{}, _meta} =
+             TraceFile.normalize(
+               "agent_event",
+               Map.merge(base, %{
+                 "event" => "voice_live_call_stop",
+                 "session_id" => "voice_live:1"
+               })
+             )
+  end
+
+  test "a voice_live_delegation_stop row replays its duration measurement" do
+    base = %{"ts" => "2026-09-12T12:00:00.000Z", "type" => "agent_event"}
+
+    assert {[:fermix, :voice_live, :delegation_stop], %{duration_ms: 1_200}, meta} =
+             TraceFile.normalize(
+               "agent_event",
+               Map.merge(base, %{
+                 "event" => "voice_live_delegation_stop",
+                 "session_id" => "voice_live:1",
+                 "delegation_id" => "dlg_1",
+                 "status" => "failed",
+                 "duration_ms" => 1_200
+               })
+             )
+
+    assert meta.status == "failed"
+  end
+
   defp write(dir, file, rows) do
     content = Enum.map_join(rows, &(Jason.encode!(&1) <> "\n"))
     File.write!(Path.join(dir, file), content)

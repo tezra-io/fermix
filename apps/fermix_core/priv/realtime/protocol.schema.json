@@ -3,8 +3,8 @@
   "$id": "https://fermix.sh/realtime/protocol.schema.json",
   "title": "Fermix Realtime voice socket protocol",
   "description": "Newline-delimited JSON wire contract between the Fermix daemon and the FermixPet companion. Source of truth: FermixCore.Realtime.Protocol. See PROTOCOL.md.",
-  "x-protocol-version": 1,
-  "x-supported-version-range": { "min": 1, "max": 1 },
+  "x-protocol-version": 2,
+  "x-supported-version-range": { "min": 1, "max": 2 },
   "$defs": {
     "clientEvent": {
       "type": "object",
@@ -17,7 +17,8 @@
             "audio_chunk",
             "interrupt",
             "mute",
-            "call_stop"
+            "call_stop",
+            "task_cancel"
           ]
         }
       },
@@ -33,6 +34,10 @@
         {
           "if": { "required": ["type"], "properties": { "type": { "const": "interrupt" } } },
           "then": { "$ref": "#/$defs/interrupt" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "task_cancel" } } },
+          "then": { "$ref": "#/$defs/task_cancel" }
         }
       ]
     },
@@ -50,7 +55,10 @@
             "tool_event",
             "usage",
             "error",
-            "playback_stop"
+            "playback_stop",
+            "call_ready",
+            "caption",
+            "task"
           ]
         }
       },
@@ -62,6 +70,22 @@
         {
           "if": { "required": ["type"], "properties": { "type": { "const": "error" } } },
           "then": { "$ref": "#/$defs/error" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "call_ready" } } },
+          "then": { "$ref": "#/$defs/call_ready" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "caption" } } },
+          "then": { "$ref": "#/$defs/caption" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "task" } } },
+          "then": { "$ref": "#/$defs/task" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "usage" } } },
+          "then": { "$ref": "#/$defs/usage" }
         }
       ]
     },
@@ -89,6 +113,15 @@
         "audio_end_ms": { "type": "integer", "minimum": 0 }
       }
     },
+    "task_cancel": {
+      "type": "object",
+      "description": "Cancels one backend delegation of a Live call. Refused with error(unsupported_by_engine) under the Realtime engine.",
+      "required": ["type", "delegation_id"],
+      "properties": {
+        "type": { "const": "task_cancel" },
+        "delegation_id": { "type": "string", "minLength": 1 }
+      }
+    },
     "server_hello": {
       "type": "object",
       "required": ["type", "min_version", "max_version"],
@@ -98,12 +131,90 @@
         "max_version": { "type": "integer", "minimum": 1 }
       }
     },
+    "call_ready": {
+      "type": "object",
+      "description": "The provider session is established and the call can carry audio.",
+      "required": ["type", "engine", "call_id", "captions"],
+      "properties": {
+        "type": { "const": "call_ready" },
+        "engine": { "enum": ["openai_realtime", "openai_live"] },
+        "call_id": { "type": "string", "minLength": 1 },
+        "provider_session_id": { "type": "string" },
+        "expires_at": {
+          "type": "integer",
+          "description": "Unix seconds at which the provider session expires; absent when unknown."
+        },
+        "captions": {
+          "type": "boolean",
+          "description": "True when caption frames will be sent for this call."
+        }
+      }
+    },
+    "caption": {
+      "type": "object",
+      "description": "One verbatim transcript fragment. Concatenate deltas without trimming or inserting spaces.",
+      "required": ["type", "speaker", "delta", "start_ms", "end_ms"],
+      "properties": {
+        "type": { "const": "caption" },
+        "speaker": { "enum": ["user", "assistant"] },
+        "delta": { "type": "string" },
+        "start_ms": { "type": "integer", "minimum": 0 },
+        "end_ms": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "task": {
+      "type": "object",
+      "description": "Lifecycle of one backend delegation. revision fences a re-asked task.",
+      "required": ["type", "delegation_id", "revision", "status"],
+      "properties": {
+        "type": { "const": "task" },
+        "delegation_id": { "type": "string", "minLength": 1 },
+        "revision": { "type": "integer", "minimum": 1 },
+        "status": { "enum": ["pending", "running", "completed", "failed", "cancelled"] },
+        "summary": { "type": "string", "maxLength": 240 }
+      }
+    },
+    "usage": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": { "const": "usage" },
+        "status": { "type": "string" },
+        "input_tokens": { "type": "integer" },
+        "output_tokens": { "type": "integer" },
+        "voice_seconds": { "type": "number" },
+        "voice_cost_cents": { "type": "number" },
+        "backend_turns": { "type": "integer" },
+        "backend_cost": { "const": "unknown" },
+        "accounting": { "enum": ["complete", "incomplete", "running"] }
+      }
+    },
     "error": {
       "type": "object",
       "required": ["type", "reason"],
       "properties": {
         "type": { "const": "error" },
         "reason": { "type": "string" },
+        "kind": {
+          "enum": [
+            "update_required",
+            "provider_refused",
+            "cost_limit",
+            "session_expired",
+            "close_timeout",
+            "bridge_unavailable",
+            "max_session_duration",
+            "provider_disconnected"
+          ]
+        },
+        "detail": {
+          "type": "string",
+          "description": "The vendor's own sentence, bounded. Present when the provider explained the failure."
+        },
+        "required_for": {
+          "enum": ["openai_live"],
+          "description": "On update_required: the engine that needs the higher protocol version."
+        },
         "direction": { "enum": ["client_too_old", "client_too_new"] },
         "client_version": { "type": "integer" },
         "min_version": { "type": "integer" },

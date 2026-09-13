@@ -524,6 +524,7 @@ defmodule FermixCore.Realtime.SessionServerTest do
 
   test "audio_chunk forwards provider append event and tracks usage", %{server: server} do
     assert :ok = SessionServer.call_start(server)
+    assert :ok = SessionServer.handle_provider_event(server, {:input_audio_speech_started, %{}})
     assert :ok = SessionServer.audio_chunk(server, "1234")
 
     openai = SessionServer.openai_pid(server)
@@ -532,6 +533,75 @@ defmodule FermixCore.Realtime.SessionServerTest do
     assert append == OpenAIClient.audio_append_event("1234")
     assert SessionServer.usage(server).estimated.input_audio_ms > 0
     assert_receive {:realtime, %{type: "usage", status: "estimated"}}
+  end
+
+  # An open microphone streams silence continuously, and metering it as
+  # conversational input inflated the estimate the cost ceiling is measured
+  # against — a quiet call could be torn down for audio nobody was billed for.
+  # VAD-filtered silence is not billed upstream, so the estimate must not count
+  # it. The chunks still go out: the provider's own VAD needs the quiet to find
+  # where speech begins.
+  test "audio before the provider reports speech is sent but never estimated", %{server: server} do
+    assert :ok = SessionServer.call_start(server)
+    assert :ok = SessionServer.audio_chunk(server, :binary.copy(<<0>>, 4800))
+
+    openai = SessionServer.openai_pid(server)
+
+    assert OpenAIClient.audio_append_event(:binary.copy(<<0>>, 4800)) in FakeOpenAIClient.events(
+             openai
+           )
+
+    usage = SessionServer.usage(server)
+    assert usage.estimated.input_audio_ms == 0
+    assert usage.estimated.input_audio_tokens == 0
+    assert usage.estimated.transcription_ms == 0
+    refute_receive {:realtime, %{type: "usage", status: "estimated"}}, 50
+  end
+
+  test "audio between the provider's speech start and stop is estimated", %{server: server} do
+    assert :ok = SessionServer.call_start(server)
+    assert :ok = SessionServer.handle_provider_event(server, {:input_audio_speech_started, %{}})
+
+    # 4800 bytes of PCM16 @ 48 bytes/ms = 100 ms of speech.
+    assert :ok = SessionServer.audio_chunk(server, :binary.copy(<<0>>, 4800))
+
+    assert_receive {:realtime, %{type: "usage", status: "estimated"}}
+    usage = SessionServer.usage(server)
+    assert usage.estimated.input_audio_ms == 100
+    assert usage.estimated.transcription_ms == 100
+
+    assert :ok = SessionServer.handle_provider_event(server, {:input_audio_speech_stopped, %{}})
+    assert :ok = SessionServer.audio_chunk(server, :binary.copy(<<0>>, 4800))
+
+    # the quiet after the turn adds nothing
+    assert SessionServer.usage(server).estimated.input_audio_ms == 100
+  end
+
+  # Gating the estimate on speech must not disarm it: the estimate is what ends a
+  # long call the provider has not reported usage for yet.
+  test "the cost ceiling still fires from estimated speech audio" do
+    {:ok, server} =
+      SessionServer.start_link(
+        companion: self(),
+        config: Config.normalize(enabled: true, max_estimated_cost_cents_per_session: 1),
+        openai_client: FakeOpenAIClient,
+        api_key: "sk-test",
+        safety_identifier: "safe-id",
+        capabilities: [],
+        prompt_loader: fn _opts -> {:ok, %{messages: [], parts: [], accounting: []}} end
+      )
+
+    Process.unlink(server)
+    ref = Process.monitor(server)
+    assert :ok = SessionServer.call_start(server)
+    assert :ok = SessionServer.handle_provider_event(server, {:input_audio_speech_started, %{}})
+
+    # 25 s of PCM16 @ 48 bytes/ms: 250 input-audio tokens (0.8 cents) plus 25 s
+    # of whisper-1 transcription (0.25 cents), past the 1-cent ceiling.
+    SessionServer.audio_chunk(server, :binary.copy(<<0>>, 48 * 25_000))
+
+    assert_receive {:realtime, %{type: "usage", status: "limit_reached"}}
+    assert_receive {:DOWN, ^ref, :process, ^server, {:shutdown, :cost_limit}}
   end
 
   test "audio_chunk keeps streaming while the assistant is responding", %{server: server} do
@@ -1073,6 +1143,43 @@ defmodule FermixCore.Realtime.SessionServerTest do
 
       [event] = ProgrammableOpenAIClient.events(reconnected)
       assert event.type == "session.update"
+
+      GenServer.stop(server)
+    end
+
+    # `speech_active?` mirrors the OLD provider session's VAD. The reconnect
+    # opens a fresh conversation with its own detection, so carrying the flag
+    # across would meter the new session's silence until its first
+    # `speech_stopped` — the exact defect the gate exists to prevent.
+    test "a reconnect forgets the old session's speech state" do
+      {:ok, server} =
+        SessionServer.start_link(
+          companion: self(),
+          config: Config.normalize(enabled: true),
+          openai_client: ProgrammableOpenAIClient,
+          api_key: "sk-test",
+          safety_identifier: "safe-id",
+          capabilities: [],
+          reconnect_backoff_ms: [10, 10, 10],
+          prompt_loader: fn _opts ->
+            {:ok, %{messages: [%{role: "system", content: "p"}], parts: [], accounting: []}}
+          end
+        )
+
+      assert :ok = SessionServer.call_start(server)
+      assert_receive {:start_link_called, _opts}
+      assert :ok = SessionServer.handle_provider_event(server, {:session_updated, %{}})
+      assert_receive {:realtime, %{type: "state", state: "listening"}}
+      assert :ok = SessionServer.handle_provider_event(server, {:input_audio_speech_started, %{}})
+
+      send(server, {:openai_realtime_disconnect, :network})
+      assert_receive {:realtime, %{type: "state", state: "reconnecting"}}
+      assert_receive {:start_link_called, _opts}
+      assert :ok = SessionServer.handle_provider_event(server, {:session_updated, %{}})
+      assert_receive {:realtime, %{type: "state", state: "listening"}}
+
+      assert :ok = SessionServer.audio_chunk(server, :binary.copy(<<0>>, 4800))
+      assert SessionServer.usage(server).estimated.input_audio_ms == 0
 
       GenServer.stop(server)
     end

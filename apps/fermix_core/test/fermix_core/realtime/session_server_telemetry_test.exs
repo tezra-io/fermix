@@ -239,6 +239,8 @@ defmodule FermixCore.Realtime.SessionServerTelemetryTest do
     server: server
   } do
     assert :ok = SessionServer.call_start(server)
+    # Mic audio is estimated only while the provider reports speech.
+    assert :ok = SessionServer.handle_provider_event(server, {:input_audio_speech_started, %{}})
     # 4800 bytes of PCM16 @ 48 bytes/ms = 100 ms of input audio.
     assert :ok = SessionServer.audio_chunk(server, :binary.copy(<<0>>, 4800))
 

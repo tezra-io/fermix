@@ -96,6 +96,18 @@ defmodule FermixChannels.Gateway.AuthorizerTest do
                Authorizer.resolve(source)
     end
 
+    # MILESTONE_41_OPENAI_LIVE_VOICE.md §7: the Live session runs inside the
+    # daemon the owner started, so the transport IS the authorization. There is
+    # no inbox to allow-list and no sender id to look up.
+    test "voice resolves to :operator with no allowlist and no sender id" do
+      for sender_id <- [nil, "", "voice"] do
+        source = %Source{channel: "voice", channel_key: nil, sender_id: sender_id}
+
+        assert {:ok, %Authorization{role: :operator, trust: :operator}} =
+                 Authorizer.resolve(source)
+      end
+    end
+
     test "unknown remote channel is rejected with :unknown_channel" do
       source = %Source{channel: "matrix", channel_key: nil}
 

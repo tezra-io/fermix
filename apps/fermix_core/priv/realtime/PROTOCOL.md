@@ -31,9 +31,32 @@ Current values (see the schema's `x-protocol-version` / `x-supported-version-ran
 
 | Field | Value |
 |---|---|
-| `protocol_version` (pet declares) | `1` |
+| `protocol_version` (pet declares) | `2` |
 | daemon `min_version` | `1` |
-| daemon `max_version` | `1` |
+| daemon `max_version` | `2` |
+
+### Version 2 — the Live engine
+
+Version 2 adds the frames the `openai_live` engine needs: `task_cancel` from the
+pet, and `call_ready`, `caption` and `task` from the daemon, plus extra fields on
+`usage` and `error`. A **v1 pet may still run the Realtime engine** against a v2
+daemon — that is the whole point of the N/N-1 window, and nothing in the Realtime
+path changed.
+
+Live is the exception: a v1 pet that sends `call_start` while the daemon is
+configured for `openai_live` is refused with
+
+```json
+{"type":"error","reason":"unsupported_protocol_version","kind":"update_required",
+ "direction":"client_too_old","client_version":1,"min_version":2,"max_version":2,
+ "required_for":"openai_live"}
+```
+
+and the connection closes — no session is started. `min_version` in **this**
+refusal is the version the configured engine requires (2), not the handshake
+floor the daemon advertises in `server_hello` (1); `required_for` names the
+engine that raised it. The handshake itself still succeeds for a v1 pet, so the
+refusal arrives at `call_start`, where the engine is known.
 
 ## Handshake state machine
 
@@ -108,6 +131,7 @@ and `CompanionState.swift` (pet) together.
 | `interrupt` | `audio_end_ms` (int ≥ 0, optional) | Barge-in; `audio_end_ms` is how much of the assistant's audio actually played. |
 | `mute` | `enabled` (bool, default `true`) | Mutes/unmutes capture. |
 | `call_stop` | — | Ends the active call and closes the session. |
+| `task_cancel` | `delegation_id` (non-empty string, required) | **v2.** Cancels one backend delegation of a Live call. Under the Realtime engine it is refused with `error: unsupported_by_engine` and the connection closes. |
 
 ## Server events (daemon → pet)
 
@@ -119,6 +143,39 @@ and `CompanionState.swift` (pet) together.
 | `transcript_delta` | `text` | Incremental transcript of the assistant's speech. |
 | `assistant_text_delta` | `text` | Incremental assistant text. |
 | `tool_event` | `status`, `reason?` | A tool call's lifecycle. |
-| `usage` | token/cost fields | Per-turn usage. |
-| `error` | `reason`, plus context fields | A failure; the daemon closes the connection after most errors. |
+| `usage` | token/cost fields | Per-turn usage. Live adds `status: "live"`, `voice_seconds`, `voice_cost_cents` (3 decimals), `backend_turns`, `backend_cost: "unknown"` and `accounting` (`complete` \| `incomplete` \| `running`). Unknown is not zero: a backend on a subscription allowance reports `unknown`, never `0`. |
+| `error` | `reason`, plus context fields | A failure; the daemon closes the connection after most errors. Optional `kind` (`update_required` \| `provider_refused` \| `cost_limit` \| `session_expired` \| `close_timeout` \| `bridge_unavailable` \| `max_session_duration` \| `provider_disconnected`) is the typed failure, and optional `detail` carries the vendor's own bounded sentence. |
 | `playback_stop` | — | The assistant's audio playback has stopped. |
+| `call_ready` | `engine`, `call_id`, `provider_session_id?`, `expires_at?`, `captions` | **v2.** The provider session is established and the call can carry audio. `expires_at` is unix seconds and is absent when the provider did not say; `captions` is true when `caption` frames will follow. |
+| `caption` | `speaker` (`user` \| `assistant`), `delta`, `start_ms`, `end_ms` | **v2.** One verbatim transcript fragment. Concatenate `delta` bytes as received — never trim them or insert spaces — and allow user and assistant captions to overlap in time. A missing fragment is not proof of silence. |
+| `task` | `delegation_id`, `revision`, `status`, `summary?` | **v2.** Lifecycle of one backend delegation: `pending` \| `running` \| `completed` \| `failed` \| `cancelled`. `revision` fences a re-asked task so a late frame from an earlier revision can be dropped. `summary` is bounded to 240 characters. Backend progress belongs here, outside the spoken captions. |
+
+## Live call sequence
+
+Under `openai_live` the daemon speaks to the pet in this order. Every frame
+except `call_ready` is optional and may repeat; there is no spoken-response
+completion event, so nothing here waits for one.
+
+```
+pet  -> daemon:  call_start
+                 daemon opens the provider session and the backend bridge
+daemon -> pet:   call_ready { engine: "openai_live", call_id, provider_session_id?, expires_at?, captions }
+daemon -> pet:   state { state: "listening" }
+pet  -> daemon:  audio_chunk …                     (continuous PCM, including silence)
+daemon -> pet:   caption …                         (user and assistant fragments, overlapping)
+daemon -> pet:   audio_delta … / state { speaking }
+daemon -> pet:   task { delegation_id, revision, status: "running" }      (backend work started)
+pet  -> daemon:  task_cancel { delegation_id }                            (optional)
+daemon -> pet:   task { …, status: "completed" | "failed" | "cancelled", summary? }
+daemon -> pet:   usage { status: "live", voice_seconds, voice_cost_cents, backend_turns,
+                         backend_cost: "unknown", accounting: "running" }
+pet  -> daemon:  call_stop
+daemon -> pet:   state { state: "idle" }
+daemon -> pet:   usage { …, accounting: "complete" | "incomplete" }       (final)
+```
+
+The final `usage` is the settled bill for the call: `accounting: "incomplete"`
+says the provider never reported a terminal duration, and an incomplete total is
+never overwritten with zero. A call the daemon ends itself (cost ceiling, session
+expiry, max duration, provider disconnect) sends the same `state: "idle"` and
+final `usage`, followed by `error` carrying the matching `kind`.

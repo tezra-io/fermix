@@ -1,11 +1,16 @@
 defmodule FermixCore.Realtime.SessionSupervisor do
   @moduledoc """
-  Dynamic supervisor for local Realtime voice sessions.
+  Dynamic supervisor for local voice sessions, whichever engine owns them.
+
+  The child module is the caller's (`:engine_module`, derived from the
+  configured engine by `SessionControl.engine_module/1`) rather than a constant
+  here, so one supervisor holds Realtime and Live sessions and the reload path
+  drives both through `SessionControl`.
   """
 
   use DynamicSupervisor
 
-  alias FermixCore.Realtime.SessionServer
+  alias FermixCore.Realtime.SessionControl
 
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(opts \\ []) do
@@ -15,9 +20,17 @@ defmodule FermixCore.Realtime.SessionSupervisor do
   @impl true
   def init(_opts), do: DynamicSupervisor.init(strategy: :one_for_one)
 
+  @doc """
+  Starts one voice session under `opts[:engine_module]`.
+
+  The engine is required, never defaulted: a session started under the wrong
+  engine would speak the wrong provider wire, and guessing it here would hide
+  which engine a call actually ran on.
+  """
   @spec start_session(GenServer.server(), keyword()) :: DynamicSupervisor.on_start_child()
   def start_session(server \\ __MODULE__, opts) when is_list(opts) do
-    DynamicSupervisor.start_child(server, {FermixCore.Realtime.SessionServer, opts})
+    engine_module = Keyword.fetch!(opts, :engine_module)
+    DynamicSupervisor.start_child(server, {engine_module, opts})
   end
 
   @spec active_sessions(GenServer.server()) :: non_neg_integer()
@@ -42,7 +55,7 @@ defmodule FermixCore.Realtime.SessionSupervisor do
   end
 
   defp reload_child({_id, pid, :worker, _modules}) when is_pid(pid) do
-    case SessionServer.reload_runtime(pid) do
+    case SessionControl.reload_runtime(pid) do
       {:ok, summary} -> {:ok, summary}
       {:error, reason} -> {:error, reason}
     end

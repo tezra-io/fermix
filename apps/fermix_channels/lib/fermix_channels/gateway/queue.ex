@@ -37,6 +37,7 @@ defmodule FermixChannels.Gateway.Queue do
   alias FermixCore.Agents.ConversationKey
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Agents.TurnRunner
+  alias FermixCore.Agents.VoiceCall
   alias FermixCore.Browser
   alias FermixCore.Memory.ConversationStore
 
@@ -664,10 +665,28 @@ defmodule FermixChannels.Gateway.Queue do
   # stored message is the user turn) — lighter than a full `runner.commit`, so an
   # emoji ack triggers no memory review or auto-compaction. Best-effort: a down
   # store must not crash the turn task's reply path.
-  defp append_marker(%{conversation_store: store, conversation_key: conversation_key}, marker) do
-    ConversationStore.append_stopped_marker(conversation_key, marker, server: store)
+  defp append_marker(
+         %{conversation_store: store, conversation_key: conversation_key, msg: msg},
+         marker
+       ) do
+    ConversationStore.append_stopped_marker(conversation_key, marker,
+      server: marker_store(store, msg)
+    )
   catch
     :exit, _reason -> :skipped
+  end
+
+  # Which store holds the turn's history. A Live voice delegation runs on its
+  # call-owned store (ephemeral unless the call persists), so its marker must
+  # close the orphaned user turn THERE — writing it to the global store would
+  # leave the call's own history dangling and put a voice fragment in the
+  # durable conversation (M41 §5.2). One seam, read by both marker sites; every
+  # other channel resolves to the store this queue was started with.
+  defp marker_store(default_store, msg) when is_map(msg) do
+    case VoiceCall.from_message(msg) do
+      {:ok, %{conversation_store: store}} -> store
+      :none -> default_store
+    end
   end
 
   # `commit/4` returns `:compacted` when it summarized the history; surface a
@@ -941,9 +960,9 @@ defmodule FermixChannels.Gateway.Queue do
   # killed before it stored). Best-effort: a down store must not crash the stop.
   defp mark_stopped_turn(_state, _key, %{active: nil}), do: :skipped
 
-  defp mark_stopped_turn(state, key, %{active: _active}) do
+  defp mark_stopped_turn(state, key, %{active: %{message: msg}}) do
     ConversationStore.append_stopped_marker(key, @stopped_turn_marker,
-      server: state.conversation_store
+      server: marker_store(state.conversation_store, msg)
     )
   catch
     :exit, _reason -> :skipped

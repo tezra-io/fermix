@@ -36,6 +36,39 @@ defmodule FermixCore.Prompt.BootstrapLoader do
     end
   end
 
+  @doc """
+  Load `LIVE.md`, the Live voice frontend's own prompt (M41 §6.1).
+
+  Deliberately outside `load/2`'s map and not a `PromptComposer` part: LIVE.md
+  instructs the voice frontend that delegates to Core, so a Core text prompt
+  carrying it would tell the agent it is the frontend. `Realtime.LivePrompt`
+  is the only caller. Missing or empty falls back to the shipped template
+  (in memory only — the seeder is still the only writer).
+  """
+  @spec load_live(String.t(), keyword()) :: {:ok, bootstrap_file()} | {:error, term()}
+  def load_live(agent_id, opts \\ []) when is_binary(agent_id) and is_list(opts) do
+    with :ok <- BootstrapPaths.validate_agent_id(agent_id) do
+      do_load_live(agent_id, opts)
+    end
+  end
+
+  defp do_load_live(agent_id, opts) do
+    path = BootstrapPaths.live_path(agent_id, opts)
+
+    case BootstrapFile.read_present(path) do
+      {:ok, content} ->
+        file = BootstrapFile.metadata(:live, path, content, :present)
+        capture_bootstrap_revision(agent_id, :live_md, file, opts)
+        {:ok, file}
+
+      {:missing, _reason} ->
+        {:ok, BootstrapFile.metadata(:live, path, Defaults.live_md(), :fallback)}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
   defp load_identity(agent_id, opts) do
     path = BootstrapPaths.identity_path(agent_id, opts)
 

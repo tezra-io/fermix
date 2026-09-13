@@ -112,6 +112,7 @@ defmodule FermixCore.HealthTest do
              enabled: false,
              status: :disabled,
              provider: nil,
+             engine: nil,
              model: nil,
              socket_path: nil,
              socket_alive: nil,

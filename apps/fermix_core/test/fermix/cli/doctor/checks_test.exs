@@ -236,7 +236,12 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     end
 
     test "ok when seeds match the current shipped templates", %{repo: repo} do
-      for {name, type} <- [fermix: :fermix_md, soul: :soul_md, realtime: :realtime_md] do
+      for {name, type} <- [
+            fermix: :fermix_md,
+            soul: :soul_md,
+            realtime: :realtime_md,
+            live: :live_md
+          ] do
         {:ok, current} = TemplateRenderer.render(name, %{})
         commit_seed(repo, type, current)
       end
@@ -249,15 +254,30 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     test "warns when a shipped template changed since seed", %{repo: repo} do
       {:ok, current_soul} = TemplateRenderer.render(:soul, %{})
       {:ok, current_realtime} = TemplateRenderer.render(:realtime, %{})
+      {:ok, current_live} = TemplateRenderer.render(:live, %{})
 
       commit_seed(repo, :fermix_md, "an older fermix template render")
       commit_seed(repo, :soul_md, current_soul)
       commit_seed(repo, :realtime_md, current_realtime)
+      commit_seed(repo, :live_md, current_live)
 
       result = Checks.bootstrap_template_drift(repo: repo)
       assert result.status == :warn
       assert result.detail =~ "fermix.md"
       refute result.detail =~ "soul.md"
+    end
+
+    test "warns when the shipped LIVE.md template changed since seed", %{repo: repo} do
+      for {name, type} <- [fermix: :fermix_md, soul: :soul_md, realtime: :realtime_md] do
+        {:ok, current} = TemplateRenderer.render(name, %{})
+        commit_seed(repo, type, current)
+      end
+
+      commit_seed(repo, :live_md, "an older live template render")
+
+      result = Checks.bootstrap_template_drift(repo: repo)
+      assert result.status == :warn
+      assert result.detail =~ "live.md"
     end
 
     test "reports unknown for installs seeded before revision tracking", %{repo: repo} do
@@ -532,6 +552,27 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.name == "realtime voice"
       assert result.status == :ok
       assert result.detail =~ "key present"
+      assert result.detail =~ "engine openai_realtime"
+      assert result.detail =~ "model gpt-realtime-2"
+    end
+
+    # Both engines authenticate with the same OpenAI Platform key, so the line
+    # that says the key is present has to say which wire it is present for:
+    # without it a Live install and a Realtime install read identically.
+    test "names the Live engine and its model when Live is selected" do
+      Application.put_env(:fermix_core, :realtime,
+        enabled: true,
+        engine: "openai_live",
+        model: "gpt-live-1"
+      )
+
+      Application.put_env(:fermix_core, :providers, openai: [api_key: "sk-test"])
+
+      result = Checks.realtime()
+
+      assert result.status == :ok
+      assert result.detail =~ "engine openai_live"
+      assert result.detail =~ "model gpt-live-1"
     end
 
     test "warns when enabled but the OpenAI key is missing" do

@@ -13,9 +13,10 @@ defmodule FermixCore.Prompt.TemplateRenderer do
 
   require EEx
 
-  @type template_name :: :identity | :fermix | :soul | :user | :memory | :realtime
+  @type template_name ::
+          :identity | :fermix | :soul | :user | :memory | :realtime | :live
 
-  @templates [:identity, :fermix, :soul, :user, :memory, :realtime]
+  @templates [:identity, :fermix, :soul, :user, :memory, :realtime, :live]
 
   for name <- @templates do
     path =
@@ -35,16 +36,17 @@ defmodule FermixCore.Prompt.TemplateRenderer do
 
   @spec render(template_name(), map()) :: {:ok, String.t()} | {:error, term()}
   def render(name, assigns) when is_atom(name) and is_map(assigns) do
-    list = Map.to_list(assigns)
+    render_template(name, Map.to_list(assigns))
+  end
 
-    case name do
-      :identity -> {:ok, render_identity(list)}
-      :fermix -> {:ok, render_fermix(list)}
-      :soul -> {:ok, render_soul(list)}
-      :user -> {:ok, render_user(list)}
-      :memory -> {:ok, render_memory(list)}
-      :realtime -> {:ok, render_realtime(list)}
-      _ -> {:error, :not_found}
+  # Dispatch is generated from `@templates` (kept in its own loop so the
+  # clauses stay grouped) — the module list is the single place a template is
+  # declared, and adding one never means editing `render/2`.
+  for name <- @templates do
+    defp render_template(unquote(name), assigns) do
+      {:ok, unquote(:"render_#{name}")(assigns)}
     end
   end
+
+  defp render_template(_name, _assigns), do: {:error, :not_found}
 end

@@ -1,6 +1,12 @@
 defmodule FermixCore.Realtime.LocalVoiceSocket do
   @moduledoc """
-  Local Unix-domain socket listener for the native Realtime voice companion.
+  Local Unix-domain socket listener for the native voice companion.
+
+  Engine-agnostic by construction: a connection's session is driven through
+  `SessionControl`, so the same listener serves the Realtime and the Live
+  engines. It branches on the engine in exactly the two places where the WIRE
+  differs — the Live-requires-v2 refusal at `call_start`, and `task_cancel`,
+  which only Live has delegations for.
   """
 
   use GenServer
@@ -10,7 +16,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.DeviceIdentity
   alias FermixCore.Realtime.Protocol
-  alias FermixCore.Realtime.SessionServer
+  alias FermixCore.Realtime.SessionControl
   alias FermixCore.Realtime.SessionSupervisor
   alias FermixCore.Setup.ConfigStore
 
@@ -19,6 +25,13 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
   @accept_idle_ms 50
   @max_wire_line_bytes 65_536
   @default_max_clients 4
+  # The wire version the Live engine requires. The handshake window still admits
+  # a v1 companion (it may run the Realtime engine); this is the floor for a
+  # Live CALL, and the number the refusal reports as `min_version`.
+  @live_min_protocol_version 2
+  # How many queued companion frames a refused `call_start` drains before it
+  # gives up and renders the refusal itself. A refusal queues a handful.
+  @max_flushed_frames 64
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
@@ -32,6 +45,34 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
     error -> {:error, error}
   catch
     :exit, reason -> {:error, reason}
+  end
+
+  @doc """
+  The options the default starter hands `SessionSupervisor.start_session/2`.
+
+  This is the listener's half of the session contract: which engine module runs
+  the call, under which scope, with which credentials. Both engine-derived
+  values come from `SessionControl`, so the scope prefix a trace reader searches
+  for (`session:` vs `voice_live:`) and the module that gets started can never
+  disagree about which engine is in force.
+  """
+  @spec session_opts(keyword()) :: {:ok, keyword()} | {:error, term()}
+  def session_opts(opts) when is_list(opts) do
+    with {:ok, api_key} <- CoreConfig.provider_api_key(:openai),
+         {:ok, device_id} <-
+           DeviceIdentity.ensure_device_id(ConfigStore.workspace_paths().realtime) do
+      config = Config.current()
+      owner_id = MemoryConfig.owner_id()
+
+      {:ok,
+       opts
+       |> Keyword.put(:config, config)
+       |> Keyword.put(:engine_module, SessionControl.engine_module(config))
+       |> Keyword.put(:api_key, api_key)
+       |> Keyword.put(:device_id, device_id)
+       |> Keyword.put_new(:session_scope, SessionControl.session_scope(config))
+       |> Keyword.put(:safety_identifier, DeviceIdentity.safety_identifier(owner_id, device_id))}
+    end
   end
 
   @impl true
@@ -52,7 +93,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
          task_supervisor: Keyword.get(opts, :task_supervisor, FermixCore.TaskSupervisor),
          session_supervisor: Keyword.get(opts, :session_supervisor, SessionSupervisor),
          session_starter: Keyword.get(opts, :session_starter, &default_session_starter/1),
-         session_module: Keyword.get(opts, :session_module, SessionServer),
+         session_module: Keyword.get(opts, :session_module, SessionControl),
          session_opts: Keyword.get(opts, :session_opts, []),
          max_clients: positive_int_opt(opts, :max_clients, @default_max_clients),
          # handler pid -> bound session pid (or nil before `call_start`). This map
@@ -215,7 +256,10 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
       session_opts: state.session_opts,
       session_supervisor: state.session_supervisor,
       buffer: "",
-      hello_received: false
+      hello_received: false,
+      # The version negotiated in `client_hello`. Nil until the handshake lands;
+      # every event that reads it is gated behind `hello_received`.
+      client_version: nil
     }
 
     case Task.Supervisor.start_child(state.task_supervisor, fn ->
@@ -404,17 +448,25 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
     send_error_and_stop(:handshake_required, state)
   end
 
+  # `call_start` is the first moment both the negotiated version and the
+  # configured engine are known, so the Live-requires-v2 rule lands here — and
+  # BEFORE a session exists, because a Live session bills by the minute from the
+  # moment it opens and a v1 companion could not render the call anyway.
   defp dispatch_event(%{type: "call_start"}, state) do
-    case ensure_session(state) do
-      {:ok, session, state} ->
-        with :ok <- state.session_module.call_start(session) do
-          {:cont, state}
-        else
-          {:error, reason} -> send_error_and_stop(reason, state)
-        end
+    if live_call_needs_upgrade?(state) do
+      send_update_required_and_stop(state)
+    else
+      start_call(state)
+    end
+  end
 
-      {:error, reason} ->
-        send_error_and_stop(reason, state)
+  # Only the Live engine has delegations to cancel. A Realtime connection is
+  # refused here rather than forwarded to a session with no clause for it.
+  defp dispatch_event(%{type: "task_cancel", payload: payload}, state) do
+    if Config.live?(state.config) do
+      cancel_task(Map.fetch!(payload, "delegation_id"), state)
+    else
+      send_error_and_stop(:unsupported_by_engine, state)
     end
   end
 
@@ -473,6 +525,97 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
     {:cont, state}
   end
 
+  defp start_call(state) do
+    case ensure_session(state) do
+      {:ok, session, state} ->
+        with :ok <- state.session_module.call_start(session) do
+          {:cont, state}
+        else
+          {:error, reason} -> flush_then_stop(reason, state)
+        end
+
+      # No session was ever started, so nothing can be queued: render the
+      # refusal directly.
+      {:error, reason} ->
+        send_error_and_stop(reason, state)
+    end
+  end
+
+  # The session pushes its frames to this handler's MAILBOX, and the handler is
+  # blocked inside `call_start` while it does — so the session's own rich `error`
+  # (its published `kind`, and the vendor's words in `detail`) is sitting there
+  # unwritten by the time the refusal comes back. Write what is queued first, in
+  # order. If one of those frames was itself an `error`, stop on it and send no
+  # second one: the companion treats the FIRST `error` as terminal, so a bare
+  # `reason`-only frame would be the one it read and the diagnosis would be lost.
+  defp flush_then_stop(reason, state) do
+    if flush_queued_frames(state, false, @max_flushed_frames) do
+      {:stop, state}
+    else
+      send_error_and_stop(reason, state)
+    end
+  end
+
+  # Bounded twice over: `after 0` takes only what the session has ALREADY
+  # delivered, never waiting on one that is still producing, and the counter caps
+  # a flood. At the cap the drain stops and the caller renders the refusal as
+  # usual — the connection is closing on this path either way.
+  defp flush_queued_frames(_state, error_sent?, 0), do: error_sent?
+
+  defp flush_queued_frames(state, error_sent?, remaining) do
+    receive do
+      {:realtime, event} ->
+        _ = send_event(state.conn, event)
+        flush_queued_frames(state, error_sent? or error_frame?(event), remaining - 1)
+    after
+      0 -> error_sent?
+    end
+  end
+
+  defp error_frame?(%{type: "error"}), do: true
+  defp error_frame?(_event), do: false
+
+  defp cancel_task(delegation_id, state) do
+    case require_session(state) do
+      {:ok, session, state} ->
+        with :ok <- state.session_module.cancel_task(session, delegation_id) do
+          {:cont, state}
+        else
+          {:error, reason} -> send_error_and_stop(reason, state)
+        end
+
+      {:error, reason} ->
+        send_error_and_stop(reason, state)
+    end
+  end
+
+  # A non-integer client_version cannot reach this: every event but
+  # `client_hello` is gated behind a completed handshake. Match on the integer
+  # so a future path that broke that gate fails loud instead of reading an atom
+  # as "new enough".
+  defp live_call_needs_upgrade?(%{client_version: version, config: config})
+       when is_integer(version) do
+    Config.live?(config) and version < @live_min_protocol_version
+  end
+
+  # `min_version` here is the version the ENGINE requires, not the handshake
+  # floor in `server_hello` — `required_for` names which engine raised it.
+  defp send_update_required_and_stop(state) do
+    _ =
+      send_event(state.conn, %{
+        type: "error",
+        reason: "unsupported_protocol_version",
+        kind: "update_required",
+        direction: "client_too_old",
+        client_version: state.client_version,
+        min_version: @live_min_protocol_version,
+        max_version: Protocol.protocol_version(),
+        required_for: "openai_live"
+      })
+
+    {:stop, state}
+  end
+
   # A repeat hello is a protocol violation — the handshake is a one-shot
   # transition. Fail loud rather than silently re-negotiating.
   defp handle_client_hello(_payload, %{hello_received: true} = state) do
@@ -490,7 +633,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
         # instead of letting a hard `:ok =` match-fail turn a normal disconnect
         # into a handler crash.
         case send_event(state.conn, reply) do
-          :ok -> {:cont, %{state | hello_received: true}}
+          :ok -> {:cont, %{state | hello_received: true, client_version: version}}
           {:error, _reason} -> {:stop, state}
         end
 
@@ -576,13 +719,14 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
   # Best-effort graceful teardown shared by the listener's crash path and the
   # handler's own terminal exits. Exit-safe: it may race a session already dying
   # on its own, so a call_stop/stop that exits must not take down the caller
-  # (listener or handler). Only a real SessionServer is GenServer.stop-ed; a test
-  # session double just gets call_stop.
+  # (listener or handler). Only a real engine session — reached through
+  # `SessionControl` — is GenServer.stop-ed; a test session double just gets
+  # call_stop.
   defp stop_session(session, session_module) when is_pid(session) do
     if Process.alive?(session) do
       session_module.call_stop(session)
 
-      if session_module == SessionServer and Process.alive?(session) do
+      if session_module == SessionControl and Process.alive?(session) do
         GenServer.stop(session, :normal, 1_000)
       end
     end
@@ -604,29 +748,9 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
     session_supervisor = Keyword.fetch!(opts, :session_supervisor)
     opts = Keyword.drop(opts, [:session_supervisor])
 
-    with {:ok, session_opts} <- build_session_opts(opts) do
-      SessionSupervisor.start_session(session_supervisor, session_opts)
+    with {:ok, started_opts} <- session_opts(opts) do
+      SessionSupervisor.start_session(session_supervisor, started_opts)
     end
-  end
-
-  defp build_session_opts(opts) do
-    with {:ok, api_key} <- CoreConfig.provider_api_key(:openai),
-         {:ok, device_id} <-
-           DeviceIdentity.ensure_device_id(ConfigStore.workspace_paths().realtime) do
-      owner_id = MemoryConfig.owner_id()
-
-      {:ok,
-       opts
-       |> Keyword.put(:config, Config.current())
-       |> Keyword.put(:api_key, api_key)
-       |> Keyword.put(:device_id, device_id)
-       |> Keyword.put_new(:session_scope, session_scope())
-       |> Keyword.put(:safety_identifier, DeviceIdentity.safety_identifier(owner_id, device_id))}
-    end
-  end
-
-  defp session_scope do
-    "session:" <> Integer.to_string(System.unique_integer([:positive, :monotonic]))
   end
 
   defp reason_to_string(reason) when is_atom(reason), do: Atom.to_string(reason)

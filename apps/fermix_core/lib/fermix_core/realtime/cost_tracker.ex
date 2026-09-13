@@ -15,46 +15,75 @@ defmodule FermixCore.Realtime.CostTracker do
   client-side per sent frame (`add_feed_frame/1`) — the provider's reported
   image tokens cannot distinguish a feed frame from the model's own tool
   screenshots.
+
+  Two lines are ESTIMATES the provider never reports, and the ceiling compares
+  the larger of estimate and report rather than their sum:
+
+    * `estimated.cost_cents` prices microphone audio the session decided was
+      speech (`add_input_audio_ms/2`), at the model's uncached audio-input rate.
+    * `estimated.transcription_cost_cents` prices input transcription of that
+      same speech (`add_transcription_ms/2`) — a separately invoiced line the
+      Realtime usage payload does not carry at all.
   """
 
   alias FermixCore.Realtime.Config
 
-  # Cached input is billed at ONE rate per model here rather than per modality
-  # (audio/text/image each have their own cached rate upstream). It is a small
-  # correction on a spend ceiling, and collapsing it keeps one table readable;
-  # the uncached rates — which dominate — are exact.
+  # Cached input is priced PER MODALITY: a cached image token and a cached text
+  # token do not cost the same, and on mini they differ by 8x. One shared rate
+  # per model billed whichever modality happened to cache at another's price.
   @rates %{
     "gpt-realtime-2" => %{
       audio_in: 32.0,
-      cached_in: 0.40,
       text_in: 4.0,
       image_in: 5.0,
+      cached_audio_in: 0.40,
+      cached_text_in: 0.40,
+      cached_image_in: 0.50,
       audio_out: 64.0,
-      text_out: 16.0
+      text_out: 24.0
     },
     "gpt-realtime-2.1" => %{
       audio_in: 32.0,
-      cached_in: 0.40,
       text_in: 4.0,
       image_in: 5.0,
+      cached_audio_in: 0.40,
+      cached_text_in: 0.40,
+      cached_image_in: 0.50,
       audio_out: 64.0,
       text_out: 24.0
     },
     "gpt-realtime-2.1-mini" => %{
       audio_in: 10.0,
-      cached_in: 0.30,
       text_in: 0.60,
       image_in: 0.80,
+      cached_audio_in: 0.30,
+      cached_text_in: 0.06,
+      cached_image_in: 0.08,
       audio_out: 20.0,
       text_out: 2.40
     }
   }
 
   @input_token_ms 100
+  @minute_ms 60_000
+
+  # Input transcription is priced per MINUTE of audio, not per token, and the
+  # Realtime usage payload does not report it at all — so it is an estimate or
+  # it is missing from every total here. This prices `whisper-1`, the configured
+  # default (`Config` `transcription_model`); another transcription model bills
+  # differently and this line does not follow it.
+  @transcription_cents_per_minute 0.6
 
   # Input modalities that can be cached, dearest first — the order cached tokens
-  # are attributed in when the payload does not break them down.
-  @cached_modalities ~w(audio_tokens text_tokens image_tokens)
+  # are attributed in when the payload does not break them down — each with the
+  # rate its cached tokens bill at.
+  @cached_rates [
+    {"audio_tokens", :cached_audio_in},
+    {"text_tokens", :cached_text_in},
+    {"image_tokens", :cached_image_in}
+  ]
+
+  @cached_modalities Enum.map(@cached_rates, fn {modality, _rate} -> modality end)
 
   # The screen feed may spend at most this share of the call's ONE budget. Not a
   # second config key: a fixed fraction keeps "how much may this call cost" a
@@ -65,7 +94,9 @@ defmodule FermixCore.Realtime.CostTracker do
   @type usage :: %{
           input_audio_ms: non_neg_integer(),
           input_audio_tokens: non_neg_integer(),
-          cost_cents: float()
+          cost_cents: float(),
+          transcription_ms: non_neg_integer(),
+          transcription_cost_cents: float()
         }
 
   @type feed_usage :: %{image_tokens: non_neg_integer(), cost_cents: float()}
@@ -79,7 +110,13 @@ defmodule FermixCore.Realtime.CostTracker do
         }
 
   defstruct config: nil,
-            estimated: %{input_audio_ms: 0, input_audio_tokens: 0, cost_cents: 0.0},
+            estimated: %{
+              input_audio_ms: 0,
+              input_audio_tokens: 0,
+              cost_cents: 0.0,
+              transcription_ms: 0,
+              transcription_cost_cents: 0.0
+            },
             reported: %{cost_cents: 0.0},
             feed: %{image_tokens: 0, cost_cents: 0.0},
             counted_responses: MapSet.new()
@@ -98,9 +135,29 @@ defmodule FermixCore.Realtime.CostTracker do
     cost_cents = tokens_cents(input_audio_tokens, rate(tracker, :audio_in))
 
     put_in(tracker.estimated, %{
-      input_audio_ms: input_audio_ms,
-      input_audio_tokens: input_audio_tokens,
-      cost_cents: cost_cents
+      tracker.estimated
+      | input_audio_ms: input_audio_ms,
+        input_audio_tokens: input_audio_tokens,
+        cost_cents: cost_cents
+    })
+  end
+
+  @doc """
+  Add milliseconds of speech to the estimated input-transcription line.
+
+  The caller passes the SAME milliseconds it passes to `add_input_audio_ms/2`:
+  the Realtime session transcribes the operator's committed speech, and that
+  transcription is invoiced apart from the conversational audio tokens, so a
+  total without it cannot be compared against a bill.
+  """
+  @spec add_transcription_ms(t(), non_neg_integer()) :: t()
+  def add_transcription_ms(%__MODULE__{} = tracker, ms) when is_integer(ms) and ms >= 0 do
+    transcription_ms = tracker.estimated.transcription_ms + ms
+
+    put_in(tracker.estimated, %{
+      tracker.estimated
+      | transcription_ms: transcription_ms,
+        transcription_cost_cents: transcription_ms / @minute_ms * @transcription_cents_per_minute
     })
   end
 
@@ -207,7 +264,7 @@ defmodule FermixCore.Realtime.CostTracker do
     total_cents =
       tokens_cents(uncached(input, cached, "audio_tokens"), rate(tracker, :audio_in)) +
         tokens_cents(uncached(input, cached, "text_tokens"), rate(tracker, :text_in)) +
-        tokens_cents(billed_cached(cached), rate(tracker, :cached_in)) +
+        cached_cents(tracker, cached) +
         tokens_cents(out_tokens(output, "audio_tokens"), rate(tracker, :audio_out)) +
         tokens_cents(out_tokens(output, "text_tokens"), rate(tracker, :text_out)) +
         image_cents
@@ -250,7 +307,14 @@ defmodule FermixCore.Realtime.CostTracker do
     max(0, non_negative_int(Map.get(totals, key, 0)) - Map.get(cached, key, 0))
   end
 
-  defp billed_cached(cached), do: cached |> Map.values() |> Enum.sum()
+  # Each modality's cached tokens bill at THAT modality's cached rate. Summing
+  # them first and pricing the total at one rate charged cached image tokens the
+  # audio rate (and, on mini, cached text at 5x its own).
+  defp cached_cents(tracker, cached) do
+    Enum.reduce(@cached_rates, 0.0, fn {modality, rate_key}, cents ->
+      cents + tokens_cents(Map.get(cached, modality, 0), rate(tracker, rate_key))
+    end)
+  end
 
   defp out_tokens(output, key), do: non_negative_int(Map.get(output, key, 0))
 
@@ -272,7 +336,10 @@ defmodule FermixCore.Realtime.CostTracker do
   defp non_negative_int(value) when is_integer(value) and value >= 0, do: value
   defp non_negative_int(_value), do: 0
 
+  # Transcription rides on the ESTIMATED side: it is a real charge the reported
+  # payload never carries, so leaving it out of the comparison understated every
+  # call by it.
   defp max_cost_cents(%__MODULE__{estimated: estimated, reported: reported}) do
-    max(estimated.cost_cents, reported.cost_cents)
+    max(estimated.cost_cents + estimated.transcription_cost_cents, reported.cost_cents)
   end
 end

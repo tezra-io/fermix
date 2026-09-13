@@ -166,6 +166,10 @@ defmodule FermixCore.Realtime.SessionServer do
            recorder_opts: Keyword.get(opts, :recorder_opts, []),
            usage: CostTracker.new(config),
            muted?: false,
+           # Mirrors the provider's OWN speech detection, and gates the mic
+           # estimate: silence is streamed but never metered (see
+           # `estimate_speech_audio/2`).
+           speech_active?: false,
            max_session_timer: nil,
            user_transcript: "",
            assistant_transcript: "",
@@ -308,11 +312,8 @@ defmodule FermixCore.Realtime.SessionServer do
       when is_pid(openai_pid) do
     case send_openai(state, OpenAIClient.audio_append_event(audio)) do
       :ok ->
-        usage = CostTracker.add_input_audio_ms(state.usage, audio_duration_ms(audio))
-        state = %{state | usage: usage}
-
-        notify_usage(state, "estimated")
-        enforce_audio_limits(state, usage)
+        state = estimate_speech_audio(state, audio)
+        enforce_audio_limits(state, state.usage)
 
       {:error, reason} ->
         report_provider_send_error(state, reason)
@@ -334,6 +335,28 @@ defmodule FermixCore.Realtime.SessionServer do
   # 100 ms blip instead of a 43-second freeze.
   def handle_cast({:audio_chunk, _audio}, state) do
     {:stop, {:shutdown, :provider_session_missing}, state}
+  end
+
+  # Mic audio is metered ONLY between the provider's `speech_started` and
+  # `speech_stopped`. An open microphone streams silence continuously, and the
+  # provider's VAD discards it rather than billing it — so estimating it inflated
+  # the very number the session cost ceiling is measured against, and a quiet call
+  # could be torn down for audio nobody charged for. The chunk is still SENT
+  # either way: the provider's VAD needs the quiet to find where speech begins.
+  # Notifies the companion only when something actually accrued.
+  defp estimate_speech_audio(%{speech_active?: false} = state, _audio), do: state
+
+  defp estimate_speech_audio(state, audio) do
+    ms = audio_duration_ms(audio)
+
+    usage =
+      state.usage
+      |> CostTracker.add_input_audio_ms(ms)
+      |> CostTracker.add_transcription_ms(ms)
+
+    state = %{state | usage: usage}
+    notify_usage(state, "estimated")
+    state
   end
 
   defp enforce_audio_limits(state, usage) do
@@ -582,9 +605,18 @@ defmodule FermixCore.Realtime.SessionServer do
         # ids are that conversation's too: forget them (nothing to delete — the
         # items die with the old conversation).
         state = state |> cancel_pending_tool_calls() |> suspend_screen_feed()
-        # The old conversation's items, its in-flight response, and any deferred
-        # trigger all die with it.
-        state = %{state | tool_image_items: [], response_active?: false, needs_response?: false}
+        # The old conversation's items, its in-flight response, any deferred
+        # trigger, and its speech detection all die with it — the fresh session
+        # runs its own VAD and reports `speech_started` again, so carrying the
+        # flag across would meter the new session's silence.
+        state = %{
+          state
+          | tool_image_items: [],
+            response_active?: false,
+            needs_response?: false,
+            speech_active?: false
+        }
+
         # A socket death can produce BOTH a disconnect notice and an EXIT, so
         # cancel any timer already armed rather than stack a second attempt on top
         # of the first.
@@ -830,7 +862,7 @@ defmodule FermixCore.Realtime.SessionServer do
   # (`maybe_notify_cancelled_response/2`) and a committed user turn
   # (`:input_audio_committed` below).
   defp handle_provider_event_internal({:input_audio_speech_started, _event}, state) do
-    set_screen_feed_speaking(state, true)
+    set_screen_feed_speaking(%{state | speech_active?: true}, true)
   end
 
   defp handle_provider_event_internal({:input_audio_speech_stopped, _event}, state) do
@@ -838,7 +870,7 @@ defmodule FermixCore.Realtime.SessionServer do
       notify(state.companion, %{type: "state", state: "thinking"})
     end
 
-    set_screen_feed_speaking(state, false)
+    set_screen_feed_speaking(%{state | speech_active?: false}, false)
   end
 
   defp handle_provider_event_internal({:assistant_transcript_done, text}, state) do

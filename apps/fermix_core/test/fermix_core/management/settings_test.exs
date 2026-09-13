@@ -15,6 +15,7 @@ defmodule FermixCore.Management.SettingsTest do
   alias FermixCore.Management.Settings.Row
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Readiness
+  alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.RestartState
@@ -249,6 +250,257 @@ defmodule FermixCore.Management.SettingsTest do
 
       assert %{"min" => 0, "step" => 1, "unit" => "hours"} =
                row("memory", "review_interval_hours")
+    end
+  end
+
+  # The voice section is the one section whose row list depends on a value inside
+  # itself: the model decides which engine is in force, and the engine decides
+  # which voices exist, whether reasoning effort is a setting at all, and whether
+  # the backend that answers is worth naming. A client renders whichever list it
+  # is handed, so the engine-scoped half is pinned here rather than trusted.
+  describe "the voice section under each engine" do
+    test "the default engine publishes the effort row and no engine row" do
+      Application.put_env(:fermix_core, :realtime, enabled: true)
+
+      keys = Enum.map(rows("realtime"), & &1["key"])
+
+      assert keys == [
+               "realtime_enabled",
+               "realtime_model",
+               "realtime_voice",
+               "realtime_reasoning_effort",
+               "openai_api_key",
+               "realtime_max_session_minutes",
+               "realtime_max_cost_cents",
+               "realtime_persist_transcripts"
+             ]
+
+      assert %{"value" => "gpt-realtime-2"} = row("realtime", "realtime_model")
+      assert option_values("realtime", "realtime_voice") == RealtimeConfig.valid_voices()
+    end
+
+    # One combined menu, both catalogs, under either engine: the model IS the
+    # engine choice, so a client that published only the engine in force would
+    # leave an operator with no way to reach the other one.
+    test "the model row is one list of both catalogs, each option naming its engine" do
+      Application.put_env(:fermix_core, :realtime, enabled: true)
+
+      assert option_values("realtime", "realtime_model") == RealtimeConfig.all_models()
+
+      labels =
+        "realtime" |> row("realtime_model") |> Map.fetch!("options") |> Enum.map(& &1["label"])
+
+      assert labels == [
+               "gpt-realtime-2.1-mini · Realtime, integrated tools",
+               "gpt-realtime-2.1 · Realtime, integrated tools",
+               "gpt-realtime-2 · Realtime, integrated tools",
+               "gpt-live-1 · Live, with your Fermix agent"
+             ]
+    end
+
+    test "the Live engine publishes Live's voices and no reasoning effort row" do
+      Application.put_env(:fermix_core, :realtime,
+        enabled: true,
+        engine: "openai_live",
+        model: "gpt-live-1"
+      )
+
+      keys = Enum.map(rows("realtime"), & &1["key"])
+
+      assert keys == [
+               "realtime_enabled",
+               "realtime_model",
+               "realtime_voice",
+               "realtime_backend",
+               "openai_api_key",
+               "realtime_max_session_minutes",
+               "realtime_max_cost_cents",
+               "realtime_persist_transcripts"
+             ]
+
+      assert option_values("realtime", "realtime_model") == RealtimeConfig.all_models()
+
+      assert option_values("realtime", "realtime_voice") ==
+               RealtimeConfig.valid_voices("openai_live")
+
+      assert "beacon" in option_values("realtime", "realtime_voice")
+    end
+
+    # Live speaks and the operator's own primary provider answers. The row is
+    # read-only because it is a statement about the Providers pane, and
+    # `settings.apply` refuses it rather than offering a control that cannot save.
+    test "the Live engine names the primary route in a read-only backend row" do
+      Application.put_env(:fermix_core, :providers,
+        openai: [primary: true, default_model: "gpt-5.4"]
+      )
+
+      Application.put_env(:fermix_core, :realtime,
+        enabled: true,
+        engine: "openai_live",
+        model: "gpt-live-1"
+      )
+
+      assert %{"kind" => "text", "read_only" => true, "label" => "Backend", "value" => value} =
+               row("realtime", "realtime_backend")
+
+      assert value == "OpenAI · gpt-5.4"
+
+      assert {:error, {:invalid_params, "realtime_backend", _sentence}} =
+               Settings.apply("realtime", %{"realtime_backend" => "anything"})
+    end
+
+    test "a host that has never chosen a primary provider says so rather than guessing" do
+      Application.put_env(:fermix_core, :providers, [])
+      Application.put_env(:fermix_core, :agent, [])
+
+      Application.put_env(:fermix_core, :realtime,
+        enabled: true,
+        engine: "openai_live",
+        model: "gpt-live-1"
+      )
+
+      assert %{"value" => "Not configured"} = row("realtime", "realtime_backend")
+    end
+  end
+
+  # Choosing a model of the other engine is the one write in this pane that
+  # carries other keys with it: Live refuses the Realtime-only settings at the
+  # configuration boundary, and a Realtime engine left on a Live model refuses
+  # too. Answering the operator's choice with a validation error is the defect
+  # these cases exist for.
+  describe "switching the voice engine through the model" do
+    test "choosing a Live model moves the engine and drops the Realtime-only settings" do
+      Application.put_env(:fermix_core, :realtime,
+        enabled: true,
+        engine: "openai_realtime",
+        model: "gpt-realtime-2",
+        reasoning_effort: "high",
+        voice: "marin"
+      )
+
+      assert {:ok, result} =
+               Settings.apply("realtime", %{"realtime_model" => "gpt-live-1"})
+
+      realtime = Application.get_env(:fermix_core, :realtime)
+
+      assert Keyword.get(realtime, :engine) == "openai_live"
+      assert Keyword.get(realtime, :model) == "gpt-live-1"
+      refute Keyword.has_key?(realtime, :reasoning_effort)
+
+      assert Enum.sort(result["applied"]) ==
+               ["realtime_engine", "realtime_model", "realtime_reasoning_effort"]
+
+      assert "The engine changed to Live, with your Fermix agent." in result["side_effects"]
+
+      assert "Reasoning effort was removed because this engine does not use it." in result[
+               "side_effects"
+             ]
+    end
+
+    test "choosing a Realtime model moves back and restores a reasoning effort" do
+      Application.put_env(:fermix_core, :realtime,
+        enabled: true,
+        engine: "openai_live",
+        model: "gpt-live-1",
+        voice: "marin"
+      )
+
+      assert {:ok, result} =
+               Settings.apply("realtime", %{"realtime_model" => "gpt-realtime-2.1"})
+
+      realtime = Application.get_env(:fermix_core, :realtime)
+
+      assert Keyword.get(realtime, :engine) == "openai_realtime"
+      assert Keyword.get(realtime, :model) == "gpt-realtime-2.1"
+      assert Keyword.get(realtime, :reasoning_effort) == "low"
+
+      assert "realtime_engine" in result["applied"]
+      assert "realtime_reasoning_effort" in result["applied"]
+      assert "The engine changed to Realtime, integrated tools." in result["side_effects"]
+
+      assert "Reasoning effort was restored because this engine uses it." in result[
+               "side_effects"
+             ]
+    end
+
+    # The engine stopped being a row when it became a consequence of the model,
+    # and a key this section does not publish is refused by its own name rather
+    # than written from a vocabulary no pane renders.
+    test "an engine sent explicitly is refused by name as a setting this section has not got" do
+      Application.put_env(:fermix_core, :realtime, enabled: true, engine: "openai_realtime")
+
+      assert {:error, {:invalid_params, "realtime_engine", sentence}} =
+               Settings.apply("realtime", %{"realtime_engine" => "openai_live"})
+
+      assert sentence == "This section has no setting by that name."
+      assert Keyword.get(Application.get_env(:fermix_core, :realtime), :engine) != "openai_live"
+    end
+
+    # A voice is a voice under both engines, so nothing is derived and the
+    # operator is told nothing they did not do.
+    test "a change that is not an engine switch derives nothing" do
+      Application.put_env(:fermix_core, :realtime,
+        enabled: true,
+        engine: "openai_realtime",
+        model: "gpt-realtime-2",
+        reasoning_effort: "low",
+        voice: "marin"
+      )
+
+      assert {:ok, result} = Settings.apply("realtime", %{"realtime_voice" => "cedar"})
+
+      assert result["applied"] == ["realtime_voice"]
+      assert result["side_effects"] == []
+    end
+
+    # Live ships every Realtime voice plus twelve of its own, so the return
+    # journey is the one that can strand a voice. The snap is a change the
+    # operator did not type, so it is named exactly as the model is.
+    test "returning to Realtime snaps a Live-only voice and names the row it moved" do
+      Application.put_env(:fermix_core, :realtime,
+        enabled: true,
+        engine: "openai_live",
+        model: "gpt-live-1",
+        voice: "beacon"
+      )
+
+      assert {:ok, result} =
+               Settings.apply("realtime", %{"realtime_model" => "gpt-realtime-2"})
+
+      realtime = Application.get_env(:fermix_core, :realtime)
+
+      assert Keyword.get(realtime, :voice) == "marin"
+      assert "realtime_voice" in result["applied"]
+      assert "The voice changed to marin." in result["side_effects"]
+      assert %{"value" => "marin"} = row("realtime", "realtime_voice")
+    end
+
+    test "a voice both engines ship survives the switch and is never named" do
+      Application.put_env(:fermix_core, :realtime,
+        enabled: true,
+        engine: "openai_realtime",
+        model: "gpt-realtime-2",
+        reasoning_effort: "low",
+        voice: "cedar"
+      )
+
+      assert {:ok, result} = Settings.apply("realtime", %{"realtime_model" => "gpt-live-1"})
+
+      assert Keyword.get(Application.get_env(:fermix_core, :realtime), :voice) == "cedar"
+      refute "realtime_voice" in result["applied"]
+      refute Enum.any?(result["side_effects"], &(&1 =~ "The voice changed"))
+    end
+
+    # The combined menu is the whole value space, so a slug no engine ships is
+    # still refused against the published options rather than reaching the
+    # configuration boundary.
+    test "a model no engine ships is refused against the published options" do
+      Application.put_env(:fermix_core, :realtime, enabled: true, engine: "openai_realtime")
+
+      assert {:error, {:invalid_params, "realtime_model", sentence}} =
+               Settings.apply("realtime", %{"realtime_model" => "gpt-realtime-9"})
+
+      assert sentence =~ "published values"
     end
   end
 
@@ -595,6 +847,9 @@ defmodule FermixCore.Management.SettingsTest do
   end
 
   defp row(id, key), do: Enum.find(rows(id), &(&1["key"] == key)) || flunk("no #{id}/#{key} row")
+
+  defp option_values(id, key),
+    do: id |> row(key) |> Map.fetch!("options") |> Enum.map(& &1["value"])
 
   defp restore(app, key, nil), do: Application.delete_env(app, key)
   defp restore(app, key, value), do: Application.put_env(app, key, value)

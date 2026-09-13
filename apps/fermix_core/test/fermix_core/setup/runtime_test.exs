@@ -888,6 +888,21 @@ defmodule FermixCore.Setup.RuntimeTest do
       assert Keyword.get(answers, :realtime_persist_transcripts) == true
     end
 
+    # The model flag reaches the same answer vocabulary the setup panes write
+    # through, so a headless install picks the voice engine by naming a model.
+    # There is no engine flag any more: the engine is derived from the model, so
+    # an engine answer cannot arrive from the command line at all.
+    test "extracts the voice model flag as an answer and has no engine flag" do
+      answers = Runtime.provided_answers(realtime_model: "gpt-live-1")
+
+      assert Keyword.get(answers, :realtime_model) == "gpt-live-1"
+
+      refute Keyword.has_key?(
+               Runtime.provided_answers(realtime_engine: "openai_live"),
+               :realtime_engine
+             )
+    end
+
     test "keeps the xai_api_key flag as an answer" do
       answers = Runtime.provided_answers(provider: "xai", xai_api_key: "xai-key")
 

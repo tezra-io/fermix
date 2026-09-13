@@ -9,6 +9,11 @@ defmodule FermixCore.Realtime.ConversationRecorder do
   alias FermixCore.Realtime.Config
 
   @kind "voice_turn"
+  # One verbatim Live transcript fragment. A caption is NOT a turn: it is a
+  # speaker-labelled slice of speech with its own timings, and Live sends many
+  # of them per sentence. Recording it under `@kind` would make a call look like
+  # dozens of exchanges to every reader of the conversation history.
+  @caption_kind "live_caption"
   @source_type "realtime"
 
   @spec conversation_key(String.t(), atom() | String.t() | integer()) ::
@@ -36,6 +41,38 @@ defmodule FermixCore.Realtime.ConversationRecorder do
       |> Enum.reject(&(String.trim(&1.content) == ""))
 
     record_messages(config, device_id, messages, opts)
+  end
+
+  @doc """
+  Persist one Live caption fragment.
+
+  Verbatim: the delta is stored exactly as the provider sent it, because
+  concatenating trimmed fragments corrupts the sentence. Memory review is never
+  requested for a fragment — a syllable is not a conversation, and the review
+  belongs to whatever owns the call's history.
+  """
+  @spec record_caption(Config.t(), String.t(), String.t(), String.t(), keyword()) ::
+          :ok | {:error, term()}
+  def record_caption(%Config{} = config, device_id, speaker, delta, opts \\ [])
+      when is_binary(device_id) and speaker in ["user", "assistant"] and is_binary(delta) and
+             is_list(opts) do
+    caption_opts =
+      opts
+      |> Keyword.put(:kind, @caption_kind)
+      |> Keyword.put(:request_review?, false)
+      |> Keyword.put(:metadata, caption_metadata(speaker, opts))
+
+    record_messages(config, device_id, [%{role: speaker, content: delta}], caption_opts)
+  end
+
+  defp caption_metadata(speaker, opts) do
+    opts
+    |> Keyword.get(:metadata, %{})
+    |> Map.merge(%{
+      speaker: speaker,
+      start_ms: Keyword.get(opts, :start_ms),
+      end_ms: Keyword.get(opts, :end_ms)
+    })
   end
 
   defp record_messages(%Config{persist_transcripts?: false}, _device_id, _messages, _opts),
@@ -84,7 +121,7 @@ defmodule FermixCore.Realtime.ConversationRecorder do
       thread_scope: scope,
       sender: Keyword.get(opts, :sender, role),
       role: role,
-      kind: @kind,
+      kind: kind(opts),
       content: content,
       metadata:
         metadata(config, device_id, source, opts)
@@ -99,12 +136,14 @@ defmodule FermixCore.Realtime.ConversationRecorder do
       model: config.model,
       source_type: @source_type,
       source_id: source,
-      transcript_kind: @kind,
+      transcript_kind: kind(opts),
       usage: Keyword.get(opts, :usage),
       cost: Keyword.get(opts, :cost),
       tool_calls: Keyword.get(opts, :tool_calls, [])
     }
   end
+
+  defp kind(opts), do: Keyword.get(opts, :kind, @kind)
 
   defp maybe_request_review(device_id, opts) do
     if Keyword.get(opts, :request_review?, true) do

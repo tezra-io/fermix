@@ -60,6 +60,81 @@ defmodule FermixCore.Realtime.ProtocolContractTest do
     assert "reason" in defs["error"]["required"]
   end
 
+  test "the v2 defs require the fields the daemon enforces", %{schema: schema} do
+    defs = schema["$defs"]
+
+    assert "delegation_id" in defs["task_cancel"]["required"]
+    assert "engine" in defs["call_ready"]["required"]
+    assert "call_id" in defs["call_ready"]["required"]
+    assert "captions" in defs["call_ready"]["required"]
+
+    for field <- ~w(speaker delta start_ms end_ms) do
+      assert field in defs["caption"]["required"]
+    end
+
+    for field <- ~w(delegation_id revision status) do
+      assert field in defs["task"]["required"]
+    end
+  end
+
+  test "the error def publishes the typed failure vocabulary", %{schema: schema} do
+    error = schema["$defs"]["error"]["properties"]
+
+    assert MapSet.new(error["kind"]["enum"]) ==
+             MapSet.new(~w(update_required provider_refused cost_limit session_expired
+                           close_timeout bridge_unavailable max_session_duration
+                           provider_disconnected))
+
+    assert error["detail"]["type"] == "string"
+    assert error["required_for"]["enum"] == ["openai_live"]
+  end
+
+  test "the golden fixtures carry both handshake versions and every v2 frame" do
+    client_types =
+      @client_fixtures
+      |> fixture_lines()
+      |> Enum.map(&Jason.decode!/1)
+
+    assert Enum.any?(
+             client_types,
+             &(&1["type"] == "client_hello" and &1["protocol_version"] == 1)
+           )
+
+    assert Enum.any?(
+             client_types,
+             &(&1["type"] == "client_hello" and &1["protocol_version"] == 2)
+           )
+
+    assert Enum.any?(client_types, &(&1["type"] == "task_cancel"))
+
+    server_frames =
+      @server_fixtures
+      |> fixture_lines()
+      |> Enum.map(&Jason.decode!/1)
+
+    for type <- ~w(call_ready caption task) do
+      assert Enum.any?(server_frames, &(&1["type"] == type)), "no golden #{type} frame"
+    end
+
+    assert Enum.any?(server_frames, &(&1["type"] == "usage" and &1["status"] == "live")),
+           "no golden Live usage frame"
+
+    assert Enum.any?(server_frames, &(&1["kind"] == "update_required")),
+           "no golden update_required refusal"
+  end
+
+  test "the golden server_hello advertises the module's live window", %{schema: _schema} do
+    {min, max} = Protocol.supported_version_range()
+
+    hello =
+      @server_fixtures
+      |> fixture_lines()
+      |> Enum.map(&Jason.decode!/1)
+      |> Enum.find(&(&1["type"] == "server_hello"))
+
+    assert hello == %{"type" => "server_hello", "min_version" => min, "max_version" => max}
+  end
+
   test "every golden client frame decodes against the live protocol" do
     config = Config.normalize([])
 

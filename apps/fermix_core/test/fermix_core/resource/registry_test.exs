@@ -332,6 +332,21 @@ defmodule FermixCore.Resource.RegistryTest do
     assert Path.wildcard("#{path}.tmp-*") == []
   end
 
+  test "live_md is a file-backed type defaulting to bootstrap/<agent>/LIVE.md", %{repo: repo} do
+    dir = temp_bootstrap_dir("commit-and-write-live")
+    path = Path.join([dir, "main", "LIVE.md"])
+
+    assert {:ok, %Revision{revision: 1}} =
+             Registry.commit_and_write("main", "live_md", "global", "live v1\n",
+               mutation_source: :seed,
+               provenance: %{"trigger" => "setup_seed"},
+               bootstrap_dir: dir,
+               repo: repo
+             )
+
+    assert File.read!(path) == "live v1\n"
+  end
+
   test "commit_and_write restores prior bytes and leaves the registry unchanged on commit failure",
        %{repo: repo} do
     dir = temp_bootstrap_dir("commit-and-write-restore")

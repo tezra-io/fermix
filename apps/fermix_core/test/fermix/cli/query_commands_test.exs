@@ -52,6 +52,38 @@ defmodule Fermix.CLI.QueryCommandsTest do
     assert decoded["daemon"] == "online"
     assert is_map(decoded["realtime"])
     assert decoded["realtime"]["status"] in ["disabled", "ready", "setup_required", "degraded"]
+    assert Map.has_key?(decoded["realtime"], "engine")
+  end
+
+  # Both voice engines authenticate with the same OpenAI Platform key and both
+  # report provider "openai", so the engine is the only field that says which
+  # wire a call will use. It rides both outputs.
+  test "voice status reports the configured voice engine" do
+    realtime = Application.get_env(:fermix_core, :realtime)
+
+    on_exit(fn ->
+      case realtime do
+        nil -> Application.delete_env(:fermix_core, :realtime)
+        value -> Application.put_env(:fermix_core, :realtime, value)
+      end
+    end)
+
+    Application.put_env(:fermix_core, :realtime,
+      enabled: true,
+      engine: "openai_live",
+      model: "gpt-live-1"
+    )
+
+    {json_status, json} = run_command(fn -> VoiceCommand.run(["status", "--json"]) end)
+
+    assert json_status == 0
+    assert Jason.decode!(json)["realtime"]["engine"] == "openai_live"
+
+    {human_status, human} = run_command(fn -> VoiceCommand.run(["status"]) end)
+
+    assert human_status == 0
+    assert human =~ "engine: openai_live"
+    assert human =~ "model: gpt-live-1"
   end
 
   test "agents --json returns main-agent and worker status" do

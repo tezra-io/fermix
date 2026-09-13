@@ -192,18 +192,28 @@ defmodule FermixCore.Agents.RuntimeContext do
   @doc """
   Assemble the full message list for a turn, stable tier first
   (cache stratification — M10 P1):
-  `stable ++ profile.runtime_message ++ volatile ++ history ++ [user_message]`.
+  `stable ++ profile.runtime_message ++ extra_system ++ volatile ++ history ++
+  [user_message]`.
+
+  `extra_system` is the turn-local system seam: messages that belong to THIS
+  turn's origin rather than to the cached profile, spliced directly after the
+  runtime contract so they read as part of the agent's standing instructions.
+  A Live voice delegation puts its backend addendum here
+  (MILESTONE_41_OPENAI_LIVE_VOICE.md §6.3) — it must never mutate the shared
+  prompt a text conversation replays, so it is never cached into a profile.
+  Empty (the default) leaves every existing caller byte-identical.
   """
-  @spec messages_for(t(), profile(), [map()], message()) :: [message()]
+  @spec messages_for(t(), profile(), [map()], message(), [message()]) :: [message()]
   def messages_for(
         %__MODULE__{} = ctx,
         %{runtime_message: runtime_message},
         history,
-        user_message
+        user_message,
+        extra_system \\ []
       )
-      when is_list(history) and is_map(user_message) do
+      when is_list(history) and is_map(user_message) and is_list(extra_system) do
     ctx.stable_messages ++
-      [runtime_message] ++ ctx.volatile_messages ++ history ++ [user_message]
+      [runtime_message] ++ extra_system ++ ctx.volatile_messages ++ history ++ [user_message]
   end
 
   @doc """

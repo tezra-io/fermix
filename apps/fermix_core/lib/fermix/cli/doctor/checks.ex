@@ -464,7 +464,7 @@ defmodule Fermix.CLI.Doctor.Checks do
   render against the content the `:seed` revision recorded at install time.
   A mismatch means the shipped template gained changes after this install
   was seeded — the operator's file may lag and deserves a manual diff.
-  Variable-free templates only (fermix/soul/realtime); IDENTITY.md embeds
+  Variable-free templates only (fermix/soul/realtime/live); IDENTITY.md embeds
   the agent name, so a render comparison cannot distinguish template drift
   from a rename. Installs seeded before revision tracking report unknown.
   """
@@ -473,7 +473,7 @@ defmodule Fermix.CLI.Doctor.Checks do
     agent_id = Keyword.get(opts, :agent_id, "main")
 
     {drifted, unknown} =
-      [fermix: :fermix_md, soul: :soul_md, realtime: :realtime_md]
+      [fermix: :fermix_md, soul: :soul_md, realtime: :realtime_md, live: :live_md]
       |> Enum.reduce({[], []}, fn {name, type}, {drifted, unknown} ->
         case template_drift_state(agent_id, name, type, opts) do
           :current -> {drifted, unknown}
@@ -667,7 +667,11 @@ defmodule Fermix.CLI.Doctor.Checks do
   defp realtime_key_status(config) do
     case FermixCore.Config.provider_api_key(:openai) do
       {:ok, _key} ->
-        ok("realtime voice", "enabled; OpenAI Realtime key present (model #{config.model})")
+        ok(
+          "realtime voice",
+          "enabled; OpenAI voice key present " <>
+            "(engine #{config.engine}, model #{config.model})"
+        )
 
       {:error, _reason} ->
         warn(
