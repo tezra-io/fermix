@@ -198,6 +198,21 @@ defmodule FermixCore.Management.PluginsTest do
       assert separate["consent_sentence"] == "Runs on this Mac as a separate process."
     end
 
+    # The catalog half above spells a local runtime as `local_stdio`; the
+    # installed half read the manifest, whose spelling is how the process
+    # starts, so every installed local plugin said it ran inside Fermix while
+    # its helper ran beside it.
+    test "an installed local plugin says it runs as a separate process", %{home: home} do
+      install_runtime_gated(home)
+
+      {:ok, %{"plugins" => rows}} = Plugins.list()
+      local = row(rows, @runtime_gated)
+
+      assert local["runtime_kind"] == "local_stdio"
+      assert local["consent_sentence"] == "Runs on this Mac as a separate process."
+      assert local["remote_disclosure"] == nil
+    end
+
     test "an installed remote plugin publishes its access profiles and its binding", %{home: home} do
       install_remote(home)
 

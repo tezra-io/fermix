@@ -34,6 +34,7 @@ defmodule FermixCore.Management.Plugins.Row do
   alias FermixCore.Auth.OAuthProviders
   alias FermixCore.Capabilities.MCP.RuntimeStatus
   alias FermixCore.Plugins.Config
+  alias FermixCore.Plugins.Dist.McpSource
   alias FermixCore.Plugins.Plugin
   alias FermixCore.Plugins.Registry
   alias FermixCore.Plugins.Status
@@ -279,10 +280,16 @@ defmodule FermixCore.Management.Plugins.Row do
   defp catalog_status(%{compat: {:error, _reason}}), do: :incompatible
   defp catalog_status(_entry), do: :available
 
-  defp runtime_kind(%Plugin{runtime: runtime}) when is_map(runtime) do
-    case Map.get(runtime, "kind") do
-      kind when kind in @runtime_kinds -> kind
-      _absent_or_unknown -> nil
+  # The manifest spells how a local process starts (`node`, `python`, `binary`,
+  # `escript`); the row publishes where the code runs, in the catalog's two
+  # words. Matching the manifest against the catalog's words is how every
+  # installed local plugin came to say it runs inside Fermix while its helper
+  # ran beside it: the two halves of one row spelled one fact differently.
+  defp runtime_kind(%Plugin{runtime: runtime} = plugin) when is_map(runtime) do
+    cond do
+      McpSource.remote?(plugin) -> "remote_mcp"
+      Map.get(runtime, "kind") in Registry.local_runtime_kinds() -> "local_stdio"
+      true -> nil
     end
   end
 

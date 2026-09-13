@@ -228,6 +228,15 @@ defmodule FermixCore.Plugins.Registry do
 
   def decode_manifest(_manifest, path), do: {:error, {:invalid_manifest, path, :not_a_map}}
 
+  @doc """
+  The manifest spellings of a runtime that is one process on this Mac.
+
+  They say how the process starts; where it runs is the catalog's word
+  `local_stdio`, and the row that publishes it derives it from this list.
+  """
+  @spec local_runtime_kinds() :: [String.t()]
+  def local_runtime_kinds, do: @runtime_kinds
+
   @doc "Names of the plugins bundled with this Fermix build (the priv catalog)."
   @spec bundled_names() :: {:ok, [String.t()]} | {:error, term()}
   def bundled_names, do: catalog_names()
