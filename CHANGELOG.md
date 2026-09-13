@@ -4,6 +4,47 @@ All notable changes to Fermix are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Tesla plugin support.** A `tesla` sign-in provider that exchanges the
+  code with the account's regional audience, sends the public redirect
+  page Tesla requires (`https://fermix.ai/api/integrations/tesla/callback`,
+  which forwards to the daemon's loopback listener), rotates refresh tokens,
+  and records the account's region on the grant. HTTP plugin tools may
+  declare `regional_urls` (the host is chosen from the signed-in region,
+  never from the model), `requires_setting` (a tool exists only while a
+  plugin setting reads `true`), and scalar bounds on their arguments.
+- **Region on the sign-in client.** A regional provider offers its regions
+  on the client row, `plugins.oauth_client.set` takes a `region`, the
+  browser setup form renders the choice, and after every sign-in the daemon
+  checks the account's region with the provider; a mismatch shows on the
+  plugin row as `wrong_region` with the fix, and that grant is never served.
+- **Plugin settings can be switches.** A manifest `config` entry declares a
+  `kind` (`text` or `boolean`); a boolean setting stores only `true` or
+  `false`, is published on the plugin row, and renders as an instant switch
+  on the setup page's plugin card.
+- **Local plugin processes can sign for the account.** A local plugin
+  runtime can be gated by a setting (`runtime.requires_setting`) and
+  receives the account's current access token through a daemon-owned file
+  named by `FERMIX_PLUGIN_TOKEN_FILE`, rewritten on every refresh and
+  deleted on sign-out; the refresh token and client secret never leave the
+  daemon.
+- **Behavioral eval suite** `tesla` (reads, command safety, explicit wake
+  and command cases).
+
+### Fixed
+
+- **Two local plugins can run side by side.** Every MCP client advertised
+  the same identity, and the client library keys a cache table by that
+  name, so the second local plugin failed discovery on every attempt.
+- **A local plugin's error is an error.** A result the child flagged as an
+  error reached the agent as a success, and a successful result reached it
+  as a dumped response struct rather than the child's text.
+- **A configured OAuth `region` was silently dropped** on the way through
+  the config store, so an explicit setting could never take effect.
+
 ## [0.10.4] - 2026-09-12
 
 ### Fixed

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-08-04T02:49:35Z",
+  "generated_at": "2026-09-13T20:27:03Z",
   "plugins": [
     {
       "name": "agentmail",
@@ -376,6 +376,66 @@
           ]
         }
       ]
+    },
+    {
+      "name": "tesla",
+      "display_name": "Tesla",
+      "category": "productivity",
+      "description": "Check your Tesla's charge, climate, location, alerts and history, and control charging, climate and locks.",
+      "short_description": "See your Tesla's state, and control it when you allow commands",
+      "developer_name": "Fermix",
+      "brand_color": "#E82127",
+      "logo": {
+        "mime": "image/svg+xml",
+        "data_base64": "PHN2ZyB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgdmlld0JveD0iMCAwIDEwMCAxMDAiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CiAgPGcgZmlsbD0iI0U4MjEyNyIgdHJhbnNmb3JtPSJ0cmFuc2xhdGUoLTQuNjE5MiAtMTAuMjcxMykgc2NhbGUoMC4zMTU0NzcpIj4KICAgIDxwYXRoIGQ9Im0xNzMuMTQ2IDMxNy4yOTkgMzUuNDc2LTE5OS41MTljMzMuODE1IDAgNDQuNDgxIDMuNzA4IDQ2LjAyMSAxOC44NDMgMCAwIDIyLjY4NC04LjQ1OCAzNC4xMjUtMjUuNjM2LTQ0LjY0Ni0yMC42ODgtODkuNTA1LTIxLjYyMS04OS41MDUtMjEuNjIxbC0yNi4xNzYgMzEuODgyIDAuMDU5LTRlLTMgLTI2LjE3Ni0zMS44ODNzLTQ0Ljg2IDAuOTM0LTg5LjUgMjEuNjIyYzExLjQzMSAxNy4xNzggMzQuMTI0IDI1LjYzNiAzNC4xMjQgMjUuNjM2IDEuNTQ5LTE1LjEzNiAxMi4yMDItMTguODQ0IDQ1Ljc5LTE4Ljg2OGwzNS43NjIgMTk5LjU0OCIvPgogICAgPHBhdGggZD0ibTE3My4xMzIgODAuMTU3YzM2LjA5LTAuMjc2IDc3LjM5OSA1LjU4MyAxMTkuNjg3IDI0LjAxNCA1LjY1Mi0xMC4xNzMgNy4xMDUtMTQuNjY5IDcuMTA1LTE0LjY2OS00Ni4yMjctMTguMjg5LTg5LjUxOC0yNC41NDgtMTI2Ljc5Ny0yNC43MDUtMzcuMjc3IDAuMTU3LTgwLjU2NiA2LjQxNy0xMjYuNzg3IDI0LjcwNSAwIDAgMi4wNjIgNS41MzggNy4xIDE0LjY2OSA0Mi4yOC0xOC40MzEgODMuNTk2LTI0LjI5IDExOS42ODctMjQuMDE0aDVlLTMiLz4KICA8L2c+Cjwvc3ZnPgo="
+      },
+      "auth_type": "oauth2",
+      "auth_provider": "tesla",
+      "rails": [
+        "http",
+        "mcp"
+      ],
+      "latest": "1.0.0",
+      "yanked": [],
+      "versions": [
+        {
+          "version": "1.0.0",
+          "published_at": "2026-09-13T20:25:30Z",
+          "min_core_version": "0.11.0",
+          "plugin_api": 2,
+          "artifacts": [
+            {
+              "target": "linux-aarch64",
+              "url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.0.0/tesla-1.0.0-linux-aarch64.tar.gz",
+              "sha256": "0a195b7fc05f392c15e08c16eac9a9e1eee565643f88da37229ea93daddef514",
+              "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.0.0/tesla-1.0.0-linux-aarch64.tar.gz.sig",
+              "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.0.0/tesla-1.0.0-linux-aarch64.tar.gz.pem"
+            },
+            {
+              "target": "linux-x86_64",
+              "url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.0.0/tesla-1.0.0-linux-x86_64.tar.gz",
+              "sha256": "b179f0e75e02bdb646fe54fbeddb92b409bdf313be076d2eada21d4482fdf573",
+              "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.0.0/tesla-1.0.0-linux-x86_64.tar.gz.sig",
+              "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.0.0/tesla-1.0.0-linux-x86_64.tar.gz.pem"
+            },
+            {
+              "target": "macos-aarch64",
+              "url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.0.0/tesla-1.0.0-macos-aarch64.tar.gz",
+              "sha256": "6051151a99081d3a7428dd2c1711a0f1fa726538d1d31b3053e13d0d54188e0a",
+              "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.0.0/tesla-1.0.0-macos-aarch64.tar.gz.sig",
+              "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.0.0/tesla-1.0.0-macos-aarch64.tar.gz.pem"
+            },
+            {
+              "target": "macos-x86_64",
+              "url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.0.0/tesla-1.0.0-macos-x86_64.tar.gz",
+              "sha256": "1eecea01b4b08c57736e87eb822f7e53b96ed239e3a6cf62b7dd424d0b18d4d8",
+              "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.0.0/tesla-1.0.0-macos-x86_64.tar.gz.sig",
+              "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.0.0/tesla-1.0.0-macos-x86_64.tar.gz.pem"
+            }
+          ]
+        }
+      ],
+      "runtime_kind": "local_stdio"
     },
     {
       "name": "x",
