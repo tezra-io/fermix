@@ -1706,8 +1706,27 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       :ok
     end
 
+    # The agent is linked to the test process that started it, so by the time
+    # the next test's `init/1` (or `on_exit`) looks it up it may be mid-exit:
+    # `Agent.stop/1` on a name whose process is already gone raises `:noproc`
+    # (one CI failure on 2026-09-13). Stop it by pid and wait for the exit
+    # instead of trusting the name to stay alive across the call.
     def cleanup do
-      if Process.whereis(@state), do: Agent.stop(@state), else: :ok
+      case Process.whereis(@state) do
+        nil -> :ok
+        pid -> stop_and_wait(pid)
+      end
+    end
+
+    defp stop_and_wait(pid) do
+      ref = Process.monitor(pid)
+      Process.exit(pid, :shutdown)
+
+      receive do
+        {:DOWN, ^ref, :process, ^pid, _reason} -> :ok
+      after
+        5_000 -> raise "review spy #{inspect(pid)} did not stop"
+      end
     end
 
     def start_background(opts) do
