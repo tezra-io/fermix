@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-09-13T20:27:03Z",
+  "generated_at": "2026-09-13T21:14:33Z",
   "plugins": [
     {
       "name": "agentmail",
@@ -386,8 +386,8 @@
       "developer_name": "Fermix",
       "brand_color": "#E82127",
       "logo": {
-        "mime": "image/svg+xml",
-        "data_base64": "PHN2ZyB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgdmlld0JveD0iMCAwIDEwMCAxMDAiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CiAgPGcgZmlsbD0iI0U4MjEyNyIgdHJhbnNmb3JtPSJ0cmFuc2xhdGUoLTQuNjE5MiAtMTAuMjcxMykgc2NhbGUoMC4zMTU0NzcpIj4KICAgIDxwYXRoIGQ9Im0xNzMuMTQ2IDMxNy4yOTkgMzUuNDc2LTE5OS41MTljMzMuODE1IDAgNDQuNDgxIDMuNzA4IDQ2LjAyMSAxOC44NDMgMCAwIDIyLjY4NC04LjQ1OCAzNC4xMjUtMjUuNjM2LTQ0LjY0Ni0yMC42ODgtODkuNTA1LTIxLjYyMS04OS41MDUtMjEuNjIxbC0yNi4xNzYgMzEuODgyIDAuMDU5LTRlLTMgLTI2LjE3Ni0zMS44ODNzLTQ0Ljg2IDAuOTM0LTg5LjUgMjEuNjIyYzExLjQzMSAxNy4xNzggMzQuMTI0IDI1LjYzNiAzNC4xMjQgMjUuNjM2IDEuNTQ5LTE1LjEzNiAxMi4yMDItMTguODQ0IDQ1Ljc5LTE4Ljg2OGwzNS43NjIgMTk5LjU0OCIvPgogICAgPHBhdGggZD0ibTE3My4xMzIgODAuMTU3YzM2LjA5LTAuMjc2IDc3LjM5OSA1LjU4MyAxMTkuNjg3IDI0LjAxNCA1LjY1Mi0xMC4xNzMgNy4xMDUtMTQuNjY5IDcuMTA1LTE0LjY2OS00Ni4yMjctMTguMjg5LTg5LjUxOC0yNC41NDgtMTI2Ljc5Ny0yNC43MDUtMzcuMjc3IDAuMTU3LTgwLjU2NiA2LjQxNy0xMjYuNzg3IDI0LjcwNSAwIDAgMi4wNjIgNS41MzggNy4xIDE0LjY2OSA0Mi4yOC0xOC40MzEgODMuNTk2LTI0LjI5IDExOS42ODctMjQuMDE0aDVlLTMiLz4KICA8L2c+Cjwvc3ZnPgo="
+        "mime": "image/png",
+        "data_base64": "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"
       },
       "auth_type": "oauth2",
       "auth_provider": "tesla",
@@ -395,9 +395,45 @@
         "http",
         "mcp"
       ],
-      "latest": "1.0.0",
+      "latest": "1.0.1",
       "yanked": [],
       "versions": [
+        {
+          "version": "1.0.1",
+          "published_at": "2026-09-13T21:12:44Z",
+          "min_core_version": "0.11.0",
+          "plugin_api": 2,
+          "artifacts": [
+            {
+              "target": "linux-aarch64",
+              "url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.0.1/tesla-1.0.1-linux-aarch64.tar.gz",
+              "sha256": "54a8cf9bd2cef060d9ad6920e2f508be96770c93ce97ba9affc99bd8e7bee5e2",
+              "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.0.1/tesla-1.0.1-linux-aarch64.tar.gz.sig",
+              "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.0.1/tesla-1.0.1-linux-aarch64.tar.gz.pem"
+            },
+            {
+              "target": "linux-x86_64",
+              "url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.0.1/tesla-1.0.1-linux-x86_64.tar.gz",
+              "sha256": "5c497a183061a4f394d7ddfaf3c2b288268c205ebd56d6c5b5df17ec648be0ca",
+              "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.0.1/tesla-1.0.1-linux-x86_64.tar.gz.sig",
+              "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.0.1/tesla-1.0.1-linux-x86_64.tar.gz.pem"
+            },
+            {
+              "target": "macos-aarch64",
+              "url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.0.1/tesla-1.0.1-macos-aarch64.tar.gz",
+              "sha256": "a5f407115f1d72fa6c6b5852008452e60d41cf4ba0014ca4f7c14309509a0046",
+              "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.0.1/tesla-1.0.1-macos-aarch64.tar.gz.sig",
+              "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.0.1/tesla-1.0.1-macos-aarch64.tar.gz.pem"
+            },
+            {
+              "target": "macos-x86_64",
+              "url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.0.1/tesla-1.0.1-macos-x86_64.tar.gz",
+              "sha256": "c58be2e5a2aa6ff98f6aac69f3da71017525f48b6b78fba0bca4f0f76fb9f083",
+              "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.0.1/tesla-1.0.1-macos-x86_64.tar.gz.sig",
+              "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.0.1/tesla-1.0.1-macos-x86_64.tar.gz.pem"
+            }
+          ]
+        },
         {
           "version": "1.0.0",
           "published_at": "2026-09-13T20:25:30Z",
