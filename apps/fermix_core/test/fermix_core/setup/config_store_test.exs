@@ -1298,6 +1298,51 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert Keyword.get(resolved_google, :client_secret) == "desktop-secret"
   end
 
+  # An oauth section key that is not in the string -> atom table round-trips as a
+  # BINARY key, so `Keyword.get(config, :region)` silently misses it and the
+  # provider registry rebuilds a default region for a config that named one.
+  test "save/load round-trips the tesla oauth region and redirect URI as atom keys" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    snapshot = %{
+      fermix_core: [
+        oauth: %{
+          "tesla" => [
+            client_type: "desktop_public_pkce",
+            client_id: "tesla-client-id",
+            client_secret: "tesla-secret",
+            region: "eu",
+            redirect_uri: "https://fermix.ai/api/integrations/tesla/callback"
+          ]
+        }
+      ],
+      fermix_channels: [],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ "[fermix_core.oauth.tesla]"
+    assert contents =~ ~s(region = "eu")
+    assert contents =~ ~s(redirect_uri = "https://fermix.ai/api/integrations/tesla/callback")
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+    tesla = loaded.fermix_core |> Keyword.get(:oauth, %{}) |> Map.get("tesla", [])
+
+    assert Keyword.get(tesla, :region) == "eu"
+
+    assert Keyword.get(tesla, :redirect_uri) ==
+             "https://fermix.ai/api/integrations/tesla/callback"
+
+    # A binary key here is the failure this test exists for: it reads as absent.
+    refute Enum.any?(tesla, fn {key, _value} -> is_binary(key) end)
+  end
+
   test "load/save round-trips plugins dev_local as a top-level scalar" do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")

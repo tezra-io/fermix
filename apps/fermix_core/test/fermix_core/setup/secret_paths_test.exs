@@ -3,12 +3,14 @@ defmodule FermixCore.Setup.SecretPathsTest do
 
   alias FermixCore.Setup.SecretPaths
 
-  test "registers the plugin OAuth client secrets (google, github, notion, x)" do
+  test "registers the plugin OAuth client secrets (google, github, notion, x, slack, tesla)" do
     for {key, env, provider} <- [
           {:google_oauth_client_secret, "GOOGLE_OAUTH_CLIENT_SECRET", "google"},
           {:github_oauth_client_secret, "GITHUB_OAUTH_CLIENT_SECRET", "github"},
           {:notion_oauth_client_secret, "NOTION_OAUTH_CLIENT_SECRET", "notion"},
-          {:x_oauth_client_secret, "X_OAUTH_CLIENT_SECRET", "x"}
+          {:x_oauth_client_secret, "X_OAUTH_CLIENT_SECRET", "x"},
+          {:slack_oauth_client_secret, "SLACK_OAUTH_CLIENT_SECRET", "slack"},
+          {:tesla_oauth_client_secret, "TESLA_OAUTH_CLIENT_SECRET", "tesla"}
         ] do
       secret = SecretPaths.fetch!(key)
       assert secret.env == env
@@ -54,6 +56,8 @@ defmodule FermixCore.Setup.SecretPathsTest do
     refute :github_oauth_client_secret in eligible
     refute :notion_oauth_client_secret in eligible
     refute :x_oauth_client_secret in eligible
+    refute :slack_oauth_client_secret in eligible
+    refute :tesla_oauth_client_secret in eligible
   end
 
   test "registers the APNs signing key as a keychain-only mobile secret" do

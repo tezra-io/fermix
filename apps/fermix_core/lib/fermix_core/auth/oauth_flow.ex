@@ -213,13 +213,17 @@ defmodule FermixCore.Auth.OAuthFlow do
   def exchange_code(%OAuthProvider{} = provider, code, code_verifier, redirect_uri, req_options)
       when is_binary(code) and is_binary(code_verifier) and is_binary(redirect_uri) and
              is_list(req_options) do
+    # `extra_token_params` is merged UNDER the exchange's own fields, so a
+    # provider definition can add what its endpoint requires (Tesla's regional
+    # `audience`) but can never rewrite the grant, the code, or the redirect.
     body =
-      %{
+      provider.extra_token_params
+      |> Map.merge(%{
         "grant_type" => "authorization_code",
         "code" => code,
         "redirect_uri" => redirect_uri,
         "code_verifier" => code_verifier
-      }
+      })
       |> Map.merge(OAuthProvider.body_credentials(provider))
       |> maybe_echo_code_challenge(provider, code_verifier)
       |> URI.encode_query()
@@ -374,6 +378,11 @@ defmodule FermixCore.Auth.OAuthFlow do
         err
     end
   end
+
+  # A provider that registered a public redirect URI (Tesla accepts no loopback
+  # one) sends that URI in authorize and in the exchange; the bounce page it
+  # names forwards the callback to the loopback listener, which stays local.
+  defp redirect_uri(%OAuthProvider{public_redirect_uri: uri}, _port) when is_binary(uri), do: uri
 
   defp redirect_uri(%OAuthProvider{} = provider, port) do
     "http://#{provider.redirect_host}:#{port}#{provider.redirect_path}"

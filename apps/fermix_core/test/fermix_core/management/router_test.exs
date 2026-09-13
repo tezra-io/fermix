@@ -137,6 +137,7 @@ defmodule FermixCore.Management.RouterTest do
         enabled: true,
         status: :ready,
         provider: :openai,
+        engine: "openai_live",
         model: "gpt-realtime",
         socket_path: "/Users/private/.fermix/realtime.sock",
         socket_alive: true,
@@ -187,6 +188,7 @@ defmodule FermixCore.Management.RouterTest do
            }
 
     assert result["realtime"]["socket_alive"] == true
+    assert result["realtime"]["engine"] == "openai_live"
     refute Map.has_key?(result["realtime"], "socket_path")
 
     encoded = Jason.encode!(result)
@@ -844,6 +846,37 @@ defmodule FermixCore.Management.RouterTest do
       assert {:error, :invalid_params, %{"field" => "client_secret"}} =
                Router.route(v2("plugins.oauth_client.set", secret))
     end
+
+    # The region is a published id, so it is bounded like one rather than by the
+    # generic text ceiling: an absent one is legal here and answered by the
+    # operation, which is the half that knows whether the provider offers any.
+    test "a sign-in client bounds the region it is given" do
+      base = %{"provider" => "google", "client_id" => "id"}
+
+      for region <- ["e", String.duplicate("x", 9), 5] do
+        assert {:error, :invalid_params, %{"field" => "region"}} =
+                 Router.route(v2("plugins.oauth_client.set", Map.put(base, "region", region))),
+               "#{inspect(region)} was not refused"
+      end
+
+      # A well-formed region is inside the bound, so it reaches the operation,
+      # which is the half that knows google offers no region to choose.
+      assert {:error, :invalid_params, details} =
+               Router.route(v2("plugins.oauth_client.set", Map.put(base, "region", "eu")))
+
+      assert details["sentence"] =~ "no region to choose"
+    end
+
+    # A client older than this field sends no region at all, and a provider with
+    # one region never needs it, so an absent one is the operation's question.
+    test "a sign-in client with no region reaches the operation" do
+      assert {:error, :invalid_params, %{"field" => field}} =
+               Router.route(v2("plugins.oauth_client.set", base_client()))
+
+      assert field != "region"
+    end
+
+    defp base_client, do: %{"provider" => "google", "client_id" => "id"}
 
     test "a setting write names its plugin and its key" do
       assert {:error, :invalid_params, %{"field" => "key"}} =

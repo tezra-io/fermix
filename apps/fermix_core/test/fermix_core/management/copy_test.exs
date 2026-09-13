@@ -182,6 +182,30 @@ defmodule FermixCore.Management.CopyTest do
       end
     end
 
+    # A wrong-region row names the account's own region, and a region label is a
+    # proper noun the daemon interpolates rather than writes: it is declared as
+    # data at the call site, exactly like a plugin's display name, rather than
+    # widening the hand-listed set with words no fixed sentence uses.
+    test "every region label a row can name obeys the rules as the data it is" do
+      labels =
+        Enum.flat_map(OAuthProviders.providers(), fn id ->
+          Enum.map(OAuthProviders.regions(id), & &1.label)
+        end)
+
+      assert labels != []
+
+      for label <- labels do
+        assert_clean(label, :name, [], "region label #{label}")
+
+        sentence =
+          "The account belongs to the #{label} region. " <>
+            "Choose it for the sign-in client and sign in again."
+
+        assert_clean(sentence, :prose, [label], "region sentence #{label}")
+        assert internal_terms(sentence) == []
+      end
+    end
+
     # The refused-client sentences are written once in `Auth.ClientRejection`
     # and rendered verbatim by the app, the browser door and the CLI. The case
     # set is every plugin provider and every refusal code it declares, read
@@ -189,7 +213,7 @@ defmodule FermixCore.Management.CopyTest do
     test "every refused sign-in client sentence obeys the rules" do
       refusals =
         Enum.flat_map(OAuthProviders.providers(), fn id ->
-          {:ok, provider} = OAuthProviders.definition(id, client_id: "id", client_secret: "s")
+          {:ok, provider} = OAuthProviders.definition(id, client_config(id))
           Enum.map(provider.client_rejection_errors, &refusal(provider, &1))
         end)
 
@@ -341,6 +365,18 @@ defmodule FermixCore.Management.CopyTest do
   defp plugin_rows do
     {:ok, %{"plugins" => rows}} = Plugins.list()
     rows
+  end
+
+  # A regional provider's client is incomplete without a region, so the sweep
+  # over every provider carries the first region each one offers.
+  defp client_config(id) do
+    region =
+      case OAuthProviders.regions(id) do
+        [] -> []
+        [%{id: region} | _rest] -> [region: region]
+      end
+
+    [client_id: "id", client_secret: "s"] ++ region
   end
 
   defp refusal(provider, error) do

@@ -349,6 +349,28 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
     assert result.error =~ "fermix plugins auth login google_calendar"
   end
 
+  # No token is served for a grant minted in the wrong region, so the tool never
+  # calls the wrong host. What reaches the model has to say which half is wrong,
+  # or the next turn retries into the same wall.
+  test "a grant in the wrong region answers with the fix, not a bare reason" do
+    context = %{
+      plugin_token_getter: fn "google_calendar:primary" -> {:error, :wrong_region} end
+    }
+
+    assert {:ok, result} =
+             ToolExecutor.execute(
+               %{"query" => "standup"},
+               context,
+               "google_calendar",
+               %{"name" => "google_calendar_search_events", "read_only" => true}
+             )
+
+    assert result.success == false
+    assert result.error =~ "region"
+    assert result.error =~ "google_calendar"
+    refute result.error =~ "plugin auth unavailable"
+  end
+
   # Reconnecting with the same saved client would be refused again, so the tool
   # error carries the one fix: the owner updates the client, then signs in.
   test "a refused sign-in client answers with the sentence that names the fix" do
@@ -1491,5 +1513,343 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
       assert_received {:hop, "/items/42"}
       refute_received {:hop, _path}
     end
+  end
+
+  # --- M40 §3.2: per-region hosts and per-tool setting gates ---------------
+
+  describe "a regional tool (request.regional_urls)" do
+    test "targets the host for the account's recorded region" do
+      assert regional_host("na") == "fleet-na.provider.test"
+      assert regional_host("eu") == "fleet-eu.provider.test"
+    end
+
+    # No host fallback, ever: without a recorded region there is nothing to
+    # pick, so the call is refused before any transport.
+    test "with no recorded region refuses before any transport and names the fix" do
+      parent = self()
+      name = setup_regional_fixture()
+
+      plug = fn conn ->
+        send(parent, :transport_reached)
+        Plug.Conn.send_resp(conn, 200, "{}")
+      end
+
+      context = regional_context(plug, nil)
+
+      assert {:ok, result} =
+               ToolExecutor.execute(
+                 %{"vin" => "5YJ3E1EA7JF000316"},
+                 context,
+                 name,
+                 regional_fixture_tool(name)
+               )
+
+      assert result.success == false
+      assert result.error =~ "sign in again so Fermix records the account region"
+      assert result.error =~ "fermix plugins auth reauthorize #{name}"
+      refute_received :transport_reached
+    end
+
+    test "whose region has no endpoint names the region and the supported ones" do
+      parent = self()
+      name = setup_regional_fixture()
+
+      plug = fn conn ->
+        send(parent, :transport_reached)
+        Plug.Conn.send_resp(conn, 200, "{}")
+      end
+
+      assert {:ok, result} =
+               ToolExecutor.execute(
+                 %{"vin" => "5YJ3E1EA7JF000316"},
+                 regional_context(plug, "cn"),
+                 name,
+                 regional_fixture_tool(name)
+               )
+
+      assert result.success == false
+      assert result.error =~ "no endpoint for region cn"
+      assert result.error =~ "eu, na"
+      refute_received :transport_reached
+    end
+
+    test "emits exactly one failed tool exec event for the refusal" do
+      name = setup_regional_fixture()
+      tool = regional_fixture_tool(name)
+      handler = attach_exec_telemetry(tool["name"])
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      assert {:ok, %{success: false}} =
+               ToolExecutor.execute(
+                 %{"vin" => "5YJ3E1EA7JF000316"},
+                 regional_context(fn conn -> Plug.Conn.send_resp(conn, 200, "{}") end, nil),
+                 name,
+                 tool
+               )
+
+      assert_receive {:telemetry, [:fermix, :tool, :exec], measurements, metadata}
+      assert metadata.tool == tool["name"]
+      assert metadata.success == false
+      assert metadata.plugin == name
+      assert is_integer(measurements.duration_ms)
+      refute_received {:telemetry, [:fermix, :tool, :exec], _measurements, _metadata}
+    end
+  end
+
+  describe "a tool gated on requires_setting" do
+    # Enforced at the executor even though the capability set already hides it:
+    # a stale tool list or a direct dispatch must not reach the provider.
+    test "is refused before any transport when the setting is off" do
+      parent = self()
+      name = setup_gated_fixture([])
+
+      plug = fn conn ->
+        send(parent, :transport_reached)
+        Plug.Conn.send_resp(conn, 200, "{}")
+      end
+
+      assert {:ok, result} =
+               ToolExecutor.execute(
+                 %{},
+                 gated_context(plug),
+                 name,
+                 gated_tool(name, "ALLOW_WAKE")
+               )
+
+      assert result.success == false
+      assert result.error =~ "#{name}_wake is off"
+      assert result.error =~ "Set ALLOW_WAKE to true"
+      refute_received :transport_reached
+    end
+
+    test "runs once the setting is exactly \"true\"" do
+      parent = self()
+      name = setup_gated_fixture(ALLOW_WAKE: "true")
+
+      plug = fn conn ->
+        send(parent, {:gated, conn.request_path})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(200, Jason.encode!(%{"ok" => true}))
+      end
+
+      assert {:ok, result} =
+               ToolExecutor.execute(
+                 %{},
+                 gated_context(plug),
+                 name,
+                 gated_tool(name, "ALLOW_WAKE")
+               )
+
+      assert result.success == true
+      assert_received {:gated, "/wake"}
+    end
+
+    test "the plugin's ungated tools are unaffected" do
+      parent = self()
+      name = setup_gated_fixture([])
+
+      plug = fn conn ->
+        send(parent, {:gated, conn.request_path})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(200, Jason.encode!(%{"ok" => true}))
+      end
+
+      assert {:ok, result} =
+               ToolExecutor.execute(%{}, gated_context(plug), name, gated_tool(name, nil))
+
+      assert result.success == true
+      assert_received {:gated, "/read"}
+    end
+
+    test "emits exactly one failed tool exec event for the refusal" do
+      name = setup_gated_fixture([])
+      tool = gated_tool(name, "ALLOW_WAKE")
+      handler = attach_exec_telemetry(tool["name"])
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      plug = fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(200, "{}")
+      end
+
+      assert {:ok, %{success: false}} = ToolExecutor.execute(%{}, gated_context(plug), name, tool)
+
+      assert_receive {:telemetry, [:fermix, :tool, :exec], _measurements, metadata}
+      assert metadata.tool == tool["name"]
+      assert metadata.success == false
+      refute_received {:telemetry, [:fermix, :tool, :exec], _measurements, _metadata}
+    end
+  end
+
+  # Issue the regional fixture's tool with `region` recorded on the account and
+  # return the host the provider request actually reached.
+  defp regional_host(region) do
+    parent = self()
+    name = setup_regional_fixture()
+
+    plug = fn conn ->
+      send(parent, {:regional, conn.host, conn.request_path})
+
+      conn
+      |> Plug.Conn.put_resp_content_type("application/json")
+      |> Plug.Conn.send_resp(200, Jason.encode!(%{"state" => "asleep"}))
+    end
+
+    assert {:ok, %{success: true}} =
+             ToolExecutor.execute(
+               %{"vin" => "5YJ3E1EA7JF000316"},
+               regional_context(plug, region),
+               name,
+               regional_fixture_tool(name)
+             )
+
+    assert_received {:regional, host, "/api/1/vehicles/5YJ3E1EA7JF000316"}
+    host
+  end
+
+  defp regional_context(plug, region) do
+    %{
+      plugin_url_guard: fn _ -> :ok end,
+      plugin_req_options: [plug: plug],
+      plugin_secret_getter: fn _name -> {:ok, "fleet-token"} end,
+      plugin_region_getter: fn _plugin -> region end
+    }
+  end
+
+  defp gated_context(plug) do
+    %{
+      plugin_url_guard: fn _ -> :ok end,
+      plugin_req_options: [plug: plug],
+      plugin_secret_getter: fn _name -> {:ok, "gate-token"} end
+    }
+  end
+
+  defp setup_regional_fixture do
+    name = "regiofix"
+    write_fixture(name, [regional_fixture_tool(name)], nil, [])
+    name
+  end
+
+  defp setup_gated_fixture(entries) do
+    name = "gatefix"
+    config = [%{"key" => "ALLOW_WAKE", "prompt" => "Allow waking", "required" => false}]
+    write_fixture(name, [gated_tool(name, nil), gated_tool(name, "ALLOW_WAKE")], config, entries)
+    name
+  end
+
+  # Lay down one dev_local api_key fixture, enable it and establish its plugin
+  # settings (hermetic app-env set + restore).
+  defp write_fixture(name, tools, config, entries) do
+    dev = FermixTestSupport.SafeRm.make_tmp_dir!("fermix-#{name}-fixture")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf(dev) end)
+
+    manifest =
+      %{
+        "schema_version" => 2,
+        "name" => name,
+        "display_name" => name,
+        "description" => "#{name} fixture",
+        "category" => "developer",
+        "version" => "1.0.0",
+        "min_core_version" => "0.1.0",
+        "plugin_api" => 2,
+        "auth" => %{"type" => "api_key", "header" => "authorization", "scopes" => []},
+        "tools" => tools,
+        "skills" => []
+      }
+      |> then(fn manifest ->
+        if config, do: Map.put(manifest, "config", config), else: manifest
+      end)
+
+    dir = Path.join(dev, name)
+    File.mkdir_p!(dir)
+    File.write!(Path.join(dir, "plugin.json"), Jason.encode!(manifest))
+
+    previous = Application.get_env(:fermix_core, :plugins, [])
+
+    Application.put_env(:fermix_core, :plugins,
+      enabled: [name],
+      dev_local: dev,
+      entries: %{name => entries}
+    )
+
+    on_exit(fn -> Application.put_env(:fermix_core, :plugins, previous) end)
+  end
+
+  defp regional_fixture_tool(name) do
+    %{
+      "name" => "#{name}_vehicle",
+      "description" => "Read vehicle state.",
+      "policy_class" => "external_api",
+      "read_only" => true,
+      "rail" => "http",
+      "parameters" => %{
+        "type" => "object",
+        "properties" => %{"vin" => %{"type" => "string", "minLength" => 17, "maxLength" => 17}},
+        "required" => ["vin"]
+      },
+      "request" => %{
+        "method" => "GET",
+        "regional_urls" => %{
+          "na" => "https://fleet-na.provider.test/api/1/vehicles/{vin}",
+          "eu" => "https://fleet-eu.provider.test/api/1/vehicles/{vin}"
+        },
+        "success" => [200]
+      }
+    }
+  end
+
+  defp gated_tool(name, nil) do
+    %{
+      "name" => "#{name}_read",
+      "description" => "Read state.",
+      "policy_class" => "external_api",
+      "read_only" => true,
+      "rail" => "http",
+      "parameters" => %{"type" => "object", "properties" => %{}},
+      "request" => %{"method" => "GET", "url" => "https://provider.test/read", "success" => [200]}
+    }
+  end
+
+  defp gated_tool(name, key) do
+    %{
+      "name" => "#{name}_wake",
+      "description" => "Wake it.",
+      "policy_class" => "external_api",
+      "read_only" => false,
+      "requires_setting" => key,
+      "rail" => "http",
+      "parameters" => %{"type" => "object", "properties" => %{}},
+      "request" => %{
+        "method" => "POST",
+        "url" => "https://provider.test/wake",
+        "success" => [200]
+      }
+    }
+  end
+
+  # A global handler, pinned to this process AND this fixture's tool name, so a
+  # sibling module's event can never satisfy the assertion.
+  defp attach_exec_telemetry(tool_name) do
+    handler = "tool-executor-m40-#{System.unique_integer([:positive])}"
+    parent = self()
+
+    :telemetry.attach(
+      handler,
+      [:fermix, :tool, :exec],
+      fn event, measurements, metadata, _config ->
+        if self() == parent and metadata.tool == tool_name do
+          send(parent, {:telemetry, event, measurements, metadata})
+        end
+      end,
+      nil
+    )
+
+    handler
   end
 end

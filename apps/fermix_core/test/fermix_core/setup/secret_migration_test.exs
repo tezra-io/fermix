@@ -60,7 +60,7 @@ defmodule FermixCore.Setup.SecretMigrationTest do
       assert value == Map.fetch!(secret_values(), secret.key)
     end)
 
-    assert_received {:puts, "Migrated 33 secret(s) to keyring."}
+    assert_received {:puts, "Migrated 34 secret(s) to keyring."}
   end
 
   test "run writes a sandbox.env source for migrated AI-provider secrets", %{home: home} do
@@ -176,6 +176,13 @@ defmodule FermixCore.Setup.SecretMigrationTest do
     client_id = "x-client-id"
     client_secret = "x-oauth-old"
 
+    [fermix_core.oauth.tesla]
+    client_type = "desktop_public_pkce"
+    client_id = "tesla-client-id"
+    client_secret = "tesla-oauth-old"
+    region = "na"
+    redirect_uri = "https://fermix.ai/api/integrations/tesla/callback"
+
     [fermix_channels.telegram]
     bot_token = "telegram-old"
 
@@ -235,6 +242,7 @@ defmodule FermixCore.Setup.SecretMigrationTest do
       github_oauth_client_secret: "github-oauth-old",
       notion_oauth_client_secret: "notion-oauth-old",
       x_oauth_client_secret: "x-oauth-old",
+      tesla_oauth_client_secret: "tesla-oauth-old",
       telegram_bot_token: "telegram-old",
       whatsapp_access_token: "whatsapp-access-old",
       whatsapp_verify_token: "whatsapp-verify-old",

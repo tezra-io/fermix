@@ -136,6 +136,18 @@ defmodule FermixCore.Plugins.PromptCatalogTest do
       refute entry.remediation =~ "fermix plugins auth login"
     end
 
+    # A grant minted for the wrong region fails every call until the client's
+    # region is corrected, so the remediation leads with the client, not the sign-in.
+    test "a grant in the wrong region sends the owner to the client's region first" do
+      store_gmail_grant("wrong_region")
+
+      assert [entry] = PromptCatalog.entries([], [])
+      assert entry.status == :wrong_region
+      assert entry.remediation =~ "choose the account's region"
+      assert entry.remediation =~ "sign in again"
+      refute entry.remediation =~ "fermix plugins doctor"
+    end
+
     test "a grant that merely expired still points at the sign-in" do
       store_gmail_grant("reauthorization_required")
 

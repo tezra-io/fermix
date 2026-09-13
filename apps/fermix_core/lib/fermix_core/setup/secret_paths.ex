@@ -166,6 +166,11 @@ defmodule FermixCore.Setup.SecretPaths do
       path: [:fermix_core, :oauth, "slack", :client_secret]
     },
     %{
+      key: :tesla_oauth_client_secret,
+      env: "TESLA_OAUTH_CLIENT_SECRET",
+      path: [:fermix_core, :oauth, "tesla", :client_secret]
+    },
+    %{
       key: :telegram_bot_token,
       env: "TELEGRAM_BOT_TOKEN",
       path: [:fermix_channels, :telegram, :bot_token]

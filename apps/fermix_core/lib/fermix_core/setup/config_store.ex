@@ -47,6 +47,8 @@ defmodule FermixCore.Setup.ConfigStore do
     "enabled" => :enabled,
     "redirect_host" => :redirect_host,
     "redirect_port" => :redirect_port,
+    "redirect_uri" => :redirect_uri,
+    "region" => :region,
     "scope_profile" => :scope_profile,
     "unsupported" => :unsupported
   }
@@ -702,12 +704,15 @@ defmodule FermixCore.Setup.ConfigStore do
     :ok
   end
 
+  # Replace (not merge) for the same reason computer use does below, plus one of
+  # its own: the voice engine decides which keys are legal, so a switch to Live
+  # DROPS the Realtime-only settings. Merging left the dropped `reasoning_effort`
+  # in application environment, where the very next `Realtime.Config.current/0`
+  # raised on the pair it had just written — a poisoned live configuration under
+  # a save that persisted a correct file. The section is fully normalized by
+  # `persistable_snapshot/1`, so the persisted keyword is the complete state.
   defp apply_realtime_config(realtime_config) do
-    merged =
-      Application.get_env(:fermix_core, :realtime, [])
-      |> Keyword.merge(realtime_config)
-
-    Application.put_env(:fermix_core, :realtime, merged)
+    Application.put_env(:fermix_core, :realtime, realtime_config)
     :ok
   end
 

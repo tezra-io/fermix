@@ -31,6 +31,7 @@ defmodule FermixCore.Management.Plugins.Row do
   """
 
   alias FermixCore.Auth.ClientRejection
+  alias FermixCore.Auth.OAuthProviders
   alias FermixCore.Capabilities.MCP.RuntimeStatus
   alias FermixCore.Plugins.Config
   alias FermixCore.Plugins.Plugin
@@ -79,6 +80,11 @@ defmodule FermixCore.Management.Plugins.Row do
   @runtime_kinds ~w(local_stdio remote_mcp)
   @auth_kinds ~w(oauth api_key)
 
+  # What control a setting is drawn as. `boolean` is a switch whose value is
+  # the word `true` or `false` and nothing else; `text` is a free-text field.
+  # Published rather than inferred, so both doors draw one control per entry.
+  @setting_kinds ~w(text boolean)
+
   @type t :: %{String.t() => term()}
 
   @doc "Every status a row's sentence covers, ordered."
@@ -107,6 +113,10 @@ defmodule FermixCore.Management.Plugins.Row do
   @doc "Every credential kind a row may publish. `null` is a plugin that needs none."
   @spec auth_kinds() :: [String.t()]
   def auth_kinds, do: @auth_kinds
+
+  @doc "Every kind a setting entry may publish. There is no absent case."
+  @spec setting_kinds() :: [String.t()]
+  def setting_kinds, do: @setting_kinds
 
   @doc """
   Why a health check refused a plugin that is not ready.
@@ -219,7 +229,8 @@ defmodule FermixCore.Management.Plugins.Row do
       workspace_id: selection.workspace_id,
       workspace_label: selection.workspace_label,
       auth_provider: plugin.auth[:provider],
-      client_rejected: Status.client_rejected?(plugin)
+      client_rejected: Status.client_rejected?(plugin),
+      region_actual: Status.region_actual(plugin)
     }
   end
 
@@ -231,7 +242,8 @@ defmodule FermixCore.Management.Plugins.Row do
       workspace_id: nil,
       workspace_label: nil,
       auth_provider: nil,
-      client_rejected: false
+      client_rejected: false,
+      region_actual: nil
     }
   end
 
@@ -243,7 +255,8 @@ defmodule FermixCore.Management.Plugins.Row do
         %{
           empty_facts()
           | auth_provider: plugin.auth[:provider],
-            client_rejected: Status.client_rejected?(plugin)
+            client_rejected: Status.client_rejected?(plugin),
+            region_actual: Status.region_actual(plugin)
         }
 
       _unreadable ->
@@ -287,7 +300,8 @@ defmodule FermixCore.Management.Plugins.Row do
         "key" => entry.key,
         "label" => entry.prompt,
         "value" => Map.get(configured, entry.key),
-        "required" => entry.required
+        "required" => entry.required,
+        "kind" => Atom.to_string(entry.kind)
       }
     end)
   end
@@ -338,6 +352,17 @@ defmodule FermixCore.Management.Plugins.Row do
     do: ClientRejection.grant_sentence(provider)
 
   defp sentence(:reauthorization_required, _facts), do: "The sign-in expired and needs renewing."
+
+  # The grant is real and the provider refuses every call it authorises, because
+  # the account is not in the region the sign-in client chose. The fix is that
+  # choice, so the account's own region is named wherever the provider gave one:
+  # "choose the right region" is not an instruction anybody can follow without
+  # being told which one it is.
+  defp sentence(:wrong_region, %{auth_provider: provider, region_actual: actual})
+       when is_binary(provider) and is_binary(actual),
+       do: region_sentence(OAuthProviders.region_label(provider, actual))
+
+  defp sentence(:wrong_region, _facts), do: region_sentence(nil)
   defp sentence(:not_installed, _facts), do: "Not installed."
   defp sentence(:available, _facts), do: "Not installed."
   defp sentence(:connecting, _facts), do: "Connecting."
@@ -371,6 +396,16 @@ defmodule FermixCore.Management.Plugins.Row do
 
   defp sentence(:error, _facts), do: "Turned on, but its state could not be read."
 
+  defp region_sentence(label) when is_binary(label) do
+    "The account belongs to the #{label} region. " <>
+      "Choose it for the sign-in client and sign in again."
+  end
+
+  defp region_sentence(nil) do
+    "The account is in a different region from the sign-in client. " <>
+      "Choose the account's region and sign in again."
+  end
+
   # A sign-in under a refused client is refused again, so a refused-client row
   # leads with the client; "Sign in again" stays one button away (`verb_list/2`).
   defp primary_verb(:reauthorization_required, %{client_rejected: true}),
@@ -388,7 +423,10 @@ defmodule FermixCore.Management.Plugins.Row do
   defp primary_verb(:reauthorization_required), do: "Sign in again"
   defp primary_verb(:needs_secret), do: "Add token…"
   defp primary_verb(:insufficient_credential_scope), do: "Replace the token"
-  defp primary_verb(:needs_client_config), do: "Set up the sign-in client"
+
+  defp primary_verb(status) when status in [:needs_client_config, :wrong_region],
+    do: "Set up the sign-in client"
+
   defp primary_verb(:needs_workspace), do: "Choose workspace"
   defp primary_verb(status) when status in [:connecting, :needs_config], do: nil
   defp primary_verb(status) when status in [:missing_host_runtime, :incompatible], do: nil
@@ -410,5 +448,9 @@ defmodule FermixCore.Management.Plugins.Row do
   # The second half of a refused client's fix: once the client is updated, the
   # sign-in is renewed, so the row keeps offering it.
   defp renewal(:reauthorization_required, %{client_rejected: true}), do: ["Sign in again"]
+
+  # The same two halves for a wrong-region grant: the region on the client is
+  # the fix, and the sign-in is renewed once it is right.
+  defp renewal(:wrong_region, _facts), do: ["Sign in again"]
   defp renewal(_status, _facts), do: []
 end

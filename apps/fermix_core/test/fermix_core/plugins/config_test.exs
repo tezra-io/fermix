@@ -1,6 +1,7 @@
 defmodule FermixCore.Plugins.ConfigTest do
   use ExUnit.Case, async: false
 
+  alias FermixCore.Auth.OAuthProviders
   alias FermixCore.Auth.Store
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Auth.TokenRegistry
@@ -322,6 +323,98 @@ defmodule FermixCore.Plugins.ConfigTest do
     assert Application.get_env(:fermix_core, :oauth) == %{}
   end
 
+  # Tesla is the one regional provider: its region picks the Fleet API base URL
+  # the token exchange must name as `audience`, and its registered redirect URI
+  # is a public https bounce page. Both are validated on this write path so a
+  # bad value never reaches config.toml.
+  describe "set_oauth_provider/2 — the tesla region and redirect URI" do
+    @tesla [client_id: "tesla-client-id", client_secret: "tesla-client-secret"]
+
+    test "persists a supported region and the registered redirect URI", %{home: home} do
+      assert {:ok, _snapshot} =
+               Config.set_oauth_provider(
+                 "tesla",
+                 @tesla ++
+                   [
+                     region: "eu",
+                     redirect_uri: "https://fermix.ai/api/integrations/tesla/callback"
+                   ]
+               )
+
+      tesla = Application.get_env(:fermix_core, :oauth) |> Map.fetch!("tesla")
+      assert Keyword.get(tesla, :region) == "eu"
+
+      assert Keyword.get(tesla, :redirect_uri) ==
+               "https://fermix.ai/api/integrations/tesla/callback"
+
+      contents = File.read!(Path.join(home, "config.toml"))
+      assert contents =~ ~s(region = "eu")
+      assert contents =~ ~s(redirect_uri = "https://fermix.ai/api/integrations/tesla/callback")
+      assert contents =~ ~s(client_secret = "@keyring")
+      refute contents =~ "tesla-client-secret"
+
+      assert {:ok, "tesla-client-secret"} =
+               FermixTestSupport.SecretWriterStub.get(:tesla_oauth_client_secret)
+    end
+
+    # The write path and the definition agree on one region set, so a client
+    # saved without a region could never sign in and is refused here instead.
+    test "a client config with no region is refused and nothing is written" do
+      assert {:error, {:missing_oauth_region, "tesla"}} =
+               Config.set_oauth_provider("tesla", @tesla)
+
+      assert {:error, {:missing_oauth_region, "tesla"}} =
+               Config.set_oauth_provider("tesla", @tesla ++ [region: "  "])
+
+      assert Application.get_env(:fermix_core, :oauth) == %{}
+      refute File.exists?(Path.join(System.fetch_env!("FERMIX_HOME"), "config.toml"))
+    end
+
+    test "a region with no Fleet API base URL is refused and nothing is written" do
+      assert {:error, {:invalid_oauth_region, "tesla", "apac"}} =
+               Config.set_oauth_provider("tesla", @tesla ++ [region: "apac"])
+
+      assert {:error, {:invalid_oauth_region, "tesla", "cn"}} =
+               Config.set_oauth_provider("tesla", @tesla ++ [region: "cn"])
+
+      assert Application.get_env(:fermix_core, :oauth) == %{}
+      refute File.exists?(Path.join(System.fetch_env!("FERMIX_HOME"), "config.toml"))
+    end
+
+    test "every region the registry offers is accepted" do
+      for %{id: region} <- OAuthProviders.regions("tesla") do
+        assert {:ok, _snapshot} = Config.set_oauth_provider("tesla", @tesla ++ [region: region])
+
+        assert Application.get_env(:fermix_core, :oauth)
+               |> Map.fetch!("tesla")
+               |> Keyword.get(:region) == region
+      end
+    end
+
+    test "a non-https redirect URI is refused: Tesla registers public https URIs only" do
+      assert {:error,
+              {:invalid_oauth_redirect_uri, "tesla", "http://localhost:1461/auth/callback"}} =
+               Config.set_oauth_provider(
+                 "tesla",
+                 @tesla ++
+                   [region: "na", redirect_uri: "http://localhost:1461/auth/callback"]
+               )
+
+      assert {:error, {:invalid_oauth_redirect_uri, "tesla", "not-a-url"}} =
+               Config.set_oauth_provider(
+                 "tesla",
+                 @tesla ++ [region: "na", redirect_uri: "not-a-url"]
+               )
+
+      assert Application.get_env(:fermix_core, :oauth) == %{}
+    end
+
+    test "the client fields are still required" do
+      assert {:error, {:missing_oauth_client_field, "tesla", :client_secret}} =
+               Config.set_oauth_provider("tesla", client_id: "tesla-client-id", region: "na")
+    end
+  end
+
   test "rejects non-desktop google oauth client config" do
     assert {:error, {:invalid_oauth_client_type, "google", "web"}} =
              Config.set_oauth_provider("google",
@@ -400,6 +493,53 @@ defmodule FermixCore.Plugins.ConfigTest do
       assert Keyword.get(plugins, :enabled) == ["vaultdemo"]
       entry = plugins |> Keyword.fetch!(:entries) |> Map.fetch!("vaultdemo")
       refute Keyword.get(entry, :enabled) == false
+    end
+
+    # A boolean setting is the tool gate's own spelling: `Status` reads exactly
+    # "true", so the writer accepts exactly the two words that gate can mean and
+    # refuses everything else rather than persisting a value that silently
+    # reads as off.
+    test "a boolean setting takes exactly true or false", %{home: home} do
+      assert {:ok, _snapshot} = Config.set_plugin_setting("vaultdemo", "DEMO_WAKE", "true")
+      assert Config.plugin_settings("vaultdemo") == %{"DEMO_WAKE" => "true"}
+
+      assert {:ok, _snapshot} = Config.set_plugin_setting("vaultdemo", "DEMO_WAKE", "false")
+      assert Config.plugin_settings("vaultdemo") == %{"DEMO_WAKE" => "false"}
+
+      contents = File.read!(Path.join(home, "config.toml"))
+      assert contents =~ ~s(DEMO_WAKE = "false")
+    end
+
+    test "a boolean setting refuses any other spelling without writing config" do
+      for value <- ["True", "TRUE", "1", "yes", "on", "/tmp/demo-vault"] do
+        assert {:error, {:invalid_config_value, "DEMO_WAKE", :boolean}} =
+                 Config.set_plugin_setting("vaultdemo", "DEMO_WAKE", value),
+               "#{value} was accepted as a switch"
+      end
+
+      refute File.exists?(Path.join(System.fetch_env!("FERMIX_HOME"), "config.toml"))
+      assert Config.plugin_settings("vaultdemo") == %{}
+    end
+
+    # Clearing keeps the one refusal it always had, and an unwritten switch is
+    # simply absent from the injected settings, which is what "off" is.
+    test "a blank boolean is refused as blank, and an unset one reads as absent" do
+      assert {:error, {:blank_config_value, "DEMO_WAKE"}} =
+               Config.set_plugin_setting("vaultdemo", "DEMO_WAKE", "   ")
+
+      assert {:ok, _snapshot} =
+               Config.set_plugin_setting("vaultdemo", "DEMO_VAULT_PATH", "/tmp/demo-vault")
+
+      refute Map.has_key?(Config.plugin_settings("vaultdemo"), "DEMO_WAKE")
+    end
+
+    # The text entry beside it keeps taking any non-blank string: the kind is a
+    # per-entry fact, not a mode the whole plugin switches into.
+    test "a text setting beside a boolean one is unrestricted" do
+      assert {:ok, _snapshot} = Config.set_plugin_setting("vaultdemo", "DEMO_VAULT_PATH", "true")
+      assert {:ok, _snapshot} = Config.set_plugin_setting("vaultdemo", "DEMO_VAULT_PATH", "maybe")
+
+      assert Config.plugin_settings("vaultdemo") == %{"DEMO_VAULT_PATH" => "maybe"}
     end
 
     test "a setting written before enable round-trips through a TOML reload" do
@@ -536,7 +676,13 @@ defmodule FermixCore.Plugins.ConfigTest do
       "min_core_version" => "0.1.0",
       "auth" => %{"type" => "none"},
       "config" => [
-        %{"key" => "DEMO_VAULT_PATH", "prompt" => "Path to your vault", "required" => true}
+        %{"key" => "DEMO_VAULT_PATH", "prompt" => "Path to your vault", "required" => true},
+        %{
+          "key" => "DEMO_WAKE",
+          "prompt" => "Allow waking",
+          "required" => false,
+          "kind" => "boolean"
+        }
       ],
       "tools" => []
     }

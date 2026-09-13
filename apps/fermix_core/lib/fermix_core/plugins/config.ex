@@ -3,6 +3,7 @@ defmodule FermixCore.Plugins.Config do
   Persists plugin enablement and provider client configuration.
   """
 
+  alias FermixCore.Auth.OAuthProviders
   alias FermixCore.Auth.TokenSupervisor
   alias FermixCore.Plugins.Plugin
   alias FermixCore.Plugins.Registry
@@ -52,6 +53,12 @@ defmodule FermixCore.Plugins.Config do
   `[fermix_core.plugins.<name>]`. The key must be declared in the plugin's
   manifest `config` block; the commit reloads the runtime so an `mcp` child
   restarts with the new env.
+
+  The one writer for a plugin setting: the management surface, the setup page
+  and `fermix plugins config set` all commit through here, so the value rules
+  the manifest declares are enforced once. An entry declared `kind: "boolean"`
+  takes only `"true"` or `"false"`; a blank value is refused for every kind,
+  and an unwritten setting is simply absent, which is what off is.
   """
   @spec set_plugin_setting(String.t(), String.t(), String.t()) :: snapshot_result()
   def set_plugin_setting(name, key, value)
@@ -69,6 +76,11 @@ defmodule FermixCore.Plugins.Config do
   # `auth_profile` and `enabled` — deliberately NOT UPPER_SNAKE, because
   # `plugin_settings/1` is the mcp env-injection seam and these must never
   # reach a child process environment.
+  # The two words a `:boolean` setting may hold, and the spelling the
+  # `requires_setting` gate reads. One casing only: "TRUE" leaves a gated tool
+  # off, so accepting it here would store a value the operator reads as on.
+  @boolean_values ~w(true false)
+
   @selection_keys ~w(access_profile workspace_id workspace_label)
   @max_workspace_id_bytes 256
   @max_workspace_label_bytes 128
@@ -412,12 +424,26 @@ defmodule FermixCore.Plugins.Config do
   # The declared-key check subsumes the UPPER_SNAKE shape: manifest config
   # keys already passed the registry's key regex at decode.
   defp validate_plugin_setting(%Plugin{config: entries}, key, value) do
+    case Enum.find(entries, &(&1.key == key)) do
+      nil -> {:error, {:unknown_config_key, key}}
+      entry -> validate_config_value(entry, value)
+    end
+  end
+
+  # A `:boolean` entry is a switch, and `Plugins.Status` reads exactly "true"
+  # for the `requires_setting` gate, so the only two values that can mean
+  # anything are the two words the gate spells. Any other is refused here
+  # rather than persisted as a value that silently reads as off. A `:text`
+  # entry keeps the one rule it always had.
+  defp validate_config_value(%{key: key, kind: kind}, value) do
     cond do
-      not Enum.any?(entries, &(&1.key == key)) -> {:error, {:unknown_config_key, key}}
       String.trim(value) == "" -> {:error, {:blank_config_value, key}}
+      kind == :boolean and value not in @boolean_values -> boolean_refusal(key)
       true -> :ok
     end
   end
+
+  defp boolean_refusal(key), do: {:error, {:invalid_config_value, key, :boolean}}
 
   # TOML-loaded entries carry UPPER_SNAKE keys as strings (lowercase plumbing
   # keys normalize to atoms); replace by string identity so an overwrite never
@@ -480,7 +506,7 @@ defmodule FermixCore.Plugins.Config do
   # search.messages flow (M16 §7.1, see Auth.OAuthProviders.build/2). Keeping it
   # here means a Slack OAuth client is validated like every other provider rather
   # than falling through to the permissive clause below.
-  @registry_oauth_providers ~w(google github notion x slack)
+  @registry_oauth_providers ~w(google github notion x slack tesla)
 
   defp normalize_oauth_provider(provider, opts) when provider in @registry_oauth_providers do
     client_type = Keyword.get(opts, :client_type, "desktop_public_pkce")
@@ -496,7 +522,7 @@ defmodule FermixCore.Plugins.Config do
         {:error, {:missing_oauth_client_field, provider, :client_secret}}
 
       true ->
-        {:ok, normalized_oauth_provider(opts, client_type)}
+        normalize_registry_oauth_provider(provider, opts, client_type)
     end
   end
 
@@ -504,15 +530,45 @@ defmodule FermixCore.Plugins.Config do
     {:ok, normalized_oauth_provider(opts, Keyword.get(opts, :client_type))}
   end
 
+  # The two keys only a regional provider carries. The region set itself belongs
+  # to Auth.OAuthProviders (region -> Fleet API audience is one table, one
+  # owner); this is the write path that keeps a refused value out of config.toml,
+  # where it would otherwise surface as a login-time crash on the next boot.
+  defp normalize_registry_oauth_provider(provider, opts, client_type) do
+    with :ok <- OAuthProviders.validate_region(provider, Keyword.get(opts, :region)),
+         :ok <- validate_oauth_redirect_uri(provider, Keyword.get(opts, :redirect_uri)) do
+      {:ok, normalized_oauth_provider(opts, client_type)}
+    end
+  end
+
+  # A registered redirect URI is a public https URL (Tesla accepts no other kind
+  # and registers it exact-match), so an http or malformed one is refused here
+  # rather than at the provider's authorize endpoint.
+  defp validate_oauth_redirect_uri(_provider, nil), do: :ok
+
+  defp validate_oauth_redirect_uri(provider, uri) when is_binary(uri) do
+    case URI.parse(uri) do
+      %URI{scheme: "https", host: host} when is_binary(host) and host != "" -> :ok
+      _not_public_https -> {:error, {:invalid_oauth_redirect_uri, provider, uri}}
+    end
+  end
+
+  defp validate_oauth_redirect_uri(provider, uri),
+    do: {:error, {:invalid_oauth_redirect_uri, provider, uri}}
+
   # The redirect port is persisted only when the operator chose one — the
-  # per-provider defaults live in FermixCore.Auth.OAuthProviders.
+  # per-provider defaults live in FermixCore.Auth.OAuthProviders. `region` and
+  # `redirect_uri` are only meaningful for a regional provider and are absent
+  # from every other provider's saved client.
   defp normalized_oauth_provider(opts, client_type) do
     [
       client_type: client_type,
       client_id: Keyword.get(opts, :client_id),
       client_secret: Keyword.get(opts, :client_secret),
       redirect_host: Keyword.get(opts, :redirect_host),
-      redirect_port: Keyword.get(opts, :redirect_port)
+      redirect_port: Keyword.get(opts, :redirect_port),
+      region: Keyword.get(opts, :region),
+      redirect_uri: Keyword.get(opts, :redirect_uri)
     ]
     |> Enum.reject(fn {_key, value} -> blank?(value) end)
   end

@@ -25,6 +25,7 @@ defmodule FermixCore.Management.Plugins do
   drops them from its own card grid for the same reason.
   """
 
+  alias FermixCore.Auth.OAuthProviders
   alias FermixCore.Auth.Redaction
   alias FermixCore.Capabilities.MCP.RuntimeStatus
   alias FermixCore.ComputerUse.SidecarInstaller
@@ -44,6 +45,11 @@ defmodule FermixCore.Management.Plugins do
   require Logger
 
   @max_setting_bytes 4_096
+
+  # Published once so the refusal and the reason it exists sit together: the row
+  # for such a provider carries an empty `regions`, which is the daemon saying
+  # there is nothing here to choose.
+  @no_region_sentence "This provider signs in to one region, so there is no region to choose."
 
   @type error ::
           {:invalid_params, String.t(), String.t()}
@@ -102,14 +108,21 @@ defmodule FermixCore.Management.Plugins do
   `secret.set oauth_client:<provider>`, and this refuses until it has. An
   absent `redirect_port` clears any override, which is what leaves the
   daemon's own default in force.
+
+  `region` is required exactly where the row publishes a non-empty `regions`:
+  it selects the audience the token exchange sends and the host every tool then
+  calls, so a client without it could not sign in. A provider that publishes no
+  regions is sent none, and a region on such a call is refused rather than
+  stored, because nothing would ever read it back.
   """
-  @spec oauth_client_set(String.t(), String.t(), pos_integer() | nil, keyword()) ::
+  @spec oauth_client_set(String.t(), String.t(), pos_integer() | nil, String.t() | nil, keyword()) ::
           {:ok, map()} | {:error, error()}
-  def oauth_client_set(provider, client_id, redirect_port, opts \\ [])
+  def oauth_client_set(provider, client_id, redirect_port, region, opts \\ [])
       when is_binary(provider) and is_binary(client_id) and is_list(opts) do
     with {:ok, providers} <- published_providers(opts),
          :ok <- known_provider(provider, providers),
-         {:ok, _config} <- store_oauth_client(provider, client_id, redirect_port) do
+         :ok <- region_offered(provider, region),
+         {:ok, _config} <- store_oauth_client(provider, client_id, redirect_port, region) do
       {:ok, %{"oauth_client" => oauth_client(provider)}}
     end
   end
@@ -219,8 +232,27 @@ defmodule FermixCore.Management.Plugins do
       "configured" =>
         present?(Keyword.get(config, :client_id)) and
           present?(Keyword.get(config, :client_secret)),
-      "redirect_port" => redirect_port(Keyword.get(config, :redirect_port))
+      "redirect_port" => redirect_port(Keyword.get(config, :redirect_port)),
+      "region" => region(Keyword.get(config, :region)),
+      "regions" => published_regions(provider)
     }
+  end
+
+  defp region(value) when is_binary(value), do: if(present?(value), do: value)
+  defp region(_value), do: nil
+
+  # The daemon's own region set, in the daemon's own words, so a client draws a
+  # picker rather than carrying a table of its own that can go stale.
+  defp published_regions(provider) do
+    provider
+    |> regions_of()
+    |> Enum.map(fn region -> %{"id" => region.id, "label" => region.label} end)
+  end
+
+  # A provider no OAuth registry defines offers no regions. That is a state the
+  # listing can reach, because the provider name comes from a plugin manifest.
+  defp regions_of(provider) do
+    if provider in OAuthProviders.providers(), do: OAuthProviders.regions(provider), else: []
   end
 
   defp redirect_port(port) when is_integer(port) and port > 0 and port <= 65_535, do: port
@@ -292,11 +324,22 @@ defmodule FermixCore.Management.Plugins do
     end
   end
 
-  # The stored client secret is carried through rather than re-sent: it arrives
-  # only through `secret.set`, and the one writer replaces the provider block
-  # whole, so leaving it out here would erase the credential this call is not
-  # allowed to carry.
-  defp store_oauth_client(provider, client_id, redirect_port) do
+  # A region on a call for a provider that publishes none would be written and
+  # never read, so it is refused instead: the row said there was nothing to
+  # choose. The set itself is validated by the one owner on the write path
+  # below; this is only about what this method's own parameters may carry.
+  defp region_offered(provider, region) do
+    if regions_of(provider) == [] and present?(region) do
+      {:error, {:invalid_params, "region", @no_region_sentence}}
+    else
+      :ok
+    end
+  end
+
+  # The stored client secret and registered redirect URI are carried through
+  # rather than re-sent: neither is a parameter of this call, and the one writer
+  # replaces the provider block whole, so leaving either out would erase it.
+  defp store_oauth_client(provider, client_id, redirect_port, region) do
     existing = Config.oauth_provider(provider)
 
     result =
@@ -305,7 +348,9 @@ defmodule FermixCore.Management.Plugins do
         client_id: client_id,
         client_secret: Keyword.get(existing, :client_secret),
         redirect_host: Keyword.get(existing, :redirect_host),
-        redirect_port: redirect_port
+        redirect_port: redirect_port,
+        redirect_uri: Keyword.get(existing, :redirect_uri),
+        region: region
       )
 
     case result do
@@ -320,6 +365,17 @@ defmodule FermixCore.Management.Plugins do
 
   defp oauth_error(_provider, {:missing_oauth_client_field, _named, :client_id}) do
     {:error, {:invalid_params, "client_id", "A sign-in client needs its identifier."}}
+  end
+
+  # The region set has one owner, so its two refusals are rendered here rather
+  # than re-derived: an unchosen region and an unoffered one have different
+  # fixes and must not wear one sentence.
+  defp oauth_error(_provider, {:missing_oauth_region, _named}) do
+    {:error, {:invalid_params, "region", "Choose the account's region for this sign-in client."}}
+  end
+
+  defp oauth_error(_provider, {:invalid_oauth_region, _named, _region}) do
+    {:error, {:invalid_params, "region", "That is not a region this provider offers."}}
   end
 
   defp oauth_error(provider, reason), do: write_error(provider, reason, [])
@@ -340,6 +396,9 @@ defmodule FermixCore.Management.Plugins do
 
   defp write_error(_name, {:blank_config_value, _key}, _opts),
     do: {:error, {:invalid_params, "value", "This setting cannot be empty."}}
+
+  defp write_error(_name, {:invalid_config_value, _key, :boolean}, _opts),
+    do: {:error, {:invalid_params, "value", "This setting is a switch: send true or false."}}
 
   defp write_error(_name, :nothing_to_disconnect, _opts),
     do: {:error, {:invalid_params, "name", "This plugin holds no credential to forget."}}

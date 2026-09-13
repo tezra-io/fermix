@@ -681,6 +681,11 @@ defmodule Fermix.CLI.PluginsCommand do
     1
   end
 
+  defp error({:invalid_config_value, key, :boolean}) do
+    IO.puts(:stderr, "fermix plugins: #{key} is a switch — set it to true or false")
+    1
+  end
+
   # auth login, reauthorize and refresh: the provider refused the saved sign-in
   # client, which signing in again cannot fix until the client is updated.
   defp error({:oauth_client_rejected, detail}) do
