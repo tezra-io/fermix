@@ -23,7 +23,6 @@ defmodule FermixCore.Realtime.LiveTranscript do
   # transcript delta for that speech may still be in flight. A user fragment
   # that ended within this much of the delegation offset is the sentence being
   # delegated; nothing at all within it means the request has no context yet.
-  @sufficient_lookback_ms 2_000
 
   @type speaker :: :user | :assistant
 
@@ -84,18 +83,24 @@ defmodule FermixCore.Realtime.LiveTranscript do
   end
 
   @doc """
-  True when the operator's speech reaches the delegation offset.
+  True when the operator's speech reaches the delegation: some user fragment
+  ends inside the `window_ms` before `offset_ms` — the same window the request
+  is built from, so a delegation that has context to read is one that can be
+  submitted. Live raises a delegation seconds after the sentence that asked for
+  it (observed live: a task delegated a few seconds after the operator stopped
+  speaking, which a two-second lookback refused as "did not catch that"), so
+  the lookback is the request window, not a guess about model latency.
 
   A delegation with no user speech behind it has nothing to act on, and guessing
   a consequential operation from a partial sentence is exactly what this gate
   exists to prevent.
   """
-  @spec sufficient?(t(), non_neg_integer()) :: boolean()
-  def sufficient?(%__MODULE__{} = transcript, offset_ms)
-      when is_integer(offset_ms) and offset_ms >= 0 do
+  @spec sufficient?(t(), non_neg_integer(), pos_integer()) :: boolean()
+  def sufficient?(%__MODULE__{} = transcript, offset_ms, window_ms)
+      when is_integer(offset_ms) and offset_ms >= 0 and is_integer(window_ms) and window_ms > 0 do
     case latest_user_end_ms(transcript) do
       nil -> false
-      end_ms -> end_ms >= offset_ms - @sufficient_lookback_ms
+      end_ms -> end_ms >= offset_ms - window_ms
     end
   end
 

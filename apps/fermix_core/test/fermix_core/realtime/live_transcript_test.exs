@@ -55,23 +55,31 @@ defmodule FermixCore.Realtime.LiveTranscriptTest do
     end
   end
 
-  describe "sufficient?/2" do
-    test "is true when a user fragment ends within the lookback" do
+  describe "sufficient?/3" do
+    test "is true when a user fragment ends within the window" do
       transcript = LiveTranscript.append(LiveTranscript.new(), :user, "yes", 3_000, 3_400)
 
-      assert LiveTranscript.sufficient?(transcript, 4_000)
+      assert LiveTranscript.sufficient?(transcript, 4_000, 30_000)
+    end
+
+    # Live delegates a few seconds after the sentence that asked for it; the
+    # window is the request window, so that sentence still counts.
+    test "is true when the user finished speaking seconds before the delegation" do
+      transcript = LiveTranscript.append(LiveTranscript.new(), :user, "book it", 2_000, 3_000)
+
+      assert LiveTranscript.sufficient?(transcript, 9_000, 30_000)
     end
 
     test "is false when only assistant speech is in the window" do
       transcript = LiveTranscript.append(LiveTranscript.new(), :assistant, "on it", 3_000, 3_400)
 
-      refute LiveTranscript.sufficient?(transcript, 4_000)
+      refute LiveTranscript.sufficient?(transcript, 4_000, 30_000)
     end
 
-    test "is false when the newest user fragment is older than the lookback" do
+    test "is false when the newest user fragment is older than the window" do
       transcript = LiveTranscript.append(LiveTranscript.new(), :user, "hello", 0, 500)
 
-      refute LiveTranscript.sufficient?(transcript, 9_000)
+      refute LiveTranscript.sufficient?(transcript, 40_000, 30_000)
     end
   end
 

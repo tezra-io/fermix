@@ -314,6 +314,16 @@ defmodule FermixCore.Management.ProtocolContractTest do
   # Every kind and format a row may carry is pinned to the module, so a kind
   # added in Elixir fails here rather than reaching a client that cannot render
   # it.
+  # The router publishes `realtime.engine` on the overview and the golden
+  # carries it; the schema must declare it too, or the app decodes a field the
+  # contract never promised (the declaration was lost once in a merge).
+  test "the overview's realtime object declares the engine field", %{schema: schema} do
+    realtime = schema["$defs"]["overview_get_result"]["properties"]["realtime"]
+
+    assert Map.has_key?(realtime["properties"], "engine")
+    assert "engine" in realtime["required"]
+  end
+
   test "the schema's row vocabulary matches the settings module", %{schema: schema} do
     row = schema["$defs"]["settingsRow"]["properties"]
     %{kinds: kinds, formats: formats} = Settings.vocabulary()

@@ -513,7 +513,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   end
 
   defp submit_or_wait(state, record) do
-    if LiveTranscript.sufficient?(state.transcript, record.offset_ms) do
+    if LiveTranscript.sufficient?(state.transcript, record.offset_ms, @context_window_ms) do
       submit_delegation(state, record)
     else
       arm_context_wait(state, record.id)
@@ -524,7 +524,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   # delta that explains it, so waiting once is right — waiting twice, or
   # guessing, is how a partial sentence becomes a consequential action.
   defp submit_or_clarify(state, record) do
-    if LiveTranscript.sufficient?(state.transcript, record.offset_ms) do
+    if LiveTranscript.sufficient?(state.transcript, record.offset_ms, @context_window_ms) do
       submit_delegation(state, record)
     else
       state
