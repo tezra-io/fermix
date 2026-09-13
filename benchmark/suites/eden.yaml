@@ -3,11 +3,13 @@
 # Eden's tools register as ordinary capabilities under their EXACT upstream
 # names (tool_name_mode: preserve), so they emit normal tool spans:
 # eden_list_workspace_items, eden_search_workspace_items,
-# eden_find_workspace_items, eden_read_board, eden_read_card,
-# eden_read_media_card, eden_read_social_post, eden_get_note_markdown,
-# eden_get_item_connections, eden_get_suggested_connections,
-# eden_search_highlights, eden_list_highlights (the `retrieval` profile), plus
-# seven capture tools on the `capture` profile.
+# eden_find_workspace_items, eden_read_board, eden_read_media_card,
+# eden_read_social_post, eden_get_note_markdown, eden_get_connections,
+# eden_search_highlights (the `retrieval` profile), plus six capture tools on
+# the `capture` profile. Eden withdrew eden_read_card, eden_list_highlights,
+# eden_get_suggested_connections and eden_create_sticky_note, and merged
+# eden_get_item_connections into eden_get_connections; plugin 1.1.0 signs the
+# surviving surface.
 #
 # PRECONDITIONS: the eden plugin is enabled, its personal access token is set
 # (`fermix plugins auth set eden`), and exactly one workspace is selected in
@@ -80,7 +82,6 @@ defaults:
     tools_none:
       - eden_create_note
       - eden_append_to_note
-      - eden_create_sticky_note
       - eden_create_board
       - eden_save_links_to_board
       - eden_save_posts_to_board

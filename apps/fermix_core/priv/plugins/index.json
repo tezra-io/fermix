@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-09-13T21:14:33Z",
+  "generated_at": "2026-09-13T21:47:18Z",
   "plugins": [
     {
       "name": "agentmail",
@@ -132,9 +132,24 @@
       "rails": [
         "mcp"
       ],
-      "latest": "1.0.0",
+      "latest": "1.1.0",
       "yanked": [],
       "versions": [
+        {
+          "version": "1.1.0",
+          "published_at": "2026-09-13T21:44:29Z",
+          "min_core_version": "0.7.2",
+          "plugin_api": 3,
+          "artifacts": [
+            {
+              "target": "any",
+              "url": "https://github.com/tezra-io/fermix-plugins/releases/download/eden/v1.1.0/eden-1.1.0.tar.gz",
+              "sha256": "6c3fd9086e00cd741dc72528f821dafffb3821f9597a7f2f44cd98499e1c5bcb",
+              "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/eden/v1.1.0/eden-1.1.0.tar.gz.sig",
+              "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/eden/v1.1.0/eden-1.1.0.tar.gz.pem"
+            }
+          ]
+        },
         {
           "version": "1.0.0",
           "published_at": "2026-08-04T02:46:04Z",
