@@ -135,7 +135,9 @@ else
   if ! checkout_status="$(cd "$repo_root" && git status --porcelain --untracked-files=all)"; then
     fail "cannot inspect the checkout source state"
   fi
-  [ -z "$checkout_status" ] || fail "checkout has uncommitted source changes"
+  [ -z "$checkout_status" ] ||
+    fail "checkout has uncommitted source changes:
+$checkout_status"
 fi
 
 scratch_parent="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"

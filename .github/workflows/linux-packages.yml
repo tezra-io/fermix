@@ -29,9 +29,18 @@ permissions:
 
 jobs:
   build:
-    name: Build Linux packages
+    name: Build Linux packages (${{ matrix.target }})
+    # One job per target in its own checkout, for the reason release.yml gives:
+    # a build leaves outputs behind it, and the script refuses to snapshot a
+    # checkout that is not exactly the commit. A dispatch that names one
+    # target skips the other job rather than building both.
+    if: github.event_name != 'workflow_dispatch' || github.event.inputs.target == 'both' || github.event.inputs.target == matrix.target
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [linux_x86_64, linux_aarch64]
     env:
       MIX_ENV: prod
       ELIXIR_VERSION: "1.19.5"
@@ -60,28 +69,19 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y xz-utils jq patchelf
 
-      - name: Build the requested package targets
-        env:
-          REQUESTED_TARGET: ${{ github.event.inputs.target || 'both' }}
+      - name: Build the package target
         run: |
           set -euo pipefail
           version="$(awk -F '"' '/^      version:/ { print $2; exit }' mix.exs)"
-          if [ "$REQUESTED_TARGET" = both ]; then
-            targets="linux_x86_64 linux_aarch64"
-          else
-            targets="$REQUESTED_TARGET"
-          fi
-          for target in $targets; do
-            scripts/release/build_linux_packages.sh \
-              "$target" \
-              "$version" \
-              packaging/linux/out/packages
-          done
+          scripts/release/build_linux_packages.sh \
+            "${{ matrix.target }}" \
+            "$version" \
+            packaging/linux/out/packages
 
       - name: Upload Linux packages
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: linux-packages-${{ github.run_id }}
+          name: linux-packages-${{ matrix.target }}-${{ github.run_id }}
           path: |
             packaging/linux/out/packages/*.deb
             packaging/linux/out/packages/*.rpm

@@ -123,11 +123,18 @@ class ReleaseWorkflowTest(unittest.TestCase):
         )
 
     def test_builds_both_linux_packages_from_the_tag_the_engines_come_from(self):
-        self.assertRegex(self.release, r"\n  linux-packages:\n    name: Build Linux packages\n    needs: preflight\n")
+        self.assertRegex(
+            self.release,
+            r"\n  linux-packages:\n    name: Build Linux packages \(\$\{\{ matrix.target \}\}\)\n    needs: preflight\n",
+        )
         self.assertIn("scripts/release/build_linux_packages.sh", self.release)
-        self.assertIn("for target in linux_x86_64 linux_aarch64; do", self.release)
+        # One job per target: a second build in the same checkout refuses on
+        # the first build's leftovers, which is what a shared job did.
+        self.assertIn("target: [linux_x86_64, linux_aarch64]", self.release)
+        self.assertNotIn("for target in linux_x86_64 linux_aarch64; do", self.release)
         self.assertIn("FERMIX_BUILD_ID: release-${{ github.run_id }}", self.release)
-        self.assertIn("name: linux-packages\n", self.release)
+        self.assertIn("name: linux-packages-${{ matrix.target }}\n", self.release)
+        self.assertIn("pattern: linux-packages-*\n          path: linux_packages\n          merge-multiple: true", self.release)
         self.assertIn("packaging/linux/out/packages/*.deb", self.release)
         self.assertIn("packaging/linux/out/packages/*.rpm", self.release)
         # patchelf is what points the packaged interpreters at the loader the

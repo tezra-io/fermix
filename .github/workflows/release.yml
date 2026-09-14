@@ -108,10 +108,17 @@ jobs:
           retention-days: 1
 
   linux-packages:
-    name: Build Linux packages
+    name: Build Linux packages (${{ matrix.target }})
     needs: preflight
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    # One job per target, each in its own checkout: a build leaves outputs
+    # behind it, and the script refuses to snapshot a checkout that is not
+    # exactly the commit, so two targets in one job means the second refuses.
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [linux_x86_64, linux_aarch64]
     env:
       MIX_ENV: prod
       ELIXIR_VERSION: "1.19.5"
@@ -141,22 +148,20 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y xz-utils jq patchelf
 
-      - name: Build the deb and the rpm for both targets
+      - name: Build the deb and the rpm for ${{ matrix.target }}
         env:
           VERSION: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          for target in linux_x86_64 linux_aarch64; do
-            scripts/release/build_linux_packages.sh \
-              "$target" \
-              "${VERSION#v}" \
-              packaging/linux/out/packages
-          done
+          scripts/release/build_linux_packages.sh \
+            "${{ matrix.target }}" \
+            "${VERSION#v}" \
+            packaging/linux/out/packages
 
       - name: Upload Linux packages
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: linux-packages
+          name: linux-packages-${{ matrix.target }}
           path: |
             packaging/linux/out/packages/*.deb
             packaging/linux/out/packages/*.rpm
@@ -228,8 +233,9 @@ jobs:
       - name: Download Linux packages
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: linux-packages
+          pattern: linux-packages-*
           path: linux_packages
+          merge-multiple: true
 
       - name: Download app-engine candidates
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
