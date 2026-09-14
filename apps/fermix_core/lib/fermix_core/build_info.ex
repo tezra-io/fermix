@@ -26,8 +26,9 @@ defmodule FermixCore.BuildInfo do
     "linux_x86_64" => "x86_64"
   }
   @app_targets Map.take(@target_architectures, ["macos_aarch64", "macos_x86_64"])
+  @linux_package_targets Map.take(@target_architectures, ["linux_aarch64", "linux_x86_64"])
 
-  unless @distribution_identity in ["standalone", "macos_app"] do
+  unless @distribution_identity in ["standalone", "macos_app", "linux_package"] do
     raise "invalid FERMIX_BUILD_DISTRIBUTION: #{inspect(@distribution_identity)}"
   end
 
@@ -35,18 +36,29 @@ defmodule FermixCore.BuildInfo do
     raise "invalid FERMIX_BUILD_TARGET: #{inspect(@artifact_target)}"
   end
 
-  if @distribution_identity == "macos_app" do
+  # Both published distributions carry the same three inputs; only the platform
+  # the target must name differs. One check, called twice, so a new published
+  # distribution cannot be stamped with half an identity.
+  require_published_inputs = fn distribution, platform, targets ->
     unless is_binary(@build_id) and Regex.match?(@build_id_pattern, @build_id) do
-      raise "FERMIX_BUILD_ID is required for macos_app builds"
+      raise "FERMIX_BUILD_ID is required for #{distribution} builds"
     end
 
     unless is_binary(@source_commit) and Regex.match?(@source_commit_pattern, @source_commit) do
-      raise "FERMIX_BUILD_SOURCE_COMMIT must be a full commit for macos_app builds"
+      raise "FERMIX_BUILD_SOURCE_COMMIT must be a full commit for #{distribution} builds"
     end
 
-    unless Map.has_key?(@app_targets, @artifact_target) do
-      raise "FERMIX_BUILD_TARGET must name a macOS architecture for macos_app builds"
+    unless Map.has_key?(targets, @artifact_target) do
+      raise "FERMIX_BUILD_TARGET must name a #{platform} architecture for #{distribution} builds"
     end
+  end
+
+  if @distribution_identity == "macos_app" do
+    require_published_inputs.("macos_app", "macOS", @app_targets)
+  end
+
+  if @distribution_identity == "linux_package" do
+    require_published_inputs.("linux_package", "Linux", @linux_package_targets)
   end
 
   @architecture Map.get_lazy(@target_architectures, @artifact_target, fn ->
@@ -127,6 +139,10 @@ defmodule FermixCore.BuildInfo do
   @spec app_engine?() :: boolean()
   def app_engine?, do: @distribution_identity == "macos_app"
 
+  @doc "Whether this artifact is a Linux distribution package engine (M38 §3)."
+  @spec linux_package?() :: boolean()
+  def linux_package?, do: @distribution_identity == "linux_package"
+
   @doc "Returns management and Realtime ranges from their wire authorities."
   @spec protocols() :: map()
   def protocols do
@@ -139,23 +155,34 @@ defmodule FermixCore.BuildInfo do
   @doc "Validates identity fields required in a published macOS app engine."
   @spec validate_app_engine(map()) :: :ok | {:error, {:invalid_build_info, atom()}}
   def validate_app_engine(identity) when is_map(identity) do
+    validate_published(identity, "macos_app", @app_targets)
+  end
+
+  def validate_app_engine(_identity), do: invalid(:identity)
+
+  @doc "Validates identity fields required in a published Linux package engine."
+  @spec validate_linux_package(map()) :: :ok | {:error, {:invalid_build_info, atom()}}
+  def validate_linux_package(identity) when is_map(identity) do
+    validate_published(identity, "linux_package", @linux_package_targets)
+  end
+
+  def validate_linux_package(_identity), do: invalid(:identity)
+
+  @doc "Validates the identity compiled into the current app-engine build."
+  @spec validate_current_app_engine() :: :ok | {:error, {:invalid_build_info, atom()}}
+  def validate_current_app_engine, do: validate_app_engine(identity())
+
+  defp validate_published(identity, distribution, targets) do
     with :ok <- exact_fields(identity),
          :ok <- valid_string(identity, :engine_id),
          :ok <- valid_string(identity, :product_version),
          :ok <- valid_pattern(identity, :build_id, @build_id_pattern),
          :ok <- valid_pattern(identity, :source_commit, @source_commit_pattern),
-         :ok <- valid_distribution(identity),
-         :ok <- valid_target(identity),
-         :ok <- matching_architecture(identity) do
-      :ok
+         :ok <- valid_distribution(identity, distribution),
+         :ok <- valid_target(identity, targets) do
+      matching_architecture(identity, targets)
     end
   end
-
-  def validate_app_engine(_identity), do: invalid(:identity)
-
-  @doc "Validates the identity compiled into the current app-engine build."
-  @spec validate_current_app_engine() :: :ok | {:error, {:invalid_build_info, atom()}}
-  def validate_current_app_engine, do: validate_app_engine(identity())
 
   defp protocol_metadata(module) do
     {minimum, maximum} = module.supported_version_range()
@@ -193,17 +220,20 @@ defmodule FermixCore.BuildInfo do
     end
   end
 
-  defp valid_distribution(%{distribution_identity: "macos_app"}), do: :ok
-  defp valid_distribution(_identity), do: invalid(:distribution_identity)
+  defp valid_distribution(identity, expected) do
+    if Map.get(identity, :distribution_identity) == expected,
+      do: :ok,
+      else: invalid(:distribution_identity)
+  end
 
-  defp valid_target(identity) do
-    if Map.has_key?(@app_targets, Map.get(identity, :artifact_target)),
+  defp valid_target(identity, targets) do
+    if Map.has_key?(targets, Map.get(identity, :artifact_target)),
       do: :ok,
       else: invalid(:artifact_target)
   end
 
-  defp matching_architecture(identity) do
-    expected = Map.get(@app_targets, identity.artifact_target)
+  defp matching_architecture(identity, targets) do
+    expected = Map.get(targets, identity.artifact_target)
     if identity.architecture == expected, do: :ok, else: invalid(:architecture)
   end
 

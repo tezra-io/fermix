@@ -4,6 +4,7 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
   alias FermixCore.Agents.LifecycleTelemetry
   alias FermixCore.Capabilities.MCP.Telemetry, as: MCPClientTelemetry
   alias FermixCore.Plugins.Auth.Telemetry, as: PluginAuthTelemetry
+  alias FermixCore.Realtime.LiveTelemetry
   alias FermixCore.Trace
   alias FermixCore.Trace.TelemetryHandler
 
@@ -683,5 +684,74 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
     assert journal_entry["session_id"] == "skill-session-2"
     assert journal_entry["path"] == "/tmp/fake-journal.md"
     assert journal_entry["bytes"] == 512
+  end
+
+  # A Live voice call is a run kind whose phases are the ONLY record of what the
+  # provider session did — there is no per-turn row for the call itself. A phase
+  # missing from `event_definitions/0` is invisible in the JSONL with no error,
+  # so the invariant is written over every event the emitter can produce rather
+  # than over a hand-listed subset.
+  test "every voice_live phase reaches the JSONL trace stream", %{dir: dir, server: server} do
+    meta = %{
+      session_id: "voice_live:1",
+      parent_session: "main-4",
+      device_id: "dev-1",
+      model: "gpt-live-1",
+      voice: "marin",
+      provider_session_id: "sess_live_abc"
+    }
+
+    delegation = %{delegation_id: "dlg_1", revision: 1, turn_session_id: "voice_delegation_7"}
+
+    LiveTelemetry.call_start(meta, 900_000)
+    LiveTelemetry.session_started(meta)
+    LiveTelemetry.delegation_start(meta, delegation)
+    LiveTelemetry.delegation_stop(meta, delegation, "completed", 1_200)
+    LiveTelemetry.provider_error(meta, "moderation cut the reply")
+
+    LiveTelemetry.call_stop(
+      meta,
+      %{
+        voice_seconds: 62,
+        voice_cost_millicents: 5_167,
+        backend_turns: 2,
+        accounting_complete: 1
+      },
+      :call_stop
+    )
+
+    sync(server)
+
+    rows =
+      dir
+      |> read_entries(:agent_event)
+      |> Enum.filter(&String.starts_with?(&1["event"] || "", "voice_live_"))
+
+    expected =
+      Enum.map(LiveTelemetry.trace_event_definitions(), & &1.trace_event)
+
+    assert Enum.map(rows, & &1["event"]) == expected
+    assert Enum.all?(rows, &(&1["agent"] == "voice_live"))
+    assert Enum.all?(rows, &(&1["session_id"] == "voice_live:1"))
+    assert Enum.all?(rows, &(&1["parent_session"] == "main-4"))
+    assert Enum.all?(rows, &(&1["engine"] == "openai_live"))
+
+    start_row = find_entry!(rows, &(&1["event"] == "voice_live_call_start"))
+    assert start_row["max_duration_ms"] == 900_000
+
+    stop_row = find_entry!(rows, &(&1["event"] == "voice_live_delegation_stop"))
+    assert stop_row["turn_session_id"] == "voice_delegation_7"
+    assert stop_row["revision"] == 1
+    assert stop_row["status"] == "completed"
+    assert stop_row["duration_ms"] == 1_200
+
+    # The ledger is the call's whole cost record: flattened as numbers, never as
+    # a rendered string, so a reader can sum a day of calls out of the JSONL.
+    call_stop = find_entry!(rows, &(&1["event"] == "voice_live_call_stop"))
+    assert call_stop["voice_seconds"] == 62
+    assert call_stop["voice_cost_millicents"] == 5_167
+    assert call_stop["backend_turns"] == 2
+    assert call_stop["accounting_complete"] == 1
+    assert call_stop["reason"] == "call_stop"
   end
 end

@@ -7,9 +7,18 @@ defmodule FermixCore.Auth.RefreshClientTest do
 
   @client [client_id: "client-id", client_secret: "stale-secret", scopes: []]
 
+  # A regional provider's client is incomplete without a region, so a sweep over
+  # every provider carries the first region each one offers.
   defp provider(id) do
-    {:ok, provider} = OAuthProviders.definition(id, @client)
+    {:ok, provider} = OAuthProviders.definition(id, @client ++ region_of(id))
     provider
+  end
+
+  defp region_of(id) do
+    case OAuthProviders.regions(id) do
+      [] -> []
+      [%{id: region} | _rest] -> [region: region]
+    end
   end
 
   # Answers every request with one JSON response and reports each request to
@@ -86,6 +95,34 @@ defmodule FermixCore.Auth.RefreshClientTest do
 
       assert {:ok, %{access_token: "new_at", refresh_token: "new_rt"}} =
                RefreshClient.refresh(provider("x"), "old_rt", plug: plug)
+    end
+  end
+
+  # `extra_token_params` belongs to the authorization-code exchange alone: Tesla
+  # refuses an exchange without `audience` and its refresh form is documented
+  # without one, so a refresh that copied the exchange's extras would be sending
+  # a parameter the endpoint never asked for.
+  describe "refresh/3 — the exchange-only token params never travel" do
+    test "a Tesla refresh sends no audience, only the documented refresh form" do
+      parent = self()
+
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(parent, {:refresh_form, URI.decode_query(body)})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(200, Jason.encode!(%{"access_token" => "new_at"}))
+      end
+
+      assert {:ok, %{access_token: "new_at"}} =
+               RefreshClient.refresh(provider("tesla"), "old_rt", plug: plug)
+
+      assert_received {:refresh_form, form}
+      refute Map.has_key?(form, "audience")
+      assert form["grant_type"] == "refresh_token"
+      assert form["refresh_token"] == "old_rt"
+      assert form["client_id"] == "client-id"
     end
   end
 end

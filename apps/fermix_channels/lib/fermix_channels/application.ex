@@ -43,11 +43,20 @@ defmodule FermixChannels.Application do
       FermixChannels.Channels.Telegram.Poller
     )
 
+    # The Live voice engine delegates every task back to a Core turn through
+    # this bridge (M41 §6). Core owns the behaviour and resolves an
+    # implementation; it must not compile-depend on channels, so the bridge
+    # registers itself here and is present iff this application runs.
+    Application.put_env(:fermix_core, :voice_bridge, FermixChannels.Voice.Bridge)
+
     mobile_boot_epoch = mobile_boot_epoch()
 
     children =
       [
         FermixChannels.Gateway.Queue,
+        # After the queue, deliberately: the bridge ingests through it, so a
+        # delegation accepted before the queue is up has nowhere to run.
+        FermixChannels.Voice.Supervisor,
         FermixChannels.Gateway.BackgroundSupervisor,
         FermixChannels.Gateway.Commands.Sandbox.Confirmations,
         FermixChannels.Gateway.Commands.Soul.Confirmations,

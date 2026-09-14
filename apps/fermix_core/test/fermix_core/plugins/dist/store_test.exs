@@ -222,6 +222,33 @@ defmodule FermixCore.Plugins.Dist.StoreTest do
     end
   end
 
+  # The path the daemon projects an `mcp` child's access token to (M8 §9.3).
+  # It lives here because `run/` has one owner, and the Go helper is written
+  # against this exact shape.
+  describe "token_file/2" do
+    test "names the file after the auth profile under run/", %{root: root} do
+      assert Store.token_file(root, "tesla:primary") ==
+               Path.join([root, "run", "tesla_primary.token"])
+    end
+
+    test "is collected by the boot sweep", %{root: root} do
+      path = Store.token_file(root, "tesla:primary")
+      File.write!(path, "{}")
+
+      assert :ok = Store.sweep_transient!(root)
+      refute File.exists?(path)
+    end
+
+    # An auth profile reaches here from config, and a hand-edited one could name
+    # a path outside the store. A token is never written somewhere else under a
+    # sanitized name: the corrupt value fails loud.
+    test "refuses a profile that could escape run/" do
+      for profile <- ["../../etc/passwd", "a/b", "", "x\ny"] do
+        assert_raise ArgumentError, fn -> Store.token_file("/tmp/store", profile) end
+      end
+    end
+  end
+
   describe "sweep_transient!/1" do
     test "clears staging dirs and run/*.token but keeps other run files", %{root: root} do
       File.mkdir_p!(Path.join(Store.paths(root).staging, "half-download"))

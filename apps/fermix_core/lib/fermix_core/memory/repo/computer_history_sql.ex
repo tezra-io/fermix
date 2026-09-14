@@ -459,10 +459,15 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
   @doc """
   Per-app coverage states inside the window (§8.4a): the distinct
   `{bundle_id, gap_reason}` pairs of `observer.gap` rows that name an app AND a
-  coverage reason (`title_only`, `ax_refused:<notifications>`), with
-  `ts >= since_ts`. Machine-wide gaps (sleep, wake, write_failure) name no app and
-  are excluded — this answers "which apps can Fermix only see titles in", which
-  `/history status` has to tell the owner rather than silently record nothing.
+  coverage reason (`title_only`, `private_unknown`, `ax_refused:<notifications>`),
+  with `ts >= since_ts`. Machine-wide gaps (sleep, wake, write_failure) name no app
+  and are excluded — this answers "which apps can Fermix only see titles in, and
+  which browsers can it not classify as private", which `/history status` has to
+  tell the owner rather than silently record nothing.
+
+  This reason set and `/history status`'s clauses are ONE contract: the command
+  raises on a reason it has no clause for, so a reason added here without a clause
+  fails loud instead of rendering as the wrong coverage sentence.
 
   The `ax_refused` prefix is matched with `substr/3`, not `LIKE`: `_` is a LIKE
   wildcard, so `'ax_refused%'` would also match reasons that merely look like it.
@@ -472,7 +477,8 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
     sql =
       "SELECT DISTINCT bundle_id, gap_reason FROM computer_history_events " <>
         "WHERE type = 'observer.gap' AND ts >= ? AND bundle_id IS NOT NULL " <>
-        "AND (gap_reason = 'title_only' OR substr(gap_reason, 1, 10) = 'ax_refused') " <>
+        "AND (gap_reason = 'title_only' OR gap_reason = 'private_unknown' " <>
+        "OR substr(gap_reason, 1, 10) = 'ax_refused') " <>
         "ORDER BY bundle_id ASC, gap_reason ASC"
 
     with {:ok, rows} <- query_all(conn, sql, [since_ts]) do

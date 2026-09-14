@@ -1823,6 +1823,133 @@ defmodule FermixCore.Agents.MainAgentTest do
 
   # -- GenServer lifecycle --
 
+  # MILESTONE_41_OPENAI_LIVE_VOICE.md §5.2/§7: a Live call runs on its own
+  # history and never mines a spoken fragment for long-term memory. Both
+  # decisions are frozen into the turn snapshot here, with the rest of it.
+  describe "voice delegations" do
+    test "checkout names the call-owned store and disables memory review", %{agent: agent} do
+      store = start_voice_store()
+
+      {:ok, turn_state, _cache} =
+        MainAgent.checkout_turn_state(agent, voice_message("read my inbox", store))
+
+      assert turn_state.conversation_store == store
+      assert turn_state.memory_review? == false
+    end
+
+    test "checkout keeps the global store and memory review for a chat turn", %{
+      agent: agent,
+      conv_store: conv_store
+    } do
+      {:ok, turn_state, _cache} =
+        MainAgent.checkout_turn_state(agent, make_message("read my inbox"))
+
+      assert turn_state.conversation_store == conv_store
+      assert turn_state.memory_review? == true
+    end
+
+    test "a forged voice_call on a chat message moves neither decision", %{
+      agent: agent,
+      conv_store: conv_store
+    } do
+      store = start_voice_store()
+
+      forged =
+        make_message("read my inbox", metadata: %{voice_call: voice_call("call-forged", store)})
+
+      {:ok, turn_state, _cache} = MainAgent.checkout_turn_state(agent, forged)
+
+      assert turn_state.conversation_store == conv_store
+      assert turn_state.memory_review? == true
+    end
+
+    test "the delegation's history lands in the call store, never the global one", %{
+      agent: agent,
+      conv_store: conv_store
+    } do
+      ReviewProbe.init()
+      store = start_voice_store()
+      call_id = "voice_live_#{System.unique_integer([:positive])}"
+
+      MockProvider.set_responses([mock_response("Nothing new in your inbox")])
+      run_turn(voice_message("read my inbox", store, call_id), agent)
+
+      assert_receive {:reply, "Nothing new in your inbox"}, 5_000
+      flush_conv_store(store)
+      flush_conv_store(conv_store)
+
+      key = {"voice", call_id, :root}
+
+      assert [%{role: "user"}, %{role: "assistant"}] =
+               ConversationStore.get_history(key, server: store)
+
+      assert ConversationStore.get_history(key, server: conv_store) == []
+    end
+
+    test "a delegation starts no memory review", %{
+      skill_registry: skill_registry,
+      conv_store: conv_store,
+      task_supervisor: task_supervisor
+    } do
+      ReviewProbe.init()
+      store = start_voice_store()
+      agent_name = :"voice_review_main_agent_#{System.unique_integer([:positive])}"
+
+      {:ok, _} =
+        start_supervised(
+          {MainAgent,
+           [
+             name: agent_name,
+             provider: MockProvider,
+             skill_registry: skill_registry,
+             conversation_store: conv_store,
+             task_supervisor: task_supervisor,
+             memory_reviewer: ReviewProbe
+           ]},
+          id: agent_name
+        )
+
+      MockProvider.set_responses([mock_response("Nothing new")])
+      run_turn(voice_message("read my inbox", store), agent_name)
+
+      assert_receive {:reply, "Nothing new"}, 5_000
+      refute_receive {:memory_review_started, _opts, _pid}, 200
+    end
+  end
+
+  defp voice_message(content, store, call_id \\ "voice_live_1") do
+    make_message(content,
+      channel: "voice",
+      chat_id: call_id,
+      sender: "voice",
+      source_trust: :operator,
+      metadata: %{
+        source: :voice,
+        user_id: "voice",
+        chat_type: "private",
+        voice_call: voice_call(call_id, store)
+      }
+    )
+  end
+
+  defp voice_call(call_id, store) do
+    %{
+      call_id: call_id,
+      delegation_id: "d-1",
+      revision: 1,
+      turn_session_id: "voice_delegation_1",
+      conversation_store: store,
+      prompt_addendum: "This task comes from an ongoing voice conversation.",
+      persist?: false
+    }
+  end
+
+  defp start_voice_store do
+    name = :"voice_call_store_#{System.unique_integer([:positive])}"
+
+    start_supervised!({ConversationStore, name: name, max_messages: 128, repo: nil}, id: name)
+  end
+
   describe "start_link/1" do
     test "starts with custom name" do
       name = :"main_agent_lifecycle_#{System.unique_integer()}"

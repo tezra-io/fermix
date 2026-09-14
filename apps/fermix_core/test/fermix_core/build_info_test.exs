@@ -138,6 +138,79 @@ defmodule FermixCore.BuildInfoTest do
              BuildInfo.validate_app_engine(%{valid | architecture: "x86_64"})
   end
 
+  test "validates complete arm64 and x86_64 linux-package identities" do
+    refute BuildInfo.linux_package?()
+
+    for {target, architecture} <- [
+          {"linux_aarch64", "arm64"},
+          {"linux_x86_64", "x86_64"}
+        ] do
+      assert :ok =
+               BuildInfo.validate_linux_package(%{
+                 engine_id: "fermix-core",
+                 product_version: "1.2.3",
+                 build_id: "release-123-attempt-1",
+                 source_commit: String.duplicate("a", 40),
+                 distribution_identity: "linux_package",
+                 artifact_target: target,
+                 architecture: architecture
+               })
+    end
+  end
+
+  test "rejects incomplete or contradictory linux-package identities" do
+    valid = %{
+      engine_id: "fermix-core",
+      product_version: "1.2.3",
+      build_id: "release-123-attempt-1",
+      source_commit: String.duplicate("a", 40),
+      distribution_identity: "linux_package",
+      artifact_target: "linux_aarch64",
+      architecture: "arm64"
+    }
+
+    assert {:error, {:invalid_build_info, :build_id}} =
+             BuildInfo.validate_linux_package(%{valid | build_id: nil})
+
+    assert {:error, {:invalid_build_info, :source_commit}} =
+             BuildInfo.validate_linux_package(%{valid | source_commit: "short"})
+
+    assert {:error, {:invalid_build_info, :distribution_identity}} =
+             BuildInfo.validate_linux_package(%{valid | distribution_identity: "standalone"})
+
+    assert {:error, {:invalid_build_info, :artifact_target}} =
+             BuildInfo.validate_linux_package(%{valid | artifact_target: "macos_aarch64"})
+
+    assert {:error, {:invalid_build_info, :architecture}} =
+             BuildInfo.validate_linux_package(%{valid | architecture: "x86_64"})
+  end
+
+  # The two published distributions never validate as one another: an app engine
+  # and a Linux package differ in every field a caller keys a decision on.
+  test "each published distribution refuses the other's identity" do
+    linux = %{
+      engine_id: "fermix-core",
+      product_version: "1.2.3",
+      build_id: "release-123-attempt-1",
+      source_commit: String.duplicate("a", 40),
+      distribution_identity: "linux_package",
+      artifact_target: "linux_aarch64",
+      architecture: "arm64"
+    }
+
+    macos = %{
+      linux
+      | distribution_identity: "macos_app",
+        artifact_target: "macos_aarch64"
+    }
+
+    assert {:error, {:invalid_build_info, :distribution_identity}} =
+             BuildInfo.validate_app_engine(linux)
+
+    assert {:error, {:invalid_build_info, :distribution_identity}} =
+             BuildInfo.validate_linux_package(macos)
+  end
+
   defp protocol_metadata(module) do
     {minimum, maximum} = module.supported_version_range()
 

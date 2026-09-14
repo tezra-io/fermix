@@ -1379,14 +1379,19 @@ def test_planned_turns_counts_every_declared_turn():
     assert rc._planned_turns(cases) == 3        # not 2: the store turn is real work
 
 
-def test_the_shipped_default_sweep_plans_24_tasks_and_130_turns():
+def test_the_shipped_default_sweep_plans_every_declared_turn():
     # The pin the review's §10 called out: "120 turns" omitted the two memory store
-    # turns, understating the declared input by 10 turns at 5 trials.
+    # turns, understating the declared input by 10 turns at 5 trials. The defect was
+    # counting CASES where the plan must count declared TURNS, so that — not the
+    # catalog's size — is what this pins; literal totals only ever get re-pinned.
     cap_dir = os.path.join(os.path.dirname(HERE), "suites", "capability")
     selected, _skipped = rc.capability_cases(
         suites.load_all(cap_dir), None, None, None, False)
-    assert len(selected) == 24
-    assert rc._planned_turns(selected) * 5 == 130
+    declared = sum(len(case.turns) for _suite, _scenario, case in selected)
+    # The shipped catalog still carries multi-turn (cross-session) cases, so the
+    # one-turn-per-case undercount stays distinguishable from the right answer.
+    assert declared > len(selected)
+    assert rc._planned_turns(selected) == declared
 
 
 def test_selection_label_records_the_candidate_flag():

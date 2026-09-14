@@ -135,6 +135,39 @@ defmodule Fermix.CLI.SetupTest do
     assert Keyword.get(opts, :acp_enabled) == true
   end
 
+  # The voice engine stopped being a choice of its own: `--realtime-model`
+  # selects it, so the engine switch is withdrawn and has to be refused by the
+  # ordinary unknown-flag path rather than quietly parsed and dropped.
+  test "--realtime-model is a recognized answer and --realtime-engine is withdrawn" do
+    parent = self()
+
+    assert 0 =
+             Setup.run(["--realtime-model", "gpt-live-1"],
+               standalone?: fn -> true end,
+               display?: fn -> true end,
+               setup_ready?: fn -> false end,
+               runtime: runtime(parent),
+               web_launcher: unexpected_web_launcher(parent)
+             )
+
+    assert_receive {:runtime, opts}
+    assert Keyword.get(opts, :realtime_model) == "gpt-live-1"
+
+    stderr =
+      capture_io(:stderr, fn ->
+        assert 1 =
+                 Setup.run(["--realtime-engine", "openai_live"],
+                   standalone?: fn -> true end,
+                   display?: fn -> true end,
+                   runtime: unexpected_runtime(parent),
+                   web_launcher: unexpected_web_launcher(parent)
+                 )
+      end)
+
+    assert stderr =~ "invalid options"
+    refute_received {:runtime, _opts}
+  end
+
   # The mobile channel is feature-flagged with no setup surface: every mobile
   # switch is unregistered, so each one has to be refused by the ordinary
   # unknown-flag path rather than quietly parsed and dropped. Looping over the

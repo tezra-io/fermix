@@ -12,6 +12,9 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias Fermix.CLI.AcpCommand
   alias Fermix.CLI.Daemon.Client
   alias Fermix.CLI.Service
+  alias Fermix.CLI.Service.Systemd
+  alias Fermix.CLI.ServiceCommand
+  alias Fermix.CLI.Upgrade.InstallMethod
   alias Fermix.CLI.Upgrade.Manifest
   alias Fermix.CLI.VersionSkew
   alias FermixCore.Acp.IdentityStore
@@ -28,6 +31,7 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias FermixCore.Config, as: CoreConfig
   alias FermixCore.Harness.Artifacts, as: HarnessArtifacts
   alias FermixCore.Harness.Config, as: HarnessConfig
+  alias FermixCore.Harness.Identity
   alias FermixCore.Harness.Ledger, as: HarnessLedger
   alias FermixCore.Harness.Vendors, as: HarnessVendors
   alias FermixCore.Nostr.Key, as: NostrKey
@@ -63,6 +67,14 @@ defmodule Fermix.CLI.Doctor.Checks do
   # (§7.3) compares each run tool's registration against its vendor's detection.
   @harness_run_tools [{"codex", "codex_run"}, {"claude", "claude_code_run"}]
   @bytes_per_gb 1_073_741_824
+
+  # M38 §8.2's architecture sentence, verbatim. `linux_aarch64` is a first-class
+  # engine target while the computer-use sidecar publishes no arm64 Linux build,
+  # so the row says what is refused, why, and what remains true.
+  @unsupported_architecture_hint "computer use is unavailable on this architecture. " <>
+                                   "The computer-use sidecar publishes no arm64 Linux build, " <>
+                                   "so there is nothing to install. Fermix itself is fully " <>
+                                   "supported here."
 
   @spec readiness() :: result()
   def readiness do
@@ -192,13 +204,18 @@ defmodule Fermix.CLI.Doctor.Checks do
   # Management v1 `hello` is the liveness answer: it carries the daemon's
   # immutable identity and proves the protocol negotiated, which the retired
   # unversioned `status` method could not.
+  #
+  # Whether that daemon is running the INSTALLED engine is a different question
+  # with a different remedy, and M38 §11.3 gives it its own row. This one
+  # answers "is something answering", so the two never disagree and an operator
+  # reads one sentence per fact.
   @spec daemon_socket(keyword()) :: result()
   def daemon_socket(opts \\ []) do
     client = Keyword.get(opts, :client, fn -> Client.request_v1("hello") end)
 
     case client.() do
       {:ok, %{"engine" => %{"product_version" => version}}} ->
-        daemon_socket_result(version)
+        ok("daemon socket", "running, version #{version}")
 
       {:ok, other} ->
         warn("daemon socket", "unexpected reply: #{inspect(other)}")
@@ -211,17 +228,114 @@ defmodule Fermix.CLI.Doctor.Checks do
     end
   end
 
-  # A daemon on a different version than this binary is the stale state a
-  # package-manager upgrade leaves behind (brew swaps the binary on disk,
-  # the service keeps running the old release) — warn, don't pass.
-  defp daemon_socket_result(version) do
-    detail = "running, version #{version}"
+  @doc """
+  Who owns the `fermix` binary on this host (M38 §9.3, §11.3).
 
-    case VersionSkew.note(version) do
-      nil -> ok("daemon socket", detail)
-      note -> warn("daemon socket", "#{detail}; #{note}")
+  The row reads `Upgrade.InstallMethod` rather than growing its own detectors,
+  which is what keeps one answer to package ownership across `fermix upgrade`,
+  this row and the interface. It reports rather than judges: a package-manager
+  install is correct and passes, naming the command that updates it, because the
+  operator's next question after "who owns this" is always "so how do I update
+  it".
+  """
+  @spec package_origin(keyword()) :: result()
+  def package_origin(opts \\ []) when is_list(opts) do
+    opts
+    |> Keyword.take([:build_info, :cmd, :find_executable, :resolve_self])
+    |> then(&InstallMethod.detect(Keyword.get(opts, :binary_path), &1))
+    |> package_origin_result()
+  end
+
+  defp package_origin_result({:managed, name, hint}) do
+    ok("package origin", "#{package_owner(name)} owns this binary; update it with #{hint}")
+  end
+
+  defp package_origin_result({:unmanaged, path}) do
+    ok("package origin", "no package manager owns #{path}; `fermix upgrade` updates it in place")
+  end
+
+  defp package_origin_result({:error, :fermix_not_on_path}) do
+    warn("package origin", "fermix is not on PATH, so its owner cannot be established")
+  end
+
+  defp package_origin_result({:error, reason}) do
+    warn("package origin", "could not establish who owns this binary: #{inspect(reason)}")
+  end
+
+  # The one identifier this project uses for its own packages is not an
+  # operator's word for them, so it is spelled out; every other name is a real
+  # command the operator already types.
+  defp package_owner(:linux_package), do: "this machine's package manager"
+  defp package_owner(name), do: Atom.to_string(name)
+
+  @doc """
+  Whether the daemon that is answering is the engine this host has installed
+  (M38 §9.2, §11.3).
+
+  A package manager changes files on disk and never restarts the daemon, so an
+  upgraded install keeps serving the old engine until it is restarted. The
+  verdict is `VersionSkew.compare/2`'s typed one — the same comparison `fermix
+  status` and `fermix service status --json` publish — so there is one answer to
+  "is this the installed engine" across every surface.
+
+  `unknown` stays a note rather than a warning: an identity Fermix cannot
+  establish is not evidence of skew, and warning on it would send an operator to
+  restart a daemon that is already current.
+  """
+  @spec engine_alignment(keyword()) :: result()
+  def engine_alignment(opts \\ []) do
+    client = Keyword.get(opts, :client, fn -> Client.request_v1("hello") end)
+    installed = Keyword.get(opts, :build_info, BuildInfo).public_identity()
+
+    installed
+    |> VersionSkew.compare(running_identity(client))
+    |> alignment_result(installed)
+  end
+
+  defp running_identity(client) do
+    case client.() do
+      {:ok, %{"engine" => engine}} when is_map(engine) -> engine
+      _absent_or_unusable -> nil
     end
   end
+
+  defp alignment_result(:aligned, installed) do
+    ok("engine alignment", "the running engine is the installed one (#{version(installed)})")
+  end
+
+  defp alignment_result(:not_running, installed) do
+    not_applicable(
+      "engine alignment",
+      "no daemon is answering, so there is nothing to compare against the installed " <>
+        "engine (#{version(installed)})"
+    )
+  end
+
+  defp alignment_result(:pending_restart, installed) do
+    warn(
+      "engine alignment",
+      "the daemon is running an older engine than the installed one " <>
+        "(#{version(installed)}). Run `fermix restart` to load the installed engine."
+    )
+  end
+
+  defp alignment_result(:unknown, _installed) do
+    not_applicable(
+      "engine alignment",
+      "the daemon reported no build id, so whether it is the installed engine cannot " <>
+        "be established. It is not read off the product version."
+    )
+  end
+
+  defp alignment_result(:ownership_conflict, installed) do
+    fail(
+      "engine alignment",
+      "the daemon answering is a different Fermix build than the one installed here " <>
+        "(#{version(installed)}), so this install does not own it."
+    )
+  end
+
+  defp version(installed), do: Map.get(installed, "product_version")
 
   # Opik readiness is answered BY THE DAEMON over the control socket — the env
   # var, loaded exporter, and attached reporter are the daemon's process state,
@@ -278,16 +392,89 @@ defmodule Fermix.CLI.Doctor.Checks do
   # `Diagnostics.default_service/0` about the same fact.
   @spec service_unit(keyword()) :: result()
   def service_unit(opts \\ []) when is_list(opts) do
+    cond do
+      app_engine?(opts) -> app_managed_service_row()
+      packaged?(opts) -> packaged_service_unit(opts)
+      true -> standalone_service_unit(opts)
+    end
+  end
+
+  defp standalone_service_unit(opts) do
     installed? = Keyword.get(opts, :installed?, &installed_safe?/1)
     drifted? = Keyword.get(opts, :drifted?, &drifted_safe?/1)
 
     cond do
-      app_engine?(opts) -> app_managed_service_row()
       installed?.(:user) -> unit_result(:user, drifted?)
       installed?.(:system) -> unit_result(:system, drifted?)
       true -> warn("service unit", "no unit installed (run `fermix service install`)")
     end
   end
+
+  # A packaged install owns no unit of its own: the distribution package owns
+  # `/usr/lib/systemd/user/fermix.service` and this CLI owns the binding. So the
+  # question is not "does the unit match what I would write" — nothing here
+  # writes one — but "is the package's unit the effective one, and is a home
+  # bound to it". A file Fermix did not write is named and left alone (M38
+  # §4.5, §11.3); it is never rewritten as drift.
+  defp packaged_service_unit(opts) do
+    service = Keyword.get(opts, :service, Service)
+
+    case service.status(Keyword.get(opts, :service_opts, [])) do
+      {:ok, status} -> packaged_unit_result(status)
+      {:error, reason} -> warn("service unit", ServiceCommand.format_reason(reason))
+    end
+  end
+
+  defp packaged_unit_result(%{"unit" => %{"foreign" => true} = unit}) do
+    fail(
+      "service unit",
+      "a service file Fermix did not write is shadowing the package's unit at " <>
+        "#{unit_path(unit)}. Remove or rename it if you want Fermix to manage this service."
+    )
+  end
+
+  defp packaged_unit_result(%{"unit" => %{"legacy_generated" => true} = unit}) do
+    warn(
+      "service unit",
+      "a unit written by an earlier Fermix is shadowing the package's unit at " <>
+        "#{unit_path(unit)}. Run `fermix service install` to adopt this service."
+    )
+  end
+
+  defp packaged_unit_result(%{"binding" => %{"state" => "invalid", "reason" => reason}}) do
+    fail("service unit", "the service binding cannot be read: #{reason}")
+  end
+
+  defp packaged_unit_result(%{"binding" => %{"state" => "unbound"}}) do
+    warn(
+      "service unit",
+      "the package's unit is installed but no home is bound to it. " <>
+        "Run `fermix service install` to choose one."
+    )
+  end
+
+  defp packaged_unit_result(%{"unit" => %{"need_daemon_reload" => true}}) do
+    warn(
+      "service unit",
+      "the unit on disk changed since the service manager read it. " <>
+        "Run `fermix service install` to reload it."
+    )
+  end
+
+  defp packaged_unit_result(%{"unit" => %{"vendor" => true}, "binding" => binding}) do
+    ok("service unit", "the package's unit is effective, bound to #{binding["home"]}")
+  end
+
+  defp packaged_unit_result(%{"unit" => unit}) do
+    warn(
+      "service unit",
+      "the package's unit is not the effective one (#{unit_path(unit)}). " <>
+        "Run `fermix service install` to reconcile it."
+    )
+  end
+
+  defp unit_path(%{"effective_path" => path}) when is_binary(path), do: path
+  defp unit_path(_absent), do: "an unreported path"
 
   defp app_managed_service_row do
     not_applicable(
@@ -333,18 +520,66 @@ defmodule Fermix.CLI.Doctor.Checks do
     _ -> false
   end
 
-  @spec linger() :: result() | nil
-  def linger do
-    cond do
-      not linux?() ->
-        nil
+  @doc """
+  Whether this account's user manager lingers (M38 §4.3, §11.3).
 
-      not Service.installed?(:user) ->
-        nil
+  Without linger a user-scope daemon dies at logout and does not return until
+  the next login, which Fermix refuses to ship as a lesser tier — so a disabled
+  linger is a failure with the one command that fixes it, and an absent
+  `loginctl` is a different outcome with no command at all, because there is
+  nothing for the operator to run until the login manager exists.
 
-      true ->
-        check_linger_state()
-    end
+  The state is read through `Service.Systemd.linger_state/1`, the same inspector
+  `fermix service install` and `fermix service status` use, so the row and the
+  verbs can never report different linger.
+  """
+  @spec linger(keyword()) :: result() | nil
+  def linger(opts \\ []) when is_list(opts) do
+    if linger_applies?(opts), do: linger_result(Systemd.linger_state(opts), opts), else: nil
+  end
+
+  # A packaged engine always has a user service to keep alive; a standalone one
+  # only when it wrote a user unit. `Service.installed?/1` probes the unit this
+  # binary writes, which a packaged install never has.
+  defp linger_applies?(opts) do
+    linux?(opts) and (packaged?(opts) or installed_safe?(:user))
+  end
+
+  defp linger_result({:ok, true}, _opts) do
+    ok("linger", "enabled — the daemon survives logout and starts at boot")
+  end
+
+  defp linger_result({:ok, false}, opts) do
+    fail(
+      "linger",
+      "disabled — the daemon dies when you log out and does not come back until you " <>
+        "log in again. Run `sudo loginctl enable-linger #{account(opts)}`."
+    )
+  end
+
+  defp linger_result({:error, :loginctl_absent}, _opts) do
+    warn(
+      "linger",
+      "loginctl is not installed, so Fermix cannot tell whether the daemon survives " <>
+        "logout. Install systemd's login manager on this host."
+    )
+  end
+
+  defp linger_result({:error, :no_identity}, _opts) do
+    warn(
+      "linger",
+      "Fermix could not tell which account it is running as, so linger cannot be " <>
+        "checked. Run `fermix doctor` from a normal login session."
+    )
+  end
+
+  defp linger_result({:error, {:linger_unknown, output}}, _opts) do
+    warn("linger", "loginctl could not report linger: #{output}")
+  end
+
+  defp account(opts) do
+    username = Keyword.get(opts, :username, &Identity.username/1)
+    username.([]) || "USER"
   end
 
   @spec recent_log_activity() :: result()
@@ -464,7 +699,7 @@ defmodule Fermix.CLI.Doctor.Checks do
   render against the content the `:seed` revision recorded at install time.
   A mismatch means the shipped template gained changes after this install
   was seeded — the operator's file may lag and deserves a manual diff.
-  Variable-free templates only (fermix/soul/realtime); IDENTITY.md embeds
+  Variable-free templates only (fermix/soul/realtime/live); IDENTITY.md embeds
   the agent name, so a render comparison cannot distinguish template drift
   from a rename. Installs seeded before revision tracking report unknown.
   """
@@ -473,7 +708,7 @@ defmodule Fermix.CLI.Doctor.Checks do
     agent_id = Keyword.get(opts, :agent_id, "main")
 
     {drifted, unknown} =
-      [fermix: :fermix_md, soul: :soul_md, realtime: :realtime_md]
+      [fermix: :fermix_md, soul: :soul_md, realtime: :realtime_md, live: :live_md]
       |> Enum.reduce({[], []}, fn {name, type}, {drifted, unknown} ->
         case template_drift_state(agent_id, name, type, opts) do
           :current -> {drifted, unknown}
@@ -667,7 +902,11 @@ defmodule Fermix.CLI.Doctor.Checks do
   defp realtime_key_status(config) do
     case FermixCore.Config.provider_api_key(:openai) do
       {:ok, _key} ->
-        ok("realtime voice", "enabled; OpenAI Realtime key present (model #{config.model})")
+        ok(
+          "realtime voice",
+          "enabled; OpenAI voice key present " <>
+            "(engine #{config.engine}, model #{config.model})"
+        )
 
       {:error, _reason} ->
         warn(
@@ -1118,24 +1357,48 @@ defmodule Fermix.CLI.Doctor.Checks do
   so a click returns ok yet nothing moves. The check names the exact fix. Probes the
   sidecar only when the feature is enabled and installed (otherwise it stays cheap).
   """
-  @spec computer_use_permissions({:ok, map()} | {:error, term()}) :: result()
-  def computer_use_permissions(result \\ ProviderProbe.computer_use_permissions()) do
+  @spec computer_use_permissions({:ok, map()} | {:error, term()}, keyword()) :: result()
+  def computer_use_permissions(
+        result \\ ProviderProbe.computer_use_permissions(),
+        opts \\ []
+      ) do
     case result do
       {:ok, %{state: :disabled}} ->
         ok("computer use", "disabled")
 
       {:ok, %{state: :not_installed}} ->
-        warn(
-          "computer use",
-          "enabled but the helper isn't installed — install it from setup#{install_version_note()}"
-        )
+        not_installed_result(sidecar_target(opts))
 
       {:ok, %{state: :probed} = probe} ->
         format_computer_use_probe(probe)
 
+      # The sidecar refuses every target but Apple-Silicon macOS and x86_64
+      # Linux, and `linux_aarch64` is a first-class engine target — so this is
+      # the architecture case, not a broken helper (M38 §8.2).
+      {:error, {:unsupported_target, _os, _arch}} ->
+        warn("computer use", @unsupported_architecture_hint)
+
       {:error, reason} ->
         fail("computer use", "could not probe the helper: #{inspect(reason)}")
     end
+  end
+
+  # Offering an install whose only outcome is `{:error, {:unsupported_target,
+  # ...}}` is a lie told with a control. On a host the sidecar publishes no
+  # build for, the row states the refusal instead of naming the setup pane.
+  defp not_installed_result({:error, {:unsupported_target, _os, _arch}}) do
+    warn("computer use", @unsupported_architecture_hint)
+  end
+
+  defp not_installed_result(_supported) do
+    warn(
+      "computer use",
+      "enabled but the helper isn't installed — install it from setup#{install_version_note()}"
+    )
+  end
+
+  defp sidecar_target(opts) do
+    Keyword.get_lazy(opts, :sidecar_target, &Compux.Binary.target/0)
   end
 
   defp format_computer_use_probe(%{screen_capture: true, input_control: true} = probe) do
@@ -1180,8 +1443,14 @@ defmodule Fermix.CLI.Doctor.Checks do
       "silently dropped. Grant Accessibility: System Settings → Privacy & Security → Accessibility."
   end
 
+  # M38 §8.2: the old string told every Wayland user to "use an X11 session" on
+  # desktops that no longer offer one, which is worse than naming no remedy.
+  # Each replacement says what is refused, why, and what remains true.
   defp computer_use_input_hint(%{display_server: "wayland"}) do
-    "input control unavailable on Wayland — global input injection is blocked; use an X11 session."
+    "input control unavailable on this Wayland session. The computer-use sidecar " <>
+      "injects input through XTEST only; Wayland input needs the RemoteDesktop portal " <>
+      "and libei, which it does not implement yet. An X11 session still works on " <>
+      "desktops that offer one, and GNOME 50 and later do not."
   end
 
   defp computer_use_input_hint(probe) do
@@ -1336,8 +1605,7 @@ defmodule Fermix.CLI.Doctor.Checks do
 
     detail =
       "on; summarizer #{summarizer_label(ComputerHistoryConfig.summarizer(config))}; " <>
-        "#{length(ComputerHistoryConfig.apps(config))} app(s), " <>
-        "#{length(ComputerHistoryConfig.sites(config))} site(s) allowlisted. " <>
+        "#{length(ComputerHistoryConfig.apps(config))} app(s) allowlisted. " <>
         ComputerHistoryGate.chain_posture_sentence(posture)
 
     history_row(posture.state, detail)
@@ -1625,7 +1893,10 @@ defmodule Fermix.CLI.Doctor.Checks do
   end
 
   defp computer_use_capture_hint(%{display_server: "wayland"}) do
-    "screen capture unavailable on Wayland — use an X11 session (Wayland is unsupported)."
+    "screen capture unavailable on this Wayland session. The computer-use sidecar " <>
+      "captures through X11 only; Wayland capture needs the ScreenCast portal, which it " <>
+      "does not implement yet. An X11 session still works on desktops that offer one, " <>
+      "and GNOME 50 and later do not."
   end
 
   defp computer_use_capture_hint(probe) do
@@ -2037,7 +2308,7 @@ defmodule Fermix.CLI.Doctor.Checks do
   end
 
   @doc """
-  Reports whether `cosign` is on PATH.
+  Reports the `cosign` executable this host actually resolves (M38 §11.3).
 
   Two shipped features shell out to it and fail closed without it: `fermix
   upgrade` verifies the downloaded binary's keyless signature, and every plugin
@@ -2046,24 +2317,48 @@ defmodule Fermix.CLI.Doctor.Checks do
   never reach `fermix upgrade` anyway. So on the install path that actually uses
   the verifier, cosign is absent by default — and without this row the operator
   discovers that only when an upgrade or a plugin install refuses.
+
+  The row reports the **resolved path**, because on a packaged Linux host the
+  answer can be the distribution's own cosign or the one the package bundles at
+  `/usr/lib/fermix/cosign`, which the shared PATH baseline appends last, and
+  which of the two answered is the fact an operator needs. The remedy names the
+  install family's own command rather than Homebrew's on every host.
   """
   @spec cosign(keyword()) :: result()
   def cosign(opts \\ []) when is_list(opts) do
     opts
     |> Keyword.get_lazy(:cosign_path, fn -> System.find_executable("cosign") end)
-    |> cosign_result()
+    |> cosign_result(opts)
   end
 
-  defp cosign_result(nil) do
+  defp cosign_result(nil, opts) do
     warn(
       "cosign",
       "not on PATH — `fermix upgrade` and `fermix plugins install` both refuse " <>
-        "without it. Install it from https://github.com/sigstore/cosign " <>
-        "(`brew install cosign` on macOS)."
+        "without it. " <> cosign_remedy(opts)
     )
   end
 
-  defp cosign_result(path) when is_binary(path), do: ok("cosign", "present at #{path}")
+  defp cosign_result(path, _opts) when is_binary(path), do: ok("cosign", "present at #{path}")
+
+  # One sentence per install family, chosen by the distribution identity and the
+  # host — the same two questions `Upgrade.InstallMethod` asks, in the same
+  # order, so the row and the refusal cannot name different package managers.
+  defp cosign_remedy(opts) do
+    cond do
+      packaged?(opts) ->
+        "Install your distribution's own (`sudo apt install cosign`, " <>
+          "`sudo dnf install cosign`, or `sudo zypper install cosign`), or the bundled " <>
+          "`/usr/lib/fermix/cosign` is used."
+
+      linux?(opts) ->
+        "Install it from https://github.com/sigstore/cosign, or use the Linux package, " <>
+          "which bundles its own."
+
+      true ->
+        "Install it from https://github.com/sigstore/cosign (`brew install cosign` on macOS)."
+    end
+  end
 
   @spec plaintext_secrets() :: result()
   def plaintext_secrets do
@@ -2262,27 +2557,16 @@ defmodule Fermix.CLI.Doctor.Checks do
     |> Base.encode16(case: :lower)
   end
 
-  defp check_linger_state do
-    user = System.get_env("USER") || ""
-
-    case System.cmd("loginctl", ["show-user", user, "--property=Linger"], stderr_to_stdout: true) do
-      {out, 0} ->
-        if String.contains?(out, "Linger=yes") do
-          ok("linger", "Linger=yes (reboot survival on)")
-        else
-          fail("linger", "Linger=no — reboot survival off; run `loginctl enable-linger #{user}`")
-        end
-
-      {_out, _code} ->
-        warn("linger", "loginctl unavailable; cannot verify linger state")
-    end
-  end
-
-  defp linux? do
-    case :os.type() do
-      {:unix, :linux} -> true
-      _ -> false
-    end
+  # Injectable for the same reason every other platform predicate here is: the
+  # real one answers from THIS host, so a Linux row is unreachable from a macOS
+  # test run and a macOS row from a Linux one.
+  defp linux?(opts) do
+    Keyword.get_lazy(opts, :linux?, fn ->
+      case :os.type() do
+        {:unix, :linux} -> true
+        _other -> false
+      end
+    end)
   end
 
   defp log_path do
@@ -2440,4 +2724,6 @@ defmodule Fermix.CLI.Doctor.Checks do
     do: %{name: name, status: :not_applicable, detail: detail}
 
   defp app_engine?(opts), do: Keyword.get(opts, :build_info, BuildInfo).app_engine?()
+
+  defp packaged?(opts), do: Keyword.get(opts, :build_info, BuildInfo).linux_package?()
 end

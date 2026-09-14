@@ -47,6 +47,24 @@ defmodule FermixCore.Prompt.RuntimeSections do
     system: "System"
   }
 
+  @doc """
+  Render order for capability categories: the order the built-in catalog
+  groups them in. Public so a second capability renderer (the Live voice
+  frontend's `Realtime.LivePrompt`) groups by the same vocabulary instead of
+  keeping a second copy of this list that drifts from it.
+  """
+  @spec category_order() :: [atom()]
+  def category_order, do: @category_order
+
+  @doc """
+  Display label for a capability category. Public for the same reason as
+  `category_order/0`; an unmapped category titleizes.
+  """
+  @spec category_label(atom()) :: String.t()
+  def category_label(category) when is_atom(category) do
+    Map.get(@category_labels, category, titleize(category))
+  end
+
   @spec build([skill()], keyword()) :: String.t()
   def build(available_skills, opts \\ []) when is_list(available_skills) and is_list(opts) do
     [
@@ -259,7 +277,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
   end
 
   defp format_category({category, capabilities}) do
-    "### #{Map.get(@category_labels, category, titleize(category))}\n#{capability_lines(capabilities)}"
+    "### #{category_label(category)}\n#{capability_lines(capabilities)}"
   end
 
   defp capability_lines(capabilities) do

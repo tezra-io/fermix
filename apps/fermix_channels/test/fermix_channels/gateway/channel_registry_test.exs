@@ -93,7 +93,7 @@ defmodule FermixChannels.Gateway.ChannelRegistryTest do
         |> Enum.reject(&ChannelRegistry.commands?(&1.name))
         |> Enum.map(& &1.name)
 
-      assert opted_out == ["acp"]
+      assert opted_out == ["acp", "voice"]
     end
 
     test "false only when the entry opts out" do
@@ -151,11 +151,43 @@ defmodule FermixChannels.Gateway.ChannelRegistryTest do
     test "lists the remote config keys, excluding local channels" do
       remote = ChannelRegistry.remote_channels()
       # `acp` is `remote?: true` for its lifecycle meanings (§4) even though its
-      # transport is a same-user socket, so it belongs to this list.
+      # transport is a same-user socket, so it belongs to this list. `voice` is
+      # remote for the same reason but carries no config key at all, so it
+      # contributes nothing — a key list must never contain a nil.
       assert Enum.sort(remote) ==
                [:acp, :discord, :mobile, :signal, :slack, :telegram, :whatsapp]
 
       refute nil in remote
+    end
+  end
+
+  # MILESTONE_41_OPENAI_LIVE_VOICE.md §7: the Live delegation surface. Trust
+  # comes from the transport (the daemon's own session, in process), so it has
+  # no inbox, no allow-list, and no slash-command pipeline — and no transport
+  # child, because nothing external connects to it.
+  describe "the voice channel" do
+    test "is a remote, command-less, local-operator loopback with no child" do
+      voice = Enum.find(ChannelRegistry.channels(), &(&1.name == "voice"))
+
+      assert voice.adapter == FermixChannels.Channels.Voice
+      assert voice.config_key == nil
+      assert voice.remote? == true
+      assert voice.transport == :loopback
+      assert voice.child == nil
+      assert ChannelRegistry.trust("voice") == :local_operator
+      refute ChannelRegistry.commands?("voice")
+      assert ChannelRegistry.ingress_auth("voice") == nil
+    end
+
+    test "is remote for lifecycle purposes, so a turn never reaps its browser" do
+      refute ChannelRegistry.local?("voice")
+    end
+
+    test "starts no transport child and needs no ingress authorization" do
+      children = ChannelRegistry.transport_children(%{status: :ready})
+
+      refute Enum.any?(children, fn {child, _opts} -> child == nil end)
+      refute :voice in ChannelRegistry.missing_ingress_authorizations()
     end
   end
 

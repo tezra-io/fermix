@@ -19,6 +19,7 @@ defmodule Fermix.CLI.StatusCommand do
 
   alias Fermix.CLI.Daemon.Client
   alias Fermix.CLI.VersionSkew
+  alias FermixCore.BuildInfo
 
   @not_running_exit 3
 
@@ -73,8 +74,9 @@ defmodule Fermix.CLI.StatusCommand do
 
   defp print_running(hello, overview) do
     daemon = Map.get(overview, "daemon", %{})
-    version = get_in(hello, ["engine", "product_version"])
-    pid = get_in(hello, ["engine", "pid"]) || "?"
+    running = get_in(hello, ["engine"]) || %{}
+    version = Map.get(running, "product_version")
+    pid = Map.get(running, "pid") || "?"
     protocol = get_in(hello, ["protocol", "current_version"])
 
     IO.puts(
@@ -82,8 +84,18 @@ defmodule Fermix.CLI.StatusCommand do
         "up #{format_uptime(Map.get(daemon, "uptime_ms"))}, protocol v#{protocol})"
     )
 
-    print_skew_warning(VersionSkew.note(version))
+    print_skew_warning(skew_note(running, version))
     0
+  end
+
+  # The typed comparison (M38 §9.2), not a version-string equality: this build's
+  # own identity against the one the answering daemon published.
+  defp skew_note(running, version) do
+    installed = BuildInfo.public_identity()
+
+    installed
+    |> VersionSkew.compare(running)
+    |> VersionSkew.note(installed: Map.get(installed, "product_version"), running: version)
   end
 
   defp print_skew_warning(nil), do: :ok

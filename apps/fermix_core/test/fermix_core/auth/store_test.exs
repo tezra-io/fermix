@@ -357,4 +357,111 @@ defmodule FermixCore.Auth.StoreTest do
       refute "broken" in names
     end
   end
+
+  # A regional provider (Tesla) records which Fleet API region its grant was
+  # minted for, because the refresh path and the plugin's HTTP host both need it
+  # and neither can re-derive it from the tokens.
+  describe "region" do
+    defp oauth_entry(extra) do
+      Map.merge(
+        %{
+          auth_mode: "oauth2",
+          provider: "tesla",
+          granted_scopes: ["openid"],
+          tokens: %{access_token: "AT", refresh_token: "RT"},
+          expires_at: DateTime.add(DateTime.utc_now(), 3600, :second),
+          last_refresh: nil,
+          status: "ready"
+        },
+        extra
+      )
+    end
+
+    test "write/read round-trips the region through JSON" do
+      path = tmp_path()
+
+      assert :ok = Store.write("tesla:primary", oauth_entry(%{region: "eu"}), path)
+      assert {:ok, entry} = Store.read("tesla:primary", path)
+      assert entry.region == "eu"
+
+      # The serialized key is a plain JSON string, not an inspected atom.
+      stored = path |> File.read!() |> Jason.decode!() |> get_in(["providers", "tesla:primary"])
+      assert Map.fetch!(stored, "region") == "eu"
+    end
+
+    test "a provider with no region reads back nil, and writes no region key" do
+      path = tmp_path()
+
+      assert :ok = Store.write("github:primary", oauth_entry(%{provider: "github"}), path)
+      assert {:ok, entry} = Store.read("github:primary", path)
+      assert entry.region == nil
+
+      stored = path |> File.read!() |> Jason.decode!() |> get_in(["providers", "github:primary"])
+      refute Map.has_key?(stored, "region")
+    end
+
+    test "a rewrite without a region keeps the stored one (merge, not clobber)" do
+      path = tmp_path()
+
+      assert :ok = Store.write("tesla:primary", oauth_entry(%{region: "na"}), path)
+      assert :ok = Store.write("tesla:primary", oauth_entry(%{}), path)
+
+      assert {:ok, entry} = Store.read("tesla:primary", path)
+      assert entry.region == "na"
+    end
+
+    # The region the account is actually in, recorded beside the chosen one when
+    # a sign-in finds they disagree. It travels the same way the chosen region
+    # does, so a row reading the pair back gets both or neither.
+    test "write/read round-trips the account's own region beside the chosen one" do
+      path = tmp_path()
+
+      entry = oauth_entry(%{region: "na", region_actual: "eu", status: "wrong_region"})
+      assert :ok = Store.write("tesla:primary", entry, path)
+
+      assert {:ok, read} = Store.read("tesla:primary", path)
+      assert read.region == "na"
+      assert read.region_actual == "eu"
+      assert read.status == "wrong_region"
+
+      stored = path |> File.read!() |> Jason.decode!() |> get_in(["providers", "tesla:primary"])
+      assert Map.fetch!(stored, "region_actual") == "eu"
+    end
+
+    test "a grant with no mismatch reads back nil, and writes no key for it" do
+      path = tmp_path()
+
+      assert :ok = Store.write("tesla:primary", oauth_entry(%{region: "na"}), path)
+      assert {:ok, entry} = Store.read("tesla:primary", path)
+      assert entry.region_actual == nil
+
+      stored = path |> File.read!() |> Jason.decode!() |> get_in(["providers", "tesla:primary"])
+      refute Map.has_key?(stored, "region_actual")
+    end
+
+    # A refresh rewrites the tokens and the status and nothing else, so the pair
+    # a row reads survives one unchanged rather than being re-derived from a
+    # token response that never carried it.
+    test "the keys a refreshed grant carries survive a round trip" do
+      path = tmp_path()
+
+      stored = oauth_entry(%{region: "na", region_actual: "eu", status: "wrong_region"})
+      assert :ok = Store.write("tesla:primary", stored, path)
+      assert {:ok, entry} = Store.read("tesla:primary", path)
+
+      refreshed = %{
+        entry
+        | tokens: %{access_token: "AT2", refresh_token: "RT2"},
+          status: "ready"
+      }
+
+      assert :ok = Store.write("tesla:primary", refreshed, path)
+      assert {:ok, read} = Store.read("tesla:primary", path)
+
+      assert read.status == "ready"
+      assert read.region == "na"
+      assert read.region_actual == "eu"
+      assert read.tokens.access_token == "AT2"
+    end
+  end
 end

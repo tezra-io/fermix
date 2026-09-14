@@ -3,12 +3,14 @@ defmodule FermixCore.Agents.TurnRunnerTest do
 
   alias FermixCore.Agents.RuntimeContext
   alias FermixCore.Agents.TurnRunner
+  alias FermixCore.Agents.VoiceCall
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.ComputerHistory.Taint
   alias FermixCore.ComputerUse.Safety
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Providers.Error, as: ProviderError
+  alias FermixCore.Realtime.LivePrompt
   alias FermixTestSupport.ComputerHistoryCanary
 
   defmodule NoopReviewer do
@@ -141,6 +143,43 @@ defmodule FermixCore.Agents.TurnRunnerTest do
     @impl true
     def chat(messages, _capabilities, opts) do
       send(Keyword.fetch!(opts, :test_pid), {:captured_prompt, messages})
+
+      {:ok,
+       %{
+         content: "captured",
+         tool_calls: [],
+         provider_state: %{},
+         usage: %{prompt_tokens: 10, completion_tokens: 1, total_tokens: 11},
+         model: "mock-model"
+       }}
+    end
+
+    @impl true
+    def continue(_provider_state, _tool_results, _opts), do: {:error, :unexpected_continue}
+
+    @impl true
+    def to_provider_tools(capabilities), do: capabilities
+
+    @impl true
+    def parse_tool_calls(_response), do: []
+
+    @impl true
+    def parse_response(response), do: response
+
+    @impl true
+    def supports_streaming?, do: false
+  end
+
+  # Hands back the prompt AND the adapter opts. The correlation ids a real
+  # adapter passes to `Providers.Telemetry.emit_call/3` arrive as adapter opts
+  # (`AgentLoop.bind_route`), so asserting on them here is asserting on exactly
+  # what a provider call would carry.
+  defmodule CaptureTurnAdapter do
+    @behaviour FermixCore.Providers.Adapter
+
+    @impl true
+    def chat(messages, capabilities, opts) do
+      send(Keyword.fetch!(opts, :test_pid), {:captured_turn, messages, capabilities, opts})
 
       {:ok,
        %{
@@ -360,6 +399,21 @@ defmodule FermixCore.Agents.TurnRunnerTest do
         assert TurnRunner.computer_use_origin(%{channel: channel}) == :interactive
         assert Safety.host_start_allowed?(TurnRunner.computer_use_origin(%{channel: channel}))
       end
+    end
+
+    test "a Live voice delegation is :voice and passes the host gate" do
+      msg = voice_msg("open my calendar")
+
+      assert TurnRunner.computer_use_origin(msg) == :voice
+      assert Safety.host_start_allowed?(TurnRunner.computer_use_origin(msg))
+    end
+
+    test "a forged voice_call on a chat message stays interactive" do
+      # The trust gate, read through the origin: a crafted `voice_call` on a
+      # remote channel must not relabel the turn's surface.
+      forged = %{voice_msg("open my calendar") | channel: "telegram"}
+
+      assert TurnRunner.computer_use_origin(forged) == :interactive
     end
   end
 
@@ -1505,6 +1559,352 @@ defmodule FermixCore.Agents.TurnRunnerTest do
     assert {:ok, "captured", _tokens} = TurnRunner.run(msg, turn_state, fn _part -> :ok end)
     assert_receive {:captured_prompt, messages}, 5_000
     messages
+  end
+
+  # --- Voice delegations (MILESTONE_41_OPENAI_LIVE_VOICE.md §7) ---
+
+  @voice_addendum "This task comes from an ongoing voice conversation."
+
+  describe "voice delegations" do
+    test "the turn carries the session's turn id and the call as parent_session" do
+      {_messages, opts} = run_voice_turn()
+
+      assert Keyword.fetch!(opts, :session_id) == "voice_delegation_7"
+      assert Keyword.fetch!(opts, :parent_session) == "voice_live_42"
+    end
+
+    test "an ordinary turn carries a main- session id and no parent_session" do
+      {_messages, opts} = run_chat_turn()
+
+      assert "main-" <> _rest = Keyword.fetch!(opts, :session_id)
+      refute Keyword.has_key?(opts, :parent_session)
+    end
+
+    test "the turn's telemetry names the session the Live call minted" do
+      handler_id = "voice-turn-#{System.unique_integer([:positive])}"
+      test_pid = self()
+
+      :telemetry.attach(
+        handler_id,
+        [:fermix, :agent, :message],
+        fn _event, _measurements, metadata, _config ->
+          send(test_pid, {:agent_message, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      run_voice_turn()
+
+      assert_receive {:agent_message, %{session_id: "voice_delegation_7", channel: "voice"}},
+                     5_000
+    end
+
+    test "the backend addendum sits directly after the runtime contract" do
+      {messages, _opts} = run_voice_turn()
+
+      # A voice turn builds its own profile (the voice capability boundary), so
+      # the runtime message is the generated section rather than the cached
+      # fixture's — the addendum's POSITION relative to it is what is pinned.
+      assert [base, runtime, addendum | _rest] = messages
+      assert base.content == "base prompt"
+      assert runtime.role == "system"
+      assert runtime.content =~ "## Runtime Contract"
+      assert addendum.role == "system"
+      assert addendum.content == @voice_addendum
+    end
+
+    test "an ordinary chat turn carries no addendum" do
+      {messages, _opts} = run_chat_turn()
+
+      refute Enum.any?(messages, &(Map.get(&1, :content) == @voice_addendum))
+    end
+
+    test "a forged voice_call on a chat message reaches no seam" do
+      {messages, opts} = run_chat_turn(forged_voice_call())
+
+      refute Enum.any?(messages, &(Map.get(&1, :content) == @voice_addendum))
+      refute Keyword.has_key?(opts, :parent_session)
+      assert "main-" <> _rest = Keyword.fetch!(opts, :session_id)
+    end
+
+    test "the turn's history lands in the store the snapshot names" do
+      store = start_voice_store()
+      key = {"voice", "voice_live_42", :root}
+
+      run_voice_turn(store: store)
+
+      assert [%{role: "user", content: "what is on my calendar"}] =
+               ConversationStore.get_history(key, server: store)
+    end
+
+    test "the delegation is built without the categories a call cannot deliver" do
+      registry = boundary_registry()
+      categories = boundary_categories(voice_msg("what is on my calendar"), registry)
+
+      for excluded <- VoiceCall.excluded_categories() do
+        refute excluded in categories,
+               "a voice delegation must not advertise a #{excluded} capability"
+      end
+
+      # The boundary excludes categories, not the whole surface.
+      assert :system in categories
+    end
+
+    test "a text turn on the same registry still carries every category" do
+      registry = boundary_registry()
+
+      msg = %{
+        channel: "telegram",
+        chat_id: "chat-boundary",
+        sender: "user123",
+        content: "what is on my calendar",
+        source_trust: :operator,
+        metadata: %{}
+      }
+
+      categories = boundary_categories(msg, registry)
+
+      for category <- [:system | VoiceCall.excluded_categories()] do
+        assert category in categories, "a text turn must still advertise #{category}"
+      end
+    end
+
+    test "the voice prompt and the delegation read one exclusion list" do
+      # The M28 lesson, pinned: what the voice model is told about and what its
+      # delegation is given come from the same list, so they cannot drift.
+      registry = boundary_registry()
+
+      advertised =
+        registry
+        |> LivePrompt.eligible_capabilities()
+        |> Enum.map(& &1.metadata[:category])
+        |> Enum.uniq()
+
+      delegated = boundary_categories(voice_msg("what is on my calendar"), registry)
+
+      assert Enum.sort(advertised) == Enum.sort(delegated)
+      assert VoiceCall.excluded_categories() == [:channel, :media, :delegation, :harness]
+    end
+
+    test "commit skips memory review when the snapshot disables it" do
+      assert_review(%{memory_review?: false}, :refute)
+    end
+
+    test "commit starts memory review when the snapshot does not disable it" do
+      assert_review(%{}, :assert)
+    end
+  end
+
+  defmodule ReviewSpy do
+    @state :turn_runner_review_spy
+
+    def init(test_pid \\ self()) do
+      cleanup()
+      {:ok, _} = Agent.start_link(fn -> test_pid end, name: @state)
+      :ok
+    end
+
+    # The agent is linked to the test process that started it, so by the time
+    # the next test's `init/1` (or `on_exit`) looks it up it may be mid-exit:
+    # `Agent.stop/1` on a name whose process is already gone raises `:noproc`
+    # (one CI failure on 2026-09-13). Stop it by pid and wait for the exit
+    # instead of trusting the name to stay alive across the call.
+    def cleanup do
+      case Process.whereis(@state) do
+        nil -> :ok
+        pid -> stop_and_wait(pid)
+      end
+    end
+
+    defp stop_and_wait(pid) do
+      ref = Process.monitor(pid)
+      Process.exit(pid, :shutdown)
+
+      receive do
+        {:DOWN, ^ref, :process, ^pid, _reason} -> :ok
+      after
+        5_000 -> raise "review spy #{inspect(pid)} did not stop"
+      end
+    end
+
+    def start_background(opts) do
+      send(Agent.get(@state, & &1), {:review_started, opts})
+      :ok
+    end
+  end
+
+  defp assert_review(turn_state_overrides, expectation) do
+    # Establish the compaction posture this commit runs under rather than
+    # inheriting whatever an earlier module left in app env; the module setup
+    # restores it.
+    Application.put_env(:fermix_core, :compaction, enabled: false)
+    :ok = ReviewSpy.init()
+    on_exit(&ReviewSpy.cleanup/0)
+
+    store = start_voice_store()
+    registry_name = :"tr_review_reg_#{System.unique_integer([:positive])}"
+    start_supervised!({CapabilityRegistry, name: registry_name}, id: registry_name)
+
+    turn_state =
+      [
+        adapter: CaptureTurnAdapter,
+        adapter_opts: [model: "mock-model", test_pid: self()],
+        capability_registry: registry_name,
+        conversation_store: store,
+        memory_reviewer: ReviewSpy,
+        main_agent_server: nil,
+        review_interval_hours: 24,
+        review_max_messages: 50,
+        review_input_token_budget: 1_000,
+        review_failure_backoff_ms: 60_000
+      ]
+      |> turn_state()
+      |> Map.merge(turn_state_overrides)
+
+    TurnRunner.commit(
+      voice_msg("what is on my calendar"),
+      turn_state,
+      "the calendar is clear",
+      10
+    )
+
+    case expectation do
+      :assert -> assert_receive {:review_started, _opts}, 5_000
+      :refute -> refute_receive {:review_started, _opts}, 200
+    end
+  end
+
+  # One capability per category the voice boundary names, plus one it keeps, so
+  # a turn's advertised categories say exactly which side of the boundary it ran
+  # on. Both profiles are built by the REAL builder the cache uses, so the text
+  # comparison is the cached path, not a fixture that flatters it.
+  defp boundary_registry do
+    name = :"tr_boundary_reg_#{System.unique_integer([:positive])}"
+    start_supervised!({CapabilityRegistry, name: name}, id: name)
+
+    for category <- [:system | VoiceCall.excluded_categories()] do
+      :ok = CapabilityRegistry.register(name, boundary_capability(category))
+    end
+
+    name
+  end
+
+  defp boundary_capability(category) do
+    Capability.new(%{
+      name: "boundary_#{category}",
+      description: "a #{category} capability",
+      parameters: %{"type" => "object", "properties" => %{}},
+      kind: :builtin,
+      executor: {CwdRecorder, :execute, [self()]},
+      policy_class: :read_only,
+      metadata: %{category: category}
+    })
+  end
+
+  defp boundary_categories(msg, registry) do
+    turn_state =
+      turn_state(
+        adapter: CaptureTurnAdapter,
+        adapter_opts: [model: "mock-model", test_pid: self()],
+        capability_registry: registry,
+        conversation_store: start_voice_store(),
+        runtime_context: boundary_runtime_context(registry)
+      )
+
+    assert {:ok, "captured", _tokens} = TurnRunner.run(msg, turn_state, fn _part -> :ok end)
+    assert_receive {:captured_turn, _messages, capabilities, _opts}, 5_000
+
+    capabilities |> Enum.map(& &1.metadata[:category]) |> Enum.uniq()
+  end
+
+  defp boundary_runtime_context(registry) do
+    operator = RuntimeContext.build_profile(:operator, [], registry)
+    guest = RuntimeContext.build_profile(:guest, [], registry)
+
+    %RuntimeContext{
+      agent_id: "main",
+      built_at_ms: 0,
+      base_messages: [%{role: "system", content: "base prompt"}],
+      stable_messages: [%{role: "system", content: "base prompt"}],
+      volatile_messages: [],
+      base_accounting: [],
+      available_skills: [],
+      operator_profile: operator,
+      guest_profile: guest,
+      harness_free_profiles: %{operator: operator, guest: guest}
+    }
+  end
+
+  defp run_voice_turn(opts \\ []) do
+    store = Keyword.get_lazy(opts, :store, &start_voice_store/0)
+    run_capture_turn(voice_msg("what is on my calendar"), store)
+  end
+
+  defp run_chat_turn(extra_metadata \\ %{}) do
+    msg = %{
+      channel: "telegram",
+      chat_id: "chat-1",
+      sender: "user123",
+      content: "what is on my calendar",
+      source_trust: :operator,
+      metadata: extra_metadata
+    }
+
+    run_capture_turn(msg, start_voice_store())
+  end
+
+  defp run_capture_turn(msg, store) do
+    registry_name = :"tr_voice_reg_#{System.unique_integer([:positive])}"
+    start_supervised!({CapabilityRegistry, name: registry_name}, id: registry_name)
+
+    turn_state =
+      turn_state(
+        adapter: CaptureTurnAdapter,
+        adapter_opts: [model: "mock-model", test_pid: self()],
+        capability_registry: registry_name,
+        conversation_store: store
+      )
+
+    assert {:ok, "captured", _tokens} = TurnRunner.run(msg, turn_state, fn _part -> :ok end)
+    assert_receive {:captured_turn, messages, _capabilities, opts}, 5_000
+    {messages, opts}
+  end
+
+  defp start_voice_store do
+    name = :"tr_voice_store_#{System.unique_integer([:positive])}"
+
+    start_supervised!(
+      {ConversationStore, name: name, max_messages: 128, repo: nil},
+      id: name
+    )
+  end
+
+  defp voice_msg(content) do
+    %{
+      channel: "voice",
+      chat_id: "voice_live_42",
+      sender: "voice",
+      content: content,
+      source_trust: :operator,
+      metadata: %{source: :voice, user_id: "voice", chat_type: "private"}
+    }
+    |> put_in([:metadata, :voice_call], voice_call())
+  end
+
+  defp forged_voice_call, do: %{source: :telegram, voice_call: voice_call()}
+
+  defp voice_call do
+    %{
+      call_id: "voice_live_42",
+      delegation_id: "d-1",
+      revision: 1,
+      turn_session_id: "voice_delegation_7",
+      conversation_store: ConversationStore,
+      prompt_addendum: @voice_addendum,
+      persist?: false
+    }
   end
 
   defp presentation_note(messages) do

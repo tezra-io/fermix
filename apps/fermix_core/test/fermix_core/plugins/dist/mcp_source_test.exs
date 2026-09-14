@@ -1,11 +1,19 @@
 defmodule FermixCore.Plugins.Dist.McpSourceTest do
   use ExUnit.Case, async: false
 
+  alias FermixCore.Auth.Store, as: AuthStore
+  alias FermixCore.Auth.TokenSupervisor
   alias FermixCore.Capabilities.MCP.Remote.Contract
   alias FermixCore.Plugins.Dist.McpSource
+  alias FermixCore.Plugins.Dist.Store, as: DistStore
   alias FermixCore.Plugins.Plugin
 
   @pat "eden_pat_canary_do_not_leak"
+
+  # A fixed, host-independent vendored target: `probe/3` and
+  # `vendored_command_path/3` both take it from the same `:target` seam, so the
+  # case reads the same on every leg of CI.
+  @target "fermix-test-target"
 
   defp probe_ok do
     [
@@ -197,6 +205,195 @@ defmodule FermixCore.Plugins.Dist.McpSourceTest do
     enable("obsidian", [])
 
     assert {:ok, []} = McpSource.server_specs(source_opts(ctx))
+  end
+
+  # --- the vendored oauth2 helper (M8 §9.3, M40 §14.7) --------------------
+  #
+  # `teslahelper` stands in for the first `runtime.kind: "binary"`,
+  # `vendored: true`, oauth2 `mcp` plugin: its child process exists only while
+  # the operator's switch is on, and it reads the account's access token out of
+  # a file the daemon owns and keeps fresh.
+  describe "a vendored oauth2 helper" do
+    setup ctx do
+      DistStore.ensure!(ctx.store)
+      oauth = Application.get_env(:fermix_core, :oauth)
+
+      Application.put_env(:fermix_core, :oauth, %{
+        "tesla" => [client_id: "t-id", client_secret: "t-sec", region: "eu"]
+      })
+
+      profile = "teslahelper_#{System.unique_integer([:positive])}:primary"
+
+      on_exit(fn ->
+        TokenSupervisor.stop_profile(profile)
+
+        case oauth do
+          nil -> Application.delete_env(:fermix_core, :oauth)
+          value -> Application.put_env(:fermix_core, :oauth, value)
+        end
+      end)
+
+      command = write_helper(ctx.checkout, "teslahelper")
+      :ok = AuthStore.write(profile, helper_grant())
+
+      %{
+        profile: profile,
+        command: command,
+        token_file: DistStore.token_file(ctx.store, profile)
+      }
+    end
+
+    test "hands the child the daemon-owned token file it must read", ctx do
+      enable_helper(ctx, "true")
+
+      assert {:ok, [spec]} = McpSource.server_specs(helper_opts(ctx))
+      assert spec.command == ctx.command
+      assert spec.env["FERMIX_PLUGIN_TOKEN_FILE"] == ctx.token_file
+      assert ctx.token_file =~ ~r{/plugins/run/teslahelper_\d+_primary\.token$}
+
+      projected = ctx.token_file |> File.read!() |> Jason.decode!()
+      assert projected["access_token"] == "AT"
+      assert projected["auth_profile"] == ctx.profile
+      assert projected["region"] == "eu"
+      assert projected["generation"] == 1
+    end
+
+    # The path is an internal spawn-spec field, not an operator setting. A
+    # manifest could declare the key, or a hand-edited config.toml could set it;
+    # neither may point the child at a file the daemon does not keep fresh.
+    test "a plugin setting can never override the token file path", ctx do
+      enable_helper(ctx, "true", [{"FERMIX_PLUGIN_TOKEN_FILE", "/tmp/attacker.token"}])
+
+      assert {:ok, [spec]} = McpSource.server_specs(helper_opts(ctx))
+      assert spec.env["FERMIX_PLUGIN_TOKEN_FILE"] == ctx.token_file
+    end
+
+    test "the runtime gate decides whether the child exists at all", ctx do
+      enable_helper(ctx, "true")
+      assert {:ok, [_spec]} = McpSource.server_specs(helper_opts(ctx))
+
+      for value <- ["false", "TRUE", "1", "yes"] do
+        enable_helper(ctx, value)
+
+        assert {:ok, []} = McpSource.server_specs(helper_opts(ctx)),
+               "#{inspect(value)} started the gated runtime"
+      end
+
+      enable_helper(ctx, nil)
+      assert {:ok, []} = McpSource.server_specs(helper_opts(ctx))
+    end
+
+    test "turning the gate off deletes the projection the child was reading", ctx do
+      enable_helper(ctx, "true")
+      assert {:ok, [_spec]} = McpSource.server_specs(helper_opts(ctx))
+      assert File.exists?(ctx.token_file)
+
+      enable_helper(ctx, "false")
+      assert {:ok, []} = McpSource.server_specs(helper_opts(ctx))
+      refute File.exists?(ctx.token_file)
+    end
+
+    test "disabling the plugin deletes the projection", ctx do
+      enable_helper(ctx, "true")
+      assert {:ok, [_spec]} = McpSource.server_specs(helper_opts(ctx))
+      assert File.exists?(ctx.token_file)
+
+      Application.put_env(:fermix_core, :plugins, enabled: [], entries: %{})
+      assert {:ok, []} = McpSource.server_specs(helper_opts(ctx))
+      refute File.exists?(ctx.token_file)
+    end
+
+    # M8 §9.3 v1 invariant: one `mcp` child per auth profile. Two children
+    # sharing one profile would overwrite each other's projection and race the
+    # delete-on-disable, so the whole desired list is refused rather than
+    # silently letting one plugin win.
+    test "two helpers sharing one auth profile are refused loudly", ctx do
+      write_helper(ctx.checkout, "teslatwin")
+
+      Application.put_env(:fermix_core, :plugins,
+        enabled: ["teslahelper", "teslatwin"],
+        entries: %{
+          "teslahelper" => [{:auth_profile, ctx.profile}, {"ALLOW_CONTROL", "true"}],
+          "teslatwin" => [{:auth_profile, ctx.profile}, {"ALLOW_CONTROL", "true"}]
+        }
+      )
+
+      assert {:error, {:token_file_profile_conflict, profile, ["teslahelper", "teslatwin"]}} =
+               McpSource.server_specs(helper_opts(ctx))
+
+      assert profile == ctx.profile
+    end
+  end
+
+  defp write_helper(checkout, name) do
+    dir = write_plugin(checkout, name, helper_manifest(name))
+    command = Path.join([dir, "bin", @target, "fermix-tesla"])
+    File.mkdir_p!(Path.dirname(command))
+    File.write!(command, "#!/bin/sh\n")
+    File.chmod!(command, 0o755)
+    command
+  end
+
+  defp enable_helper(ctx, gate, extra \\ []) do
+    gate_entry = if gate, do: [{"ALLOW_CONTROL", gate}], else: []
+
+    Application.put_env(:fermix_core, :plugins,
+      enabled: ["teslahelper"],
+      entries: %{"teslahelper" => [{:auth_profile, ctx.profile}] ++ gate_entry ++ extra}
+    )
+  end
+
+  defp helper_opts(ctx) do
+    [registry: [dev_local: ctx.checkout, installed_root: ctx.store], probe: [target: @target]]
+  end
+
+  defp helper_grant do
+    %{
+      auth_mode: "oauth2",
+      provider: "tesla",
+      granted_scopes: ["openid"],
+      tokens: %{access_token: "AT", refresh_token: "RT"},
+      expires_at: DateTime.add(DateTime.utc_now(), 3600, :second),
+      last_refresh: nil,
+      status: "ready",
+      region: "eu"
+    }
+  end
+
+  defp helper_manifest(name) do
+    %{
+      "auth" => %{
+        "type" => "oauth2",
+        "provider" => "tesla",
+        "profile_key" => name,
+        "account_mode" => "single",
+        "scopes" => ["openid"]
+      },
+      "health_check" => %{"kind" => "local_readiness", "requires_auth" => true},
+      "runtime" => %{
+        "kind" => "binary",
+        "command" => "fermix-tesla",
+        "vendored" => true,
+        "requires_setting" => "ALLOW_CONTROL"
+      },
+      "config" => [
+        %{
+          "key" => "ALLOW_CONTROL",
+          "prompt" => "Allow vehicle commands",
+          "required" => false,
+          "kind" => "boolean"
+        }
+      ],
+      "tools" => [
+        %{
+          "name" => "#{name}_send_command",
+          "description" => "Send a signed vehicle command.",
+          "rail" => "mcp",
+          "read_only" => false,
+          "requires_scopes" => ["openid"]
+        }
+      ]
+    }
   end
 
   describe "remote_spec/1" do

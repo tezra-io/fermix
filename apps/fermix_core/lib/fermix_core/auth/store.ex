@@ -26,7 +26,9 @@ defmodule FermixCore.Auth.Store do
           optional(:account) => map() | nil,
           optional(:scope_profile) => String.t() | nil,
           optional(:granted_scopes) => [String.t()],
-          optional(:status) => String.t() | nil
+          optional(:status) => String.t() | nil,
+          optional(:region) => String.t() | nil,
+          optional(:region_actual) => String.t() | nil
         }
 
   @spec read(provider(), Path.t()) :: {:ok, entry()} | {:error, term()}
@@ -124,6 +126,24 @@ defmodule FermixCore.Auth.Store do
   defp label_value(value) when is_binary(value) and value != "", do: value
   defp label_value(_value), do: nil
 
+  # The statuses a sign-in writes onto a grant that must not be served, and the
+  # reason each answers with. `reauthorization_required` and `client_rejected`
+  # are NOT here: a refresh writes those, and the refresher that wrote one is
+  # already refusing in memory, so reading them back would change how an
+  # unexpired grant behaves across a restart. `wrong_region` is the one a LOGIN
+  # writes, so the entry is the only place it can be read from.
+  @quarantines %{"wrong_region" => :wrong_region}
+
+  @doc """
+  Why a stored grant must not be served, or `nil` when it may be.
+
+  One reader, so the supervised token manager and the tree-less direct read
+  answer a quarantined grant identically: a CLI VM with no manager must not hand
+  out the credential the daemon refuses.
+  """
+  @spec quarantine_reason(entry()) :: atom() | nil
+  def quarantine_reason(%{} = entry), do: Map.get(@quarantines, Map.get(entry, :status))
+
   @spec validate_permissions(Path.t()) ::
           :ok | {:error, {:insecure_permissions, Path.t(), non_neg_integer()}} | {:error, term()}
   def validate_permissions(path \\ default_path()) when is_binary(path) do
@@ -207,7 +227,15 @@ defmodule FermixCore.Auth.Store do
       },
       expires_at: parse_iso8601(Map.get(entry, "expires_at")),
       last_refresh: parse_iso8601(Map.get(entry, "last_refresh")),
-      status: Map.get(entry, "status")
+      status: Map.get(entry, "status"),
+      # The provider region the grant was minted for (Tesla's Fleet API region),
+      # recorded at sign-in because nothing downstream can re-derive it. `nil`
+      # for every provider that has no regions.
+      region: Map.get(entry, "region"),
+      # The region the account itself is in, recorded beside `region` when the
+      # sign-in found the two disagree. Only ever meaningful beside a
+      # `wrong_region` status; `nil` says nothing was found to disagree with.
+      region_actual: Map.get(entry, "region_actual")
     }
   end
 
@@ -345,6 +373,8 @@ defmodule FermixCore.Auth.Store do
       |> put_serialized("scope_profile", entry_value(entry, :scope_profile))
       |> put_serialized("granted_scopes", entry_value(entry, :granted_scopes, []))
       |> put_serialized("status", entry_value(entry, :status))
+      |> put_serialized("region", entry_value(entry, :region))
+      |> put_serialized("region_actual", entry_value(entry, :region_actual))
 
     providers = Map.put(providers, provider_key, Map.merge(existing, serialized))
     %{"version" => @schema_version, "providers" => providers}

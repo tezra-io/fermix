@@ -484,10 +484,15 @@ defmodule FermixCore.Browser.ProfileServerGuardsTest do
     progress(pid, "G1", "inProgress", 2_000, 9_000_000)
 
     assert_receive {:cdp, _owner, "Browser.cancelDownload", %{guid: "G1"}}
-    refute File.exists?(partial)
 
     assert {:error, %Error{code: "download_too_large"} = error} =
              req(pid, "download", %{"timeout_ms" => 50})
+
+    # The partial is deleted AFTER the cancel command goes out, so the outbound
+    # notification proves nothing about the file. This `req/2` is a
+    # GenServer.call into the very process that does the delete, so it is the
+    # first point at which the partial's absence is a fact and not a race.
+    refute File.exists?(partial)
 
     assert error.details["guid"] == "G1"
     assert error.details["received_bytes"] == 2_000
@@ -559,10 +564,13 @@ defmodule FermixCore.Browser.ProfileServerGuardsTest do
     begin_download(pid, "G5", "http://192.168.1.1/config.bin", "config.bin")
 
     assert_receive {:cdp, _owner, "Browser.cancelDownload", %{guid: "G5"}}
-    refute File.exists?(partial)
 
     assert {:error, %Error{code: "download_blocked"} = error} =
              req(pid, "download", %{"timeout_ms" => 50})
+
+    # As above: the cancel notification is emitted before the delete runs, and
+    # this `req/2` is a GenServer.call into the process that performs it.
+    refute File.exists?(partial)
 
     assert error.details["url"] == "http://192.168.1.1/config.bin"
     assert error.message =~ "browser policy"

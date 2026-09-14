@@ -64,6 +64,11 @@ defmodule FermixChannels.Channels.SlackTest do
   setup do
     Req.Test.set_req_test_to_shared()
 
+    # `:slack` is pinned in config/config.exs (enabled: false, mode: :webhook), so
+    # deleting it on the way out hands every later module an unconfigured channel
+    # instead of the posture the suite is supposed to run against.
+    previous_slack = Application.get_env(:fermix_channels, :slack)
+
     Application.put_env(:fermix_channels, :slack,
       enabled: true,
       mode: :webhook,
@@ -74,10 +79,13 @@ defmodule FermixChannels.Channels.SlackTest do
       req_options: [plug: {Req.Test, :slack}]
     )
 
-    on_exit(fn -> Application.delete_env(:fermix_channels, :slack) end)
+    on_exit(fn -> restore_slack(previous_slack) end)
 
     :ok
   end
+
+  defp restore_slack(nil), do: Application.delete_env(:fermix_channels, :slack)
+  defp restore_slack(value), do: Application.put_env(:fermix_channels, :slack, value)
 
   describe "reactions" do
     defp slack_react_message do

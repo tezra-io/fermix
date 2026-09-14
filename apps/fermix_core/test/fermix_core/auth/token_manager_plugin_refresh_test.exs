@@ -19,7 +19,13 @@ defmodule FermixCore.Auth.TokenManagerPluginRefreshTest do
         client_id: "gh-id",
         client_secret: "gh-sec"
       ],
-      "x" => [client_type: "desktop_public_pkce", client_id: "x-id", client_secret: "stale-sec"]
+      "x" => [client_type: "desktop_public_pkce", client_id: "x-id", client_secret: "stale-sec"],
+      "tesla" => [
+        client_type: "desktop_public_pkce",
+        client_id: "t-id",
+        client_secret: "t-sec",
+        region: "eu"
+      ]
     })
 
     dir = FermixTestSupport.SafeRm.make_tmp_dir!("tm-plugin-refresh")
@@ -49,25 +55,23 @@ defmodule FermixCore.Auth.TokenManagerPluginRefreshTest do
     )
   end
 
-  defp write_auth_file(dir, profile, provider) do
+  defp write_auth_file(dir, profile, provider, extra \\ %{}) do
     path = Path.join(dir, "fermix_auth.json")
 
-    File.write!(
-      path,
-      Jason.encode!(%{
-        "version" => 2,
-        "providers" => %{
-          profile => %{
-            "auth_mode" => "oauth2",
-            "provider" => provider,
-            "granted_scopes" => ["a-scope"],
-            "tokens" => %{"access_token" => "old_at", "refresh_token" => "old_rt"},
-            "expires_at" =>
-              DateTime.utc_now() |> DateTime.add(3600, :second) |> DateTime.to_iso8601()
-          }
-        }
-      })
-    )
+    entry =
+      Map.merge(
+        %{
+          "auth_mode" => "oauth2",
+          "provider" => provider,
+          "granted_scopes" => ["a-scope"],
+          "tokens" => %{"access_token" => "old_at", "refresh_token" => "old_rt"},
+          "expires_at" =>
+            DateTime.utc_now() |> DateTime.add(3600, :second) |> DateTime.to_iso8601()
+        },
+        extra
+      )
+
+    File.write!(path, Jason.encode!(%{"version" => 2, "providers" => %{profile => entry}}))
 
     path
   end
@@ -114,6 +118,42 @@ defmodule FermixCore.Auth.TokenManagerPluginRefreshTest do
     entry = data["providers"]["google_calendar:primary"]
     assert entry["tokens"]["access_token"] == "new_at"
     assert entry["provider"] == "google"
+  end
+
+  # The region is recorded once, at sign-in, and nothing on the refresh path can
+  # re-derive it — so a refresh that rebuilt the entry instead of updating it
+  # would silently strand the plugin without a Fleet API host.
+  test "a tesla refresh keeps the recorded region and sends no exchange audience", %{dir: dir} do
+    fermix_path = write_auth_file(dir, "tesla:primary", "tesla", %{"region" => "eu"})
+    parent = self()
+
+    plug = fn conn ->
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
+      send(parent, {:refresh_form, URI.decode_query(body)})
+      __MODULE__.refresh_plug(conn)
+    end
+
+    name =
+      start_manager(
+        auth_profile: "tesla:primary",
+        fermix_auth_path: fermix_path,
+        req_options: [plug: plug]
+      )
+
+    assert {:ok, "new_at"} = TokenManager.refresh(name)
+
+    entry =
+      fermix_path |> File.read!() |> Jason.decode!() |> get_in(["providers", "tesla:primary"])
+
+    assert entry["region"] == "eu"
+    assert entry["tokens"]["access_token"] == "new_at"
+    assert entry["tokens"]["refresh_token"] == "new_rt"
+    assert entry["status"] == "ready"
+
+    assert_received {:refresh_form, form}
+    refute Map.has_key?(form, "audience")
+    assert form["grant_type"] == "refresh_token"
+    assert form["client_id"] == "t-id"
   end
 
   test "unknown providers stay unsupported", %{dir: dir} do
@@ -260,5 +300,86 @@ defmodule FermixCore.Auth.TokenManagerPluginRefreshTest do
     assert data["providers"]["github:primary"]["status"] == "reauthorization_required"
     assert log =~ "fermix auth login"
     assert {:error, :reauthorization_required} = TokenManager.get_token(name)
+  end
+
+  # A grant minted for the wrong region is real and unexpired, so nothing stops
+  # it being handed out on its own: every call it authorises is refused by the
+  # provider from the wrong host. The manager reads the quarantine off the stored
+  # grant, which is where the sign-in recorded it, and refuses instead.
+  describe "a grant the sign-in recorded as wrong_region" do
+    test "is refused rather than served", %{dir: dir} do
+      fermix_path =
+        write_auth_file(dir, "tesla:primary", "tesla", %{
+          "status" => "wrong_region",
+          "region" => "na",
+          "region_actual" => "eu"
+        })
+
+      name =
+        start_manager(
+          auth_profile: "tesla:primary",
+          fermix_auth_path: fermix_path,
+          req_options: [plug: &__MODULE__.refresh_plug/1]
+        )
+
+      assert {:error, :wrong_region} = TokenManager.get_token(name)
+      assert {:error, :wrong_region} = TokenManager.refresh(name)
+      assert {:ok, %{invalidated?: true}} = TokenManager.status(name)
+    end
+
+    # A fresh sign-in rewrites the status, and a reload is what a sign-in runs.
+    test "is served again once a sign-in clears the marker", %{dir: dir} do
+      fermix_path =
+        write_auth_file(dir, "tesla:primary", "tesla", %{
+          "status" => "wrong_region",
+          "region" => "na",
+          "region_actual" => "eu"
+        })
+
+      name =
+        start_manager(
+          auth_profile: "tesla:primary",
+          fermix_auth_path: fermix_path,
+          req_options: [plug: &__MODULE__.refresh_plug/1]
+        )
+
+      assert {:error, :wrong_region} = TokenManager.get_token(name)
+
+      :ok =
+        Store.write(
+          "tesla:primary",
+          %{
+            auth_mode: "oauth2",
+            provider: "tesla",
+            granted_scopes: ["a-scope"],
+            tokens: %{access_token: "eu_at", refresh_token: "eu_rt"},
+            expires_at: DateTime.add(DateTime.utc_now(), 3600, :second),
+            last_refresh: nil,
+            status: "ready",
+            region: "eu"
+          },
+          fermix_path
+        )
+
+      assert {:ok, "eu_at"} = TokenManager.reload(name)
+      assert {:ok, "eu_at"} = TokenManager.get_token(name)
+    end
+
+    test "a grant with a region and no mismatch is served normally", %{dir: dir} do
+      fermix_path =
+        write_auth_file(dir, "tesla:primary", "tesla", %{
+          "status" => "ready",
+          "region" => "eu"
+        })
+
+      name =
+        start_manager(
+          auth_profile: "tesla:primary",
+          fermix_auth_path: fermix_path,
+          req_options: [plug: &__MODULE__.refresh_plug/1]
+        )
+
+      assert {:ok, "old_at"} = TokenManager.get_token(name)
+    end
   end
 end

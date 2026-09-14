@@ -81,4 +81,47 @@ defmodule FermixCore.Realtime.ConversationRecorderTest do
     refute Keyword.has_key?(review_opts, :adapter)
     refute Keyword.has_key?(review_opts, :route_key)
   end
+
+  test "records a Live caption verbatim as its own kind and never asks for review" do
+    config = Config.normalize(enabled: true, engine: "openai_live", persist_transcripts: true)
+
+    assert :ok =
+             ConversationRecorder.record_caption(config, "device-1", "user", "book ",
+               repo_module: FakeRepo,
+               repo: :memory_repo,
+               memory_reviewer: FakeReviewer,
+               session_scope: "voice_live:1",
+               start_ms: 1_200,
+               end_ms: 1_640,
+               test_pid: self()
+             )
+
+    assert_receive {:insert_message, attrs, _repo_opts}
+    assert attrs.kind == "live_caption"
+    assert attrs.role == "user"
+    assert attrs.sender == "user"
+    assert attrs.thread_scope == "voice_live:1"
+    # Verbatim: the trailing space belongs to the sentence, not to formatting.
+    assert attrs.content == "book "
+    assert attrs.metadata.speaker == "user"
+    assert attrs.metadata.start_ms == 1_200
+    assert attrs.metadata.end_ms == 1_640
+    assert attrs.metadata.transcript_kind == "live_caption"
+
+    refute_received {:request_review, _opts}
+  end
+
+  test "a caption writes nothing when transcript persistence is disabled" do
+    config = Config.normalize(enabled: true, engine: "openai_live", persist_transcripts: false)
+
+    assert :ok =
+             ConversationRecorder.record_caption(config, "device-1", "assistant", "on it",
+               repo_module: FakeRepo,
+               memory_reviewer: FakeReviewer,
+               test_pid: self()
+             )
+
+    refute_received {:insert_message, _attrs, _opts}
+    refute_received {:request_review, _opts}
+  end
 end

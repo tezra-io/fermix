@@ -39,6 +39,29 @@ defmodule FermixCore.Capabilities.MCP.Remote.ProxyTest do
 
     def set_delay(ms), do: :ets.insert(@table, {:delay, ms})
 
+    # A release handshake for the tests that must OBSERVE a call settling rather
+    # than assume it settled inside a slept window: while held, every dispatch
+    # announces itself to the process that called `hold/0` and blocks until that
+    # process sends it `:dispatch_release`.
+    def hold, do: :ets.insert(@table, {:hold, self()})
+
+    defp stall do
+      case :ets.lookup(@table, :hold) do
+        [{:hold, waiter}] -> await_release(waiter)
+        [] -> delay()
+      end
+    end
+
+    defp await_release(waiter) do
+      send(waiter, {:dispatch_held, self()})
+
+      receive do
+        :dispatch_release -> :ok
+      after
+        5_000 -> {:error, :dispatch_release_timeout}
+      end
+    end
+
     defp delay do
       case :ets.lookup(@table, :delay) do
         [{:delay, ms}] -> Process.sleep(ms)
@@ -55,8 +78,14 @@ defmodule FermixCore.Capabilities.MCP.Remote.ProxyTest do
     def call_tool(_target, tool, args, _timeout) do
       [{:calls, calls}] = :ets.lookup(@table, :calls)
       :ets.insert(@table, {:calls, [{tool, args} | calls]})
-      delay()
 
+      case stall() do
+        :ok -> response()
+        {:error, reason} -> {:error, reason}
+      end
+    end
+
+    defp response do
       case :ets.lookup(@table, :response) do
         [{:response, response}] -> response
         [] -> {:ok, %{"content" => [%{"type" => "text", "text" => ~s({"ok":true})}]}}
@@ -176,15 +205,22 @@ defmodule FermixCore.Capabilities.MCP.Remote.ProxyTest do
     end
   end
 
-  defp eventually(fun) do
-    Enum.reduce_while(1..300, false, fn _i, _acc ->
-      if fun.() do
-        {:halt, true}
-      else
+  # The inverse of `await_inflight/1`: the released call's result has been
+  # PROCESSED by the proxy. It is read off the proxy's own accounting because
+  # the dispatch task's reply is not ordered against this test's own calls.
+  defp await_settled(proxy) do
+    Enum.reduce_while(1..300, :timeout, fn _i, _acc ->
+      if Proxy.stats(proxy).inflight? do
         Process.sleep(10)
-        {:cont, false}
+        {:cont, :timeout}
+      else
+        {:halt, :ok}
       end
     end)
+    |> case do
+      :ok -> :ok
+      :timeout -> flunk("proxy never settled: #{inspect(Proxy.stats(proxy))}")
+    end
   end
 
   # A queued entry's real deadline is a full call timeout. Rewriting it is what
@@ -345,7 +381,14 @@ defmodule FermixCore.Capabilities.MCP.Remote.ProxyTest do
       proxy = start_proxy(%{}, budget)
       FakeDispatch.set_delay(2_000)
 
+      # Admission order is the proxy's mailbox order, never spawn order, so the
+      # caller that must be the QUEUED one is spawned only once another caller
+      # provably holds the single in-flight slot. Spawned together, the doomed
+      # caller could take that slot instead, and killing it then legitimately
+      # released the other one into a second dispatch.
       spawn_callers(proxy, 1)
+      await_inflight(proxy)
+
       [doomed] = spawn_callers(proxy, 1)
       await_queue(proxy, 1)
 
@@ -444,17 +487,23 @@ defmodule FermixCore.Capabilities.MCP.Remote.ProxyTest do
     # and "already queued" is not an exemption.
     test "a queued call is held, not dispatched, while the gate is suspended", %{budget: budget} do
       proxy = start_proxy(%{}, budget)
-      FakeDispatch.set_delay(300)
+      FakeDispatch.hold()
 
       spawn_callers(proxy, 2)
+      assert_receive {:dispatch_held, first}, 5_000
       await_queue(proxy, 1)
       assert %{inflight?: true} = Proxy.stats(proxy)
 
       :ok = Proxy.tools_changed(proxy)
 
-      # Past the in-flight call's own duration AND the pacing interval: both of
-      # the events that used to release the queued entry have now happened.
-      Process.sleep(300 + Limits.min_call_interval_ms() + 300)
+      # Both of the events that used to release a queued entry are DELIVERED
+      # here, not waited out: the in-flight call is released by this test and
+      # its settlement read off the proxy, and the pacing event is the very
+      # message the timer sends — with `stats/1` from this same process ordered
+      # behind it. The old sleep only assumed the first of the two had happened.
+      send(first, :dispatch_release)
+      await_settled(proxy)
+      send(proxy, :pace)
 
       assert %{gate: :suspended, queued: 1, inflight?: false} = Proxy.stats(proxy)
       assert length(FakeDispatch.calls()) == 1
@@ -472,7 +521,11 @@ defmodule FermixCore.Capabilities.MCP.Remote.ProxyTest do
       await_queue(proxy, 1)
       :ok = Proxy.tools_changed(proxy)
 
-      Process.sleep(Limits.min_call_interval_ms() + 300)
+      # The pacing event is delivered by hand rather than slept past: `stats/1`
+      # from this same process is ordered behind `:pace`, so the assertion reads
+      # state the proxy has already acted on. A sleep that ended before the
+      # timer fired would have passed without the timer ever running.
+      send(proxy, :pace)
 
       assert %{gate: :suspended, queued: 1, inflight?: false} = Proxy.stats(proxy)
       assert length(FakeDispatch.calls()) == 1
@@ -480,19 +533,31 @@ defmodule FermixCore.Capabilities.MCP.Remote.ProxyTest do
 
     test "resume/2 releases the work held during the drift", %{budget: budget} do
       proxy = start_proxy(%{}, budget)
-      FakeDispatch.set_delay(200)
+      FakeDispatch.hold()
 
       spawn_callers(proxy, 2)
+      assert_receive {:dispatch_held, first}, 5_000
       await_queue(proxy, 1)
       :ok = Proxy.tools_changed(proxy)
 
-      Process.sleep(200 + Limits.min_call_interval_ms() + 200)
+      # Settling and pacing are delivered, not slept past, so "still queued" is
+      # a fact about the suspended gate rather than about the clock.
+      send(first, :dispatch_release)
+      await_settled(proxy)
+      send(proxy, :pace)
+
       assert %{queued: 1} = Proxy.stats(proxy)
       assert length(FakeDispatch.calls()) == 1
 
       :ok = Proxy.resume(proxy, contract())
 
-      assert eventually(fn -> length(FakeDispatch.calls()) == 2 end)
+      # Reopening does not exempt the entry from pacing, so it goes out when the
+      # proxy's own pace timer next fires. The handshake is that completion
+      # signal; a fixed wait would only have been a guess at the interval.
+      assert_receive {:dispatch_held, second}, 5_000
+      send(second, :dispatch_release)
+
+      assert length(FakeDispatch.calls()) == 2
       assert %{gate: :ready, queued: 0} = Proxy.stats(proxy)
     end
 

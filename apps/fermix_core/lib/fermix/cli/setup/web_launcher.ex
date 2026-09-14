@@ -176,6 +176,10 @@ defmodule Fermix.CLI.Setup.WebLauncher do
   defp format_error({:invalid_port, :environment, value}),
     do: "invalid PORT=#{inspect(value)}; expected 1..65535"
 
+  # A packaged engine refuses `PORT` rather than parsing it (M38 §4.7), and the
+  # resolver's own sentence names the setting that does decide the listener.
+  defp format_error({:port_not_used, sentence}), do: sentence
+
   defp format_error(reason), do: inspect(reason)
 
   defp format_skipped(:not_standalone),

@@ -285,15 +285,26 @@ defmodule FermixCore.Providers.OpenAITest do
 
   describe "chat/2 telemetry" do
     test "emits [:fermix, :provider, :call] on success" do
-      _ref =
-        :telemetry.attach(
-          "test-provider-success",
-          [:fermix, :provider, :call],
-          fn event, measurements, metadata, _config ->
-            send(self(), {:telemetry, event, measurements, metadata})
-          end,
-          nil
-        )
+      # The handler runs in the EMITTING process, so `self()` inside it is not
+      # this test — the old send delivered the event to whoever emitted it and
+      # the receive below was satisfied by whatever else was in the mailbox.
+      # Capture the pid outside, filter on it, and take a unique id: a fixed id
+      # silently loses the attach to a collision when the result is discarded.
+      test_pid = self()
+      handler_id = "test-provider-success-#{System.unique_integer([:positive])}"
+
+      assert :ok =
+               :telemetry.attach(
+                 handler_id,
+                 [:fermix, :provider, :call],
+                 fn event, measurements, metadata, _config ->
+                   if self() == test_pid,
+                     do: send(test_pid, {:telemetry, event, measurements, metadata})
+                 end,
+                 nil
+               )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
 
       stub_openai(self(), 200, success_body("hi"))
       {:ok, _} = chat([%{role: "user", content: "hi"}])
@@ -305,22 +316,27 @@ defmodule FermixCore.Providers.OpenAITest do
       assert metadata.model == "gpt-5.4-mini"
       assert metadata.status == :ok
       assert is_map(metadata.tokens)
-
-      :telemetry.detach("test-provider-success")
-    after
-      :telemetry.detach("test-provider-success")
     end
 
     test "emits [:fermix, :provider, :call] on error" do
-      _ref =
-        :telemetry.attach(
-          "test-provider-error",
-          [:fermix, :provider, :call],
-          fn event, measurements, metadata, _config ->
-            send(self(), {:telemetry, event, measurements, metadata})
-          end,
-          nil
-        )
+      # Same three defects as the success case above: an emitting-process send, a
+      # fixed id whose attach result was discarded, and a detach that only ran on
+      # the happy path.
+      test_pid = self()
+      handler_id = "test-provider-error-#{System.unique_integer([:positive])}"
+
+      assert :ok =
+               :telemetry.attach(
+                 handler_id,
+                 [:fermix, :provider, :call],
+                 fn event, measurements, metadata, _config ->
+                   if self() == test_pid,
+                     do: send(test_pid, {:telemetry, event, measurements, metadata})
+                 end,
+                 nil
+               )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
 
       stub_openai(self(), 500, %{"error" => "boom"})
       {:error, _} = chat([%{role: "user", content: "hi"}])
@@ -329,10 +345,6 @@ defmodule FermixCore.Providers.OpenAITest do
       assert is_integer(measurements.duration_ms)
       assert metadata.provider == :openai
       assert metadata.status == :error
-
-      :telemetry.detach("test-provider-error")
-    after
-      :telemetry.detach("test-provider-error")
     end
   end
 

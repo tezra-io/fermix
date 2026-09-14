@@ -14,6 +14,7 @@ defmodule FermixCore.Application do
   alias FermixCore.Auth.Store, as: AuthStore
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Auth.TokenSupervisor
+  alias FermixCore.Boot.PathBaseline
   alias FermixCore.BootProfile
   alias FermixCore.BuildInfo
   alias FermixCore.Capabilities.BuiltinSeeder
@@ -81,7 +82,17 @@ defmodule FermixCore.Application do
     start_supervision_tree()
   end
 
-  defp start_profile(:standalone_cli), do: cli_dispatch(BurritoArgs.argv())
+  defp start_profile(:standalone_cli), do: cli_dispatch(:standalone_cli, BurritoArgs.argv())
+
+  # The packaged Linux CLI (M38 §4.4.7). The baseline `PATH` is applied before
+  # every verb, not only the daemon ones: a packaged `fermix` is invoked by the
+  # desktop client and by systemd as often as from a shell, and both hand it an
+  # environment that resolves neither the bundled `cosign` nor a vendor CLI in
+  # `~/.local/bin`. It appends only, so an operator's own `PATH` is never shadowed.
+  defp start_profile(:linux_package_cli) do
+    _added = PathBaseline.ensure!()
+    cli_dispatch(:linux_package_cli, BurritoArgs.argv())
+  end
 
   # Dev (mix test, mix fermix.dev, iex -S mix phx.server) or an ordinary
   # plain release. `mix fermix.dev` sets the existing gates before starting
@@ -93,19 +104,18 @@ defmodule FermixCore.Application do
   # fermix_web), build the supervision tree, then spawn `Fermix.CLI.Run`
   # for log + block. The BEAM stays alive because all sibling apps are
   # `:permanent` — we do not call `System.halt`.
-  defp cli_dispatch(["run" | _] = argv) do
-    :ok = BootProfile.prepare(:standalone_cli)
+  defp cli_dispatch(profile, ["run" | _] = argv), do: run_daemon(profile, argv)
 
-    with {:ok, pid} <- start_supervision_tree() do
-      spawn(fn -> run_cli(argv) end)
-      {:ok, pid}
-    end
-  end
+  # `service run` is the systemd vendor unit's launch entry point (M38 §4.2),
+  # and it is the daemon run under another name: the binding that names this
+  # service's home is resolved in `config/runtime.exs`, before any configuration
+  # is read, so by the time dispatch happens there is nothing left to decide.
+  defp cli_dispatch(profile, ["service", "run" | rest]), do: run_daemon(profile, ["run" | rest])
 
   # `setup`: the service-first web path avoids the local tree and starts
   # the real daemon instead. Terminal setup still builds the tree needed
   # for `SetupSeeder`, then halts before sibling OTP apps start.
-  defp cli_dispatch(["setup" | _] = argv) do
+  defp cli_dispatch(_profile, ["setup" | _] = argv) do
     if Setup.supervision_required?(tl(argv)) do
       {:ok, _pid} = start_supervision_tree()
     end
@@ -113,7 +123,7 @@ defmodule FermixCore.Application do
     System.halt(run_cli(argv))
   end
 
-  defp cli_dispatch(["memory" | _] = argv) do
+  defp cli_dispatch(_profile, ["memory" | _] = argv) do
     {:ok, _pid} = start_supervision_tree()
     System.halt(run_cli(argv))
   end
@@ -124,8 +134,17 @@ defmodule FermixCore.Application do
   # tree here would create a competing listener and a split persistence path.
   # Halt before any sibling app starts so there is no file logger, no
   # `Memory.Repo`, no `TokenManager`, and no port bind.
-  defp cli_dispatch(argv) do
+  defp cli_dispatch(_profile, argv) do
     System.halt(run_cli(argv))
+  end
+
+  defp run_daemon(profile, argv) do
+    :ok = BootProfile.prepare(profile)
+
+    with {:ok, pid} <- start_supervision_tree() do
+      spawn(fn -> run_cli(argv) end)
+      {:ok, pid}
+    end
   end
 
   defp start_supervision_tree do

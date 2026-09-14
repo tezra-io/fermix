@@ -1813,4 +1813,174 @@ defmodule FermixOpik.AggregationTest do
       assert trace.name == "meeting:mtg_ab12cd"
     end
   end
+
+  @voice_live_start [:fermix, :voice_live, :call_start]
+  @voice_live_session_started [:fermix, :voice_live, :session_started]
+  @voice_live_delegation_start [:fermix, :voice_live, :delegation_start]
+  @voice_live_delegation_stop [:fermix, :voice_live, :delegation_stop]
+  @voice_live_provider_error [:fermix, :voice_live, :provider_error]
+  @voice_live_stop [:fermix, :voice_live, :call_stop]
+  @voice_live_call "voice_live:1"
+  @voice_delegation_session "voice_delegation_7"
+
+  # The emitter's own metadata shape (FermixCore.Realtime.LiveTelemetry).
+  # `fermix_opik` declares no dependency on `fermix_core`, so this mirrors it by
+  # hand, exactly like `meeting_meta/1` and `followup_meta/1` above.
+  defp voice_live_meta(extra) do
+    Map.merge(
+      %{
+        agent: "voice_live",
+        session_id: @voice_live_call,
+        device_id: "dev-1",
+        model: "gpt-live-1",
+        voice: "marin",
+        engine: "openai_live"
+      },
+      extra
+    )
+  end
+
+  describe "live voice runs" do
+    test "the reporter subscribes to every voice_live event" do
+      for event <- [
+            @voice_live_start,
+            @voice_live_session_started,
+            @voice_live_delegation_start,
+            @voice_live_delegation_stop,
+            @voice_live_provider_error,
+            @voice_live_stop
+          ] do
+        assert event in FermixOpik.Reporter.events(),
+               "#{inspect(event)} is not subscribed, so the run is invisible to Opik"
+      end
+    end
+
+    test "a live call becomes one trace whose delegation turn nests under the root via parent_session" do
+      {_state, closed} =
+        run([
+          {@voice_live_start, %{}, voice_live_meta(%{max_duration_ms: 900_000})},
+          {@voice_live_session_started, %{},
+           voice_live_meta(%{provider_session_id: "sess_live_abc"})},
+          # The backend turn is its own run: its session id is minted by the Live
+          # session and its parent_session is the CALL, which is the only link
+          # between the two — a delegation carries no other correlation.
+          {[:fermix, :provider, :call], %{duration_ms: 900},
+           %{
+             provider: :anthropic,
+             model: "claude-opus-4-8",
+             status: :ok,
+             agent: "main",
+             session_id: @voice_delegation_session,
+             parent_session: @voice_live_call,
+             tokens: %{prompt: 120, completion: 40}
+           }},
+          {@voice_live_delegation_start, %{},
+           voice_live_meta(%{
+             delegation_id: "dlg_1",
+             revision: 1,
+             turn_session_id: @voice_delegation_session
+           })},
+          {@voice_live_delegation_stop, %{duration_ms: 1_200},
+           voice_live_meta(%{
+             delegation_id: "dlg_1",
+             revision: 1,
+             turn_session_id: @voice_delegation_session,
+             status: "completed"
+           })},
+          {@voice_live_stop,
+           %{
+             voice_seconds: 62,
+             voice_cost_millicents: 5_167,
+             backend_turns: 1,
+             accounting_complete: 1
+           }, voice_live_meta(%{reason: "call_stop"})}
+        ])
+
+      assert [%{trace: trace, spans: spans}] = closed
+      assert trace.name == "voice_live:1"
+      assert trace.tags == ["voice_live"]
+      # A call that ended on its own terms is not flagged errored; `reason`
+      # below is what names the wall when one was hit.
+      refute Map.has_key?(trace, :error_info)
+
+      # The call's own wrapper IS the root: no parent span id survives export.
+      root = span_named(spans, "voice_live:1")
+      refute Map.has_key?(root, :parent_span_id)
+
+      # The delegation's own wrapper hangs off the root wrapper, and the model
+      # call hangs off the delegation — one trace, two runs, no orphan root.
+      delegation = span_named(spans, @voice_delegation_session)
+      assert delegation.parent_span_id == root.id
+
+      [llm] = spans_of_type(spans, "llm")
+      assert llm.parent_span_id == delegation.id
+      assert llm.usage == %{prompt_tokens: 120, completion_tokens: 40, total_tokens: 160}
+
+      started = span_named(spans, "voice_live:session_started")
+      assert started.parent_span_id == root.id
+      assert started.metadata.provider_session_id == "sess_live_abc"
+
+      stopped = span_named(spans, "voice_live:delegation_stop")
+      assert stopped.metadata.status == "completed"
+      assert stopped.metadata.turn_session_id == @voice_delegation_session
+
+      # Voice is duration-priced: the ledger rides the trace, never as tokens.
+      assert trace.metadata.voice_seconds == 62
+      assert trace.metadata.voice_cost_millicents == 5_167
+      assert trace.metadata.backend_turns == 1
+      assert trace.metadata.accounting_complete == 1
+      assert trace.metadata.reason == "call_stop"
+      assert trace.metadata.engine == "openai_live"
+      assert trace.metadata.model == "gpt-live-1"
+    end
+
+    test "a provider_error is a phase span, never a terminal event" do
+      {state, closed} =
+        run([
+          {@voice_live_start, %{}, voice_live_meta(%{max_duration_ms: 900_000})},
+          {@voice_live_provider_error, %{},
+           voice_live_meta(%{reason: "moderation cut the reply"})}
+        ])
+
+      assert closed == []
+      assert map_size(state.traces) == 1
+    end
+
+    # A Live call is silent between delegations for minutes at a time; the idle
+    # TTL would force-close it mid-call and mint a second root when call_stop
+    # finally arrived (the meeting/follow-up precedent).
+    test "a live call is swept by its max duration, not the idle TTL" do
+      agg = Aggregation.new(project: "fermix", ttl_ms: 1)
+
+      {agg, []} =
+        Aggregation.apply_event(
+          agg,
+          @voice_live_start,
+          %{},
+          voice_live_meta(%{max_duration_ms: 1_000}),
+          %{at: ~U[2026-06-02 12:00:00.000Z], mono: 0}
+        )
+
+      {agg, []} = Aggregation.sweep(agg, 500_000)
+
+      {_agg, closed} = Aggregation.sweep(agg, 61_000_001)
+      assert [%{trace: trace}] = closed
+      assert trace.name == "voice_live:1"
+    end
+
+    # Without the prefix clause a call_stop that arrived after a daemon restart
+    # would mint a root `infer_kind/1` reads as `:subagent` — the phantom-root
+    # shape the computer-history clause exists to prevent.
+    test "a call_stop with no opener still closes as a voice_live root" do
+      {_state, closed} =
+        run([
+          {@voice_live_stop, %{voice_seconds: 5, accounting_complete: 0},
+           voice_live_meta(%{reason: "provider_disconnected"})}
+        ])
+
+      assert [%{trace: trace}] = closed
+      assert trace.tags == ["voice_live"]
+      assert trace.name == "voice_live:1"
+    end
+  end
 end

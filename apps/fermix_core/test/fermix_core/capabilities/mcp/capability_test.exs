@@ -161,6 +161,113 @@ defmodule FermixCore.Capabilities.MCP.CapabilityTest do
       assert result.error =~ "MCP tool 'github/create_issue' failed"
       assert result.error =~ "unauthorized"
     end
+
+    # A local child says "this call failed" with `isError: true` on an otherwise
+    # valid JSON-RPC response. Rendering that as a SUCCESS whose output happens
+    # to contain the word "error" tells the agent the call worked, and records
+    # `success: true` in the exec event, so a failing plugin looks healthy in
+    # every trace. Only a JSON-RPC error used to reach `Tool.error`.
+    test "a child result flagged isError becomes a tool error" do
+      descriptor = %{name: "send_command", description: "x", input_schema: %{}}
+      cap = McpCapability.from_tool_descriptor("tesla", descriptor, caller: StubCaller)
+
+      response = %Anubis.MCP.Response{
+        id: "req-1",
+        is_error: true,
+        result: %{
+          "isError" => true,
+          "content" => [
+            %{"type" => "text", "text" => "vehicle is asleep"},
+            %{"type" => "text", "text" => "wake it first"}
+          ]
+        }
+      }
+
+      :ok = StubCaller.set_response({:operator, "tesla"}, "send_command", {:ok, response})
+
+      assert {:ok, result} = Capability.execute(cap, %{}, %{})
+      refute result.success
+      assert result.error =~ "MCP tool 'tesla/send_command' reported an error"
+      assert result.error =~ "vehicle is asleep"
+      assert result.error =~ "wake it first"
+      assert result.output == ""
+    end
+
+    test "an isError result with no text still names the tool" do
+      descriptor = %{name: "send_command", description: "x", input_schema: %{}}
+      cap = McpCapability.from_tool_descriptor("tesla", descriptor, caller: StubCaller)
+
+      response = %Anubis.MCP.Response{id: "req-2", is_error: true, result: %{"isError" => true}}
+      :ok = StubCaller.set_response({:operator, "tesla"}, "send_command", {:ok, response})
+
+      assert {:ok, result} = Capability.execute(cap, %{}, %{})
+      refute result.success
+      assert result.error =~ "MCP tool 'tesla/send_command' reported an error"
+    end
+
+    # The child's own words reach the agent, but a child that echoes a bearer
+    # token back in its failure message must not put one in the trace.
+    test "the child's message is redacted before it reaches the agent" do
+      descriptor = %{name: "send_command", description: "x", input_schema: %{}}
+      cap = McpCapability.from_tool_descriptor("tesla", descriptor, caller: StubCaller)
+
+      response = %Anubis.MCP.Response{
+        id: "req-3",
+        is_error: true,
+        result: %{
+          "isError" => true,
+          "content" => [%{"type" => "text", "text" => "rejected Bearer eyJhbGciOiJIUzI1NiJ9"}]
+        }
+      }
+
+      :ok = StubCaller.set_response({:operator, "tesla"}, "send_command", {:ok, response})
+
+      assert {:ok, result} = Capability.execute(cap, %{}, %{})
+      refute result.error =~ "eyJhbGciOiJIUzI1NiJ9"
+      assert result.error =~ "[REDACTED]"
+    end
+
+    test "a child result that is not flagged still succeeds" do
+      descriptor = %{name: "send_command", description: "x", input_schema: %{}}
+      cap = McpCapability.from_tool_descriptor("tesla", descriptor, caller: StubCaller)
+
+      response = %Anubis.MCP.Response{
+        id: "req-4",
+        is_error: false,
+        result: %{"content" => [%{"type" => "text", "text" => "honked"}]}
+      }
+
+      :ok = StubCaller.set_response({:operator, "tesla"}, "send_command", {:ok, response})
+
+      assert {:ok, result} = Capability.execute(cap, %{}, %{})
+      assert result.success
+      # The child's text is the tool output, verbatim: the model reads a
+      # sentence or JSON, never a dumped response struct.
+      assert result.output == "honked"
+    end
+
+    test "several text blocks are joined and non-text blocks are dropped" do
+      descriptor = %{name: "send_command", description: "x", input_schema: %{}}
+      cap = McpCapability.from_tool_descriptor("tesla", descriptor, caller: StubCaller)
+
+      response = %Anubis.MCP.Response{
+        id: "req-5",
+        is_error: false,
+        result: %{
+          "content" => [
+            %{"type" => "text", "text" => "{\"result\":true}"},
+            %{"type" => "image", "data" => "AAAA", "mimeType" => "image/png"},
+            %{"type" => "text", "text" => "done"}
+          ]
+        }
+      }
+
+      :ok = StubCaller.set_response({:operator, "tesla"}, "send_command", {:ok, response})
+
+      assert {:ok, result} = Capability.execute(cap, %{}, %{})
+      assert result.success
+      assert result.output == "{\"result\":true}\ndone"
+    end
   end
 
   describe "invoke/3 telemetry" do
@@ -217,6 +324,32 @@ defmodule FermixCore.Capabilities.MCP.CapabilityTest do
       assert metadata.success == false
       assert metadata.mcp_server == "github"
       assert metadata.error =~ "unauthorized"
+    end
+
+    # The half the local rail used to get wrong: a child that answered every
+    # call with `isError: true` recorded `success: true` in every exec event,
+    # so a broken plugin read as a healthy one in the trace.
+    test "a child result flagged isError records success: false" do
+      descriptor = %{name: "send_command", description: "x", input_schema: %{}}
+      cap = McpCapability.from_tool_descriptor("tesla", descriptor, caller: StubCaller)
+
+      response = %Anubis.MCP.Response{
+        id: "req-5",
+        is_error: true,
+        result: %{
+          "isError" => true,
+          "content" => [%{"type" => "text", "text" => "vehicle is asleep"}]
+        }
+      }
+
+      :ok = StubCaller.set_response({:operator, "tesla"}, "send_command", {:ok, response})
+
+      assert {:ok, result} = Capability.execute(cap, %{}, %{agent_name: "main"})
+      refute result.success
+
+      assert_receive {:tool_exec, _measurements, metadata}
+      assert metadata.success == false
+      assert metadata.error =~ "vehicle is asleep"
     end
 
     test "a signed remote call records the redacted correlatable subset only" do

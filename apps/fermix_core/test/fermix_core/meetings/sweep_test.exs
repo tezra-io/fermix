@@ -72,10 +72,17 @@ defmodule FermixCore.Meetings.SweepTest do
   end
 
   defp run_sweep(repo) do
+    # The sweep does its whole job in handle_continue and ends {:stop, :normal},
+    # so it can already be gone when a monitor placed after start_link runs — and
+    # a monitor on a dead process answers :noproc, which a pinned :normal can
+    # never match. The link start_link installs at spawn carries the one exit
+    # signal no scheduling can lose. capture_log/1 runs its fun in this process,
+    # so the flag belongs to the process that calls start_link.
+    Process.flag(:trap_exit, true)
+
     capture_log(fn ->
       {:ok, pid} = Sweep.start_link(store_opts: [server: repo])
-      ref = Process.monitor(pid)
-      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+      assert_receive {:EXIT, ^pid, :normal}, 2_000
     end)
   end
 

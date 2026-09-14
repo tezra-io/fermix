@@ -5,7 +5,9 @@ defmodule FermixCore.Plugins.Auth do
 
   alias FermixCore.Auth.ClientRejection
   alias FermixCore.Auth.OAuthFlow
+  alias FermixCore.Auth.OAuthProvider
   alias FermixCore.Auth.OAuthProviders
+  alias FermixCore.Auth.Redaction
   alias FermixCore.Auth.Store
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Auth.TokenSupervisor
@@ -24,11 +26,11 @@ defmodule FermixCore.Plugins.Auth do
     with {:ok, plugin} <- fetch_oauth_plugin(name),
          {:ok, provider} <- oauth_provider(plugin, opts),
          {:ok, tokens} <- OAuthFlow.start_loopback(provider, flow_opts(opts)),
-         entry <- entry_from_tokens(plugin, provider, tokens),
+         entry <- minted_entry(plugin, provider, tokens, opts),
          :ok <- Store.write(Config.default_auth_profile(plugin), entry),
          {:ok, _snapshot} <- Config.enable(plugin.name) do
       reload_token_manager(plugin)
-      report(:login, plugin.name, {:ok, :ready}, started_at)
+      report(:login, plugin.name, {:ok, login_tag(entry)}, started_at)
       {:ok, entry}
     else
       {:error, _reason} = err ->
@@ -188,6 +190,83 @@ defmodule FermixCore.Plugins.Auth do
 
   defp split_scopes(scope, " "), do: String.split(scope, ~r/\s+/, trim: true)
 
+  # The grant as it will be stored: the tokens the exchange minted, and — for a
+  # regional provider — the account's own region confirmed against the one the
+  # sign-in client chose.
+  defp minted_entry(plugin, provider, tokens, opts) do
+    plugin
+    |> entry_from_tokens(provider, tokens)
+    |> confirm_region(provider, tokens, opts)
+  end
+
+  # A sign-in is the one moment the account's region can be learned, and the
+  # region the operator chose is what every later call uses as its host. Tesla
+  # refuses a call from the wrong region with 421, so the two are compared here
+  # and a mismatch is recorded on the grant: the plugin row then says what to
+  # fix instead of the first tool call relaying a 421 nobody can act on.
+  #
+  # Best-effort, exactly like the userinfo fetch: the grant is real either way,
+  # so a probe that cannot answer is logged and the sign-in stands.
+  defp confirm_region(entry, %OAuthProvider{region_probe: nil}, _tokens, _opts), do: entry
+
+  defp confirm_region(entry, %OAuthProvider{} = provider, tokens, opts) do
+    req_options = Keyword.get(opts, :region_req_options, [])
+
+    case probe_region(provider, tokens.access_token, req_options) do
+      {:ok, region} -> settle_region(entry, provider.region, region)
+      {:wrong_region, region} -> mark_wrong_region(entry, region)
+      {:error, reason} -> keep_unconfirmed(entry, reason)
+    end
+  end
+
+  defp probe_region(%OAuthProvider{region_probe: probe} = provider, access_token, req_options) do
+    request =
+      Req.new(
+        method: :get,
+        url: probe.url,
+        headers: [{"authorization", "Bearer #{access_token}"}],
+        redirect: false
+      )
+
+    case request |> Req.merge(req_options) |> Req.request() do
+      {:ok, %{status: 200, body: body}} when is_map(body) -> region_at(body, probe.path)
+      {:ok, %{status: 421, body: body}} -> {:wrong_region, refused_region(provider, body)}
+      {:ok, %{status: status}} -> {:error, {:region_probe_failed, status}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp region_at(body, path) do
+    case get_in(body, path) do
+      region when is_binary(region) and region != "" -> {:ok, region}
+      _unreadable -> {:error, {:region_probe_unreadable, path}}
+    end
+  end
+
+  # Tesla names the right base URL in its own 421 text; the registry owns the
+  # mapping back to a region id, and answers nil for a URL it does not publish.
+  defp refused_region(%OAuthProvider{id: id}, body) do
+    OAuthProviders.region_for_base_url(Atom.to_string(id), refusal_text(body))
+  end
+
+  defp refusal_text(%{"error" => text}) when is_binary(text), do: text
+  defp refusal_text(body) when is_binary(body), do: body
+  defp refusal_text(_body), do: ""
+
+  defp settle_region(entry, chosen, chosen), do: entry
+  defp settle_region(entry, _chosen, actual), do: mark_wrong_region(entry, actual)
+
+  defp mark_wrong_region(entry, actual),
+    do: %{entry | status: "wrong_region", region_actual: actual}
+
+  defp keep_unconfirmed(entry, reason) do
+    Logger.warning("Plugins.Auth: the account region check failed: #{Redaction.format(reason)}")
+    entry
+  end
+
+  defp login_tag(%{status: "wrong_region"}), do: :wrong_region
+  defp login_tag(_entry), do: :ready
+
   defp entry_from_tokens(plugin, provider, tokens) do
     %{
       auth_mode: "oauth2",
@@ -200,7 +279,14 @@ defmodule FermixCore.Plugins.Auth do
       },
       expires_at: tokens.expires_at,
       last_refresh: DateTime.utc_now(),
-      status: "ready"
+      status: "ready",
+      # The provider's region, for the providers whose API is regional (Tesla's
+      # Fleet API). It is knowable only here, while the grant is minted: the
+      # refresh path and the plugin's HTTP host read it back off the entry.
+      region: provider.region,
+      # The account's own region, filled in by `confirm_region/4` only when it
+      # disagrees with the one above.
+      region_actual: nil
     }
   end
 

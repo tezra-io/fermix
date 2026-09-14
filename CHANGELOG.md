@@ -4,6 +4,196 @@ All notable changes to Fermix are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **A Fermix installed from a Linux package manages its service through
+  its own verbs.** The package owns the systemd user unit, so
+  `fermix service install [--home PATH]` writes no unit: it records which
+  home this account's service runs in `$XDG_CONFIG_HOME/fermix/service.json`
+  (default `~/.config`), requires `loginctl enable-linger`, enables the unit,
+  and then proves it worked — the bound home's own socket answers and that
+  daemon's web address is live, within ninety seconds. `fermix service
+  uninstall` disables and stops the service and keeps the binding, the home
+  and the runtime store. A user unit an older install left behind is
+  recognised and migrated: its home becomes the binding, its observability
+  values move into a drop-in, and the shadowing unit is removed. Any other
+  unit or drop-in is named and left alone.
+- **`fermix service status [--json]`** answers with no daemon running, and
+  reports the binding, the effective unit and whether it is the package's,
+  enabled, active and sub-state, pid, invocation id, restart count, linger,
+  the listener, and the installed versus running engine identity with a typed
+  alignment. A session with no user service manager is its own answer rather
+  than a service reported as inactive.
+- **Fermix installs from a Linux package.** Every release now also builds a
+  `.deb` and an `.rpm` for x86_64 and arm64, carrying the engine, the systemd
+  user unit the package owns, a bundled `cosign` so plugin signatures verify on
+  a stock host, shell completions for bash, zsh and fish, a man page, and the
+  installed engine's identity at `/usr/share/fermix/engine.json`. The packages
+  are cosign-signed beside the standalone binaries, attached to the release, and
+  described in `releases.json`; the release rail installs all four and runs the
+  whole service transaction on a real host before publishing. Installing the
+  package writes the engine's own loader to `/var/lib/fermix/runtimes/<digest>/`
+  after verifying its digest, and removing the package leaves it there, because
+  a Fermix that is still running opens that exact file whenever it starts a
+  helper.
+- **`fermix upgrade` tells a Linux operator the right command.** An engine this
+  project built as a package refuses to update itself before it looks at a
+  single file and names the command for the family — `sudo apt update && sudo
+  apt upgrade fermix`, `sudo dnf upgrade fermix`, or `sudo zypper update
+  fermix`. A binary the host's own package database owns is recognised too:
+  `rpm -qf` and `pacman -Qo` join `dpkg -S`, so an rpm-installed or
+  AUR-installed Fermix is no longer treated as a file the updater may rename
+  out from under the package manager, and the Debian hint finally names a
+  package that exists.
+- **`fermix restart [--json] [--when-idle]` on a Linux package install** runs
+  one restart transaction and lets systemd own the termination signal: it takes
+  the admission lease from the daemon it is replacing, clears the start-limit
+  budget, issues a single `systemctl --user restart`, waits up to ninety seconds
+  for a different pid to answer, and reports the previous pid, the new one and
+  whether the running engine is now the installed one. The lease is never
+  committed, and is cancelled only when the restart could not be issued. A
+  daemon that is not answering is recovered rather than refused. `--when-idle`
+  is refused with a sentence for now, because restarting today interrupts work
+  in progress and saying so is better than quietly doing it.
+- **`fermix diagnostics export --offline [--json]`** collects a bounded,
+  redacted support bundle with no daemon at all — the state it is most needed
+  in. Six sources (engine, service, doctor, logs, secret backend and desktop
+  session) each report available, unavailable or not applicable with an
+  observation time, so a stopped daemon, an unreadable journal or a missing log
+  file is evidence rather than a lost bundle. Logs carry both named places,
+  labelled per entry: the daemon's own rotated file and a bounded
+  `journalctl --user -u fermix` tail. Nothing is read from a keyring, and a
+  bundle that would exceed a megabyte or ten seconds refuses rather than
+  arriving truncated.
+- **`[fermix_web] port`**, an integer from 1024 through 65535 defaulting to
+  4030, sets the port the daemon's web listener and setup page use. It is
+  parsed and validated by the shared settings layer and written by `fermix
+  service install --port N`, which works while the daemon is down. A packaged
+  engine takes the port from that setting and refuses a `PORT` environment
+  variable rather than starting somewhere nothing can predict; standalone and
+  source installs keep `PORT`, then the setting, then the default. Changing it
+  needs a restart.
+- **Doctor rows for a Linux host.** `linger` reads the same inspector the
+  service verbs use and separates "not enabled" (with the one command that
+  fixes it) from "this host has no `loginctl`" (which has no command to give).
+  `service unit` understands a packaged install, where Fermix owns no unit:
+  it passes when the package's unit is effective with a home bound, warns on a
+  unit an older install left behind with the verb that adopts it, and fails on
+  a file Fermix did not write, naming it. A new `engine alignment` row carries
+  the typed comparison of installed and running engine identity, so a daemon
+  still serving the old engine after an update says so once, with the restart,
+  rather than in two places, and a new `package origin` row reports who owns the
+  binary and the command that updates it, reading the same detectors `fermix
+  upgrade` refuses with.
+- **Behavioral eval scenarios** `linux_install_and_update` and
+  `linux_service_not_running` in the `skills` suite.
+- **The typed CLI is a published contract.** `priv/cli/CONTRACT.md` and one
+  golden per published result under `priv/cli/fixtures/` describe the envelope,
+  every error code with the sentence it prints, and every field of the service,
+  restart and diagnostics results with its type and nullability. A test rebuilds
+  every golden from the code that prints it and fails on drift, so a graphical
+  client can vendor the directory and decode against it the way the macOS
+  application vendors the management protocol.
+- **A machine-readable mode for the service verbs.** `--json` on `service
+  install`, `service uninstall` and `service status` prints one
+  schema-versioned envelope on standard output and nothing else, with every
+  refusal carrying a code and one sentence; prose and progress go to standard
+  error. Exit 0 when the verb succeeded, 1 when it refused, 2 on a usage error.
+- **Tesla plugin support.** A `tesla` sign-in provider that exchanges the
+  code with the account's regional audience, sends the public redirect
+  page Tesla requires (`https://fermix.ai/api/integrations/tesla/callback`,
+  which forwards to the daemon's loopback listener), rotates refresh tokens,
+  and records the account's region on the grant. HTTP plugin tools may
+  declare `regional_urls` (the host is chosen from the signed-in region,
+  never from the model), `requires_setting` (a tool exists only while a
+  plugin setting reads `true`), and scalar bounds on their arguments.
+- **Region on the sign-in client.** A regional provider offers its regions
+  on the client row, `plugins.oauth_client.set` takes a `region`, the
+  browser setup form renders the choice, and after every sign-in the daemon
+  checks the account's region with the provider; a mismatch shows on the
+  plugin row as `wrong_region` with the fix, and that grant is never served.
+- **Plugin settings can be switches.** A manifest `config` entry declares a
+  `kind` (`text` or `boolean`); a boolean setting stores only `true` or
+  `false`, is published on the plugin row, and renders as an instant switch
+  on the setup page's plugin card.
+- **Local plugin processes can sign for the account.** A local plugin
+  runtime can be gated by a setting (`runtime.requires_setting`) and
+  receives the account's current access token through a daemon-owned file
+  named by `FERMIX_PLUGIN_TOKEN_FILE`, rewritten on every refresh and
+  deleted on sign-out; the refresh token and client secret never leave the
+  daemon.
+- **Behavioral eval suite** `tesla` (reads, command safety, explicit wake
+  and command cases).
+
+### Changed
+
+- **`fermix doctor`'s `cosign` row names the executable this host resolved**
+  and the remedy for its own install family — the distribution's own package on
+  a Linux package install, where the bundled `/usr/lib/fermix/cosign` is the
+  fallback, and Homebrew's on macOS. It no longer tells a Linux operator to run
+  `brew`.
+- **The computer-use remediation stops naming an action the user cannot take.**
+  On a Wayland session the row now says what is refused, why, and what remains
+  true, instead of "use an X11 session" on desktops that no longer offer one;
+  on arm64 Linux, where the sidecar publishes no build, it says computer use is
+  unavailable on this architecture and that Fermix itself is fully supported,
+  instead of offering an install that can only fail.
+- **The daemon-socket Doctor row reports liveness only.** Whether the running
+  engine is the installed one is a different question with a different remedy,
+  and it is now the `engine alignment` row's, so the two can never disagree.
+
+### Fixed
+
+- **The first `fermix service install` on a Linux account no longer refuses
+  itself.** Clearing the unit's start-limit budget is part of enabling it, and
+  systemd answers "not loaded" for a unit it has never seen — which is nothing
+  to clear, not a reason to stop, so a fresh account's install and the first
+  `fermix restart` after it now go through.
+- **`fermix service status` reports each fact under its own name on every
+  systemd.** The unit's properties were read back in the order they were asked
+  for while systemd answers in its own, so on some versions the status put a
+  process id where a state belongs and read a file path as a restart count.
+- **A Linux package install can restart itself from the setup page again.**
+  "Is this process supervised" and "is a service installed" were both answered
+  by looking for a unit file this binary writes, which a packaged install never
+  has — so the browser setup's apply-and-restart button refused on a daemon
+  systemd was supervising, and `fermix setup`'s own service activation read the
+  install it had just completed as a failure. Both now read the package's
+  world: a bound home with the package's unit in force, and the service
+  invocation systemd puts in the daemon's own environment.
+- **`fermix service install --port N` refuses a settings file it cannot
+  rewrite.** Setting the port re-renders `config.toml` through the shared
+  renderer, which does not know the hand-written `[mcp.*]` blocks a different
+  parser reads. Such a file is now named and left untouched, with the fix, so
+  setting a port can never delete an operator's MCP servers.
+- **`fermix setup` no longer calls a `PORT` invalid when it is simply not
+  read.** A packaged engine takes its listener port from the settings file, and
+  a `PORT` left in the shell was reported as a bad port number rather than as
+  the variable this engine does not use.
+- **The Linux service unit no longer fights the daemon for the log file.**
+  The unit sent its own output to `logs/fermix.log` with `append:` while the
+  daemon's rotating handler owned the same path, so after the first rotation
+  half the output went to a file the next rotation deleted. The unit's streams
+  now go to the journal (`journalctl --user -u fermix`) and the daemon owns
+  the file, so each line is in one named place. Every `Environment=` line is
+  serialized and escaped, so a home containing a space or a percent character
+  round-trips instead of producing a unit systemd reads wrong.
+- **An over-long home is refused before the socket bind, by name.** The
+  control socket and the voice socket now measure their path against this
+  operating system's socket address limit and refuse with the same sentence
+  the ACP socket already used, instead of failing the bind with an error that
+  every client reports as "the daemon is not running".
+- **Two local plugins can run side by side.** Every MCP client advertised
+  the same identity, and the client library keys a cache table by that
+  name, so the second local plugin failed discovery on every attempt.
+- **A local plugin's error is an error.** A result the child flagged as an
+  error reached the agent as a success, and a successful result reached it
+  as a dumped response struct rather than the child's text.
+- **A configured OAuth `region` was silently dropped** on the way through
+  the config store, so an explicit setting could never take effect.
+
 ## [0.10.4] - 2026-09-12
 
 ### Fixed
@@ -64,6 +254,25 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   universal update could never verify on both kinds of Mac. A release now
   stamps one id shared by both trees; the target remains its own field in
   the engine manifest. Nothing else changed.
+
+### Added
+
+- **Computer History records every site you visit in the browsers you
+  allow.** Alongside window titles, the recorder now reports each page's
+  address and title for every site inside an allowlisted browser, so
+  "which page was I reading about X" is answerable through `recall_activity`
+  and the daily threads. Addresses are kept as scheme, host and path only:
+  the query string and fragment, where session ids and tokens live, are
+  dropped in the recorder and again at the store. Typed text inside a
+  browser is recorded only from windows the recorder can positively classify
+  as not private; today that is the Chrome family, whose incognito windows
+  carry a marker the live check pins. Safari, Edge and Firefox report an
+  unknown private state, so their addresses are recorded, their typed text
+  is withheld, and `/history status` names them. The per-site allowlist
+  (`sites`) is retired: an existing `config.toml` still boots, logs one
+  retirement line, and the key disappears on the next save. The scrubber
+  also redacts payment-card numbers and IBANs before anything is stored.
+  Pairs with compux 0.9.0.
 
 ## [0.10.0] - 2026-09-11
 

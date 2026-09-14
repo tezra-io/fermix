@@ -23,6 +23,7 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.Harness.Vendors, as: HarnessVendors
   alias FermixCore.Management.Protocol, as: ManagementProtocol
   alias FermixCore.Management.Settings, as: ManagementSettings
+  alias FermixCore.Management.Settings.Voice, as: VoiceSettings
   alias FermixCore.Meetings
   alias FermixCore.Meetings.BrowserInstall
   alias FermixCore.Meetings.Config, as: MeetingsConfig
@@ -109,8 +110,8 @@ defmodule FermixWebWeb.SetupLive do
   @meetbot_signin_timeout_message "Sign-in timed out. Open it again and complete the Google sign-in."
   # Providers the per-provider OAuth-client form supports — mirrors
   # FermixCore.Auth.OAuthProviders. Default ports: google 1455, github 1457,
-  # notion 1458, x 1459, slack 1460.
-  @oauth_client_providers ~w(google github notion x slack)
+  # notion 1458, x 1459, slack 1460, tesla 1461.
+  @oauth_client_providers ~w(google github notion x slack tesla)
   # Derived from the descriptor registry: every provider setup field plus
   # each multi-auth-mode provider's auth_mode answer (M12 §6.2).
   @provider_restart_keys [:provider, :default_model, :reasoning_effort, :fast] ++
@@ -124,6 +125,7 @@ defmodule FermixWebWeb.SetupLive do
   @realtime_restart_keys [
     :realtime_enabled,
     :realtime_api_key,
+    :realtime_engine,
     :realtime_model,
     :realtime_reasoning_effort,
     :realtime_voice,
@@ -331,13 +333,17 @@ defmodule FermixWebWeb.SetupLive do
     end
   end
 
+  def handle_event("change_realtime", %{"realtime_form" => params}, socket) do
+    form = edited_realtime_form(socket.assigns.realtime_form, params)
+    {:noreply, assign(socket, :realtime_form, form)}
+  end
+
   def handle_event("save_realtime", %{"realtime_form" => params} = root, socket) do
     answers =
       []
       |> maybe_put_string(:realtime_enabled, params["enabled"])
       |> maybe_put_string(:realtime_api_key, params["api_key"])
-      |> maybe_put_string(:realtime_model, params["model"])
-      |> maybe_put_string(:realtime_reasoning_effort, params["reasoning_effort"])
+      |> realtime_model_answers(params, socket.assigns.realtime_form)
       |> maybe_put_string(:realtime_voice, params["voice"])
       |> maybe_put_string(:realtime_max_session_minutes, params["max_session_minutes"])
       |> maybe_put_string(:realtime_max_cost_cents, params["max_cost_cents"])
@@ -484,6 +490,9 @@ defmodule FermixWebWeb.SetupLive do
     {:noreply, save_meetings(socket, changes, Map.get(root, "__nav"))}
   end
 
+  # `set_oauth_provider/2` rebuilds the provider block from `opts` alone, so a
+  # key left out is erased: every stored value the form does not render
+  # (`redirect_uri`) or leaves blank (`region`) is carried through explicitly.
   def handle_event(
         "save_oauth_client",
         %{"provider" => provider, "oauth_client_form" => params},
@@ -499,7 +508,9 @@ defmodule FermixWebWeb.SetupLive do
         parse_int(
           params["redirect_port"],
           Keyword.get(current, :redirect_port, oauth_default_port(provider))
-        )
+        ),
+      region: present_or(params["region"], Keyword.get(current, :region)),
+      redirect_uri: Keyword.get(current, :redirect_uri)
     ]
 
     result = PluginConfig.set_oauth_provider(provider, opts)
@@ -626,6 +637,25 @@ defmodule FermixWebWeb.SetupLive do
       ) do
     case save_plugin_settings(name, params) do
       :ok ->
+        {:noreply, refresh_report(socket, "Plugin configuration saved.")}
+
+      {:error, reason} ->
+        {:noreply, save_refused(socket, reason)}
+    end
+  end
+
+  # A `kind: :boolean` manifest entry is a switch on the card, not a field in
+  # that form: the click carries the word it stores, so it applies at once. The
+  # card keeps the switch afterwards, since "off" is an answer the operator can
+  # give again.
+  def handle_event(
+        "set_plugin_switch",
+        %{"name" => name, "key" => key, "value" => value},
+        socket
+      )
+      when value in ["true", "false"] do
+    case PluginConfig.set_plugin_setting(name, key, value) do
+      {:ok, _snapshot} ->
         {:noreply, refresh_report(socket, "Plugin configuration saved.")}
 
       {:error, reason} ->
@@ -1158,10 +1188,25 @@ defmodule FermixWebWeb.SetupLive do
     "#{oauth_display_name(provider)} OAuth Client secret is required."
   end
 
+  # A regional provider's region is the token-exchange audience and the API
+  # host, so it is chosen before connecting and never defaulted.
+  defp format_config_error({:missing_oauth_region, provider})
+       when provider in @oauth_client_providers do
+    "Choose the account's region for the #{oauth_display_name(provider)} sign-in client."
+  end
+
+  defp format_config_error({:invalid_oauth_region, provider, region})
+       when provider in @oauth_client_providers and is_binary(region) do
+    "#{oauth_display_name(provider)} has no region named #{region}."
+  end
+
   defp format_config_error({:unknown_config_key, key}),
     do: "#{key} is not a config key this plugin declares."
 
   defp format_config_error({:blank_config_value, key}), do: "#{key} requires a value."
+
+  defp format_config_error({:invalid_config_value, key, :boolean}),
+    do: "#{key} is a switch: send true or false."
 
   # The two refusals the shared write tails raise. Both sentences are the
   # daemon's: the external-change one is read from the error catalog both
@@ -1215,6 +1260,7 @@ defmodule FermixWebWeb.SetupLive do
   defp oauth_default_port("notion"), do: 1458
   defp oauth_default_port("x"), do: 1459
   defp oauth_default_port("slack"), do: 1460
+  defp oauth_default_port("tesla"), do: 1461
 
   defp refresh_report(socket, message, opts \\ []) do
     Wizard.report()
@@ -1489,23 +1535,116 @@ defmodule FermixWebWeb.SetupLive do
   defp default_effort(:anthropic), do: :high
   defp default_effort(_provider), do: :none
 
+  # The model names its engine, so the two travel together and the pane never
+  # sends a pair the configuration would refuse. Reasoning effort is a
+  # Realtime-only session setting: the browser posts the effort select it last
+  # rendered, which under a Live model belongs to the engine the operator just
+  # left, so it is sent only when the chosen model is a Realtime one.
+  defp realtime_model_answers(answers, params, form) do
+    model = realtime_model_or(params["model"], form.model)
+    {:ok, engine} = RealtimeConfig.engine_for_model(model)
+
+    answers
+    |> maybe_put_string(:realtime_engine, engine)
+    |> maybe_put_string(:realtime_model, model)
+    |> realtime_effort_answer(engine, params)
+  end
+
+  defp realtime_effort_answer(answers, "openai_realtime", params),
+    do: maybe_put_string(answers, :realtime_reasoning_effort, params["reasoning_effort"])
+
+  defp realtime_effort_answer(answers, "openai_live", _params), do: answers
+
   defp build_realtime_form(snapshot) do
     config = snapshot |> get_fermix_core(:realtime) |> RealtimeConfig.normalize()
 
     %{
       enabled: config.enabled?,
-      model: config.model,
-      models: RealtimeConfig.valid_models(),
-      reasoning_effort: config.reasoning_effort,
+      models: realtime_model_options(),
       reasoning_efforts: RealtimeConfig.valid_reasoning_efforts(),
-      voice: config.voice,
-      voices: RealtimeConfig.valid_voices(),
       max_session_minutes: config.max_session_minutes,
       max_cost_cents: config.max_estimated_cost_cents_per_session,
       persist_transcripts: config.persist_transcripts?,
       api_key_set: api_key_configured?(snapshot)
     }
+    |> Map.merge(realtime_model_scope(config.model, config.voice, config.reasoning_effort))
   end
+
+  # `phx-change` posts every input the pane rendered, so the operator's unsaved
+  # edits travel back as typed and only the model-scoped fields are re-derived.
+  defp edited_realtime_form(form, params) do
+    model = realtime_model_or(params["model"], form.model)
+
+    form
+    |> Map.merge(%{
+      enabled: Map.get(params, "enabled", to_string(form.enabled)) == "true",
+      persist_transcripts:
+        Map.get(params, "persist_transcripts", to_string(form.persist_transcripts)) == "true",
+      max_session_minutes: Map.get(params, "max_session_minutes", form.max_session_minutes),
+      max_cost_cents: Map.get(params, "max_cost_cents", form.max_cost_cents)
+    })
+    |> Map.merge(
+      realtime_model_scope(
+        model,
+        params["voice"],
+        Map.get(params, "reasoning_effort", form.reasoning_effort)
+      )
+    )
+  end
+
+  # The model is the one voice choice the pane offers, so it is the axis
+  # everything else hangs off: the engine it belongs to, the voices that engine
+  # speaks, and whether reasoning effort is a setting at all. One derivation
+  # serves the saved config and an unsaved pick, so what the pane offers before
+  # a save is exactly what the save seam keeps.
+  defp realtime_model_scope(model, voice, effort) do
+    {:ok, engine} = RealtimeConfig.engine_for_model(model)
+    voices = RealtimeConfig.valid_voices(engine)
+
+    %{
+      engine: engine,
+      # `live?/1` reads the one field; asking Config keeps the engine's name out
+      # of this module.
+      live?: RealtimeConfig.live?(%RealtimeConfig{engine: engine}),
+      model: model,
+      voice: if(voice in voices, do: voice, else: %RealtimeConfig{}.voice),
+      voices: voices,
+      reasoning_effort: realtime_effort_for(engine, effort)
+    }
+  end
+
+  # Reasoning effort exists only under Realtime; Live normalizes it away. A
+  # return to a Realtime model therefore has nothing to restore and opens on the
+  # same default the save seam writes.
+  defp realtime_effort_for("openai_live", _effort), do: nil
+
+  defp realtime_effort_for("openai_realtime", effort) do
+    if effort in RealtimeConfig.valid_reasoning_efforts(),
+      do: effort,
+      else: %RealtimeConfig{}.reasoning_effort
+  end
+
+  # Both engines' models in one list, each option naming the engine it speaks
+  # through. The engine is a property of the model, never a second control the
+  # operator has to keep in agreement with the first.
+  defp realtime_model_options do
+    Enum.flat_map(RealtimeConfig.valid_engines(), fn engine ->
+      label = VoiceSettings.engine_label(engine)
+      Enum.map(RealtimeConfig.valid_models(engine), &%{id: &1, label: "#{&1} · #{label}"})
+    end)
+  end
+
+  # The <select> offers only models the catalog names, so anything else is a
+  # hand-crafted post: keep the model the pane is already scoped to rather than
+  # deriving an engine from a slug no release knows.
+  defp realtime_model_or(model, current) when is_binary(model) do
+    case RealtimeConfig.engine_for_model(model) do
+      {:ok, _engine} -> model
+      :error -> current
+    end
+  end
+
+  defp realtime_model_or(_model, current), do: current
 
   defp build_channels_form(snapshot) do
     channels = Map.get(snapshot, :fermix_channels, [])
@@ -2193,6 +2332,7 @@ defmodule FermixWebWeb.SetupLive do
 
   defp plugin_card(plugin, snapshot, yanked_installed) do
     {enabled?, status} = plugin_card_state(plugin, snapshot)
+    configured = PluginConfig.plugin_settings(plugin.name)
 
     %{
       name: plugin.name,
@@ -2211,7 +2351,8 @@ defmodule FermixWebWeb.SetupLive do
       # Manifest data, not a plugin name: a `resource_scope` is what earns the
       # card its workspace step (M27 §8.1).
       resource_scope?: plugin.resource_scope != nil,
-      missing_config: missing_config_entries(plugin),
+      config_entries: config_entries(plugin, configured, status),
+      config_switches: config_switches(plugin, configured, enabled?),
       yanked_version: Map.get(yanked_installed, plugin.name)
     }
   end
@@ -2248,14 +2389,55 @@ defmodule FermixWebWeb.SetupLive do
 
   defp client_rejection(_plugin, _status), do: nil
 
-  # The card's config form (§4.4): one input per missing required manifest
-  # config entry, labelled with the manifest prompt.
-  defp missing_config_entries(plugin) do
-    configured = PluginConfig.plugin_settings(plugin.name)
-
+  # The card's config form (§4.4): one input per manifest text entry the operator
+  # still owes, labelled with the manifest prompt. A boolean entry is never here
+  # — it is a switch, and a switch is answered in place.
+  defp config_entries(plugin, configured, status) do
     plugin.config
-    |> Enum.filter(&(&1.required and not Map.has_key?(configured, &1.key)))
-    |> Enum.map(&Map.take(&1, [:key, :prompt]))
+    |> Enum.filter(&owed_text_entry?(&1, configured, status))
+    |> Enum.map(&config_form_entry(&1, configured))
+  end
+
+  defp owed_text_entry?(%{kind: :boolean}, _configured, _status), do: false
+
+  defp owed_text_entry?(%{kind: :text} = entry, configured, status) do
+    status == :needs_config and entry.required and unanswered?(entry, configured)
+  end
+
+  # Every boolean entry an enabled plugin declares is an instant switch beside
+  # the card's other controls — "off" is a real answer, so a switch stays on the
+  # card after it is given instead of vanishing the way a filled-in path does.
+  # `next` is the word one click stores.
+  defp config_switches(_plugin, _configured, false), do: []
+
+  defp config_switches(plugin, configured, true) do
+    plugin.config
+    |> Enum.filter(&boolean_entry?/1)
+    |> Enum.map(&config_switch_entry(&1, configured))
+  end
+
+  defp boolean_entry?(%{kind: :boolean}), do: true
+  defp boolean_entry?(%{kind: :text}), do: false
+
+  defp unanswered?(entry, configured), do: not Map.has_key?(configured, entry.key)
+
+  defp config_form_entry(entry, configured) do
+    %{
+      key: entry.key,
+      prompt: entry.prompt,
+      value: Map.get(configured, entry.key, "")
+    }
+  end
+
+  defp config_switch_entry(entry, configured) do
+    checked? = Map.get(configured, entry.key) == "true"
+
+    %{
+      key: entry.key,
+      prompt: entry.prompt,
+      checked: checked?,
+      next: to_string(not checked?)
+    }
   end
 
   # A not-yet-installed catalog entry: branding straight from the index (§6 —
@@ -2382,7 +2564,9 @@ defmodule FermixWebWeb.SetupLive do
       display_name: oauth_display_name(provider),
       client_id: Keyword.get(config, :client_id, ""),
       client_secret_set: Keyword.get(config, :client_secret) |> present?(),
-      redirect_port: Keyword.get(config, :redirect_port, oauth_default_port(provider))
+      redirect_port: Keyword.get(config, :redirect_port, oauth_default_port(provider)),
+      region: Keyword.get(config, :region),
+      regions: OAuthProviders.regions(provider)
     }
   end
 
@@ -2774,9 +2958,9 @@ defmodule FermixWebWeb.SetupLive do
       display_name: "Computer History",
       description: "Passive activity memory from the apps you allow.",
       tooltip:
-        "Opt-in activity memory from the apps you allow: window titles and typed text; " <>
-          "inside browsers only window titles are captured today. " <>
-          "Passwords and secure fields are never captured. " <>
+        "Opt-in activity memory from the apps you allow: window titles, and in browsers " <>
+          "the page titles and addresses of every site you visit, plus typed text outside " <>
+          "private windows. Passwords and secure fields are never captured. " <>
           computer_history_summarizer_sentence(),
       docs_url: "https://fermix.ai/docs/computer-history/",
       enabled?: enabled?,

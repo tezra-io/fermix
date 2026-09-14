@@ -32,8 +32,8 @@ defmodule Fermix.CLI.HomeOwnerTest do
     def installed?(_scope), do: false
     def start(_scope), do: :ok
     def stop(_scope), do: :ok
-    def install(_scope), do: :ok
-    def uninstall(_scope), do: :ok
+    def install(_scope, _opts), do: :ok
+    def uninstall(_scope, _opts), do: :ok
   end
 
   describe "when a daemon answers" do

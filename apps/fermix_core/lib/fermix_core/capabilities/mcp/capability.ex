@@ -25,8 +25,18 @@ defmodule FermixCore.Capabilities.MCP.Capability do
   default (`hidden_from_agent?: false`); operators can hide individual tools by
   setting `[mcp.servers.X.tools.Y] hidden_from_agent = true` in the TOML, which
   is wired through `tool_overrides`.
+
+  ## Two ways a call fails, both honest
+
+  A JSON-RPC error (`{:error, reason}` from the caller) and an MCP *domain*
+  error (a valid response carrying `isError: true`) are both `Tool.error`, so
+  the exec event records `success: false` either way. The child's own text
+  content rides the tool result, redacted — a terminal status word is not a
+  diagnosis, and an agent that cannot read "vehicle is asleep" blind-retries
+  into the same wall.
   """
 
+  alias FermixCore.Auth.Redaction
   alias FermixCore.Capabilities.Builtin.Tool
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.MCP.Naming
@@ -169,6 +179,14 @@ defmodule FermixCore.Capabilities.MCP.Capability do
 
   defp run_call(spec, invoke_context, args) do
     case spec.caller.call_tool(spec.source_id, spec.original, args, invoke_context) do
+      # A local child says "this call failed" with `isError: true` on an
+      # otherwise valid JSON-RPC response. Rendering that as a success whose
+      # output happens to contain the word "error" tells the agent the call
+      # worked and records `success: true` in the exec event, so a plugin that
+      # fails every call reads as a healthy one in every trace.
+      {:ok, %Anubis.MCP.Response{is_error: true} = response} ->
+        {:ok, Tool.error(child_error_message(spec, response))}
+
       {:ok, result} ->
         {:ok, Tool.success(format_result(result))}
 
@@ -243,7 +261,47 @@ defmodule FermixCore.Capabilities.MCP.Capability do
   end
 
   defp format_result(result) when is_binary(result), do: result
+
+  # A child's text blocks are the tool output, verbatim and joined: the model
+  # reads the helper's sentence or JSON, never a dumped response struct. A
+  # result with no text block falls back to the inspected value so nothing is
+  # silently dropped.
+  defp format_result(%Anubis.MCP.Response{result: result} = response) do
+    case child_error_text(result) do
+      nil -> inspect(response, pretty: true, limit: :infinity)
+      text -> text
+    end
+  end
+
   defp format_result(result), do: inspect(result, pretty: true, limit: :infinity)
+
+  # The child's own words are what let the agent act ("vehicle is asleep — wake
+  # it first") instead of blind-retrying into the same wall, so they ride the
+  # tool result. They are redacted first: a child that echoes a bearer token
+  # back in its failure message must not put one in the trace.
+  defp child_error_message(spec, %Anubis.MCP.Response{result: result}) do
+    prefix = "MCP tool '#{spec.server_name}/#{spec.original}' reported an error"
+
+    case child_error_text(result) do
+      nil -> prefix <> " with no message."
+      text -> prefix <> ": " <> Redaction.redact(text)
+    end
+  end
+
+  defp child_error_text(%{"content" => content}) when is_list(content) do
+    content
+    |> Enum.flat_map(fn
+      %{"text" => text} when is_binary(text) -> [text]
+      _other_block -> []
+    end)
+    |> Enum.join("\n")
+    |> case do
+      "" -> nil
+      text -> text
+    end
+  end
+
+  defp child_error_text(_result), do: nil
 
   defp format_reason(reason) when is_binary(reason), do: reason
 

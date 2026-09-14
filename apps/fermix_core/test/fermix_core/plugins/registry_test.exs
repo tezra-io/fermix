@@ -298,6 +298,285 @@ defmodule FermixCore.Plugins.RegistryTest do
     end
   end
 
+  # --- M40 §3.2: per-region hosts and per-tool setting gates ---------------
+
+  describe "request.regional_urls" do
+    test "a regional http tool loads on a plugin_api 2 manifest" do
+      tool = regional_tool("notion_search")
+      manifest = v2_manifest("notion") |> Map.put("tools", [tool]) |> api_key_auth()
+
+      assert {:ok, plugin} = Registry.decode_manifest(manifest, "/tmp/notion/plugin.json")
+      assert [%{"request" => request}] = plugin.tools
+      assert Map.keys(request["regional_urls"]) |> Enum.sort() == ["eu", "na"]
+      refute Map.has_key?(request, "url")
+    end
+
+    test "a non-https regional url is rejected at load, tagged with the tool" do
+      tool =
+        put_in(
+          regional_tool("notion_search"),
+          ["request", "regional_urls", "eu"],
+          "http://api.eu.notion.com/v1/search"
+        )
+
+      manifest = v2_manifest("notion") |> Map.put("tools", [tool]) |> api_key_auth()
+
+      assert {:error,
+              {:invalid_tool_template, "notion_search",
+               {:non_https_url, "http://api.eu.notion.com/v1/search"}}} =
+               Registry.decode_manifest(manifest, "/tmp/notion/plugin.json")
+    end
+
+    test "declaring both url and regional_urls is rejected at load" do
+      tool =
+        put_in(regional_tool("notion_search"), ["request", "url"], "https://api.notion.com/x")
+
+      manifest = v2_manifest("notion") |> Map.put("tools", [tool]) |> api_key_auth()
+
+      assert {:error, {:invalid_tool_template, "notion_search", :regional_urls_and_url}} =
+               Registry.decode_manifest(manifest, "/tmp/notion/plugin.json")
+    end
+
+    test "a request declaring neither url nor regional_urls is rejected at load" do
+      tool =
+        update_in(regional_tool("notion_search"), ["request"], &Map.delete(&1, "regional_urls"))
+
+      manifest = v2_manifest("notion") |> Map.put("tools", [tool]) |> api_key_auth()
+
+      assert {:error, {:invalid_tool_template, "notion_search", :missing_url}} =
+               Registry.decode_manifest(manifest, "/tmp/notion/plugin.json")
+    end
+
+    test "a placeholder in any regional url must be a declared parameter" do
+      tool =
+        put_in(
+          regional_tool("notion_search"),
+          ["request", "regional_urls", "eu"],
+          "https://api.eu.notion.com/v1/{undeclared}"
+        )
+
+      manifest = v2_manifest("notion") |> Map.put("tools", [tool]) |> api_key_auth()
+
+      assert {:error,
+              {:invalid_tool_template, "notion_search", {:undeclared_placeholder, "undeclared"}}} =
+               Registry.decode_manifest(manifest, "/tmp/notion/plugin.json")
+    end
+  end
+
+  describe "per-tool requires_setting" do
+    test "a tool may gate itself on a key its own manifest declares" do
+      manifest = gated_manifest("notion_wake", "ALLOW_WAKE")
+
+      assert {:ok, plugin} = Registry.decode_manifest(manifest, "/tmp/notion/plugin.json")
+      assert [%{"requires_setting" => "ALLOW_WAKE"}] = plugin.tools
+      assert [%{key: "ALLOW_WAKE"}] = plugin.config
+    end
+
+    test "a requires_setting naming a key the manifest does not declare is rejected" do
+      manifest =
+        gated_manifest("notion_wake", "ALLOW_WAKE")
+        |> put_in(["tools", Access.at(0), "requires_setting"], "ALLOW_SOMETHING_ELSE")
+
+      assert {:error, {:unknown_requires_setting, "notion_wake", "ALLOW_SOMETHING_ELSE"}} =
+               Registry.decode_manifest(manifest, "/tmp/notion/plugin.json")
+    end
+
+    test "a requires_setting that is not a string is rejected" do
+      manifest =
+        gated_manifest("notion_wake", "ALLOW_WAKE")
+        |> put_in(["tools", Access.at(0), "requires_setting"], true)
+
+      assert {:error, {:unknown_requires_setting, "notion_wake", true}} =
+               Registry.decode_manifest(manifest, "/tmp/notion/plugin.json")
+    end
+
+    # The gate governs what `Plugins.Capabilities` advertises, and mcp-rail
+    # entries never register there — MCP discovery is authoritative. A gate that
+    # could not take effect is refused rather than silently ignored.
+    test "an mcp-rail tool cannot carry the gate" do
+      manifest =
+        gated_manifest("notion_wake", "ALLOW_WAKE")
+        |> put_in(["tools", Access.at(0), "rail"], "mcp")
+        |> Map.put("runtime", %{
+          "kind" => "node",
+          "min_version" => "20",
+          "command" => "node",
+          "args" => ["src/index.js"],
+          "vendored" => false
+        })
+
+      assert {:error, {:requires_setting_on_mcp_tool, "notion_wake"}} =
+               Registry.decode_manifest(manifest, "/tmp/notion/plugin.json")
+    end
+
+    test "a manifest that declares no config at all cannot gate a tool" do
+      manifest =
+        gated_manifest("notion_wake", "ALLOW_WAKE") |> Map.delete("config")
+
+      assert {:error, {:unknown_requires_setting, "notion_wake", "ALLOW_WAKE"}} =
+               Registry.decode_manifest(manifest, "/tmp/notion/plugin.json")
+    end
+  end
+
+  # The runtime half of the gate (M8 §9.3): the local process itself may be
+  # gated on one of its own manifest's `config` keys, so an operator switch
+  # decides whether a vendored helper runs at all — not just which of its tools
+  # are advertised.
+  describe "runtime requires_setting" do
+    test "a runtime may gate itself on a key its own manifest declares" do
+      assert {:ok, plugin} =
+               Registry.decode_manifest(gated_runtime_manifest("ALLOW_CONTROL"), "/tmp/p.json")
+
+      assert plugin.runtime["requires_setting"] == "ALLOW_CONTROL"
+    end
+
+    test "a runtime block with no gate still decodes" do
+      manifest =
+        gated_runtime_manifest("ALLOW_CONTROL")
+        |> update_in(["runtime"], &Map.delete(&1, "requires_setting"))
+
+      assert {:ok, plugin} = Registry.decode_manifest(manifest, "/tmp/p.json")
+      refute Map.has_key?(plugin.runtime, "requires_setting")
+    end
+
+    test "a gate naming a key the manifest does not declare is rejected" do
+      manifest =
+        gated_runtime_manifest("ALLOW_CONTROL")
+        |> put_in(["runtime", "requires_setting"], "ALLOW_SOMETHING_ELSE")
+
+      assert {:error, {:unknown_requires_setting, "runtime", "ALLOW_SOMETHING_ELSE"}} =
+               Registry.decode_manifest(manifest, "/tmp/p.json")
+    end
+
+    test "a gate that is not a string is rejected" do
+      manifest =
+        gated_runtime_manifest("ALLOW_CONTROL") |> put_in(["runtime", "requires_setting"], true)
+
+      assert {:error, {:unknown_requires_setting, "runtime", true}} =
+               Registry.decode_manifest(manifest, "/tmp/p.json")
+    end
+
+    test "a manifest that declares no config at all cannot gate its runtime" do
+      manifest = gated_runtime_manifest("ALLOW_CONTROL") |> Map.delete("config")
+
+      assert {:error, {:unknown_requires_setting, "runtime", "ALLOW_CONTROL"}} =
+               Registry.decode_manifest(manifest, "/tmp/p.json")
+    end
+
+    # A hosted runtime is not a process this daemon starts, so there is no
+    # local switch to gate it with.
+    test "a remote runtime may not carry the gate" do
+      manifest =
+        v2_manifest("remotefix")
+        |> api_key_auth()
+        |> Map.merge(%{
+          "plugin_api" => 3,
+          "runtime" => %{
+            "kind" => "remote_mcp",
+            "transport" => "streamable_http",
+            "protocol_version" => "2025-06-18",
+            "base_url" => "https://mcp.example.com",
+            "mcp_path" => "/mcp",
+            "tool_name_mode" => "prefix",
+            "requires_setting" => "ALLOW_CONTROL"
+          }
+        })
+
+      assert {:error, {:remote_runtime_conflict, ["requires_setting"]}} =
+               Registry.decode_manifest(manifest, "/tmp/p.json")
+    end
+  end
+
+  defp gated_runtime_manifest(key) do
+    v2_manifest("gatedrt")
+    |> api_key_auth()
+    |> Map.put("config", [
+      %{"key" => key, "prompt" => "Allow it", "required" => false, "kind" => "boolean"}
+    ])
+    |> Map.put("runtime", %{
+      "kind" => "binary",
+      "command" => "gatedrt-helper",
+      "vendored" => true,
+      "requires_setting" => key
+    })
+    |> Map.put("tools", [mcp_tool("gatedrt_do")])
+  end
+
+  # A setting's kind is what both doors render it as: a switch or a text field.
+  # It is declared rather than inferred, because a gate that reads exactly
+  # "true" and a field the operator types into are the same wire shape, and
+  # guessing from the key name is how a vault path becomes a toggle.
+  describe "config entry kinds" do
+    test "an entry that declares no kind is text" do
+      manifest = config_manifest(%{"key" => "VAULT_PATH", "prompt" => "Where?"})
+
+      assert {:ok, plugin} = Registry.decode_manifest(manifest, "/tmp/cfg/plugin.json")
+
+      assert [%{key: "VAULT_PATH", prompt: "Where?", required: false, kind: :text}] =
+               plugin.config
+    end
+
+    test "both declared kinds decode to their atom" do
+      for {declared, kind} <- [{"text", :text}, {"boolean", :boolean}] do
+        entry = %{"key" => "ALLOW_WAKE", "prompt" => "Allow waking", "kind" => declared}
+
+        assert {:ok, plugin} =
+                 Registry.decode_manifest(config_manifest(entry), "/tmp/cfg/plugin.json")
+
+        assert [%{key: "ALLOW_WAKE", kind: ^kind}] = plugin.config
+      end
+    end
+
+    # Refused at decode rather than defaulted: a manifest asking for a switch
+    # Fermix does not have must not quietly render as a text field the operator
+    # then types the wrong word into.
+    test "any other kind is refused, named with the key that declared it" do
+      for declared <- ["switch", "Boolean", "", nil, true] do
+        entry = %{"key" => "ALLOW_WAKE", "prompt" => "Allow waking", "kind" => declared}
+
+        assert {:error, {:invalid_config_kind, "ALLOW_WAKE", ^declared}} =
+                 Registry.decode_manifest(config_manifest(entry), "/tmp/cfg/plugin.json"),
+               "#{inspect(declared)} was accepted as a setting kind"
+      end
+    end
+
+    # The gate is not restricted to boolean entries: a text setting can gate a
+    # tool too, and boolean is the kind the gate is meant for rather than the
+    # only one it accepts.
+    test "a boolean entry can carry a tool gate" do
+      manifest =
+        gated_manifest("notion_wake", "ALLOW_WAKE")
+        |> put_in(["config", Access.at(0), "kind"], "boolean")
+
+      assert {:ok, plugin} = Registry.decode_manifest(manifest, "/tmp/notion/plugin.json")
+      assert [%{key: "ALLOW_WAKE", kind: :boolean}] = plugin.config
+      assert [%{"requires_setting" => "ALLOW_WAKE"}] = plugin.tools
+    end
+  end
+
+  defp regional_tool(name) do
+    http_tool(name)
+    |> update_in(["request"], fn request ->
+      request
+      |> Map.delete("url")
+      |> Map.put("regional_urls", %{
+        "na" => "https://api.notion.com/v1/search",
+        "eu" => "https://api.eu.notion.com/v1/search"
+      })
+    end)
+  end
+
+  defp config_manifest(entry) do
+    valid_manifest("cfgfix") |> Map.put("config", [entry])
+  end
+
+  defp gated_manifest(tool_name, key) do
+    v2_manifest("notion")
+    |> api_key_auth()
+    |> Map.put("config", [%{"key" => key, "prompt" => "Allow it", "required" => false}])
+    |> Map.put("tools", [Map.put(http_tool(tool_name), "requires_setting", key)])
+  end
+
   defp mcp_tool(name) do
     %{"name" => name, "description" => "An mcp tool.", "read_only" => true, "rail" => "mcp"}
   end

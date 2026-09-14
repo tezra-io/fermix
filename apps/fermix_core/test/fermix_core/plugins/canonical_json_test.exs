@@ -10,18 +10,26 @@ defmodule FermixCore.Plugins.CanonicalJsonTest do
   # algorithm is never entirely unguarded.
   @fixture_dir Path.expand("../../../../../../fermix-plugins/scripts/fixtures/jcs", __DIR__)
 
-  defp fixtures do
-    case File.ls(@fixture_dir) do
-      {:ok, files} -> files |> Enum.filter(&String.ends_with?(&1, ".json")) |> Enum.sort()
-      {:error, _reason} -> []
-    end
-  end
+  # The listing and the helpers that serve it share one condition. When the
+  # sibling checkout is absent the `for` below generates no test body, and a
+  # helper defined only for those bodies then warns as unused — which
+  # `mix test --warnings-as-errors` turns into a failure in exactly the
+  # environment that has no checkout, namely CI.
+  @fixture_files (case File.ls(@fixture_dir) do
+                    {:ok, files} ->
+                      files |> Enum.filter(&String.ends_with?(&1, ".json")) |> Enum.sort()
 
-  defp load(file), do: @fixture_dir |> Path.join(file) |> File.read!() |> Jason.decode!()
+                    {:error, _reason} ->
+                      []
+                  end)
+
+  if @fixture_files != [] do
+    defp load(file), do: @fixture_dir |> Path.join(file) |> File.read!() |> Jason.decode!()
+  end
 
   describe "cross-language golden fixtures" do
     test "the fixture directory is present" do
-      if fixtures() == [] do
+      if @fixture_files == [] do
         IO.puts(
           :stderr,
           "\n  SKIPPED: #{@fixture_dir} not found — clone tezra-io/fermix-plugins " <>
@@ -32,15 +40,7 @@ defmodule FermixCore.Plugins.CanonicalJsonTest do
       assert true
     end
 
-    for file <-
-          File.ls(@fixture_dir)
-          |> (case do
-                {:ok, files} ->
-                  files |> Enum.filter(&String.ends_with?(&1, ".json")) |> Enum.sort()
-
-                {:error, _} ->
-                  []
-              end) do
+    for file <- @fixture_files do
       @file_name file
 
       test "#{file} canonicalizes byte-for-byte as pluginlib.py does" do
@@ -50,20 +50,22 @@ defmodule FermixCore.Plugins.CanonicalJsonTest do
     end
   end
 
-  defp run_fixture(%{"error" => _error} = fixture) do
-    # A refusal fixture: parsing must fail BEFORE canonicalization.
-    assert {:error, :duplicate_object_key} = CanonicalJson.decode(fixture["input_json"])
-  end
+  if @fixture_files != [] do
+    defp run_fixture(%{"error" => _error} = fixture) do
+      # A refusal fixture: parsing must fail BEFORE canonicalization.
+      assert {:error, :duplicate_object_key} = CanonicalJson.decode(fixture["input_json"])
+    end
 
-  defp run_fixture(fixture) do
-    assert {:ok, decoded} = CanonicalJson.decode(fixture["input_json"])
-    assert {:ok, canonical} = CanonicalJson.encode(decoded)
+    defp run_fixture(fixture) do
+      assert {:ok, decoded} = CanonicalJson.decode(fixture["input_json"])
+      assert {:ok, canonical} = CanonicalJson.encode(decoded)
 
-    assert canonical == fixture["expected"],
-           "#{fixture["name"]}: canonical bytes differ from the pluginlib.py fixture"
+      assert canonical == fixture["expected"],
+             "#{fixture["name"]}: canonical bytes differ from the pluginlib.py fixture"
 
-    assert {:ok, digest} = CanonicalJson.digest(decoded)
-    assert digest == fixture["expected_sha256"]
+      assert {:ok, digest} = CanonicalJson.digest(decoded)
+      assert digest == fixture["expected_sha256"]
+    end
   end
 
   describe "number formatting (ECMAScript Number::toString)" do

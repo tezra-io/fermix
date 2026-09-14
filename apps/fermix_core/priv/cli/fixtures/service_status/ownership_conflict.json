@@ -1,0 +1,52 @@
+{
+  "ok": true,
+  "result": {
+    "active": true,
+    "alignment": "ownership_conflict",
+    "binding": {
+      "home": "/home/operator/.fermix",
+      "reason": null,
+      "state": "bound"
+    },
+    "enabled": true,
+    "installed": {
+      "architecture": "x86_64",
+      "artifact_target": "linux_x86_64",
+      "build_id": "release-9",
+      "distribution_identity": "linux_package",
+      "engine_id": "fermix-core",
+      "integrity": "verified",
+      "product_version": "1.2.3",
+      "source_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "invocation_id": "4b1e9d1a",
+    "linger": "enabled",
+    "listener": {
+      "origin": "http://127.0.0.1:4030",
+      "port": 4030,
+      "source": "daemon"
+    },
+    "path_source": "engine_baseline",
+    "pid": 4711,
+    "restart_count": 0,
+    "running": {
+      "architecture": "x86_64",
+      "artifact_target": "linux_x86_64",
+      "build_id": "release-9",
+      "distribution_identity": "standalone",
+      "engine_id": "fermix-core",
+      "pid": "4711",
+      "product_version": "1.2.3",
+      "source_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "sub_state": "running",
+    "unit": {
+      "effective_path": "/usr/lib/systemd/user/fermix.service",
+      "foreign": false,
+      "legacy_generated": false,
+      "need_daemon_reload": false,
+      "vendor": true
+    }
+  },
+  "schema_version": 1
+}

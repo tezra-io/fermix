@@ -68,6 +68,7 @@ defmodule Fermix.CLI.VoiceCommand do
     IO.puts("daemon: #{daemon}")
     IO.puts("enabled: #{Map.get(realtime, "enabled", false)}")
     IO.puts("provider: #{Map.get(realtime, "provider") || "none"}")
+    IO.puts("engine: #{Map.get(realtime, "engine") || "none"}")
     IO.puts("model: #{Map.get(realtime, "model") || "none"}")
     IO.puts("realtime key: #{realtime_key_label(realtime)}")
     IO.puts("socket: #{Map.get(realtime, "socket_path") || "none"}")

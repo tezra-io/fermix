@@ -209,6 +209,39 @@ defmodule FermixOpik.TraceFile do
     {[:fermix, :realtime, :call_stop], realtime_usage_measurements(row), realtime_meta(row)}
   end
 
+  # A GPT-Live voice call (M41 §7). Every row replays through one allowlist that
+  # INCLUDES `parent_session`: a delegation's turn is linked to its call by that
+  # field alone, so dropping it would replay a call and its backend turns as
+  # unrelated roots.
+  defp normalize_agent_event("voice_live_call_start", row) do
+    {[:fermix, :voice_live, :call_start], voice_live_usage_measurements(row),
+     voice_live_meta(row)}
+  end
+
+  defp normalize_agent_event("voice_live_session_started", row) do
+    {[:fermix, :voice_live, :session_started], voice_live_usage_measurements(row),
+     voice_live_meta(row)}
+  end
+
+  defp normalize_agent_event("voice_live_delegation_start", row) do
+    {[:fermix, :voice_live, :delegation_start], voice_live_usage_measurements(row),
+     voice_live_meta(row)}
+  end
+
+  defp normalize_agent_event("voice_live_delegation_stop", row) do
+    {[:fermix, :voice_live, :delegation_stop], voice_live_usage_measurements(row),
+     voice_live_meta(row)}
+  end
+
+  defp normalize_agent_event("voice_live_provider_error", row) do
+    {[:fermix, :voice_live, :provider_error], voice_live_usage_measurements(row),
+     voice_live_meta(row)}
+  end
+
+  defp normalize_agent_event("voice_live_call_stop", row) do
+    {[:fermix, :voice_live, :call_stop], voice_live_usage_measurements(row), voice_live_meta(row)}
+  end
+
   # A management Doctor run (M34 §5). Counts only — a check summary can name an
   # operator path, so no summary or evidence text is replayed.
   defp normalize_agent_event("doctor_session_start", row) do
@@ -259,6 +292,39 @@ defmodule FermixOpik.TraceFile do
 
   defp doctor_count_keys do
     [:passed, :warning, :failed, :unavailable, :skipped, :cancelled, :timed_out]
+  end
+
+  defp voice_live_meta(row) do
+    meta(row, [
+      :session_id,
+      :parent_session,
+      :agent,
+      :engine,
+      :device_id,
+      :model,
+      :voice,
+      :provider_session_id,
+      :delegation_id,
+      :revision,
+      :turn_session_id,
+      :status,
+      :reason,
+      :max_duration_ms
+    ])
+  end
+
+  # Rebuild a voice_live row's numeric measurements. Voice is duration-priced,
+  # so the ledger is seconds plus integer millicents — never tokens. Only keys
+  # actually present are carried: a call whose finalization never completed must
+  # replay with no cost rather than a fabricated zero.
+  defp voice_live_usage_measurements(row) do
+    [:voice_seconds, :voice_cost_millicents, :backend_turns, :accounting_complete, :duration_ms]
+    |> Enum.reduce(%{}, fn key, acc ->
+      case Map.fetch(row, Atom.to_string(key)) do
+        {:ok, value} when is_number(value) -> Map.put(acc, key, value)
+        _other -> acc
+      end
+    end)
   end
 
   defp realtime_meta(row) do

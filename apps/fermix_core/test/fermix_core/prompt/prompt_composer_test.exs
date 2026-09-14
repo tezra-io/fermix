@@ -128,6 +128,30 @@ defmodule FermixCore.Prompt.PromptComposerTest do
     assert Enum.at(realtime.messages, 4).content =~ "<memory-context>"
   end
 
+  # LIVE.md belongs to the Live voice frontend alone (M41 §6.1). It is loaded
+  # through `BootstrapLoader.load_live/2` and composed by `Realtime.LivePrompt`,
+  # never by this composer — a Core text prompt that carried it would tell the
+  # agent it is the voice frontend. Written as "no LIVE.md part and no LIVE.md
+  # bytes", so a future part named differently still fails this test.
+  test "compose_with_metadata/1 never carries LIVE.md, realtime sessions included", %{
+    agent_id: agent_id
+  } do
+    write_bootstrap(agent_id, "IDENTITY.md", "identity content")
+    write_bootstrap(agent_id, "FERMIX.md", "agents content")
+    write_bootstrap(agent_id, "REALTIME.md", "realtime voice rules")
+    write_bootstrap(agent_id, "LIVE.md", "# LIVE.md — Live Voice Companion\n\nlive rules")
+
+    for opts <- [[], [realtime?: true]] do
+      assert {:ok, composition} =
+               PromptComposer.compose_with_metadata(
+                 [agent_id: agent_id, available_skills: []] ++ opts
+               )
+
+      refute Enum.any?(composition.parts, &(&1.name == :live))
+      refute Enum.any?(composition.messages, &(&1.content =~ "LIVE.md — Live Voice Companion"))
+    end
+  end
+
   test "compose/1 falls back to defaults for IDENTITY/FERMIX when bootstrap is missing", %{
     agent_id: agent_id
   } do

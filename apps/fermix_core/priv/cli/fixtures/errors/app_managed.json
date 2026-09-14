@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "app_managed",
+    "sentence": "The Fermix application owns this engine's background service. Use the application's own background service controls."
+  },
+  "ok": false,
+  "schema_version": 1
+}

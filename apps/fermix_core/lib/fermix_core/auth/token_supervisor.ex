@@ -51,6 +51,69 @@ defmodule FermixCore.Auth.TokenSupervisor do
   end
 
   @doc """
+  Ask this profile's manager to project its access token to `path` (M8 §9.3).
+
+  Only the daemon can do this: the projection has to be rewritten on every
+  refresh, and a tree-less CLI VM has no manager to do the rewriting. Such a VM
+  refuses with `:token_file_needs_daemon` rather than writing a token file it
+  could never keep fresh — `Auth.TokenFile.needs_daemon_sentence/0` is the
+  sentence for it. No `fermix` CLI verb reaches here today: the verbs mutate
+  config and the plugin store on disk and ask the running daemon to re-apply,
+  and plugin children are only ever materialized inside the daemon's MCP tree.
+  """
+  @spec enable_token_file(String.t(), Path.t()) :: :ok | {:error, term()}
+  def enable_token_file(auth_profile, path) when is_binary(auth_profile) and is_binary(path) do
+    case ensure_child(auth_profile) do
+      {:ok, server} -> TokenManager.enable_token_file(server, path)
+      {:error, :not_started} -> {:error, :token_file_needs_daemon}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  Delete one profile's token projection, when a manager is holding it.
+
+  Never starts a manager, for the same reason `forget/1` does not: a profile
+  with no live holder is already writing nothing, and a projection left on disk
+  by a previous daemon is collected by the plugin store's boot sweep before any
+  child spawns.
+  """
+  @spec disable_token_file(String.t()) :: :ok | {:error, term()}
+  def disable_token_file(auth_profile) when is_binary(auth_profile) do
+    case running_manager(auth_profile) do
+      {:ok, server} -> TokenManager.disable_token_file(server)
+      :none -> :ok
+    end
+  end
+
+  @doc """
+  Delete every profile's token projection except the ones in `kept`.
+
+  The reconciliation half of `enable_token_file/2`: the daemon re-derives which
+  plugin children it wants on every reload, and every other live manager must
+  stop keeping an access token on disk. It asks the running managers rather than
+  the plugin registry, because the registry no longer lists a plugin that was
+  just uninstalled or dropped from `dev_local` — and those are precisely the
+  cases whose file has to go. A manager holding no projection answers a cheap
+  no-op, so profiles that never had one cost nothing.
+  """
+  @spec release_token_files_except(Enumerable.t()) :: :ok
+  def release_token_files_except(kept) do
+    keep = MapSet.new(kept)
+
+    live_profiles()
+    |> Enum.reject(&MapSet.member?(keep, &1))
+    |> Enum.each(&disable_token_file/1)
+  end
+
+  defp live_profiles do
+    case Process.whereis(@registry) do
+      nil -> []
+      _pid -> Registry.select(@registry, [{{:"$1", :_, :_}, [], [:"$1"]}])
+    end
+  end
+
+  @doc """
   Drops one profile's tokens from the manager serving it, when one is running.
 
   Never starts a manager: a profile with no live holder is already in the state
@@ -172,7 +235,16 @@ defmodule FermixCore.Auth.TokenSupervisor do
     end
   end
 
-  defp direct_read_entry(
+  # The tree-less world reads the same quarantine the supervised manager applies
+  # in memory, so a CLI VM cannot hand out a credential the daemon refuses.
+  defp direct_read_entry(auth_profile, entry) do
+    case Store.quarantine_reason(entry) do
+      nil -> serve_entry(auth_profile, entry)
+      reason -> {:error, reason}
+    end
+  end
+
+  defp serve_entry(
          auth_profile,
          %{tokens: %{access_token: token}, expires_at: expires_at}
        )
@@ -184,7 +256,7 @@ defmodule FermixCore.Auth.TokenSupervisor do
     end
   end
 
-  defp direct_read_entry(_auth_profile, _entry), do: {:error, :no_token}
+  defp serve_entry(_auth_profile, _entry), do: {:error, :no_token}
 
   defp direct_status(auth_profile) do
     case Store.read(auth_profile) do

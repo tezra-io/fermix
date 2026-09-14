@@ -16,10 +16,14 @@ defmodule Fermix.CLI.AppManagedCommandTest do
 
   defmodule AppBuildInfo do
     def app_engine?, do: true
+    def linux_package?, do: false
+    def distribution_identity, do: "macos_app"
   end
 
   defmodule StandaloneBuildInfo do
     def app_engine?, do: false
+    def linux_package?, do: false
+    def distribution_identity, do: "standalone"
   end
 
   defmodule RaisingService do

@@ -1,0 +1,8 @@
+{
+  "ok": true,
+  "result": {
+    "action": "uninstalled",
+    "scope": "user"
+  },
+  "schema_version": 1
+}

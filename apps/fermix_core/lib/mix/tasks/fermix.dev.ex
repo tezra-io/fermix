@@ -24,11 +24,11 @@ defmodule Mix.Tasks.Fermix.Dev do
   alias FermixCore.Realtime.LocalVoiceSocket
   alias FermixCore.Setup.AccessToken
   alias FermixCore.Setup.ConfigStore
+  alias FermixCore.Setup.WebListener
 
   @shortdoc "Run the full Fermix daemon from source"
 
   @switches [channels: :boolean, web: :boolean, realtime: :boolean]
-  @default_port 4030
 
   @impl true
   def run(argv) do
@@ -86,7 +86,7 @@ defmodule Mix.Tasks.Fermix.Dev do
     :fermix_web
     |> Application.get_env(FermixWebWeb.Endpoint, [])
     |> Keyword.get(:http, [])
-    |> Keyword.get(:port, @default_port)
+    |> Keyword.get(:port, WebListener.default_port())
   end
 
   defp preflight_port!(port) do

@@ -100,7 +100,7 @@ defmodule FermixCore.Capabilities.MCP.AnubisStarter.Default do
          [
            name: client_name,
            transport: {:stdio, transport_opts},
-           client_info: client_info(),
+           client_info: client_info(server.name),
            capabilities: %{}
          ]},
         id: {:anubis_client, server.name},
@@ -116,8 +116,13 @@ defmodule FermixCore.Capabilities.MCP.AnubisStarter.Default do
 
   defp client_name_for(server_name), do: :"#{__MODULE__}.Client.#{server_name}"
 
-  defp client_info do
+  # One identity per server, never a shared "fermix": Anubis keys its
+  # per-client ETS cache (`Anubis.Client.Cache`) by `client_info["name"]` and
+  # creates the table protected, owned by the first client to touch it, so a
+  # second stdio client with the same name crashes on its first `tools/list`
+  # reply. Two local plugins (obsidian, tesla) must be able to run side by side.
+  defp client_info(server_name) when is_binary(server_name) do
     version = Application.spec(:fermix_core, :vsn) |> to_string()
-    %{"name" => "fermix", "version" => version}
+    %{"name" => "fermix-" <> server_name, "version" => version}
   end
 end

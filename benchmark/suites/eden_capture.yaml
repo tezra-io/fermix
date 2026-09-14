@@ -98,14 +98,26 @@ scenarios:
               # scores green off a write it never made.
               reply_matches: "round-trip marker __EVAL_RUN_ID__"
 
-      # The failures that went unseen were tool errors, not refusals — the agent
-      # asked correctly and Eden rejected it. This pins the tool call itself, so
-      # a regression in argument construction (the `"invalid"` class) fails here
-      # even if the model's prose sounds like it worked.
-      - id: sticky_note_accepted
+      # This replaces a `sticky_note_accepted` case. It pinned
+      # eden_create_sticky_note so that a regression in argument construction
+      # failed here even when the model's prose sounded like it worked — the
+      # failures that went unseen were tool errors, not refusals. Eden withdrew
+      # that tool and plugin 1.1.0 stopped signing it, so the case could only
+      # score zero. The property moves to the surviving capture write with the
+      # same shape: one turn, one pinned write, one artifact per run.
+      #
+      # `eden_create_board` is declared "only when the operator asks to
+      # organize", so the query asks to organize rather than to save — a query
+      # that merely saved would be right to refuse the tool, and the case would
+      # be testing the guard instead of the arguments.
+      #
+      # NOT YET CONFIRMED BY A LIVE RUN: authored from the 1.1.0 manifest after
+      # the upstream withdrawal, not observed. Treat a first red here as
+      # unproven wording before treating it as a product regression.
+      - id: board_created
         query: >
-          Put a sticky note in my Eden second brain that says
-          "fermix sticky __EVAL_RUN_ID__".
+          Organize my Eden second brain: create a new board called
+          "Fermix organize check __EVAL_RUN_ID__".
         expect:
-          tools_any: [eden_create_sticky_note]
+          tools_any: [eden_create_board]
           max_tool_calls: 10

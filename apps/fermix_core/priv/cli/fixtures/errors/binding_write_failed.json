@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "binding_write_failed",
+    "sentence": "Fermix could not record which home the background service runs from. It said: permission denied"
+  },
+  "ok": false,
+  "schema_version": 1
+}

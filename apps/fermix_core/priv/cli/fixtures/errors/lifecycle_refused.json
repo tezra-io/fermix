@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "lifecycle_refused",
+    "sentence": "The background service would not open a window to restart in. It said: the daemon returned no lease"
+  },
+  "ok": false,
+  "schema_version": 1
+}

@@ -270,6 +270,107 @@ defmodule FermixCore.Auth.OAuthFlowTest do
     end
   end
 
+  # `extra_token_params` exists because Tesla's code exchange is refused without
+  # an `audience` naming the region's Fleet API base URL, while its refresh must
+  # not carry one. These prove the exchange half; refresh_client_test proves the
+  # refresh half never sees it.
+  describe "exchange_code/5 — provider extra_token_params" do
+    defp tesla_provider(extra) do
+      {:ok, provider} =
+        OAuthProviders.definition(
+          "tesla",
+          extra ++ [client_id: "t-id", client_secret: "t-sec", scopes: ["openid"], region: "na"]
+        )
+
+      provider
+    end
+
+    defp form_capturing_plug do
+      parent = self()
+
+      fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(parent, {:token_form, URI.decode_query(body)})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(200, Jason.encode!(%{"access_token" => "t_at"}))
+      end
+    end
+
+    test "the Tesla exchange form carries the region's audience" do
+      provider = tesla_provider(region: "eu")
+
+      assert {:ok, %{access_token: "t_at"}} =
+               OAuthFlow.exchange_code(
+                 provider,
+                 "the-code",
+                 "the-verifier",
+                 provider.public_redirect_uri,
+                 plug: form_capturing_plug()
+               )
+
+      assert_received {:token_form, form}
+      assert form["audience"] == "https://fleet-api.prd.eu.vn.cloud.tesla.com"
+      assert form["grant_type"] == "authorization_code"
+      assert form["client_id"] == "t-id"
+      assert form["client_secret"] == "t-sec"
+      assert form["redirect_uri"] == "https://fermix.ai/api/integrations/tesla/callback"
+    end
+
+    test "a provider without extra token params sends no audience" do
+      {:ok, provider} =
+        OAuthProviders.definition("github", client_id: "gh-id", client_secret: "gh-sec")
+
+      assert {:ok, _tokens} =
+               OAuthFlow.exchange_code(
+                 provider,
+                 "the-code",
+                 "the-verifier",
+                 "http://127.0.0.1:1457/auth/callback",
+                 plug: form_capturing_plug()
+               )
+
+      assert_received {:token_form, form}
+      refute Map.has_key?(form, "audience")
+    end
+
+    # A provider field must never be able to rewrite the exchange's own fields:
+    # the fixed ones win, so a bad manifest or config cannot redirect the code.
+    test "extra token params can never override the exchange's fixed fields" do
+      %OAuthProvider{} = base = tesla_provider([])
+
+      provider = %{
+        base
+        | extra_token_params: %{
+            "audience" => "https://fleet-api.prd.na.vn.cloud.tesla.com",
+            "grant_type" => "client_credentials",
+            "code" => "spoofed",
+            "redirect_uri" => "https://attacker.test/callback",
+            "code_verifier" => "spoofed",
+            "client_id" => "spoofed"
+          }
+      }
+
+      assert {:ok, _tokens} =
+               OAuthFlow.exchange_code(
+                 provider,
+                 "the-code",
+                 "the-verifier",
+                 provider.public_redirect_uri,
+                 plug: form_capturing_plug()
+               )
+
+      assert_received {:token_form, form}
+      assert form["grant_type"] == "authorization_code"
+      assert form["code"] == "the-code"
+      assert form["code_verifier"] == "the-verifier"
+      assert form["redirect_uri"] == "https://fermix.ai/api/integrations/tesla/callback"
+      assert form["client_id"] == "t-id"
+      assert form["audience"] == "https://fleet-api.prd.na.vn.cloud.tesla.com"
+    end
+  end
+
   # The provider refusing the operator's saved client is its own diagnosis: the
   # vendor body used to come back as a raw string whose "Token" the redactor
   # turned into "[REDACTED]", so no surface could say what to fix.
@@ -588,6 +689,113 @@ defmodule FermixCore.Auth.OAuthFlowTest do
                  timeout_ms: 5_000,
                  puts: fn _ -> :ok end
                )
+    end
+  end
+
+  # Tesla registers a public https redirect URI and accepts no loopback one, so
+  # a static bounce page forwards the callback query string to this listener.
+  # The authorize request and the code exchange must both name the public URI
+  # while the listener still binds 127.0.0.1 on the provider's fixed port.
+  describe "start_loopback/2 — a provider with a public redirect URI" do
+    test "authorizes with the public URI, binds the loopback port, and completes on a bounce" do
+      port = pick_free_port()
+      parent = self()
+
+      {:ok, provider} =
+        OAuthProviders.definition("tesla",
+          client_id: "t-id",
+          client_secret: "t-sec",
+          scopes: ["openid", "offline_access"],
+          region: "na",
+          redirect_port: port
+        )
+
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(parent, {:token_form, URI.decode_query(body)})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(
+          200,
+          Jason.encode!(%{
+            "access_token" => "tesla_at",
+            "refresh_token" => "tesla_rt",
+            "expires_in" => 28_800
+          })
+        )
+      end
+
+      opener = fn url ->
+        send(parent, {:opened, url})
+
+        Task.start(fn ->
+          # The bounce page forwards the query string it was handed, so the
+          # daemon sees an ordinary loopback callback on its own port.
+          deliver_callback(port, "/auth/callback?code=TESLACODE&state=#{state_from(url)}")
+        end)
+
+        :ok
+      end
+
+      assert {:ok, tokens} =
+               OAuthFlow.start_loopback(provider,
+                 opener: opener,
+                 timeout_ms: 5_000,
+                 puts: fn _ -> :ok end,
+                 req_options: [plug: plug]
+               )
+
+      assert tokens.access_token == "tesla_at"
+      assert tokens.refresh_token == "tesla_rt"
+      assert tokens.userinfo == nil
+
+      assert_received {:opened, url}
+      query = url |> URI.parse() |> Map.fetch!(:query) |> URI.decode_query()
+      assert String.starts_with?(url, "https://auth.tesla.com/oauth2/v3/authorize?")
+      assert query["redirect_uri"] == "https://fermix.ai/api/integrations/tesla/callback"
+      assert query["scope"] == "openid offline_access"
+      assert query["code_challenge_method"] == "S256"
+
+      assert_received {:token_form, form}
+      assert form["code"] == "TESLACODE"
+      assert form["redirect_uri"] == "https://fermix.ai/api/integrations/tesla/callback"
+      assert form["audience"] == "https://fleet-api.prd.na.vn.cloud.tesla.com"
+    end
+
+    # The public redirect URI replaces only the URI that is sent; the listener
+    # is still local, which is what a wrongly bound listener would break.
+    test "the loopback listener is bound on 127.0.0.1, not on the public host" do
+      port = pick_free_port()
+      parent = self()
+
+      {:ok, provider} =
+        OAuthProviders.definition("tesla",
+          client_id: "t-id",
+          client_secret: "t-sec",
+          scopes: ["openid"],
+          region: "na",
+          redirect_port: port
+        )
+
+      opener = fn _url ->
+        Task.start(fn ->
+          result = :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false])
+          send(parent, {:connected, result})
+        end)
+
+        :ok
+      end
+
+      assert {:error, :callback_timeout} =
+               OAuthFlow.start_loopback(provider,
+                 opener: opener,
+                 timeout_ms: 400,
+                 puts: fn _ -> :ok end
+               )
+
+      assert_receive {:connected, {:ok, socket}}, 1_000
+      :gen_tcp.close(socket)
     end
   end
 

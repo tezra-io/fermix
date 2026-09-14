@@ -102,6 +102,13 @@ defmodule FermixCore.Plugins.PromptCatalog do
       else: connect_remediation(name)
   end
 
+  # The grant is real but minted for the wrong region: signing in again under
+  # the same client repeats the mismatch, so the owner fixes the client first.
+  defp remediation(:wrong_region, _name),
+    do:
+      "its sign-in client names a region the account is not in — have the owner choose " <>
+        "the account's region on that client in setup, then sign in again"
+
   defp remediation(:needs_auth, name), do: connect_remediation(name)
 
   defp remediation(:needs_client_config, name),
