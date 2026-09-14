@@ -2,9 +2,18 @@ defmodule Fermix.CLI.ServiceTest do
   use ExUnit.Case, async: true
 
   alias Fermix.CLI.Service
+  alias Fermix.CLI.Service.Binding
+
+  @vendor_unit "/usr/lib/systemd/user/fermix.service"
 
   defmodule AppBuildInfo do
     def app_engine?, do: true
+    def linux_package?, do: false
+  end
+
+  defmodule PackagedBuildInfo do
+    def app_engine?, do: false
+    def linux_package?, do: true
   end
 
   describe "app-managed mutation guard" do
@@ -69,7 +78,7 @@ defmodule Fermix.CLI.ServiceTest do
       {:ok, body} = Service.render_unit(:user, fixture_opts(:linux, tmp))
 
       assert body =~ "Type=simple"
-      assert body =~ "Environment=FERMIX_HOME=#{tmp}"
+      assert body =~ ~s(Environment="FERMIX_HOME=#{tmp}")
     end
   end
 
@@ -179,13 +188,19 @@ defmodule Fermix.CLI.ServiceTest do
     test "both platforms end with the user-scope bin dir, and nothing shadows the standard dirs" do
       tmp = mkdir!()
       user_bin = Path.join(System.user_home!(), ".local/bin")
+      # Linux appends one more tail entry, the Linux package's own helper
+      # directory, which is where a distribution install keeps `cosign`.
+      tails = %{darwin: [user_bin], linux: [user_bin, "/usr/lib/fermix"]}
 
-      for os <- [:darwin, :linux] do
+      for {os, tail} <- tails do
         {:ok, spec} = Service.spec(:user, fixture_opts(os, tmp))
         dirs = String.split(spec.service_env["PATH"], ":")
 
         assert user_bin in dirs, "#{os} PATH is missing #{user_bin}"
-        assert List.last(dirs) == user_bin, "#{os} must not let the user dir shadow system dirs"
+
+        assert Enum.take(dirs, -length(tail)) == tail,
+               "#{os} must not let the user dir shadow system dirs"
+
         assert dirs == Enum.uniq(dirs)
       end
     end
@@ -208,7 +223,7 @@ defmodule Fermix.CLI.ServiceTest do
       assert plist =~ "<key>PATH</key><string>#{tmp}:/opt/homebrew/bin"
 
       {:ok, unit} = Service.render_unit(:user, fixture_opts(:linux, tmp))
-      assert unit =~ "Environment=PATH=#{tmp}:/usr/local/bin"
+      assert unit =~ ~s(Environment="PATH=#{tmp}:/usr/local/bin)
     end
   end
 
@@ -291,6 +306,102 @@ defmodule Fermix.CLI.ServiceTest do
 
       assert spec.fermix_path == Path.join(tmp, "fermix")
     end
+  end
+
+  # M38 §4.4: the three predicates every self-restart and every setup launch
+  # gates on. A packaged engine writes no unit, so the standalone answers — "is
+  # there a file at the path I would write" — are structurally wrong for it.
+  describe "packaged predicates" do
+    test "installed? needs both a bound home and the package's own unit" do
+      tmp = mkdir!()
+      config_root = Path.join(tmp, "config")
+      :ok = Binding.write(tmp, root: config_root)
+
+      bound = packaged_opts(config_root, @vendor_unit)
+
+      assert Service.installed?(:user, bound)
+
+      shadowed = packaged_opts(config_root, Path.join(tmp, "fermix.service"))
+
+      refute Service.installed?(:user, shadowed)
+      refute Service.installed?(:user, packaged_opts(Path.join(tmp, "empty"), @vendor_unit))
+    end
+
+    # The package owns one user unit, so reporting the same service under a
+    # system scope would have `Diagnostics` publish a scope that does not exist.
+    test "installed? is false for a system scope a package never installs" do
+      tmp = mkdir!()
+      config_root = Path.join(tmp, "config")
+      :ok = Binding.write(tmp, root: config_root)
+
+      refute Service.installed?(:system, packaged_opts(config_root, @vendor_unit))
+    end
+
+    # Nothing here renders a packaged unit, so there is nothing to compare: a
+    # true answer would send `fermix setup` into a rewrite path that must never
+    # write over the package's file.
+    test "drifted? is false for a packaged engine" do
+      tmp = mkdir!()
+
+      refute Service.drifted?(:user, packaged_opts(Path.join(tmp, "config"), @vendor_unit))
+    end
+
+    # The vendor unit is installed on every packaged host, so its presence says
+    # nothing about THIS process. `INVOCATION_ID` is what systemd sets in the
+    # service it started, and a binary run from a shell carries none.
+    test "supervised? reads the service invocation, not the unit file" do
+      tmp = mkdir!()
+      config_root = Path.join(tmp, "config")
+      :ok = Binding.write(tmp, root: config_root)
+      base = packaged_opts(config_root, @vendor_unit) ++ [standalone?: fn -> true end]
+
+      assert Service.supervised?(base ++ [invocation_id: "4b1e9d1a"])
+      refute Service.supervised?(base ++ [invocation_id: nil])
+      refute Service.supervised?(base ++ [invocation_id: ""])
+
+      refute Service.supervised?(
+               packaged_opts(config_root, @vendor_unit) ++
+                 [standalone?: fn -> false end, invocation_id: "4b1e9d1a"]
+             )
+    end
+
+    test "supervised? still reads the unit file for a standalone release" do
+      tmp = mkdir!()
+      unit_path = Path.join(tmp, "fermix.service")
+      opts = fixture_opts(:linux, tmp) ++ [unit_path: unit_path, standalone?: fn -> true end]
+
+      refute Service.supervised?(opts ++ [invocation_id: "4b1e9d1a"])
+
+      File.write!(unit_path, "stub\n")
+
+      assert Service.supervised?(opts)
+    end
+  end
+
+  defp packaged_opts(config_root, fragment_path) do
+    [
+      build_info: PackagedBuildInfo,
+      binding_root: config_root,
+      cmd: fn "systemctl", ["--user", "show" | _rest] -> {show_output(fragment_path), 0} end
+    ]
+  end
+
+  # `systemctl show` prints one `Key=Value` per requested property, in systemd's
+  # own order rather than the requested one. This is systemd 257's order.
+  defp show_output(fragment_path) do
+    """
+    MainPID=4711
+    NRestarts=0
+    ExecMainPID=4711
+    LoadState=loaded
+    ActiveState=active
+    SubState=running
+    FragmentPath=#{fragment_path}
+    DropInPaths=
+    UnitFileState=enabled
+    NeedDaemonReload=no
+    InvocationID=4b1e9d1a
+    """
   end
 
   # Explicit empty `:env` keeps tests hermetic — the spec snapshots the process

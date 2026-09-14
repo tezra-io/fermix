@@ -5,6 +5,7 @@ defmodule Fermix.CLI.DaemonTest do
   alias Fermix.CLI.Daemon.Client
   alias FermixCore.Capabilities.MCP.RuntimeStatus
   alias FermixCore.Management.Lifecycle
+  alias FermixCore.SocketPath
 
   defmodule TestPluginsRuntime do
     def apply_persisted do
@@ -562,6 +563,32 @@ defmodule Fermix.CLI.DaemonTest do
     assert reply == %{"status" => "error", "reason" => "pairing_already_active"}
 
     assert {:ok, %{"engine" => _engine}} = hello(socket_path)
+  end
+
+  # M38 §4.4.6: the address-length failure is named BEFORE bind, because the
+  # kernel's own answer is a bare `:einval` that reads as a Fermix bug, and the
+  # client that then cannot connect reports the daemon as not running.
+  test "an over-long control socket path refuses before bind and names the fix" do
+    path = Path.join([System.tmp_dir!(), String.duplicate("d", 160), "daemon.sock"])
+    limit = SocketPath.max_bytes()
+    # A refused `init/1` exits with its reason, and this process is its link.
+    Process.flag(:trap_exit, true)
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:error, {:socket_path_too_long, bytes, ^limit, ^path}} =
+                 Daemon.start_link(
+                   name: :"long_path_daemon_#{System.unique_integer([:positive, :monotonic])}",
+                   socket_path: path
+                 )
+
+        assert bytes == byte_size(path)
+      end)
+
+    assert log =~ "the daemon.sock path is #{byte_size(path)} bytes"
+    assert log =~ "set a shorter FERMIX_HOME and restart"
+    # The pre-flight touches no filesystem object, so a refused boot leaves none.
+    refute File.exists?(Path.dirname(path))
   end
 
   test "no daemon listening returns :not_running" do

@@ -108,6 +108,8 @@ defmodule Fermix.CLI.Doctor do
       Checks.workspace_layout(),
       Checks.service_unit(),
       Checks.daemon_socket(),
+      Checks.engine_alignment(),
+      Checks.package_origin(),
       Checks.opik_readiness(),
       Checks.recent_log_activity(),
       Checks.compaction_config(),

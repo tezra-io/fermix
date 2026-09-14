@@ -4,6 +4,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.LocalVoiceSocket
   alias FermixCore.Realtime.SessionServer
+  alias FermixCore.SocketPath
 
   defmodule FakeSession do
     def call_start(pid) do
@@ -126,6 +127,31 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     end)
 
     %{socket: socket, socket_path: socket_path}
+  end
+
+  # M38 §4.4.6, the same pre-flight the control socket runs: an over-long address
+  # fails the bind with a bare `:einval`, which reads as a Fermix bug rather than
+  # as "your FERMIX_HOME is too long".
+  test "an over-long voice socket path refuses before bind and names the fix" do
+    path = Path.join([System.tmp_dir!(), String.duplicate("v", 160), "realtime.sock"])
+    limit = SocketPath.max_bytes()
+    # A refused `init/1` exits with its reason, and this process is its link.
+    Process.flag(:trap_exit, true)
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:error, {:socket_path_too_long, bytes, ^limit, ^path}} =
+                 LocalVoiceSocket.start_link(
+                   socket_path: path,
+                   name: :"rt_long_path_#{System.unique_integer([:positive])}"
+                 )
+
+        assert bytes == byte_size(path)
+      end)
+
+    assert log =~ "the realtime.sock path is #{byte_size(path)} bytes"
+    assert log =~ "set a shorter FERMIX_HOME and restart"
+    refute File.exists?(Path.dirname(path))
   end
 
   test "binds the Unix socket with 0600 permissions", %{socket_path: socket_path} do

@@ -637,6 +637,9 @@ defmodule FermixCore.Setup.ConfigStoreTest do
 
   [fermix_core.plugins]
   dev_local = "/tmp/fermix-dev-local"
+
+  [fermix_web]
+  port = 4555
   """
 
   test "whole-snapshot save/load is a fixed point over every config section (round-trip gate)" do
@@ -671,6 +674,147 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert :ok = ConfigStore.save_snapshot(first)
     assert {:ok, second} = ConfigStore.load_runtime_config(resolve_secrets: false)
     assert second == first
+
+    # The listener lives outside `fermix_core`, so the roster check above cannot
+    # reach it; name it here rather than leave the one section the gate walks
+    # past unasserted.
+    assert second.fermix_web == [port: 4555]
+  end
+
+  # M38 §4.7. The listener port is a home setting, and the pitfall this file's
+  # gate above exists for is a section that normalizes one way: the live app-env
+  # shape is what setup actually persists, so the round-trip is seeded with THAT
+  # rather than with a TOML string.
+  describe "[fermix_web] port" do
+    setup do
+      tmp_home =
+        Path.join(System.tmp_dir!(), "fermix-web-listener-#{System.unique_integer([:positive])}")
+
+      previous = Application.get_env(:fermix_web, :listener)
+      File.mkdir_p!(tmp_home)
+      System.put_env("FERMIX_HOME", tmp_home)
+
+      on_exit(fn ->
+        FermixTestSupport.SafeRm.rm_rf!(tmp_home)
+        restore_env(:fermix_web, :listener, previous)
+      end)
+
+      %{home: tmp_home}
+    end
+
+    test "the normalized app-env shape survives save then load" do
+      Application.put_env(:fermix_web, :listener, port: 4555)
+
+      snapshot = ConfigStore.current_snapshot()
+      assert snapshot.fermix_web == [port: 4555]
+
+      assert :ok = ConfigStore.save_snapshot(snapshot)
+      assert {:ok, reloaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+      assert reloaded.fermix_web == [port: 4555]
+
+      # Idempotent over its own output, which is what makes the next save safe.
+      assert ConfigStore.persistable_snapshot(reloaded).fermix_web == [port: 4555]
+    end
+
+    test "an absent section stays absent rather than persisting a default" do
+      Application.put_env(:fermix_web, :listener, [])
+
+      assert :ok = ConfigStore.save_snapshot(ConfigStore.current_snapshot())
+      refute File.read!(ConfigStore.path()) =~ "[fermix_web]"
+      assert {:ok, reloaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+      assert reloaded.fermix_web == []
+    end
+
+    # A hand-edited port that could never bind is a named parse refusal, not a
+    # daemon quietly listening somewhere else.
+    test "a port outside the bounds refuses the parse by name", %{home: home} do
+      File.write!(Path.join(home, "config.toml"), "[fermix_web]\nport = 80\n")
+
+      assert_raise ArgumentError, ~r/\[fermix_web\].*1024.*65535/, fn ->
+        ConfigStore.load_runtime_config(resolve_secrets: false)
+      end
+    end
+
+    test "a non-integer port refuses the same way", %{home: home} do
+      File.write!(Path.join(home, "config.toml"), ~s([fermix_web]\nport = "4030"\n))
+
+      assert_raise ArgumentError, ~r/\[fermix_web\]/, fn ->
+        ConfigStore.load_runtime_config(resolve_secrets: false)
+      end
+    end
+
+    test "apply_snapshot puts the port where every surface reads it" do
+      Application.put_env(:fermix_web, :listener, [])
+
+      assert :ok =
+               ConfigStore.apply_snapshot(%{
+                 fermix_core: [],
+                 sandbox: [],
+                 fermix_channels: [],
+                 fermix_web: [port: 4444]
+               })
+
+      assert Application.get_env(:fermix_web, :listener) == [port: 4444]
+    end
+
+    # `put_web_port/2` names the home because `fermix service install` runs in a
+    # CLI whose own home is not necessarily the one being bound, and it must
+    # carry every unrelated setting across.
+    test "put_web_port records the port in a named home and preserves the rest", %{home: home} do
+      other = Path.join(home, "other-home")
+      File.mkdir_p!(other)
+
+      File.write!(
+        Path.join(other, "config.toml"),
+        "[fermix_core.agent]\nname = \"fermi\"\n\n[fermix_core.providers.openai]\napi_key = \"@keyring\"\n"
+      )
+
+      assert :ok = ConfigStore.put_web_port(other, 4600)
+
+      written = File.read!(Path.join(other, "config.toml"))
+      assert written =~ "[fermix_web]\nport = 4600"
+      assert written =~ ~s(name = "fermi")
+      assert written =~ ~s(api_key = "@keyring")
+      assert ConfigStore.web_port(other) == {:ok, 4600}
+    end
+
+    test "put_web_port creates a settings file when the home has none", %{home: home} do
+      fresh = Path.join(home, "fresh-home")
+
+      assert :ok = ConfigStore.put_web_port(fresh, 4601)
+      assert ConfigStore.web_port(fresh) == {:ok, 4601}
+    end
+
+    test "put_web_port refuses a port outside the bounds and writes nothing", %{home: home} do
+      fresh = Path.join(home, "refused-home")
+
+      assert {:error, {:invalid_port, sentence}} = ConfigStore.put_web_port(fresh, 22)
+      assert sentence =~ "1024"
+      refute File.exists?(Path.join(fresh, "config.toml"))
+    end
+
+    test "web_port reports an absent file as unset rather than as a fault", %{home: home} do
+      assert ConfigStore.web_port(Path.join(home, "nowhere")) == {:ok, nil}
+    end
+
+    # `[mcp.servers.*]` and `[mcp.inbound]` are read by their own parsers and
+    # are not in this renderer's snapshot, so re-rendering a settings file that
+    # carries one would delete it. Setting a port is not a reason to do that.
+    test "put_web_port refuses a settings file it cannot re-render", %{home: home} do
+      guarded = Path.join(home, "mcp-home")
+      File.mkdir_p!(guarded)
+      original = "[mcp.servers.github]\ncommand = \"npx\"\n"
+      File.write!(Path.join(guarded, "config.toml"), original)
+
+      assert {:error, {:unrenderable_settings, sentence}} =
+               ConfigStore.put_web_port(guarded, 4602)
+
+      assert sentence =~ "[mcp]"
+      assert File.read!(Path.join(guarded, "config.toml")) == original
+    end
+
+    defp restore_env(app, key, nil), do: Application.delete_env(app, key)
+    defp restore_env(app, key, value), do: Application.put_env(app, key, value)
   end
 
   # v1.1 decision 1: `sites` is retired. An operator's existing config.toml still

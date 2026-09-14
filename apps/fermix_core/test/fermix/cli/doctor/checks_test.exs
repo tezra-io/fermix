@@ -24,6 +24,52 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
 
   defmodule AppBuildInfo do
     def app_engine?, do: true
+    def linux_package?, do: false
+  end
+
+  defmodule PackagedBuildInfo do
+    def app_engine?, do: false
+    def linux_package?, do: true
+
+    def public_identity do
+      %{
+        "engine_id" => "fermix-core",
+        "product_version" => "1.2.3",
+        "build_id" => "release-9",
+        "source_commit" => String.duplicate("a", 40),
+        "distribution_identity" => "linux_package",
+        "artifact_target" => "linux_x86_64",
+        "architecture" => "x86_64"
+      }
+    end
+  end
+
+  defmodule StandaloneBuildInfo do
+    def app_engine?, do: false
+    def linux_package?, do: false
+
+    def public_identity do
+      %{
+        "engine_id" => "fermix-core",
+        "product_version" => "0.5.7",
+        "build_id" => nil,
+        "source_commit" => nil,
+        "distribution_identity" => "standalone",
+        "artifact_target" => nil,
+        "architecture" => "arm64"
+      }
+    end
+  end
+
+  # `Checks.service_unit/1` calls `service.status/1`; these two stand in for
+  # `Fermix.CLI.Service` so every packaged state is reachable without a host
+  # service manager.
+  defmodule AnsweringService do
+    def status(_opts), do: {:ok, Process.get(:fake_service_status)}
+  end
+
+  defmodule RefusingService do
+    def status(_opts), do: {:error, :user_manager_unreachable}
   end
 
   defmodule HealthyChannel do
@@ -183,11 +229,73 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.detail =~ "Screen Recording"
     end
 
-    test "wayland is refused with the X11 hint" do
+    # M38 §8.2. The shipped string told every Wayland user to "use an X11
+    # session" on desktops that no longer offer one, which is worse than naming
+    # no remedy at all. Each replacement says what is refused, why, and what
+    # remains true — and never instructs an impossible action.
+    test "wayland capture names the portal it needs and hedges the X11 advice" do
       probe = probed(platform: "linux", display_server: "wayland", screen_capture: false)
       result = Checks.computer_use_permissions({:ok, probe})
+
       assert result.status == :warn
-      assert result.detail =~ "X11"
+      assert result.detail =~ "screen capture unavailable on this Wayland session"
+      assert result.detail =~ "ScreenCast portal"
+      assert result.detail =~ "GNOME 50 and later do not"
+      refute result.detail =~ "Wayland is unsupported"
+    end
+
+    test "wayland input names libei and the RemoteDesktop portal" do
+      probe =
+        probed(
+          platform: "linux",
+          display_server: "wayland",
+          screen_capture: true,
+          input_control: false
+        )
+
+      result = Checks.computer_use_permissions({:ok, probe})
+
+      assert result.status == :warn
+      assert result.detail =~ "input control unavailable on this Wayland session"
+      assert result.detail =~ "RemoteDesktop portal"
+      assert result.detail =~ "libei"
+      refute result.detail =~ "global input injection is blocked"
+    end
+
+    # An install button whose only outcome is `{:error, {:unsupported_target,
+    # ...}}` is a lie told with a control: `linux_aarch64` is a first-class
+    # engine target and the sidecar publishes no arm64 Linux build.
+    test "arm64 Linux states the architecture refusal instead of offering an install" do
+      result =
+        Checks.computer_use_permissions(
+          {:ok, %{state: :not_installed}},
+          sidecar_target: {:error, {:unsupported_target, "linux", "aarch64"}}
+        )
+
+      assert result.status == :warn
+      assert result.detail =~ "computer use is unavailable on this architecture"
+      assert result.detail =~ "no arm64 Linux build"
+      assert result.detail =~ "Fermix itself is fully supported here"
+      refute result.detail =~ "install it from setup"
+    end
+
+    test "a probe that refuses the target answers the same way" do
+      result =
+        Checks.computer_use_permissions({:error, {:unsupported_target, "linux", "aarch64"}})
+
+      assert result.status == :warn
+      assert result.detail =~ "computer use is unavailable on this architecture"
+    end
+
+    test "a supported target still offers the install" do
+      result =
+        Checks.computer_use_permissions(
+          {:ok, %{state: :not_installed}},
+          sidecar_target: {:ok, "linux-x86_64"}
+        )
+
+      assert result.status == :warn
+      assert result.detail =~ "install it from setup"
     end
 
     test "probe error fails the check" do
@@ -912,14 +1020,17 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.detail =~ "running, version #{vsn}"
     end
 
-    test "warns when the daemon runs a different version than this binary" do
+    # The skew verdict moved to its own row (M38 §11.3): this row answers "is
+    # something answering", and one fact per row is what keeps the two from
+    # disagreeing.
+    test "reports liveness and leaves the engine comparison to its own row" do
       client = fn -> {:ok, hello("0.0.1")} end
 
       result = Checks.daemon_socket(client: client)
 
-      assert result.status == :warn
+      assert result.status == :ok
       assert result.detail =~ "running, version 0.0.1"
-      assert result.detail =~ "`fermix restart`"
+      refute result.detail =~ "`fermix restart`"
     end
 
     # A daemon that answers something other than management v1 is a failure with
@@ -2358,6 +2469,17 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.detail =~ "/opt/homebrew/bin/cosign"
     end
 
+    # M38 §11.3: the row reports the executable this host actually resolved. On a
+    # packaged install that can be the distribution's own cosign or the bundled
+    # one, and which answered is the fact the operator needs.
+    test "names the resolved bundled executable on a packaged host" do
+      result =
+        Checks.cosign(cosign_path: "/usr/lib/fermix/cosign", build_info: PackagedBuildInfo)
+
+      assert result.status == :ok
+      assert result.detail =~ "/usr/lib/fermix/cosign"
+    end
+
     # Both features fail closed without it, and the `curl | sh` install path
     # never supplies it — so the message has to name both, or the operator
     # learns about it from an unrelated-looking refusal much later.
@@ -2367,6 +2489,375 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.status == :warn
       assert result.detail =~ "fermix upgrade"
       assert result.detail =~ "fermix plugins install"
+    end
+
+    test "the macOS remedy stays Homebrew's" do
+      result = Checks.cosign(cosign_path: nil, build_info: StandaloneBuildInfo, linux?: false)
+
+      assert result.detail =~ "brew install cosign"
+      refute result.detail =~ "apt"
+    end
+
+    # A packaged host has no Homebrew, and telling its operator to run `brew` is
+    # the same class of defect as telling a Wayland user to switch to X11.
+    test "a packaged host is told its own families and the bundled fallback" do
+      result = Checks.cosign(cosign_path: nil, build_info: PackagedBuildInfo)
+
+      assert result.detail =~ "sudo apt install cosign"
+      assert result.detail =~ "sudo dnf install cosign"
+      assert result.detail =~ "sudo zypper install cosign"
+      assert result.detail =~ "/usr/lib/fermix/cosign"
+      refute result.detail =~ "brew"
+    end
+
+    test "a standalone Linux host is pointed at the upstream project" do
+      result = Checks.cosign(cosign_path: nil, build_info: StandaloneBuildInfo, linux?: true)
+
+      assert result.detail =~ "github.com/sigstore/cosign"
+      refute result.detail =~ "brew"
+    end
+  end
+
+  # M38 §9.2/§11.3. The verdict is `VersionSkew.compare/2`'s, so this row can
+  # never disagree with `fermix status` or `fermix service status --json`.
+  describe "engine_alignment/1" do
+    test "the installed engine answering is a pass" do
+      result =
+        Checks.engine_alignment(
+          build_info: PackagedBuildInfo,
+          client: fn -> {:ok, engine_hello(PackagedBuildInfo.public_identity())} end
+        )
+
+      assert result.name == "engine alignment"
+      assert result.status == :ok
+      assert result.detail =~ "1.2.3"
+    end
+
+    test "a different build id warns and names the restart" do
+      running = %{PackagedBuildInfo.public_identity() | "build_id" => "release-8"}
+
+      result =
+        Checks.engine_alignment(
+          build_info: PackagedBuildInfo,
+          client: fn -> {:ok, engine_hello(running)} end
+        )
+
+      assert result.status == :warn
+      assert result.detail =~ "Run `fermix restart` to load the installed engine."
+    end
+
+    # §9.2: an identity Fermix cannot establish is not evidence of skew, and
+    # warning on it would send an operator to restart a current daemon.
+    test "an absent build id stays a note rather than a warning" do
+      running = %{PackagedBuildInfo.public_identity() | "build_id" => nil}
+
+      result =
+        Checks.engine_alignment(
+          build_info: PackagedBuildInfo,
+          client: fn -> {:ok, engine_hello(running)} end
+        )
+
+      assert result.status == :not_applicable
+      assert result.detail =~ "no build id"
+      refute result.detail =~ "fermix restart"
+    end
+
+    test "a daemon of another distribution is a failure, not a restart" do
+      running = %{PackagedBuildInfo.public_identity() | "distribution_identity" => "standalone"}
+
+      result =
+        Checks.engine_alignment(
+          build_info: PackagedBuildInfo,
+          client: fn -> {:ok, engine_hello(running)} end
+        )
+
+      assert result.status == :fail
+      assert result.detail =~ "different Fermix build"
+      refute result.detail =~ "fermix restart"
+    end
+
+    test "nothing answering is not a comparison" do
+      result =
+        Checks.engine_alignment(
+          build_info: PackagedBuildInfo,
+          client: fn -> {:error, :not_running} end
+        )
+
+      assert result.status == :not_applicable
+      assert result.detail =~ "no daemon is answering"
+    end
+
+    # The brew-upgrade state on a standalone install: no build id on either
+    # side, so the product version is the generation and the row must still fire.
+    test "a standalone install compares product versions" do
+      running = %{StandaloneBuildInfo.public_identity() | "product_version" => "0.5.6"}
+
+      result =
+        Checks.engine_alignment(
+          build_info: StandaloneBuildInfo,
+          client: fn -> {:ok, engine_hello(running)} end
+        )
+
+      assert result.status == :warn
+      assert result.detail =~ "fermix restart"
+    end
+
+    defp engine_hello(engine) do
+      %{
+        "protocol" => %{"current_version" => 1, "minimum_version" => 1, "maximum_version" => 1},
+        "engine" => Map.put(engine, "pid", "1")
+      }
+    end
+  end
+
+  # M38 §9.3, §11.3: one answer to package ownership, shared with `fermix
+  # upgrade`, so the row and the refusal can never name different managers.
+  describe "package_origin/1" do
+    test "a packaged engine is named before any filesystem query" do
+      result =
+        Checks.package_origin(
+          build_info: PackagedBuildInfo,
+          resolve_self: fn -> raise "the path must not be resolved" end,
+          cmd: fn _executable, _args -> raise "no ownership tool may be run" end
+        )
+
+      assert result.name == "package origin"
+      assert result.status == :ok
+      assert result.detail =~ "this machine's package manager"
+      assert result.detail =~ "sudo apt update"
+      refute result.detail =~ "linux_package"
+    end
+
+    test "a host package database that owns the binary is reported with its command" do
+      result =
+        Checks.package_origin(
+          build_info: StandaloneBuildInfo,
+          binary_path: "/usr/bin/fermix",
+          find_executable: fn
+            "dpkg" -> "/usr/bin/dpkg"
+            _other -> nil
+          end,
+          cmd: fn "/usr/bin/dpkg", ["-S", "/usr/bin/fermix"] -> {"fermix: /usr/bin/fermix", 0} end
+        )
+
+      assert result.status == :ok
+      assert result.detail =~ "dpkg"
+      assert result.detail =~ "sudo apt update"
+    end
+
+    test "a binary nothing owns says the updater handles it" do
+      result =
+        Checks.package_origin(
+          build_info: StandaloneBuildInfo,
+          binary_path: "/opt/fermix/bin/fermix",
+          find_executable: fn _tool -> nil end
+        )
+
+      assert result.status == :ok
+      assert result.detail =~ "/opt/fermix/bin/fermix"
+      assert result.detail =~ "fermix upgrade"
+    end
+
+    test "a fermix that is not on PATH is a warning, not an invented owner" do
+      result =
+        Checks.package_origin(
+          build_info: StandaloneBuildInfo,
+          resolve_self: fn -> nil end,
+          find_executable: fn _tool -> nil end
+        )
+
+      assert result.status == :warn
+      assert result.detail =~ "not on PATH"
+    end
+  end
+
+  # M38 §4.3, §11.3. Every state goes through the shared inspector, so the row
+  # and `fermix service install` can never report different linger.
+  describe "linger/1" do
+    test "not applicable off Linux" do
+      assert Checks.linger(linux?: false, build_info: StandaloneBuildInfo) == nil
+    end
+
+    test "a packaged install is always in scope, unit probe or not" do
+      result =
+        Checks.linger(
+          linux?: true,
+          build_info: PackagedBuildInfo,
+          find_executable: fn _name -> "/usr/bin/loginctl" end,
+          username: fn _opts -> "ada" end,
+          cmd: fn "loginctl", _args -> {"yes\n", 0} end
+        )
+
+      assert result.name == "linger"
+      assert result.status == :ok
+      assert result.detail =~ "survives logout"
+    end
+
+    test "disabled fails with the one command that fixes it" do
+      result =
+        Checks.linger(
+          linux?: true,
+          build_info: PackagedBuildInfo,
+          find_executable: fn _name -> "/usr/bin/loginctl" end,
+          username: fn _opts -> "ada" end,
+          cmd: fn "loginctl", _args -> {"no\n", 0} end
+        )
+
+      assert result.status == :fail
+      assert result.detail =~ "sudo loginctl enable-linger ada"
+    end
+
+    # An absent login manager is a different outcome with NO command: there is
+    # nothing for the operator to run until systemd's login manager exists.
+    test "an absent loginctl warns and names no command" do
+      result =
+        Checks.linger(
+          linux?: true,
+          build_info: PackagedBuildInfo,
+          find_executable: fn _name -> nil end
+        )
+
+      assert result.status == :warn
+      assert result.detail =~ "Install systemd's login manager on this host."
+      refute result.detail =~ "enable-linger"
+    end
+
+    test "an account Fermix cannot determine is its own warning" do
+      result =
+        Checks.linger(
+          linux?: true,
+          build_info: PackagedBuildInfo,
+          find_executable: fn _name -> "/usr/bin/loginctl" end,
+          username: fn _opts -> nil end
+        )
+
+      assert result.status == :warn
+      assert result.detail =~ "which account"
+    end
+
+    test "a loginctl that will not answer quotes it rather than assuming off" do
+      result =
+        Checks.linger(
+          linux?: true,
+          build_info: PackagedBuildInfo,
+          find_executable: fn _name -> "/usr/bin/loginctl" end,
+          username: fn _opts -> "ada" end,
+          cmd: fn "loginctl", _args -> {"Failed to look up user", 1} end
+        )
+
+      assert result.status == :warn
+      assert result.detail =~ "Failed to look up user"
+    end
+  end
+
+  # M38 §4.5, §11.3. A packaged install owns no unit of its own, so the question
+  # is whether the package's unit is effective and a home is bound to it.
+  describe "service_unit/1 on a packaged install" do
+    test "the vendor unit with a bound home passes" do
+      result = packaged_unit_row(packaged_status())
+
+      assert result.status == :ok
+      assert result.detail =~ "/home/ada/.fermix"
+    end
+
+    test "a legacy generated unit warns with the adoption verb" do
+      status =
+        put_in(packaged_status(), ["unit"], %{
+          "effective_path" => "/home/ada/.config/systemd/user/fermix.service",
+          "vendor" => false,
+          "legacy_generated" => true,
+          "foreign" => false,
+          "need_daemon_reload" => false
+        })
+
+      result = packaged_unit_row(status)
+
+      assert result.status == :warn
+      assert result.detail =~ "Run `fermix service install` to adopt this service."
+      assert result.detail =~ "/home/ada/.config/systemd/user/fermix.service"
+    end
+
+    # A file Fermix did not write is named and left alone, never rewritten as
+    # drift: the standalone row's whole job is the opposite and must not leak.
+    test "a foreign unit fails naming its path" do
+      status =
+        put_in(packaged_status(), ["unit"], %{
+          "effective_path" => "/etc/systemd/user/fermix.service",
+          "vendor" => false,
+          "legacy_generated" => false,
+          "foreign" => true,
+          "need_daemon_reload" => false
+        })
+
+      result = packaged_unit_row(status)
+
+      assert result.status == :fail
+      assert result.detail =~ "/etc/systemd/user/fermix.service"
+      refute result.detail =~ "stale"
+    end
+
+    test "an unbound home warns rather than reporting a working service" do
+      status =
+        put_in(packaged_status(), ["binding"], %{
+          "state" => "unbound",
+          "home" => nil,
+          "reason" => nil
+        })
+
+      result = packaged_unit_row(status)
+
+      assert result.status == :warn
+      assert result.detail =~ "no home is bound"
+    end
+
+    test "a malformed binding fails with the reason the reader can act on" do
+      status =
+        put_in(packaged_status(), ["binding"], %{
+          "state" => "invalid",
+          "home" => nil,
+          "reason" => "the recorded home is not an absolute path"
+        })
+
+      result = packaged_unit_row(status)
+
+      assert result.status == :fail
+      assert result.detail =~ "not an absolute path"
+    end
+
+    test "a pending reload warns" do
+      status = put_in(packaged_status(), ["unit", "need_daemon_reload"], true)
+      result = packaged_unit_row(status)
+
+      assert result.status == :warn
+      assert result.detail =~ "reload"
+    end
+
+    # An unreachable user manager is not a broken unit: it is a session with no
+    # service manager, and it keeps the sentence the CLI already publishes.
+    test "an unreachable user manager warns with the published sentence" do
+      result = Checks.service_unit(build_info: PackagedBuildInfo, service: RefusingService)
+
+      assert result.status == :warn
+      assert result.detail =~ "no user service manager"
+    end
+
+    defp packaged_unit_row(status) do
+      Process.put(:fake_service_status, status)
+
+      Checks.service_unit(build_info: PackagedBuildInfo, service: AnsweringService)
+    end
+
+    defp packaged_status do
+      %{
+        "binding" => %{"state" => "bound", "home" => "/home/ada/.fermix", "reason" => nil},
+        "unit" => %{
+          "effective_path" => "/usr/lib/systemd/user/fermix.service",
+          "vendor" => true,
+          "legacy_generated" => false,
+          "foreign" => false,
+          "need_daemon_reload" => false
+        }
+      }
     end
   end
 end

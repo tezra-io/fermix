@@ -47,6 +47,19 @@ defmodule FermixCore.Boot.PathBaselineTest do
     assert "/usr/local/bin" in dirs
   end
 
+  # The packaged Linux engine ships its own `cosign` in `/usr/lib/fermix`, and a
+  # tail entry can only make an otherwise unresolvable name resolvable (M38 §4.4.7).
+  test "linux ends with the packaged helper directory, after the user bin directory" do
+    dirs = PathBaseline.dirs(os: :linux, user_home: "/home/o")
+
+    assert List.last(dirs) == "/usr/lib/fermix"
+    assert Enum.at(dirs, -2) == "/home/o/.local/bin"
+  end
+
+  test "darwin carries no packaged helper directory" do
+    refute "/usr/lib/fermix" in PathBaseline.dirs(os: :darwin, user_home: "/home/o")
+  end
+
   # Appending only. A leading entry would silently change resolution for every
   # colliding binary the operator's own PATH already chose.
   test "ensure! appends what is missing and never reorders what is present" do

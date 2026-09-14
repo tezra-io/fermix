@@ -13,7 +13,14 @@ defmodule Fermix.CLI.UpgradeTest do
   # breaking the code signature. Raising doubles turn "the gate happens to fire
   # first" into "reaching either module is a test failure".
   defmodule RaisingInstallMethod do
-    def detect(_binary_path), do: raise("install-method detection must not run")
+    def detect(_binary_path, _opts), do: raise("install-method detection must not run")
+  end
+
+  # A Linux distribution package's engine. `app_engine?/0` is false because the
+  # app-engine gate runs first and must let this one through to its own answer.
+  defmodule PackagedBuildInfo do
+    def app_engine?, do: false
+    def linux_package?, do: true
   end
 
   defmodule RaisingSwapper do
@@ -93,6 +100,24 @@ defmodule Fermix.CLI.UpgradeTest do
                  req_options: [plug: fn _conn -> raise "manifest fetch must not run" end],
                  binary_path: @app_engine_binary
                )
+    end
+
+    # The packaged engine's own refusal, through the real classifier, on a host
+    # where no ownership tool is installed: the identity guard is the one that
+    # has to answer, and the swapper must never be reached.
+    test "a Linux package engine refuses to self-update before any filesystem query" do
+      assert {:error, {:managed_install, :linux_package, hint}} =
+               Upgrade.run(
+                 build_info: PackagedBuildInfo,
+                 swapper: RaisingSwapper,
+                 find_executable: fn _tool -> nil end,
+                 binary_path: "/usr/bin/fermix",
+                 req_options: [plug: fn _conn -> raise "manifest fetch must not run" end]
+               )
+
+      assert hint =~ "sudo apt update && sudo apt upgrade fermix"
+      assert hint =~ "sudo dnf upgrade fermix"
+      assert hint =~ "sudo zypper update fermix"
     end
 
     # Without this, the case above could pass because the doubles are wired to

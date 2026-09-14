@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "no_identity",
+    "sentence": "Fermix could not tell which account it is running as, and it will not guess one. Run this command from a normal login session."
+  },
+  "ok": false,
+  "schema_version": 1
+}

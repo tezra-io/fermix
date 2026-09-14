@@ -9,7 +9,7 @@ defmodule FermixCore.BootProfile do
 
   alias FermixCore.Boot.PathBaseline
 
-  @type profile :: :app_engine | :standalone_cli | :source
+  @type profile :: :app_engine | :standalone_cli | :linux_package_cli | :source
 
   @doc "Selects a boot profile while giving app identity strict precedence."
   @spec select(String.t(), (-> boolean())) :: profile()
@@ -17,6 +17,13 @@ defmodule FermixCore.BootProfile do
 
   def select("standalone", detector) when is_function(detector, 0) do
     if detector.(), do: :standalone_cli, else: :source
+  end
+
+  # A `linux_package` stamp names how the artifact was built, and a source run of
+  # that checkout is still a developer's tree: only the Burrito wrapper is the
+  # packaged CLI the distribution package installs.
+  def select("linux_package", detector) when is_function(detector, 0) do
+    if detector.(), do: :linux_package_cli, else: :source
   end
 
   @doc """
@@ -28,7 +35,7 @@ defmodule FermixCore.BootProfile do
   A `:source` run deliberately gets none, so a developer sees their own `PATH`.
   """
   @spec prepare(profile()) :: :ok
-  def prepare(profile) when profile in [:app_engine, :standalone_cli] do
+  def prepare(profile) when profile in [:app_engine, :standalone_cli, :linux_package_cli] do
     PathBaseline.ensure!()
     enable_endpoint_server()
     Application.put_env(:fermix_core, :daemon_socket_enabled, true)

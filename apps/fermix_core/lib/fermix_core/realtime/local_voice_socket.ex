@@ -19,6 +19,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
   alias FermixCore.Realtime.SessionControl
   alias FermixCore.Realtime.SessionSupervisor
   alias FermixCore.Setup.ConfigStore
+  alias FermixCore.SocketPath
 
   require Logger
 
@@ -79,9 +80,10 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
   def init(opts) do
     Process.flag(:trap_exit, true)
     socket_path = Keyword.get(opts, :socket_path, Config.socket_path())
-    File.mkdir_p!(Path.dirname(socket_path))
 
-    with :ok <- clear_stale_socket(socket_path),
+    with :ok <- check_socket_path(socket_path),
+         :ok <- ensure_socket_dir(socket_path),
+         :ok <- clear_stale_socket(socket_path),
          {:ok, listen_socket} <- listen(socket_path) do
       File.chmod!(socket_path, 0o600)
       Process.send_after(self(), :accept, 0)
@@ -188,6 +190,29 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
         "listener_close=#{inspect(close_result)} socket_unlink=#{inspect(unlink_result)}"
     )
 
+    :ok
+  end
+
+  # Before `mkdir_p` and before bind: an over-long address fails the bind with a
+  # bare `:einval`, which reads as a Fermix bug instead of as an over-long home.
+  # The pre-flight measures the path string and touches no filesystem object.
+  defp check_socket_path(socket_path) do
+    case SocketPath.check(socket_path) do
+      :ok ->
+        :ok
+
+      {:error, {:path_too_long, bytes, limit}} ->
+        Logger.error(
+          "Realtime voice socket refused: " <>
+            SocketPath.refusal("realtime.sock", bytes, limit) <> ". Path: #{socket_path}"
+        )
+
+        {:error, {:socket_path_too_long, bytes, limit, socket_path}}
+    end
+  end
+
+  defp ensure_socket_dir(socket_path) do
+    File.mkdir_p!(Path.dirname(socket_path))
     :ok
   end
 

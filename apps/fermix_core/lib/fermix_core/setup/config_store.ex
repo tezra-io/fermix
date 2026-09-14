@@ -20,6 +20,7 @@ defmodule FermixCore.Setup.ConfigStore do
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Setup.RestartState
   alias FermixCore.Setup.SecretStore
+  alias FermixCore.Setup.WebListener
   alias FermixCore.SkillCuration.Config, as: SkillCurationConfig
   alias FermixCore.Transcription.Registry, as: TranscriptionRegistry
 
@@ -141,7 +142,7 @@ defmodule FermixCore.Setup.ConfigStore do
         acp: Application.get_env(:fermix_channels, :acp, []),
         mobile: Application.get_env(:fermix_channels, :mobile, [])
       ],
-      fermix_web: []
+      fermix_web: Application.get_env(:fermix_web, :listener, [])
     }
     |> persistable_snapshot()
   end
@@ -233,6 +234,18 @@ defmodule FermixCore.Setup.ConfigStore do
     apply_channel_config(:signal, Keyword.get(persisted.fermix_channels, :signal, []))
     apply_channel_config(:acp, Keyword.get(persisted.fermix_channels, :acp, []))
     apply_channel_config(:mobile, Keyword.get(persisted.fermix_channels, :mobile, []))
+    apply_web_config(Map.get(persisted, :fermix_web, []))
+  end
+
+  # Re-normalized on the way in, so application environment holds exactly one
+  # shape whether the snapshot came from the boot parse or from a live save.
+  defp apply_web_config(web_config) do
+    merged =
+      Application.get_env(:fermix_web, :listener, [])
+      |> Keyword.merge(normalize_web(web_config))
+
+    Application.put_env(:fermix_web, :listener, merged)
+    :ok
   end
 
   @doc """
@@ -486,7 +499,7 @@ defmodule FermixCore.Setup.ConfigStore do
           |> Keyword.get(:mobile, [])
           |> normalize_mobile()
       ],
-      fermix_web: []
+      fermix_web: snapshot |> Map.get(:fermix_web, []) |> normalize_web() |> web_to_keyword()
     }
   end
 
@@ -574,6 +587,121 @@ defmodule FermixCore.Setup.ConfigStore do
       fermix_web: []
     }
   end
+
+  @doc """
+  The `[fermix_web] port` recorded in one home's settings file, or `nil`.
+
+  Named rather than derived from `FERMIX_HOME`, because `fermix service status`
+  and `fermix service install` run in a CLI whose own home is not necessarily
+  the one the background service is bound to (M38 §4.7). An absent file is
+  `{:ok, nil}` — "nothing is configured" is a state, not a fault — and an
+  unreadable one is an error rather than a silent default.
+  """
+  @spec web_port(Path.t()) :: {:ok, pos_integer() | nil} | {:error, term()}
+  def web_port(home) when is_binary(home) do
+    case read_home_document(home) do
+      {:ok, contents} -> {:ok, contents |> parse_document() |> get_in([:fermix_web, :port])}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  Records the `[fermix_web] port` in one home's settings file.
+
+  A read, one key changed, and the shared renderer: every unrelated setting is
+  carried through the same parse and dump a setup save uses, `@keyring`
+  sentinels included, and no secret is read to write a port. An unreadable file
+  refuses rather than being replaced by a fresh one, because overwriting a
+  settings file nobody could parse is how a recoverable fault becomes data loss.
+
+  The renderer emits the sections this module owns, and a settings file may also
+  carry `[mcp.*]` blocks that a different parser reads and this one never sees.
+  Re-rendering such a file would drop them, so this write **refuses** it and
+  names the section instead: setting a port is not a reason to delete an
+  operator's MCP servers.
+  """
+  @spec put_web_port(Path.t(), pos_integer()) :: :ok | {:error, term()}
+  def put_web_port(home, port) when is_binary(home) and is_integer(port) do
+    with :ok <- validate_web_port(port),
+         {:ok, contents} <- read_home_document(home),
+         :ok <- renderable_document(contents),
+         :ok <- File.mkdir_p(home) do
+      document = contents |> parse_document() |> Map.put(:fermix_web, port: port)
+
+      File.write(home_document_path(home), dump_snapshot(persistable_snapshot(document)))
+    end
+  end
+
+  defp validate_web_port(port) do
+    if WebListener.valid_configured_port?(port),
+      do: :ok,
+      else: {:error, {:invalid_port, WebListener.invalid_port_sentence(port)}}
+  end
+
+  # The top-level section names `dump_snapshot/1` can produce. A document
+  # carrying anything else is one this renderer cannot round-trip.
+  @renderable_sections ~w(fermix_core sandbox fermix_channels fermix_web)
+
+  defp renderable_document(contents) do
+    case contents |> section_names() |> Enum.reject(&(&1 in @renderable_sections)) do
+      [] -> :ok
+      [name | _rest] -> {:error, {:unrenderable_settings, unrenderable_sentence(name)}}
+    end
+  end
+
+  defp unrenderable_sentence(name) do
+    "the settings file carries a [#{name}] section this command cannot rewrite " <>
+      "without dropping it. Set the web listener port by editing config.toml."
+  end
+
+  defp section_names(contents) do
+    ~r/^\s*\[\[?([A-Za-z0-9_-]+)/m
+    |> Regex.scan(contents)
+    |> Enum.map(fn [_line, name] -> name end)
+    |> Enum.uniq()
+  end
+
+  defp read_home_document(home) do
+    case File.read(home_document_path(home)) do
+      {:ok, contents} -> {:ok, contents}
+      {:error, :enoent} -> {:ok, ""}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp home_document_path(home), do: Path.join(home, "config.toml")
+
+  # The whole `[fermix_web]` section: one bounded integer, refused loudly when
+  # it is anything else. A hand-edited port that cannot bind is a named parse
+  # refusal the operator can act on, never a daemon quietly listening elsewhere.
+  defp normalize_web(nil), do: []
+
+  defp normalize_web(config) when is_map(config) or is_list(config) do
+    case web_value(config) do
+      nil -> []
+      port -> [port: validated_web_port!(port)]
+    end
+  end
+
+  defp normalize_web(_other), do: []
+
+  defp web_value(config) when is_map(config), do: Map.get(config, "port")
+  defp web_value(config) when is_list(config), do: Keyword.get(config, :port)
+
+  defp validated_web_port!(port) do
+    if WebListener.valid_configured_port?(port) do
+      port
+    else
+      raise ArgumentError, "[fermix_web] " <> WebListener.invalid_port_sentence(port)
+    end
+  end
+
+  # The inverse of `normalize_web/1`, per the round-trip rule every normalizing
+  # section owes: the persisted spelling of an integer is the integer, so this
+  # is the identity — and it is written down, and tested, so the next key added
+  # to this section cannot quietly skip it.
+  defp web_to_keyword([]), do: []
+  defp web_to_keyword(port: port), do: [port: port]
 
   defp maybe_resolve_keyring(snapshot, opts) do
     if Keyword.get(opts, :resolve_secrets, true) do
@@ -844,6 +972,7 @@ defmodule FermixCore.Setup.ConfigStore do
     profile = Keyword.get(fermix_core, :profile, "general")
     sandbox = Map.get(snapshot, :sandbox, [])
     channels = Map.get(snapshot, :fermix_channels, [])
+    web = snapshot |> Map.get(:fermix_web, []) |> normalize_web() |> web_to_keyword()
 
     [
       "# Managed by mix fermix.setup",
@@ -893,7 +1022,8 @@ defmodule FermixCore.Setup.ConfigStore do
       render_section(["fermix_channels", "slack"], Keyword.get(channels, :slack, [])),
       render_section(["fermix_channels", "signal"], Keyword.get(channels, :signal, [])),
       render_section(["fermix_channels", "acp"], Keyword.get(channels, :acp, [])),
-      render_mobile(Keyword.get(channels, :mobile, []))
+      render_mobile(Keyword.get(channels, :mobile, [])),
+      render_section(["fermix_web"], web)
     ]
     |> List.flatten()
     |> Enum.reject(&(&1 in [nil, ""]))
@@ -1119,7 +1249,7 @@ defmodule FermixCore.Setup.ConfigStore do
         acp: normalize_acp(get_in(document, ["fermix_channels", "acp"])),
         mobile: normalize_mobile(get_in(document, ["fermix_channels", "mobile"]))
       ],
-      fermix_web: []
+      fermix_web: normalize_web(get_in(document, ["fermix_web"]))
     }
   end
 

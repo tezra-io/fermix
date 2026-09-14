@@ -54,6 +54,31 @@ defmodule FermixCore.Management.Diagnostics do
   @spec max_log_entries() :: pos_integer()
   def max_log_entries, do: @max_log_entries
 
+  @doc "The engine identity fields this bundle may carry."
+  @spec engine_fields() :: [String.t()]
+  def engine_fields, do: @engine_fields
+
+  @doc "The log entry fields this bundle may carry."
+  @spec entry_fields() :: [String.t()]
+  def entry_fields, do: @entry_fields
+
+  @doc """
+  The allowlist itself: only the named keys survive, and the two that carry
+  operator text are scrubbed on the way through.
+
+  Public because the offline collector (`Diagnostics.Offline`) builds the same
+  object from different sources and must use this construction rather than a
+  second one — a source that grows a new key must not grow either bundle.
+  """
+  @spec take(map() | term(), [String.t()]) :: map()
+  def take(source, fields)
+
+  def take(source, fields) when is_map(source) do
+    Map.new(fields, fn field -> {field, field_value(source, field)} end)
+  end
+
+  def take(_source, fields), do: Map.new(fields, &{&1, nil})
+
   @doc """
   Builds the core diagnostic object.
 
@@ -124,14 +149,6 @@ defmodule FermixCore.Management.Diagnostics do
       "entries" => Enum.map(entries, &take(&1, @entry_fields))
     }
   end
-
-  # The allowlist itself: only named keys survive, and the two that carry
-  # operator text are scrubbed on the way through.
-  defp take(source, fields) when is_map(source) do
-    Map.new(fields, fn field -> {field, field_value(source, field)} end)
-  end
-
-  defp take(_source, fields), do: Map.new(fields, &{&1, nil})
 
   defp field_value(source, field) when field in @text_fields do
     case Map.get(source, field) do

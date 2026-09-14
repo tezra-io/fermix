@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "home_change_refused",
+    "sentence": "The background service is running from /home/operator/.fermix. Stop it with fermix service uninstall before moving it to another home."
+  },
+  "ok": false,
+  "schema_version": 1
+}

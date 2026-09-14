@@ -1,0 +1,64 @@
+{
+  "ok": true,
+  "result": {
+    "generated_at": "2026-01-01T00:00:00Z",
+    "mode": "offline",
+    "schema_version": 1,
+    "sources": {
+      "desktop_session": {
+        "observed_at": "2026-01-01T00:00:00Z",
+        "reason": "session facts are supplied by the graphical client",
+        "status": "unavailable"
+      },
+      "doctor": {
+        "observed_at": "2026-01-01T00:00:00Z",
+        "reason": "Doctor runs against the daemon, which is not being contacted",
+        "status": "unavailable"
+      },
+      "engine": {
+        "data": {
+          "installed": {
+            "architecture": "x86_64",
+            "artifact_target": "linux_x86_64",
+            "build_id": "release-9",
+            "distribution_identity": "linux_package",
+            "engine_id": "fermix-core",
+            "integrity": "unreadable",
+            "pid": null,
+            "product_version": "1.2.3",
+            "source_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "running": null,
+          "running_status": "unavailable"
+        },
+        "observed_at": "2026-01-01T00:00:00Z",
+        "status": "available"
+      },
+      "logs": {
+        "data": {
+          "count": 0,
+          "entries": [],
+          "file_status": "unavailable",
+          "journal_reason": "journalctl is not installed",
+          "journal_status": "unavailable"
+        },
+        "observed_at": "2026-01-01T00:00:00Z",
+        "status": "available"
+      },
+      "secret_backend": {
+        "data": {
+          "present": false,
+          "tool": "secret-tool"
+        },
+        "observed_at": "2026-01-01T00:00:00Z",
+        "status": "available"
+      },
+      "service": {
+        "observed_at": "2026-01-01T00:00:00Z",
+        "reason": "This session has no user service manager, so the background service cannot be inspected or changed from here. Log in to this machine and try again.",
+        "status": "unavailable"
+      }
+    }
+  },
+  "schema_version": 1
+}

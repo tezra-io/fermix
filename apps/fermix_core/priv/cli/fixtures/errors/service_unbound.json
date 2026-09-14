@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "service_unbound",
+    "sentence": "No home is bound to the background service yet. Run fermix service install to choose one."
+  },
+  "ok": false,
+  "schema_version": 1
+}

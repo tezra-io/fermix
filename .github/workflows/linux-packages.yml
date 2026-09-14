@@ -1,0 +1,89 @@
+name: linux-packages
+
+# Build the deb and the rpm from a branch, so a packaging change is testable
+# before a tag exists (M38 §12.1). Nothing here signs or publishes anything:
+# the packages are workflow artifacts, and the release rail is the only thing
+# that produces a package anybody installs.
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Which package target to build
+        type: choice
+        default: both
+        options:
+          - both
+          - linux_x86_64
+          - linux_aarch64
+  pull_request:
+    paths:
+      - packaging/linux/**
+      - scripts/release/build_linux_packages.sh
+      - scripts/release/linux_packages.py
+      - mix.exs
+      - .github/workflows/linux-packages.yml
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Linux packages
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      MIX_ENV: prod
+      ELIXIR_VERSION: "1.19.5"
+      OTP_VERSION: "28.4.1"
+      ZIG_VERSION: "0.15.2"
+      # A branch build is stamped as one: nothing that carries this id is a
+      # release, and the identity is still complete, so the engine inside the
+      # package reports what it is.
+      FERMIX_BUILD_ID: pr-${{ github.run_id }}
+      FERMIX_BUILD_SOURCE_COMMIT: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Install release tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xz-utils jq patchelf
+
+      - name: Build the requested package targets
+        env:
+          REQUESTED_TARGET: ${{ github.event.inputs.target || 'both' }}
+        run: |
+          set -euo pipefail
+          version="$(awk -F '"' '/^      version:/ { print $2; exit }' mix.exs)"
+          if [ "$REQUESTED_TARGET" = both ]; then
+            targets="linux_x86_64 linux_aarch64"
+          else
+            targets="$REQUESTED_TARGET"
+          fi
+          for target in $targets; do
+            scripts/release/build_linux_packages.sh \
+              "$target" \
+              "$version" \
+              packaging/linux/out/packages
+          done
+
+      - name: Upload Linux packages
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: linux-packages-${{ github.run_id }}
+          path: |
+            packaging/linux/out/packages/*.deb
+            packaging/linux/out/packages/*.rpm
+          if-no-files-found: error
+          retention-days: 7

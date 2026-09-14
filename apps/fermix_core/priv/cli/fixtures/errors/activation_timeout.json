@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "activation_timeout",
+    "sentence": "The background service was started but did not answer in time. Read what it said with journalctl --user -u fermix, then try again."
+  },
+  "ok": false,
+  "schema_version": 1
+}
