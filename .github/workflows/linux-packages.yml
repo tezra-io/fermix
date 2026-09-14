@@ -33,14 +33,15 @@ jobs:
     # One job per target in its own checkout, for the reason release.yml gives:
     # a build leaves outputs behind it, and the script refuses to snapshot a
     # checkout that is not exactly the commit. A dispatch that names one
-    # target skips the other job rather than building both.
-    if: github.event_name != 'workflow_dispatch' || github.event.inputs.target == 'both' || github.event.inputs.target == matrix.target
+    # target gets one job; a pull request and a dispatch of "both" get two.
+    # The choice is made in the matrix, because a job-level condition cannot
+    # read the matrix it would select from.
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
-        target: [linux_x86_64, linux_aarch64]
+        target: ${{ fromJSON(github.event_name == 'workflow_dispatch' && github.event.inputs.target != 'both' && format('["{0}"]', github.event.inputs.target) || '["linux_x86_64","linux_aarch64"]') }}
     env:
       MIX_ENV: prod
       ELIXIR_VERSION: "1.19.5"

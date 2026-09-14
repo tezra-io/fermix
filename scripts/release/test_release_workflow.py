@@ -190,6 +190,8 @@ class ReleaseWorkflowTest(unittest.TestCase):
                 self.assertIn(f"- {path}", self.linux_packages)
 
         self.assertIn("FERMIX_BUILD_ID: pr-${{ github.run_id }}", self.linux_packages)
+        self.assertIn('\'["linux_x86_64","linux_aarch64"]\'', self.linux_packages)
+        self.assertNotIn("if: github.event_name", self.linux_packages)
         self.assertIn("scripts/release/build_linux_packages.sh", self.linux_packages)
         self.assertNotIn("cosign", self.linux_packages)
         self.assertNotIn("softprops/action-gh-release", self.linux_packages)
