@@ -1454,6 +1454,18 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       refute reply == "Sorry, I encountered an error processing your message."
     end
 
+    # A 404 with a zero-byte body (Codex, 2026-09-15) rendered "returned HTTP 404.
+    # Check provider logs and retry." — and the log line it pointed at read
+    # `404 - ""`. The reply states what is actually known and sends nobody after
+    # a log that holds nothing.
+    test "maps an empty-bodied HTTP error to a reply saying no reason was given" do
+      reply = TurnRunner.error_reply(ProviderError.api(:openai_codex, :codex, 404, ""))
+
+      assert reply =~ "returned HTTP 404"
+      assert reply =~ "gave no reason"
+      refute reply =~ "Check provider logs"
+    end
+
     test "maps an exhausted failover chain to a reply naming the attempted providers" do
       last = ProviderError.transport(:openai, :responses, :timeout)
 

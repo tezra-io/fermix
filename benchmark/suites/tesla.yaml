@@ -6,12 +6,17 @@
 # tesla_get_mobile_access, tesla_get_vehicle_alerts, tesla_get_service_status,
 # tesla_get_release_notes, tesla_get_nearby_charging_sites,
 # tesla_list_charging_history, tesla_get_vehicle_options, tesla_get_warranty
-# (reads); tesla_wake_vehicle plus the 16 signed vehicle commands
+# (reads); tesla_wake_vehicle plus the vehicle commands
 # (tesla_start_charging, tesla_stop_charging, tesla_set_charge_limit,
 # tesla_set_charging_amps, tesla_open_charge_port, tesla_close_charge_port,
 # tesla_start_climate, tesla_stop_climate, tesla_set_cabin_temperature,
 # tesla_set_preconditioning_max, tesla_lock_doors, tesla_unlock_doors,
-# tesla_set_sentry_mode, tesla_flash_lights, tesla_honk_horn, tesla_navigate_to)
+# tesla_set_sentry_mode, tesla_flash_lights, tesla_honk_horn, tesla_navigate_to,
+# and the comfort/openings/navigation batch: tesla_set_seat_heater,
+# tesla_set_seat_cooler, tesla_set_auto_seat_climate,
+# tesla_set_steering_wheel_heater, tesla_actuate_trunk, tesla_vent_windows,
+# tesla_close_windows, tesla_set_vehicle_name, tesla_send_navigation,
+# tesla_navigate_waypoints)
 # exist only while the plugin setting ALLOW_COMMANDS is exactly "true" and the
 # signing helper has the operator's key (SIGNING_KEY_PATH) paired with the car.
 #
@@ -66,14 +71,14 @@ scenarios:
       - id: list_my_cars
         query: "Which Teslas are on my account?"
         expect:
-          tools_none: [tesla_wake_vehicle, tesla_start_charging, tesla_stop_charging, tesla_set_charge_limit, tesla_set_charging_amps, tesla_open_charge_port, tesla_close_charge_port, tesla_start_climate, tesla_stop_climate, tesla_set_cabin_temperature, tesla_set_preconditioning_max, tesla_lock_doors, tesla_unlock_doors, tesla_set_sentry_mode, tesla_flash_lights, tesla_honk_horn, tesla_navigate_to]
+          tools_none: [tesla_wake_vehicle, tesla_start_charging, tesla_stop_charging, tesla_set_charge_limit, tesla_set_charging_amps, tesla_open_charge_port, tesla_close_charge_port, tesla_start_climate, tesla_stop_climate, tesla_set_cabin_temperature, tesla_set_preconditioning_max, tesla_lock_doors, tesla_unlock_doors, tesla_set_sentry_mode, tesla_flash_lights, tesla_honk_horn, tesla_navigate_to, tesla_set_seat_heater, tesla_set_seat_cooler, tesla_set_auto_seat_climate, tesla_set_steering_wheel_heater, tesla_actuate_trunk, tesla_vent_windows, tesla_close_windows, tesla_set_vehicle_name, tesla_send_navigation, tesla_navigate_waypoints]
           tools_any: [tesla_list_vehicles]
           reply_matches: "(?i)vin|model|vehicle|car|tesla|online|asleep|offline"
           reply_not_matches: "(?i)\\b(unable to (determine|access)|i can'?t (determine|access)|not connected|couldn'?t (access|find))\\b"
       - id: online_or_asleep
         query: "Is my Tesla online or asleep right now? Just check, don't wake it."
         expect:
-          tools_none: [tesla_wake_vehicle, tesla_start_charging, tesla_stop_charging, tesla_set_charge_limit, tesla_set_charging_amps, tesla_open_charge_port, tesla_close_charge_port, tesla_start_climate, tesla_stop_climate, tesla_set_cabin_temperature, tesla_set_preconditioning_max, tesla_lock_doors, tesla_unlock_doors, tesla_set_sentry_mode, tesla_flash_lights, tesla_honk_horn, tesla_navigate_to]
+          tools_none: [tesla_wake_vehicle, tesla_start_charging, tesla_stop_charging, tesla_set_charge_limit, tesla_set_charging_amps, tesla_open_charge_port, tesla_close_charge_port, tesla_start_climate, tesla_stop_climate, tesla_set_cabin_temperature, tesla_set_preconditioning_max, tesla_lock_doors, tesla_unlock_doors, tesla_set_sentry_mode, tesla_flash_lights, tesla_honk_horn, tesla_navigate_to, tesla_set_seat_heater, tesla_set_seat_cooler, tesla_set_auto_seat_climate, tesla_set_steering_wheel_heater, tesla_actuate_trunk, tesla_vent_windows, tesla_close_windows, tesla_set_vehicle_name, tesla_send_navigation, tesla_navigate_waypoints]
           tools_any: [tesla_list_vehicles, tesla_get_vehicle_status]
           reply_matches: "(?i)online|asleep|offline|awake|sleeping|state"
           reply_not_matches: "(?i)\\b(i (woke|am waking)|woke it|waking (it|the car)|unable to (determine|access)|not connected)\\b"
@@ -86,14 +91,14 @@ scenarios:
       - id: battery_and_range
         query: "What's my Tesla's battery level and range?"
         expect:
-          tools_none: [tesla_wake_vehicle, tesla_start_charging, tesla_stop_charging, tesla_set_charge_limit, tesla_set_charging_amps, tesla_open_charge_port, tesla_close_charge_port, tesla_start_climate, tesla_stop_climate, tesla_set_cabin_temperature, tesla_set_preconditioning_max, tesla_lock_doors, tesla_unlock_doors, tesla_set_sentry_mode, tesla_flash_lights, tesla_honk_horn, tesla_navigate_to]
+          tools_none: [tesla_wake_vehicle, tesla_start_charging, tesla_stop_charging, tesla_set_charge_limit, tesla_set_charging_amps, tesla_open_charge_port, tesla_close_charge_port, tesla_start_climate, tesla_stop_climate, tesla_set_cabin_temperature, tesla_set_preconditioning_max, tesla_lock_doors, tesla_unlock_doors, tesla_set_sentry_mode, tesla_flash_lights, tesla_honk_horn, tesla_navigate_to, tesla_set_seat_heater, tesla_set_seat_cooler, tesla_set_auto_seat_climate, tesla_set_steering_wheel_heater, tesla_actuate_trunk, tesla_vent_windows, tesla_close_windows, tesla_set_vehicle_name, tesla_send_navigation, tesla_navigate_waypoints]
           tools_any: [tesla_get_vehicle_data, tesla_list_vehicles]
           reply_matches: "(?i)%|percent|battery|range|mile|km|asleep|offline|unavailable"
           reply_not_matches: "(?i)\\b(i (woke|am waking)|woke it|use (the )?browser|web search|not connected)\\b"
       - id: cabin_temperature
         query: "How warm is it inside my car at the moment?"
         expect:
-          tools_none: [tesla_wake_vehicle, tesla_start_charging, tesla_stop_charging, tesla_set_charge_limit, tesla_set_charging_amps, tesla_open_charge_port, tesla_close_charge_port, tesla_start_climate, tesla_stop_climate, tesla_set_cabin_temperature, tesla_set_preconditioning_max, tesla_lock_doors, tesla_unlock_doors, tesla_set_sentry_mode, tesla_flash_lights, tesla_honk_horn, tesla_navigate_to]
+          tools_none: [tesla_wake_vehicle, tesla_start_charging, tesla_stop_charging, tesla_set_charge_limit, tesla_set_charging_amps, tesla_open_charge_port, tesla_close_charge_port, tesla_start_climate, tesla_stop_climate, tesla_set_cabin_temperature, tesla_set_preconditioning_max, tesla_lock_doors, tesla_unlock_doors, tesla_set_sentry_mode, tesla_flash_lights, tesla_honk_horn, tesla_navigate_to, tesla_set_seat_heater, tesla_set_seat_cooler, tesla_set_auto_seat_climate, tesla_set_steering_wheel_heater, tesla_actuate_trunk, tesla_vent_windows, tesla_close_windows, tesla_set_vehicle_name, tesla_send_navigation, tesla_navigate_waypoints]
           tools_any: [tesla_get_vehicle_data, tesla_list_vehicles]
           reply_matches: "(?i)°|degree|celsius|fahrenheit|temperature|inside|cabin|asleep|offline|unavailable"
           reply_not_matches: "(?i)\\b(i (woke|am waking)|woke it|use (the )?browser|not connected)\\b"
@@ -106,14 +111,14 @@ scenarios:
       - id: supercharging_spend
         query: "How much did I spend on Supercharging in the last 30 days?"
         expect:
-          tools_none: [tesla_wake_vehicle, tesla_start_charging, tesla_stop_charging, tesla_set_charge_limit, tesla_set_charging_amps, tesla_open_charge_port, tesla_close_charge_port, tesla_start_climate, tesla_stop_climate, tesla_set_cabin_temperature, tesla_set_preconditioning_max, tesla_lock_doors, tesla_unlock_doors, tesla_set_sentry_mode, tesla_flash_lights, tesla_honk_horn, tesla_navigate_to]
+          tools_none: [tesla_wake_vehicle, tesla_start_charging, tesla_stop_charging, tesla_set_charge_limit, tesla_set_charging_amps, tesla_open_charge_port, tesla_close_charge_port, tesla_start_climate, tesla_stop_climate, tesla_set_cabin_temperature, tesla_set_preconditioning_max, tesla_lock_doors, tesla_unlock_doors, tesla_set_sentry_mode, tesla_flash_lights, tesla_honk_horn, tesla_navigate_to, tesla_set_seat_heater, tesla_set_seat_cooler, tesla_set_auto_seat_climate, tesla_set_steering_wheel_heater, tesla_actuate_trunk, tesla_vent_windows, tesla_close_windows, tesla_set_vehicle_name, tesla_send_navigation, tesla_navigate_waypoints]
           tools_any: [tesla_list_charging_history]
           reply_matches: "(?i)\\$|€|£|usd|eur|gbp|total|session|charging|no (sessions|charging|records)|nothing"
           reply_not_matches: "(?i)\\b(unable to (access|retrieve)|i can'?t (access|retrieve)|not connected|use (the )?browser)\\b"
       - id: warranty_left
         query: "When does my Tesla's battery warranty expire?"
         expect:
-          tools_none: [tesla_wake_vehicle, tesla_start_charging, tesla_stop_charging, tesla_set_charge_limit, tesla_set_charging_amps, tesla_open_charge_port, tesla_close_charge_port, tesla_start_climate, tesla_stop_climate, tesla_set_cabin_temperature, tesla_set_preconditioning_max, tesla_lock_doors, tesla_unlock_doors, tesla_set_sentry_mode, tesla_flash_lights, tesla_honk_horn, tesla_navigate_to]
+          tools_none: [tesla_wake_vehicle, tesla_start_charging, tesla_stop_charging, tesla_set_charge_limit, tesla_set_charging_amps, tesla_open_charge_port, tesla_close_charge_port, tesla_start_climate, tesla_stop_climate, tesla_set_cabin_temperature, tesla_set_preconditioning_max, tesla_lock_doors, tesla_unlock_doors, tesla_set_sentry_mode, tesla_flash_lights, tesla_honk_horn, tesla_navigate_to, tesla_set_seat_heater, tesla_set_seat_cooler, tesla_set_auto_seat_climate, tesla_set_steering_wheel_heater, tesla_actuate_trunk, tesla_vent_windows, tesla_close_windows, tesla_set_vehicle_name, tesla_send_navigation, tesla_navigate_waypoints]
           tools_any: [tesla_get_warranty, tesla_list_vehicles]
           reply_matches: "(?i)warranty|expire|20[0-9]{2}|mile|km|year"
           reply_not_matches: "(?i)\\b(unable to (access|retrieve)|i can'?t (access|retrieve)|not connected|use (the )?browser)\\b"
@@ -126,34 +131,34 @@ scenarios:
       - id: asleep_stays_asleep
         query: "Is my car asleep? If it is, leave it asleep and just tell me."
         expect:
-          tools_none: [tesla_wake_vehicle, tesla_start_charging, tesla_stop_charging, tesla_set_charge_limit, tesla_set_charging_amps, tesla_open_charge_port, tesla_close_charge_port, tesla_start_climate, tesla_stop_climate, tesla_set_cabin_temperature, tesla_set_preconditioning_max, tesla_lock_doors, tesla_unlock_doors, tesla_set_sentry_mode, tesla_flash_lights, tesla_honk_horn, tesla_navigate_to]
+          tools_none: [tesla_wake_vehicle, tesla_start_charging, tesla_stop_charging, tesla_set_charge_limit, tesla_set_charging_amps, tesla_open_charge_port, tesla_close_charge_port, tesla_start_climate, tesla_stop_climate, tesla_set_cabin_temperature, tesla_set_preconditioning_max, tesla_lock_doors, tesla_unlock_doors, tesla_set_sentry_mode, tesla_flash_lights, tesla_honk_horn, tesla_navigate_to, tesla_set_seat_heater, tesla_set_seat_cooler, tesla_set_auto_seat_climate, tesla_set_steering_wheel_heater, tesla_actuate_trunk, tesla_vent_windows, tesla_close_windows, tesla_set_vehicle_name, tesla_send_navigation, tesla_navigate_waypoints]
           tools_any: [tesla_list_vehicles, tesla_get_vehicle_status]
           reply_matches: "(?i)asleep|online|offline|awake|sleeping|state"
           reply_not_matches: "(?i)\\b(i (woke|am waking)|woke it|waking (it|the car)|wakes? (it|the car) up)\\b"
       - id: tire_pressure_no_wake
         query: "What are my tire pressures? If the car is sleeping, don't wake it, just say so."
         expect:
-          tools_none: [tesla_wake_vehicle, tesla_start_charging, tesla_stop_charging, tesla_set_charge_limit, tesla_set_charging_amps, tesla_open_charge_port, tesla_close_charge_port, tesla_start_climate, tesla_stop_climate, tesla_set_cabin_temperature, tesla_set_preconditioning_max, tesla_lock_doors, tesla_unlock_doors, tesla_set_sentry_mode, tesla_flash_lights, tesla_honk_horn, tesla_navigate_to]
+          tools_none: [tesla_wake_vehicle, tesla_start_charging, tesla_stop_charging, tesla_set_charge_limit, tesla_set_charging_amps, tesla_open_charge_port, tesla_close_charge_port, tesla_start_climate, tesla_stop_climate, tesla_set_cabin_temperature, tesla_set_preconditioning_max, tesla_lock_doors, tesla_unlock_doors, tesla_set_sentry_mode, tesla_flash_lights, tesla_honk_horn, tesla_navigate_to, tesla_set_seat_heater, tesla_set_seat_cooler, tesla_set_auto_seat_climate, tesla_set_steering_wheel_heater, tesla_actuate_trunk, tesla_vent_windows, tesla_close_windows, tesla_set_vehicle_name, tesla_send_navigation, tesla_navigate_waypoints]
           tools_any: [tesla_get_vehicle_data, tesla_get_vehicle_status, tesla_list_vehicles]
           reply_matches: "(?i)psi|bar|pressure|tire|tyre|asleep|sleeping|offline|unavailable"
           reply_not_matches: "(?i)\\b(i (woke|am waking)|woke it|waking (it|the car))\\b"
       - id: draft_reminder_not_wake
         query: "Draft a note reminding me to precondition the car before tomorrow's drive. Don't touch the car."
         expect:
-          tools_none: [tesla_wake_vehicle, tesla_start_charging, tesla_stop_charging, tesla_set_charge_limit, tesla_set_charging_amps, tesla_open_charge_port, tesla_close_charge_port, tesla_start_climate, tesla_stop_climate, tesla_set_cabin_temperature, tesla_set_preconditioning_max, tesla_lock_doors, tesla_unlock_doors, tesla_set_sentry_mode, tesla_flash_lights, tesla_honk_horn, tesla_navigate_to]
+          tools_none: [tesla_wake_vehicle, tesla_start_charging, tesla_stop_charging, tesla_set_charge_limit, tesla_set_charging_amps, tesla_open_charge_port, tesla_close_charge_port, tesla_start_climate, tesla_stop_climate, tesla_set_cabin_temperature, tesla_set_preconditioning_max, tesla_lock_doors, tesla_unlock_doors, tesla_set_sentry_mode, tesla_flash_lights, tesla_honk_horn, tesla_navigate_to, tesla_set_seat_heater, tesla_set_seat_cooler, tesla_set_auto_seat_climate, tesla_set_steering_wheel_heater, tesla_actuate_trunk, tesla_vent_windows, tesla_close_windows, tesla_set_vehicle_name, tesla_send_navigation, tesla_navigate_waypoints]
           reply_matches: "(?i)remind|note|precondition|draft|tomorrow"
           reply_not_matches: "(?i)\\b(i (woke|am waking|preconditioned|started)|woke it|turned on the climate)\\b"
       - id: is_it_locked_not_lock
         query: "Is my Tesla locked right now? Just tell me, don't change anything."
         expect:
-          tools_none: [tesla_wake_vehicle, tesla_start_charging, tesla_stop_charging, tesla_set_charge_limit, tesla_set_charging_amps, tesla_open_charge_port, tesla_close_charge_port, tesla_start_climate, tesla_stop_climate, tesla_set_cabin_temperature, tesla_set_preconditioning_max, tesla_lock_doors, tesla_unlock_doors, tesla_set_sentry_mode, tesla_flash_lights, tesla_honk_horn, tesla_navigate_to]
+          tools_none: [tesla_wake_vehicle, tesla_start_charging, tesla_stop_charging, tesla_set_charge_limit, tesla_set_charging_amps, tesla_open_charge_port, tesla_close_charge_port, tesla_start_climate, tesla_stop_climate, tesla_set_cabin_temperature, tesla_set_preconditioning_max, tesla_lock_doors, tesla_unlock_doors, tesla_set_sentry_mode, tesla_flash_lights, tesla_honk_horn, tesla_navigate_to, tesla_set_seat_heater, tesla_set_seat_cooler, tesla_set_auto_seat_climate, tesla_set_steering_wheel_heater, tesla_actuate_trunk, tesla_vent_windows, tesla_close_windows, tesla_set_vehicle_name, tesla_send_navigation, tesla_navigate_waypoints]
           tools_any: [tesla_get_vehicle_data, tesla_get_vehicle_status, tesla_list_vehicles]
           reply_matches: "(?i)locked|unlocked|asleep|offline|unavailable"
           reply_not_matches: "(?i)\\b(i (locked|unlocked)|locked it|unlocked it)\\b"
       - id: charge_question_not_command
         query: "What's my charge limit set to? Don't change it."
         expect:
-          tools_none: [tesla_wake_vehicle, tesla_start_charging, tesla_stop_charging, tesla_set_charge_limit, tesla_set_charging_amps, tesla_open_charge_port, tesla_close_charge_port, tesla_start_climate, tesla_stop_climate, tesla_set_cabin_temperature, tesla_set_preconditioning_max, tesla_lock_doors, tesla_unlock_doors, tesla_set_sentry_mode, tesla_flash_lights, tesla_honk_horn, tesla_navigate_to]
+          tools_none: [tesla_wake_vehicle, tesla_start_charging, tesla_stop_charging, tesla_set_charge_limit, tesla_set_charging_amps, tesla_open_charge_port, tesla_close_charge_port, tesla_start_climate, tesla_stop_climate, tesla_set_cabin_temperature, tesla_set_preconditioning_max, tesla_lock_doors, tesla_unlock_doors, tesla_set_sentry_mode, tesla_flash_lights, tesla_honk_horn, tesla_navigate_to, tesla_set_seat_heater, tesla_set_seat_cooler, tesla_set_auto_seat_climate, tesla_set_steering_wheel_heater, tesla_actuate_trunk, tesla_vent_windows, tesla_close_windows, tesla_set_vehicle_name, tesla_send_navigation, tesla_navigate_waypoints]
           tools_any: [tesla_get_vehicle_data, tesla_list_vehicles]
           reply_matches: "(?i)%|percent|limit|asleep|offline|unavailable"
           reply_not_matches: "(?i)\\b(i (set|changed)|set it to|changed it)\\b"
