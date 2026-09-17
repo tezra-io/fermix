@@ -278,10 +278,13 @@ Notes that the shapes alone do not carry:
   `summary` carries one count per status.
 - **Readiness is split into gating and advisory.** A failure carries `gating`,
   the `pane` that can clear it, and a closed-set `detail_key`. Provider and
-  personalization failures gate; the five channels and realtime are advisory.
-  `status` is `ready` exactly when no gating failure remains, and every advisory
-  failure stays in the list, so a surface never needs a second definition of
-  ready.
+  personalization failures gate; the five channels, realtime, and allowed
+  sandbox environment variables the daemon cannot read (`sandbox:env_missing`,
+  `sandbox:env_helper_failed`, pane `sandbox`, one failure per cause naming
+  every affected variable, with `component` `sandbox:env:missing` or
+  `sandbox:env:helper_failed`) are advisory. `status` is `ready` exactly
+  when no gating failure remains, and every advisory failure stays in the list,
+  so a surface never needs a second definition of ready.
 - **Restart truth has one owner.** `restart.required` and `restart.reasons` come
   from the daemon's two baselines: the application environment captured at boot,
   and the parsed settings file as this daemon last saw it. The sentence for each

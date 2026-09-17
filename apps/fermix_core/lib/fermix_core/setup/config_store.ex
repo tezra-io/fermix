@@ -18,6 +18,7 @@ defmodule FermixCore.Setup.ConfigStore do
   alias FermixCore.Providers.ReasoningEffort
   alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Sandbox.Config, as: SandboxConfig
+  alias FermixCore.Sandbox.EnvHealth
   alias FermixCore.Setup.RestartState
   alias FermixCore.Setup.SecretStore
   alias FermixCore.Setup.WebListener
@@ -934,9 +935,12 @@ defmodule FermixCore.Setup.ConfigStore do
     :ok
   end
 
+  # A newly allowed name is probed as soon as it is applied, so readiness says
+  # it cannot be read before the first command finds out. A no-op in a
+  # tree-less process, where the record does not exist.
   defp apply_sandbox_config(sandbox_config) do
     Application.put_env(:fermix_core, :sandbox, SandboxConfig.normalize(sandbox_config))
-    :ok
+    EnvHealth.refresh()
   end
 
   defp apply_channel_config(channel, channel_config) do

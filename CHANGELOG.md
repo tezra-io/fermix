@@ -146,6 +146,26 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **One allowed environment variable the daemon cannot read no longer
+  refuses every shell command.** An entry on `[sandbox.env] allow` whose value
+  lives only in a shell profile is invisible to a background service, and the
+  sandbox used to answer that by denying every command in every session, even
+  a bare `date`, with a raw error and nothing in the log. Each allowed name now
+  resolves on its own: the command runs with the rest, its result opens with a
+  note naming the variable and the fix, the trace carries the names, the log
+  says once when a name stops resolving and once when it resolves again, and
+  the app's Settings, Home and Doctor show an advisory row in the Sandbox pane
+  until it is stored with `fermix sandbox env set` or removed from the list. A
+  `fermix doctor` run from a shell has no view of the daemon's record and does
+  not show the row. A variable
+  a coding-agent adapter or a command capability names for itself is still
+  required.
+- **A scheduled job's run history says when a run was blocked.** A run's
+  `ok` status only ever meant the agent loop finished, so a job whose tracker
+  tool refused on every call still read as a success. Each run now records how
+  many of its tool calls failed, visible in `list_job_runs`, in the run's
+  `output.md`, and on the run's trace event, without failing runs that met a
+  recoverable tool error.
 - **The first `fermix service install` on a Linux account no longer refuses
   itself.** Clearing the unit's start-limit budget is part of enabling it, and
   systemd answers "not loaded" for a unit it has never seen — which is nothing

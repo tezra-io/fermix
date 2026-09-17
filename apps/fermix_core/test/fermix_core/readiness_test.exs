@@ -3,6 +3,8 @@ defmodule FermixCore.ReadinessTest do
 
   alias FermixCore.Auth.Store
   alias FermixCore.Readiness
+  alias FermixCore.Sandbox.Config, as: SandboxConfig
+  alias FermixCore.Sandbox.EnvHealth
 
   setup do
     providers = Application.get_env(:fermix_core, :providers, [])
@@ -596,6 +598,112 @@ defmodule FermixCore.ReadinessTest do
       assert report.status == :ready
       refute Enum.any?(report.failures, &(&1.component == "channel:acp"))
     end
+  end
+
+  # An allowed sandbox variable the daemon cannot read used to refuse every
+  # shell command and appear nowhere: doctor counted the entries and jobs said
+  # `ok`. It is now a readiness failure in the sandbox pane. Advisory, because a
+  # trading credential must never mark messaging or repair as unfinished.
+  describe "sandbox environment" do
+    # The world this report reads: the daemon's record AND the allow list it
+    # is checked against. Both are established here and put back, because the
+    # record is one global process and every other module's config apply
+    # writes to it.
+    setup do
+      seed_ready_home()
+      sandbox = Application.get_env(:fermix_core, :sandbox)
+      allow_names(["FERMIX_TEST_ABSENT", "FERMIX_TEST_OTHER"])
+
+      on_exit(fn ->
+        EnvHealth.record(%{resolved: ["FERMIX_TEST_ABSENT", "FERMIX_TEST_OTHER"], unresolved: []})
+
+        case sandbox do
+          nil -> Application.delete_env(:fermix_core, :sandbox)
+          value -> Application.put_env(:fermix_core, :sandbox, value)
+        end
+      end)
+
+      :ok
+    end
+
+    test "an allowed variable the daemon cannot resolve is advisory in the sandbox pane" do
+      record_missing(["FERMIX_TEST_ABSENT"])
+
+      report = Readiness.report()
+
+      assert report.status == :ready
+      assert [failure] = Enum.filter(report.failures, &(&1.pane == "sandbox"))
+      assert failure.component == "sandbox:env:missing"
+      assert failure.gating == false
+      assert failure.detail_key == "sandbox:env_missing"
+      assert failure.action =~ "`FERMIX_TEST_ABSENT`"
+      assert failure.action =~ "fermix sandbox env set"
+      assert Readiness.gating_failures(report.failures) == []
+    end
+
+    test "a helper that fails is its own cause" do
+      EnvHealth.record(%{
+        resolved: [],
+        unresolved: [
+          %{
+            name: "FERMIX_TEST_ABSENT",
+            reason: {:env_command_failed, "/usr/bin/security", 44, "item not found"}
+          }
+        ]
+      })
+
+      assert [failure] = Enum.filter(Readiness.report().failures, &(&1.pane == "sandbox"))
+      assert failure.component == "sandbox:env:helper_failed"
+      assert failure.detail_key == "sandbox:env_helper_failed"
+      assert failure.action =~ "`FERMIX_TEST_ABSENT`"
+      refute failure.action =~ "item not found"
+    end
+
+    # A detail key is one cause and appears once per report, so two variables
+    # with the same cause share one row that names them both.
+    test "two variables with one cause share one row" do
+      record_missing(["FERMIX_TEST_ABSENT", "FERMIX_TEST_OTHER"])
+
+      assert [failure] = Enum.filter(Readiness.report().failures, &(&1.pane == "sandbox"))
+      assert failure.detail_key == "sandbox:env_missing"
+      assert failure.action =~ "`FERMIX_TEST_ABSENT`, `FERMIX_TEST_OTHER`"
+    end
+
+    test "a variable that resolves again clears its failure" do
+      record_missing(["FERMIX_TEST_ABSENT"])
+
+      EnvHealth.record(%{resolved: ["FERMIX_TEST_ABSENT"], unresolved: []})
+
+      refute Enum.any?(Readiness.report().failures, &(&1.pane == "sandbox"))
+    end
+
+    # The record can outlive an allow-list edit; the report answers for the
+    # list in force now.
+    test "a variable no longer on the allow list is not reported" do
+      record_missing(["FERMIX_TEST_ABSENT"])
+      allow_names([])
+
+      refute Enum.any?(Readiness.report().failures, &(&1.pane == "sandbox"))
+    end
+
+    test "both causes are published for the copy gate, and the pane is routable" do
+      keys = Enum.map(Readiness.published_actions(), &elem(&1, 0))
+
+      assert "sandbox:env_missing" in keys
+      assert "sandbox:env_helper_failed" in keys
+      assert "sandbox" in Readiness.panes()
+    end
+  end
+
+  defp allow_names(names) do
+    Application.put_env(:fermix_core, :sandbox, SandboxConfig.normalize(env: [allow: names]))
+  end
+
+  defp record_missing(names) do
+    EnvHealth.record(%{
+      resolved: [],
+      unresolved: Enum.map(names, &%{name: &1, reason: {:missing_env, &1}})
+    })
   end
 
   defp seed_ready_home do

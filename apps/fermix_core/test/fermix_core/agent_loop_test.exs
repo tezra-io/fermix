@@ -407,6 +407,64 @@ defmodule FermixCore.AgentLoopTest do
     end
   end
 
+  # -- Tool failure count --
+
+  # A scheduled run reports `ok` when the loop completes, whether or not its
+  # tools worked. The count of tool calls that came back as errors is the
+  # deterministic signal a run row can carry beside that status.
+  describe "run/1 tool failure count" do
+    test "counts tool calls that returned an error", %{registry: registry} do
+      register_caps(registry, [EchoTool, FailTool])
+
+      set_mock_responses([
+        turn("",
+          tool_calls: [
+            tool_call("call_1", "echo", %{"text" => "hi"}),
+            tool_call("call_2", "fail_tool", %{})
+          ]
+        ),
+        turn("Done!")
+      ])
+
+      assert {:ok, result} = run_loop(capability_registry: registry)
+      assert result.tool_failures == 1
+    end
+
+    test "is zero when every tool call succeeds", %{registry: registry} do
+      register_caps(registry, [EchoTool])
+
+      set_mock_responses([
+        turn("", tool_calls: [tool_call("call_1", "echo", %{"text" => "hi"})]),
+        turn("Done!")
+      ])
+
+      assert {:ok, result} = run_loop(capability_registry: registry)
+      assert result.tool_failures == 0
+    end
+
+    test "is zero for a turn with no tool calls", %{registry: registry} do
+      set_mock_responses([turn("Hi")])
+
+      assert {:ok, result} = run_loop(capability_registry: registry)
+      assert result.tool_failures == 0
+    end
+
+    test "accumulates across iterations, and a tool that does not exist counts", %{
+      registry: registry
+    } do
+      register_caps(registry, [EchoTool, FailTool])
+
+      set_mock_responses([
+        turn("", tool_calls: [tool_call("call_1", "fail_tool", %{})]),
+        turn("", tool_calls: [tool_call("call_2", "no_such_tool", %{})]),
+        turn("Done!")
+      ])
+
+      assert {:ok, result} = run_loop(capability_registry: registry)
+      assert result.tool_failures == 2
+    end
+  end
+
   # -- Single tool call --
 
   describe "run/1 with single tool call" do

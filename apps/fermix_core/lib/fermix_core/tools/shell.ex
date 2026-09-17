@@ -8,6 +8,8 @@ defmodule FermixCore.Tools.Shell do
   alias FermixCore.Capabilities.Builtin.Tool
   alias FermixCore.CommandRunner
   alias FermixCore.Sandbox
+  alias FermixCore.Sandbox.Env
+  alias FermixCore.Sandbox.EnvHealth
   alias FermixCore.Tools.Telemetry, as: ToolTelemetry
 
   @default_timeout_ms 30_000
@@ -88,7 +90,7 @@ defmodule FermixCore.Tools.Shell do
     success = match?({:ok, %{success: true}}, result)
 
     ToolTelemetry.exec("shell", context, success, duration,
-      metadata: maybe_put_error_summary(trace_metadata, result),
+      metadata: trace_metadata,
       input: args,
       result: result
     )
@@ -108,30 +110,66 @@ defmodule FermixCore.Tools.Shell do
 
       with :ok <- validate_command(command),
            {:ok, plan} <- Sandbox.shell_plan(command, working_dir, context) do
+        EnvHealth.record(%{resolved: plan.env_resolved, unresolved: plan.env_unresolved})
         {result, run_trace} = run_command(command, plan.working_dir, timeout, plan.env)
 
+        # The trace summary is the command's own words; the notice prefixed for
+        # the model would otherwise open it, and `env_unresolved` already says it.
         {
-          result,
+          with_env_notice(result, plan.env_unresolved),
           trace
           |> Map.put(:working_dir, plan.working_dir)
           |> Map.put(:timeout_ms, timeout)
           |> Map.merge(run_trace)
+          |> maybe_put_error_summary(result)
+          |> put_env_unresolved(plan.env_unresolved)
         }
       else
         {:error, reason} ->
-          {{:ok, Tool.error(format_error(reason))},
+          result = {:ok, Tool.error(format_error(reason))}
+
+          {result,
            trace
            |> Map.put(:failure, sandbox_failure_tag(reason))
-           |> maybe_put_policy_enforcement(reason)}
+           |> maybe_put_policy_enforcement(reason)
+           |> maybe_put_error_summary(result)}
       end
     else
       :error ->
-        {{:ok, Tool.error("Missing required parameter: command")}, %{failure: "missing_command"}}
+        result = {:ok, Tool.error("Missing required parameter: command")}
+        {result, maybe_put_error_summary(%{failure: "missing_command"}, result)}
     end
   end
 
   defp validate_command(command) when is_binary(command) and byte_size(command) > 0, do: :ok
   defp validate_command(_), do: {:error, "Command must be a non-empty string"}
+
+  # The command ran without an allowed variable the daemon could not read. The
+  # model reads the tool result and nothing else, so the notice names each
+  # variable with the same remedy sentence the CLI prints, ahead of whatever
+  # the command produced, on success and on failure alike: a script that died
+  # for want of that variable is exactly the case that needs it.
+  defp with_env_notice(result, []), do: result
+
+  defp with_env_notice({:ok, %{success: true, output: output} = result}, unresolved),
+    do: {:ok, %{result | output: env_notice(unresolved) <> output}}
+
+  defp with_env_notice({:ok, %{success: false, error: error} = result}, unresolved),
+    do: {:ok, %{result | error: env_notice(unresolved) <> error}}
+
+  defp env_notice(unresolved) do
+    "Note: the sandbox could not pass these allowed environment variables, " <>
+      "so the command ran without them.\n" <>
+      Enum.map_join(unresolved, "\n", fn %{name: name, reason: reason} ->
+        "- #{name}: #{Env.format_error(reason)}"
+      end) <> "\n\n"
+  end
+
+  # Names only, so the fact survives a content-free export.
+  defp put_env_unresolved(trace, []), do: trace
+
+  defp put_env_unresolved(trace, unresolved),
+    do: Map.put(trace, :env_unresolved, Enum.map(unresolved, & &1.name))
 
   defp run_command(command, working_dir, timeout, env) do
     case CommandRunner.run(env_binary(), env_args(env, command),

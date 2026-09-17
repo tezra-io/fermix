@@ -176,6 +176,7 @@ defmodule FermixCore.Tools.JobRegistrySupport do
       delivery_status: run.delivery_status,
       delivery_error: run.delivery_error,
       iterations: run.iterations,
+      tool_failures: run.tool_failures,
       created_at: timestamp(run.created_at)
     }
   end

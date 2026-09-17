@@ -233,6 +233,7 @@ defmodule FermixCore.Jobs.Runner do
         output_ref: output_ref,
         final_response: result.response,
         iterations: result.iterations,
+        tool_failures: result.tool_failures,
         token_usage: %{"total" => result.total_tokens},
         latency: %{},
         delivery_status: Delivery.initial_status(state.job, result.response),
@@ -1102,6 +1103,7 @@ defmodule FermixCore.Jobs.Runner do
     Job ID: #{state.job.id}
     Run ID: #{state.run.id}
     Session ID: #{state.run.session_id}
+    Tool failures: #{result.tool_failures}
 
     ## Final Response
 

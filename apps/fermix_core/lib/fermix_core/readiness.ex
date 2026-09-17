@@ -18,6 +18,8 @@ defmodule FermixCore.Readiness do
   alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Providers.Selection
   alias FermixCore.Realtime.Config, as: RealtimeConfig
+  alias FermixCore.Sandbox.Config, as: SandboxConfig
+  alias FermixCore.Sandbox.EnvHealth
 
   @typedoc """
   Public readiness state.
@@ -51,7 +53,7 @@ defmodule FermixCore.Readiness do
 
   # Every pane slug a failure may name. Kept beside the constructors so a new
   # failure cannot invent a pane no surface routes to.
-  @panes ~w(providers personality channels voice)
+  @panes ~w(providers personality channels voice sandbox)
 
   # Credentials each channel needs, DERIVED from `Channels.Inventory` — the one
   # channel table — rather than repeated here. The two copies had already
@@ -95,7 +97,7 @@ defmodule FermixCore.Readiness do
           personalization_failure()
         ],
         &is_nil/1
-      )
+      ) ++ sandbox_env_failures()
 
     %{
       status: status_for(failures),
@@ -131,6 +133,8 @@ defmodule FermixCore.Readiness do
         providers ++
         [
           personalization_row(),
+          sandbox_env_row(:missing, ["FERMIX_EXAMPLE_KEY"]),
+          sandbox_env_row(:helper_failed, ["FERMIX_EXAMPLE_KEY"]),
           unknown_provider_action(:not_a_provider),
           multiple_primary_action(),
           invalid_auth_mode_action("provider:anthropic", "subscription"),
@@ -457,6 +461,62 @@ defmodule FermixCore.Readiness do
   defp present?(value) when is_list(value), do: value != []
   defp present?(nil), do: false
   defp present?(_value), do: true
+
+  # Allowed sandbox variables the daemon cannot read where it runs. Read from
+  # the daemon's own record (`Sandbox.EnvHealth`: boot, every config apply,
+  # every shell command), never probed here: a probe would inspect the world
+  # this report runs in, and the operator's shell is the world that had the
+  # variable while the service did not. Only names on the allow list right now
+  # count, so a name the operator removed stops being a failure at once. One
+  # row per cause, naming every variable, because a detail key is one cause
+  # and appears once per report. Advisory and in its own pane, so a trading
+  # credential can never mark messaging or repair as unfinished. A tree-less
+  # verb has no record and reports nothing, the defined answer.
+  defp sandbox_env_failures do
+    allowed = MapSet.new(SandboxConfig.current().env.allow)
+
+    EnvHealth.unresolved()
+    |> Enum.filter(&MapSet.member?(allowed, &1.name))
+    |> Enum.group_by(&sandbox_env_cause/1, & &1.name)
+    |> Enum.sort()
+    |> Enum.map(fn {cause, names} -> sandbox_env_row(cause, names) end)
+  end
+
+  defp sandbox_env_cause(%{reason: {:missing_env, _name}}), do: :missing
+  defp sandbox_env_cause(_helper_failure), do: :helper_failed
+
+  defp sandbox_env_row(:missing, names) do
+    advisory(
+      %{component: "sandbox:env:missing", action: sandbox_env_missing_action(names)},
+      "sandbox",
+      "sandbox:env_missing"
+    )
+  end
+
+  defp sandbox_env_row(:helper_failed, names) do
+    advisory(
+      %{component: "sandbox:env:helper_failed", action: sandbox_env_helper_action(names)},
+      "sandbox",
+      "sandbox:env_helper_failed"
+    )
+  end
+
+  # Variables are backticked because they are literals the operator types; a
+  # helper's own output stays out of the sentence, which is published copy.
+  defp sandbox_env_missing_action(names) do
+    "Allowed for sandboxed commands but not set where Fermix runs: #{backticked(names)}. " <>
+      "Commands run without these until each value is stored with " <>
+      "`fermix sandbox env set NAME -- <helper> [args...]` or the name is removed from the " <>
+      "list. A background service does not read a shell profile."
+  end
+
+  defp sandbox_env_helper_action(names) do
+    "A configured helper failed for: #{backticked(names)}. Sandboxed commands run without " <>
+      "these until the helper works: run it by hand to verify it, or reconfigure it with " <>
+      "`fermix sandbox env set NAME -- <helper> [args...]`."
+  end
+
+  defp backticked(names), do: Enum.map_join(names, ", ", &"`#{&1}`")
 
   # One constructor per class, so `gating`, `pane` and `detail_key` are minted
   # where the cause is known rather than inferred later from the open

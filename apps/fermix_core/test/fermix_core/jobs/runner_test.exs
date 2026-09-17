@@ -1346,6 +1346,58 @@ defmodule FermixCore.Jobs.RunnerTest do
   defp maybe_put_attr(attrs, _key, nil), do: attrs
   defp maybe_put_attr(attrs, key, value), do: Map.put(attrs, key, value)
 
+  # A run whose tool calls failed still completes with status `ok`, because the
+  # status says the loop finished. The row carries how many tool calls came back
+  # as errors, so `list_job_runs` and the artifact can say a run was blocked
+  # without failing every run that met a recoverable tool error.
+  test "a completed run records how many of its tool calls failed", %{
+    repo: repo,
+    capability_registry: capability_registry,
+    output_base_dir: output_base_dir
+  } do
+    :ok = CapabilityRegistry.register(capability_registry, test_capability("stage3_echo"))
+    :ok = CapabilityRegistry.register(capability_registry, failing_capability("stage3_fail"))
+
+    assert {:ok, {job, run}} =
+             create_claimed_job(repo,
+               name: "Blocked Tracker",
+               schedule: "every 15 minutes",
+               task_prompt: "Use both tools, then report.",
+               allowed_tools: ["stage3_echo", "stage3_fail"]
+             )
+
+    assert_runner_exits_normally(
+      job,
+      run,
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir,
+      script: [
+        %{
+          tool_calls: [
+            scripted_call("call_1", "stage3_echo"),
+            scripted_call("call_2", "stage3_fail")
+          ]
+        },
+        %{
+          content: "The tracker could not run.",
+          usage: %{prompt_tokens: 7, completion_tokens: 4, total_tokens: 11}
+        }
+      ]
+    )
+
+    assert {:ok, stored_run} = Repo.get_job_run(run.id, server: repo)
+    assert stored_run.status == "ok"
+    assert stored_run.tool_failures == 1
+
+    assert {:ok, artifact} = File.read(Path.join(output_base_dir, stored_run.output_ref))
+    assert artifact =~ "Tool failures: 1"
+  end
+
+  defp scripted_call(call_id, name) do
+    %{id: "fc_#{call_id}", call_id: call_id, name: name, arguments: "{}"}
+  end
+
   defp test_capability(name, policy_class \\ :read_only) do
     Capability.new(%{
       name: name,
@@ -1357,8 +1409,23 @@ defmodule FermixCore.Jobs.RunnerTest do
     })
   end
 
+  defp failing_capability(name) do
+    Capability.new(%{
+      name: name,
+      description: "Test capability #{name} that always fails",
+      parameters: %{"type" => "object", "properties" => %{}},
+      kind: :builtin,
+      executor: {__MODULE__, :execute_failing_capability, []},
+      policy_class: :read_only
+    })
+  end
+
   def execute_test_capability(args, _context) do
     {:ok, %{success: true, output: "echo #{inspect(args)}"}}
+  end
+
+  def execute_failing_capability(_args, _context) do
+    {:ok, %{success: false, output: "", error: "tracker refused"}}
   end
 
   describe "provider_atom/1" do

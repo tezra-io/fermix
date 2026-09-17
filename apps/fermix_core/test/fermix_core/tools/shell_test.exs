@@ -2,6 +2,7 @@ defmodule FermixCore.Tools.ShellTest do
   use ExUnit.Case, async: false
 
   alias FermixCore.Sandbox.Config
+  alias FermixCore.Sandbox.EnvHealth
   alias FermixCore.Sandbox.PathPolicy
   alias FermixCore.Tools.Shell
 
@@ -321,6 +322,89 @@ defmodule FermixCore.Tools.ShellTest do
       :telemetry.detach(handler_id)
       FermixTestSupport.SafeRm.rm_rf!(root)
     end
+
+    # One allowed variable the daemon cannot read is not a reason to refuse a
+    # command that never asked for it. The command runs, the result names the
+    # variable and the remedy where the model reads it, and the trace carries
+    # the names only, so a content-free export still shows what was missing.
+    test "a command still runs when an allowed variable cannot be resolved, and says so" do
+      handler_id = attach_telemetry()
+      config = allow_absent_variable()
+
+      assert {:ok, result} =
+               Shell.execute(
+                 %{"command" => "printf ran"},
+                 Map.put(@context, :sandbox_config, config)
+               )
+
+      assert result.success == true
+      assert result.output =~ "ran"
+      assert result.output =~ "FERMIX_TEST_ABSENT could not be resolved"
+      assert result.output =~ "fermix sandbox env set FERMIX_TEST_ABSENT"
+
+      assert_receive {:telemetry, [:fermix, :tool, :exec], _measurements, metadata}
+      assert metadata.success == true
+      assert metadata.env_unresolved == ["FERMIX_TEST_ABSENT"]
+      refute Map.has_key?(metadata, :policy_enforcement)
+
+      :telemetry.detach(handler_id)
+    end
+
+    # The trace summary stays the command's own words: a reader matching on the
+    # exit line must not hit the notice first, and `env_unresolved` already
+    # carries the machine-readable claim.
+    test "a failing command carries the notice for the model, not in its trace summary" do
+      handler_id = attach_telemetry()
+      config = allow_absent_variable()
+
+      assert {:ok, result} =
+               Shell.execute(
+                 %{"command" => "test -n \"$FERMIX_TEST_ABSENT\""},
+                 Map.put(@context, :sandbox_config, config)
+               )
+
+      assert result.success == false
+      assert result.error =~ "FERMIX_TEST_ABSENT could not be resolved"
+      assert result.error =~ "exit code 1"
+
+      assert_receive {:telemetry, [:fermix, :tool, :exec], _measurements, metadata}
+      assert metadata.error_summary =~ "exit code 1"
+      refute metadata.error_summary =~ "could not be resolved"
+      assert metadata.env_unresolved == ["FERMIX_TEST_ABSENT"]
+
+      :telemetry.detach(handler_id)
+    end
+
+    test "a command whose allowed variables all resolve carries no notice" do
+      handler_id = attach_telemetry()
+
+      Shell.execute(%{"command" => "printf ran"}, @context)
+
+      assert_receive {:telemetry, [:fermix, :tool, :exec], _measurements, metadata}
+      assert metadata.success == true
+      refute Map.has_key?(metadata, :env_unresolved)
+
+      :telemetry.detach(handler_id)
+    end
+  end
+
+  # Establishes an allowed variable the daemon cannot read, and puts back both
+  # the OS variable and the shared health record when the test is over.
+  defp allow_absent_variable do
+    original = System.get_env("FERMIX_TEST_ABSENT")
+    System.delete_env("FERMIX_TEST_ABSENT")
+
+    on_exit(fn ->
+      EnvHealth.record(%{resolved: ["FERMIX_TEST_ABSENT"], unresolved: []})
+
+      case original do
+        nil -> System.delete_env("FERMIX_TEST_ABSENT")
+        value -> System.put_env("FERMIX_TEST_ABSENT", value)
+      end
+    end)
+
+    current = Config.current()
+    %{current | env: %{current.env | allow: ["FERMIX_TEST_ABSENT"]}}
   end
 
   defp attach_telemetry do

@@ -51,6 +51,25 @@ defmodule FermixOpik.TraceFileTest do
     assert meta.job_id == "j"
   end
 
+  test "a job_run_complete row carries its tool failure count" do
+    row = %{
+      "ts" => "2026-06-02T12:00:00.000Z",
+      "type" => "agent_event",
+      "event" => "job_run_complete",
+      "job_id" => "j",
+      "session_id" => "cron_j_1",
+      "duration_ms" => 900,
+      "iterations" => 4,
+      "total_tokens" => 64_245,
+      "tool_failures" => 2
+    }
+
+    assert {[:fermix, :job, :run_complete], measurements, _meta} =
+             TraceFile.normalize("agent_event", row)
+
+    assert measurements.tool_failures == 2
+  end
+
   test "skips non-trace rows" do
     assert :skip = TraceFile.normalize("channel_msg", %{"ts" => "x"})
     assert :skip = TraceFile.normalize("agent_event", %{"event" => "prompt_context"})

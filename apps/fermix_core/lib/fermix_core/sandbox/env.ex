@@ -1,6 +1,19 @@
 defmodule FermixCore.Sandbox.Env do
   @moduledoc """
   Builds child-process environments from explicit sandbox passthrough config.
+
+  Two kinds of name reach the resolver, and they fail differently on purpose.
+
+  The operator's allow list (`[sandbox.env] allow`) is passthrough policy. Every
+  name resolves on its own: a name the daemon cannot read where it runs is
+  reported in `unresolved` beside the names that did resolve, and the command
+  still gets the rest. One stale entry must never refuse a command that asked
+  for nothing (a trading key nobody had stored for the service refused every
+  `date` in every session for 26 days).
+
+  A name a consumer requests explicitly (a harness adapter's declared variable,
+  a command capability's `pass_env`) is a requirement, and a requirement that
+  cannot be met is an error.
   """
 
   alias FermixCore.CommandRunner
@@ -9,24 +22,42 @@ defmodule FermixCore.Sandbox.Env do
   @default_keys ~w(PATH HOME USER LANG SHELL TMPDIR)
   @secret_max_bytes 8_192
 
-  @spec build(Config.t() | map() | keyword(), [String.t()], keyword()) ::
-          {:ok, [{String.t(), String.t()}]} | {:error, term()}
-  def build(config, extra_names \\ [], opts \\ []) do
-    config = Config.normalize(config)
+  @typedoc "One allowed name the daemon could not read, with the resolver's reason."
+  @type unresolved :: %{name: String.t(), reason: term()}
 
-    with {:ok, selected} <-
-           selected_env(config, config.env.allow ++ extra_names, supervised(opts)) do
-      {:ok, default_env() |> Map.merge(selected) |> Map.to_list()}
+  @typedoc """
+  A built child environment. `resolved` and `unresolved` cover the allow list
+  only, in allow-list order; a requested name is either in `env` or an error.
+  """
+  @type built :: %{
+          env: [{String.t(), String.t()}],
+          resolved: [String.t()],
+          unresolved: [unresolved()]
+        }
+
+  @spec build(Config.t() | map() | keyword(), [String.t()], keyword()) ::
+          {:ok, built()} | {:error, term()}
+  def build(config, extra_names \\ [], opts \\ []) when is_list(extra_names) and is_list(opts) do
+    config = Config.normalize(config)
+    required = Enum.uniq(extra_names)
+
+    case selected_names(config, required) do
+      :everything ->
+        env = default_env() |> Map.merge(everything_env(config)) |> Map.to_list()
+        {:ok, %{env: env, resolved: [], unresolved: []}}
+
+      {allowed, required} ->
+        build_selected(config, allowed, required, supervised(opts))
     end
   end
 
   @spec build_command(Config.t() | map() | keyword(), [String.t()], keyword()) ::
           {:ok, [{String.t(), String.t()}]} | {:error, term()}
-  def build_command(config, pass_env, opts \\ []) when is_list(pass_env) do
+  def build_command(config, pass_env, opts \\ []) when is_list(pass_env) and is_list(opts) do
     config = Config.normalize(config)
 
     with :ok <- validate_pass_env(config, pass_env),
-         {:ok, selected} <- selected_env(config, pass_env, supervised(opts)) do
+         {:ok, selected} <- command_env(config, Enum.uniq(pass_env), supervised(opts)) do
       {:ok, default_env() |> Map.merge(selected) |> Map.to_list()}
     end
   end
@@ -110,32 +141,76 @@ defmodule FermixCore.Sandbox.Env do
 
   def format_error(reason), do: inspect(reason)
 
-  defp selected_env(%Config{env: %{mode: :all} = env}, names, supervised) do
+  # `mode = "all"` with nothing named at all is the whole daemon environment
+  # minus the deny list. The moment a name is allowed or requested, only names
+  # are resolved, exactly as before, and the deny list wins over both kinds:
+  # denying the one allowed name narrows to the default keys, never widens.
+  defp selected_names(%Config{env: %{mode: :all, allow: []}}, []), do: :everything
+
+  defp selected_names(%Config{env: %{mode: :all} = env}, required) do
     denied = MapSet.new(env.deny)
 
-    if names == [] do
-      System.get_env()
-      |> Enum.reject(fn {name, _value} -> MapSet.member?(denied, name) end)
-      |> Map.new()
-      |> then(&{:ok, &1})
-    else
-      names
-      |> Enum.reject(&MapSet.member?(denied, &1))
-      |> resolve_names(env.sources, supervised)
+    {Enum.reject(env.allow, &MapSet.member?(denied, &1)),
+     Enum.reject(required, &MapSet.member?(denied, &1))}
+  end
+
+  defp selected_names(%Config{env: env}, required), do: {env.allow, required}
+
+  defp build_selected(config, allowed, required, supervised) do
+    sources = config.env.sources
+    allowed = Enum.uniq(allowed)
+
+    with {:ok, required_env} <- resolve_required(required, sources, supervised) do
+      report = resolve_each(allowed -- required, sources, supervised)
+      read = Map.merge(report.env, required_env)
+
+      {:ok,
+       %{
+         env: default_env() |> Map.merge(read) |> Map.to_list(),
+         resolved: Enum.filter(allowed, &Map.has_key?(read, &1)),
+         unresolved: report.unresolved
+       }}
     end
   end
 
-  defp selected_env(%Config{env: env}, names, supervised) do
-    names |> Enum.uniq() |> resolve_names(env.sources, supervised)
+  defp command_env(%Config{env: %{mode: :all}} = config, [], _supervised),
+    do: {:ok, everything_env(config)}
+
+  defp command_env(%Config{env: env}, names, supervised),
+    do: resolve_required(names, env.sources, supervised)
+
+  defp everything_env(%Config{env: env}) do
+    denied = MapSet.new(env.deny)
+
+    System.get_env()
+    |> Enum.reject(fn {name, _value} -> MapSet.member?(denied, name) end)
+    |> Map.new()
   end
 
-  defp resolve_names(names, sources, supervised) do
-    Enum.reduce_while(Enum.uniq(names), {:ok, %{}}, fn name, {:ok, acc} ->
+  # A requirement: the first name that cannot be read is the error.
+  defp resolve_required(names, sources, supervised) do
+    Enum.reduce_while(names, {:ok, %{}}, fn name, {:ok, acc} ->
       case resolve_name(name, sources, supervised) do
         {:ok, value} -> {:cont, {:ok, Map.put(acc, name, value)}}
         {:error, reason} -> {:halt, {:error, reason}}
       end
     end)
+  end
+
+  # Policy: every name on its own, the misses reported in allow-list order.
+  defp resolve_each(names, sources, supervised) do
+    report =
+      Enum.reduce(names, %{env: %{}, unresolved: []}, fn name, acc ->
+        case resolve_name(name, sources, supervised) do
+          {:ok, value} ->
+            %{acc | env: Map.put(acc.env, name, value)}
+
+          {:error, reason} ->
+            %{acc | unresolved: [%{name: name, reason: reason} | acc.unresolved]}
+        end
+      end)
+
+    %{report | unresolved: Enum.reverse(report.unresolved)}
   end
 
   defp validate_pass_env(%Config{env: %{mode: :all} = env}, pass_env) do

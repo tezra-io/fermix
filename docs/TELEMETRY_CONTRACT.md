@@ -58,6 +58,18 @@ The fields are three fixed strings with no user content, so `Mapper.tool_span/3`
 exports them outside the content-capture gate — a blocked-before-execution claim
 must stay provable in a content-free export.
 
+### An allowed variable the sandbox could not pass
+
+The opposite claim, kept distinct on purpose. When an allow-listed environment
+variable cannot be read where the daemon runs, the shell command still executes
+without it, and the tool's `:metadata` carries `env_unresolved: [names]` (names
+only, no values, no reasons). It is **not** a policy denial and never carries
+`policy_enforcement`: the command ran. `Mapper.tool_span/3` exports the names
+outside the content-capture gate because they are operator configuration, not
+user content. The reason and the remedy sentence go to the model in the tool
+result and to the daemon log once per transition (`Sandbox.EnvHealth`), and
+readiness publishes the name in the sandbox pane until it resolves.
+
 ## Adding a provider / adapter
 
 Emit the LLM call via the single provider emitter, and pass the correlation ids

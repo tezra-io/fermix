@@ -121,7 +121,7 @@ defmodule FermixCore.SandboxTest do
       assert Enum.any?(String.split(path, ":"), &File.regular?(Path.join(&1, "buzz")))
 
       # The overlay wins on ITS keys only; everything else stays policy env.
-      assert {:ok, policy_env} = Env.build(ctx.config)
+      assert {:ok, %{env: policy_env}} = Env.build(ctx.config)
       assert List.keyfind(env, "HOME", 0) == List.keyfind(policy_env, "HOME", 0)
     end
 
@@ -129,7 +129,7 @@ defmodule FermixCore.SandboxTest do
       assert {:ok, %{env: env}} =
                Sandbox.shell_plan("echo hi", ctx.root, %{sandbox_config: ctx.config})
 
-      assert {:ok, expected} = Env.build(ctx.config)
+      assert {:ok, %{env: expected}} = Env.build(ctx.config)
       assert Enum.sort(env) == Enum.sort(expected)
     end
 

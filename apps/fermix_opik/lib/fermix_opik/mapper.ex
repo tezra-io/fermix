@@ -161,6 +161,10 @@ defmodule FermixOpik.Mapper do
             :target_ref,
             :selector,
             :policy_enforcement,
+            # Allowed sandbox variables the shell tool could not pass: names
+            # only, operator configuration rather than user content, so what a
+            # command ran without stays visible in a content-free export.
+            :env_unresolved,
             # `MCP.Capability.invoke/3` stamps the outbound server on every MCP
             # tool exec; without it here the server identity was dropped from
             # every Opik tool span (this map is the only allowlist there is).

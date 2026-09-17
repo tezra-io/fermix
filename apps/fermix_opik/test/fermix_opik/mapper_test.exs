@@ -167,6 +167,21 @@ defmodule FermixOpik.MapperTest do
            }
   end
 
+  # Variable names are operator configuration, not user content, so the list of
+  # allowed variables the sandbox could not pass survives a content-free export.
+  test "tool_span exports the allowed variables the sandbox could not pass" do
+    metadata = %{tool: "shell", success: true, env_unresolved: ["FERMIX_PROD_ALPACA_API_KEY"]}
+
+    span =
+      Mapper.tool_span(metadata, %{duration_ms: 1},
+        trace_id: "t",
+        project_name: "fermix",
+        ended: @ended
+      )
+
+    assert span.metadata == %{env_unresolved: ["FERMIX_PROD_ALPACA_API_KEY"]}
+  end
+
   test "tool_span routes error_code/error_summary into error_info" do
     metadata = %{
       tool: "browser",

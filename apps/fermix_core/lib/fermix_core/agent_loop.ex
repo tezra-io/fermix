@@ -114,11 +114,18 @@ defmodule FermixCore.AgentLoop do
           retry_delay_fn: (non_neg_integer() -> any())
         ]
 
+  @typedoc """
+  A finished loop. `tool_failures` counts the tool calls that came back as an
+  error result (a tool that refused, exploded, was unknown, or received
+  arguments it could not parse); the loop went on and the model answered, so
+  the run's status alone would never show it.
+  """
   @type loop_result :: %{
           response: String.t(),
           iterations: pos_integer(),
           total_tokens: non_neg_integer(),
-          context_tokens: non_neg_integer()
+          context_tokens: non_neg_integer(),
+          tool_failures: non_neg_integer()
         }
 
   @spec run(loop_opts()) :: {:ok, loop_result()} | {:error, term()}
@@ -187,6 +194,7 @@ defmodule FermixCore.AgentLoop do
       iteration: 0,
       total_tokens: 0,
       context_tokens: 0,
+      tool_failures: 0,
       loop_detector: loop_detector_state(opts),
       activity_callback: Keyword.get(opts, :activity_callback),
       stream_callback: Keyword.get(opts, :stream_callback),
@@ -503,8 +511,11 @@ defmodule FermixCore.AgentLoop do
   defp unwrap_bridge_call(call), do: call
 
   defp run_continuation(turn, state, warning) do
-    with {:ok, tool_results, sole_terminal?} <- execute_tool_calls(turn.tool_calls, state),
+    with {:ok, tool_results, sole_terminal?, failures} <-
+           execute_tool_calls(turn.tool_calls, state),
          :ok <- ensure_tool_results_image_capable(tool_results, state) do
+      state = %{state | tool_failures: state.tool_failures + failures}
+
       if sole_terminal? and blank?(turn.content) do
         # The terminal side-effect (react) delivered and IS the reply; the model
         # added no text and called no other tool. Skip the continuation LLM call —
@@ -530,7 +541,8 @@ defmodule FermixCore.AgentLoop do
       response: response,
       iterations: state.iteration,
       total_tokens: state.total_tokens,
-      context_tokens: state.context_tokens
+      context_tokens: state.context_tokens,
+      tool_failures: state.tool_failures
     }
   end
 
@@ -639,22 +651,28 @@ defmodule FermixCore.AgentLoop do
 
   defp continuation_transient?(_reason), do: false
 
+  # Returns the results for the provider, whether the turn's one call was a
+  # terminal side-effect, and how many calls came back as an error result.
   defp execute_tool_calls(tool_calls, state) do
     with :ok <- enforce_channel_side_effect_bound(tool_calls, state) do
       outcomes =
         Enum.map(tool_calls, fn tool_call ->
-          %{output: output, images: images, terminal: terminal} = run_tool_call(tool_call, state)
-          {build_tool_result(tool_call.call_id, sanitize_tool_output(output), images), terminal}
+          %{output: output, images: images, terminal: terminal, status: status} =
+            run_tool_call(tool_call, state)
+
+          {build_tool_result(tool_call.call_id, sanitize_tool_output(output), images), terminal,
+           status}
         end)
 
-      {:ok, Enum.map(outcomes, &elem(&1, 0)), sole_terminal?(outcomes)}
+      {:ok, Enum.map(outcomes, &elem(&1, 0)), sole_terminal?(outcomes),
+       Enum.count(outcomes, &(elem(&1, 2) == :error))}
     end
   end
 
   # A turn ends without a continuation LLM call only when its ONE tool call was a
   # terminal side-effect that delivered (react). More than one call, or a
   # non-terminal call, always continues.
-  defp sole_terminal?([{_result, true}]), do: true
+  defp sole_terminal?([{_result, true, _status}]), do: true
   defp sole_terminal?(_outcomes), do: false
 
   # Text-only results keep the exact pre-image shape (`%{call_id, output}`) so

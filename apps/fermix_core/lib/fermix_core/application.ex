@@ -199,6 +199,12 @@ defmodule FermixCore.Application do
         # read live by `/health`, `overview.get` and `setup.state.get`. One read
         # path, no cache plus an invalidation rule.
         RestartState,
+        # The daemon's record of which allowed sandbox variables it can read
+        # (boot probe, every config apply, every shell command). Before every
+        # process that runs shell commands, so readiness has an answer before
+        # the first command; after the command host, because a `command`
+        # source spawns its helper through it.
+        FermixCore.Sandbox.EnvHealth,
         AgentSupervisor,
         MainAgent,
         JobRunnerSupervisor,

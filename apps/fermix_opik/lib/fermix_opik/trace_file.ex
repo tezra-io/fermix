@@ -176,7 +176,8 @@ defmodule FermixOpik.TraceFile do
      %{
        duration_ms: int(row["duration_ms"]),
        iterations: int(row["iterations"]),
-       total_tokens: int(row["total_tokens"])
+       total_tokens: int(row["total_tokens"]),
+       tool_failures: int(row["tool_failures"])
      }, meta(row, [:agent, :job_id, :run_id, :session_id, :status, :output])}
   end
 
