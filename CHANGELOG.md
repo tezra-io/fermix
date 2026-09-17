@@ -36,6 +36,15 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A skill can use its own files without a grant.** In the default
+  `standard` sandbox mode a scheduled job bound to a skill, or a chat turn
+  following one, was refused when it read the skill's own folder inside the
+  Fermix home, so a skill that ships photos, scripts or a state file only worked
+  after the operator granted that folder by hand or switched the whole sandbox
+  to `open`. The `skills` folder under the Fermix home is now a standard-mode
+  root, like the workspace. Nothing else in the home comes with it: browser
+  profiles, tokens, the secret key base and pairing state stay outside every
+  standard root.
 - **A scheduled run no longer fails outright when the model asks to send two
   things at once.** Fermix executes one channel send per step so a job cannot
   flood a chat, but asking for a second one ended the entire run with an error
