@@ -471,8 +471,8 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletionsTest do
   end
 
   describe "continue/3 screenshot retention" do
-    @screenshot_label "Screen state returned by the preceding tool call:"
-    @screenshot_elided "[earlier screen state omitted to bound context]"
+    @screenshot_label "Image returned by the preceding tool call:"
+    @screenshot_elided "[earlier tool image omitted to bound context]"
 
     test "keeps only the most recent N screenshots; older image bytes are elided" do
       test_pid = self()
@@ -694,7 +694,7 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletionsTest do
 
       assert text_part == %{
                "type" => "text",
-               "text" => "Screen state returned by the preceding tool call:"
+               "text" => "Image returned by the preceding tool call:"
              }
 
       assert image_part["type"] == "image_url"

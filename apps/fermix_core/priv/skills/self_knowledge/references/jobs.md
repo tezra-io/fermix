@@ -1,35 +1,68 @@
 # Jobs — scheduled agent runs
 
-`schedule_job` creates durable work without running it now — use it when the future run must reason or act; a deterministic personal date that only needs to notify the owner belongs in `event_store` (see the `events_reminders` reference).
+`schedule_job` creates durable work that runs later and must reason or act; a date that only notifies the owner is an event instead (`events_reminders`).
 
-## Schedule forms
+## Creating
 
-Schedule forms: interval (`every N minutes|hours|days`), one ISO8601 datetime (`once`), or 5-field cron; free-form English (e.g. "daily at 8am") is rejected — use `0 8 * * *`. Each cron field supports `*`, single values, comma lists (`1,15`), ranges (`9-17`), and steps (`*/15`, `8-18/4`); weekday `7` and `0` both mean Sunday; out-of-range or malformed fields are rejected at creation. Cron fires in the job's timezone (DST-aware; an unknown zone is rejected at creation).
+| field | required | default | notes |
+| --- | --- | --- | --- |
+| `name` | yes | — | non-empty; slugged into the id |
+| `schedule` | yes | — | see Schedule grammar |
+| `task` | yes | — | non-empty |
+| `timezone` | no | `UTC` | IANA zone; unknown is rejected |
+| `description` | no | none | for the source catalog |
+| `expires_at` | no | none | ISO8601 + offset, future |
+| `delivery_mode` | no | config default, else `none` | `none`/`origin`/`channel`/`local` |
+| `delivery_target` | no | none | `platform` plus one of `chat_id`, `channel_id`, `recipient`, `target`, `reply_target` |
+| `allowed_tools` | no | no narrowing | subset of the caller's visible tools |
+| `skill_name` | no | none | must name a loaded skill |
+| `provider` + `model` | no | cron route | both or neither; provider known |
+| `timeout_seconds` | no | 30 minutes | positive integer |
+| `inactivity_timeout_seconds` | no | unarmed | positive integer |
 
-## Isolation
+No other parameters exist: the iteration cap (100), isolation, the `job:<id>` memory scope, the `[SILENT]` marker and `capability_policy` are fixed.
 
-Runs are isolated bounded agent loops and cannot see the creating chat, so include needed facts in task text.
+`task` is the run's entire brief. It cannot see the conversation that created it, so bake in every value it needs (location, account, recipient) and keep timing in `schedule`/`expires_at`. Ask for a missing detail rather than inventing one; revise with `update_job` rather than recreating.
 
-## Missed fires and terminal states
+## Schedule grammar
 
-If the daemon was down across a recurring job's fire time, a due time older than the freshness window (`[fermix_core.jobs] run_freshness_window_seconds`, default 3600) is **skipped** rather than fired late at the wrong wall-clock — the schedule just advances to the next future occurrence (logged). A one-off `once` run has no next occurrence, so it runs late instead of being dropped. A schedule expression or timezone that no longer parses (e.g. a corrupted row) is **terminal**: the job moves to a `disabled` state with the parse error in `last_error` and stops being retried — it must be fixed with `update_job` and then resumed, distinct from a user pause.
+Exactly one of three forms. Free-form English ("daily at 8am") is rejected.
 
-## Concurrency and transient retries
+- Interval: `every N minutes|hours|days`, `N` positive. First run is N from creation.
+- Cron: `minute hour day-of-month month day-of-week`. Fields take `*`, a value, a list (`1,15`), a range (`9-17`), or a step (`*/15`, `8-18/4`). Weekday `0` and `7` are Sunday. Day-of-month and day-of-week must both match. Malformed or out-of-range fields are rejected.
+- One-off: one ISO8601 instant with an offset, `2035-09-10T16:00:00Z` or `2035-09-10T12:00:00-04:00`. No offset is rejected. A past instant fires on the next tick.
 
-Concurrent scheduled runs are capped (a small fixed ceiling); while the cap is full a due job stays `scheduled` and is claimed by a later tick as a slot frees, so a burst of simultaneously-due jobs never fans out without bound. A transient failure on the whole-loop retry is only retried before any tool has executed — once a tool has run, a mid-run connection loss fails the run loudly rather than replaying the tool's side effects (one narrow exception: a continuation call that failed transiently — a pre-response timeout, a transport cut, or a provider-declared overload — with nothing user-visible emitted is re-issued in place by the agent loop with short bounded backoff; nothing replays). A run that fires just as the host wakes can hit a not-yet-ready network: the runner classifies a pool-checkout `connection_unavailable` failure as transient infrastructure (not a provider-failover case) and re-runs the whole loop with bounded exponential backoff, and — when `[fermix_core.jobs] network_readiness_enabled` (default true) is on — first waits on a short, bounded TCP readiness probe to the primary route's host before the first model call.
+`timezone` affects cron only: `0 9 * * 1` with `timezone: "America/New_York"` fires 09:00 local and tracks DST, and without `timezone` fires 09:00 UTC. Interval and one-off are absolute instants. The owner's zone is in the current-date system note; pass it whenever the owner spoke in local time.
 
-## Lifetime, timeouts, and delivery
+## Delivery
 
-`expires_at` makes a temporary job; `delivery_mode` is `none|origin|channel|local`. `timeout_seconds` caps each run's wall clock (absent = the 30-minute daemon default) and `inactivity_timeout_seconds` arms a watchdog that fails a run whose provider/tool loop stops making progress (absent = unarmed); both are set at creation only — `update_job` cannot edit them — and `get_job_run`'s config snapshot echoes the values a run actually executed under.
+`none` sends nothing, `local` records without a channel send, `origin` replies into the creating conversation, `channel` sends to an explicit `delivery_target`. Delivery resolves once at creation and is snapshotted, so later config edits never retarget a job: an explicit mode wins; a `delivery_target` alone implies `channel`; neither falls to `[fermix_core.jobs] default_delivery_mode`/`default_delivery_target`, else `none`. A job the owner expects to hear from needs an explicit mode.
 
-## Capability confinement and trust
+`channel` with no target and no configured default is rejected, as is a target missing `platform` or a destination key. `origin` derives platform, chat id and thread from the creating chat and is rejected without one; an ACP session refuses it outright, so schedule to an explicit channel there.
 
-`allowed_tools` narrows the run to a subset of the caller's currently-visible tools (unknown names rejected); the model can never widen the run's capability policy past the creator's trust. **Operator-created** scheduled runs can delegate in parallel via `subagents` (regular caps — 10 tasks / 8 concurrent), and each worker's surface is the intersection of the delegation baseline and the run's own ceiling: a job confined by `allowed_tools`/`capability_policy`/`skill_name` spawns workers confined the same way, never wider. Guest-created runs never see `subagents` (it is policy class `external_api`, which the guest surface excludes), and `subagents` is only advertised to a run where it can actually execute. Every job is stamped at creation with its creator's own trust (operator or guest) — a context that carries no trust cannot create a job at all, so a job never inherits a trust the creator lacked. `skill_name` binds the run to an existing skill (rejected at creation if unknown): the run then executes inside that skill's confinement — the skill's `allowed_tools` and policy are intersected with the job's, never widened, and a guest job naming a skill whose policy grants nothing under guest trust fails loud rather than running unconfined.
+A final response of exactly `[SILENT]` delivers nothing and stores no run summary; the run prompt tells it to answer that way when there is nothing new. Under `origin`/`channel` the run can also send files with `send_attachment` and `generate_image` (16 media sends max, always to the job's own destination — `images` reference); under `local`/`none` they refuse first.
 
-## Route pins
+## Runs
 
-Optional `provider` + `model` pin which provider/model the job's runs use; they are both-or-neither (set both or neither — a pin without its pair is rejected), `provider` must be a known/configured provider (validated at creation against the same catalog the runner enforces), and `model` is a free-form provider-specific id. Omit both to use the default cron route (`[fermix_core.routing] cron_*`, else the primary/fallback chain resolved at run time).
+Each run is a fresh bounded loop with the job prompt, the current date and the task; no chat history.
 
-## Managing jobs
+Trust is stamped from the creating turn and never widens; a context carrying no trust cannot create a job. `skill_name` runs the job inside that skill's prompt, its tools and policy intersected with the job's, never wider; a skill granting nothing under the job's trust fails the run loudly. Unpinned runs resolve `[fermix_core.routing] cron_*`, else the primary/fallback chain, at run time.
 
-`update_job` edits a job in place — task, schedule, description, `skill_name` rebinding, `provider`/`model` route pin, and delivery (`delivery_mode`/`delivery_target`); omitted fields are left unchanged (delivery is never silently retargeted to a config default, and an omitted `provider`/`model` keeps the current pin), and switching delivery to `none`/`local` clears the target. A `clear_route_pin` boolean un-pins the job's `provider`/`model` back to default routing; it is mutually exclusive with `provider`/`model` (set those to re-pin instead) and combining them is rejected. `list_jobs` payloads surface `task_prompt` (the job's current instructions), `skill_name`, `provider`, `model`, `delivery_mode`, and `delivery_target` so the instructions, binding, pinned route, and destination are readable without reaching into the database. `run_job_now` fires a job immediately, out of band, through the same isolated runner (the run is tagged `trigger: "manual"`) and leaves the timed cadence untouched — use it to test a job or satisfy an on-demand request; it refuses when the job is paused/disabled/expired or already mid-run. `list_job_runs` reads a job's execution history (status/trigger/timing/outcome, newest first, optional `status` filter) and `get_job_run` reads one run in full (`task_prompt` the run actually executed — captured in its config snapshot, so it reflects the instructions at run time rather than the job's current ones; plus prompt snapshot, token usage, final response, error) — use these to confirm a job is actually firing and inspect what its runs produced. A run's `status: ok` means the agent loop completed, not that the task succeeded: every run row also carries `tool_failures`, the number of tool calls that came back as errors, so a run that reported itself blocked is visible in `list_job_runs`, in the run's `output.md` artifact, and on the `job_run_complete` trace event, without failing runs that met a recoverable tool error.
+`timeout_seconds` bounds the run's wall clock and `inactivity_timeout_seconds` fails a loop that stops progressing. Both are creation-only — `update_job` cannot change them — and `get_job_run` echoes what a run executed under.
+
+## Lifecycle
+
+A recurring job due older than the freshness window (`[fermix_core.jobs] run_freshness_window_seconds`, default 3600) is skipped rather than fired at the wrong wall-clock and its schedule advances; a one-off never goes stale and runs late instead. `expires_at` marks the job expired.
+
+A schedule or timezone that no longer parses is terminal: the job moves to `disabled` with the reason in `last_error` and is never retried. Fix it with `update_job`, then `resume_job`.
+
+At most four scheduled runs execute at once; a due job over the cap stays `scheduled` until a later tick claims a slot, and `run_job_now` is uncapped. A transient infrastructure failure re-runs the whole loop with bounded backoff only while no tool has executed; afterwards the run fails loudly rather than replaying side effects.
+
+## Managing
+
+- `update_job` edits `task`, `schedule`, `description`, `skill_name`, the route pin and delivery in place; omitted fields are unchanged, so delivery is never silently retargeted and a pin is kept. Switching to `none`/`local` clears the target. `clear_route_pin: true` un-pins to default routing and cannot be combined with `provider`/`model`. An empty patch is rejected.
+- `list_jobs` lists jobs with their `task_prompt`, schedule, `timezone`, `next_run_at`, state, pin, delivery and last outcome; optional `state` filter.
+- `pause_job` stops future ticks. `resume_job` recomputes the next run and refuses an expired job or a one-off whose instant has passed.
+- `remove_job` deletes the job and tombstones its memory source; it refuses while a run is active.
+- `run_job_now` fires one run immediately through the same runner, tagged `manual`, leaving the cadence untouched; it refuses a paused, disabled, expired or already-running job.
+- `list_job_runs` reads history newest first, optional `status` (`queued`/`running`/`ok`/`error`) and `limit` (default 20, max 100). `get_job_run` reads one run in full: the `task_prompt` it executed, prompt snapshot, token usage, final response, error. A just-triggered run can still be `queued`, so re-read before reporting an outcome. A run's `status: ok` means the loop finished, not that the task succeeded: each run row carries `tool_failures`, the number of tool calls that came back as errors, visible in `list_job_runs`, the run's `output.md` and its `job_run_complete` trace event.

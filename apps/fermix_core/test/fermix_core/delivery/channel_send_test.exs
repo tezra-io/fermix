@@ -13,6 +13,27 @@ defmodule FermixCore.Delivery.ChannelSendTest do
     def send_message(_destination, _text, _opts), do: {:error, :permanent}
   end
 
+  defmodule MediaAdapter do
+    def send_message(_destination, _text, _opts), do: :ok
+
+    def send_media(destination, part, opts) do
+      send(self(), {:media_sent, destination, part, opts})
+      Process.get(:media_result, :ok)
+    end
+  end
+
+  defmodule FlakyMediaAdapter do
+    def send_message(_destination, _text, _opts), do: :ok
+
+    def send_media(_destination, _part, _opts) do
+      attempts = Process.get(:media_attempts, 0) + 1
+      Process.put(:media_attempts, attempts)
+      # The exact Finch pool-checkout signature `HttpClient.connection_unavailable?/1`
+      # classifies as transient; it fires before any byte reaches the channel.
+      {:error, %RuntimeError{message: "unable to provide a connection during checkout timeout"}}
+    end
+  end
+
   defmodule ProposalAdapter do
     def send_message(_destination, _text, _opts), do: {:error, :wrong_path}
 
@@ -56,6 +77,58 @@ defmodule FermixCore.Delivery.ChannelSendTest do
                  adapter: OkAdapter,
                  dispatch: {:send_proposal, "TOK12345"}
                )
+    end
+  end
+
+  describe "send_media/5" do
+    @part %{kind: :image, path: "/tmp/preview.png", filename: "preview.png"}
+
+    test "hands the part, destination and send opts to the adapter verbatim" do
+      assert :ok =
+               ChannelSend.send_media("telegram", "c1", @part, [message_thread_id: "77"],
+                 adapter: MediaAdapter
+               )
+
+      assert_received {:media_sent, "c1", part, opts}
+      assert part == @part
+      assert Keyword.fetch!(opts, :message_thread_id) == "77"
+    end
+
+    test "refuses an adapter that cannot send media instead of degrading to text" do
+      assert {:error, {:invalid_delivery_adapter, OkAdapter}} =
+               ChannelSend.send_media("telegram", "c1", @part, [], adapter: OkAdapter)
+    end
+
+    test "reports an unsupported platform when no adapter is configured" do
+      assert {:error, {:unsupported_delivery_platform, "telegram"}} =
+               ChannelSend.send_media("telegram", "c1", @part, [], channels: %{})
+    end
+
+    test "fails fast on a non-transient channel error — an upload is never repeated" do
+      Process.put(:media_result, {:error, {:http_status, 400}})
+
+      assert {:error, {:http_status, 400}} =
+               ChannelSend.send_media("telegram", "c1", @part, [],
+                 adapter: MediaAdapter,
+                 delivery_max_attempts: 3,
+                 delivery_backoff_ms: 0
+               )
+
+      assert_received {:media_sent, "c1", _part, _opts}
+      refute_received {:media_sent, _destination, _part, _opts}
+    end
+
+    test "retries the connection-unavailable error up to the ceiling" do
+      Process.put(:media_attempts, 0)
+
+      assert {:error, %RuntimeError{}} =
+               ChannelSend.send_media("telegram", "c1", @part, [],
+                 adapter: FlakyMediaAdapter,
+                 delivery_max_attempts: 3,
+                 delivery_backoff_ms: 0
+               )
+
+      assert Process.get(:media_attempts) == 3
     end
   end
 

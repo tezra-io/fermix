@@ -166,7 +166,7 @@ defmodule FermixCore.Providers.OpenAI.ResponsesSharedTest do
                  content: [
                    %{
                      type: "input_text",
-                     text: "Screen state returned by the preceding tool call:"
+                     text: "Image returned by the preceding tool call:"
                    },
                    %{
                      type: "input_image",
@@ -187,7 +187,7 @@ defmodule FermixCore.Providers.OpenAI.ResponsesSharedTest do
       assert fco == %{
                type: "function_call_output",
                call_id: "c",
-               output: "[screen state in the following message]"
+               output: "[image in the following message]"
              }
     end
 
@@ -214,8 +214,8 @@ defmodule FermixCore.Providers.OpenAI.ResponsesSharedTest do
   end
 
   describe "retain_screenshots/2" do
-    @label "Screen state returned by the preceding tool call:"
-    @elided "[earlier screen state omitted to bound context]"
+    @label "Image returned by the preceding tool call:"
+    @elided "[earlier tool image omitted to bound context]"
 
     defp screenshot_item(n) do
       %{
@@ -258,6 +258,42 @@ defmodule FermixCore.Providers.OpenAI.ResponsesSharedTest do
       assert elided1.content == [%{type: "input_text", text: @elided}]
       assert elided2.content == [%{type: "input_text", text: @elided}]
       assert Enum.any?(kept.content, &match?(%{type: "input_image"}, &1))
+    end
+
+    # V07: a `view_image` result rides the SAME labelled carrier a screenshot
+    # does, so the one retention bound covers both — and a local garment photo
+    # cannot accumulate unbounded in the replayed history either.
+    test "view_image carriers are bounded by the same cap, inbound images untouched" do
+      jpeg = <<0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3>>
+
+      results =
+        for index <- 1..3 do
+          %{
+            call_id: "call_view_#{index}",
+            output: "Reference 1: garment#{index}.jpg (image/jpeg, 7 bytes)",
+            images: [%{type: :image, mime_type: "image/jpeg", data: jpeg}]
+          }
+        end
+
+      input = [inbound_image_item() | ResponsesShared.build_function_call_outputs(results)]
+      retained = ResponsesShared.retain_screenshots(input, 1)
+
+      carriers = Enum.filter(retained, &match?(%{role: "user"}, &1))
+      # The inbound user image plus three view_image carriers.
+      assert length(carriers) == 4
+      assert Enum.at(retained, 0) == inbound_image_item()
+
+      with_bytes =
+        Enum.count(retained, fn
+          %{content: content} when is_list(content) ->
+            Enum.any?(content, &match?(%{type: "input_image"}, &1))
+
+          _other ->
+            false
+        end)
+
+      # One kept view_image carrier plus the untouched inbound image.
+      assert with_bytes == 2
     end
 
     test "an inbound user image (no screenshot label) is never elided" do

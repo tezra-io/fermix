@@ -31,6 +31,15 @@ plugin-signature verification and to brew-installed `node`/`python` for MCP
 runtimes. A bare launchd/systemd `PATH` omits the Homebrew prefix, which makes
 plugin installs fail with a misleading `signature invalid`.
 
+The engine appends that same baseline to its own `PATH` at boot, from one list
+the unit and the process both read, so a daemon started any other way — an
+app-managed engine launched by `SMAppService`, or a plain `fermix run` — still
+resolves `cosign`, brew `node` and `python`, and the `codex` and `claude` CLIs in
+`~/.local/bin`. It appends and never prepends, so it can make an unresolvable
+name resolvable and can never shadow a binary the operator's own `PATH` already
+chose; a source checkout gets none of it, so a developer sees their real `PATH`.
+`fermix doctor` carries an `engine path baseline` warning row.
+
 ## Drifted units
 
 The unit is a snapshot of install-time settings, but `fermix setup` self-heals a

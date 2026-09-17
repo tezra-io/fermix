@@ -13,6 +13,7 @@ defmodule FermixCore.Jobs.Runner do
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Jobs.Delivery
+  alias FermixCore.Jobs.MediaBridge
   alias FermixCore.Jobs.Telemetry, as: JobTelemetry
   alias FermixCore.Memory.Config, as: MemoryConfig
   alias FermixCore.Memory.Repo
@@ -185,7 +186,15 @@ defmodule FermixCore.Jobs.Runner do
     stagger_start(state)
     await_network_ready(loop_input.loop_opts, state)
 
-    case run_agent_loop_with_retry(loop_input.loop_opts, state) do
+    result = run_agent_loop_with_retry(loop_input.loop_opts, state)
+
+    # The media closure dies with the run, not with the runner process: a leaked
+    # copy (a straggling task, a subagent that somehow kept it) must not be able
+    # to send after the loop returned — so the flag drops BEFORE the run is
+    # marked and its final text delivered.
+    deactivate_media(loop_input)
+
+    case result do
       {:ok, result} ->
         completed_run = mark_completed(state, result)
         completed_state = %{state | run: completed_run}
@@ -438,19 +447,57 @@ defmodule FermixCore.Jobs.Runner do
   end
 
   defp build_loop_input(state) do
+    media = build_media_bridge(state)
+
     with {:ok, skill} <- load_skill(state),
-         {:ok, loop_opts} <- loop_opts(state, skill) do
-      messages = prompt_messages(state.job, skill)
+         {:ok, loop_opts} <- loop_opts(state, skill, media) do
+      messages = prompt_messages(state.job, skill, media)
 
       {:ok,
        %{
          messages: messages,
          prompt_snapshot: prompt_snapshot(messages),
          route_used: resolved_route_used(loop_opts, state.job),
-         loop_opts: Keyword.put(loop_opts, :messages, messages)
+         loop_opts: Keyword.put(loop_opts, :messages, messages),
+         media_active: media_active_ref(media)
        }}
     end
   end
+
+  # Resolve once, bind once (M46 §7.1). `active` starts at 1 and is zeroed the
+  # moment the loop returns; `sends` counts every media request this run made,
+  # successful or not.
+  defp build_media_bridge(state) do
+    active = :atomics.new(1, signed: false)
+    :atomics.put(active, 1, 1)
+
+    opts = [
+      adapter: state.delivery_adapter,
+      channels: state.delivery_channels,
+      delivery_opts: state.delivery_opts,
+      delivery_timeout_ms: state.delivery_timeout_ms,
+      deadline_ms: run_deadline_ms(state),
+      active: active,
+      sends: :atomics.new(1, signed: false)
+    ]
+
+    case MediaBridge.build(state.job, state.run, opts) do
+      {:ok, reply_fn, target} ->
+        {:ok, %{reply_fn: reply_fn, active: active, platform: target.platform}}
+
+      {:unavailable, reason} ->
+        {:unavailable, reason}
+    end
+  end
+
+  defp run_deadline_ms(%{timeout_ms: nil}), do: nil
+  defp run_deadline_ms(%{timeout_ms: timeout_ms}), do: monotonic_ms() + timeout_ms
+
+  defp media_active_ref({:ok, %{active: active}}), do: active
+  defp media_active_ref({:unavailable, _reason}), do: nil
+
+  defp deactivate_media(%{media_active: nil}), do: :ok
+  defp deactivate_media(%{media_active: active}), do: :atomics.put(active, 1, 0)
 
   defp fallback_loop_input(state, reason) do
     messages = [
@@ -461,6 +508,7 @@ defmodule FermixCore.Jobs.Runner do
 
     %{
       messages: messages,
+      media_active: nil,
       prompt_snapshot: prompt_snapshot(messages) <> "\n\nPrompt setup error: #{inspect(reason)}",
       # Route resolution is what failed here — there is no route to record, and
       # re-resolving for the snapshot would just raise the same error again.
@@ -478,11 +526,11 @@ defmodule FermixCore.Jobs.Runner do
 
   # Job runs bypass TurnRunner, so they stamp the current date themselves —
   # scheduled work is exactly where "today" matters most.
-  defp prompt_messages(job, skill) do
+  defp prompt_messages(job, skill, media) do
     [
       %{role: "system", content: cron_guidance()},
       skill_prompt_message(skill, job),
-      %{role: "system", content: job_context_prompt(job)},
+      %{role: "system", content: job_context_prompt(job, media)},
       %{role: "system", content: CurrentDate.note()},
       %{role: "user", content: job.task_prompt}
     ]
@@ -514,15 +562,28 @@ defmodule FermixCore.Jobs.Runner do
     |> String.trim()
   end
 
-  defp job_context_prompt(job) do
+  defp job_context_prompt(job, media) do
     """
     Scheduled job: #{job.name}
     Job id: #{job.id}
     Schedule: #{job.schedule_expr} (#{job.timezone})
     Memory source id: #{job.memory_source_id}
     Delivery mode: #{job.delivery_mode}
+    #{attachment_line(media)}
     """
     |> String.trim()
+  end
+
+  # The prompt says what is actually wired (M46 §7.2), derived from the SAME
+  # resolution the closure came from — never a hopeful sentence the run cannot
+  # honour. Execute-time refusal stays the hard gate either way.
+  defp attachment_line({:ok, %{platform: platform}}) do
+    "Attachments: send_attachment delivers files to this job's configured " <>
+      "#{platform} destination"
+  end
+
+  defp attachment_line({:unavailable, reason}) do
+    "Attachments: unavailable (#{MediaBridge.unavailable_reason(reason)})"
   end
 
   defp prompt_snapshot(messages) do
@@ -531,12 +592,12 @@ defmodule FermixCore.Jobs.Runner do
     end)
   end
 
-  defp loop_opts(state, skill) do
+  defp loop_opts(state, skill, media) do
     trust = effective_trust(state.job)
     {routing_opts, worker_routing} = resolve_run_routing(state)
 
     base = [
-      context: loop_context(state, skill, trust, worker_routing),
+      context: loop_context(state, skill, trust, worker_routing, media),
       capability_registry: state.capability_registry,
       allowed_tools: effective_allowed_tools(state.job, skill),
       policy: effective_policy(state.job, trust, skill),
@@ -747,7 +808,7 @@ defmodule FermixCore.Jobs.Runner do
     end)
   end
 
-  defp loop_context(state, skill, trust, worker_routing) do
+  defp loop_context(state, skill, trust, worker_routing, media) do
     %{
       agent_name: "scheduled:#{state.job.id}",
       conversation_key: {:scheduled_job, state.job.id, state.run.id},
@@ -778,7 +839,16 @@ defmodule FermixCore.Jobs.Runner do
       route_transient_retry: false
     }
     |> Map.merge(worker_routing)
+    |> put_media_reply_fn(media)
   end
+
+  # Present only when the run actually has a media route: a `reply_fn` a tool
+  # cannot use is worse than none, because `send_attachment` would report a
+  # delivery failure where the truth is "this job has nowhere to send".
+  defp put_media_reply_fn(context, {:ok, %{reply_fn: reply_fn}}),
+    do: Map.put(context, :reply_fn, reply_fn)
+
+  defp put_media_reply_fn(context, {:unavailable, _reason}), do: context
 
   # Proactive readiness gate (Layer 2 of the wake-from-sleep defense). Before
   # the first LLM call, poll a cheap TCP connect against the run's primary-route

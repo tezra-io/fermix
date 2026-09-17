@@ -50,11 +50,11 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletions do
   # a SUBSEQUENT user turn — emitted after ALL tool messages so every tool_call is
   # paired before any user turn. State carries by full replay, so the image is
   # re-sent each turn (bounded by the screenshot-retention cap once it lands).
-  @image_followup_label "Screen state returned by the preceding tool call:"
-  @image_followup_placeholder "[screen state in the following message]"
+  @image_followup_label "Image returned by the preceding tool call:"
+  @image_followup_placeholder "[image in the following message]"
   # Replaces a screenshot follow-up turn once it ages out of the retention
   # window (ScreenshotRetention) — the image bytes drop, the textual trail stays.
-  @image_followup_elided "[earlier screen state omitted to bound context]"
+  @image_followup_elided "[earlier tool image omitted to bound context]"
 
   @impl true
   def continue(

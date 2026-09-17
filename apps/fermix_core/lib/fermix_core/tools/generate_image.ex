@@ -1,7 +1,15 @@
 defmodule FermixCore.Tools.GenerateImage do
   @moduledoc """
   Create or edit a raster image from a text prompt; the result is written to the
-  sandbox and sent to the current chat automatically.
+  sandbox and, unless told otherwise, sent to the current chat.
+
+  `delivery` makes that choice explicit: `"save"` generates and saves without
+  touching a channel (the review-before-sending workflow — save, `view_image`
+  the result, then `send_attachment`), `"send"` requires a usable media reply
+  path BEFORE any provider call, and an omitted value keeps the declared context
+  default. A requested send that fails is never reported as a successful save:
+  the saved path comes back with the delivery error so the file can be retried
+  without paying to generate it again.
 
   The agent states intent (prompt + a couple of enums); the operator's config
   picks the provider/model (`Media.Registry`). Edit references a source image by
@@ -21,6 +29,7 @@ defmodule FermixCore.Tools.GenerateImage do
   alias FermixCore.Tools.Support, as: ToolSupport
 
   @operations ~w(generate edit)
+  @deliveries ~w(save send)
   @modality :image
 
   @impl true
@@ -31,8 +40,8 @@ defmodule FermixCore.Tools.GenerateImage do
   @spec description() :: String.t()
   def description do
     "Create or edit a raster image (photo, illustration, render) from a text prompt; " <>
-      "the result is sent to the current chat automatically. Not for diagrams, charts, " <>
-      "or code assets, and not for live data."
+      "the result is saved to the sandbox and sent to the current chat unless " <>
+      "delivery is \"save\". Not for diagrams, charts, or code assets, and not for live data."
   end
 
   @impl true
@@ -65,14 +74,22 @@ defmodule FermixCore.Tools.GenerateImage do
           type: "string",
           description: "Optional output size (e.g. 1024x1024). Defaults to the configured size."
         },
-        model: %{type: "string", description: "Optional model override for this call."}
+        model: %{type: "string", description: "Optional model override for this call."},
+        delivery: %{
+          type: "string",
+          enum: @deliveries,
+          description:
+            "save = write the file and do not send it (inspect it with view_image first, " <>
+              "then send_attachment); send = require a chat destination before generating. " <>
+              "Omitted sends when this run has a chat channel and saves only when it does not."
+        }
       }
     }
   end
 
   @impl true
   def when_to_use do
-    "Create or edit a raster image from a text prompt (and optionally a source image already in the sandbox or just sent in chat); the result is sent to the chat automatically."
+    "Create or edit a raster image from a text prompt (and optionally a source image already in the sandbox or just sent in chat); the result is sent to the chat unless you ask for delivery \"save\"."
   end
 
   @impl true
@@ -89,6 +106,10 @@ defmodule FermixCore.Tools.GenerateImage do
           "prompt" => "make the sky stormy"
         },
         note: "edit the image just sent in chat"
+      },
+      %{
+        args: %{"prompt" => "an outfit preview", "delivery" => "save"},
+        note: "save it without sending, so you can look at it before you attach it"
       }
     ]
   end
@@ -100,6 +121,10 @@ defmodule FermixCore.Tools.GenerateImage do
       %{tag: "auth_failed", description: "the backend's vendor API key is missing or invalid"},
       %{tag: "edit_unsupported", description: "the configured backend cannot edit images"},
       %{tag: "mask_unsupported", description: "the configured backend does not support masks"},
+      %{
+        tag: "media_reply_unavailable",
+        description: "delivery \"send\" was asked for but this run has no chat destination"
+      },
       %{tag: "sandbox_denied", description: "a source/output path is outside the sandbox roots"},
       %{tag: "rate_limited", description: "the provider returned a rate limit"},
       %{tag: "provider_error", description: "the provider returned an unexpected HTTP error"},
@@ -133,16 +158,52 @@ defmodule FermixCore.Tools.GenerateImage do
 
   defp run_with_config(args, config, context) do
     with {:ok, prompt} <- ToolSupport.required_string(args, "prompt"),
+         {:ok, delivery} <- delivery(args),
          {:ok, backend} <- Registry.active_backend(@modality, config),
          {:ok, operation} <- operation(args),
          caps = backend.capabilities(),
          :ok <- ensure_operation(operation, caps),
+         :ok <- ensure_delivery_route(delivery, context),
          {:ok, request} <- build_request(operation, prompt, args, config, caps, context) do
-      generate(backend, operation, request, backend_opts(config, args, context), context)
+      opts = backend_opts(config, args, context)
+      generate(backend, operation, request, opts, context, delivery)
     else
       {:error, message} -> ToolSupport.error(message)
     end
   end
+
+  defp delivery(args) do
+    case Map.get(args, "delivery") do
+      nil ->
+        {:ok, :default}
+
+      "save" ->
+        {:ok, :save}
+
+      "send" ->
+        {:ok, :send}
+
+      other ->
+        {:error,
+         "delivery must be one of: #{Enum.join(@deliveries, ", ")} (got #{inspect(other)})"}
+    end
+  end
+
+  # An explicit send is gated BEFORE the provider call so a run with nowhere to
+  # deliver never pays for an image it cannot hand over.
+  defp ensure_delivery_route(:send, context) do
+    case Map.get(context, :reply_fn) do
+      reply_fn when is_function(reply_fn, 1) ->
+        :ok
+
+      _absent ->
+        {:error,
+         "media_reply_unavailable: this run has no chat destination to send an image to. " <>
+           "Use delivery \"save\" and report the saved path instead."}
+    end
+  end
+
+  defp ensure_delivery_route(_delivery, _context), do: :ok
 
   defp operation(args) do
     case Map.get(args, "operation", "generate") do
@@ -230,41 +291,55 @@ defmodule FermixCore.Tools.GenerateImage do
     end
   end
 
-  defp generate(backend, operation, request, opts, context) do
+  defp generate(backend, operation, request, opts, context, delivery) do
     case backend.run(operation, request, opts) do
-      {:ok, artifact, _trace} -> emit_and_report(backend, operation, artifact, context)
-      {:error, reason, _trace} -> ToolSupport.error(reason)
+      {:ok, artifact, _trace} ->
+        emit_and_report(backend, operation, artifact, context, delivery)
+
+      {:error, reason, _trace} ->
+        ToolSupport.error(reason)
     end
   end
 
-  defp emit_and_report(backend, operation, artifact, context) do
-    case Output.emit(artifact, %{modality: @modality}, context) do
+  defp emit_and_report(backend, operation, artifact, context, delivery) do
+    case Output.emit(artifact, %{modality: @modality, delivery: delivery}, context) do
       {:ok, %{path: path, delivered?: delivered?}} ->
-        message = success_message(operation, path, delivered?)
-        {:ok, Tool.success(message), trace(backend, operation, artifact, path, delivered?)}
+        message = success_message(operation, path, delivered?, delivery)
 
-      {:error, reason} ->
-        ToolSupport.error("The image was generated but could not be delivered: #{reason}")
+        {:ok, Tool.success(message),
+         trace(backend, operation, artifact, path, delivered?, delivery)}
+
+      {:error, %{path: path, reason: reason}} ->
+        ToolSupport.error(
+          "The image was generated and saved to #{path} but could not be delivered: #{reason}"
+        )
+
+      {:error, %{reason: reason}} ->
+        ToolSupport.error("The image was generated but could not be saved: #{reason}")
     end
   end
 
-  defp success_message(operation, path, true),
+  defp success_message(_operation, path, false, :save),
+    do: "Saved the image to #{path}; it was not sent."
+
+  defp success_message(operation, path, true, _delivery),
     do: "#{verb(operation)} and sent the image (#{Path.basename(path)})."
 
-  defp success_message(operation, path, false),
+  defp success_message(operation, path, false, _delivery),
     do:
       "#{verb(operation)} the image and saved it to #{path} (no chat channel was available to send it to)."
 
   defp verb(:generate), do: "Generated"
   defp verb(:edit), do: "Edited"
 
-  defp trace(backend, operation, artifact, path, delivered?) do
+  defp trace(backend, operation, artifact, path, delivered?, delivery) do
     %{
       backend: Atom.to_string(backend.name()),
       operation: Atom.to_string(operation),
       bytes: byte_size(artifact.bytes),
       filename: Path.basename(path),
-      delivered: delivered?
+      delivered: delivered?,
+      delivery_mode: Atom.to_string(delivery)
     }
   end
 end

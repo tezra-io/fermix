@@ -214,6 +214,59 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **A configured OAuth `region` was silently dropped** on the way through
   the config store, so an explicit setting could never take effect.
 
+## [0.10.5] - 2026-09-17
+
+### Added
+
+- **Fermix can look at a picture that is already on disk.** Until now the only way to read
+  a file was as text, so a photo on disk was invisible: the assistant would try
+  the browser, then the desktop, then build something elaborate, and still
+  never see it. A new `view_image` tool hands one to six sandbox-approved
+  image files straight to the model in the order you name them. JPEG, PNG and
+  WebP are supported and the format is read from the file's own bytes rather
+  than its name, so a mislabelled file is refused instead of silently
+  misread. One unreadable path fails the whole request, because a partial set
+  of references the model believes is complete is worse than an error.
+- **Image generation can save without sending.** `generate_image` takes a
+  `delivery` argument: `save` writes the picture and sends nothing, so it can
+  be inspected before it goes anywhere, and `send` refuses up front when there
+  is nowhere to deliver it rather than charging for a picture that cannot be
+  handed over. Left out, it behaves exactly as before. A send the chat rejects
+  is now reported as a failure that still names the saved file, so the picture
+  can be retried without paying to make it again.
+- **A scheduled job can send attachments to the conversation it reports to.**
+  The scheduler resolves that destination once, when the run starts, from the
+  job's own configuration — never from whichever chat happens to be active, and
+  never from something the model supplies — and lets `send_attachment` deliver
+  through it. A run is bounded to sixteen attachments and to its own remaining
+  time, and the destination stops accepting the moment the run ends. Jobs that
+  save locally or report nowhere refuse the send and say so, in the run's own
+  instructions as well as in the tool's answer, so the assistant is never told
+  it can attach something it cannot.
+
+### Fixed
+
+- **A skill can use its own files without a grant.** In the default
+  `standard` sandbox mode a scheduled job bound to a skill, or a chat turn
+  following one, was refused when it read the skill's own folder inside the
+  Fermix home, so a skill that ships photos, scripts or a state file only worked
+  after the operator granted that folder by hand or switched the whole sandbox
+  to `open`. The `skills` folder under the Fermix home is now a standard-mode
+  root, like the workspace. Nothing else in the home comes with it: browser
+  profiles, tokens, the secret key base and pairing state stay outside every
+  standard root.
+- **A scheduled run no longer fails outright when the model asks to send two
+  things at once.** Fermix executes one channel send per step so a job cannot
+  flood a chat, but asking for a second one ended the entire run with an error
+  the model never saw — one wardrobe job died that way after three and a half
+  minutes and two generated previews. The first send now goes through, each
+  extra one comes back as an answer telling the model to ask again on its next
+  step, and everything else in the same step still runs.
+- **`send_attachment` works inside a scheduled job.** It used to refuse before
+  it even looked at the file, because a scheduled run had no conversation
+  attached to it, which is why jobs reported their work as finished while the
+  files stayed on disk.
+
 ## [0.10.4] - 2026-09-12
 
 ### Fixed

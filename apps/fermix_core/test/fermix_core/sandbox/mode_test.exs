@@ -189,4 +189,67 @@ defmodule FermixCore.Sandbox.ModeTest do
 
     assert Mode.effective_roots(config) == [PathPolicy.canonical_path(os_home)]
   end
+
+  # The skills folder is the agent's own place in the Fermix home, like the
+  # workspace: a skill package is instructions, scripts, assets and its state
+  # file, which a chat turn (after `skill_view`) and a `skill_name`-bound job
+  # both operate on. It is admitted by the mode, not by a grant, and nothing
+  # else in the home comes with it — browser profiles, tokens and the secret
+  # key base stay outside every standard root.
+  test "standard mode admits the skills folder under the Fermix home and nothing else in it" do
+    fermix_home = FermixTestSupport.SafeRm.make_tmp_dir!("sandbox-mode-fh")
+    os_home = FermixTestSupport.SafeRm.make_tmp_dir!("sandbox-mode-oh")
+    Application.put_env(:fermix_core, :sandbox_launch_cwd, os_home)
+
+    config =
+      Config.normalize(
+        mode: :standard,
+        home: fermix_home,
+        os_home: os_home,
+        workspace_root: Path.join(fermix_home, "workspace")
+      )
+
+    roots = Mode.effective_roots(config)
+
+    assert PathPolicy.canonical_path(Path.join(fermix_home, "skills")) in roots
+    refute PathPolicy.canonical_path(fermix_home) in roots
+    refute PathPolicy.canonical_path(Path.join(fermix_home, "browser")) in roots
+
+    provenance = Mode.root_provenance(config)
+    assert {PathPolicy.canonical_path(Path.join(fermix_home, "skills")), :mode} in provenance
+  end
+
+  test "strict mode does not admit the skills folder" do
+    fermix_home = FermixTestSupport.SafeRm.make_tmp_dir!("sandbox-mode-fh")
+
+    config =
+      Config.normalize(
+        mode: :strict,
+        home: fermix_home,
+        workspace_root: Path.join(fermix_home, "workspace")
+      )
+
+    assert Mode.effective_roots(config) == [
+             PathPolicy.canonical_path(Path.join(fermix_home, "workspace"))
+           ]
+  end
+
+  test "a blocked root still excludes the skills folder in standard mode" do
+    fermix_home = FermixTestSupport.SafeRm.make_tmp_dir!("sandbox-mode-fh")
+    os_home = FermixTestSupport.SafeRm.make_tmp_dir!("sandbox-mode-oh")
+    Application.put_env(:fermix_core, :sandbox_launch_cwd, os_home)
+    skills = Path.join(fermix_home, "skills")
+    File.mkdir_p!(skills)
+
+    config =
+      Config.normalize(
+        mode: :standard,
+        home: fermix_home,
+        os_home: os_home,
+        workspace_root: Path.join(fermix_home, "workspace"),
+        blocked_roots: [skills]
+      )
+
+    refute PathPolicy.canonical_path(skills) in Mode.effective_roots(config)
+  end
 end

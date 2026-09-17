@@ -651,22 +651,50 @@ defmodule FermixCore.AgentLoop do
 
   defp continuation_transient?(_reason), do: false
 
+  # At most ONE `:channel`-category call executes per iteration: the first one.
+  # Every later one comes back as an error tool result the MODEL reads and can
+  # act on, and non-channel calls in the same batch run normally, in order.
+  # Refusing the whole iteration instead used to end the run with an error the
+  # model never saw — a scheduled wardrobe run died that way after two paid
+  # image generations (M46 §2.4).
+  #
   # Returns the results for the provider, whether the turn's one call was a
   # terminal side-effect, and how many calls came back as an error result.
   defp execute_tool_calls(tool_calls, state) do
-    with :ok <- enforce_channel_side_effect_bound(tool_calls, state) do
-      outcomes =
-        Enum.map(tool_calls, fn tool_call ->
-          %{output: output, images: images, terminal: terminal, status: status} =
-            run_tool_call(tool_call, state)
+    {outcomes, _channel_used?} =
+      Enum.map_reduce(tool_calls, false, &execute_or_refuse(&1, &2, state))
 
-          {build_tool_result(tool_call.call_id, sanitize_tool_output(output), images), terminal,
-           status}
-        end)
+    {:ok, Enum.map(outcomes, &elem(&1, 0)), sole_terminal?(outcomes),
+     Enum.count(outcomes, &(elem(&1, 2) == :error))}
+  end
 
-      {:ok, Enum.map(outcomes, &elem(&1, 0)), sole_terminal?(outcomes),
-       Enum.count(outcomes, &(elem(&1, 2) == :error))}
+  defp execute_or_refuse(tool_call, channel_used?, state) do
+    channel? = channel_side_effect_call?(tool_call, state)
+
+    if channel? and channel_used? do
+      {refused_channel_outcome(tool_call, state), true}
+    else
+      {executed_outcome(tool_call, state), channel_used? or channel?}
     end
+  end
+
+  defp executed_outcome(tool_call, state) do
+    %{output: output, images: images, terminal: terminal, status: status} =
+      run_tool_call(tool_call, state)
+
+    {build_tool_result(tool_call.call_id, sanitize_tool_output(output), images), terminal, status}
+  end
+
+  # Not executed, so no `:tool_start`/`:tool_finish` activity — but it IS one
+  # model tool call, so it gets exactly one `[:fermix, :tool, :exec]` event under
+  # the name the model used, like every other unexecuted call.
+  defp refused_channel_outcome(%{call_id: call_id, name: name} = tool_call, state) do
+    message =
+      "Error: Only one channel side-effect tool call is executed per iteration; " <>
+        "`#{name}` was not executed. Call it again in your next step."
+
+    %{output: output} = trace_unexecuted(name, tool_call.arguments, message, state)
+    {build_tool_result(call_id, sanitize_tool_output(output), []), false, :error}
   end
 
   # A turn ends without a continuation LLM call only when its ONE tool call was a
@@ -691,18 +719,6 @@ defmodule FermixCore.AgentLoop do
   # seam so every tool result reaching every provider is encodable.
   defp sanitize_tool_output(output) when is_binary(output), do: String.replace_invalid(output)
   defp sanitize_tool_output(output), do: output
-
-  defp enforce_channel_side_effect_bound(tool_calls, state) do
-    count = Enum.count(tool_calls, &channel_side_effect_call?(&1, state))
-
-    if count > 1 do
-      {:error,
-       "Multiple channel side-effect tool calls in one iteration are not allowed; " <>
-         "retry with one channel send per iteration."}
-    else
-      :ok
-    end
-  end
 
   defp channel_side_effect_call?(%{name: name}, state) when is_binary(name) do
     capability_allowed?(name, state.allowed_tools) and channel_capability?(name, state)

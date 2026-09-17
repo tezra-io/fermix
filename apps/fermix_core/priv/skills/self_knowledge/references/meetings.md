@@ -90,6 +90,17 @@ on disk — `list_meetings` keeps surfacing the path.
 Speech-to-text uses the globally configured transcription backend unless
 `transcription_backend` names a different one just for meetings.
 
+The summary itself runs on the operator's default route unless
+`[fermix_core.routing]` `meeting_provider`, `meeting_model` and
+`meeting_reasoning_effort` point it elsewhere — the same shape as `subagent_*`
+and `cron_*`, and like `cron_*` they are hand-written in `config.toml` with no
+setup screen. `fermix doctor`'s `routing` row validates and prints the meeting
+override beside the other two, so a mistyped provider name or effort level is
+caught at the desk rather than at the end of the meeting. Stated plainly for the
+privacy surface: the summarizer is a bounded, no-tools run that frames the
+transcript and the participant roster as untrusted content, and it sends both to
+whichever provider those keys resolve to.
+
 ## When it refuses
 
 The reason is the fix, and each one is its own message rather than a generic
