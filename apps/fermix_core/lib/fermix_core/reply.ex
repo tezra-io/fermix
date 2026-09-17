@@ -122,6 +122,25 @@ defmodule FermixCore.Reply do
     "channel adapter #{format_value(adapter)} is missing or cannot send messages"
   end
 
+  # Scheduled-run media bridge refusals (M46 §7.4). `send_attachment` and
+  # `Tools.Media.Output` both render through this function, so a job-scoped
+  # refusal reads as a sentence rather than an inspected atom.
+  def format_delivery_error(:job_not_active) do
+    "the scheduled run that owns this attachment has already finished"
+  end
+
+  def format_delivery_error(:media_limit_reached) do
+    "this scheduled run has reached its limit of 16 attachments"
+  end
+
+  def format_delivery_error(:job_deadline_exceeded) do
+    "the scheduled run ran out of time before the attachment could be sent"
+  end
+
+  def format_delivery_error({:unsupported_job_reply, kind}) do
+    "a scheduled run delivers attachments only; it cannot send #{format_value(kind)} this way"
+  end
+
   def format_delivery_error({:unexpected_delivery_result, :invalid_contract}) do
     "channel returned an unrecognized result; the raw shape is in the daemon log"
   end

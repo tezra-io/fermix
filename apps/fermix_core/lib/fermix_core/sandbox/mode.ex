@@ -50,7 +50,7 @@ defmodule FermixCore.Sandbox.Mode do
     end
   end
 
-  @typedoc "Where an effective root came from: `:granted` (config `allowed_roots`) vs `:mode` (workspace / launch cwd / request cwd / os_home)."
+  @typedoc "Where an effective root came from: `:granted` (config `allowed_roots`) vs `:mode` (workspace / skills folder / launch cwd / request cwd / os_home)."
   @type provenance :: :granted | :mode
 
   @spec root_provenance(Config.t() | map() | keyword()) :: [{String.t(), provenance()}]
@@ -79,10 +79,22 @@ defmodule FermixCore.Sandbox.Mode do
   defp mode_roots(%Config{mode: :strict} = config), do: [config.workspace_root]
   defp mode_roots(%Config{mode: :open} = config), do: [config.os_home]
 
+  # Standard admits two places in the Fermix home and nothing else in it: the
+  # workspace and the skills folder. A skill package is instructions, scripts,
+  # assets and its own state file, which a chat turn (after `skill_view`) and a
+  # `skill_name`-bound scheduled run both operate on, so it is agent-owned in
+  # the same sense as the workspace. The rest of the home (browser profiles,
+  # tokens, the secret key base, pairing state, run artifacts) stays outside
+  # every standard root; only `open` reaches it, through `os_home`.
   defp mode_roots(%Config{mode: :standard} = config) do
-    [config.workspace_root, launch_root(config.os_home)]
+    [config.workspace_root, skills_root(config), launch_root(config.os_home)]
     |> Enum.reject(&is_nil/1)
   end
+
+  defp skills_root(%Config{home: home}) when is_binary(home) and home != "",
+    do: Path.join(home, "skills")
+
+  defp skills_root(_config), do: nil
 
   defp request_roots(%Config{mode: :standard, os_home: os_home}, request_cwd)
        when is_binary(request_cwd) do

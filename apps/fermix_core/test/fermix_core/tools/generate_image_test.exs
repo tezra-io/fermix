@@ -126,6 +126,149 @@ defmodule FermixCore.Tools.GenerateImageTest do
     end
   end
 
+  describe "execute/2 — explicit delivery (M46 §6.1)" do
+    test "G01: delivery save generates and saves without calling the channel" do
+      tmp_dir = FermixTestSupport.SafeRm.make_tmp_dir!("generate-image-delivery-save")
+      test_pid = self()
+      handler_id = attach_tool_telemetry()
+
+      try do
+        configure_openai(tmp_dir, %{"data" => [%{"b64_json" => Base.encode64("PNGOUT")}]})
+        context = channel_context(tmp_dir, test_pid)
+
+        args = %{"prompt" => "an outfit preview", "delivery" => "save"}
+        assert {:ok, %{success: true, output: output}} = GenerateImage.execute(args, context)
+
+        assert output =~ "Saved the image to"
+        assert output =~ "it was not sent"
+        refute_receive {:reply, _outbound}, 100
+
+        assert_receive {:telemetry, %{tool: "generate_image", delivery_mode: "save"}}
+      after
+        :telemetry.detach(handler_id)
+        FermixTestSupport.SafeRm.rm_rf!(tmp_dir)
+      end
+    end
+
+    test "G02: delivery send with no media route refuses before any provider call" do
+      tmp_dir = FermixTestSupport.SafeRm.make_tmp_dir!("generate-image-delivery-unrouted")
+
+      try do
+        test_id = unique_id()
+
+        Req.Test.stub(test_id, fn conn ->
+          send(self(), :unexpected_request)
+          Plug.Conn.resp(conn, 200, "{}")
+        end)
+
+        Application.put_env(:fermix_core, :tools,
+          generate_image: [backend: "openai", api_key: "sk-test"]
+        )
+
+        Process.put(:openai_test_id, test_id)
+
+        # No reply_fn in the context: a scheduled job or subagent with nowhere
+        # to deliver.
+        context = base_context(tmp_dir)
+        args = %{"prompt" => "an outfit preview", "delivery" => "send"}
+
+        assert {:ok, %{success: false, error: error}} = GenerateImage.execute(args, context)
+        assert error =~ "media_reply_unavailable"
+        refute_received :unexpected_request
+      after
+        FermixTestSupport.SafeRm.rm_rf!(tmp_dir)
+      end
+    end
+
+    test "G03: an explicit send that the channel rejects reports the saved path, not success" do
+      tmp_dir = FermixTestSupport.SafeRm.make_tmp_dir!("generate-image-delivery-rejected")
+
+      try do
+        configure_openai(tmp_dir, %{"data" => [%{"b64_json" => Base.encode64("PNGOUT")}]})
+
+        context =
+          Map.put(base_context(tmp_dir), :reply_fn, fn {:media, _part} ->
+            {:error, {:http_status, 400}}
+          end)
+
+        args = %{"prompt" => "an outfit preview", "delivery" => "send"}
+
+        assert {:ok, %{success: false, error: error}} = GenerateImage.execute(args, context)
+        assert error =~ "generated and saved to"
+        assert error =~ "could not be delivered"
+        assert error =~ "HTTP 400"
+      after
+        FermixTestSupport.SafeRm.rm_rf!(tmp_dir)
+      end
+    end
+
+    test "G03: an explicit send that succeeds reports the send" do
+      tmp_dir = FermixTestSupport.SafeRm.make_tmp_dir!("generate-image-delivery-sent")
+      test_pid = self()
+
+      try do
+        configure_openai(tmp_dir, %{"data" => [%{"b64_json" => Base.encode64("PNGOUT")}]})
+        context = channel_context(tmp_dir, test_pid)
+
+        args = %{"prompt" => "an outfit preview", "delivery" => "send"}
+
+        assert {:ok, %{success: true, output: output}} = GenerateImage.execute(args, context)
+        assert output =~ "sent the image"
+        assert_receive {:reply, {:media, %{kind: :image}}}
+      after
+        FermixTestSupport.SafeRm.rm_rf!(tmp_dir)
+      end
+    end
+
+    test "G04: an omitted delivery keeps the context default for existing callers" do
+      tmp_dir = FermixTestSupport.SafeRm.make_tmp_dir!("generate-image-delivery-default")
+      test_pid = self()
+      handler_id = attach_tool_telemetry()
+
+      try do
+        configure_openai(tmp_dir, %{"data" => [%{"b64_json" => Base.encode64("PNGOUT")}]})
+        context = channel_context(tmp_dir, test_pid)
+
+        assert {:ok, %{success: true, output: output}} =
+                 GenerateImage.execute(%{"prompt" => "a fox"}, context)
+
+        assert output =~ "sent the image"
+        assert_receive {:reply, {:media, %{kind: :image}}}
+        assert_receive {:telemetry, %{delivery_mode: "default"}}
+      after
+        :telemetry.detach(handler_id)
+        FermixTestSupport.SafeRm.rm_rf!(tmp_dir)
+      end
+    end
+
+    test "an unknown delivery value is a validation error with zero provider calls" do
+      tmp_dir = FermixTestSupport.SafeRm.make_tmp_dir!("generate-image-delivery-invalid")
+
+      try do
+        test_id = unique_id()
+
+        Req.Test.stub(test_id, fn conn ->
+          send(self(), :unexpected_request)
+          Plug.Conn.resp(conn, 200, "{}")
+        end)
+
+        Application.put_env(:fermix_core, :tools,
+          generate_image: [backend: "openai", api_key: "sk-test"]
+        )
+
+        Process.put(:openai_test_id, test_id)
+        context = channel_context(tmp_dir, self())
+        args = %{"prompt" => "a fox", "delivery" => "broadcast"}
+
+        assert {:ok, %{success: false, error: error}} = GenerateImage.execute(args, context)
+        assert error =~ "delivery must be one of: save, send"
+        refute_received :unexpected_request
+      after
+        FermixTestSupport.SafeRm.rm_rf!(tmp_dir)
+      end
+    end
+  end
+
   describe "execute/2 — provider errors surface" do
     test "an auth failure from the backend surfaces as a tool error" do
       tmp_dir = FermixTestSupport.SafeRm.make_tmp_dir!("generate-image-auth")

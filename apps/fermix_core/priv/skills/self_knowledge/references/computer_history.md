@@ -251,7 +251,7 @@ search can never return activity.
   sent and the recorder has not answered yet), restarting, standing down because
   another daemon on this Mac holds capture, or degraded with the reason — the
   recorder never answered the start request, it speaks a protocol older than the
-  one capture requires, it refused to start observing, it kept exiting, or its
+  one capture requires, it refuses to start observing, it keeps exiting, or its
   binary is missing. A degraded recorder releases the machine-wide hold, so the
   other daemon on the Mac can take over instead of standing down for good. Also a
   `Coverage:` line naming the apps where only window titles are observable
@@ -298,7 +298,3 @@ the owner's. Never assume your own actions are absent from what you recall.
 `/history status` reports how many spool events are still unsummarized and how
 old the oldest is, so a summarizer falling behind is visible before the 48h
 retention starts eating the backlog.
-
-**Current status:** the config, tools, `/history` commands, summarizer, the
-entire privacy rail, and the macOS capture layer (an AXObserver/CFRunLoop engine
-in the shared native driver, wire protocol v6) are implemented.

@@ -142,6 +142,6 @@ Normal turns retain the standard `main-*` trace session and group in Opik under
 the `mobile:main` conversation thread. Pairing emits terminal
 `channel_pair` events (`approved`, `denied`, `expired`, or `rate_limited`) and
 APNs attempts emit `channel_push` (`sent` or `failed`) in `agent_event.jsonl`.
-Those operational events contain counts, duration, channel, and status only—no
+Those operational events contain counts, duration, channel, and status only, never
 message text, pairing secret, key material, SAS, device name, APNs token, or
 provider response body.

@@ -379,6 +379,44 @@ defmodule FermixCore.AgentLoopTest do
       # The gate fires BEFORE the continuation — the model is never asked.
       assert mock_continues() == []
     end
+
+    # V06 (M46 §13): the same gate must hold for LOCAL images, not just
+    # screenshots — a non-vision route fails loud rather than dropping the
+    # garment photos and letting the model answer as if it had inspected them.
+    test "a view_image result on a NON-vision route fails loud", %{registry: registry} do
+      dir = FermixTestSupport.SafeRm.make_tmp_dir!("agent-loop-view-image")
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
+
+      png = <<0x89, "PNG", 0x0D, 0x0A, 0x1A, 0x0A>> <> "bytes"
+      File.write!(Path.join(dir, "top.png"), png)
+
+      register_caps(registry, [FermixCore.Tools.ViewImage])
+
+      set_mock_responses([
+        turn("",
+          tool_calls: [tool_call("c1", "view_image", %{"paths" => [Path.join(dir, "top.png")]})]
+        )
+      ])
+
+      route_key = %{
+        provider: :ollama,
+        model: "qwen3:32b",
+        auth_mode: :api_key,
+        base_url: "mock://"
+      }
+
+      context = %{
+        agent_name: "test",
+        conversation_key: :test,
+        cwd: dir,
+        sandbox_config: %{mode: :strict, workspace_root: dir, allowed_roots: [dir]}
+      }
+
+      assert {:error, {:image_unsupported, :ollama, "qwen3:32b"}} =
+               run_loop(capability_registry: registry, route_key: route_key, context: context)
+
+      assert mock_continues() == []
+    end
   end
 
   # -- Tool output that is not valid UTF-8 --
@@ -1011,7 +1049,11 @@ defmodule FermixCore.AgentLoopTest do
       assert Enum.map(results, & &1.output) == ["Echo: a", "Echo: b"]
     end
 
-    test "rejects multiple channel side-effect tool calls before execution", %{
+    # The bound is a correction the MODEL must see, not a run-ending error: the
+    # first channel call executes, every later one in the same iteration comes
+    # back as an error tool result, and the loop continues (M46 §2.4 — the
+    # production 07:15 run died here after two paid image generations).
+    test "executes the first channel side-effect call and refuses the rest with a tool error", %{
       registry: registry
     } do
       register_caps(registry, [ChannelSpyTool])
@@ -1022,13 +1064,86 @@ defmodule FermixCore.AgentLoopTest do
             tool_call("call_1", "channel_spy", %{}),
             tool_call("call_2", "channel_spy", %{})
           ]
-        )
+        ),
+        turn("All done")
       ])
 
-      assert {:error, reason} = run_loop(capability_registry: registry)
-      assert reason =~ "Multiple channel side-effect tool calls"
+      assert {:ok, result} = run_loop(capability_registry: registry)
+      assert result.response == "All done"
+
+      # Executed exactly once, not twice and not zero times.
+      assert_received :channel_spy_executed
       refute_received :channel_spy_executed
-      assert mock_continues() == []
+
+      [{_state, results, _opts}] = mock_continues()
+      assert Enum.map(results, & &1.call_id) == ["call_1", "call_2"]
+      [executed, refused] = results
+      assert executed.output == "channel side effect ran"
+      assert refused.output =~ "Only one channel side-effect tool call is executed per iteration"
+      assert refused.output =~ "channel_spy"
+      assert refused.output =~ "Call it again in your next step."
+    end
+
+    test "non-channel calls in the same iteration still execute, in order", %{registry: registry} do
+      register_caps(registry, [ChannelSpyTool, EchoTool])
+
+      set_mock_responses([
+        turn("",
+          tool_calls: [
+            tool_call("call_1", "channel_spy", %{}),
+            tool_call("call_2", "channel_spy", %{}),
+            tool_call("call_3", "echo", %{"text" => "still ran"}),
+            tool_call("call_4", "channel_spy", %{})
+          ]
+        ),
+        turn("All done")
+      ])
+
+      assert {:ok, _result} = run_loop(capability_registry: registry)
+
+      assert_received :channel_spy_executed
+      refute_received :channel_spy_executed
+
+      [{_state, results, _opts}] = mock_continues()
+      assert Enum.map(results, & &1.call_id) == ["call_1", "call_2", "call_3", "call_4"]
+      [first, second, echo, third] = results
+      assert first.output == "channel side effect ran"
+      assert echo.output == "Echo: still ran"
+      assert second.output =~ "was not executed"
+      assert third.output =~ "was not executed"
+    end
+
+    test "a refused channel call emits exactly one tool exec event under the model's name", %{
+      registry: registry
+    } do
+      attach_tool_exec()
+      register_caps(registry, [ChannelSpyTool])
+
+      set_mock_responses([
+        turn("",
+          tool_calls: [
+            tool_call("call_1", "channel_spy", %{}),
+            tool_call("call_2", "channel_spy", %{})
+          ]
+        ),
+        turn("All done")
+      ])
+
+      assert {:ok, _result} = run_loop(capability_registry: registry)
+
+      # The refusal is still one model tool call, so it leaves one row under the
+      # name the model used — the only name a trace reader can search for. (The
+      # executed call emits its own event from inside the real tool; this test
+      # double does not, so the refusal's is the only one here.)
+      assert_received {:tool_exec, measurements,
+                       %{tool: "channel_spy", success: false} = refused_metadata}
+
+      assert measurements.duration_ms == 0
+
+      assert refused_metadata.error =~
+               "Only one channel side-effect tool call is executed per iteration"
+
+      refute_received {:tool_exec, _measurements, %{tool: "channel_spy"}}
     end
 
     test "allows one channel side-effect tool call with other read-only calls", %{

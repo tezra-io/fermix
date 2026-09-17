@@ -42,6 +42,7 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
   @builtin_tool_modules [
     FermixCore.Tools.Shell,
     FermixCore.Tools.FileRead,
+    FermixCore.Tools.ViewImage,
     FermixCore.Tools.FileWrite,
     FermixCore.Tools.FileEdit,
     FermixCore.Tools.GlobSearch,

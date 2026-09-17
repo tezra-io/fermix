@@ -14,7 +14,7 @@ defmodule FermixCore.Tools.Media.OutputTest do
         context = sandbox_context(tmp_dir, reply_fn: capturing_reply(test_pid))
 
         assert {:ok, %{path: path, delivered?: true}} =
-                 Output.emit(@artifact, %{modality: :image}, context)
+                 Output.emit(@artifact, %{modality: :image, delivery: :default}, context)
 
         assert File.read!(path) == "PNGBYTES"
         # Landed under the workspace `media/` floor (compare via basename — macOS
@@ -39,7 +39,11 @@ defmodule FermixCore.Tools.Media.OutputTest do
         context = sandbox_context(tmp_dir, reply_fn: capturing_reply(test_pid))
 
         assert {:ok, %{delivered?: true}} =
-                 Output.emit(@artifact, %{modality: :image, caption: "a fox"}, context)
+                 Output.emit(
+                   @artifact,
+                   %{modality: :image, delivery: :default, caption: "a fox"},
+                   context
+                 )
 
         assert_receive {:reply, {:media, %{caption: "a fox"}}}
       after
@@ -54,8 +58,57 @@ defmodule FermixCore.Tools.Media.OutputTest do
         context = sandbox_context(tmp_dir)
 
         assert {:ok, %{path: path, delivered?: false}} =
-                 Output.emit(@artifact, %{modality: :image}, context)
+                 Output.emit(@artifact, %{modality: :image, delivery: :default}, context)
 
+        assert File.read!(path) == "PNGBYTES"
+      after
+        FermixTestSupport.SafeRm.rm_rf!(tmp_dir)
+      end
+    end
+
+    test "G01: delivery :save writes the file and never calls the reply function" do
+      tmp_dir = FermixTestSupport.SafeRm.make_tmp_dir!("media-output-save")
+      test_pid = self()
+
+      try do
+        context = sandbox_context(tmp_dir, reply_fn: capturing_reply(test_pid))
+
+        assert {:ok, %{path: path, delivered?: false}} =
+                 Output.emit(@artifact, %{modality: :image, delivery: :save}, context)
+
+        assert File.read!(path) == "PNGBYTES"
+        refute_receive {:reply, _outbound}, 100
+      after
+        FermixTestSupport.SafeRm.rm_rf!(tmp_dir)
+      end
+    end
+
+    test "delivery :send with a reply function delivers and reports it" do
+      tmp_dir = FermixTestSupport.SafeRm.make_tmp_dir!("media-output-send")
+      test_pid = self()
+
+      try do
+        context = sandbox_context(tmp_dir, reply_fn: capturing_reply(test_pid))
+
+        assert {:ok, %{delivered?: true}} =
+                 Output.emit(@artifact, %{modality: :image, delivery: :send}, context)
+
+        assert_receive {:reply, {:media, %{kind: :image}}}
+      after
+        FermixTestSupport.SafeRm.rm_rf!(tmp_dir)
+      end
+    end
+
+    test "delivery :send without a reply function fails loud and keeps the saved path" do
+      tmp_dir = FermixTestSupport.SafeRm.make_tmp_dir!("media-output-send-unrouted")
+
+      try do
+        context = sandbox_context(tmp_dir)
+
+        assert {:error, %{path: path, reason: reason}} =
+                 Output.emit(@artifact, %{modality: :image, delivery: :send}, context)
+
+        assert reason =~ "no channel reply context"
         assert File.read!(path) == "PNGBYTES"
       after
         FermixTestSupport.SafeRm.rm_rf!(tmp_dir)
@@ -73,9 +126,13 @@ defmodule FermixCore.Tools.Media.OutputTest do
             end
           )
 
-        assert {:error, message} = Output.emit(@artifact, %{modality: :image}, context)
-        assert message =~ "11.0 MiB"
-        assert message =~ "10.0 MiB"
+        assert {:error, %{path: path, reason: reason}} =
+                 Output.emit(@artifact, %{modality: :image, delivery: :default}, context)
+
+        assert reason =~ "11.0 MiB"
+        assert reason =~ "10.0 MiB"
+        # The artifact the caller already paid for is still reported.
+        assert File.read!(path) == "PNGBYTES"
       after
         FermixTestSupport.SafeRm.rm_rf!(tmp_dir)
       end
@@ -87,8 +144,10 @@ defmodule FermixCore.Tools.Media.OutputTest do
       try do
         context = sandbox_context(tmp_dir, reply_fn: fn {:media, _part} -> :weird end)
 
-        assert {:error, message} = Output.emit(@artifact, %{modality: :image}, context)
-        assert message =~ "invalid reply result"
+        assert {:error, %{path: _path, reason: reason}} =
+                 Output.emit(@artifact, %{modality: :image, delivery: :default}, context)
+
+        assert reason =~ "invalid reply result"
       after
         FermixTestSupport.SafeRm.rm_rf!(tmp_dir)
       end

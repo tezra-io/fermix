@@ -11,6 +11,14 @@ defmodule FermixCore.Jobs.Delivery do
 
   @type delivery_result :: {:ok, String.t()} | {:error, term()}
 
+  @typedoc """
+  The channel destination a job's configuration resolves to: the platform, the
+  destination id, and the normalized thread/topic/request options the adapter
+  takes. One resolver serves both the final text and the media bridge, so a job
+  can never deliver its attachment somewhere its text would not go.
+  """
+  @type target :: %{platform: String.t(), destination: String.t(), opts: keyword()}
+
   @default_timeout_ms 60_000
 
   @spec initial_status(map(), String.t() | nil) :: String.t()
@@ -75,8 +83,19 @@ defmodule FermixCore.Jobs.Delivery do
     delivery_mode(job) in ["none", "local"] or silent?(text, Map.get(job, :silent_marker))
   end
 
+  @doc """
+  Resolves `job`'s configured channel destination (M46 §7.1).
+
+  The explicit `delivery_target` wins; an `origin` job with none derives it from
+  the session id that created it. Shared by final-text delivery and
+  `FermixCore.Jobs.MediaBridge`; neither consults live registry state or a
+  model-supplied recipient.
+  """
+  @spec resolve_target(map()) :: {:ok, target()} | {:error, term()}
+  def resolve_target(job) when is_map(job), do: delivery_target(job)
+
   defp deliver_to_channel(job, text, opts) do
-    with {:ok, target} <- delivery_target(job) do
+    with {:ok, target} <- resolve_target(job) do
       send_opts = target.opts ++ delivery_opts(opts)
 
       case ChannelSend.send(target.platform, target.destination, text, send_opts, opts) do

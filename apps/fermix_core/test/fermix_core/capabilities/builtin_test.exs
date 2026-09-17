@@ -182,7 +182,10 @@ defmodule FermixCore.Capabilities.BuiltinTest do
                "memory_sources_list",
                # On-device computer-history recall is owner data (MILESTONE_32 §11.2).
                "recall_activity",
-               "reminder_snooze"
+               "reminder_snooze",
+               # `view_image` returns the owner's own image files, exactly as
+               # `file_read` returns their text (M46 §5.1).
+               "view_image"
              ]
     end
   end
