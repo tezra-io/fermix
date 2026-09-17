@@ -148,11 +148,11 @@ defmodule FermixCore.Providers.OpenAI.ResponsesShared do
   # encoding inbound images use. Ordering matters: outputs must immediately follow
   # their function_calls before any user item. Both OpenAI.Responses and
   # OpenAI.Codex concatenate this list last, so both get the screenshot path.
-  @image_followup_label "Screen state returned by the preceding tool call:"
-  @image_followup_placeholder "[screen state in the following message]"
+  @image_followup_label "Image returned by the preceding tool call:"
+  @image_followup_placeholder "[image in the following message]"
   # Replaces a screenshot input item once it ages out of the retention window
   # (ScreenshotRetention) — image bytes drop, the textual trail stays.
-  @image_followup_elided "[earlier screen state omitted to bound context]"
+  @image_followup_elided "[earlier tool image omitted to bound context]"
 
   @spec build_function_call_outputs([tool_result()]) :: [map()]
   def build_function_call_outputs(tool_results) when is_list(tool_results) do

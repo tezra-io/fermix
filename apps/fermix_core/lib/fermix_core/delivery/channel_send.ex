@@ -3,7 +3,7 @@ defmodule FermixCore.Delivery.ChannelSend do
   The generic channel-send primitive shared by every outbound delivery path.
 
   This is the single place that turns a resolved `{platform, destination}` pair
-  into an adapter `send_message/3` call: it resolves the adapter (from an
+  into an adapter `send_message/3` (or `send_media/3`) call: it resolves the adapter (from an
   injected `:adapter` or the configured `[:fermix_core, :jobs, :delivery_channels]`
   map), runs the bounded transient-retry loop (only the connection-unavailable
   pool-checkout error is retried — every other error fails fast), rescues the
@@ -24,6 +24,7 @@ defmodule FermixCore.Delivery.ChannelSend do
   require Logger
 
   alias FermixCore.Net.HttpClient
+  alias FermixCore.Reply
 
   @default_delivery_attempts 3
   @default_delivery_backoff_ms 1_000
@@ -52,6 +53,32 @@ defmodule FermixCore.Delivery.ChannelSend do
              is_list(send_opts) and is_list(opts) do
     case resolve_adapter(platform, opts) do
       {:ok, adapter} -> run_send(adapter, destination, text, send_opts, opts)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  Sends `part` — a `FermixCore.Reply.media_part/0` — to `destination` on
+  `platform` through the resolved channel adapter's `send_media/3`.
+
+  Same adapter resolution, RuntimeError rescue, attempt ceiling and
+  narrow transient retry as `send/5`: only the connection-unavailable
+  pool-checkout error is retried, and it fires before any bytes reach the
+  channel, so a retry cannot duplicate an upload. `send_opts` (thread/topic
+  options, request options, the proactive key) is passed verbatim to the
+  adapter, which owns its own byte caps and idempotency claim. An adapter
+  without `send_media/3` is refused as `{:invalid_delivery_adapter, module}`
+  rather than degraded to a text message (M46 §7.3).
+  """
+  @spec send_media(String.t(), String.t(), Reply.media_part(), keyword(), keyword()) ::
+          send_result()
+  def send_media(platform, destination, part, send_opts \\ [], opts \\ [])
+      when is_binary(platform) and is_binary(destination) and is_map(part) and
+             is_list(send_opts) and is_list(opts) do
+    opts = Keyword.put(opts, :dispatch, :send_media)
+
+    case resolve_adapter(platform, opts) do
+      {:ok, adapter} -> run_send(adapter, destination, part, send_opts, opts)
       {:error, reason} -> {:error, reason}
     end
   end
@@ -91,7 +118,7 @@ defmodule FermixCore.Delivery.ChannelSend do
 
   # --- Send loop ----------------------------------------------------------
 
-  defp run_send(adapter, destination, text, send_opts, opts) do
+  defp run_send(adapter, destination, payload, send_opts, opts) do
     max_attempts = Keyword.get(opts, :delivery_max_attempts, @default_delivery_attempts)
     backoff_ms = Keyword.get(opts, :delivery_backoff_ms, @default_delivery_backoff_ms)
     dispatch = Keyword.get(opts, :dispatch, :send_message)
@@ -102,7 +129,7 @@ defmodule FermixCore.Delivery.ChannelSend do
     # budget in `HttpClient`, so a small ceiling is a wide-enough floor.
     Enum.reduce_while(1..max_attempts, {:error, :not_attempted}, fn attempt, _acc ->
       adapter
-      |> send_with_rescue(destination, text, send_opts, dispatch)
+      |> send_with_rescue(destination, payload, send_opts, dispatch)
       |> decide_delivery_attempt(attempt, max_attempts, backoff_ms)
     end)
   end
@@ -117,6 +144,17 @@ defmodule FermixCore.Delivery.ChannelSend do
   # being silently surfaced as a plain delivery failure.
   defp send_with_rescue(adapter, destination, text, opts, :send_message) do
     adapter.send_message(destination, text, opts)
+  rescue
+    exception in [RuntimeError] ->
+      Logger.warning("Delivery send raised: #{Exception.message(exception)}")
+      {:error, exception}
+  end
+
+  # Media dispatch: the same rescue and retry classification as text, with the
+  # media part handed to the adapter verbatim. Adapter resolution already proved
+  # `send_media/3` is exported.
+  defp send_with_rescue(adapter, destination, part, opts, :send_media) do
+    adapter.send_media(destination, part, opts)
   rescue
     exception in [RuntimeError] ->
       Logger.warning("Delivery send raised: #{Exception.message(exception)}")
@@ -237,6 +275,7 @@ defmodule FermixCore.Delivery.ChannelSend do
   defp ensure_adapter(adapter, _dispatch), do: {:error, {:invalid_delivery_adapter, adapter}}
 
   defp dispatch_callback(:send_message), do: :send_message
+  defp dispatch_callback(:send_media), do: :send_media
   defp dispatch_callback({:send_proposal, _token}), do: :send_proposal
 
   defp default_channels do

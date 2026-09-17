@@ -317,15 +317,45 @@ defmodule FermixCore.Tools.Media.SupportTest do
   end
 
   describe "resolve_edit_image/2 — sandbox paths" do
-    test "reads an in-sandbox source image" do
+    test "reads an in-sandbox source image, identifying its type from the bytes" do
       tmp_dir = FermixTestSupport.SafeRm.make_tmp_dir!("media-resolve-path")
+      png = <<0x89, "PNG", 0x0D, 0x0A, 0x1A, 0x0A>> <> "DATA"
+
+      try do
+        File.write!(Path.join(tmp_dir, "src.png"), png)
+        context = sandbox_context(tmp_dir)
+
+        assert {:ok, %{bytes: ^png, mime: "image/png", filename: "src.png"}} =
+                 Support.resolve_edit_image("src.png", context)
+      after
+        FermixTestSupport.SafeRm.rm_rf!(tmp_dir)
+      end
+    end
+
+    test "refuses a file whose bytes are not an image, whatever its extension" do
+      tmp_dir = FermixTestSupport.SafeRm.make_tmp_dir!("media-resolve-not-image")
 
       try do
         File.write!(Path.join(tmp_dir, "src.png"), "PNGDATA")
         context = sandbox_context(tmp_dir)
 
-        assert {:ok, %{bytes: "PNGDATA", mime: "image/png", filename: "src.png"}} =
-                 Support.resolve_edit_image("src.png", context)
+        assert {:error, message} = Support.resolve_edit_image("src.png", context)
+        assert message =~ "image_type_unsupported"
+      after
+        FermixTestSupport.SafeRm.rm_rf!(tmp_dir)
+      end
+    end
+
+    test "refuses a source image over the per-file byte cap" do
+      tmp_dir = FermixTestSupport.SafeRm.make_tmp_dir!("media-resolve-too-big")
+      png = <<0x89, "PNG", 0x0D, 0x0A, 0x1A, 0x0A>>
+
+      try do
+        File.write!(Path.join(tmp_dir, "src.png"), png <> :binary.copy("x", 10 * 1024 * 1024))
+        context = sandbox_context(tmp_dir)
+
+        assert {:error, message} = Support.resolve_edit_image("src.png", context)
+        assert message =~ "per-file limit"
       after
         FermixTestSupport.SafeRm.rm_rf!(tmp_dir)
       end
@@ -487,12 +517,6 @@ defmodule FermixCore.Tools.Media.SupportTest do
       assert Support.ext_for_mime("image/webp") == "webp"
       assert Support.ext_for_mime("image/gif") == "gif"
       assert Support.ext_for_mime("application/pdf") == "bin"
-    end
-
-    test "image_mime_for_path/1 maps extensions and defaults to octet-stream" do
-      assert Support.image_mime_for_path("/a/b.png") == "image/png"
-      assert Support.image_mime_for_path("/a/b.JPG") == "image/jpeg"
-      assert Support.image_mime_for_path("/a/b.heic") == "application/octet-stream"
     end
 
     test "sandbox_error/1 renders each denial reason on one line" do

@@ -6,9 +6,10 @@ defmodule FermixCore.Tools.Media.Support do
   Covers the cross-backend concerns: resolving a vendor credential, decoding the
   base64 image payload every image provider returns, wrapping the generation HTTP
   call in `[:fermix, :provider, :call]` telemetry (image gen is modeled as a
-  provider call, §12), resolving an edit's source image (a sandbox path, or a
-  this-turn inbound channel image ingested to the sandbox floor, §7), and writing
-  artifact bytes under the workspace sandbox.
+  provider call, §12), resolving an edit's source image (a sandbox path read through the
+  one bounded local-image reader, or a this-turn inbound channel image ingested
+  to the sandbox floor, §7), and writing artifact bytes under the workspace
+  sandbox.
   """
 
   require Logger
@@ -40,6 +41,15 @@ defmodule FermixCore.Tools.Media.Support do
   # but Rule #2 wants the bound declared and enforced here, at the point of use —
   # not left implicit in each channel's buffer.
   @max_inbound_images 10
+
+  # Hard ceiling on ONE local image read (a `view_image` reference, a generation
+  # edit source or mask). Enforced against the bytes actually read rather than
+  # the stat size, so a file that grows between the two cannot cross it.
+  @max_local_image_bytes 10 * 1024 * 1024
+
+  # The raster types the generation backends accept as a reference. `view_image`
+  # narrows this further at its own call site (no GIF).
+  @generation_image_mimes ["image/png", "image/jpeg", "image/webp", "image/gif"]
 
   @typedoc "A source image resolved for an edit: bytes in hand plus its MIME and a filename."
   @type source_image :: %{bytes: binary(), mime: String.t(), filename: String.t()}
@@ -249,25 +259,105 @@ defmodule FermixCore.Tools.Media.Support do
     end
   end
 
-  defp resolve_sandbox_path(path, context) do
-    with {:ok, abs} <- read_via_sandbox(path, context),
-         {:ok, bytes} <- read_file(abs) do
-      {:ok, %{bytes: bytes, mime: image_mime_for_path(abs), filename: Path.basename(abs)}}
+  defp resolve_sandbox_path(path, context), do: read_local_image(path, context)
+
+  @doc """
+  The single bounded reader for a local image file: `view_image`'s references
+  and the generation path's edit source/mask both come through here (M46 §5.2
+  step 4), so the two can never drift into incompatible validators.
+
+  Resolves `path` through the sandbox under `opts[:action]`, requires a
+  non-empty regular file, enforces `opts[:max_bytes]` against the bytes actually
+  read, and identifies the MIME from the leading bytes rather than the filename
+  extension. A type outside `opts[:allowed_mimes]` is refused. Nothing partial
+  is ever returned, and the descriptor is closed on every path (`File.open/3`
+  with a function closes it after the function returns or raises).
+  """
+  @spec read_local_image(String.t(), map(), keyword()) ::
+          {:ok, source_image()} | {:error, String.t()}
+  def read_local_image(path, context, opts \\ [])
+      when is_binary(path) and is_map(context) and is_list(opts) do
+    action = Keyword.get(opts, :action, @action)
+    max_bytes = Keyword.get(opts, :max_bytes, @max_local_image_bytes)
+    allowed = Keyword.get(opts, :allowed_mimes, @generation_image_mimes)
+
+    with {:ok, abs} <- read_via_sandbox(path, context, action),
+         :ok <- regular_image_file(abs, max_bytes),
+         {:ok, bytes} <- read_bounded(abs, max_bytes),
+         {:ok, mime} <- allowed_image_mime(abs, bytes, allowed) do
+      {:ok, %{bytes: bytes, mime: mime, filename: Path.basename(abs)}}
     end
   end
 
-  defp read_via_sandbox(path, context) do
-    case Sandbox.read_path(path, @action, context) do
+  defp read_via_sandbox(path, context, action) do
+    case Sandbox.read_path(path, action, context) do
       {:ok, abs} -> {:ok, abs}
       {:error, reason} -> {:error, sandbox_error(reason)}
     end
   end
 
-  defp read_file(abs) do
-    case File.read(abs) do
-      {:ok, bytes} when byte_size(bytes) > 0 -> {:ok, bytes}
-      {:ok, _empty} -> {:error, "source image is empty: #{abs}"}
-      {:error, reason} -> {:error, "could not read source image: #{:file.format_error(reason)}"}
+  defp regular_image_file(abs, max_bytes) do
+    case File.stat(abs) do
+      {:ok, %{type: :regular, size: 0}} ->
+        {:error, "source image is empty: #{abs}"}
+
+      {:ok, %{type: :regular, size: size}} when size > max_bytes ->
+        {:error, "source image is #{size} bytes; the per-file limit is #{max_bytes} bytes"}
+
+      {:ok, %{type: :regular}} ->
+        :ok
+
+      {:ok, %{type: type}} ->
+        {:error, "source image is not a regular file (#{type}): #{abs}"}
+
+      {:error, :enoent} ->
+        {:error, "source image not found: #{abs}"}
+
+      {:error, reason} ->
+        {:error, "could not read source image: #{:file.format_error(reason)}"}
+    end
+  end
+
+  # Reads at most `max_bytes + 1`: one byte over the cap is enough to prove the
+  # file crossed it, and the read stops there, so a file that grew after the
+  # stat above is refused instead of being buffered whole.
+  defp read_bounded(abs, max_bytes) do
+    abs
+    |> File.open([:read, :binary], fn fd -> IO.binread(fd, max_bytes + 1) end)
+    |> bounded_result(abs, max_bytes)
+  end
+
+  defp bounded_result({:ok, bytes}, abs, max_bytes) when is_binary(bytes) do
+    cond do
+      byte_size(bytes) > max_bytes ->
+        {:error, "source image exceeds the #{max_bytes}-byte per-file limit: #{abs}"}
+
+      byte_size(bytes) == 0 ->
+        {:error, "source image is empty: #{abs}"}
+
+      true ->
+        {:ok, bytes}
+    end
+  end
+
+  defp bounded_result({:ok, :eof}, abs, _max_bytes),
+    do: {:error, "source image is empty: #{abs}"}
+
+  defp bounded_result({:ok, {:error, reason}}, _abs, _max_bytes),
+    do: {:error, "could not read source image: #{:file.format_error(reason)}"}
+
+  defp bounded_result({:error, reason}, _abs, _max_bytes),
+    do: {:error, "could not read source image: #{:file.format_error(reason)}"}
+
+  defp allowed_image_mime(abs, bytes, allowed) do
+    mime = sniff_image_mime(bytes)
+
+    if mime in allowed do
+      {:ok, mime}
+    else
+      {:error,
+       "image_type_unsupported: #{Path.basename(abs)} is #{mime}; " <>
+         "supported types are #{Enum.join(allowed, ", ")}"}
     end
   end
 
@@ -434,19 +524,6 @@ defmodule FermixCore.Tools.Media.Support do
     if String.length(message) <= @max_error_detail,
       do: message,
       else: String.slice(message, 0, @max_error_detail) <> "…"
-  end
-
-  @doc "Maps a file path's extension to an image MIME type (octet-stream when unknown)."
-  @spec image_mime_for_path(String.t()) :: String.t()
-  def image_mime_for_path(path) when is_binary(path) do
-    case path |> Path.extname() |> String.downcase() do
-      ".png" -> "image/png"
-      ".jpg" -> "image/jpeg"
-      ".jpeg" -> "image/jpeg"
-      ".webp" -> "image/webp"
-      ".gif" -> "image/gif"
-      _ -> "application/octet-stream"
-    end
   end
 
   @doc "Maps an image MIME type to a file extension (`bin` when unknown)."

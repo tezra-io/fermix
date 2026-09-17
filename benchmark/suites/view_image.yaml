@@ -1,0 +1,93 @@
+# Local image inspection — the view_image builtin (M46 §5).
+#
+# PHILOSOPHY (UAT, not spoon-fed): a real user says "have a look at this photo
+# and tell me what it says", never "call view_image". Every query states intent
+# and the MODEL picks the tool. The route is pinned in exactly ONE labelled
+# sanity case; everywhere else the gate is the SUBSTANCE of the answer — the
+# reply has to quote what is actually in the picture, which only a run that
+# really looked at the bytes can produce.
+#
+# FIXTURES: the two bundled PNGs under suites/fixtures/ carry known text —
+# text_alpha.png reads "ALPHA 42" and text_bravo.png reads "BRAVO 73". They are
+# referenced by absolute path through __EVAL_REPO_ROOT__ and read read-only, so
+# this suite mutates nothing (risk: host_readonly). It is the local-file
+# counterpart of multimodal.yaml, which attaches the same fixtures as INBOUND
+# chat images: that path proves the gateway carries an attachment, this one
+# proves the assistant can open a file that is already on the machine.
+#
+#   uv run bin/run_eval.py --suite view_image --judge
+suite: view_image
+risk: host_readonly
+title: "Local image inspection — view_image reads files already on the machine"
+description: >
+  Exercises the view_image builtin against bundled fixtures with known contents:
+  one file read back, two files read in one call, and a comparison between them.
+  A denial, or an answer that hedges about not being able to see images, is a
+  capability failure rather than an acceptable reply. Gates are tools_any over
+  the plausible read tools plus a reply_matches on the text the picture actually
+  contains; tools_all / tools_in_order are avoided because the model may
+  legitimately glob or read around the file first.
+defaults:
+  timeout_ms: 180000
+  judge: true
+  expect:
+    status: ok
+    no_tool_errors: true
+
+scenarios:
+  - id: read_one_local_image
+    title: "Reads back the text in a single local image file"
+    severity: critical
+    tags: [view_image, vision, files, local-image]
+    cases:
+      # The labelled route-sanity case: the one place this suite pins that the
+      # local-image route actually fires, so the scenario cannot go green on a
+      # model that answers from thin air or from the file's name.
+      - id: read_alpha_sanity
+        query: "Open __EVAL_REPO_ROOT__/benchmark/suites/fixtures/text_alpha.png and tell me exactly what it says."
+        expect:
+          tools_any: [view_image]
+          reply_matches: "(?is)(?=.*\\balpha\\b)(?=.*\\b42\\b)"
+          max_tool_calls: 6
+          max_cost_usd: 0.8
+          max_duration_ms: 120000
+        rubric: >
+          Reports the text ALPHA 42 from the image itself. Answering from the
+          filename alone, or saying it cannot look at images, fails.
+      - id: describe_bravo
+        query: "I've got a picture at __EVAL_REPO_ROOT__/benchmark/suites/fixtures/text_bravo.png — what's in it?"
+        expect:
+          tools_any: [view_image, file_read, glob_search]
+          reply_matches: "(?is)(?=.*\\bbravo\\b)(?=.*\\b73\\b)"
+          max_cost_usd: 0.8
+          max_duration_ms: 120000
+        rubric: >
+          Describes the picture's actual content — the words BRAVO 73 on a plain
+          background — rather than guessing from the path or declining.
+
+  - id: read_several_local_images
+    title: "Reads two local images in one go and keeps them apart"
+    severity: normal
+    tags: [view_image, vision, multi-image, local-image]
+    cases:
+      - id: read_both_labels
+        query: "Have a look at both __EVAL_REPO_ROOT__/benchmark/suites/fixtures/text_alpha.png and __EVAL_REPO_ROOT__/benchmark/suites/fixtures/text_bravo.png and list what each one says."
+        expect:
+          tools_any: [view_image]
+          reply_matches: "(?i)(?=[\\s\\S]*\\balpha\\b)(?=[\\s\\S]*\\bbravo\\b)"
+          reply_not_matches: "(?i)(only|just) (one|a single|1) (image|file|picture)"
+          max_cost_usd: 1.0
+          max_duration_ms: 150000
+        rubric: >
+          Reads BOTH pictures and reports ALPHA (42) and BRAVO (73) separately.
+          Seeing only one, or merging them into a single answer, fails.
+      - id: compare_the_numbers
+        query: "Which of these two has the bigger number on it — __EVAL_REPO_ROOT__/benchmark/suites/fixtures/text_alpha.png or __EVAL_REPO_ROOT__/benchmark/suites/fixtures/text_bravo.png?"
+        expect:
+          tools_any: [view_image]
+          reply_matches: "(?is)(?=.*\\bbravo\\b)(?=.*\\b73\\b)"
+          max_cost_usd: 1.0
+          max_duration_ms: 150000
+        rubric: >
+          Identifies text_bravo.png (73) as carrying the bigger number, grounded
+          in what both pictures actually show rather than in their filenames.

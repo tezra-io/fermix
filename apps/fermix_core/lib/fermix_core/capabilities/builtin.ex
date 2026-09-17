@@ -13,6 +13,9 @@ defmodule FermixCore.Capabilities.Builtin do
   @policy_defaults %{
     "shell" => %{policy_class: :exec, hidden_from_agent?: false, owner_only?: false},
     "file_read" => %{policy_class: :read_only, hidden_from_agent?: false, owner_only?: true},
+    # Returns the owner's own image files, exactly like `file_read` returns their
+    # text — so it carries the same owner-only bound and a guest never sees it.
+    "view_image" => %{policy_class: :read_only, hidden_from_agent?: false, owner_only?: true},
     "file_write" => %{policy_class: :read_write, hidden_from_agent?: false, owner_only?: false},
     "file_edit" => %{policy_class: :read_write, hidden_from_agent?: false, owner_only?: false},
     "glob_search" => %{policy_class: :read_only, hidden_from_agent?: false, owner_only?: true},

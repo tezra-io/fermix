@@ -113,6 +113,35 @@ defmodule FermixCore.Jobs.RunnerTest do
     end
   end
 
+  defmodule MediaDelivery do
+    @moduledoc false
+    # A delivery adapter that speaks BOTH halves of the channel contract: the
+    # text `send_message/3` the scheduler has always used for the final response,
+    # and the `send_media/3` the scheduled-run media bridge dispatches to. Each
+    # records to the test pid so a run's text and attachment outcomes stay
+    # independently visible (M46 R01).
+    def send_message(target, text, opts) do
+      send(Keyword.fetch!(opts, :test_pid), {:delivery_send, target, text, opts})
+      Keyword.get(opts, :result, :ok)
+    end
+
+    def send_media(target, part, opts) do
+      send(Keyword.fetch!(opts, :test_pid), {:delivery_media, target, part, opts})
+      Keyword.get(opts, :media_result, :ok)
+    end
+  end
+
+  defmodule TextOnlyDelivery do
+    @moduledoc false
+    # The §7.2 "valid text-only adapter" row: it can deliver the final text and
+    # cannot send media at all, so the bridge must refuse to bind rather than
+    # invent an alternate channel.
+    def send_message(target, text, opts) do
+      send(Keyword.fetch!(opts, :test_pid), {:delivery_send, target, text, opts})
+      :ok
+    end
+  end
+
   defmodule TransientAdapter do
     @moduledoc false
     # Drives the runner's transient-infrastructure retry: each fresh AgentLoop
@@ -2148,5 +2177,384 @@ defmodule FermixCore.Jobs.RunnerTest do
       ref = Process.monitor(pid)
       assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
     end
+  end
+
+  # --- Scheduled-run media delivery (M46 §7; D01, D02, D05, D06, D09, R01) ---
+  #
+  # The bridge resolves the job's captured destination ONCE and binds a
+  # media-only `reply_fn` into the scheduled loop context, so `send_attachment`
+  # reaches the same channel the final text does. These tests drive the REAL
+  # `send_attachment` built-in against a fixture inside the run's readable root,
+  # so the proof covers the tool's own path/sandbox checks too.
+  describe "scheduled-run media delivery" do
+    # The eight-byte PNG signature plus filler: enough for the sandbox/regular-file
+    # checks `send_attachment` performs, and no image decoding happens here.
+    @png_fixture <<0x89, "PNG", 0x0D, 0x0A, 0x1A, 0x0A>> <> "fixture-bytes"
+
+    setup do
+      sandbox = Application.get_env(:fermix_core, :sandbox)
+      media_dir = FermixTestSupport.SafeRm.make_tmp_dir!("fermix-jobs-runner-media")
+      image_path = Path.join(media_dir, "preview.png")
+      File.write!(image_path, @png_fixture)
+
+      # The scheduled loop context carries no `:sandbox_config`, so the run reads
+      # the global sandbox. Establish it here and restore it on exit (CLAUDE.md:
+      # a test that reads global app env establishes its own precondition).
+      Application.put_env(:fermix_core, :sandbox, %{
+        mode: :strict,
+        workspace_root: media_dir,
+        allowed_roots: [media_dir]
+      })
+
+      on_exit(fn ->
+        restore_app_env(:sandbox, sandbox)
+        FermixTestSupport.SafeRm.rm_rf!(media_dir)
+      end)
+
+      %{media_dir: media_dir, image_path: image_path}
+    end
+
+    test "D01: an origin job's send_attachment reaches the configured media adapter", %{
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir,
+      image_path: image_path
+    } do
+      register_send_attachment(capability_registry)
+
+      assert {:ok, {job, run}} =
+               create_claimed_job(repo,
+                 name: "Outfit Preview",
+                 schedule: "every 15 minutes",
+                 task_prompt: "Send today's preview.",
+                 delivery_mode: "origin",
+                 delivery_target: %{"platform" => "telegram", "chat_id" => "123"}
+               )
+
+      assert_runner_exits_normally(
+        job,
+        run,
+        repo: repo,
+        capability_registry: capability_registry,
+        output_base_dir: output_base_dir,
+        delivery_adapter: MediaDelivery,
+        delivery_opts: [test_pid: self()],
+        script: [
+          %{tool_calls: [attach_call("call_1", image_path, "Outfit preview")]},
+          %{content: "Preview sent."}
+        ]
+      )
+
+      assert_receive {:delivery_media, "123", part, media_opts}
+      assert part.kind == :image
+      assert part.filename == "preview.png"
+      assert part.caption == "Outfit preview"
+      assert Keyword.fetch!(media_opts, :proactive_key) == "job:#{run.id}"
+      assert Keyword.fetch!(media_opts, :proactive_part_id) == "media-1"
+
+      assert_receive {:adapter_continue, [%{output: tool_output}]}
+      assert tool_output =~ "Sent attachment"
+
+      # The scheduler still owns the final text and delivers it exactly once.
+      assert_receive {:delivery_send, "123", "Preview sent.", _opts}
+      refute_receive {:delivery_send, _target, _text, _opts}, 100
+
+      assert {:ok, stored_run} = Repo.get_job_run(run.id, server: repo)
+      assert stored_run.status == "ok"
+      assert stored_run.delivery_status == "sent"
+      assert stored_run.prompt_snapshot =~ "Attachments: send_attachment delivers files"
+    end
+
+    test "D02: a threaded target carries its thread id on both media and final text", %{
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir,
+      image_path: image_path
+    } do
+      register_send_attachment(capability_registry)
+
+      assert {:ok, {job, run}} =
+               create_claimed_job(repo,
+                 name: "Threaded Preview",
+                 schedule: "every 15 minutes",
+                 task_prompt: "Send today's preview.",
+                 delivery_mode: "channel",
+                 delivery_target: %{
+                   "platform" => "telegram",
+                   "chat_id" => "123",
+                   "message_thread_id" => "77"
+                 }
+               )
+
+      assert_runner_exits_normally(
+        job,
+        run,
+        repo: repo,
+        capability_registry: capability_registry,
+        output_base_dir: output_base_dir,
+        delivery_adapter: MediaDelivery,
+        delivery_opts: [test_pid: self()],
+        script: [
+          %{tool_calls: [attach_call("call_1", image_path, nil)]},
+          %{content: "Preview sent."}
+        ]
+      )
+
+      assert_receive {:delivery_media, "123", _part, media_opts}
+      assert Keyword.fetch!(media_opts, :message_thread_id) == "77"
+
+      assert_receive {:delivery_send, "123", "Preview sent.", text_opts}
+      assert Keyword.fetch!(text_opts, :message_thread_id) == "77"
+    end
+
+    test "D05: delivery_mode local leaves the run without a media reply path", %{
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir,
+      image_path: image_path
+    } do
+      assert_media_unavailable(
+        %{
+          repo: repo,
+          capability_registry: capability_registry,
+          output_base_dir: output_base_dir,
+          image_path: image_path
+        },
+        [name: "Local Media Check", delivery_mode: "local"],
+        MediaDelivery,
+        "delivery mode is local"
+      )
+    end
+
+    test "D05: delivery_mode none leaves the run without a media reply path", %{
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir,
+      image_path: image_path
+    } do
+      assert_media_unavailable(
+        %{
+          repo: repo,
+          capability_registry: capability_registry,
+          output_base_dir: output_base_dir,
+          image_path: image_path
+        },
+        [name: "No Delivery Media Check", delivery_mode: "none"],
+        MediaDelivery,
+        "delivery mode is none"
+      )
+    end
+
+    test "D05: an unresolvable channel target leaves the run without a media reply path", %{
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir,
+      image_path: image_path
+    } do
+      assert_media_unavailable(
+        %{
+          repo: repo,
+          capability_registry: capability_registry,
+          output_base_dir: output_base_dir,
+          image_path: image_path
+        },
+        [
+          name: "Broken Target Media Check",
+          delivery_mode: "channel",
+          delivery_target: %{"platform" => "telegram"}
+        ],
+        MediaDelivery,
+        "no valid delivery target"
+      )
+    end
+
+    test "D05: a text-only adapter refuses to bind a media reply path", %{
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir,
+      image_path: image_path
+    } do
+      assert_media_unavailable(
+        %{
+          repo: repo,
+          capability_registry: capability_registry,
+          output_base_dir: output_base_dir,
+          image_path: image_path
+        },
+        [
+          name: "Text Only Media Check",
+          delivery_mode: "channel",
+          delivery_target: %{"platform" => "telegram", "chat_id" => "123"}
+        ],
+        TextOnlyDelivery,
+        "the channel cannot send files"
+      )
+    end
+
+    test "D06/R01: an adapter failure is a tool error and the run still delivers its text", %{
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir,
+      image_path: image_path
+    } do
+      register_send_attachment(capability_registry)
+
+      assert {:ok, {job, run}} =
+               create_claimed_job(repo,
+                 name: "Rejected Attachment",
+                 schedule: "every 15 minutes",
+                 task_prompt: "Send today's preview.",
+                 delivery_mode: "channel",
+                 delivery_target: %{"platform" => "telegram", "chat_id" => "123"}
+               )
+
+      assert_runner_exits_normally(
+        job,
+        run,
+        repo: repo,
+        capability_registry: capability_registry,
+        output_base_dir: output_base_dir,
+        delivery_adapter: MediaDelivery,
+        delivery_opts: [test_pid: self(), media_result: {:error, {:http_status, 400}}],
+        script: [
+          %{tool_calls: [attach_call("call_1", image_path, nil)]},
+          %{content: "Text went out; the attachment did not."}
+        ]
+      )
+
+      assert_receive {:delivery_media, "123", _part, _opts}
+      refute_receive {:delivery_media, _target, _part, _opts}, 100
+
+      assert_receive {:adapter_continue, [%{output: tool_output}]}
+      assert tool_output =~ "Failed to send attachment"
+      assert tool_output =~ "HTTP 400"
+
+      assert_receive {:delivery_send, "123", "Text went out; the attachment did not.", _opts}
+
+      assert {:ok, stored_run} = Repo.get_job_run(run.id, server: repo)
+      assert stored_run.status == "ok"
+      assert stored_run.delivery_status == "sent"
+    end
+
+    test "D09: the seventeenth media request is refused without reaching the adapter", %{
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir,
+      image_path: image_path
+    } do
+      register_send_attachment(capability_registry)
+
+      assert {:ok, {job, run}} =
+               create_claimed_job(repo,
+                 name: "Attachment Flood",
+                 schedule: "every 15 minutes",
+                 task_prompt: "Send every preview.",
+                 delivery_mode: "channel",
+                 delivery_target: %{"platform" => "telegram", "chat_id" => "123"}
+               )
+
+      # One send per iteration (the channel side-effect bound), and each call
+      # carries a distinct caption so the repeated-tool-call detector sees
+      # seventeen different signatures rather than one repeated seventeen times.
+      attempts =
+        for index <- 1..17 do
+          %{tool_calls: [attach_call("call_#{index}", image_path, "Attachment #{index}")]}
+        end
+
+      assert_runner_exits_normally(
+        job,
+        run,
+        repo: repo,
+        capability_registry: capability_registry,
+        output_base_dir: output_base_dir,
+        delivery_adapter: MediaDelivery,
+        delivery_opts: [test_pid: self()],
+        exit_timeout_ms: 5_000,
+        script: attempts ++ [%{content: "Done."}]
+      )
+
+      for index <- 1..16 do
+        assert_receive {:delivery_media, "123", %{caption: caption}, _opts}
+        assert caption == "Attachment #{index}"
+      end
+
+      refute_receive {:delivery_media, _target, _part, _opts}, 100
+
+      outputs = collect_tool_outputs([])
+      assert Enum.count(outputs, &(&1 =~ "Sent attachment")) == 16
+      assert Enum.any?(outputs, &(&1 =~ "limit of 16 attachments"))
+    end
+
+    defp assert_media_unavailable(ctx, job_attrs, delivery_adapter, reason_fragment) do
+      register_send_attachment(ctx.capability_registry)
+
+      attrs =
+        Keyword.merge(
+          [schedule: "every 15 minutes", task_prompt: "Send today's preview."],
+          job_attrs
+        )
+
+      assert {:ok, {job, run}} = create_claimed_job(ctx.repo, attrs)
+
+      assert_runner_exits_normally(
+        job,
+        run,
+        repo: ctx.repo,
+        capability_registry: ctx.capability_registry,
+        output_base_dir: ctx.output_base_dir,
+        delivery_adapter: delivery_adapter,
+        delivery_opts: [test_pid: self()],
+        script: [
+          %{tool_calls: [attach_call("call_1", ctx.image_path, nil)]},
+          %{content: "Nothing was attached."}
+        ]
+      )
+
+      refute_receive {:delivery_media, _target, _part, _opts}, 100
+
+      assert_receive {:adapter_continue, [%{output: tool_output}]}
+      assert tool_output =~ "send_attachment requires a channel reply context"
+
+      assert {:ok, stored_run} = Repo.get_job_run(run.id, server: repo_of(ctx), timeout: 5_000)
+      assert stored_run.status == "ok"
+      assert stored_run.prompt_snapshot =~ "Attachments: unavailable (#{reason_fragment})"
+    end
+
+    defp repo_of(%{repo: repo}), do: repo
+
+    defp register_send_attachment(capability_registry) do
+      :ok =
+        CapabilityRegistry.register(
+          capability_registry,
+          BuiltinCapability.from_tool_module(FermixCore.Tools.SendAttachment)
+        )
+    end
+
+    defp attach_call(call_id, path, caption) do
+      args =
+        %{"path" => path, "kind" => "image"}
+        |> then(fn map -> if caption, do: Map.put(map, "caption", caption), else: map end)
+
+      %{
+        id: "fc_#{call_id}",
+        call_id: call_id,
+        name: "send_attachment",
+        arguments: Jason.encode!(args)
+      }
+    end
+
+    # Drains every `{:adapter_continue, results}` already in the mailbox and
+    # returns the tool outputs they carry, in arrival order.
+    defp collect_tool_outputs(acc) do
+      receive do
+        {:adapter_continue, results} ->
+          collect_tool_outputs(acc ++ Enum.map(results, & &1.output))
+      after
+        200 -> acc
+      end
+    end
+
+    defp restore_app_env(key, nil), do: Application.delete_env(:fermix_core, key)
+    defp restore_app_env(key, value), do: Application.put_env(:fermix_core, key, value)
   end
 end
