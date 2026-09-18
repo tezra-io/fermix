@@ -48,6 +48,17 @@ would write (the `PATH` or the template changed across an upgrade, say), setup
 rewrites and reloads it instead of just restarting. So re-running setup picks up
 unit changes. `fermix service install` is the manual escape hatch.
 
+## The optional environment file (Linux)
+
+Every Linux unit loads an optional environment file: `~/.config/fermix/env` for
+a user-scope unit and for the distribution package's unit, `/etc/fermix/env` for
+a system-scope unit. It is how a server with no keyring gives allowed sandbox
+variables to the daemon: one `NAME=value` per line, allow the name, then restart
+Fermix, because the file is read only when the service starts. Fermix never
+writes it, and a missing file is fine. A unit written before the line existed
+gets it when setup rewrites the drifted unit. What reaches commands from there:
+`skill_view(name: "self-knowledge", file: "sandbox_env")`.
+
 ## Linux distribution packages
 
 A Fermix installed from a `.deb` or `.rpm` is a different configuration from the
@@ -65,7 +76,8 @@ it — a headless server installs the engine package alone.
 **The package owns the unit.** It installs a systemd *user* unit at
 `/usr/lib/systemd/user/fermix.service` that starts `fermix service run`. Nothing
 in Fermix writes, rewrites or removes it, and it carries no install-time values
-at all — one unit file serves every account on the machine.
+at all — one unit file serves every account on the machine, and the optional
+environment file it loads is each account's own `~/.config/fermix/env`.
 
 **The listener port is a home setting.** `[fermix_web] port` (1024 through
 65535, default 4030) is parsed and validated by the shared config layer, and

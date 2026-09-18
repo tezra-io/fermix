@@ -20,6 +20,25 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `bootstrap templates` Doctor row, and a file with no baseline record is never
   guessed to be untouched. `IDENTITY.md`, `USER.md` and `MEMORY.md` are never
   part of this.
+- **A skill's API key can be stored from Settings, and every shell command
+  gets it.** Allow the variable name under Settings > Sandbox, then add its
+  value on the row that appears.
+  - The value is stored in the Keychain on macOS, or in the Secret Service
+    on a Linux desktop, under its own entry (`fermix:external_env:NAME`). It
+    never collides with a provider key of the same name.
+  - Every shell command the assistant runs receives it as an ordinary
+    environment variable, in chat, scheduled jobs and delegated work alike.
+    It needs no terminal export, no change to the skill and no restart.
+  - Removing the value deletes the stored item and keeps the name allowed.
+  - On the management wire this is a new `env:<NAME>` id family on
+    `secret.set` and `secret.clear`, plus one row per name in the sandbox
+    section. There is no new method, so an older app shows the rows through
+    its existing secret control.
+- **A Linux server with no keyring can supply skill keys from a file.** The
+  service unit now loads an optional `~/.config/fermix/env` (for a system
+  unit, `/etc/fermix/env`), one `NAME=value` per line. An allowed name with
+  no stored value is read from there. Changing the file needs a service
+  restart.
 
 - **A Fermix installed from a Linux package manages its service through
   its own verbs.** The package owns the systemd user unit, so
@@ -160,7 +179,23 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   operating rules now say the same thing: a confident memory of a mutable
   fact is a reason to search, and the browser is for pages that need
   rendering, login or interaction.
-
+- **Allowed variable values no longer appear in any process's command line,
+  and are scrubbed from what the assistant sees.**
+  - Shell commands and operator command capabilities now receive their
+    environment directly as the child process's own environment.
+    Previously it was passed as `env -i NAME=value` arguments, which any
+    process on the machine could read.
+  - Every allowed value of at least eight bytes is replaced with
+    `«redacted»` in the command's result and in its trace. A non-secret
+    allowed value, such as `NODE_ENV=production`, is redacted too.
+- **Reading allowed variables has one time limit per command.** All helper
+  lookups for a command share a five-second budget, so a locked keychain
+  can no longer delay a command by three seconds for every name. A name
+  still unread when the budget runs out is reported, and the command runs
+  without it.
+- **A missing allowed variable now names where to store it**: in the sandbox
+  settings, or on a Linux server in the service's env file. The old
+  sentence pointed at a CLI verb that the macOS app does not ship.
 - **`fermix doctor`'s `cosign` row names the executable this host resolved**
   and the remedy for its own install family — the distribution's own package on
   a Linux package install, where the bundled `/usr/lib/fermix/cosign` is the
