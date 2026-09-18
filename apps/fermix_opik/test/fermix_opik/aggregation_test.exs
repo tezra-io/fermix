@@ -1225,7 +1225,7 @@ defmodule FermixOpik.AggregationTest do
   @mcp_client_phases @mcp_client_boot_phases ++ @mcp_client_turn_phases
 
   defp mcp_meta(phase, extra \\ %{}) do
-    Map.merge(%{source_id: "plugin:eden", plugin: "eden", phase: phase, result: :ok}, extra)
+    Map.merge(%{source_id: "plugin:acme", plugin: "acme", phase: phase, result: :ok}, extra)
   end
 
   describe "outbound MCP client lifecycle" do
@@ -1276,8 +1276,8 @@ defmodule FermixOpik.AggregationTest do
         ])
 
       assert [%{trace: trace, spans: []}] = closed
-      assert trace.metadata.source_id == "plugin:eden"
-      assert trace.metadata.plugin == "eden"
+      assert trace.metadata.source_id == "plugin:acme"
+      assert trace.metadata.plugin == "acme"
       assert trace.metadata.phase == "initialize"
       assert trace.metadata.result == "error"
       assert trace.metadata.error_class == "remote_unreachable"

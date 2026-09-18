@@ -15,6 +15,10 @@ complete release is an error, not a skip. Yanked versions stay listed in both
 `versions[]` and `yanked[]` and are still verified: yank blocks install, it
 does not unpublish.
 
+A plugin named in `RETIRED_PLUGINS` is never pinned, whatever tags it has. Its
+releases stay published so an engine whose catalog already pins it can still
+install it; retiring only stops new catalogs from offering it.
+
 Usage:
   sync_plugin_catalog.py [--repo tezra-io/fermix-plugins]
                          [--out apps/fermix_core/priv/plugins/index.json]
@@ -43,6 +47,10 @@ OIDC_ISSUER = "https://token.actions.githubusercontent.com"
 RELEASE_WORKFLOW = ".github/workflows/release-plugin.yml"
 TAG_RE = re.compile(r"^(?P<name>[a-z][a-z0-9_]{0,63})/v(?P<version>\d+\.\d+\.\d+)$")
 REQUIRED_MANIFEST_FIELDS = ("display_name", "category", "description", "min_core_version", "plugin_api")
+# Released in fermix-plugins, offered by no new catalog. The tags and GitHub
+# Releases are left alone because an engine whose baked catalog already pins one
+# of these still fetches and re-verifies it at install time.
+RETIRED_PLUGINS = frozenset({"eden"})
 
 
 class SyncError(Exception):
@@ -56,6 +64,11 @@ def parse_tag(tag):
     """(name, version) for a plugin release tag `<name>/v<semver>`, else None."""
     match = TAG_RE.match(tag)
     return (match["name"], match["version"]) if match else None
+
+
+def offered_tags(tags, retired=RETIRED_PLUGINS):
+    """`tags` ({name: [version, ...]}) without the plugins no catalog offers any more."""
+    return {name: versions for name, versions in tags.items() if name not in retired}
 
 
 def semver_key(version):
@@ -373,7 +386,7 @@ def main(argv=None):
     parser.add_argument("--out", type=Path, default=Path("apps/fermix_core/priv/plugins/index.json"))
     args = parser.parse_args(argv)
     try:
-        tags = list_plugin_tags(args.repo)
+        tags = offered_tags(list_plugin_tags(args.repo))
         entries = []
         for name in sorted(tags):
             try:

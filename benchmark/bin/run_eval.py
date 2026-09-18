@@ -1482,9 +1482,9 @@ def _abort_signal(suite, result: dict) -> dict | None:
 
     An exhausted external account is not a product signal. Every case driven
     after the balance hits zero fails `no_tool_errors` for a reason the daemon
-    did not cause, so those results are void, not red — an observed eden run
-    spent its EdenAI credits mid-suite and banked nine meaningless failures that
-    cost more to diagnose than the run was worth.
+    did not cause, so those results are void, not red — an observed run
+    exhausted a hosted plugin's credits mid-suite and banked nine meaningless
+    failures that cost more to diagnose than the run was worth.
     """
     for turn in result.get("turns", []):
         for failure in turn.get("tool_failures", []):

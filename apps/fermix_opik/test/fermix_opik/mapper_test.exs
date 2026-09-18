@@ -389,7 +389,7 @@ defmodule FermixOpik.MapperTest do
   end
 
   test "tool_span keeps the outbound MCP server identity" do
-    metadata = %{tool: "eden_get_note_markdown", success: true, mcp_server: "eden"}
+    metadata = %{tool: "acme_get_note_markdown", success: true, mcp_server: "acme"}
 
     span =
       Mapper.tool_span(metadata, %{duration_ms: 30},
@@ -398,7 +398,7 @@ defmodule FermixOpik.MapperTest do
         ended: @ended
       )
 
-    assert span.metadata.mcp_server == "eden"
+    assert span.metadata.mcp_server == "acme"
   end
 
   # `Gateway.DraftStream` emits :rotate with duration_us + edit_index; while those
@@ -431,8 +431,8 @@ defmodule FermixOpik.MapperTest do
   describe "mcp_client_span/3" do
     test "builds a general lifecycle point span from the emitter's allowlist" do
       metadata = %{
-        source_id: "plugin:eden",
-        plugin: "eden",
+        source_id: "plugin:acme",
+        plugin: "acme",
         phase: :security_block,
         result: :error,
         error_class: "tool_not_allowed",
@@ -456,8 +456,8 @@ defmodule FermixOpik.MapperTest do
       assert span.end_time == "2026-06-02T12:00:03.200Z"
 
       assert span.metadata == %{
-               source_id: "plugin:eden",
-               plugin: "eden",
+               source_id: "plugin:acme",
+               plugin: "acme",
                phase: "security_block",
                result: "error",
                error_class: "tool_not_allowed",
@@ -469,13 +469,13 @@ defmodule FermixOpik.MapperTest do
     # silently dropped, and that is what must stay true for anything sensitive.
     test "an unlisted metadata key never exports" do
       metadata = %{
-        source_id: "plugin:eden",
+        source_id: "plugin:acme",
         phase: :ready,
         result: :ok,
-        authorization: "Bearer eden_pat_fakevalue",
+        authorization: "Bearer acme_pat_fakevalue",
         mcp_session_id: "mcp-sess-01JFAKE",
         workspace_id: "ws_fake_0123456789",
-        base_url: "https://mcp.eden.so/mcp"
+        base_url: "https://mcp.acme.example/mcp"
       }
 
       span =
@@ -485,11 +485,11 @@ defmodule FermixOpik.MapperTest do
           ended: @ended
         )
 
-      assert span.metadata == %{source_id: "plugin:eden", phase: "ready", result: "ok"}
-      refute String.contains?(inspect(span), "eden_pat_fakevalue")
+      assert span.metadata == %{source_id: "plugin:acme", phase: "ready", result: "ok"}
+      refute String.contains?(inspect(span), "acme_pat_fakevalue")
       refute String.contains?(inspect(span), "mcp-sess")
       refute String.contains?(inspect(span), "ws_fake")
-      refute String.contains?(inspect(span), "mcp.eden.so")
+      refute String.contains?(inspect(span), "mcp.acme.example")
     end
   end
 

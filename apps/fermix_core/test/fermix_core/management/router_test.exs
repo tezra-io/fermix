@@ -793,7 +793,7 @@ defmodule FermixCore.Management.RouterTest do
                Router.route(v2("plugins.list"), plugins_reader: reader)
 
       assert {:error, :invalid_params, %{"method" => "plugins.list"}} =
-               Router.route(v2("plugins.list", %{"name" => "eden"}), plugins_reader: reader)
+               Router.route(v2("plugins.list", %{"name" => "acme"}), plugins_reader: reader)
     end
 
     test "a listing the daemon could not build names the capability, never the reason" do
@@ -812,13 +812,13 @@ defmodule FermixCore.Management.RouterTest do
                "#{method} answered a request with no plugin named"
 
         assert {:error, :invalid_params, %{"field" => "extra"}} =
-                 Router.route(v2(method, %{"name" => "eden", "extra" => 1}))
+                 Router.route(v2(method, %{"name" => "acme", "extra" => 1}))
       end
     end
 
     test "a workspace selection needs all four of its fields" do
       complete = %{
-        "name" => "eden",
+        "name" => "acme",
         "profile" => "read_only",
         "workspace_id" => "ws_a",
         "label" => "A"
@@ -880,12 +880,12 @@ defmodule FermixCore.Management.RouterTest do
 
     test "a setting write names its plugin and its key" do
       assert {:error, :invalid_params, %{"field" => "key"}} =
-               Router.route(v2("plugins.setting.set", %{"name" => "eden", "value" => "x"}))
+               Router.route(v2("plugins.setting.set", %{"name" => "acme", "value" => "x"}))
 
       assert {:error, :invalid_params, %{"field" => "extra"}} =
                Router.route(
                  v2("plugins.setting.set", %{
-                   "name" => "eden",
+                   "name" => "acme",
                    "key" => "K",
                    "value" => "x",
                    "extra" => 1

@@ -202,7 +202,7 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
     for phase <- phases do
       MCPClientTelemetry.emit_lifecycle(
         phase,
-        %{source_id: {:plugin, "eden"}, plugin: "eden"},
+        %{source_id: {:plugin, "acme"}, plugin: "acme"},
         :ok,
         7
       )
@@ -214,8 +214,8 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
     lifecycle = Enum.filter(entries, &(&1["event"] == "mcp_client_lifecycle"))
 
     assert Enum.map(lifecycle, & &1["phase"]) == Enum.map(phases, &to_string/1)
-    assert Enum.all?(lifecycle, &(&1["agent"] == "plugin:eden"))
-    assert Enum.all?(lifecycle, &(&1["source_id"] == "plugin:eden"))
+    assert Enum.all?(lifecycle, &(&1["agent"] == "plugin:acme"))
+    assert Enum.all?(lifecycle, &(&1["source_id"] == "plugin:acme"))
     assert Enum.all?(lifecycle, &(&1["duration_ms"] == 7))
   end
 
@@ -223,7 +223,7 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
     MCPClientTelemetry.emit_lifecycle(
       :security_block,
       %{source_id: {:operator, "fs"}},
-      {:error, {:tool_not_allowed, "eden_delete_note"}},
+      {:error, {:tool_not_allowed, "acme_delete_note"}},
       3,
       session_id: "main-9",
       attempt: 2

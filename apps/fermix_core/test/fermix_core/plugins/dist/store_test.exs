@@ -173,12 +173,12 @@ defmodule FermixCore.Plugins.Dist.StoreTest do
     end
 
     test "removes the version's provenance evidence with it (§9.3)", %{root: root} do
-      Store.install_tree(root, "eden", "1.0.0", stage(root, "eden", "1.0.0"))
-      stage_evidence(root, "eden", "1.0.0")
+      Store.install_tree(root, "acme", "1.0.0", stage(root, "acme", "1.0.0"))
+      stage_evidence(root, "acme", "1.0.0")
 
-      assert :ok = Store.uninstall(root, "eden")
-      refute File.exists?(Store.evidence_dir(root, "eden", "1.0.0"))
-      refute File.exists?(Path.join(Store.paths(root).evidence, "eden"))
+      assert :ok = Store.uninstall(root, "acme")
+      refute File.exists?(Store.evidence_dir(root, "acme", "1.0.0"))
+      refute File.exists?(Path.join(Store.paths(root).evidence, "acme"))
     end
   end
 
@@ -200,17 +200,17 @@ defmodule FermixCore.Plugins.Dist.StoreTest do
 
     test "evidence is collected with its version and never separated from it", %{root: root} do
       for v <- ["1.0.0", "1.1.0", "1.2.0"] do
-        Store.install_tree(root, "eden", v, stage(root, "eden", v))
-        stage_evidence(root, "eden", v)
+        Store.install_tree(root, "acme", v, stage(root, "acme", v))
+        stage_evidence(root, "acme", v)
       end
 
       assert :ok = Store.gc(root)
 
       # active (1.2.0) and the one-deep rollback (1.1.0) keep theirs — rollback
       # re-verifies, so evidence has to still be there.
-      assert File.exists?(Store.evidence_dir(root, "eden", "1.2.0"))
-      assert File.exists?(Store.evidence_dir(root, "eden", "1.1.0"))
-      refute File.exists?(Store.evidence_dir(root, "eden", "1.0.0"))
+      assert File.exists?(Store.evidence_dir(root, "acme", "1.2.0"))
+      assert File.exists?(Store.evidence_dir(root, "acme", "1.1.0"))
+      refute File.exists?(Store.evidence_dir(root, "acme", "1.0.0"))
     end
 
     test "evidence for a name that is no longer installed is collected", %{root: root} do

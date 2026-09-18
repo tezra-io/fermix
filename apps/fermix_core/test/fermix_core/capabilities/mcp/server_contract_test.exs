@@ -12,7 +12,7 @@ defmodule FermixCore.Capabilities.MCP.ServerContractTest do
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Plugins.CanonicalJson
 
-  @source {:plugin, "eden"}
+  @source {:plugin, "acme"}
 
   @schema %{
     "type" => "object",
@@ -132,14 +132,14 @@ defmodule FermixCore.Capabilities.MCP.ServerContractTest do
     Map.merge(
       %{
         source_id: @source,
-        name: "eden",
+        name: "acme",
         transport: :streamable_http,
         name_mode: :preserve,
         selected_profile: "retrieval",
         resource_scope: %{kind: :single_workspace, argument: "workspaceId", id: "ws_1"},
         allowed_tools: %{
-          "eden_get_note" => facts("eden_get_note", @schema),
-          "eden_search" => facts("eden_search", @schema)
+          "acme_get_note" => facts("acme_get_note", @schema),
+          "acme_search" => facts("acme_search", @schema)
         },
         budgets: %{"agent_turn_calls" => 20, "agent_turn_paginated_calls" => 5},
         result_contract: %{
@@ -191,7 +191,7 @@ defmodule FermixCore.Capabilities.MCP.ServerContractTest do
     opts =
       Keyword.merge(
         [
-          server_name: "eden",
+          server_name: "acme",
           source_id: @source,
           client: :fake_client,
           discoverer: StubDiscoverer,
@@ -228,43 +228,43 @@ defmodule FermixCore.Capabilities.MCP.ServerContractTest do
   describe "signed allowlist enforcement" do
     test "registers exactly the selected profile and never an extra tool", ctx do
       StubDiscoverer.set_tools([
-        descriptor("eden_get_note"),
-        descriptor("eden_search"),
-        descriptor("eden_delete_workspace")
+        descriptor("acme_get_note"),
+        descriptor("acme_search"),
+        descriptor("acme_delete_workspace")
       ])
 
       {:ok, server} = start_server(ctx)
-      assert registered(ctx) == ["eden_get_note", "eden_search"]
-      assert Naming.lookup("eden_delete_workspace") == :error
+      assert registered(ctx) == ["acme_get_note", "acme_search"]
+      assert Naming.lookup("acme_delete_workspace") == :error
       GenServer.stop(server)
     end
 
     test "preserve mode keeps the exact declared name", ctx do
-      StubDiscoverer.set_tools([descriptor("eden_get_note"), descriptor("eden_search")])
+      StubDiscoverer.set_tools([descriptor("acme_get_note"), descriptor("acme_search")])
 
       {:ok, server} = start_server(ctx)
-      assert "eden_get_note" in registered(ctx)
-      refute "eden_eden_get_note" in registered(ctx)
+      assert "acme_get_note" in registered(ctx)
+      refute "acme_acme_get_note" in registered(ctx)
       GenServer.stop(server)
     end
 
     test "one changed descriptor registers ZERO capabilities", ctx do
       drifted = Map.put(@schema, "properties", %{"noteId" => %{"type" => "integer"}})
-      StubDiscoverer.set_tools([descriptor("eden_get_note"), descriptor("eden_search", drifted)])
+      StubDiscoverer.set_tools([descriptor("acme_get_note"), descriptor("acme_search", drifted)])
 
-      assert {:error, {:mcp_discovery_failed, "eden", reason}} = start_server(ctx)
-      assert {:upstream_contract_mismatch, {:descriptor_changed, "eden_search"}} = reason
+      assert {:error, {:mcp_discovery_failed, "acme", reason}} = start_server(ctx)
+      assert {:upstream_contract_mismatch, {:descriptor_changed, "acme_search"}} = reason
       assert registered(ctx) == []
-      assert Naming.lookup("eden_get_note") == :error
+      assert Naming.lookup("acme_get_note") == :error
     end
 
     test "one missing descriptor registers ZERO capabilities", ctx do
-      StubDiscoverer.set_tools([descriptor("eden_get_note")])
+      StubDiscoverer.set_tools([descriptor("acme_get_note")])
 
-      assert {:error, {:mcp_discovery_failed, "eden", reason}} = start_server(ctx)
-      assert {:upstream_contract_mismatch, {:missing_tool, "eden_search"}} = reason
+      assert {:error, {:mcp_discovery_failed, "acme", reason}} = start_server(ctx)
+      assert {:upstream_contract_mismatch, {:missing_tool, "acme_search"}} = reason
       assert registered(ctx) == []
-      assert Naming.lookup("eden_get_note") == :error
+      assert Naming.lookup("acme_get_note") == :error
     end
 
     # The log line is the ONLY surface that can name which tool broke the
@@ -273,39 +273,39 @@ defmodule FermixCore.Capabilities.MCP.ServerContractTest do
     # `:upstream_contract_mismatch` sent one operator on a live-probe hunt for a
     # fact the daemon already held.
     test "the terminal log line names the tool that broke the contract", ctx do
-      StubDiscoverer.set_tools([descriptor("eden_get_note")])
+      StubDiscoverer.set_tools([descriptor("acme_get_note")])
 
       log = capture_log(fn -> run_supervised_discovery(ctx) end)
 
       assert log =~ "upstream_contract_mismatch"
       assert log =~ "missing_tool"
-      assert log =~ "eden_search"
+      assert log =~ "acme_search"
     end
 
     test "a name collision names the colliding capability in the terminal log", ctx do
-      {:ok, _name} = Naming.reserve("other", "get_note", "eden_search")
-      StubDiscoverer.set_tools([descriptor("eden_get_note"), descriptor("eden_search")])
+      {:ok, _name} = Naming.reserve("other", "get_note", "acme_search")
+      StubDiscoverer.set_tools([descriptor("acme_get_note"), descriptor("acme_search")])
 
       log = capture_log(fn -> run_supervised_discovery(ctx) end)
 
       assert log =~ "capability_conflict"
-      assert log =~ "eden_search"
+      assert log =~ "acme_search"
     end
   end
 
   describe "transactional registration" do
     test "an already-taken name fails the whole registration with no partial set", ctx do
       # Another owner holds one of the preserved names.
-      {:ok, _name} = Naming.reserve("other", "get_note", "eden_search")
-      StubDiscoverer.set_tools([descriptor("eden_get_note"), descriptor("eden_search")])
+      {:ok, _name} = Naming.reserve("other", "get_note", "acme_search")
+      StubDiscoverer.set_tools([descriptor("acme_get_note"), descriptor("acme_search")])
 
-      assert {:error, {:mcp_discovery_failed, "eden", reason}} = start_server(ctx)
-      assert {:capability_conflict, "eden_search"} = reason
+      assert {:error, {:mcp_discovery_failed, "acme", reason}} = start_server(ctx)
+      assert {:capability_conflict, "acme_search"} = reason
 
       assert registered(ctx) == []
       # The foreign reservation survives; ours is not left behind.
-      assert {:ok, {"other", "get_note"}} = Naming.lookup("eden_search")
-      assert Naming.lookup("eden_get_note") == :error
+      assert {:ok, {"other", "get_note"}} = Naming.lookup("acme_search")
+      assert Naming.lookup("acme_get_note") == :error
     end
 
     test "a capability-registry duplicate rolls back every naming reservation", ctx do
@@ -313,7 +313,7 @@ defmodule FermixCore.Capabilities.MCP.ServerContractTest do
         CapabilityRegistry.register(
           ctx.cap_registry,
           Capability.new(%{
-            name: "eden_search",
+            name: "acme_search",
             description: "squatter",
             parameters: %{"type" => "object"},
             kind: :builtin,
@@ -321,36 +321,36 @@ defmodule FermixCore.Capabilities.MCP.ServerContractTest do
           })
         )
 
-      StubDiscoverer.set_tools([descriptor("eden_get_note"), descriptor("eden_search")])
+      StubDiscoverer.set_tools([descriptor("acme_get_note"), descriptor("acme_search")])
 
-      assert {:error, {:mcp_discovery_failed, "eden", reason}} = start_server(ctx)
-      assert {:capability_conflict, {:duplicate_name, "eden_search"}} = reason
+      assert {:error, {:mcp_discovery_failed, "acme", reason}} = start_server(ctx)
+      assert {:capability_conflict, {:duplicate_name, "acme_search"}} = reason
 
-      assert registered(ctx) == ["eden_search"]
-      assert Naming.lookup("eden_get_note") == :error
-      assert Naming.lookup("eden_search") == :error
+      assert registered(ctx) == ["acme_search"]
+      assert Naming.lookup("acme_get_note") == :error
+      assert Naming.lookup("acme_search") == :error
     end
 
     test "a skill collision fails loudly with no partial set", ctx do
       skills =
-        start_supervised!({__MODULE__.FakeSkillRegistry, names: ["eden_search"]},
+        start_supervised!({__MODULE__.FakeSkillRegistry, names: ["acme_search"]},
           id: :fake_skills
         )
 
-      StubDiscoverer.set_tools([descriptor("eden_get_note"), descriptor("eden_search")])
+      StubDiscoverer.set_tools([descriptor("acme_get_note"), descriptor("acme_search")])
 
-      assert {:error, {:mcp_discovery_failed, "eden", reason}} =
+      assert {:error, {:mcp_discovery_failed, "acme", reason}} =
                start_server(ctx, %{}, skill_registry: skills)
 
-      assert {:capability_conflict, {:skill_name_collision, "eden_search"}} = reason
+      assert {:capability_conflict, {:skill_name_collision, "acme_search"}} = reason
       assert registered(ctx) == []
-      assert Naming.lookup("eden_get_note") == :error
+      assert Naming.lookup("acme_get_note") == :error
     end
   end
 
   describe "the private client and the published proxy" do
     test "only the proxy is reachable for a remote source", ctx do
-      StubDiscoverer.set_tools([descriptor("eden_get_note"), descriptor("eden_search")])
+      StubDiscoverer.set_tools([descriptor("acme_get_note"), descriptor("acme_search")])
       {:ok, server} = start_server(ctx)
 
       assert {:ok, proxy} = McpRegistry.lookup_proxy(ctx.mcp_registry, @source)
@@ -363,9 +363,9 @@ defmodule FermixCore.Capabilities.MCP.ServerContractTest do
 
   describe "drift" do
     test "a tools-changed notification suspends and atomically restores", ctx do
-      StubDiscoverer.set_tools([descriptor("eden_get_note"), descriptor("eden_search")])
+      StubDiscoverer.set_tools([descriptor("acme_get_note"), descriptor("acme_search")])
       {:ok, server} = start_server(ctx)
-      assert registered(ctx) == ["eden_get_note", "eden_search"]
+      assert registered(ctx) == ["acme_get_note", "acme_search"]
 
       assert {:ok, proxy} = McpRegistry.lookup_proxy(ctx.mcp_registry, @source)
       StubDiscoverer.hold_next_list_tools()
@@ -385,22 +385,22 @@ defmodule FermixCore.Capabilities.MCP.ServerContractTest do
 
       # The gate reopens only after the same profile re-registered atomically.
       assert eventually(fn -> Proxy.state(proxy) == :ready end)
-      assert registered(ctx) == ["eden_get_note", "eden_search"]
+      assert registered(ctx) == ["acme_get_note", "acme_search"]
       GenServer.stop(server)
     end
 
     test "a drifted contract stays unavailable and never serves the old tools", ctx do
-      StubDiscoverer.set_tools([descriptor("eden_get_note"), descriptor("eden_search")])
+      StubDiscoverer.set_tools([descriptor("acme_get_note"), descriptor("acme_search")])
       {:ok, server} = start_server(ctx)
       ref = Process.monitor(server)
-      assert registered(ctx) == ["eden_get_note", "eden_search"]
+      assert registered(ctx) == ["acme_get_note", "acme_search"]
 
-      StubDiscoverer.set_tools([descriptor("eden_get_note")])
+      StubDiscoverer.set_tools([descriptor("acme_get_note")])
       :ok = McpServer.tools_changed(server)
 
       assert_receive {:DOWN, ^ref, :process, ^server, :normal}, 5_000
       assert registered(ctx) == []
-      assert Naming.lookup("eden_get_note") == :error
+      assert Naming.lookup("acme_get_note") == :error
     end
 
     # THE BUG THIS PINS: `tools_changed/1` was called only from tests. No
@@ -409,7 +409,7 @@ defmodule FermixCore.Capabilities.MCP.ServerContractTest do
     # re-registration — was unreachable from the wire. The watch is what closes
     # that gap, and it is armed on every discovery pass.
     test "the registration owner arms the upstream watch with itself", ctx do
-      StubDiscoverer.set_tools([descriptor("eden_get_note"), descriptor("eden_search")])
+      StubDiscoverer.set_tools([descriptor("acme_get_note"), descriptor("acme_search")])
       {:ok, server} = start_server(ctx)
 
       assert StubDiscoverer.listener() == server
@@ -419,7 +419,7 @@ defmodule FermixCore.Capabilities.MCP.ServerContractTest do
     # A stdio source carries no signed contract, so it has no registration for a
     # notification to invalidate and nothing to watch.
     test "a contract-less server arms no watch", ctx do
-      StubDiscoverer.set_tools([descriptor("eden_get_note")])
+      StubDiscoverer.set_tools([descriptor("acme_get_note")])
       {:ok, server} = start_server(ctx, %{}, contract: nil, client: nil)
 
       assert StubDiscoverer.listener() == nil
@@ -427,10 +427,10 @@ defmodule FermixCore.Capabilities.MCP.ServerContractTest do
     end
 
     test "an owner-reported change drives the same drift as the cast", ctx do
-      StubDiscoverer.set_tools([descriptor("eden_get_note"), descriptor("eden_search")])
+      StubDiscoverer.set_tools([descriptor("acme_get_note"), descriptor("acme_search")])
       {:ok, server} = start_server(ctx)
       assert {:ok, proxy} = McpRegistry.lookup_proxy(ctx.mcp_registry, @source)
-      assert registered(ctx) == ["eden_get_note", "eden_search"]
+      assert registered(ctx) == ["acme_get_note", "acme_search"]
 
       StubDiscoverer.hold_next_list_tools()
       send(server, {:mcp_owner, :tools_changed})
@@ -443,12 +443,12 @@ defmodule FermixCore.Capabilities.MCP.ServerContractTest do
       StubDiscoverer.release_hold(server)
 
       assert eventually(fn -> Proxy.state(proxy) == :ready end)
-      assert registered(ctx) == ["eden_get_note", "eden_search"]
+      assert registered(ctx) == ["acme_get_note", "acme_search"]
       GenServer.stop(server)
     end
 
     test "a drift storm is capped per session and requires an explicit reconnect", ctx do
-      StubDiscoverer.set_tools([descriptor("eden_get_note"), descriptor("eden_search")])
+      StubDiscoverer.set_tools([descriptor("acme_get_note"), descriptor("acme_search")])
       {:ok, server} = start_server(ctx, %{}, rediscovery_interval_ms: 0)
       ref = Process.monitor(server)
 

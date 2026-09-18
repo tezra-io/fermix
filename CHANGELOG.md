@@ -144,6 +144,17 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   engine is the installed one is a different question with a different remedy,
   and it is now the `engine alignment` row's, so the two can never disagree.
 
+### Removed
+
+- **Eden is no longer offered as a plugin.** The catalog no longer lists it, so
+  the macOS app, the setup page and `fermix plugins` stop offering it. Support
+  for hosted (remote MCP) plugins is unchanged, and Eden's published releases
+  stay up, so an older Fermix can still install it. If you use Eden, disconnect
+  it before you upgrade, then turn it off or run
+  `fermix plugins uninstall eden`: disconnecting is what deletes its token from
+  your keychain, and a Fermix without Eden can no longer find that token to
+  delete it.
+
 ### Fixed
 
 - **One allowed environment variable the daemon cannot read no longer

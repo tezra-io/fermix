@@ -3,7 +3,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.BudgetTest do
 
   alias FermixCore.Capabilities.MCP.Remote.Budget
 
-  @source {:plugin, "eden"}
+  @source {:plugin, "acme"}
   @limits %{turn_calls: 3, turn_paginated_calls: 2}
 
   setup do

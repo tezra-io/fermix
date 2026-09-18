@@ -5,8 +5,8 @@ defmodule FermixCore.Capabilities.MCP.Remote.OwnerTest do
   alias FermixCore.Capabilities.MCP.Remote.Owner
   alias FermixCore.Capabilities.MCP.RuntimeStatus
 
-  @credential "eden_pat_canary_do_not_leak"
-  @source {:plugin, "eden"}
+  @credential "acme_pat_canary_do_not_leak"
+  @source {:plugin, "acme"}
 
   # The same module double the session tests use: the whole connect →
   # initialize → discover → ready path runs with no socket, no TLS chain, no
@@ -53,17 +53,17 @@ defmodule FermixCore.Capabilities.MCP.Remote.OwnerTest do
     Map.merge(
       %{
         source_id: @source,
-        name: "eden",
+        name: "acme",
         transport: :streamable_http,
         protocol_version: "2025-06-18",
-        base_url: "https://mcp.eden.so",
+        base_url: "https://mcp.acme.example",
         mcp_path: "/mcp",
-        auth_ref: %{type: :plugin_secret, plugin: "eden"},
+        auth_ref: %{type: :plugin_secret, plugin: "acme"},
         name_mode: :preserve,
         selected_profile: "retrieval",
         resource_scope: %{kind: :single_workspace, argument: "workspaceId", id: "ws_opaque_id"},
         allowed_tools: %{},
-        capability_metadata: %{plugin_owned?: true, plugin: "eden", category: :plugin}
+        capability_metadata: %{plugin_owned?: true, plugin: "acme", category: :plugin}
       },
       overrides
     )
@@ -133,7 +133,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.OwnerTest do
       runtime_status: status,
       transport: FakeTransport,
       connect_opts: [agent: agent] ++ connect_opts,
-      resolver: fn "eden" -> @credential end
+      resolver: fn "acme" -> @credential end
     ]
   end
 
@@ -149,13 +149,13 @@ defmodule FermixCore.Capabilities.MCP.Remote.OwnerTest do
         start_agent([
           initialize_ok(),
           accepted(),
-          tools_page(2, [tool("eden_search"), tool("eden_get_note")])
+          tools_page(2, [tool("acme_search"), tool("acme_get_note")])
         ])
 
       owner = start_owner(owner_opts(status, agent))
 
       assert {:ok, descriptors} = Owner.list_tools(owner)
-      assert Enum.map(descriptors, & &1.name) == ["eden_search", "eden_get_note"]
+      assert Enum.map(descriptors, & &1.name) == ["acme_search", "acme_get_note"]
 
       assert [initialize, initialized, list] = requests(agent)
       assert Jason.decode!(initialize.body)["method"] == "initialize"
@@ -170,7 +170,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.OwnerTest do
       assert {:ok, entry} = RuntimeStatus.fetch(status, @source)
       assert entry.status == :connecting
       assert entry.owner == owner
-      assert entry.plugin == "eden"
+      assert entry.plugin == "acme"
     end
 
     test "follows a bounded cursor across pages", %{status: status} do
@@ -178,14 +178,14 @@ defmodule FermixCore.Capabilities.MCP.Remote.OwnerTest do
         start_agent([
           initialize_ok(),
           accepted(),
-          tools_page(2, [tool("eden_search")], "page-2"),
-          tools_page(3, [tool("eden_get_note")])
+          tools_page(2, [tool("acme_search")], "page-2"),
+          tools_page(3, [tool("acme_get_note")])
         ])
 
       owner = start_owner(owner_opts(status, agent))
 
       assert {:ok, descriptors} = Owner.list_tools(owner)
-      assert Enum.map(descriptors, & &1.name) == ["eden_search", "eden_get_note"]
+      assert Enum.map(descriptors, & &1.name) == ["acme_search", "acme_get_note"]
       assert length(requests(agent)) == 4
     end
 
@@ -194,8 +194,8 @@ defmodule FermixCore.Capabilities.MCP.Remote.OwnerTest do
         start_agent([
           initialize_ok(),
           accepted(),
-          tools_page(2, [tool("eden_search")], "loop"),
-          tools_page(3, [tool("eden_get_note")], "loop")
+          tools_page(2, [tool("acme_search")], "loop"),
+          tools_page(3, [tool("acme_get_note")], "loop")
         ])
 
       owner = start_owner(owner_opts(status, agent))
@@ -206,7 +206,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.OwnerTest do
     test "refuses more pages than the bound rather than truncating", %{status: status} do
       pages =
         for page <- 1..(Limits.max_discovery_pages() + 1) do
-          tools_page(page + 1, [tool("eden_tool_#{page}")], "page-#{page}")
+          tools_page(page + 1, [tool("acme_tool_#{page}")], "page-#{page}")
         end
 
       agent = start_agent([initialize_ok(), accepted()] ++ pages)
@@ -216,7 +216,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.OwnerTest do
     end
 
     test "refuses more tools than the bound rather than truncating", %{status: status} do
-      tools = for i <- 1..(Limits.max_discovered_tools() + 1), do: tool("eden_tool_#{i}")
+      tools = for i <- 1..(Limits.max_discovered_tools() + 1), do: tool("acme_tool_#{i}")
       agent = start_agent([initialize_ok(), accepted(), tools_page(2, tools)])
       owner = start_owner(owner_opts(status, agent))
 
@@ -230,7 +230,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.OwnerTest do
         start_agent([
           initialize_ok(),
           accepted(),
-          tools_page(2, [tool("eden_search")], cursor)
+          tools_page(2, [tool("acme_search")], cursor)
         ])
 
       owner = start_owner(owner_opts(status, agent))
@@ -297,14 +297,14 @@ defmodule FermixCore.Capabilities.MCP.Remote.OwnerTest do
         start_agent([
           initialize_ok(),
           accepted(),
-          tools_page_with_notice(2, [tool("eden_search")])
+          tools_page_with_notice(2, [tool("acme_search")])
         ])
 
       owner = start_owner(owner_opts(status, agent))
 
       assert :ok = Owner.watch_tools(owner, self())
       assert {:ok, [descriptor]} = Owner.list_tools(owner)
-      assert descriptor.name == "eden_search"
+      assert descriptor.name == "acme_search"
 
       assert_receive {:mcp_owner, :tools_changed}
     end
@@ -371,7 +371,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.OwnerTest do
     test "an unpinnable endpoint is refused before anything connects", %{status: status} do
       Process.flag(:trap_exit, true)
       agent = start_agent([])
-      opts = owner_opts(status, agent, %{base_url: "http://mcp.eden.so"})
+      opts = owner_opts(status, agent, %{base_url: "http://mcp.acme.example"})
 
       assert {:error, {:invalid_remote_config, _detail}} = Owner.start_link(opts)
       assert {:ok, %{status: :invalid_remote_config}} = RuntimeStatus.fetch(status, @source)
@@ -386,7 +386,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.OwnerTest do
       opts =
         status
         |> owner_opts(agent)
-        |> Keyword.put(:resolver, fn "eden" -> nil end)
+        |> Keyword.put(:resolver, fn "acme" -> nil end)
 
       {:ok, owner} = Owner.start_link(opts)
 
@@ -469,7 +469,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.OwnerTest do
       redacted = Owner.redacted(spec())
       rendered = inspect(redacted, limit: :infinity)
 
-      assert redacted.base_url == "https://mcp.eden.so"
+      assert redacted.base_url == "https://mcp.acme.example"
       assert redacted.resource_scope_kind == :single_workspace
       refute rendered =~ @credential
       refute rendered =~ "ws_opaque_id"
@@ -499,7 +499,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.OwnerTest do
         handler,
         [:fermix, :mcp_client, :lifecycle],
         fn _event, measurements, metadata, _config ->
-          if metadata[:source_id] == "plugin:eden",
+          if metadata[:source_id] == "plugin:acme",
             do: send(parent, {:lifecycle, metadata[:phase], metadata, measurements})
         end,
         nil
@@ -507,13 +507,13 @@ defmodule FermixCore.Capabilities.MCP.Remote.OwnerTest do
 
       on_exit(fn -> :telemetry.detach(handler) end)
 
-      agent = start_agent([initialize_ok(), accepted(), tools_page(2, [tool("eden_search")])])
+      agent = start_agent([initialize_ok(), accepted(), tools_page(2, [tool("acme_search")])])
       owner = start_owner(owner_opts(status, agent))
       {:ok, _descriptors} = Owner.list_tools(owner)
 
       assert_receive {:lifecycle, :initialize, initialize_meta, _m}
-      assert initialize_meta.source_id == "plugin:eden"
-      assert initialize_meta.plugin == "eden"
+      assert initialize_meta.source_id == "plugin:acme"
+      assert initialize_meta.plugin == "acme"
       assert initialize_meta.result == :ok
       assert initialize_meta.attempt == 1
 
@@ -538,7 +538,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.OwnerTest do
   describe "the proxy dispatch contract" do
     # THE BUG THIS PINS: `Remote.Proxy` dispatches `dispatch.call_tool(target,
     # tool, args, timeout)` and defaults `dispatch` to this module — but
-    # `call_tool/4` did not exist, so every allowlisted Eden call died `:undef`
+    # `call_tool/4` did not exist, so every allowlisted Acme call died `:undef`
     # and surfaced as `:dispatch_failed`. Neither side's tests could see it: the
     # proxy suite injects a fake dispatch module that DOES implement the
     # function, and the owner suite never exercised the proxy's expectations.

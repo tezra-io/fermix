@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Unit tests for sync_plugin_catalog's pure functions.
 
-No network, no gh, no cosign — fixture dicts only. Run with:
+No network, no gh, no cosign — fixture dicts, plus the committed catalog for
+the one invariant that is about the catalog itself. Run with:
   python3 -m unittest scripts.release.test_sync_plugin_catalog
   python3 scripts/release/test_sync_plugin_catalog.py
 """
 
 import base64
+import json
 import re
 import sys
 import unittest
@@ -14,6 +16,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 import sync_plugin_catalog as sync  # noqa: E402
+
+CATALOG = Path(__file__).resolve().parents[2] / "apps/fermix_core/priv/plugins/index.json"
 
 
 def manifest_fixture(**overrides):
@@ -214,6 +218,22 @@ class YankedHandlingTest(unittest.TestCase):
         self.assertIn("1.1.0", [v["version"] for v in entry["versions"]])
 
 
+class RetiredPluginTest(unittest.TestCase):
+    """A retired plugin keeps its releases, so an engine whose baked catalog
+    already pins it can still fetch and verify it, but no new catalog offers it."""
+
+    def test_retired_plugins_are_never_pinned(self):
+        tags = {"github": ["1.0.1", "1.0.0"], "gone": ["1.1.0", "1.0.0"]}
+        self.assertEqual(sync.offered_tags(tags, retired={"gone"}), {"github": ["1.0.1", "1.0.0"]})
+
+    # The script is the only writer, but a hand edit or a run from a stale
+    # checkout would put a retired plugin back in front of every user.
+    def test_the_committed_catalog_offers_no_retired_plugin(self):
+        index = json.loads(CATALOG.read_text())
+        offered = {plugin["name"] for plugin in index["plugins"]}
+        self.assertEqual(offered & sync.RETIRED_PLUGINS, set())
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -223,9 +243,9 @@ class RuntimeKindTest(unittest.TestCase):
 
     def test_remote_mcp_manifest_discloses_hosted_execution(self):
         release = release_fixture(
-            name="eden", runtime={"kind": "remote_mcp", "base_url": "https://mcp.eden.so"}
+            name="acme", runtime={"kind": "remote_mcp", "base_url": "https://mcp.acme.example"}
         )
-        entry = sync.plugin_entry("eden", [release], [], None)
+        entry = sync.plugin_entry("acme", [release], [], None)
         self.assertEqual(entry["runtime_kind"], "remote_mcp")
 
     def test_local_runtimes_collapse_to_local_stdio(self):

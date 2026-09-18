@@ -1041,12 +1041,13 @@ defmodule FermixCore.Plugins.Registry do
 
   # `result_items_pointer` says where the returned collection lives in the tool
   # RESULT, and the proxy caps that collection at call time either way. The
-  # signed output schema is a cross-check, not the enforcement — and Stage 0
-  # against Eden found it is usually absent: all 78 of its tools publish
-  # `outputSchema: null`, which is common for MCP servers. Demanding one would
-  # make `collection_policy` unusable against real servers, so the schema check
-  # applies when a schema is published and the pointer is syntax-checked when it
-  # is not. One rule, one stated condition — the runtime cap is unconditional.
+  # signed output schema is a cross-check, not the enforcement — and it is
+  # usually absent: the first hosted server this was built against published
+  # `outputSchema: null` on all 78 of its tools, which is common for MCP
+  # servers. Demanding one would make `collection_policy` unusable against real
+  # servers, so the schema check applies when a schema is published and the
+  # pointer is syntax-checked when it is not. One rule, one stated condition —
+  # the runtime cap is unconditional.
   defp validate_items_pointer(policy, nil, tag) do
     with {:ok, _segments} <-
            parse_pointer(Map.get(policy, "result_items_pointer"), "result_items_pointer", tag) do

@@ -3,8 +3,8 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatusTest do
 
   alias FermixCore.Capabilities.MCP.RuntimeStatus
 
-  @source {:plugin, "eden"}
-  @other {:operator, "eden"}
+  @source {:plugin, "acme"}
+  @other {:operator, "acme"}
 
   setup do
     status = start_supervised!({RuntimeStatus, name: :"runtime_status_#{unique()}"})
@@ -25,13 +25,13 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatusTest do
       owner = fake_owner()
 
       assert {:ok, generation} =
-               RuntimeStatus.register_owner(status, @source, owner, plugin: "eden")
+               RuntimeStatus.register_owner(status, @source, owner, plugin: "acme")
 
       assert {:ok, entry} = RuntimeStatus.fetch(status, @source)
       assert entry.status == :connecting
       assert entry.generation == generation
       assert entry.owner == owner
-      assert entry.plugin == "eden"
+      assert entry.plugin == "acme"
     end
 
     test "each start installs a DIFFERENT generation", %{status: status} do
@@ -203,10 +203,10 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatusTest do
 
   describe "classify/1" do
     test "maps the remote rail's reasons onto statuses with atom-only detail" do
-      assert {:needs_secret, nil, nil} = RuntimeStatus.classify({:needs_secret, "eden"})
+      assert {:needs_secret, nil, nil} = RuntimeStatus.classify({:needs_secret, "acme"})
 
       assert {:reauthorization_required, nil, nil} =
-               RuntimeStatus.classify({:reauthorization_required, "mcp.eden.so"})
+               RuntimeStatus.classify({:reauthorization_required, "mcp.acme.example"})
 
       assert {:remote_protocol_error, :session_expired, nil} =
                RuntimeStatus.classify(:session_expired)
@@ -227,16 +227,16 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatusTest do
     # state holds a bearer credential. Only the class may survive.
     test "an unrecognized reason keeps only its class" do
       assert {:remote_unreachable, :unclassified, nil} =
-               RuntimeStatus.classify(%{secret: "eden_pat_do_not_leak"})
+               RuntimeStatus.classify(%{secret: "acme_pat_do_not_leak"})
 
       assert {:remote_unreachable, :badarg, nil} =
-               RuntimeStatus.classify({:badarg, %{credential: "eden_pat_do_not_leak"}})
+               RuntimeStatus.classify({:badarg, %{credential: "acme_pat_do_not_leak"}})
     end
 
     test "every status it can produce is a declared status" do
       reasons = [
-        {:needs_secret, "eden"},
-        {:needs_workspace, "eden"},
+        {:needs_secret, "acme"},
+        {:needs_workspace, "acme"},
         {:insufficient_credential_scope, :write},
         {:invalid_remote_config, :transport},
         {:reauthorization_required, "host"},
@@ -245,7 +245,7 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatusTest do
         {:invalid_remote_result, :empty_body},
         :session_expired,
         {:upstream_contract_mismatch, :missing},
-        {:capability_conflict, "eden_search"},
+        {:capability_conflict, "acme_search"},
         {:remote_jsonrpc_error, -32_000, "nope"},
         {:remote_http_error, 503},
         {:rate_limited, 60_000},
@@ -265,21 +265,21 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatusTest do
     # The one question a contract refusal raises is WHICH capability, and before
     # this the answer existed only inside the daemon's own memory.
     test "a contract refusal carries the capability it names" do
-      assert {:upstream_contract_mismatch, :missing_tool, "eden_get_item_connections"} =
+      assert {:upstream_contract_mismatch, :missing_tool, "acme_get_item_connections"} =
                RuntimeStatus.classify(
-                 {:upstream_contract_mismatch, {:missing_tool, "eden_get_item_connections"}}
+                 {:upstream_contract_mismatch, {:missing_tool, "acme_get_item_connections"}}
                )
 
-      assert {:upstream_contract_mismatch, :descriptor_changed, "eden_read_card"} =
+      assert {:upstream_contract_mismatch, :descriptor_changed, "acme_read_card"} =
                RuntimeStatus.classify(
-                 {:upstream_contract_mismatch, {:descriptor_changed, "eden_read_card"}}
+                 {:upstream_contract_mismatch, {:descriptor_changed, "acme_read_card"}}
                )
 
-      assert {:capability_conflict, nil, "eden_search"} =
-               RuntimeStatus.classify({:capability_conflict, "eden_search"})
+      assert {:capability_conflict, nil, "acme_search"} =
+               RuntimeStatus.classify({:capability_conflict, "acme_search"})
 
-      assert {:capability_conflict, :duplicate_name, "eden_search"} =
-               RuntimeStatus.classify({:capability_conflict, {:duplicate_name, "eden_search"}})
+      assert {:capability_conflict, :duplicate_name, "acme_search"} =
+               RuntimeStatus.classify({:capability_conflict, {:duplicate_name, "acme_search"}})
 
       # A manifest key that failed the namespace rule is still a manifest key —
       # `Contract.verify_one/2` fetches it out of the signed tool map before the
@@ -295,7 +295,7 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatusTest do
     # are the two ways a string could otherwise reach an operator's screen.
     test "crash terms and unrecognized shapes never become a subject" do
       assert {:remote_unreachable, :unclassified, nil} =
-               RuntimeStatus.classify(%{tokens: %{access_token: "eden_pat_do_not_leak"}})
+               RuntimeStatus.classify(%{tokens: %{access_token: "acme_pat_do_not_leak"}})
 
       assert {:remote_unreachable, :EXIT, nil} =
                RuntimeStatus.classify({:EXIT, self(), {%RuntimeError{message: "boom"}, []}})
@@ -304,7 +304,7 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatusTest do
       # even though it looks exactly like a refusal this table would name.
       assert {:upstream_contract_mismatch, :some_future_kind, nil} =
                RuntimeStatus.classify(
-                 {:upstream_contract_mismatch, {:some_future_kind, "eden_pat_do_not_leak"}}
+                 {:upstream_contract_mismatch, {:some_future_kind, "acme_pat_do_not_leak"}}
                )
 
       # A peer-authored JSON-RPC error is never a runtime status at all.
@@ -391,14 +391,14 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatusTest do
     test "renders the same refusal for every operator surface, atoms or wire strings" do
       assert RuntimeStatus.describe({:ready, nil, nil}) == "ready"
 
-      assert RuntimeStatus.describe({:upstream_contract_mismatch, :missing_tool, "eden_x"}) ==
-               "upstream_contract_mismatch/missing_tool (eden_x)"
+      assert RuntimeStatus.describe({:upstream_contract_mismatch, :missing_tool, "acme_x"}) ==
+               "upstream_contract_mismatch/missing_tool (acme_x)"
 
-      assert RuntimeStatus.describe({"upstream_contract_mismatch", "missing_tool", "eden_x"}) ==
-               "upstream_contract_mismatch/missing_tool (eden_x)"
+      assert RuntimeStatus.describe({"upstream_contract_mismatch", "missing_tool", "acme_x"}) ==
+               "upstream_contract_mismatch/missing_tool (acme_x)"
 
-      assert RuntimeStatus.describe({:capability_conflict, nil, "eden_x"}) ==
-               "capability_conflict (eden_x)"
+      assert RuntimeStatus.describe({:capability_conflict, nil, "acme_x"}) ==
+               "capability_conflict (acme_x)"
     end
   end
 

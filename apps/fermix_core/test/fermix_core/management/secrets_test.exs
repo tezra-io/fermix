@@ -27,7 +27,7 @@ defmodule FermixCore.Management.SecretsTest do
 
   # Every app-env key a test here can dirty. `:plugin_secrets` and `:oauth` are
   # on the list because the prefixed-id family writes through to them: a stored
-  # `plugin:eden` token or a google `client_secret` that outlives this module
+  # `plugin:agentmail` token or a google `client_secret` that outlives this module
   # reaches every later module that asks whether a plugin is credentialed.
   @core_keys [
     :providers,
@@ -192,16 +192,16 @@ defmodule FermixCore.Management.SecretsTest do
     test "a plugin's own token stores under the plugin's registered key", %{home: home} do
       Application.put_env(:fermix_core, :plugin_secrets, %{})
 
-      assert {:ok, view} = Secrets.set("plugin:eden", "eden-token")
+      assert {:ok, view} = Secrets.set("plugin:agentmail", "agentmail-token")
 
-      assert view["id"] == "plugin:eden"
+      assert view["id"] == "plugin:agentmail"
       assert view["present"]
-      assert SecretWriter.get(:eden_plugin_secret) == {:ok, "eden-token"}
-      assert PluginConfig.plugin_secret("eden") == "eden-token"
+      assert SecretWriter.get(:agentmail_plugin_secret) == {:ok, "agentmail-token"}
+      assert PluginConfig.plugin_secret("agentmail") == "agentmail-token"
 
       persisted = File.read!(Path.join(home, "config.toml"))
       assert persisted =~ SecretWriter.sentinel()
-      refute persisted =~ "eden-token"
+      refute persisted =~ "agentmail-token"
     end
 
     test "a sign-in client's secret stores under the provider's registered key", %{home: home} do
@@ -215,12 +215,12 @@ defmodule FermixCore.Management.SecretsTest do
     end
 
     test "clearing one forgets the keyring item and then the reference" do
-      assert {:ok, _stored} = Secrets.set("plugin:eden", "eden-token")
-      assert {:ok, view} = Secrets.clear("plugin:eden")
+      assert {:ok, _stored} = Secrets.set("plugin:agentmail", "agentmail-token")
+      assert {:ok, view} = Secrets.clear("plugin:agentmail")
 
       refute view["present"]
-      assert {:error, _absent} = SecretWriter.get(:eden_plugin_secret)
-      assert PluginConfig.plugin_secret("eden") in [nil, ""]
+      assert {:error, _absent} = SecretWriter.get(:agentmail_plugin_secret)
+      assert PluginConfig.plugin_secret("agentmail") in [nil, ""]
     end
 
     test "a plugin with no registered token slot is refused by name" do
@@ -234,7 +234,7 @@ defmodule FermixCore.Management.SecretsTest do
     end
 
     test "both families are enumerable beside the registry keys" do
-      assert "plugin:eden" in Secrets.ids()
+      assert "plugin:agentmail" in Secrets.ids()
       assert "oauth_client:google" in Secrets.ids()
       assert Secrets.ids() == Enum.uniq(Secrets.ids())
     end

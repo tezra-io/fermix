@@ -891,10 +891,10 @@ defmodule Fermix.CLI.DaemonTest do
       )
 
     owner = spawn(fn -> Process.sleep(:infinity) end)
-    source_id = {:plugin, "eden"}
+    source_id = {:plugin, "acme"}
 
     {:ok, generation} =
-      RuntimeStatus.register_owner(status_server, source_id, owner, plugin: "eden")
+      RuntimeStatus.register_owner(status_server, source_id, owner, plugin: "acme")
 
     :ok =
       RuntimeStatus.put(
@@ -903,7 +903,7 @@ defmodule Fermix.CLI.DaemonTest do
         generation,
         :upstream_contract_mismatch,
         :missing_tool,
-        "eden_get_item_connections"
+        "acme_get_item_connections"
       )
 
     {:ok, daemon} =
@@ -925,13 +925,13 @@ defmodule Fermix.CLI.DaemonTest do
 
     assert reply["status"] == "ok"
     assert [row] = reply["runtime_status"]
-    assert row["source"] == "plugin:eden"
-    assert row["plugin"] == "eden"
+    assert row["source"] == "plugin:acme"
+    assert row["plugin"] == "acme"
     assert row["status"] == "upstream_contract_mismatch"
     assert row["detail"] == "missing_tool"
     # The capability the upstream withdrew: the fact a one-shot CLI has no other
     # way to learn, and the reason this row exists at all.
-    assert row["subject"] == "eden_get_item_connections"
+    assert row["subject"] == "acme_get_item_connections"
     assert is_integer(row["updated_at"])
     # The generation ref and owner pid are runtime bookkeeping, not operator
     # facts — §11.1 forbids exporting generation references at all.

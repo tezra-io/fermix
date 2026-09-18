@@ -187,7 +187,7 @@ def _validate_expect(expect, where: str, problems: list[str]) -> None:
 # is a single assertion a case may legitimately restate, but a `tools_none` is a
 # ban the SUITE placed on every case: letting a case-level list overwrite it
 # means adding one narrow prohibition silently un-forbids all the others. That is
-# not hypothetical — four cases in the eden suite each declared one extra
+# not hypothetical — four cases in one suite each declared one extra
 # forbidden tool and thereby dropped the eight-tool write guard the defaults set,
 # so the profile-boundary assertion those cases appeared to make was not running.
 _PROHIBITION_KEYS = ("tools_none", "tools_none_succeeded")

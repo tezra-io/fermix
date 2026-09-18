@@ -1,7 +1,7 @@
 defmodule FermixCore.Capabilities.MCP.RuntimeStatus do
   @moduledoc """
   Live, in-memory status for outbound MCP clients, keyed by the
-  source-qualified identity `{:plugin, "eden"}` / `{:operator, "fs"}`
+  source-qualified identity `{:plugin, "acme"}` / `{:operator, "fs"}`
   (M27 §7.8).
 
   This process is deliberately **outside** every per-server subtree. A remote

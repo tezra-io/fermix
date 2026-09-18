@@ -153,11 +153,11 @@ defmodule FermixCore.Plugins.CanonicalJsonTest do
     # An absent outputSchema and an explicit null one must hash identically, or
     # a server that starts omitting the field would read as contract drift.
     test "always carries all four keys, so absent and null agree" do
-      assert {:ok, digest} = CanonicalJson.descriptor_digest("eden_read_card", %{}, nil, nil)
+      assert {:ok, digest} = CanonicalJson.descriptor_digest("acme_read_card", %{}, nil, nil)
 
       assert {:ok, ^digest} =
                CanonicalJson.digest(%{
-                 "name" => "eden_read_card",
+                 "name" => "acme_read_card",
                  "inputSchema" => %{},
                  "outputSchema" => nil,
                  "annotations" => nil

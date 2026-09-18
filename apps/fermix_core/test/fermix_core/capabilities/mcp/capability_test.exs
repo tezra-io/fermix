@@ -88,30 +88,30 @@ defmodule FermixCore.Capabilities.MCP.CapabilityTest do
       descriptor = %{name: "get_note", description: "x", input_schema: %{}}
 
       cap =
-        McpCapability.from_tool_descriptor("eden", descriptor,
+        McpCapability.from_tool_descriptor("acme", descriptor,
           caller: StubCaller,
-          source_id: {:plugin, "eden"},
-          name_prefix: "eden_"
+          source_id: {:plugin, "acme"},
+          name_prefix: "acme_"
         )
 
-      assert cap.name == "eden_get_note"
-      assert cap.metadata.mcp_source == "plugin:eden"
+      assert cap.name == "acme_get_note"
+      assert cap.metadata.mcp_source == "plugin:acme"
 
-      assert {McpCapability, :invoke, [%{source_id: {:plugin, "eden"}, plugin: "eden"}]} =
+      assert {McpCapability, :invoke, [%{source_id: {:plugin, "acme"}, plugin: "acme"}]} =
                cap.executor
     end
 
     test "final_name: bypasses derivation for an already-preflighted signed name" do
-      descriptor = %{name: "eden_get_note", description: "x", input_schema: %{}}
+      descriptor = %{name: "acme_get_note", description: "x", input_schema: %{}}
 
       cap =
-        McpCapability.from_tool_descriptor("eden", descriptor,
+        McpCapability.from_tool_descriptor("acme", descriptor,
           caller: StubCaller,
-          source_id: {:plugin, "eden"},
-          final_name: "eden_get_note"
+          source_id: {:plugin, "acme"},
+          final_name: "acme_get_note"
         )
 
-      assert cap.name == "eden_get_note"
+      assert cap.name == "acme_get_note"
     end
 
     test "tool_overrides flip hidden_from_agent? to true" do
@@ -375,24 +375,24 @@ defmodule FermixCore.Capabilities.MCP.CapabilityTest do
 
       cap =
         McpCapability.from_tool_descriptor(
-          "eden",
-          %{name: "eden_get_note", description: "x", input_schema: %{}},
+          "acme",
+          %{name: "acme_get_note", description: "x", input_schema: %{}},
           caller: StubCaller,
-          source_id: {:plugin, "eden"},
-          final_name: "eden_get_note",
+          source_id: {:plugin, "acme"},
+          final_name: "acme_get_note",
           policy: policy,
-          extra_metadata: %{plugin: "eden"}
+          extra_metadata: %{plugin: "acme"}
         )
 
-      :ok = StubCaller.set_response({:plugin, "eden"}, "eden_get_note", {:ok, "note body"})
+      :ok = StubCaller.set_response({:plugin, "acme"}, "acme_get_note", {:ok, "note body"})
 
       context = %{agent_name: "main", session_id: "turn-9"}
       assert {:ok, %{success: true}} = Capability.execute(cap, %{"noteId" => "n1"}, context)
 
       assert_receive {:tool_exec, _measurements, metadata}
-      assert metadata.tool == "eden_get_note"
-      assert metadata.plugin == "eden"
-      assert metadata.mcp_source == "plugin:eden"
+      assert metadata.tool == "acme_get_note"
+      assert metadata.plugin == "acme"
+      assert metadata.mcp_source == "plugin:acme"
       assert metadata.profile == "retrieval"
       assert metadata.workspace_scope == :single_selected
       assert metadata.read_only == true
@@ -418,15 +418,15 @@ defmodule FermixCore.Capabilities.MCP.CapabilityTest do
 
       cap =
         McpCapability.from_tool_descriptor(
-          "eden",
-          %{name: "eden_get_note", description: "x", input_schema: %{}},
+          "acme",
+          %{name: "acme_get_note", description: "x", input_schema: %{}},
           caller: StubCaller,
-          source_id: {:plugin, "eden"},
-          final_name: "eden_get_note",
+          source_id: {:plugin, "acme"},
+          final_name: "acme_get_note",
           policy: policy
         )
 
-      :ok = StubCaller.set_response({:plugin, "eden"}, "eden_get_note", {:ok, "ok"})
+      :ok = StubCaller.set_response({:plugin, "acme"}, "acme_get_note", {:ok, "ok"})
 
       hostile = %{
         "profile" => "capture",
@@ -440,7 +440,7 @@ defmodule FermixCore.Capabilities.MCP.CapabilityTest do
                Capability.execute(cap, hostile, %{agent_name: "main", session_id: "turn-real"})
 
       invoke_context = StubCaller.last_context()
-      assert invoke_context.source_id == {:plugin, "eden"}
+      assert invoke_context.source_id == {:plugin, "acme"}
       assert invoke_context.profile == "retrieval"
       assert invoke_context.read_only == true
       assert invoke_context.replay_safe == false

@@ -100,10 +100,10 @@ defmodule FermixCore.Management.CopyTest do
     end
 
     test "an interpolated name is data the call site declares" do
-      sentence = "Your prompt reaches Eden."
+      sentence = "Your prompt reaches Acme."
 
-      assert {:sentence_case, "Eden"} in Copy.violations(sentence, :prose)
-      assert Copy.violations(sentence, :prose, ["Eden"]) == []
+      assert {:sentence_case, "Acme"} in Copy.violations(sentence, :prose)
+      assert Copy.violations(sentence, :prose, ["Acme"]) == []
     end
   end
 

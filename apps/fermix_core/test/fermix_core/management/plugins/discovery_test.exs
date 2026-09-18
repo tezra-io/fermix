@@ -16,45 +16,45 @@ defmodule FermixCore.Management.Plugins.DiscoveryTest do
   end
 
   test "answers with what the last discovery found", %{opts: opts} do
-    assert Discovery.fetch("eden", opts) == []
+    assert Discovery.fetch("acme", opts) == []
 
-    :ok = Discovery.record("eden", [%{id: "ws_a", label: "A"}], opts)
+    :ok = Discovery.record("acme", [%{id: "ws_a", label: "A"}], opts)
 
-    assert Discovery.fetch("eden", opts) == [%{id: "ws_a", label: "A"}]
-    assert Discovery.all(opts) == %{"eden" => [%{id: "ws_a", label: "A"}]}
+    assert Discovery.fetch("acme", opts) == [%{id: "ws_a", label: "A"}]
+    assert Discovery.all(opts) == %{"acme" => [%{id: "ws_a", label: "A"}]}
   end
 
   # The next discovery is the answer, not an addition to the previous one: a
   # workspace the credential can no longer reach must leave the list.
   test "the next discovery replaces the previous list", %{opts: opts} do
-    :ok = Discovery.record("eden", [%{id: "ws_a", label: "A"}], opts)
-    :ok = Discovery.record("eden", [%{id: "ws_b", label: "B"}], opts)
+    :ok = Discovery.record("acme", [%{id: "ws_a", label: "A"}], opts)
+    :ok = Discovery.record("acme", [%{id: "ws_b", label: "B"}], opts)
 
-    assert Discovery.fetch("eden", opts) == [%{id: "ws_b", label: "B"}]
+    assert Discovery.fetch("acme", opts) == [%{id: "ws_b", label: "B"}]
   end
 
   test "one plugin's discovery never disturbs another's", %{opts: opts} do
-    :ok = Discovery.record("eden", [%{id: "ws_a", label: "A"}], opts)
+    :ok = Discovery.record("acme", [%{id: "ws_a", label: "A"}], opts)
     :ok = Discovery.record("notion", [%{id: "ws_n", label: "N"}], opts)
 
-    assert Discovery.fetch("eden", opts) == [%{id: "ws_a", label: "A"}]
+    assert Discovery.fetch("acme", opts) == [%{id: "ws_a", label: "A"}]
     assert Discovery.fetch("notion", opts) == [%{id: "ws_n", label: "N"}]
   end
 
   test "a discovery longer than the wire publishes is cut to it", %{opts: opts} do
     found = Enum.map(1..(Discovery.max_workspaces() + 10), &%{id: "ws_#{&1}", label: "W#{&1}"})
-    :ok = Discovery.record("eden", found, opts)
+    :ok = Discovery.record("acme", found, opts)
 
-    assert length(Discovery.fetch("eden", opts)) == Discovery.max_workspaces()
+    assert length(Discovery.fetch("acme", opts)) == Discovery.max_workspaces()
   end
 
   # A tree-less verb has run no discovery, so it has nothing to report. The read
   # answers truthfully rather than raising at a caller that never asked for a
   # daemon.
   test "reads answer empty with no server running" do
-    assert Discovery.fetch("eden", discovery: :discovery_never_started) == []
+    assert Discovery.fetch("acme", discovery: :discovery_never_started) == []
     assert Discovery.all(discovery: :discovery_never_started) == %{}
-    assert Discovery.record("eden", [], discovery: :discovery_never_started) == :ok
+    assert Discovery.record("acme", [], discovery: :discovery_never_started) == :ok
   end
 
   # "No server running" and "the server is wedged or failing" are different
@@ -62,7 +62,7 @@ defmodule FermixCore.Management.Plugins.DiscoveryTest do
   # sheet over a broken daemon, so anything that is not an absent process is
   # raised at the caller.
   test "a failing server is raised at the caller, not read as an empty discovery" do
-    assert {:failing, _call} = catch_exit(Discovery.fetch("eden", discovery: failing_server()))
+    assert {:failing, _call} = catch_exit(Discovery.fetch("acme", discovery: failing_server()))
     assert {:failing, _call} = catch_exit(Discovery.all(discovery: failing_server()))
   end
 

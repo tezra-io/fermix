@@ -292,7 +292,7 @@ defmodule Fermix.CLI.PluginsCommand do
   end
 
   # The manifest's `auth.prompt` is the plugin author's operator-facing wording
-  # ("Paste an Eden personal access token"); plugins that declare none get the
+  # ("Paste an Acme personal access token"); plugins that declare none get the
   # generic label. Resolving the plugin first also means an unknown name fails
   # before the operator is asked to type a secret at it.
   defp secret_prompt(name) do

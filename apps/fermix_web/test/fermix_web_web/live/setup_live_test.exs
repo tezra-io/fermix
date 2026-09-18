@@ -110,7 +110,7 @@ defmodule FermixWebWeb.SetupLiveTest do
           generation,
           :upstream_contract_mismatch,
           :descriptor_changed,
-          "eden_read_card"
+          "acme_read_card"
         )
 
       {:ok, owner}
@@ -4856,7 +4856,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       on_exit(fn ->
         Application.put_env(:fermix_core, :plugin_secrets, secrets)
         Application.delete_env(:fermix_web, :remote_setup_opts)
-        RuntimeStatus.clear(RuntimeStatus, {:plugin, "eden"})
+        RuntimeStatus.clear(RuntimeStatus, {:plugin, "acme"})
         DistVerifierStub.cleanup()
         FermixTestSupport.SafeRm.rm_rf(checkout)
       end)
@@ -4865,7 +4865,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       # `Registry.list()` inside the LiveView takes no options, so the artifact
       # must land in the DEFAULT store under this test's tmp FERMIX_HOME.
       write_remote_plugin(ConfigStore.workspace_paths().plugins)
-      Application.put_env(:fermix_core, :plugins, enabled: ["eden"])
+      Application.put_env(:fermix_core, :plugins, enabled: ["acme"])
 
       %{checkout: checkout}
     end
@@ -4876,16 +4876,14 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       # Credential first: the workspace step is meaningless without a token to
       # ask with, so the card offers the key form and nothing else.
-      assert html =~ ~s(data-plugin-name="eden")
+      assert html =~ ~s(data-plugin-name="acme")
       assert html =~ "Needs key"
       refute html =~ ~s(phx-click="open_resource_picker")
 
-      html =
-        view
-        |> form(~s|#plugin-secret-form-eden|, %{
-          "plugin_secret_form" => %{"value" => "eden_pat_0123456789abcdef"}
-        })
-        |> render_submit()
+      store_credential()
+
+      {:ok, view, _html} = live(conn, "/setup")
+      html = view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
 
       assert html =~ "Needs workspace"
       assert html =~ ~s(phx-click="open_resource_picker")
@@ -4899,7 +4897,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       Application.put_env(:fermix_web, :remote_setup_opts,
         transport: FakeRemoteTransport,
         connect_opts: [agent: agent],
-        resolver: fn "eden" -> "eden_pat_0123456789abcdef" end,
+        resolver: fn "acme" -> "acme_pat_0123456789abcdef" end,
         mcp_supervisor: ReadySupervisor
       )
 
@@ -4907,7 +4905,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
 
       view
-      |> element(~s|button[phx-click="open_resource_picker"][phx-value-name="eden"]|)
+      |> element(~s|button[phx-click="open_resource_picker"][phx-value-name="acme"]|)
       |> render_click()
 
       html = render_until(view, "Beta")
@@ -4933,7 +4931,7 @@ defmodule FermixWebWeb.SetupLiveTest do
         :fermix_core
         |> Application.get_env(:plugins, [])
         |> Keyword.get(:entries, %{})
-        |> Map.get("eden", [])
+        |> Map.get("acme", [])
 
       assert Keyword.get(entry, :workspace_id) == "ws_alpha"
       assert Keyword.get(entry, :workspace_label) == "Alpha"
@@ -4951,7 +4949,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       Application.put_env(:fermix_web, :remote_setup_opts,
         transport: FakeRemoteTransport,
         connect_opts: [agent: agent],
-        resolver: fn "eden" -> "eden_pat_0123456789abcdef" end,
+        resolver: fn "acme" -> "acme_pat_0123456789abcdef" end,
         mcp_supervisor: MismatchSupervisor
       )
 
@@ -4959,7 +4957,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
 
       view
-      |> element(~s|button[phx-click="open_resource_picker"][phx-value-name="eden"]|)
+      |> element(~s|button[phx-click="open_resource_picker"][phx-value-name="acme"]|)
       |> render_click()
 
       render_until(view, "Beta")
@@ -4977,7 +4975,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       # The operator's actual question is WHICH capability, and the modal is the
       # surface they are looking at when they ask it. Rendered by the same
       # resolver the daemon log and `fermix doctor` use.
-      assert html =~ "upstream_contract_mismatch/descriptor_changed (eden_read_card)"
+      assert html =~ "upstream_contract_mismatch/descriptor_changed (acme_read_card)"
       assert html =~ "Alpha"
       refute html =~ "Workspace selected."
     end
@@ -4996,7 +4994,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       Application.put_env(:fermix_web, :remote_setup_opts,
         transport: FakeRemoteTransport,
         connect_opts: [agent: agent],
-        resolver: fn "eden" -> "eden_pat_0123456789abcdef" end,
+        resolver: fn "acme" -> "acme_pat_0123456789abcdef" end,
         mcp_supervisor: ReadySupervisor
       )
 
@@ -5004,12 +5002,12 @@ defmodule FermixWebWeb.SetupLiveTest do
       view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
 
       view
-      |> element(~s|button[phx-click="open_resource_picker"][phx-value-name="eden"]|)
+      |> element(~s|button[phx-click="open_resource_picker"][phx-value-name="acme"]|)
       |> render_click()
 
       html = render_until(view, "Could not list workspaces")
       refute html =~ "remote_jsonrpc_error (Fermix: re-enter your token)"
-      refute html =~ "eden_pat_"
+      refute html =~ "acme_pat_"
     end
 
     test "a discovery failure renders a redacted error and persists nothing", %{conn: conn} do
@@ -5019,7 +5017,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       Application.put_env(:fermix_web, :remote_setup_opts,
         transport: FakeRemoteTransport,
         connect_opts: [agent: agent],
-        resolver: fn "eden" -> "eden_pat_0123456789abcdef" end,
+        resolver: fn "acme" -> "acme_pat_0123456789abcdef" end,
         mcp_supervisor: ReadySupervisor
       )
 
@@ -5027,23 +5025,23 @@ defmodule FermixWebWeb.SetupLiveTest do
       view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
 
       view
-      |> element(~s|button[phx-click="open_resource_picker"][phx-value-name="eden"]|)
+      |> element(~s|button[phx-click="open_resource_picker"][phx-value-name="acme"]|)
       |> render_click()
 
       # The classified transport failure, and nothing else: no credential, no
       # endpoint, no process state.
       html = render_until(view, "Could not list workspaces")
       assert html =~ "Could not list workspaces: :nxdomain"
-      refute html =~ "eden_pat_"
+      refute html =~ "acme_pat_"
 
       entry =
         :fermix_core
         |> Application.get_env(:plugins, [])
         |> Keyword.get(:entries, %{})
-        |> Map.get("eden", [])
+        |> Map.get("acme", [])
 
       assert Keyword.get(entry, :workspace_id) == nil
-      assert PluginStatus.status("eden") == :needs_workspace
+      assert PluginStatus.status("acme") == :needs_workspace
     end
   end
 
@@ -5371,7 +5369,7 @@ defmodule FermixWebWeb.SetupLiveTest do
   # --- remote-plugin picker fixtures --------------------------------------
 
   defp store_credential do
-    Application.put_env(:fermix_core, :plugin_secrets, %{"eden" => "eden_pat_0123456789abcdef"})
+    Application.put_env(:fermix_core, :plugin_secrets, %{"acme" => "acme_pat_0123456789abcdef"})
   end
 
   # initialize -> initialized -> tools/list -> tools/call -> teardown.
@@ -5422,7 +5420,7 @@ defmodule FermixWebWeb.SetupLiveTest do
 
   defp remote_live_descriptor do
     %{
-      "name" => "eden_list_workspaces",
+      "name" => "acme_list_workspaces",
       "description" => "List workspaces.",
       "inputSchema" => remote_workspaces_parameters()
     }
@@ -5430,9 +5428,10 @@ defmodule FermixWebWeb.SetupLiveTest do
 
   defp remote_workspaces_parameters, do: %{"type" => "object", "properties" => %{}}
 
-  # A plugin-api-3 `remote_mcp` plugin named `eden`, the one plugin with a
-  # registered `SecretPaths` entry, so the credential form is the real one.
-  # Nothing in the picker keys on that name.
+  # A plugin-api-3 `remote_mcp` plugin named `acme`. No hosted plugin has a
+  # registered `SecretPaths` entry, so these tests seed the credential directly
+  # (`store_credential/0`); the key form itself is proven on the Discord api_key
+  # plugin above. Nothing in the picker keys on that name.
   #
   # INSTALLED, not dev_local: a remote manifest with no publisher signature is
   # refused by the provenance gate (M27 §9.3), so a dev_local fixture would
@@ -5442,23 +5441,23 @@ defmodule FermixWebWeb.SetupLiveTest do
       "schema_version" => 2,
       "plugin_api" => 3,
       "min_core_version" => "0.1.0",
-      "name" => "eden",
-      "display_name" => "Eden",
+      "name" => "acme",
+      "display_name" => "Acme",
       "description" => "Remote MCP fixture with a single-workspace resource scope.",
       "category" => "productivity",
       "version" => "1.0.0",
       "auth" => %{
         "type" => "api_key",
-        "key_name" => "EDEN_PERSONAL_ACCESS_TOKEN",
+        "key_name" => "ACME_PERSONAL_ACCESS_TOKEN",
         "header" => "Authorization",
         "scheme" => "Bearer",
-        "prompt" => "Paste an Eden personal access token"
+        "prompt" => "Paste an Acme personal access token"
       },
       "runtime" => %{
         "kind" => "remote_mcp",
         "transport" => "streamable_http",
         "protocol_version" => "2025-06-18",
-        "base_url" => "https://mcp.eden.so",
+        "base_url" => "https://mcp.acme.example",
         "mcp_path" => "/mcp",
         "tool_name_mode" => "preserve"
       },
@@ -5469,7 +5468,7 @@ defmodule FermixWebWeb.SetupLiveTest do
           "default" => true,
           "required_credential_scope" => "read",
           "scope_visibility" => "none",
-          "tools" => ["eden_search"]
+          "tools" => ["acme_search"]
         },
         %{
           "name" => "capture",
@@ -5477,13 +5476,13 @@ defmodule FermixWebWeb.SetupLiveTest do
           "default" => false,
           "required_credential_scope" => "write",
           "scope_visibility" => "none",
-          "tools" => ["eden_search", "eden_append"]
+          "tools" => ["acme_search", "acme_append"]
         }
       ],
-      "setup_tools" => ["eden_list_workspaces"],
+      "setup_tools" => ["acme_list_workspaces"],
       "resource_scope" => %{
         "kind" => "single_workspace",
-        "discovery_tool" => "eden_list_workspaces",
+        "discovery_tool" => "acme_list_workspaces",
         "id_field" => "id",
         "label_field" => "name",
         "argument" => "workspaceId"
@@ -5497,7 +5496,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       },
       "tools" => [
         sign_remote_tool(%{
-          "name" => "eden_list_workspaces",
+          "name" => "acme_list_workspaces",
           "description" => "List workspaces available to the connected token.",
           "policy_class" => "external_api",
           "read_only" => true,
@@ -5511,7 +5510,7 @@ defmodule FermixWebWeb.SetupLiveTest do
           "upstream_annotations" => nil
         }),
         sign_remote_tool(%{
-          "name" => "eden_search",
+          "name" => "acme_search",
           "description" => "Search a workspace.",
           "policy_class" => "external_api",
           "read_only" => true,
@@ -5531,7 +5530,7 @@ defmodule FermixWebWeb.SetupLiveTest do
           "upstream_annotations" => nil
         }),
         sign_remote_tool(%{
-          "name" => "eden_append",
+          "name" => "acme_append",
           "description" => "Append to a note.",
           "policy_class" => "external_api",
           "read_only" => false,
@@ -5558,8 +5557,8 @@ defmodule FermixWebWeb.SetupLiveTest do
     File.mkdir_p!(fixtures)
     DistStore.ensure!(store)
     DistVerifierStub.init()
-    :ok = DistFixtures.install_remote_plugin(store, fixtures, "eden", "1.0.0", manifest)
-    :ok = DistVerifierStub.allow("eden", "1.0.0")
+    :ok = DistFixtures.install_remote_plugin(store, fixtures, "acme", "1.0.0", manifest)
+    :ok = DistVerifierStub.allow("acme", "1.0.0")
   end
 
   defp sign_remote_tool(tool) do

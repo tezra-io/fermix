@@ -7,7 +7,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.ProxyTest do
   alias FermixCore.Capabilities.MCP.Remote.Proxy
   alias FermixCore.Plugins.CanonicalJson
 
-  @source {:plugin, "eden"}
+  @source {:plugin, "acme"}
 
   @schema %{
     "type" => "object",
@@ -117,12 +117,12 @@ defmodule FermixCore.Capabilities.MCP.Remote.ProxyTest do
       Map.merge(
         %{
           source_id: @source,
-          name: "eden",
+          name: "acme",
           transport: :streamable_http,
           name_mode: :preserve,
           selected_profile: "retrieval",
           resource_scope: %{kind: :single_workspace, argument: "workspaceId", id: "ws_secret"},
-          allowed_tools: %{"eden_get_note" => facts("eden_get_note")},
+          allowed_tools: %{"acme_get_note" => facts("acme_get_note")},
           budgets: %{"agent_turn_calls" => 20, "agent_turn_paginated_calls" => 5},
           result_contract: %{
             "kind" => "json_boolean",
@@ -168,7 +168,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.ProxyTest do
 
   defp spawn_callers(proxy, count) do
     for _i <- 1..count do
-      spawn(fn -> Proxy.call(proxy, context(), "eden_get_note", %{}) end)
+      spawn(fn -> Proxy.call(proxy, context(), "acme_get_note", %{}) end)
     end
   end
 
@@ -260,16 +260,16 @@ defmodule FermixCore.Capabilities.MCP.Remote.ProxyTest do
       proxy = start_proxy(%{}, budget)
 
       assert {:error, :tool_not_allowed} =
-               Proxy.call(proxy, context(), "eden_delete_workspace", %{})
+               Proxy.call(proxy, context(), "acme_delete_workspace", %{})
 
       assert FakeDispatch.calls() == []
     end
 
     test "a context minted for another source is refused", %{budget: budget} do
       proxy = start_proxy(%{}, budget)
-      other = context(%{source_id: {:operator, "eden"}})
+      other = context(%{source_id: {:operator, "acme"}})
 
-      assert {:error, :source_mismatch} = Proxy.call(proxy, other, "eden_get_note", %{})
+      assert {:error, :source_mismatch} = Proxy.call(proxy, other, "acme_get_note", %{})
       assert FakeDispatch.calls() == []
     end
 
@@ -277,7 +277,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.ProxyTest do
       proxy = start_proxy(%{}, budget)
 
       assert {:error, :profile_mismatch} =
-               Proxy.call(proxy, context(%{profile: "capture"}), "eden_get_note", %{})
+               Proxy.call(proxy, context(%{profile: "capture"}), "acme_get_note", %{})
 
       assert FakeDispatch.calls() == []
     end
@@ -286,7 +286,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.ProxyTest do
       proxy = start_proxy(%{}, budget)
 
       assert {:error, :stale_capability} =
-               Proxy.call(proxy, context(%{read_only: false}), "eden_get_note", %{})
+               Proxy.call(proxy, context(%{read_only: false}), "acme_get_note", %{})
 
       assert FakeDispatch.calls() == []
     end
@@ -295,7 +295,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.ProxyTest do
       proxy = start_proxy(%{}, budget)
       :ok = Proxy.suspend(proxy)
 
-      assert {:error, :remote_suspended} = Proxy.call(proxy, context(), "eden_get_note", %{})
+      assert {:error, :remote_suspended} = Proxy.call(proxy, context(), "acme_get_note", %{})
       assert FakeDispatch.calls() == []
     end
   end
@@ -304,8 +304,8 @@ defmodule FermixCore.Capabilities.MCP.Remote.ProxyTest do
     test "injects the operator-selected value the model never sees", %{budget: budget} do
       proxy = start_proxy(%{}, budget)
 
-      assert {:ok, _text} = Proxy.call(proxy, context(), "eden_get_note", %{"noteId" => "n1"})
-      assert [{"eden_get_note", args}] = FakeDispatch.calls()
+      assert {:ok, _text} = Proxy.call(proxy, context(), "acme_get_note", %{"noteId" => "n1"})
+      assert [{"acme_get_note", args}] = FakeDispatch.calls()
       assert args == %{"noteId" => "n1", "workspaceId" => "ws_secret"}
     end
 
@@ -314,7 +314,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.ProxyTest do
       args = %{"noteId" => "n1", "workspaceId" => "ws_someone_else"}
 
       assert {:error, :resource_scope_violation} =
-               Proxy.call(proxy, context(), "eden_get_note", args)
+               Proxy.call(proxy, context(), "acme_get_note", args)
 
       assert FakeDispatch.calls() == []
     end
@@ -334,20 +334,20 @@ defmodule FermixCore.Capabilities.MCP.Remote.ProxyTest do
       :ok = Budget.charge(budget, key, :call, %{turn_calls: 1, turn_paginated_calls: 1}, self())
 
       assert {:error, {:budget_exhausted, :agent_turn_calls}} =
-               Proxy.call(proxy, ctx, "eden_get_note", %{})
+               Proxy.call(proxy, ctx, "acme_get_note", %{})
 
       assert FakeDispatch.calls() == []
     end
 
     test "an argument above a signed guard fails before dispatch", %{budget: budget} do
       guards = [%{"pointer" => "/urls", "kind" => "public_http_url_array", "max_items" => 1}]
-      tools = %{"eden_get_note" => facts("eden_get_note", %{argument_guards: guards})}
+      tools = %{"acme_get_note" => facts("acme_get_note", %{argument_guards: guards})}
       proxy = start_proxy(%{allowed_tools: tools}, budget)
 
       args = %{"urls" => ["https://a.example", "https://b.example"]}
 
       assert {:error, {:argument_guard, "public_http_url_array", :too_many_items}} =
-               Proxy.call(proxy, context(), "eden_get_note", args)
+               Proxy.call(proxy, context(), "acme_get_note", args)
 
       assert FakeDispatch.calls() == []
     end
@@ -372,7 +372,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.ProxyTest do
       spawn_callers(proxy, Limits.max_queued_calls() + 1)
       await_queue(proxy, Limits.max_queued_calls())
 
-      assert {:error, :remote_busy} = Proxy.call(proxy, context(), "eden_get_note", %{})
+      assert {:error, :remote_busy} = Proxy.call(proxy, context(), "acme_get_note", %{})
       assert %{queued: queued} = Proxy.stats(proxy)
       assert queued == Limits.max_queued_calls()
     end
@@ -412,7 +412,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.ProxyTest do
       )
 
       assert {:error, {:remote_tool_error, "unspecified", _}} =
-               Proxy.call(proxy, context(), "eden_get_note", %{})
+               Proxy.call(proxy, context(), "acme_get_note", %{})
     end
 
     test "a signed {ok:false} body is an error even without isError", %{budget: budget} do
@@ -421,7 +421,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.ProxyTest do
       FakeDispatch.set_response({:ok, %{"content" => [%{"type" => "text", "text" => body}]}})
 
       assert {:error, {:remote_tool_error, "missing-workspace", _}} =
-               Proxy.call(proxy, context(), "eden_get_note", %{})
+               Proxy.call(proxy, context(), "acme_get_note", %{})
     end
 
     test "three consecutive invalid results close the gate", %{budget: budget} do
@@ -429,13 +429,13 @@ defmodule FermixCore.Capabilities.MCP.Remote.ProxyTest do
       FakeDispatch.set_response({:ok, %{"content" => [%{"type" => "image", "data" => "AA"}]}})
 
       assert {:error, {:invalid_remote_result, :unsupported_content}} =
-               Proxy.call(proxy, context(), "eden_get_note", %{})
+               Proxy.call(proxy, context(), "acme_get_note", %{})
 
       assert {:error, {:invalid_remote_result, :unsupported_content}} =
-               Proxy.call(proxy, context(), "eden_get_note", %{})
+               Proxy.call(proxy, context(), "acme_get_note", %{})
 
       assert {:error, {:remote_protocol_error, :unsupported_content}} =
-               Proxy.call(proxy, context(), "eden_get_note", %{})
+               Proxy.call(proxy, context(), "acme_get_note", %{})
 
       assert Proxy.state(proxy) == :suspended
     end
@@ -449,14 +449,14 @@ defmodule FermixCore.Capabilities.MCP.Remote.ProxyTest do
         "max_returned_items" => 2
       }
 
-      tools = %{"eden_get_note" => facts("eden_get_note", %{collection_policy: policy})}
+      tools = %{"acme_get_note" => facts("acme_get_note", %{collection_policy: policy})}
       proxy = start_proxy(%{allowed_tools: tools}, budget)
 
       body = ~s({"ok":true,"items":[1,2,3]})
       FakeDispatch.set_response({:ok, %{"content" => [%{"type" => "text", "text" => body}]}})
 
       assert {:error, {:collection, :oversized_returned_collection}} =
-               Proxy.call(proxy, context(), "eden_get_note", %{})
+               Proxy.call(proxy, context(), "acme_get_note", %{})
     end
   end
 
@@ -467,7 +467,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.ProxyTest do
 
       :ok = Proxy.tools_changed(proxy)
       assert Proxy.state(proxy) == :suspended
-      assert {:error, :remote_suspended} = Proxy.call(proxy, context(), "eden_get_note", %{})
+      assert {:error, :remote_suspended} = Proxy.call(proxy, context(), "acme_get_note", %{})
       assert FakeDispatch.calls() == []
     end
 
@@ -477,7 +477,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.ProxyTest do
       :ok = Proxy.resume(proxy, contract())
 
       assert Proxy.state(proxy) == :ready
-      assert {:ok, _text} = Proxy.call(proxy, context(), "eden_get_note", %{})
+      assert {:ok, _text} = Proxy.call(proxy, context(), "acme_get_note", %{})
     end
 
     # THE BUG THIS PINS: suspension gated admission only. `dispatch_next/1` never
@@ -514,7 +514,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.ProxyTest do
 
       # One completed call arms the pacing interval, so the next admission waits
       # on a `:pace` timer instead of dispatching straight away.
-      assert {:ok, _text} = Proxy.call(proxy, context(), "eden_get_note", %{})
+      assert {:ok, _text} = Proxy.call(proxy, context(), "acme_get_note", %{})
       assert length(FakeDispatch.calls()) == 1
 
       spawn_callers(proxy, 1)
@@ -570,11 +570,11 @@ defmodule FermixCore.Capabilities.MCP.Remote.ProxyTest do
       FakeDispatch.set_delay(200)
       parent = self()
 
-      spawn(fn -> Proxy.call(proxy, context(), "eden_get_note", %{}) end)
+      spawn(fn -> Proxy.call(proxy, context(), "acme_get_note", %{}) end)
       await_inflight(proxy)
 
       spawn(fn ->
-        send(parent, {:queued_reply, Proxy.call(proxy, context(), "eden_get_note", %{})})
+        send(parent, {:queued_reply, Proxy.call(proxy, context(), "acme_get_note", %{})})
       end)
 
       await_queue(proxy, 1)
@@ -598,17 +598,17 @@ defmodule FermixCore.Capabilities.MCP.Remote.ProxyTest do
 
       # Two invalid results; the third closes the gate for good.
       assert {:error, {:invalid_remote_result, _}} =
-               Proxy.call(proxy, context(), "eden_get_note", %{})
+               Proxy.call(proxy, context(), "acme_get_note", %{})
 
       assert {:error, {:invalid_remote_result, _}} =
-               Proxy.call(proxy, context(), "eden_get_note", %{})
+               Proxy.call(proxy, context(), "acme_get_note", %{})
 
       FakeDispatch.set_delay(200)
-      spawn(fn -> Proxy.call(proxy, context(), "eden_get_note", %{}) end)
+      spawn(fn -> Proxy.call(proxy, context(), "acme_get_note", %{}) end)
       await_inflight(proxy)
 
       spawn(fn ->
-        send(parent, {:queued_reply, Proxy.call(proxy, context(), "eden_get_note", %{})})
+        send(parent, {:queued_reply, Proxy.call(proxy, context(), "acme_get_note", %{})})
       end)
 
       await_queue(proxy, 1)

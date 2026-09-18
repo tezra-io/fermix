@@ -7,8 +7,8 @@ defmodule FermixCore.Plugins.Dist.McpSource do
 
   Every spec carries the source-qualified identity `{:plugin, name}` (M27
   §7.3). Operator TOML servers are `{:operator, name}`, so an operator server
-  that happens to be called `eden` can never be stopped, restarted, or
-  status-reported as the Eden plugin client.
+  that happens to share a plugin's name can never be stopped, restarted, or
+  status-reported as that plugin's client.
 
   ## Two mutually exclusive shapes
 

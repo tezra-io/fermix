@@ -800,10 +800,10 @@ defmodule Fermix.CLI.Daemon do
     end
   end
 
-  # Entries are keyed by the source-qualified `{:plugin, "eden"}` id and carry a
+  # Entries are keyed by the source-qualified `{:plugin, "acme"}` id and carry a
   # `generation_ref`, an owner pid, and a monitor ref — `Wire.json_safe/1` RAISES
   # on the tuple key and on both refs. Flatten to a list, render the id as the
-  # same stable string the lifecycle telemetry uses ("plugin:eden"), and drop the
+  # same stable string the lifecycle telemetry uses ("plugin:acme"), and drop the
   # generation/owner: neither is an operator-facing fact, and §11.1 forbids
   # exporting generation references at all.
   defp runtime_status_rows(entries) do

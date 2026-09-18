@@ -182,13 +182,15 @@ defmodule FermixCore.Management.PluginsTest do
     # The consent sentence is the field the catalog shipped wrong once: a hosted
     # plugin rendering the local-process line tells the operator their content
     # stays on this Mac when it does not.
-    test "the consent sentence names where the plugin's code actually runs" do
-      {:ok, %{"plugins" => rows}} = Plugins.list()
+    test "the consent sentence names where the plugin's code actually runs", %{home: home} do
+      catalog = [index_opts: [seed_path: catalog_with_hosted(home)]]
+      {:ok, %{"plugins" => rows}} = Plugins.list(dist_opts: catalog)
 
       assert row(rows, @bundled)["consent_sentence"] == "Runs inside Fermix on this Mac."
       assert row(rows, @bundled)["remote_disclosure"] == nil
 
-      hosted = row(rows, "eden")
+      hosted = row(rows, "acme")
+      assert hosted["installed"] == false
       assert hosted["runtime_kind"] == "remote_mcp"
       assert hosted["consent_sentence"] == "Runs on the plugin's own servers, not on this Mac."
       assert hosted["remote_disclosure"] =~ "leave this Mac"
@@ -1048,6 +1050,48 @@ defmodule FermixCore.Management.PluginsTest do
 
   defp row(rows, name) do
     Enum.find(rows, &(&1["name"] == name)) || flunk("no row for #{name}")
+  end
+
+  # The baked catalog offers no hosted plugin, so the catalog half's hosted
+  # sentence is proven on the baked entries plus one `remote_mcp` entry.
+  defp catalog_with_hosted(home) do
+    baked =
+      :fermix_core
+      |> Application.app_dir("priv/plugins/index.json")
+      |> File.read!()
+      |> Jason.decode!()
+
+    base = "https://example.com/acme-1.0.0"
+
+    hosted = %{
+      "name" => "acme",
+      "display_name" => "Acme",
+      "category" => "productivity",
+      "auth_type" => "api_key",
+      "rails" => ["mcp"],
+      "runtime_kind" => "remote_mcp",
+      "latest" => "1.0.0",
+      "yanked" => [],
+      "versions" => [
+        %{
+          "version" => "1.0.0",
+          "published_at" => "2026-06-07T00:00:00Z",
+          "min_core_version" => "0.1.0",
+          "plugin_api" => 3,
+          "artifacts" => [
+            %{
+              "target" => "any",
+              "url" => base <> ".tar.gz",
+              "sha256" => String.duplicate("a", 64),
+              "sig_url" => base <> ".tar.gz.sig",
+              "cert_url" => base <> ".tar.gz.pem"
+            }
+          ]
+        }
+      ]
+    }
+
+    DistFixtures.write_index(Path.join(home, "hosted-index.json"), baked["plugins"] ++ [hosted])
   end
 
   # Read out of the baked catalog rather than named here: the entry that is in

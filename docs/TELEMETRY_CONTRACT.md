@@ -280,7 +280,7 @@ headers, the MCP session ID, the workspace ID, the endpoint URL, discovered
 schemas, tool arguments, and response bodies. `error_class` is *derived* from the
 `{:error, reason}` — an atom, or a tagged tuple's atom head; anything else
 (a message body, where a URL or token would hide) flattens to `"unclassified"`.
-`source_id` is serialized to a stable string (`"plugin:eden"`, `"operator:fs"`):
+`source_id` is serialized to a stable string (`"plugin:acme"`, `"operator:fs"`):
 a tuple raises on the daemon wire path and only `inspect`s into JSONL.
 
 Routing splits on **whether a turn exists**, not on a retry:

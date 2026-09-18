@@ -55,7 +55,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.Limits do
   # session; one call per 500 ms is that ceiling, paced rather than burst.
   @min_call_interval_ms 500
   @max_session_id_bytes 256
-  # Eden documents `Retry-After` as optional, so an absent header uses one
+  # A server may omit `Retry-After`, so an absent header uses one
   # fixed local backoff. A server-supplied value beyond this bound is refused
   # rather than honoured: server-controlled state must not create an unbounded
   # timer.

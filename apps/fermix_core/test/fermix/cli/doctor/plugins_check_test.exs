@@ -97,31 +97,31 @@ defmodule Fermix.CLI.Doctor.PluginsCheckTest do
 
   describe "plugins/1 — remote runtime status" do
     setup ctx do
-      write_plugin!(ctx, "eden", remote_manifest("eden"))
-      select_workspace!(ctx, ["eden"], "eden")
+      write_plugin!(ctx, "acme", remote_manifest("acme"))
+      select_workspace!(ctx, ["acme"], "acme")
       :ok
     end
 
     test "a remote plugin with a credential but no chosen workspace warns", ctx do
       # The rung between :needs_secret and :ready — a token alone does not make a
       # remote plugin callable, and the operator needs to see which step is left.
-      enable!(ctx, ["eden"])
-      put_secret!("eden", "eden_pat_0123456789abcdef")
+      enable!(ctx, ["acme"])
+      put_secret!("acme", "acme_pat_0123456789abcdef")
 
       result = Checks.plugins(installed_root: ctx.installed_root, client: &down_client/1)
 
       assert result.status == :warn
-      assert result.detail =~ "eden: needs_workspace"
+      assert result.detail =~ "acme: needs_workspace"
     end
 
     test "a startable remote plugin with no daemon reports the static ladder plus the note",
          ctx do
-      put_secret!("eden", "eden_pat_0123456789abcdef")
+      put_secret!("acme", "acme_pat_0123456789abcdef")
 
       result = Checks.plugins(installed_root: ctx.installed_root, client: &down_client/1)
 
       assert result.status == :ok
-      assert result.detail =~ "eden: ready"
+      assert result.detail =~ "acme: ready"
       assert result.detail =~ "runtime status unavailable — daemon not running"
       # The whole point of §7.8: a locally absent status table is unknown, not
       # a live `:ready`.
@@ -132,49 +132,49 @@ defmodule Fermix.CLI.Doctor.PluginsCheckTest do
       result = Checks.plugins(installed_root: ctx.installed_root, client: &down_client/1)
 
       assert result.status == :warn
-      assert result.detail =~ "eden: needs_secret"
+      assert result.detail =~ "acme: needs_secret"
       assert result.detail =~ "runtime status unavailable — daemon not running"
       refute result.detail =~ "runtime ready"
     end
 
     test "a live ready runtime status is ok", ctx do
-      put_secret!("eden", "eden_pat_0123456789abcdef")
+      put_secret!("acme", "acme_pat_0123456789abcdef")
 
       result =
         Checks.plugins(
           installed_root: ctx.installed_root,
-          client: runtime_client([row("plugin:eden", "eden", "ready")])
+          client: runtime_client([row("plugin:acme", "acme", "ready")])
         )
 
       assert result.status == :ok
-      assert result.detail =~ "eden: ready (remote; runtime ready)"
+      assert result.detail =~ "acme: ready (remote; runtime ready)"
     end
 
     test "a signed-contract mismatch fails even though the plugin is startable", ctx do
-      put_secret!("eden", "eden_pat_0123456789abcdef")
+      put_secret!("acme", "acme_pat_0123456789abcdef")
 
       result =
         Checks.plugins(
           installed_root: ctx.installed_root,
-          client: runtime_client([row("plugin:eden", "eden", "upstream_contract_mismatch")])
+          client: runtime_client([row("plugin:acme", "acme", "upstream_contract_mismatch")])
         )
 
       assert result.status == :fail
-      assert result.detail =~ "eden: ready (remote; runtime upstream_contract_mismatch)"
+      assert result.detail =~ "acme: ready (remote; runtime upstream_contract_mismatch)"
     end
 
     # The daemon already serializes the classified detail; dropping it here made
     # `fermix doctor` print strictly less than the wire carried, so the operator
     # could not tell a vanished tool from a changed descriptor.
     test "the reported detail rides the runtime status when the daemon sends one", ctx do
-      put_secret!("eden", "eden_pat_0123456789abcdef")
+      put_secret!("acme", "acme_pat_0123456789abcdef")
 
       result =
         Checks.plugins(
           installed_root: ctx.installed_root,
           client:
             runtime_client([
-              row("plugin:eden", "eden", "upstream_contract_mismatch", "missing_tool")
+              row("plugin:acme", "acme", "upstream_contract_mismatch", "missing_tool")
             ])
         )
 
@@ -185,7 +185,7 @@ defmodule Fermix.CLI.Doctor.PluginsCheckTest do
     # The whole point of the chain: the operator reads the withdrawn tool's name
     # off the doctor row instead of probing the vendor for it.
     test "the row names the capability the upstream withdrew", ctx do
-      put_secret!("eden", "eden_pat_0123456789abcdef")
+      put_secret!("acme", "acme_pat_0123456789abcdef")
 
       result =
         Checks.plugins(
@@ -193,11 +193,11 @@ defmodule Fermix.CLI.Doctor.PluginsCheckTest do
           client:
             runtime_client([
               row(
-                "plugin:eden",
-                "eden",
+                "plugin:acme",
+                "acme",
                 "upstream_contract_mismatch",
                 "missing_tool",
-                "eden_get_item_connections"
+                "acme_get_item_connections"
               )
             ])
         )
@@ -205,18 +205,18 @@ defmodule Fermix.CLI.Doctor.PluginsCheckTest do
       assert result.status == :fail
 
       assert result.detail =~
-               "runtime upstream_contract_mismatch/missing_tool (eden_get_item_connections)"
+               "runtime upstream_contract_mismatch/missing_tool (acme_get_item_connections)"
     end
 
     # A daemon that reports no detail (every :ready row, and any build predating
     # the field) must render exactly as before — no trailing separator.
     test "a row without a detail renders the bare status", ctx do
-      put_secret!("eden", "eden_pat_0123456789abcdef")
+      put_secret!("acme", "acme_pat_0123456789abcdef")
 
       result =
         Checks.plugins(
           installed_root: ctx.installed_root,
-          client: runtime_client([Map.delete(row("plugin:eden", "eden", "ready"), "detail")])
+          client: runtime_client([Map.delete(row("plugin:acme", "acme", "ready"), "detail")])
         )
 
       assert result.status == :ok
@@ -225,12 +225,12 @@ defmodule Fermix.CLI.Doctor.PluginsCheckTest do
     end
 
     test "a transient remote failure warns rather than fails", ctx do
-      put_secret!("eden", "eden_pat_0123456789abcdef")
+      put_secret!("acme", "acme_pat_0123456789abcdef")
 
       result =
         Checks.plugins(
           installed_root: ctx.installed_root,
-          client: runtime_client([row("plugin:eden", "eden", "remote_unreachable")])
+          client: runtime_client([row("plugin:acme", "acme", "remote_unreachable")])
         )
 
       assert result.status == :warn
@@ -240,7 +240,7 @@ defmodule Fermix.CLI.Doctor.PluginsCheckTest do
     # Enabled, credentialed, and startable, but the daemon holds no owner for it:
     # a reload/restart away, and nothing else on the report would say so.
     test "a startable remote plugin the daemon never started warns", ctx do
-      put_secret!("eden", "eden_pat_0123456789abcdef")
+      put_secret!("acme", "acme_pat_0123456789abcdef")
 
       result =
         Checks.plugins(
@@ -249,14 +249,14 @@ defmodule Fermix.CLI.Doctor.PluginsCheckTest do
         )
 
       assert result.status == :warn
-      assert result.detail =~ "eden: ready (remote; no live client registered)"
+      assert result.detail =~ "acme: ready (remote; no live client registered)"
       refute result.detail =~ "runtime ready"
     end
 
     # A reachable daemon that cannot answer is version skew or a broken build —
     # never silently read as "no remote plugins are connected".
     test "a daemon that cannot answer the op fails loud", ctx do
-      put_secret!("eden", "eden_pat_0123456789abcdef")
+      put_secret!("acme", "acme_pat_0123456789abcdef")
 
       client = fn "plugins_runtime_status" ->
         {:ok, %{"status" => "error", "reason" => "unknown method"}}
@@ -269,7 +269,7 @@ defmodule Fermix.CLI.Doctor.PluginsCheckTest do
     end
 
     test "a socket error other than a down daemon fails loud", ctx do
-      put_secret!("eden", "eden_pat_0123456789abcdef")
+      put_secret!("acme", "acme_pat_0123456789abcdef")
 
       client = fn "plugins_runtime_status" -> {:error, :emsgsize} end
       result = Checks.plugins(installed_root: ctx.installed_root, client: client)
@@ -281,12 +281,12 @@ defmodule Fermix.CLI.Doctor.PluginsCheckTest do
     # A row the daemon's serializer could not have produced means a skewed
     # build; rendering it would show a plugin whose runtime state is blank.
     test "a malformed row fails loud instead of rendering a blank runtime state", ctx do
-      put_secret!("eden", "eden_pat_0123456789abcdef")
+      put_secret!("acme", "acme_pat_0123456789abcdef")
 
       result =
         Checks.plugins(
           installed_root: ctx.installed_root,
-          client: runtime_client([%{"source" => "plugin:eden"}])
+          client: runtime_client([%{"source" => "plugin:acme"}])
         )
 
       assert result.status == :fail
@@ -448,23 +448,23 @@ defmodule Fermix.CLI.Doctor.PluginsCheckTest do
       "plugin_api" => 3,
       "min_core_version" => "0.4.0",
       "name" => name,
-      "display_name" => "Eden",
+      "display_name" => "Acme",
       "description" => "A remote MCP plugin fixture.",
       "category" => "productivity",
       "version" => "1.0.0",
       "default_enabled" => false,
       "auth" => %{
         "type" => "api_key",
-        "key_name" => "EDEN_PERSONAL_ACCESS_TOKEN",
+        "key_name" => "ACME_PERSONAL_ACCESS_TOKEN",
         "header" => "Authorization",
         "scheme" => "Bearer",
-        "prompt" => "Paste an Eden personal access token"
+        "prompt" => "Paste an Acme personal access token"
       },
       "runtime" => %{
         "kind" => "remote_mcp",
         "transport" => "streamable_http",
         "protocol_version" => "2025-06-18",
-        "base_url" => "https://mcp.eden.so",
+        "base_url" => "https://mcp.acme.example",
         "mcp_path" => "/mcp",
         "tool_name_mode" => "preserve"
       },
@@ -475,13 +475,13 @@ defmodule Fermix.CLI.Doctor.PluginsCheckTest do
           "default" => true,
           "required_credential_scope" => "read",
           "scope_visibility" => "none",
-          "tools" => ["eden_search"]
+          "tools" => ["acme_search"]
         }
       ],
-      "setup_tools" => ["eden_list_workspaces"],
+      "setup_tools" => ["acme_list_workspaces"],
       "resource_scope" => %{
         "kind" => "single_workspace",
-        "discovery_tool" => "eden_list_workspaces",
+        "discovery_tool" => "acme_list_workspaces",
         "id_field" => "id",
         "label_field" => "name",
         "argument" => "workspaceId"
@@ -500,8 +500,8 @@ defmodule Fermix.CLI.Doctor.PluginsCheckTest do
 
   defp workspaces_tool do
     sign(%{
-      "name" => "eden_list_workspaces",
-      "description" => "List Eden workspaces available to the connected token.",
+      "name" => "acme_list_workspaces",
+      "description" => "List Acme workspaces available to the connected token.",
       "policy_class" => "external_api",
       "read_only" => true,
       "replay_safe" => false,
@@ -517,8 +517,8 @@ defmodule Fermix.CLI.Doctor.PluginsCheckTest do
 
   defp search_tool do
     sign(%{
-      "name" => "eden_search",
-      "description" => "Search an Eden workspace.",
+      "name" => "acme_search",
+      "description" => "Search an Acme workspace.",
       "policy_class" => "external_api",
       "read_only" => true,
       "replay_safe" => true,

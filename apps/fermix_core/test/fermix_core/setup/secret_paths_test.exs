@@ -27,26 +27,23 @@ defmodule FermixCore.Setup.SecretPathsTest do
     assert secret.functionality == "Brave web_search backend and place_search"
   end
 
-  test "registers the Eden plugin secret under the plugin-secret shape" do
-    secret = SecretPaths.fetch!(:eden_plugin_secret)
+  # M27 §7.5: a plugin secret's `env` is only the keyring/account label
+  # SecretWriter stores under. A `sandbox_env` entry would publish it as
+  # [sandbox.env.<env>], a second credential source that makes "forget local
+  # credential" a lie. Plugin credentials are BEAM-internal HTTP.
+  test "every plugin secret sits under the plugin-secret shape and never reaches the sandbox env" do
+    plugin_secrets = Enum.filter(SecretPaths.all(), &Map.has_key?(&1, :plugin))
+    eligible = Enum.map(SecretPaths.sandbox_env_eligible(), & &1.key)
 
-    assert secret.env == "FERMIX_PLUGIN_EDEN"
-    assert secret.path == [:fermix_core, :plugin_secrets, "eden"]
-    assert secret.plugin == "eden"
-    assert secret.functionality == "Eden plugin"
-    assert secret.optional? == true
-    assert SecretPaths.fetch_plugin("eden") == secret
-  end
+    assert plugin_secrets != []
 
-  test "the Eden plugin secret has exactly one source: the keychain, not the env" do
-    # M27 §7.5: `env` is the keyring/account label SecretWriter stores under. A
-    # `sandbox_env` entry would publish it as [sandbox.env.FERMIX_PLUGIN_EDEN],
-    # creating a second credential source and making "forget local credential"
-    # a lie. Eden is BEAM-internal HTTP, like the other plugin secrets.
-    secret = SecretPaths.fetch!(:eden_plugin_secret)
-
-    refute Map.has_key?(secret, :sandbox_env)
-    refute :eden_plugin_secret in Enum.map(SecretPaths.sandbox_env_eligible(), & &1.key)
+    for secret <- plugin_secrets do
+      assert secret.path == [:fermix_core, :plugin_secrets, secret.plugin]
+      assert secret.optional? == true
+      assert SecretPaths.fetch_plugin(secret.plugin) == secret
+      refute Map.has_key?(secret, :sandbox_env)
+      refute secret.key in eligible
+    end
   end
 
   test "oauth client secrets are not sandbox_env eligible" do
