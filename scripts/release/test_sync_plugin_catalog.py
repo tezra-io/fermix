@@ -234,10 +234,6 @@ class RetiredPluginTest(unittest.TestCase):
         self.assertEqual(offered & sync.RETIRED_PLUGINS, set())
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class RuntimeKindTest(unittest.TestCase):
     """The catalog's runtime disclosure is derived, never hand-set."""
 
@@ -265,3 +261,7 @@ class RuntimeKindTest(unittest.TestCase):
     def test_an_unmapped_runtime_kind_fails_the_sync(self):
         with self.assertRaises(sync.SyncError):
             sync.plugin_entry("github", [release_fixture(runtime={"kind": "wasm"})], [], None)
+
+
+if __name__ == "__main__":
+    unittest.main()
