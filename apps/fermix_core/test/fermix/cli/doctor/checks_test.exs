@@ -187,8 +187,18 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.detail =~ "disabled"
     end
 
+    # The not-installed row branches on the sidecar target, and the default
+    # target is the real host's: compux refuses linux-aarch64 and macos-x86_64,
+    # both first-class engine targets and both CI legs. A test of the install
+    # offer therefore establishes a supported target instead of reading the
+    # machine it happens to run on.
     test "enabled but no sidecar warns to install" do
-      result = Checks.computer_use_permissions({:ok, %{state: :not_installed}})
+      result =
+        Checks.computer_use_permissions(
+          {:ok, %{state: :not_installed}},
+          sidecar_target: {:ok, "macos-aarch64"}
+        )
+
       assert result.status == :warn
       assert result.detail =~ "install"
     end
@@ -210,7 +220,13 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
 
     test "the not-installed warning names the version that would install" do
       version = to_string(Application.spec(:compux, :vsn))
-      result = Checks.computer_use_permissions({:ok, %{state: :not_installed}})
+
+      result =
+        Checks.computer_use_permissions(
+          {:ok, %{state: :not_installed}},
+          sidecar_target: {:ok, "macos-aarch64"}
+        )
+
       assert result.detail =~ "installs compux v#{version}"
     end
 
@@ -277,6 +293,48 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.detail =~ "no arm64 Linux build"
       assert result.detail =~ "Fermix itself is fully supported here"
       refute result.detail =~ "install it from setup"
+    end
+
+    # compux refuses Intel macOS too, and `macos_x86_64` is a first-class engine
+    # target, so the refusal names the platform it refused. A fixed arm64 Linux
+    # sentence told every Intel Mac it was a Linux machine.
+    test "Intel macOS states its own architecture refusal, not arm64 Linux's" do
+      result =
+        Checks.computer_use_permissions(
+          {:ok, %{state: :not_installed}},
+          sidecar_target: {:error, {:unsupported_target, "macos", "x86_64"}}
+        )
+
+      assert result.status == :warn
+      assert result.detail =~ "computer use is unavailable on this architecture"
+      assert result.detail =~ "no Intel macOS build"
+      assert result.detail =~ "Fermix itself is fully supported here"
+      refute result.detail =~ "Linux"
+      refute result.detail =~ "install it from setup"
+    end
+
+    test "a probe that refuses Intel macOS names Intel macOS" do
+      result =
+        Checks.computer_use_permissions({:error, {:unsupported_target, "macos", "x86_64"}})
+
+      assert result.status == :warn
+      assert result.detail =~ "no Intel macOS build"
+      refute result.detail =~ "Linux"
+    end
+
+    # compux refuses exactly two pairs today, arm64 Linux and Intel macOS.
+    # Doctor is the command that explains a broken install, so a pair it has no
+    # name for still renders a row naming the refused target instead of
+    # crashing the whole run.
+    test "a refused pair with no plain name is named by its target" do
+      result =
+        Checks.computer_use_permissions(
+          {:ok, %{state: :not_installed}},
+          sidecar_target: {:error, {:unsupported_target, "linux", "riscv64"}}
+        )
+
+      assert result.status == :warn
+      assert result.detail =~ "publishes no linux-riscv64 build"
     end
 
     test "a probe that refuses the target answers the same way" do

@@ -71,14 +71,6 @@ defmodule Fermix.CLI.Doctor.Checks do
   @harness_run_tools [{"codex", "codex_run"}, {"claude", "claude_code_run"}]
   @bytes_per_gb 1_073_741_824
 
-  # M38 §8.2's architecture sentence, verbatim. `linux_aarch64` is a first-class
-  # engine target while the computer-use sidecar publishes no arm64 Linux build,
-  # so the row says what is refused, why, and what remains true.
-  @unsupported_architecture_hint "computer use is unavailable on this architecture. " <>
-                                   "The computer-use sidecar publishes no arm64 Linux build, " <>
-                                   "so there is nothing to install. Fermix itself is fully " <>
-                                   "supported here."
-
   @spec readiness() :: result()
   def readiness do
     report = FermixCore.Readiness.report()
@@ -1399,8 +1391,8 @@ defmodule Fermix.CLI.Doctor.Checks do
       # The sidecar refuses every target but Apple-Silicon macOS and x86_64
       # Linux, and `linux_aarch64` is a first-class engine target — so this is
       # the architecture case, not a broken helper (M38 §8.2).
-      {:error, {:unsupported_target, _os, _arch}} ->
-        warn("computer use", @unsupported_architecture_hint)
+      {:error, {:unsupported_target, os, arch}} ->
+        warn("computer use", unsupported_architecture_hint(os, arch))
 
       {:error, reason} ->
         fail("computer use", "could not probe the helper: #{inspect(reason)}")
@@ -1410,8 +1402,8 @@ defmodule Fermix.CLI.Doctor.Checks do
   # Offering an install whose only outcome is `{:error, {:unsupported_target,
   # ...}}` is a lie told with a control. On a host the sidecar publishes no
   # build for, the row states the refusal instead of naming the setup pane.
-  defp not_installed_result({:error, {:unsupported_target, _os, _arch}}) do
-    warn("computer use", @unsupported_architecture_hint)
+  defp not_installed_result({:error, {:unsupported_target, os, arch}}) do
+    warn("computer use", unsupported_architecture_hint(os, arch))
   end
 
   defp not_installed_result(_supported) do
@@ -1420,6 +1412,20 @@ defmodule Fermix.CLI.Doctor.Checks do
       "enabled but the helper isn't installed — install it from setup#{install_version_note()}"
     )
   end
+
+  # M38 §8.2's architecture sentence, verbatim for `linux_aarch64`: what is
+  # refused, why, and what remains true. It names the platform the sidecar
+  # refused rather than assuming one, because `macos_x86_64` is a first-class
+  # engine target the sidecar publishes no build for either.
+  defp unsupported_architecture_hint(os, arch) do
+    "computer use is unavailable on this architecture. " <>
+      "The computer-use sidecar publishes no #{platform_name(os, arch)} build, " <>
+      "so there is nothing to install. Fermix itself is fully supported here."
+  end
+
+  defp platform_name("linux", "aarch64"), do: "arm64 Linux"
+  defp platform_name("macos", "x86_64"), do: "Intel macOS"
+  defp platform_name(os, arch), do: "#{os}-#{arch}"
 
   defp sidecar_target(opts) do
     Keyword.get_lazy(opts, :sidecar_target, &Compux.Binary.target/0)
