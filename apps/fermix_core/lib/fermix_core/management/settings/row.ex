@@ -8,9 +8,10 @@ defmodule FermixCore.Management.Settings.Row do
   restart flag are the daemon's, and no front-end composes its own.
 
   `restart` is derived, never hand-listed: a row is flagged exactly when its own
-  configuration section is one `Setup.RestartState` compares against the boot
-  baseline. Declaring it per row would let a row claim "no restart needed" for a
-  change that makes the very next `overview.get` ask for one.
+  configuration section, or the part of one it writes, is one
+  `Setup.RestartState` compares against the boot baseline. Declaring it per row
+  would let a row claim "no restart needed" for a change that makes the very
+  next `overview.get` ask for one.
 
   `suggestions` says whether a choice row's `options` are the WHOLE value space
   or only what a client may offer inline. It is the field `settings.apply`
@@ -79,15 +80,17 @@ defmodule FermixCore.Management.Settings.Row do
   end
 
   @doc """
-  Whether a change to a row in `section` needs a restart.
+  Whether a change to a row in `section`, or in one part of it (`[:sandbox,
+  :env]`), needs a restart.
 
-  Read from `RestartState`'s own boot-bound list, which is the same list that
+  Read from `RestartState`'s own boot-bound rule, which is the same rule that
   decides what `restart.required` reports after the write lands.
   """
-  @spec restart?(atom()) :: boolean()
-  def restart?(section) when is_atom(section) do
-    List.keymember?(RestartState.boot_bound_sections(), section, 0)
-  end
+  @spec restart?(atom() | [atom(), ...]) :: boolean()
+  def restart?(section) when is_atom(section), do: RestartState.boot_bound?([section])
+
+  def restart?([section | _parts] = path) when is_atom(section),
+    do: RestartState.boot_bound?(path)
 
   @doc "A configuration value as the wire carries it."
   @spec value(term()) :: term()

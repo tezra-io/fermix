@@ -1,15 +1,31 @@
 defmodule FermixCore.Setup.SecretWriter do
   @moduledoc """
   Facade for setup-managed OS secret storage.
+
+  A key is one of two shapes. A registry atom names a `SecretPaths` entry and
+  is stored under that entry's environment name. `{:external_env, name}` is a
+  skill's own credential (M45 §4.1), stored under `external_env:<NAME>` so it
+  can never share an item with a provider key of the same variable name. The
+  name never becomes an atom, and it is validated by `Sandbox.ExternalEnv`
+  before it becomes an address.
   """
 
+  alias FermixCore.Sandbox.ExternalEnv
   alias FermixCore.Setup.SecretPaths
 
   @sentinel "@keyring"
   @default_profile "general"
   @compiled_env Mix.env()
-  @type secret_key :: atom()
+  @external_prefix "external_env:"
+  @type external_key :: {:external_env, String.t()}
+  @type secret_key :: atom() | external_key()
   @type writer_error :: {:error, term()}
+
+  @doc "Whether `key` is one of the two key shapes every writer accepts."
+  defguard is_secret_key(key)
+           when is_atom(key) or
+                  (is_tuple(key) and tuple_size(key) == 2 and elem(key, 0) == :external_env and
+                     is_binary(elem(key, 1)))
 
   @callback put(secret_key(), String.t(), keyword()) :: :ok | writer_error()
   @callback get(secret_key(), keyword()) :: {:ok, String.t()} | writer_error()
@@ -49,12 +65,12 @@ defmodule FermixCore.Setup.SecretWriter do
   end
 
   @spec put(secret_key(), String.t(), keyword()) :: :ok | writer_error()
-  def put(key, value, opts \\ []) when is_atom(key) and is_binary(value) do
+  def put(key, value, opts \\ []) when is_secret_key(key) and is_binary(value) do
     impl(opts).put(key, value, opts)
   end
 
   @spec get(secret_key(), keyword()) :: {:ok, String.t()} | writer_error()
-  def get(key, opts \\ []) when is_atom(key), do: impl(opts).get(key, opts)
+  def get(key, opts \\ []) when is_secret_key(key), do: impl(opts).get(key, opts)
 
   @doc """
   Removes the OS-keyring item for `key`. Succeeds when no item exists — the
@@ -63,7 +79,7 @@ defmodule FermixCore.Setup.SecretWriter do
   orphan a credential can refuse to drop its config reference.
   """
   @spec delete(secret_key(), keyword()) :: :ok | writer_error()
-  def delete(key, opts \\ []) when is_atom(key), do: impl(opts).delete(key, opts)
+  def delete(key, opts \\ []) when is_secret_key(key), do: impl(opts).delete(key, opts)
 
   @spec get!(secret_key(), keyword()) :: String.t()
   def get!(key, opts \\ []) when is_atom(key) do
@@ -77,11 +93,27 @@ defmodule FermixCore.Setup.SecretWriter do
   def available?(opts \\ []), do: impl(opts).available?(opts)
 
   @spec command_source(secret_key()) :: map()
-  def command_source(key) when is_atom(key), do: impl([]).command_source(key, [])
+  def command_source(key) when is_secret_key(key), do: impl([]).command_source(key, [])
 
   @spec command_source(secret_key(), keyword()) :: map()
-  def command_source(key, opts) when is_atom(key) and is_list(opts),
+  def command_source(key, opts) when is_secret_key(key) and is_list(opts),
     do: impl(opts).command_source(key, opts)
+
+  @doc """
+  The name an OS store files `key` under, before the profile prefix: a
+  registry key's environment name, or `external_env:<NAME>`. Raises for an
+  external name that fails validation, so an unvalidated name can never reach
+  a keychain address.
+  """
+  @spec item_name(secret_key()) :: String.t()
+  def item_name(key) when is_atom(key), do: SecretPaths.fetch!(key).env
+
+  def item_name({:external_env, name}) when is_binary(name) do
+    case ExternalEnv.validate_name(name) do
+      :ok -> @external_prefix <> name
+      {:error, reason} -> raise ArgumentError, "external env name refused (#{reason})"
+    end
+  end
 
   @spec format_error(secret_key(), term()) :: String.t()
   def format_error(key, reason) when is_atom(key) do
@@ -128,6 +160,8 @@ defmodule FermixCore.Setup.SecretWriter.Auto do
 
   @behaviour FermixCore.Setup.SecretWriter
 
+  import FermixCore.Setup.SecretWriter, only: [is_secret_key: 1]
+
   alias FermixCore.Setup.SecretWriter
 
   @default_candidates [
@@ -139,18 +173,18 @@ defmodule FermixCore.Setup.SecretWriter.Auto do
   def available?(opts \\ []), do: selected(opts).available?(opts)
 
   @impl true
-  def put(key, value, opts \\ []) when is_atom(key) and is_binary(value) do
+  def put(key, value, opts \\ []) when is_secret_key(key) and is_binary(value) do
     selected(opts).put(key, value, opts)
   end
 
   @impl true
-  def get(key, opts \\ []) when is_atom(key), do: selected(opts).get(key, opts)
+  def get(key, opts \\ []) when is_secret_key(key), do: selected(opts).get(key, opts)
 
   @impl true
-  def delete(key, opts \\ []) when is_atom(key), do: selected(opts).delete(key, opts)
+  def delete(key, opts \\ []) when is_secret_key(key), do: selected(opts).delete(key, opts)
 
   @impl true
-  def command_source(key, opts \\ []) when is_atom(key) do
+  def command_source(key, opts \\ []) when is_secret_key(key) do
     selected(opts).command_source(key, opts)
   end
 
@@ -195,8 +229,9 @@ defmodule FermixCore.Setup.SecretWriter.SecretTool do
 
   @behaviour FermixCore.Setup.SecretWriter
 
+  import FermixCore.Setup.SecretWriter, only: [is_secret_key: 1]
+
   alias FermixCore.CommandRunner
-  alias FermixCore.Setup.SecretPaths
   alias FermixCore.Setup.SecretWriter
 
   @account "fermix"
@@ -207,7 +242,7 @@ defmodule FermixCore.Setup.SecretWriter.SecretTool do
   def available?(_opts \\ []), do: not is_nil(secret_tool_binary()) and not is_nil(shell_binary())
 
   @impl true
-  def put(key, value, opts \\ []) when is_atom(key) and is_binary(value) do
+  def put(key, value, opts \\ []) when is_secret_key(key) and is_binary(value) do
     with {:ok, binary} <- fetch_secret_tool_binary(),
          {:ok, shell} <- fetch_shell_binary() do
       with_temp_secret(value, fn secret_file ->
@@ -217,7 +252,7 @@ defmodule FermixCore.Setup.SecretWriter.SecretTool do
   end
 
   @impl true
-  def get(key, opts \\ []) when is_atom(key) do
+  def get(key, opts \\ []) when is_secret_key(key) do
     with {:ok, binary} <- fetch_secret_tool_binary(),
          {:ok, output} <- run(binary, lookup_args(key, opts), opts) do
       output
@@ -232,7 +267,7 @@ defmodule FermixCore.Setup.SecretWriter.SecretTool do
   # `secret-tool clear` exits 0 whether or not an item matched, so a missing
   # item needs no special case here (unlike macOS `security`, which exits 44).
   @impl true
-  def delete(key, opts \\ []) when is_atom(key) do
+  def delete(key, opts \\ []) when is_secret_key(key) do
     with {:ok, binary} <- fetch_secret_tool_binary(),
          {:ok, _output} <- run(binary, clear_args(key, opts), opts) do
       :ok
@@ -243,11 +278,11 @@ defmodule FermixCore.Setup.SecretWriter.SecretTool do
   The `secret-tool` argument list `delete/2` runs. Exposed as data so the
   attribute coordinate is unit-testable without a libsecret keyring present.
   """
-  @spec clear_command(atom(), keyword()) :: [String.t()]
-  def clear_command(key, opts \\ []) when is_atom(key), do: clear_args(key, opts)
+  @spec clear_command(SecretWriter.secret_key(), keyword()) :: [String.t()]
+  def clear_command(key, opts \\ []) when is_secret_key(key), do: clear_args(key, opts)
 
   @impl true
-  def command_source(key, opts \\ []) when is_atom(key) do
+  def command_source(key, opts \\ []) when is_secret_key(key) do
     %{
       source: :command,
       command: secret_tool_binary() || "secret-tool",
@@ -265,8 +300,8 @@ defmodule FermixCore.Setup.SecretWriter.SecretTool do
   defp clear_args(key, opts), do: ["clear" | attributes(key, opts)]
 
   defp attributes(key, opts) do
-    secret = SecretPaths.fetch!(key)
-    ["service", SecretWriter.scoped_prefix(opts), "account", @account, "env", secret.env]
+    service = SecretWriter.scoped_prefix(opts)
+    ["service", service, "account", @account, "env", SecretWriter.item_name(key)]
   end
 
   defp fetch_secret_tool_binary do
@@ -367,8 +402,9 @@ defmodule FermixCore.Setup.SecretWriter.MacOS do
 
   @behaviour FermixCore.Setup.SecretWriter
 
+  import FermixCore.Setup.SecretWriter, only: [is_secret_key: 1]
+
   alias FermixCore.CommandRunner
-  alias FermixCore.Setup.SecretPaths
   alias FermixCore.Setup.SecretWriter
 
   @account "fermix"
@@ -378,7 +414,7 @@ defmodule FermixCore.Setup.SecretWriter.MacOS do
   def available?(_opts \\ []), do: not is_nil(security_binary())
 
   @impl true
-  def put(key, value, opts \\ []) when is_atom(key) and is_binary(value) do
+  def put(key, value, opts \\ []) when is_secret_key(key) and is_binary(value) do
     with {:ok, binary} <- fetch_security_binary() do
       [delete, add] = put_commands(key, value, opts)
       # Best-effort delete FIRST so the add re-creates the item fresh with `-A`'s
@@ -402,13 +438,13 @@ defmodule FermixCore.Setup.SecretWriter.MacOS do
   first makes each save self-heal to the open ACL. Exposed as data so the sequence
   is unit-testable without touching the real keychain.
   """
-  @spec put_commands(atom(), String.t(), keyword()) :: [[String.t()]]
-  def put_commands(key, value, opts \\ []) do
+  @spec put_commands(SecretWriter.secret_key(), String.t(), keyword()) :: [[String.t()]]
+  def put_commands(key, value, opts \\ []) when is_secret_key(key) and is_binary(value) do
     [delete_args(key, opts), put_args(key, value, opts)]
   end
 
   @impl true
-  def get(key, opts \\ []) when is_atom(key) do
+  def get(key, opts \\ []) when is_secret_key(key) do
     with {:ok, binary} <- fetch_security_binary(),
          {:ok, output} <- run(binary, get_args(key, opts), opts) do
       output
@@ -427,7 +463,7 @@ defmodule FermixCore.Setup.SecretWriter.MacOS do
   @item_not_found_exit 44
 
   @impl true
-  def delete(key, opts \\ []) when is_atom(key) do
+  def delete(key, opts \\ []) when is_secret_key(key) do
     with {:ok, binary} <- fetch_security_binary() do
       binary
       |> run(delete_args(key, opts), opts)
@@ -440,8 +476,8 @@ defmodule FermixCore.Setup.SecretWriter.MacOS do
   before re-adding, so a forget targets exactly the item a save creates.
   Exposed as data so the coordinate is unit-testable without a keychain.
   """
-  @spec delete_command(atom(), keyword()) :: [String.t()]
-  def delete_command(key, opts \\ []) when is_atom(key), do: delete_args(key, opts)
+  @spec delete_command(SecretWriter.secret_key(), keyword()) :: [String.t()]
+  def delete_command(key, opts \\ []) when is_secret_key(key), do: delete_args(key, opts)
 
   @doc """
   Classifies a `delete/2` helper result. Exposed as a pure function so the
@@ -455,8 +491,8 @@ defmodule FermixCore.Setup.SecretWriter.MacOS do
   def delete_result({:error, reason}), do: {:error, reason}
 
   @impl true
-  @spec command_source(atom(), keyword()) :: map()
-  def command_source(key, opts \\ []) when is_atom(key) do
+  @spec command_source(SecretWriter.secret_key(), keyword()) :: map()
+  def command_source(key, opts \\ []) when is_secret_key(key) do
     %{
       source: :command,
       command: security_binary() || "/usr/bin/security",
@@ -486,10 +522,8 @@ defmodule FermixCore.Setup.SecretWriter.MacOS do
     ["find-generic-password", "-a", @account, "-s", service(key, opts), "-w"]
   end
 
-  defp service(key, opts) do
-    secret = SecretPaths.fetch!(key)
-    "#{SecretWriter.scoped_prefix(opts)}:#{secret.env}"
-  end
+  defp service(key, opts),
+    do: "#{SecretWriter.scoped_prefix(opts)}:#{SecretWriter.item_name(key)}"
 
   defp fetch_security_binary do
     case security_binary() do

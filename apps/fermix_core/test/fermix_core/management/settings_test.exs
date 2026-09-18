@@ -187,7 +187,10 @@ defmodule FermixCore.Management.SettingsTest do
     test "a row is flagged exactly when its own section is boot-bound" do
       assert Enum.all?(rows("channels.telegram"), & &1["restart"])
       assert Enum.all?(rows("realtime"), & &1["restart"])
-      assert Enum.all?(rows("sandbox"), & &1["restart"])
+      assert %{"restart" => true} = row("sandbox", "sandbox_mode")
+      assert %{"restart" => true} = row("sandbox", "sandbox_profile")
+      # The environment policy is read on every command (M45 §4.5).
+      assert %{"restart" => false} = row("sandbox", "sandbox_env_allow")
 
       refute Enum.any?(rows("memory"), & &1["restart"])
       refute Enum.any?(rows("transcription"), & &1["restart"])
@@ -798,6 +801,120 @@ defmodule FermixCore.Management.SettingsTest do
     Application.put_env(:fermix_core, :sandbox, SandboxConfig.normalize(%{mode: :strict}))
   end
 
+  # M45 §4.4: one row per allowed or stored name, after the allow list. The
+  # snapshot is passed in, so each shape is seeded rather than inherited.
+  describe "the sandbox environment rows" do
+    setup do
+      profile = Application.get_env(:fermix_core, :profile)
+      Application.delete_env(:fermix_core, :profile)
+      on_exit(fn -> restore(:fermix_core, :profile, profile) end)
+      :ok
+    end
+
+    test "every name state has its own row, in allow-list order then stored names" do
+      rows = env_rows(sandbox_with_every_shape())
+
+      assert Enum.map(rows, & &1["key"]) ==
+               ~w(env:STORED_KEY env:UNSTORED_KEY env:HELPER_KEY env:ALIAS_KEY env:A_PARKED env:Z_PARKED)
+
+      assert Enum.map(rows, & &1["label"]) ==
+               ~w(STORED_KEY UNSTORED_KEY HELPER_KEY ALIAS_KEY A_PARKED Z_PARKED)
+    end
+
+    test "a stored and allowed name is a present secret row" do
+      row = env_row(sandbox_with_every_shape(), "STORED_KEY")
+
+      assert %{"kind" => "secret", "present" => true, "value" => nil, "footer" => nil} = row
+      assert row["read_only"] == false
+    end
+
+    test "a stored name that is no longer allowed says it is parked" do
+      row = env_row(sandbox_with_every_shape(), "A_PARKED")
+
+      assert %{"kind" => "secret", "present" => true, "value" => nil} = row
+
+      assert row["footer"] ==
+               "Stored, but commands do not get it until the name is allowed again."
+    end
+
+    test "an allowed name with no source is a secret row that is not stored" do
+      row = env_row(sandbox_with_every_shape(), "UNSTORED_KEY")
+
+      assert %{"kind" => "secret", "present" => false, "value" => nil} = row
+      assert row["footer"] == "Not stored. Commands get it only if Fermix was started with it."
+    end
+
+    test "a helper or an alias is a read-only text row saying where the value comes from" do
+      helper = env_row(sandbox_with_every_shape(), "HELPER_KEY")
+      alias_row = env_row(sandbox_with_every_shape(), "ALIAS_KEY")
+
+      assert %{"kind" => "text", "read_only" => true, "present" => nil, "value" => nil} = helper
+      assert helper["footer"] == "Read by a command set in the settings file."
+
+      assert %{"kind" => "text", "read_only" => true, "value" => "ALPACA_OLD_NAME"} = alias_row
+
+      assert alias_row["footer"] ==
+               "Read from another variable in the environment Fermix was started with."
+    end
+
+    # Offering Add on a name every store refuses is a control whose save always
+    # fails; the row says what is in force instead.
+    test "an allowed name Fermix cannot store is read-only" do
+      rows = env_rows(sandbox_from(env: [allow: ["HOME", "MY-VAR"]]))
+
+      assert Enum.map(rows, & &1["key"]) == ["env:HOME", "env:MY-VAR"]
+
+      for row <- rows do
+        assert %{"kind" => "text", "read_only" => true, "value" => nil} = row
+
+        assert row["footer"] ==
+                 "Fermix cannot store a value under this name. " <>
+                   "Commands get it from the environment Fermix was started with."
+      end
+    end
+
+    test "presence comes from the settings file alone, never a keychain read" do
+      Application.put_env(:fermix_core, :secret_writer, FermixTestSupport.CountingSecretWriter)
+      :ok = FermixTestSupport.CountingSecretWriter.watch()
+      on_exit(fn -> FermixTestSupport.CountingSecretWriter.unwatch() end)
+
+      rows = env_rows(sandbox_with_every_shape())
+
+      assert Enum.any?(rows, &(&1["present"] == true))
+      refute_received {:secret_writer_get, _key}
+    end
+
+    test "the allow-list and name rows derive their restart flag from the env rule" do
+      {:ok, %{"rows" => rows}} =
+        Settings.get("sandbox", snapshot: snapshot_with(sandbox_with_every_shape()))
+
+      live = Row.restart?([:sandbox, :env])
+
+      refute live
+      assert live == RestartState.boot_bound?([:sandbox, :env])
+
+      for row <- rows, row["key"] == "sandbox_env_allow" or env_key?(row) do
+        assert row["restart"] == live, row["key"]
+      end
+
+      for row <- rows, row["key"] in ["sandbox_mode", "sandbox_profile"] do
+        assert row["restart"] == Row.restart?(:sandbox)
+      end
+    end
+
+    test "settings.apply refuses every name row: values cross in secret.set alone" do
+      Application.put_env(:fermix_core, :sandbox, sandbox_with_every_shape())
+
+      assert {:error, {:invalid_params, "env:UNSTORED_KEY", sentence}} =
+               Settings.apply("sandbox", %{"env:UNSTORED_KEY" => "a-value"})
+
+      assert sentence == "This is a secret. Store it with secret.set instead."
+
+      assert {:error, {:invalid_params, "env:HELPER_KEY", _read_only}} =
+               Settings.apply("sandbox", %{"env:HELPER_KEY" => "a-value"})
+    end
+  end
+
   # The golden envelopes are hand-written, and a responder round trip proves only
   # that a map survives being encoded. These drive the real writers and compare
   # key shapes, so renaming a field here fails the export rather than shipping a
@@ -845,6 +962,40 @@ defmodule FermixCore.Management.SettingsTest do
     {:ok, %{"rows" => rows}} = Settings.get(id)
     rows
   end
+
+  # Every §4.4 name state at once: stored and allowed, allowed with no source,
+  # allowed through a helper, allowed through an alias, and two stored names no
+  # longer allowed (published sorted, after the allow list).
+  defp sandbox_with_every_shape do
+    sandbox_from(
+      env: [
+        allow: ~w(STORED_KEY UNSTORED_KEY HELPER_KEY ALIAS_KEY),
+        sources: %{
+          "STORED_KEY" => managed("STORED_KEY"),
+          "HELPER_KEY" => %{source: :command, command: "/usr/local/bin/op", args: ["read"]},
+          "ALIAS_KEY" => %{source: :env, name: "ALPACA_OLD_NAME"},
+          "Z_PARKED" => managed("Z_PARKED"),
+          "A_PARKED" => managed("A_PARKED")
+        }
+      ]
+    )
+  end
+
+  defp managed(name), do: SecretWriter.command_source({:external_env, name})
+
+  defp sandbox_from(config), do: SandboxConfig.normalize(config)
+
+  defp snapshot_with(sandbox), do: Map.put(ConfigStore.current_snapshot(), :sandbox, sandbox)
+
+  defp env_rows(sandbox) do
+    {:ok, %{"rows" => rows}} = Settings.get("sandbox", snapshot: snapshot_with(sandbox))
+    Enum.filter(rows, &env_key?/1)
+  end
+
+  defp env_row(sandbox, name),
+    do: Enum.find(env_rows(sandbox), &(&1["label"] == name)) || flunk("no env row for #{name}")
+
+  defp env_key?(row), do: String.starts_with?(row["key"], "env:")
 
   defp row(id, key), do: Enum.find(rows(id), &(&1["key"] == key)) || flunk("no #{id}/#{key} row")
 

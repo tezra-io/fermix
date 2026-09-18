@@ -22,7 +22,10 @@ defmodule FermixCore.Management.CopyTest do
   alias FermixCore.Management.Settings
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Readiness
+  alias FermixCore.Sandbox.Config, as: SandboxConfig
+  alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.RestartState
+  alias FermixCore.Setup.SecretWriter
 
   # What the two renderers really answer for a reason the plugin installer
   # produces: a tuple, a map, and the operator's own home directory.
@@ -105,6 +108,15 @@ defmodule FermixCore.Management.CopyTest do
       assert {:sentence_case, "Acme"} in Copy.violations(sentence, :prose)
       assert Copy.violations(sentence, :prose, ["Acme"]) == []
     end
+
+    # A variable name an operator allowed is data under every rule, not only
+    # the capitalisation one: the label of its row IS the name, and a name is
+    # `UPPER_SNAKE` by convention. Undeclared, it is still a wire token.
+    test "a declared name is exempt from the wire-token rule too" do
+      assert {:wire_token, "ALPACA_API_KEY"} in Copy.violations("ALPACA_API_KEY", :prose)
+      assert Copy.violations("ALPACA_API_KEY", :prose, ["ALPACA_API_KEY"]) == []
+      assert Copy.violations("Set ALPACA_API_KEY.", :prose, ["OTHER_KEY"]) != []
+    end
   end
 
   describe "the copy the management wire publishes" do
@@ -124,7 +136,7 @@ defmodule FermixCore.Management.CopyTest do
       for section <- Settings.sections(), row <- rows(section.id) do
         where = "#{section.id}.#{row["key"]}"
 
-        assert_clean(row["label"], :prose, [], "row label #{where}")
+        assert_clean(row["label"], :prose, row_names(row), "row label #{where}")
         assert_clean(row["footer"], :prose, [], "row footer #{where}")
         assert_clean(row["unit"], :name, [], "row unit #{where}")
 
@@ -132,6 +144,23 @@ defmodule FermixCore.Management.CopyTest do
           assert_clean(option["label"], :name, [], "option label #{where}")
           assert_clean(option["hint"], :prose, [], "option hint #{where}")
         end
+      end
+    end
+
+    # The live snapshot of an async case allows whatever the suite configured,
+    # which is usually nothing, so the sandbox name rows are walked here from a
+    # snapshot that carries every shape M45 §4.4 publishes.
+    test "every sandbox name row obeys the rules, with the name declared as data" do
+      rows = sandbox_name_rows()
+
+      assert length(rows) == 6
+
+      for row <- rows do
+        where = "sandbox.#{row["key"]}"
+
+        assert_clean(row["label"], :prose, row_names(row), "row label #{where}")
+        assert_clean(row["footer"], :prose, [], "row footer #{where}")
+        assert internal_terms(row["footer"] || "") == []
       end
     end
 
@@ -360,6 +389,32 @@ defmodule FermixCore.Management.CopyTest do
   defp rows(section) do
     {:ok, view} = Settings.get(section)
     view["rows"]
+  end
+
+  # A sandbox name row is labelled with the variable name the operator allowed,
+  # which is data the row reflects rather than copy the daemon wrote.
+  defp row_names(%{"key" => "env:" <> name}), do: [name]
+  defp row_names(_row), do: []
+
+  defp sandbox_name_rows do
+    managed = &SecretWriter.command_source({:external_env, &1})
+
+    sandbox =
+      SandboxConfig.normalize(
+        env: [
+          allow: ~w(STORED_KEY UNSTORED_KEY HELPER_KEY ALIAS_KEY HOME),
+          sources: %{
+            "STORED_KEY" => managed.("STORED_KEY"),
+            "HELPER_KEY" => %{source: :command, command: "/usr/local/bin/op"},
+            "ALIAS_KEY" => %{source: :env, name: "OLD_NAME"},
+            "PARKED_KEY" => managed.("PARKED_KEY")
+          }
+        ]
+      )
+
+    snapshot = Map.put(ConfigStore.current_snapshot(), :sandbox, sandbox)
+    {:ok, view} = Settings.get("sandbox", snapshot: snapshot)
+    Enum.filter(view["rows"], &String.starts_with?(&1["key"], "env:"))
   end
 
   defp plugin_rows do

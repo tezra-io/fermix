@@ -316,9 +316,27 @@ Notes that the shapes alone do not carry:
 - **`restart` on a row is derived, never declared.** A row is flagged exactly
   when its own configuration section is one the daemon compares against the
   values it read at boot, so a row can never deny a restart the next
-  `overview.get` asks for.
+  `overview.get` asks for. A section can have a part that is read on every use
+  instead: the sandbox environment policy (the allowed names, the deny list and
+  where each value comes from) is read by every command, so the allowed
+  environment variables row and every name row below it carry `restart: false`,
+  while the sandbox mode and command profile rows still carry `true`.
 - **`read_only` marks a row `settings.apply` will not take**, rendered as a plain
   labelled row rather than a control whose save always refuses.
+- **The sandbox section publishes one row per environment variable name.**
+  After `sandbox_env_allow` come the allowed names in allow-list order, then
+  the names Fermix still stores but no longer allows, sorted. Each row's key is
+  `env:<NAME>` and its label is the name itself. A stored name is a `secret`
+  row with `present: true`, and one no longer allowed says in its footer that
+  commands do not get it until the name is allowed again. An allowed name with
+  nothing stored is a `secret` row with `present: false`, whose footer says
+  commands get it only if Fermix was started with it. A name whose value comes
+  from a helper command or from another variable, and a name Fermix cannot
+  store, is a read-only `text` row whose footer says where the value comes from;
+  for another variable, `value` is that variable's name. `present` is read from
+  the settings file alone, like every other secret row. Removing a name from
+  the allow list keeps its stored value, so its row stays reachable: allowing
+  the name again reuses the value, and `secret.clear` removes it.
 - **The voice section's model row selects its engine.** `realtime_model`
   publishes every model both engines ship, in one list, each option labelled
   with the engine it selects: `openai_realtime` (the Realtime API, which runs
@@ -344,10 +362,11 @@ Notes that the shapes alone do not carry:
   sits at that key's own path, never "the keyring holds an item": a key stored
   without its reference is never read back, so calling it present would describe
   a credential the runtime cannot use.
-- **`id` names one of four families.** A bare registry key (`openai_api_key`,
+- **`id` names one of five families.** A bare registry key (`openai_api_key`,
   `telegram_bot_token`, …), `plugin:<name>` for a plugin's own token,
-  `oauth_client:<provider>` for a sign-in client's secret, and
-  `anthropic_setup_token`. The first three take the same keychain-first write.
+  `oauth_client:<provider>` for a sign-in client's secret,
+  `anthropic_setup_token`, and `env:<NAME>` for a sandbox environment variable.
+  The first three take the same keychain-first write.
   The fourth is a different mechanism and is documented as such: a
   `claude setup-token` value is a long-lived subscription credential, so it is
   stored in the auth store rather than the keychain, storing one also selects
@@ -356,6 +375,23 @@ Notes that the shapes alone do not carry:
   `auth.logout anthropic`. Its `present` is "a setup token is stored", not "an
   Anthropic sign-in exists": an adopted Claude Code login lives under the same
   profile and is reported by `setup.state.get`'s account row instead.
+- **`env:<NAME>` stores a value every sandboxed command receives as `NAME`.**
+  It is the key of the sandbox section's name rows, and the family is open:
+  `NAME` is any name matching `^[A-Za-z_][A-Za-z0-9_]{0,127}$` exactly, except
+  `PATH`, `HOME`, `USER`, `LANG`, `SHELL`, `TMPDIR`, `FERMIX_HOME` and any name
+  starting `LC_`, which Fermix sets itself. The value is one line of 1 to 8,192
+  bytes with no NUL, CR or LF, and at most 64 names are stored. `secret.set`
+  stores the value in the OS secret store in a namespace of its own (a skill's
+  `OPENAI_API_KEY` never touches the OpenAI provider's key), reads it back to
+  verify it, and then allows the name, removes it from the deny list and points
+  the name at the stored value in one settings write. It refuses a name whose
+  value already comes from a helper command or another variable, because
+  storing would silently change where the value comes from. `secret.clear`
+  deletes the stored value first and then the reference, so a refused delete
+  changes nothing; the name stays allowed and reads the environment Fermix was
+  started with. Neither ever asks for a restart. Where no OS secret store
+  exists, `secret.set` answers `secret_store_failed` with reason `unavailable`.
+  `present` is "the settings file points this name at a stored value".
 - **A plugin row is one shape for two halves.** An installed plugin and a
   catalog entry that has never been fetched publish the same fields, so a client
   decodes one record rather than two. `installed` is what separates them.

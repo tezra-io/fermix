@@ -427,6 +427,30 @@
       "why": "The OpenAI API-key provider carries a reasoning effort like the other reasoning providers; the draft drew the row only for the subscription providers. Adding it is a row the app renders through the descriptor form with no Swift work."
     },
     {
+      "method": "settings.get:sandbox",
+      "field": "rows:env:ALPACA_API_KEY",
+      "kind": "engine_only",
+      "why": "M45 external skill credentials: the sandbox section publishes one row per allowed or stored environment variable name after the allow-list row, keyed env:<NAME> and labelled with the name. A stored name is a secret row stored and removed through secret.set and secret.clear with that key; an allowed name with no source is a secret row that is not present; a name read from a helper command or an alias is a read-only text row. The golden fixture illustrates each shape with example names. The draft predates the family, and the rows render through the generic secret and text row controls with no Swift work."
+    },
+    {
+      "method": "settings.get:sandbox",
+      "field": "rows:env:BROKER_API_KEY",
+      "kind": "engine_only",
+      "why": "M45 external skill credentials: the sandbox section publishes one row per allowed or stored environment variable name after the allow-list row, keyed env:<NAME> and labelled with the name. A stored name is a secret row stored and removed through secret.set and secret.clear with that key; an allowed name with no source is a secret row that is not present; a name read from a helper command or an alias is a read-only text row. The golden fixture illustrates each shape with example names. The draft predates the family, and the rows render through the generic secret and text row controls with no Swift work."
+    },
+    {
+      "method": "settings.get:sandbox",
+      "field": "rows:env:GITHUB_TOKEN",
+      "kind": "engine_only",
+      "why": "M45 external skill credentials: the sandbox section publishes one row per allowed or stored environment variable name after the allow-list row, keyed env:<NAME> and labelled with the name. A stored name is a secret row stored and removed through secret.set and secret.clear with that key; an allowed name with no source is a secret row that is not present; a name read from a helper command or an alias is a read-only text row. The golden fixture illustrates each shape with example names. The draft predates the family, and the rows render through the generic secret and text row controls with no Swift work."
+    },
+    {
+      "method": "settings.get:sandbox",
+      "field": "rows:env:POLYGON_API_KEY",
+      "kind": "engine_only",
+      "why": "M45 external skill credentials: the sandbox section publishes one row per allowed or stored environment variable name after the allow-list row, keyed env:<NAME> and labelled with the name. A stored name is a secret row stored and removed through secret.set and secret.clear with that key; an allowed name with no source is a secret row that is not present; a name read from a helper command or an alias is a read-only text row. The golden fixture illustrates each shape with example names. The draft predates the family, and the rows render through the generic secret and text row controls with no Swift work."
+    },
+    {
       "method": "settings.get:transcription",
       "field": "rows:transcription_local_state",
       "kind": "draft_only",

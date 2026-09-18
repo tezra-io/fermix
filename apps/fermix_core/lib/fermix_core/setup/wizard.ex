@@ -753,6 +753,28 @@ defmodule FermixCore.Setup.Wizard do
   end
 
   @doc """
+  Rewrites the sandbox environment policy alone, through the shared write tail.
+
+  The entry for `secret.set` and `secret.clear` on the `env:<NAME>` family
+  (M45 §4.3): the external-change refusal, the save, the live apply and the
+  env-only drop are the ones every sibling writer runs. `update` receives the
+  policy in force when this write reads the snapshot and returns the new one,
+  so a change made between the caller's own checks and this write is not
+  reverted by it.
+  """
+  @spec update_sandbox_env((SandboxConfig.env_config() -> SandboxConfig.env_config())) ::
+          {:ok, report()} | {:error, term()}
+  def update_sandbox_env(update) when is_function(update, 1) do
+    snapshot = ConfigStore.current_snapshot()
+    sandbox = snapshot |> Map.get(:sandbox) |> SandboxConfig.normalize()
+
+    snapshot
+    |> Map.put(:sandbox, %{sandbox | env: update.(sandbox.env)})
+    |> drop_unanswered_env_only_secrets([])
+    |> commit_snapshot()
+  end
+
+  @doc """
   Sets a provider's `auth_mode` (`:api_key` or `:oauth`) without going through
   the prompt-driven `save_answers/2` path. Used by the CLI `fermix auth
   login/logout` commands so the OAuth token write and the config route selector

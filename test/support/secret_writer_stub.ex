@@ -35,20 +35,24 @@ defmodule FermixTestSupport.SecretWriterStub do
 
   @behaviour FermixCore.Setup.SecretWriter
 
+  import FermixCore.Setup.SecretWriter, only: [is_secret_key: 1]
+
+  alias FermixCore.Setup.SecretWriter
+
   @table __MODULE__
 
   @impl true
   def available?(_opts \\ []), do: true
 
   @impl true
-  def put(key, value, opts \\ []) when is_atom(key) and is_binary(value) do
+  def put(key, value, opts \\ []) when is_secret_key(key) and is_binary(value) do
     ensure_table()
     :ets.insert(@table, {{profile(opts), key}, value})
     :ok
   end
 
   @impl true
-  def get(key, opts \\ []) when is_atom(key) do
+  def get(key, opts \\ []) when is_secret_key(key) do
     ensure_table()
 
     case :ets.lookup(@table, {profile(opts), key}) do
@@ -60,15 +64,24 @@ defmodule FermixTestSupport.SecretWriterStub do
   # Mirrors the real writers: deleting an absent item succeeds, because the
   # postcondition (no stored value under this key) already holds.
   @impl true
-  def delete(key, opts \\ []) when is_atom(key) do
+  def delete(key, opts \\ []) when is_secret_key(key) do
     ensure_table()
     :ets.delete(@table, {profile(opts), key})
     :ok
   end
 
   @impl true
-  def command_source(key, _opts \\ []) when is_atom(key) do
+  def command_source(key, opts \\ [])
+
+  def command_source(key, _opts) when is_atom(key) do
     %{source: :command, command: "stub-keyring", args: [Atom.to_string(key)]}
+  end
+
+  # A skill's own key names its profile the way the real writers do, so a test
+  # can observe that "stored by Fermix" is decided per profile (M45 §4.2).
+  def command_source({:external_env, _name} = key, opts) do
+    address = "#{SecretWriter.scoped_prefix(opts)}:#{SecretWriter.item_name(key)}"
+    %{source: :command, command: "stub-keyring", args: [address]}
   end
 
   # Mirror the real writers: secrets are namespaced by profile so tests observe
@@ -130,6 +143,10 @@ defmodule FermixTestSupport.CountingSecretWriter do
 
   @behaviour FermixCore.Setup.SecretWriter
 
+  import FermixCore.Setup.SecretWriter, only: [is_secret_key: 1]
+
+  alias FermixCore.Setup.SecretWriter
+
   @observer __MODULE__.Observer
 
   @doc "Registers the calling process as the one told about every read."
@@ -152,20 +169,26 @@ defmodule FermixTestSupport.CountingSecretWriter do
   def available?(_opts \\ []), do: true
 
   @impl true
-  def put(key, _value, _opts \\ []) when is_atom(key), do: :ok
+  def put(key, _value, _opts \\ []) when is_secret_key(key), do: :ok
 
   @impl true
-  def get(key, _opts \\ []) when is_atom(key) do
+  def get(key, _opts \\ []) when is_secret_key(key) do
     report({:secret_writer_get, key})
     {:error, :missing_secret}
   end
 
   @impl true
-  def delete(key, _opts \\ []) when is_atom(key), do: :ok
+  def delete(key, _opts \\ []) when is_secret_key(key), do: :ok
 
   @impl true
-  def command_source(key, _opts \\ []) when is_atom(key) do
+  def command_source(key, opts \\ [])
+
+  def command_source(key, _opts) when is_atom(key) do
     %{source: :command, command: "counting-keyring", args: [Atom.to_string(key)]}
+  end
+
+  def command_source({:external_env, _name} = key, _opts) do
+    %{source: :command, command: "counting-keyring", args: [SecretWriter.item_name(key)]}
   end
 
   defp report(message) do
