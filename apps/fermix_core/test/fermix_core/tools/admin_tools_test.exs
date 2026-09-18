@@ -1,7 +1,7 @@
 defmodule FermixCore.Tools.AdminToolsTest do
-  # async: false — setup mutates System env (FERMIX_HOME) and one test mutates
-  # Application env (:fermix_core, :routing). Running async would race other
-  # tests reading those globals.
+  # async: false — setup mutates System env (FERMIX_HOME) and the routing tests
+  # mutate Application env (:fermix_core, :routing and :sandbox). Running async
+  # would race other tests reading those globals.
   use ExUnit.Case, async: false
 
   alias FermixCore.Tools.ModelRoutingConfig
@@ -17,6 +17,9 @@ defmodule FermixCore.Tools.AdminToolsTest do
     System.put_env("FERMIX_HOME", home)
 
     previous_routing = Application.get_env(:fermix_core, :routing)
+    # A routing write applies the whole snapshot, and that rewrites the sandbox
+    # to whatever this fresh home's file holds.
+    previous_sandbox = Application.get_env(:fermix_core, :sandbox)
 
     on_exit(fn ->
       if previous_home,
@@ -26,6 +29,10 @@ defmodule FermixCore.Tools.AdminToolsTest do
       if previous_routing,
         do: Application.put_env(:fermix_core, :routing, previous_routing),
         else: Application.delete_env(:fermix_core, :routing)
+
+      if previous_sandbox,
+        do: Application.put_env(:fermix_core, :sandbox, previous_sandbox),
+        else: Application.delete_env(:fermix_core, :sandbox)
 
       FermixTestSupport.SafeRm.rm_rf!(home)
     end)
