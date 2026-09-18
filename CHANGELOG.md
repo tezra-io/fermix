@@ -129,6 +129,17 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **The shipped persona and operating rules are shorter and sharper.** `SOUL.md`
+  now asks for judgment with confidence that follows evidence rather than a
+  forced side, dry wit with clear limits instead of stock praise, and scoped
+  authorization instead of a fresh question for every outward step; its stale
+  description of self-editing memory is gone. `FERMIX.md` drops rules that
+  repeated it, says tools are the advertised and discoverable capabilities
+  rather than "everything I have", asks only about gaps that change the
+  outcome, carries the active task and earlier approvals forward, and keeps
+  every verification, provenance and proof-of-work contract. New installs and
+  untouched files get the new text; an edited file keeps yours.
+
 - **`fermix doctor`'s `cosign` row names the executable this host resolved**
   and the remedy for its own install family — the distribution's own package on
   a Linux package install, where the bundled `/usr/lib/fermix/cosign` is the
