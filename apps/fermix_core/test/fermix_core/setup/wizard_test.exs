@@ -38,6 +38,9 @@ defmodule FermixCore.Setup.WizardTest do
 
   setup do
     providers = Application.fetch_env(:fermix_core, :providers)
+    # Every save applies its sandbox to app env, and a provider key answer adds
+    # a keyring-backed `[sandbox.env]` allow entry under the stub writer.
+    sandbox = Application.fetch_env(:fermix_core, :sandbox)
     telegram = Application.fetch_env(:fermix_channels, :telegram)
     whatsapp = Application.fetch_env(:fermix_channels, :whatsapp)
     discord = Application.fetch_env(:fermix_channels, :discord)
@@ -87,6 +90,7 @@ defmodule FermixCore.Setup.WizardTest do
 
     on_exit(fn ->
       restore_env(:fermix_core, :providers, providers)
+      restore_env(:fermix_core, :sandbox, sandbox)
       restore_env(:fermix_channels, :telegram, telegram)
       restore_env(:fermix_channels, :whatsapp, whatsapp)
       restore_env(:fermix_channels, :discord, discord)

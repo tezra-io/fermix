@@ -1,5 +1,5 @@
 defmodule FermixCore.Sandbox.EnvHealthTest do
-  # `async: false` because the refresh tests read the shared `:sandbox` app env,
+  # `async: false` because every instance probes the shared `:sandbox` app env,
   # and the module under test logs through the global Logger.
   use ExUnit.Case, async: false
 
@@ -11,7 +11,23 @@ defmodule FermixCore.Sandbox.EnvHealthTest do
   @absent "FERMIX_TEST_ABSENT"
   @missing {:missing_env, "FERMIX_TEST_ABSENT"}
 
+  # An instance probes the allow list in force the moment it starts, off its own
+  # process, so the list is established before it starts. Left to chance, the
+  # probe reads whatever an earlier module's config apply left there: a wizard
+  # save under the stub keyring allows `OPENAI_API_KEY` through a helper that
+  # does not exist, and that name landed in these records beside the one each
+  # test asserts on.
   setup do
+    sandbox = Application.get_env(:fermix_core, :sandbox)
+    Application.put_env(:fermix_core, :sandbox, Config.normalize(env: [allow: []]))
+
+    on_exit(fn ->
+      case sandbox do
+        nil -> Application.delete_env(:fermix_core, :sandbox)
+        value -> Application.put_env(:fermix_core, :sandbox, value)
+      end
+    end)
+
     name = :"env_health_#{System.unique_integer([:positive])}"
     start_supervised!({EnvHealth, name: name})
     %{server: name}
@@ -122,15 +138,9 @@ defmodule FermixCore.Sandbox.EnvHealthTest do
 
   describe "refresh/1" do
     setup do
-      sandbox = Application.get_env(:fermix_core, :sandbox)
       original = System.get_env(@absent)
 
       on_exit(fn ->
-        case sandbox do
-          nil -> Application.delete_env(:fermix_core, :sandbox)
-          value -> Application.put_env(:fermix_core, :sandbox, value)
-        end
-
         case original do
           nil -> System.delete_env(@absent)
           value -> System.put_env(@absent, value)

@@ -9,6 +9,10 @@ defmodule FermixCore.Setup.RuntimeTest do
 
   setup do
     providers = Application.fetch_env(:fermix_core, :providers)
+    # A setup run applies its home's config and saves through the wizard, and both
+    # write the sandbox to app env: a provider key answer adds a keyring-backed
+    # `[sandbox.env]` allow entry under the stub writer.
+    sandbox = Application.fetch_env(:fermix_core, :sandbox)
     telegram = Application.fetch_env(:fermix_channels, :telegram)
     personalization = Application.get_env(:fermix_core, :personalization, [])
     agent = Application.get_env(:fermix_core, :agent, [])
@@ -22,6 +26,7 @@ defmodule FermixCore.Setup.RuntimeTest do
 
     on_exit(fn ->
       restore(:fermix_core, :providers, providers)
+      restore(:fermix_core, :sandbox, sandbox)
       restore(:fermix_channels, :telegram, telegram)
       restore(:fermix_channels, :mobile, mobile)
       Application.put_env(:fermix_core, :personalization, personalization)
