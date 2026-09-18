@@ -376,6 +376,95 @@ defmodule FermixCore.Resource.RegistryTest do
     assert Path.wildcard("#{path}.tmp-*") == []
   end
 
+  test "commit_and_write accepts a matching expected_hash", %{repo: repo} do
+    dir = temp_bootstrap_dir("commit-and-write-expected-ok")
+    path = Path.join([dir, "main", "SOUL.md"])
+    File.mkdir_p!(Path.dirname(path))
+    File.write!(path, "on disk\n")
+
+    assert {:ok, %Revision{revision: 1}} =
+             Registry.commit_and_write("main", "soul_md", "global", "adopted\n",
+               mutation_source: :template_adopt,
+               provenance: %{"trigger" => "template_adopt"},
+               expected_hash: Registry.content_hash("on disk\n"),
+               bootstrap_dir: dir,
+               repo: repo
+             )
+
+    assert File.read!(path) == "adopted\n"
+  end
+
+  test "commit_and_write refuses a stale expected_hash before touching the file", %{repo: repo} do
+    dir = temp_bootstrap_dir("commit-and-write-expected-stale")
+    path = Path.join([dir, "main", "SOUL.md"])
+    File.mkdir_p!(Path.dirname(path))
+    File.write!(path, "edited after classification\n")
+
+    assert {:error, :stale_base} =
+             Registry.commit_and_write("main", "soul_md", "global", "adopted\n",
+               mutation_source: :template_adopt,
+               expected_hash: Registry.content_hash("what the caller read\n"),
+               bootstrap_dir: dir,
+               repo: repo
+             )
+
+    assert File.read!(path) == "edited after classification\n"
+
+    assert {:error, :not_found} =
+             Registry.current_revision("main", "soul_md", "global", repo: repo)
+
+    assert Path.wildcard("#{path}.tmp-*") == []
+  end
+
+  test "commit_and_write refuses an expected_hash when the file is gone", %{repo: repo} do
+    dir = temp_bootstrap_dir("commit-and-write-expected-gone")
+    path = Path.join([dir, "main", "SOUL.md"])
+
+    assert {:error, :stale_base} =
+             Registry.commit_and_write("main", "soul_md", "global", "adopted\n",
+               mutation_source: :template_adopt,
+               expected_hash: Registry.content_hash("what the caller read\n"),
+               bootstrap_dir: dir,
+               repo: repo
+             )
+
+    refute File.exists?(path)
+  end
+
+  test "commit_and_write rewrites an explicit resource_path, not the path the row recorded",
+       %{repo: repo} do
+    old_dir = temp_bootstrap_dir("commit-and-write-path-old")
+    new_dir = temp_bootstrap_dir("commit-and-write-path-new")
+    old_path = Path.join([old_dir, "main", "SOUL.md"])
+    new_path = Path.join([new_dir, "main", "SOUL.md"])
+    File.mkdir_p!(Path.dirname(new_path))
+    File.write!(new_path, "seeded\n")
+
+    # The row remembers where the file lived when it was seeded; the home has
+    # since moved and nothing recommitted, so that recorded path is stale.
+    assert {:ok, %Revision{revision: 1}} =
+             Registry.commit("main", "soul_md", "global", "seeded\n",
+               mutation_source: :seed,
+               resource_path: old_path,
+               repo: repo
+             )
+
+    assert {:ok, %Revision{revision: 2}} =
+             Registry.commit_and_write("main", "soul_md", "global", "adopted\n",
+               mutation_source: :template_adopt,
+               resource_path: new_path,
+               expected_hash: Registry.content_hash("seeded\n"),
+               bootstrap_dir: new_dir,
+               repo: repo
+             )
+
+    assert File.read!(new_path) == "adopted\n"
+    refute File.exists?(old_path)
+
+    assert {:ok, %{resource_path: ^new_path}} =
+             Registry.get_resource("main", "soul_md", "global", repo: repo)
+  end
+
   test "commit_and_write rejects resource types with no on-disk file", %{repo: repo} do
     assert {:error, {:not_file_backed, "checkpoint"}} =
              Registry.commit_and_write("main", "checkpoint", "global", "summary",

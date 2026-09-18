@@ -34,17 +34,17 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias FermixCore.Harness.Identity
   alias FermixCore.Harness.Ledger, as: HarnessLedger
   alias FermixCore.Harness.Vendors, as: HarnessVendors
+  alias FermixCore.Memory.Config, as: MemoryConfig
   alias FermixCore.Nostr.Key, as: NostrKey
   alias FermixCore.Plugins.Config, as: PluginConfig
   alias FermixCore.Plugins.Dist.McpSource
   alias FermixCore.Plugins.Registry, as: PluginRegistry
   alias FermixCore.Plugins.Status, as: PluginStatus
-  alias FermixCore.Prompt.TemplateRenderer
+  alias FermixCore.Prompt.TemplateReconciler
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.RoutingOverrides
   alias FermixCore.Providers.Selection
   alias FermixCore.Realtime.Config, as: RealtimeConfig
-  alias FermixCore.Resource.Registry, as: ResourceRegistry
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Sandbox.Mode, as: SandboxMode
   alias FermixCore.Setup.Coexistence
@@ -57,6 +57,9 @@ defmodule Fermix.CLI.Doctor.Checks do
 
   @type status :: :ok | :warn | :fail | :not_applicable
   @type result :: %{name: String.t(), status: status(), detail: String.t()}
+
+  # One row name for every branch of the bootstrap-template verdict.
+  @drift_row "bootstrap templates"
 
   @sandbox_trace_days 7
   @sandbox_trace_limit 20
@@ -695,65 +698,86 @@ defmodule Fermix.CLI.Doctor.Checks do
   end
 
   @doc """
-  Bootstrap template drift (M10 P5): compares the CURRENT shipped template
-  render against the content the `:seed` revision recorded at install time.
-  A mismatch means the shipped template gained changes after this install
-  was seeded — the operator's file may lag and deserves a manual diff.
+  Bootstrap template drift (M10 P5, M43 §9.3): the operator-visible half of
+  `Prompt.TemplateReconciler`. It renders that one classifier rather than
+  comparing anything itself, so the row and the boot-time adoption can never
+  disagree about what an installed file is.
+
   Variable-free templates only (fermix/soul/realtime/live); IDENTITY.md embeds
-  the agent name, so a render comparison cannot distinguish template drift
-  from a rename. Installs seeded before revision tracking report unknown.
+  the agent name, so a render comparison cannot distinguish template drift from
+  a rename, and USER/MEMORY are rebuilt from durable memory.
   """
   @spec bootstrap_template_drift(keyword()) :: result()
   def bootstrap_template_drift(opts \\ []) do
-    agent_id = Keyword.get(opts, :agent_id, "main")
-
-    {drifted, unknown} =
-      [fermix: :fermix_md, soul: :soul_md, realtime: :realtime_md, live: :live_md]
-      |> Enum.reduce({[], []}, fn {name, type}, {drifted, unknown} ->
-        case template_drift_state(agent_id, name, type, opts) do
-          :current -> {drifted, unknown}
-          :drifted -> {[name | drifted], unknown}
-          :unknown -> {drifted, [name | unknown]}
-        end
-      end)
-
-    cond do
-      drifted != [] ->
-        warn(
-          "bootstrap templates",
-          "shipped template(s) changed since this install was seeded: " <>
-            "#{drifted |> Enum.reverse() |> Enum.map_join(", ", &"#{&1}.md")} — " <>
-            "diff your bootstrap file(s) against the current template for missed improvements"
-        )
-
-      unknown != [] ->
-        ok(
-          "bootstrap templates",
-          "no seed record for #{unknown |> Enum.reverse() |> Enum.map_join(", ", &"#{&1}.md")} " <>
-            "(seeded before revision tracking); others match the shipped templates"
-        )
-
-      true ->
-        ok("bootstrap templates", "seeded from the current shipped templates")
+    case TemplateReconciler.classify(MemoryConfig.agent_id(opts), opts) do
+      {:ok, entries} -> render_template_drift(entries)
+      {:error, reason} -> warn(@drift_row, "could not be checked: #{inspect(reason)}")
     end
   catch
     # Doctor must not crash when the memory repo is unavailable in this VM;
     # report the honest skip instead.
-    :exit, _reason -> ok("bootstrap templates", "skipped (memory repo unavailable)")
+    :exit, _reason -> ok(@drift_row, "skipped (memory repo unavailable)")
   end
 
-  defp template_drift_state(agent_id, name, type, opts) do
-    registry_opts = Keyword.take(opts, [:repo])
+  defp render_template_drift(entries) do
+    pending = drift_files(entries, &(&1.state == :untouched))
+    customized = drift_files(entries, &(&1.state == :customized and &1.default_moved?))
+    unknown = drift_files(entries, &(&1.state == :unknown))
 
-    with {:ok, revisions} <-
-           ResourceRegistry.list_revisions(agent_id, type, "global", registry_opts),
-         %{content: seeded} <- Enum.find(revisions, &(&1.mutation_source == "seed")),
-         {:ok, current} <- TemplateRenderer.render(name, %{}) do
-      if String.trim_trailing(seeded) == String.trim_trailing(current),
-        do: :current,
-        else: :drifted
+    cond do
+      Enum.all?(entries, &(&1.state == :skipped)) ->
+        ok(@drift_row, "skipped (memory repo unavailable)")
+
+      pending != [] or customized != [] ->
+        warn(@drift_row, drift_detail(pending, customized))
+
+      unknown != [] ->
+        ok(
+          @drift_row,
+          "no seed record for #{Enum.join(unknown, ", ")} (seeded before revision tracking) — " <>
+            "preserved as is and worth a manual review"
+        )
+
+      Enum.all?(entries, &(&1.state in [:absent, :empty])) ->
+        ok(@drift_row, "no bootstrap files installed yet; setup seeds them")
+
+      true ->
+        ok(@drift_row, "match the shipped templates")
+    end
+  end
+
+  defp drift_files(entries, predicate) do
+    entries
+    |> Enum.filter(predicate)
+    |> Enum.map(&Path.basename(&1.path))
+  end
+
+  defp drift_detail(pending, customized) do
+    [pending_sentence(pending), customized_sentence(customized)]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join("; ")
+  end
+
+  defp pending_sentence([]), do: nil
+
+  defp pending_sentence(files) do
+    "shipped template(s) updated and your file(s) are untouched defaults: " <>
+      "#{Enum.join(files, ", ")} — Fermix will adopt them on the next daemon start"
+  end
+
+  defp customized_sentence([]), do: nil
+
+  defp customized_sentence(files) do
+    "shipped template(s) changed while your file(s) carry local edits: " <>
+      "#{Enum.join(files, ", ")} — diff them against the current template" <>
+      soul_reset_hint(files)
+  end
+
+  defp soul_reset_hint(files) do
+    if "SOUL.md" in files do
+      ", or run `/soul reset` to take the shipped SOUL.md"
     else
-      _no_seed_record -> :unknown
+      ""
     end
   end
 

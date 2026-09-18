@@ -8,6 +8,19 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A prompt file you never edited adopts the newer shipped template on the
+  next daemon start.** Setup seeds `SOUL.md`, `FERMIX.md`, `REALTIME.md` and
+  `LIVE.md` once and then treats them as yours, so a `brew upgrade` or an app
+  update that shipped better prompts never reached an existing home. The daemon
+  now compares each of those four files against the baseline it recorded
+  (the seed, an earlier adoption, or a `/soul reset`) and against the template
+  the running build ships: a file still equal to its baseline is rewritten to
+  the new default through the versioned registry (revertable with the existing
+  history), a file you changed is left alone and named in the log and in the
+  `bootstrap templates` Doctor row, and a file with no baseline record is never
+  guessed to be untouched. `IDENTITY.md`, `USER.md` and `MEMORY.md` are never
+  part of this.
+
 - **A Fermix installed from a Linux package manages its service through
   its own verbs.** The package owns the systemd user unit, so
   `fermix service install [--home PATH]` writes no unit: it records which

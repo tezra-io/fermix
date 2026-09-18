@@ -318,80 +318,164 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
 
   describe "bootstrap_template_drift/1" do
     alias FermixCore.Memory.Repo, as: MemoryRepo
-    alias FermixCore.Prompt.TemplateRenderer
+    alias FermixCore.Prompt.Defaults
     alias FermixCore.Resource.Registry, as: ResourceRegistry
+
+    @drift_types [:fermix_md, :soul_md, :realtime_md, :live_md]
 
     setup do
       unique = System.unique_integer([:positive])
-      db_dir = FermixTestSupport.SafeRm.make_tmp_dir!("doctor-drift-#{unique}")
+      root = FermixTestSupport.SafeRm.make_tmp_dir!("doctor-drift-#{unique}")
+      bootstrap_dir = Path.join(root, "bootstrap")
+      agent_dir = Path.join(bootstrap_dir, "main")
       repo_name = :"drift_repo_#{unique}"
 
+      File.mkdir_p!(agent_dir)
+
       start_supervised!(
-        {MemoryRepo,
-         name: repo_name, enabled: true, database_path: Path.join(db_dir, "memory.db")}
+        {MemoryRepo, name: repo_name, enabled: true, database_path: Path.join(root, "memory.db")}
       )
 
-      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(db_dir) end)
-      %{repo: repo_name}
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(root) end)
+
+      %{
+        agent_dir: agent_dir,
+        opts: [repo: repo_name, bootstrap_dir: bootstrap_dir, agent_id: "main"],
+        repo: repo_name
+      }
     end
 
-    defp commit_seed(repo, type, content) do
+    defp drift_file(:fermix_md), do: "FERMIX.md"
+    defp drift_file(:soul_md), do: "SOUL.md"
+    defp drift_file(:realtime_md), do: "REALTIME.md"
+    defp drift_file(:live_md), do: "LIVE.md"
+
+    defp drift_default(:fermix_md), do: Defaults.fermix_md()
+    defp drift_default(:soul_md), do: Defaults.soul_md()
+    defp drift_default(:realtime_md), do: Defaults.realtime_md()
+    defp drift_default(:live_md), do: Defaults.live_md()
+
+    # The classifier reads the file AND the revision history, so a fixture that
+    # only commits a revision describes a home that cannot exist.
+    defp install(ctx, type, content) do
+      path = Path.join(ctx.agent_dir, drift_file(type))
+      File.write!(path, content)
+      path
+    end
+
+    defp seed(ctx, type, content) do
+      path = install(ctx, type, content)
+
       {:ok, _revision} =
         ResourceRegistry.commit("main", type, "global", content,
           mutation_source: :seed,
-          repo: repo
+          resource_path: path,
+          repo: ctx.opts[:repo]
         )
+
+      :ok
     end
 
-    test "ok when seeds match the current shipped templates", %{repo: repo} do
-      for {name, type} <- [
-            fermix: :fermix_md,
-            soul: :soul_md,
-            realtime: :realtime_md,
-            live: :live_md
-          ] do
-        {:ok, current} = TemplateRenderer.render(name, %{})
-        commit_seed(repo, type, current)
-      end
+    defp seed_current(ctx) do
+      Enum.each(@drift_types, &seed(ctx, &1, drift_default(&1)))
+    end
 
-      result = Checks.bootstrap_template_drift(repo: repo)
+    test "ok when every installed file matches the current shipped templates", ctx do
+      seed_current(ctx)
+
+      result = Checks.bootstrap_template_drift(ctx.opts)
+      assert result.name == "bootstrap templates"
       assert result.status == :ok
-      assert result.detail =~ "current shipped templates"
+      assert result.detail =~ "match the shipped templates"
     end
 
-    test "warns when a shipped template changed since seed", %{repo: repo} do
-      {:ok, current_soul} = TemplateRenderer.render(:soul, %{})
-      {:ok, current_realtime} = TemplateRenderer.render(:realtime, %{})
-      {:ok, current_live} = TemplateRenderer.render(:live, %{})
+    test "warns that an untouched default will be adopted on the next daemon start", ctx do
+      seed_current(ctx)
+      seed(ctx, :fermix_md, "an older fermix template render")
 
-      commit_seed(repo, :fermix_md, "an older fermix template render")
-      commit_seed(repo, :soul_md, current_soul)
-      commit_seed(repo, :realtime_md, current_realtime)
-      commit_seed(repo, :live_md, current_live)
-
-      result = Checks.bootstrap_template_drift(repo: repo)
+      result = Checks.bootstrap_template_drift(ctx.opts)
       assert result.status == :warn
-      assert result.detail =~ "fermix.md"
-      refute result.detail =~ "soul.md"
+      assert result.detail =~ "FERMIX.md"
+      assert result.detail =~ "untouched defaults"
+      assert result.detail =~ "adopt them on the next daemon start"
+      refute result.detail =~ "SOUL.md"
     end
 
-    test "warns when the shipped LIVE.md template changed since seed", %{repo: repo} do
-      for {name, type} <- [fermix: :fermix_md, soul: :soul_md, realtime: :realtime_md] do
-        {:ok, current} = TemplateRenderer.render(name, %{})
-        commit_seed(repo, type, current)
-      end
+    test "warns that a customized file's shipped template moved", ctx do
+      seed_current(ctx)
+      seed(ctx, :live_md, "an older live template render")
+      install(ctx, :live_md, "my own live instructions")
 
-      commit_seed(repo, :live_md, "an older live template render")
-
-      result = Checks.bootstrap_template_drift(repo: repo)
+      result = Checks.bootstrap_template_drift(ctx.opts)
       assert result.status == :warn
-      assert result.detail =~ "live.md"
+      assert result.detail =~ "LIVE.md"
+      assert result.detail =~ "local edits"
+      assert result.detail =~ "diff them against the current template"
+      refute result.detail =~ "/soul reset"
     end
 
-    test "reports unknown for installs seeded before revision tracking", %{repo: repo} do
-      result = Checks.bootstrap_template_drift(repo: repo)
+    test "offers /soul reset only when SOUL.md is the customized file", ctx do
+      seed_current(ctx)
+      seed(ctx, :soul_md, "an older soul template render")
+      install(ctx, :soul_md, "my own persona")
+
+      result = Checks.bootstrap_template_drift(ctx.opts)
+      assert result.status == :warn
+      assert result.detail =~ "SOUL.md"
+      assert result.detail =~ "/soul reset"
+    end
+
+    test "names both a pending adoption and a customized file in one warning", ctx do
+      seed_current(ctx)
+      seed(ctx, :fermix_md, "an older fermix template render")
+      seed(ctx, :live_md, "an older live template render")
+      install(ctx, :live_md, "my own live instructions")
+
+      result = Checks.bootstrap_template_drift(ctx.opts)
+      assert result.status == :warn
+      assert result.detail =~ "untouched defaults: FERMIX.md"
+      assert result.detail =~ "local edits: LIVE.md"
+    end
+
+    test "a customized file whose shipped template never moved is not drift", ctx do
+      seed_current(ctx)
+      install(ctx, :soul_md, "my own persona")
+
+      result = Checks.bootstrap_template_drift(ctx.opts)
+      assert result.status == :ok
+      assert result.detail =~ "match the shipped templates"
+    end
+
+    test "reports unknown for installs with no seed record", ctx do
+      @drift_types
+      |> Enum.reject(&(&1 == :fermix_md))
+      |> Enum.each(&seed(ctx, &1, drift_default(&1)))
+
+      install(ctx, :fermix_md, "content of unknown origin")
+
+      result = Checks.bootstrap_template_drift(ctx.opts)
       assert result.status == :ok
       assert result.detail =~ "no seed record"
+      assert result.detail =~ "FERMIX.md"
+    end
+
+    test "ok when no bootstrap file is installed yet", ctx do
+      result = Checks.bootstrap_template_drift(ctx.opts)
+      assert result.status == :ok
+      assert result.detail =~ "no bootstrap files installed yet"
+    end
+
+    test "ok and skipped when the resource registry is switched off", ctx do
+      seed_current(ctx)
+      disabled = :"drift_disabled_#{System.unique_integer([:positive])}"
+
+      start_supervised!(
+        Supervisor.child_spec({MemoryRepo, name: disabled, enabled: false}, id: disabled)
+      )
+
+      result = Checks.bootstrap_template_drift(Keyword.put(ctx.opts, :repo, disabled))
+      assert result.status == :ok
+      assert result.detail =~ "skipped (memory repo unavailable)"
     end
   end
 

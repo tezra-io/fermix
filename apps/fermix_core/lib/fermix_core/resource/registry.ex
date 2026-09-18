@@ -12,7 +12,7 @@ defmodule FermixCore.Resource.Registry do
 
   @resource_types ~w(identity_md fermix_md soul_md realtime_md live_md user_md memory_md checkpoint)
   @file_resource_types ~w(identity_md fermix_md soul_md realtime_md live_md user_md memory_md)
-  @mutation_sources ~w(seed imported manual_edit extraction_rebuild scheduler_rebuild compaction rollback soul_curation)
+  @mutation_sources ~w(seed imported manual_edit extraction_rebuild scheduler_rebuild compaction rollback soul_curation template_adopt)
   @max_commit_attempts 4
 
   @type resource_row :: Repo.resource_row()
@@ -89,6 +89,17 @@ defmodule FermixCore.Resource.Registry do
 
   Requires `:mutation_source` in `opts` exactly like `commit/5`. Rejects a
   resource type that has no on-disk file (`checkpoint`) or is unknown.
+
+  An explicit `:resource_path` in `opts` is both the path recorded on the new
+  revision and the file this call rewrites, so a caller that classified bytes at
+  a path writes to that same path. Without it the target is the path the
+  registry row recorded, else the default under the bootstrap or prompt dir.
+
+  Optional `:expected_hash` is the concurrent-edit guard: the `content_hash/1`
+  of the bytes the caller read before deciding to write. If the file on disk no
+  longer hashes to it — including when the file has since been removed — nothing
+  is written and `{:error, :stale_base}` comes back, the same refusal soul
+  curation returns for a proposal drafted against older bytes.
   """
   @spec commit_and_write(String.t(), String.t() | atom(), String.t(), String.t(), keyword()) ::
           {:ok, Revision.t() | :unchanged} | {:error, term()}
@@ -96,8 +107,9 @@ defmodule FermixCore.Resource.Registry do
       when is_binary(agent_id) and is_binary(scope_id) and is_binary(content) and is_list(opts) do
     with {:ok, type} <- normalize_resource_type(resource_type),
          :ok <- ensure_file_backed(type),
-         {:ok, path} <- resource_path(agent_id, type, scope_id, opts),
+         {:ok, path} <- write_target(agent_id, type, scope_id, opts),
          {:ok, prior} <- read_existing(path),
+         :ok <- check_expected_hash(prior, opts),
          :ok <- rewrite_file(path, content) do
       commit_after_write(agent_id, type, scope_id, content, path, prior, opts)
     end
@@ -353,6 +365,28 @@ defmodule FermixCore.Resource.Registry do
 
         {:error, {:commit_failed_restore_failed, reason, restore_reason}}
     end
+  end
+
+  defp write_target(agent_id, type, scope_id, opts) do
+    case Keyword.get(opts, :resource_path) do
+      path when is_binary(path) and path != "" -> {:ok, path}
+      _no_explicit_path -> resource_path(agent_id, type, scope_id, opts)
+    end
+  end
+
+  defp check_expected_hash(prior, opts) do
+    case Keyword.fetch(opts, :expected_hash) do
+      :error -> :ok
+      {:ok, expected} -> compare_expected_hash(prior, expected)
+    end
+  end
+
+  # No file where the caller read one is as stale as different bytes: whatever
+  # it classified is gone.
+  defp compare_expected_hash(nil, _expected), do: {:error, :stale_base}
+
+  defp compare_expected_hash(prior, expected) when is_binary(prior) do
+    if content_hash(prior) == expected, do: :ok, else: {:error, :stale_base}
   end
 
   defp read_existing(path) do

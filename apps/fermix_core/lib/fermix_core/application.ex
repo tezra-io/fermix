@@ -43,6 +43,7 @@ defmodule FermixCore.Application do
   alias FermixCore.Plugins.Dist.Installer, as: PluginInstaller
   alias FermixCore.Prompt.BootstrapRename
   alias FermixCore.Prompt.IdentityName
+  alias FermixCore.Prompt.TemplateReconciler
   alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Providers.Selection
   alias FermixCore.Realtime.Config, as: RealtimeConfig
@@ -183,6 +184,12 @@ defmodule FermixCore.Application do
         McpRuntimeStatus,
         {McpSupervisor, capability_registry: CapabilityRegistry},
         Repo,
+        # Prompt-template reconciliation (M43 §9.3) runs here and nowhere else:
+        # it needs the resource registry, so it cannot join `BootstrapRename` and
+        # `IdentityName` above `Repo`, and it must finish before `MainAgent` or
+        # the realtime supervisor composes a prompt — one pass, before any turn,
+        # so nothing can read a half-migrated set and no cache needs invalidating.
+        TemplateReconciler,
         ConversationStore,
         Store,
         # Before the boot report and the restart state, because both of those
