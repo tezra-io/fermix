@@ -281,6 +281,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   stored in the keychain, and a sign-in stopped after its token was already
   saved. The keychain step now runs inside the command, and the release rail
   runs `fermix plugins auth clear` from each standalone binary before it ships.
+- **`fermix doctor` names the platform computer use is unavailable on.** On an
+  Intel Mac with computer use turned on, the computer-use row said the sidecar
+  publishes no arm64 Linux build. It now says Intel macOS, in `fermix doctor`
+  and in the app's Doctor pane.
 - **The Linux service unit no longer fights the daemon for the log file.**
   The unit sent its own output to `logs/fermix.log` with `append:` while the
   daemon's rotating handler owned the same path, so after the first rotation
