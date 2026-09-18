@@ -780,10 +780,14 @@ defmodule FermixCore.Setup.Wizard do
   login/logout` commands so the OAuth token write and the config route selector
   stay in sync (a stored token is inert unless `auth_mode = "oauth"`). Routes
   through the same save → apply → seed → report cycle as `save_answers/2`.
+
+  `opts` carries the caller's world to that cycle: the tree-less CLI passes
+  `supervised: false` (see `commit_snapshot/2`).
   """
-  @spec set_provider_auth_mode(provider(), auth_mode() | String.t()) ::
+  @spec set_provider_auth_mode(provider(), auth_mode() | String.t(), keyword()) ::
           {:ok, report()} | {:error, term()}
-  def set_provider_auth_mode(provider, mode) when is_atom(provider) do
+  def set_provider_auth_mode(provider, mode, opts \\ [])
+      when is_atom(provider) and is_list(opts) do
     if not Descriptor.multi_auth_mode?(Descriptor.fetch!(provider)) do
       raise ArgumentError,
             "provider #{inspect(provider)} has a fixed auth mode; auth_mode is not configurable"
@@ -792,7 +796,7 @@ defmodule FermixCore.Setup.Wizard do
     ConfigStore.current_snapshot()
     |> put_provider_auth_mode(provider, mode)
     |> drop_unanswered_env_only_secrets([])
-    |> commit_snapshot()
+    |> commit_snapshot(opts)
   end
 
   @doc """
@@ -953,14 +957,22 @@ defmodule FermixCore.Setup.Wizard do
   public entries plus the management writers reach the file through it. Putting
   the refusal in one of those entries instead would leave the other three able
   to revert an outside edit silently, which is the exact defect it exists for.
+
+  The save and the apply can both run a keychain helper, so they run in the
+  caller's world: a tree-less CLI verb passes `supervised: false` and each
+  helper runs inline, while the daemon passes nothing and keeps its supervised
+  command host (`CommandRunner.run/3`).
   """
-  @spec commit_snapshot(ConfigStore.runtime_config()) :: {:ok, report()} | {:error, term()}
-  def commit_snapshot(snapshot) when is_map(snapshot) do
+  @spec commit_snapshot(ConfigStore.runtime_config(), keyword()) ::
+          {:ok, report()} | {:error, term()}
+  def commit_snapshot(snapshot, opts \\ []) when is_map(snapshot) and is_list(opts) do
+    supervised = Keyword.take(opts, [:supervised])
+
     # `save_snapshot/2` records the new baseline itself, so there is one
     # recording site for every writer rather than one per tail.
     with :ok <- RestartState.writable(),
-         :ok <- ConfigStore.save_snapshot(snapshot),
-         :ok <- ConfigStore.apply_snapshot(snapshot),
+         :ok <- ConfigStore.save_snapshot(snapshot, supervised),
+         :ok <- ConfigStore.apply_snapshot(snapshot, supervised),
          {:ok, seeding_results} <- maybe_seed_prompt_files(snapshot) do
       {:ok, BootReport.refresh_if_started(seeding_results) || report(seeding_results)}
     end

@@ -38,6 +38,37 @@ defmodule FermixCore.Plugins.ConfigTest do
     end
   end
 
+  # Answers like the shared stub and reports the options each write and delete
+  # carried, so a test can pin which world the caller claimed.
+  defmodule OptsRecordingWriter do
+    @moduledoc false
+
+    @behaviour FermixCore.Setup.SecretWriter
+
+    alias FermixTestSupport.SecretWriterStub
+
+    @impl true
+    def available?(opts \\ []), do: SecretWriterStub.available?(opts)
+
+    @impl true
+    def put(key, value, opts \\ []) do
+      send(self(), {:keychain_opts, :put, key, opts})
+      SecretWriterStub.put(key, value, opts)
+    end
+
+    @impl true
+    def get(key, opts \\ []), do: SecretWriterStub.get(key, opts)
+
+    @impl true
+    def delete(key, opts \\ []) do
+      send(self(), {:keychain_opts, :delete, key, opts})
+      SecretWriterStub.delete(key, opts)
+    end
+
+    @impl true
+    def command_source(key, opts \\ []), do: SecretWriterStub.command_source(key, opts)
+  end
+
   setup do
     home = FermixTestSupport.SafeRm.make_tmp_dir!("plugin-config")
     old_home = System.get_env("FERMIX_HOME")
@@ -225,6 +256,23 @@ defmodule FermixCore.Plugins.ConfigTest do
 
     assert {:ok, "xoxb-secret"} =
              FermixTestSupport.SecretWriterStub.get(:discord_plugin_secret)
+  end
+
+  # The caller's world decides where a keychain helper runs. A tree-less CLI
+  # verb says `supervised: false`; the daemon's callers (the setup page, the
+  # app's disconnect) say nothing, so their helpers stay on the supervised host.
+  test "a daemon caller's keychain calls stay on the supervised command host" do
+    checkout = write_api_key_plugin("discord")
+    Application.put_env(:fermix_core, :plugins, dev_local: checkout)
+    Application.put_env(:fermix_core, :secret_writer, OptsRecordingWriter)
+
+    assert {:ok, _snapshot} = Config.set_plugin_secret("discord", "xoxb-secret")
+    assert_received {:keychain_opts, :put, :discord_plugin_secret, put_opts}
+    refute Keyword.has_key?(put_opts, :supervised)
+
+    assert {:ok, _snapshot} = Config.forget_plugin_secret("discord")
+    assert_received {:keychain_opts, :delete, :discord_plugin_secret, delete_opts}
+    refute Keyword.has_key?(delete_opts, :supervised)
   end
 
   test "set_plugin_secret refuses a non-api_key plugin" do

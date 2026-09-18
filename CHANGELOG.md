@@ -270,6 +270,17 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   read.** A packaged engine takes its listener port from the settings file, and
   a `PORT` left in the shell was reported as a bad port number rather than as
   the variable this engine does not use.
+- **`fermix plugins` and `fermix auth` commands that save settings work
+  again.** A command run from a shell has no background service around it, and
+  the keychain step of a save still asked for the service's process supervisor,
+  so the command stopped with "command host supervisor ... is not running".
+  `fermix plugins auth set` and `auth clear` stopped wherever a keychain is
+  available; `enable`, `disable`, `uninstall`, `config set`, `auth login` and
+  `reauthorize`, and `fermix auth login` and `logout` with `--provider
+  anthropic` or `--provider xai`, stopped whenever the settings held a key
+  stored in the keychain, and a sign-in stopped after its token was already
+  saved. The keychain step now runs inside the command, and the release rail
+  runs `fermix plugins auth clear` from each standalone binary before it ships.
 - **The Linux service unit no longer fights the daemon for the log file.**
   The unit sent its own output to `logs/fermix.log` with `append:` while the
   daemon's rotating handler owned the same path, so after the first rotation

@@ -1,6 +1,11 @@
 defmodule Fermix.CLI.PluginsCommand do
   @moduledoc """
   `fermix plugins` — manage local Fermix plugins.
+
+  Every verb runs tree-less: `cli_dispatch/2` halts without starting the
+  supervision tree, so no `CommandHost.Supervisor` exists to own a keychain
+  helper or a runtime probe. Each call that can reach one passes
+  `supervised: false` and the helper runs inline.
   """
 
   alias Fermix.CLI.Daemon.Client, as: DaemonClient
@@ -77,7 +82,7 @@ defmodule Fermix.CLI.PluginsCommand do
   defp enable(name, argv) do
     with {:ok, opts} <- parse_opts(argv, @json_switches),
          :ok <- ensure_available(name),
-         {:ok, _snapshot} <- Config.enable(name) do
+         {:ok, _snapshot} <- Config.enable(name, supervised: false) do
       print(%{enabled: name}, Keyword.get(opts, :json, false), fn _ ->
         IO.puts("enabled #{name}")
       end)
@@ -91,7 +96,7 @@ defmodule Fermix.CLI.PluginsCommand do
 
   defp disable(name, argv) do
     with {:ok, opts} <- parse_opts(argv, @json_switches),
-         {:ok, _snapshot} <- Config.disable(name) do
+         {:ok, _snapshot} <- Config.disable(name, supervised: false) do
       print(%{disabled: name}, Keyword.get(opts, :json, false), fn _ ->
         IO.puts("disabled #{name}")
       end)
@@ -260,7 +265,7 @@ defmodule Fermix.CLI.PluginsCommand do
   defp auth_set(name, argv) do
     with {:ok, opts} <- parse_auth_set_opts(argv),
          {:ok, value} <- read_secret(name, opts),
-         {:ok, _name} <- Auth.set_secret(name, value) do
+         {:ok, _name} <- Auth.set_secret(name, value, supervised: false) do
       print(%{plugin: name, secret_set: true}, Keyword.get(opts, :json, false), fn _ ->
         IO.puts("stored api key for #{name}")
       end)
@@ -309,7 +314,7 @@ defmodule Fermix.CLI.PluginsCommand do
   # operator must do that with the provider (M27 §7.5).
   defp auth_clear(name, argv) do
     with {:ok, opts} <- parse_opts(argv, @json_switches),
-         :ok <- Auth.forget_secret(name) do
+         :ok <- Auth.forget_secret(name, supervised: false) do
       print(%{plugin: name, cleared: true}, Keyword.get(opts, :json, false), fn _ ->
         IO.puts("deleted the stored api key for #{name} — revoke it with the provider too")
       end)
@@ -341,7 +346,7 @@ defmodule Fermix.CLI.PluginsCommand do
 
   defp config_set(name, key, value, argv) do
     with {:ok, json?} <- parse_json(argv),
-         {:ok, _snapshot} <- Config.set_plugin_setting(name, key, value) do
+         {:ok, _snapshot} <- Config.set_plugin_setting(name, key, value, supervised: false) do
       print(%{plugin: name, key: key, value: value}, json?, fn _ ->
         IO.puts("set #{name} #{key}")
       end)
@@ -447,7 +452,7 @@ defmodule Fermix.CLI.PluginsCommand do
 
   defp maybe_disable(name) do
     if name in Config.enabled_plugins() do
-      with {:ok, _snapshot} <- Config.disable(name), do: :ok
+      with {:ok, _snapshot} <- Config.disable(name, supervised: false), do: :ok
     else
       :ok
     end
@@ -557,7 +562,7 @@ defmodule Fermix.CLI.PluginsCommand do
   end
 
   defp login_opts(opts) do
-    []
+    [supervised: false]
     |> maybe_put(:port, Keyword.get(opts, :port))
     |> maybe_put(:timeout_ms, timeout_ms(Keyword.get(opts, :timeout)))
     |> maybe_put_no_browser(Keyword.get(opts, :no_browser, false))

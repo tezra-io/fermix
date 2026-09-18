@@ -130,6 +130,62 @@ defmodule FermixCore.Plugins.OAuthLoginTest do
     assert params["redirect_uri"] == "http://127.0.0.1:#{port}/auth/callback"
   end
 
+  # `fermix plugins auth login` runs without the supervision tree, so the save
+  # that enables the plugin after the grant must keychain the sign-in client's
+  # secret inline. The caller says so; the daemon's sign-ins say nothing.
+  test "a tree-less sign-in enables the plugin with its keychain calls inline" do
+    previous_writer = Application.get_env(:fermix_core, :secret_writer)
+    Application.put_env(:fermix_core, :secret_writer, FermixTestSupport.TreeLessSecretWriter)
+    :ok = FermixTestSupport.TreeLessSecretWriter.watch()
+
+    on_exit(fn ->
+      case previous_writer do
+        nil -> Application.delete_env(:fermix_core, :secret_writer)
+        writer -> Application.put_env(:fermix_core, :secret_writer, writer)
+      end
+
+      FermixTestSupport.SecretWriterStub.reset()
+    end)
+
+    port = pick_free_port()
+
+    token_plug = fn conn ->
+      conn
+      |> Plug.Conn.put_resp_content_type("application/json")
+      |> Plug.Conn.send_resp(
+        200,
+        Jason.encode!(%{"access_token" => "google_at", "refresh_token" => "google_rt"})
+      )
+    end
+
+    opener = fn url ->
+      Task.start(fn ->
+        state =
+          url |> URI.parse() |> Map.fetch!(:query) |> URI.decode_query() |> Map.fetch!("state")
+
+        deliver_callback(port, "/auth/callback?code=AUTHCODE&state=#{state}")
+      end)
+
+      :ok
+    end
+
+    assert {:ok, _entry} =
+             Auth.login("google_calendar",
+               supervised: false,
+               port: port,
+               opener: opener,
+               timeout_ms: 5_000,
+               req_options: [plug: token_plug],
+               userinfo_req_options: [plug: fn conn -> Plug.Conn.send_resp(conn, 500, "") end],
+               puts: fn _ -> :ok end
+             )
+
+    assert_received {:tree_less_keychain, :put, :google_oauth_client_secret}
+
+    plugins = Application.get_env(:fermix_core, :plugins)
+    assert Keyword.get(plugins, :enabled) == ["google_calendar"]
+  end
+
   test "missing Google client config returns needs_client_config" do
     Application.put_env(:fermix_core, :oauth, %{})
 

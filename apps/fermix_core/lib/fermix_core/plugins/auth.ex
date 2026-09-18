@@ -19,6 +19,11 @@ defmodule FermixCore.Plugins.Auth do
 
   require Logger
 
+  @doc """
+  Signs in to an OAuth plugin through the loopback flow, stores the grant and
+  enables the plugin. A tree-less caller passes `supervised: false`, which the
+  enabling save runs its keychain helpers under (see `Plugins.Config`).
+  """
   @spec login(String.t(), keyword()) :: {:ok, Store.entry()} | {:error, term()}
   def login(name, opts \\ []) when is_binary(name) and is_list(opts) do
     started_at = AuthTelemetry.start()
@@ -28,7 +33,7 @@ defmodule FermixCore.Plugins.Auth do
          {:ok, tokens} <- OAuthFlow.start_loopback(provider, flow_opts(opts)),
          entry <- minted_entry(plugin, provider, tokens, opts),
          :ok <- Store.write(Config.default_auth_profile(plugin), entry),
-         {:ok, _snapshot} <- Config.enable(plugin.name) do
+         {:ok, _snapshot} <- Config.enable(plugin.name, Keyword.take(opts, [:supervised])) do
       reload_token_manager(plugin)
       report(:login, plugin.name, {:ok, login_tag(entry)}, started_at)
       {:ok, entry}
@@ -85,12 +90,14 @@ defmodule FermixCore.Plugins.Auth do
   @doc """
   Store the static credential for an `api_key` plugin (M16). The value is
   keychained via the secure-on-save path; the plugin then resolves `:ready`.
+  A tree-less caller passes `supervised: false` (see `Plugins.Config`).
   """
-  @spec set_secret(String.t(), String.t()) :: {:ok, String.t()} | {:error, term()}
-  def set_secret(name, value) when is_binary(name) and is_binary(value) do
+  @spec set_secret(String.t(), String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
+  def set_secret(name, value, opts \\ [])
+      when is_binary(name) and is_binary(value) and is_list(opts) do
     started_at = AuthTelemetry.start()
 
-    case Config.set_plugin_secret(name, value) do
+    case Config.set_plugin_secret(name, value, opts) do
       {:ok, _snapshot} ->
         report(:set, name, {:ok, :ready}, started_at)
         {:ok, name}
@@ -104,13 +111,14 @@ defmodule FermixCore.Plugins.Auth do
   @doc """
   Forget an `api_key` plugin's stored credential: the OS-keychain item is
   deleted and only then is the config reference dropped. Local only — it does
-  not revoke the credential with the provider.
+  not revoke the credential with the provider. A tree-less caller passes
+  `supervised: false` (see `Plugins.Config`).
   """
-  @spec forget_secret(String.t()) :: :ok | {:error, term()}
-  def forget_secret(name) when is_binary(name) do
+  @spec forget_secret(String.t(), keyword()) :: :ok | {:error, term()}
+  def forget_secret(name, opts \\ []) when is_binary(name) and is_list(opts) do
     started_at = AuthTelemetry.start()
 
-    case Config.forget_plugin_secret(name) do
+    case Config.forget_plugin_secret(name, opts) do
       {:ok, _snapshot} ->
         report(:clear, name, {:ok, :logged_out}, started_at)
         :ok
