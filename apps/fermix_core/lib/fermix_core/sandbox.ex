@@ -26,12 +26,17 @@ defmodule FermixCore.Sandbox do
   allow list's outcome for this command: an allowed name the daemon could not
   read is not a denial, so the plan carries it for the tool to report rather
   than refusing the command.
+
+  `redact_values` are the values read for the allowed names (never the default
+  keys), which the tool scrubs from everything the model and the trace see. The
+  plan holds secrets, so it is never itself put in a trace or a log.
   """
   @type shell_plan :: %{
           working_dir: String.t(),
           env: [{String.t(), String.t()}],
           env_resolved: [String.t()],
-          env_unresolved: [Env.unresolved()]
+          env_unresolved: [Env.unresolved()],
+          redact_values: [String.t()]
         }
 
   @spec shell_plan(String.t(), String.t() | nil, map()) :: {:ok, shell_plan()} | {:error, term()}
@@ -47,15 +52,17 @@ defmodule FermixCore.Sandbox do
          {:ok, built} <- Env.build(config) do
       # The client-session env overlay (MILESTONE_29_ACP_AGENT_SURFACE §8.3).
       # This plan IS the shell child's whole environment (`Tools.Shell` spawns
-      # `env -i <assignments> sh -c <command>`), so a Buzz session's PATH and
-      # relay credentials have to land here or the model can never run the `buzz`
-      # CLI it is instructed to answer with. Absent on every other surface.
+      # `sh -c <command>` with this list replacing everything it would inherit),
+      # so a Buzz session's PATH and relay credentials have to land here or the
+      # model can never run the `buzz` CLI it is instructed to answer with.
+      # Absent on every other surface.
       {:ok,
        %{
          working_dir: working_dir,
          env: Env.apply_session_env(built.env, Map.get(context, :session_env)),
          env_resolved: built.resolved,
-         env_unresolved: built.unresolved
+         env_unresolved: built.unresolved,
+         redact_values: Env.values_for(built.env, built.resolved)
        }}
     else
       {:hardline, reason} -> {:error, {:hardline, reason}}

@@ -62,6 +62,33 @@ defmodule FermixCore.SandboxTest do
     FermixTestSupport.SafeRm.rm_rf!(outside)
   end
 
+  # M45 §4.7: the plan names what the shell must scrub, the allowed values it
+  # read, and never the default keys, even when one is also allowed by name.
+  test "shell_plan carries the allowed values to redact and never a default key" do
+    root = FermixTestSupport.SafeRm.make_tmp_dir!("sandbox-shell-plan-redact")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(root) end)
+
+    config =
+      Config.normalize(
+        mode: :strict,
+        workspace_root: root,
+        env: [
+          allow: ["FERMIX_M45_PLAN_TOKEN", "HOME"],
+          sources: %{
+            "FERMIX_M45_PLAN_TOKEN" => [
+              source: :command,
+              command: "/bin/echo",
+              args: ["plan-fixture-value"]
+            ]
+          }
+        ]
+      )
+
+    assert {:ok, plan} = Sandbox.shell_plan("echo hi", root, %{sandbox_config: config})
+    assert plan.env_resolved == ["FERMIX_M45_PLAN_TOKEN", "HOME"]
+    assert plan.redact_values == ["plan-fixture-value"]
+  end
+
   test "enforce applies working-dir policy to command capabilities" do
     root = FermixTestSupport.SafeRm.make_tmp_dir!("sandbox-enforce-command")
     outside = FermixTestSupport.SafeRm.make_tmp_dir!("sandbox-enforce-command-outside")

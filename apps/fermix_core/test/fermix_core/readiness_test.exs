@@ -4,6 +4,7 @@ defmodule FermixCore.ReadinessTest do
   alias FermixCore.Auth.Store
   alias FermixCore.Readiness
   alias FermixCore.Sandbox.Config, as: SandboxConfig
+  alias FermixCore.Sandbox.Env
   alias FermixCore.Sandbox.EnvHealth
 
   setup do
@@ -637,8 +638,26 @@ defmodule FermixCore.ReadinessTest do
       assert failure.gating == false
       assert failure.detail_key == "sandbox:env_missing"
       assert failure.action =~ "`FERMIX_TEST_ABSENT`"
-      assert failure.action =~ "fermix sandbox env set"
+      # M45 §4.10: the same doors the shell notice names.
+      assert failure.action =~ Env.missing_env_remedy()
+      refute failure.action =~ "fermix sandbox env set"
       assert Readiness.gating_failures(report.failures) == []
+    end
+
+    # M45 §4.8: a helper cut off by the shared lookup budget is a helper that
+    # did not answer, the cause this row already publishes, so the wire gains
+    # no detail key the app would have to learn.
+    test "a helper stopped by the lookup budget is reported as a failed helper" do
+      EnvHealth.record(%{
+        resolved: [],
+        unresolved: [
+          %{name: "FERMIX_TEST_ABSENT", reason: {:env_lookup_budget_exhausted, 5_000}}
+        ]
+      })
+
+      assert [failure] = Enum.filter(Readiness.report().failures, &(&1.pane == "sandbox"))
+      assert failure.detail_key == "sandbox:env_helper_failed"
+      assert failure.action =~ "`FERMIX_TEST_ABSENT`"
     end
 
     test "a helper that fails is its own cause" do

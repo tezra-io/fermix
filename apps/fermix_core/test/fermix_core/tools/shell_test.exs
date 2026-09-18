@@ -2,9 +2,11 @@ defmodule FermixCore.Tools.ShellTest do
   use ExUnit.Case, async: false
 
   alias FermixCore.Sandbox.Config
+  alias FermixCore.Sandbox.Env
   alias FermixCore.Sandbox.EnvHealth
   alias FermixCore.Sandbox.PathPolicy
   alias FermixCore.Tools.Shell
+  alias FermixTestSupport.RunnerCallTrace
 
   @context %{agent_name: "test_agent", conversation_key: :test}
 
@@ -339,8 +341,8 @@ defmodule FermixCore.Tools.ShellTest do
 
       assert result.success == true
       assert result.output =~ "ran"
-      assert result.output =~ "FERMIX_TEST_ABSENT could not be resolved"
-      assert result.output =~ "fermix sandbox env set FERMIX_TEST_ABSENT"
+      assert result.output =~ "FERMIX_TEST_ABSENT has no value Fermix can read"
+      assert result.output =~ Env.missing_env_remedy()
 
       assert_receive {:telemetry, [:fermix, :tool, :exec], _measurements, metadata}
       assert metadata.success == true
@@ -364,12 +366,12 @@ defmodule FermixCore.Tools.ShellTest do
                )
 
       assert result.success == false
-      assert result.error =~ "FERMIX_TEST_ABSENT could not be resolved"
+      assert result.error =~ "FERMIX_TEST_ABSENT has no value Fermix can read"
       assert result.error =~ "exit code 1"
 
       assert_receive {:telemetry, [:fermix, :tool, :exec], _measurements, metadata}
       assert metadata.error_summary =~ "exit code 1"
-      refute metadata.error_summary =~ "could not be resolved"
+      refute metadata.error_summary =~ "has no value Fermix can read"
       assert metadata.env_unresolved == ["FERMIX_TEST_ABSENT"]
 
       :telemetry.detach(handler_id)
@@ -386,6 +388,141 @@ defmodule FermixCore.Tools.ShellTest do
 
       :telemetry.detach(handler_id)
     end
+  end
+
+  # M45 §4.6 and §4.7. An allowed variable's value reaches the command as its
+  # environment and nowhere else: not as argv, where any process on the host
+  # can read it, and not in anything the model or a trace sees, where an echo
+  # would carry it out of the machine.
+  # A synthetic fixture read through a `command` source, the shape a stored
+  # credential has, so no test reads the operator's keychain or environment.
+  @token_name "FERMIX_TEST_M45_TOKEN"
+  @token "m45Qz-fixture-token-7781"
+
+  describe "an allowed credential" do
+    setup do
+      prior = Application.get_env(:fermix_core, :telemetry, [])
+      on_exit(fn -> Application.put_env(:fermix_core, :telemetry, prior) end)
+
+      session = "m45-shell-#{System.unique_integer([:positive])}"
+      handler = attach_session_telemetry(session)
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      context =
+        @context
+        |> Map.put(:session_id, session)
+        |> Map.put(:sandbox_config, credential_config())
+
+      %{context: context, session: session, prior: prior}
+    end
+
+    test "reaches the shell as its environment and never as argv", ctx do
+      RunnerCallTrace.start()
+
+      assert {:ok, %{success: true}} = Shell.execute(%{"command" => "printf ok"}, ctx.context)
+
+      {executable, args, opts} = RunnerCallTrace.call_with("printf ok")
+      assert Path.basename(executable) == "sh"
+      assert args == ["-c", "printf ok"]
+      refute Enum.any?([executable | args], &String.contains?(&1, @token))
+      assert Keyword.fetch!(opts, :env_mode) == :replace
+      assert {@token_name, @token} in Keyword.fetch!(opts, :env)
+    end
+
+    for capture <- [true, false] do
+      test "an echoed value is redacted from a successful result (capture #{capture})", ctx do
+        set_capture_content(ctx.prior, unquote(capture))
+
+        assert {:ok, result} =
+                 Shell.execute(%{"command" => ~s(printf '%s' "$#{@token_name}")}, ctx.context)
+
+        assert result.success == true
+        assert result.output == "«redacted»"
+
+        session = ctx.session
+        assert_receive {:shell_event, %{session_id: ^session} = metadata}
+        refute inspect(metadata) =~ @token
+        if unquote(capture), do: assert(metadata.output == "«redacted»")
+      end
+
+      test "an echoed value is redacted from a failed result (capture #{capture})", ctx do
+        set_capture_content(ctx.prior, unquote(capture))
+        command = ~s(printf '%s' "$#{@token_name}"; exit 3)
+
+        assert {:ok, result} = Shell.execute(%{"command" => command}, ctx.context)
+
+        assert result.success == false
+        assert result.error =~ "exit code 3"
+        assert result.error =~ "«redacted»"
+        refute result.error =~ @token
+
+        session = ctx.session
+        assert_receive {:shell_event, %{session_id: ^session} = metadata}
+        assert metadata.error_summary =~ "«redacted»"
+        refute inspect(metadata) =~ @token
+        if unquote(capture), do: assert(metadata.output =~ "«redacted»")
+      end
+    end
+
+    # The trace summary is cut to a bounded length. Scrubbing after that cut
+    # would miss a value the cut split in two and export its first half.
+    test "the value is scrubbed before the trace summary is truncated", ctx do
+      set_capture_content(ctx.prior, false)
+      # "Command failed (exit code 3):\n" is 30 bytes, so the value starts five
+      # bytes before the summary's 500-byte cut.
+      padding = String.duplicate("x", 465)
+      command = ~s(printf '%s%s' "#{padding}" "$#{@token_name}"; exit 3)
+
+      assert {:ok, %{success: false}} = Shell.execute(%{"command" => command}, ctx.context)
+
+      session = ctx.session
+      assert_receive {:shell_event, %{session_id: ^session} = metadata}
+      refute metadata.error_summary =~ binary_part(@token, 0, 5)
+    end
+
+    # The default keys are the child's ordinary environment, not credentials.
+    test "a default key such as HOME is not redacted", ctx do
+      home = System.get_env("HOME")
+
+      assert {:ok, %{success: true, output: output}} =
+               Shell.execute(%{"command" => ~s(printf '%s' "$HOME")}, ctx.context)
+
+      assert output == home
+    end
+  end
+
+  defp credential_config do
+    Config.normalize(
+      mode: :strict,
+      workspace_root: Config.current().workspace_root,
+      env: [
+        allow: [@token_name],
+        sources: %{
+          @token_name => [source: :command, command: "/bin/echo", args: [@token]]
+        }
+      ]
+    )
+  end
+
+  defp set_capture_content(prior, value) do
+    Application.put_env(:fermix_core, :telemetry, Keyword.put(prior, :capture_content, value))
+  end
+
+  # Pinned to one session id: a global handler must not read another test's event.
+  defp attach_session_telemetry(session) do
+    handler = "test-shell-m45-#{System.unique_integer([:positive])}"
+    test_pid = self()
+
+    :telemetry.attach(
+      handler,
+      [:fermix, :tool, :exec],
+      fn _event, _measurements, metadata, _config ->
+        if metadata[:session_id] == session, do: send(test_pid, {:shell_event, metadata})
+      end,
+      nil
+    )
+
+    handler
   end
 
   # Establishes an allowed variable the daemon cannot read, and puts back both

@@ -79,6 +79,7 @@ defmodule Fermix.CLI.Service.Templates do
     [Service]
     Type=simple
     #{render_unit_env(service_env)}
+    EnvironmentFile=-#{env_file(scope)}
     ExecStart=#{fermix_path} run
     Restart=always
     RestartSec=5
@@ -116,6 +117,7 @@ defmodule Fermix.CLI.Service.Templates do
     Type=simple
     ExecStart=/usr/bin/fermix service run
     Environment=FERMIX_LINUX_PACKAGE_INSTALL_DIR=%h/.cache/fermix/runtime
+    EnvironmentFile=-#{env_file(:user)}
     Restart=always
     RestartSec=5
     TimeoutStopSec=30
@@ -194,4 +196,12 @@ defmodule Fermix.CLI.Service.Templates do
 
   defp install_target(:user), do: "default.target"
   defp install_target(:system), do: "multi-user.target"
+
+  # The optional environment file a server with no keyring stores allowed
+  # sandbox variables in (M45 §4.9); the unit's leading `-` makes it optional,
+  # and Fermix never writes it. `%h` is the account's home in a user unit, but
+  # `/root` in the system manager whatever `User=` says, so a system unit names
+  # the machine-wide path.
+  defp env_file(:user), do: "%h/.config/fermix/env"
+  defp env_file(:system), do: "/etc/fermix/env"
 end

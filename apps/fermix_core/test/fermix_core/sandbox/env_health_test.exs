@@ -89,9 +89,9 @@ defmodule FermixCore.Sandbox.EnvHealthTest do
         EnvHealth.unresolved(server: server)
       end)
 
-    assert first =~ "FERMIX_TEST_ABSENT could not be resolved"
+    assert first =~ "FERMIX_TEST_ABSENT has no value Fermix can read"
     assert first =~ "run without it"
-    assert length(String.split(first, "FERMIX_TEST_ABSENT could not be resolved")) == 2
+    assert length(String.split(first, "FERMIX_TEST_ABSENT has no value Fermix can read")) == 2
 
     recovered =
       capture_log(fn ->

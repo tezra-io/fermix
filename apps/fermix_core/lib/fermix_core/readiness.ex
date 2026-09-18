@@ -19,6 +19,7 @@ defmodule FermixCore.Readiness do
   alias FermixCore.Providers.Selection
   alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Sandbox.Config, as: SandboxConfig
+  alias FermixCore.Sandbox.Env, as: SandboxEnv
   alias FermixCore.Sandbox.EnvHealth
 
   @typedoc """
@@ -503,11 +504,14 @@ defmodule FermixCore.Readiness do
 
   # Variables are backticked because they are literals the operator types; a
   # helper's own output stays out of the sentence, which is published copy.
+  # The remedy is the shell notice's own sentence (`Sandbox.Env`), so the two
+  # surfaces name the same doors.
   defp sandbox_env_missing_action(names) do
     "Allowed for sandboxed commands but not set where Fermix runs: #{backticked(names)}. " <>
-      "Commands run without these until each value is stored with " <>
-      "`fermix sandbox env set NAME -- <helper> [args...]` or the name is removed from the " <>
-      "list. A background service does not read a shell profile."
+      "Commands run without these until each value is stored or the name is removed from " <>
+      "the list. " <>
+      SandboxEnv.missing_env_remedy() <>
+      " A background service does not read a shell profile."
   end
 
   defp sandbox_env_helper_action(names) do

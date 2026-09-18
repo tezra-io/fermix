@@ -72,8 +72,20 @@ defmodule FermixCore.Sandbox.EnvTest do
            ]
 
     message = Env.format_error({:missing_env, "FERMIX_TEST_ABSENT"})
-    assert message =~ "FERMIX_TEST_ABSENT could not be resolved"
-    assert message =~ "fermix sandbox env set FERMIX_TEST_ABSENT"
+    assert message =~ "FERMIX_TEST_ABSENT has no value Fermix can read"
+  end
+
+  # M45 §4.10: the remedy names the doors every install has, the sandbox
+  # settings and, on a server with no keyring, the service's env file, and the
+  # readiness row speaks the same sentence.
+  test "a missing value names the sandbox settings and the server env file" do
+    message = Env.format_error({:missing_env, "FERMIX_TEST_ABSENT"})
+
+    assert message =~ Env.missing_env_remedy()
+    assert Env.missing_env_remedy() =~ "sandbox settings"
+    assert Env.missing_env_remedy() =~ "`~/.config/fermix/env`"
+    assert Env.missing_env_remedy() =~ "restart Fermix"
+    refute message =~ "fermix sandbox env set"
   end
 
   test "every allowed name resolving reports nothing unresolved" do
@@ -284,6 +296,98 @@ defmodule FermixCore.Sandbox.EnvTest do
 
     Process.sleep(800)
     refute File.exists?(marker), "helper child outlived the timeout — touch ran to completion"
+  end
+
+  # M45 §4.8: every allow-list lookup for one command shares one budget, so a
+  # locked keychain with several names costs a command the budget once, not a
+  # timeout per name. The command still runs; what did not resolve in time is
+  # reported with its own reason.
+  describe "the allow-list lookup budget" do
+    setup do
+      dir = FermixTestSupport.SafeRm.make_tmp_dir!("sandbox-env-budget")
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
+      %{dir: dir}
+    end
+
+    test "is 5000ms per command" do
+      assert Env.lookup_budget_ms() == 5_000
+    end
+
+    test "slow helpers exhaust it, late names are reported, and no helper outlives it", ctx do
+      System.put_env("FERMIX_TEST_SECRET", "from-the-environment")
+      overran = Path.join(ctx.dir, "overran")
+      skipped = Path.join(ctx.dir, "skipped")
+
+      config =
+        Config.normalize(
+          env: [
+            allow: ["FERMIX_M45_FAST", "FERMIX_M45_SLOW", "FERMIX_M45_LATE", "FERMIX_TEST_SECRET"],
+            sources: %{
+              "FERMIX_M45_FAST" => sh_source("echo fast-value", 5_000),
+              "FERMIX_M45_SLOW" => sh_source("sleep 3; touch #{overran}; echo slow", 5_000),
+              "FERMIX_M45_LATE" => sh_source("touch #{skipped}; echo late", 5_000)
+            }
+          ]
+        )
+
+      started = System.monotonic_time(:millisecond)
+      assert {:ok, built} = Env.build(config, [], lookup_budget_ms: 1_000)
+      elapsed = System.monotonic_time(:millisecond) - started
+
+      # The budget plus the runner's kill grace, never a helper's own 5s: the
+      # overrunning helper alone would have taken 3s.
+      assert elapsed < 2_500, "lookups took #{elapsed}ms against a 1000ms budget"
+      assert {"FERMIX_M45_FAST", "fast-value"} in built.env
+      # An environment read spawns nothing and costs no budget.
+      assert {"FERMIX_TEST_SECRET", "from-the-environment"} in built.env
+      assert built.resolved == ["FERMIX_M45_FAST", "FERMIX_TEST_SECRET"]
+
+      assert built.unresolved == [
+               %{name: "FERMIX_M45_SLOW", reason: {:env_lookup_budget_exhausted, 1_000}},
+               %{name: "FERMIX_M45_LATE", reason: {:env_lookup_budget_exhausted, 1_000}}
+             ]
+
+      # Past the moment the overrunning helper would have written its marker.
+      Process.sleep(3_000 - elapsed + 500)
+      refute File.exists?(overran), "the overrunning helper outlived the budget"
+      refute File.exists?(skipped), "a helper past the budget was still started"
+    end
+
+    test "a helper that times out inside the budget keeps its own timeout reason" do
+      config = command_source_config(["-c", "sleep 2"], 100)
+
+      assert {:ok, built} = Env.build(config, [], lookup_budget_ms: 1_000)
+
+      assert [%{name: "FERMIX_TEST_SECRET", reason: {:env_command_timeout, _command, 100}}] =
+               built.unresolved
+    end
+
+    # A consumer's requested name is a requirement: its own timeout bounds it,
+    # and the allow list's budget never turns it into a silent omission.
+    test "a requested name is not cut short by the budget" do
+      config =
+        Config.normalize(
+          env: [
+            allow: [],
+            sources: %{"FERMIX_M45_REQUIRED" => sh_source("sleep 0.3; echo required", 5_000)}
+          ]
+        )
+
+      assert {:ok, built} = Env.build(config, ["FERMIX_M45_REQUIRED"], lookup_budget_ms: 50)
+      assert {"FERMIX_M45_REQUIRED", "required"} in built.env
+    end
+
+    test "the budget reason has its own sentence" do
+      message = Env.format_error({:env_lookup_budget_exhausted, 5_000})
+
+      assert message =~ "5000ms"
+      refute message == Env.format_error({:env_command_timeout, "helper", 5_000})
+    end
+  end
+
+  defp sh_source(script, timeout_ms) do
+    sh = System.find_executable("sh") || "/bin/sh"
+    [source: :command, command: sh, args: ["-c", script], timeout_ms: timeout_ms]
   end
 
   defp command_source_config(args, timeout_ms) do

@@ -72,6 +72,14 @@ STATE_DIRS = ("skills", "memory", "job_runs", "journals", "grants", "bootstrap",
 STATE_FILES = ("memory.db", "memory.db-wal", "memory.db-shm")
 # Only these keys are allowed in a provider block (else the daemon refuses boot).
 _PROVIDER_KEYS = ("default_model", "reasoning_effort", "auth_mode", "base_url", "api_key")
+# M45 external skill credentials: one allowed sandbox variable whose value a harmless
+# `command` source prints from a file this seed writes — the same record shape a value
+# stored from Settings > Sandbox has, with no keychain and no operator environment. The
+# cap_skill_credentials checker reads the same file for its gold, so the value lives
+# here and nowhere else. At least 8 bytes, so the shell's redaction floor applies.
+SKILL_TOKEN_NAME = "FERMIX_EVAL_SKILL_TOKEN"
+SKILL_TOKEN_VALUE = "fxeval-desk-7Kq2-Rm9p"
+SKILL_TOKEN_FILE = os.path.join("eval-fixtures", "skill_token")
 # Primary provider id -> its key in the Fermix auth store ($FERMIX_HOME/auth.json),
 # for OAuth providers whose token must be copied into the disposable home.
 _OAUTH_PROFILE_KEY = {
@@ -151,6 +159,14 @@ def render_config(
         json.dumps(root) for root in (os.path.join(home, "skills"), *allowed_roots))
     lines += ["", "[sandbox]", 'mode = "strict"',
               f'workspace_root = "{workspace}"', f"allowed_roots = [{roots}]", ""]
+    # The skill-credential fixture (M45): allowed, and read through a `command`
+    # source, so every shell command the eval daemon runs receives it and the
+    # redaction of its value is exercised on the real agent path.
+    token_path = os.path.join(home, SKILL_TOKEN_FILE)
+    lines += ["[sandbox.env]", f"allow = [{json.dumps(SKILL_TOKEN_NAME)}]", "",
+              f"[sandbox.env.{SKILL_TOKEN_NAME}]", 'source = "command"',
+              'command = "/bin/cat"', f"args = [{json.dumps(token_path)}]",
+              "timeout_ms = 3000", ""]
     # Pre-approve coding agents in the disposable home. Consent is a setup decision
     # (design §23.3) and defaults false, and an unapproved host advertises no run
     # tool and renders no delegation steering at all (§23.4) — it does not stall,
@@ -230,6 +246,20 @@ def copy_oauth_token(home: str, pid: str) -> None:
     with open(dest, "w", encoding="utf-8") as fh:
         json.dump({"version": store.get("version", 2), "providers": {key: entry}}, fh)
     os.chmod(dest, 0o600)   # the store refuses to load a world-readable auth.json
+
+
+def write_skill_token(home: str) -> str:
+    """Write the skill-credential fixture value the seeded `command` source prints.
+
+    Rewritten on every seed, so it is the home's setup rather than sweep state. No
+    trailing newline: the value the daemon reads is byte-identical to the constant.
+    Private (0600), like any credential file, although the value is a fixture."""
+    path = os.path.join(home, SKILL_TOKEN_FILE)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(SKILL_TOKEN_VALUE)
+    os.chmod(path, 0o600)
+    return path
 
 
 def reset_state(home: str) -> None:
@@ -364,6 +394,7 @@ def main() -> None:
     if not os.path.isdir(os.path.join(workspace, ".git")):
         subprocess.run(["git", "-C", workspace, "init", "-q"], check=True)
     reset_state(home)
+    write_skill_token(home)
 
     with open(os.path.join(home, "config.toml"), "w", encoding="utf-8") as fh:
         fh.write(render_config(home, pid, blk, profile, allowed_roots,

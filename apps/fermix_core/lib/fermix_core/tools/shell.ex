@@ -85,11 +85,11 @@ defmodule FermixCore.Tools.Shell do
   @spec execute(map(), Tool.context()) :: {:ok, Tool.tool_result()}
   def execute(args, context) when is_map(args) and is_map(context) do
     start = System.monotonic_time(:millisecond)
-    {result, trace_metadata} = do_execute(args, context)
+    {result, trace_metadata, secrets} = do_execute(args, context)
     duration = System.monotonic_time(:millisecond) - start
     success = match?({:ok, %{success: true}}, result)
 
-    ToolTelemetry.exec("shell", context, success, duration,
+    ToolTelemetry.exec("shell", with_redact_values(context, secrets), success, duration,
       metadata: trace_metadata,
       input: args,
       result: result
@@ -98,6 +98,8 @@ defmodule FermixCore.Tools.Shell do
     result
   end
 
+  # Returns the result, its trace metadata, and the credential values the
+  # command ran with, which the event must scrub as the result already was.
   defp do_execute(args, context) do
     with {:ok, command} <- Map.fetch(args, "command") do
       working_dir = Map.get(args, "working_dir")
@@ -110,20 +112,7 @@ defmodule FermixCore.Tools.Shell do
 
       with :ok <- validate_command(command),
            {:ok, plan} <- Sandbox.shell_plan(command, working_dir, context) do
-        EnvHealth.record(%{resolved: plan.env_resolved, unresolved: plan.env_unresolved})
-        {result, run_trace} = run_command(command, plan.working_dir, timeout, plan.env)
-
-        # The trace summary is the command's own words; the notice prefixed for
-        # the model would otherwise open it, and `env_unresolved` already says it.
-        {
-          with_env_notice(result, plan.env_unresolved),
-          trace
-          |> Map.put(:working_dir, plan.working_dir)
-          |> Map.put(:timeout_ms, timeout)
-          |> Map.merge(run_trace)
-          |> maybe_put_error_summary(result)
-          |> put_env_unresolved(plan.env_unresolved)
-        }
+        run_plan(command, plan, timeout, trace)
       else
         {:error, reason} ->
           result = {:ok, Tool.error(format_error(reason))}
@@ -132,14 +121,49 @@ defmodule FermixCore.Tools.Shell do
            trace
            |> Map.put(:failure, sandbox_failure_tag(reason))
            |> maybe_put_policy_enforcement(reason)
-           |> maybe_put_error_summary(result)}
+           |> maybe_put_error_summary(result), []}
       end
     else
       :error ->
         result = {:ok, Tool.error("Missing required parameter: command")}
-        {result, maybe_put_error_summary(%{failure: "missing_command"}, result)}
+        {result, maybe_put_error_summary(%{failure: "missing_command"}, result), []}
     end
   end
+
+  # The result is scrubbed of the allowed values first, before the notice, the
+  # trace summary's cut or anything downstream can truncate it: a value split in
+  # two by a cut no longer matches, and its first half would leave the machine.
+  defp run_plan(command, plan, timeout, trace) do
+    EnvHealth.record(%{resolved: plan.env_resolved, unresolved: plan.env_unresolved})
+    {result, run_trace} = run_command(command, plan.working_dir, timeout, plan.env)
+    result = redact_result(result, plan.redact_values)
+
+    # The trace summary is the command's own words; the notice prefixed for
+    # the model would otherwise open it, and `env_unresolved` already says it.
+    {
+      with_env_notice(result, plan.env_unresolved),
+      trace
+      |> Map.put(:working_dir, plan.working_dir)
+      |> Map.put(:timeout_ms, timeout)
+      |> Map.merge(run_trace)
+      |> maybe_put_error_summary(result)
+      |> put_env_unresolved(plan.env_unresolved),
+      plan.redact_values
+    }
+  end
+
+  defp redact_result(result, []), do: result
+
+  defp redact_result({:ok, %{success: true, output: output} = result}, values),
+    do: {:ok, %{result | output: ToolTelemetry.redact(output, values)}}
+
+  defp redact_result({:ok, %{success: false, error: error} = result}, values),
+    do: {:ok, %{result | error: ToolTelemetry.redact(error, values)}}
+
+  defp with_redact_values(context, []), do: context
+
+  defp with_redact_values(context, values),
+    do: Map.update(context, :redact_values, values, &(&1 ++ values))
 
   defp validate_command(command) when is_binary(command) and byte_size(command) > 0, do: :ok
   defp validate_command(_), do: {:error, "Command must be a non-empty string"}
@@ -171,10 +195,14 @@ defmodule FermixCore.Tools.Shell do
   defp put_env_unresolved(trace, unresolved),
     do: Map.put(trace, :env_unresolved, Enum.map(unresolved, & &1.name))
 
+  # The plan's list is the child's whole environment (`env_mode: :replace`),
+  # handed over as port options, so no value appears in any process's argv.
   defp run_command(command, working_dir, timeout, env) do
-    case CommandRunner.run(env_binary(), env_args(env, command),
+    case CommandRunner.run(shell_binary(), ["-c", command],
            cwd: working_dir,
-           timeout_ms: timeout
+           timeout_ms: timeout,
+           env: env,
+           env_mode: :replace
          ) do
       {:ok, %{exit: 0, stdout: output}} ->
         {{:ok, Tool.success(output)}, %{exit_code: 0}}
@@ -193,13 +221,8 @@ defmodule FermixCore.Tools.Shell do
     end
   end
 
-  defp env_args(env, command) do
-    assignments = Enum.map(env, fn {name, value} -> "#{name}=#{value}" end)
-    ["-i" | assignments] ++ ["sh", "-c", command]
-  end
-
-  defp env_binary do
-    System.find_executable("env") || "/usr/bin/env"
+  defp shell_binary do
+    System.find_executable("sh") || "/bin/sh"
   end
 
   defp format_error({:hardline, reason}), do: "Sandbox hardline blocked command: #{reason}"

@@ -91,6 +91,33 @@ defmodule Fermix.CLI.Service.TemplatesTest do
       assert unit =~ "WantedBy=multi-user.target"
       assert unit =~ ~s(Environment="FERMIX_HOME=/var/lib/fermix")
     end
+
+    # M45 §4.9: a server with no keyring feeds allowed sandbox variables to
+    # the daemon through an optional environment file. The leading `-` keeps a
+    # missing file from failing the unit. `%h` is the user manager's home in a
+    # user unit, but `/root` in the system manager, so a system unit names a
+    # fixed path instead.
+    test "the user-scope unit loads the optional per-user env file" do
+      unit =
+        Templates.render_linux_unit(%{
+          scope: :user,
+          fermix_path: "/usr/local/bin/fermix",
+          service_env: %{"FERMIX_HOME" => "/home/dev/.fermix"}
+        })
+
+      assert environment_files(unit) == ["EnvironmentFile=-%h/.config/fermix/env"]
+    end
+
+    test "the system-scope unit loads the optional machine env file" do
+      unit =
+        Templates.render_linux_unit(%{
+          scope: :system,
+          fermix_path: "/usr/local/bin/fermix",
+          service_env: %{"FERMIX_HOME" => "/var/lib/fermix"}
+        })
+
+      assert environment_files(unit) == ["EnvironmentFile=-/etc/fermix/env"]
+    end
   end
 
   describe "render_vendor_unit/0" do
@@ -138,6 +165,13 @@ defmodule Fermix.CLI.Service.TemplatesTest do
 
       refute unit =~ "FERMIX_HOME"
       refute unit =~ System.user_home!()
+    end
+
+    # One file per account, named by the specifier like the payload directory.
+    test "loads the optional per-user env file" do
+      assert environment_files(Templates.render_vendor_unit()) == [
+               "EnvironmentFile=-%h/.config/fermix/env"
+             ]
     end
   end
 
@@ -246,4 +280,8 @@ defmodule Fermix.CLI.Service.TemplatesTest do
   end
 
   defp pos(haystack, needle), do: :binary.match(haystack, needle) |> elem(0)
+
+  defp environment_files(unit) do
+    unit |> String.split("\n") |> Enum.filter(&String.starts_with?(&1, "EnvironmentFile="))
+  end
 end

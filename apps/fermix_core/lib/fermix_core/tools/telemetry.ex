@@ -74,6 +74,19 @@ defmodule FermixCore.Tools.Telemetry do
     :telemetry.execute([:fermix, :tool, :exec], %{duration_ms: duration_ms}, metadata)
   end
 
+  @doc """
+  Replace every occurrence of each value in `text` with the redaction marker.
+
+  The same rule the emitter applies to a context's `:redact_values`, exposed so
+  a tool can scrub its model-visible result with it rather than a second copy
+  (M45 §4.7): values under #{@min_redact_bytes} bytes and non-strings are
+  skipped, and a longer value is replaced before a shorter one it contains.
+  Exact-value matching only; an encoded or transformed value is not detected.
+  """
+  @spec redact(String.t(), [term()]) :: String.t()
+  def redact(text, values) when is_binary(text) and is_list(values),
+    do: scrub(text, redactable(values))
+
   defp maybe_put_content(metadata, opts, redact) do
     if Telemetry.capture_content?() do
       metadata
@@ -84,10 +97,15 @@ defmodule FermixCore.Tools.Telemetry do
     end
   end
 
-  defp redact_values(context) do
-    context
-    |> Map.get(:redact_values, [])
+  defp redact_values(context), do: context |> Map.get(:redact_values, []) |> redactable()
+
+  # Longest first: a value that contains another is replaced whole, before the
+  # shorter one can split it and leave its tail in the text.
+  defp redactable(values) do
+    values
     |> Enum.filter(&(is_binary(&1) and byte_size(&1) >= @min_redact_bytes))
+    |> Enum.uniq()
+    |> Enum.sort_by(&byte_size/1, :desc)
   end
 
   defp output_value(opts) do
