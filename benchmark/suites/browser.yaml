@@ -10,9 +10,10 @@ description: >
   Policy, Snapshot), which prove the CDP plumbing without a model in the loop.
 
   Browser is the tool for JS/dynamic/interactive pages — distinct from
-  `web_search` (static facts, no URL) and `web_fetch` (one known server-rendered
-  URL). The cases here are written so the browser is the natural route: they need
-  rendering, form interaction, or a click-through that a single fetch can't do.
+  `web_search` (a fact with no known URL, current or not) and `web_fetch` (one
+  known server-rendered URL). The cases here are written so the browser is the
+  natural route: they need rendering, form interaction, or a click-through that a
+  single fetch can't do.
   Per the UAT discipline they state a real-user intent and let the model pick the
   tool; the only route gates are a `tools_any: [browser]` sanity on the
   interactive cases and a `tools_none: [browser]` discipline gate proving a plain

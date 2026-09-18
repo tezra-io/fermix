@@ -496,7 +496,7 @@ defmodule FermixCore.Tools.PlaceSearchTest do
       refute prompt =~ "search_anchor"
       refute prompt =~ "with no named area"
       # The keyless sibling still owns local intent in the routing block.
-      assert prompt =~ "`web_search` for static facts"
+      assert prompt =~ "`web_search` for a fact with no known URL"
     end
 
     test "a resolvable key: the prompt carries the catalog entry and the routing rule" do

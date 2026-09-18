@@ -152,6 +152,14 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   outcome, carries the active task and earlier approvals forward, and keeps
   every verification, provenance and proof-of-work contract. New installs and
   untouched files get the new text; an edited file keeps yours.
+- **`web_search` is the route for any fact that may have moved since
+  training.** Every routing surface described it as a tool for static facts and
+  sent "live data" to the browser, so a current price, rate, version or office
+  holder could read as neither and be answered from memory. The tool
+  description, the runtime routing rule, the browser guidance and the
+  operating rules now say the same thing: a confident memory of a mutable
+  fact is a reason to search, and the browser is for pages that need
+  rendering, login or interaction.
 
 - **`fermix doctor`'s `cosign` row names the executable this host resolved**
   and the remedy for its own install family — the distribution's own package on
