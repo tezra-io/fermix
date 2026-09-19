@@ -8,6 +8,18 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Venice is a provider, and every model says how private it is.** Save a
+  Venice API key under Providers and Venice joins the fallback chain after
+  Mistral, ahead of the local Ollama hop. The model picker lists every
+  tool-calling model Venice serves, newest first within each model family, and
+  each label ends with the privacy tier Venice publishes for that model:
+  `Private` when the prompt is not kept, `Anonymized` when it is passed to the
+  model's maker without your account and that maker still reads it, and
+  `Private (TEE)` when the model runs inside a hardware enclave. An info control
+  beside the Model row explains the three, in the browser setup and in the macOS
+  app. The default model is `grok-4-6`, a private one. Every request tells
+  Venice not to add its own system prompt and to strip inline thinking out of
+  the reply.
 - **Computer-use sessions now appear in traces.** A session starting, being
   paused and resumed, finishing, or dying on its helper used to leave no record
   anywhere: the events were emitted and nothing listened. They now reach the

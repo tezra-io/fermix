@@ -162,7 +162,7 @@ snapshot built when the loop starts, never hard-coded in the loop.
 `supports_streaming?/0`). The static `Providers.Descriptor` registry is the
 single source of truth for the supported providers: `openai_codex` (Codex
 OAuth), OpenAI (API key), Anthropic (API key or subscription OAuth), xAI (API
-key or Grok OAuth, shown as SpaceXAI), OpenRouter, Mistral, and a
+key or Grok OAuth, shown as SpaceXAI), OpenRouter, Mistral, Venice, and a
 keyless local Ollama. Each entry names the adapter module, auth modes, secrets,
 config keys, and whether the provider supports reasoning effort. Adapters
 include `OpenAI.ChatCompletions`, `OpenAI.Responses`, `OpenAI.Codex`,
