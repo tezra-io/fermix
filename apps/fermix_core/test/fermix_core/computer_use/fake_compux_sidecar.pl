@@ -2,11 +2,17 @@
 # Test-only fake compux sidecar for the fermix PortDriver adapter. Autoflush so a
 # one-line reply reaches the Port immediately.
 #
-# It speaks protocol 8 framing: every inbound line is a tagged `request` or
+# It speaks protocol 9 framing: every inbound line is a tagged `request` or
 # `control` frame carrying a `request_id`, and every reply echoes that id inside a
 # tagged `response` or `control_ack`. A reply that hands back coordinates mints an
 # `observation_id`; a pointer action that names none, or names one this fake has
 # retired, is refused with a `not_sent` receipt exactly as the helper does.
+#
+# Protocol 9 adds the references: `elements` hands back controls carrying an
+# `element_ref`, `press` and `set_value` address one, and a pointer action may
+# address one INSTEAD of a point. Every refusal the helper has for them is here
+# too — a fake that refused LESS than the helper would let a request shape the
+# helper rejects pass every test in this repo.
 #
 # The stdin loop NEVER blocks on a request it cannot answer yet, which is the
 # whole point of the control channel: `defer` records the id and keeps reading, so
@@ -21,31 +27,51 @@
 #   defer       record the id, answer only once a control releases it
 #   refuse      ok:false + error + a not_sent receipt (a refused mutation)
 #   no_receipt  ok:true with NO receipt on a mutating action (the protocol fault)
-#   screenshot/elements/windows -> a minted observation
+#   screenshot/windows -> a minted observation
+#   elements    -> a minted observation plus the controls it named, one of each
+#                  kind the summary has to render: pressable, settable, disabled
+#   press       -> an `ax` receipt, effect not_observed (an AX return is a
+#                  dispatch result, not an effect)
+#   set_value   -> an `ax` receipt, effect verified (or not_observed for the
+#                  secure field, which reads back masked)
 #   anything else -> ok + pong, with a receipt when the action is mutating
 #
 # Env: FAKE_PROTO (reported protocol_version), FAKE_SIDECAR_GENERATION,
 #      FAKE_CONTROL_MODE ("ack" default, "refuse" to answer ok:false),
 #      FAKE_OBSERVATION_ERROR (an addressing/geometry code to refuse every
-#      pointer action with, e.g. "expired_observation").
+#      pointer action with, e.g. "expired_observation"),
+#      FAKE_ELEMENT_ERROR (an element code to refuse every referenced action
+#      with, e.g. "element_disabled"),
+#      FAKE_FOREGROUND_CHANGED (1 to report that an AX action took the front).
 use strict;
 use warnings;
 $| = 1;
 
-my $proto        = $ENV{FAKE_PROTO} // 8;
+my $proto        = $ENV{FAKE_PROTO} // 9;
 my $BOOT         = $ENV{FAKE_SIDECAR_GENERATION} // 'boot-fake';
 my $CONTROL_MODE = $ENV{FAKE_CONTROL_MODE} // 'ack';
 my $OBS_ERROR    = $ENV{FAKE_OBSERVATION_ERROR};
+my $ELEMENT_ERROR = $ENV{FAKE_ELEMENT_ERROR};
+my $FOREGROUND   = $ENV{FAKE_FOREGROUND_CHANGED} ? 'true' : 'false';
 
 # One counter per process, so an id from a sidecar that died can never resolve in
 # its successor: the boot generation is part of the id.
 my $OBS_SEQ = 0;
 
-# Mirrors the helper's addressed set: each of these needs an `observation_id` and
-# refuses a `region`.
+# Mirrors the helper's addressed set: each of these is aimed INTO an observation,
+# so each needs an `observation_id` and refuses a `region`.
 my %ADDRESSED = map { $_ => 1 } qw(
     left_click right_click double_click mouse_move left_click_drag scroll inspect
+    press set_value
 );
+
+# Mirrors the helper's element set: addressed by a control, never by a point.
+my %ELEMENT_ONLY = map { $_ => 1 } qw(press set_value);
+
+# The references this fake has minted, and what each control answers to. `e1`
+# presses, `e2` is a settable field, `e3` is the secure field whose read-back is
+# masked, `e4` is disabled and `e5` offers no accessibility action at all.
+my %ELEMENTS = map { $_ => 1 } qw(e1 e2 e3 e4 e5);
 
 # Mirrors the helper's producing set: each of these MINTS an observation.
 my %PRODUCES = map { $_ => 1 } qw(screenshot elements windows wait_for_change);
@@ -79,6 +105,15 @@ sub receipt {
         . qq("input_method":"foreground_hid","timings_ms":{"input":1,"settle":0,"capture":0}});
 }
 
+# The receipt an accessibility action earns: the `ax` method, the effect its own
+# read-back proved, and whether the action pulled its application to the front.
+sub ax_receipt {
+    my ($effect) = @_;
+    return qq("receipt":{"dispatch":"sent","effect":"$effect","input_method":"ax",)
+        . qq("foreground_changed":$FOREGROUND,)
+        . qq("timings_ms":{"input":1,"settle":0,"capture":0}});
+}
+
 sub control {
     my ($id, $action) = @_;
     my $ok = ($CONTROL_MODE eq 'refuse') ? 'false' : 'true';
@@ -98,21 +133,33 @@ sub control {
     }
 }
 
-# The addressing half of the wire (protocol 8), matching the helper on BOTH sides:
-# an action that reads coordinates must name an image and must not carry a
-# rectangle, and an action that reads none must not name an image at all. A fake
-# that refused LESS than the helper would let a request shape the helper rejects
-# pass every test here. Any refusal below dispatched nothing.
-# Returns 1 when the request was answered with a refusal.
+# The addressing half of the wire (protocol 9), matching the helper on BOTH
+# sides: an action aimed into an observation must name it and must not
+# carry a rectangle; an action that aims at nothing must not name one at all; and
+# a target named twice, or named by a reference nobody minted, is refused before
+# anything is dispatched. A fake that refused LESS than the helper would let a
+# request shape the helper rejects pass every test here. Any refusal below
+# dispatched nothing. Returns 1 when the request was answered with a refusal.
 sub refuse_addressing {
     my ($id, $action, $line) = @_;
     my $names_image = $line =~ /"observation_id":"[^"]/;
+    my ($reference) = $line =~ /"element_ref":"([^"]*)"/;
+    my $has_point = $line =~ /"(?:x|from|to)":/;
 
     my $code;
     if ($ADDRESSED{$action}) {
-        if    ($line =~ /"region":/) { $code = 'unknown_field'; }
-        elsif (!$names_image)        { $code = 'observation_required'; }
-        elsif ($OBS_ERROR)           { $code = $OBS_ERROR; }
+        if    ($line =~ /"region":/)                 { $code = 'unknown_field'; }
+        elsif (!$names_image)                        { $code = 'observation_required'; }
+        elsif (defined $reference && $has_point)     { $code = 'addressing_conflict'; }
+        elsif ($ELEMENT_ONLY{$action} && !defined $reference) { $code = 'element_required'; }
+        elsif (defined $reference && !$ELEMENTS{$reference})  { $code = 'stale_element'; }
+        elsif (defined $reference && $ELEMENT_ERROR) { $code = $ELEMENT_ERROR; }
+        elsif ($OBS_ERROR)                           { $code = $OBS_ERROR; }
+    }
+    elsif (defined $reference) {
+        # `type`, `key`, `wait`, `windows` and the viewing actions address no
+        # control, so a reference on one is a field the helper does not accept.
+        $code = 'unknown_field';
     }
     elsif ($names_image && !$VIEWING{$action}) {
         # `type`, `key`, `wait`, `windows`, the operational verbs: they read no
@@ -135,16 +182,66 @@ sub observation {
         . qq("captured_at_monotonic_ns":1000);
 }
 
+# One control of each kind the summary has to render, exactly as the helper lists
+# them: a pressable button, a settable field, a secure field, a disabled button,
+# and one that offers no accessibility action at all.
+sub elements_body {
+    return qq("elements":[)
+        . qq({"element_ref":"e1","role":"AXButton","label":"Save",)
+        . qq("enabled":true,"actions":["press"],"settable":false,)
+        . qq("bounds":{"x":10,"y":20,"w":60,"h":24},"path":["Document","Toolbar"],)
+        . qq("x":40,"y":32},)
+        . qq({"element_ref":"e2","role":"AXTextField","label":"Search","value":"chess",)
+        . qq("enabled":true,"actions":[],"settable":true,)
+        . qq("bounds":{"x":10,"y":60,"w":200,"h":24},"path":["Toolbar"],"x":110,"y":72},)
+        . qq({"element_ref":"e3","role":"AXSecureTextField","label":"Password",)
+        . qq("enabled":true,"actions":[],"settable":true,)
+        # A secure field's contents are never read, so it carries no `value` at all.
+        . qq("bounds":{"x":10,"y":90,"w":200,"h":24},"path":["Toolbar"],"x":110,"y":102},)
+        . qq({"element_ref":"e4","role":"AXButton","label":"Delete",)
+        . qq("enabled":false,"actions":["press"],"settable":false,)
+        . qq("bounds":{"x":10,"y":120,"w":60,"h":24},"path":["Document"],"x":40,"y":132},)
+        . qq({"element_ref":"e5","role":"AXImage","label":"Board",)
+        . qq("enabled":true,"actions":[],"settable":false,)
+        . qq("bounds":{"x":10,"y":150,"w":60,"h":24},"path":["Document"],"x":40,"y":162})
+        . qq(],"truncated":"nodes");
+}
+
 sub request {
     my ($id, $action, $line) = @_;
 
     return if refuse_addressing($id, $action, $line);
 
+    # An accessibility action reports what IT observed; a pointer action addressed
+    # by a reference still went out over the pointer, so it keeps the HID receipt.
+    # The PAYLOADS are the helper's exactly — a press answers a bare ack, and a
+    # set_value answers `verified` plus what the field holds NOW, withheld for a
+    # secure field whose value is never read back rather than published as a row
+    # of bullets. A fake that invented `pressed`/`value_set` keys would let this
+    # side come to depend on fields the helper never sends.
+    if ($action eq 'press') {
+        print qq({"type":"response",) . envelope($id)
+            . qq(,"ok":true,) . ax_receipt('not_observed') . qq(}\n);
+        return;
+    }
+    if ($action eq 'set_value') {
+        my ($reference) = $line =~ /"element_ref":"([^"]*)"/;
+        my ($value)     = $line =~ /"value":"([^"]*)"/;
+        $value = '' unless defined $value;
+        my $secure    = ($reference eq 'e3');
+        my $effect    = $secure ? 'not_observed' : 'verified';
+        my $verified  = $secure ? 'false' : 'true';
+        my $read_back = $secure ? '' : qq("value":"$value",);
+        print qq({"type":"response",) . envelope($id)
+            . qq(,"ok":true,"verified":$verified,$read_back) . ax_receipt($effect) . qq(}\n);
+        return;
+    }
+
     if ($PRODUCES{$action}) {
         my $kind = ($action eq 'elements' || $action eq 'windows') ? 'semantic' : 'image';
         my $body = ($kind eq 'image')
             ? qq("data":"cG5n","mime":"image/png","width":100,"height":80)
-            : qq("$action":[]);
+            : ($action eq 'elements' ? elements_body() : qq("$action":[]));
         print qq({"type":"response",) . envelope($id)
             . qq(,"ok":true,) . observation($kind) . qq(,$body}\n);
         return;

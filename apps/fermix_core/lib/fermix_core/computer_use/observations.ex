@@ -39,17 +39,33 @@ defmodule FermixCore.ComputerUse.Observations do
   # plausible for the same point.
   @ambiguity_min_zoom 1.5
 
-  # Actions whose x,y are read off an image, so each must name the image it read
-  # them in. `scroll` carries optional coordinates too; keyboard actions never do.
-  @addressed_actions ~w(left_click right_click double_click mouse_move left_click_drag scroll inspect)
+  # Actions whose target is read off an image — a point, or a control named by
+  # `element_ref` — so each must name the image it was read in. `scroll` carries
+  # optional coordinates too; keyboard actions never do.
+  @addressed_actions ~w(left_click right_click double_click mouse_move left_click_drag scroll
+                        inspect press set_value)
+
+  # The accessibility half of that set: these name a control and never a point, so
+  # a mark on one resolves to the badged control rather than to its badge's pixel.
+  @element_actions ~w(press set_value)
+
+  # The actions that accept EITHER form, so that naming a target twice is a choice
+  # the model has to make rather than a shape the action never had. `Compux.Protocol`
+  # is the authority on this split — a drag names two points and `inspect` reports
+  # what is under one, so neither has a meaning for a reference and the library
+  # refuses one there with a sentence of its own, which is the right sentence for
+  # it. Anything outside this list falls through to that.
+  @either_form @element_actions ++ ~w(left_click right_click double_click mouse_move scroll)
 
   @type id :: String.t()
+
+  @type badge :: %{point: {integer(), integer()}, element_ref: String.t() | nil}
 
   @type entry :: %{
           kind: String.t() | nil,
           region: map() | nil,
           dims: {pos_integer(), pos_integer()} | nil,
-          marks: %{integer() => {integer(), integer()}} | nil,
+          marks: %{integer() => badge()} | nil,
           recorded_at_ms: integer()
         }
 
@@ -120,20 +136,50 @@ defmodule FermixCore.ComputerUse.Observations do
   def fetch(table, _id) when is_list(table), do: :error
 
   @doc """
-  Refuse a pointer action or `inspect` that names no image, before any driver call.
+  Refuse an action whose target is unaddressed or addressed twice, before any
+  driver call.
 
-  This replaces the region guard: there is no rectangle to forget any more, so the
-  only question left is whether the coordinates say which image they are pixels of.
+  This replaces the region guard: there is no rectangle to forget any more, so
+  two questions are left. Does the action say which image its target was read in —
+  a point and an `element_ref` alike mean nothing without one, because a ref is
+  scoped to the observation that minted it. And does it name exactly ONE target:
+  there are three ways to say where (a point, a numbered mark, a control's
+  `element_ref`) and a request carrying two of them has two answers to "where",
+  which is the one thing a GUI driver may never guess at.
   """
-  @spec check_addressing(t(), map()) :: :ok | {:error, :observation_required}
+  @spec check_addressing(t(), map()) ::
+          :ok | {:error, :observation_required | :addressing_conflict}
   def check_addressing(table, request) when is_list(table) and is_map(request) do
-    if request["action"] in @addressed_actions and not is_binary(request["observation_id"]),
-      do: {:error, :observation_required},
-      else: :ok
+    cond do
+      request["action"] not in @addressed_actions -> :ok
+      not is_binary(request["observation_id"]) -> {:error, :observation_required}
+      addressed_twice?(request) -> {:error, :addressing_conflict}
+      true -> :ok
+    end
+  end
+
+  defp addressed_twice?(%{"action" => action} = request) when action in @either_form,
+    do: length(addressing_forms(request)) > 1
+
+  defp addressed_twice?(_request), do: false
+
+  # Which of the three ways of naming a target this request used. A drag's two
+  # endpoints are one form, not two: they say where together.
+  defp addressing_forms(request) do
+    Enum.filter(
+      [
+        Map.has_key?(request, "x") or Map.has_key?(request, "from") or
+          Map.has_key?(request, "to"),
+        Map.has_key?(request, "mark"),
+        is_binary(request["element_ref"])
+      ],
+      & &1
+    )
   end
 
   @doc """
-  Resolve `mark: N` to its badge's point in the image the action names.
+  Resolve `mark: N` to what the action carrying it needs: the badge's point for a
+  pointer action, the badged control's `element_ref` for `press`/`set_value`.
 
   A mark names its observation like any other coordinate, so the badge table is a
   property of the image it was drawn on: an image with no badges answers
@@ -141,12 +187,20 @@ defmodule FermixCore.ComputerUse.Observations do
   count}`. Staleness is gone — a mark from an image the model has left is a mark
   on an image it can still name, and the helper refuses the id if it has aged out.
 
-  The resolved request carries x/y and no `mark`: the helper stays free of any
-  cross-request badge table.
+  A badge IS a control, so a mark is also the shortest way to name one by
+  accessibility. A badge the helper minted no reference for answers
+  `{:mark_not_pressable, id}` rather than being quietly clicked instead — which
+  mechanism to fall back on is the model's call, never this side's.
+
+  The resolved request carries x/y or an `element_ref` and no `mark`: the helper
+  stays free of any cross-request badge table.
   """
   @spec resolve_mark(t(), map()) ::
           {:ok, map(), boolean()}
-          | {:error, :no_marks | {:unknown_mark, integer(), non_neg_integer()}}
+          | {:error,
+             :no_marks
+             | {:unknown_mark, integer(), non_neg_integer()}
+             | {:mark_not_pressable, integer()}}
   def resolve_mark(table, %{"mark" => mark} = request)
       when is_list(table) and is_integer(mark) do
     case fetch(table, request["observation_id"]) do
@@ -224,13 +278,23 @@ defmodule FermixCore.ComputerUse.Observations do
 
   defp substitute_mark(request, mark, marks) do
     case Map.fetch(marks, mark) do
-      {:ok, {x, y}} ->
-        {:ok, request |> Map.delete("mark") |> Map.put("x", x) |> Map.put("y", y), true}
-
-      :error ->
-        {:error, {:unknown_mark, mark, map_size(marks)}}
+      {:ok, badge} -> address_from(request, mark, badge)
+      :error -> {:error, {:unknown_mark, mark, map_size(marks)}}
     end
   end
+
+  defp address_from(%{"action" => action} = request, mark, badge)
+       when action in @element_actions do
+    case badge.element_ref do
+      ref when is_binary(ref) -> {:ok, put_target(request, %{"element_ref" => ref}), true}
+      nil -> {:error, {:mark_not_pressable, mark}}
+    end
+  end
+
+  defp address_from(request, _mark, %{point: {x, y}}),
+    do: {:ok, put_target(request, %{"x" => x, "y" => y}), true}
+
+  defp put_target(request, fields), do: request |> Map.delete("mark") |> Map.merge(fields)
 
   # A crop is an image a rectangle was ASKED for (the request), positioned where
   # the helper RESOLVED it to (the reply, in full-display image pixels). A capture
@@ -248,12 +312,18 @@ defmodule FermixCore.ComputerUse.Observations do
   defp dims(%{"width" => w, "height" => h}) when is_integer(w) and is_integer(h), do: {w, h}
   defp dims(_response), do: nil
 
+  # A badge is a point AND, since the helper retains the element behind it, a
+  # control it can act on by name. Both are recorded: `mark: N` on a click still
+  # means the point, and on a `press` it means the control.
   defp marks(%{"marks" => marks}) when is_list(marks) do
-    for %{"id" => id, "x" => x, "y" => y} <- marks,
+    for %{"id" => id, "x" => x, "y" => y} = mark <- marks,
         is_integer(id) and is_integer(x) and is_integer(y),
         into: %{},
-        do: {id, {x, y}}
+        do: {id, %{point: {x, y}, element_ref: element_ref(mark["element_ref"])}}
   end
 
   defp marks(_response), do: nil
+
+  defp element_ref(ref) when is_binary(ref) and ref != "", do: ref
+  defp element_ref(_absent), do: nil
 end

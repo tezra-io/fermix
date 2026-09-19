@@ -8,6 +8,27 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Buttons can be pressed by name instead of aimed at.** The element listing now
+  gives each control a short reference and says what that control itself can do —
+  whether it is enabled, whether it can be pressed, whether its value can be set —
+  plus where it sits, so two "Save" buttons in one window are tellable apart. A
+  control that can be pressed is pressed by name: no pointer moves, nothing is
+  aimed, and it cannot land on the wrong thing. A field that reports itself as
+  settable is filled the same way, and its value is read back afterwards, so a set
+  that could not be confirmed says so and says to check the field rather than
+  being reported as done. Typing and pasting stay for fields that are not
+  settable. A click, move or scroll can name a control instead of a point too, and
+  the control's position is re-read as it is used, so one that has shifted since
+  the listing is still hit. Disabled controls are now listed AS disabled rather
+  than left out, because a button that is simply missing invites a guess about
+  why. Nothing is ever swapped for something else: a control that cannot be
+  pressed is refused and says so, a disabled one says to work out what enables it
+  rather than to try again, and a reference from a listing that has aged out says
+  to take a fresh listing. Naming a target twice — a control and a coordinate on
+  the same action — is refused before anything reaches the screen. An action that
+  pulls its application to the front now says so, because it changes where the
+  next keystroke goes.
+
 - **Every screenshot now has a name, and a click says which picture it came
   from.** Before, coordinates read on a zoomed crop only landed correctly if the
   same `region` rectangle was repeated on the click that followed, and forgetting

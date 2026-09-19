@@ -94,8 +94,9 @@ defmodule FermixCore.Tools.ComputerUse do
       "— element click, keyboard, the browser's own click — not aim. " <>
       "`inspect` (read-only) reports the UI element under a point — its role and label — so you " <>
       "can confirm you're about to click the right control (e.g., a button labeled \"Delete\") " <>
-      "before a consequential action. `elements` (read-only) lists the clickable UI elements — " <>
-      "each with a click point — so you target by element instead of guessing pixels; " <>
+      "before a consequential action. `elements` (read-only) lists the UI controls — each " <>
+      "with a reference, whether it is enabled, what it supports and a click point — so you " <>
+      "target by control instead of guessing pixels, and press the ones that can be pressed; " <>
       "`wait_for_change` blocks until the screen updates (e.g. a page finishes loading) instead " <>
       "of repeated screenshots. Honor " <>
       "the configured access mode: standard confirms before anything " <>
@@ -201,7 +202,21 @@ defmodule FermixCore.Tools.ComputerUse do
           "description" =>
             "Act on a numbered mark instead of x/y — the exact click point is resolved for " <>
               "you. A mark belongs to the image it was badged on, so send it with that " <>
-              "image's `observation_id`"
+              "image's `observation_id`. On `press`/`set_value` it names the badged CONTROL"
+        },
+        "element_ref" => %{
+          "type" => "string",
+          "description" =>
+            "A control, by the reference an `elements` listing (or a mark) gave it — `e1`, " <>
+              "`e2`, … A reference belongs to the listing that minted it, so send it with " <>
+              "that reply's `observation_id`. REQUIRED by `press`/`set_value`; a click, " <>
+              "right-click, double-click, move or scroll may take it INSTEAD of x,y and the " <>
+              "control's bounds are re-read at that moment, so a control that has shifted is " <>
+              "still hit. Never send both a reference and coordinates on one action"
+        },
+        "value" => %{
+          "type" => "string",
+          "description" => "The text to set (for action=set_value)"
         }
       }
     }
@@ -245,7 +260,15 @@ defmodule FermixCore.Tools.ComputerUse do
       "whole screen), " <>
       "wait_for_change (block until the screen changes, then return the new frame), " <>
       "mouse_move, wait. Mutating: left_click, right_click, double_click, " <>
-      "left_click_drag, scroll, type, paste (clipboard — prefer for long text), key."
+      "left_click_drag, scroll, type, paste (clipboard — prefer for long text), key, " <>
+      "press, set_value. PREFER A NAMED CONTROL: `elements` says, per control, whether it " <>
+      "can be pressed and whether its value can be set, and a control that lists `press` is " <>
+      "pressed by name with `press` + its `element_ref` — that moves no pointer, takes no aim " <>
+      "and cannot miss. `set_value` fills a field the same way where `elements` says it is " <>
+      "settable; `type` and `paste` remain for a field that is not, and for text that must go " <>
+      "through real keystrokes. A control that lists neither is clicked — by `element_ref` " <>
+      "(its bounds are re-read as it is clicked) or by point. Nothing is switched for you: a " <>
+      "refused `press` is a refusal, never a quiet click."
   end
 
   defp action_description(:strict) do
@@ -282,6 +305,23 @@ defmodule FermixCore.Tools.ComputerUse do
       %{
         args: %{"action" => "inspect", "observation_id" => "7c1e-12", "x" => 640, "y" => 360},
         note: "check what UI element is under a point before clicking it"
+      },
+      %{
+        args: %{"action" => "elements"},
+        note: "list the controls, each with a reference, what it supports, and a click point"
+      },
+      %{
+        args: %{"action" => "press", "observation_id" => "7c1e-13", "element_ref" => "e4"},
+        note: "press a control that listed `press` — no pointer, no aim, no miss"
+      },
+      %{
+        args: %{
+          "action" => "set_value",
+          "observation_id" => "7c1e-13",
+          "element_ref" => "e7",
+          "value" => "chess.com"
+        },
+        note: "fill a field that listed `settable`, instead of clicking it and typing"
       },
       %{args: %{"action" => "type", "text" => "hello"}, note: "type into the focused field"}
     ]
@@ -365,6 +405,44 @@ defmodule FermixCore.Tools.ComputerUse do
         description:
           "the helper's measurements of the display disagree with the picture it " <>
             "captured, so nothing was sent; an operator fault, not a retryable one"
+      },
+      %{
+        tag: "addressing_conflict",
+        description:
+          "the action named its target twice — an element_ref together with " <>
+            "coordinates or a mark; nothing was sent. Send one or the other"
+      },
+      %{
+        tag: "stale_element",
+        description:
+          "the control the element_ref names is gone with the listing that minted " <>
+            "it; nothing was sent. Take `elements` again and use the new reference"
+      },
+      %{
+        tag: "element_disabled",
+        description:
+          "the control is disabled, so nothing would reach it by any mechanism; " <>
+            "nothing was sent and retrying cannot help"
+      },
+      %{
+        tag: "ax_action_unsupported",
+        description:
+          "the control does not offer that accessibility action; nothing was sent " <>
+            "and nothing was switched to a click for you — choose the mechanism yourself"
+      },
+      %{
+        tag: "ax_timed_out / ax_action_failed",
+        description:
+          "an accessibility call failed. Whether the control was touched follows the " <>
+            "helper's receipt: a message that went out and never answered is an " <>
+            "unknown outcome and must NOT be repeated; one refused before it went " <>
+            "anywhere was not sent, and usually means a missing Accessibility grant"
+      },
+      %{
+        tag: "value_must_be_text",
+        description:
+          "set_value was given a non-string value; nothing was sent and nothing was " <>
+            "converted — send the characters you want in the field, in quotes"
       }
     ]
   end
@@ -488,9 +566,10 @@ defmodule FermixCore.Tools.ComputerUse do
     |> geometry_refusal(refusal_code(reason))
   end
 
-  # The one gate on this side that belongs to the addressing family, so a trace
-  # counts it beside the helper's own five.
+  # The two gates on this side that belong to the addressing family, so a trace
+  # counts them beside the helper's own.
   defp refusal_code(:observation_required), do: "observation_required"
+  defp refusal_code(:addressing_conflict), do: "addressing_conflict"
   defp refusal_code(_reason), do: nil
 
   # The human reclaimed the machine with /pause — the one refusal with its own
@@ -546,10 +625,37 @@ defmodule FermixCore.Tools.ComputerUse do
   # guessing which of the last few images the model meant — a wrong guess is a
   # click on the wrong thing, the one outcome a GUI driver must never produce.
   defp refusal_message(:observation_required) do
-    "this action was not sent: it names no `observation_id`, so there is no image its " <>
-      "coordinates belong to. Take a `screenshot` (or `elements`, or `windows`), then send " <>
-      "this action again with the `observation_id` that reply names and the coordinates you " <>
-      "read in it."
+    "this action was not sent: it names no `observation_id`, so there is no reply its target " <>
+      "belongs to — a coordinate and an `element_ref` alike mean something only in the image " <>
+      "or listing they were read from. Take a `screenshot` (or `elements`, or `windows`), " <>
+      "then send this action again with the `observation_id` that reply names and the target " <>
+      "you read in it."
+  end
+
+  # Two answers to "where" on one request. Guessing which the model meant is a
+  # click on the wrong thing, so it is refused here, before anything is dispatched.
+  defp refusal_message(:addressing_conflict) do
+    "this action was not sent: it names its target twice — an `element_ref` together with " <>
+      "coordinates or a `mark`. Send ONE: the reference, to act on that control wherever it " <>
+      "now is, or the point, to act at those pixels of the image you named."
+  end
+
+  # The schema says `value` is a string; a model that sends a number gets a
+  # sentence rather than a helper code. Nothing coerces it: `42` and `"42"` are
+  # different acts in a field that formats what it is given.
+  defp refusal_message(:value_must_be_text) do
+    "this action was not sent: `value` must be TEXT — send the characters you want in the " <>
+      "field, in quotes (`\"42\"`, not `42`). Nothing was converted for you, because a field " <>
+      "that formats what it is given would store a different thing."
+  end
+
+  # A badge that carries no control reference. Clicking it instead would be this
+  # side choosing a mechanism the model did not ask for, on a control that may
+  # behave differently under the pointer.
+  defp refusal_message({:mark_not_pressable, id}) do
+    "mark #{id} carries no `element_ref`, so it cannot be pressed by name. Take `elements` " <>
+      "and use the reference of the control you want, or click this mark with " <>
+      "`\"mark\": #{id}` instead — your choice, not one made for you."
   end
 
   # The wrong-grid tripwire (M28): the coordinates are plausible on BOTH live
@@ -612,8 +718,12 @@ defmodule FermixCore.Tools.ComputerUse do
       # input. Its error code picks the sentence; its receipt — which the session
       # has already read — is the outcome. Nothing here infers either.
       {:error, {:action_failed, failure}} ->
-        {{:ok, Tool.error(failure_message(failure))},
-         geometry_refusal(%{courtesy: :na, outcome: failure.outcome}, failure.code)}
+        telemetry =
+          %{courtesy: :na, outcome: failure.outcome}
+          |> geometry_refusal(failure.code)
+          |> put_receipt_facts(failure)
+
+        {{:ok, Tool.error(failure_message(failure))}, telemetry}
 
       # A `/pause` cast can land between classify and execute, so the SAME refusal
       # can arrive here. It gets the same sentence and the same courtesy dimension
@@ -633,7 +743,21 @@ defmodule FermixCore.Tools.ComputerUse do
   defp action_telemetry(%{outcome: outcome} = result) do
     %{courtesy: courtesy_of(result), outcome: outcome}
     |> put_age(Map.get(result, :observation_age_ms))
+    |> put_receipt_facts(result)
   end
+
+  # By which mechanism the input went out (`ax` or `foreground_hid`) and what the
+  # helper observed of it. Two closed enums the session read off the receipt — the
+  # value a `set_value` carried is NOT among them and never reaches a row: it is
+  # content, and content rides the capture gate, not always-on metadata.
+  defp put_receipt_facts(telemetry, source) do
+    telemetry
+    |> put_enum(:input_method, Map.get(source, :input_method))
+    |> put_enum(:effect, Map.get(source, :effect))
+  end
+
+  defp put_enum(telemetry, _key, nil), do: telemetry
+  defp put_enum(telemetry, key, value), do: Map.put(telemetry, key, value)
 
   # How stale the image an action aimed at was, in milliseconds. A bounded number
   # and nothing else: no id (it does not outlive the session), no size, no pixels.
@@ -648,8 +772,9 @@ defmodule FermixCore.Tools.ComputerUse do
   # of wire codes, so a trace can be counted by them without parsing a sentence.
   # `capture_geometry_mismatch` is the one that is never the model's doing, which
   # is exactly why it has to be countable.
-  @geometry_refusals ~w(observation_required unknown_observation expired_observation
-                        stale_observation point_outside_observation capture_geometry_mismatch)
+  @geometry_refusals ~w(observation_required addressing_conflict unknown_observation
+                        expired_observation stale_observation point_outside_observation
+                        capture_geometry_mismatch)
 
   defp geometry_refusal(telemetry, code) when code in @geometry_refusals,
     do: Map.put(telemetry, :geometry_refusal, code)
@@ -835,6 +960,51 @@ defmodule FermixCore.Tools.ComputerUse do
       "and give them both sizes below."
   end
 
+  # The control a reference names is gone: the listing that minted it has been
+  # replaced or aged out, the window was rebuilt under it, or its application
+  # restarted. A reference is only as live as the listing it came from, and there
+  # is no re-finding it from here — the same control in a fresh listing has a fresh
+  # reference.
+  defp action_error_message("stale_element") do
+    "this action was not sent: the control its `element_ref` names is no longer one the " <>
+      "computer-use helper holds — the listing that minted it has been replaced or aged out, " <>
+      "or the window was rebuilt under it. Take `elements` again and use the reference from " <>
+      "THAT reply; do not re-send this one."
+  end
+
+  # The control is there and it is off. Retrying presses the same dead button, so
+  # the next move is to find what turns it on — not a second attempt, and not a
+  # click at its pixels either, which a disabled control ignores just as firmly.
+  defp action_error_message("element_disabled") do
+    "this action was not sent: that control is DISABLED right now, so it would do nothing " <>
+      "however it were reached — clicking its pixels included. Do not retry it. Work out what " <>
+      "enables it (a field left empty, a selection not made, a mode not switched), do that " <>
+      "first, then take `elements` again."
+  end
+
+  # The control exists and is enabled but does not offer the accessibility action.
+  # What to do instead is the model's call: the helper never switches mechanism on
+  # its own, because a click is a different act with different consequences.
+  defp action_error_message("ax_action_unsupported") do
+    "this action was not sent: that control cannot be operated by name — its own list of " <>
+      "accessibility actions does not include the one you asked for. Reach it another way if " <>
+      "you still want to: click it by `element_ref`, or by its point from `elements` or a " <>
+      "marked `screenshot`. Nothing was switched for you."
+  end
+
+  # The same fact as Fermix's own conflict refusal, from the other side of the
+  # wire, so it reads the same whichever half the request met first.
+  defp action_error_message("addressing_conflict"), do: refusal_message(:addressing_conflict)
+
+  # The helper wants a control and got none. Fermix never sends this shape (the
+  # library refuses it first), so it means the two halves disagree about what the
+  # action takes.
+  defp action_error_message("element_required") do
+    "this action was not sent: it names no control. `press` and `set_value` act on the " <>
+      "`element_ref` of a control an `elements` listing named — take `elements`, then send " <>
+      "the reference of the control you want with that reply's `observation_id`."
+  end
+
   # The build and the installed helper disagree about what a request may contain.
   # No retry can fix that, and it is an operator fact, not a model one.
   defp action_error_message("unknown_field") do
@@ -897,18 +1067,60 @@ defmodule FermixCore.Tools.ComputerUse do
   # image's size for a point off its edge, and both measurements for a geometry
   # mismatch. Quoting the helper beats re-deriving them here — one authority for a
   # fact, and the operator reads the words the helper actually used.
-  @detailed_codes ~w(point_outside_observation capture_geometry_mismatch)
+  # The platform's own words belong beside these, because an AXError number is
+  # what a bug report needs — appended, never rendered AS the message.
+  @detailed_codes ~w(point_outside_observation capture_geometry_mismatch
+                     ax_timed_out ax_action_failed)
+
+  # The two codes whose sentence cannot be read off the code alone.
+  @ax_failures ~w(ax_timed_out ax_action_failed)
 
   # A refusal the helper named. Its code selects the sentence above; a `detail`
   # reaches the model on a code whose sentence asked for it, and on a code with no
   # sentence of its own, where the alternative is a bare token the operator cannot
   # act on.
-  defp failure_message(%{code: code, detail: detail}) do
-    message = action_error_message(code)
+  defp failure_message(%{code: code, detail: detail} = failure) do
+    message = named_failure_message(failure)
 
     if is_binary(detail) and (code in @detailed_codes or message =~ "action failed:"),
       do: message <> " (#{detail})",
       else: message
+  end
+
+  defp named_failure_message(%{code: code, dispatch: dispatch}) when code in @ax_failures,
+    do: ax_dispatch_message(ax_cause(code, dispatch), dispatch)
+
+  defp named_failure_message(%{code: code}), do: action_error_message(code)
+
+  # The two accessibility failures, whose sentence follows the RECEIPT and not the
+  # code: the same failure name covers a message the platform refused before it
+  # went anywhere and one that failed after it had already gone out, and those
+  # are opposite facts about whether the control was touched. The code picks the
+  # CAUSE clause; `ax_dispatch_message/2` picks which claim may be made about it.
+  defp ax_cause("ax_timed_out", :sent), do: "was made and never came back"
+  defp ax_cause("ax_timed_out", _not_sent), do: "timed out before its message went anywhere"
+  defp ax_cause("ax_action_failed", :sent), do: "failed after its message had already gone out"
+
+  defp ax_cause("ax_action_failed", _not_sent),
+    do: "was refused by the accessibility system before it went anywhere"
+
+  # The call was made and its result was never read. Repeating it is a second
+  # press on a control that may already have acted, which is the one thing the
+  # receipt family exists to prevent.
+  defp ax_dispatch_message(cause, :sent) do
+    "outcome unknown: the accessibility call #{cause}, so whether this control acted cannot " <>
+      "be told from here. Do NOT repeat it; look first — take a `screenshot`, or `elements` " <>
+      "again — and act only if it shows nothing happened."
+  end
+
+  # Nothing left this process, so the control was definitively not touched, and the
+  # causes are all things the user or a fresh listing resolves rather than a retry.
+  defp ax_dispatch_message(cause, _not_sent) do
+    "this action was not sent: the accessibility call #{cause}, so this control was not " <>
+      "touched. The usual causes are the Accessibility permission not being granted, the " <>
+      "control going away between the listing and now, or a platform that does not offer this " <>
+      "at all. Take `elements` again to see whether the control is still there; if it is, tell " <>
+      "the user computer use may be missing its Accessibility permission."
   end
 
   defp helper_fault({:timeout, :cu_sidecar_action, ms}),

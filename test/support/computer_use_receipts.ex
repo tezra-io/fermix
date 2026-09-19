@@ -18,6 +18,12 @@ defmodule FermixTestSupport.ComputerUseReceipts do
   A receipt with the given dispatch verdict: `:not_sent`, `:sent`, `:partial` or
   `:unknown`. `effect` is `not_observed` when the sidecar took an after-image and
   `unknown` when it did not; the doubles here do not, so `unknown` is the default.
+
+  `input_method` is `foreground_hid` — the pointer and the keyboard — unless the
+  action reached its target through accessibility, which is the one case where
+  `effect` is an ANSWER rather than a field the method cannot fill in (M42 slice 4
+  §3.3), and `foreground_changed` says whether the action pulled its application
+  to the front.
   """
   @spec receipt(:not_sent | :sent | :partial | :unknown, keyword()) :: map()
   def receipt(dispatch, opts \\ [])
@@ -25,9 +31,21 @@ defmodule FermixTestSupport.ComputerUseReceipts do
     %{
       "dispatch" => Atom.to_string(dispatch),
       "effect" => Keyword.get(opts, :effect, "unknown"),
-      "input_method" => "foreground_hid",
+      "input_method" => Keyword.get(opts, :input_method, "foreground_hid"),
+      "foreground_changed" => Keyword.get(opts, :foreground_changed, false),
       "timings_ms" => %{"input" => 1, "settle" => 0, "capture" => 0}
     }
+  end
+
+  @doc """
+  The receipt an accessibility action earns: the `ax` method, and the effect the
+  helper's own read-back proved. `press` is `not_observed` unless a later check
+  says otherwise — a successful AX return is a dispatch result, not an effect —
+  and `unknown` is the call that was made and never came back.
+  """
+  @spec ax(:verified | :not_observed | :unknown, keyword()) :: map()
+  def ax(effect, opts \\ []) when effect in [:verified, :not_observed, :unknown] do
+    receipt(:sent, Keyword.merge(opts, effect: Atom.to_string(effect), input_method: "ax"))
   end
 
   @doc """

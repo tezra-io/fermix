@@ -7,7 +7,7 @@
 # so frames reach the Port immediately. Env knobs (passed via the Port `env:`):
 #   FAKE_PID_FILE     write this process's own OS pid here at start, so a test can
 #                     prove the capturer REAPED it rather than merely dropping it
-#   FAKE_PROTO        reported protocol_version in the ack (default 8)
+#   FAKE_PROTO        reported protocol_version in the ack (default 9)
 #   FAKE_ACK_OK       "false" to refuse the start (ack ok:false)
 #   FAKE_PRE_ACK_FILE NDJSON frames to stream BEFORE the ack (buffer-before-handshake)
 #   FAKE_EVENTS_FILE  NDJSON frames to stream AFTER a successful ack
@@ -25,7 +25,7 @@ if (defined $ENV{FAKE_PID_FILE}) {
     if (open(my $p, ">", $ENV{FAKE_PID_FILE})) { print $p "$$"; close($p); }
 }
 
-my $proto  = $ENV{FAKE_PROTO} // 8;
+my $proto  = $ENV{FAKE_PROTO} // 9;
 my $ack_ok = (($ENV{FAKE_ACK_OK} // "true") eq "false") ? "false" : "true";
 
 sub stream_file {

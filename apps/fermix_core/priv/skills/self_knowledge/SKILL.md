@@ -97,7 +97,7 @@ The OpenAI voice companion (FermixPet) is local and off by default (`[fermix_cor
 
 Two separate opt-in features share one native driver binary — each with its own consent, permission, and on/off — enabled from their own cards atop setup's Plugins page:
 
-- **Computer use** (experimental; Apple Silicon macOS + Linux x86_64) — `computer_use` drives the host desktop GUI by screenshot plus mouse/keyboard; its safety `access` posture derives 1:1 from `[sandbox] mode`; operator-only, never delegated to subagents or started by an unattended run. Full detail: skill_view(name: "self-knowledge", file: "computer_use").
+- **Computer use** (experimental; Apple Silicon macOS + Linux x86_64) — `computer_use` drives the host desktop GUI by screenshot plus mouse/keyboard, and by NAME where the accessibility tree exposes a control — `elements` gives each one a reference and says whether it can be pressed or its value set, and pressing by name moves no pointer and cannot miss; its safety `access` posture derives 1:1 from `[sandbox] mode`; operator-only, never delegated to subagents or started by an unattended run. Full detail: skill_view(name: "self-knowledge", file: "computer_use").
 - **Computer history** (macOS only) — opt-in apps-only activity memory: window titles, page titles and addresses for every site in an allowed browser, typed text outside private windows; summarized off-device by default into memories `recall_activity` surfaces. Full detail: skill_view(name: "self-knowledge", file: "computer_history").
 
 ## Config & control surfaces

@@ -241,8 +241,35 @@ defmodule FermixCore.Tools.ComputerUseTest do
       assert params["properties"]["observation_id"]["description"] =~ "REQUIRED"
     end
 
+    # A control the model can NAME needs the schema to say so, and to say when
+    # naming beats aiming — otherwise the accessibility half ships invisible.
+    test "the schema offers a control reference and says when to prefer it" do
+      params = ComputerUse.parameters()
+      action = params["properties"]["action"]["description"]
+      ref = params["properties"]["element_ref"]
+
+      assert "press" in params["properties"]["action"]["enum"]
+      assert "set_value" in params["properties"]["action"]["enum"]
+      assert ref["type"] == "string"
+      assert ref["description"] =~ "REQUIRED by `press`/`set_value`"
+      assert ref["description"] =~ "Never send both a reference and coordinates"
+      assert params["properties"]["value"]["description"] =~ "set_value"
+      assert action =~ "cannot miss"
+      assert action =~ "`type` and `paste` remain"
+      assert action =~ "never a quiet click"
+    end
+
     test "failure_modes are tagged maps" do
       assert Enum.all?(ComputerUse.failure_modes(), &match?(%{tag: _, description: _}, &1))
+    end
+
+    # Every refusal the model can meet needs a failure mode it can read beforehand.
+    test "the reference refusals are all declared failure modes" do
+      tags = Enum.map(ComputerUse.failure_modes(), & &1.tag)
+
+      for tag <- ~w(addressing_conflict stale_element element_disabled ax_action_unsupported) do
+        assert tag in tags, "#{tag} can be returned and is not a declared failure mode"
+      end
     end
   end
 

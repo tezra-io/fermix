@@ -15,7 +15,7 @@ defmodule FermixCore.ComputerUse.MarksTest do
   alias FermixCore.ComputerUse.Session
 
   # Mirrors compux's screenshot payload for the incident display: dims plus the
-  # minted `observation_id` (protocol 8), and a canned mark table when
+  # minted `observation_id` (protocol 9), and a canned mark table when
   # `marks: true` rides the request.
   defmodule MarksDriver do
     @behaviour Compux.Driver
@@ -97,8 +97,8 @@ defmodule FermixCore.ComputerUse.MarksTest do
   # Mark 1 sits INSIDE the positioned ambiguity rect — the exact point a raw
   # click would be refused for — proving mark resolution bypasses the tripwire.
   @marks [
-    %{"id" => 1, "role" => "AXButton", "title" => "Start game", "x" => 200, "y" => 300},
-    %{"id" => 2, "role" => "AXLink", "title" => "Chess", "x" => 1100, "y" => 700}
+    %{"id" => 1, "role" => "AXButton", "label" => "Start game", "x" => 200, "y" => 300},
+    %{"id" => 2, "role" => "AXLink", "label" => "Chess", "x" => 1100, "y" => 700}
   ]
 
   defp start_session(opts \\ []) do

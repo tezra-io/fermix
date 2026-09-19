@@ -201,7 +201,13 @@ defmodule FermixOpik.Mapper do
             # session), no dimensions, nothing from the screen — so both ride
             # outside the content-capture gate like the pair above.
             :observation_age_ms,
-            :geometry_refusal
+            :geometry_refusal,
+            # References (M42 slice 4): by which mechanism the input went out
+            # (`ax` or `foreground_hid`) and what the helper observed of it. Two
+            # closed enums; the VALUE a `set_value` carried is content and never
+            # appears here, whatever the capture posture.
+            :input_method,
+            :effect
           ])
         )
     }
