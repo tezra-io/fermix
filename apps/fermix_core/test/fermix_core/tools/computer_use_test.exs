@@ -41,26 +41,41 @@ defmodule FermixCore.Tools.ComputerUseTest do
     def stop(_state), do: :ok
   end
 
-  # Returns a configurable sidecar error from every action — exercises the tool's
-  # action-failure messaging path (the real driver decodes `{"ok": false, ...}`
-  # into the same `{:error, reason}` this returns).
+  # Returns a configurable REFUSAL from every action — exercises the tool's
+  # action-failure messaging path. The real driver decodes an `ok: false` response
+  # into exactly this shape: the error code, an optional detail, and the receipt
+  # that says what became of the input, which is what the outcome is read from.
   defmodule ErrorDriver do
     @behaviour Compux.Driver
 
     @impl true
-    def start(opts), do: {:ok, %{error: Keyword.fetch!(opts, :error)}}
+    def start(opts) do
+      {:ok,
+       %{
+         error: Keyword.fetch!(opts, :error),
+         dispatch: Keyword.get(opts, :dispatch, "not_sent"),
+         detail: Keyword.get(opts, :detail)
+       }}
+    end
 
     @impl true
-    def execute(%{error: error}, _request), do: {:error, error}
+    def execute(state, _request), do: {:error, {:action_failed, payload(state)}}
 
     @impl true
     def stop(_state), do: :ok
+
+    defp payload(state) do
+      %{"error" => state.error, "receipt" => %{"dispatch" => state.dispatch}}
+      |> then(&if state.detail, do: Map.put(&1, "detail", state.detail), else: &1)
+    end
   end
 
   # Answers the session's one-time input-control probe normally and fails a NAMED
   # driver call: the courtesy probe (`on: :idle`, before any input reaches the
   # screen) or the action itself. One module, because the difference under test is
-  # exactly which call failed.
+  # exactly which call failed. `error:` is a TRANSPORT fault term — a helper that
+  # stopped answering or died — which is a different thing from a helper that
+  # answered "no" (that is `ErrorDriver`, above).
   defmodule FailingActionDriver do
     @behaviour Compux.Driver
 
@@ -172,15 +187,20 @@ defmodule FermixCore.Tools.ComputerUseTest do
     on_exit(fn -> :telemetry.detach(handler) end)
   end
 
-  defp error_session(error) do
+  # A unique child id, so one test may hold two sessions at once (which is how the
+  # same refusal code is shown meaning two different things).
+  defp error_session(error, opts \\ []) do
+    tag = System.unique_integer([:positive])
+
     start_supervised!(
       {Session,
        [
          config: Config.normalize(enabled: true),
-         driver: {ErrorDriver, [error: error]},
+         driver: {ErrorDriver, [error: error] ++ opts},
          origin: :interactive,
-         session_id: "cua_err_#{System.unique_integer([:positive])}"
-       ]}
+         session_id: "cua_err_#{tag}"
+       ]},
+      id: {Session, tag}
     )
   end
 
@@ -657,13 +677,14 @@ defmodule FermixCore.Tools.ComputerUseTest do
       assert meta.outcome == :unknown
     end
 
-    # Some of the input was posted and some was not — the definition of an unknown
-    # dispatch. Reporting it as a plain failure would buy a second real drag.
+    # Some of the input was posted and some was not — and the RECEIPT says so,
+    # rather than the tool inferring it from the code. Reporting it as a plain
+    # failure would buy a second real drag.
     test "a sequence the helper stopped part way through is unknown, not failed", %{
       config: config,
       turn: turn
     } do
-      session = failing_action_session(error: "cancelled")
+      session = error_session("cancelled", dispatch: "partial")
 
       assert {:ok, result} =
                ComputerUse.execute(
@@ -674,6 +695,136 @@ defmodule FermixCore.Tools.ComputerUseTest do
       assert result.success == false
       assert result.error =~ "outcome unknown"
       assert result.error =~ "stopped part way through"
+      refute result.error =~ "action failed"
+
+      assert_receive {:tool_exec, meta}
+      assert meta.outcome == :unknown
+    end
+
+    # The whole point of the receipt: the SAME refusal code means different things
+    # for the input depending on what the helper says it dispatched, and the tool
+    # reads that rather than deciding from the code. Before this the code alone
+    # decided, which is how a half-sent drag was recorded as a clean refusal.
+    test "a refusal's outcome comes from its receipt, not from its code", %{
+      config: config,
+      turn: turn
+    } do
+      not_sent = error_session("no_active_display", dispatch: "not_sent")
+      partial = error_session("no_active_display", dispatch: "partial")
+      click = %{"action" => "left_click", "x" => 1, "y" => 2}
+
+      assert {:ok, _} = ComputerUse.execute(click, tool_context(not_sent, config, turn))
+      assert_receive {:tool_exec, %{outcome: :refused}}
+
+      assert {:ok, _} = ComputerUse.execute(click, tool_context(partial, config, turn))
+      assert_receive {:tool_exec, %{outcome: :unknown}}
+    end
+
+    # The helper's own words about a code that has no sentence here, so an operator
+    # is never left with a bare token. A code that HAS a sentence already says more
+    # than the detail would, and appending it would make that sentence ramble.
+    test "a detail reaches the model only where the code has no sentence of its own", %{
+      config: config,
+      turn: turn
+    } do
+      named = error_session("no_active_display", detail: "CGDisplayCreateImage returned null")
+      unnamed = error_session("ax_timeout", detail: "the element tree took 1500 ms")
+      click = %{"action" => "left_click", "x" => 1, "y" => 2}
+
+      assert {:ok, named_result} = ComputerUse.execute(click, tool_context(named, config, turn))
+      assert named_result.error =~ "no capturable display"
+      refute named_result.error =~ "CGDisplayCreateImage"
+
+      assert {:ok, other} = ComputerUse.execute(click, tool_context(unnamed, config, turn))
+      assert other.error =~ "ax_timeout"
+      assert other.error =~ "the element tree took 1500 ms"
+    end
+
+    # Every code the helper's gate can answer with has a sentence naming the next
+    # move. A bare token — "action failed: stale_mutation" — is a dead end for a
+    # model and a mystery for whoever reads the trace.
+    test "every gate refusal names its next move rather than echoing a token", %{
+      config: config,
+      turn: turn
+    } do
+      click = %{"action" => "left_click", "x" => 1, "y" => 2}
+
+      for {code, expected} <- [
+            {"busy", "already running another action"},
+            {"stale_generation", "out of step with the session"},
+            {"stale_mutation", "out of step with the session"},
+            {"unknown_field", "needs reinstalling to match"}
+          ] do
+        session = error_session(code)
+        assert {:ok, result} = ComputerUse.execute(click, tool_context(session, config, turn))
+
+        assert result.error =~ expected, "#{code} rendered as: #{result.error}"
+        refute result.error =~ "action failed", "#{code} fell to the catch-all"
+        refute result.error =~ code, "#{code} echoed its own token at the model"
+
+        assert_receive {:tool_exec, %{outcome: :refused}}
+      end
+    end
+
+    # The blocker this fix pass exists for, from the tool's side. `Session.execute/2`
+    # catches only its OWN deadline, so a session that dies without answering kills
+    # the tool process — and `Tools.Telemetry.exec/5` never runs, so the turn that
+    # drove the machine leaves no row at all. Exactly one exec, and it says unknown.
+    test "a session that dies under an action still records exactly one exec", %{
+      config: config,
+      turn: turn
+    } do
+      session = scripted_session(reply: {:error, {:helper_fault, :control_unconfirmed}})
+
+      assert {:ok, result} =
+               ComputerUse.execute(
+                 %{"action" => "left_click", "x" => 1, "y" => 2},
+                 tool_context(session, config, turn)
+               )
+
+      assert result.success == false
+      assert result.error =~ "outcome unknown"
+      refute result.error =~ "control_unconfirmed"
+
+      assert_receive {:tool_exec, meta}
+      assert meta.outcome == :unknown
+      refute_receive {:tool_exec, _second}, 50
+    end
+
+    # One hold, one sentence. The helper's barrier and Fermix's own flag are two
+    # halves of the same pause, so which half an action met first must not change
+    # what the model is told.
+    test "the helper's own pause reads exactly like Fermix's pause refusal", %{
+      config: config,
+      turn: turn
+    } do
+      session = error_session("paused")
+
+      assert {:ok, result} =
+               ComputerUse.execute(
+                 %{"action" => "left_click", "x" => 1, "y" => 2},
+                 tool_context(session, config, turn)
+               )
+
+      assert result.error =~ "computer use is paused"
+      assert result.error =~ "/resume"
+      refute result.error =~ "action failed"
+    end
+
+    # A frame this build cannot read is a broken wire, not a failed action: the
+    # frame that would have said what happened to the input is the unreadable one.
+    test "a wire fault is unknown dispatch, and never a raw term", %{config: config, turn: turn} do
+      session = failing_action_session(error: {:malformed_frame, {:invalid_json, "boom"}})
+
+      assert {:ok, result} =
+               ComputerUse.execute(
+                 %{"action" => "left_click", "x" => 1, "y" => 2},
+                 tool_context(session, config, turn)
+               )
+
+      assert result.error =~ "outcome unknown"
+      assert result.error =~ "cannot read"
+      refute result.error =~ "malformed_frame"
       refute result.error =~ "action failed"
 
       assert_receive {:tool_exec, meta}

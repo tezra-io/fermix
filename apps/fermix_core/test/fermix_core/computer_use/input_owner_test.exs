@@ -82,4 +82,15 @@ defmodule FermixCore.ComputerUse.InputOwnerTest do
   test "acquiring against an absent owner is a clean grant, never a crash" do
     assert :ok = InputOwner.acquire(self(), :input_owner_that_is_not_running)
   end
+
+  # An arbiter that IS there but does not answer is the one case where granting is
+  # indefensible: ownership is unknown, and handing the machine to a second
+  # conversation on an unknown is exactly the failure this module exists to
+  # prevent. Absent means there is nothing to arbitrate; slow means we cannot tell.
+  test "an owner that does not answer fails closed, it does not grant" do
+    slow = spawn(fn -> receive do: (:never -> :ok) end)
+    on_exit(fn -> Process.exit(slow, :kill) end)
+
+    assert {:error, :input_unavailable} = InputOwner.acquire(self(), slow)
+  end
 end

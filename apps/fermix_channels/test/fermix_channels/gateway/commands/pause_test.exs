@@ -12,24 +12,44 @@ defmodule FermixChannels.Gateway.Commands.PauseTest do
   alias FermixCore.ComputerUse.Supervisor, as: CuSupervisor
 
   # A driver whose action blocks until released, so `/pause` can be run while one
-  # action is genuinely inside the helper. Bounded, and no native code.
+  # action is genuinely inside the helper — and which answers a control at once
+  # from a separate call, as the real wire does (the helper's control reader is
+  # not its action worker). Its ack names the request still under way, which is
+  # exactly the fact `/pause` has to tell the human. Bounded, and no native code.
   defmodule BlockingDriver do
     @behaviour Compux.Driver
 
     @impl true
-    def start(opts), do: {:ok, %{test_pid: Keyword.fetch!(opts, :test_pid)}}
+    def start(opts) do
+      {:ok, in_flight} = Agent.start_link(fn -> nil end)
+      {:ok, %{test_pid: Keyword.fetch!(opts, :test_pid), in_flight: in_flight}}
+    end
 
     @impl true
     def execute(_state, %{"action" => "probe"}), do: {:ok, %{"input_control" => true}}
 
-    def execute(%{test_pid: pid}, request) do
+    def execute(%{test_pid: pid, in_flight: in_flight}, request) do
       send(pid, {:driver_entered, request, self()})
+      Agent.update(in_flight, fn _ -> "r-" <> request["action"] end)
 
       receive do
-        :driver_release -> {:ok, %{"ok" => true}}
+        :driver_release ->
+          Agent.update(in_flight, fn _ -> nil end)
+          {:ok, %{"ok" => true}}
       after
         5_000 -> {:error, :test_driver_never_released}
       end
+    end
+
+    @impl true
+    def control(%{in_flight: in_flight}, action) do
+      {:ok,
+       %{
+         action: action,
+         ok: true,
+         authorization_generation: 2,
+         in_flight_request_id: Agent.get(in_flight, & &1)
+       }}
     end
 
     @impl true

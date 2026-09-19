@@ -22,7 +22,6 @@ defmodule FermixCore.ComputerUse.ActionWorkerTest do
           {:ok,
            %{
              test_pid: Keyword.fetch!(opts, :test_pid),
-             port: Keyword.get(opts, :port),
              probe: Keyword.get(opts, :probe, {:ok, %{"input_control" => true}})
            }}
 
@@ -80,30 +79,43 @@ defmodule FermixCore.ComputerUse.ActionWorkerTest do
     assert ActionWorker.input_control?(worker)
   end
 
-  # Responses match by Port order over this protocol, so a frame arriving after a
-  # prior call timed out would desync onto the next one. Dropped here, where the
-  # Port is owned. (Retired in the slice that puts request ids on the wire.)
-  test "a stale sidecar frame is dropped without crashing the worker" do
-    port = make_ref()
-    {:ok, worker} = start_worker(port: port)
-
-    send(worker, {port, {:data, {:eol, "stale"}}})
-
-    assert ActionWorker.input_control?(worker)
-  end
-
-  # The sidecar's exit status is reported as its own stop reason: the session
-  # classifies it (75 is compux's designed capture-stall self-reap), because that
-  # is where the wedge counter and the lifecycle bookend read the same shapes.
+  # The sidecar's exit status is reported as its own stop reason, unclassified:
+  # the session decides what a status MEANS (75 is compux's designed capture-stall
+  # self-reap), because that is where the wedge counter and the lifecycle bookend
+  # read the same shapes.
   test "the sidecar exiting stops the worker with the raw status" do
     Process.flag(:trap_exit, true)
-    port = make_ref()
-    {:ok, worker} = start_worker(port: port)
+    {:ok, worker} = start_worker([])
 
-    send(worker, {port, {:exit_status, 75}})
+    send(worker, {:compux_sidecar_exit, self(), 75})
 
     assert_receive {:EXIT, ^worker, {:shutdown, {:sidecar_exit_status, 75}}}
     assert_receive :driver_stop
+  end
+
+  # A transport that killed the sidecar over an unusable wire says so with a term,
+  # not a number: an exit code there could only ever be the signal it sent.
+  test "a poisoned wire is carried through as its own reason, not a status" do
+    Process.flag(:trap_exit, true)
+    {:ok, worker} = start_worker([])
+
+    send(worker, {:compux_sidecar_exit, self(), {:poisoned, {:malformed_frame, :nope}}})
+
+    assert_receive {:EXIT, ^worker,
+                    {:shutdown, {:sidecar_exit_status, {:poisoned, {:malformed_frame, :nope}}}}}
+  end
+
+  # Decoded and forwarded by the transport; nothing emits one at this protocol
+  # version, so the worker must name it rather than die on an unexpected message.
+  test "a session event is ignored without crashing the worker" do
+    {:ok, worker} = start_worker([])
+
+    send(
+      worker,
+      {:compux_session_event, self(), %Compux.Frame.SessionEvent{kind: "x", payload: %{}}}
+    )
+
+    assert ActionWorker.input_control?(worker)
   end
 
   # The load-bearing teardown: `stop/1` closes the Port AND kills the OS process,

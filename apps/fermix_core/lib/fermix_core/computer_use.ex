@@ -109,19 +109,22 @@ defmodule FermixCore.ComputerUse do
   @doc """
   Pause the computer-use session for a conversation `context` (the `/pause` command):
   the human is reclaiming the machine. The session, its sidecar, and the task stay
-  ALIVE and resumable — this only flips the session's guard so it refuses actions
-  until `resume/1` (contrast the interactive `/stop`, which tears the session down).
-  A safe no-op when computer-use isn't running.
+  ALIVE and resumable — this installs a barrier in the helper and flips the session's
+  guard so it refuses actions until `resume/1` (contrast the interactive `/stop`,
+  which tears the session down). A safe no-op when computer-use isn't running.
 
-  Returns `:paused` when the session was idle, `:paused_in_flight` when one action is
-  already inside the helper and will finish (it cannot be recalled over this
-  protocol), or `:no_session`.
+  The verdict is the helper's acknowledgement: `:paused`, `:paused_in_flight` when one
+  action is already under way and will finish, `:unconfirmed` when the barrier could
+  not be proven installed (the session is reset), or `:no_session`.
   """
-  @spec pause(map()) :: :paused | :paused_in_flight | :no_session
+  @spec pause(map()) :: SessionManager.verdict()
   def pause(context) when is_map(context), do: SessionManager.pause(context)
 
-  @doc "Resume a paused computer-use session (`/resume`). `:resumed` or `:no_session`."
-  @spec resume(map()) :: :resumed | :no_session
+  @doc """
+  Resume a paused computer-use session (`/resume`). `:resumed`, `:unconfirmed` when
+  lifting the barrier was not acknowledged (the session is reset), or `:no_session`.
+  """
+  @spec resume(map()) :: SessionManager.verdict()
   def resume(context) when is_map(context), do: SessionManager.resume(context)
 
   @doc """

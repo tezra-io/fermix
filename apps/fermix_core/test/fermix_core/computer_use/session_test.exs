@@ -28,10 +28,31 @@ defmodule FermixCore.ComputerUse.SessionTest do
          idle_response: Keyword.get(opts, :idle_response, %{"ok" => true, "idle_ms" => 10_000}),
          wait_for_idle_response:
            Keyword.get(opts, :wait_for_idle_response, %{"ok" => true, "idle" => true}),
-         # An optional fake port so handle_info port-matched clauses can be
-         # exercised without a real Port/sidecar.
-         port: Keyword.get(opts, :port)
+         # The acknowledgement this double gives a control, so a Session that
+         # pauses gets the same shape the wire returns. `nil` in_flight means the
+         # helper had nothing under way when the barrier installed.
+         ack: Keyword.get(opts, :ack, %{ok: true, in_flight_request_id: nil})
        }}
+    end
+
+    @impl true
+    def control(%{test_pid: pid, ack: ack}, action) do
+      send(pid, {:driver_control, action})
+
+      case ack do
+        :unconfirmed ->
+          {:error, :control_unconfirmed}
+
+        # A helper wedged inside its own control reader: the call does not return
+        # within any budget a caller cares about. Bounded so a test can never hang,
+        # but far longer than a teardown is allowed to wait on it.
+        :never_answers ->
+          Process.sleep(30_000)
+          {:error, :control_unconfirmed}
+
+        ack ->
+          {:ok, Map.put(ack, :action, action)}
+      end
     end
 
     @impl true
@@ -108,12 +129,20 @@ defmodule FermixCore.ComputerUse.SessionTest do
   # A Driver whose action call BLOCKS until the test releases it, so the window
   # "an action is inside the driver" can be held open and the session probed while
   # it is. The one-time probe and the courtesy arbiter answer immediately, so only
-  # the model's own action blocks.
+  # the model's own action blocks. Its control answers from a SEPARATE call, as
+  # the real wire does — the helper's control reader is not its action worker — so
+  # `control:` steers what that answer is while an action is genuinely under way.
   defmodule BlockingDriver do
     @behaviour Compux.Driver
 
     @impl true
-    def start(opts), do: {:ok, %{test_pid: Keyword.fetch!(opts, :test_pid)}}
+    def start(opts) do
+      {:ok,
+       %{
+         test_pid: Keyword.fetch!(opts, :test_pid),
+         control: Keyword.get(opts, :control, %{ok: true, in_flight_request_id: nil})
+       }}
+    end
 
     @impl true
     def execute(_state, %{"action" => "probe"}), do: {:ok, %{"input_control" => true}}
@@ -130,6 +159,10 @@ defmodule FermixCore.ComputerUse.SessionTest do
         5_000 -> {:error, :test_driver_never_released}
       end
     end
+
+    @impl true
+    def control(%{control: :unconfirmed}, _action), do: {:error, :control_unconfirmed}
+    def control(%{control: ack}, action), do: {:ok, Map.put(ack, :action, action)}
 
     @impl true
     def stop(%{test_pid: pid}) do
@@ -495,29 +528,42 @@ defmodule FermixCore.ComputerUse.SessionTest do
     end
   end
 
-  # The Port belongs to the `ActionWorker` now — it is the process that opened it —
-  # so both port-matched clauses moved there with it. The session-level consequence
-  # is what these pin: the sidecar's exit status still classifies HERE, where the
-  # wedge counter and the lifecycle bookend read the same shapes.
-  describe "handle_info" do
-    test "drains a stale sidecar response after a prior timeout without crashing" do
-      port = make_ref()
-      session = start_session(driver_opts: [port: port])
+  # The sidecar's death is reported to the `ActionWorker` — the driver's owner —
+  # and the session reads its reason. The stale-frame drain that used to live here
+  # is gone with the wire that needed it: a reply now reaches the request that
+  # asked for it by id, so a late frame can never answer a different one.
+  describe "the sidecar ending" do
+    test "an exit status the sidecar chose for itself stops the session, classified here" do
+      {session, ref} = start_monitored(StubDriver)
 
-      # the cryptic-incident message: a late {port,{:data,_}} after a timeout
-      send(worker(session), {port, {:data, {:eol, "stale"}}})
-
-      # still alive and serving (no crash, no unexpected-message error)
-      assert Session.action_count(session) == 0
-    end
-
-    test "stops the session when the sidecar exits" do
-      port = make_ref()
-      {session, ref} = start_monitored(StubDriver, port: port)
-
-      send(worker(session), {port, {:exit_status, 2}})
+      send(worker(session), {:compux_sidecar_exit, self(), 2})
 
       assert_receive {:DOWN, ^ref, :process, ^session, {:sidecar_exited, 2}}
+    end
+
+    # 75 is compux's designed capture-stall self-reap: a clean, retryable reset
+    # that feeds the capture breaker, never a crash.
+    test "the capture-stall status stays a clean completion" do
+      {session, ref} = start_monitored(StubDriver)
+
+      send(worker(session), {:compux_sidecar_exit, self(), 75})
+
+      assert_receive {:DOWN, ^ref, :process, ^session, {:shutdown, {:sidecar_exited, 75}}}
+    end
+
+    # A transport that killed the sidecar over an unusable wire is a FAULT. Its
+    # payload is a term, never a number, so it can never be read as a status the
+    # sidecar chose — and 75 in particular can never be forged from one.
+    test "a poisoned wire is a fault reason, never a status the sidecar chose" do
+      {session, ref} = start_monitored(StubDriver)
+
+      send(
+        worker(session),
+        {:compux_sidecar_exit, self(), {:poisoned, :sidecar_response_too_large}}
+      )
+
+      assert_receive {:DOWN, ^ref, :process, ^session,
+                      {:shutdown, {:sidecar_poisoned, :sidecar_response_too_large}}}
     end
   end
 
@@ -610,9 +656,11 @@ defmodule FermixCore.ComputerUse.SessionTest do
       session = start_session([])
       refute Session.paused?(session)
 
-      :ok = Session.pause(session)
-      # `paused?` is a call, so it also proves the cast has been processed
+      # The verdict is the helper's acknowledgement of the barrier, not the fact
+      # that a control was sent.
+      assert :paused = Session.pause(session)
       assert Session.paused?(session)
+      assert_received {:driver_control, :pause}
 
       assert {:error, {:refused, :paused}} =
                Session.classify(session, %{"action" => "screenshot"})
@@ -620,8 +668,9 @@ defmodule FermixCore.ComputerUse.SessionTest do
       assert {:error, {:refused, :paused}} =
                Session.classify(session, %{"action" => "left_click", "x" => 1, "y" => 2})
 
-      :ok = Session.resume(session)
+      assert :resumed = Session.resume(session)
       refute Session.paused?(session)
+      assert_received {:driver_control, :resume}
       assert {:ok, :auto, _request} = Session.classify(session, %{"action" => "screenshot"})
     end
 
@@ -635,7 +684,7 @@ defmodule FermixCore.ComputerUse.SessionTest do
       {:ok, :auto, request} =
         Session.classify(session, %{"action" => "left_click", "x" => 1, "y" => 2})
 
-      :ok = Session.pause(session)
+      assert :paused = Session.pause(session)
       assert Session.paused?(session)
 
       assert {:error, {:refused, :paused}} = Session.execute(session, request)
@@ -664,23 +713,66 @@ defmodule FermixCore.ComputerUse.SessionTest do
 
       session = start_session([])
 
-      :ok = Session.pause(session)
+      assert :paused = Session.pause(session)
       assert Session.paused?(session)
       assert_receive {:lifecycle, :session_pause, %{session_id: "cua_test", mode: :host}}
 
       # A repeated pause is not a second event — a trace showing two pauses and one
-      # resume would read as a session that is still held when it is running.
-      :ok = Session.pause(session)
+      # resume would read as a session that is still held when it is running. The
+      # control IS re-sent: re-confirming a barrier costs nothing and can still
+      # report an action that started in between.
+      assert :paused = Session.pause(session)
       assert Session.paused?(session)
       refute_receive {:lifecycle, :session_pause, %{session_id: "cua_test"}}, 50
 
-      :ok = Session.resume(session)
+      assert :resumed = Session.resume(session)
       refute Session.paused?(session)
       assert_receive {:lifecycle, :session_resume, %{session_id: "cua_test"}}
 
-      :ok = Session.resume(session)
+      assert :resumed = Session.resume(session)
       refute Session.paused?(session)
       refute_receive {:lifecycle, :session_resume, %{session_id: "cua_test"}}, 50
+    end
+
+    # The ack names the request the helper had already begun. That is the same
+    # fact the Registry in-flight flag used to carry, from the side that knows it.
+    test "an ack naming an action under way reports it, so /pause can say so" do
+      session = start_session(driver_opts: [ack: %{ok: true, in_flight_request_id: "r7"}])
+
+      assert :paused_in_flight = Session.pause(session)
+      assert Session.paused?(session)
+    end
+
+    # No acknowledgement means no proof the barrier installed. Claiming a pause
+    # would hand back a machine that may still be driven, so the helper is ended,
+    # which definitively returns it — and the session says so rather than "paused".
+    test "a pause the helper never acknowledged is unconfirmed, and resets the session" do
+      Process.flag(:trap_exit, true)
+
+      {:ok, session} =
+        Session.start_link(
+          config: Config.normalize(enabled: true),
+          driver: {StubDriver, [test_pid: self(), ack: :unconfirmed]},
+          session_id: "cua_unconfirmed"
+        )
+
+      ref = Process.monitor(session)
+
+      assert :unconfirmed = Session.pause(session)
+      assert_receive {:DOWN, ^ref, :process, ^session, {:shutdown, :control_unconfirmed}}
+      assert_receive :driver_stop
+    end
+
+    # Held input is released BEFORE the helper is killed, because a SIGKILL runs
+    # none of the helper's own release guards — this is the only thing that
+    # un-presses a key it is holding.
+    test "teardown releases held input before it ends the helper" do
+      session = start_session([])
+
+      :ok = Session.abort(session)
+
+      assert_received {:driver_control, :release}
+      assert_receive :driver_stop
     end
   end
 
@@ -724,7 +816,9 @@ defmodule FermixCore.ComputerUse.SessionTest do
       # driver receive before the split.
       refute Session.paused?(session)
       assert Session.action_count(session) == 0
-      :ok = Session.pause(session)
+      # …including the control itself, which reaches the helper's control reader
+      # rather than queueing behind the action it is pausing.
+      assert :paused = Session.pause(session)
       assert Session.paused?(session)
 
       send(worker, {:driver_release, %{"ok" => true, "receipt" => sent_receipt()}})
@@ -768,6 +862,93 @@ defmodule FermixCore.ComputerUse.SessionTest do
 
       assert {:error, {:helper_fault, :killed}} = Task.await(caller)
       assert_receive {:DOWN, ^ref, :process, ^session, :killed}
+    end
+
+    # THE headline path of this slice, and the one place a caller can be orphaned:
+    # `/pause` ends a session that has an action inside the helper. The caller is
+    # blocked in `Session.execute/2`, whose catch covers only its OWN deadline — so
+    # a session that dies without answering does not time that caller out, it kills
+    # it, and the model's tool call then records nothing at all.
+    test "an unconfirmed pause answers the action it interrupts before the session dies" do
+      Process.flag(:trap_exit, true)
+
+      {:ok, session} =
+        Session.start_link(
+          config: Config.normalize(enabled: true),
+          driver: {BlockingDriver, [test_pid: self(), control: :unconfirmed]},
+          session_id: "cua_pause_pending"
+        )
+
+      ref = Process.monitor(session)
+      caller = execute_async(session, %{"action" => "left_click", "x" => 1, "y" => 2})
+      {_request, worker} = await_blocked()
+
+      assert :unconfirmed = Session.pause(session)
+
+      assert {:error, {:helper_fault, :control_unconfirmed}} = Task.await(caller)
+      assert_receive {:DOWN, ^ref, :process, ^session, {:shutdown, :control_unconfirmed}}
+
+      send(worker, {:driver_release, %{"ok" => true}})
+    end
+
+    # Every other way a session can stop with an action pending — a conversation
+    # ending mid-action is the one a supervisor produces.
+    test "a shutdown mid-action answers the caller rather than killing it" do
+      Process.flag(:trap_exit, true)
+
+      {:ok, session} =
+        Session.start_link(
+          config: Config.normalize(enabled: true),
+          driver: {BlockingDriver, [test_pid: self()]},
+          session_id: "cua_shutdown_pending"
+        )
+
+      caller = execute_async(session, %{"action" => "left_click", "x" => 1, "y" => 2})
+      {_request, worker} = await_blocked()
+
+      Process.exit(session, :shutdown)
+
+      assert {:error, {:helper_fault, :shutdown}} = Task.await(caller)
+      send(worker, {:driver_release, %{"ok" => true}})
+    end
+
+    # The lifecycle row is the only record a dead session leaves. Teardown does two
+    # best-effort things that can each wait on a wedged helper, so the row is
+    # written BEFORE them — and the whole teardown stays well inside the child
+    # spec's shutdown, or the supervisor brutal-kills the session and the row with it.
+    test "the lifecycle row survives a helper that never answers the release" do
+      test_pid = self()
+      handler = "cu-teardown-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        handler,
+        [:fermix, :computer_use, :session_complete],
+        fn _e, _m, meta, _ -> send(test_pid, {:completed, meta}) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      {:ok, session} =
+        Session.start_link(
+          config: Config.normalize(enabled: true),
+          driver: {StubDriver, [test_pid: self(), ack: :never_answers]},
+          session_id: "cua_slow_release"
+        )
+
+      started = System.monotonic_time(:millisecond)
+      :ok = Session.abort(session)
+      elapsed = System.monotonic_time(:millisecond) - started
+
+      assert_receive {:completed, %{session_id: "cua_slow_release"}}
+      assert elapsed < 5_000, "teardown took #{elapsed} ms; it must finish inside its budget"
+    end
+
+    # The budget the child spec promises its supervisor has to exceed what teardown
+    # can actually spend, or the guarantee above is a hope rather than a bound.
+    test "the child spec's shutdown budget exceeds the worst-case teardown" do
+      assert %{shutdown: shutdown} = Session.child_spec([])
+      assert is_integer(shutdown) and shutdown >= 5_000
     end
 
     # The session's teardown guarantee now spans two processes: whatever kills the
@@ -834,9 +1015,11 @@ defmodule FermixCore.ComputerUse.SessionTest do
   end
 
   # M42 slice 1 §4: a receipt says what is known. A check that never came back is not
-  # a failed action, a helper that died is not a session that may keep running, and a
-  # timeout on any driver call poisons the Port the same way — pairing is positional,
-  # so a late frame becomes the NEXT request's reply unless the session resets.
+  # a failed action, and a helper that died is not a session that may keep running.
+  # A timeout on any driver call resets the session for the same reason it always
+  # did — a helper that stopped answering is not one to hand real input to next —
+  # though no longer because a late frame could answer the following request: the
+  # wire correlates a reply to the request that asked for it.
   describe "truthful receipts" do
     @region %{"x" => 0, "y" => 0, "w" => 600, "h" => 380}
 
@@ -882,7 +1065,8 @@ defmodule FermixCore.ComputerUse.SessionTest do
     end
 
     # The swallowed timeout: the check turned `{:timeout, …}` into a string, so the
-    # poison-reset never fired and the late frame became the next action's reply.
+    # reset never fired and the session carried on against a helper that had stopped
+    # answering.
     test "a check timeout says the action was performed, unverified, then resets the session" do
       {session, ref} =
         start_scripted(%{"screenshot" => {:error, {:timeout, :cu_sidecar_action, 30_000}}})
@@ -956,7 +1140,8 @@ defmodule FermixCore.ComputerUse.SessionTest do
       assert result.summary =~ "the action itself was sent"
       assert result.summary =~ "invalid base64"
       refute result.summary =~ "action failed"
-      # Nothing is desynchronised, so the session keeps its sidecar.
+      # The helper answered — a whole frame arrived and was paired — so the session
+      # keeps it; only the picture inside was unreadable.
       refute result.summary =~ "session was reset"
       assert Process.alive?(session)
     end
@@ -1082,6 +1267,87 @@ defmodule FermixCore.ComputerUse.SessionTest do
       assert_receive {:DOWN, ^ref, :process, ^session, {:shutdown, :protocol_error}}
     end
 
+    # A refusal is a wire frame like a success, minus the payload: it carries the
+    # same receipt, so the same rule reads it. The session lives — a live helper
+    # saying "no" is it doing its job, not a reason to take a fresh one.
+    test "a refusal's outcome comes from its receipt, and the session lives" do
+      {session, _ref} =
+        start_scripted(%{
+          "left_click" => {:error, {:action_failed, refusal("paused", :not_sent)}}
+        })
+
+      {:ok, :auto, click} =
+        Session.classify(session, %{"action" => "left_click", "x" => 1, "y" => 2})
+
+      assert {:error, {:action_failed, %{code: "paused", outcome: :refused}}} =
+               Session.execute(session, click)
+
+      assert Process.alive?(session)
+    end
+
+    # The sequence was stopped part way through, so some of the input landed. The
+    # code alone cannot say that; the receipt does.
+    test "a refusal that half sent the input is an unknown outcome" do
+      {session, _ref} =
+        start_scripted(%{
+          "left_click" => {:error, {:action_failed, refusal("cancelled", :partial)}}
+        })
+
+      {:ok, :auto, click} =
+        Session.classify(session, %{"action" => "left_click", "x" => 1, "y" => 2})
+
+      assert {:error, {:action_failed, %{code: "cancelled", outcome: :unknown}}} =
+               Session.execute(session, click)
+    end
+
+    # A refusal owes a receipt exactly as a success does — it is the same frame.
+    # Inferring one from the error code is the habit the receipt exists to end.
+    test "a refusal with no receipt is the same protocol fault" do
+      {session, ref} =
+        start_scripted(%{
+          "left_click" => {:error, {:action_failed, %{"error" => "paused"}}}
+        })
+
+      {:ok, :auto, click} =
+        Session.classify(session, %{"action" => "left_click", "x" => 1, "y" => 2})
+
+      assert {:error, {:protocol_error, :missing_receipt}} = Session.execute(session, click)
+      assert_receive {:DOWN, ^ref, :process, ^session, {:shutdown, :protocol_error}}
+    end
+
+    # A read-only action dispatches nothing, so a refusal of one carries no receipt
+    # and needs none — and it is still a read, never an unknown dispatch.
+    test "a read-only action refused without a receipt is still a read" do
+      {session, _ref} =
+        start_scripted(%{
+          "screenshot" => {:error, {:action_failed, %{"error" => "no_active_display"}}}
+        })
+
+      {:ok, :auto, request} = Session.classify(session, %{"action" => "screenshot"})
+
+      assert {:error, {:action_failed, %{code: "no_active_display", outcome: :read}}} =
+               Session.execute(session, request)
+
+      assert Process.alive?(session)
+    end
+
+    # The sentence has to follow the receipt too. "The action itself was sent" is
+    # true for a `sent` dispatch and a lie for any other, and a lie here is what
+    # makes a model repeat an action that may already be half done.
+    test "a check that failed after a half-sent action never claims the input was sent" do
+      {session, _ref} =
+        start_scripted(%{
+          "left_click" => {:ok, %{"ok" => true, "receipt" => receipt(:partial)}},
+          "screenshot" => {:ok, %{"data" => "!!!not-base64!!!", "mime" => "image/png"}}
+        })
+
+      assert {:ok, result} = click_in_region(session)
+      assert result.outcome == :unknown
+      assert result.summary =~ "outcome unknown"
+      refute result.summary =~ "the action itself was sent"
+      refute result.summary =~ "action performed"
+    end
+
     # 75 is compux's INTENTIONAL capture-stall fail-fast, so it stays a clean
     # completion (`session_complete`, no crash report) on this path too.
     test "a helper exiting 75 on the action is a clean completion" do
@@ -1132,6 +1398,11 @@ defmodule FermixCore.ComputerUse.SessionTest do
   defp sent_receipt, do: ComputerUseReceipts.receipt(:sent)
 
   defp receipt(dispatch), do: ComputerUseReceipts.receipt(dispatch)
+
+  # The payload an `ok: false` response carries: the helper's own code, and the
+  # same receipt a success carries.
+  defp refusal(code, dispatch),
+    do: %{"error" => code, "receipt" => ComputerUseReceipts.receipt(dispatch)}
 
   # classify an action and return just the request (helper for execute tests)
   defp wrap_classify(session, params) do

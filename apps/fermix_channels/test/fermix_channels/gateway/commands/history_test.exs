@@ -97,10 +97,10 @@ defmodule FermixChannels.Gateway.Commands.HistoryTest do
   end
 
   test "status names a pre-v6 recorder as the protocol mismatch it is", %{ctx: ctx} do
-    capturer(:degraded, {:protocol_mismatch, %{required: 6, sidecar: :pre_v6}})
+    capturer(:degraded, {:protocol_mismatch, %{required: 7, sidecar: :pre_v6}})
 
     assert status_reply(ctx) =~
-             "Capture: degraded — recorder speaks a pre-v6 protocol ≠ required v6 " <>
+             "Capture: degraded — recorder speaks a pre-v6 protocol ≠ required v7 " <>
                "(a compux upgrade is needed)."
 
     # A sidecar with no observe_start verb has no version to name, so the numeric
@@ -115,10 +115,10 @@ defmodule FermixChannels.Gateway.Commands.HistoryTest do
   end
 
   test "status keeps naming the version a numeric mismatch reported", %{ctx: ctx} do
-    capturer(:degraded, {:protocol_mismatch, %{required: 6, sidecar: 5}})
+    capturer(:degraded, {:protocol_mismatch, %{required: 7, sidecar: 5}})
 
     assert status_reply(ctx) =~
-             "Capture: degraded — recorder protocol v5 ≠ required v6 (a compux upgrade is needed)."
+             "Capture: degraded — recorder protocol v5 ≠ required v7 (a compux upgrade is needed)."
   end
 
   test "status reports the unsummarized backlog and how old it is", %{ctx: ctx, repo: repo} do

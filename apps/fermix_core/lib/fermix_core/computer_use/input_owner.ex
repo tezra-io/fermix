@@ -49,15 +49,25 @@ defmodule FermixCore.ComputerUse.InputOwner do
   @doc """
   Take (or keep) the native input seat for `owner`. `:ok` when `owner` now holds
   it, `{:error, :input_busy}` when another live conversation does and has not gone
-  idle for long enough to lose it.
+  idle for long enough to lose it, and `{:error, :input_unavailable}` when who
+  holds it cannot be established at all.
   """
-  @spec acquire(pid(), GenServer.server()) :: :ok | {:error, :input_busy}
+  @spec acquire(pid(), GenServer.server()) ::
+          :ok | {:error, :input_busy} | {:error, :input_unavailable}
   def acquire(owner, server \\ __MODULE__) when is_pid(owner) do
     GenServer.call(server, {:acquire, owner})
   catch
-    # No CU tree => no second conversation. Documented above; the same backstop
-    # shape `CaptureHealth` uses when computer-use is off.
-    :exit, _reason -> :ok
+    # NOT RUNNING is a grant: no CU tree means there is no second conversation to
+    # arbitrate against, the same backstop shape `CaptureHealth` uses when
+    # computer-use is off. Anything else — a call that timed out, an arbiter that
+    # died mid-call — leaves ownership UNKNOWN, and granting on an unknown is
+    # precisely the failure this module exists to prevent. It fails closed.
+    :exit, {reason, _call} when reason in [:noproc, :normal, :shutdown] ->
+      :ok
+
+    :exit, reason ->
+      Logger.warning("computer_use: the input owner did not answer (#{inspect(reason)})")
+      {:error, :input_unavailable}
   end
 
   @impl true
