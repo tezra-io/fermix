@@ -8,6 +8,18 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The browser can use the tools a page offers to agents over WebMCP.** A page
+  that registers WebMCP tools (a game, a docs search, a booking form) can now be
+  driven with one typed call per step instead of a snapshot and a click. The
+  `browser` tool gains a `webmcp` action: `op: "list"` names the tools the page
+  offers with their input schemas, and `op: "call"` runs one by `name` with an
+  `input` object. It runs in the same managed Chrome and behind the same read
+  policy as every other page read, and the managed Chrome now starts with the
+  WebMCP feature on, so a site that relies on the browser's own API works as
+  well as one that ships its own shim. Tool names, descriptions and results come
+  from the page, so they are marked as page content and never treated as
+  instructions. A tool that throws, or does not answer in time, is reported that
+  way with its effect unknown, so the assistant looks before it repeats anything.
 - **A prompt file you never edited adopts the newer shipped template on the
   next daemon start.** Setup seeds `SOUL.md`, `FERMIX.md`, `REALTIME.md` and
   `LIVE.md` once and then treats them as yours, so a `brew upgrade` or an app
@@ -224,6 +236,19 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A click is no longer sent twice when the browser dies mid-action.** When a
+  browser profile's process died with an action in flight, the same request was
+  re-sent up to three times, which for a click, a form fill, an upload or a page
+  tool call means doing it again. A request that never reached the browser (an
+  idle-reaped profile, or one still shutting down after the previous turn) is
+  retried on a fresh profile, as before. One that was in flight when the process
+  died is retried only if it is a read. Anything that changes something now
+  answers `outcome_unknown` and tells the assistant to take a snapshot and check
+  before repeating it.
+- **Page text can no longer close the page-content marker early.** A browser
+  snapshot is wrapped in delimiters that tell the model it is reading page
+  content. A page that spelled the closing delimiter itself could end that block
+  early. It is now neutralised, as every other content wrapper already did.
 - **One allowed environment variable the daemon cannot read no longer
   refuses every shell command.** An entry on `[sandbox.env] allow` whose value
   lives only in a shell profile is invisible to a background service, and the
