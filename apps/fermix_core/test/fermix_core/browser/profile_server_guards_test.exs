@@ -32,8 +32,11 @@ defmodule FermixCore.Browser.ProfileServerGuardsTest do
 
     def close(pid), do: Agent.stop(pid)
 
+    @drifted "http://169.254.169.254/latest/meta-data/"
+    @drifted_origin "file:///etc/passwd"
+
     def command(pid, method, params, _session_id, _timeout_ms, _grace_ms) do
-      page = Agent.get(pid, & &1)
+      page = Agent.get_and_update(pid, &{&1, drift(&1, method, params)})
 
       if collector = Process.whereis(:browser_guard_collector) do
         send(collector, {:cdp, page.owner, method, params})
@@ -41,6 +44,26 @@ defmodule FermixCore.Browser.ProfileServerGuardsTest do
 
       run(page, method, params)
     end
+
+    # A tab that DRIFTS: the first live-URL read answers with the href it was
+    # opened on — so a snapshot lands and the model holds refs — and every later
+    # one answers with a private host, which is a page that navigated itself
+    # after the model last looked at it.
+    defp drift(%{mode: "drift"} = page, "Runtime.evaluate", %{expression: expression}) do
+      if String.contains?(expression, "document.location.href"),
+        do: %{page | href: @drifted},
+        else: page
+    end
+
+    # The other way a page can leave the readable world: not a blocked HOST but
+    # a document that is not an http(s) document at all.
+    defp drift(%{mode: "drift_origin"} = page, "Runtime.evaluate", %{expression: expression}) do
+      if String.contains?(expression, "document.location.href"),
+        do: %{page | href: @drifted_origin},
+        else: page
+    end
+
+    defp drift(page, _method, _params), do: page
 
     defp run(page, "Target.getTargets", _params) do
       {:ok,
@@ -54,6 +77,9 @@ defmodule FermixCore.Browser.ProfileServerGuardsTest do
     defp run(_page, "Target.attachToTarget", _params), do: {:ok, %{"sessionId" => "S1"}}
     defp run(_page, "Accessibility.getFullAXTree", _params), do: {:ok, %{"nodes" => ax_nodes()}}
     defp run(_page, "DOM.resolveNode", _params), do: {:ok, %{"object" => %{"objectId" => "OBJ1"}}}
+
+    defp run(_page, "DOM.getBoxModel", _params),
+      do: {:ok, %{"model" => %{"content" => [0, 0, 20, 0, 20, 20, 0, 20]}}}
 
     defp run(_page, "Page.captureScreenshot", _params),
       do: {:ok, %{"data" => Base.encode64("PNG-BYTES")}}
@@ -76,7 +102,7 @@ defmodule FermixCore.Browser.ProfileServerGuardsTest do
 
     defp run(_page, _method, _params), do: {:ok, %{}}
 
-    defp live_meta(%{mode: "live", href: href}) do
+    defp live_meta(%{mode: mode, href: href}) when mode in ["live", "drift", "drift_origin"] do
       {:ok,
        %{"result" => %{"value" => %{"url" => href, "title" => "Page", "ready" => "complete"}}}}
     end
@@ -260,6 +286,54 @@ defmodule FermixCore.Browser.ProfileServerGuardsTest do
              req(pid, "webmcp", %{"op" => "call", "name" => "steal", "input" => %{}})
 
     refute_receive {:cdp, _owner, "Runtime.callFunctionOn", _params}, 100
+  end
+
+  # An action that observes the page (M47 §3.1) is a READ of it, so it faces the
+  # same gate. The dangerous shape is precisely the one that can hold a mark: a
+  # tab snapshotted while it was on an allowed page, which then navigated itself
+  # onto a private host. The model's own click is not a door around the gate.
+  test "a click, submit, Enter or click_coords on a drifted tab returns no page text" do
+    pid = start_page("https://example.com/form", public_config(), :guards_drift, "drift")
+    ready(pid)
+
+    observing = [
+      %{"kind" => "click", "ref" => "textbox_1"},
+      %{"kind" => "submit", "ref" => "textbox_1"},
+      %{"kind" => "press", "key" => "Enter"},
+      %{"kind" => "click_coords", "x" => 5, "y" => 5}
+    ]
+
+    for args <- observing do
+      assert {:ok, result} = req(pid, "act", args)
+
+      assert result["page"] == "read_blocked",
+             "`act #{args["kind"]}` observed a policy-blocked page: #{inspect(result)}"
+
+      refute Map.has_key?(result, "snapshot"),
+             "`act #{args["kind"]}` returned page text from a blocked host"
+    end
+  end
+
+  # The two refusals are different verdicts with different fixes — a blocked
+  # HOST is "navigate somewhere allowed", a refused ORIGIN is "this is not a web
+  # document, use the file tools". Collapsing both into `read_blocked` on an act
+  # result sends the model looking for a host rule that was never the problem.
+  test "an act on a tab that drifted off the web says so as read_origin_blocked" do
+    pid =
+      start_page(
+        "https://example.com/form",
+        public_config(),
+        :guards_drift_origin,
+        "drift_origin"
+      )
+
+    ready(pid)
+
+    assert {:ok, result} = req(pid, "act", %{"kind" => "click", "ref" => "textbox_1"})
+
+    assert result["page"] == "read_origin_blocked"
+    assert result["page_reason"] =~ "file tools"
+    refute Map.has_key?(result, "snapshot")
   end
 
   # The gate must not over-block: the same verbs still serve an allowed page.

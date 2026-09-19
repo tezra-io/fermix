@@ -47,6 +47,37 @@ defmodule FermixCore.Tools.BrowserTest do
     end
   end
 
+  # The turn `act` now saves is only saved if the model knows not to snapshot
+  # again after a result that already carries the page. Steering that nobody
+  # asserts rots silently.
+  describe "steering for the post-action page report" do
+    test "the prompt surface teaches `page` and one fill_form per form" do
+      guidance = Browser.description() <> " " <> Browser.when_to_use()
+
+      for word <-
+            ~w(changed unchanged unobserved read_blocked read_origin_blocked page_reason
+               click_coords fill_form) do
+        assert guidance =~ word, "the prompt surface never mentions `#{word}`"
+      end
+    end
+
+    # The precondition is the half a model cannot guess: a first click on a tab
+    # it has never snapshotted returns no `page` key at all, and a model that
+    # reads its absence as "nothing changed" stops looking.
+    test "both halves of the prompt state that `page` needs a prior snapshot" do
+      assert Browser.description() =~ "already snapshotted"
+      assert Browser.when_to_use() =~ "already snapshotted"
+    end
+
+    test "both read refusals are documented as act outcomes, not only refusals" do
+      for tag <- ~w(read_blocked read_origin_blocked) do
+        %{description: description} = Enum.find(Browser.failure_modes(), &(&1.tag == tag))
+
+        assert description =~ "act", "`#{tag}` is an act `page` value and does not say so"
+      end
+    end
+  end
+
   describe "parameters/0" do
     test "returns flat JSON Schema with action as required" do
       params = Browser.parameters()
@@ -78,6 +109,18 @@ defmodule FermixCore.Tools.BrowserTest do
       assert Map.has_key?(params.properties, :compact)
       assert Map.has_key?(params.properties, :depth)
       assert Map.has_key?(params.properties, :include_urls)
+    end
+
+    # The model cannot call an argument it cannot see: `fill_form` is only worth
+    # having if `fields` is in the schema beside the kind that reads it.
+    test "carries the fill_form fields, and names the kind that takes them" do
+      params = Browser.parameters()
+
+      assert params.properties.fields.type == "array"
+      assert params.properties.fields.items.type == "object"
+      assert Map.has_key?(params.properties.fields.items.properties, :ref)
+      assert Map.has_key?(params.properties.fields.items.properties, :text)
+      assert params.properties.kind.description =~ "fill_form"
     end
 
     test "carries the webmcp arguments, with op as a closed enum" do
@@ -202,6 +245,47 @@ defmodule FermixCore.Tools.BrowserTest do
       assert {:ok, result} = Browser.execute(%{"action" => "act", "kind" => "submit"}, @context)
       assert result.success == false
       assert result.error =~ "submit requires ref"
+    end
+
+    # Every fill_form refusal is decided before any Chrome launch, so these stay
+    # hermetic while covering the shape the model has to get right.
+    test "fill_form without fields says what a field is" do
+      assert {:ok, result} =
+               Browser.execute(%{"action" => "act", "kind" => "fill_form"}, @context)
+
+      assert result.success == false
+      assert result.error =~ "fields"
+      assert result.error =~ "ref"
+      assert result.error =~ "text"
+      refute result.error =~ "Invalid act kind"
+    end
+
+    test "fill_form refuses an empty list, a bad entry, and more fields than the cap" do
+      empty = %{"action" => "act", "kind" => "fill_form", "fields" => []}
+      assert {:ok, result} = Browser.execute(empty, @context)
+      assert result.success == false
+      assert result.error =~ "fields"
+
+      bad = %{
+        "action" => "act",
+        "kind" => "fill_form",
+        "fields" => [%{"ref" => "textbox_1", "text" => "a"}, %{"ref" => "textbox_2"}]
+      }
+
+      assert {:ok, entry} = Browser.execute(bad, @context)
+      assert entry.success == false
+      assert entry.error =~ "field 2"
+      assert entry.error =~ "text"
+
+      many = %{
+        "action" => "act",
+        "kind" => "fill_form",
+        "fields" => Enum.map(1..13, &%{"ref" => "textbox_#{&1}", "text" => "x"})
+      }
+
+      assert {:ok, over} = Browser.execute(many, @context)
+      assert over.success == false
+      assert over.error =~ "12"
     end
 
     # Every webmcp refusal below is decided before any Chrome launch, so these

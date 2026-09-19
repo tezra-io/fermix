@@ -85,6 +85,11 @@ defmodule FermixCore.Browser.Config do
 
   `webmcp_limits/0`, not struct fields: they bound text a PAGE controls and one
   argument the model supplies, neither of which is an operator's business.
+
+  ## Act bounds
+
+  `act_limits/0`, not struct fields either: the post-action settle budget and
+  the `fill_form` field count are tuning, not posture.
   """
 
   alias FermixCore.Browser.Error
@@ -220,6 +225,19 @@ defmodule FermixCore.Browser.Config do
     call_max_ms: 60_000
   }
 
+  # Bounds on the `act` action itself. Constants rather than struct fields, for
+  # the same reason as `@webmcp_limits`: neither is a posture an operator would
+  # want to take — `[fermix_core.browser]` still accepts `allowed_hosts` alone.
+  # `settle_budget_ms` is the cost of looking at the page after an action, and
+  # the poll runs inside the profile's `handle_call`, so it is deliberately
+  # short: a page holding a JS dialog answers nothing at all, and this is what
+  # bounds that wait. It bounds the WORK, not the wall clock — a command waits
+  # its own timeout and the caller adds `cdp_response_grace_ms`, so the ceiling
+  # is this budget plus one poll plus one grace (see `ProfileServer.settle/4`).
+  # `form_fields` is how many fields one `fill_form` may carry, and `ref_chars`
+  # bounds a ref quoted back at the model in a refusal.
+  @act_limits %{settle_budget_ms: 1_500, form_fields: 12, ref_chars: 128}
+
   @doc """
   Canonical list of allowed `[fermix_core.browser]` keys, used by the config
   store to reject unsettable keys at the parse boundary.
@@ -241,6 +259,18 @@ defmodule FermixCore.Browser.Config do
           call_max_ms: pos_integer()
         }
   def webmcp_limits, do: @webmcp_limits
+
+  @doc """
+  Bounds on `act`: the total budget for observing the page after an action, the
+  number of fields one `fill_form` may carry, and how much of a ref a refusal
+  quotes back.
+  """
+  @spec act_limits() :: %{
+          settle_budget_ms: pos_integer(),
+          form_fields: pos_integer(),
+          ref_chars: pos_integer()
+        }
+  def act_limits, do: @act_limits
 
   @doc """
   `[fermix_core.browser]` as a keyword list, keeping only the settable keys.

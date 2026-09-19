@@ -12,6 +12,8 @@ defmodule FermixCore.Browser.BrowserActTest do
   defmodule FakeConnection do
     use Agent
 
+    alias FermixCore.Browser.Error
+
     # The field starts pre-filled with "Rome" so the tests prove REPLACE vs
     # APPEND behaviorally: fill must yield "Amsterdam"; type must yield
     # "RomeAmsterdam" (the original bug — now the intended `type` semantics).
@@ -51,6 +53,11 @@ defmodule FermixCore.Browser.BrowserActTest do
       do: {:ok, %{"model" => %{"content" => [0, 0, 20, 0, 20, 20, 0, 20]}}}
 
     defp run(_pid, "DOM.resolveNode", _params), do: {:ok, %{"object" => %{"objectId" => "OBJ1"}}}
+
+    # One text the page refuses, so a fill that fails PART WAY through a
+    # `fill_form` is drivable.
+    defp run(_pid, "Input.insertText", %{text: "BOOM"}),
+      do: {:error, Error.new("cdp_error", "Input.insertText failed")}
 
     # insertText APPENDS at the cursor — exactly the real CDP behavior.
     defp run(pid, "Input.insertText", %{text: text}) do
@@ -116,12 +123,19 @@ defmodule FermixCore.Browser.BrowserActTest do
 
     defp ax_nodes do
       [
-        %{"nodeId" => "1", "role" => %{"value" => "RootWebArea"}, "childIds" => ["2"]},
+        %{"nodeId" => "1", "role" => %{"value" => "RootWebArea"}, "childIds" => ["2", "3"]},
         %{
           "nodeId" => "2",
           "role" => %{"value" => "textbox"},
           "name" => %{"value" => "Where to?"},
           "backendDOMNodeId" => 42,
+          "childIds" => []
+        },
+        %{
+          "nodeId" => "3",
+          "role" => %{"value" => "textbox"},
+          "name" => %{"value" => "When?"},
+          "backendDOMNodeId" => 43,
           "childIds" => []
         }
       ]
@@ -205,6 +219,22 @@ defmodule FermixCore.Browser.BrowserActTest do
     assert_receive {:cdp, _, "Accessibility.disable", _}
     assert_receive {:cdp, _, "Accessibility.enable", _}
     assert_receive {:cdp, _, "Accessibility.getFullAXTree", _}
+  end
+
+  # Every control the snapshot text already names as `@ref [role] "name"` was
+  # repeated in a `refs` array beside it, so each name was paid for twice in
+  # every later turn of the conversation. The ref map stays server-side; the
+  # text is the one thing the model reads.
+  test "the snapshot result carries the text alone, not a second copy of the refs", %{pid: pid} do
+    assert {:ok, _} = req(pid, "start")
+    assert {:ok, result} = req(pid, "snapshot")
+
+    refute Map.has_key?(result, "refs")
+    assert result["snapshot"] =~ "@textbox_1 [textbox] \"Where to?\""
+
+    # And the ref map is still there, server-side: the ref works.
+    assert {:ok, %{"action" => "click"}} =
+             req(pid, "act", %{"kind" => "click", "ref" => "textbox_1"})
   end
 
   # A ref below the fold clicked at its box-model center dispatches into nothing
@@ -296,6 +326,123 @@ defmodule FermixCore.Browser.BrowserActTest do
               "submitted" => "Search",
               "url" => "https://example.com/results"
             }} = req(pid, "act", %{"kind" => "submit", "ref" => "textbox_1"})
+  end
+
+  # M47 §3.5: a five-field form used to be five model turns. One call, one
+  # receipt per field, in order.
+  test "fill_form fills every field in order and receipts each one", %{pid: pid} do
+    ready(pid)
+
+    assert {:ok, result} =
+             req(pid, "act", %{
+               "kind" => "fill_form",
+               "fields" => [
+                 %{"ref" => "textbox_1", "text" => "Paris"},
+                 %{"ref" => "textbox_2", "text" => "Rome"}
+               ]
+             })
+
+    assert result["action"] == "fill_form"
+
+    assert result["filled"] == [
+             %{"ref" => "textbox_1", "value" => "Paris"},
+             %{"ref" => "textbox_2", "value" => "Rome"}
+           ]
+
+    # A fill is not a page-changing action, so it does not observe.
+    refute Map.has_key?(result, "page")
+
+    assert_receive {:cdp, _, "Input.insertText", %{text: "Paris"}}
+    assert_receive {:cdp, _, "Input.insertText", %{text: "Rome"}}
+  end
+
+  # A form half filled from a stale snapshot is worse than one not filled at
+  # all: the model cannot tell which fields took. So every ref is checked before
+  # the first keystroke.
+  test "an unknown ref refuses the whole call before any input", %{pid: pid} do
+    ready(pid)
+
+    assert {:error, error} =
+             req(pid, "act", %{
+               "kind" => "fill_form",
+               "fields" => [
+                 %{"ref" => "textbox_1", "text" => "Paris"},
+                 %{"ref" => "textbox_9", "text" => "Rome"}
+               ]
+             })
+
+    assert error.code == "stale_ref"
+    assert error.message =~ "textbox_9"
+    refute error.message =~ "textbox_1"
+    refute_received {:cdp, _, "Input.insertText", _params}
+  end
+
+  # The facade is what teaches the shape, but a call that reaches the server
+  # without it must not be told this kind does not exist — the same floor
+  # `webmcp` keeps under a missing `op`.
+  test "a fill_form with no fields names the argument, not a missing kind", %{pid: pid} do
+    ready(pid)
+
+    assert {:error, error} = req(pid, "act", %{"kind" => "fill_form"})
+
+    assert error.code == "missing_arg"
+    assert error.message =~ "fields"
+    refute error.message =~ "Unsupported act kind"
+  end
+
+  # The floor has to hold for every shape, not just the missing one: a non-map
+  # entry raised inside the ref check, and a nil `text` would have been typed
+  # into the page. Both are refused before any input, in the facade's words.
+  test "a fill_form entry that is not a ref and a text is refused before any input", %{pid: pid} do
+    ready(pid)
+
+    malformed = [
+      {[%{"ref" => "textbox_1", "text" => "Paris"}, "textbox_2"], "field 2"},
+      {[%{"ref" => "textbox_1"}], "field 1"},
+      {[%{"ref" => "textbox_1", "text" => nil}], "field 1"},
+      {[%{"text" => "Paris"}], "field 1"},
+      {[%{"ref" => "", "text" => "Paris"}], "field 1"}
+    ]
+
+    for {fields, named} <- malformed do
+      assert {:error, error} = req(pid, "act", %{"kind" => "fill_form", "fields" => fields})
+
+      assert error.code == "invalid_arg", "#{inspect(fields)} was not refused"
+      assert error.message =~ named
+      refute_received {:cdp, _, "Input.insertText", _params}
+    end
+  end
+
+  test "a direct fill_form is still capped at twelve fields", %{pid: pid} do
+    ready(pid)
+
+    fields = Enum.map(1..13, &%{"ref" => "textbox_1", "text" => "x#{&1}"})
+
+    assert {:error, error} = req(pid, "act", %{"kind" => "fill_form", "fields" => fields})
+
+    assert error.code == "invalid_arg"
+    assert error.message =~ "12"
+    refute_received {:cdp, _, "Input.insertText", _params}
+  end
+
+  test "a mid-list failure stops there and reports the index and what was filled", %{pid: pid} do
+    ready(pid)
+
+    assert {:error, error} =
+             req(pid, "act", %{
+               "kind" => "fill_form",
+               "fields" => [
+                 %{"ref" => "textbox_1", "text" => "Paris"},
+                 %{"ref" => "textbox_2", "text" => "BOOM"},
+                 %{"ref" => "textbox_1", "text" => "Never typed"}
+               ]
+             })
+
+    assert error.details["failed_index"] == 1
+    assert error.details["filled"] == ["textbox_1"]
+
+    # The call stopped at the failure.
+    refute_received {:cdp, _, "Input.insertText", %{text: "Never typed"}}
   end
 
   test "about:blank popups are filtered — only the real page is tracked", %{pid: pid} do

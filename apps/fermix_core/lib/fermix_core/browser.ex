@@ -13,7 +13,7 @@ defmodule FermixCore.Browser do
   # The `act` kinds — page interactions, reachable only as `act`'s `kind`. Listed
   # here so an unknown action that IS one can say so (see `action/1`); the kinds
   # themselves are validated in `validate_act_args/2`.
-  @act_kinds ~w(click fill type submit press hover get wait click_coords)
+  @act_kinds ~w(click fill type submit press hover get wait click_coords fill_form)
   # Requests that CHANGE something — the page, the browser, or a server on the
   # far side of it. `ProfileManager` re-sends a request whose server died, which
   # for these is a second click, a second upload, a second tool call; the list
@@ -117,7 +117,7 @@ defmodule FermixCore.Browser do
      Error.new(
        "invalid_action",
        "Invalid action: #{action}. Valid actions: #{Enum.join(@actions, ", ")}. " <>
-         "Page interactions (click, fill, type, submit, press, hover, wait, get, " <>
+         "Page interactions (click, fill, fill_form, type, submit, press, hover, wait, get, " <>
          "click_coords) go through `act` as its `kind`."
      )}
   end
@@ -222,6 +222,16 @@ defmodule FermixCore.Browser do
     end
   end
 
+  # One snapshot, several fields, one call. The shape is checked here so a
+  # malformed list costs nothing; the refs themselves are checked against the
+  # tab's live ref map in the server, before the first keystroke.
+  defp validate_act_args("fill_form", %{"fields" => fields}) when is_list(fields) do
+    validate_form_fields(fields)
+  end
+
+  defp validate_act_args("fill_form", _args),
+    do: {:error, Error.new("missing_arg", fill_form_shape())}
+
   defp validate_act_args("click_coords", args) do
     if is_number(args["x"]) and is_number(args["y"]),
       do: :ok,
@@ -262,6 +272,43 @@ defmodule FermixCore.Browser do
 
   defp validate_act_args(kind, _args),
     do: {:error, Error.new("invalid_action", "Invalid act kind: #{kind}")}
+
+  defp validate_form_fields([]), do: {:error, Error.new("missing_arg", fill_form_shape())}
+
+  defp validate_form_fields(fields) do
+    max = Config.act_limits().form_fields
+
+    if length(fields) > max do
+      {:error,
+       Error.new(
+         "invalid_arg",
+         "fill_form takes at most #{max} fields, and this call sent #{length(fields)}. " <>
+           "Fill the rest in a second call."
+       )}
+    else
+      fields |> Enum.with_index(1) |> Enum.reduce_while(:ok, &validate_form_field/2)
+    end
+  end
+
+  defp validate_form_field({%{"ref" => ref, "text" => text}, _position}, :ok)
+       when is_binary(ref) and ref != "" and is_binary(text),
+       do: {:cont, :ok}
+
+  defp validate_form_field({_field, position}, :ok) do
+    {:halt,
+     {:error,
+      Error.new(
+        "invalid_arg",
+        "fill_form field #{position} must be an object with `ref` (an element ref from the " <>
+          "latest snapshot) and `text` (the string to put in it, possibly empty)."
+      )}}
+  end
+
+  defp fill_form_shape do
+    "fill_form requires `fields`: a non-empty list of objects with `ref` and `text`, at most " <>
+      "#{Config.act_limits().form_fields} of them. They are the fields of ONE form, taken from " <>
+      "ONE snapshot, filled in order."
+  end
 
   defp require_element_target(args) do
     if is_binary(args["ref"]) or is_binary(args["selector"]),

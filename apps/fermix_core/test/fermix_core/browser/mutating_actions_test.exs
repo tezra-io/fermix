@@ -46,7 +46,7 @@ defmodule FermixCore.Browser.MutatingActionsTest do
   # `act` is nine kinds under one action: the two that only read are the two
   # that may be re-sent.
   test "act is split by kind — get and wait read, the rest change the page" do
-    for kind <- ~w(click fill type submit press hover click_coords) do
+    for kind <- ~w(click fill type submit press hover click_coords fill_form) do
       assert Browser.mutating?("act", %{"kind" => kind}), "act #{kind} was classified a read"
     end
 
