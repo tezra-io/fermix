@@ -8,6 +8,13 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Computer-use sessions now appear in traces.** A session starting, being
+  paused and resumed, finishing, or dying on its helper used to leave no record
+  anywhere: the events were emitted and nothing listened. They now reach the
+  local trace stream, the Opik exporter and trace replay, and a session that
+  died says so with its reason instead of looking like one that finished. Every
+  `computer_use` tool call also records which session it ran in and how it ended:
+  `refused`, `performed`, `performed_unverified`, `unknown`, or `read`.
 - **Several form fields can be filled in one browser step.** The `browser`
   tool's `act` gains a `fill_form` kind that takes up to twelve fields from one
   snapshot and fills them in order, so a five-field form is one step instead of
@@ -179,6 +186,15 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Computer use tells the assistant the truth about what happened to an
+  action.** A click whose helper timed out used to come back as "action failed"
+  with a raw error term, and a check image whose cursor had moved used to say the
+  action "did nothing, re-send the same action". Neither is known: someone moving
+  the mouse makes a click that landed look like a miss, and a blind re-send is a
+  double submit. The result now says what was and was not seen. An action that
+  was sent but could not be checked says so; one whose outcome cannot be told
+  says "outcome unknown" and asks for a screenshot before anything else; one that
+  was never sent says it was not sent. How the assistant aims is unchanged.
 - **A browser click now reports what it did to the page.** After a `click`, a
   `submit`, a `click_coords` or an Enter on a page the assistant has already
   read, the result says whether the page is `unchanged` (the elements it knows
@@ -253,6 +269,19 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`/pause` can no longer be raced, and says when an action is still
+  finishing.** A pause that landed between the assistant deciding on an action and
+  sending it was ignored for that action. It is now checked again at the moment
+  of sending. When one action is already under way, `/pause` says it will finish
+  and that nothing further will be sent, instead of claiming the cursor and
+  keyboard were already yours.
+- **A computer-use helper that stops answering no longer leaves the session half
+  alive.** A check or an idle probe that timed out was swallowed, which left the
+  helper's replies one step out of order so the next action could be answered
+  with the last one's reply. A helper that exited mid-action, or was no longer
+  running, left a session that failed every later action until the conversation
+  ended. All of these now reset the session, so the next action starts a fresh
+  helper.
 - **A long page's snapshot and its element list can no longer disagree.** The
   snapshot text was cut to size after the elements had been collected, so the
   assistant could be handed elements whose lines it never saw. The text is now
