@@ -41,12 +41,23 @@ Use `browser` for JavaScript-capable pages. Choose the right web tool once, read
 - `webmcp_tool_threw` and `webmcp_timeout` both leave the effect UNKNOWN — the call may have landed. Read the page state (`get`/`snapshot`, or the page's own read tool) before calling it again; never blind-retry a call that changes something.
 - `webmcp_unavailable` means this page offers no tools at all: drive it with `snapshot` and `act` instead.
 
+## The Person's Own Tab
+
+- The default profile is Fermix's OWN managed browser. `profile: "selected_tab"` is instead ONE tab of the person's own browser, signed in as them, which they hand over by clicking the Fermix browser extension on it. Use it only when they ask about the tab they have open; for a new web task the managed profile is simpler and borrows nothing.
+- Nothing about reading or acting changes there: `snapshot`, `act`, `screenshot`, `pdf`, `storage`, `webmcp` and every read refusal behave exactly as above.
+- Five actions are refused there with `unsupported_in_attached_tab`, because the grant is one tab and they are the whole browser: `open` (a new tab), `close`, `focus`, `cookies`, `download`. Do that work in the managed profile instead; navigating the granted tab is fine.
+- `attached_tab_not_granted` means nothing is handed over yet. Ask the person to click the Fermix extension on the tab they mean — do NOT open the same URL in the managed profile and treat it as the same page; it is a different session.
+- `attached_tab_detached` means the tab is gone, and the message says which way: they clicked again, the tab closed, Chrome's debugging bar was dismissed, DevTools opened on it, or the extension disconnected. Report what happened and ask for a fresh click if the work is not finished.
+- A detach is always reported before any other tab is used: if a different tab was granted in the meantime, the first answer is still `attached_tab_detached` and the next call picks the new one up. `browser_bridge_unavailable` means this process has no bridge at all — use the managed profile.
+- `attached_tab_not_allowed` means this turn is not one the person is present for (a scheduled job, a background run, a guest, a delegated worker). Use the managed profile.
+
 ## Tab And Ref Hygiene
 
 - Reuse one tab target per flow. If popups or retries create extras, use `tabs`, then `focus` or `close`.
 - On stale/missing refs: snapshot the same target, retry once with the new ref, then report the blocker.
 - Avoid snapshot churn; do not snapshot after every successful `fill`.
 - The `screenshot` action returns the page as an image the model actually sees — use it to inspect rendered/visual state. Treat PDFs and downloads as saved artifacts (a path, not seen); read them with `file_read`. A download past the size ceiling is canceled and its partial deleted (`download_too_large`); if the browser refuses the cancel you get `download_too_large_cancel_failed` instead, meaning the transfer may still be writing — close the tab rather than retrying.
+- `console` is a read of the page like any other — a page chooses what it logs — so it is refused on a host the read policy blocks. Clear the block by navigating somewhere allowed, then read it.
 - Reads are checked at the URL the page has actually committed to, against a policy of their own — stricter than navigation on the scheme, identical on the host. Three distinct refusals, three different fixes: `read_blocked` (the live host is refused — navigate somewhere allowed and read again), `read_origin_blocked` (the document is not something this tool reads at all), `read_url_unavailable` (the live URL could not be read, so no policy could be applied — retry; usually a page that just navigated).
 - Only `http`/`https` pages are readable, plus `about:blank` and a `blob:` URL whose inner origin is allowed. `file:`, `view-source:`, `filesystem:`, `data:`, `blob:null/` and `chrome:`-family documents are refused — read local files with `file_read`, not by opening them in a tab.
 - Hosts ending `.internal`, `.local` or `.localhost` are refused outright unless the operator listed them in `allowed_hosts`, so an mDNS name like `printer.local` is not reachable by default. That list is the recovery for every host refusal on this page, and the operator sets it in `config.toml` under `[fermix_core.browser]` (`allowed_hosts = ["printer.local"]`), then restarts the daemon; an entry that is not spelled in the canonical ASCII form is refused at config load rather than silently never matching. Loopback (`localhost`, `127.0.0.1`, `::1`) stays allowed under every `allowed_hosts` setting — inspecting your own dev server is the point.

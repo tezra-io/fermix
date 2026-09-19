@@ -12,6 +12,8 @@ defmodule Fermix.CLI do
   alias Fermix.CLI.AcpCommand
   alias Fermix.CLI.AgentsCommand
   alias Fermix.CLI.AuthCommand
+  alias Fermix.CLI.BrowserBridgeCommand
+  alias Fermix.CLI.BrowserCommand
   alias Fermix.CLI.CapabilitiesCommand
   alias Fermix.CLI.ChatCommand
   alias Fermix.CLI.DevicesCommand
@@ -74,6 +76,8 @@ defmodule Fermix.CLI do
   defp dispatch("health", rest), do: HealthCommand.run(rest)
   defp dispatch("voice", rest), do: VoiceCommand.run(rest)
   defp dispatch("acp", rest), do: AcpCommand.run(rest)
+  defp dispatch("browser", rest), do: BrowserCommand.run(rest)
+  defp dispatch("browser-bridge", rest), do: BrowserBridgeCommand.run(rest)
   defp dispatch("agents", rest), do: AgentsCommand.run(rest)
   defp dispatch("capabilities", rest), do: CapabilitiesCommand.run(rest)
   defp dispatch("skills", rest), do: SkillsCommand.run(rest)
@@ -125,6 +129,8 @@ defmodule Fermix.CLI do
       fermix voice status [--json]                Show local voice companion status
       fermix acp                                  Bridge an ACP client's stdio to the daemon
       fermix acp forget NPUB|--all                Disconnect a remembered ACP client identity
+      fermix browser bridge install|uninstall|status  Manage the browser extension bridge
+      fermix browser-bridge --manifest PATH ORIGIN  Pump the browser extension to the daemon
       fermix agents [--json]                      Show main-agent and worker status
       fermix capabilities [--kind KIND] [--json]  Show registered capabilities
       fermix skills [list|view NAME|reload] [--json]  Inspect and reload installed skills

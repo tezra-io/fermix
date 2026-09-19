@@ -220,7 +220,6 @@ defmodule FermixCore.Browser.ProfileServerGuardsTest do
       "the tab inventory; refusing it would hide the blocked tab and leave no id to close",
     "focus" => "activates a tab; returns no page bytes",
     "close" => "closes a tab; must stay reachable so the blocked tab can be disposed of",
-    "console" => "browser-scoped event buffer, not a read of the addressed tab",
     "dialog" => "answers or lists a JS dialog; needed to unblock a stuck page",
     "upload" => "a write into a file input; confined by confined_upload_path/1 instead",
     "download" =>

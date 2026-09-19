@@ -2,7 +2,7 @@
 # zsh completion for fermix, installed by the fermix package.
 # The verb list is the one `fermix help` prints; a test keeps them in step.
 
-_fermix_verbs=(setup auth ask chat run sandbox grant revoke service start stop restart status health voice acp agents capabilities skills plugins pair devices memory logs upgrade uninstall migrate-to-app doctor diagnostics version help)
+_fermix_verbs=(setup auth ask chat run sandbox grant revoke service start stop restart status health voice acp browser browser-bridge agents capabilities skills plugins pair devices memory logs upgrade uninstall migrate-to-app doctor diagnostics version help)
 
 _fermix() {
   local context state state_descr line
@@ -48,6 +48,12 @@ _fermix() {
           ;;
         acp)
           _values 'subcommand' 'forget' '--all'
+          ;;
+        browser)
+          _values 'subcommand' 'bridge' 'install' 'uninstall' 'status' '--browser' '--extension-id'
+          ;;
+        browser-bridge)
+          _values 'option' '--manifest'
           ;;
         capabilities)
           _values 'option' '--kind' '--json'

@@ -32,16 +32,19 @@ raw_argv =
 # before looking; anything else in argv is the verb's own business.
 cli_argv = Enum.reject(raw_argv, &(&1 == "--"))
 
-acp_verb? =
+wire_verb? =
   case cli_argv do
     ["acp" | _rest] -> true
+    # The browser-bridge pump's stdout IS the native-messaging wire: one stray
+    # boot warning on it and the browser reads a length header that is not one.
+    ["browser-bridge" | _rest] -> true
     _other -> false
   end
 
 # Asking for machine output IS the declaration that stdout is a wire, so the
 # flag is the predicate rather than a second list of verbs to keep in step with
 # the dispatcher.
-wire_stdout? = acp_verb? or "--json" in cli_argv
+wire_stdout? = wire_verb? or "--json" in cli_argv
 
 if wire_stdout? and Code.ensure_loaded?(Fermix.CLI.StdoutPurity) and
      function_exported?(Fermix.CLI.StdoutPurity, :route_logs_to_stderr, 0) do

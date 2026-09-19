@@ -8,6 +8,20 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **One tab of your own browser can be handed to Fermix.** Click the Fermix
+  browser extension on a tab and Fermix can read and act in that tab, with your
+  real login, without a second browser and without touching the pointer. It is
+  the same `browser` tool with the same rules — the read policy, the navigation
+  checks and the upload path policy are unchanged — reached with
+  `profile: "selected_tab"`. Everything browser-wide stays with the managed
+  profile and is refused there by name: no new tabs, no closing tabs, no
+  bringing a tab to the front, no cookies, no downloads. Closing the tab,
+  dismissing Chrome's debugging bar, opening DevTools on it, or ending the task
+  detaches, and Fermix says which of those happened. Only a turn you are present
+  for can use it: guest, scheduled, background and delegated runs get the
+  managed browser instead. Install the bridge with
+  `fermix browser bridge install --browser chrome --extension-id <id>`; the
+  extension and how to load it live in `apps/fermix_core/priv/browser_extension/`.
 - **Computer-use sessions now appear in traces.** A session starting, being
   paused and resumed, finishing, or dying on its helper used to leave no record
   anywhere: the events were emitted and nothing listened. They now reach the
@@ -269,6 +283,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The browser's `console` action now faces the same read policy as every other
+  page read.** Console entries are page text, and a page that redirected or was
+  clicked onto a host the browser policy refuses logs there too — so `console`
+  was returning bytes the same tab's `snapshot` had just refused. It is now
+  refused the same way, in every browser profile.
 - **`/pause` can no longer be raced, and says when an action is still
   finishing.** A pause that landed between the assistant deciding on an action and
   sending it was ignored for that action. It is now checked again at the moment

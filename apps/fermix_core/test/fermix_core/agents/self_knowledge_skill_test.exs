@@ -235,8 +235,11 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     end
 
     # Every `file:` pointer named in the main body resolves to a real reference.
+    # The lookbehind is load-bearing: `profile: "selected_tab"` ends in `file:`
+    # and is an ordinary thing to write in the body, so without it an argument
+    # name reads as a dangling pointer.
     pointers =
-      ~r/file:\s*"([a-z0-9_]+)"/
+      ~r/(?<![a-z_])file:\s*"([a-z0-9_]+)"/
       |> Regex.scan(body)
       |> Enum.map(fn [_, name] -> name end)
       |> Enum.uniq()

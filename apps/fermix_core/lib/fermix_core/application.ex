@@ -171,7 +171,10 @@ defmodule FermixCore.Application do
         {Trace, trace_opts()},
         TokenSupervisor,
         maybe_token_manager(),
-        FermixCore.Browser.Supervisor,
+        # The browser bridge listens on a socket the browser extension's pump
+        # connects to, so it starts in a daemon and nowhere else — the same
+        # question `maybe_daemon_socket/0` answers below.
+        {FermixCore.Browser.Supervisor, bridge: daemon_boot?()},
         CapabilityRegistry,
         BuiltinSeeder,
         {CommandCapabilities, capability_registry: CapabilityRegistry},
