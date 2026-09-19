@@ -123,6 +123,11 @@ defmodule FermixCore.Realtime.OpenAIClient do
         reasoning: %{effort: config.reasoning_effort},
         instructions: instructions,
         output_modalities: ["audio"],
+        # The session-level cap, which the GA Realtime session applies to every
+        # response INCLUDING the ones its own VAD creates. The per-`response.create`
+        # field covers only responses Fermix asks for after a tool, which are the
+        # minority of a call — on its own it left ordinary spoken turns uncapped.
+        max_output_tokens: config.max_response_output_tokens,
         audio: %{
           input: %{
             format: input_audio_format(config),

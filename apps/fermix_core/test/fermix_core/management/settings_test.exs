@@ -15,6 +15,7 @@ defmodule FermixCore.Management.SettingsTest do
   alias FermixCore.Management.Settings.Row
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Readiness
+  alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.RestartState
@@ -186,7 +187,10 @@ defmodule FermixCore.Management.SettingsTest do
     test "a row is flagged exactly when its own section is boot-bound" do
       assert Enum.all?(rows("channels.telegram"), & &1["restart"])
       assert Enum.all?(rows("realtime"), & &1["restart"])
-      assert Enum.all?(rows("sandbox"), & &1["restart"])
+      assert %{"restart" => true} = row("sandbox", "sandbox_mode")
+      assert %{"restart" => true} = row("sandbox", "sandbox_profile")
+      # The environment policy is read on every command (M45 §4.5).
+      assert %{"restart" => false} = row("sandbox", "sandbox_env_allow")
 
       refute Enum.any?(rows("memory"), & &1["restart"])
       refute Enum.any?(rows("transcription"), & &1["restart"])
@@ -249,6 +253,257 @@ defmodule FermixCore.Management.SettingsTest do
 
       assert %{"min" => 0, "step" => 1, "unit" => "hours"} =
                row("memory", "review_interval_hours")
+    end
+  end
+
+  # The voice section is the one section whose row list depends on a value inside
+  # itself: the model decides which engine is in force, and the engine decides
+  # which voices exist, whether reasoning effort is a setting at all, and whether
+  # the backend that answers is worth naming. A client renders whichever list it
+  # is handed, so the engine-scoped half is pinned here rather than trusted.
+  describe "the voice section under each engine" do
+    test "the default engine publishes the effort row and no engine row" do
+      Application.put_env(:fermix_core, :realtime, enabled: true)
+
+      keys = Enum.map(rows("realtime"), & &1["key"])
+
+      assert keys == [
+               "realtime_enabled",
+               "realtime_model",
+               "realtime_voice",
+               "realtime_reasoning_effort",
+               "openai_api_key",
+               "realtime_max_session_minutes",
+               "realtime_max_cost_cents",
+               "realtime_persist_transcripts"
+             ]
+
+      assert %{"value" => "gpt-realtime-2"} = row("realtime", "realtime_model")
+      assert option_values("realtime", "realtime_voice") == RealtimeConfig.valid_voices()
+    end
+
+    # One combined menu, both catalogs, under either engine: the model IS the
+    # engine choice, so a client that published only the engine in force would
+    # leave an operator with no way to reach the other one.
+    test "the model row is one list of both catalogs, each option naming its engine" do
+      Application.put_env(:fermix_core, :realtime, enabled: true)
+
+      assert option_values("realtime", "realtime_model") == RealtimeConfig.all_models()
+
+      labels =
+        "realtime" |> row("realtime_model") |> Map.fetch!("options") |> Enum.map(& &1["label"])
+
+      assert labels == [
+               "gpt-realtime-2.1-mini · Realtime, integrated tools",
+               "gpt-realtime-2.1 · Realtime, integrated tools",
+               "gpt-realtime-2 · Realtime, integrated tools",
+               "gpt-live-1 · Live, with your Fermix agent"
+             ]
+    end
+
+    test "the Live engine publishes Live's voices and no reasoning effort row" do
+      Application.put_env(:fermix_core, :realtime,
+        enabled: true,
+        engine: "openai_live",
+        model: "gpt-live-1"
+      )
+
+      keys = Enum.map(rows("realtime"), & &1["key"])
+
+      assert keys == [
+               "realtime_enabled",
+               "realtime_model",
+               "realtime_voice",
+               "realtime_backend",
+               "openai_api_key",
+               "realtime_max_session_minutes",
+               "realtime_max_cost_cents",
+               "realtime_persist_transcripts"
+             ]
+
+      assert option_values("realtime", "realtime_model") == RealtimeConfig.all_models()
+
+      assert option_values("realtime", "realtime_voice") ==
+               RealtimeConfig.valid_voices("openai_live")
+
+      assert "beacon" in option_values("realtime", "realtime_voice")
+    end
+
+    # Live speaks and the operator's own primary provider answers. The row is
+    # read-only because it is a statement about the Providers pane, and
+    # `settings.apply` refuses it rather than offering a control that cannot save.
+    test "the Live engine names the primary route in a read-only backend row" do
+      Application.put_env(:fermix_core, :providers,
+        openai: [primary: true, default_model: "gpt-5.4"]
+      )
+
+      Application.put_env(:fermix_core, :realtime,
+        enabled: true,
+        engine: "openai_live",
+        model: "gpt-live-1"
+      )
+
+      assert %{"kind" => "text", "read_only" => true, "label" => "Backend", "value" => value} =
+               row("realtime", "realtime_backend")
+
+      assert value == "OpenAI · gpt-5.4"
+
+      assert {:error, {:invalid_params, "realtime_backend", _sentence}} =
+               Settings.apply("realtime", %{"realtime_backend" => "anything"})
+    end
+
+    test "a host that has never chosen a primary provider says so rather than guessing" do
+      Application.put_env(:fermix_core, :providers, [])
+      Application.put_env(:fermix_core, :agent, [])
+
+      Application.put_env(:fermix_core, :realtime,
+        enabled: true,
+        engine: "openai_live",
+        model: "gpt-live-1"
+      )
+
+      assert %{"value" => "Not configured"} = row("realtime", "realtime_backend")
+    end
+  end
+
+  # Choosing a model of the other engine is the one write in this pane that
+  # carries other keys with it: Live refuses the Realtime-only settings at the
+  # configuration boundary, and a Realtime engine left on a Live model refuses
+  # too. Answering the operator's choice with a validation error is the defect
+  # these cases exist for.
+  describe "switching the voice engine through the model" do
+    test "choosing a Live model moves the engine and drops the Realtime-only settings" do
+      Application.put_env(:fermix_core, :realtime,
+        enabled: true,
+        engine: "openai_realtime",
+        model: "gpt-realtime-2",
+        reasoning_effort: "high",
+        voice: "marin"
+      )
+
+      assert {:ok, result} =
+               Settings.apply("realtime", %{"realtime_model" => "gpt-live-1"})
+
+      realtime = Application.get_env(:fermix_core, :realtime)
+
+      assert Keyword.get(realtime, :engine) == "openai_live"
+      assert Keyword.get(realtime, :model) == "gpt-live-1"
+      refute Keyword.has_key?(realtime, :reasoning_effort)
+
+      assert Enum.sort(result["applied"]) ==
+               ["realtime_engine", "realtime_model", "realtime_reasoning_effort"]
+
+      assert "The engine changed to Live, with your Fermix agent." in result["side_effects"]
+
+      assert "Reasoning effort was removed because this engine does not use it." in result[
+               "side_effects"
+             ]
+    end
+
+    test "choosing a Realtime model moves back and restores a reasoning effort" do
+      Application.put_env(:fermix_core, :realtime,
+        enabled: true,
+        engine: "openai_live",
+        model: "gpt-live-1",
+        voice: "marin"
+      )
+
+      assert {:ok, result} =
+               Settings.apply("realtime", %{"realtime_model" => "gpt-realtime-2.1"})
+
+      realtime = Application.get_env(:fermix_core, :realtime)
+
+      assert Keyword.get(realtime, :engine) == "openai_realtime"
+      assert Keyword.get(realtime, :model) == "gpt-realtime-2.1"
+      assert Keyword.get(realtime, :reasoning_effort) == "low"
+
+      assert "realtime_engine" in result["applied"]
+      assert "realtime_reasoning_effort" in result["applied"]
+      assert "The engine changed to Realtime, integrated tools." in result["side_effects"]
+
+      assert "Reasoning effort was restored because this engine uses it." in result[
+               "side_effects"
+             ]
+    end
+
+    # The engine stopped being a row when it became a consequence of the model,
+    # and a key this section does not publish is refused by its own name rather
+    # than written from a vocabulary no pane renders.
+    test "an engine sent explicitly is refused by name as a setting this section has not got" do
+      Application.put_env(:fermix_core, :realtime, enabled: true, engine: "openai_realtime")
+
+      assert {:error, {:invalid_params, "realtime_engine", sentence}} =
+               Settings.apply("realtime", %{"realtime_engine" => "openai_live"})
+
+      assert sentence == "This section has no setting by that name."
+      assert Keyword.get(Application.get_env(:fermix_core, :realtime), :engine) != "openai_live"
+    end
+
+    # A voice is a voice under both engines, so nothing is derived and the
+    # operator is told nothing they did not do.
+    test "a change that is not an engine switch derives nothing" do
+      Application.put_env(:fermix_core, :realtime,
+        enabled: true,
+        engine: "openai_realtime",
+        model: "gpt-realtime-2",
+        reasoning_effort: "low",
+        voice: "marin"
+      )
+
+      assert {:ok, result} = Settings.apply("realtime", %{"realtime_voice" => "cedar"})
+
+      assert result["applied"] == ["realtime_voice"]
+      assert result["side_effects"] == []
+    end
+
+    # Live ships every Realtime voice plus twelve of its own, so the return
+    # journey is the one that can strand a voice. The snap is a change the
+    # operator did not type, so it is named exactly as the model is.
+    test "returning to Realtime snaps a Live-only voice and names the row it moved" do
+      Application.put_env(:fermix_core, :realtime,
+        enabled: true,
+        engine: "openai_live",
+        model: "gpt-live-1",
+        voice: "beacon"
+      )
+
+      assert {:ok, result} =
+               Settings.apply("realtime", %{"realtime_model" => "gpt-realtime-2"})
+
+      realtime = Application.get_env(:fermix_core, :realtime)
+
+      assert Keyword.get(realtime, :voice) == "marin"
+      assert "realtime_voice" in result["applied"]
+      assert "The voice changed to marin." in result["side_effects"]
+      assert %{"value" => "marin"} = row("realtime", "realtime_voice")
+    end
+
+    test "a voice both engines ship survives the switch and is never named" do
+      Application.put_env(:fermix_core, :realtime,
+        enabled: true,
+        engine: "openai_realtime",
+        model: "gpt-realtime-2",
+        reasoning_effort: "low",
+        voice: "cedar"
+      )
+
+      assert {:ok, result} = Settings.apply("realtime", %{"realtime_model" => "gpt-live-1"})
+
+      assert Keyword.get(Application.get_env(:fermix_core, :realtime), :voice) == "cedar"
+      refute "realtime_voice" in result["applied"]
+      refute Enum.any?(result["side_effects"], &(&1 =~ "The voice changed"))
+    end
+
+    # The combined menu is the whole value space, so a slug no engine ships is
+    # still refused against the published options rather than reaching the
+    # configuration boundary.
+    test "a model no engine ships is refused against the published options" do
+      Application.put_env(:fermix_core, :realtime, enabled: true, engine: "openai_realtime")
+
+      assert {:error, {:invalid_params, "realtime_model", sentence}} =
+               Settings.apply("realtime", %{"realtime_model" => "gpt-realtime-9"})
+
+      assert sentence =~ "published values"
     end
   end
 
@@ -546,6 +801,120 @@ defmodule FermixCore.Management.SettingsTest do
     Application.put_env(:fermix_core, :sandbox, SandboxConfig.normalize(%{mode: :strict}))
   end
 
+  # M45 §4.4: one row per allowed or stored name, after the allow list. The
+  # snapshot is passed in, so each shape is seeded rather than inherited.
+  describe "the sandbox environment rows" do
+    setup do
+      profile = Application.get_env(:fermix_core, :profile)
+      Application.delete_env(:fermix_core, :profile)
+      on_exit(fn -> restore(:fermix_core, :profile, profile) end)
+      :ok
+    end
+
+    test "every name state has its own row, in allow-list order then stored names" do
+      rows = env_rows(sandbox_with_every_shape())
+
+      assert Enum.map(rows, & &1["key"]) ==
+               ~w(env:STORED_KEY env:UNSTORED_KEY env:HELPER_KEY env:ALIAS_KEY env:A_PARKED env:Z_PARKED)
+
+      assert Enum.map(rows, & &1["label"]) ==
+               ~w(STORED_KEY UNSTORED_KEY HELPER_KEY ALIAS_KEY A_PARKED Z_PARKED)
+    end
+
+    test "a stored and allowed name is a present secret row" do
+      row = env_row(sandbox_with_every_shape(), "STORED_KEY")
+
+      assert %{"kind" => "secret", "present" => true, "value" => nil, "footer" => nil} = row
+      assert row["read_only"] == false
+    end
+
+    test "a stored name that is no longer allowed says it is parked" do
+      row = env_row(sandbox_with_every_shape(), "A_PARKED")
+
+      assert %{"kind" => "secret", "present" => true, "value" => nil} = row
+
+      assert row["footer"] ==
+               "Stored, but commands do not get it until the name is allowed again."
+    end
+
+    test "an allowed name with no source is a secret row that is not stored" do
+      row = env_row(sandbox_with_every_shape(), "UNSTORED_KEY")
+
+      assert %{"kind" => "secret", "present" => false, "value" => nil} = row
+      assert row["footer"] == "Not stored. Commands get it only if Fermix was started with it."
+    end
+
+    test "a helper or an alias is a read-only text row saying where the value comes from" do
+      helper = env_row(sandbox_with_every_shape(), "HELPER_KEY")
+      alias_row = env_row(sandbox_with_every_shape(), "ALIAS_KEY")
+
+      assert %{"kind" => "text", "read_only" => true, "present" => nil, "value" => nil} = helper
+      assert helper["footer"] == "Read by a command set in the settings file."
+
+      assert %{"kind" => "text", "read_only" => true, "value" => "ALPACA_OLD_NAME"} = alias_row
+
+      assert alias_row["footer"] ==
+               "Read from another variable in the environment Fermix was started with."
+    end
+
+    # Offering Add on a name every store refuses is a control whose save always
+    # fails; the row says what is in force instead.
+    test "an allowed name Fermix cannot store is read-only" do
+      rows = env_rows(sandbox_from(env: [allow: ["HOME", "MY-VAR"]]))
+
+      assert Enum.map(rows, & &1["key"]) == ["env:HOME", "env:MY-VAR"]
+
+      for row <- rows do
+        assert %{"kind" => "text", "read_only" => true, "value" => nil} = row
+
+        assert row["footer"] ==
+                 "Fermix cannot store a value under this name. " <>
+                   "Commands get it from the environment Fermix was started with."
+      end
+    end
+
+    test "presence comes from the settings file alone, never a keychain read" do
+      Application.put_env(:fermix_core, :secret_writer, FermixTestSupport.CountingSecretWriter)
+      :ok = FermixTestSupport.CountingSecretWriter.watch()
+      on_exit(fn -> FermixTestSupport.CountingSecretWriter.unwatch() end)
+
+      rows = env_rows(sandbox_with_every_shape())
+
+      assert Enum.any?(rows, &(&1["present"] == true))
+      refute_received {:secret_writer_get, _key}
+    end
+
+    test "the allow-list and name rows derive their restart flag from the env rule" do
+      {:ok, %{"rows" => rows}} =
+        Settings.get("sandbox", snapshot: snapshot_with(sandbox_with_every_shape()))
+
+      live = Row.restart?([:sandbox, :env])
+
+      refute live
+      assert live == RestartState.boot_bound?([:sandbox, :env])
+
+      for row <- rows, row["key"] == "sandbox_env_allow" or env_key?(row) do
+        assert row["restart"] == live, row["key"]
+      end
+
+      for row <- rows, row["key"] in ["sandbox_mode", "sandbox_profile"] do
+        assert row["restart"] == Row.restart?(:sandbox)
+      end
+    end
+
+    test "settings.apply refuses every name row: values cross in secret.set alone" do
+      Application.put_env(:fermix_core, :sandbox, sandbox_with_every_shape())
+
+      assert {:error, {:invalid_params, "env:UNSTORED_KEY", sentence}} =
+               Settings.apply("sandbox", %{"env:UNSTORED_KEY" => "a-value"})
+
+      assert sentence == "This is a secret. Store it with secret.set instead."
+
+      assert {:error, {:invalid_params, "env:HELPER_KEY", _read_only}} =
+               Settings.apply("sandbox", %{"env:HELPER_KEY" => "a-value"})
+    end
+  end
+
   # The golden envelopes are hand-written, and a responder round trip proves only
   # that a map survives being encoded. These drive the real writers and compare
   # key shapes, so renaming a field here fails the export rather than shipping a
@@ -594,7 +963,44 @@ defmodule FermixCore.Management.SettingsTest do
     rows
   end
 
+  # Every §4.4 name state at once: stored and allowed, allowed with no source,
+  # allowed through a helper, allowed through an alias, and two stored names no
+  # longer allowed (published sorted, after the allow list).
+  defp sandbox_with_every_shape do
+    sandbox_from(
+      env: [
+        allow: ~w(STORED_KEY UNSTORED_KEY HELPER_KEY ALIAS_KEY),
+        sources: %{
+          "STORED_KEY" => managed("STORED_KEY"),
+          "HELPER_KEY" => %{source: :command, command: "/usr/local/bin/op", args: ["read"]},
+          "ALIAS_KEY" => %{source: :env, name: "ALPACA_OLD_NAME"},
+          "Z_PARKED" => managed("Z_PARKED"),
+          "A_PARKED" => managed("A_PARKED")
+        }
+      ]
+    )
+  end
+
+  defp managed(name), do: SecretWriter.command_source({:external_env, name})
+
+  defp sandbox_from(config), do: SandboxConfig.normalize(config)
+
+  defp snapshot_with(sandbox), do: Map.put(ConfigStore.current_snapshot(), :sandbox, sandbox)
+
+  defp env_rows(sandbox) do
+    {:ok, %{"rows" => rows}} = Settings.get("sandbox", snapshot: snapshot_with(sandbox))
+    Enum.filter(rows, &env_key?/1)
+  end
+
+  defp env_row(sandbox, name),
+    do: Enum.find(env_rows(sandbox), &(&1["label"] == name)) || flunk("no env row for #{name}")
+
+  defp env_key?(row), do: String.starts_with?(row["key"], "env:")
+
   defp row(id, key), do: Enum.find(rows(id), &(&1["key"] == key)) || flunk("no #{id}/#{key} row")
+
+  defp option_values(id, key),
+    do: id |> row(key) |> Map.fetch!("options") |> Enum.map(& &1["value"])
 
   defp restore(app, key, nil), do: Application.delete_env(app, key)
   defp restore(app, key, value), do: Application.put_env(app, key, value)

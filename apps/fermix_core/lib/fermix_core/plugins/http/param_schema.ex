@@ -4,15 +4,33 @@ defmodule FermixCore.Plugins.Http.ParamSchema do
   `parameters` block and materializes defaults — the in-house bounded subset of
   JSON Schema the `http` rail uses (§5.3). Deliberately NOT a JSON-Schema
   dependency: a single-level `object` with `properties` (`type`, `enum`,
-  `default`, `description`) + `required`. Nested validation below the top level
-  is not performed — `object`/`array` params (e.g. Notion block payloads) pass
-  through opaquely. A JSON-string value for a declared `object`/`array` param is
-  decoded to its native shape first (models stringify freeform structured
-  params); only the top-level type is then checked.
+  `default`, `description`, and the scalar bounds below) + `required`. Nested
+  validation below the top level is not performed — `object`/`array` params
+  (e.g. Notion block payloads) pass through opaquely. A JSON-string value for a
+  declared `object`/`array` param is decoded to its native shape first (models
+  stringify freeform structured params); only the top-level type is then checked.
 
   `validate/2` returns the normalized args (declared keys only, defaults
   materialized) or a `{:error, _}` the runtime turns into a tool error before
   any request is sent.
+
+  ## Scalar bounds (top level only)
+
+  A property may bound its value, and the bound is *enforced* here rather than
+  merely described: `minimum`/`maximum` on an `integer` or `number` (inclusive),
+  `minLength`/`maxLength` on a `string` (inclusive). String lengths are counted
+  in **codepoints**, not graphemes — a combining sequence is two codepoints and
+  one grapheme, and a fixed-width identifier (a 17-character VIN) means
+  codepoints. Bounds are checked after `type` and `enum`, so a wrong-typed value
+  reports its type error rather than a bound error, and each bound has its own
+  reason (`:below_minimum`, `:above_maximum`, `:below_min_length`,
+  `:above_max_length`).
+
+  A bound is consulted only for the kind of value it can describe: a `minimum`
+  declared on a string, or a `minLength` declared on an integer, says nothing
+  and is never applied. A bound that is present but not a number is a broken
+  manifest and is refused (`:invalid_bound`) rather than skipped. Unknown
+  arguments are still dropped silently, bounds or not.
   """
 
   @types ~w(string integer number boolean array object)
@@ -62,7 +80,8 @@ defmodule FermixCore.Plugins.Http.ParamSchema do
     value = coerce_structured(Map.get(spec, "type"), value)
 
     with :ok <- check_type(key, spec, value),
-         :ok <- check_enum(key, spec, value) do
+         :ok <- check_enum(key, spec, value),
+         :ok <- check_bounds(key, spec, value) do
       {:ok, value}
     end
   end
@@ -122,6 +141,53 @@ defmodule FermixCore.Plugins.Http.ParamSchema do
         :ok
     end
   end
+
+  # Bounds run last and only for the value kind they describe: `minimum`/
+  # `maximum` bound a number, `minLength`/`maxLength` bound a string's codepoint
+  # count. Anything else (boolean, array, object) has no bound grammar.
+  defp check_bounds(key, spec, value) when is_number(value) do
+    with {:ok, min} <- bound(key, spec, "minimum"),
+         {:ok, max} <- bound(key, spec, "maximum"),
+         :ok <- at_least(key, min, value, :below_minimum) do
+      at_most(key, max, value, :above_maximum)
+    end
+  end
+
+  defp check_bounds(key, spec, value) when is_binary(value) do
+    codepoints = value |> String.codepoints() |> length()
+
+    with {:ok, min} <- bound(key, spec, "minLength"),
+         {:ok, max} <- bound(key, spec, "maxLength"),
+         :ok <- at_least(key, min, codepoints, :below_min_length) do
+      at_most(key, max, codepoints, :above_max_length)
+    end
+  end
+
+  defp check_bounds(_key, _spec, _value), do: :ok
+
+  # An absent bound is `nil`; a present one must be a number, or the manifest is
+  # broken and says so at the first call instead of being quietly ignored.
+  defp bound(key, spec, field) do
+    case Map.fetch(spec, field) do
+      :error -> {:ok, nil}
+      {:ok, value} when is_number(value) -> {:ok, value}
+      {:ok, value} -> {:error, {:invalid_param, key, {:invalid_bound, field, value}}}
+    end
+  end
+
+  defp at_least(_key, nil, _actual, _reason), do: :ok
+
+  defp at_least(key, min, actual, reason) when actual < min,
+    do: {:error, {:invalid_param, key, {reason, min}}}
+
+  defp at_least(_key, _min, _actual, _reason), do: :ok
+
+  defp at_most(_key, nil, _actual, _reason), do: :ok
+
+  defp at_most(key, max, actual, reason) when actual > max,
+    do: {:error, {:invalid_param, key, {reason, max}}}
+
+  defp at_most(_key, _max, _actual, _reason), do: :ok
 
   defp check_required(required, normalized) do
     case Enum.find(required, &(not Map.has_key?(normalized, &1))) do

@@ -19,6 +19,7 @@ defmodule FermixCore.Auth.TokenManager do
   alias FermixCore.Auth.RefreshClient
   alias FermixCore.Auth.Store
   alias FermixCore.Auth.TokenExpiry
+  alias FermixCore.Auth.TokenFile
   alias FermixCore.Auth.TokenSupervisor
 
   require Logger
@@ -86,6 +87,35 @@ defmodule FermixCore.Auth.TokenManager do
     GenServer.call(server, :status)
   end
 
+  @doc """
+  Project this profile's access token to `path` and keep it there (M8 §9.3).
+
+  Writes the current token immediately, then rewrites it from the same seam
+  that accepts any new grant, so a refreshed token reaches the plugin child
+  without the child ever holding a refresh token. A grant that must not be
+  served is refused here and leaves no file behind: a child started without the
+  credential it exists to use would 401 every call, so the caller drops its
+  spec instead.
+  """
+  @spec enable_token_file(GenServer.server() | String.t(), Path.t()) :: :ok | {:error, term()}
+  def enable_token_file(auth_profile, path) when is_binary(auth_profile) and is_binary(path),
+    do: TokenSupervisor.enable_token_file(auth_profile, path)
+
+  def enable_token_file(server, path) when is_binary(path),
+    do: GenServer.call(server, {:enable_token_file, path})
+
+  @doc """
+  Delete this profile's token projection and stop rewriting it.
+
+  Called when no child is reading it any more: the plugin was disabled, its
+  runtime gate was switched off, it stopped being ready, or it was uninstalled.
+  """
+  @spec disable_token_file(GenServer.server() | String.t()) :: :ok | {:error, term()}
+  def disable_token_file(auth_profile) when is_binary(auth_profile),
+    do: TokenSupervisor.disable_token_file(auth_profile)
+
+  def disable_token_file(server), do: GenServer.call(server, :disable_token_file)
+
   # --- Server Callbacks ---
 
   @impl true
@@ -108,6 +138,11 @@ defmodule FermixCore.Auth.TokenManager do
       # `{:oauth_client_rejected, detail}` when the provider refused the client.
       refusal: nil,
       refresh_timer: nil,
+      # The plugin-child token projection (M8 §9.3): nil until a local `mcp`
+      # child that authenticates as this profile is materialized. `generation`
+      # counts writes of the current file and resets when it is disabled.
+      token_file: nil,
+      token_file_generation: 0,
       refresh_margin_ms:
         Keyword.get(opts, :proactive_refresh_margin_ms, @default_proactive_refresh_margin_ms)
     }
@@ -172,16 +207,35 @@ defmodule FermixCore.Auth.TokenManager do
 
     Logger.info("TokenManager: forgot tokens for #{inspect(state.auth_profile)}")
 
-    {:reply, :ok,
-     %{
-       state
-       | access_token: nil,
-         refresh_token: nil,
-         expires_at: nil,
-         entry: nil,
-         refresh_timer: nil,
-         refusal: permanent_reason(state.auth_profile)
-     }}
+    forgotten =
+      refresh_token_file(%{
+        state
+        | access_token: nil,
+          refresh_token: nil,
+          expires_at: nil,
+          entry: nil,
+          refresh_timer: nil,
+          refusal: permanent_reason(state.auth_profile)
+      })
+
+    {:reply, :ok, forgotten}
+  end
+
+  def handle_call({:enable_token_file, path}, _from, state) do
+    case sync_token_file(%{state | token_file: path}) do
+      {:ok, synced} -> reply_enabled(synced)
+      {:error, reason, _synced} -> {:reply, {:error, reason}, %{state | token_file: nil}}
+    end
+  end
+
+  def handle_call(:disable_token_file, _from, %{token_file: nil} = state),
+    do: {:reply, :ok, state}
+
+  def handle_call(:disable_token_file, _from, state) do
+    case TokenFile.delete(state.token_file) do
+      :ok -> {:reply, :ok, %{state | token_file: nil, token_file_generation: 0}}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
   end
 
   def handle_call(:reload, _from, state) do
@@ -252,7 +306,7 @@ defmodule FermixCore.Auth.TokenManager do
         )
 
         mark_client_rejected(state.auth_profile, entry, state.fermix_path)
-        {:error, reason, %{state | refusal: reason}}
+        refuse(state, reason)
 
       {:error, {:permanent, status, body}} ->
         Logger.error(
@@ -260,9 +314,8 @@ defmodule FermixCore.Auth.TokenManager do
             "Recover with `fermix auth login`, then restart the daemon."
         )
 
-        reason = permanent_reason(state.auth_profile)
         mark_reauthorization_required(state.auth_profile, entry, state.fermix_path)
-        {:error, reason, %{state | refusal: reason}}
+        refuse(state, permanent_reason(state.auth_profile))
 
       {:error, reason} ->
         {:error, reason, state}
@@ -277,10 +330,86 @@ defmodule FermixCore.Auth.TokenManager do
         expires_at: expires_at,
         # Keep the whole entry — refresh dispatch keys on :provider
         # (anthropic/google), which a tokens-only merge silently dropped.
-        entry: Map.merge(state.entry || %{}, entry)
+        entry: Map.merge(state.entry || %{}, entry),
+        # A grant a sign-in quarantined is unexpired and otherwise servable, so
+        # the refusal has to come off the entry itself. `Store` owns which
+        # statuses those are; a grant that clears one clears the refusal here,
+        # which is what a sign-in's reload does.
+        refusal: Store.quarantine_reason(entry)
     }
     |> schedule_proactive_refresh()
+    |> refresh_token_file()
   end
+
+  # --- the plugin-child token projection (M8 §9.3) ---
+
+  # The one place a grant becomes refused, so the projection is deleted with it:
+  # a child must never keep calling with a credential the daemon has stopped
+  # serving.
+  defp refuse(state, reason), do: {:error, reason, refresh_token_file(%{state | refusal: reason})}
+
+  # Write-through on every accepted grant. A failed projection is loud but not
+  # fatal to the manager: serving tokens in-process is its primary job, and a
+  # crash here would take the daemon's own provider calls down with it.
+  defp refresh_token_file(%{token_file: nil} = state), do: state
+
+  defp refresh_token_file(state) do
+    case sync_token_file(state) do
+      {:ok, synced} ->
+        synced
+
+      {:error, reason, synced} ->
+        Logger.error(
+          "TokenManager: could not project the #{synced.auth_profile} token for its plugin " <>
+            "child — #{Redaction.format(reason)}"
+        )
+
+        synced
+    end
+  end
+
+  # "Make the file match the grant": write the current token, or delete the file
+  # when there is no servable token to project.
+  defp sync_token_file(%{token_file: nil} = state), do: {:ok, state}
+
+  defp sync_token_file(%{refusal: refusal, access_token: token} = state)
+       when not is_nil(refusal) or is_nil(token) do
+    case TokenFile.delete(state.token_file) do
+      :ok -> {:ok, state}
+      {:error, reason} -> {:error, reason, state}
+    end
+  end
+
+  defp sync_token_file(state) do
+    generation = state.token_file_generation + 1
+
+    case TokenFile.write(state.token_file, projection(state, generation)) do
+      :ok -> {:ok, %{state | token_file_generation: generation}}
+      {:error, reason} -> {:error, reason, state}
+    end
+  end
+
+  defp projection(state, generation) do
+    %{
+      access_token: state.access_token,
+      expires_at: state.expires_at,
+      region: state.entry && Map.get(state.entry, :region),
+      auth_profile: to_string(state.auth_profile),
+      generation: generation
+    }
+  end
+
+  # `sync_token_file/1` deleting rather than writing means "the file matches the
+  # grant", which is not the same as "the child has a credential to read". The
+  # caller needs the second answer, and it drops the child's spec on anything
+  # but `:ok` — so the registration comes back off too.
+  defp reply_enabled(%{refusal: reason} = state) when not is_nil(reason),
+    do: {:reply, {:error, reason}, %{state | token_file: nil}}
+
+  defp reply_enabled(%{access_token: nil} = state),
+    do: {:reply, {:error, :no_token}, %{state | token_file: nil}}
+
+  defp reply_enabled(state), do: {:reply, :ok, state}
 
   # Refresh from the newest persisted entry, not the in-memory copy. Another
   # refresher (a CLI/doctor probe, or a prior refresh) may have rotated the

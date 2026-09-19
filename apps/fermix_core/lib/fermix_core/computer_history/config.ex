@@ -8,7 +8,6 @@ defmodule FermixCore.ComputerHistory.Config do
   [fermix_core.computer_history]
   enabled          = false   # the enable/consent act
   apps             = []      # capture allowlist, default-deny (bundle ids)
-  sites            = []      # per-site allowlist inside allowlisted browsers (hosts)
   remote_summaries = []      # Tier 2: providers that may receive DERIVED summaries
   summarizer       = "default" # where summarization runs: "default" (the daemon's
                              #   default provider), "local" (on-device), or one
@@ -23,6 +22,12 @@ defmodule FermixCore.ComputerHistory.Config do
   the persisted TOML is the sole source, applied replace-style — so every
   accessor reads `Application.get_env(:fermix_core, :computer_history, [])` and
   falls back to its own default when the key is absent.
+
+  `sites` is **retired** (v1.1 decision 1: every site visited in an allowlisted
+  browser is recorded, so there is no per-site filter to configure). It stays in
+  `@retired_keys` so a `config.toml` that still carries it is accepted, named once
+  at warning, and dropped — a retired key must never refuse boot, and `to_keyword/1`
+  never writes it back.
   """
 
   require Logger
@@ -34,11 +39,14 @@ defmodule FermixCore.ComputerHistory.Config do
   @app :fermix_core
   @section :computer_history
 
-  @config_keys [:enabled, :apps, :sites, :remote_summaries, :summarizer]
+  @config_keys [:enabled, :apps, :remote_summaries, :summarizer]
+
+  # Keys a persisted config may still carry: accepted at parse, dropped at
+  # normalize, never written back.
+  @retired_keys [:sites]
 
   @default_enabled false
   @default_apps []
-  @default_sites []
   @default_remote_summaries []
   # The default summarizer runs on the daemon's configured default provider
   # (§22.1): on-device (`:local`) is DOA for the majority who can't run a local
@@ -54,6 +62,22 @@ defmodule FermixCore.ComputerHistory.Config do
   @spec config_keys() :: [atom(), ...]
   def config_keys, do: @config_keys
 
+  @doc """
+  Keys this section no longer honors but still accepts from an existing
+  `config.toml`. `normalize/1` names each one at warning and drops it.
+  """
+  @spec retired_keys() :: [atom()]
+  def retired_keys, do: @retired_keys
+
+  @doc """
+  Every key the parse boundary accepts: the live keys plus the retired ones. The
+  one resolver the config store's unknown-key refusal consults, so a retired key
+  is never mistaken for a typo (which would refuse boot on a config the operator
+  already has).
+  """
+  @spec accepted_keys() :: [atom(), ...]
+  def accepted_keys, do: @config_keys ++ @retired_keys
+
   @doc "The current config block from app env."
   @spec current() :: keyword()
   def current, do: Application.get_env(@app, @section, [])
@@ -64,10 +88,6 @@ defmodule FermixCore.ComputerHistory.Config do
   @doc "App-capture allowlist (bundle ids), default-deny (empty = nothing captured)."
   @spec apps(keyword()) :: [String.t()]
   def apps(config \\ current()), do: Keyword.get(config, :apps, @default_apps)
-
-  @doc "Per-site allowlist (hosts) inside allowlisted browsers, default-deny."
-  @spec sites(keyword()) :: [String.t()]
-  def sites(config \\ current()), do: Keyword.get(config, :sites, @default_sites)
 
   @doc "Tier-2 grant: providers that may receive derived summaries, as atoms."
   @spec remote_summaries(keyword()) :: [atom()]
@@ -199,12 +219,35 @@ defmodule FermixCore.ComputerHistory.Config do
   def normalize(nil), do: []
 
   def normalize(config) when is_map(config) or is_list(config) do
+    warn_retired_keys(config)
+
     Enum.reduce(@config_keys, [], fn key, acc ->
       case lookup(config, key) do
         @absent -> acc
         value -> Keyword.put(acc, key, normalize_value(key, value))
       end
     end)
+  end
+
+  # One line per retired key actually present, never a refusal: the operator's
+  # existing config.toml must keep booting. Because normalize DROPS the key, the
+  # second pass over its own output is silent (idempotence, config_test).
+  # Expect the line TWICE on the first setup save and never again: the save reads
+  # the still-on-disk file (one line) and then re-parses the snapshot it is about
+  # to write (a second). The saved file no longer has the key, so every later boot
+  # is silent. That is the retirement working, not a double-warn bug.
+  defp warn_retired_keys(config) do
+    Enum.each(@retired_keys, fn key ->
+      case lookup(config, key) do
+        @absent -> :ok
+        _present -> Logger.warning(retired_message(key))
+      end
+    end)
+  end
+
+  defp retired_message(:sites) do
+    "computer_history.sites is retired: every site in an allowlisted browser is " <>
+      "recorded; remove the key from config.toml"
   end
 
   # --- per-key validators -------------------------------------------------
@@ -218,8 +261,7 @@ defmodule FermixCore.ComputerHistory.Config do
         "invalid computer_history.enabled #{inspect(value)}; expected a boolean"
       )
 
-  defp normalize_value(key, value) when key in [:apps, :sites],
-    do: normalize_string_list(key, value)
+  defp normalize_value(:apps, value), do: normalize_string_list(:apps, value)
 
   defp normalize_value(:remote_summaries, value) when is_list(value) do
     value

@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "user_manager_unreachable",
+    "sentence": "This session has no user service manager, so the background service cannot be inspected or changed from here. Log in to this machine and try again."
+  },
+  "ok": false,
+  "schema_version": 1
+}

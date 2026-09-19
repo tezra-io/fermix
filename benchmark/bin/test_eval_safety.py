@@ -969,7 +969,7 @@ def _scripted_with_tool_errors(monkeypatch, script):
     def scripted(_cfg, _client, _suite, _scn, case, _run_id, trial, _judge_on):
         seen_trials.append(trial)
         outcome, messages = next(remaining)
-        turns = [{"tool_failures": [{"name": "eden_read_board", "error_text": m}
+        turns = [{"tool_failures": [{"name": "acme_read_board", "error_text": m}
                                     for m in messages],
                   "cost_usd": 0.0, "duration_ms": 0.0, "gates": []}]
         return {"id": case.id, "trial": trial, "outcome": outcome,
@@ -1024,7 +1024,7 @@ def test_unmatched_tool_error_does_not_abort(tmp_path, monkeypatch):
 
 
 def test_abort_record_persisted_to_report_omits_vendor_text():
-    aborted = {"suite": "eden", "case": "one", "tool": "eden_read_board",
+    aborted = {"suite": "acme", "case": "one", "tool": "acme_read_board",
                "fragment": "out_of_credits", "message": "quota text", "unrun": 3}
     persisted = run_eval._persistable_abort(aborted)
     assert "message" not in persisted
@@ -1302,14 +1302,14 @@ def test_gate_placeholders_pin_a_read_back_to_this_run():
     # Without this, a suite whose every run leaves a permanent artifact scores
     # green off a PREVIOUS run's leftovers: the marker matches either way.
     rendered = run_eval._render_expect(
-        {"tools_any": ["eden_get_note_markdown"],
+        {"tools_any": ["acme_get_note_markdown"],
          "reply_matches": "round-trip marker __EVAL_RUN_ID__",
          "max_tool_calls": 10},
         "20260715T151102Z",
         1,
     )
     assert rendered["reply_matches"] == "round-trip marker 20260715T151102Z"
-    assert rendered["tools_any"] == ["eden_get_note_markdown"]
+    assert rendered["tools_any"] == ["acme_get_note_markdown"]
     assert rendered["max_tool_calls"] == 10
 
 
@@ -1620,11 +1620,10 @@ def test_recommended_core_selection_and_contains_epistemic_controls():
         for scenario in scenarios
         for case in scenario.cases
     }
-    # Three sources, and the count moves every time one of them grows:
-    # 15 originals, + 3 meetings guest-deny phrasings (M21), + 3
-    # computer_history relayed-activity-probe refusals. `make dry` prints the
-    # same number, and the README states it (see the README test below).
-    assert len(chosen) == 21
+    # No count assertion: the size of the core tag moves with every legitimate
+    # suite addition and a literal only ever re-pins. What must hold is WHICH
+    # cases the tag selects; the count against the README is pinned by
+    # `test_readme_states_the_core_case_count_the_selection_actually_produces`.
     assert {
         ("epistemic_integrity", "sycophancy_counterfactual_pair",
          "incorrect_arithmetic_under_pressure"),
@@ -1880,7 +1879,7 @@ def test_report_states_an_aborted_run_stopped_early(tmp_path):
             "rubrics", "rubrics_passed", "cost_usd", "duration_ms_total",
             "judge_calls", "judge_usage_reported_calls", "judge_tokens_reported")},
         "suites": [], "reliability": [],
-        "aborted": {"suite": "eden", "case": "one", "tool": "eden_read_board",
+        "aborted": {"suite": "acme", "case": "one", "tool": "acme_read_board",
                     "fragment": "out_of_credits", "unrun": 9},
     }
     paths = report.write(results, str(tmp_path / "out"))
@@ -1896,11 +1895,11 @@ def test_vendor_error_text_is_redacted_but_the_tool_name_survives():
     """The name is already public in `tools`; the vendor text may quote content."""
     results = {"suites": [{"scenarios": [{"cases": [{"turns": [{
         "query": "q", "reply": "r",
-        "tool_failures": [{"name": "eden_read_board", "error_text": "quota + note title"}],
+        "tool_failures": [{"name": "acme_read_board", "error_text": "quota + note title"}],
     }], "rubric": None}]}]}], "config": {}}
     redacted = run_eval.redact_content(results)
     failure = redacted["suites"][0]["scenarios"][0]["cases"][0]["turns"][0]["tool_failures"][0]
-    assert failure["name"] == "eden_read_board"
+    assert failure["name"] == "acme_read_board"
     assert failure["error_text"] == "[redacted by default]"
 
 

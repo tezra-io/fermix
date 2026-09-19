@@ -29,6 +29,29 @@ defmodule FermixCore.Setup.EndpointTest do
              {:ok, %{"origin" => "http://127.0.0.1:4030", "path" => "/setup"}}
   end
 
+  # M38 §4.7: the setup origin and the daemon's own listener are one resolver's
+  # answer, so `hello`'s published origin cannot name a port nothing listens on.
+  test "resolves the persisted setting when no environment port is supplied" do
+    assert Endpoint.port(port_env: nil, configured: 4555) == {:ok, 4555}
+
+    assert Endpoint.describe(port_env: nil, configured: 4555) ==
+             {:ok, %{"origin" => "http://127.0.0.1:4555", "path" => "/setup"}}
+  end
+
+  # The refusal keeps its own reason: a `PORT` a packaged engine does not read is
+  # not a `PORT` this resolver parsed and disliked, and calling it invalid would
+  # send an operator to fix a number that was never wrong.
+  test "a packaged engine reads the setting and refuses a PORT override" do
+    assert Endpoint.port(distribution: "linux_package", port_env: nil, configured: 4555) ==
+             {:ok, 4555}
+
+    assert {:error, {:port_not_used, sentence}} =
+             Endpoint.port(distribution: "linux_package", port_env: "4040", configured: 4555)
+
+    assert sentence =~ "PORT is not used by the packaged engine"
+    refute sentence =~ "fermix:"
+  end
+
   test "builds a tokenized launch URL without changing the token" do
     assert Endpoint.launch_url(4030, "token/with spaces") ==
              {:ok, "http://127.0.0.1:4030/setup?t=token%2Fwith+spaces"}

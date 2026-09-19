@@ -9,11 +9,13 @@ defmodule Fermix.CLI.PluginsCommandTest do
   alias FermixCore.Auth.Store
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Plugins.Config
   alias FermixCore.Plugins.Dist.Store, as: DistStore
   alias FermixCore.Plugins.Runtime
   alias FermixTestSupport.DistFetcherStub
   alias FermixTestSupport.DistFixtures
   alias FermixTestSupport.DistVerifierStub
+  alias FermixTestSupport.TreeLessSecretWriter
 
   setup do
     home = FermixTestSupport.SafeRm.make_tmp_dir!("plugins-command")
@@ -344,6 +346,94 @@ defmodule Fermix.CLI.PluginsCommandTest do
     end
   end
 
+  # Every verb here runs in the world an installed binary gives it: no command
+  # host, so each keychain call must run inline or the verb dies with the
+  # command host error instead of doing its work.
+  describe "in the tree-less CLI world" do
+    setup %{home: home} do
+      checkout =
+        write_api_key_plugin(home, "discord", "Paste a Discord bot token", %{
+          "config" => [%{"key" => "DISCORD_GUILD_ID", "prompt" => "Server id"}]
+        })
+
+      plugin_secrets = Application.get_env(:fermix_core, :plugin_secrets, %{})
+      Application.put_env(:fermix_core, :plugin_secrets, %{})
+      FermixTestSupport.SecretWriterStub.reset()
+
+      on_exit(fn ->
+        Application.delete_env(:fermix_core, :secret_terminal)
+        Application.put_env(:fermix_core, :plugin_secrets, plugin_secrets)
+        FermixTestSupport.SecretWriterStub.reset()
+      end)
+
+      # The home holds a Discord key stored the way the daemon stores one:
+      # keychained, `@keyring` on disk, and read back into the environment when
+      # the verb's VM started.
+      Application.put_env(:fermix_core, :plugins, dev_local: checkout)
+      {:ok, _snapshot} = Config.set_plugin_secret("discord", "bot-token-xyz")
+
+      enter_tree_less_world()
+      use_terminal(FermixTestSupport.PipedTerminal)
+      :ok
+    end
+
+    test "auth clear deletes the stored key and drops its reference", %{home: home} do
+      output =
+        capture_io(fn ->
+          assert PluginsCommand.run(["auth", "clear", "discord"]) == 0
+        end)
+
+      assert output =~ "deleted the stored api key for discord"
+      assert_received {:tree_less_keychain, :delete, :discord_plugin_secret}
+
+      assert {:error, :missing_secret} =
+               FermixTestSupport.SecretWriterStub.get(:discord_plugin_secret)
+
+      refute File.read!(Path.join(home, "config.toml")) =~ ~r/^discord = /m
+    end
+
+    # One verb per saving call site, so a verb added later that saves without
+    # the tree-less option fails here rather than on an operator's machine.
+    test "every other verb that saves settings finishes, keychain calls inline" do
+      capture_io(:stderr, fn ->
+        run_verb(["config", "set", "discord", "DISCORD_GUILD_ID", "1234"])
+        assert_received {:tree_less_keychain, :get, :discord_plugin_secret}
+
+        run_verb(["enable", "discord"])
+        assert_received {:tree_less_keychain, :get, :discord_plugin_secret}
+
+        run_verb(["disable", "discord"])
+        assert_received {:tree_less_keychain, :get, :discord_plugin_secret}
+
+        capture_io("bot-token-rotated\n", fn ->
+          assert PluginsCommand.run(["auth", "set", "discord", "--stdin"]) == 0
+        end)
+
+        assert_received {:tree_less_keychain, :put, :discord_plugin_secret}
+      end)
+
+      assert Config.plugin_settings("discord") == %{"DISCORD_GUILD_ID" => "1234"}
+      assert Config.enabled_plugins() == []
+
+      assert {:ok, "bot-token-rotated"} =
+               FermixTestSupport.SecretWriterStub.get(:discord_plugin_secret)
+    end
+
+    # The key could not be read when the verb's VM started (a locked keychain,
+    # an item deleted by hand), so the environment still holds `@keyring` and
+    # the save's apply asks the keychain again.
+    test "a key the keychain could not answer at start does not stop a save", %{home: home} do
+      Application.put_env(:fermix_core, :plugin_secrets, %{"discord" => "@keyring"})
+      FermixTestSupport.SecretWriterStub.reset()
+
+      capture_io(:stderr, fn -> run_verb(["enable", "discord"]) end)
+
+      assert_received {:tree_less_keychain, :get, :discord_plugin_secret}
+      assert "discord" in Config.enabled_plugins()
+      assert File.read!(Path.join(home, "config.toml")) =~ ~r/^discord = "@keyring"/m
+    end
+  end
+
   describe "dist verbs" do
     setup %{home: home} do
       fixtures = Path.join(home, "fixtures")
@@ -471,6 +561,31 @@ defmodule Fermix.CLI.PluginsCommandTest do
       refute DistStore.active_version(ctx.plugins_root, "github")
       assert DistStore.installed(ctx.plugins_root) == %{}
       refute "github" in Keyword.get(Application.get_env(:fermix_core, :plugins), :enabled, [])
+    end
+
+    # `uninstall` disables an enabled plugin through its own call site, so it is
+    # proven in the tree-less world on its own. The home keeps one keychained
+    # secret, the plugin's sign-in client, so each save asks the keychain.
+    test "enable and uninstall in the tree-less CLI world keep keychain calls inline", ctx do
+      wire_index(ctx, "github", "1.2.0")
+      DistVerifierStub.allow("github", "1.2.0")
+      on_exit(fn -> FermixTestSupport.SecretWriterStub.reset() end)
+
+      {:ok, _snapshot} =
+        Config.set_oauth_provider("github", client_id: "Iv1.cli", client_secret: "gh-secret")
+
+      enter_tree_less_world()
+
+      capture_io(:stderr, fn ->
+        run_verb(["enable", "github"])
+        assert_received {:tree_less_keychain, :get, :github_oauth_client_secret}
+
+        run_verb(["uninstall", "github"])
+        assert_received {:tree_less_keychain, :get, :github_oauth_client_secret}
+      end)
+
+      assert DistStore.installed(ctx.plugins_root) == %{}
+      refute "github" in Config.enabled_plugins()
     end
 
     test "uninstall refuses a bundled plugin and points at disable", ctx do
@@ -612,10 +727,29 @@ defmodule Fermix.CLI.PluginsCommandTest do
     Application.put_env(:fermix_core, :secret_terminal, module)
   end
 
+  # The keychain as an installed `fermix plugins` verb meets it. `cli_dispatch/2`
+  # runs every such verb without the supervision tree, so no command host exists
+  # to own a keychain helper, while `mix test` always boots one; the writer puts
+  # the test back in the verb's world (see `TreeLessSecretWriter`).
+  defp enter_tree_less_world do
+    previous = Application.get_env(:fermix_core, :secret_writer)
+    Application.put_env(:fermix_core, :secret_writer, TreeLessSecretWriter)
+    :ok = TreeLessSecretWriter.watch()
+    on_exit(fn -> restore_secret_writer(previous) end)
+  end
+
+  defp restore_secret_writer(nil), do: Application.delete_env(:fermix_core, :secret_writer)
+  defp restore_secret_writer(value), do: Application.put_env(:fermix_core, :secret_writer, value)
+
+  defp run_verb(argv) do
+    capture_io(fn -> assert PluginsCommand.run(argv) == 0 end)
+  end
+
   # An api_key plugin carrying the manifest `auth.prompt` the masked prompt
   # must use, seeded through the dev_local registry seam (no install pipeline).
   # `discord` because SecretPaths registers a plugin secret under that name.
-  defp write_api_key_plugin(home, name, prompt) do
+  # `extra` merges further manifest fields, such as a `config` block.
+  defp write_api_key_plugin(home, name, prompt, extra \\ %{}) do
     checkout = Path.join(home, "dev-plugins")
     dir = Path.join(checkout, name)
     File.mkdir_p!(dir)
@@ -640,7 +774,7 @@ defmodule Fermix.CLI.PluginsCommandTest do
       "skills" => []
     }
 
-    File.write!(Path.join(dir, "plugin.json"), Jason.encode!(manifest))
+    File.write!(Path.join(dir, "plugin.json"), Jason.encode!(Map.merge(manifest, extra)))
     checkout
   end
 

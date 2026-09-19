@@ -427,6 +427,30 @@
       "why": "The OpenAI API-key provider carries a reasoning effort like the other reasoning providers; the draft drew the row only for the subscription providers. Adding it is a row the app renders through the descriptor form with no Swift work."
     },
     {
+      "method": "settings.get:sandbox",
+      "field": "rows:env:ALPACA_API_KEY",
+      "kind": "engine_only",
+      "why": "M45 external skill credentials: the sandbox section publishes one row per allowed or stored environment variable name after the allow-list row, keyed env:<NAME> and labelled with the name. A stored name is a secret row stored and removed through secret.set and secret.clear with that key; an allowed name with no source is a secret row that is not present; a name read from a helper command or an alias is a read-only text row. The golden fixture illustrates each shape with example names. The draft predates the family, and the rows render through the generic secret and text row controls with no Swift work."
+    },
+    {
+      "method": "settings.get:sandbox",
+      "field": "rows:env:BROKER_API_KEY",
+      "kind": "engine_only",
+      "why": "M45 external skill credentials: the sandbox section publishes one row per allowed or stored environment variable name after the allow-list row, keyed env:<NAME> and labelled with the name. A stored name is a secret row stored and removed through secret.set and secret.clear with that key; an allowed name with no source is a secret row that is not present; a name read from a helper command or an alias is a read-only text row. The golden fixture illustrates each shape with example names. The draft predates the family, and the rows render through the generic secret and text row controls with no Swift work."
+    },
+    {
+      "method": "settings.get:sandbox",
+      "field": "rows:env:GITHUB_TOKEN",
+      "kind": "engine_only",
+      "why": "M45 external skill credentials: the sandbox section publishes one row per allowed or stored environment variable name after the allow-list row, keyed env:<NAME> and labelled with the name. A stored name is a secret row stored and removed through secret.set and secret.clear with that key; an allowed name with no source is a secret row that is not present; a name read from a helper command or an alias is a read-only text row. The golden fixture illustrates each shape with example names. The draft predates the family, and the rows render through the generic secret and text row controls with no Swift work."
+    },
+    {
+      "method": "settings.get:sandbox",
+      "field": "rows:env:POLYGON_API_KEY",
+      "kind": "engine_only",
+      "why": "M45 external skill credentials: the sandbox section publishes one row per allowed or stored environment variable name after the allow-list row, keyed env:<NAME> and labelled with the name. A stored name is a secret row stored and removed through secret.set and secret.clear with that key; an allowed name with no source is a secret row that is not present; a name read from a helper command or an alias is a read-only text row. The golden fixture illustrates each shape with example names. The draft predates the family, and the rows render through the generic secret and text row controls with no Swift work."
+    },
+    {
       "method": "settings.get:transcription",
       "field": "rows:transcription_local_state",
       "kind": "draft_only",
@@ -503,6 +527,48 @@
       "field": "results[].signed_in",
       "kind": "engine_only",
       "why": "The meetbot row publishes its Google sign-in as a boolean beside the sentence it also carries, null while the notetaker is absent. A client that hides the sign-in control once the account is in place switches on this fact rather than on the words of the sentence it renders, which the app's rules forbid. The draft predates the row; the app adds the field when it re-vendors."
+    },
+    {
+      "method": "overview.get",
+      "field": "realtime.engine",
+      "kind": "engine_only",
+      "why": "ADDED with the Live voice engine (M41): the voice section now carries an engine beside its provider, openai_realtime for the Realtime API that runs tools inside the voice session and openai_live for the Live API that delegates every tool call back to the Fermix agent. Null while voice is disabled, exactly like provider and model. The draft was authored when there was one engine, so a client that reads only model cannot tell which wire a call will use or why the reasoning effort row disappeared. E5: show the engine beside the model in the voice status."
+    },
+    {
+      "method": "plugins.list",
+      "field": "oauth_clients[].region",
+      "kind": "engine_only",
+      "why": "The sign-in client row carries the account region it is bound to. Some providers serve one region per host and refuse every call from another, so the region is chosen as part of the client rather than discovered by the first tool call. The draft was authored before any provider had regions, so its client sheet offers no picker and a client written against it can register a client that can never sign in."
+    },
+    {
+      "method": "plugins.list",
+      "field": "oauth_clients[].regions",
+      "kind": "engine_only",
+      "why": "The choices for the field above, with the daemon's own labels. It is empty for a provider that serves one region, which is what tells the sheet to draw no picker at all; the draft has no such field, so an app built against it cannot tell the two cases apart."
+    },
+    {
+      "method": "plugins.oauth_client.set",
+      "field": "oauth_client.region",
+      "kind": "engine_only",
+      "why": "The sign-in client row carries the account region it is bound to. Some providers serve one region per host and refuse every call from another, so the region is chosen as part of the client rather than discovered by the first tool call. The draft was authored before any provider had regions, so its client sheet offers no picker and a client written against it can register a client that can never sign in."
+    },
+    {
+      "method": "plugins.oauth_client.set",
+      "field": "oauth_client.regions",
+      "kind": "engine_only",
+      "why": "The choices for the field above, with the daemon's own labels. It is empty for a provider that serves one region, which is what tells the sheet to draw no picker at all; the draft has no such field, so an app built against it cannot tell the two cases apart."
+    },
+    {
+      "method": "plugins.list",
+      "field": "plugins[].settings[].kind",
+      "kind": "engine_only",
+      "why": "Every setting entry now names the control it is: text is a free-text field, boolean a switch whose value is the string true or false and which plugins.setting.set refuses anything else for. The draft drew every setting as text, so an app built against it renders a consent switch as a box the operator has to type the word true into, which is the one spelling a gated tool reads. The field is optional on the wire, so an older engine that publishes none still decodes and means text."
+    },
+    {
+      "method": "plugins.setting.set",
+      "field": "plugin.settings[].kind",
+      "kind": "engine_only",
+      "why": "The same field on the row this write answers with, for the same reason: the app redraws the control from the row it is handed, so a kind present in the listing and absent here would make the field change shape on save."
     }
   ]
 }

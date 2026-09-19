@@ -65,13 +65,13 @@ defmodule FermixCore.Capabilities.MCP.Discoverer.AnubisTest do
     # carry only name/description/inputSchema, so `Contract` hashed every
     # remote tool with `annotations: nil` while the publisher had signed the
     # real ones — every descriptor read as drifted and NOTHING registered.
-    # Eden returns annotations on all 78 of its tools, so this was total.
+    # Acme returns annotations on all 78 of its tools, so this was total.
     test "carries outputSchema and annotations through" do
       response = %Anubis.MCP.Response{
         result: %{
           "tools" => [
             %{
-              "name" => "eden_list_workspaces",
+              "name" => "acme_list_workspaces",
               "description" => "List workspaces.",
               "inputSchema" => %{"type" => "object", "properties" => %{}},
               "outputSchema" => %{"type" => "object"},
@@ -114,14 +114,14 @@ defmodule FermixCore.Capabilities.MCP.Discoverer.AnubisTest do
     # `Discoverer.Anubis` for stdio, `Remote.Owner` for remote — and BOTH copies
     # dropped outputSchema and annotations. The signed hash covers all four
     # fields, so every remote tool hashed to something the publisher never
-    # signed and the whole plugin read as drifted. Eden sends annotations on all
+    # signed and the whole plugin read as drifted. Acme sends annotations on all
     # 78 of its tools, so nothing registered at all. There is now one function;
     # this pins its contract.
     alias FermixCore.Capabilities.MCP.Discoverer
     alias FermixCore.Plugins.CanonicalJson
 
     @wire %{
-      "name" => "eden_list_workspaces",
+      "name" => "acme_list_workspaces",
       "description" => "List workspaces.",
       "inputSchema" => %{"type" => "object", "properties" => %{}},
       "annotations" => %{"readOnlyHint" => true, "idempotentHint" => true}
@@ -130,7 +130,7 @@ defmodule FermixCore.Capabilities.MCP.Discoverer.AnubisTest do
     test "carries every field the signature covers" do
       d = Discoverer.normalize(@wire)
 
-      assert d.name == "eden_list_workspaces"
+      assert d.name == "acme_list_workspaces"
       assert d.input_schema == %{"type" => "object", "properties" => %{}}
       assert d.annotations == %{"readOnlyHint" => true, "idempotentHint" => true}
       assert d.output_schema == nil

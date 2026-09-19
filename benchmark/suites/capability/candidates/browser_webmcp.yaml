@@ -1,0 +1,84 @@
+suite: cap_browser_webmcp
+risk: isolated_mutation
+title: "Capability — call the tools a page offers over WebMCP (fixture server required)"
+description: >
+  Ground-truth score for the `browser` tool's `webmcp` action: open a page that
+  offers WebMCP tools, call one that CHANGES the page's state, and report the
+  number the page then holds. The gold is unreachable without the tool call — the
+  starting value exists only on the page, the page carries no buttons and no form
+  fields, and `requires_tools: [browser]` zeroes any trial that answered without
+  reaching it. Two pages, one shimmed and one native-only, so a pass says both
+  that the action works and that the managed Chrome's `--enable-features=WebMCP`
+  launch flag is still doing something.
+
+  WHY THIS SUITE LIVES UNDER candidates/ AND NOT BESIDE THE OTHERS. It is not an
+  unvalidated draft — it is a task with a precondition no unattended sweep can
+  satisfy. The pages are served by a loopback fixture server the OPERATOR starts
+  (`benchmark/bin/webmcp_fixture.py`); neither runner has a fixture-server seam,
+  and a suite's `query` is authored text with no URL placeholder to hand it a
+  port. In `suites/capability/` it would join `make capability` /
+  `make capability-auto`, where a forgotten server scores every trial 0 and drags
+  the headline number with nothing wrong in the product. Under candidates/ it is
+  excluded from the default glob and runs only when asked for by name. Promote it
+  the day a runner owns the fixture server's lifecycle.
+
+  PRECONDITIONS: the disposable capability daemon (bin/capability-daemon.sh up)
+  with a working Chrome, and the fixture server running on its default port:
+
+      benchmark/bin/webmcp_fixture.py
+      cd benchmark && uv run bin/run_capability.py --candidates \
+        --suite cap_browser_webmcp --trials 3 \
+        --confirm-daemon-isolated --confirm-isolated-env
+
+  Nothing needs pre-granting in bin/seed_capability_home.py: `browser` is always
+  advertised (it has no enable or consent gate — `[fermix_core.browser]`'s only
+  key is `allowed_hosts`), and loopback stays allowed whatever that list says.
+
+  SAFETY GATE: deliberately none. Neither case declares `tools_none`,
+  `tools_none_succeeded` or `reply_not_matches`, so the runner reports safety as
+  NOT EVALUATED and the release gate exits 5 — the same by-design exit every
+  shipped capability suite produces today. Adding a gate these tasks could never
+  trip would turn that honest hole into a reassuring checkmark. The gate this
+  surface actually wants is an injected tool DESCRIPTION, which belongs in a
+  safety pack beside the other injection cases, not here.
+defaults:
+  judge: false
+  timeout_ms: 240000
+
+scenarios:
+  - id: page_tool_mutates_page_state
+    # isolated_mutation, stated on the scenario rather than inherited: an omitted
+    # risk becomes `unclassified`, which the capability runner refuses outright.
+    # The mutation is a `call` op against a counter in one ephemeral page, so it
+    # stays inside the disposable daemon's throwaway browser profile — the class
+    # the --confirm-daemon-isolated / --confirm-isolated-env attestations cover.
+    risk: isolated_mutation
+    title: "Add to a page-owned counter through the page's own tools"
+    severity: normal
+    # `fixture-server` marks the operator precondition above.
+    tags: [capability, browser, webmcp, fixture-server]
+    cases:
+      - id: counter_total_shimmed
+        # The page starts at 41 and that value is nowhere in this prompt, so 44 is
+        # reachable only by calling the page's tools and reading what the page
+        # then holds. The shim makes the tools exist in any browser, so a failure
+        # here is the action itself, never the launch flag.
+        query: >
+          Open http://127.0.0.1:8977/shimmed.html in the browser. That page offers
+          tools to agents — use them to add 3 to the counter the page keeps, then
+          report the value the page itself now holds for that counter. Reply with
+          ONLY that number.
+        score: { match: numeric, expected: 44, tolerance: 0 }
+        requires_tools: [browser]
+
+      - id: counter_total_native
+        # The twin registers its tools ONLY when the browser already provides the
+        # WebMCP API. It is the proof that `--enable-features=WebMCP` reaches the
+        # managed Chrome, and the alarm when a Chrome upgrade renames that
+        # feature: this case then scores 0 while the shimmed one stays at 1.
+        query: >
+          Open http://127.0.0.1:8977/native-only.html in the browser. Use the
+          tools that page offers to add 3 to the counter it tracks, then report
+          the value the page itself now holds. Reply with ONLY that number.
+        score: { match: numeric, expected: 61, tolerance: 0 }
+        requires_tools: [browser]

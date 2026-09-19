@@ -2,6 +2,8 @@ defmodule FermixCore.ComputerHistory.ConfigTest do
   @moduledoc "MILESTONE_32 §9.4 — config normalization + accessors."
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias FermixCore.ComputerHistory.Config
 
   setup do
@@ -25,7 +27,6 @@ defmodule FermixCore.ComputerHistory.ConfigTest do
 
       refute Config.enabled?()
       assert Config.apps() == []
-      assert Config.sites() == []
       assert Config.remote_summaries() == []
       assert Config.granted_providers() == MapSet.new()
       # §22.1 — default summarization runs on the configured default provider,
@@ -39,14 +40,12 @@ defmodule FermixCore.ComputerHistory.ConfigTest do
       configure(
         enabled: true,
         apps: ["com.apple.Safari"],
-        sites: ["github.com"],
         remote_summaries: [:anthropic],
         summarizer: :anthropic
       )
 
       assert Config.enabled?()
       assert Config.apps() == ["com.apple.Safari"]
-      assert Config.sites() == ["github.com"]
       assert Config.granted_providers() == MapSet.new([:anthropic])
       assert Config.summarizer() == {:provider, :anthropic}
     end
@@ -107,7 +106,6 @@ defmodule FermixCore.ComputerHistory.ConfigTest do
         Config.normalize(%{
           "enabled" => true,
           "apps" => ["com.apple.Safari"],
-          "sites" => ["github.com"],
           "remote_summaries" => ["anthropic"],
           "summarizer" => "anthropic"
         })
@@ -145,13 +143,11 @@ defmodule FermixCore.ComputerHistory.ConfigTest do
       assert Config.to_keyword(
                enabled: true,
                apps: ["com.apple.Safari"],
-               sites: [],
                remote_summaries: [:anthropic],
                summarizer: :default_provider
              ) == [
                enabled: true,
                apps: ["com.apple.Safari"],
-               sites: [],
                remote_summaries: ["anthropic"],
                summarizer: "default"
              ]
@@ -229,8 +225,8 @@ defmodule FermixCore.ComputerHistory.ConfigTest do
     end
 
     test "an empty-string allowlist entry" do
-      assert_raise ArgumentError, ~r/computer_history.sites/, fn ->
-        Config.normalize(%{"sites" => [""]})
+      assert_raise ArgumentError, ~r/computer_history.apps/, fn ->
+        Config.normalize(%{"apps" => [""]})
       end
     end
   end
@@ -250,7 +246,56 @@ defmodule FermixCore.ComputerHistory.ConfigTest do
   end
 
   test "config_keys/0 is the canonical allowlist" do
-    assert Config.config_keys() == [:enabled, :apps, :sites, :remote_summaries, :summarizer]
+    assert Config.config_keys() == [:enabled, :apps, :remote_summaries, :summarizer]
+  end
+
+  # v1.1 decision 1: every site visited in an allowlisted browser is recorded, so
+  # there is no per-site filter left to configure. A key an operator already has
+  # on disk must never refuse boot (the poisoned-config incident) — it is accepted,
+  # named once, and dropped.
+  describe "the retired `sites` key" do
+    test "retired_keys/0 names it and config_keys/0 does not" do
+      assert Config.retired_keys() == [:sites]
+      refute :sites in Config.config_keys()
+      assert Config.accepted_keys() == Config.config_keys() ++ Config.retired_keys()
+    end
+
+    test "a config carrying sites normalizes to the same shape as one without it" do
+      {normalized, log} =
+        with_log(fn ->
+          Config.normalize(%{
+            "enabled" => true,
+            "apps" => ["com.apple.Safari"],
+            "sites" => ["github.com"]
+          })
+        end)
+
+      assert normalized == Config.normalize(%{"enabled" => true, "apps" => ["com.apple.Safari"]})
+      assert log =~ "computer_history.sites is retired"
+    end
+
+    test "the deprecation is logged exactly once, and names the repair" do
+      log =
+        capture_log(fn ->
+          Config.normalize(%{"sites" => ["github.com", "example.com"]})
+        end)
+
+      assert [_one] = Regex.scan(~r/computer_history\.sites is retired/, log)
+
+      assert log =~
+               "every site in an allowlisted browser is recorded; remove the key from config.toml"
+    end
+
+    test "to_keyword never emits it" do
+      normalized = Config.normalize(%{"apps" => ["com.apple.Safari"], "sites" => ["github.com"]})
+      refute Keyword.has_key?(Config.to_keyword(normalized), :sites)
+    end
+
+    test "normalize stays idempotent over its own output (no second warning)" do
+      normalized = Config.normalize(%{"enabled" => true, "sites" => ["github.com"]})
+      assert capture_log(fn -> Config.normalize(normalized) end) == ""
+      assert Config.normalize(normalized) == normalized
+    end
   end
 
   describe "timezone/0,1 (the one resolver both surfaces use)" do

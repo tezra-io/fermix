@@ -176,6 +176,13 @@ defmodule FermixCore.Setup.SecretMigrationTest do
     client_id = "x-client-id"
     client_secret = "x-oauth-old"
 
+    [fermix_core.oauth.tesla]
+    client_type = "desktop_public_pkce"
+    client_id = "tesla-client-id"
+    client_secret = "tesla-oauth-old"
+    region = "na"
+    redirect_uri = "https://fermix.ai/api/integrations/tesla/callback"
+
     [fermix_channels.telegram]
     bot_token = "telegram-old"
 
@@ -209,7 +216,6 @@ defmodule FermixCore.Setup.SecretMigrationTest do
     discord = "discord-plugin-old"
     agentmail = "agentmail-plugin-old"
     slack = "slack-plugin-old"
-    eden = "eden-plugin-old"
     """)
   end
 
@@ -235,6 +241,7 @@ defmodule FermixCore.Setup.SecretMigrationTest do
       github_oauth_client_secret: "github-oauth-old",
       notion_oauth_client_secret: "notion-oauth-old",
       x_oauth_client_secret: "x-oauth-old",
+      tesla_oauth_client_secret: "tesla-oauth-old",
       telegram_bot_token: "telegram-old",
       whatsapp_access_token: "whatsapp-access-old",
       whatsapp_verify_token: "whatsapp-verify-old",
@@ -246,8 +253,7 @@ defmodule FermixCore.Setup.SecretMigrationTest do
       mobile_apns_key: "apns-old",
       discord_plugin_secret: "discord-plugin-old",
       agentmail_plugin_secret: "agentmail-plugin-old",
-      slack_plugin_secret: "slack-plugin-old",
-      eden_plugin_secret: "eden-plugin-old"
+      slack_plugin_secret: "slack-plugin-old"
     }
   end
 

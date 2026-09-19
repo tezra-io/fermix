@@ -142,6 +142,51 @@ defmodule FermixCore.Prompt.BootstrapLoaderTest do
     assert {:error, {:invalid_agent_id, "../../etc"}} = BootstrapLoader.load("../../etc")
   end
 
+  test "load_live/2 prefers the installed LIVE.md and captures a revision", %{
+    agent_id: agent_id,
+    repo: repo
+  } do
+    File.mkdir_p!(BootstrapPaths.agent_dir(agent_id))
+    File.write!(BootstrapPaths.live_path(agent_id), "operator live rules")
+
+    assert {:ok, file} = BootstrapLoader.load_live(agent_id, repo: repo)
+
+    assert file.name == :live
+    assert file.path == BootstrapPaths.live_path(agent_id)
+    assert file.content == "operator live rules"
+    assert file.status == :present
+    assert file.approx_size == byte_size("operator live rules")
+
+    assert {:ok, [revision]} = Registry.list_revisions(agent_id, :live_md, "global", repo: repo)
+    assert revision.mutation_source == "imported"
+    assert revision.content == "operator live rules"
+  end
+
+  test "load_live/2 falls back to the shipped template when LIVE.md is missing", %{
+    agent_id: agent_id,
+    repo: repo
+  } do
+    assert {:ok, file} = BootstrapLoader.load_live(agent_id, repo: repo)
+
+    assert file.content == Defaults.live_md()
+    assert file.status == :fallback
+    assert {:error, :not_found} = Registry.current_hash(agent_id, :live_md, "global", repo: repo)
+  end
+
+  test "load_live/2 rejects agent IDs that can escape the bootstrap directory" do
+    assert {:error, {:invalid_agent_id, "../../etc"}} = BootstrapLoader.load_live("../../etc")
+  end
+
+  # LIVE.md is the Live voice frontend's prompt (M41 §6.1) and must never reach
+  # a Core text prompt, so it is deliberately absent from `load/2`'s map.
+  test "load/2 never returns LIVE.md", %{agent_id: agent_id} do
+    File.mkdir_p!(BootstrapPaths.agent_dir(agent_id))
+    File.write!(BootstrapPaths.live_path(agent_id), "operator live rules")
+
+    assert {:ok, result} = BootstrapLoader.load(agent_id, realtime?: true)
+    refute Map.has_key?(result, :live)
+  end
+
   defp unique do
     System.unique_integer([:positive, :monotonic])
   end

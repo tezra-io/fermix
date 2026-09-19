@@ -44,6 +44,7 @@ defmodule Fermix.CLI.AcpCommand do
   purity guarantee is one property of the verb rather than one of its branches.
   """
 
+  alias Fermix.CLI.StdoutPurity
   alias FermixCore.Acp.Identity
   alias FermixCore.Acp.IdentityStore
   alias FermixCore.Nostr.Key
@@ -190,65 +191,20 @@ defmodule Fermix.CLI.AcpCommand do
   Public because `run/2` is not the first byte-producing moment of a
   `fermix acp` process: `config/runtime.exs` — the boot config-provider chain,
   which runs before any application starts — hydrates config, and that hydration
-  logs. Both call sites share this one implementation so the move cannot drift;
-  each renders its own failure, because only the bridge can refuse to start.
-
-  `:logger_std_h` refuses an in-place `type` change (its `changing_config/3`
-  answers `:illegal_config_change`), so the move is remove-then-add: same
-  module, same formatter, stderr.
+  logs. The mechanism itself is `Fermix.CLI.StdoutPurity`, shared with every
+  `--json` verb, which has the same stdout guarantee for the same reason.
   """
   @spec route_logs_to_stderr() :: :ok | {:error, log_route_error()}
-  def route_logs_to_stderr do
-    case :logger.get_handler_config(:default) do
-      # A handler that writes to stdout is the one and only purity problem.
-      {:ok, %{module: :logger_std_h, config: %{type: :standard_io}} = config} ->
-        redirect_default_handler(config)
+  defdelegate route_logs_to_stderr(), to: StdoutPurity
 
-      # Already stderr, or a file handler: the guarantee holds, leave it alone.
-      {:ok, %{module: :logger_std_h}} ->
-        :ok
-
-      # No default handler at all (`mix test`, a release that removed it):
-      # nothing writes to stdout, which is the whole guarantee.
-      {:error, {:not_found, :default}} ->
-        :ok
-
-      {:ok, %{module: module}} ->
-        {:error, {:unmovable_handler, module}}
-    end
-  end
-
-  @doc """
-  The operator-facing sentence for a `route_logs_to_stderr/0` failure.
-
-  Lives here with the move it explains, so the bridge and the boot chain report
-  one failure in one wording.
-  """
+  @doc "The operator-facing sentence for a `route_logs_to_stderr/0` failure."
   @spec log_route_message(log_route_error()) :: String.t()
-  def log_route_message({:unmovable_handler, module}) do
-    "the default logger handler is #{inspect(module)}, which this bridge cannot move off " <>
-      "stdout; ACP forbids non-protocol bytes there, so it will not start"
-  end
-
-  def log_route_message({:add_handler_failed, reason}) do
-    "could not move Fermix logging off stdout (#{inspect(reason)})"
-  end
+  defdelegate log_route_message(reason), to: StdoutPurity, as: :message
 
   defp ensure_pure_stdout(io) do
     case route_logs_to_stderr() do
       :ok -> :ok
       {:error, reason} -> halt(io, log_route_message(reason))
-    end
-  end
-
-  defp redirect_default_handler(config) do
-    {module, rest} = Map.pop!(config, :module)
-    handler_config = rest |> Map.get(:config, %{}) |> Map.put(:type, :standard_error)
-    _ = :logger.remove_handler(:default)
-
-    case :logger.add_handler(:default, module, Map.put(rest, :config, handler_config)) do
-      :ok -> :ok
-      {:error, reason} -> {:error, {:add_handler_failed, reason}}
     end
   end
 

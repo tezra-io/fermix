@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "invalid_home",
+    "sentence": "The service home must be an absolute path, and \"fermix\" is not."
+  },
+  "ok": false,
+  "schema_version": 1
+}

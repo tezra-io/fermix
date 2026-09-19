@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "config_write_failed",
+    "sentence": "Fermix could not record the web listener port in the settings file. It said: permission denied"
+  },
+  "ok": false,
+  "schema_version": 1
+}

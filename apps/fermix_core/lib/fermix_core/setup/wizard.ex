@@ -50,6 +50,8 @@ defmodule FermixCore.Setup.Wizard do
           | {:review_interval_hours, non_neg_integer() | String.t()}
           | {:realtime_enabled, boolean() | String.t()}
           | {:realtime_api_key, String.t()}
+          | {:realtime_engine, String.t()}
+          | {:realtime_model, String.t()}
           | {:realtime_voice, String.t()}
           | {:realtime_max_session_minutes, pos_integer() | String.t()}
           | {:realtime_max_cost_cents, pos_integer() | String.t()}
@@ -751,15 +753,41 @@ defmodule FermixCore.Setup.Wizard do
   end
 
   @doc """
+  Rewrites the sandbox environment policy alone, through the shared write tail.
+
+  The entry for `secret.set` and `secret.clear` on the `env:<NAME>` family
+  (M45 §4.3): the external-change refusal, the save, the live apply and the
+  env-only drop are the ones every sibling writer runs. `update` receives the
+  policy in force when this write reads the snapshot and returns the new one,
+  so a change made between the caller's own checks and this write is not
+  reverted by it.
+  """
+  @spec update_sandbox_env((SandboxConfig.env_config() -> SandboxConfig.env_config())) ::
+          {:ok, report()} | {:error, term()}
+  def update_sandbox_env(update) when is_function(update, 1) do
+    snapshot = ConfigStore.current_snapshot()
+    sandbox = snapshot |> Map.get(:sandbox) |> SandboxConfig.normalize()
+
+    snapshot
+    |> Map.put(:sandbox, %{sandbox | env: update.(sandbox.env)})
+    |> drop_unanswered_env_only_secrets([])
+    |> commit_snapshot()
+  end
+
+  @doc """
   Sets a provider's `auth_mode` (`:api_key` or `:oauth`) without going through
   the prompt-driven `save_answers/2` path. Used by the CLI `fermix auth
   login/logout` commands so the OAuth token write and the config route selector
   stay in sync (a stored token is inert unless `auth_mode = "oauth"`). Routes
   through the same save → apply → seed → report cycle as `save_answers/2`.
+
+  `opts` carries the caller's world to that cycle: the tree-less CLI passes
+  `supervised: false` (see `commit_snapshot/2`).
   """
-  @spec set_provider_auth_mode(provider(), auth_mode() | String.t()) ::
+  @spec set_provider_auth_mode(provider(), auth_mode() | String.t(), keyword()) ::
           {:ok, report()} | {:error, term()}
-  def set_provider_auth_mode(provider, mode) when is_atom(provider) do
+  def set_provider_auth_mode(provider, mode, opts \\ [])
+      when is_atom(provider) and is_list(opts) do
     if not Descriptor.multi_auth_mode?(Descriptor.fetch!(provider)) do
       raise ArgumentError,
             "provider #{inspect(provider)} has a fixed auth mode; auth_mode is not configurable"
@@ -768,7 +796,7 @@ defmodule FermixCore.Setup.Wizard do
     ConfigStore.current_snapshot()
     |> put_provider_auth_mode(provider, mode)
     |> drop_unanswered_env_only_secrets([])
-    |> commit_snapshot()
+    |> commit_snapshot(opts)
   end
 
   @doc """
@@ -929,14 +957,22 @@ defmodule FermixCore.Setup.Wizard do
   public entries plus the management writers reach the file through it. Putting
   the refusal in one of those entries instead would leave the other three able
   to revert an outside edit silently, which is the exact defect it exists for.
+
+  The save and the apply can both run a keychain helper, so they run in the
+  caller's world: a tree-less CLI verb passes `supervised: false` and each
+  helper runs inline, while the daemon passes nothing and keeps its supervised
+  command host (`CommandRunner.run/3`).
   """
-  @spec commit_snapshot(ConfigStore.runtime_config()) :: {:ok, report()} | {:error, term()}
-  def commit_snapshot(snapshot) when is_map(snapshot) do
+  @spec commit_snapshot(ConfigStore.runtime_config(), keyword()) ::
+          {:ok, report()} | {:error, term()}
+  def commit_snapshot(snapshot, opts \\ []) when is_map(snapshot) and is_list(opts) do
+    supervised = Keyword.take(opts, [:supervised])
+
     # `save_snapshot/2` records the new baseline itself, so there is one
     # recording site for every writer rather than one per tail.
     with :ok <- RestartState.writable(),
-         :ok <- ConfigStore.save_snapshot(snapshot),
-         :ok <- ConfigStore.apply_snapshot(snapshot),
+         :ok <- ConfigStore.save_snapshot(snapshot, supervised),
+         :ok <- ConfigStore.apply_snapshot(snapshot, supervised),
          {:ok, seeding_results} <- maybe_seed_prompt_files(snapshot) do
       {:ok, BootReport.refresh_if_started(seeding_results) || report(seeding_results)}
     end
@@ -1628,48 +1664,149 @@ defmodule FermixCore.Setup.Wizard do
   end
 
   defp put_realtime_config(snapshot, answers) do
-    values =
-      [
-        enabled:
-          normalize_realtime_bool(Keyword.get(answers, :realtime_enabled), :realtime_enabled),
-        model: normalize_realtime_string(Keyword.get(answers, :realtime_model), :realtime_model),
-        reasoning_effort:
-          normalize_realtime_string(
-            Keyword.get(answers, :realtime_reasoning_effort),
-            :realtime_reasoning_effort
-          ),
-        voice: normalize_realtime_string(Keyword.get(answers, :realtime_voice), :realtime_voice),
-        max_session_minutes:
-          normalize_realtime_positive_int(
-            Keyword.get(answers, :realtime_max_session_minutes),
-            :realtime_max_session_minutes
-          ),
-        max_estimated_cost_cents_per_session:
-          normalize_realtime_positive_int(
-            Keyword.get(answers, :realtime_max_cost_cents),
-            :realtime_max_cost_cents
-          ),
-        persist_transcripts:
-          normalize_realtime_bool(
-            Keyword.get(answers, :realtime_persist_transcripts),
-            :realtime_persist_transcripts
-          )
-      ]
-      |> reject_nil_values()
+    case realtime_values(answers) do
+      [] -> snapshot
+      values -> commit_realtime_config(snapshot, values)
+    end
+  end
 
-    if values == [] do
-      snapshot
+  defp realtime_values(answers) do
+    [
+      enabled:
+        normalize_realtime_bool(Keyword.get(answers, :realtime_enabled), :realtime_enabled),
+      engine: realtime_engine_answer(answers),
+      model: normalize_realtime_string(Keyword.get(answers, :realtime_model), :realtime_model),
+      reasoning_effort:
+        normalize_realtime_string(
+          Keyword.get(answers, :realtime_reasoning_effort),
+          :realtime_reasoning_effort
+        ),
+      voice: normalize_realtime_string(Keyword.get(answers, :realtime_voice), :realtime_voice),
+      max_session_minutes:
+        normalize_realtime_positive_int(
+          Keyword.get(answers, :realtime_max_session_minutes),
+          :realtime_max_session_minutes
+        ),
+      max_estimated_cost_cents_per_session:
+        normalize_realtime_positive_int(
+          Keyword.get(answers, :realtime_max_cost_cents),
+          :realtime_max_cost_cents
+        ),
+      persist_transcripts:
+        normalize_realtime_bool(
+          Keyword.get(answers, :realtime_persist_transcripts),
+          :realtime_persist_transcripts
+        )
+    ]
+    |> reject_nil_values()
+  end
+
+  # The model is the operator-facing choice and the engine follows from it, so
+  # an answer set that names only the model still writes the engine the
+  # configuration stores. `:realtime_engine` stays an accepted answer for the
+  # doors that send both, and then the two have to agree: resolving a
+  # disagreement in favour of either one would write a pair the operator never
+  # chose, so it is refused with both named. A model no engine ships leaves the
+  # engine alone and is refused by name in `RealtimeConfig.normalize/1`.
+  defp realtime_engine_answer(answers) do
+    engine = normalize_realtime_string(Keyword.get(answers, :realtime_engine), :realtime_engine)
+    model = normalize_realtime_string(Keyword.get(answers, :realtime_model), :realtime_model)
+
+    derive_realtime_engine(engine, model)
+  end
+
+  defp derive_realtime_engine(engine, nil), do: engine
+
+  defp derive_realtime_engine(engine, model) do
+    case RealtimeConfig.engine_for_model(model) do
+      {:ok, derived} -> agree_realtime_engine!(engine, derived, model)
+      :error -> engine
+    end
+  end
+
+  defp agree_realtime_engine!(nil, derived, _model), do: derived
+  defp agree_realtime_engine!(engine, engine, _model), do: engine
+
+  defp agree_realtime_engine!(engine, derived, model) do
+    raise ArgumentError,
+          ~s(realtime.model #{model} requires engine "#{derived}", got "#{engine}"; ) <>
+            "the model selects the engine, so send the model on its own or send the engine it names"
+  end
+
+  defp commit_realtime_config(snapshot, values) do
+    fermix_core = Map.get(snapshot, :fermix_core, [])
+    existing = Keyword.get(fermix_core, :realtime, [])
+
+    realtime =
+      existing
+      |> switch_realtime_engine(Keyword.get(values, :engine))
+      |> Keyword.merge(values)
+      |> RealtimeConfig.normalize()
+      |> RealtimeConfig.to_keyword()
+
+    Map.put(snapshot, :fermix_core, Keyword.put(fermix_core, :realtime, realtime))
+  end
+
+  # The one seam every door reaches: an explicit engine switch carries the keys
+  # the engine owns with it. Live refuses the Realtime-only settings at the
+  # configuration boundary and a Realtime engine refuses a Live model, so
+  # answering the operator's switch with a validation error is the defect this
+  # exists to prevent. It rewrites what they did NOT type: an answer naming one
+  # of these keys is merged on top and is refused by name if it disagrees.
+  defp switch_realtime_engine(existing, nil), do: existing
+
+  defp switch_realtime_engine(existing, engine) do
+    if realtime_engine(existing) == engine do
+      existing
     else
-      fermix_core = Map.get(snapshot, :fermix_core, [])
-      existing = Keyword.get(fermix_core, :realtime, [])
+      move_realtime_engine(existing, engine)
+    end
+  end
 
-      realtime =
-        existing
-        |> Keyword.merge(values)
-        |> RealtimeConfig.normalize()
-        |> RealtimeConfig.to_keyword()
+  defp move_realtime_engine(existing, "openai_live") do
+    existing
+    |> Keyword.drop([:reasoning_effort, :transcription_model, :max_response_output_tokens])
+    |> put_realtime_model("openai_live")
+    |> put_realtime_voice("openai_live")
+  end
 
-      Map.put(snapshot, :fermix_core, Keyword.put(fermix_core, :realtime, realtime))
+  defp move_realtime_engine(existing, "openai_realtime") do
+    existing
+    |> Keyword.put_new(:reasoning_effort, "low")
+    |> put_realtime_model("openai_realtime")
+    |> put_realtime_voice("openai_realtime")
+  end
+
+  # An engine name no release knows is left for `RealtimeConfig.normalize/1` to
+  # refuse by name: deriving a model from a typo would answer it with a silent
+  # configuration change.
+  defp move_realtime_engine(existing, _engine), do: existing
+
+  defp put_realtime_model(existing, engine) do
+    if Keyword.get(existing, :model) in RealtimeConfig.valid_models(engine) do
+      existing
+    else
+      Keyword.put(existing, :model, RealtimeConfig.default_model(engine))
+    end
+  end
+
+  # Live ships every Realtime voice plus twelve of its own, so only the return
+  # journey can strand one. The struct default is the voice both catalogs open
+  # with, which is what makes it the one value a switch can always land on.
+  defp put_realtime_voice(existing, engine) do
+    if Keyword.get(existing, :voice) in RealtimeConfig.valid_voices(engine) do
+      existing
+    else
+      Keyword.put(existing, :voice, %RealtimeConfig{}.voice)
+    end
+  end
+
+  # An absent engine is the struct default, which is how a configuration written
+  # before the engine axis existed reads as Realtime rather than as a switch.
+  defp realtime_engine(existing) do
+    case Keyword.get(existing, :engine) do
+      engine when is_binary(engine) -> engine
+      _absent -> %RealtimeConfig{}.engine
     end
   end
 

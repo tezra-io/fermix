@@ -1,8 +1,15 @@
 defmodule FermixCore.Plugins.Config do
   @moduledoc """
   Persists plugin enablement and provider client configuration.
+
+  The writers a `fermix plugins` verb reaches take a trailing `opts` whose one
+  key, `supervised`, names the caller's world. A tree-less CLI verb passes
+  `supervised: false`, so every keychain helper a save runs executes inline;
+  the daemon's callers pass nothing, so each runs under the supervised command
+  host (`CommandRunner.run/3`). It is threaded from the caller, never probed.
   """
 
+  alias FermixCore.Auth.OAuthProviders
   alias FermixCore.Auth.TokenSupervisor
   alias FermixCore.Plugins.Plugin
   alias FermixCore.Plugins.Registry
@@ -17,23 +24,23 @@ defmodule FermixCore.Plugins.Config do
 
   @type snapshot_result :: {:ok, ConfigStore.runtime_config()} | {:error, term()}
 
-  @spec enable(String.t()) :: snapshot_result()
-  def enable(name) when is_binary(name) do
+  @spec enable(String.t(), keyword()) :: snapshot_result()
+  def enable(name, opts \\ []) when is_binary(name) and is_list(opts) do
     with {:ok, plugin} <- fetch_plugin(name) do
       ConfigStore.current_snapshot()
       |> update_plugins(fn plugins -> enable_plugin(plugins, plugin) end)
-      |> commit()
+      |> commit(opts)
     end
   end
 
-  @spec disable(String.t()) :: snapshot_result()
-  def disable(name) when is_binary(name) do
+  @spec disable(String.t(), keyword()) :: snapshot_result()
+  def disable(name, opts \\ []) when is_binary(name) and is_list(opts) do
     with {:ok, plugin} <- fetch_plugin(name) do
       auth_profile = auth_profile(plugin)
 
       ConfigStore.current_snapshot()
       |> update_plugins(fn plugins -> disable_plugin(plugins, plugin) end)
-      |> commit()
+      |> commit(opts)
       |> stop_refresh_if_unused(auth_profile)
     end
   end
@@ -52,15 +59,21 @@ defmodule FermixCore.Plugins.Config do
   `[fermix_core.plugins.<name>]`. The key must be declared in the plugin's
   manifest `config` block; the commit reloads the runtime so an `mcp` child
   restarts with the new env.
+
+  The one writer for a plugin setting: the management surface, the setup page
+  and `fermix plugins config set` all commit through here, so the value rules
+  the manifest declares are enforced once. An entry declared `kind: "boolean"`
+  takes only `"true"` or `"false"`; a blank value is refused for every kind,
+  and an unwritten setting is simply absent, which is what off is.
   """
-  @spec set_plugin_setting(String.t(), String.t(), String.t()) :: snapshot_result()
-  def set_plugin_setting(name, key, value)
-      when is_binary(name) and is_binary(key) and is_binary(value) do
+  @spec set_plugin_setting(String.t(), String.t(), String.t(), keyword()) :: snapshot_result()
+  def set_plugin_setting(name, key, value, opts \\ [])
+      when is_binary(name) and is_binary(key) and is_binary(value) and is_list(opts) do
     with {:ok, plugin} <- fetch_plugin(name),
          :ok <- validate_plugin_setting(plugin, key, value) do
       ConfigStore.current_snapshot()
       |> update_plugins(fn plugins -> put_plugin_setting(plugins, plugin, key, value) end)
-      |> commit()
+      |> commit(opts)
     end
   end
 
@@ -69,6 +82,11 @@ defmodule FermixCore.Plugins.Config do
   # `auth_profile` and `enabled` — deliberately NOT UPPER_SNAKE, because
   # `plugin_settings/1` is the mcp env-injection seam and these must never
   # reach a child process environment.
+  # The two words a `:boolean` setting may hold, and the spelling the
+  # `requires_setting` gate reads. One casing only: "TRUE" leaves a gated tool
+  # off, so accepting it here would store a value the operator reads as on.
+  @boolean_values ~w(true false)
+
   @selection_keys ~w(access_profile workspace_id workspace_label)
   @max_workspace_id_bytes 256
   @max_workspace_label_bytes 128
@@ -187,15 +205,16 @@ defmodule FermixCore.Plugins.Config do
   `commit/1` routes it through the secure-on-save path, so it is keychained
   (not written to `config.toml` plaintext) and the runtime reflects it.
   """
-  @spec set_plugin_secret(String.t(), String.t()) :: snapshot_result()
-  def set_plugin_secret(name, value) when is_binary(name) and is_binary(value) do
+  @spec set_plugin_secret(String.t(), String.t(), keyword()) :: snapshot_result()
+  def set_plugin_secret(name, value, opts \\ [])
+      when is_binary(name) and is_binary(value) and is_list(opts) do
     with {:ok, plugin} <- fetch_plugin(name),
          :ok <- ensure_api_key(plugin),
          {:ok, secret} <- fetch_plugin_secret(name),
          :ok <- ensure_non_blank(value) do
       ConfigStore.current_snapshot()
       |> SecretStore.put_snapshot_value(secret.path, value)
-      |> commit()
+      |> commit(opts)
     end
   end
 
@@ -210,26 +229,27 @@ defmodule FermixCore.Plugins.Config do
   retry; it never reports success. Forgetting is local: it does not revoke the
   credential with the provider.
   """
-  @spec forget_plugin_secret(String.t()) :: snapshot_result()
-  def forget_plugin_secret(name) when is_binary(name) do
+  @spec forget_plugin_secret(String.t(), keyword()) :: snapshot_result()
+  def forget_plugin_secret(name, opts \\ []) when is_binary(name) and is_list(opts) do
     snapshot = ConfigStore.current_snapshot()
 
     with {:ok, _plugin} <- fetch_plugin(name),
          {:ok, secret} <- fetch_plugin_secret(name),
-         :ok <- delete_keychain_item(secret, snapshot) do
+         :ok <- delete_keychain_item(secret, snapshot, opts) do
       snapshot
       |> SecretStore.delete_snapshot_value(secret.path)
-      |> commit()
+      |> commit(opts)
     end
   end
 
   # The snapshot's own profile names the keychain namespace its secrets live
   # in, exactly as the secure-on-save path derives it — reading app env here
   # would delete from the wrong namespace on a profile switch.
-  defp delete_keychain_item(secret, snapshot) do
+  defp delete_keychain_item(secret, snapshot, opts) do
     profile = SecretStore.get_snapshot_value(snapshot, [:fermix_core, :profile])
+    delete_opts = [profile: profile] ++ Keyword.take(opts, [:supervised])
 
-    case SecretWriter.delete(secret.key, profile: profile) do
+    case SecretWriter.delete(secret.key, delete_opts) do
       :ok -> :ok
       {:error, reason} -> {:error, {:keychain_delete_failed, secret.env, reason}}
     end
@@ -412,12 +432,26 @@ defmodule FermixCore.Plugins.Config do
   # The declared-key check subsumes the UPPER_SNAKE shape: manifest config
   # keys already passed the registry's key regex at decode.
   defp validate_plugin_setting(%Plugin{config: entries}, key, value) do
+    case Enum.find(entries, &(&1.key == key)) do
+      nil -> {:error, {:unknown_config_key, key}}
+      entry -> validate_config_value(entry, value)
+    end
+  end
+
+  # A `:boolean` entry is a switch, and `Plugins.Status` reads exactly "true"
+  # for the `requires_setting` gate, so the only two values that can mean
+  # anything are the two words the gate spells. Any other is refused here
+  # rather than persisted as a value that silently reads as off. A `:text`
+  # entry keeps the one rule it always had.
+  defp validate_config_value(%{key: key, kind: kind}, value) do
     cond do
-      not Enum.any?(entries, &(&1.key == key)) -> {:error, {:unknown_config_key, key}}
       String.trim(value) == "" -> {:error, {:blank_config_value, key}}
+      kind == :boolean and value not in @boolean_values -> boolean_refusal(key)
       true -> :ok
     end
   end
+
+  defp boolean_refusal(key), do: {:error, {:invalid_config_value, key, :boolean}}
 
   # TOML-loaded entries carry UPPER_SNAKE keys as strings (lowercase plumbing
   # keys normalize to atoms); replace by string identity so an overwrite never
@@ -480,7 +514,7 @@ defmodule FermixCore.Plugins.Config do
   # search.messages flow (M16 §7.1, see Auth.OAuthProviders.build/2). Keeping it
   # here means a Slack OAuth client is validated like every other provider rather
   # than falling through to the permissive clause below.
-  @registry_oauth_providers ~w(google github notion x slack)
+  @registry_oauth_providers ~w(google github notion x slack tesla)
 
   defp normalize_oauth_provider(provider, opts) when provider in @registry_oauth_providers do
     client_type = Keyword.get(opts, :client_type, "desktop_public_pkce")
@@ -496,7 +530,7 @@ defmodule FermixCore.Plugins.Config do
         {:error, {:missing_oauth_client_field, provider, :client_secret}}
 
       true ->
-        {:ok, normalized_oauth_provider(opts, client_type)}
+        normalize_registry_oauth_provider(provider, opts, client_type)
     end
   end
 
@@ -504,15 +538,45 @@ defmodule FermixCore.Plugins.Config do
     {:ok, normalized_oauth_provider(opts, Keyword.get(opts, :client_type))}
   end
 
+  # The two keys only a regional provider carries. The region set itself belongs
+  # to Auth.OAuthProviders (region -> Fleet API audience is one table, one
+  # owner); this is the write path that keeps a refused value out of config.toml,
+  # where it would otherwise surface as a login-time crash on the next boot.
+  defp normalize_registry_oauth_provider(provider, opts, client_type) do
+    with :ok <- OAuthProviders.validate_region(provider, Keyword.get(opts, :region)),
+         :ok <- validate_oauth_redirect_uri(provider, Keyword.get(opts, :redirect_uri)) do
+      {:ok, normalized_oauth_provider(opts, client_type)}
+    end
+  end
+
+  # A registered redirect URI is a public https URL (Tesla accepts no other kind
+  # and registers it exact-match), so an http or malformed one is refused here
+  # rather than at the provider's authorize endpoint.
+  defp validate_oauth_redirect_uri(_provider, nil), do: :ok
+
+  defp validate_oauth_redirect_uri(provider, uri) when is_binary(uri) do
+    case URI.parse(uri) do
+      %URI{scheme: "https", host: host} when is_binary(host) and host != "" -> :ok
+      _not_public_https -> {:error, {:invalid_oauth_redirect_uri, provider, uri}}
+    end
+  end
+
+  defp validate_oauth_redirect_uri(provider, uri),
+    do: {:error, {:invalid_oauth_redirect_uri, provider, uri}}
+
   # The redirect port is persisted only when the operator chose one — the
-  # per-provider defaults live in FermixCore.Auth.OAuthProviders.
+  # per-provider defaults live in FermixCore.Auth.OAuthProviders. `region` and
+  # `redirect_uri` are only meaningful for a regional provider and are absent
+  # from every other provider's saved client.
   defp normalized_oauth_provider(opts, client_type) do
     [
       client_type: client_type,
       client_id: Keyword.get(opts, :client_id),
       client_secret: Keyword.get(opts, :client_secret),
       redirect_host: Keyword.get(opts, :redirect_host),
-      redirect_port: Keyword.get(opts, :redirect_port)
+      redirect_port: Keyword.get(opts, :redirect_port),
+      region: Keyword.get(opts, :region),
+      redirect_uri: Keyword.get(opts, :redirect_uri)
     ]
     |> Enum.reject(fn {_key, value} -> blank?(value) end)
   end
@@ -530,8 +594,8 @@ defmodule FermixCore.Plugins.Config do
 
   defp normalize_oauth_map(_oauth), do: %{}
 
-  defp commit(snapshot) do
-    with {:ok, snapshot} <- persist(snapshot) do
+  defp commit(snapshot, opts \\ []) do
+    with {:ok, snapshot} <- persist(snapshot, opts) do
       reload_runtime()
       {:ok, snapshot}
     end
@@ -539,15 +603,21 @@ defmodule FermixCore.Plugins.Config do
 
   # Save + apply only. The caller that owns a stronger reconciliation than the
   # generic fan-out (`set_workspace_selection/2`) uses this directly.
-  defp persist(snapshot) do
+  #
+  # Both halves can run a keychain helper: the save stores or re-checks every
+  # secret the snapshot holds, and the apply reads back any `@keyring` value
+  # the environment still carries. Both therefore run in the caller's world.
+  defp persist(snapshot, opts \\ []) do
+    supervised = Keyword.take(opts, [:supervised])
+
     # The second write tail, and it consults the SAME predicate as the wizard's
     # — `RestartState.writable/0`, one owner: the `plugin:<name>` and
     # `oauth_client:<provider>` families reach `config.toml` through here and
     # never through the wizard, so a refusal in one tail alone would let a
     # plugin write revert an outside edit silently.
     with :ok <- RestartState.writable(),
-         :ok <- ConfigStore.save_snapshot(snapshot),
-         :ok <- ConfigStore.apply_snapshot(snapshot) do
+         :ok <- ConfigStore.save_snapshot(snapshot, supervised),
+         :ok <- ConfigStore.apply_snapshot(snapshot, supervised) do
       {:ok, ConfigStore.current_snapshot()}
     end
   end

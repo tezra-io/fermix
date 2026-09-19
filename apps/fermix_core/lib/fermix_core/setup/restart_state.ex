@@ -68,6 +68,11 @@ defmodule FermixCore.Setup.RestartState do
     {:computer_use, "Computer control settings changed since Fermix started."},
     {:computer_history, "Computer history settings changed since Fermix started."}
   ]
+  # Parts of a boot-bound section that every consumer reads on each call, so a
+  # change to them is live the moment it is applied. `sandbox.env` (mode, allow,
+  # deny and sources) is read by the shell tool and command capabilities per
+  # command (M45 §4.5); the rest of the sandbox section is read at boot.
+  @live_parts [sandbox: [:env]]
   @wrong_shape_sentence "The settings file could not be read: a value in it is not the shape Fermix expects."
   @external_change_section "settings_file"
   @external_change_sentence "The settings file changed outside Fermix."
@@ -85,6 +90,20 @@ defmodule FermixCore.Setup.RestartState do
   @doc "Every boot-bound section, with the sentence published when it changed."
   @spec boot_bound_sections() :: [{atom(), String.t()}]
   def boot_bound_sections, do: @boot_bound
+
+  @doc """
+  Whether a change at `path` needs a restart: a section (`[:providers]`) or a
+  part of one (`[:sandbox, :env]`). The same rule decides which differences
+  `restart/1` reports, so a row asking this can never deny a restart the next
+  read reports, nor claim one it never will.
+  """
+  @spec boot_bound?([atom(), ...]) :: boolean()
+  def boot_bound?([section | parts]) when is_atom(section) and is_list(parts) do
+    List.keymember?(@boot_bound, section, 0) and not live_part?(section, parts)
+  end
+
+  defp live_part?(_section, []), do: false
+  defp live_part?(section, [part | _rest]), do: part in Keyword.get(@live_parts, section, [])
 
   @doc """
   Whether a restart is needed, and the daemon's own sentence for every reason.
@@ -320,12 +339,23 @@ defmodule FermixCore.Setup.RestartState do
     current = ConfigStore.current_snapshot()
 
     Enum.flat_map(@boot_bound, fn {section, sentence} ->
-      if section_value(current, section) == section_value(booted_live, section) do
+      if boot_value(current, section) == boot_value(booted_live, section) do
         []
       else
         [%{section: Atom.to_string(section), sentence: sentence}]
       end
     end)
+  end
+
+  # The section as the boot-bound comparison sees it: without its live parts.
+  # The external-change comparison keeps reading the whole section, because an
+  # outside edit to a live part would still be reverted by the next save.
+  defp boot_value(snapshot, section) do
+    case {section_value(snapshot, section), Keyword.get(@live_parts, section, [])} do
+      {value, []} -> value
+      {value, parts} when is_list(value) -> Keyword.drop(value, parts)
+      {nil, _parts} -> nil
+    end
   end
 
   # The fourth restart input, and the one no snapshot comparison can see: a

@@ -110,7 +110,7 @@ defmodule FermixWebWeb.SetupLiveTest do
           generation,
           :upstream_contract_mismatch,
           :descriptor_changed,
-          "eden_read_card"
+          "acme_read_card"
         )
 
       {:ok, owner}
@@ -124,6 +124,7 @@ defmodule FermixWebWeb.SetupLiveTest do
     secret_writer = Application.get_env(:fermix_core, :secret_writer)
     tools = Application.get_env(:fermix_core, :tools, [])
     transcription = Application.get_env(:fermix_core, :transcription, [])
+    realtime = Application.get_env(:fermix_core, :realtime)
     meetings = Application.get_env(:fermix_core, :meetings, [])
     plugins = Application.get_env(:fermix_core, :plugins, [])
     computer_history = Application.get_env(:fermix_core, :computer_history)
@@ -176,6 +177,11 @@ defmodule FermixWebWeb.SetupLiveTest do
       max_file_mb: 20
     )
 
+    # Clean voice baseline. The engine decides which controls the Realtime pane
+    # draws at all, so a case that saved one engine would otherwise change what
+    # the next case renders, and the pane's own cases establish what they assert.
+    Application.put_env(:fermix_core, :realtime, [])
+
     # Meetings ships off; the card's own tests establish the posture they assert.
     Application.put_env(:fermix_core, :meetings, enabled: false)
 
@@ -211,6 +217,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       restore_env(:fermix_core, :secret_writer, secret_writer)
       Application.put_env(:fermix_core, :tools, tools)
       Application.put_env(:fermix_core, :transcription, transcription)
+      restore_env(:fermix_core, :realtime, realtime)
       Application.put_env(:fermix_core, :meetings, meetings)
       Application.put_env(:fermix_core, :plugins, plugins)
       restore_env(:fermix_core, :computer_history, computer_history)
@@ -678,9 +685,11 @@ defmodule FermixWebWeb.SetupLiveTest do
         assert card =~ "remote_summaries = [&quot;openai&quot;]"
       end
 
-      # The pinned native driver withholds typed text inside browsers and captures
-      # no URLs, so the tooltip must not promise either (§23.3).
-      test "the tooltip claims window titles only inside browsers, never URLs (§23.3)",
+      # M32.1 §2.1/§2.2: consent is per app, so the card must say that allowing a
+      # browser records the address of EVERY site visited in it — and that typed
+      # text is captured only outside private windows, which is the only gate left
+      # on browser content.
+      test "the tooltip claims every site and typed text outside private windows",
            %{conn: conn} do
         Application.put_env(:fermix_core, :computer_history, [])
 
@@ -690,10 +699,12 @@ defmodule FermixWebWeb.SetupLiveTest do
         card = view |> element(~s|section[data-feature-name="computer_history"]|) |> render()
 
         assert card =~
-                 "Opt-in activity memory from the apps you allow: window titles and typed " <>
-                   "text; inside browsers only window titles are captured today."
+                 "Opt-in activity memory from the apps you allow: window titles, and in " <>
+                   "browsers the page titles and addresses of every site you visit, plus " <>
+                   "typed text outside private windows."
 
-        refute card =~ "URLs"
+        assert card =~ "Passwords and secure fields are never captured."
+        refute card =~ "only window titles"
       end
     end
 
@@ -2582,6 +2593,24 @@ defmodule FermixWebWeb.SetupLiveTest do
         assert realtime_html =~ value
       end
 
+      # One Model control spans both engines: every model of every engine, in
+      # catalog order, each option naming the engine that model speaks through.
+      # The engine is a property of the model, never a second control the
+      # operator has to keep in agreement with the first.
+      assert option_values(view, "model") ==
+               FermixCore.Realtime.Config.valid_models("openai_realtime") ++
+                 FermixCore.Realtime.Config.valid_models("openai_live")
+
+      assert option_labels(view, "model") ==
+               Enum.map(
+                 FermixCore.Realtime.Config.valid_models("openai_realtime"),
+                 &(&1 <> " · Realtime, integrated tools")
+               ) ++
+                 Enum.map(
+                   FermixCore.Realtime.Config.valid_models("openai_live"),
+                   &(&1 <> " · Live, with your Fermix agent")
+                 )
+
       view
       |> form("form[phx-submit=\"save_realtime\"]",
         realtime_form: %{
@@ -2601,6 +2630,7 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       realtime = Application.get_env(:fermix_core, :realtime, [])
       assert Keyword.get(realtime, :enabled) == true
+      assert Keyword.get(realtime, :engine) == "openai_realtime"
       assert Keyword.get(realtime, :model) == "gpt-realtime-2.1-mini"
       assert Keyword.get(realtime, :reasoning_effort) == "high"
       assert Keyword.get(realtime, :voice) == "cedar"
@@ -2609,10 +2639,127 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert Keyword.get(realtime, :persist_transcripts) == true
 
       contents = File.read!(Path.join(tmp_home, "config.toml"))
+      assert contents =~ ~s(engine = "openai_realtime")
       assert contents =~ ~s(model = "gpt-realtime-2.1-mini")
       assert contents =~ ~s(reasoning_effort = "high")
       assert contents =~ ~s(voice = "cedar")
       assert contents =~ "max_session_minutes = 20"
+    end
+
+    # The pane is scoped to the model the operator is LOOKING at, not to the one
+    # last saved. Picking a Live model re-scopes the voices and withdraws the
+    # Realtime-only reasoning effort on the spot — otherwise the only way to see
+    # what Live offers is to save an engine whose surface the page cannot draw.
+    test "choosing a Live model re-scopes the pane without saving", %{
+      conn: conn,
+      tmp_home: tmp_home
+    } do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      view
+      |> element("button[phx-value-tab=\"realtime\"]")
+      |> render_click()
+
+      config_path = Path.join(tmp_home, "config.toml")
+      config_before = File.read(config_path)
+
+      view
+      |> form("form[phx-submit=\"save_realtime\"]", realtime_form: %{model: "gpt-live-1"})
+      |> render_change()
+
+      assert selected_options(view, "model") == ["gpt-live-1"]
+
+      assert option_values(view, "voice") ==
+               FermixCore.Realtime.Config.valid_voices("openai_live")
+
+      assert length(option_values(view, "voice")) == 22
+      refute render(view) =~ ~s(name="realtime_form[reasoning_effort]")
+
+      # A re-scope is a re-render, not a save: nothing reaches app env or disk
+      # until the operator presses Save.
+      assert Application.get_env(:fermix_core, :realtime) == []
+      assert File.read(config_path) == config_before
+    end
+
+    test "choosing a Realtime model restores its voices and reasoning effort", %{conn: conn} do
+      # Establish the saved posture this case unwinds: Live, on a voice only
+      # Live speaks. The module baseline is Realtime, so the case owns this.
+      Application.put_env(:fermix_core, :realtime,
+        engine: "openai_live",
+        model: "gpt-live-1",
+        voice: "beacon"
+      )
+
+      {:ok, view, _html} = live(conn, "/setup")
+
+      live_html =
+        view
+        |> element("button[phx-value-tab=\"realtime\"]")
+        |> render_click()
+
+      refute live_html =~ ~s(name="realtime_form[reasoning_effort]")
+
+      view
+      |> form("form[phx-submit=\"save_realtime\"]", realtime_form: %{model: "gpt-realtime-2.1"})
+      |> render_change()
+
+      assert option_values(view, "voice") ==
+               FermixCore.Realtime.Config.valid_voices("openai_realtime")
+
+      # A Live-only voice has no Realtime counterpart, so the pane lands on the
+      # voice both catalogs open with rather than on one the save would refuse.
+      assert selected_options(view, "voice") == ["marin"]
+      assert selected_options(view, "reasoning_effort") == ["low"]
+    end
+
+    # The model names the engine, so a Live pick carries the engine with it and
+    # leaves no reasoning effort behind: a persisted pair the engine refuses is
+    # a config.toml the next boot will not load.
+    test "submitting a Live model persists its engine with Live's model and no effort", %{
+      conn: conn,
+      tmp_home: tmp_home
+    } do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      realtime_html =
+        view
+        |> element("button[phx-value-tab=\"realtime\"]")
+        |> render_click()
+
+      assert realtime_html =~ "gpt-live-1 · Live, with your Fermix agent"
+
+      view
+      |> form("form[phx-submit=\"save_realtime\"]",
+        realtime_form: %{
+          enabled: "true",
+          model: "gpt-live-1",
+          voice: "cedar"
+        }
+      )
+      |> render_submit()
+
+      assert render(view) =~ "Realtime saved."
+
+      realtime = Application.get_env(:fermix_core, :realtime, [])
+      assert Keyword.get(realtime, :engine) == "openai_live"
+      assert Keyword.get(realtime, :model) == "gpt-live-1"
+      assert Keyword.get(realtime, :voice) == "cedar"
+      refute Keyword.has_key?(realtime, :reasoning_effort)
+
+      contents = File.read!(Path.join(tmp_home, "config.toml"))
+      assert contents =~ ~s(engine = "openai_live")
+      assert contents =~ ~s(model = "gpt-live-1")
+      refute contents =~ "reasoning_effort"
+
+      # The pane re-renders against the engine it just saved: Live's voices and
+      # no reasoning effort control at all.
+      live_html =
+        view
+        |> element("button[phx-value-tab=\"realtime\"]")
+        |> render_click()
+
+      refute live_html =~ ~s(name="realtime_form[reasoning_effort]")
+      assert live_html =~ "beacon"
     end
   end
 
@@ -4223,6 +4370,154 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert Keyword.get(github, :client_secret) == "gh-secret"
     end
 
+    # Tesla is the one regional provider: the chosen region is the
+    # token-exchange audience and the Fleet API host, and Tesla refuses a
+    # mismatch with 421 only after sign-in. So it is picked here, in the same
+    # form as the client id and secret, and never defaulted.
+    test "the tesla client form renders the region picker with nothing chosen", %{
+      conn: conn,
+      tmp_home: tmp_home,
+      fixtures: fixtures
+    } do
+      {_view, modal_html} = open_tesla_client_modal(conn, tmp_home, fixtures)
+
+      assert modal_html =~ ~s(name="oauth_client_form[region]")
+      assert modal_html =~ "Region"
+
+      assert modal_html =~
+               ~r{<option value="" selected="">\s*Choose the account&#39;s region\s*</option>}
+
+      assert modal_html =~ ~r{<option value="na"[^>]*>\s*North America and Asia-Pacific\s*<}
+      assert modal_html =~ ~r{<option value="eu"[^>]*>\s*Europe, Middle East and Africa\s*<}
+      refute modal_html =~ ~r{<option value="(na|eu)" selected}
+    end
+
+    test "a client form for a provider with one region renders no region picker", %{
+      conn: conn,
+      tmp_home: tmp_home,
+      fixtures: fixtures
+    } do
+      entry =
+        wire_catalog_plugin(fixtures, "github", "1.0.0",
+          auth_type: "oauth2",
+          auth_provider: "github"
+        )
+
+      seed_catalog(tmp_home, [entry])
+
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+      modal_html =
+        view
+        |> element(~s|button[phx-click="open_oauth_modal"][phx-value-provider="github"]|)
+        |> render_click()
+
+      assert modal_html =~ ~s(id="oauth-client-form-github")
+      refute modal_html =~ "oauth_client_form[region]"
+      refute modal_html =~ "Choose the account"
+    end
+
+    test "saving a chosen region persists it and keeps the stored secret and redirect uri", %{
+      conn: conn,
+      tmp_home: tmp_home,
+      fixtures: fixtures
+    } do
+      Application.put_env(:fermix_core, :oauth, %{
+        "tesla" => [
+          client_type: "desktop_public_pkce",
+          client_id: "tesla-client",
+          client_secret: "tesla-secret",
+          redirect_uri: "https://fermix.ai/api/integrations/tesla/callback"
+        ]
+      })
+
+      {view, _modal_html} = open_tesla_client_modal(conn, tmp_home, fixtures)
+
+      html =
+        view
+        |> form("#oauth-client-form-tesla", oauth_client_form: %{region: "eu"})
+        |> render_submit()
+
+      assert html =~ "Tesla OAuth client saved."
+
+      tesla = PluginConfig.oauth_provider("tesla")
+      assert Keyword.get(tesla, :region) == "eu"
+      assert Keyword.get(tesla, :client_id) == "tesla-client"
+      assert Keyword.get(tesla, :client_secret) == "tesla-secret"
+
+      assert Keyword.get(tesla, :redirect_uri) ==
+               "https://fermix.ai/api/integrations/tesla/callback"
+    end
+
+    test "saving a tesla client with no region names the region as the fix", %{
+      conn: conn,
+      tmp_home: tmp_home,
+      fixtures: fixtures
+    } do
+      {view, _modal_html} = open_tesla_client_modal(conn, tmp_home, fixtures)
+
+      html =
+        view
+        |> form("#oauth-client-form-tesla",
+          oauth_client_form: %{client_id: "tesla-client", client_secret: "tesla-secret"}
+        )
+        |> render_submit()
+
+      assert html =~ "Choose the account&#39;s region for the Tesla sign-in client."
+      assert PluginConfig.oauth_provider("tesla") == []
+    end
+
+    # A region the picker does not offer can only come from a hand-edited
+    # config.toml. Leaving the picker blank carries that stored value forward,
+    # and the refusal names it rather than quietly substituting a default.
+    test "a stored region the picker does not offer is refused by name", %{
+      conn: conn,
+      tmp_home: tmp_home,
+      fixtures: fixtures
+    } do
+      Application.put_env(:fermix_core, :oauth, %{
+        "tesla" => [
+          client_type: "desktop_public_pkce",
+          client_id: "tesla-client",
+          client_secret: "tesla-secret",
+          region: "apac"
+        ]
+      })
+
+      {view, modal_html} = open_tesla_client_modal(conn, tmp_home, fixtures)
+
+      refute modal_html =~ ~r{<option value="(na|eu)" selected}
+
+      html =
+        view
+        |> form("#oauth-client-form-tesla", oauth_client_form: %{})
+        |> render_submit()
+
+      assert html =~ "Tesla has no region named apac."
+    end
+
+    test "a stored region renders as the chosen option", %{
+      conn: conn,
+      tmp_home: tmp_home,
+      fixtures: fixtures
+    } do
+      Application.put_env(:fermix_core, :oauth, %{
+        "tesla" => [
+          client_type: "desktop_public_pkce",
+          client_id: "tesla-client",
+          client_secret: "tesla-secret",
+          region: "eu"
+        ]
+      })
+
+      {_view, modal_html} = open_tesla_client_modal(conn, tmp_home, fixtures)
+
+      assert modal_html =~ ~r{<option value="eu" selected="">}
+      refute modal_html =~ ~r{<option value="" selected}
+      refute modal_html =~ ~r{<option value="na" selected}
+    end
+
     test "an unconfigured github card routes Connect to the modal and still guards direct auth",
          %{
            conn: conn,
@@ -4468,6 +4763,86 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert html =~ ~s(id="plugin-config-form-vaultdemo")
       assert PluginConfig.plugin_settings("vaultdemo") == %{}
     end
+
+    # A `kind: "boolean"` config entry (Tesla's ALLOW_WAKE) is an instant switch
+    # beside the card's other controls, not a field with a Save button: the click
+    # is the whole answer. The stored value stays the strings "true" and "false"
+    # — the value the tool gate reads.
+    test "a boolean config entry renders as an unchecked switch labelled with its prompt", %{
+      conn: conn,
+      tmp_home: tmp_home,
+      fixtures: fixtures
+    } do
+      view = enable_config_plugin(conn, tmp_home, fixtures, "wakedemo", [boolean_config_entry()])
+
+      assert render(view) =~ "Allow waking the car"
+      assert has_element?(view, wake_checkbox())
+      refute has_element?(view, wake_checkbox() <> "[checked]")
+      # There is nothing to submit: the switch sits outside the config form,
+      # which does not render at all when no text entry is owed.
+      refute has_element?(view, ~s|#plugin-config-form-wakedemo|)
+      refute has_element?(view, ~s|form input[phx-value-key="DEMO_ALLOW_WAKE"]|)
+
+      refute has_element?(
+               view,
+               ~s|input[type="text"][name="plugin_config_form[DEMO_ALLOW_WAKE]"]|
+             )
+
+      assert PluginConfig.plugin_settings("wakedemo") == %{}
+    end
+
+    test "a boolean config entry whose stored value is true renders checked", %{
+      conn: conn,
+      tmp_home: tmp_home,
+      fixtures: fixtures
+    } do
+      view = enable_config_plugin(conn, tmp_home, fixtures, "wakedemo", [boolean_config_entry()])
+
+      assert view |> element(wake_checkbox()) |> render_click() =~ "Plugin configuration saved."
+
+      # A switch is answerable twice, so it stays on the card once set — unlike a
+      # filled-in path, which leaves the form.
+      assert has_element?(view, wake_checkbox() <> "[checked]")
+    end
+
+    test "clicking the switch persists true, and clicking it again persists false", %{
+      conn: conn,
+      tmp_home: tmp_home,
+      fixtures: fixtures
+    } do
+      view = enable_config_plugin(conn, tmp_home, fixtures, "wakedemo", [boolean_config_entry()])
+
+      view |> element(wake_checkbox()) |> render_click()
+
+      assert PluginConfig.plugin_settings("wakedemo") == %{"DEMO_ALLOW_WAKE" => "true"}
+
+      view |> element(wake_checkbox()) |> render_click()
+
+      assert PluginConfig.plugin_settings("wakedemo") == %{"DEMO_ALLOW_WAKE" => "false"}
+      refute has_element?(view, wake_checkbox() <> "[checked]")
+    end
+
+    test "a text config entry still renders as a text input inside the form", %{
+      conn: conn,
+      tmp_home: tmp_home,
+      fixtures: fixtures
+    } do
+      view =
+        enable_config_plugin(conn, tmp_home, fixtures, "vaultdemo", [
+          %{"key" => "DEMO_VAULT_PATH", "prompt" => "Path to your vault", "required" => true}
+        ])
+
+      assert render(view) =~ "Path to your vault"
+
+      assert has_element?(
+               view,
+               ~s|#plugin-config-form-vaultdemo input[type="text"][name="plugin_config_form[DEMO_VAULT_PATH]"]|
+             )
+
+      assert has_element?(view, ~s|#plugin-config-form-vaultdemo button[type="submit"]|)
+
+      refute has_element?(view, ~s|input[type="checkbox"][phx-value-key="DEMO_VAULT_PATH"]|)
+    end
   end
 
   # M27 §7.5 steps 3–7: the per-plugin workspace step, the first custom setup
@@ -4481,7 +4856,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       on_exit(fn ->
         Application.put_env(:fermix_core, :plugin_secrets, secrets)
         Application.delete_env(:fermix_web, :remote_setup_opts)
-        RuntimeStatus.clear(RuntimeStatus, {:plugin, "eden"})
+        RuntimeStatus.clear(RuntimeStatus, {:plugin, "acme"})
         DistVerifierStub.cleanup()
         FermixTestSupport.SafeRm.rm_rf(checkout)
       end)
@@ -4490,7 +4865,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       # `Registry.list()` inside the LiveView takes no options, so the artifact
       # must land in the DEFAULT store under this test's tmp FERMIX_HOME.
       write_remote_plugin(ConfigStore.workspace_paths().plugins)
-      Application.put_env(:fermix_core, :plugins, enabled: ["eden"])
+      Application.put_env(:fermix_core, :plugins, enabled: ["acme"])
 
       %{checkout: checkout}
     end
@@ -4501,16 +4876,14 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       # Credential first: the workspace step is meaningless without a token to
       # ask with, so the card offers the key form and nothing else.
-      assert html =~ ~s(data-plugin-name="eden")
+      assert html =~ ~s(data-plugin-name="acme")
       assert html =~ "Needs key"
       refute html =~ ~s(phx-click="open_resource_picker")
 
-      html =
-        view
-        |> form(~s|#plugin-secret-form-eden|, %{
-          "plugin_secret_form" => %{"value" => "eden_pat_0123456789abcdef"}
-        })
-        |> render_submit()
+      store_credential()
+
+      {:ok, view, _html} = live(conn, "/setup")
+      html = view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
 
       assert html =~ "Needs workspace"
       assert html =~ ~s(phx-click="open_resource_picker")
@@ -4524,7 +4897,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       Application.put_env(:fermix_web, :remote_setup_opts,
         transport: FakeRemoteTransport,
         connect_opts: [agent: agent],
-        resolver: fn "eden" -> "eden_pat_0123456789abcdef" end,
+        resolver: fn "acme" -> "acme_pat_0123456789abcdef" end,
         mcp_supervisor: ReadySupervisor
       )
 
@@ -4532,7 +4905,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
 
       view
-      |> element(~s|button[phx-click="open_resource_picker"][phx-value-name="eden"]|)
+      |> element(~s|button[phx-click="open_resource_picker"][phx-value-name="acme"]|)
       |> render_click()
 
       html = render_until(view, "Beta")
@@ -4558,7 +4931,7 @@ defmodule FermixWebWeb.SetupLiveTest do
         :fermix_core
         |> Application.get_env(:plugins, [])
         |> Keyword.get(:entries, %{})
-        |> Map.get("eden", [])
+        |> Map.get("acme", [])
 
       assert Keyword.get(entry, :workspace_id) == "ws_alpha"
       assert Keyword.get(entry, :workspace_label) == "Alpha"
@@ -4576,7 +4949,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       Application.put_env(:fermix_web, :remote_setup_opts,
         transport: FakeRemoteTransport,
         connect_opts: [agent: agent],
-        resolver: fn "eden" -> "eden_pat_0123456789abcdef" end,
+        resolver: fn "acme" -> "acme_pat_0123456789abcdef" end,
         mcp_supervisor: MismatchSupervisor
       )
 
@@ -4584,7 +4957,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
 
       view
-      |> element(~s|button[phx-click="open_resource_picker"][phx-value-name="eden"]|)
+      |> element(~s|button[phx-click="open_resource_picker"][phx-value-name="acme"]|)
       |> render_click()
 
       render_until(view, "Beta")
@@ -4602,7 +4975,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       # The operator's actual question is WHICH capability, and the modal is the
       # surface they are looking at when they ask it. Rendered by the same
       # resolver the daemon log and `fermix doctor` use.
-      assert html =~ "upstream_contract_mismatch/descriptor_changed (eden_read_card)"
+      assert html =~ "upstream_contract_mismatch/descriptor_changed (acme_read_card)"
       assert html =~ "Alpha"
       refute html =~ "Workspace selected."
     end
@@ -4621,7 +4994,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       Application.put_env(:fermix_web, :remote_setup_opts,
         transport: FakeRemoteTransport,
         connect_opts: [agent: agent],
-        resolver: fn "eden" -> "eden_pat_0123456789abcdef" end,
+        resolver: fn "acme" -> "acme_pat_0123456789abcdef" end,
         mcp_supervisor: ReadySupervisor
       )
 
@@ -4629,12 +5002,12 @@ defmodule FermixWebWeb.SetupLiveTest do
       view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
 
       view
-      |> element(~s|button[phx-click="open_resource_picker"][phx-value-name="eden"]|)
+      |> element(~s|button[phx-click="open_resource_picker"][phx-value-name="acme"]|)
       |> render_click()
 
       html = render_until(view, "Could not list workspaces")
       refute html =~ "remote_jsonrpc_error (Fermix: re-enter your token)"
-      refute html =~ "eden_pat_"
+      refute html =~ "acme_pat_"
     end
 
     test "a discovery failure renders a redacted error and persists nothing", %{conn: conn} do
@@ -4644,7 +5017,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       Application.put_env(:fermix_web, :remote_setup_opts,
         transport: FakeRemoteTransport,
         connect_opts: [agent: agent],
-        resolver: fn "eden" -> "eden_pat_0123456789abcdef" end,
+        resolver: fn "acme" -> "acme_pat_0123456789abcdef" end,
         mcp_supervisor: ReadySupervisor
       )
 
@@ -4652,23 +5025,23 @@ defmodule FermixWebWeb.SetupLiveTest do
       view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
 
       view
-      |> element(~s|button[phx-click="open_resource_picker"][phx-value-name="eden"]|)
+      |> element(~s|button[phx-click="open_resource_picker"][phx-value-name="acme"]|)
       |> render_click()
 
       # The classified transport failure, and nothing else: no credential, no
       # endpoint, no process state.
       html = render_until(view, "Could not list workspaces")
       assert html =~ "Could not list workspaces: :nxdomain"
-      refute html =~ "eden_pat_"
+      refute html =~ "acme_pat_"
 
       entry =
         :fermix_core
         |> Application.get_env(:plugins, [])
         |> Keyword.get(:entries, %{})
-        |> Map.get("eden", [])
+        |> Map.get("acme", [])
 
       assert Keyword.get(entry, :workspace_id) == nil
-      assert PluginStatus.status("eden") == :needs_workspace
+      assert PluginStatus.status("acme") == :needs_workspace
     end
   end
 
@@ -4765,6 +5138,37 @@ defmodule FermixWebWeb.SetupLiveTest do
     DistFixtures.wire(fixtures, name, version, tgz, sha, wire_opts)
   end
 
+  # Install + enable a fixture plugin that declares manifest `config` entries and
+  # land on the plugins pane with its card rendered.
+  defp enable_config_plugin(conn, tmp_home, fixtures, name, config) do
+    entry = wire_catalog_plugin(fixtures, name, "1.0.0", manifest_extra: %{"config" => config})
+    seed_catalog(tmp_home, [entry])
+
+    {:ok, view, _html} = live(conn, "/setup")
+    view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+    view
+    |> element(~s|button[phx-click="plugin_enable"][phx-value-name="#{name}"]|)
+    |> render_click()
+
+    render_until(view, "Plugin enabled.")
+    view
+  end
+
+  # Tesla's ALLOW_WAKE shape: a switch the operator flips, not a word they type.
+  defp boolean_config_entry do
+    %{
+      "key" => "DEMO_ALLOW_WAKE",
+      "prompt" => "Allow waking the car",
+      "required" => true,
+      "kind" => "boolean"
+    }
+  end
+
+  defp wake_checkbox,
+    do:
+      ~s|input[type="checkbox"][phx-click="set_plugin_switch"][phx-value-name="wakedemo"][phx-value-key="DEMO_ALLOW_WAKE"]|
+
   # Install an oauth2/github-provider plugin through the dist seam so the
   # plugins pane renders it as an installed card in the GitHub group.
   defp install_github_plugin(tmp_home, fixtures) do
@@ -4779,6 +5183,28 @@ defmodule FermixWebWeb.SetupLiveTest do
 
     opts = seed_catalog(tmp_home, [entry])
     assert {:ok, :installed} = DistInstaller.run_install("github", opts)
+  end
+
+  # Wire the one regional provider into the catalog and open its client modal:
+  # the region picker lives inside that form and nowhere else.
+  defp open_tesla_client_modal(conn, tmp_home, fixtures) do
+    entry =
+      wire_catalog_plugin(fixtures, "tesla", "1.0.0",
+        auth_type: "oauth2",
+        auth_provider: "tesla"
+      )
+
+    seed_catalog(tmp_home, [entry])
+
+    {:ok, view, _html} = live(conn, "/setup")
+    view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+    modal_html =
+      view
+      |> element(~s|button[phx-click="open_oauth_modal"][phx-value-provider="tesla"]|)
+      |> render_click()
+
+    {view, modal_html}
   end
 
   # A dev_local checkout of the computer-use sidecar (manifest only): the registry
@@ -4943,7 +5369,7 @@ defmodule FermixWebWeb.SetupLiveTest do
   # --- remote-plugin picker fixtures --------------------------------------
 
   defp store_credential do
-    Application.put_env(:fermix_core, :plugin_secrets, %{"eden" => "eden_pat_0123456789abcdef"})
+    Application.put_env(:fermix_core, :plugin_secrets, %{"acme" => "acme_pat_0123456789abcdef"})
   end
 
   # initialize -> initialized -> tools/list -> tools/call -> teardown.
@@ -4994,7 +5420,7 @@ defmodule FermixWebWeb.SetupLiveTest do
 
   defp remote_live_descriptor do
     %{
-      "name" => "eden_list_workspaces",
+      "name" => "acme_list_workspaces",
       "description" => "List workspaces.",
       "inputSchema" => remote_workspaces_parameters()
     }
@@ -5002,9 +5428,10 @@ defmodule FermixWebWeb.SetupLiveTest do
 
   defp remote_workspaces_parameters, do: %{"type" => "object", "properties" => %{}}
 
-  # A plugin-api-3 `remote_mcp` plugin named `eden`, the one plugin with a
-  # registered `SecretPaths` entry, so the credential form is the real one.
-  # Nothing in the picker keys on that name.
+  # A plugin-api-3 `remote_mcp` plugin named `acme`. No hosted plugin has a
+  # registered `SecretPaths` entry, so these tests seed the credential directly
+  # (`store_credential/0`); the key form itself is proven on the Discord api_key
+  # plugin above. Nothing in the picker keys on that name.
   #
   # INSTALLED, not dev_local: a remote manifest with no publisher signature is
   # refused by the provenance gate (M27 §9.3), so a dev_local fixture would
@@ -5014,23 +5441,23 @@ defmodule FermixWebWeb.SetupLiveTest do
       "schema_version" => 2,
       "plugin_api" => 3,
       "min_core_version" => "0.1.0",
-      "name" => "eden",
-      "display_name" => "Eden",
+      "name" => "acme",
+      "display_name" => "Acme",
       "description" => "Remote MCP fixture with a single-workspace resource scope.",
       "category" => "productivity",
       "version" => "1.0.0",
       "auth" => %{
         "type" => "api_key",
-        "key_name" => "EDEN_PERSONAL_ACCESS_TOKEN",
+        "key_name" => "ACME_PERSONAL_ACCESS_TOKEN",
         "header" => "Authorization",
         "scheme" => "Bearer",
-        "prompt" => "Paste an Eden personal access token"
+        "prompt" => "Paste an Acme personal access token"
       },
       "runtime" => %{
         "kind" => "remote_mcp",
         "transport" => "streamable_http",
         "protocol_version" => "2025-06-18",
-        "base_url" => "https://mcp.eden.so",
+        "base_url" => "https://mcp.acme.example",
         "mcp_path" => "/mcp",
         "tool_name_mode" => "preserve"
       },
@@ -5041,7 +5468,7 @@ defmodule FermixWebWeb.SetupLiveTest do
           "default" => true,
           "required_credential_scope" => "read",
           "scope_visibility" => "none",
-          "tools" => ["eden_search"]
+          "tools" => ["acme_search"]
         },
         %{
           "name" => "capture",
@@ -5049,13 +5476,13 @@ defmodule FermixWebWeb.SetupLiveTest do
           "default" => false,
           "required_credential_scope" => "write",
           "scope_visibility" => "none",
-          "tools" => ["eden_search", "eden_append"]
+          "tools" => ["acme_search", "acme_append"]
         }
       ],
-      "setup_tools" => ["eden_list_workspaces"],
+      "setup_tools" => ["acme_list_workspaces"],
       "resource_scope" => %{
         "kind" => "single_workspace",
-        "discovery_tool" => "eden_list_workspaces",
+        "discovery_tool" => "acme_list_workspaces",
         "id_field" => "id",
         "label_field" => "name",
         "argument" => "workspaceId"
@@ -5069,7 +5496,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       },
       "tools" => [
         sign_remote_tool(%{
-          "name" => "eden_list_workspaces",
+          "name" => "acme_list_workspaces",
           "description" => "List workspaces available to the connected token.",
           "policy_class" => "external_api",
           "read_only" => true,
@@ -5083,7 +5510,7 @@ defmodule FermixWebWeb.SetupLiveTest do
           "upstream_annotations" => nil
         }),
         sign_remote_tool(%{
-          "name" => "eden_search",
+          "name" => "acme_search",
           "description" => "Search a workspace.",
           "policy_class" => "external_api",
           "read_only" => true,
@@ -5103,7 +5530,7 @@ defmodule FermixWebWeb.SetupLiveTest do
           "upstream_annotations" => nil
         }),
         sign_remote_tool(%{
-          "name" => "eden_append",
+          "name" => "acme_append",
           "description" => "Append to a note.",
           "policy_class" => "external_api",
           "read_only" => false,
@@ -5130,8 +5557,8 @@ defmodule FermixWebWeb.SetupLiveTest do
     File.mkdir_p!(fixtures)
     DistStore.ensure!(store)
     DistVerifierStub.init()
-    :ok = DistFixtures.install_remote_plugin(store, fixtures, "eden", "1.0.0", manifest)
-    :ok = DistVerifierStub.allow("eden", "1.0.0")
+    :ok = DistFixtures.install_remote_plugin(store, fixtures, "acme", "1.0.0", manifest)
+    :ok = DistVerifierStub.allow("acme", "1.0.0")
   end
 
   defp sign_remote_tool(tool) do
@@ -5291,6 +5718,30 @@ defmodule FermixWebWeb.SetupLiveTest do
       refute refused =~ "config_unreadable"
       refute refused =~ "Sandbox saved."
     end
+  end
+
+  # The rendered <option> nodes of one realtime select, in document order.
+  defp realtime_options(view, field) do
+    view
+    |> element(~s(select[name="realtime_form[#{field}]"]))
+    |> render()
+    |> Floki.parse_fragment!()
+    |> Floki.find("option")
+  end
+
+  defp option_values(view, field), do: view |> realtime_options(field) |> Floki.attribute("value")
+
+  defp option_labels(view, field) do
+    view
+    |> realtime_options(field)
+    |> Enum.map(&(&1 |> Floki.text() |> String.trim()))
+  end
+
+  defp selected_options(view, field) do
+    view
+    |> realtime_options(field)
+    |> Enum.filter(fn {_tag, attrs, _children} -> List.keymember?(attrs, "selected", 0) end)
+    |> Floki.attribute("value")
   end
 
   defp submit_sandbox(view) do

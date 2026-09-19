@@ -14,6 +14,38 @@ defmodule FermixCore.BootProfileTest do
     assert BootProfile.select("standalone", fn -> false end) == :source
   end
 
+  # A linux_package stamp on a source tree is a developer's own checkout, not a
+  # packaged install: the packaged CLI posture is claimed only by the wrapper.
+  test "linux-package identity separates the packaged CLI from a source run" do
+    assert BootProfile.select("linux_package", fn -> true end) == :linux_package_cli
+    assert BootProfile.select("linux_package", fn -> false end) == :source
+  end
+
+  test "preparing the packaged Linux CLI opens the same daemon surfaces" do
+    endpoint_before = Application.get_env(:fermix_web, FermixWebWeb.Endpoint)
+    daemon_before = Application.get_env(:fermix_core, :daemon_socket_enabled)
+    realtime_before = Application.get_env(:fermix_core, :realtime_socket_enabled)
+
+    on_exit(fn ->
+      restore_env(:fermix_web, FermixWebWeb.Endpoint, endpoint_before)
+      restore_env(:fermix_core, :daemon_socket_enabled, daemon_before)
+      restore_env(:fermix_core, :realtime_socket_enabled, realtime_before)
+    end)
+
+    Application.put_env(:fermix_web, FermixWebWeb.Endpoint, custom: :preserved, server: false)
+    Application.put_env(:fermix_core, :daemon_socket_enabled, false)
+    Application.put_env(:fermix_core, :realtime_socket_enabled, false)
+
+    assert BootProfile.prepare(:linux_package_cli) == :ok
+
+    endpoint = Application.get_env(:fermix_web, FermixWebWeb.Endpoint)
+    assert endpoint[:custom] == :preserved
+    assert endpoint[:server] == true
+
+    assert Application.get_env(:fermix_core, :daemon_socket_enabled) == true
+    assert Application.get_env(:fermix_core, :realtime_socket_enabled) == true
+  end
+
   test "preparing app-engine boot enables every daemon surface" do
     endpoint_before = Application.get_env(:fermix_web, FermixWebWeb.Endpoint)
     daemon_before = Application.get_env(:fermix_core, :daemon_socket_enabled)

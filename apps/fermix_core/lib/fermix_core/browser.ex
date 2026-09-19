@@ -8,15 +8,42 @@ defmodule FermixCore.Browser do
   alias FermixCore.Browser.Scope
 
   @actions ~w(doctor status start stop open navigate snapshot tabs focus close screenshot act pdf
-              console dialog cookies storage upload download)
+              console dialog cookies storage upload download webmcp)
   @profile_actions @actions -- ["doctor", "status"]
   # The `act` kinds — page interactions, reachable only as `act`'s `kind`. Listed
   # here so an unknown action that IS one can say so (see `action/1`); the kinds
   # themselves are validated in `validate_act_args/2`.
   @act_kinds ~w(click fill type submit press hover get wait click_coords)
+  # Requests that CHANGE something — the page, the browser, or a server on the
+  # far side of it. `ProfileManager` re-sends a request whose server died, which
+  # for these is a second click, a second upload, a second tool call; the list
+  # lives here, beside `@actions`, because this is where the action vocabulary
+  # is. `cookies`, `storage` and `webmcp` each read by default and write in one
+  # form, so they are decided from their arguments in `mutating?/2`.
+  @mutating_actions ~w(open navigate act close upload download dialog focus)
+  @mutating_act_kinds @act_kinds -- ["get", "wait"]
 
   @spec actions() :: [String.t()]
   def actions, do: @actions
+
+  @doc """
+  Whether running `action` with `args` changes something a re-send would repeat.
+
+  Stamped onto every dispatched request so `ProfileManager` can tell a retry it
+  may take (the profile was reaped before the request was delivered) from one it
+  may not (the server died with a mutation in flight). A page's own annotations
+  never reach this decision — the page is the untrusted party.
+  """
+  @spec mutating?(String.t(), map()) :: boolean()
+  def mutating?(action, args) when is_binary(action) and is_map(args) do
+    case action do
+      "act" -> Map.get(args, "kind") in @mutating_act_kinds
+      "cookies" -> Map.get(args, "kind") == "clear"
+      "storage" -> not is_nil(Map.get(args, "value"))
+      "webmcp" -> Map.get(args, "op") == "call"
+      _other -> action in @mutating_actions
+    end
+  end
 
   @doc """
   Tear down the managed browser for a finished conversation (its owner scope),
@@ -55,7 +82,12 @@ defmodule FermixCore.Browser do
 
   defp dispatch(action, args, context, owner, profile_name, profile, config)
        when action in @profile_actions do
-    request = %{action: action, args: args, context: context}
+    request = %{
+      action: action,
+      args: args,
+      context: context,
+      mutating: mutating?(action, args)
+    }
 
     case ProfileManager.dispatch(owner, profile_name, profile, config, request) do
       {:ok, result} -> {:ok, encode(result)}
@@ -109,7 +141,66 @@ defmodule FermixCore.Browser do
     end
   end
 
+  defp validate_args("webmcp", args), do: validate_webmcp_args(args)
+
   defp validate_args(_action, _args), do: :ok
+
+  # The two ops and what each one reads, in the shape `@wait_modes` uses below:
+  # an argument-starved call is told which op it meant and what that op needs,
+  # rather than stopping at "invalid".
+  @webmcp_ops %{
+    "list" => "no extra argument",
+    "call" => "`name` (the tool to run) and optionally `input` (a JSON object of its arguments)"
+  }
+
+  defp validate_webmcp_args(%{"op" => "list"}), do: :ok
+
+  defp validate_webmcp_args(%{"op" => "call"} = args) do
+    with :ok <- require_string(args, "name", "webmcp op=call"),
+         :ok <- validate_webmcp_name(Map.fetch!(args, "name")) do
+      validate_webmcp_input(Map.get(args, "input"))
+    end
+  end
+
+  defp validate_webmcp_args(_args) do
+    {:error,
+     Error.new(
+       "missing_arg",
+       "webmcp requires `op` — one of " <>
+         Enum.map_join(@webmcp_ops, "; ", fn {op, arg} -> "#{op} with #{arg}" end) <> "."
+     )}
+  end
+
+  defp validate_webmcp_name(name) do
+    max = Config.webmcp_limits().name_chars
+
+    if String.length(name) <= max,
+      do: :ok,
+      else: {:error, Error.new("invalid_arg", "webmcp `name` is at most #{max} characters")}
+  end
+
+  # `input` is the one model-supplied value that reaches the page. It is bounded
+  # here, before any browser work, so an oversize argument costs nothing.
+  defp validate_webmcp_input(nil), do: :ok
+
+  defp validate_webmcp_input(input) when is_map(input) do
+    max = Config.webmcp_limits().input_bytes
+
+    if byte_size(Jason.encode!(input)) <= max do
+      :ok
+    else
+      {:error,
+       Error.new(
+         "invalid_arg",
+         "webmcp `input` must encode to at most #{max} bytes; send the tool a smaller argument"
+       )}
+    end
+  end
+
+  defp validate_webmcp_input(_input) do
+    {:error,
+     Error.new("invalid_arg", "webmcp `input` must be an object of the tool's named arguments")}
+  end
 
   # Wait modes and the argument each one reads. There is deliberately NO
   # plain-pause mode: "load" matches instantly on an already-complete page, so

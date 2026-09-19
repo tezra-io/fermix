@@ -51,6 +51,25 @@ defmodule FermixOpik.TraceFileTest do
     assert meta.job_id == "j"
   end
 
+  test "a job_run_complete row carries its tool failure count" do
+    row = %{
+      "ts" => "2026-06-02T12:00:00.000Z",
+      "type" => "agent_event",
+      "event" => "job_run_complete",
+      "job_id" => "j",
+      "session_id" => "cron_j_1",
+      "duration_ms" => 900,
+      "iterations" => 4,
+      "total_tokens" => 64_245,
+      "tool_failures" => 2
+    }
+
+    assert {[:fermix, :job, :run_complete], measurements, _meta} =
+             TraceFile.normalize("agent_event", row)
+
+    assert measurements.tool_failures == 2
+  end
+
   test "skips non-trace rows" do
     assert :skip = TraceFile.normalize("channel_msg", %{"ts" => "x"})
     assert :skip = TraceFile.normalize("agent_event", %{"event" => "prompt_context"})
@@ -85,12 +104,14 @@ defmodule FermixOpik.TraceFileTest do
     assert meta.error_summary == "navigation timed out"
   end
 
-  test "read_events reads a day directory and feeds the aggregator end to end" do
-    dir = Path.join(System.tmp_dir!(), "opik_tracefile_#{System.unique_integer([:positive])}")
+  # ExUnit owns this directory: it clears and recreates it per test, so the
+  # test needs no cleanup call of its own. FermixTestSupport.SafeRm — the
+  # repo's guarded alternative to a bare File.rm_rf! in test/ — is compiled
+  # only into fermix_core, so it is not reachable from this app.
+  @tag :tmp_dir
+  test "read_events reads a day directory and feeds the aggregator end to end", %{tmp_dir: dir} do
     day = Path.join(dir, "2026-06-02")
     File.mkdir_p!(day)
-
-    on_exit(fn -> File.rm_rf!(dir) end)
 
     write(day, "llm_call.jsonl", [
       %{
@@ -193,6 +214,110 @@ defmodule FermixOpik.TraceFileTest do
            }
 
     assert meta.session_id == "session:1"
+  end
+
+  # A Live call's whole record in the JSONL is these six rows: replay has to
+  # rebuild every one of them, including the `parent_session` that is the only
+  # link between a call and the backend turns it delegated.
+  test "normalizes every voice_live agent_event row back into its event" do
+    base = %{"ts" => "2026-09-12T12:00:00.000Z", "type" => "agent_event"}
+
+    phases = [
+      {"voice_live_call_start", :call_start},
+      {"voice_live_session_started", :session_started},
+      {"voice_live_delegation_start", :delegation_start},
+      {"voice_live_delegation_stop", :delegation_stop},
+      {"voice_live_provider_error", :provider_error},
+      {"voice_live_call_stop", :call_stop}
+    ]
+
+    for {row_event, phase} <- phases do
+      row =
+        Map.merge(base, %{
+          "event" => row_event,
+          "session_id" => "voice_live:1",
+          "parent_session" => "main-4",
+          "agent" => "voice_live",
+          "engine" => "openai_live",
+          "device_id" => "dev-1",
+          "model" => "gpt-live-1",
+          "voice" => "marin",
+          "provider_session_id" => "sess_live_abc",
+          "delegation_id" => "dlg_1",
+          "revision" => 1,
+          "turn_session_id" => "voice_delegation_7",
+          "status" => "completed",
+          "reason" => "call_stop"
+        })
+
+      assert {[:fermix, :voice_live, ^phase], _meas, meta} =
+               TraceFile.normalize("agent_event", row)
+
+      assert meta.session_id == "voice_live:1"
+      assert meta.parent_session == "main-4"
+      assert meta.engine == "openai_live"
+      assert meta.turn_session_id == "voice_delegation_7"
+    end
+  end
+
+  test "voice_live_call_stop normalize reconstructs the numeric ledger" do
+    base = %{"ts" => "2026-09-12T12:00:00.000Z", "type" => "agent_event"}
+
+    assert {[:fermix, :voice_live, :call_stop], measurements, meta} =
+             TraceFile.normalize(
+               "agent_event",
+               Map.merge(base, %{
+                 "event" => "voice_live_call_stop",
+                 "session_id" => "voice_live:1",
+                 "voice_seconds" => 62,
+                 "voice_cost_millicents" => 5_167,
+                 "backend_turns" => 2,
+                 "accounting_complete" => 1,
+                 "reason" => "cost_limit"
+               })
+             )
+
+    assert measurements == %{
+             voice_seconds: 62,
+             voice_cost_millicents: 5_167,
+             backend_turns: 2,
+             accounting_complete: 1
+           }
+
+    assert meta.reason == "cost_limit"
+  end
+
+  # A pre-ledger row replays with no measurements rather than fabricated zeros:
+  # a measured 0 cent call and an unaccounted one price differently.
+  test "a voice_live row without the ledger replays with empty measurements" do
+    base = %{"ts" => "2026-09-12T12:00:00.000Z", "type" => "agent_event"}
+
+    assert {[:fermix, :voice_live, :call_stop], %{}, _meta} =
+             TraceFile.normalize(
+               "agent_event",
+               Map.merge(base, %{
+                 "event" => "voice_live_call_stop",
+                 "session_id" => "voice_live:1"
+               })
+             )
+  end
+
+  test "a voice_live_delegation_stop row replays its duration measurement" do
+    base = %{"ts" => "2026-09-12T12:00:00.000Z", "type" => "agent_event"}
+
+    assert {[:fermix, :voice_live, :delegation_stop], %{duration_ms: 1_200}, meta} =
+             TraceFile.normalize(
+               "agent_event",
+               Map.merge(base, %{
+                 "event" => "voice_live_delegation_stop",
+                 "session_id" => "voice_live:1",
+                 "delegation_id" => "dlg_1",
+                 "status" => "failed",
+                 "duration_ms" => 1_200
+               })
+             )
+
+    assert meta.status == "failed"
   end
 
   defp write(dir, file, rows) do

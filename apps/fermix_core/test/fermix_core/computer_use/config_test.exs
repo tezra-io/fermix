@@ -1,5 +1,9 @@
 defmodule FermixCore.ComputerUse.ConfigTest do
-  use ExUnit.Case, async: true
+  # async: false — the `current/0` block writes the global `:fermix_core,
+  # :computer_use` and `:fermix_core, :sandbox` app env (and deletes the former),
+  # which async siblings read live through `Sandbox.Config.current/0`,
+  # `MCP.Supervisor` and `Harness.Run` (the leaked-app-env pitfall class).
+  use ExUnit.Case, async: false
 
   alias FermixCore.ComputerUse.Config
   alias FermixCore.Sandbox.Config, as: SandboxConfig

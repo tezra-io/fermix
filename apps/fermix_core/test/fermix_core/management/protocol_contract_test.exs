@@ -314,6 +314,16 @@ defmodule FermixCore.Management.ProtocolContractTest do
   # Every kind and format a row may carry is pinned to the module, so a kind
   # added in Elixir fails here rather than reaching a client that cannot render
   # it.
+  # The router publishes `realtime.engine` on the overview and the golden
+  # carries it; the schema must declare it too, or the app decodes a field the
+  # contract never promised (the declaration was lost once in a merge).
+  test "the overview's realtime object declares the engine field", %{schema: schema} do
+    realtime = schema["$defs"]["overview_get_result"]["properties"]["realtime"]
+
+    assert Map.has_key?(realtime["properties"], "engine")
+    assert "engine" in realtime["required"]
+  end
+
   test "the schema's row vocabulary matches the settings module", %{schema: schema} do
     row = schema["$defs"]["settingsRow"]["properties"]
     %{kinds: kinds, formats: formats} = Settings.vocabulary()
@@ -356,6 +366,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
     assert published["actions"] == PluginRow.actions()
     assert published["runtime_kinds"] == PluginRow.runtime_kinds()
     assert published["auth_kinds"] == PluginRow.auth_kinds()
+    assert published["setting_kinds"] == PluginRow.setting_kinds()
   end
 
   # A word is not a routing key. Every golden row therefore carries an action id
@@ -406,6 +417,24 @@ defmodule FermixCore.Management.ProtocolContractTest do
 
     assert enum_of(row["runtime_kind"]) == PluginRow.runtime_kinds()
     assert enum_of(row["auth_kind"]) == PluginRow.auth_kinds()
+
+    setting = schema["$defs"]["pluginSetting"]["properties"]
+    assert enum_of(setting["kind"]) == PluginRow.setting_kinds()
+  end
+
+  # A setting's kind is what picks the control the app draws, so a golden entry
+  # without one is a row the far side renders by guessing. Walked over every
+  # settings entry in the export rather than the one the shape comparison
+  # happens to reach, which is only the head of each list.
+  test "every golden setting entry publishes a kind from the closed set" do
+    settings = golden_plugin_rows() |> Enum.flat_map(& &1["settings"])
+
+    assert settings != [], "no golden plugin row illustrates a setting"
+
+    for setting <- settings do
+      assert setting["kind"] in PluginRow.setting_kinds(),
+             "a golden setting publishes #{inspect(setting["kind"])} as its kind"
+    end
   end
 
   # `hello` is how a client learns what this daemon serves. A catalog in the
@@ -834,6 +863,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
         enabled: true,
         status: :ready,
         provider: :openai,
+        engine: "openai_realtime",
         model: "m",
         socket_alive: true,
         active_sessions: 0,

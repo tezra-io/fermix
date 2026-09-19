@@ -42,6 +42,7 @@ defmodule Fermix.CLI.Daemon do
   alias FermixCore.Management.Text
   alias FermixCore.Observability
   alias FermixCore.Plugins.Runtime, as: PluginsRuntime
+  alias FermixCore.SocketPath
   alias FermixCore.Trace
 
   require Logger
@@ -81,6 +82,31 @@ defmodule Fermix.CLI.Daemon do
     Process.flag(:trap_exit, true)
     socket_path = Keyword.get(opts, :socket_path, default_socket_path())
 
+    case check_socket_path(socket_path) do
+      :ok -> bind(socket_path, opts)
+      {:error, reason} -> {:stop, reason}
+    end
+  end
+
+  # Before `mkdir_p` and before bind: an over-long address fails the bind with a
+  # bare `:einval`, and every client then reports the daemon as not running.
+  # The pre-flight measures the path string and touches no filesystem object.
+  defp check_socket_path(socket_path) do
+    case SocketPath.check(socket_path) do
+      :ok ->
+        :ok
+
+      {:error, {:path_too_long, bytes, limit}} ->
+        Logger.error(
+          "Daemon control socket refused: " <>
+            SocketPath.refusal("daemon.sock", bytes, limit) <> ". Path: #{socket_path}"
+        )
+
+        {:error, {:socket_path_too_long, bytes, limit, socket_path}}
+    end
+  end
+
+  defp bind(socket_path, opts) do
     File.mkdir_p!(Path.dirname(socket_path))
 
     case clear_stale_socket(socket_path) do
@@ -774,10 +800,10 @@ defmodule Fermix.CLI.Daemon do
     end
   end
 
-  # Entries are keyed by the source-qualified `{:plugin, "eden"}` id and carry a
+  # Entries are keyed by the source-qualified `{:plugin, "acme"}` id and carry a
   # `generation_ref`, an owner pid, and a monitor ref — `Wire.json_safe/1` RAISES
   # on the tuple key and on both refs. Flatten to a list, render the id as the
-  # same stable string the lifecycle telemetry uses ("plugin:eden"), and drop the
+  # same stable string the lifecycle telemetry uses ("plugin:acme"), and drop the
   # generation/owner: neither is an operator-facing fact, and §11.1 forbids
   # exporting generation references at all.
   defp runtime_status_rows(entries) do

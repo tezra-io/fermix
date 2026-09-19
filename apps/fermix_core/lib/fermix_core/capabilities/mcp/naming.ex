@@ -16,8 +16,8 @@ defmodule FermixCore.Capabilities.MCP.Naming do
   ## `mode: :preserve` (M27 §7.7)
 
   A signed remote plugin whose upstream names already carry its namespace
-  (`eden_get_note`) uses `mode: :preserve`: the final capability name is the
-  **exact** upstream name, never `eden_eden_get_note`. Preserved names still
+  (`acme_get_note`) uses `mode: :preserve`: the final capability name is the
+  **exact** upstream name, never `acme_acme_get_note`. Preserved names still
   pass the same character and 64-byte validation — `validate_name/1` is the one
   gate both modes go through — and they never hash-rename on collision. That is
   what `reserve/3` is for: a preserved name that is already taken fails the whole

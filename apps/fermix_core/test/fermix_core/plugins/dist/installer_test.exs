@@ -271,21 +271,21 @@ defmodule FermixCore.Plugins.Dist.InstallerTest do
 
     defp remote_install(ctx, members) do
       {tgz, sha} =
-        build_tarball(ctx.fixtures, "eden", "1.0.0",
+        build_tarball(ctx.fixtures, "acme", "1.0.0",
           manifest_extra: @remote_manifest_extra,
           extra_members: members
         )
 
-      idx = wire(ctx, "eden", "1.0.0", tgz, sha, plugin_api: 3)
-      DistVerifierStub.allow("eden", "1.0.0")
-      Installer.run_install("eden", install_opts(ctx, idx))
+      idx = wire(ctx, "acme", "1.0.0", tgz, sha, plugin_api: 3)
+      DistVerifierStub.allow("acme", "1.0.0")
+      Installer.run_install("acme", install_opts(ctx, idx))
     end
 
     test "refuses a remote artifact carrying src/", ctx do
       assert {:error, {:remote_content_boundary_violation, "src"}} =
                remote_install(ctx, [{~c"src/index.js", "console.log(1)"}])
 
-      refute File.exists?(Path.join(Store.paths(ctx.root).installed, "eden"))
+      refute File.exists?(Path.join(Store.paths(ctx.root).installed, "acme"))
     end
 
     test "refuses a remote artifact carrying bin/", ctx do
@@ -308,7 +308,7 @@ defmodule FermixCore.Plugins.Dist.InstallerTest do
       assert {:error, {:remote_executable_file, "assets/run.sh"}} =
                remote_install(ctx, [{~c"assets/run.sh", String.to_charlist(script)}])
 
-      refute File.exists?(Path.join(Store.paths(ctx.root).installed, "eden"))
+      refute File.exists?(Path.join(Store.paths(ctx.root).installed, "acme"))
     end
   end
 

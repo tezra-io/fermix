@@ -4,7 +4,36 @@ defmodule FermixCore.Realtime.SupervisorTest do
   alias FermixCore.Realtime
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.LocalVoiceSocket
+  alias FermixCore.Realtime.SessionServer
   alias FermixCore.Realtime.SessionSupervisor
+
+  # Stands in for whichever engine module the caller names, so the supervisor's
+  # engine dispatch is testable without a provider socket. It answers the
+  # `SessionControl` messages the supervisor sends.
+  defmodule EngineDouble do
+    @moduledoc false
+    use GenServer
+
+    def child_spec(opts) when is_list(opts) do
+      %{
+        id: {__MODULE__, Keyword.get(opts, :session_scope, make_ref())},
+        start: {__MODULE__, :start_link, [opts]},
+        restart: :temporary,
+        type: :worker
+      }
+    end
+
+    def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
+
+    @impl true
+    def init(opts), do: {:ok, opts}
+
+    @impl true
+    def handle_call(:reload_runtime, _from, opts),
+      do: {:reply, {:ok, %{tools: 0, applies: :next_call}}, opts}
+
+    def handle_call(:opts, _from, opts), do: {:reply, opts, opts}
+  end
 
   test "starts session supervisor and local voice socket" do
     socket_path =
@@ -81,6 +110,7 @@ defmodule FermixCore.Realtime.SupervisorTest do
 
     {:ok, session} =
       SessionSupervisor.start_session(session_name,
+        engine_module: SessionServer,
         companion: self(),
         config: Config.normalize(enabled: true),
         capabilities: [],
@@ -92,6 +122,59 @@ defmodule FermixCore.Realtime.SupervisorTest do
     GenServer.stop(session, :normal, 1_000)
 
     wait_until(fn -> SessionSupervisor.active_sessions(session_name) == 0 end)
+  end
+
+  test "start_session starts the engine module the caller names" do
+    session_name = :"rt_engine_#{System.unique_integer([:positive])}"
+    {:ok, supervisor} = SessionSupervisor.start_link(name: session_name)
+
+    on_exit(fn ->
+      if Process.alive?(supervisor), do: Process.exit(supervisor, :shutdown)
+    end)
+
+    assert {:ok, session} =
+             SessionSupervisor.start_session(session_name,
+               engine_module: EngineDouble,
+               companion: self(),
+               session_scope: "voice_live:1"
+             )
+
+    assert Keyword.get(GenServer.call(session, :opts), :session_scope) == "voice_live:1"
+    assert SessionSupervisor.active_sessions(session_name) == 1
+  end
+
+  test "start_session refuses to guess an engine" do
+    session_name = :"rt_no_engine_#{System.unique_integer([:positive])}"
+    {:ok, supervisor} = SessionSupervisor.start_link(name: session_name)
+
+    on_exit(fn ->
+      if Process.alive?(supervisor), do: Process.exit(supervisor, :shutdown)
+    end)
+
+    assert_raise KeyError, fn ->
+      SessionSupervisor.start_session(session_name, companion: self())
+    end
+  end
+
+  test "reload_sessions drives every engine through the session control seam" do
+    session_name = :"rt_reload_#{System.unique_integer([:positive])}"
+    {:ok, supervisor} = SessionSupervisor.start_link(name: session_name)
+
+    on_exit(fn ->
+      if Process.alive?(supervisor), do: Process.exit(supervisor, :shutdown)
+    end)
+
+    for scope <- ["session:1", "voice_live:2"] do
+      assert {:ok, _pid} =
+               SessionSupervisor.start_session(session_name,
+                 engine_module: EngineDouble,
+                 companion: self(),
+                 session_scope: scope
+               )
+    end
+
+    assert {:ok, %{active: 2, reloaded: 2, failed: []}} =
+             SessionSupervisor.reload_sessions(session_name)
   end
 
   defp wait_until(fun, attempts \\ 20)

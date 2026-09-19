@@ -10,9 +10,11 @@ defmodule FermixCore.Management.Settings.Tools do
 
   alias FermixCore.Harness.Config, as: HarnessConfig
   alias FermixCore.Harness.Vendors
+  alias FermixCore.Management.Secrets
   alias FermixCore.Management.Settings.Row
   alias FermixCore.Management.Settings.Source
   alias FermixCore.Sandbox.Config, as: SandboxConfig
+  alias FermixCore.Sandbox.ExternalEnv
   alias FermixCore.Tools.Media.Registry, as: MediaRegistry
   alias FermixCore.Tools.WebSearch
 
@@ -71,6 +73,15 @@ defmodule FermixCore.Management.Settings.Tools do
     standard: "Reads your Fermix home and what you name",
     open: "Reads anything you can read"
   }
+
+  # One footer per sandbox name state that needs one (M45 §4.4). A stored and
+  # allowed name needs none: the row's presence already says it all.
+  @env_parked_footer "Stored, but commands do not get it until the name is allowed again."
+  @env_unstored_footer "Not stored. Commands get it only if Fermix was started with it."
+  @env_helper_footer "Read by a command set in the settings file."
+  @env_alias_footer "Read from another variable in the environment Fermix was started with."
+  @env_unstorable_footer "Fermix cannot store a value under this name. " <>
+                           "Commands get it from the environment Fermix was started with."
 
   @doc "Every section this module owns, in publication order."
   @spec sections() :: [%{id: String.t(), pane: String.t(), title: String.t()}]
@@ -165,6 +176,7 @@ defmodule FermixCore.Management.Settings.Tools do
   def rows("sandbox", snapshot) do
     config = SandboxConfig.normalize(Map.get(snapshot, :sandbox))
     restart = Row.restart?(:sandbox)
+    env_restart = Row.restart?([:sandbox, :env])
 
     [
       Row.new("sandbox_mode", :choice, "Sandbox",
@@ -180,9 +192,56 @@ defmodule FermixCore.Management.Settings.Tools do
       Row.new("sandbox_env_allow", :list, "Allowed environment variables",
         footer: "These are names only. Values are never shown here.",
         value: Map.get(config.env, :allow, []),
-        restart: restart
+        restart: env_restart
       )
-    ]
+    ] ++ Enum.map(env_row_names(config.env), &env_row(config.env, &1, env_restart))
+  end
+
+  # Allowed names in allow-list order, then names still stored but no longer
+  # allowed, sorted: removing a name from the list keeps its stored value, and
+  # its row is how the operator reaches Remove.
+  defp env_row_names(env) do
+    allowed = Enum.uniq(env.allow)
+    allowed ++ Enum.reject(ExternalEnv.managed_names(env), &(&1 in allowed))
+  end
+
+  # Presence comes from the settings file alone, never from a keychain read,
+  # which is the contract every other secret row already keeps.
+  defp env_row(env, name, restart) do
+    key = Secrets.env_prefix() <> name
+
+    case {ExternalEnv.source_kind(env, name), name in env.allow} do
+      {:managed, true} ->
+        Row.new(key, :secret, name, present: true, restart: restart)
+
+      {:managed, false} ->
+        env_secret_row(key, name, true, @env_parked_footer, restart)
+
+      {:engine_env, _allowed} ->
+        engine_env_row(key, name, restart)
+
+      {:alias, _allowed} ->
+        env_text_row(key, name, env.sources[name].name, @env_alias_footer, restart)
+
+      {:helper, _allowed} ->
+        env_text_row(key, name, nil, @env_helper_footer, restart)
+    end
+  end
+
+  # Offering Add on a name every store refuses would be a control whose save
+  # always fails, so a name Fermix cannot store says what is in force instead.
+  defp engine_env_row(key, name, restart) do
+    case ExternalEnv.validate_name(name) do
+      :ok -> env_secret_row(key, name, false, @env_unstored_footer, restart)
+      {:error, _reason} -> env_text_row(key, name, nil, @env_unstorable_footer, restart)
+    end
+  end
+
+  defp env_secret_row(key, name, present, footer, restart),
+    do: Row.new(key, :secret, name, present: present, footer: footer, restart: restart)
+
+  defp env_text_row(key, name, value, footer, restart) do
+    Row.new(key, :text, name, value: value, footer: footer, read_only: true, restart: restart)
   end
 
   # Read-only until the summarizer has an answer key of its own: a control whose

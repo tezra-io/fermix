@@ -7,9 +7,18 @@ defmodule FermixCore.Auth.ClientRejectionTest do
 
   @client [client_id: "client-id", client_secret: "stale-secret", scopes: []]
 
+  # A regional provider's client is incomplete without a region, so a sweep over
+  # every provider carries the first region each one offers.
   defp provider(id) do
-    {:ok, provider} = OAuthProviders.definition(id, @client)
+    {:ok, provider} = OAuthProviders.definition(id, @client ++ region_of(id))
     provider
+  end
+
+  defp region_of(id) do
+    case OAuthProviders.regions(id) do
+      [] -> []
+      [%{id: region} | _rest] -> [region: region]
+    end
   end
 
   defp refusal(error), do: %{"error" => error}

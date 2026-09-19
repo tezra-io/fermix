@@ -5,6 +5,7 @@ defmodule FermixCore.Setup.WizardTest do
 
   alias FermixCore.Auth.Store, as: AuthStore
   alias FermixCore.Memory.Repo, as: MemoryRepo
+  alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.Wizard
@@ -37,6 +38,9 @@ defmodule FermixCore.Setup.WizardTest do
 
   setup do
     providers = Application.fetch_env(:fermix_core, :providers)
+    # Every save applies its sandbox to app env, and a provider key answer adds
+    # a keyring-backed `[sandbox.env]` allow entry under the stub writer.
+    sandbox = Application.fetch_env(:fermix_core, :sandbox)
     telegram = Application.fetch_env(:fermix_channels, :telegram)
     whatsapp = Application.fetch_env(:fermix_channels, :whatsapp)
     discord = Application.fetch_env(:fermix_channels, :discord)
@@ -86,6 +90,7 @@ defmodule FermixCore.Setup.WizardTest do
 
     on_exit(fn ->
       restore_env(:fermix_core, :providers, providers)
+      restore_env(:fermix_core, :sandbox, sandbox)
       restore_env(:fermix_channels, :telegram, telegram)
       restore_env(:fermix_channels, :whatsapp, whatsapp)
       restore_env(:fermix_channels, :discord, discord)
@@ -1259,6 +1264,257 @@ defmodule FermixCore.Setup.WizardTest do
     assert Keyword.get(realtime, :persist_transcripts) == true
   end
 
+  # The engine is the first axis of the voice section, and it owns which model,
+  # which voices and which Realtime-only settings are legal. A switch that
+  # persisted the operator's word and left the old model behind would write a
+  # config.toml the very next boot refuses.
+  test "save_answers switching the voice engine to Live carries the model and drops the effort" do
+    tmp_home = realtime_engine_home!()
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(
+        realtime_enabled: "yes",
+        realtime_voice: "marin",
+        realtime_reasoning_effort: "high"
+      )
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(realtime_engine: "openai_live")
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    realtime = Keyword.get(persisted.fermix_core, :realtime, [])
+
+    assert Keyword.get(realtime, :engine) == "openai_live"
+    assert Keyword.get(realtime, :model) == "gpt-live-1"
+    assert Keyword.get(realtime, :voice) == "marin"
+    refute Keyword.has_key?(realtime, :reasoning_effort)
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ ~s(engine = "openai_live")
+    assert contents =~ ~s(model = "gpt-live-1")
+    refute contents =~ "reasoning_effort"
+
+    # The live application environment is the half that poisons a daemon: a
+    # merged apply would leave the dropped key behind and raise on the next read.
+    assert %{engine: "openai_live", model: "gpt-live-1", reasoning_effort: nil} =
+             RealtimeConfig.current()
+  end
+
+  test "save_answers switching the voice engine back to Realtime restores a model and effort" do
+    realtime_engine_home!()
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(realtime_enabled: "yes", realtime_engine: "openai_live")
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(realtime_engine: "openai_realtime")
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    realtime = Keyword.get(persisted.fermix_core, :realtime, [])
+
+    assert Keyword.get(realtime, :engine) == "openai_realtime"
+    assert Keyword.get(realtime, :model) == RealtimeConfig.default_model("openai_realtime")
+    assert Keyword.get(realtime, :reasoning_effort) == "low"
+  end
+
+  test "save_answers takes an explicit engine and model together" do
+    realtime_engine_home!()
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(
+        realtime_enabled: "yes",
+        realtime_engine: "openai_live",
+        realtime_model: "gpt-live-1"
+      )
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    realtime = Keyword.get(persisted.fermix_core, :realtime, [])
+
+    assert Keyword.get(realtime, :engine) == "openai_live"
+    assert Keyword.get(realtime, :model) == "gpt-live-1"
+  end
+
+  # The model selects the engine, so a pair that disagrees is not a preference to
+  # resolve: it is two answers that cannot both be honoured, and both are named.
+  test "save_answers refuses a model and an engine that disagree, naming both" do
+    realtime_engine_home!()
+
+    assert_raise ArgumentError,
+                 ~r/gpt-realtime-2 requires engine "openai_realtime", got "openai_live"/,
+                 fn ->
+                   Wizard.report().wizard
+                   |> Wizard.save_answers(
+                     realtime_enabled: "yes",
+                     realtime_engine: "openai_live",
+                     realtime_model: "gpt-realtime-2"
+                   )
+                 end
+  end
+
+  # The one answer the panes now send: the model, on its own. The engine it
+  # implies is what reaches config.toml and the live application environment,
+  # and the Realtime-only settings move with it.
+  test "save_answers derives the engine from the model alone" do
+    tmp_home = realtime_engine_home!()
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(
+        realtime_enabled: "yes",
+        realtime_voice: "marin",
+        realtime_reasoning_effort: "high"
+      )
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(realtime_model: "gpt-live-1")
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    realtime = Keyword.get(persisted.fermix_core, :realtime, [])
+
+    assert Keyword.get(realtime, :engine) == "openai_live"
+    assert Keyword.get(realtime, :model) == "gpt-live-1"
+    refute Keyword.has_key?(realtime, :reasoning_effort)
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ ~s(engine = "openai_live")
+    refute contents =~ "reasoning_effort"
+
+    assert %{engine: "openai_live", model: "gpt-live-1", reasoning_effort: nil} =
+             RealtimeConfig.current()
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(realtime_model: "gpt-realtime-2.1")
+
+    assert {:ok, back} = ConfigStore.load_runtime_config()
+    returned = Keyword.get(back.fermix_core, :realtime, [])
+
+    assert Keyword.get(returned, :engine) == "openai_realtime"
+    assert Keyword.get(returned, :model) == "gpt-realtime-2.1"
+    assert Keyword.get(returned, :reasoning_effort) == "low"
+  end
+
+  # An unknown slug derives no engine, so the engine is left alone and the model
+  # is refused by the one validator that owns the catalog.
+  test "save_answers refuses a model no engine ships with the configuration sentence" do
+    realtime_engine_home!()
+
+    assert_raise ArgumentError, ~r/realtime.model must be one of/, fn ->
+      Wizard.report().wizard
+      |> Wizard.save_answers(realtime_enabled: "yes", realtime_model: "gpt-realtime-9")
+    end
+  end
+
+  test "save_answers refuses an engine no release ships" do
+    realtime_engine_home!()
+
+    assert_raise ArgumentError, ~r/realtime.engine must be one of/, fn ->
+      Wizard.report().wizard
+      |> Wizard.save_answers(realtime_engine: "gpt_live")
+    end
+  end
+
+  # Live ships every Realtime voice plus twelve of its own, so the return journey
+  # is the one that can strand a voice. Snapping it at the same seam is what
+  # keeps an engine switch from answering with a validation error about a value
+  # the operator never chose on this pane.
+  test "save_answers switching to Realtime snaps a Live-only voice onto one both engines ship" do
+    realtime_engine_home!()
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(
+        realtime_enabled: "yes",
+        realtime_engine: "openai_live",
+        realtime_voice: "beacon"
+      )
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(realtime_engine: "openai_realtime")
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    realtime = Keyword.get(persisted.fermix_core, :realtime, [])
+
+    assert Keyword.get(realtime, :engine) == "openai_realtime"
+    assert Keyword.get(realtime, :voice) == "marin"
+    assert Keyword.get(realtime, :voice) in RealtimeConfig.valid_voices("openai_realtime")
+    assert Keyword.get(realtime, :voice) in RealtimeConfig.valid_voices("openai_live")
+  end
+
+  test "save_answers leaves a voice both engines ship untouched across a switch" do
+    realtime_engine_home!()
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(
+        realtime_enabled: "yes",
+        realtime_engine: "openai_realtime",
+        realtime_voice: "cedar"
+      )
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(realtime_engine: "openai_live")
+
+    assert {:ok, forward} = ConfigStore.load_runtime_config()
+    assert forward.fermix_core |> Keyword.get(:realtime, []) |> Keyword.get(:voice) == "cedar"
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(realtime_engine: "openai_realtime")
+
+    assert {:ok, back} = ConfigStore.load_runtime_config()
+    assert back.fermix_core |> Keyword.get(:realtime, []) |> Keyword.get(:voice) == "cedar"
+  end
+
+  # The snap only fills what the operator did not say. A voice named in the same
+  # save is merged on top of it, and is still held to the target engine catalog.
+  test "save_answers takes an explicit voice while switching the engine" do
+    realtime_engine_home!()
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(
+        realtime_enabled: "yes",
+        realtime_engine: "openai_live",
+        realtime_voice: "beacon"
+      )
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(realtime_engine: "openai_realtime", realtime_voice: "sage")
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    assert persisted.fermix_core |> Keyword.get(:realtime, []) |> Keyword.get(:voice) == "sage"
+
+    assert_raise ArgumentError, ~r/realtime.voice must be one of/, fn ->
+      Wizard.report().wizard
+      |> Wizard.save_answers(realtime_engine: "openai_realtime", realtime_voice: "beacon")
+    end
+  end
+
+  defp realtime_engine_home! do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-realtime-engine-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+    Application.put_env(:fermix_core, :providers, [])
+    Application.put_env(:fermix_core, :realtime, [])
+    Application.delete_env(:fermix_channels, :telegram)
+    start_memory_repo!()
+
+    tmp_home
+  end
+
   test "save_answers persists the computer_use enable flag" do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-cu-setup-#{System.unique_integer([:positive])}")
@@ -1696,6 +1952,7 @@ defmodule FermixCore.Setup.WizardTest do
              :fermix,
              :soul,
              :realtime,
+             :live,
              :user,
              :memory
            ]
@@ -1706,6 +1963,7 @@ defmodule FermixCore.Setup.WizardTest do
     assert File.exists?(Path.join([bootstrap_dir, "main", "IDENTITY.md"]))
     assert File.exists?(Path.join([bootstrap_dir, "main", "FERMIX.md"]))
     assert File.exists?(Path.join([bootstrap_dir, "main", "SOUL.md"]))
+    assert File.exists?(Path.join([bootstrap_dir, "main", "LIVE.md"]))
   end
 
   test "save_answers skips seeding when prerequisites are still missing" do

@@ -10,11 +10,12 @@ defmodule FermixCore.Setup.RestartStateTest do
 
   use ExUnit.Case, async: false
 
+  alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Setup.RestartState
   alias FermixCore.Setup.SecretWriteLog
   alias FermixTestSupport.SafeRm
 
-  @env_keys [:providers, :personalization, :agent, :realtime, :harness, :meetings]
+  @env_keys [:providers, :personalization, :agent, :realtime, :harness, :meetings, :sandbox]
 
   setup do
     home = System.get_env("FERMIX_HOME")
@@ -100,6 +101,63 @@ defmodule FermixCore.Setup.RestartStateTest do
         refute sentence =~ "—", "#{section} sentence carries an em dash"
         refute sentence =~ "!", "#{section} sentence carries an exclamation mark"
       end
+    end
+  end
+
+  # M45 §4.5: the shell tool and command capabilities read the environment
+  # policy on every call, so storing a skill's key must not ask for a restart.
+  # The rest of the sandbox section is still read at boot.
+  describe "the sandbox environment policy" do
+    test "an env change since boot is no restart reason" do
+      Application.put_env(:fermix_core, :sandbox, SandboxConfig.normalize(%{}))
+      server = start_state()
+
+      Application.put_env(
+        :fermix_core,
+        :sandbox,
+        SandboxConfig.normalize(
+          env: [
+            allow: ["ALPACA_API_KEY"],
+            deny: ["OTHER"],
+            sources: %{"ALPACA_API_KEY" => %{source: :command, command: "/bin/echo"}}
+          ]
+        )
+      )
+
+      assert RestartState.restart(server: server) == %{required: false, reasons: []}
+    end
+
+    # The negative control: the rule narrows the section, it does not drop it.
+    test "a mode change in the same section is still a reason" do
+      Application.put_env(:fermix_core, :sandbox, SandboxConfig.normalize(%{mode: :standard}))
+      server = start_state()
+
+      Application.put_env(:fermix_core, :sandbox, SandboxConfig.normalize(%{mode: :strict}))
+
+      assert %{required: true, reasons: [reason]} = RestartState.restart(server: server)
+      assert reason.section == "sandbox"
+      assert reason.sentence == "Sandbox settings changed since Fermix started."
+    end
+
+    # Not boot-bound is not unwatched: a later save would revert an outside edit
+    # to the allow list exactly as it would any other section.
+    test "an outside edit to the env policy is still an external change", %{home: home} do
+      path = Path.join(home, "config.toml")
+      File.write!(path, "[sandbox.env]\nallow = [\"A_KEY\"]\n")
+      server = start_state()
+      assert RestartState.config_state(server: server) == :clear
+
+      File.write!(path, "[sandbox.env]\nallow = [\"A_KEY\", \"B_KEY\"]\n")
+
+      assert {:external_change, ["sandbox"]} = RestartState.config_state(server: server)
+    end
+
+    test "boot_bound?/1 answers for a section and for a part of one" do
+      assert RestartState.boot_bound?([:sandbox])
+      assert RestartState.boot_bound?([:sandbox, :commands])
+      refute RestartState.boot_bound?([:sandbox, :env])
+      assert RestartState.boot_bound?([:providers, :openai])
+      refute RestartState.boot_bound?([:memory])
     end
   end
 

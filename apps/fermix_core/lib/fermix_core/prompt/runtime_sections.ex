@@ -47,6 +47,24 @@ defmodule FermixCore.Prompt.RuntimeSections do
     system: "System"
   }
 
+  @doc """
+  Render order for capability categories: the order the built-in catalog
+  groups them in. Public so a second capability renderer (the Live voice
+  frontend's `Realtime.LivePrompt`) groups by the same vocabulary instead of
+  keeping a second copy of this list that drifts from it.
+  """
+  @spec category_order() :: [atom()]
+  def category_order, do: @category_order
+
+  @doc """
+  Display label for a capability category. Public for the same reason as
+  `category_order/0`; an unmapped category titleizes.
+  """
+  @spec category_label(atom()) :: String.t()
+  def category_label(category) when is_atom(category) do
+    Map.get(@category_labels, category, titleize(category))
+  end
+
   @spec build([skill()], keyword()) :: String.t()
   def build(available_skills, opts \\ []) when is_list(available_skills) and is_list(opts) do
     [
@@ -90,9 +108,9 @@ defmodule FermixCore.Prompt.RuntimeSections do
     - Even on the user's own screen, an intent the OS can NAME is a script, not a pixel hunt: launch apps from `shell` (`open -a` on macOS), drive app menus/settings/Finder through the OS scripting surface where it names the object (AppleScript via `osascript` on macOS), and spend `computer_use` clicks only on state that exists solely as pixels.
     - Web routing — pick ONE and commit; switch only on a new reason, never rotate through tools for the same goal:
       - If a connected plugin owns the surface (e.g. `github_*` for GitHub, `notion_*` for Notion, `obsidian_*` for the vault, `x_*` for X/Twitter, the Google tools for mail/calendar/drive) use its tools — they hit the real API directly; do NOT open the browser or `web_search` for that surface. Any such plugin is listed under Plugins below.
-      - `web_search` for static facts with no known URL (hours, prices, schedules, addresses, lookups).
+      - `web_search` for a fact with no known URL — anything current, changing, or possibly moved since training (prices, rates, versions, who holds a role, schedules, hours, addresses, news) as well as plain lookups; a confident memory of a mutable fact is still a reason to search.
       - `web_fetch` for the readable text of ONE known URL whose content is in the server HTML.
-    #{place_routing_rule()}  - `browser` for JavaScript/dynamic/interactive pages or live data (flight prices, seat maps, dashboards, login, forms) — in its OWN browser instance, not the page/app the user has open on screen (for that, `computer_use`).
+    #{place_routing_rule()}  - `browser` for JavaScript/dynamic/interactive pages or data only a rendered or driven page exposes (booking flows, seat maps, dashboards, login, forms) — in its OWN browser instance, not the page/app the user has open on screen (for that, `computer_use`).
       - Never shell-scrape a JS-rendered site (`curl`/`urllib`/`requests` return empty or partial markup — a dead end, not a retry). An empty `web_search`/`web_fetch` result on dynamic content is the signal to switch to `browser`, not to rerun the same tool.
     - Drive ONE surface per task: don't restart the same work in the other tool's separate session — wait for a change with the session you're already in (the browser's `act` wait for a page you drive, `computer_use`'s `wait_for_change` for the host screen). On a single shared page, structure goes through `browser` and pixels through `computer_use`: that split is one context, not a switch.
     - Research evidence — when a tool result (`web_search`, `web_fetch`, or any other tool that returns URLs) supplies a fact you state, keep that tool's exact URL in the answer:
@@ -259,7 +277,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
   end
 
   defp format_category({category, capabilities}) do
-    "### #{Map.get(@category_labels, category, titleize(category))}\n#{capability_lines(capabilities)}"
+    "### #{category_label(category)}\n#{capability_lines(capabilities)}"
   end
 
   defp capability_lines(capabilities) do

@@ -88,30 +88,30 @@ defmodule FermixCore.Capabilities.MCP.CapabilityTest do
       descriptor = %{name: "get_note", description: "x", input_schema: %{}}
 
       cap =
-        McpCapability.from_tool_descriptor("eden", descriptor,
+        McpCapability.from_tool_descriptor("acme", descriptor,
           caller: StubCaller,
-          source_id: {:plugin, "eden"},
-          name_prefix: "eden_"
+          source_id: {:plugin, "acme"},
+          name_prefix: "acme_"
         )
 
-      assert cap.name == "eden_get_note"
-      assert cap.metadata.mcp_source == "plugin:eden"
+      assert cap.name == "acme_get_note"
+      assert cap.metadata.mcp_source == "plugin:acme"
 
-      assert {McpCapability, :invoke, [%{source_id: {:plugin, "eden"}, plugin: "eden"}]} =
+      assert {McpCapability, :invoke, [%{source_id: {:plugin, "acme"}, plugin: "acme"}]} =
                cap.executor
     end
 
     test "final_name: bypasses derivation for an already-preflighted signed name" do
-      descriptor = %{name: "eden_get_note", description: "x", input_schema: %{}}
+      descriptor = %{name: "acme_get_note", description: "x", input_schema: %{}}
 
       cap =
-        McpCapability.from_tool_descriptor("eden", descriptor,
+        McpCapability.from_tool_descriptor("acme", descriptor,
           caller: StubCaller,
-          source_id: {:plugin, "eden"},
-          final_name: "eden_get_note"
+          source_id: {:plugin, "acme"},
+          final_name: "acme_get_note"
         )
 
-      assert cap.name == "eden_get_note"
+      assert cap.name == "acme_get_note"
     end
 
     test "tool_overrides flip hidden_from_agent? to true" do
@@ -160,6 +160,113 @@ defmodule FermixCore.Capabilities.MCP.CapabilityTest do
       refute result.success
       assert result.error =~ "MCP tool 'github/create_issue' failed"
       assert result.error =~ "unauthorized"
+    end
+
+    # A local child says "this call failed" with `isError: true` on an otherwise
+    # valid JSON-RPC response. Rendering that as a SUCCESS whose output happens
+    # to contain the word "error" tells the agent the call worked, and records
+    # `success: true` in the exec event, so a failing plugin looks healthy in
+    # every trace. Only a JSON-RPC error used to reach `Tool.error`.
+    test "a child result flagged isError becomes a tool error" do
+      descriptor = %{name: "send_command", description: "x", input_schema: %{}}
+      cap = McpCapability.from_tool_descriptor("tesla", descriptor, caller: StubCaller)
+
+      response = %Anubis.MCP.Response{
+        id: "req-1",
+        is_error: true,
+        result: %{
+          "isError" => true,
+          "content" => [
+            %{"type" => "text", "text" => "vehicle is asleep"},
+            %{"type" => "text", "text" => "wake it first"}
+          ]
+        }
+      }
+
+      :ok = StubCaller.set_response({:operator, "tesla"}, "send_command", {:ok, response})
+
+      assert {:ok, result} = Capability.execute(cap, %{}, %{})
+      refute result.success
+      assert result.error =~ "MCP tool 'tesla/send_command' reported an error"
+      assert result.error =~ "vehicle is asleep"
+      assert result.error =~ "wake it first"
+      assert result.output == ""
+    end
+
+    test "an isError result with no text still names the tool" do
+      descriptor = %{name: "send_command", description: "x", input_schema: %{}}
+      cap = McpCapability.from_tool_descriptor("tesla", descriptor, caller: StubCaller)
+
+      response = %Anubis.MCP.Response{id: "req-2", is_error: true, result: %{"isError" => true}}
+      :ok = StubCaller.set_response({:operator, "tesla"}, "send_command", {:ok, response})
+
+      assert {:ok, result} = Capability.execute(cap, %{}, %{})
+      refute result.success
+      assert result.error =~ "MCP tool 'tesla/send_command' reported an error"
+    end
+
+    # The child's own words reach the agent, but a child that echoes a bearer
+    # token back in its failure message must not put one in the trace.
+    test "the child's message is redacted before it reaches the agent" do
+      descriptor = %{name: "send_command", description: "x", input_schema: %{}}
+      cap = McpCapability.from_tool_descriptor("tesla", descriptor, caller: StubCaller)
+
+      response = %Anubis.MCP.Response{
+        id: "req-3",
+        is_error: true,
+        result: %{
+          "isError" => true,
+          "content" => [%{"type" => "text", "text" => "rejected Bearer eyJhbGciOiJIUzI1NiJ9"}]
+        }
+      }
+
+      :ok = StubCaller.set_response({:operator, "tesla"}, "send_command", {:ok, response})
+
+      assert {:ok, result} = Capability.execute(cap, %{}, %{})
+      refute result.error =~ "eyJhbGciOiJIUzI1NiJ9"
+      assert result.error =~ "[REDACTED]"
+    end
+
+    test "a child result that is not flagged still succeeds" do
+      descriptor = %{name: "send_command", description: "x", input_schema: %{}}
+      cap = McpCapability.from_tool_descriptor("tesla", descriptor, caller: StubCaller)
+
+      response = %Anubis.MCP.Response{
+        id: "req-4",
+        is_error: false,
+        result: %{"content" => [%{"type" => "text", "text" => "honked"}]}
+      }
+
+      :ok = StubCaller.set_response({:operator, "tesla"}, "send_command", {:ok, response})
+
+      assert {:ok, result} = Capability.execute(cap, %{}, %{})
+      assert result.success
+      # The child's text is the tool output, verbatim: the model reads a
+      # sentence or JSON, never a dumped response struct.
+      assert result.output == "honked"
+    end
+
+    test "several text blocks are joined and non-text blocks are dropped" do
+      descriptor = %{name: "send_command", description: "x", input_schema: %{}}
+      cap = McpCapability.from_tool_descriptor("tesla", descriptor, caller: StubCaller)
+
+      response = %Anubis.MCP.Response{
+        id: "req-5",
+        is_error: false,
+        result: %{
+          "content" => [
+            %{"type" => "text", "text" => "{\"result\":true}"},
+            %{"type" => "image", "data" => "AAAA", "mimeType" => "image/png"},
+            %{"type" => "text", "text" => "done"}
+          ]
+        }
+      }
+
+      :ok = StubCaller.set_response({:operator, "tesla"}, "send_command", {:ok, response})
+
+      assert {:ok, result} = Capability.execute(cap, %{}, %{})
+      assert result.success
+      assert result.output == "{\"result\":true}\ndone"
     end
   end
 
@@ -219,6 +326,32 @@ defmodule FermixCore.Capabilities.MCP.CapabilityTest do
       assert metadata.error =~ "unauthorized"
     end
 
+    # The half the local rail used to get wrong: a child that answered every
+    # call with `isError: true` recorded `success: true` in every exec event,
+    # so a broken plugin read as a healthy one in the trace.
+    test "a child result flagged isError records success: false" do
+      descriptor = %{name: "send_command", description: "x", input_schema: %{}}
+      cap = McpCapability.from_tool_descriptor("tesla", descriptor, caller: StubCaller)
+
+      response = %Anubis.MCP.Response{
+        id: "req-5",
+        is_error: true,
+        result: %{
+          "isError" => true,
+          "content" => [%{"type" => "text", "text" => "vehicle is asleep"}]
+        }
+      }
+
+      :ok = StubCaller.set_response({:operator, "tesla"}, "send_command", {:ok, response})
+
+      assert {:ok, result} = Capability.execute(cap, %{}, %{agent_name: "main"})
+      refute result.success
+
+      assert_receive {:tool_exec, _measurements, metadata}
+      assert metadata.success == false
+      assert metadata.error =~ "vehicle is asleep"
+    end
+
     test "a signed remote call records the redacted correlatable subset only" do
       # "content by default" means the global capture gate OFF. An earlier module
       # can leave it on in this VM, so this test establishes its own precondition.
@@ -242,24 +375,24 @@ defmodule FermixCore.Capabilities.MCP.CapabilityTest do
 
       cap =
         McpCapability.from_tool_descriptor(
-          "eden",
-          %{name: "eden_get_note", description: "x", input_schema: %{}},
+          "acme",
+          %{name: "acme_get_note", description: "x", input_schema: %{}},
           caller: StubCaller,
-          source_id: {:plugin, "eden"},
-          final_name: "eden_get_note",
+          source_id: {:plugin, "acme"},
+          final_name: "acme_get_note",
           policy: policy,
-          extra_metadata: %{plugin: "eden"}
+          extra_metadata: %{plugin: "acme"}
         )
 
-      :ok = StubCaller.set_response({:plugin, "eden"}, "eden_get_note", {:ok, "note body"})
+      :ok = StubCaller.set_response({:plugin, "acme"}, "acme_get_note", {:ok, "note body"})
 
       context = %{agent_name: "main", session_id: "turn-9"}
       assert {:ok, %{success: true}} = Capability.execute(cap, %{"noteId" => "n1"}, context)
 
       assert_receive {:tool_exec, _measurements, metadata}
-      assert metadata.tool == "eden_get_note"
-      assert metadata.plugin == "eden"
-      assert metadata.mcp_source == "plugin:eden"
+      assert metadata.tool == "acme_get_note"
+      assert metadata.plugin == "acme"
+      assert metadata.mcp_source == "plugin:acme"
       assert metadata.profile == "retrieval"
       assert metadata.workspace_scope == :single_selected
       assert metadata.read_only == true
@@ -274,6 +407,38 @@ defmodule FermixCore.Capabilities.MCP.CapabilityTest do
       refute metadata |> Map.values() |> Enum.any?(&(&1 == "note body"))
     end
 
+    # A local plugin's call can succeed with the wrong arguments (a command the
+    # car accepts and then does something else with), and the arguments are the
+    # only record of what was asked. They are content, so they ride the capture
+    # gate; the always-on metadata above stays the correlatable subset.
+    test "records the model's arguments as the input preview under content capture" do
+      establish_capture_content(true)
+      descriptor = %{name: "set_seat_heater", description: "x", input_schema: %{}}
+      cap = McpCapability.from_tool_descriptor("tesla", descriptor, caller: StubCaller)
+      :ok = StubCaller.set_response({:operator, "tesla"}, "set_seat_heater", {:ok, "done"})
+
+      args = %{"seat" => "front_left", "level" => 2}
+      context = %{agent_name: "main", session_id: "input-preview-on"}
+      assert {:ok, %{success: true}} = Capability.execute(cap, args, context)
+
+      assert_receive {:tool_exec, _measurements, %{session_id: "input-preview-on"} = metadata}
+      assert metadata.input =~ "front_left"
+      assert metadata.input =~ "level"
+    end
+
+    test "records no arguments while content capture is off" do
+      establish_capture_content(false)
+      descriptor = %{name: "set_seat_heater", description: "x", input_schema: %{}}
+      cap = McpCapability.from_tool_descriptor("tesla", descriptor, caller: StubCaller)
+      :ok = StubCaller.set_response({:operator, "tesla"}, "set_seat_heater", {:ok, "done"})
+
+      context = %{agent_name: "main", session_id: "input-preview-off"}
+      assert {:ok, %{success: true}} = Capability.execute(cap, %{"seat" => "front_left"}, context)
+
+      assert_receive {:tool_exec, _measurements, %{session_id: "input-preview-off"} = metadata}
+      refute Map.has_key?(metadata, :input)
+    end
+
     test "model arguments cannot supply or override the invoke context" do
       policy = %{
         profile: "retrieval",
@@ -285,15 +450,15 @@ defmodule FermixCore.Capabilities.MCP.CapabilityTest do
 
       cap =
         McpCapability.from_tool_descriptor(
-          "eden",
-          %{name: "eden_get_note", description: "x", input_schema: %{}},
+          "acme",
+          %{name: "acme_get_note", description: "x", input_schema: %{}},
           caller: StubCaller,
-          source_id: {:plugin, "eden"},
-          final_name: "eden_get_note",
+          source_id: {:plugin, "acme"},
+          final_name: "acme_get_note",
           policy: policy
         )
 
-      :ok = StubCaller.set_response({:plugin, "eden"}, "eden_get_note", {:ok, "ok"})
+      :ok = StubCaller.set_response({:plugin, "acme"}, "acme_get_note", {:ok, "ok"})
 
       hostile = %{
         "profile" => "capture",
@@ -307,11 +472,19 @@ defmodule FermixCore.Capabilities.MCP.CapabilityTest do
                Capability.execute(cap, hostile, %{agent_name: "main", session_id: "turn-real"})
 
       invoke_context = StubCaller.last_context()
-      assert invoke_context.source_id == {:plugin, "eden"}
+      assert invoke_context.source_id == {:plugin, "acme"}
       assert invoke_context.profile == "retrieval"
       assert invoke_context.read_only == true
       assert invoke_context.replay_safe == false
       assert invoke_context.session_id == "turn-real"
     end
+  end
+
+  # The capture gate is global app env, and an earlier module can leave it
+  # either way in this VM, so each test establishes the posture it asserts.
+  defp establish_capture_content(value) when is_boolean(value) do
+    previous = Application.get_env(:fermix_core, :telemetry, [])
+    Application.put_env(:fermix_core, :telemetry, Keyword.put(previous, :capture_content, value))
+    on_exit(fn -> Application.put_env(:fermix_core, :telemetry, previous) end)
   end
 end

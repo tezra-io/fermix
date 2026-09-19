@@ -612,6 +612,102 @@ defmodule FermixChannels.Gateway.QueueTest do
       [_user, marker] = ConversationStore.get_history(key, server: store)
       assert marker.content =~ "stopped"
     end
+
+    # MILESTONE_41_OPENAI_LIVE_VOICE.md §5.2/§7: a Live delegation runs on the
+    # call's own store, so closing its orphaned turn must land THERE — writing
+    # it to the global store would both leave the call's history dangling and
+    # put a spoken fragment into the durable conversation.
+    test "a voice turn's stopped marker lands in the call-owned store", ctx do
+      global = start_marker_store(:voice_global_store)
+      call_store = start_marker_store(:voice_call_store)
+
+      queue = start_queue(ctx, conversation_store: global)
+      key = {"voice", "voice_live_1", :root}
+
+      ConversationStore.add_message(key, "user", "user: read my inbox",
+        server: call_store,
+        sender: "voice"
+      )
+
+      Queue.enqueue(queue, voice_msg("user: read my inbox", call_store, ctx.test_pid))
+      assert_receive {:turn_started, "user: read my inbox", _pid}, 5_000
+
+      assert %{active_stopped: 1} = Queue.stop_all(queue)
+
+      assert eventually(fn ->
+               match?(
+                 [%{role: "user"}, %{role: "assistant"}],
+                 ConversationStore.get_history(key, server: call_store)
+               )
+             end)
+
+      assert ConversationStore.get_history(key, server: global) == []
+    end
+
+    test "a forged voice_call on a chat turn still marks the queue's own store", ctx do
+      global = start_marker_store(:forged_global_store)
+      call_store = start_marker_store(:forged_call_store)
+
+      queue = start_queue(ctx, conversation_store: global)
+      key = {"telegram", "c1", :root}
+
+      ConversationStore.add_message(key, "user", "stopped query", server: global, sender: "user")
+
+      msg =
+        "stopped query"
+        |> make_msg("c1", ctx.test_pid)
+        |> Map.put(:source_trust, :operator)
+        |> Map.put(:metadata, %{voice_call: voice_call("voice_live_1", call_store)})
+
+      Queue.enqueue(queue, msg)
+      assert_receive {:turn_started, "stopped query", _pid}, 5_000
+      assert %{active_stopped: 1} = Queue.stop_all(queue)
+
+      assert eventually(fn ->
+               match?(
+                 [%{role: "user"}, %{role: "assistant"}],
+                 ConversationStore.get_history(key, server: global)
+               )
+             end)
+
+      assert ConversationStore.get_history(key, server: call_store) == []
+    end
+  end
+
+  defp start_marker_store(id) do
+    start_supervised!(
+      {ConversationStore,
+       name: :"queue_cs_#{System.unique_integer([:positive])}", max_messages: 128, repo: nil},
+      id: id
+    )
+  end
+
+  defp voice_msg(content, store, test_pid) do
+    %{
+      content: content,
+      sender: "voice",
+      channel: "voice",
+      chat_id: "voice_live_1",
+      source_trust: :operator,
+      metadata: %{
+        source: :voice,
+        user_id: "voice",
+        voice_call: voice_call("voice_live_1", store)
+      },
+      reply_fn: fn {:text, text} -> send(test_pid, {:reply, text}) end
+    }
+  end
+
+  defp voice_call(call_id, store) do
+    %{
+      call_id: call_id,
+      delegation_id: "d-1",
+      revision: 1,
+      turn_session_id: "voice_delegation_1",
+      conversation_store: store,
+      prompt_addendum: "This task comes from an ongoing voice conversation.",
+      persist?: false
+    }
   end
 
   describe "telemetry" do

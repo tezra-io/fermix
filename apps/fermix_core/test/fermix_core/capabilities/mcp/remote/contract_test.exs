@@ -43,13 +43,13 @@ defmodule FermixCore.Capabilities.MCP.Remote.ContractTest do
   defp spec(overrides \\ %{}) do
     Map.merge(
       %{
-        source_id: {:plugin, "eden"},
-        name: "eden",
+        source_id: {:plugin, "acme"},
+        name: "acme",
         transport: :streamable_http,
         name_mode: :preserve,
         selected_profile: "retrieval",
         resource_scope: %{kind: :single_workspace, argument: "workspaceId", id: "ws_abc"},
-        allowed_tools: %{"eden_get_note" => facts("eden_get_note", @schema)},
+        allowed_tools: %{"acme_get_note" => facts("acme_get_note", @schema)},
         budgets: %{"agent_turn_calls" => 20, "agent_turn_paginated_calls" => 5},
         result_contract: %{
           "kind" => "json_boolean",
@@ -75,13 +75,13 @@ defmodule FermixCore.Capabilities.MCP.Remote.ContractTest do
     test "compiles a signed remote spec into the immutable contract" do
       contract = compiled()
 
-      assert contract.source_id == {:plugin, "eden"}
-      assert contract.plugin == "eden"
+      assert contract.source_id == {:plugin, "acme"}
+      assert contract.plugin == "acme"
       assert contract.name_mode == :preserve
       assert contract.selected_profile == "retrieval"
       assert contract.budgets == %{turn_calls: 20, turn_paginated_calls: 5}
       assert contract.result_contract.kind == :json_boolean
-      assert contract.tools["eden_get_note"].credential_scope == :read
+      assert contract.tools["acme_get_note"].credential_scope == :read
     end
 
     test "refuses a spec with no signed budgets rather than inventing ceilings" do
@@ -100,9 +100,9 @@ defmodule FermixCore.Capabilities.MCP.Remote.ContractTest do
     end
 
     test "refuses a tool whose signed digest is not a sha256" do
-      tools = %{"eden_get_note" => facts("eden_get_note", @schema, %{descriptor_sha256: "nope"})}
+      tools = %{"acme_get_note" => facts("acme_get_note", @schema, %{descriptor_sha256: "nope"})}
 
-      assert {:error, {:invalid_remote_config, {:descriptor_sha256, "eden_get_note"}}} =
+      assert {:error, {:invalid_remote_config, {:descriptor_sha256, "acme_get_note"}}} =
                Contract.compile(spec(%{allowed_tools: tools}))
     end
   end
@@ -113,11 +113,11 @@ defmodule FermixCore.Capabilities.MCP.Remote.ContractTest do
 
       {:ok, selected} =
         Contract.select(contract, [
-          descriptor("eden_get_note", @schema),
-          descriptor("eden_delete_workspace", @schema)
+          descriptor("acme_get_note", @schema),
+          descriptor("acme_delete_workspace", @schema)
         ])
 
-      assert Enum.map(selected, & &1.name) == ["eden_get_note"]
+      assert Enum.map(selected, & &1.name) == ["acme_get_note"]
     end
 
     test "filters BEFORE any schema is walked or hashed" do
@@ -127,24 +127,24 @@ defmodule FermixCore.Capabilities.MCP.Remote.ContractTest do
 
       {:ok, selected} =
         Contract.select(compiled(), [
-          descriptor("eden_get_note", @schema),
-          descriptor("eden_evil", hostile)
+          descriptor("acme_get_note", @schema),
+          descriptor("acme_evil", hostile)
         ])
 
-      assert Enum.map(selected, & &1.name) == ["eden_get_note"]
+      assert Enum.map(selected, & &1.name) == ["acme_get_note"]
       assert {:ok, [_verified]} = Contract.verify(compiled(), selected)
     end
 
     test "a missing required tool fails the whole profile" do
-      assert {:error, {:upstream_contract_mismatch, {:missing_tool, "eden_get_note"}}} =
-               Contract.select(compiled(), [descriptor("eden_other", @schema)])
+      assert {:error, {:upstream_contract_mismatch, {:missing_tool, "acme_get_note"}}} =
+               Contract.select(compiled(), [descriptor("acme_other", @schema)])
     end
 
     test "a duplicated upstream name fails the profile" do
-      assert {:error, {:upstream_contract_mismatch, {:duplicate_tool, "eden_get_note"}}} =
+      assert {:error, {:upstream_contract_mismatch, {:duplicate_tool, "acme_get_note"}}} =
                Contract.select(compiled(), [
-                 descriptor("eden_get_note", @schema),
-                 descriptor("eden_get_note", @schema)
+                 descriptor("acme_get_note", @schema),
+                 descriptor("acme_get_note", @schema)
                ])
     end
 
@@ -156,9 +156,9 @@ defmodule FermixCore.Capabilities.MCP.Remote.ContractTest do
 
   describe "verify/2 — all-or-none descriptor hashing" do
     test "verifies a matching descriptor and strips the resource-scope field" do
-      {:ok, [tool]} = Contract.verify(compiled(), [descriptor("eden_get_note", @schema)])
+      {:ok, [tool]} = Contract.verify(compiled(), [descriptor("acme_get_note", @schema)])
 
-      assert tool.final_name == "eden_get_note"
+      assert tool.final_name == "acme_get_note"
       refute Map.has_key?(tool.parameters["properties"], "workspaceId")
       assert tool.parameters["required"] == ["noteId"]
       assert tool.policy.read_only == true
@@ -168,24 +168,24 @@ defmodule FermixCore.Capabilities.MCP.Remote.ContractTest do
       contract =
         compiled(%{
           allowed_tools: %{
-            "eden_get_note" => facts("eden_get_note", @schema),
-            "eden_search" => facts("eden_search", @list_schema)
+            "acme_get_note" => facts("acme_get_note", @schema),
+            "acme_search" => facts("acme_search", @list_schema)
           }
         })
 
       drifted = Map.put(@list_schema, "properties", %{"limit" => %{"type" => "string"}})
 
-      assert {:error, {:upstream_contract_mismatch, {:descriptor_changed, "eden_search"}}} =
+      assert {:error, {:upstream_contract_mismatch, {:descriptor_changed, "acme_search"}}} =
                Contract.verify(contract, [
-                 descriptor("eden_get_note", @schema),
-                 descriptor("eden_search", drifted)
+                 descriptor("acme_get_note", @schema),
+                 descriptor("acme_search", drifted)
                ])
     end
 
     test "an outputSchema the manifest signed as null is drift when the server adds one" do
-      assert {:error, {:upstream_contract_mismatch, {:descriptor_changed, "eden_get_note"}}} =
+      assert {:error, {:upstream_contract_mismatch, {:descriptor_changed, "acme_get_note"}}} =
                Contract.verify(compiled(), [
-                 descriptor("eden_get_note", @schema, %{output_schema: %{"type" => "object"}})
+                 descriptor("acme_get_note", @schema, %{output_schema: %{"type" => "object"}})
                ])
     end
 
@@ -196,22 +196,22 @@ defmodule FermixCore.Capabilities.MCP.Remote.ContractTest do
       contract =
         compiled(%{
           allowed_tools: %{
-            "eden_get_note" =>
-              facts("eden_get_note", @schema, %{
-                descriptor_sha256: digest("eden_get_note", @schema, output, annotations)
+            "acme_get_note" =>
+              facts("acme_get_note", @schema, %{
+                descriptor_sha256: digest("acme_get_note", @schema, output, annotations)
               })
           }
         })
 
       assert {:ok, [tool]} =
                Contract.verify(contract, [
-                 descriptor("eden_get_note", @schema, %{
+                 descriptor("acme_get_note", @schema, %{
                    output_schema: output,
                    annotations: annotations
                  })
                ])
 
-      assert tool.name == "eden_get_note"
+      assert tool.name == "acme_get_note"
     end
 
     test "a pathological allowlisted schema is bounded, not parsed forever" do
@@ -219,17 +219,17 @@ defmodule FermixCore.Capabilities.MCP.Remote.ContractTest do
 
       contract =
         compiled(%{
-          allowed_tools: %{"eden_get_note" => facts("eden_get_note", deep)}
+          allowed_tools: %{"acme_get_note" => facts("acme_get_note", deep)}
         })
 
-      assert {:error, {:upstream_contract_mismatch, {:schema_too_deep, "eden_get_note"}}} =
-               Contract.verify(contract, [descriptor("eden_get_note", deep)])
+      assert {:error, {:upstream_contract_mismatch, {:schema_too_deep, "acme_get_note"}}} =
+               Contract.verify(contract, [descriptor("acme_get_note", deep)])
     end
   end
 
   describe "final_name/2" do
     test "preserve keeps the exact upstream name" do
-      assert {:ok, "eden_get_note"} = Contract.final_name(compiled(), "eden_get_note")
+      assert {:ok, "acme_get_note"} = Contract.final_name(compiled(), "acme_get_note")
     end
 
     test "preserve refuses a name outside the plugin namespace" do
@@ -238,7 +238,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.ContractTest do
     end
 
     test "preserve still enforces the 64-byte capability-name bound" do
-      long = "eden_" <> String.duplicate("a", 70)
+      long = "acme_" <> String.duplicate("a", 70)
 
       assert {:error, {:capability_name_too_long, ^long}} =
                Contract.final_name(compiled(), long)
@@ -246,7 +246,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.ContractTest do
 
     test "prefix mode namespaces a plugin's tool as <plugin>_<tool>" do
       contract = compiled(%{name_mode: :prefix})
-      assert {:ok, "eden_get_note"} = Contract.final_name(contract, "get_note")
+      assert {:ok, "acme_get_note"} = Contract.final_name(contract, "get_note")
     end
   end
 

@@ -51,7 +51,7 @@ defmodule FermixCore.Management.Router do
   @capability_params ~w(target)
   @plugin_name_params ~w(name)
   @plugin_setting_params ~w(name key value)
-  @oauth_client_params ~w(provider client_id redirect_port)
+  @oauth_client_params ~w(provider client_id redirect_port region)
   @workspace_select_params ~w(name profile workspace_id label)
   # A published name, an opaque workspace id and a display label are all bounded
   # strings; the widest of them is the workspace id's own 256-byte bound.
@@ -270,8 +270,11 @@ defmodule FermixCore.Management.Router do
     with :ok <- reject_unknown_params(params, @oauth_client_params),
          {:ok, provider} <- fetch_text(params, "provider", 1),
          {:ok, client_id} <- fetch_text(params, "client_id", 1),
-         {:ok, port} <- fetch_redirect_port(params) do
-      operation_result(Plugins.oauth_client_set(provider, client_id, port, operation_opts(opts)))
+         {:ok, port} <- fetch_redirect_port(params),
+         {:ok, region} <- fetch_region(params) do
+      operation_result(
+        Plugins.oauth_client_set(provider, client_id, port, region, operation_opts(opts))
+      )
     end
   end
 
@@ -292,6 +295,23 @@ defmodule FermixCore.Management.Router do
       nil -> {:ok, nil}
       port when is_integer(port) and port >= 1 and port <= 65_535 -> {:ok, port}
       _invalid -> invalid_params("redirect_port")
+    end
+  end
+
+  # An absent region reaches the operation rather than being refused here: only
+  # it knows whether the provider publishes any to choose from, and a client
+  # older than this field sends none at all. A present one is a published id, so
+  # it is bounded like one rather than by the generic text ceiling.
+  defp fetch_region(params) do
+    case Map.get(params, "region") do
+      nil ->
+        {:ok, nil}
+
+      value when is_binary(value) and byte_size(value) >= 2 and byte_size(value) <= 8 ->
+        {:ok, value}
+
+      _invalid ->
+        invalid_params("region")
     end
   end
 
@@ -822,6 +842,7 @@ defmodule FermixCore.Management.Router do
       "enabled" => value(realtime, :enabled, false) == true,
       "status" => public_scalar(value(realtime, :status, :unknown)),
       "provider" => public_scalar(value(realtime, :provider)),
+      "engine" => public_scalar(value(realtime, :engine)),
       "model" => public_scalar(value(realtime, :model)),
       "socket_alive" => public_scalar(value(realtime, :socket_alive)),
       "active_sessions" => public_count(value(realtime, :active_sessions, 0)),

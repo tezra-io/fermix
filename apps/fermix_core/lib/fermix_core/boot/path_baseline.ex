@@ -32,15 +32,26 @@ defmodule FermixCore.Boot.PathBaseline do
   @darwin_bindirs ~w(/opt/homebrew/bin /usr/local/bin /usr/bin /bin /usr/sbin /sbin)
   @linux_bindirs ~w(/usr/local/bin /usr/bin /bin /usr/sbin /sbin)
 
+  # The Linux distribution package installs its bundled `cosign` here (M38 §2.2),
+  # and it is the LAST entry on purpose: a tail entry can make an otherwise
+  # unresolvable name resolvable and can never shadow the operator's own choice,
+  # including an operator who installed their own `cosign`. It is appended for
+  # every Linux rendering, not only a packaged one — an absent directory costs a
+  # failed `stat` per lookup and keeps one list rather than two.
+  @linux_package_libdir "/usr/lib/fermix"
+
   @type os :: :darwin | :linux
 
   @doc """
   The ordered baseline directories.
 
   `:binary_dir` leads when given — on a Homebrew install its siblings include
-  `cosign`. `~/.local/bin` is last, because it is where the official Codex and
-  Claude Code installers put their binaries and it is the entry most likely to
-  collide with something the operator already chose.
+  `cosign`. `~/.local/bin` comes after every system directory, because it is
+  where the official Codex and Claude Code installers put their binaries and it
+  is the entry most likely to collide with something the operator already chose.
+  On Linux the packaged helper directory `/usr/lib/fermix` follows it and ends
+  the list, so a distribution package's bundled `cosign` is found only when
+  nothing the operator chose answers first.
   """
   @spec dirs(keyword()) :: [String.t()]
   def dirs(opts \\ []) when is_list(opts) do
@@ -52,7 +63,7 @@ defmodule FermixCore.Boot.PathBaseline do
         _absent -> []
       end
 
-    Enum.uniq(leading ++ standard_bindirs(os) ++ [user_bindir(opts)])
+    Enum.uniq(leading ++ standard_bindirs(os) ++ [user_bindir(opts)] ++ trailing_bindirs(os))
   end
 
   @doc """
@@ -105,6 +116,9 @@ defmodule FermixCore.Boot.PathBaseline do
 
   defp standard_bindirs(:darwin), do: @darwin_bindirs
   defp standard_bindirs(:linux), do: @linux_bindirs
+
+  defp trailing_bindirs(:darwin), do: []
+  defp trailing_bindirs(:linux), do: [@linux_package_libdir]
 
   defp user_bindir(opts) do
     home = Keyword.get(opts, :user_home) || System.user_home!()

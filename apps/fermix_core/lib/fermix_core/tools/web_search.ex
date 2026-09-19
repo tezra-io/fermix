@@ -51,7 +51,7 @@ defmodule FermixCore.Tools.WebSearch do
   @impl true
   def description,
     do:
-      "Search the public web by query when you have no known URL. USE FOR static facts (hours, prices, schedules, addresses, lookups); do NOT use for JavaScript/dynamic/interactive pages or live data (use browser), and do not rerun it on dynamic content that returns empty."
+      "Search the public web by query when you have no known URL. USE FOR any fact that is current, changing, or could have moved since your training (prices, rates, versions, who holds a role, schedules, hours, addresses, news) as well as plain lookups — a confident memory of a mutable fact is still a reason to search. Do NOT use for pages that need JavaScript, login, or interaction (use browser), and do not rerun it on dynamic content that returns empty."
 
   @impl true
   def parameters do

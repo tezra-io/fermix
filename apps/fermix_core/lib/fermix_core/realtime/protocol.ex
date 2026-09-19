@@ -18,6 +18,12 @@ defmodule FermixCore.Realtime.Protocol do
   current version and the previous one). Each side connects only if its version
   falls inside the other's range; otherwise it refuses and reports which side
   must update. See `PROTOCOL.md` for the state machine and the rollout order.
+
+  Version 2 adds the Live engine's frames (`task_cancel`, `call_ready`,
+  `caption`, `task`). A version-1 companion is still served for the Realtime
+  engine; a Live-configured call refuses it at `call_start` with
+  `update_required` (the rule lives in `LocalVoiceSocket`, which is the only
+  place that knows both the negotiated version and the configured engine).
   """
 
   alias FermixCore.Realtime.Config
@@ -25,11 +31,11 @@ defmodule FermixCore.Realtime.Protocol do
   # Bumped in lockstep with any wire-shape change. The supported range is an
   # N/N-1 window derived from this single constant, so a bump automatically
   # keeps accepting the previous version for one release.
-  @protocol_version 1
+  @protocol_version 2
   @min_supported_version max(1, @protocol_version - 1)
 
-  @client_events ~w(client_hello call_start audio_chunk interrupt mute call_stop)
-  @server_events ~w(server_hello state audio_delta transcript_delta assistant_text_delta tool_event usage error playback_stop)
+  @client_events ~w(client_hello call_start audio_chunk interrupt mute call_stop task_cancel)
+  @server_events ~w(server_hello state audio_delta transcript_delta assistant_text_delta tool_event usage error playback_stop call_ready caption task)
 
   @type event :: %{type: String.t(), payload: map()}
 
@@ -122,6 +128,13 @@ defmodule FermixCore.Realtime.Protocol do
 
       _other ->
         {:error, :invalid_protocol_version}
+    end
+  end
+
+  defp payload_for("task_cancel", decoded, _config) do
+    case Map.get(decoded, "delegation_id") do
+      id when is_binary(id) and id != "" -> {:ok, %{"delegation_id" => id}}
+      _other -> {:error, :missing_delegation_id}
     end
   end
 

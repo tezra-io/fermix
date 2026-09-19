@@ -154,3 +154,68 @@ scenarios:
           Creates the supported scaffold, then reloads and lists skills so the unique
           eval-greeter name appears; it does not claim the scaffold already implements
           French greeting behavior.
+
+  # M38 §13.4. The skill is what an assistant answers a packaging question from,
+  # and these two scenarios are the only part of that milestone a model can
+  # reach. Gated with a command-name floor (a package manager's name cannot be
+  # paraphrased) plus a prohibition on the answers that are wrong on Linux, and
+  # a rubric that owns the wording — never a positive allowlist of phrasings.
+  - id: linux_install_and_update
+    title: "Answers how Fermix is installed and updated on a Linux machine"
+    severity: normal
+    tags: [skills, linux, packaging]
+    cases:
+      - id: install_on_ubuntu
+        query: "How do I install fermix on ubuntu?"
+        expect:
+          reply_matches: "(?i)\\bapt\\b|\\.deb\\b"
+          reply_not_matches: "(?i)mix fermix|brew install fermix"
+          max_cost_usd: 0.6
+          max_duration_ms: 120000
+        rubric: >
+          Naming the Debian/Ubuntu package (the .deb, or apt) is the required
+          behaviour and must be scored as correct. The answer must not tell a
+          Linux user to install Fermix with Homebrew or with a mix task, and
+          must not invent a command the project does not ship.
+      - id: update_on_fedora
+        query: "How do I update fermix on fedora?"
+        expect:
+          reply_matches: "(?i)\\bdnf\\b|\\brpm\\b"
+          reply_not_matches: "(?i)mix fermix|brew upgrade fermix"
+          max_cost_usd: 0.6
+          max_duration_ms: 120000
+        rubric: >
+          Naming the rpm family's own update command (dnf, or the rpm package)
+          is the required behaviour and must be scored as correct, as is saying
+          that the package manager updates Fermix rather than fermix upgrade.
+          The answer must not tell a Fedora user to use Homebrew or a mix task.
+
+  - id: linux_service_not_running
+    title: "Answers what to check when the Linux background service is not running"
+    severity: normal
+    tags: [skills, linux, service]
+    cases:
+      - id: not_running_after_reboot
+        query: "fermix isn't running after a reboot on my linux box, what do I check?"
+        expect:
+          reply_matches: "(?i)fermix service status|systemctl --user|linger"
+          reply_not_matches: "(?i)mix fermix|launchctl|brew services"
+          max_cost_usd: 0.6
+          max_duration_ms: 120000
+        rubric: >
+          Pointing at fermix service status, the systemd user service, or
+          lingering is the required behaviour and must be scored as correct.
+          The answer must not name a macOS-only tool such as launchctl or brew
+          services, and must not invent a verb Fermix does not have.
+      - id: where_are_the_daemon_logs
+        query: "How do I see the daemon logs on linux?"
+        expect:
+          reply_matches: "(?i)journalctl|fermix logs|fermix\\.log"
+          reply_not_matches: "(?i)mix fermix|launchctl|Console\\.app"
+          max_cost_usd: 0.6
+          max_duration_ms: 120000
+        rubric: >
+          Naming where the logs are — the daemon's own rotating log file, the
+          fermix logs verb, or the journal for the unit's own output — is the
+          required behaviour and must be scored as correct. The answer must not
+          name a macOS-only log surface.

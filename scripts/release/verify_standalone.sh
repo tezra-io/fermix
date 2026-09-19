@@ -54,6 +54,94 @@ case "$version_output" in
   *) fail "--version output does not contain $version" ;;
 esac
 
+# ── plugins auth clear, run tree-less from this artifact ────────────────────
+# Every `fermix plugins` verb runs without the supervision tree, so no command
+# host exists to own a keychain helper and each helper has to run inline. Unit
+# tests can only model that world, and `auth clear` shipped dying on every
+# install with "command host supervisor ... is not running", so this stage runs
+# it from the artifact the release is about to publish. It runs before the
+# migrate-to-app stage because that stage ends the script on a Linux target.
+#
+# No keychain is touched. A stand-in `security` first on PATH answers the one
+# delete the verb makes with "item not found" (exit 44, which the writer reads
+# as already forgotten) and records it. The keychain writer takes the first
+# helper it finds on PATH, so the stand-in is the one used on every target, and
+# an argv it does not recognize exits non-zero so a keychain call added later
+# cannot pass this gate unanswered. The home is a fresh one whose profile names
+# no stored item, and it holds a dev_local api_key plugin for the verb to find,
+# because `auth clear` resolves the plugin before it asks the keychain.
+plugins_home="$runtime_root/plugins-home"
+keychain_bin="$runtime_root/keychain-bin"
+keychain_log="$runtime_root/keychain.log"
+plugin_checkout="$runtime_root/dev-plugins"
+profile="fermix-verify-standalone-$$"
+mkdir -m 700 "$plugins_home"
+mkdir -p "$keychain_bin" "$plugin_checkout/discord"
+
+cat > "$keychain_bin/security" <<SECURITY
+#!/bin/sh
+printf '%s\n' "\$*" >> "$keychain_log"
+case "\$1" in
+  delete-generic-password)
+    printf 'security: The specified item could not be found in the keychain.\n'
+    exit 44
+    ;;
+  *) printf 'stand-in security: unexpected invocation: security %s\n' "\$*" >&2 ; exit 64 ;;
+esac
+SECURITY
+chmod +x "$keychain_bin/security"
+
+cat > "$plugin_checkout/discord/plugin.json" <<'MANIFEST'
+{
+  "schema_version": 2,
+  "name": "discord",
+  "display_name": "Discord",
+  "description": "An api_key plugin for the standalone verification",
+  "category": "communication",
+  "version": "1.0.0",
+  "min_core_version": "0.1.0",
+  "plugin_api": 2,
+  "auth": {"type": "api_key", "header": "authorization", "scheme": "Bot", "scopes": []},
+  "tools": [],
+  "skills": []
+}
+MANIFEST
+
+cat > "$plugins_home/config.toml" <<CONFIG
+[fermix_core]
+profile = "$profile"
+
+[fermix_core.plugins]
+dev_local = "$plugin_checkout"
+CONFIG
+
+clear_status=0
+clear_output="$(
+  env -u FERMIX_OPIK_ENABLED \
+    HOME="$home" \
+    FERMIX_HOME="$plugins_home" \
+    PATH="$keychain_bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+    "$artifact" plugins auth clear discord 2>&1
+)" || clear_status=$?
+printf '%s\n' "$clear_output"
+
+# Named before any other verdict so the message is precise when this class
+# comes back: a keychain helper asked for a host the tree-less verb lacks.
+case "$clear_output" in
+  *"command host supervisor"*)
+    fail "plugins auth clear ran its keychain helper under a command host this tree-less verb does not have"
+    ;;
+esac
+[ "$clear_status" -eq 0 ] || fail "plugins auth clear must exit 0 in the throwaway world, got $clear_status"
+case "$clear_output" in
+  *"deleted the stored api key for discord"*) ;;
+  *) fail "plugins auth clear did not report the forgotten key" ;;
+esac
+# Without the recorded delete the verb never reached the keychain helper, and
+# this stage would pass vacuously.
+grep -Fq "delete-generic-password -a fermix -s fermix:$profile:FERMIX_PLUGIN_DISCORD" "$keychain_log" 2>/dev/null ||
+  fail "plugins auth clear never ran the stand-in keychain helper, so this stage proved nothing"
+
 # ── migrate-to-app preflight, run from this artifact ────────────────────────
 # `fermix migrate-to-app` with no `--yes` is a plan: it inspects the account
 # and mutates nothing. It is also the one verb that reads PATH, the process

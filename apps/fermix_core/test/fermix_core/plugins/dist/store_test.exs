@@ -173,12 +173,12 @@ defmodule FermixCore.Plugins.Dist.StoreTest do
     end
 
     test "removes the version's provenance evidence with it (§9.3)", %{root: root} do
-      Store.install_tree(root, "eden", "1.0.0", stage(root, "eden", "1.0.0"))
-      stage_evidence(root, "eden", "1.0.0")
+      Store.install_tree(root, "acme", "1.0.0", stage(root, "acme", "1.0.0"))
+      stage_evidence(root, "acme", "1.0.0")
 
-      assert :ok = Store.uninstall(root, "eden")
-      refute File.exists?(Store.evidence_dir(root, "eden", "1.0.0"))
-      refute File.exists?(Path.join(Store.paths(root).evidence, "eden"))
+      assert :ok = Store.uninstall(root, "acme")
+      refute File.exists?(Store.evidence_dir(root, "acme", "1.0.0"))
+      refute File.exists?(Path.join(Store.paths(root).evidence, "acme"))
     end
   end
 
@@ -200,17 +200,17 @@ defmodule FermixCore.Plugins.Dist.StoreTest do
 
     test "evidence is collected with its version and never separated from it", %{root: root} do
       for v <- ["1.0.0", "1.1.0", "1.2.0"] do
-        Store.install_tree(root, "eden", v, stage(root, "eden", v))
-        stage_evidence(root, "eden", v)
+        Store.install_tree(root, "acme", v, stage(root, "acme", v))
+        stage_evidence(root, "acme", v)
       end
 
       assert :ok = Store.gc(root)
 
       # active (1.2.0) and the one-deep rollback (1.1.0) keep theirs — rollback
       # re-verifies, so evidence has to still be there.
-      assert File.exists?(Store.evidence_dir(root, "eden", "1.2.0"))
-      assert File.exists?(Store.evidence_dir(root, "eden", "1.1.0"))
-      refute File.exists?(Store.evidence_dir(root, "eden", "1.0.0"))
+      assert File.exists?(Store.evidence_dir(root, "acme", "1.2.0"))
+      assert File.exists?(Store.evidence_dir(root, "acme", "1.1.0"))
+      refute File.exists?(Store.evidence_dir(root, "acme", "1.0.0"))
     end
 
     test "evidence for a name that is no longer installed is collected", %{root: root} do
@@ -219,6 +219,33 @@ defmodule FermixCore.Plugins.Dist.StoreTest do
 
       assert :ok = Store.gc(root)
       refute File.exists?(Path.join(Store.paths(root).evidence, "ghost"))
+    end
+  end
+
+  # The path the daemon projects an `mcp` child's access token to (M8 §9.3).
+  # It lives here because `run/` has one owner, and the Go helper is written
+  # against this exact shape.
+  describe "token_file/2" do
+    test "names the file after the auth profile under run/", %{root: root} do
+      assert Store.token_file(root, "tesla:primary") ==
+               Path.join([root, "run", "tesla_primary.token"])
+    end
+
+    test "is collected by the boot sweep", %{root: root} do
+      path = Store.token_file(root, "tesla:primary")
+      File.write!(path, "{}")
+
+      assert :ok = Store.sweep_transient!(root)
+      refute File.exists?(path)
+    end
+
+    # An auth profile reaches here from config, and a hand-edited one could name
+    # a path outside the store. A token is never written somewhere else under a
+    # sanitized name: the corrupt value fails loud.
+    test "refuses a profile that could escape run/" do
+      for profile <- ["../../etc/passwd", "a/b", "", "x\ny"] do
+        assert_raise ArgumentError, fn -> Store.token_file("/tmp/store", profile) end
+      end
     end
   end
 

@@ -377,7 +377,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.Session do
     end
   end
 
-  # An absent header is legal (Eden documents it as optional) and uses one
+  # An absent header is legal (a server may omit it) and uses one
   # fixed local backoff. A value beyond the bound is refused rather than
   # honoured: server-controlled state must not create an unbounded timer.
   defp retry_after_ms(headers) do

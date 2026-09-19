@@ -210,7 +210,7 @@ daemon onto anything else.
 | `auth.start` | `provider` | Starts a browser sign-in and answers with the job plus the authorize url and its lifetime, returned once. Minimum version `2`. |
 | `auth.import.start` | `source` | Adopts a sign-in this Mac already has, from Claude Code or the Codex CLI. A job, because reading the keychain can prompt. Minimum version `2`. |
 | `auth.logout` | `provider` | Forgets one provider's local session and reverts the route it fed. Nothing is revoked upstream. Minimum version `2`. |
-| `plugins.list` | none | Every integration this daemon can show, installed or not, in one row shape, plus one entry per sign-in client a published plugin needs. Every word on a row is the daemon's. Minimum version `2`. |
+| `plugins.list` | none | Every integration this daemon can show, installed or not, in one row shape, plus one entry per sign-in client a published plugin needs, each carrying the account region it is bound to and the regions this daemon offers for it. Every word on a row is the daemon's. Minimum version `2`. |
 | `plugins.install.start` | `name` | Fetches, verifies and activates one catalog plugin. A job. Minimum version `2`. |
 | `plugins.check.start` | `name` | Runs one plugin's own health check, live probe included. A job. Minimum version `2`. |
 | `plugins.workspaces.discover.start` | `name` | Lists the workspaces a hosted plugin's stored credential can reach. A job; what it finds is republished on the plugin's row rather than in the job result. Minimum version `2`. |
@@ -218,8 +218,8 @@ daemon onto anything else.
 | `plugins.enable` | `name` | Turns one installed plugin on and answers with its row. Minimum version `2`. |
 | `plugins.disable` | `name` | Turns one plugin off and answers with its row. Minimum version `2`. |
 | `plugins.disconnect` | `name` | Forgets the credential behind one plugin, locally: an OAuth session is deleted, a stored token is removed from the keyring, and neither is revoked upstream. Minimum version `2`. |
-| `plugins.oauth_client.set` | `provider`, `client_id`, `redirect_port` | Registers one sign-in client. The client secret is not a parameter: it arrives through `secret.set`. Minimum version `2`. |
-| `plugins.setting.set` | `name`, `key`, `value` | Writes one manifest-declared setting and answers with the plugin's row. Minimum version `2`. |
+| `plugins.oauth_client.set` | `provider`, `client_id`, `redirect_port`, `region` | Registers one sign-in client. The client secret is not a parameter: it arrives through `secret.set`. `region` is required exactly where the client row publishes a non-empty `regions`, and refused where it publishes none; it is optional on the wire, like `secret_present`, so an older engine is unaffected. Minimum version `2`. |
+| `plugins.setting.set` | `name`, `key`, `value` | Writes one manifest-declared setting and answers with the plugin's row. `value` is always a string, and a setting whose `kind` is `boolean` takes only `true` or `false`. Minimum version `2`. |
 | `capabilities.install.start` | `target` | Installs the computer use helper, the meeting notetaker, or the on-device speech backend. A job. Minimum version `2`. |
 | `meetings.signin.start` | none | Starts the notetaker's one-time interactive sign-in. A job, because it waits for a person. Minimum version `2`. |
 | `computer_use.grant.start` | none | Raises the OS permission prompts and answers with what was granted. A job, and only ever on an explicit ask. Minimum version `2`. |
@@ -278,10 +278,13 @@ Notes that the shapes alone do not carry:
   `summary` carries one count per status.
 - **Readiness is split into gating and advisory.** A failure carries `gating`,
   the `pane` that can clear it, and a closed-set `detail_key`. Provider and
-  personalization failures gate; the five channels and realtime are advisory.
-  `status` is `ready` exactly when no gating failure remains, and every advisory
-  failure stays in the list, so a surface never needs a second definition of
-  ready.
+  personalization failures gate; the five channels, realtime, and allowed
+  sandbox environment variables the daemon cannot read (`sandbox:env_missing`,
+  `sandbox:env_helper_failed`, pane `sandbox`, one failure per cause naming
+  every affected variable, with `component` `sandbox:env:missing` or
+  `sandbox:env:helper_failed`) are advisory. `status` is `ready` exactly
+  when no gating failure remains, and every advisory failure stays in the list,
+  so a surface never needs a second definition of ready.
 - **Restart truth has one owner.** `restart.required` and `restart.reasons` come
   from the daemon's two baselines: the application environment captured at boot,
   and the parsed settings file as this daemon last saw it. The sentence for each
@@ -313,18 +316,57 @@ Notes that the shapes alone do not carry:
 - **`restart` on a row is derived, never declared.** A row is flagged exactly
   when its own configuration section is one the daemon compares against the
   values it read at boot, so a row can never deny a restart the next
-  `overview.get` asks for.
+  `overview.get` asks for. A section can have a part that is read on every use
+  instead: the sandbox environment policy (the allowed names, the deny list and
+  where each value comes from) is read by every command, so the allowed
+  environment variables row and every name row below it carry `restart: false`,
+  while the sandbox mode and command profile rows still carry `true`.
 - **`read_only` marks a row `settings.apply` will not take**, rendered as a plain
   labelled row rather than a control whose save always refuses.
+- **The sandbox section publishes one row per environment variable name.**
+  After `sandbox_env_allow` come the allowed names in allow-list order, then
+  the names Fermix still stores but no longer allows, sorted. Each row's key is
+  `env:<NAME>` and its label is the name itself. A stored name is a `secret`
+  row with `present: true`, and one no longer allowed says in its footer that
+  commands do not get it until the name is allowed again. An allowed name with
+  nothing stored is a `secret` row with `present: false`, whose footer says
+  commands get it only if Fermix was started with it. A name whose value comes
+  from a helper command or from another variable, and a name Fermix cannot
+  store, is a read-only `text` row whose footer says where the value comes from;
+  for another variable, `value` is that variable's name. `present` is read from
+  the settings file alone, like every other secret row. Removing a name from
+  the allow list keeps its stored value, so its row stays reachable: allowing
+  the name again reuses the value, and `secret.clear` removes it.
+- **The voice section's model row selects its engine.** `realtime_model`
+  publishes every model both engines ship, in one list, each option labelled
+  with the engine it selects: `openai_realtime` (the Realtime API, which runs
+  tools inside the voice session) or `openai_live` (the Live API, which
+  delegates every tool call, memory read and reasoning step back to the Fermix
+  agent and bills by the minute). There is no engine row; the engine is derived
+  from the model and stored as `realtime.engine`, and `settings.apply` refuses
+  `realtime_engine` as a key this section does not have. The rest of the section
+  is scoped to the engine that model implies: `realtime_voice` publishes the
+  voices of that engine and nothing else, `realtime_reasoning_effort` is a
+  Realtime session setting with no Live equivalent and is absent under Live, and
+  `realtime_backend` is present only under Live, is read-only, and names the
+  primary provider and model that answer while Live speaks. Applying a model of
+  the other engine therefore moves the engine with it, adds or removes the
+  reasoning effort, and moves a voice the new engine does not ship. The result
+  names every key the daemon derived in `applied` — including `realtime_engine`,
+  which is a derived key rather than a row — with a sentence for each in
+  `side_effects`; reload the section when one of those keys appears, because its
+  row list has changed. `overview.get` reports the same selection as
+  `realtime.engine`, null while voice is disabled.
 - **Secrets travel inbound only, in `secret.set`, one per call.** Every other
   method reports presence as a boolean. "Present" means a reference or a value
   sits at that key's own path, never "the keyring holds an item": a key stored
   without its reference is never read back, so calling it present would describe
   a credential the runtime cannot use.
-- **`id` names one of four families.** A bare registry key (`openai_api_key`,
+- **`id` names one of five families.** A bare registry key (`openai_api_key`,
   `telegram_bot_token`, …), `plugin:<name>` for a plugin's own token,
-  `oauth_client:<provider>` for a sign-in client's secret, and
-  `anthropic_setup_token`. The first three take the same keychain-first write.
+  `oauth_client:<provider>` for a sign-in client's secret,
+  `anthropic_setup_token`, and `env:<NAME>` for a sandbox environment variable.
+  The first three take the same keychain-first write.
   The fourth is a different mechanism and is documented as such: a
   `claude setup-token` value is a long-lived subscription credential, so it is
   stored in the auth store rather than the keychain, storing one also selects
@@ -333,6 +375,23 @@ Notes that the shapes alone do not carry:
   `auth.logout anthropic`. Its `present` is "a setup token is stored", not "an
   Anthropic sign-in exists": an adopted Claude Code login lives under the same
   profile and is reported by `setup.state.get`'s account row instead.
+- **`env:<NAME>` stores a value every sandboxed command receives as `NAME`.**
+  It is the key of the sandbox section's name rows, and the family is open:
+  `NAME` is any name matching `^[A-Za-z_][A-Za-z0-9_]{0,127}$` exactly, except
+  `PATH`, `HOME`, `USER`, `LANG`, `SHELL`, `TMPDIR`, `FERMIX_HOME` and any name
+  starting `LC_`, which Fermix sets itself. The value is one line of 1 to 8,192
+  bytes with no NUL, CR or LF, and at most 64 names are stored. `secret.set`
+  stores the value in the OS secret store in a namespace of its own (a skill's
+  `OPENAI_API_KEY` never touches the OpenAI provider's key), reads it back to
+  verify it, and then allows the name, removes it from the deny list and points
+  the name at the stored value in one settings write. It refuses a name whose
+  value already comes from a helper command or another variable, because
+  storing would silently change where the value comes from. `secret.clear`
+  deletes the stored value first and then the reference, so a refused delete
+  changes nothing; the name stays allowed and reads the environment Fermix was
+  started with. Neither ever asks for a restart. Where no OS secret store
+  exists, `secret.set` answers `secret_store_failed` with reason `unavailable`.
+  `present` is "the settings file points this name at a stored value".
 - **A plugin row is one shape for two halves.** An installed plugin and a
   catalog entry that has never been fetched publish the same fields, so a client
   decodes one record rather than two. `installed` is what separates them.
@@ -360,6 +419,17 @@ Notes that the shapes alone do not carry:
   button labelled "Choose workspace" onto the health check, and one labelled
   "Set up the sign-in client" onto a sign-in the daemon refuses. Two words share
   one id: "Sign in" and "Sign in again" are the same method with different copy.
+- **A setting names the control it is, and a switch has exactly two words.**
+  Every entry in `settings` carries a `kind`: `text` is a free-text field, and
+  `boolean` is a switch whose value is the string `true` or `false` and nothing
+  else. `plugins.setting.set` refuses any other value for a `boolean` setting
+  with "This setting is a switch: send true or false.", and refuses a blank
+  value for either kind; an unwritten setting is simply absent from the row's
+  `value`, which is what off is. The daemon always publishes `kind`, but it is
+  optional for older protocol-2 engines, and an absent one reads as `text`.
+  The two words are the spelling a manifest's per-tool gate reads, so a switch
+  drawn as a text field is how an operator turns a tool on by typing `TRUE` and
+  finds it still off.
 - **`credential_present` is published rather than inferred.** A plugin that
   authenticates with a typed token never has an `account_label`, so reading
   presence off that field would hide the token that is actually stored.
@@ -379,6 +449,24 @@ Notes that the shapes alone do not carry:
   These two fields are optional for older protocol-2 engines. The secret value
   is never returned. A null `redirect_port` means the daemon's own default is in
   force, not that no port is used.
+- **The region is chosen before connecting, because it selects the token
+  audience.** Some providers serve one account region per host and refuse every
+  call from another, so the region is part of the sign-in client rather than
+  something a first call discovers. `regions` lists the choices with the
+  daemon's own labels and is empty for a provider that serves one region;
+  `region` is the chosen one, or null while nothing is chosen. Both are optional
+  for older protocol-2 engines, and an absent `regions` reads as a provider with
+  one region, never as a picker that failed to arrive. A plugin whose provider
+  offers regions and whose client has none is `needs_client_config`, the same as
+  one missing its identifier.
+- **A grant minted for the wrong region is `wrong_region`.** Right after a
+  sign-in the daemon asks the provider which region the account is in, and
+  records a disagreement on the grant. The status is its own word because the
+  fix is the region on the sign-in client, not a renewed sign-in: the row leads
+  with `set_up_client` and keeps `sign_in` beside it, and the status sentence
+  names the account's own region wherever the provider gave one. No token is
+  served for such a grant, so a plugin holding one refuses its tools rather than
+  calling the wrong host.
 - **Harness detection reports bounded public status.** Only the `harness_vendors`
   target can add `vendors` and `guidance` to its existing `target`, `present` and
   `detail` fields. Both additions are optional for older protocol-2 engines.
@@ -454,8 +542,9 @@ one, is `details.sentence`. Two codes carry one:
   operator. `details.field` names the parameter and `details.sentence` says why:
   "This provider has no browser sign-in.", "This setting cannot be cleared.",
   "A secret cannot be empty.", "Install this plugin before using it.", "Add this
-  provider's sign-in client secret first.", and every settings validation
-  refusal. A refusal with nothing to add carries `field` alone.
+  provider's sign-in client secret first.", "This setting is a switch: send true
+  or false.", and every settings validation refusal. A refusal with nothing to
+  add carries `field` alone.
 - `config_unreadable` — `details.sentence` is the parser's own message.
 
 **A client that renders `message` alone renders "Request parameters are

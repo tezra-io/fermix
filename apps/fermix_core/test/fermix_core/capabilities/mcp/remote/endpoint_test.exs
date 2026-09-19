@@ -3,7 +3,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.EndpointTest do
 
   alias FermixCore.Capabilities.MCP.Remote.Endpoint
 
-  @host "mcp.eden.so"
+  @host "mcp.acme.example"
   @base "https://" <> @host
 
   describe "new/2 accepts a signed HTTPS origin" do
@@ -17,9 +17,9 @@ defmodule FermixCore.Capabilities.MCP.Remote.EndpointTest do
     end
 
     test "downcases the host and keeps an explicit port in the origin" do
-      assert {:ok, endpoint} = Endpoint.new("https://MCP.Eden.SO:8443", "/mcp")
+      assert {:ok, endpoint} = Endpoint.new("https://MCP.Acme.EXAMPLE:8443", "/mcp")
       assert endpoint.host == @host
-      assert Endpoint.origin(endpoint) == "https://mcp.eden.so:8443"
+      assert Endpoint.origin(endpoint) == "https://mcp.acme.example:8443"
     end
 
     test "allows a multi-segment literal path" do
@@ -31,37 +31,38 @@ defmodule FermixCore.Capabilities.MCP.Remote.EndpointTest do
   describe "new/2 refuses anything that is not an origin" do
     test "plain http" do
       assert {:error, {:invalid_base_url, :scheme_not_https}} =
-               Endpoint.new("http://eden.so", "/mcp")
+               Endpoint.new("http://acme.example", "/mcp")
     end
 
     test "userinfo" do
       assert {:error, {:invalid_base_url, :userinfo_not_allowed}} =
-               Endpoint.new("https://user:pw@eden.so", "/mcp")
+               Endpoint.new("https://user:pw@acme.example", "/mcp")
     end
 
     test "a query string" do
       assert {:error, {:invalid_base_url, :query_not_allowed}} =
-               Endpoint.new("https://eden.so?a=1", "/mcp")
+               Endpoint.new("https://acme.example?a=1", "/mcp")
     end
 
     test "a fragment" do
       assert {:error, {:invalid_base_url, :fragment_not_allowed}} =
-               Endpoint.new("https://eden.so#x", "/mcp")
+               Endpoint.new("https://acme.example#x", "/mcp")
     end
 
     test "a path, including a bare trailing slash" do
       assert {:error, {:invalid_base_url, :path_not_allowed}} =
-               Endpoint.new("https://eden.so/x", "/mcp")
+               Endpoint.new("https://acme.example/x", "/mcp")
 
       assert {:error, {:invalid_base_url, :path_not_allowed}} =
-               Endpoint.new("https://eden.so/", "/mcp")
+               Endpoint.new("https://acme.example/", "/mcp")
     end
 
     test "a template or wildcard" do
       assert {:error, {:invalid_base_url, :template}} =
-               Endpoint.new("https://{env}.eden.so", "/mcp")
+               Endpoint.new("https://{env}.acme.example", "/mcp")
 
-      assert {:error, {:invalid_base_url, :template}} = Endpoint.new("https://*.eden.so", "/mcp")
+      assert {:error, {:invalid_base_url, :template}} =
+               Endpoint.new("https://*.acme.example", "/mcp")
     end
 
     # An IP literal leaves no name to verify the certificate against, so the
@@ -76,7 +77,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.EndpointTest do
 
     test "whitespace or control characters" do
       assert {:error, {:invalid_base_url, :whitespace_or_control}} =
-               Endpoint.new("https://eden.so\n", "/mcp")
+               Endpoint.new("https://acme.example\n", "/mcp")
     end
 
     test "an empty host" do

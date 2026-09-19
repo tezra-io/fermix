@@ -13,7 +13,7 @@ defmodule FermixCore.Plugins.RegistryApi3Test do
   alias FermixCore.Plugins.CanonicalJson
   alias FermixCore.Plugins.Registry
 
-  @path "/tmp/eden/plugin.json"
+  @path "/tmp/acme/plugin.json"
 
   describe "a valid plugin-api-3 remote manifest" do
     test "decodes with the remote contract on the struct" do
@@ -22,14 +22,14 @@ defmodule FermixCore.Plugins.RegistryApi3Test do
       assert plugin.plugin_api == 3
       assert plugin.runtime["kind"] == "remote_mcp"
       assert plugin.runtime["tool_name_mode"] == "preserve"
-      assert plugin.setup_tools == ["eden_list_workspaces"]
+      assert plugin.setup_tools == ["acme_list_workspaces"]
       assert plugin.budgets == %{"agent_turn_calls" => 20, "agent_turn_paginated_calls" => 5}
       assert plugin.result_contract["kind"] == "json_boolean"
       assert plugin.resource_scope["argument"] == "workspaceId"
       assert Enum.map(plugin.tool_profiles, & &1["name"]) == ["retrieval", "capture"]
 
       assert plugin.auth.validation == %{
-               prefix: "eden_pat_",
+               prefix: "acme_pat_",
                min_bytes: 16,
                max_bytes: 512,
                charset: "visible_ascii",
@@ -41,14 +41,14 @@ defmodule FermixCore.Plugins.RegistryApi3Test do
       # A read-only tool that is NOT replay-safe, and a mutating tool that IS:
       # neither combination may be inferred from the other (§7.6).
       manifest =
-        put_tool(remote_manifest(), "eden_search", fn tool ->
+        put_tool(remote_manifest(), "acme_search", fn tool ->
           Map.merge(tool, %{"read_only" => true, "replay_safe" => false})
         end)
 
       assert {:ok, _plugin} = Registry.decode_manifest(manifest, @path)
 
       manifest =
-        put_tool(remote_manifest(), "eden_connect_items", fn tool ->
+        put_tool(remote_manifest(), "acme_connect_items", fn tool ->
           Map.merge(tool, %{"read_only" => false, "replay_safe" => true})
         end)
 
@@ -69,7 +69,7 @@ defmodule FermixCore.Plugins.RegistryApi3Test do
         "tool_profiles" => {:invalid_tool_profiles, []},
         # An absent `setup_tools` decodes to `[]`, so the refusal lands on the
         # resource scope whose discovery tool is now unreachable.
-        "setup_tools" => {:invalid_resource_scope, "discovery_tool", "eden_list_workspaces"},
+        "setup_tools" => {:invalid_resource_scope, "discovery_tool", "acme_list_workspaces"},
         "resource_scope" => {:invalid_resource_scope, "resource_scope", nil},
         "budgets" => {:invalid_budgets, "budgets", nil},
         "result_contract" => {:invalid_result_contract, "contract", nil}
@@ -116,7 +116,7 @@ defmodule FermixCore.Plugins.RegistryApi3Test do
       # otherwise route the block into the stdio runtime validator.
       with_mcp_tool =
         Map.put(manifest, "tools", [
-          %{"name" => "eden_read", "description" => "Read.", "rail" => "mcp"}
+          %{"name" => "acme_read", "description" => "Read.", "rail" => "mcp"}
         ])
 
       assert {:error, {:requires_plugin_api_3, ["runtime.kind=remote_mcp"]}} =
@@ -224,11 +224,11 @@ defmodule FermixCore.Plugins.RegistryApi3Test do
 
     test "validates base_url and mcp_path through Remote.Endpoint" do
       bad = [
-        {"base_url", "http://mcp.eden.so"},
-        {"base_url", "https://user:pw@mcp.eden.so"},
-        {"base_url", "https://mcp.eden.so/mcp"},
-        {"base_url", "https://mcp.eden.so?x=1"},
-        {"base_url", "https://{host}.eden.so"},
+        {"base_url", "http://mcp.acme.example"},
+        {"base_url", "https://user:pw@mcp.acme.example"},
+        {"base_url", "https://mcp.acme.example/mcp"},
+        {"base_url", "https://mcp.acme.example?x=1"},
+        {"base_url", "https://{host}.acme.example"},
         {"base_url", "https://93.184.216.34"},
         {"mcp_path", "mcp"},
         {"mcp_path", "/mcp?x=1"},
@@ -249,9 +249,9 @@ defmodule FermixCore.Plugins.RegistryApi3Test do
       manifest =
         remote_manifest()
         |> Map.put("name", "notes")
-        |> put_in(["resource_scope", "discovery_tool"], "eden_list_workspaces")
+        |> put_in(["resource_scope", "discovery_tool"], "acme_list_workspaces")
 
-      assert {:error, {:unpreservable_tool_name, "eden_list_workspaces"}} =
+      assert {:error, {:unpreservable_tool_name, "acme_list_workspaces"}} =
                Registry.decode_manifest(manifest, @path)
     end
 
@@ -307,7 +307,7 @@ defmodule FermixCore.Plugins.RegistryApi3Test do
   describe "auth.validation" do
     test "is a bounded declarative block" do
       bad = [
-        {%{"regex" => "^eden_"}, {:unknown_fields, ["regex"]}},
+        {%{"regex" => "^acme_"}, {:unknown_fields, ["regex"]}},
         {put(auth_validation(), "prefix", ""), {:invalid_auth_validation, "prefix", ""}},
         {put(auth_validation(), "min_bytes", 0), {:invalid_auth_validation, "min_bytes", 0}},
         {put(auth_validation(), "max_bytes", "512"),
@@ -381,27 +381,27 @@ defmodule FermixCore.Plugins.RegistryApi3Test do
     end
 
     test "every profile tool must be declared" do
-      profile = put(retrieval(), "tools", ["eden_missing"])
+      profile = put(retrieval(), "tools", ["acme_missing"])
       manifest = Map.put(remote_manifest(), "tool_profiles", [profile])
 
-      assert {:error, {:undeclared_profile_tool, "eden_missing"}} =
+      assert {:error, {:undeclared_profile_tool, "acme_missing"}} =
                Registry.decode_manifest(manifest, @path)
     end
 
     test "a setup tool may not appear in a profile" do
-      profile = put(retrieval(), "tools", ["eden_search", "eden_list_workspaces"])
+      profile = put(retrieval(), "tools", ["acme_search", "acme_list_workspaces"])
       manifest = Map.put(remote_manifest(), "tool_profiles", [profile])
 
-      assert {:error, {:setup_tool_in_profile, "retrieval", "eden_list_workspaces"}} =
+      assert {:error, {:setup_tool_in_profile, "retrieval", "acme_list_workspaces"}} =
                Registry.decode_manifest(manifest, @path)
     end
   end
 
   describe "setup_tools" do
     test "must name declared tools" do
-      manifest = Map.put(remote_manifest(), "setup_tools", ["eden_nope"])
+      manifest = Map.put(remote_manifest(), "setup_tools", ["acme_nope"])
 
-      assert {:error, {:undeclared_setup_tool, "eden_nope"}} =
+      assert {:error, {:undeclared_setup_tool, "acme_nope"}} =
                Registry.decode_manifest(manifest, @path)
     end
 
@@ -423,8 +423,8 @@ defmodule FermixCore.Plugins.RegistryApi3Test do
         {put(resource_scope(), "label_field", nil),
          {:invalid_resource_scope, "label_field", nil}},
         {put(resource_scope(), "argument", ""), {:invalid_resource_scope, "argument", ""}},
-        {put(resource_scope(), "discovery_tool", "eden_search"),
-         {:invalid_resource_scope, "discovery_tool", "eden_search"}},
+        {put(resource_scope(), "discovery_tool", "acme_search"),
+         {:invalid_resource_scope, "discovery_tool", "acme_search"}},
         {put(resource_scope(), "extra", 1), {:unknown_fields, ["extra"]}}
       ]
 
@@ -436,11 +436,11 @@ defmodule FermixCore.Plugins.RegistryApi3Test do
 
     test "the argument must be a declared parameter of every profile tool" do
       manifest =
-        put_tool(remote_manifest(), "eden_search", fn tool ->
+        put_tool(remote_manifest(), "acme_search", fn tool ->
           update_in(tool, ["parameters", "properties"], &Map.delete(&1, "workspaceId"))
         end)
 
-      assert {:error, {:missing_scope_argument, "eden_search", "workspaceId"}} =
+      assert {:error, {:missing_scope_argument, "acme_search", "workspaceId"}} =
                Registry.decode_manifest(manifest, @path)
     end
   end
@@ -500,7 +500,7 @@ defmodule FermixCore.Plugins.RegistryApi3Test do
       for {tool, expected} <- bad do
         manifest = replace_tool(remote_manifest(), tool)
 
-        assert {:error, {:invalid_remote_tool, "eden_search", ^expected}} =
+        assert {:error, {:invalid_remote_tool, "acme_search", ^expected}} =
                  Registry.decode_manifest(manifest, @path)
       end
     end
@@ -508,32 +508,32 @@ defmodule FermixCore.Plugins.RegistryApi3Test do
     test "requires object schemas" do
       manifest = replace_tool(remote_manifest(), put(search_tool(), "parameters", []))
 
-      assert {:error, {:invalid_remote_tool, "eden_search", {:invalid_field, "parameters", []}}} =
+      assert {:error, {:invalid_remote_tool, "acme_search", {:invalid_field, "parameters", []}}} =
                Registry.decode_manifest(manifest, @path)
 
       manifest =
         replace_tool(remote_manifest(), put(search_tool(), "output_schema", %{"type" => "array"}))
 
-      assert {:error, {:invalid_remote_tool, "eden_search", {:invalid_field, "output_schema", _}}} =
+      assert {:error, {:invalid_remote_tool, "acme_search", {:invalid_field, "output_schema", _}}} =
                Registry.decode_manifest(manifest, @path)
 
       manifest = replace_tool(remote_manifest(), put(search_tool(), "upstream_annotations", []))
 
       assert {:error,
-              {:invalid_remote_tool, "eden_search", {:invalid_field, "upstream_annotations", []}}} =
+              {:invalid_remote_tool, "acme_search", {:invalid_field, "upstream_annotations", []}}} =
                Registry.decode_manifest(manifest, @path)
     end
 
     test "rejects unknown and missing tool fields" do
       manifest = replace_tool(remote_manifest(), put(search_tool(), "request", %{}))
 
-      assert {:error, {:invalid_remote_tool, "eden_search", {:unknown_fields, ["request"]}}} =
+      assert {:error, {:invalid_remote_tool, "acme_search", {:unknown_fields, ["request"]}}} =
                Registry.decode_manifest(manifest, @path)
 
       manifest = replace_tool(remote_manifest(), Map.delete(search_tool(), "collection_policy"))
 
       assert {:error,
-              {:invalid_remote_tool, "eden_search", {:missing_fields, ["collection_policy"]}}} =
+              {:invalid_remote_tool, "acme_search", {:missing_fields, ["collection_policy"]}}} =
                Registry.decode_manifest(manifest, @path)
     end
 
@@ -542,7 +542,7 @@ defmodule FermixCore.Plugins.RegistryApi3Test do
         manifest = replace_tool(remote_manifest(), put(search_tool(), "descriptor_sha256", value))
 
         assert {:error,
-                {:invalid_remote_tool, "eden_search",
+                {:invalid_remote_tool, "acme_search",
                  {:invalid_field, "descriptor_sha256", ^value}}} =
                  Registry.decode_manifest(manifest, @path)
       end
@@ -559,7 +559,7 @@ defmodule FermixCore.Plugins.RegistryApi3Test do
       manifest = replace_tool(remote_manifest(), tool)
 
       assert {:error,
-              {:invalid_remote_tool, "eden_search",
+              {:invalid_remote_tool, "acme_search",
                {:descriptor_sha256_mismatch, _declared, _computed}}} =
                Registry.decode_manifest(manifest, @path)
     end
@@ -585,7 +585,7 @@ defmodule FermixCore.Plugins.RegistryApi3Test do
         manifest =
           replace_tool(remote_manifest(), sign(put(search_tool(), "collection_policy", policy)))
 
-        assert {:error, {:invalid_remote_tool, "eden_search", ^expected}} =
+        assert {:error, {:invalid_remote_tool, "acme_search", ^expected}} =
                  Registry.decode_manifest(manifest, @path)
       end
     end
@@ -607,7 +607,7 @@ defmodule FermixCore.Plugins.RegistryApi3Test do
           replace_tool(remote_manifest(), sign(put(search_tool(), "collection_policy", policy)))
 
         assert {:error,
-                {:invalid_remote_tool, "eden_search", {:invalid_collection_policy, ^key, ^detail}}} =
+                {:invalid_remote_tool, "acme_search", {:invalid_collection_policy, ^key, ^detail}}} =
                  Registry.decode_manifest(manifest, @path)
       end
     end
@@ -638,7 +638,7 @@ defmodule FermixCore.Plugins.RegistryApi3Test do
         tool = sign(put(connect_tool(), "argument_guards", [guard]))
         manifest = replace_tool(remote_manifest(), tool)
 
-        assert {:error, {:invalid_remote_tool, "eden_connect_items", ^expected}} =
+        assert {:error, {:invalid_remote_tool, "acme_connect_items", ^expected}} =
                  Registry.decode_manifest(manifest, @path)
       end
     end
@@ -658,24 +658,24 @@ defmodule FermixCore.Plugins.RegistryApi3Test do
       "schema_version" => 2,
       "plugin_api" => 3,
       "min_core_version" => "0.8.0",
-      "name" => "eden",
-      "display_name" => "Eden",
-      "description" => "Search, read, capture, and connect knowledge in an Eden workspace.",
+      "name" => "acme",
+      "display_name" => "Acme",
+      "description" => "Search, read, capture, and connect knowledge in an Acme workspace.",
       "category" => "productivity",
       "version" => "1.0.0",
       "default_enabled" => false,
       "auth" => %{
         "type" => "api_key",
-        "key_name" => "EDEN_PERSONAL_ACCESS_TOKEN",
+        "key_name" => "ACME_PERSONAL_ACCESS_TOKEN",
         "header" => "Authorization",
         "scheme" => "Bearer",
-        "prompt" => "Paste an Eden personal access token",
-        "help_url" => "https://eden.so/help/eden-mcp/installing-with-cli/",
+        "prompt" => "Paste an Acme personal access token",
+        "help_url" => "https://acme.example/help/acme-mcp/installing-with-cli/",
         "validation" => auth_validation()
       },
       "runtime" => remote_runtime(),
       "tool_profiles" => profiles(),
-      "setup_tools" => ["eden_list_workspaces"],
+      "setup_tools" => ["acme_list_workspaces"],
       "resource_scope" => resource_scope(),
       "budgets" => budgets(),
       "result_contract" => result_contract(),
@@ -689,7 +689,7 @@ defmodule FermixCore.Plugins.RegistryApi3Test do
       "kind" => "remote_mcp",
       "transport" => "streamable_http",
       "protocol_version" => "2025-06-18",
-      "base_url" => "https://mcp.eden.so",
+      "base_url" => "https://mcp.acme.example",
       "mcp_path" => "/mcp",
       "tool_name_mode" => "preserve"
     }
@@ -697,7 +697,7 @@ defmodule FermixCore.Plugins.RegistryApi3Test do
 
   defp auth_validation do
     %{
-      "prefix" => "eden_pat_",
+      "prefix" => "acme_pat_",
       "min_bytes" => 16,
       "max_bytes" => 512,
       "charset" => "visible_ascii",
@@ -714,7 +714,7 @@ defmodule FermixCore.Plugins.RegistryApi3Test do
       "default" => true,
       "required_credential_scope" => "read",
       "scope_visibility" => "none",
-      "tools" => ["eden_search"]
+      "tools" => ["acme_search"]
     }
   end
 
@@ -725,14 +725,14 @@ defmodule FermixCore.Plugins.RegistryApi3Test do
       "default" => false,
       "required_credential_scope" => "write",
       "scope_visibility" => "none",
-      "tools" => ["eden_search", "eden_connect_items"]
+      "tools" => ["acme_search", "acme_connect_items"]
     }
   end
 
   defp resource_scope do
     %{
       "kind" => "single_workspace",
-      "discovery_tool" => "eden_list_workspaces",
+      "discovery_tool" => "acme_list_workspaces",
       "id_field" => "id",
       "label_field" => "name",
       "argument" => "workspaceId"
@@ -765,8 +765,8 @@ defmodule FermixCore.Plugins.RegistryApi3Test do
 
   defp workspaces_tool do
     sign(%{
-      "name" => "eden_list_workspaces",
-      "description" => "List Eden workspaces available to the connected token.",
+      "name" => "acme_list_workspaces",
+      "description" => "List Acme workspaces available to the connected token.",
       "policy_class" => "external_api",
       "read_only" => true,
       "replay_safe" => false,
@@ -782,8 +782,8 @@ defmodule FermixCore.Plugins.RegistryApi3Test do
 
   defp search_tool do
     sign(%{
-      "name" => "eden_search",
-      "description" => "Search an Eden workspace.",
+      "name" => "acme_search",
+      "description" => "Search an Acme workspace.",
       "policy_class" => "external_api",
       "read_only" => true,
       "replay_safe" => true,
@@ -810,8 +810,8 @@ defmodule FermixCore.Plugins.RegistryApi3Test do
 
   defp connect_tool do
     sign(%{
-      "name" => "eden_connect_items",
-      "description" => "Connect web sources to an Eden note.",
+      "name" => "acme_connect_items",
+      "description" => "Connect web sources to an Acme note.",
       "policy_class" => "external_api",
       "read_only" => false,
       "replay_safe" => false,
@@ -851,13 +851,13 @@ defmodule FermixCore.Plugins.RegistryApi3Test do
       "schema_version" => 2,
       "plugin_api" => 2,
       "min_core_version" => "0.4.0",
-      "name" => "eden",
-      "display_name" => "Eden",
+      "name" => "acme",
+      "display_name" => "Acme",
       "description" => "An api-2 plugin.",
       "category" => "productivity",
       "version" => "1.0.0",
       "default_enabled" => false,
-      "auth" => %{"type" => "api_key", "key_name" => "EDEN_TOKEN", "prompt" => "Token"},
+      "auth" => %{"type" => "api_key", "key_name" => "ACME_TOKEN", "prompt" => "Token"},
       "tools" => [api2_tool()],
       "skills" => []
     }
@@ -865,14 +865,14 @@ defmodule FermixCore.Plugins.RegistryApi3Test do
 
   defp api2_tool do
     %{
-      "name" => "eden_search",
-      "description" => "Search an Eden workspace.",
+      "name" => "acme_search",
+      "description" => "Search an Acme workspace.",
       "read_only" => true,
       "rail" => "http",
       "parameters" => %{"type" => "object", "properties" => %{"query" => %{"type" => "string"}}},
       "request" => %{
         "method" => "GET",
-        "url" => "https://api.eden.so/v1/search",
+        "url" => "https://api.acme.example/v1/search",
         "query" => %{"q" => "{query}"}
       }
     }
@@ -885,15 +885,15 @@ defmodule FermixCore.Plugins.RegistryApi3Test do
       "schema_version" => 2,
       "plugin_api" => 3,
       "min_core_version" => "0.8.0",
-      "name" => "eden",
-      "display_name" => "Eden",
+      "name" => "acme",
+      "display_name" => "Acme",
       "description" => "A local api-3 plugin.",
       "category" => "productivity",
       "version" => "1.0.0",
       "default_enabled" => false,
       "auth" => %{"type" => "none"},
       "runtime" => runtime,
-      "tools" => [%{"name" => "eden_read", "description" => "Read.", "rail" => "mcp"}],
+      "tools" => [%{"name" => "acme_read", "description" => "Read.", "rail" => "mcp"}],
       "skills" => []
     }
   end

@@ -26,6 +26,7 @@ defmodule Mix.Tasks.Fermix.Setup do
     fast: :boolean,
     realtime_enabled: :boolean,
     realtime_api_key: :string,
+    realtime_model: :string,
     realtime_voice: :string,
     realtime_max_session_minutes: :integer,
     realtime_max_cost_cents: :integer,

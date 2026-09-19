@@ -143,8 +143,11 @@ defmodule Fermix.CLI.AuthCommand do
   # Token write != route selection: RouteResolver keys on the config
   # [providers.<p>].auth_mode, so a stored OAuth token is inert until auth_mode
   # is "oauth". Keep them in sync here (and revert to api_key on logout).
+  #
+  # `fermix auth` runs tree-less (cli_dispatch's fall-through halts without a
+  # supervision tree), so the save's keychain helpers must run inline.
   defp select_route(provider, mode) do
-    case Wizard.set_provider_auth_mode(provider, mode) do
+    case Wizard.set_provider_auth_mode(provider, mode, supervised: false) do
       {:ok, _report} -> :ok
       {:error, reason} -> {:error, reason}
     end

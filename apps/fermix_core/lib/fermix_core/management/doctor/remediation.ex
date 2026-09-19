@@ -70,6 +70,17 @@ defmodule FermixCore.Management.Doctor.Remediation do
       title: "Sign in again",
       body: "A saved sign-in has expired, so this provider cannot answer.",
       action: %{kind: "settings_pane", target: "providers"}
+    },
+    "engine_alignment.warning" => %{
+      title: "Restart Fermix to finish updating",
+      body:
+        "The engine running is not the one installed, so the update takes effect on the next start.",
+      action: %{kind: "restart", target: nil}
+    },
+    "engine_alignment.failed" => %{
+      title: "Another Fermix owns this service",
+      body: "The background service answering is a different build than the one installed here.",
+      action: %{kind: "none", target: nil}
     }
   }
 

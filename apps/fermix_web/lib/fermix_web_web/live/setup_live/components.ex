@@ -1089,7 +1089,7 @@ defmodule FermixWebWeb.SetupLive.Components do
         subtitle="Enable the local Realtime voice path when this host should run FermixPet."
       />
 
-      <form phx-submit="save_realtime" class="mt-6 space-y-5">
+      <form phx-change="change_realtime" phx-submit="save_realtime" class="mt-6 space-y-5">
         <.realtime_primary_fields form={@realtime_form} />
         <.realtime_secret_field form={@realtime_form} />
         <.realtime_limit_fields form={@realtime_form} />
@@ -1115,10 +1115,13 @@ defmodule FermixWebWeb.SetupLive.Components do
       <label class="form-control w-full">
         <span class="label pb-1 text-sm font-medium">Model</span>
         <select name="realtime_form[model]" class="select select-bordered w-full bg-base-100">
-          <option :for={model <- @form.models} value={model} selected={model == @form.model}>
-            {model}
+          <option :for={model <- @form.models} value={model.id} selected={model.id == @form.model}>
+            {model.label}
           </option>
         </select>
+        <span class="label pt-1 text-xs text-base-content/60">
+          Live delegates tools, memory and reasoning to your Fermix agent and bills by the minute.
+        </span>
       </label>
 
       <label class="form-control w-full">
@@ -1130,7 +1133,7 @@ defmodule FermixWebWeb.SetupLive.Components do
         </select>
       </label>
 
-      <label class="form-control w-full">
+      <label :if={!@form.live?} class="form-control w-full">
         <span class="label pb-1 text-sm font-medium">Reasoning effort</span>
         <select
           name="realtime_form[reasoning_effort]"
@@ -2656,6 +2659,11 @@ defmodule FermixWebWeb.SetupLive.Components do
      "https://api.slack.com/apps"}
   end
 
+  defp oauth_help_content("tesla") do
+    {"Tesla developer site → create an application: set the allowed origin to a domain you control and the allowed redirect URI to https://fermix.ai/api/integrations/tesla/callback exactly, since Tesla accepts public https redirects only. Paste the Client ID and secret; the secret is stored in your keychain. Region is the one your Tesla account belongs to, chosen here before you connect, because Tesla refuses a mismatch.",
+     "https://developer.tesla.com/"}
+  end
+
   defp oauth_help_content(provider) do
     {"Create an OAuth client with #{provider}, then paste its Client ID and secret.", nil}
   end
@@ -3104,6 +3112,24 @@ defmodule FermixWebWeb.SetupLive.Components do
           name="oauth_client_form[client_secret]"
           set={@oauth.client_secret_set}
         />
+        <label :if={@oauth.regions != []} class="form-control w-full">
+          <span class="label pb-1 text-sm font-medium">Region</span>
+          <select
+            name="oauth_client_form[region]"
+            class="select select-bordered w-full bg-base-100"
+          >
+            <option value="" selected={@oauth.region in [nil, ""]}>
+              Choose the account's region
+            </option>
+            <option
+              :for={region <- @oauth.regions}
+              value={region.id}
+              selected={@oauth.region == region.id}
+            >
+              {region.label}
+            </option>
+          </select>
+        </label>
         <.number_field
           label="Redirect port"
           name="oauth_client_form[redirect_port]"
@@ -3194,17 +3220,17 @@ defmodule FermixWebWeb.SetupLive.Components do
           Version {@plugin.yanked_version} was yanked; run `fermix plugins upgrade {@plugin.name}`.
         </p>
         <form
-          :if={@plugin.status == :needs_config && @plugin.missing_config != []}
+          :if={@plugin.config_entries != []}
           id={"plugin-config-form-#{@plugin.name}"}
           phx-submit="save_plugin_config"
           class="mt-2 flex flex-wrap items-end gap-2"
         >
           <input type="hidden" name="name" value={@plugin.name} />
           <.text_input
-            :for={entry <- @plugin.missing_config}
+            :for={entry <- @plugin.config_entries}
             label={entry.prompt}
             name={"plugin_config_form[#{entry.key}]"}
-            value=""
+            value={entry.value}
           />
           <button type="submit" class="btn btn-outline btn-sm">Save</button>
         </form>
@@ -3232,6 +3258,11 @@ defmodule FermixWebWeb.SetupLive.Components do
       </div>
 
       <div class="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
+        <.plugin_config_switch
+          :for={switch <- @plugin.config_switches}
+          name={@plugin.name}
+          switch={switch}
+        />
         <button
           :if={@oauth_unset?}
           type="button"
@@ -3595,6 +3626,29 @@ defmodule FermixWebWeb.SetupLive.Components do
       </label>
       <span class="label pt-0 text-xs text-base-content/60">{@hint}</span>
     </div>
+    """
+  end
+
+  # A `kind: :boolean` manifest config entry on a plugin card: an instant switch
+  # beside the card's other actions, labelled with the manifest prompt. The click
+  # carries the word it stores ("true" or "false"), so there is nothing to save.
+  attr :name, :string, required: true
+  attr :switch, :map, required: true
+
+  defp plugin_config_switch(assigns) do
+    ~H"""
+    <label class="flex cursor-pointer items-center gap-1.5">
+      <input
+        type="checkbox"
+        checked={@switch.checked}
+        class="toggle toggle-xs toggle-primary"
+        phx-click="set_plugin_switch"
+        phx-value-name={@name}
+        phx-value-key={@switch.key}
+        phx-value-value={@switch.next}
+      />
+      <span class="text-xs font-medium">{@switch.prompt}</span>
+    </label>
     """
   end
 
@@ -4142,6 +4196,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   def status_pill_class(:needs_config), do: "badge badge-warning badge-sm"
   def status_pill_class(:needs_secret), do: "badge badge-warning badge-sm"
   def status_pill_class(:reauthorization_required), do: "badge badge-error badge-sm"
+  def status_pill_class(:wrong_region), do: "badge badge-warning badge-sm"
   def status_pill_class(:error), do: "badge badge-error badge-sm"
   def status_pill_class(:not_configured), do: "badge badge-ghost badge-sm"
   def status_pill_class(:available), do: "badge badge-ghost badge-sm"
@@ -4176,6 +4231,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   def status_pill_label(:needs_config), do: "Needs config"
   def status_pill_label(:needs_secret), do: "Needs key"
   def status_pill_label(:reauthorization_required), do: "Reauthorize"
+  def status_pill_label(:wrong_region), do: "Wrong region"
   def status_pill_label(:error), do: "Error"
   def status_pill_label(:not_configured), do: "Not configured"
   def status_pill_label(:available), do: "Available"
@@ -4222,6 +4278,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   def plugin_action_label(:needs_client_config), do: "Configure"
   def plugin_action_label(:needs_auth), do: "Connect"
   def plugin_action_label(:reauthorization_required), do: "Reauthorize"
+  def plugin_action_label(:wrong_region), do: "Sign in again"
   def plugin_action_label(:ready), do: "Check"
   def plugin_action_label(:not_installed), do: "Install"
   def plugin_action_label(:missing_host_runtime), do: "Install runtime"

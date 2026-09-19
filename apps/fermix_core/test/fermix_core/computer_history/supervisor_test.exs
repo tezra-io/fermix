@@ -5,7 +5,9 @@ defmodule FermixCore.ComputerHistory.SupervisorTest do
   bit (inv. 16); the supervisor's structure is checked via `init/2` so it never
   collides with the singleton the app tree may already run on macOS.
   """
-  use ExUnit.Case, async: true
+  # async: false — two cases write the global `:fermix_core, :computer_history`
+  # app env, which async siblings read live through `Config.current/0`.
+  use ExUnit.Case, async: false
 
   alias FermixCore.ComputerHistory.Controller
   alias FermixCore.ComputerHistory.Retention
@@ -27,6 +29,9 @@ defmodule FermixCore.ComputerHistory.SupervisorTest do
   end
 
   defp event(seq, ts), do: %{boot_id: "b1", source_seq: seq, ts: ts, type: "app.activated"}
+
+  defp restore_history(nil), do: Application.delete_env(:fermix_core, :computer_history)
+  defp restore_history(value), do: Application.put_env(:fermix_core, :computer_history, value)
 
   describe "supervisor structure" do
     test "always supervises Retention + Controller and owns a DynamicSupervisor" do
@@ -53,9 +58,12 @@ defmodule FermixCore.ComputerHistory.SupervisorTest do
 
   describe "retention sweeps regardless of the enable bit (inv. 16)" do
     test "with history disabled, a sweep still evicts events past the window", %{repo: repo} do
-      # The disabled posture — retention must still drain the spool.
+      # The disabled posture — retention must still drain the spool. Restore the
+      # previous value exactly: deleting turns a configured key into an absent
+      # one for every later module in the VM.
+      previous = Application.get_env(:fermix_core, :computer_history)
       Application.put_env(:fermix_core, :computer_history, enabled: false)
-      on_exit(fn -> Application.delete_env(:fermix_core, :computer_history) end)
+      on_exit(fn -> restore_history(previous) end)
 
       now = 100_000
       window = 10_000
@@ -93,8 +101,9 @@ defmodule FermixCore.ComputerHistory.SupervisorTest do
     } do
       # The tick path must sweep regardless of the enable bit, not just the
       # directly-called sweep/3.
+      previous = Application.get_env(:fermix_core, :computer_history)
       Application.put_env(:fermix_core, :computer_history, enabled: false)
-      on_exit(fn -> Application.delete_env(:fermix_core, :computer_history) end)
+      on_exit(fn -> restore_history(previous) end)
 
       now = System.system_time(:millisecond)
       # One event well past a 1s window, one fresh.

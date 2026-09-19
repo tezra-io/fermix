@@ -5,6 +5,33 @@ defmodule FermixCore.Plugins.Registry do
   `$FERMIX_HOME/plugins/installed/<name>/current`, unioned with plugin-author
   checkouts under the `[fermix_core.plugins] dev_local` directory. A name may
   never exist in more than one set.
+
+  Two tool-level grammar additions are plugin-api 2 and therefore gated only by
+  the catalog entry's `min_core_version` (M40 §3.2):
+
+    * `request.regional_urls` — a region → static https URL map in place of
+      `url`, validated here through `Http.Template.static_validate/2` and
+      resolved per call from the plugin's own stored grant.
+    * `requires_setting` — one manifest-declared `config` key that must read
+      `"true"` before the tool is advertised or executed. The key must appear in
+      this manifest's own `config` block, so a typo is refused at install
+      (`:unknown_requires_setting`) rather than becoming a tool nothing can
+      satisfy; an `mcp`-rail entry may not carry one at all
+      (`:requires_setting_on_mcp_tool`), because the gate governs what
+      `Plugins.Capabilities` advertises and mcp-rail entries never register there.
+
+  The `runtime` block takes the same gate, and it is how an `mcp`-rail plugin
+  expresses the same consent (M8 §9.3): `runtime.requires_setting` names one of
+  this manifest's own `config` keys, and `Dist.McpSource` materializes the child
+  spec only while that key reads `"true"` — so an operator switch decides
+  whether a vendored helper process runs at all, which is the mcp-rail answer to
+  the tool-level gate mcp entries may not carry. The same refusal family applies
+  with `"runtime"` in place of a tool name (`{:unknown_requires_setting,
+  "runtime", key}`), and a `remote_mcp` runtime may not carry it
+  (`:remote_runtime_conflict`) because a hosted endpoint is not a process this
+  daemon starts. A gated-off runtime does NOT change the plugin's status: it is
+  still `:ready` for its http tools, because the gate says a process is unwanted,
+  not that the install needs attention.
   """
 
   require Logger
@@ -40,7 +67,8 @@ defmodule FermixCore.Plugins.Registry do
 
   @auth_fields ~w(type provider profile_key account_mode scopes key_name header scheme prompt help_url validation)
   @auth_schemes ~w(Bearer Bot)
-  @config_entry_fields ~w(key prompt required)
+  @config_entry_fields ~w(key prompt required kind)
+  @config_kinds %{"text" => :text, "boolean" => :boolean}
   @config_key_regex ~r/^[A-Z][A-Z0-9_]*$/
   @runtime_kinds ~w(node python binary escript)
   @name_regex ~r/^[a-z][a-z0-9_]{0,63}$/
@@ -65,7 +93,7 @@ defmodule FermixCore.Plugins.Registry do
 
   @remote_runtime_kind "remote_mcp"
   @remote_runtime_fields ~w(kind transport protocol_version base_url mcp_path tool_name_mode)
-  @local_runtime_fields ~w(command args env pass_env cwd vendored min_version)
+  @local_runtime_fields ~w(command args env pass_env cwd vendored min_version requires_setting)
   @remote_transport "streamable_http"
   @remote_protocol_version "2025-06-18"
   @tool_name_modes ~w(prefix preserve)
@@ -199,6 +227,15 @@ defmodule FermixCore.Plugins.Registry do
   end
 
   def decode_manifest(_manifest, path), do: {:error, {:invalid_manifest, path, :not_a_map}}
+
+  @doc """
+  The manifest spellings of a runtime that is one process on this Mac.
+
+  They say how the process starts; where it runs is the catalog's word
+  `local_stdio`, and the row that publishes it derives it from this list.
+  """
+  @spec local_runtime_kinds() :: [String.t()]
+  def local_runtime_kinds, do: @runtime_kinds
 
   @doc "Names of the plugins bundled with this Fermix build (the priv catalog)."
   @spec bundled_names() :: {:ok, [String.t()]} | {:error, term()}
@@ -441,8 +478,9 @@ defmodule FermixCore.Plugins.Registry do
   defp auth_scheme(other), do: {:error, {:invalid_auth_scheme, other}}
 
   # Optional per-plugin config declarations (M8.1 §4.4): flat key/prompt/
-  # required entries, nothing more. Values are collected on Connect and live
-  # as plain config under `[fermix_core.plugins.<name>]`, never SecretWriter.
+  # required/kind entries, nothing more. Values are collected on Connect and
+  # live as plain config under `[fermix_core.plugins.<name>]`, never
+  # SecretWriter.
   defp decode_config(nil), do: {:ok, []}
 
   defp decode_config(entries) when is_list(entries) do
@@ -469,8 +507,9 @@ defmodule FermixCore.Plugins.Registry do
        when is_binary(key) and is_binary(prompt) and prompt != "" do
     with :ok <- reject_unknown_fields(entry, @config_entry_fields),
          :ok <- validate_config_key(key),
-         {:ok, required} <- config_required(Map.get(entry, "required", false)) do
-      {:ok, %{key: key, prompt: prompt, required: required}}
+         {:ok, required} <- config_required(Map.get(entry, "required", false)),
+         {:ok, kind} <- config_kind(key, Map.get(entry, "kind", "text")) do
+      {:ok, %{key: key, prompt: prompt, required: required, kind: kind}}
     end
   end
 
@@ -484,6 +523,17 @@ defmodule FermixCore.Plugins.Registry do
 
   defp config_required(required) when is_boolean(required), do: {:ok, required}
   defp config_required(other), do: {:error, {:invalid_config_required, other}}
+
+  # What both doors render the setting as, and what `Plugins.Config` will take
+  # for it: a text field, or a switch whose only two values are the words the
+  # `requires_setting` gate reads. Absent is `text`, which is what every
+  # manifest written before this field decodes as; anything else is refused
+  # here rather than defaulted, because a manifest asking for a control Fermix
+  # does not have must not silently render as the other one.
+  defp config_kind(_key, declared) when is_map_key(@config_kinds, declared),
+    do: {:ok, Map.fetch!(@config_kinds, declared)}
+
+  defp config_kind(key, other), do: {:error, {:invalid_config_kind, key, other}}
 
   defp validate_catalog_name(name, %Plugin{name: name}), do: :ok
 
@@ -512,26 +562,39 @@ defmodule FermixCore.Plugins.Registry do
   # A v2 manifest with any `mcp`-rail tool must declare a runtime block.
   defp validate_runtime(%Plugin{schema_version: v}) when v < 2, do: :ok
 
-  defp validate_runtime(%Plugin{tools: tools, runtime: runtime}) do
+  defp validate_runtime(%Plugin{tools: tools, runtime: runtime} = plugin) do
     if Enum.any?(tools, &(Map.get(&1, "rail") == "mcp")),
-      do: validate_runtime_block(runtime),
+      do: validate_runtime_block(runtime, plugin),
       else: :ok
   end
 
   # `command` is one executable name and `args` a list of strings — never a
   # space-joined string (the stdio transport resolves `command` whole).
-  defp validate_runtime_block(%{"kind" => kind, "command" => command} = runtime)
+  defp validate_runtime_block(%{"kind" => kind, "command" => command} = runtime, plugin)
        when kind in @runtime_kinds and is_binary(command) and command != "" do
     args = Map.get(runtime, "args", [])
     vendored = Map.get(runtime, "vendored", false)
 
     if bare_command?(command) and is_boolean(vendored) and
          is_list(args) and Enum.all?(args, &is_binary/1),
-       do: :ok,
+       do: validate_runtime_requires_setting(runtime, plugin),
        else: {:error, {:invalid_runtime, runtime}}
   end
 
-  defp validate_runtime_block(runtime), do: {:error, {:invalid_runtime, runtime}}
+  defp validate_runtime_block(runtime, _plugin), do: {:error, {:invalid_runtime, runtime}}
+
+  # The runtime half of the `requires_setting` gate (M8 §9.3): a local plugin
+  # process may gate itself on one of its own manifest's `config` keys, so an
+  # operator switch decides whether the child runs at all. Same refusal family
+  # as the tool-level field, with `"runtime"` where a tool name would be, so a
+  # typo is refused at install rather than becoming a gate nothing can satisfy.
+  defp validate_runtime_requires_setting(%{"requires_setting" => key}, %Plugin{config: entries}) do
+    if is_binary(key) and key in Enum.map(entries, & &1.key),
+      do: :ok,
+      else: {:error, {:unknown_requires_setting, "runtime", key}}
+  end
+
+  defp validate_runtime_requires_setting(_runtime, _plugin), do: :ok
 
   # `command` is one bare executable name: no whitespace (the stdio transport
   # resolves it whole), and no `/` or `..` so a `vendored: true` command stays
@@ -978,12 +1041,13 @@ defmodule FermixCore.Plugins.Registry do
 
   # `result_items_pointer` says where the returned collection lives in the tool
   # RESULT, and the proxy caps that collection at call time either way. The
-  # signed output schema is a cross-check, not the enforcement — and Stage 0
-  # against Eden found it is usually absent: all 78 of its tools publish
-  # `outputSchema: null`, which is common for MCP servers. Demanding one would
-  # make `collection_policy` unusable against real servers, so the schema check
-  # applies when a schema is published and the pointer is syntax-checked when it
-  # is not. One rule, one stated condition — the runtime cap is unconditional.
+  # signed output schema is a cross-check, not the enforcement — and it is
+  # usually absent: the first hosted server this was built against published
+  # `outputSchema: null` on all 78 of its tools, which is common for MCP
+  # servers. Demanding one would make `collection_policy` unusable against real
+  # servers, so the schema check applies when a schema is published and the
+  # pointer is syntax-checked when it is not. One rule, one stated condition —
+  # the runtime cap is unconditional.
   defp validate_items_pointer(policy, nil, tag) do
     with {:ok, _segments} <-
            parse_pointer(Map.get(policy, "result_items_pointer"), "result_items_pointer", tag) do
@@ -1219,6 +1283,7 @@ defmodule FermixCore.Plugins.Registry do
     with :ok <- validate_tool_name(name),
          :ok <- validate_tool_namespace(name, plugin_name),
          :ok <- validate_tool_description(tool, name),
+         :ok <- validate_requires_setting(plugin, tool, name),
          :ok <- validate_tool_rail(plugin, tool) do
       validate_tool_scopes(plugin, tool)
     end
@@ -1294,6 +1359,31 @@ defmodule FermixCore.Plugins.Registry do
   end
 
   defp validate_tool_description(_tool, name), do: {:error, {:invalid_tool_description, name}}
+
+  # A tool may gate itself on exactly one of its own manifest's `config` keys
+  # (M40 §3.2). Two ways to declare a gate that could never take effect, both
+  # refused at install rather than left as a runtime surprise: a key the manifest
+  # does not declare (nothing could ever set it), and an `mcp`-rail entry (the
+  # gate governs what `Plugins.Capabilities` advertises, and mcp-rail entries are
+  # previews that never register there — MCP discovery is authoritative).
+  defp validate_requires_setting(
+         %Plugin{config: entries},
+         %{"requires_setting" => key} = tool,
+         name
+       ) do
+    cond do
+      Map.get(tool, "rail") == "mcp" ->
+        {:error, {:requires_setting_on_mcp_tool, name}}
+
+      not (is_binary(key) and key in Enum.map(entries, & &1.key)) ->
+        {:error, {:unknown_requires_setting, name, key}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp validate_requires_setting(_plugin, _tool, _name), do: :ok
 
   # Scope declarations are an OAuth granted-scope concept; `none`/`api_key`
   # plugins declare no scopes.

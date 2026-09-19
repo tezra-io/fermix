@@ -15,6 +15,7 @@ defmodule Fermix.CLI do
   alias Fermix.CLI.CapabilitiesCommand
   alias Fermix.CLI.ChatCommand
   alias Fermix.CLI.DevicesCommand
+  alias Fermix.CLI.DiagnosticsCommand
   alias Fermix.CLI.Doctor
   alias Fermix.CLI.HealthCommand
   alias Fermix.CLI.LogsCommand
@@ -85,6 +86,7 @@ defmodule Fermix.CLI do
   defp dispatch("uninstall", rest), do: UninstallCommand.run(rest)
   defp dispatch("migrate-to-app", rest), do: MigrateToApp.run(rest)
   defp dispatch("doctor", rest), do: Doctor.run(rest)
+  defp dispatch("diagnostics", rest), do: DiagnosticsCommand.run(rest)
   defp dispatch(unknown, _rest), do: unknown_command(unknown)
 
   @spec usage(non_neg_integer()) :: non_neg_integer()
@@ -110,11 +112,14 @@ defmodule Fermix.CLI do
       fermix ask    [--stdin] [--session ID] [--timeout MS] [--json] MESSAGE...
       fermix chat   [--stdin] [--session ID] [--timeout MS] [--json] MESSAGE...
       fermix run                        Start the daemon in the foreground
-      fermix service install   [--user|--system]   Install OS service unit
-      fermix service uninstall [--user|--system]   Remove OS service unit
+      fermix service install   [--user|--system] [--json] [--home PATH] [--port N]
+      fermix service uninstall [--user|--system] [--json]
+      fermix service status    [--json]            Show service, binding and engine identity
+      fermix service run                           Launch entry point for the packaged service
       fermix start             [--user|--system]   Start the installed OS service
       fermix stop              [--user|--system]   Stop the installed OS service
       fermix restart           [--user|--system]   Restart the installed OS service
+      fermix restart           [--json] [--when-idle]  Restart a packaged engine's service
       fermix status [--full] [--json]             Show daemon and overview status
       fermix health [--json]                      Show daemon-evaluated health
       fermix voice status [--json]                Show local voice companion status
@@ -134,6 +139,7 @@ defmodule Fermix.CLI do
       fermix uninstall                             Remove a Fermix.app-managed installation
       fermix migrate-to-app [--yes]                Move a Homebrew formula install to Fermix.app
       fermix doctor  [--full]                      Run post-install diagnostics
+      fermix diagnostics export --offline [--json] Collect a redacted support bundle with no daemon
       fermix version                               Print version
       fermix help                                  Show this message
     """)

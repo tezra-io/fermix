@@ -1,19 +1,22 @@
 import Config
 
-# --- `fermix acp` stdout purity (must stay first) ---------------------------
+# --- stdout purity for the verbs whose stdout is a wire (must stay first) ---
 #
 # An ACP agent's stdout carries JSON-RPC and nothing else — one stray byte
-# desynchronizes the client's framing. `Fermix.CLI.AcpCommand` moves the VM's
-# default logger handler to stderr, but its `run/2` is far too late: this file
+# desynchronizes the client's framing — and every `--json` verb prints one
+# schema-versioned envelope there that a caller decodes without stripping
+# anything first (M38 §4.6). `Fermix.CLI.StdoutPurity` moves the VM's default
+# logger handler to stderr, but any verb's own code is far too late: this file
 # is the boot config-provider chain (release boot order is kernel → stdlib →
 # `Config.Provider.boot` → … → logger → … → fermix_core), so the config
 # hydration below logs — an unresolvable `@keyring` sentinel warns, a plaintext
 # secret warns — while the only handler alive is the one kernel installed on
-# `:standard_io`. Those bytes reach stdout before the verb ever runs.
+# `:standard_io`. Those bytes reach stdout before the verb ever runs, and a
+# headless Linux host with a locked keyring is exactly where that happens.
 #
-# So make the move here, before anything can log, and scope it to the one verb
-# that needs it: nothing else about this process changes.
-acp_argv =
+# So make the move here, before anything can log, and scope it to the verbs
+# that need it: nothing else about this process changes.
+raw_argv =
   if Code.ensure_loaded?(Burrito.Util) and
        function_exported?(Burrito.Util, :running_standalone?, 0) and
        Burrito.Util.running_standalone?() do
@@ -27,27 +30,69 @@ acp_argv =
 # The verb is the first argument, as `Fermix.CLI.main/1` reads it. A `--`
 # separator is a shell artifact of `mix run … -- acp`, never a verb, so drop it
 # before looking; anything else in argv is the verb's own business.
+cli_argv = Enum.reject(raw_argv, &(&1 == "--"))
+
 acp_verb? =
-  case Enum.reject(acp_argv, &(&1 == "--")) do
+  case cli_argv do
     ["acp" | _rest] -> true
     _other -> false
   end
 
-if acp_verb? and Code.ensure_loaded?(Fermix.CLI.AcpCommand) and
-     function_exported?(Fermix.CLI.AcpCommand, :route_logs_to_stderr, 0) do
-  case Fermix.CLI.AcpCommand.route_logs_to_stderr() do
+# Asking for machine output IS the declaration that stdout is a wire, so the
+# flag is the predicate rather than a second list of verbs to keep in step with
+# the dispatcher.
+wire_stdout? = acp_verb? or "--json" in cli_argv
+
+if wire_stdout? and Code.ensure_loaded?(Fermix.CLI.StdoutPurity) and
+     function_exported?(Fermix.CLI.StdoutPurity, :route_logs_to_stderr, 0) do
+  case Fermix.CLI.StdoutPurity.route_logs_to_stderr() do
     :ok ->
       :ok
 
     {:error, reason} ->
-      # Not fatal here: the bridge re-checks and refuses to start for the same
-      # reason, which is the one refusal an operator should read. Say what boot
-      # could not do, on the channel that is not the protocol.
+      # Not fatal here: the verb runs and its own reader decides what to do with
+      # what it gets. Say what boot could not do, on the channel that is not the
+      # wire.
       IO.puts(
         :standard_error,
-        "fermix acp: boot logging stayed on stdout — " <>
-          Fermix.CLI.AcpCommand.log_route_message(reason)
+        "fermix: boot logging stayed on stdout — " <>
+          Fermix.CLI.StdoutPurity.message(reason)
       )
+  end
+end
+
+# --- `fermix service run` home binding (must precede the config reader) -----
+#
+# The systemd vendor unit a Linux package installs starts `fermix service run`
+# and carries no `FERMIX_HOME`: one unit file serves every account on the
+# machine, and the home each account chose is the CLI-owned binding at
+# `$XDG_CONFIG_HOME/fermix/service.json` (M38 §4.2, §4.7).
+#
+# It has to be resolved HERE, before the configuration reader below, because
+# that reader is what decides which home's `config.toml`, secrets, sockets and
+# memory database this daemon uses. A missing or invalid binding refuses the
+# boot loudly: defaulting to `~/.fermix` would silently start a daemon on
+# somebody else's data, which is the one outcome the binding exists to prevent.
+service_run? =
+  case cli_argv do
+    ["service", "run" | _rest] -> true
+    _other -> false
+  end
+
+if service_run? and Code.ensure_loaded?(FermixCore.BuildInfo) and
+     function_exported?(FermixCore.BuildInfo, :distribution_identity, 0) and
+     FermixCore.BuildInfo.distribution_identity() == "linux_package" and
+     Code.ensure_loaded?(Fermix.CLI.Service.Binding) and
+     function_exported?(Fermix.CLI.Service.Binding, :read, 1) do
+  case Fermix.CLI.Service.Binding.read([]) do
+    {:ok, %{home: home}} ->
+      System.put_env("FERMIX_HOME", home)
+
+    {:error, :missing} ->
+      raise "fermix service run: no service binding; run fermix service install --home <path>"
+
+    {:error, {:invalid, sentence}} ->
+      raise "fermix service run: " <> sentence
   end
 end
 
@@ -70,9 +115,6 @@ end
 if System.get_env("PHX_SERVER") do
   config :fermix_web, FermixWebWeb.Endpoint, server: true
 end
-
-config :fermix_web, FermixWebWeb.Endpoint,
-  http: [port: String.to_integer(System.get_env("PORT", "4030"))]
 
 # Hydrate Application env from the persisted ConfigStore snapshot. This is
 # the single source of truth for "what was set during setup". Any key added
@@ -103,6 +145,39 @@ if Code.ensure_loaded?(FermixCore.Setup.ConfigStore) and
     config :fermix_core, key, value
   end
 end
+
+# --- the HTTP listener's port (M38 §4.7) ------------------------------------
+#
+# Resolved AFTER the hydration above, because on a packaged engine the answer is
+# `[fermix_web] port` from this home's settings file and that is what hydration
+# just read. Two distribution configurations, one resolver: a packaged engine
+# refuses a `PORT` override outright (one unit file serves every account and
+# carries no per-account values, so a shell variable that moved the listener
+# would leave a daemon answering where nothing can predict); every other
+# distribution keeps `PORT`, then the persisted setting, then the default.
+#
+# A refusal raises here rather than starting on an unexplained port, which is
+# §4.7's rule for the listener: bind failure is a named boot failure, not a
+# daemon accepted with a missing browser door.
+web_listener =
+  FermixCore.Setup.WebListener.port(
+    FermixCore.BuildInfo.distribution_identity(),
+    System.get_env()
+  )
+
+web_listener_port =
+  case web_listener do
+    {:ok, %{port: port}} ->
+      port
+
+    {:error, {:port_not_used, sentence}} ->
+      raise "fermix: " <> sentence
+
+    {:error, {:invalid_port, :environment, value}} ->
+      raise "fermix: PORT=#{inspect(value)} is not a usable port number"
+  end
+
+config :fermix_web, FermixWebWeb.Endpoint, http: [port: web_listener_port]
 
 workspace_paths =
   if Code.ensure_loaded?(FermixCore.Setup.ConfigStore) and

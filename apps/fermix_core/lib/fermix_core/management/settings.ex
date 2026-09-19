@@ -27,6 +27,7 @@ defmodule FermixCore.Management.Settings do
   alias FermixCore.Management.Settings.Voice
   alias FermixCore.Meetings.Config, as: MeetingsConfig
   alias FermixCore.Readiness
+  alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.RestartState
   alias FermixCore.Setup.Wizard
@@ -233,19 +234,60 @@ defmodule FermixCore.Management.Settings do
   end
 
   defp applied(keys, before) do
+    current = ConfigStore.current_snapshot()
+    switch = engine_switch(before, current)
+
     %{
-      "applied" => keys,
+      "applied" => keys ++ derived_keys(keys, switch),
       "restart" => restart(),
       "readiness" => readiness(),
-      "side_effects" => side_effects(before, ConfigStore.current_snapshot())
+      "side_effects" => side_effects(before, current, switch)
     }
   end
 
-  # Changes the operator did not type, in the daemon's own words. One rule
-  # today, and it is a real one: choosing a transcription backend snaps the
-  # shared model key to that backend's default, because the key is shared across
-  # backends and an OpenAI-shaped model on Deepgram fails at the provider.
-  defp side_effects(before, current) do
+  # The voice engine before and after the write, or `nil` when it did not move.
+  # It is the one write in this daemon that rewrites keys of its own section, so
+  # it is resolved once and read by both of the answers that describe it.
+  defp engine_switch(before, current) do
+    previous = realtime_block(before)
+    now = realtime_block(current)
+
+    if realtime_engine(previous) == realtime_engine(now), do: nil, else: {previous, now}
+  end
+
+  # Keys the daemon wrote that the operator did not send. The model selects the
+  # engine, and the engine owns whether reasoning effort is a setting at all, so
+  # a client that rendered back only the keys it sent would leave rows of this
+  # very section showing values nobody asked for. `realtime_engine` is on this
+  # list and is not a row: it is the derived key the section is scoped by, and a
+  # client that reloads the section on seeing it draws the right rows.
+  @realtime_derived [
+    {:engine, "realtime_engine"},
+    {:model, "realtime_model"},
+    {:voice, "realtime_voice"},
+    {:reasoning_effort, "realtime_reasoning_effort"}
+  ]
+
+  defp derived_keys(_keys, nil), do: []
+
+  defp derived_keys(keys, {previous, now}) do
+    for {key, row} <- @realtime_derived,
+        row not in keys,
+        Keyword.get(previous, key) != Keyword.get(now, key),
+        do: row
+  end
+
+  # Changes the operator did not type, in the daemon's own words. Two rules, and
+  # both are real: choosing a transcription backend snaps the shared model key to
+  # that backend's default (the key is shared across backends and an
+  # OpenAI-shaped model on Deepgram fails at the provider), and choosing a voice
+  # model of the other engine moves the engine, the voice and the reasoning
+  # effort with it.
+  defp side_effects(before, current, switch) do
+    transcription_side_effects(before, current) ++ engine_side_effects(switch)
+  end
+
+  defp transcription_side_effects(before, current) do
     previous = transcription_model(before)
     now = transcription_model(current)
 
@@ -256,12 +298,55 @@ defmodule FermixCore.Management.Settings do
     end
   end
 
+  defp engine_side_effects(nil), do: []
+
+  defp engine_side_effects({previous, now}) do
+    engine_sentence(realtime_engine(now)) ++
+      voice_sentence(Keyword.get(previous, :voice), Keyword.get(now, :voice)) ++
+      effort_sentence(
+        Keyword.has_key?(previous, :reasoning_effort),
+        Keyword.has_key?(now, :reasoning_effort)
+      )
+  end
+
+  # The model is what the operator picked, so naming it back would only repeat
+  # them. The engine is the consequence they did not type, and it is why the
+  # rows below the model changed.
+  defp engine_sentence(engine), do: ["The engine changed to #{Voice.engine_label(engine)}."]
+
+  # Unlike the model, a voice usually survives a switch: only a Live-only voice
+  # has to move, so the sentence fires on the change rather than on the switch.
+  defp voice_sentence(same, same), do: []
+  defp voice_sentence(_previous, voice), do: ["The voice changed to #{voice}."]
+
+  defp effort_sentence(same, same), do: []
+
+  defp effort_sentence(true, false),
+    do: ["Reasoning effort was removed because this engine does not use it."]
+
+  defp effort_sentence(false, true),
+    do: ["Reasoning effort was restored because this engine uses it."]
+
   defp transcription_model(snapshot) do
     snapshot
     |> Map.get(:fermix_core, [])
     |> Keyword.get(:transcription, [])
     |> Keyword.get(:model, "")
     |> to_string()
+  end
+
+  defp realtime_block(snapshot) do
+    snapshot |> Map.get(:fermix_core, []) |> Keyword.get(:realtime, [])
+  end
+
+  # An absent engine is the struct default, which is how a first write to a home
+  # that has none, and a configuration written before the engine axis existed,
+  # both read as Realtime rather than as a switch nobody made.
+  defp realtime_engine(block) do
+    case Keyword.get(block, :engine) do
+      engine when is_binary(engine) -> engine
+      _absent -> %RealtimeConfig{}.engine
+    end
   end
 
   defp snapshot(opts), do: Keyword.get_lazy(opts, :snapshot, &ConfigStore.current_snapshot/0)

@@ -167,6 +167,21 @@ defmodule FermixOpik.MapperTest do
            }
   end
 
+  # Variable names are operator configuration, not user content, so the list of
+  # allowed variables the sandbox could not pass survives a content-free export.
+  test "tool_span exports the allowed variables the sandbox could not pass" do
+    metadata = %{tool: "shell", success: true, env_unresolved: ["FERMIX_PROD_ALPACA_API_KEY"]}
+
+    span =
+      Mapper.tool_span(metadata, %{duration_ms: 1},
+        trace_id: "t",
+        project_name: "fermix",
+        ended: @ended
+      )
+
+    assert span.metadata == %{env_unresolved: ["FERMIX_PROD_ALPACA_API_KEY"]}
+  end
+
   test "tool_span routes error_code/error_summary into error_info" do
     metadata = %{
       tool: "browser",
@@ -374,7 +389,7 @@ defmodule FermixOpik.MapperTest do
   end
 
   test "tool_span keeps the outbound MCP server identity" do
-    metadata = %{tool: "eden_get_note_markdown", success: true, mcp_server: "eden"}
+    metadata = %{tool: "acme_get_note_markdown", success: true, mcp_server: "acme"}
 
     span =
       Mapper.tool_span(metadata, %{duration_ms: 30},
@@ -383,7 +398,7 @@ defmodule FermixOpik.MapperTest do
         ended: @ended
       )
 
-    assert span.metadata.mcp_server == "eden"
+    assert span.metadata.mcp_server == "acme"
   end
 
   # `Gateway.DraftStream` emits :rotate with duration_us + edit_index; while those
@@ -416,8 +431,8 @@ defmodule FermixOpik.MapperTest do
   describe "mcp_client_span/3" do
     test "builds a general lifecycle point span from the emitter's allowlist" do
       metadata = %{
-        source_id: "plugin:eden",
-        plugin: "eden",
+        source_id: "plugin:acme",
+        plugin: "acme",
         phase: :security_block,
         result: :error,
         error_class: "tool_not_allowed",
@@ -441,8 +456,8 @@ defmodule FermixOpik.MapperTest do
       assert span.end_time == "2026-06-02T12:00:03.200Z"
 
       assert span.metadata == %{
-               source_id: "plugin:eden",
-               plugin: "eden",
+               source_id: "plugin:acme",
+               plugin: "acme",
                phase: "security_block",
                result: "error",
                error_class: "tool_not_allowed",
@@ -454,13 +469,13 @@ defmodule FermixOpik.MapperTest do
     # silently dropped, and that is what must stay true for anything sensitive.
     test "an unlisted metadata key never exports" do
       metadata = %{
-        source_id: "plugin:eden",
+        source_id: "plugin:acme",
         phase: :ready,
         result: :ok,
-        authorization: "Bearer eden_pat_fakevalue",
+        authorization: "Bearer acme_pat_fakevalue",
         mcp_session_id: "mcp-sess-01JFAKE",
         workspace_id: "ws_fake_0123456789",
-        base_url: "https://mcp.eden.so/mcp"
+        base_url: "https://mcp.acme.example/mcp"
       }
 
       span =
@@ -470,11 +485,92 @@ defmodule FermixOpik.MapperTest do
           ended: @ended
         )
 
-      assert span.metadata == %{source_id: "plugin:eden", phase: "ready", result: "ok"}
-      refute String.contains?(inspect(span), "eden_pat_fakevalue")
+      assert span.metadata == %{source_id: "plugin:acme", phase: "ready", result: "ok"}
+      refute String.contains?(inspect(span), "acme_pat_fakevalue")
       refute String.contains?(inspect(span), "mcp-sess")
       refute String.contains?(inspect(span), "ws_fake")
-      refute String.contains?(inspect(span), "mcp.eden.so")
+      refute String.contains?(inspect(span), "mcp.acme.example")
+    end
+  end
+
+  describe "voice_live_span/3" do
+    test "builds a general phase point span with the delegation correlation ids" do
+      span =
+        Mapper.voice_live_span(
+          %{
+            device_id: "dev-1",
+            model: "gpt-live-1",
+            voice: "marin",
+            provider_session_id: "sess_live_abc",
+            delegation_id: "dlg_1",
+            revision: 2,
+            turn_session_id: "voice_delegation_7",
+            status: "completed"
+          },
+          %{duration_ms: 1_200},
+          trace_id: "trace-1",
+          parent_span_id: "wrap-1",
+          project_name: "fermix",
+          ended: @ended,
+          phase: :delegation_stop
+        )
+
+      assert span.name == "voice_live:delegation_stop"
+      assert span.type == "general"
+      assert span.trace_id == "trace-1"
+      assert span.parent_span_id == "wrap-1"
+      assert span.metadata.delegation_id == "dlg_1"
+      assert span.metadata.revision == 2
+      assert span.metadata.turn_session_id == "voice_delegation_7"
+      assert span.metadata.status == "completed"
+      assert span.metadata.provider_session_id == "sess_live_abc"
+      assert span.metadata.model == "gpt-live-1"
+
+      # The delegation's elapsed time is the span's own extent, not a dropped
+      # measurement: a point span would erase how long the backend turn took.
+      assert span.start_time == Mapper.iso(Mapper.start_of(@ended, 1_200))
+      assert span.end_time == Mapper.iso(@ended)
+    end
+
+    test "a phase with no duration is a point span and drops absent keys" do
+      span =
+        Mapper.voice_live_span(
+          %{model: "gpt-live-1", reason: "moderation cut the reply"},
+          %{},
+          trace_id: "trace-1",
+          parent_span_id: "wrap-1",
+          project_name: "fermix",
+          ended: @ended,
+          phase: :provider_error
+        )
+
+      assert span.name == "voice_live:provider_error"
+      assert span.start_time == span.end_time
+      assert span.metadata == %{model: "gpt-live-1", reason: "moderation cut the reply"}
+    end
+
+    # There is no global metadata allowlist: this builder's key set is the whole
+    # contract, and a caption or transcript fragment must never reach a span.
+    test "exports no spoken content" do
+      span =
+        Mapper.voice_live_span(
+          %{
+            model: "gpt-live-1",
+            caption: "my card number is 4111 1111 1111 1111",
+            transcript: "book the flight",
+            instructions: "You are a live voice companion"
+          },
+          %{},
+          trace_id: "trace-1",
+          parent_span_id: "wrap-1",
+          project_name: "fermix",
+          ended: @ended,
+          phase: :session_started
+        )
+
+      refute String.contains?(inspect(span), "4111")
+      refute String.contains?(inspect(span), "book the flight")
+      refute String.contains?(inspect(span), "live voice companion")
     end
   end
 end

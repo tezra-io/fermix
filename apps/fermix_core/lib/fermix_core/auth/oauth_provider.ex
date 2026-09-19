@@ -21,7 +21,11 @@ defmodule FermixCore.Auth.OAuthProvider do
           token_auth: :body | :basic,
           scope_delimiter: String.t(),
           fixed_port?: boolean(),
-          client_rejection_errors: [String.t()]
+          client_rejection_errors: [String.t()],
+          region: String.t() | nil,
+          extra_token_params: %{optional(String.t()) => String.t()},
+          public_redirect_uri: String.t() | nil,
+          region_probe: %{url: String.t(), path: [String.t()]} | nil
         }
 
   @enforce_keys [
@@ -71,7 +75,30 @@ defmodule FermixCore.Auth.OAuthProvider do
     # and secret) the operator saved for it — see `Auth.ClientRejection`. Empty
     # for the built-in providers: their clients are Fermix's own, not the
     # operator's, so no refusal of theirs is reclassified.
-    client_rejection_errors: []
+    client_rejection_errors: [],
+    # An opaque provider-region label recorded on the auth entry at sign-in, for
+    # the providers whose API is regional (Tesla). The region is knowable only
+    # while the grant is being minted, so nothing downstream can re-derive it.
+    # `nil` for every provider that has no regions.
+    region: nil,
+    # Extra form fields for the AUTHORIZATION_CODE EXCHANGE ONLY, never for
+    # refresh: Tesla's exchange is refused without an `audience` naming its
+    # region's Fleet API base URL, while its documented refresh form has none.
+    # The exchange's own fields win over these — see `OAuthFlow.exchange_code/5`.
+    extra_token_params: %{},
+    # The registered redirect URI, when it is not the loopback URL the listener
+    # binds. Tesla accepts only public https redirect URIs, so the registered one
+    # is a static bounce page that forwards the callback query string to the
+    # loopback listener: this URI is what authorize and exchange send, while the
+    # listener still binds `redirect_host`/`redirect_port` locally.
+    public_redirect_uri: nil,
+    # How a sign-in asks a regional provider which region the account itself is
+    # in: the `url` to GET with the fresh access token, and the `path` its JSON
+    # answers the region id under. The region the operator chose is confirmed
+    # against that answer before the grant is stored, so a mismatch is recorded
+    # on the entry instead of surfacing as a refusal on the first tool call.
+    # `nil` for every provider that has no regions.
+    region_probe: nil
   ]
 
   @doc """

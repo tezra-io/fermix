@@ -161,6 +161,10 @@ defmodule FermixOpik.Mapper do
             :target_ref,
             :selector,
             :policy_enforcement,
+            # Allowed sandbox variables the shell tool could not pass: names
+            # only, operator configuration rather than user content, so what a
+            # command ran without stays visible in a content-free export.
+            :env_unresolved,
             # `MCP.Capability.invoke/3` stamps the outbound server on every MCP
             # tool exec; without it here the server identity was dropped from
             # every Opik tool span (this map is the only allowlist there is).
@@ -249,6 +253,50 @@ defmodule FermixOpik.Mapper do
           voice: Map.get(metadata, :voice),
           reason: Map.get(metadata, :reason),
           attempt: Map.get(metadata, :attempt)
+        })
+    }
+    |> drop_nil()
+  end
+
+  @doc """
+  Build a Live-voice phase span from a `[:fermix, :voice_live, <phase>]` event.
+
+  The backend turn a delegation triggers is an ordinary `llm`/`tool` span under
+  its own run; these mark the CALL's lifecycle — the provider session, each
+  delegation's start and terminal state, and a mid-call provider refusal.
+
+  The key list below is the whole contract (there is no global allowlist), and
+  it names correlation ids only: a Live call holds captions, transcript
+  fragments and the composed instructions, and none of them may reach a span.
+  `delegation_stop` carries `duration_ms`, so a delegation span has real extent
+  rather than collapsing the backend turn's elapsed time to a point.
+  """
+  @spec voice_live_span(map(), map(), keyword()) :: map()
+  def voice_live_span(metadata, measurements, opts) do
+    ended = Keyword.fetch!(opts, :ended)
+    duration_ms = Map.get(measurements, :duration_ms, 0)
+    started = start_of(ended, duration_ms)
+
+    %{
+      id: new_id(started),
+      trace_id: Keyword.fetch!(opts, :trace_id),
+      parent_span_id: Keyword.get(opts, :parent_span_id),
+      project_name: Keyword.fetch!(opts, :project_name),
+      name: "voice_live:#{Keyword.fetch!(opts, :phase)}",
+      type: "general",
+      start_time: iso(started),
+      end_time: iso(ended),
+      metadata:
+        drop_nil(%{
+          device_id: Map.get(metadata, :device_id),
+          model: Map.get(metadata, :model),
+          voice: Map.get(metadata, :voice),
+          provider_session_id: Map.get(metadata, :provider_session_id),
+          delegation_id: Map.get(metadata, :delegation_id),
+          revision: Map.get(metadata, :revision),
+          turn_session_id: Map.get(metadata, :turn_session_id),
+          status: stringify(Map.get(metadata, :status)),
+          reason: stringify(Map.get(metadata, :reason))
         })
     }
     |> drop_nil()

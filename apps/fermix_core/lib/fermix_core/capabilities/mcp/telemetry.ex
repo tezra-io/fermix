@@ -93,8 +93,8 @@ defmodule FermixCore.Capabilities.MCP.Telemetry do
   Emit one `[:fermix, :mcp_client, :lifecycle]` event.
 
   `source` is the source-qualified server identity — `%{source_id: {:plugin,
-  "eden"}, plugin: "eden"}` or `%{source_id: {:operator, "fs"}}`. `source_id` is
-  serialized to a stable string (`"plugin:eden"`): a tuple raises on the daemon
+  "acme"}, plugin: "acme"}` or `%{source_id: {:operator, "fs"}}`. `source_id` is
+  serialized to a stable string (`"plugin:acme"`): a tuple raises on the daemon
   wire path and is `inspect`-ed into JSONL, so neither consumer can group on it.
 
   `result` is the operation's return value verbatim (`:ok` | `{:ok, _}` |

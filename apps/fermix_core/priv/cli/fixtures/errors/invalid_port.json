@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "invalid_port",
+    "sentence": "the web listener port must be a whole number from 1024 through 65535, and 22 is not"
+  },
+  "ok": false,
+  "schema_version": 1
+}

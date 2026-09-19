@@ -29,7 +29,14 @@ defmodule FermixCore.Plugins.Plugin do
           validation: auth_validation() | nil
         }
 
-  @type config_entry :: %{key: String.t(), prompt: String.t(), required: boolean()}
+  @type config_kind :: :text | :boolean
+
+  @type config_entry :: %{
+          key: String.t(),
+          prompt: String.t(),
+          required: boolean(),
+          kind: config_kind()
+        }
 
   @type t :: %__MODULE__{
           schema_version: pos_integer(),

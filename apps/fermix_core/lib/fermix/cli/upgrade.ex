@@ -8,8 +8,9 @@ defmodule Fermix.CLI.Upgrade do
   sequence and rolls back from `~/.fermix/.previous` if the post-swap
   health check fails within `@health_check_timeout_ms`.
 
-  Package-manager installs (Homebrew, dpkg) are detected up front
-  and we refuse to mutate them; instead we print the right
+  Package-manager installs (Homebrew, dpkg, rpm, pacman) and engines
+  this project built as a Linux package are detected up front and we
+  refuse to mutate them; instead we print the right
   `brew upgrade` / `apt upgrade` command and exit non-zero so the
   operator knows to use their package manager.
   """
@@ -43,7 +44,7 @@ defmodule Fermix.CLI.Upgrade do
          current: current,
          latest: manifest.latest,
          available: Manifest.compare_versions(current, manifest.latest) == :lt,
-         install_method: install_method(opts).detect(Keyword.get(opts, :binary_path))
+         install_method: detect_install_method(opts)
        }}
     end
   end
@@ -51,9 +52,7 @@ defmodule Fermix.CLI.Upgrade do
   @spec run(keyword()) :: :ok | {:error, term()}
   def run(opts \\ []) do
     with :ok <- standalone_upgrade(opts) do
-      binary_path = Keyword.get(opts, :binary_path)
-
-      case install_method(opts).detect(binary_path) do
+      case detect_install_method(opts) do
         {:managed, name, hint} -> {:error, {:managed_install, name, hint}}
         {:error, reason} -> {:error, reason}
         {:unmanaged, installed_path} -> do_upgrade(installed_path, opts)
@@ -225,6 +224,17 @@ defmodule Fermix.CLI.Upgrade do
   # are injectable so `standalone_upgrade/1`'s precedence is provable with
   # doubles that raise, rather than inferred from a returned error tuple.
   defp install_method(opts), do: Keyword.get(opts, :install_method, InstallMethod)
+
+  # The classifier reads the same build identity this module's own app-engine
+  # gate reads, and the same command seams every other CLI verb injects, so a
+  # packaged engine's refusal is provable without a packaged host.
+  defp detect_install_method(opts) do
+    install_method(opts).detect(
+      Keyword.get(opts, :binary_path),
+      Keyword.take(opts, [:build_info, :cmd, :find_executable, :resolve_self])
+    )
+  end
+
   defp swapper(opts), do: Keyword.get(opts, :swapper, Swapper)
 
   defp current_version, do: BuildInfo.product_version()

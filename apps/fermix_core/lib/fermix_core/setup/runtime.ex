@@ -39,6 +39,7 @@ defmodule FermixCore.Setup.Runtime do
                    :fast,
                    :realtime_enabled,
                    :realtime_api_key,
+                   :realtime_model,
                    :realtime_voice,
                    :realtime_max_session_minutes,
                    :realtime_max_cost_cents,

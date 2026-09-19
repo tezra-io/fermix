@@ -116,6 +116,8 @@ defmodule FermixCore.Management.Doctor.Descriptor do
         Checks.service_unit(check_opts)
       end),
       spec("daemon_socket", :runtime, :critical, :always, &Checks.daemon_socket/0),
+      spec("engine_alignment", :distribution, :warning, :always, &Checks.engine_alignment/0),
+      spec("package_origin", :distribution, :info, :always, &Checks.package_origin/0),
       spec("opik_readiness", :configuration, :info, :configured, &Checks.opik_readiness/0),
       spec("recent_log_activity", :runtime, :info, :always, &Checks.recent_log_activity/0),
       spec("compaction_config", :configuration, :warning, :always, &Checks.compaction_config/0),

@@ -1,0 +1,150 @@
+.TH FERMIX 1 "2026-09-13" "Fermix" "Fermix Manual"
+.SH NAME
+fermix \- Elixir-native multi-agent AI platform
+.SH SYNOPSIS
+.B fermix
+.I command
+.RI [ options ]
+.SH DESCRIPTION
+.B fermix
+is the engine and the command line of the Fermix platform: a background daemon
+that runs the agents, the providers, the tools and the memory, and a set of
+verbs that configure it, inspect it and talk to it.
+.PP
+A Fermix installed from a distribution package runs as a systemd user service.
+The package owns the unit at
+.IR /usr/lib/systemd/user/fermix.service ,
+and
+.B fermix service
+records which home this account's service runs from, enables the unit and
+verifies that the daemon answers. Output from the service goes to the journal:
+.IP
+journalctl \-\-user \-u fermix
+.SH COMMANDS
+.TP
+.B fermix setup
+Run the setup assistant. It opens the browser wizard when a graphical session
+is available and the terminal wizard otherwise; \fB\-\-web\fR, \fB\-\-cli\fR
+and \fB\-\-terminal\fR choose one explicitly.
+.TP
+.B fermix auth
+Sign in to a provider account, show the current sign-in, or sign out:
+\fBlogin\fR, \fBstatus\fR, \fBlogout\fR.
+.TP
+.B fermix ask
+Send one message to the assistant and print the reply.
+.TP
+.B fermix chat
+Hold a conversation with the assistant in the terminal.
+.TP
+.B fermix run
+Run the daemon in the foreground, in this terminal.
+.TP
+.B fermix sandbox
+Inspect and change which directories agents may read and write.
+.TP
+.B fermix grant
+Grant agents access to one directory.
+.TP
+.B fermix revoke
+Withdraw a directory grant.
+.TP
+.B fermix service
+Manage this account's background service:
+\fBinstall\fR [\fB\-\-home\fR \fIPATH\fR] [\fB\-\-port\fR \fIN\fR],
+\fBuninstall\fR, \fBstatus\fR and \fBrun\fR, which is the launch entry point
+the packaged unit uses. \fB\-\-json\fR prints one machine-readable envelope.
+.TP
+.B fermix start
+Start the installed background service.
+.TP
+.B fermix stop
+Stop the installed background service.
+.TP
+.B fermix restart
+Restart the installed background service.
+.TP
+.B fermix status
+Show the daemon's status and an overview of what it is running.
+.TP
+.B fermix health
+Show the health the daemon evaluates for itself.
+.TP
+.B fermix voice
+Show the local voice companion's status.
+.TP
+.B fermix acp
+Bridge an agent client's standard input and output to the daemon, and forget a
+remembered client identity.
+.TP
+.B fermix agents
+Show the main agent and its workers.
+.TP
+.B fermix capabilities
+Show the capabilities registered in this engine.
+.TP
+.B fermix skills
+List, view and reload the installed skills.
+.TP
+.B fermix plugins
+List the catalog, install, enable, disable and sign in to plugins.
+.TP
+.B fermix pair
+Pair a mobile companion device.
+.TP
+.B fermix devices
+List and revoke paired mobile devices.
+.TP
+.B fermix memory
+Review and restore what the assistant remembers.
+.TP
+.B fermix logs
+Show the daemon's own log file.
+.TP
+.B fermix upgrade
+Update the engine. An engine installed from a distribution package refuses and
+names the command for that family, because the package manager owns the files.
+.TP
+.B fermix uninstall
+Remove an application-managed installation.
+.TP
+.B fermix migrate-to-app
+Move a Homebrew formula install to the macOS application.
+.TP
+.B fermix doctor
+Run post-install diagnostics and print what to do about each finding.
+.TP
+.B fermix diagnostics
+.RI "export --offline [--json]"
+Collect a bounded, redacted support bundle from what this machine can answer
+with no daemon running. Every source reports available, unavailable or not
+applicable, so a stopped daemon or an unreadable journal is evidence rather
+than a lost bundle.
+.TP
+.B fermix version
+Print the version of this engine.
+.TP
+.B fermix help
+Print the command summary.
+.SH FILES
+.TP
+.I ~/.fermix
+The default Fermix home: configuration, memory, logs and the control socket.
+.TP
+.I $XDG_CONFIG_HOME/fermix/service.json
+Which home this account's background service runs from.
+.TP
+.I /usr/lib/systemd/user/fermix.service
+The service unit the package owns.
+.TP
+.I /usr/share/fermix/engine.json
+The installed engine's identity.
+.TP
+.I /usr/lib/fermix/cosign
+The signature verifier the engine uses for plugins and releases.
+.SH SEE ALSO
+.BR systemctl (1),
+.BR journalctl (1),
+.BR loginctl (1)
+.SH AUTHOR
+Tezra <hello@fermix.ai>

@@ -1008,6 +1008,18 @@ defmodule FermixCore.Tools.JobsTest do
     assert first["status"] == "error"
   end
 
+  test "list_job_runs reports how many tool calls failed in a run", %{context: context} do
+    job_id = seed_job(context, "Blocked")
+
+    seed_run(context, job_id, "run_blocked", "ok", ~U[2026-06-01 08:00:00Z], %{tool_failures: 2})
+    seed_run(context, job_id, "run_clean", "ok", ~U[2026-06-02 08:00:00Z], %{tool_failures: 0})
+
+    assert {:ok, listed} = ListJobRuns.execute(%{"job_id" => job_id}, context)
+    assert %{"runs" => [clean, blocked]} = Jason.decode!(listed.output)
+    assert clean["tool_failures"] == 0
+    assert blocked["tool_failures"] == 2
+  end
+
   test "list_job_runs filters by status", %{context: context} do
     job_id = seed_job(context, "Filtered")
 
@@ -1058,25 +1070,28 @@ defmodule FermixCore.Tools.JobsTest do
     Jason.decode!(created.output)["id"]
   end
 
-  defp seed_run(context, job_id, run_id, status, at) do
+  defp seed_run(context, job_id, run_id, status, at, extra \\ %{}) do
     {:ok, _run} =
       Repo.upsert_job_run(
-        %{
-          id: run_id,
-          job_id: job_id,
-          session_id: "cron_#{job_id}_#{run_id}",
-          trigger: "schedule",
-          status: status,
-          claimed_at: at,
-          started_at: at,
-          completed_at: at,
-          prompt_snapshot: "do the thing",
-          job_config_snapshot: %{"task_prompt" => "Report."},
-          final_response: "done",
-          token_usage: %{"total" => 10},
-          created_at: at,
-          updated_at: at
-        },
+        Map.merge(
+          %{
+            id: run_id,
+            job_id: job_id,
+            session_id: "cron_#{job_id}_#{run_id}",
+            trigger: "schedule",
+            status: status,
+            claimed_at: at,
+            started_at: at,
+            completed_at: at,
+            prompt_snapshot: "do the thing",
+            job_config_snapshot: %{"task_prompt" => "Report."},
+            final_response: "done",
+            token_usage: %{"total" => 10},
+            created_at: at,
+            updated_at: at
+          },
+          extra
+        ),
         server: context.memory_repo
       )
   end

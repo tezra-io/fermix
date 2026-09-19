@@ -42,11 +42,67 @@ defmodule FermixCore.Capabilities.MCP.ServerTest do
   defmodule StubDiscoverer do
     @behaviour FermixCore.Capabilities.MCP.Discoverer
 
+    @table :mcp_server_test_discoverer
+
     def set_tools(tools), do: :persistent_term.put({__MODULE__, :tools}, tools)
     def set_error(reason), do: :persistent_term.put({__MODULE__, :tools}, {:error, reason})
 
+    # A per-call script, fixed BEFORE the server starts: attempt N gets entry N
+    # and the last entry repeats. Swapping one answer for another mid-flight is
+    # what hid a retry budget behind the test process being scheduled in time.
+    #
+    # A `{:gate, waiter, result}` entry announces the attempt to `waiter` and
+    # blocks in the server until it replies `:discovery_release`, so the test
+    # decides when that attempt lands instead of racing it.
+    def script(entries) when is_list(entries) do
+      cleanup()
+      :ets.new(@table, [:named_table, :public, :set])
+      :ets.insert(@table, [{:attempts, 0}, {:script, entries}])
+      :ok
+    end
+
+    def cleanup do
+      case :ets.whereis(@table) do
+        :undefined -> :ok
+        tid -> :ets.delete(tid)
+      end
+    end
+
     @impl true
     def list_tools(_client) do
+      case next_scripted() do
+        :unscripted -> unscripted_answer()
+        {:gate, waiter, attempt, result} -> await_release(waiter, attempt, result)
+        result -> result
+      end
+    end
+
+    defp next_scripted do
+      case :ets.whereis(@table) do
+        :undefined ->
+          :unscripted
+
+        _tid ->
+          attempt = :ets.update_counter(@table, :attempts, 1)
+          [{:script, entries}] = :ets.lookup(@table, :script)
+          entries |> Enum.at(min(attempt - 1, length(entries) - 1)) |> tag(attempt)
+      end
+    end
+
+    defp tag({:gate, waiter, result}, attempt), do: {:gate, waiter, attempt, result}
+    defp tag(result, _attempt), do: result
+
+    defp await_release(waiter, attempt, result) do
+      send(waiter, {:discovery_attempt, attempt, self()})
+
+      receive do
+        :discovery_release -> result
+      after
+        5_000 -> {:error, :discovery_release_timeout}
+      end
+    end
+
+    defp unscripted_answer do
       case :persistent_term.get({__MODULE__, :tools}, []) do
         {:error, reason} -> {:error, reason}
         tools when is_list(tools) -> {:ok, tools}
@@ -73,6 +129,7 @@ defmodule FermixCore.Capabilities.MCP.ServerTest do
 
     on_exit(fn ->
       StubCaller.cleanup()
+      StubDiscoverer.cleanup()
 
       try do
         :persistent_term.erase({StubDiscoverer, :tools})
@@ -218,7 +275,17 @@ defmodule FermixCore.Capabilities.MCP.ServerTest do
       cap_registry: cap_registry,
       mcp_registry: mcp_registry
     } do
-      StubDiscoverer.set_error(:transport_closed)
+      # Both answers are fixed before the server starts: attempt 1 fails, attempt
+      # 2 succeeds. Flipping the stub mid-flight put the success behind a ~300ms
+      # retry budget, so a descheduled test process spent all five attempts on
+      # the error and the server stopped. Attempt 2 also waits for this test's
+      # release, which is what makes the empty-registry read below a fact about
+      # a transient error rather than about when the flip landed.
+      :ok =
+        StubDiscoverer.script([
+          {:error, :transport_closed},
+          {:gate, self(), {:ok, [%{name: "create_issue", description: "x", input_schema: %{}}]}}
+        ])
 
       {:ok, pid} =
         McpServer.start_link(
@@ -231,28 +298,22 @@ defmodule FermixCore.Capabilities.MCP.ServerTest do
           max_discovery_attempts: 5
         )
 
-      # Wait until the first discovery attempt has actually failed (recorded a
-      # retry) rather than guessing 40ms, then confirm the transient error
-      # registered nothing.
-      assert eventually(fn -> :sys.get_state(pid).discovery_attempts >= 1 end)
+      # The second attempt being in the discoverer is the proof that the first
+      # one failed and was retried; nothing has been registered yet because this
+      # attempt cannot return until released.
+      assert_receive {:discovery_attempt, 2, ^pid}, 5_000
       assert CapabilityRegistry.list(cap_registry, kind: :mcp) == []
 
-      StubDiscoverer.set_tools([
-        %{name: "create_issue", description: "x", input_schema: %{}}
-      ])
+      send(pid, :discovery_release)
 
-      # Wait for a retry to actually discover + register, instead of a fixed
-      # 120ms sleep that races the retry timer under CI load (the flake:
-      # left: [%{name}], right: []).
-      assert eventually(
-               fn ->
-                 match?(
-                   [%{name: "mcp_github_create_issue"}],
-                   CapabilityRegistry.list(cap_registry, kind: :mcp)
-                 )
-               end,
-               2_000
-             )
+      # `:sys.get_state/1` is queued behind the `:discover` continuation the
+      # release unblocks, so it returns only once registration has finished: a
+      # completion barrier rather than a poll against a retry budget. A
+      # successful pass is also what resets the attempt counter.
+      assert :sys.get_state(pid).discovery_attempts == 0
+
+      assert [%{name: "mcp_github_create_issue"}] =
+               CapabilityRegistry.list(cap_registry, kind: :mcp)
 
       # The server is linked (start_link); unlink before the kill or the
       # :shutdown exit signal propagates back and kills the test process —

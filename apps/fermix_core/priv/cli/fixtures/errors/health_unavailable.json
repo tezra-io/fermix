@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "health_unavailable",
+    "sentence": "The background service is running, but its web address did not answer, so the setup page is not reachable yet. Read what it said with journalctl --user -u fermix."
+  },
+  "ok": false,
+  "schema_version": 1
+}

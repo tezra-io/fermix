@@ -7,6 +7,8 @@ defmodule FermixCore.Providers.Error do
   parsing provider-specific log strings.
   """
 
+  @empty_body_message "The response body was empty, so the provider gave no reason for this status."
+
   @type provider :: atom()
   @type adapter :: atom()
 
@@ -55,7 +57,7 @@ defmodule FermixCore.Providers.Error do
       when is_atom(provider) and is_atom(adapter) and is_integer(status) and status > 0 do
     decoded = decode_body(body)
     code = error_code(decoded)
-    message = error_message(decoded) || "HTTP #{status}"
+    message = api_message(body, decoded, status)
 
     {:provider_error,
      %{
@@ -219,6 +221,20 @@ defmodule FermixCore.Providers.Error do
                 "expected :before_response, :mid_stream, or :unknown"
     end
   end
+
+  # A zero-byte or whitespace-only body is not JSON, so it decodes to
+  # %{"error" => ""} and its message comes back "" rather than nil: the
+  # "HTTP <status>" floor never applied and the error carried nothing (Codex
+  # answered a cron run's first call with a bodiless 404, 2026-09-15). Say what
+  # is actually known, rather than leave a blank for the operator, or an agent
+  # reading the run ledger, to fill with a guess.
+  defp api_message(body, decoded, status) do
+    if blank_body?(body),
+      do: @empty_body_message,
+      else: error_message(decoded) || "HTTP #{status}"
+  end
+
+  defp blank_body?(body), do: is_binary(body) and String.trim(body) == ""
 
   defp decode_body(body) when is_map(body), do: body
 

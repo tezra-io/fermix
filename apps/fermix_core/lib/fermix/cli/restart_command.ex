@@ -2,7 +2,7 @@ defmodule Fermix.CLI.RestartCommand do
   @moduledoc """
   `fermix restart` — restart the daemon.
 
-  Two configurations, two paths, one job.
+  Three configurations, three paths, one job.
 
   **Standalone:** restarts the installed OS service. Refuses on uninstalled
   hosts (no implicit install) and surfaces scope mismatches the same way
@@ -16,14 +16,24 @@ defmodule Fermix.CLI.RestartCommand do
   to: an app-managed engine refuses `fermix service install`, so the standalone
   "no service installed, run `fermix service install` first" message would send
   the operator round a loop with no exit.
+
+  **Packaged (M38 §4.1):** systemd owns the termination signal, so this CLI
+  never stops and starts anything itself. It takes the admission lease from the
+  generation being replaced, resets the start budget, issues one `systemctl
+  --user restart`, waits for a different generation and reports the typed
+  alignment. `--json` prints the shared envelope; `--when-idle` is refused with
+  a sentence until protocol 3 publishes `lifecycle.prepare_idle`, because a mode
+  that silently interrupted work would be the opposite of what it asked for.
   """
 
   alias Fermix.CLI.Daemon.Client
+  alias Fermix.CLI.MachineOutput
   alias Fermix.CLI.Service
   alias Fermix.CLI.ServiceCommand
   alias FermixCore.BuildInfo
 
   @switches [user: :boolean, system: :boolean]
+  @packaged_switches [json: :boolean, when_idle: :boolean]
 
   # 250 ms × 120 = 30 s. A restarting daemon has to stop, be relaunched by
   # launchd, boot its supervision tree, and bind the socket; this is the same
@@ -39,11 +49,87 @@ defmodule Fermix.CLI.RestartCommand do
   def run(argv, deps) when is_list(argv) and is_list(deps) do
     build_info = Keyword.get(deps, :build_info, BuildInfo)
 
-    if build_info.app_engine?() do
-      restart_app_managed(deps)
-    else
-      restart_legacy(argv, deps)
+    cond do
+      build_info.distribution_identity() == "linux_package" -> restart_packaged(argv, deps)
+      build_info.app_engine?() -> restart_app_managed(deps)
+      true -> restart_legacy(argv, deps)
     end
+  end
+
+  # ── packaged ───────────────────────────────────────────────────────────────
+
+  defp restart_packaged(argv, deps) do
+    case OptionParser.parse(argv, strict: @packaged_switches) do
+      {opts, [], []} -> packaged_mode(opts, deps)
+      {_opts, [extra | _rest], []} -> usage("unexpected argument: #{extra}")
+      {_opts, _argv, invalid} -> usage("invalid options: #{inspect(invalid)}")
+    end
+  end
+
+  defp packaged_mode(opts, deps) do
+    json? = Keyword.get(opts, :json, false)
+
+    # Deferred and recorded (M38 §4.1): published protocol 1 and 2 have no
+    # `lifecycle.prepare_idle`, so the only restart this engine can perform is
+    # the interrupting one. Saying so is the whole answer — quietly running the
+    # interrupting restart instead would be the opposite of what was asked.
+    if Keyword.get(opts, :when_idle, false) do
+      refuse(:idle_restart_unavailable, [], json?)
+    else
+      run_packaged(json?, deps)
+    end
+  end
+
+  defp run_packaged(json?, deps) do
+    service = Keyword.get(deps, :service, Service)
+
+    case service.restart(:user, Keyword.get(deps, :service_opts, [])) do
+      {:ok, result} -> report_packaged(result, json?)
+      {:error, reason} -> refuse_reason(reason, json?, deps)
+    end
+  end
+
+  defp report_packaged(result, true) do
+    IO.puts(MachineOutput.ok(result))
+    0
+  end
+
+  defp report_packaged(result, false) do
+    IO.puts(
+      "fermix restart: daemon restarted (pid #{result["pid"]}, was " <>
+        "#{result["previous_pid"] || "not running"}, engine #{result["alignment"]})."
+    )
+
+    0
+  end
+
+  defp refuse_reason(reason, json?, deps) do
+    case ServiceCommand.published_reason(reason, deps) do
+      {code, details} -> refuse(code, details, json?)
+      :untyped -> refuse_untyped(ServiceCommand.format_reason(reason), json?)
+    end
+  end
+
+  defp refuse(code, details, true) do
+    IO.puts(MachineOutput.error(code, details))
+    1
+  end
+
+  defp refuse(code, details, false) do
+    abort(MachineOutput.sentence(code, details))
+  end
+
+  defp refuse_untyped(sentence, true) do
+    IO.puts(MachineOutput.error(:systemctl_failed, output: sentence))
+    1
+  end
+
+  defp refuse_untyped(sentence, false), do: abort(sentence)
+
+  defp usage(message) do
+    IO.puts(:stderr, "fermix restart: #{message}")
+    IO.puts(:stderr, "Usage: fermix restart [--json] [--when-idle]")
+    2
   end
 
   # ── app-managed ────────────────────────────────────────────────────────────

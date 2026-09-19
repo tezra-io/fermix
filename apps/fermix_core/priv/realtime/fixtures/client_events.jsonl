@@ -1,7 +1,9 @@
 {"type":"client_hello","protocol_version":1}
+{"type":"client_hello","protocol_version":2}
 {"type":"call_start"}
 {"type":"audio_chunk","audio":"MTIzNA=="}
 {"type":"interrupt"}
 {"type":"interrupt","audio_end_ms":1500}
 {"type":"mute","enabled":true}
+{"type":"task_cancel","delegation_id":"dg_01H9"}
 {"type":"call_stop"}

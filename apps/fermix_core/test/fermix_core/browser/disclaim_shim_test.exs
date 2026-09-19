@@ -12,16 +12,20 @@ defmodule FermixCore.Browser.DisclaimShimTest do
       assert out =~ "disclaim: ok"
     end
 
+    # The child holds on its stdin until the pid has been read: one that exits
+    # first closes the port, and `Port.info/2` then answers nil. Releasing it
+    # through the pipe also proves stdin survived the exec.
     test "SETEXEC keeps the pid, inherits stdio, and delivers exit_status" do
       port =
         Port.open({:spawn_executable, shim!()}, [
           :binary,
           :exit_status,
           :stderr_to_stdout,
-          {:args, ["/bin/sh", "-c", "echo pid=$$; echo shim-stderr >&2; exit 7"]}
+          {:args, ["/bin/sh", "-c", "echo pid=$$; echo shim-stderr >&2; read go; exit 7"]}
         ])
 
       {:os_pid, os_pid} = Port.info(port, :os_pid)
+      true = Port.command(port, "go\n")
       {output, exit_status} = collect(port, "")
 
       assert exit_status == 7

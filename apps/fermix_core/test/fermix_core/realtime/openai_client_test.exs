@@ -60,6 +60,20 @@ defmodule FermixCore.Realtime.OpenAIClientTest do
     refute Map.has_key?(event.session, :max_response_output_tokens)
   end
 
+  # The cap used to ride only on explicit `response.create` messages, so the
+  # responses VAD creates on its own — the overwhelming majority of a call —
+  # were uncapped. The session-level key is the one the GA Realtime session
+  # applies to every response it starts.
+  test "session.update carries the output cap so VAD-created responses honour it" do
+    config = Config.normalize(max_response_output_tokens: 1_024)
+
+    event = OpenAIClient.session_update_event(config, "ins", [])
+
+    assert event.session.max_output_tokens == 1_024
+    # the per-response field stays: an explicit create still states its own cap
+    assert OpenAIClient.response_create_event(config).response.max_output_tokens == 1_024
+  end
+
   test "session.update honours custom transcription_model" do
     config = Config.normalize(transcription_model: "gpt-4o-transcribe")
 

@@ -3,9 +3,9 @@ defmodule FermixCore.Capabilities.MCP.Registry do
   In-memory map from a **source-qualified** MCP server identity to what dispatch
   may reach for it.
 
-  Keys are `{:plugin, "eden"}` / `{:operator, "eden"}`, never the bare name. Two
+  Keys are `{:plugin, "acme"}` / `{:operator, "acme"}`, never the bare name. Two
   servers may share a name; they can never share an identity, so a plugin
-  "eden" and a `[mcp.servers.eden]` TOML server cannot resolve to each other's
+  "acme" and a `[mcp.servers.acme]` TOML server cannot resolve to each other's
   client. Keying on the bare name made that collision reachable from dispatch.
 
   Two visibilities (M27 §7.6):

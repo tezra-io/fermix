@@ -80,6 +80,11 @@ defmodule FermixCore.Browser.Config do
 
     * `screenshot_max_side_px` — clamp on full-page capture width/height.
     * `screenshot_max_bytes` — reject captures larger than this.
+
+  ## WebMCP bounds
+
+  `webmcp_limits/0`, not struct fields: they bound text a PAGE controls and one
+  argument the model supplies, neither of which is an operator's business.
   """
 
   alias FermixCore.Browser.Error
@@ -199,12 +204,43 @@ defmodule FermixCore.Browser.Config do
     snapshot_max_children snapshot_max_chars screenshot_max_side_px screenshot_max_bytes
   )a
 
+  # Bounds on the `webmcp` action. Constants rather than struct fields: every
+  # one of them bounds page-controlled text (a tool's name, description, schema
+  # and result) or the one argument the model supplies, so there is no posture
+  # an operator would want to take on them — `[fermix_core.browser]` still
+  # accepts `allowed_hosts` alone. The call budget defaults to
+  # `action_timeout_ms` and is clamped to `call_max_ms`, which covers a page's
+  # own long waits without letting one hold the profile indefinitely.
+  @webmcp_limits %{
+    tools: 32,
+    name_chars: 128,
+    description_chars: 500,
+    schema_chars: 4_096,
+    input_bytes: 8_192,
+    call_max_ms: 60_000
+  }
+
   @doc """
   Canonical list of allowed `[fermix_core.browser]` keys, used by the config
   store to reject unsettable keys at the parse boundary.
   """
   @spec config_keys() :: [atom()]
   def config_keys, do: @config_keys
+
+  @doc """
+  Bounds on the `webmcp` action: how many of a page's tools are listed, how much
+  of each one's text is kept, how large an `input` may be, and the ceiling on a
+  single tool call.
+  """
+  @spec webmcp_limits() :: %{
+          tools: pos_integer(),
+          name_chars: pos_integer(),
+          description_chars: pos_integer(),
+          schema_chars: pos_integer(),
+          input_bytes: pos_integer(),
+          call_max_ms: pos_integer()
+        }
+  def webmcp_limits, do: @webmcp_limits
 
   @doc """
   `[fermix_core.browser]` as a keyword list, keeping only the settable keys.

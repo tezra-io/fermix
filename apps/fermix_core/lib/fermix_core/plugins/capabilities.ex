@@ -35,9 +35,16 @@ defmodule FermixCore.Plugins.Capabilities do
   #
   # `mcp`-rail entries are previews — the authoritative tool set comes from
   # MCP discovery at child spawn (M8 §8.2), so they never register here.
+  #
+  # A `requires_setting` gate is the one exception to "register and refuse at
+  # call time" (M40 §3.2): the operator has said this tool may not act at all, so
+  # it is withheld from the agent entirely rather than advertised and refused.
+  # The executor enforces the same gate, because a stale tool list must not be a
+  # way around it.
   defp register_plugin(server, %Plugin{} = plugin) do
     plugin.tools
     |> Enum.reject(&(Map.get(&1, "rail") == "mcp"))
+    |> Enum.filter(&Status.tool_setting_satisfied?(plugin, &1))
     |> Enum.flat_map(fn tool ->
       capability = capability(plugin, tool)
 

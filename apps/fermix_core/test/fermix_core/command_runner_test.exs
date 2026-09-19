@@ -53,6 +53,67 @@ defmodule FermixCore.CommandRunnerTest do
              )
   end
 
+  # M45 §4.6: a sandboxed command's environment is a replacement, never an
+  # overlay. The child gets exactly the list it was handed; everything the
+  # daemon inherited and the list does not name is unset, on both spawn paths,
+  # because both build their port options in one place.
+  describe "env_mode: :replace" do
+    setup do
+      name = "FERMIX_RUNNER_PARENT_ONLY_#{System.unique_integer([:positive])}"
+      System.put_env(name, "inherited-from-the-daemon")
+      on_exit(fn -> System.delete_env(name) end)
+
+      env = System.find_executable("env") || "/usr/bin/env"
+      %{parent_only: name, env: env}
+    end
+
+    for supervised <- [true, false] do
+      test "the child's environment is exactly the supplied list (supervised: #{supervised})",
+           ctx do
+        supplied = [{"FERMIX_RUNNER_SUPPLIED", "from-the-plan"}, {"PATH", "/usr/bin:/bin"}]
+
+        assert {:ok, %{exit: 0, stdout: out}} =
+                 CommandRunner.run(ctx.env, [],
+                   env: supplied,
+                   env_mode: :replace,
+                   supervised: unquote(supervised),
+                   timeout_ms: 5_000
+                 )
+
+        # Names first, so a failure prints variable names and never the
+        # values of the host environment this test runs in.
+        assert env_names(out) == ["FERMIX_RUNNER_SUPPLIED", "PATH"]
+        assert env_value(out, "FERMIX_RUNNER_SUPPLIED") == "from-the-plan"
+      end
+    end
+
+    test "an empty supplied list leaves the child an empty environment", ctx do
+      assert {:ok, %{exit: 0, stdout: out}} =
+               CommandRunner.run(ctx.env, [], env: [], env_mode: :replace, timeout_ms: 5_000)
+
+      assert env_names(out) == []
+    end
+
+    # Every other caller hands an overlay and still inherits the daemon's
+    # environment, exactly as before this mode existed.
+    test "the default overlay mode still inherits the daemon's environment", ctx do
+      assert {:ok, %{exit: 0, stdout: out}} =
+               CommandRunner.run(ctx.env, [],
+                 env: [{"FERMIX_RUNNER_SUPPLIED", "from-the-plan"}],
+                 timeout_ms: 5_000
+               )
+
+      assert env_value(out, ctx.parent_only) == "inherited-from-the-daemon"
+      assert env_value(out, "FERMIX_RUNNER_SUPPLIED") == "from-the-plan"
+    end
+
+    test "an unknown env_mode is refused before any spawn", ctx do
+      assert_raise ArgumentError, ~r/env_mode/, fn ->
+        CommandRunner.run(ctx.env, [], env: [], env_mode: :merge, supervised: false)
+      end
+    end
+  end
+
   test "kills the OS child on timeout and returns :timeout", %{sh: sh} do
     marker =
       Path.join(System.tmp_dir!(), "fermix_runner_kill_#{System.unique_integer([:positive])}")
@@ -159,6 +220,22 @@ defmodule FermixCore.CommandRunnerTest do
 
   @poll_max 50
   @poll_ms 100
+
+  # `env` prints NAME=value lines; a value never spans lines in these fixtures.
+  defp env_pairs(out) do
+    out
+    |> String.split("\n", trim: true)
+    |> Enum.map(&List.to_tuple(String.split(&1, "=", parts: 2)))
+  end
+
+  defp env_names(out), do: out |> env_pairs() |> Enum.map(&elem(&1, 0)) |> Enum.sort()
+
+  defp env_value(out, name) do
+    case List.keyfind(env_pairs(out), name, 0) do
+      {^name, value} -> value
+      nil -> nil
+    end
+  end
 
   defp await_pidfile(path) do
     Enum.reduce_while(1..@poll_max, nil, fn _attempt, _acc ->

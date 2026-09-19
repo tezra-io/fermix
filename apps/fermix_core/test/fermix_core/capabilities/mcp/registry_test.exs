@@ -28,23 +28,23 @@ defmodule FermixCore.Capabilities.MCP.RegistryTest do
       plugin_client = idle_process()
       operator_client = idle_process()
 
-      :ok = McpRegistry.register(registry, {:plugin, "eden"}, plugin_client)
-      :ok = McpRegistry.register(registry, {:operator, "eden"}, operator_client)
+      :ok = McpRegistry.register(registry, {:plugin, "acme"}, plugin_client)
+      :ok = McpRegistry.register(registry, {:operator, "acme"}, operator_client)
 
-      assert {:ok, ^plugin_client} = McpRegistry.lookup_client(registry, {:plugin, "eden"})
-      assert {:ok, ^operator_client} = McpRegistry.lookup_client(registry, {:operator, "eden"})
+      assert {:ok, ^plugin_client} = McpRegistry.lookup_client(registry, {:plugin, "acme"})
+      assert {:ok, ^operator_client} = McpRegistry.lookup_client(registry, {:operator, "acme"})
     end
 
     test "unregistering one source leaves the other intact", %{registry: registry} do
       plugin_client = idle_process()
       operator_client = idle_process()
 
-      :ok = McpRegistry.register(registry, {:plugin, "eden"}, plugin_client)
-      :ok = McpRegistry.register(registry, {:operator, "eden"}, operator_client)
-      :ok = McpRegistry.unregister(registry, {:plugin, "eden"})
+      :ok = McpRegistry.register(registry, {:plugin, "acme"}, plugin_client)
+      :ok = McpRegistry.register(registry, {:operator, "acme"}, operator_client)
+      :ok = McpRegistry.unregister(registry, {:plugin, "acme"})
 
-      assert {:error, :not_found} = McpRegistry.lookup_client(registry, {:plugin, "eden"})
-      assert {:ok, ^operator_client} = McpRegistry.lookup_client(registry, {:operator, "eden"})
+      assert {:error, :not_found} = McpRegistry.lookup_client(registry, {:plugin, "acme"})
+      assert {:ok, ^operator_client} = McpRegistry.lookup_client(registry, {:operator, "acme"})
     end
 
     test "a dead client is dropped", %{registry: registry} do
@@ -65,10 +65,10 @@ defmodule FermixCore.Capabilities.MCP.RegistryTest do
   describe "the raw remote client is private" do
     test "a remote source publishes only its proxy", %{registry: registry} do
       proxy = idle_process()
-      :ok = McpRegistry.register_proxy(registry, {:plugin, "eden"}, proxy)
+      :ok = McpRegistry.register_proxy(registry, {:plugin, "acme"}, proxy)
 
-      assert {:ok, ^proxy} = McpRegistry.lookup_proxy(registry, {:plugin, "eden"})
-      assert {:error, :client_private} = McpRegistry.lookup_client(registry, {:plugin, "eden"})
+      assert {:ok, ^proxy} = McpRegistry.lookup_proxy(registry, {:plugin, "acme"})
+      assert {:error, :client_private} = McpRegistry.lookup_client(registry, {:plugin, "acme"})
     end
 
     test "a stdio source publishes no proxy", %{registry: registry} do

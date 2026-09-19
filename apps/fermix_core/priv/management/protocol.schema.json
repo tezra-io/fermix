@@ -25,6 +25,7 @@
       "needs_client_config",
       "needs_auth",
       "reauthorization_required",
+      "wrong_region",
       "ready",
       "not_installed",
       "incompatible",
@@ -64,7 +65,8 @@
       "disconnect"
     ],
     "runtime_kinds": ["local_stdio", "remote_mcp"],
-    "auth_kinds": ["oauth", "api_key"]
+    "auth_kinds": ["oauth", "api_key"],
+    "setting_kinds": ["text", "boolean"]
   },
   "x-method-minimum-versions": {
     "hello": 1,
@@ -710,6 +712,7 @@
             "enabled",
             "status",
             "provider",
+          "engine",
             "model",
             "socket_alive",
             "active_sessions",
@@ -720,6 +723,7 @@
             "enabled": { "type": "boolean" },
             "status": { "type": ["string", "null"] },
             "provider": { "type": ["string", "null"] },
+            "engine": { "type": ["string", "null"] },
             "model": { "type": ["string", "null"] },
             "socket_alive": { "type": ["boolean", "null"] },
             "active_sessions": { "type": "integer", "minimum": 0 },
@@ -1784,14 +1788,15 @@
     },
     "pluginSetting": {
       "type": "object",
-      "description": "One value the plugin's manifest declares, with the label the manifest wrote for it.",
+      "description": "One value the plugin's manifest declares, with the label the manifest wrote for it. `kind` is the control to draw: `boolean` is a switch whose value is the string `true` or `false` and nothing else, `text` a free-text field. It is optional for older protocol-2 engines, which published no kind and meant `text`.",
       "required": ["key", "label", "value", "required"],
       "additionalProperties": false,
       "properties": {
         "key": { "type": "string" },
         "label": { "type": "string" },
         "value": { "type": ["string", "null"] },
-        "required": { "type": "boolean" }
+        "required": { "type": "boolean" },
+        "kind": { "enum": ["text", "boolean"] }
       }
     },
     "pluginAccessProfile": {
@@ -1814,9 +1819,19 @@
         "label": { "type": "string" }
       }
     },
+    "pluginOAuthRegion": {
+      "type": "object",
+      "description": "One account region a sign-in client can be bound to, with the daemon's own label for it. The id is what plugins.oauth_client.set takes back.",
+      "required": ["id", "label"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "minLength": 2, "maxLength": 8 },
+        "label": { "type": "string" }
+      }
+    },
     "pluginOAuthClient": {
       "type": "object",
-      "description": "A sign-in client the operator registered. client_id is its public identifier; secret_present reports credential presence independently from configured. The secret value is never returned. The added fields are optional for older protocol-2 engines. A null redirect_port selects the daemon's default.",
+      "description": "A sign-in client the operator registered. client_id is its public identifier; secret_present reports credential presence independently from configured. The secret value is never returned. region is the account region this client signs in to, chosen before connecting because it selects the token audience; regions lists the choices the daemon offers, and is empty for a provider that serves one region. The added fields are optional for older protocol-2 engines. A null redirect_port selects the daemon's default.",
       "required": ["provider", "configured", "redirect_port"],
       "additionalProperties": false,
       "properties": {
@@ -1824,7 +1839,9 @@
         "configured": { "type": "boolean" },
         "redirect_port": { "type": ["integer", "null"] },
         "client_id": { "type": ["string", "null"] },
-        "secret_present": { "type": "boolean" }
+        "secret_present": { "type": "boolean" },
+        "region": { "type": ["string", "null"] },
+        "regions": { "type": "array", "items": { "$ref": "#/$defs/pluginOAuthRegion" } }
       }
     },
     "pluginAction": {
@@ -1988,13 +2005,14 @@
     "plugins_disconnect_result": { "$ref": "#/$defs/pluginRowResult" },
     "plugins_oauth_client_set_params": {
       "type": "object",
-      "description": "The client secret is not a parameter: it arrives through `secret.set` under `oauth_client:<provider>`. An absent redirect port clears any override and leaves the daemon's own default in force.",
+      "description": "The client secret is not a parameter: it arrives through `secret.set` under `oauth_client:<provider>`. An absent redirect port clears any override and leaves the daemon's own default in force. region is required exactly where the client row publishes a non-empty regions, and refused where it publishes none; it is optional here so an older client that sends none is still refused by the daemon rather than by the frame.",
       "required": ["provider", "client_id"],
       "additionalProperties": false,
       "properties": {
         "provider": { "type": "string", "minLength": 1, "maxLength": 256 },
         "client_id": { "type": "string", "minLength": 1, "maxLength": 256 },
-        "redirect_port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+        "redirect_port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "region": { "type": "string", "minLength": 2, "maxLength": 8 }
       }
     },
     "plugins_oauth_client_set_result": {

@@ -25,6 +25,11 @@ defmodule FermixCore.MeetingsTest.IdleSource do
   @impl FermixCore.Meetings.AudioSource
   def self_count, do: 0
 
+  # This source never reports a roster, so an empty one carries no presence
+  # information and must not be read as everyone having left.
+  @impl FermixCore.Meetings.AudioSource
+  def presence_roster?, do: false
+
   @impl GenServer
   def init({session, args}), do: {:ok, %{session: session, args: args}}
 end

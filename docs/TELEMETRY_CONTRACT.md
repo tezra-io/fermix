@@ -58,6 +58,18 @@ The fields are three fixed strings with no user content, so `Mapper.tool_span/3`
 exports them outside the content-capture gate — a blocked-before-execution claim
 must stay provable in a content-free export.
 
+### An allowed variable the sandbox could not pass
+
+The opposite claim, kept distinct on purpose. When an allow-listed environment
+variable cannot be read where the daemon runs, the shell command still executes
+without it, and the tool's `:metadata` carries `env_unresolved: [names]` (names
+only, no values, no reasons). It is **not** a policy denial and never carries
+`policy_enforcement`: the command ran. `Mapper.tool_span/3` exports the names
+outside the content-capture gate because they are operator configuration, not
+user content. The reason and the remedy sentence go to the model in the tool
+result and to the daemon log once per transition (`Sandbox.EnvHealth`), and
+readiness publishes the name in the sandbox pane until it resolves.
+
 ## Adding a provider / adapter
 
 Emit the LLM call via the single provider emitter, and pass the correlation ids
@@ -268,7 +280,7 @@ headers, the MCP session ID, the workspace ID, the endpoint URL, discovered
 schemas, tool arguments, and response bodies. `error_class` is *derived* from the
 `{:error, reason}` — an atom, or a tagged tuple's atom head; anything else
 (a message body, where a URL or token would hide) flattens to `"unclassified"`.
-`source_id` is serialized to a stable string (`"plugin:eden"`, `"operator:fs"`):
+`source_id` is serialized to a stable string (`"plugin:acme"`, `"operator:fs"`):
 a tuple raises on the daemon wire path and only `inspect`s into JSONL.
 
 Routing splits on **whether a turn exists**, not on a retry:
@@ -343,6 +355,64 @@ stream lifetime at terminal (`Transcription.Support.emit_stream_call/5`) — a
 stream session is *not* a run kind. Summarizer calls are ordinary llm spans
 inside the meeting session. Ingress voice-note transcription stays sessionless
 (pre-turn), unchanged.
+
+## Live voice runs
+
+A GPT-Live call is a **run kind**, and it is always a **root**. The local voice
+socket mints `session_id = "voice_live:<n>"` for the call; the Live session
+mints a *separate* `"voice_delegation_<n>"` for every backend turn it delegates
+to, with `parent_session` = the call id. That parent link is the **only**
+correlation between a call and its turns — a delegation shares no other field
+with the call it came from — so it is what nests the turn's `llm`/`tool` spans
+under the call's trace. A call opened from a turn may carry its own
+`parent_session` as correlation metadata, but it never nests: the call outlives
+the turn that asked for it (the meeting precedent).
+
+Every emission goes through `FermixCore.Realtime.LiveTelemetry` — never
+hand-rolled. The six events are `[:fermix, :voice_live, :call_start |
+:session_started | :delegation_start | :delegation_stop | :provider_error |
+:call_stop]`. Shared metadata: `agent: "voice_live"`, `session_id` (the call
+id), `engine: "openai_live"`, `device_id`, `model`, `voice`, and
+`provider_session_id` once `session.started` arrives — that last one is the only
+handle a vendor-side investigation has, and it exists nowhere else in the trace.
+Nils are dropped rather than emitted. `call_start` carries `max_duration_ms` —
+the Opik exporter's sweep floor for the root; omit it and a call that sits quiet
+between delegations is force-closed at the idle TTL, and its ledger-bearing
+`call_stop` then mints a second, empty root. The delegation events carry
+`delegation_id`, `revision` and `turn_session_id`, and `delegation_stop` adds
+the terminal word `status` (`completed | failed | cancelled`, never a bare "ok")
+with a `duration_ms` measurement. `provider_error` carries the vendor's bounded
+sentence and is **not** terminal: a Live moderation refusal cuts the audio and
+the session keeps running.
+
+`call_stop` is the run's whole cost record, and every value is a number:
+`voice_seconds`, `voice_cost_millicents`, `backend_turns`, and
+`accounting_complete` as `0`/`1`. Metadata carries `reason` — `call_stop`,
+`cost_limit`, `max_session_duration`, `provider_disconnected`,
+`session_expired` — because a ceiling kill that read as a hang-up is exactly
+what makes a torn-down call undiagnosable. A non-numeric measurement raises at
+the emitter rather than reaching a trace as an unpriceable field.
+
+**Voice is duration-priced and is never expressed as tokens.** A Live minute is
+billed by the clock, so the ledger is seconds plus **integer millicents**
+(1 cent = 1000) and there is no token count that could stand in for it;
+inventing one would fabricate a unit the invoice does not have. The nested
+delegation turns keep their own token usage on their own `llm` spans, so voice
+cost and backend cost stay separately attributed rather than double-counted, and
+an incomplete finalization stays visible as `accounting_complete: 0` rather than
+reading as a measured zero-cost call. Spoken content — captions, transcript
+fragments, the composed instructions — reaches no field on any of these events.
+
+Backend work inside a delegation rides the shared emitters as usual
+(`Providers.Telemetry.emit_call/3`, `Tools.Telemetry.exec/5`) with the
+delegation's own `session_id`, so a Live turn is priced and rendered exactly like
+any other turn. `Trace.TelemetryHandler` registers all six events as
+`agent_event` rows; `FermixOpik` binds them (`infer_kind("voice_live:" <> _)` →
+`:voice_live`, `infer_kind("voice_delegation_" <> _)` → `:voice_delegation`,
+root open and close in `Aggregation`, phase spans via `Mapper.voice_live_span/3`,
+replay in `TraceFile`). Both id prefixes are minted outside `fermix_opik`; keep
+them in lockstep with the exporter's clauses, or a `call_stop` arriving without
+its opener reads as a `:subagent` phantom root.
 
 ## Sessionless channel points (pairing, push, transport posture)
 

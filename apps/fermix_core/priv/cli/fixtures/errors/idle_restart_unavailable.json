@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "idle_restart_unavailable",
+    "sentence": "This engine cannot restart when idle yet. Restarting now interrupts any work in progress."
+  },
+  "ok": false,
+  "schema_version": 1
+}

@@ -9,6 +9,10 @@ defmodule FermixCore.Setup.RuntimeTest do
 
   setup do
     providers = Application.fetch_env(:fermix_core, :providers)
+    # A setup run applies its home's config and saves through the wizard, and both
+    # write the sandbox to app env: a provider key answer adds a keyring-backed
+    # `[sandbox.env]` allow entry under the stub writer.
+    sandbox = Application.fetch_env(:fermix_core, :sandbox)
     telegram = Application.fetch_env(:fermix_channels, :telegram)
     personalization = Application.get_env(:fermix_core, :personalization, [])
     agent = Application.get_env(:fermix_core, :agent, [])
@@ -22,6 +26,7 @@ defmodule FermixCore.Setup.RuntimeTest do
 
     on_exit(fn ->
       restore(:fermix_core, :providers, providers)
+      restore(:fermix_core, :sandbox, sandbox)
       restore(:fermix_channels, :telegram, telegram)
       restore(:fermix_channels, :mobile, mobile)
       Application.put_env(:fermix_core, :personalization, personalization)
@@ -886,6 +891,21 @@ defmodule FermixCore.Setup.RuntimeTest do
       assert Keyword.get(answers, :realtime_max_session_minutes) == 20
       assert Keyword.get(answers, :realtime_max_cost_cents) == 35
       assert Keyword.get(answers, :realtime_persist_transcripts) == true
+    end
+
+    # The model flag reaches the same answer vocabulary the setup panes write
+    # through, so a headless install picks the voice engine by naming a model.
+    # There is no engine flag any more: the engine is derived from the model, so
+    # an engine answer cannot arrive from the command line at all.
+    test "extracts the voice model flag as an answer and has no engine flag" do
+      answers = Runtime.provided_answers(realtime_model: "gpt-live-1")
+
+      assert Keyword.get(answers, :realtime_model) == "gpt-live-1"
+
+      refute Keyword.has_key?(
+               Runtime.provided_answers(realtime_engine: "openai_live"),
+               :realtime_engine
+             )
     end
 
     test "keeps the xai_api_key flag as an answer" do

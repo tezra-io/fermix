@@ -1,0 +1,60 @@
+# The Linux package build image (M38 §12.1).
+#
+# It reproduces the release job's toolchain exactly — the same OTP, Elixir and
+# Zig versions `.github/workflows/release.yml` pins — so a package built on a
+# development machine and a package built by the rail come off the same floor.
+# Keep the three ARG versions in lockstep with that workflow.
+#
+# The image builds nothing itself: `scripts/release/build_linux_packages.sh
+# --container` bind-mounts the checkout and runs the same script inside, which
+# is what lets an arm64 package be produced on an arm64 Mac.
+FROM ubuntu:24.04
+
+ARG OTP_VERSION=28.4.1
+ARG ELIXIR_VERSION=1.19.5
+ARG ZIG_VERSION=0.15.2
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=C.UTF-8 \
+    MIX_HOME=/opt/mix \
+    HEX_HOME=/opt/hex \
+    PATH=/opt/otp/bin:/opt/elixir/bin:/opt/zig:$PATH
+
+# build-essential builds the C NIF the way the release runner's own image
+# already can; patchelf rewrites the packaged ELF interpreters onto the address
+# the package owns; xz packs the Burrito payload; the rest is the release
+# script's own tool list.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      build-essential ca-certificates curl git jq libncurses6 patchelf python3 \
+      unzip xz-utils \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN set -eux; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) otp_arch=amd64; zig_arch=x86_64 ;; \
+      arm64) otp_arch=arm64; zig_arch=aarch64 ;; \
+      *) echo "unsupported build architecture: $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    mkdir -p /opt/otp; \
+    curl -fsSL "https://builds.hex.pm/builds/otp/${otp_arch}/ubuntu-24.04/OTP-${OTP_VERSION}.tar.gz" \
+      | tar -xz -C /opt/otp --strip-components=1; \
+    (cd /opt/otp && ./Install -minimal /opt/otp); \
+    curl -fsSL -o /tmp/elixir.zip \
+      "https://builds.hex.pm/builds/elixir/v${ELIXIR_VERSION}-otp-28.zip"; \
+    mkdir -p /opt/elixir; \
+    unzip -q /tmp/elixir.zip -d /opt/elixir; \
+    rm /tmp/elixir.zip; \
+    curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-${zig_arch}-linux-${ZIG_VERSION}.tar.xz" \
+      | tar -xJ -C /opt; \
+    mv "/opt/zig-${zig_arch}-linux-${ZIG_VERSION}" /opt/zig
+
+# Hex and rebar live outside any home directory, so the build runs as the
+# invoking account's uid without a writable home and still finds them.
+RUN set -eux; \
+    mkdir -p /opt/mix /opt/hex; \
+    mix local.hex --force; \
+    mix local.rebar --force; \
+    chmod -R a+rwX /opt/mix /opt/hex
+
+WORKDIR /work

@@ -1,11 +1,19 @@
 defmodule FermixCore.Plugins.Dist.McpSourceTest do
   use ExUnit.Case, async: false
 
+  alias FermixCore.Auth.Store, as: AuthStore
+  alias FermixCore.Auth.TokenSupervisor
   alias FermixCore.Capabilities.MCP.Remote.Contract
   alias FermixCore.Plugins.Dist.McpSource
+  alias FermixCore.Plugins.Dist.Store, as: DistStore
   alias FermixCore.Plugins.Plugin
 
-  @pat "eden_pat_canary_do_not_leak"
+  @pat "acme_pat_canary_do_not_leak"
+
+  # A fixed, host-independent vendored target: `probe/3` and
+  # `vendored_command_path/3` both take it from the same `:target` seam, so the
+  # case reads the same on every leg of CI.
+  @target "fermix-test-target"
 
   defp probe_ok do
     [
@@ -199,6 +207,195 @@ defmodule FermixCore.Plugins.Dist.McpSourceTest do
     assert {:ok, []} = McpSource.server_specs(source_opts(ctx))
   end
 
+  # --- the vendored oauth2 helper (M8 §9.3, M40 §14.7) --------------------
+  #
+  # `teslahelper` stands in for the first `runtime.kind: "binary"`,
+  # `vendored: true`, oauth2 `mcp` plugin: its child process exists only while
+  # the operator's switch is on, and it reads the account's access token out of
+  # a file the daemon owns and keeps fresh.
+  describe "a vendored oauth2 helper" do
+    setup ctx do
+      DistStore.ensure!(ctx.store)
+      oauth = Application.get_env(:fermix_core, :oauth)
+
+      Application.put_env(:fermix_core, :oauth, %{
+        "tesla" => [client_id: "t-id", client_secret: "t-sec", region: "eu"]
+      })
+
+      profile = "teslahelper_#{System.unique_integer([:positive])}:primary"
+
+      on_exit(fn ->
+        TokenSupervisor.stop_profile(profile)
+
+        case oauth do
+          nil -> Application.delete_env(:fermix_core, :oauth)
+          value -> Application.put_env(:fermix_core, :oauth, value)
+        end
+      end)
+
+      command = write_helper(ctx.checkout, "teslahelper")
+      :ok = AuthStore.write(profile, helper_grant())
+
+      %{
+        profile: profile,
+        command: command,
+        token_file: DistStore.token_file(ctx.store, profile)
+      }
+    end
+
+    test "hands the child the daemon-owned token file it must read", ctx do
+      enable_helper(ctx, "true")
+
+      assert {:ok, [spec]} = McpSource.server_specs(helper_opts(ctx))
+      assert spec.command == ctx.command
+      assert spec.env["FERMIX_PLUGIN_TOKEN_FILE"] == ctx.token_file
+      assert ctx.token_file =~ ~r{/plugins/run/teslahelper_\d+_primary\.token$}
+
+      projected = ctx.token_file |> File.read!() |> Jason.decode!()
+      assert projected["access_token"] == "AT"
+      assert projected["auth_profile"] == ctx.profile
+      assert projected["region"] == "eu"
+      assert projected["generation"] == 1
+    end
+
+    # The path is an internal spawn-spec field, not an operator setting. A
+    # manifest could declare the key, or a hand-edited config.toml could set it;
+    # neither may point the child at a file the daemon does not keep fresh.
+    test "a plugin setting can never override the token file path", ctx do
+      enable_helper(ctx, "true", [{"FERMIX_PLUGIN_TOKEN_FILE", "/tmp/attacker.token"}])
+
+      assert {:ok, [spec]} = McpSource.server_specs(helper_opts(ctx))
+      assert spec.env["FERMIX_PLUGIN_TOKEN_FILE"] == ctx.token_file
+    end
+
+    test "the runtime gate decides whether the child exists at all", ctx do
+      enable_helper(ctx, "true")
+      assert {:ok, [_spec]} = McpSource.server_specs(helper_opts(ctx))
+
+      for value <- ["false", "TRUE", "1", "yes"] do
+        enable_helper(ctx, value)
+
+        assert {:ok, []} = McpSource.server_specs(helper_opts(ctx)),
+               "#{inspect(value)} started the gated runtime"
+      end
+
+      enable_helper(ctx, nil)
+      assert {:ok, []} = McpSource.server_specs(helper_opts(ctx))
+    end
+
+    test "turning the gate off deletes the projection the child was reading", ctx do
+      enable_helper(ctx, "true")
+      assert {:ok, [_spec]} = McpSource.server_specs(helper_opts(ctx))
+      assert File.exists?(ctx.token_file)
+
+      enable_helper(ctx, "false")
+      assert {:ok, []} = McpSource.server_specs(helper_opts(ctx))
+      refute File.exists?(ctx.token_file)
+    end
+
+    test "disabling the plugin deletes the projection", ctx do
+      enable_helper(ctx, "true")
+      assert {:ok, [_spec]} = McpSource.server_specs(helper_opts(ctx))
+      assert File.exists?(ctx.token_file)
+
+      Application.put_env(:fermix_core, :plugins, enabled: [], entries: %{})
+      assert {:ok, []} = McpSource.server_specs(helper_opts(ctx))
+      refute File.exists?(ctx.token_file)
+    end
+
+    # M8 §9.3 v1 invariant: one `mcp` child per auth profile. Two children
+    # sharing one profile would overwrite each other's projection and race the
+    # delete-on-disable, so the whole desired list is refused rather than
+    # silently letting one plugin win.
+    test "two helpers sharing one auth profile are refused loudly", ctx do
+      write_helper(ctx.checkout, "teslatwin")
+
+      Application.put_env(:fermix_core, :plugins,
+        enabled: ["teslahelper", "teslatwin"],
+        entries: %{
+          "teslahelper" => [{:auth_profile, ctx.profile}, {"ALLOW_CONTROL", "true"}],
+          "teslatwin" => [{:auth_profile, ctx.profile}, {"ALLOW_CONTROL", "true"}]
+        }
+      )
+
+      assert {:error, {:token_file_profile_conflict, profile, ["teslahelper", "teslatwin"]}} =
+               McpSource.server_specs(helper_opts(ctx))
+
+      assert profile == ctx.profile
+    end
+  end
+
+  defp write_helper(checkout, name) do
+    dir = write_plugin(checkout, name, helper_manifest(name))
+    command = Path.join([dir, "bin", @target, "fermix-tesla"])
+    File.mkdir_p!(Path.dirname(command))
+    File.write!(command, "#!/bin/sh\n")
+    File.chmod!(command, 0o755)
+    command
+  end
+
+  defp enable_helper(ctx, gate, extra \\ []) do
+    gate_entry = if gate, do: [{"ALLOW_CONTROL", gate}], else: []
+
+    Application.put_env(:fermix_core, :plugins,
+      enabled: ["teslahelper"],
+      entries: %{"teslahelper" => [{:auth_profile, ctx.profile}] ++ gate_entry ++ extra}
+    )
+  end
+
+  defp helper_opts(ctx) do
+    [registry: [dev_local: ctx.checkout, installed_root: ctx.store], probe: [target: @target]]
+  end
+
+  defp helper_grant do
+    %{
+      auth_mode: "oauth2",
+      provider: "tesla",
+      granted_scopes: ["openid"],
+      tokens: %{access_token: "AT", refresh_token: "RT"},
+      expires_at: DateTime.add(DateTime.utc_now(), 3600, :second),
+      last_refresh: nil,
+      status: "ready",
+      region: "eu"
+    }
+  end
+
+  defp helper_manifest(name) do
+    %{
+      "auth" => %{
+        "type" => "oauth2",
+        "provider" => "tesla",
+        "profile_key" => name,
+        "account_mode" => "single",
+        "scopes" => ["openid"]
+      },
+      "health_check" => %{"kind" => "local_readiness", "requires_auth" => true},
+      "runtime" => %{
+        "kind" => "binary",
+        "command" => "fermix-tesla",
+        "vendored" => true,
+        "requires_setting" => "ALLOW_CONTROL"
+      },
+      "config" => [
+        %{
+          "key" => "ALLOW_CONTROL",
+          "prompt" => "Allow vehicle commands",
+          "required" => false,
+          "kind" => "boolean"
+        }
+      ],
+      "tools" => [
+        %{
+          "name" => "#{name}_send_command",
+          "description" => "Send a signed vehicle command.",
+          "rail" => "mcp",
+          "read_only" => false,
+          "requires_scopes" => ["openid"]
+        }
+      ]
+    }
+  end
+
   describe "remote_spec/1" do
     setup do
       connect(profile: "retrieval", workspace: "ws_opaque_id", secret: @pat)
@@ -206,14 +403,14 @@ defmodule FermixCore.Plugins.Dist.McpSourceTest do
     end
 
     test "materializes the source-qualified remote shape" do
-      assert {:ok, spec} = McpSource.remote_spec(eden())
+      assert {:ok, spec} = McpSource.remote_spec(acme())
 
-      assert spec.source_id == {:plugin, "eden"}
+      assert spec.source_id == {:plugin, "acme"}
       assert spec.transport == :streamable_http
       assert spec.protocol_version == "2025-06-18"
-      assert spec.base_url == "https://mcp.eden.so"
+      assert spec.base_url == "https://mcp.acme.example"
       assert spec.mcp_path == "/mcp"
-      assert spec.auth_ref == %{type: :plugin_secret, plugin: "eden"}
+      assert spec.auth_ref == %{type: :plugin_secret, plugin: "acme"}
       assert spec.name_mode == :preserve
       assert spec.selected_profile == "retrieval"
 
@@ -225,7 +422,7 @@ defmodule FermixCore.Plugins.Dist.McpSourceTest do
 
       assert spec.capability_metadata == %{
                plugin_owned?: true,
-               plugin: "eden",
+               plugin: "acme",
                category: :plugin
              }
     end
@@ -234,14 +431,14 @@ defmodule FermixCore.Plugins.Dist.McpSourceTest do
     # compiles it at server start, in different modules written at different
     # times. A key missing from one and required by the other is invisible to
     # both unit suites — it surfaced as the daemon refusing to boot
-    # (`{:mcp_invalid_contract, "eden", {:invalid_remote_config, :budgets}}`),
+    # (`{:mcp_invalid_contract, "acme", {:invalid_remote_config, :budgets}}`),
     # because a failed child start cascades to application start. Round-trip
     # the two so the next omission fails here instead.
     test "the materialized spec compiles into a contract" do
-      assert {:ok, spec} = McpSource.remote_spec(eden())
+      assert {:ok, spec} = McpSource.remote_spec(acme())
       assert {:ok, contract} = Contract.compile(spec)
 
-      assert contract.source_id == {:plugin, "eden"}
+      assert contract.source_id == {:plugin, "acme"}
       assert contract.selected_profile == "retrieval"
       assert contract.budgets.turn_calls == 20
       assert contract.budgets.turn_paginated_calls == 5
@@ -251,7 +448,7 @@ defmodule FermixCore.Plugins.Dist.McpSourceTest do
     # A remote spec is not a process spec. The whole point of the two mutually
     # exclusive shapes is that nothing downstream has to ask which one it got.
     test "carries no process-shaped fields" do
-      assert {:ok, spec} = McpSource.remote_spec(eden())
+      assert {:ok, spec} = McpSource.remote_spec(acme())
 
       for field <- [:command, :args, :env, :pass_env, :cwd, :prefix] do
         refute Map.has_key?(spec, field), "remote spec must not carry #{field}"
@@ -259,17 +456,17 @@ defmodule FermixCore.Plugins.Dist.McpSourceTest do
     end
 
     test "the credential is nowhere in the materialized spec" do
-      assert {:ok, spec} = McpSource.remote_spec(eden())
+      assert {:ok, spec} = McpSource.remote_spec(acme())
 
       refute inspect(spec, limit: :infinity) =~ @pat
     end
 
     test "allowed_tools is the selected profile's signed allowlist" do
-      assert {:ok, spec} = McpSource.remote_spec(eden())
+      assert {:ok, spec} = McpSource.remote_spec(acme())
 
-      assert Map.keys(spec.allowed_tools) |> Enum.sort() == ["eden_get_note", "eden_search"]
+      assert Map.keys(spec.allowed_tools) |> Enum.sort() == ["acme_get_note", "acme_search"]
 
-      assert spec.allowed_tools["eden_search"] == %{
+      assert spec.allowed_tools["acme_search"] == %{
                read_only: true,
                replay_safe: false,
                required_credential_scope: "read",
@@ -278,23 +475,23 @@ defmodule FermixCore.Plugins.Dist.McpSourceTest do
     end
 
     test "a setup-only tool never enters the agent-facing allowlist" do
-      assert {:ok, spec} = McpSource.remote_spec(eden())
+      assert {:ok, spec} = McpSource.remote_spec(acme())
 
-      refute Map.has_key?(spec.allowed_tools, "eden_list_workspaces")
+      refute Map.has_key?(spec.allowed_tools, "acme_list_workspaces")
     end
 
     test "selecting capture widens the allowlist to the capture profile" do
       connect(profile: "capture", workspace: "ws_opaque_id", secret: @pat)
 
-      assert {:ok, spec} = McpSource.remote_spec(eden())
+      assert {:ok, spec} = McpSource.remote_spec(acme())
       assert spec.selected_profile == "capture"
-      assert "eden_create_note" in Map.keys(spec.allowed_tools)
+      assert "acme_create_note" in Map.keys(spec.allowed_tools)
     end
 
     test "no selection resolves to the signed default profile" do
       connect(workspace: "ws_opaque_id", secret: @pat)
 
-      assert {:ok, spec} = McpSource.remote_spec(eden())
+      assert {:ok, spec} = McpSource.remote_spec(acme())
       assert spec.selected_profile == "retrieval"
     end
 
@@ -302,68 +499,68 @@ defmodule FermixCore.Plugins.Dist.McpSourceTest do
       connect(profile: "everything", workspace: "ws_opaque_id", secret: @pat)
 
       assert {:error, {:invalid_remote_config, {:access_profile, "everything"}}} =
-               McpSource.remote_spec(eden())
+               McpSource.remote_spec(acme())
     end
 
     test "startable requires the credential to exist" do
       connect(profile: "retrieval", workspace: "ws_opaque_id", secret: nil)
 
-      assert {:error, {:needs_secret, "eden"}} = McpSource.remote_spec(eden())
+      assert {:error, {:needs_secret, "acme"}} = McpSource.remote_spec(acme())
     end
 
     test "startable requires a selected workspace" do
       connect(profile: "retrieval", secret: @pat)
 
-      assert {:error, {:needs_workspace, "eden"}} = McpSource.remote_spec(eden())
+      assert {:error, {:needs_workspace, "acme"}} = McpSource.remote_spec(acme())
     end
 
     test "a workspace id that is not bounded visible ASCII is refused" do
       connect(profile: "retrieval", workspace: "ws with space", secret: @pat)
 
-      assert {:error, {:invalid_remote_config, {:workspace_id, "eden"}}} =
-               McpSource.remote_spec(eden())
+      assert {:error, {:invalid_remote_config, {:workspace_id, "acme"}}} =
+               McpSource.remote_spec(acme())
     end
 
     test "a half-local/half-remote runtime is refused" do
-      plugin = eden(runtime_extra: %{"command" => "node"})
+      plugin = acme(runtime_extra: %{"command" => "node"})
 
       assert {:error, {:invalid_remote_config, {:local_field, "command"}}} =
                McpSource.remote_spec(plugin)
     end
 
     test "a runtime that declares pass_env is refused" do
-      plugin = eden(runtime_extra: %{"pass_env" => ["EDEN_TOKEN"]})
+      plugin = acme(runtime_extra: %{"pass_env" => ["ACME_TOKEN"]})
 
       assert {:error, {:invalid_remote_config, {:local_field, "pass_env"}}} =
                McpSource.remote_spec(plugin)
     end
 
     test "an unpinned protocol version is refused" do
-      plugin = eden(runtime_extra: %{"protocol_version" => "2025-11-25"})
+      plugin = acme(runtime_extra: %{"protocol_version" => "2025-11-25"})
 
       assert {:error, {:invalid_remote_config, :protocol_version}} =
                McpSource.remote_spec(plugin)
     end
 
     test "a non-HTTPS endpoint is refused" do
-      plugin = eden(runtime_extra: %{"base_url" => "http://mcp.eden.so"})
+      plugin = acme(runtime_extra: %{"base_url" => "http://mcp.acme.example"})
 
       assert {:error, {:invalid_remote_config, {:invalid_base_url, :scheme_not_https}}} =
                McpSource.remote_spec(plugin)
     end
 
     test "an auth block that is not bearer api_key is refused" do
-      plugin = eden(auth: %{type: :oauth2, header: "Authorization", scheme: "Bearer"})
+      plugin = acme(auth: %{type: :oauth2, header: "Authorization", scheme: "Bearer"})
 
       assert {:error, {:invalid_remote_config, {:invalid_remote_auth, _detail}}} =
                McpSource.remote_spec(plugin)
     end
 
     test "remote?/1 distinguishes the two rails" do
-      assert McpSource.remote?(eden())
+      assert McpSource.remote?(acme())
 
       refute McpSource.remote?(%Plugin{
-               eden()
+               acme()
                | runtime: %{"kind" => "node", "command" => "node"}
              })
     end
@@ -377,11 +574,11 @@ defmodule FermixCore.Plugins.Dist.McpSourceTest do
       ]
       |> Enum.reject(fn {_key, value} -> is_nil(value) end)
 
-    Application.put_env(:fermix_core, :plugins, enabled: ["eden"], entries: %{"eden" => entry})
+    Application.put_env(:fermix_core, :plugins, enabled: ["acme"], entries: %{"acme" => entry})
 
     case Keyword.get(opts, :secret) do
       nil -> Application.put_env(:fermix_core, :plugin_secrets, %{})
-      secret -> Application.put_env(:fermix_core, :plugin_secrets, %{"eden" => secret})
+      secret -> Application.put_env(:fermix_core, :plugin_secrets, %{"acme" => secret})
     end
   end
 
@@ -390,14 +587,14 @@ defmodule FermixCore.Plugins.Dist.McpSourceTest do
 
   # The shape `Registry.decode_manifest/2` produces for a validated
   # plugin-api-3 remote manifest.
-  defp eden(overrides \\ []) do
+  defp acme(overrides \\ []) do
     runtime =
       Map.merge(
         %{
           "kind" => "remote_mcp",
           "transport" => "streamable_http",
           "protocol_version" => "2025-06-18",
-          "base_url" => "https://mcp.eden.so",
+          "base_url" => "https://mcp.acme.example",
           "mcp_path" => "/mcp",
           "tool_name_mode" => "preserve"
         },
@@ -406,22 +603,22 @@ defmodule FermixCore.Plugins.Dist.McpSourceTest do
 
     %Plugin{
       schema_version: 2,
-      name: "eden",
-      display_name: "Eden",
-      description: "Eden second brain",
+      name: "acme",
+      display_name: "Acme",
+      description: "Acme second brain",
       category: "productivity",
       version: "1.0.0",
       plugin_api: 3,
       runtime: runtime,
       default_enabled?: false,
-      auth: Keyword.get(overrides, :auth, eden_auth()),
-      tools: eden_tools(),
+      auth: Keyword.get(overrides, :auth, acme_auth()),
+      tools: acme_tools(),
       skills: [],
-      tool_profiles: eden_profiles(),
-      setup_tools: ["eden_list_workspaces"],
+      tool_profiles: acme_profiles(),
+      setup_tools: ["acme_list_workspaces"],
       resource_scope: %{
         "kind" => "single_workspace",
-        "discovery_tool" => "eden_list_workspaces",
+        "discovery_tool" => "acme_list_workspaces",
         "id_field" => "id",
         "label_field" => "name",
         "argument" => "workspaceId"
@@ -437,17 +634,17 @@ defmodule FermixCore.Plugins.Dist.McpSourceTest do
         "status_field" => "status",
         "message_field" => "message"
       },
-      path: "/nonexistent/eden/plugin.json"
+      path: "/nonexistent/acme/plugin.json"
     }
   end
 
-  defp eden_auth do
+  defp acme_auth do
     %{
       type: :api_key,
       provider: nil,
       account_mode: nil,
       scopes: [],
-      key_name: "EDEN_PERSONAL_ACCESS_TOKEN",
+      key_name: "ACME_PERSONAL_ACCESS_TOKEN",
       header: "Authorization",
       scheme: "Bearer",
       prompt: nil,
@@ -456,12 +653,12 @@ defmodule FermixCore.Plugins.Dist.McpSourceTest do
     }
   end
 
-  defp eden_tools do
+  defp acme_tools do
     [
-      remote_tool("eden_search", true, "read", "sha-search"),
-      remote_tool("eden_get_note", true, "read", "sha-get"),
-      remote_tool("eden_create_note", false, "write", "sha-create"),
-      remote_tool("eden_list_workspaces", true, "read", "sha-workspaces")
+      remote_tool("acme_search", true, "read", "sha-search"),
+      remote_tool("acme_get_note", true, "read", "sha-get"),
+      remote_tool("acme_create_note", false, "write", "sha-create"),
+      remote_tool("acme_list_workspaces", true, "read", "sha-workspaces")
     ]
   end
 
@@ -482,7 +679,7 @@ defmodule FermixCore.Plugins.Dist.McpSourceTest do
   # `Contract.compile/1` would (correctly) refuse.
   defp digest_hex(label), do: :crypto.hash(:sha256, label) |> Base.encode16(case: :lower)
 
-  defp eden_profiles do
+  defp acme_profiles do
     [
       %{
         "name" => "retrieval",
@@ -490,7 +687,7 @@ defmodule FermixCore.Plugins.Dist.McpSourceTest do
         "default" => true,
         "required_credential_scope" => "read",
         "scope_visibility" => "none",
-        "tools" => ["eden_search", "eden_get_note"]
+        "tools" => ["acme_search", "acme_get_note"]
       },
       %{
         "name" => "capture",
@@ -498,7 +695,7 @@ defmodule FermixCore.Plugins.Dist.McpSourceTest do
         "default" => false,
         "required_credential_scope" => "write",
         "scope_visibility" => "none",
-        "tools" => ["eden_search", "eden_get_note", "eden_create_note"]
+        "tools" => ["acme_search", "acme_get_note", "acme_create_note"]
       }
     ]
   end

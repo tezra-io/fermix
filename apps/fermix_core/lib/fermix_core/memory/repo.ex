@@ -42,6 +42,7 @@ defmodule FermixCore.Memory.Repo do
   @meetings_migration_version 26
   @computer_history_access_migration_version 27
   @computer_history_sessions_migration_version 28
+  @job_run_tool_failures_migration_version 29
   @sqlite_open_intent :readwritecreate
 
   @base_schema_sql """
@@ -287,6 +288,14 @@ defmodule FermixCore.Memory.Repo do
     WHERE created_by_trust IN ('owner_remote', 'local', 'core');
   UPDATE scheduled_jobs SET created_by_trust = 'guest'
     WHERE created_by_trust = 'third_party';
+  """
+
+  # A completed run's `status` says the loop finished, not that its tools
+  # worked. The count of tool calls that returned an error rides beside it, so a
+  # run that reported itself blocked is visible without failing every run that
+  # met a recoverable tool error. NULL on rows written before the column existed.
+  @job_run_tool_failures_schema_sql """
+  ALTER TABLE job_runs ADD COLUMN tool_failures INTEGER;
   """
 
   # Prompt-resource rename: the agent operating-rules file moved from
@@ -2672,6 +2681,17 @@ defmodule FermixCore.Memory.Repo do
     call(:migration_versions, opts)
   end
 
+  @doc """
+  The base schema as SQL, for a test that seeds a store an older release wrote.
+
+  Every statement is `IF NOT EXISTS`, so a fixture can lay the base tables down
+  and then stamp the migration versions a real store of that age would carry.
+  A fixture that stamps versions without the tables they imply breaks the first
+  time a later migration alters one of them.
+  """
+  @spec base_schema_sql() :: String.t()
+  def base_schema_sql, do: @base_schema_sql
+
   @spec journal_mode(keyword()) :: {:ok, String.t()} | {:error, term()}
   def journal_mode(opts \\ []) do
     call(:journal_mode, opts)
@@ -3669,8 +3689,25 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_computer_history_state_migration(conn, versions),
          :ok <- apply_meetings_migration(conn, versions),
          :ok <- apply_computer_history_access_migration(conn, versions),
-         :ok <- apply_computer_history_sessions_migration(conn, versions) do
+         :ok <- apply_computer_history_sessions_migration(conn, versions),
+         :ok <- apply_job_run_tool_failures_migration(conn, versions) do
       :ok
+    end
+  end
+
+  defp apply_job_run_tool_failures_migration(conn, versions) do
+    if Enum.member?(versions, @job_run_tool_failures_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{@job_run_tool_failures_schema_sql}
+        INSERT INTO schema_migrations(version) VALUES (#{@job_run_tool_failures_migration_version});
+        COMMIT;
+        """
+      )
     end
   end
 
@@ -3820,7 +3857,15 @@ defmodule FermixCore.Memory.Repo do
     end
   end
 
-  defp jobs_schema_sql do
+  @doc """
+  The scheduled-jobs schema as SQL, rendered with the configured iteration
+  default. Public for the same reason as `base_schema_sql/0`: a fixture that
+  seeds a store an older release wrote lays this down after the base schema,
+  because it alters `memories` and creates the job tables a later migration
+  may alter.
+  """
+  @spec jobs_schema_sql() :: String.t()
+  def jobs_schema_sql do
     default = Integer.to_string(IterationLimits.scheduled_job_default())
     String.replace(@jobs_schema_sql_template, "{{max_iterations_default}}", default)
   end
@@ -5788,9 +5833,10 @@ defmodule FermixCore.Memory.Repo do
                token_usage_json,
                latency_json,
                created_at,
-               updated_at
+               updated_at,
+               tool_failures
              )
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(id)
              DO UPDATE SET
                job_id = excluded.job_id,
@@ -5811,7 +5857,8 @@ defmodule FermixCore.Memory.Repo do
                iterations = excluded.iterations,
                token_usage_json = excluded.token_usage_json,
                latency_json = excluded.latency_json,
-               updated_at = excluded.updated_at
+               updated_at = excluded.updated_at,
+               tool_failures = excluded.tool_failures
              """,
              job_run_upsert_params(run)
            ),
@@ -6400,6 +6447,7 @@ defmodule FermixCore.Memory.Repo do
       delivery_status: string_with_default!(attrs, :delivery_status, "none"),
       delivery_error: optional_string!(attrs, :delivery_error),
       iterations: optional_non_negative_integer!(attrs, :iterations),
+      tool_failures: optional_non_negative_integer!(attrs, :tool_failures),
       token_usage: Map.get(attrs, :token_usage),
       latency: Map.get(attrs, :latency),
       created_at: timestamp_string(Map.get(attrs, :created_at, DateTime.utc_now())),
@@ -6683,7 +6731,8 @@ defmodule FermixCore.Memory.Repo do
       encode_metadata(run.token_usage),
       encode_metadata(run.latency),
       run.created_at,
-      run.updated_at
+      run.updated_at,
+      run.tool_failures
     ]
   end
 
@@ -7492,7 +7541,8 @@ defmodule FermixCore.Memory.Repo do
          token_usage_json,
          latency_json,
          created_at,
-         updated_at
+         updated_at,
+         tool_failures
        ]) do
     %{
       id: id,
@@ -7512,6 +7562,7 @@ defmodule FermixCore.Memory.Repo do
       delivery_status: delivery_status,
       delivery_error: delivery_error,
       iterations: iterations,
+      tool_failures: tool_failures,
       token_usage: decode_metadata(token_usage_json),
       latency: decode_metadata(latency_json),
       created_at: parse_timestamp!(created_at),

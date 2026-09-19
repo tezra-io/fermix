@@ -26,6 +26,7 @@ defmodule FermixCore.Agents.MainAgent do
   alias FermixCore.Agents.RuntimeContext
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Agents.TurnRunner
+  alias FermixCore.Agents.VoiceCall
   alias FermixCore.ComputerHistory
   alias FermixCore.ComputerHistory.Gate.Snapshot
   alias FermixCore.Memory.Config
@@ -351,6 +352,11 @@ defmodule FermixCore.Agents.MainAgent do
     # routes, the taint masks, a subagent's inherited chain) takes that one value
     # from here.
     gate = TurnRunner.computer_history_gate(msg, state.ordered_routes, gate_opts(state))
+    # `:none` on every non-voice turn. A Live delegation runs against the
+    # call-owned store (ephemeral unless the call persists) and skips memory
+    # review, both frozen HERE with the rest of the snapshot so a mid-call
+    # change cannot split the turn's history from its review decision (M41 §5.2).
+    voice_call = VoiceCall.from_message(msg)
 
     %{
       provider: state.provider,
@@ -362,7 +368,8 @@ defmodule FermixCore.Agents.MainAgent do
       skill_registry: state.skill_registry,
       agent_supervisor: state.agent_supervisor,
       available_skills: state.available_skills,
-      conversation_store: state.conversation_store,
+      conversation_store: conversation_store(state, voice_call),
+      memory_review?: memory_review?(voice_call),
       task_supervisor: state.task_supervisor,
       journal_base_dir: state.journal_base_dir,
       memory_store: state.memory_store,
@@ -385,6 +392,12 @@ defmodule FermixCore.Agents.MainAgent do
       computer_history_gate: gate
     }
   end
+
+  defp conversation_store(_state, {:ok, %{conversation_store: store}}), do: store
+  defp conversation_store(state, :none), do: state.conversation_store
+
+  defp memory_review?({:ok, _voice_call}), do: false
+  defp memory_review?(:none), do: true
 
   defp gate_opts(state), do: [macos?: state.computer_history_macos?]
 
