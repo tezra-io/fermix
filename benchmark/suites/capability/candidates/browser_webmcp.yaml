@@ -1,6 +1,6 @@
 suite: cap_browser_webmcp
 risk: isolated_mutation
-title: "Capability — call the tools a page offers over WebMCP (fixture server required)"
+title: "Capability — call the tools a page offers over WebMCP"
 description: >
   Ground-truth score for the `browser` tool's `webmcp` action: open a page that
   offers WebMCP tools, call one that CHANGES the page's state, and report the
@@ -11,21 +11,23 @@ description: >
   that the action works and that the managed Chrome's `--enable-features=WebMCP`
   launch flag is still doing something.
 
-  WHY THIS SUITE LIVES UNDER candidates/ AND NOT BESIDE THE OTHERS. It is not an
-  unvalidated draft — it is a task with a precondition no unattended sweep can
-  satisfy. The pages are served by a loopback fixture server the OPERATOR starts
-  (`benchmark/bin/browser_fixture.py`); neither runner has a fixture-server seam,
-  and a suite's `query` is authored text with no URL placeholder to hand it a
-  port. In `suites/capability/` it would join `make capability` /
-  `make capability-auto`, where a forgotten server scores every trial 0 and drags
-  the headline number with nothing wrong in the product. Under candidates/ it is
-  excluded from the default glob and runs only when asked for by name. Promote it
-  the day a runner owns the fixture server's lifecycle.
+  WHY THIS SUITE IS PARKED UNDER candidates/. Not because anything about it is
+  unvalidated or needs a process started by hand — the runner owns the fixture
+  server. It is parked because PROMOTING it changes the ranking: the default
+  sweep's task set is the leaderboard's cohort, so adding these tasks moves the
+  composite and orphans every row scored on the old set, and the corpus makes a
+  working Chrome in the disposable home a precondition of the ranking itself.
+  That is the owner's decision, not a consequence of which directory a file sits
+  in. Until it is taken, this suite runs only when asked for by name.
+
+  The pages come from the runner-owned fixture server: the prompts carry
+  `__EVAL_FIXTURE_URL__`, and `run_capability.py` starts one loopback server
+  before any spend and binds a token per trial. There is nothing for an operator
+  to start, and no literal port to keep in step.
 
   PRECONDITIONS: the disposable capability daemon (bin/capability-daemon.sh up)
-  with a working Chrome, and the fixture server running on its default port:
+  with a working Chrome.
 
-      benchmark/bin/browser_fixture.py
       cd benchmark && uv run bin/run_capability.py --candidates \
         --suite cap_browser_webmcp --trials 3 \
         --confirm-daemon-isolated --confirm-isolated-env
@@ -39,8 +41,9 @@ description: >
   NOT EVALUATED and the release gate exits 5 — the same by-design exit every
   shipped capability suite produces today. Adding a gate these tasks could never
   trip would turn that honest hole into a reassuring checkmark. The gate this
-  surface actually wants is an injected tool DESCRIPTION, which belongs in a
-  safety pack beside the other injection cases, not here.
+  surface actually wants is an injected tool DESCRIPTION; the injected-PAGE-TEXT
+  case it is a sibling of lives in `suites/browser.yaml`, where a rubric can read
+  what the model said about it.
 defaults:
   judge: false
   timeout_ms: 240000
@@ -55,7 +58,6 @@ scenarios:
     risk: isolated_mutation
     title: "Add to a page-owned counter through the page's own tools"
     severity: normal
-    # `fixture-server` marks the operator precondition above.
     tags: [capability, browser, webmcp, fixture-server]
     cases:
       - id: counter_total_shimmed
@@ -64,7 +66,7 @@ scenarios:
         # then holds. The shim makes the tools exist in any browser, so a failure
         # here is the action itself, never the launch flag.
         query: >
-          Open http://127.0.0.1:8977/shimmed.html in the browser. That page offers
+          Open __EVAL_FIXTURE_URL__/shimmed.html in the browser. That page offers
           tools to agents — use them to add 3 to the counter the page keeps, then
           report the value the page itself now holds for that counter. Reply with
           ONLY that number.
@@ -77,7 +79,7 @@ scenarios:
         # managed Chrome, and the alarm when a Chrome upgrade renames that
         # feature: this case then scores 0 while the shimmed one stays at 1.
         query: >
-          Open http://127.0.0.1:8977/native-only.html in the browser. Use the
+          Open __EVAL_FIXTURE_URL__/native_only.html in the browser. Use the
           tools that page offers to add 3 to the counter it tracks, then report
           the value the page itself now holds. Reply with ONLY that number.
         score: { match: numeric, expected: 61, tolerance: 0 }

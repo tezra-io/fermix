@@ -200,7 +200,7 @@ def test_capability_judge_preflight_delegates_to_the_judge_precondition(monkeypa
 
 def test_unevaluated_judge_aborts_instead_of_scoring_candidate_zero(monkeypatch):
     case = SimpleNamespace(
-        id="quality", score_spec=None, rubric="Judge quality.",
+        id="quality", score_spec=None, rubric="Judge quality.", expect={},
         turns=[SimpleNamespace(query="q")])
     cfg = SimpleNamespace(judge=SimpleNamespace(backend="openai", model="gpt-5.4-mini"))
     monkeypatch.setattr(
@@ -393,6 +393,25 @@ def test_capability_risk_requires_mutation_and_cost_confirmations():
     assert rc._confirmation_error(_risk_case("host_readonly"), confirmed) is None
     assert rc._confirmation_error(_risk_case("isolated_mutation"), confirmed) is None
     assert rc._confirmation_error(_risk_case("expensive"), confirmed) is None
+
+
+def test_the_default_sweep_is_the_ranking_task_set_and_nothing_else():
+    """The unattended sweep's task count IS the leaderboard's cohort: one more
+    task changes the composite, and every historical row was scored on the old
+    set. A suite also joins the ranking's PRECONDITIONS — the browser corpus
+    needs a working Chrome in the disposable home — so those suites stay parked
+    under candidates/ and are promoted by the owner, deliberately, rather than by
+    landing in the directory. This number is the guard on that."""
+    cap_dir = os.path.join(os.path.dirname(HERE), "suites", "capability")
+    default, _skipped = rc.capability_cases(
+        suites.load_all(cap_dir), None, None, None, False)
+    assert len(default) == 26
+    assert not [suite.name for suite, _scn, _case in default
+                if suite.name.startswith("cap_browser")]
+    parked, _skipped = rc.capability_cases(
+        suites.load_all(cap_dir, include_candidates=True), None, None, None, False)
+    assert {"cap_browser_corpus", "cap_browser_forms", "cap_browser_webmcp"} <= {
+        suite.name for suite, _scn, _case in parked}
 
 
 def test_all_shipped_capability_scenarios_declare_a_risk():
@@ -1420,7 +1439,7 @@ def test_confirmations_are_an_execution_concern_not_a_planning_one():
 # --- argument validation ----------------------------------------------------
 
 def _args(**overrides):
-    base = dict(trials=5, k=None, threshold=1.0)
+    base = dict(trials=5, k=None, threshold=1.0, results_out=None)
     base.update(overrides)
     return SimpleNamespace(**base)
 
@@ -1655,7 +1674,8 @@ def _report_cfg(tmp_path):
 
 def _report_args(**overrides):
     base = dict(config_id=None, threshold=1.0, private=False, no_opik=True,
-                axis="tokens", suite=None, tag=None, max_tasks=None, candidates=False)
+                axis="tokens", suite=None, tag=None, max_tasks=None, candidates=False,
+                results_out=None)
     base.update(overrides)
     return SimpleNamespace(**base)
 

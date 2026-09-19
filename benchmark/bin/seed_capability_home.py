@@ -43,6 +43,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -221,6 +222,68 @@ def render_config(
     return "\n".join(lines)
 
 
+_TABLE_HEADER_RE = re.compile(r"^\s*\[\[?\s*([^\[\]]+?)\s*\]\]?\s*$")
+
+
+def table_headers(toml_text: str) -> list[str]:
+    """Every EXPLICIT table header in a TOML document, in order.
+
+    Explicit headers, not tomllib's nested result: a fragment adding
+    `[fermix_core.browser]` is fine beside the seeder's
+    `[fermix_core.providers.<id>]` — both only imply `[fermix_core]` — while a
+    second `[fermix_core.harness]` is the duplicate TOML itself refuses. Only the
+    headers each document actually writes can tell those apart."""
+    headers = []
+    for line in toml_text.splitlines():
+        match = _TABLE_HEADER_RE.match(line)
+        if match:
+            headers.append(match.group(1).strip())
+    return headers
+
+
+def extra_config_error(rendered: str, fragment: str) -> str | None:
+    """Why this `--extra-config` fragment cannot be appended, or None.
+
+    An arm's fragment is appended verbatim, so it must be a self-contained set of
+    tables that the seeded config does not already write. The alternative is the
+    daemon refusing the merged file at boot with a TOML parse error that names a
+    line number in a generated file — a worse message for a condition that is
+    knowable here."""
+    try:
+        parsed = tomllib.loads(fragment)
+    except tomllib.TOMLDecodeError as exc:
+        return f"--extra-config is not valid TOML: {exc}"
+    bare = sorted(key for key, value in parsed.items() if not isinstance(value, dict))
+    if bare:
+        # Appended after the seeder's last table, a bare key would silently join
+        # THAT table instead of the document root.
+        return (f"--extra-config must start with a table header; top-level key(s) "
+                f"{bare} would be appended into the seeder's last table")
+    written = set(table_headers(rendered))
+    clashes = sorted(set(table_headers(fragment)) & written)
+    if clashes:
+        return (f"--extra-config redefines table(s) {clashes} the seeder already writes; "
+                "an arm changes what the seeder does not own, or the seeder learns "
+                "the setting")
+    return None
+
+
+def read_extra_config(rendered: str, path: str) -> str:
+    """The arm fragment to append, refused loudly if it cannot be appended."""
+    resolved = os.path.abspath(os.path.expanduser(path))
+    try:
+        with open(resolved, encoding="utf-8") as fh:
+            fragment = fh.read()
+    except OSError as exc:
+        die(f"cannot read --extra-config {resolved}: {exc}")
+    problem = extra_config_error(rendered, fragment)
+    if problem:
+        die(problem)
+    tables = ", ".join(table_headers(fragment)) or "none"
+    print(f"appending --extra-config {resolved} (table(s): {tables})")
+    return f"\n# --- appended from {resolved} (configuration arm) ---\n{fragment.strip()}\n"
+
+
 def copy_oauth_token(home: str, pid: str) -> None:
     """Copy the primary provider's OAuth entry from the dev auth store into the
     disposable home so the daemon authenticates without an interactive login.
@@ -352,6 +415,10 @@ def parse_args() -> argparse.Namespace:
                         help="explicit mode: optional reasoning_effort")
     parser.add_argument("--allow-root", dest="allow_roots", action="append", default=[],
                         help="absolute path appended to sandbox allowed_roots (repeatable)")
+    parser.add_argument("--extra-config", dest="extra_config",
+                        help="TOML fragment appended to the rendered config (one "
+                             "configuration ARM's difference); refused when it "
+                             "redefines a table the seeder already writes")
     return parser.parse_args()
 
 
@@ -396,9 +463,12 @@ def main() -> None:
     reset_state(home)
     write_skill_token(home)
 
+    config = render_config(home, pid, blk, profile, allowed_roots,
+                           explicit=bool(args.provider))
+    if args.extra_config:
+        config += read_extra_config(config, args.extra_config)
     with open(os.path.join(home, "config.toml"), "w", encoding="utf-8") as fh:
-        fh.write(render_config(home, pid, blk, profile, allowed_roots,
-                               explicit=bool(args.provider)))
+        fh.write(config)
 
     if args.provider:
         env_name = _ENV_KEY_PROVIDERS.get(pid)

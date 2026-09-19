@@ -1,6 +1,6 @@
 suite: cap_browser_forms
 risk: isolated_mutation
-title: "Capability — fill a form in one call, and read what an action changed (fixture server required)"
+title: "Capability — fill a form in one call, and read what an action changed"
 description: >
   Ground-truth score for two `browser` economies that replace model turns with
   one call: the `fill_form` act kind, which takes several fields from one
@@ -13,22 +13,23 @@ description: >
   `requires_tools: [browser]` zeroes any trial that answered without reaching the
   page.
 
-  WHY THIS SUITE LIVES UNDER candidates/ AND NOT BESIDE THE OTHERS. Same reason
-  as its `cap_browser_webmcp` sibling: it is not an unvalidated draft, it is a
-  task with a precondition no unattended sweep can satisfy. The pages are served
-  by a loopback fixture server the OPERATOR starts
-  (`benchmark/bin/browser_fixture.py`); neither runner has a fixture-server seam,
-  and a suite's `query` is authored text with no URL placeholder to hand it a
-  port. In `suites/capability/` it would join `make capability` /
-  `make capability-auto`, where a forgotten server scores every trial 0 and drags
-  the headline number with nothing wrong in the product. Under candidates/ it is
-  excluded from the default glob and runs only when asked for by name. Promote it
-  the day a runner owns the fixture server's lifecycle.
+  WHY THIS SUITE IS PARKED UNDER candidates/. Not because anything about it is
+  unvalidated or needs a process started by hand — the runner owns the fixture
+  server. It is parked because PROMOTING it changes the ranking: the default
+  sweep's task set is the leaderboard's cohort, so adding these tasks moves the
+  composite and orphans every row scored on the old set, and the corpus makes a
+  working Chrome in the disposable home a precondition of the ranking itself.
+  That is the owner's decision, not a consequence of which directory a file sits
+  in. Until it is taken, this suite runs only when asked for by name.
+
+  The pages come from the runner-owned fixture server: the prompts carry
+  `__EVAL_FIXTURE_URL__`, and `run_capability.py` starts one loopback server
+  before any spend and binds a token per trial. There is nothing for an operator
+  to start, and no literal port to keep in step.
 
   PRECONDITIONS: the disposable capability daemon (bin/capability-daemon.sh up)
-  with a working Chrome, and the fixture server running on its default port:
+  with a working Chrome.
 
-      benchmark/bin/browser_fixture.py
       cd benchmark && uv run bin/run_capability.py --candidates \
         --suite cap_browser_forms --trials 3 \
         --confirm-daemon-isolated --confirm-isolated-env
@@ -38,14 +39,14 @@ description: >
   key is `allowed_hosts`), loopback stays allowed whatever that list says, and
   neither `fill_form` nor the post-action observation adds a configuration key.
 
-  SAFETY GATE: deliberately none, exactly as in `cap_browser_webmcp`. Neither
-  case declares `tools_none`, `tools_none_succeeded` or `reply_not_matches`, so
-  the runner reports safety as NOT EVALUATED and the release gate exits 5 — the
-  same by-design exit every shipped capability suite produces today. Adding a
-  gate these tasks could never trip would turn that honest hole into a reassuring
-  checkmark. The gate this surface actually wants is an instruction injected into
-  page text, which belongs in a safety pack beside the other injection cases, not
-  here.
+  SAFETY GATE: deliberately none. Neither case declares `tools_none`,
+  `tools_none_succeeded` or `reply_not_matches`, so the runner reports safety as
+  NOT EVALUATED and the release gate exits 5 — the same by-design exit every
+  shipped capability suite produces today. Adding a gate these tasks could never
+  trip would turn that honest hole into a reassuring checkmark. The two page
+  hazards this corpus does gate — a consequential control and an instruction
+  injected into page text — are behavioural cases in `suites/browser.yaml`, where
+  a rubric can read what the model said about them.
 defaults:
   judge: false
   timeout_ms: 240000
@@ -61,7 +62,6 @@ scenarios:
     risk: isolated_mutation
     title: "Fill five fields in one call, and read what an action changed"
     severity: normal
-    # `fixture-server` marks the operator precondition above.
     tags: [capability, browser, form, fixture-server]
     cases:
       - id: form_confirmation_code
@@ -71,7 +71,7 @@ scenarios:
         # until Save is pressed, so it cannot be reached from parametric recall
         # or from reading the form.
         query: >
-          Open http://127.0.0.1:8977/form.html in the browser and fill the
+          Open __EVAL_FIXTURE_URL__/form.html in the browser and fill the
           registration form in: full name Ada Lovelace, city Turin, organisation
           Analytical Engines, role Programmer, dietary note no shellfish. Save
           it, then report the confirmation code the page shows. Reply with ONLY
@@ -85,7 +85,7 @@ scenarios:
         # 6208 takes both steps. `escapement` matches two entries, so the wrong
         # link scores 0 on its own code rather than by luck.
         query: >
-          Open http://127.0.0.1:8977/search.html in the browser. Search the parts
+          Open __EVAL_FIXTURE_URL__/search.html in the browser. Search the parts
           catalogue for escapement, open the Silver escapement entry, and report
           the part code shown on it. Reply with ONLY that number.
         score: { match: numeric, expected: 6208, tolerance: 0 }

@@ -8,13 +8,13 @@ AIM_DISPLAY_ATTEST := $(if $(filter 1 true yes,$(CONFIRM_AIM_LIVE_DISPLAY)),--co
 AIM_HANDS_ATTEST := $(if $(filter 1 true yes,$(CONFIRM_AIM_HANDS_OFF)),--confirm-hands-off,)
 AIM_ATTEST := $(AIM_DISPLAY_ATTEST) $(AIM_HANDS_ATTEST)
 
-.PHONY: help tests check dry regression behavioral-isolated capability capability-auto capability-judged capability-readonly estimate rank baseline uplift gaia lmeval aim aim-calibrate
+.PHONY: help tests check dry regression behavioral-isolated capability capability-auto capability-judged capability-readonly estimate rank baseline uplift arms gaia lmeval aim aim-calibrate
 
 help:
-	@echo "targets: tests check dry regression behavioral-isolated capability capability-auto capability-judged capability-readonly estimate rank baseline uplift gaia lmeval aim aim-calibrate"
+	@echo "targets: tests check dry regression behavioral-isolated capability capability-auto capability-judged capability-readonly estimate rank baseline uplift arms gaia lmeval aim aim-calibrate"
 
 tests:        ## developer tests for harness code; does not run behavioral/capability E2E
-	@for t in scoring pricing aggregate leaderboard release_gate experiments uplift baseline lmeval gaia capability_runner checker grade suites judge eval_safety seed_home opik_client tier aim; do \
+	@for t in scoring pricing aggregate leaderboard release_gate experiments uplift baseline lmeval gaia capability_runner checker grade suites judge eval_safety seed_home opik_client tier aim fixture_server arms; do \
 	  echo "== $$t =="; $(UV) bin/test_$$t.py || exit 1; done
 
 check:        ## preconditions (Opik + daemon)
@@ -64,6 +64,13 @@ baseline:     ## raw-model arm (needs EVAL_BASELINE_API_KEY + EVAL_BASELINE_MODE
 
 uplift:       ## paired uplift (set FERMIX_RESULTS=... BASELINE_RESULTS=...)
 	$(UV) bin/run_uplift.py --fermix "$(FERMIX_RESULTS)" --baseline "$(BASELINE_RESULTS)"
+
+# One capability selection against several CONFIGURATIONS of the daemon: each arm
+# gets its own disposable home and Opik project, runs on its own, and is compared
+# with the first arm (the control). ARMS=<file> selects the arms file; add
+# ARMS_FLAGS=--dry-run to plan every arm and spend nothing.
+arms:         ## configuration arms (set ARMS=arms/<name>.yaml)
+	$(UV) bin/run_arms.py --arms "$(or $(ARMS),arms/model_choice.example.yaml)" $(ARMS_FLAGS)
 
 gaia:         ## GAIA (set GAIA_DATA=path to the gated JSONL; LIMIT optional)
 	$(UV) bin/run_gaia.py --data "$(GAIA_DATA)" --limit "$(or $(LIMIT),30)"

@@ -2,43 +2,27 @@
 # /// script
 # requires-python = ">=3.11"
 # ///
-"""Serve the browser eval's fixture pages on loopback.
+"""Serve the browser eval's fixture pages by hand, for AUTHORING a page.
 
-Several browser cases need a page whose behaviour is pinned rather than borrowed
-from a live site: two that offer WebMCP tools, a five-field form whose
-confirmation code is derived from what was typed, and a search page that changes
-structure twice. Loopback HTTP is the only page transport the browser policy
-allows without configuration (`file://` and `data:` are hard-blocked), and it is
-a secure context, which the WebMCP API requires. Start this before the run, leave
-it up, stop it after:
+The runners own this server during a run: `run_eval.py` and `run_capability.py`
+start one `evallib.fixture_server.FixtureServer` when a selected case uses
+`__EVAL_FIXTURE_URL__`, bind a token per case attempt, and stop it on every exit
+path. Nothing about a run needs this CLI, and no suite names a port.
+
+What it is for is the loop between editing a page and looking at it: it starts
+the same server on an ephemeral loopback port, binds one token, and prints every
+page's URL under it plus the state endpoint, so the page can be opened in a
+browser and its recorded state read back:
 
     benchmark/bin/browser_fixture.py
+    # open a printed page URL, interact with it, then:
+    curl http://127.0.0.1:<port>/s/<token>/state
 
-    # behavioral (needs the dev daemon + --judge)
-    cd benchmark && uv run bin/run_eval.py --suite browser \\
-      --scenario page_offered_tools --judge
-    cd benchmark && uv run bin/run_eval.py --suite browser \\
-      --scenario form_and_result_pages --judge
-
-    # capability (needs the disposable capability daemon)
-    cd benchmark && uv run bin/run_capability.py --candidates \\
-      --suite cap_browser_webmcp --trials 3 \\
-      --confirm-daemon-isolated --confirm-isolated-env
-    cd benchmark && uv run bin/run_capability.py --candidates \\
-      --suite cap_browser_forms --trials 3 \\
-      --confirm-daemon-isolated --confirm-isolated-env
-
-Unlike `aimlib.server` (which `run_aim.py` owns, starts on an ephemeral port and
-hands the resulting URL to the prompt it generates), this server is NOT started
-by a runner: neither `run_eval.py` nor `run_capability.py` has a fixture-server
-seam, and a suite's `query` is authored text with no URL placeholder. So the port
-is FIXED and the suites name it literally. `--port` exists for a clash, and moving
-it means editing those suites in the same change.
-
-The responses are exactly one per entry in ROUTES, plus 404 for everything else.
-Every document is read once at startup — there is no directory serving, no
-filesystem read per request, and no route that reflects request input into the
-body. Edit a page, restart the server.
+Loopback HTTP is the only page transport the browser policy allows without
+configuration (`file://` and `data:` are hard-blocked), and it is a secure
+context, which the WebMCP API requires. Every document is read once at startup —
+no directory serving, no filesystem read per request, no route that reflects
+request input into the body. Edit a page, restart.
 """
 
 from __future__ import annotations
@@ -46,19 +30,15 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import threading
 
-BIND_HOST = "127.0.0.1"
-DEFAULT_PORT = 8977
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from evallib.fixture_server import FixtureServer, ServerError  # noqa: E402
+
 PAGES_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "suites", "fixtures", "browser")
-# The whole routing table: request path -> the document that answers it.
-ROUTES = {
-    "/shimmed.html": "shimmed.html",
-    "/native-only.html": "native_only.html",
-    "/form.html": "form.html",
-    "/search.html": "search.html",
-}
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "suites", "fixtures", "browser")
 
 
 def die(msg: str) -> None:
@@ -66,71 +46,40 @@ def die(msg: str) -> None:
     raise SystemExit(1)
 
 
-def load_pages() -> dict[str, str]:
-    """Read every routed document once. A missing fixture fails here, loudly, rather
-    than as a 404 an eval would report as the model failing to open the page."""
-    pages = {}
-    for route, name in ROUTES.items():
-        path = os.path.join(PAGES_DIR, name)
-        if not os.path.isfile(path):
-            die(f"missing fixture page: {path}")
-        with open(path, encoding="utf-8") as fh:
-            pages[route] = fh.read()
-    return pages
-
-
-def make_handler(pages: dict[str, str]):
-    class Handler(BaseHTTPRequestHandler):
-        protocol_version = "HTTP/1.1"
-
-        def do_GET(self) -> None:  # noqa: N802 - stdlib callback name
-            body = pages.get(self.path.split("?", 1)[0])
-            if body is None:
-                self.send_response(404)
-                self.send_header("Content-Length", "0")
-                self.end_headers()
-                return
-            raw = body.encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(raw)))
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            self.wfile.write(raw)
-
-        def log_message(self, fmt, *args) -> None:
-            """Silence the per-request stderr line; the served URLs are the output."""
-
-    return Handler
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Serve the browser eval's fixture pages on loopback.")
-    parser.add_argument("--port", type=int, default=DEFAULT_PORT,
-                        help=f"loopback port (default {DEFAULT_PORT}); the suites name the "
-                             "default literally, so another port needs them edited too")
+        description="Serve the browser eval's fixture pages on loopback, by hand.")
+    parser.add_argument("--token", default="handauthoring",
+                        help="the token the pages are served under (default: handauthoring)")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    if not 1 <= args.port <= 65535:
-        die(f"--port must be a TCP port, got {args.port}")
-    pages = load_pages()
     try:
-        httpd = ThreadingHTTPServer((BIND_HOST, args.port), make_handler(pages))
-    except OSError as exc:
-        die(f"cannot bind {BIND_HOST}:{args.port}: {exc}")
-    for route in ROUTES:
-        print(f"serving http://{BIND_HOST}:{args.port}{route}")
+        fixtures = FixtureServer(PAGES_DIR)
+        port = fixtures.start()
+    except ServerError as exc:
+        die(str(exc))
+    try:
+        binding = fixtures.bind(args.token)
+    except ServerError as exc:
+        fixtures.stop()
+        die(str(exc))
+    print(f"serving {len(fixtures.documents)} document(s) on 127.0.0.1:{port}")
+    for name in fixtures.documents:
+        print(f"  {binding.url}/{name}")
+    print(f"recorded state: {binding.url}/state")
     print("ctrl-c to stop")
     try:
-        httpd.serve_forever()
+        # The server runs on its own daemon thread; this one only waits to be
+        # interrupted (never on stdin, which is empty when this is started
+        # detached and would spin).
+        threading.Event().wait()
     except KeyboardInterrupt:
         print("")
     finally:
-        httpd.server_close()
+        fixtures.stop()
 
 
 if __name__ == "__main__":

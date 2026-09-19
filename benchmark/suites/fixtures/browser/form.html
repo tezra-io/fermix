@@ -44,11 +44,14 @@
 </form>
 
 <p id="confirmation">Not saved yet.</p>
+<p id="fixture-status"></p>
 
+<script src="fixture.js"></script>
 <script>
-// Fixture for the `browser` tool's `fill_form` act kind. Served by
-// benchmark/bin/browser_fixture.py on loopback; named by suites/browser.yaml and
-// suites/capability/candidates/browser_forms.yaml.
+// Fixture for the `browser` tool's `fill_form` act kind. Served by the
+// runner-owned fixture server under this case attempt's token; the suites
+// address it with __EVAL_FIXTURE_URL__ (suites/browser.yaml,
+// suites/capability/browser_forms.yaml, suites/capability/browser_corpus.yaml).
 //
 // Five fields, one Save, one derived confirmation code. The code is the outcome
 // floor those cases gate on: it is reachable only by filling every field with
@@ -113,8 +116,16 @@
     // the very fields the case is about.
     event.preventDefault();
     saves += 1;
-    code = confirmationCode(values());
+    const vals = values();
+    code = confirmationCode(vals);
     confirmation.textContent = 'Saved. Confirmation: ' + code;
+    // What the page RECORDED, for a `fixture_state` assertion: the normalised
+    // value of each field as saved, plus the derived code. Reported only on a
+    // save, so `form.submitted` is absent until the form is actually submitted.
+    fixtureReport('form.submitted', {
+      full_name: vals[0], city: vals[1], organisation: vals[2],
+      role: vals[3], dietary_note: vals[4], code: code, saves: saves,
+    });
   });
 }());
 </script>

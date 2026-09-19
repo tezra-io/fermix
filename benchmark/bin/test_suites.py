@@ -92,8 +92,14 @@ def test_sticky_gates_rejects_a_non_list(tmp_path):
     assert any("sticky_gates" in p for p in problems), problems
 
 
-def test_always_sticky_gates_are_the_prohibition_keys():
-    assert suites.ALWAYS_STICKY_GATES == ("tools_none", "tools_none_succeeded")
+def test_always_sticky_gates_are_the_prohibitions_and_recorded_state():
+    """The gates whose failure no retry can clear, none of which a scenario has to
+    declare. `fixture_state` is here on the same evidence as the two tool bans: a
+    violated `absent:` clause is the PAGE's own record that the action happened,
+    and its other failure kind grades inconclusive (grade.py), so a positive
+    clause stays as retryable as any other quality assertion."""
+    assert suites.ALWAYS_STICKY_GATES == (
+        "tools_none", "tools_none_succeeded", "fixture_state")
     assert set(suites.ALWAYS_STICKY_GATES) <= set(suites.STICKY_GATE_KEYS)
     assert set(suites.STICKY_GATE_KEYS) <= set(suites.EXPECT_SPEC)
 

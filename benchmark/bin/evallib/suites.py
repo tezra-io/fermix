@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 
 import yaml
 
+from .fixture_server import (FIXTURE_URL_PLACEHOLDER, case_uses_fixture,
+                             clause_problems)
 from .scoring import MATCH_METHODS, _parse_number
 
 _SCORE_KEYS = {"match", "expected", "tolerance", "single"}
@@ -46,6 +48,12 @@ EXPECT_SPEC: dict[str, tuple] = {
     "min_subagent_spawns": (int,),
     "reply_matches": (str,),
     "reply_not_matches": (str,),
+    # What the fixture PAGE recorded about itself, read from the runner-owned
+    # fixture server instead of from the trace: a list of
+    # {path, equals|matches|absent} clauses. The only gate that can say a
+    # consequential control was not pressed, rather than that the reply did not
+    # mention pressing it (evallib/fixture_server.py owns the semantics).
+    "fixture_state": (list,),
     # Source fidelity as a hard fact: every URL in the reply must appear in the
     # tool-evidence URL inventory (grade.evidence_urls). Mechanically checkable,
     # so it is a gate — never rubric material (SCHEMA.md: rubrics judge, gates
@@ -174,6 +182,8 @@ def _validate_expect(expect, where: str, problems: list[str]) -> None:
                 except re.error as exc:
                     problems.append(
                         f"{where}: expect `{key}` contains an invalid regex {pattern!r}: {exc}")
+        if key == "fixture_state":
+            problems.extend(clause_problems(val, f"{where}: expect `fixture_state`"))
         if key in ("reply_matches", "reply_not_matches", "main_model_matches", "subagent_model_matches"):
             try:
                 re.compile(val)
@@ -204,14 +214,19 @@ def _merge_expect(base: dict, override: dict) -> dict:
     return out
 
 
+# Prohibitions are sticky whether or not a scenario declares them: they are the
+# suite's ban on an action, never a wording floor. `fixture_state` joins them for
+# the same reason and on the same evidence: a failed `absent:` clause is the
+# PAGE's own record that the action happened, which no retry unmakes. Its other
+# failure kind — an expected value that never arrived — grades inconclusive
+# (grade.py), so a positive clause stays retryable exactly like the "errored
+# without typed pre-execution evidence" half of `tools_none_succeeded`.
+ALWAYS_STICKY_GATES = (*_PROHIBITION_KEYS, "fixture_state")
 # The negative gates grade.py implements: each one asserts that something did NOT
 # happen. Only these may be declared `sticky_gates:` — a positive gate is a
 # quality assertion a later attempt can legitimately satisfy, while a disclosed
 # fact or an executed action cannot be taken back by a retry.
-STICKY_GATE_KEYS = ("reply_not_matches", *_PROHIBITION_KEYS)
-# Prohibitions are sticky whether or not a scenario declares them: they are the
-# suite's ban on an action, never a wording floor.
-ALWAYS_STICKY_GATES = _PROHIBITION_KEYS
+STICKY_GATE_KEYS = ("reply_not_matches", *ALWAYS_STICKY_GATES)
 
 
 def _validate_sticky_gates(value, where: str, problems: list[str]) -> tuple[str, ...]:
@@ -372,6 +387,33 @@ def _validate_tool_list(cs: dict, key: str, cloc: str, problems: list[str]) -> l
     return []
 
 
+def _refuse_misplaced_fixture_state(case, cloc: str, problems: list[str]) -> None:
+    """Where a `fixture_state` gate may be declared, and what it needs.
+
+    It is a CASE-level assertion. A turn-level one is refused because the
+    capability selector reads the CASE's expect: a capability case whose only
+    `fixture_state` sat on a turn was dropped from the sweep silently, with
+    `skipped == 0` and no notice — and a suite that reports nothing looks exactly
+    like a suite that passed. Nothing is lost by refusing it: recorded state
+    accumulates over a case's turns, so the case-level map (graded on the final
+    turn) is the whole case's record, and a claim about ORDER is a clause over
+    `event_keys`.
+
+    It also needs a prompt that addresses the fixture server, because the state
+    is keyed on the token the runner binds for that case attempt. Without one the
+    case would grade against an empty map for the life of the suite — every
+    `absent:` clause vacuously green, which is the reassuring checkmark a safety
+    gate exists to prevent."""
+    if any("fixture_state" in turn.expect for turn in case.turns):
+        problems.append(f"{cloc}: `fixture_state` belongs to the case, not to a turn — "
+                        "the capability runner reads the case's expect, so a "
+                        "turn-level one is never scored; page state accumulates "
+                        "across the case's turns")
+    if "fixture_state" in case.expect and not case_uses_fixture(case):
+        problems.append(f"{cloc}: `fixture_state` needs a prompt addressing the fixture "
+                        f"server — use {FIXTURE_URL_PLACEHOLDER} in `query`")
+
+
 def _refuse_undriven_turns(turns, score_spec, checker_spec, cross_session: bool,
                            cloc: str, problems: list[str]) -> None:
     """A capability case is driven by run_capability, which sends ONE prompt (or the two
@@ -419,6 +461,12 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
     default_expect_raw = defaults.get("expect", {})
     _validate_expect(default_expect_raw, f"{fname}: defaults.expect", problems)
     default_expect = default_expect_raw if isinstance(default_expect_raw, dict) else {}
+    if "fixture_state" in default_expect:
+        # Every case's state lives under its own per-attempt token, so a suite
+        # default would assert one case's page behaviour of every other one.
+        problems.append(f"{fname}: `defaults.expect` may not set `fixture_state` — a case "
+                        "asserts what ITS own page recorded")
+        default_expect = {k: v for k, v in default_expect.items() if k != "fixture_state"}
     default_judge = _boolean(
         defaults.get("judge", True), f"{fname}: defaults.judge", problems, True)
 
@@ -617,11 +665,13 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
                             continue
                         images.append(resolved)
 
-            cases.append(Case(id=cid, turns=turns, expect=case_expect, rubric=rubric,
-                              judge=judge, timeout_ms=ctimeout, drive=drive, images=images,
-                              score_spec=score_spec, checker_spec=checker_spec,
-                              requires_tools=requires_tools, cross_session=cross_session,
-                              requires_tools_all=tuple(requires_all)))
+            case = Case(id=cid, turns=turns, expect=case_expect, rubric=rubric,
+                        judge=judge, timeout_ms=ctimeout, drive=drive, images=images,
+                        score_spec=score_spec, checker_spec=checker_spec,
+                        requires_tools=requires_tools, cross_session=cross_session,
+                        requires_tools_all=tuple(requires_all))
+            _refuse_misplaced_fixture_state(case, cloc, problems)
+            cases.append(case)
 
         scenarios.append(Scenario(id=sid, title=stitle, severity=severity, tags=tags,
                                   cases=cases, risk=risk, confirm_cost=confirm_cost,
