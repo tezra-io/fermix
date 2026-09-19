@@ -194,7 +194,14 @@ defmodule FermixOpik.Mapper do
             # of unknown fate. An opaque id and a closed enum — no page or screen
             # text — so both ride outside the content-capture gate.
             :cu_session,
-            :outcome
+            :outcome,
+            # Addressing (M42 slice 3): how stale the image an action aimed at was
+            # when it was sent, and the code when it named no addressable one. A
+            # millisecond count and a closed enum — no id (it does not outlive a
+            # session), no dimensions, nothing from the screen — so both ride
+            # outside the content-capture gate like the pair above.
+            :observation_age_ms,
+            :geometry_refusal
           ])
         )
     }

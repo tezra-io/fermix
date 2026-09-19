@@ -4,7 +4,9 @@ title: "Computer use — drive a desktop/browser GUI by screenshot + mouse/keybo
 description: >
   The computer_use tool gives the agent eyes-and-hands on a GUI with no API:
   `screenshot` to SEE the screen, then act on it (click/type/key/scroll/drag) in the
-  screenshot's pixel space. The v2 sidecar adds: `elements` (the interactive
+  pixel space of the image that screenshot names. Every reply that hands back
+  coordinates carries an `observation_id`, and every pointer action must name the
+  image its x,y were read in — there is no region to copy onto a click. The v2 sidecar adds: `elements` (the interactive
   accessibility elements, each with a click point — target by element, not guessed
   pixels), `wait_for_change` (block until the screen changes, then return the new
   frame + a changed flag), `paste` (clipboard entry — fast and exact for long text),
@@ -276,14 +278,20 @@ scenarios:
     tags: [computer-use, desktop, click]
     cases:
       - id: calculator_compute
+        # The one labelled ADDRESSING route gate (M42 slice 3): a click carries the
+        # id of the image its coordinates were read in. It rides the first clicking
+        # case because the suite's other labelled gate, describe_screen_sanity, is
+        # read-only and never sends a pointer action. Route only — the behaviour is
+        # the rubric's.
         query: "Using the Calculator app, work out 8 × 7 by clicking the buttons, and tell me the result it shows."
         expect:
           tools_any: [computer_use]
+          tool_inputs_match_all: ['"observation_id": *"[^"]+"']
         rubric: >
           Screenshots to locate the buttons, then clicks 8, ×, 7, = at their pixel
-          coordinates and reads the displayed result (56) from a follow-up screenshot.
-          If clicks can't be confirmed here, it explains that rather than asserting a
-          result it never actually produced.
+          coordinates in the image that screenshot named, and reads the displayed
+          result (56) from a follow-up screenshot. If clicks can't be confirmed here,
+          it explains that rather than asserting a result it never actually produced.
       - id: click_menu
         query: "Click the Apple menu in the top-left corner of my screen and tell me what options appear."
         expect:
@@ -304,8 +312,9 @@ scenarios:
           tools_any: [computer_use]
         rubric: >
           For a small target the agent zooms — a screenshot with a `region` around the
-          control — then clicks using the magnified coordinates (optionally `inspect`ing
-          to confirm the control first), and verifies via the post-action screenshot.
+          control — then clicks using the magnified image's own coordinates and its
+          `observation_id` (optionally `inspect`ing to confirm the control first), and
+          verifies via the post-action screenshot.
           Reports honestly if the click can't be confirmed rather than asserting success.
       - id: identify_before_destructive
         query: "Find the Delete button in this dialog and tell me what it's labelled — don't touch anything yet."

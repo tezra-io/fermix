@@ -4,7 +4,13 @@ defmodule FermixCore.ComputerUse.SessionTest do
   alias FermixCore.ComputerUse.Config
   alias FermixCore.ComputerUse.InputOwner
   alias FermixCore.ComputerUse.Session
+  alias FermixTestSupport.ComputerUseObservations
   alias FermixTestSupport.ComputerUseReceipts
+
+  # The image a pointer action names. Addressing is checked before any driver
+  # call, so every click carries one; the doubles below mint the same id on the
+  # replies that hand back coordinates.
+  @obs ComputerUseObservations.id()
 
   # A stub Driver: no native code, speaks the Protocol response shape. It records
   # execute/stop calls to the test pid and returns a configurable response. Every
@@ -115,7 +121,7 @@ defmodule FermixCore.ComputerUse.SessionTest do
 
       case Map.fetch(replies, action) do
         {:ok, scripted} -> scripted
-        :error -> {:ok, FermixTestSupport.ComputerUseReceipts.stamp(%{"ok" => true}, request)}
+        :error -> {:ok, default_reply(request)}
       end
     end
 
@@ -124,6 +130,30 @@ defmodule FermixCore.ComputerUse.SessionTest do
       send(pid, :driver_stop)
       :ok
     end
+
+    # An unscripted reply is a healthy sidecar's: a receipt when the action was a
+    # mutation, an observation when it handed back coordinates.
+    defp default_reply(request) do
+      %{
+        "ok" => true,
+        "data" => Base.encode64("png"),
+        "mime" => "image/png",
+        "width" => 1200,
+        "height" => 760,
+        "region" => FermixTestSupport.ComputerUseObservations.resolved_region(request)
+      }
+      |> Map.take(reply_keys(request))
+      |> FermixTestSupport.ComputerUseObservations.stamp(request)
+      |> FermixTestSupport.ComputerUseReceipts.stamp(request)
+    end
+
+    # A capture answers with pixels and their sent size, which is what makes the
+    # observation it mints a CROP the session can re-capture through; anything
+    # else answers with a bare ack.
+    defp reply_keys(%{"action" => action}) when action in ~w(screenshot wait_for_change),
+      do: ~w(ok data mime width height region)
+
+    defp reply_keys(_request), do: ~w(ok)
   end
 
   # A Driver whose action call BLOCKS until the test releases it, so the window
@@ -239,7 +269,12 @@ defmodule FermixCore.ComputerUse.SessionTest do
       session = start_session([])
 
       assert {:ok, :auto, request} =
-               Session.classify(session, %{"action" => "left_click", "x" => 10, "y" => 20})
+               Session.classify(session, %{
+                 "action" => "left_click",
+                 "observation_id" => @obs,
+                 "x" => 10,
+                 "y" => 20
+               })
 
       assert request["screenshot_after"] == true
     end
@@ -248,7 +283,12 @@ defmodule FermixCore.ComputerUse.SessionTest do
       session = start_session(config: %{Config.normalize(enabled: true) | access: :strict})
 
       assert {:error, {:refused, :strict_mode}} =
-               Session.classify(session, %{"action" => "left_click", "x" => 10, "y" => 20})
+               Session.classify(session, %{
+                 "action" => "left_click",
+                 "observation_id" => @obs,
+                 "x" => 10,
+                 "y" => 20
+               })
 
       # read-only still classifies fine in strict
       assert {:ok, :auto, _request} = Session.classify(session, %{"action" => "screenshot"})
@@ -290,7 +330,10 @@ defmodule FermixCore.ComputerUse.SessionTest do
       assert {:ok, result} = Session.execute(session, request)
 
       assert result.image == %{type: :image, mime_type: "image/png", data: png}
-      assert result.summary =~ "screenshot 1280x800"
+      # A capture that minted no observation may not invite coordinates: it says
+      # it is not addressable, and the next pointer action is refused for want of
+      # an id rather than aimed at an image nothing can map.
+      assert result.summary =~ "Screenshot 1280x800, not addressable."
       assert_received {:driver_execute, ^request}
     end
 
@@ -298,7 +341,12 @@ defmodule FermixCore.ComputerUse.SessionTest do
       session = start_session([])
 
       assert {:ok, :auto, request} =
-               Session.classify(session, %{"action" => "left_click", "x" => 1, "y" => 2})
+               Session.classify(session, %{
+                 "action" => "left_click",
+                 "observation_id" => @obs,
+                 "x" => 1,
+                 "y" => 2
+               })
 
       assert {:ok, result} = Session.execute(session, request)
       assert %{summary: "ok", image: nil} = result
@@ -316,7 +364,14 @@ defmodule FermixCore.ComputerUse.SessionTest do
 
       session = start_session(driver_opts: [response: response])
 
-      assert {:ok, request} = wrap_classify(session, %{"action" => "inspect", "x" => 5, "y" => 6})
+      assert {:ok, request} =
+               wrap_classify(session, %{
+                 "action" => "inspect",
+                 "observation_id" => @obs,
+                 "x" => 5,
+                 "y" => 6
+               })
+
       assert {:ok, result} = Session.execute(session, request)
 
       assert result.image == nil
@@ -328,7 +383,14 @@ defmodule FermixCore.ComputerUse.SessionTest do
       response = %{"ok" => true, "found" => false}
       session = start_session(driver_opts: [response: response])
 
-      assert {:ok, request} = wrap_classify(session, %{"action" => "inspect", "x" => 5, "y" => 6})
+      assert {:ok, request} =
+               wrap_classify(session, %{
+                 "action" => "inspect",
+                 "observation_id" => @obs,
+                 "x" => 5,
+                 "y" => 6
+               })
+
       assert {:ok, result} = Session.execute(session, request)
       assert %{summary: "no UI element at that point", image: nil} = result
     end
@@ -429,7 +491,7 @@ defmodule FermixCore.ComputerUse.SessionTest do
       assert {:ok, result} = Session.execute(session, request)
 
       assert result.image == %{type: :image, mime_type: "image/png", data: png}
-      assert result.summary =~ "screen changed"
+      assert result.summary =~ "The screen changed."
     end
 
     test "a wait_for_change timeout frame notes no change" do
@@ -445,7 +507,7 @@ defmodule FermixCore.ComputerUse.SessionTest do
       session = start_session(driver_opts: [response: response])
       assert {:ok, request} = wrap_classify(session, %{"action" => "wait_for_change"})
       assert {:ok, result} = Session.execute(session, request)
-      assert result.summary =~ "no change before the wait timed out"
+      assert result.summary =~ "No change before the wait timed out."
     end
 
     test "a screenshot cursor position is surfaced in the summary" do
@@ -573,7 +635,12 @@ defmodule FermixCore.ComputerUse.SessionTest do
       session = start_session([])
 
       {:ok, :auto, request} =
-        Session.classify(session, %{"action" => "left_click", "x" => 1, "y" => 2})
+        Session.classify(session, %{
+          "action" => "left_click",
+          "observation_id" => @obs,
+          "x" => 1,
+          "y" => 2
+        })
 
       assert {:ok, %{courtesy: :proceeded}} = Session.execute(session, request)
       assert_received {:driver_execute, %{"action" => "idle_ms"}}
@@ -591,7 +658,12 @@ defmodule FermixCore.ComputerUse.SessionTest do
         )
 
       {:ok, :auto, request} =
-        Session.classify(session, %{"action" => "left_click", "x" => 1, "y" => 2})
+        Session.classify(session, %{
+          "action" => "left_click",
+          "observation_id" => @obs,
+          "x" => 1,
+          "y" => 2
+        })
 
       assert {:ok, %{courtesy: :deferred}} = Session.execute(session, request)
       assert_received {:driver_execute, %{"action" => "wait_for_idle"}}
@@ -608,7 +680,12 @@ defmodule FermixCore.ComputerUse.SessionTest do
         )
 
       {:ok, :auto, request} =
-        Session.classify(session, %{"action" => "left_click", "x" => 1, "y" => 2})
+        Session.classify(session, %{
+          "action" => "left_click",
+          "observation_id" => @obs,
+          "x" => 1,
+          "y" => 2
+        })
 
       assert {:error, :user_active} = Session.execute(session, request)
       # the action itself never ran — only the idle probe + the wait
@@ -633,7 +710,12 @@ defmodule FermixCore.ComputerUse.SessionTest do
         )
 
       {:ok, :auto, request} =
-        Session.classify(session, %{"action" => "left_click", "x" => 1, "y" => 2})
+        Session.classify(session, %{
+          "action" => "left_click",
+          "observation_id" => @obs,
+          "x" => 1,
+          "y" => 2
+        })
 
       assert {:ok, %{courtesy: :off}} = Session.execute(session, request)
       refute_received {:driver_execute, %{"action" => "idle_ms"}}
@@ -644,7 +726,12 @@ defmodule FermixCore.ComputerUse.SessionTest do
       session = start_session(driver_opts: [idle_response: %{"ok" => true}])
 
       {:ok, :auto, request} =
-        Session.classify(session, %{"action" => "left_click", "x" => 1, "y" => 2})
+        Session.classify(session, %{
+          "action" => "left_click",
+          "observation_id" => @obs,
+          "x" => 1,
+          "y" => 2
+        })
 
       assert {:ok, %{courtesy: :unavailable}} = Session.execute(session, request)
       assert_received {:driver_execute, %{"action" => "left_click"}}
@@ -666,7 +753,12 @@ defmodule FermixCore.ComputerUse.SessionTest do
                Session.classify(session, %{"action" => "screenshot"})
 
       assert {:error, {:refused, :paused}} =
-               Session.classify(session, %{"action" => "left_click", "x" => 1, "y" => 2})
+               Session.classify(session, %{
+                 "action" => "left_click",
+                 "observation_id" => @obs,
+                 "x" => 1,
+                 "y" => 2
+               })
 
       assert :resumed = Session.resume(session)
       refute Session.paused?(session)
@@ -682,7 +774,12 @@ defmodule FermixCore.ComputerUse.SessionTest do
       session = start_session([])
 
       {:ok, :auto, request} =
-        Session.classify(session, %{"action" => "left_click", "x" => 1, "y" => 2})
+        Session.classify(session, %{
+          "action" => "left_click",
+          "observation_id" => @obs,
+          "x" => 1,
+          "y" => 2
+        })
 
       assert :paused = Session.pause(session)
       assert Session.paused?(session)
@@ -809,7 +906,15 @@ defmodule FermixCore.ComputerUse.SessionTest do
 
     test "pause, paused? and action_count are answered while an action is inside the driver" do
       {session, _ref} = start_blocking()
-      caller = execute_async(session, %{"action" => "left_click", "x" => 1, "y" => 2})
+
+      caller =
+        execute_async(session, %{
+          "action" => "left_click",
+          "observation_id" => @obs,
+          "x" => 1,
+          "y" => 2
+        })
+
       {_request, worker} = await_blocked()
 
       # Every one of these is a call or a cast that had to queue behind a 30 s
@@ -833,7 +938,15 @@ defmodule FermixCore.ComputerUse.SessionTest do
 
     test "a second execute while one is in flight is refused as busy, not queued" do
       {session, _ref} = start_blocking()
-      caller = execute_async(session, %{"action" => "left_click", "x" => 1, "y" => 2})
+
+      caller =
+        execute_async(session, %{
+          "action" => "left_click",
+          "observation_id" => @obs,
+          "x" => 1,
+          "y" => 2
+        })
+
       {_request, worker} = await_blocked()
 
       {:ok, :auto, second} = Session.classify(session, %{"action" => "screenshot"})
@@ -855,7 +968,15 @@ defmodule FermixCore.ComputerUse.SessionTest do
     # way the answer can go missing.
     test "a worker that dies mid-action answers its caller, then stops the session" do
       {session, ref} = start_blocking()
-      caller = execute_async(session, %{"action" => "left_click", "x" => 1, "y" => 2})
+
+      caller =
+        execute_async(session, %{
+          "action" => "left_click",
+          "observation_id" => @obs,
+          "x" => 1,
+          "y" => 2
+        })
+
       {_request, worker} = await_blocked()
 
       Process.exit(worker, :kill)
@@ -880,7 +1001,15 @@ defmodule FermixCore.ComputerUse.SessionTest do
         )
 
       ref = Process.monitor(session)
-      caller = execute_async(session, %{"action" => "left_click", "x" => 1, "y" => 2})
+
+      caller =
+        execute_async(session, %{
+          "action" => "left_click",
+          "observation_id" => @obs,
+          "x" => 1,
+          "y" => 2
+        })
+
       {_request, worker} = await_blocked()
 
       assert :unconfirmed = Session.pause(session)
@@ -903,7 +1032,14 @@ defmodule FermixCore.ComputerUse.SessionTest do
           session_id: "cua_shutdown_pending"
         )
 
-      caller = execute_async(session, %{"action" => "left_click", "x" => 1, "y" => 2})
+      caller =
+        execute_async(session, %{
+          "action" => "left_click",
+          "observation_id" => @obs,
+          "x" => 1,
+          "y" => 2
+        })
+
       {_request, worker} = await_blocked()
 
       Process.exit(session, :shutdown)
@@ -975,7 +1111,12 @@ defmodule FermixCore.ComputerUse.SessionTest do
       assert :ok = InputOwner.acquire(spawn_holder())
 
       {:ok, :auto, click} =
-        Session.classify(session, %{"action" => "left_click", "x" => 1, "y" => 2})
+        Session.classify(session, %{
+          "action" => "left_click",
+          "observation_id" => @obs,
+          "x" => 1,
+          "y" => 2
+        })
 
       assert {:error, {:refused, :input_busy}} = Session.execute(session, click)
 
@@ -1001,7 +1142,12 @@ defmodule FermixCore.ComputerUse.SessionTest do
       session = start_session([])
 
       {:ok, :auto, click} =
-        Session.classify(session, %{"action" => "left_click", "x" => 1, "y" => 2})
+        Session.classify(session, %{
+          "action" => "left_click",
+          "observation_id" => @obs,
+          "x" => 1,
+          "y" => 2
+        })
 
       assert {:ok, %{outcome: :performed}} = Session.execute(session, click)
       assert {:ok, %{outcome: :performed}} = Session.execute(session, click)
@@ -1036,13 +1182,25 @@ defmodule FermixCore.ComputerUse.SessionTest do
       {session, Process.monitor(session)}
     end
 
+    # A click aimed in a magnified crop, which is the shape whose check the session
+    # takes itself. The crop is established with `wait_for_change` rather than a
+    # `screenshot`: it mints an image observation exactly as a screenshot does, and
+    # no test here scripts it, so the crop survives the scripted `screenshot`
+    # failure these tests are actually about.
     defp click_in_region(session) do
+      {:ok, :auto, look} =
+        Session.classify(session, %{"action" => "wait_for_change", "region" => @region})
+
+      {:ok, _} = Session.execute(session, look)
+
       {:ok, :auto, click} =
         Session.classify(session, %{
           "action" => "left_click",
-          "x" => 40,
-          "y" => 30,
-          "region" => @region
+          "observation_id" => @obs,
+          # Outside the crop's own region rectangle, so the wrong-grid tripwire
+          # (which these tests are not about) never fires on it.
+          "x" => 900,
+          "y" => 500
         })
 
       Session.execute(session, click)
@@ -1059,7 +1217,12 @@ defmodule FermixCore.ComputerUse.SessionTest do
       session = start_session([])
 
       {:ok, :auto, request} =
-        Session.classify(session, %{"action" => "left_click", "x" => 1, "y" => 2})
+        Session.classify(session, %{
+          "action" => "left_click",
+          "observation_id" => @obs,
+          "x" => 1,
+          "y" => 2
+        })
 
       assert {:ok, %{outcome: :performed}} = Session.execute(session, request)
     end
@@ -1101,7 +1264,12 @@ defmodule FermixCore.ComputerUse.SessionTest do
         start_scripted(%{"idle_ms" => {:error, {:timeout, :cu_sidecar_action, 30_000}}})
 
       {:ok, :auto, click} =
-        Session.classify(session, %{"action" => "left_click", "x" => 1, "y" => 2})
+        Session.classify(session, %{
+          "action" => "left_click",
+          "observation_id" => @obs,
+          "x" => 1,
+          "y" => 2
+        })
 
       assert {:error, {:not_dispatched, {:timeout, :cu_sidecar_action, 30_000}}} =
                Session.execute(session, click)
@@ -1200,7 +1368,12 @@ defmodule FermixCore.ComputerUse.SessionTest do
         })
 
       {:ok, :auto, click} =
-        Session.classify(session, %{"action" => "left_click", "x" => 1, "y" => 2})
+        Session.classify(session, %{
+          "action" => "left_click",
+          "observation_id" => @obs,
+          "x" => 1,
+          "y" => 2
+        })
 
       assert {:ok, %{outcome: :refused}} = Session.execute(session, click)
     end
@@ -1212,7 +1385,12 @@ defmodule FermixCore.ComputerUse.SessionTest do
         })
 
       {:ok, :auto, click} =
-        Session.classify(session, %{"action" => "left_click", "x" => 1, "y" => 2})
+        Session.classify(session, %{
+          "action" => "left_click",
+          "observation_id" => @obs,
+          "x" => 1,
+          "y" => 2
+        })
 
       assert {:ok, %{outcome: :unknown}} = Session.execute(session, click)
     end
@@ -1224,7 +1402,12 @@ defmodule FermixCore.ComputerUse.SessionTest do
         })
 
       {:ok, :auto, click} =
-        Session.classify(session, %{"action" => "left_click", "x" => 1, "y" => 2})
+        Session.classify(session, %{
+          "action" => "left_click",
+          "observation_id" => @obs,
+          "x" => 1,
+          "y" => 2
+        })
 
       assert {:ok, %{outcome: :unknown}} = Session.execute(session, click)
     end
@@ -1247,7 +1430,12 @@ defmodule FermixCore.ComputerUse.SessionTest do
       {session, ref} = start_scripted(%{"left_click" => {:ok, %{"ok" => true}}})
 
       {:ok, :auto, click} =
-        Session.classify(session, %{"action" => "left_click", "x" => 1, "y" => 2})
+        Session.classify(session, %{
+          "action" => "left_click",
+          "observation_id" => @obs,
+          "x" => 1,
+          "y" => 2
+        })
 
       assert {:error, {:protocol_error, :missing_receipt}} = Session.execute(session, click)
       assert_receive {:DOWN, ^ref, :process, ^session, {:shutdown, :protocol_error}}
@@ -1261,7 +1449,12 @@ defmodule FermixCore.ComputerUse.SessionTest do
         })
 
       {:ok, :auto, click} =
-        Session.classify(session, %{"action" => "left_click", "x" => 1, "y" => 2})
+        Session.classify(session, %{
+          "action" => "left_click",
+          "observation_id" => @obs,
+          "x" => 1,
+          "y" => 2
+        })
 
       assert {:error, {:protocol_error, :missing_receipt}} = Session.execute(session, click)
       assert_receive {:DOWN, ^ref, :process, ^session, {:shutdown, :protocol_error}}
@@ -1277,7 +1470,12 @@ defmodule FermixCore.ComputerUse.SessionTest do
         })
 
       {:ok, :auto, click} =
-        Session.classify(session, %{"action" => "left_click", "x" => 1, "y" => 2})
+        Session.classify(session, %{
+          "action" => "left_click",
+          "observation_id" => @obs,
+          "x" => 1,
+          "y" => 2
+        })
 
       assert {:error, {:action_failed, %{code: "paused", outcome: :refused}}} =
                Session.execute(session, click)
@@ -1294,7 +1492,12 @@ defmodule FermixCore.ComputerUse.SessionTest do
         })
 
       {:ok, :auto, click} =
-        Session.classify(session, %{"action" => "left_click", "x" => 1, "y" => 2})
+        Session.classify(session, %{
+          "action" => "left_click",
+          "observation_id" => @obs,
+          "x" => 1,
+          "y" => 2
+        })
 
       assert {:error, {:action_failed, %{code: "cancelled", outcome: :unknown}}} =
                Session.execute(session, click)
@@ -1309,7 +1512,12 @@ defmodule FermixCore.ComputerUse.SessionTest do
         })
 
       {:ok, :auto, click} =
-        Session.classify(session, %{"action" => "left_click", "x" => 1, "y" => 2})
+        Session.classify(session, %{
+          "action" => "left_click",
+          "observation_id" => @obs,
+          "x" => 1,
+          "y" => 2
+        })
 
       assert {:error, {:protocol_error, :missing_receipt}} = Session.execute(session, click)
       assert_receive {:DOWN, ^ref, :process, ^session, {:shutdown, :protocol_error}}

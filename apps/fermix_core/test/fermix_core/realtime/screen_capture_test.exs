@@ -69,6 +69,37 @@ defmodule FermixCore.Realtime.ScreenCaptureTest do
     # on ambient frames would present a pseudo-aiming surface.
     refute Map.has_key?(request, "rulers")
     refute Map.has_key?(request, "marks")
+    # M42 slice 3: this process owns its OWN helper, so the ids that helper mints
+    # belong to no conversation's table. It names none on the way out, and it must
+    # never send a pointer action — a frame the model was shown as awareness is
+    # not a surface it may aim in.
+    refute Map.has_key?(request, "observation_id")
+  end
+
+  # The ambient feed keeps no table, so a reply's observation fields are inert here
+  # — the frame decodes exactly as it did before they existed. Nothing may leak an
+  # id to the model through this path: the caption a frame carries is written by
+  # `Realtime.OpenAIClient`, not from the reply.
+  test "the new observation fields on a reply are ignored, and the frame still decodes" do
+    capture =
+      start_capture(
+        responses: [
+          {:ok,
+           %{
+             "data" => Base.encode64("pixels"),
+             "mime" => "image/png",
+             "observation_id" => "feed-1",
+             "observation_kind" => "image",
+             "captured_at_monotonic_ns" => 1_000,
+             "frame_seq" => 12
+           }}
+        ]
+      )
+
+    ScreenCapture.request(capture, 3)
+
+    assert_receive {:screen_capture, 3, {:ok, frame}}
+    assert frame == %{mime_type: "image/png", data: "pixels"}
   end
 
   test "a malformed frame fails loud rather than shipping garbage to the model" do
