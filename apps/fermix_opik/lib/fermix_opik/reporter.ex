@@ -67,6 +67,11 @@ defmodule FermixOpik.Reporter do
     [:fermix, :doctor, :session_error],
     [:fermix, :management_job, :start],
     [:fermix, :management_job, :complete],
+    [:fermix, :computer_use, :session_start],
+    [:fermix, :computer_use, :session_complete],
+    [:fermix, :computer_use, :session_error],
+    [:fermix, :computer_use, :session_pause],
+    [:fermix, :computer_use, :session_resume],
     [:fermix, :timeout, :expired]
   ]
 

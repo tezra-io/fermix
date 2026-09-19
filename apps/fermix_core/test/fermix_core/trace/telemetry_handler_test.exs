@@ -3,8 +3,10 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
 
   alias FermixCore.Agents.LifecycleTelemetry
   alias FermixCore.Capabilities.MCP.Telemetry, as: MCPClientTelemetry
+  alias FermixCore.ComputerUse.Telemetry, as: ComputerUseTelemetry
   alias FermixCore.Plugins.Auth.Telemetry, as: PluginAuthTelemetry
   alias FermixCore.Realtime.LiveTelemetry
+  alias FermixCore.Tools.Telemetry, as: ToolTelemetry
   alias FermixCore.Trace
   alias FermixCore.Trace.TelemetryHandler
 
@@ -753,5 +755,71 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
     assert call_stop["backend_turns"] == 2
     assert call_stop["accounting_complete"] == 1
     assert call_stop["reason"] == "call_stop"
+  end
+
+  # A computer-use session's only record is these five rows: nothing else says a
+  # session started, that the operator took the seat back, or that the sidecar
+  # died. A verb missing from `event_definitions/0` leaves no row and no error,
+  # so the invariant is written over every event the emitter can produce.
+  test "every computer_use lifecycle verb reaches the JSONL trace stream", %{
+    dir: dir,
+    server: server
+  } do
+    meta = %{
+      session_id: "cua_abc",
+      parent_session: "main-9",
+      agent: "main",
+      mode: :host,
+      origin: :interactive
+    }
+
+    ComputerUseTelemetry.session_start(meta)
+    ComputerUseTelemetry.session_pause(meta)
+    ComputerUseTelemetry.session_resume(meta)
+    ComputerUseTelemetry.session_complete(meta, %{actions: 7, duration_ms: 4_200})
+    ComputerUseTelemetry.session_error(meta, {:sidecar_exited, 1})
+
+    sync(server)
+
+    rows =
+      dir
+      |> read_entries(:agent_event)
+      |> Enum.filter(&String.starts_with?(&1["event"] || "", "computer_use_"))
+
+    expected = Enum.map(ComputerUseTelemetry.trace_event_definitions(), & &1.trace_event)
+
+    assert Enum.sort(Enum.map(rows, & &1["event"])) == Enum.sort(expected)
+    assert Enum.all?(rows, &(&1["agent"] == "main"))
+    assert Enum.all?(rows, &(&1["session_id"] == "cua_abc"))
+    assert Enum.all?(rows, &(&1["parent_session"] == "main-9"))
+    assert Enum.all?(rows, &(&1["mode"] == "host"))
+    assert Enum.all?(rows, &(&1["origin"] == "interactive"))
+
+    complete = find_entry!(rows, &(&1["event"] == "computer_use_session_complete"))
+    assert complete["actions"] == 7
+    assert complete["duration_ms"] == 4_200
+
+    errored = find_entry!(rows, &(&1["event"] == "computer_use_session_error"))
+    assert errored["reason"] =~ "sidecar_exited"
+  end
+
+  # The two correlation keys ride the ALWAYS-ON tool metadata (no content gate),
+  # and the JSONL row is the only place a reader can join a turn's tool call to
+  # the computer-use run it drove.
+  test "a computer_use tool exec keeps its session id and outcome", %{dir: dir, server: server} do
+    ToolTelemetry.exec(
+      "computer_use",
+      %{agent_name: "main", session_id: "main-9"},
+      true,
+      31,
+      metadata: %{action: "click", cu_session: "cua_abc", outcome: "performed_unverified"}
+    )
+
+    sync(server)
+
+    entry = find_entry!(read_entries(dir, :tool_exec), &(&1["tool"] == "computer_use"))
+    assert entry["session_id"] == "main-9"
+    assert entry["cu_session"] == "cua_abc"
+    assert entry["outcome"] == "performed_unverified"
   end
 end

@@ -401,6 +401,76 @@ defmodule FermixOpik.MapperTest do
     assert span.metadata.mcp_server == "acme"
   end
 
+  # The computer-use run is its own root trace, so these two keys are the ONLY
+  # link from a turn's action back to the session that performed it, and the only
+  # record of what the action actually did. An id and an enum, so they ride
+  # outside the content gate — no page or screen text goes in either. The screen
+  # snippet below must still drop: this stays an allowlist, not a passthrough.
+  test "tool_span keeps the computer-use session id and outcome, and nothing else" do
+    metadata = %{
+      tool: "computer_use",
+      success: true,
+      action: "click",
+      cu_session: "cua_ab12",
+      outcome: "performed_unverified",
+      screen_text: "Transfer $4,000 to account 12345"
+    }
+
+    span =
+      Mapper.tool_span(metadata, %{duration_ms: 40},
+        trace_id: "t",
+        project_name: "fermix",
+        ended: @ended
+      )
+
+    assert span.metadata == %{
+             action: "click",
+             cu_session: "cua_ab12",
+             outcome: "performed_unverified"
+           }
+  end
+
+  # The live emitter sends `outcome` as an ATOM (`cu_session` is always a string),
+  # and `Map.take` hands both to Opik as they came — Jason renders the atom as the
+  # same word a replayed string produces. The type differs by seam, so it is
+  # pinned on both sides (see the trace-file round trip).
+  test "tool_span keeps an atom outcome exactly as the emitter sent it" do
+    metadata = %{tool: "computer_use", success: false, cu_session: "cua_ab12", outcome: :refused}
+
+    span =
+      Mapper.tool_span(metadata, %{duration_ms: 3},
+        trace_id: "t",
+        project_name: "fermix",
+        ended: @ended
+      )
+
+    assert span.metadata == %{cu_session: "cua_ab12", outcome: :refused}
+    assert Jason.encode!(span.metadata.outcome) == ~s("refused")
+  end
+
+  test "computer_use_span records the phase inside the session's own run" do
+    metadata = %{
+      agent: "main",
+      session_id: "cua_ab12",
+      parent_session: "main-9",
+      mode: :host,
+      origin: :interactive
+    }
+
+    span =
+      Mapper.computer_use_span(metadata, %{},
+        trace_id: "t",
+        parent_span_id: "wrap-1",
+        project_name: "fermix",
+        ended: @ended,
+        phase: :session_pause
+      )
+
+    assert span.name == "computer_use:session_pause"
+    assert span.type == "general"
+    assert span.metadata == %{mode: "host", origin: "interactive"}
+  end
+
   # `Gateway.DraftStream` emits :rotate with duration_us + edit_index; while those
   # keys were unlisted the span carried channel/status only, so three rotations in
   # one turn exported as three indistinguishable spans. `session_id` is not in the

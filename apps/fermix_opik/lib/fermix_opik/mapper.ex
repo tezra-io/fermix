@@ -186,7 +186,15 @@ defmodule FermixOpik.Mapper do
             :backend,
             :result_count,
             :has_media_count,
-            :location_mode
+            :location_mode,
+            # The computer-use pair (M42 slice 1 §3). The session lifecycle is
+            # its own root trace, so `cu_session` is the only link from a turn's
+            # action back to the run that performed it, and `outcome` is the only
+            # record of whether the input was refused, performed, unverified or
+            # of unknown fate. An opaque id and a closed enum — no page or screen
+            # text — so both ride outside the content-capture gate.
+            :cu_session,
+            :outcome
           ])
         )
     }
@@ -369,6 +377,39 @@ defmodule FermixOpik.Mapper do
           from: stringify(Map.get(metadata, :from)),
           to: stringify(Map.get(metadata, :to)),
           reason: stringify(Map.get(metadata, :reason))
+        })
+    }
+    |> drop_nil()
+  end
+
+  @doc """
+  Build a point span from a `[:fermix, :computer_use, :session_pause |
+  :session_resume]` event — one in-run lifecycle marker, nested under the
+  computer-use run's own root trace (the meeting-phase shape).
+
+  The key list mirrors the emitter's allowlist exactly
+  (`FermixCore.ComputerUse.Telemetry`): `mode` and `origin` are fixed labels, and
+  nothing a session saw on screen reaches a span. The verb is the name, so a
+  trace shows why nothing was dispatched between two actions.
+  """
+  @spec computer_use_span(map(), map(), keyword()) :: map()
+  def computer_use_span(metadata, _measurements, opts) do
+    ended = Keyword.fetch!(opts, :ended)
+    started = start_of(ended, 0)
+
+    %{
+      id: new_id(started),
+      trace_id: Keyword.fetch!(opts, :trace_id),
+      parent_span_id: Keyword.get(opts, :parent_span_id),
+      project_name: Keyword.fetch!(opts, :project_name),
+      name: "computer_use:#{Keyword.fetch!(opts, :phase)}",
+      type: "general",
+      start_time: iso(started),
+      end_time: iso(ended),
+      metadata:
+        drop_nil(%{
+          mode: stringify(Map.get(metadata, :mode)),
+          origin: stringify(Map.get(metadata, :origin))
         })
     }
     |> drop_nil()

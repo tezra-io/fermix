@@ -12,7 +12,9 @@ defmodule FermixCore.ComputerUse.TelemetryTest do
       [
         [:fermix, :computer_use, :session_start],
         [:fermix, :computer_use, :session_complete],
-        [:fermix, :computer_use, :session_error]
+        [:fermix, :computer_use, :session_error],
+        [:fermix, :computer_use, :session_pause],
+        [:fermix, :computer_use, :session_resume]
       ],
       fn event, measurements, metadata, _ ->
         if self() == test_pid do
@@ -70,5 +72,47 @@ defmodule FermixCore.ComputerUse.TelemetryTest do
     assert meta.session_id == "cua_e"
     assert is_binary(meta.reason)
     assert meta.reason =~ "driver_crash"
+  end
+
+  # Pause and resume say why nothing was dispatched between two actions, so they
+  # carry the run's correlation exactly as the bookends do.
+  test "session_pause and session_resume carry the run's correlation" do
+    meta = %{session_id: "cua_p", parent_session: "main-2", agent: "main", mode: :host}
+
+    Telemetry.session_pause(meta)
+    Telemetry.session_resume(meta)
+
+    assert_receive {:cu, [:fermix, :computer_use, :session_pause], %{}, paused}
+    assert paused.session_id == "cua_p"
+    assert paused.parent_session == "main-2"
+    assert paused.mode == :host
+
+    assert_receive {:cu, [:fermix, :computer_use, :session_resume], %{}, resumed}
+    assert resumed.session_id == "cua_p"
+  end
+
+  # A verb missing from the definitions is invisible in the JSONL with no error,
+  # so the invariant is written over the whole family rather than a subset.
+  test "trace_event_definitions covers every computer_use verb as an agent_event" do
+    definitions = Telemetry.trace_event_definitions()
+
+    assert Enum.map(definitions, & &1.event) == [
+             [:fermix, :computer_use, :session_start],
+             [:fermix, :computer_use, :session_complete],
+             [:fermix, :computer_use, :session_error],
+             [:fermix, :computer_use, :session_pause],
+             [:fermix, :computer_use, :session_resume]
+           ]
+
+    assert Enum.all?(definitions, &(&1.trace_type == :agent_event))
+    assert Enum.all?(definitions, &(&1.agent_field == :agent))
+
+    assert Enum.map(definitions, & &1.trace_event) == [
+             "computer_use_session_start",
+             "computer_use_session_complete",
+             "computer_use_session_error",
+             "computer_use_session_pause",
+             "computer_use_session_resume"
+           ]
   end
 end

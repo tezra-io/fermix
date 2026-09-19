@@ -95,7 +95,12 @@ defmodule FermixOpik.TraceFile do
        :target_ref,
        :selector,
        :error_code,
-       :error_summary
+       :error_summary,
+       # The computer-use pair: the session the action drove, and what the action
+       # actually did. The lifecycle run is its own root trace, so these are the
+       # only link between a replayed action and its session.
+       :cu_session,
+       :outcome
      ])}
   end
 
@@ -283,7 +288,47 @@ defmodule FermixOpik.TraceFile do
      meta(row, [:session_id, :agent, :kind, :budget_ms, :status, :failure_code, :error])}
   end
 
+  # A computer-use session (M42 slice 1 §3). Every row replays through one
+  # allowlist that INCLUDES `parent_session`: the run is its own root and that
+  # field is the only record of which turn opened the session.
+  defp normalize_agent_event("computer_use_session_start", row) do
+    {[:fermix, :computer_use, :session_start], %{}, computer_use_meta(row)}
+  end
+
+  defp normalize_agent_event("computer_use_session_complete", row) do
+    {[:fermix, :computer_use, :session_complete], computer_use_measurements(row),
+     computer_use_meta(row)}
+  end
+
+  defp normalize_agent_event("computer_use_session_error", row) do
+    {[:fermix, :computer_use, :session_error], %{},
+     meta(row, [:session_id, :parent_session, :agent, :mode, :origin, :reason])}
+  end
+
+  defp normalize_agent_event("computer_use_session_pause", row) do
+    {[:fermix, :computer_use, :session_pause], %{}, computer_use_meta(row)}
+  end
+
+  defp normalize_agent_event("computer_use_session_resume", row) do
+    {[:fermix, :computer_use, :session_resume], %{}, computer_use_meta(row)}
+  end
+
   defp normalize_agent_event(_other, _row), do: :skip
+
+  defp computer_use_meta(row) do
+    meta(row, [:session_id, :parent_session, :agent, :mode, :origin])
+  end
+
+  # Only the counts actually present are carried: a session row written before
+  # the measurements existed must replay with none rather than a fabricated zero.
+  defp computer_use_measurements(row) do
+    Enum.reduce([:actions, :duration_ms], %{}, fn key, acc ->
+      case Map.fetch(row, Atom.to_string(key)) do
+        {:ok, value} when is_number(value) -> Map.put(acc, key, value)
+        _other -> acc
+      end
+    end)
+  end
 
   defp management_job_meta(row), do: meta(row, [:session_id, :agent, :kind, :budget_ms])
 

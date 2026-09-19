@@ -492,6 +492,73 @@ root span per settings read with nothing nested under it. If a new management
 method has to *wait* on a network, a download or a person, it is a job — start
 one and inherit the bookends rather than minting a sixth event.
 
+## Computer-use sessions
+
+A computer-use session is a **run kind**: `ComputerUse.Session` mints
+`session_id = "cua_<rand>"` for the one session per conversation, and every
+lifecycle emission goes through `FermixCore.ComputerUse.Telemetry` — never
+hand-rolled. The five verbs are `[:fermix, :computer_use, :session_start |
+:session_complete | :session_error | :session_pause | :session_resume]`. Shared
+metadata: `agent` (the turn's own agent name), `session_id`, `mode`, and the
+optional `parent_session` and `origin`. Pause and resume are lifecycle rather
+than actions — the operator took the seat back, or gave it up again — and a trace
+showing only start and complete cannot say why nothing was dispatched in between.
+
+**Which bookend closes the run is the diagnosis.** `session_complete` (measuring
+`actions` and `duration_ms`) is only for a session that ended on its own terms: a
+clean stop, or a sidecar exit with status 75. Every **fault** stop — a sidecar
+timeout and the poison reset it triggers, any other sidecar exit status, a failed
+probe, a lost check — closes with `session_error` and a bounded `reason`
+(previewed at the emitter, never a raw term). A session that died is therefore
+never reported as one that finished.
+
+The run is **always a root, and `parent_session` rides as correlation metadata,
+never as a parent**. The session is keyed by conversation and reused across
+turns, so it outlives the turn that opened it (the meeting/harness/voice-call
+reason): nesting it would let a mid-turn `session_error` — a sidecar exit, a
+poison reset — close and ship the *turn's* trace and tombstone everything the
+turn did afterwards, and a session ending after its turn would mint a phantom
+second root. `Trace.TelemetryHandler` registers all five as `agent_event` rows;
+`FermixOpik` binds them (`infer_kind("cua_" <> _)` → `:computer_use`, the root
+opening on `session_start` and closing through `close_root` on complete and
+error, pause and resume as phase spans via `Mapper.computer_use_span/3`, replay
+in `TraceFile`). The id prefix is minted outside `fermix_opik`; keep it in
+lockstep with the exporter's clause, or a `session_complete` arriving without its
+opener reads as a `:subagent` phantom root.
+
+**In Opik one session is normally more than one root, by design.** Between its
+opener and its bookend the run receives nothing — the actions ride the turn — and
+a session lives as long as the conversation wants it, so almost every real
+session sits idle past the exporter's idle TTL and its root ships then, with no
+counts and no status. A pause or resume arriving while that shipped root's
+tombstone stands is dropped from Opik (it is still in the JSONL stream). The
+closing bookend then opens a **continuation root** under the same `cua_…` id,
+and that continuation root is where `actions`, `duration_ms`, the status and any
+`error_info` live. This is not the meeting/voice-call situation: those runs pass
+a `max_duration_ms` sweep floor because they have a cap, and a computer-use
+session has none, so there is no honest number to pass and none is invented.
+**The JSONL stream is the complete record** — every verb, in order, under one
+`session_id`; read it, not Opik, when a session's whole life is the question.
+
+**The actions themselves stay under the turn.** One `computer_use` call is one
+ordinary `[:fermix, :tool, :exec]` under the *turn's* session, which is where the
+eval harness and every trace reader look for a turn's tool calls, so correlation
+runs the other way: each exec carries `cu_session` (the `cua_…` id) and
+`outcome` — one of `refused | performed | performed_unverified | unknown | read`
+— in its always-on metadata. An opaque id and a closed enum, with no page or
+screen text in either, so both ride outside the content gate. A metadata key no
+exporter names is silently dropped, so the pair is listed in both allowlists a
+tool key must pass: `Mapper.tool_span/3`'s `Map.take` and
+`TraceFile.normalize("tool_exec", …)`. The JSONL handler needs nothing — it
+writes a tool exec's metadata whole.
+
+Their **types differ by seam**, and both are pinned by tests. `cu_session` is
+always a string. `outcome` is an **atom** on the live path (the emitter's enum,
+carried through `Map.take` untouched and rendered by Jason as the bare word) and
+a **string** after replay, because the JSONL row it is read back from is JSON.
+Everything downstream treats the two alike; a consumer that compares `outcome`
+must accept both spellings rather than assume the live one.
+
 ## Content (prompts / responses / tool IO)
 
 Attach bodies **only** behind `FermixCore.Telemetry.capture_content?/0`, and

@@ -955,6 +955,89 @@ defmodule FermixOpik.Aggregation do
     })
   end
 
+  # A computer-use session (M42 slice 1 §3) is a run kind and always a ROOT. The
+  # session is keyed by conversation and reused across turns, so it OUTLIVES the
+  # turn that opened it: `parent_session` rides as correlation metadata only,
+  # never as a parent (the meeting/harness/voice_live reason). Nesting it would
+  # let a mid-turn `session_error` — a sidecar exit, a poison reset — close and
+  # ship the TURN's trace, tombstoning everything the turn did afterwards, and a
+  # session ending after its turn would mint a phantom second root. The actions
+  # stay under the turn as ordinary tool spans, joined to this run by the
+  # `cu_session` key they carry.
+  #
+  # One session is normally MORE THAN ONE root here, by design. This root
+  # receives nothing between its opener and its bookend (the actions ride the
+  # turn) and a session lives as long as the conversation wants it, so it is
+  # normally swept on the idle TTL and ships with no counts; the closing bookend
+  # then opens a CONTINUATION root under the same id, and that one carries
+  # `actions`, `duration_ms`, the status and any `error_info`. There is no
+  # `max_duration_ms` to pass because a computer-use session has no cap of its
+  # own, and an invented one would be a fabricated measurement. The JSONL stream
+  # is the complete record (docs/TELEMETRY_CONTRACT.md).
+  def apply_event(state, [:fermix, :computer_use, :session_start], _meas, meta, at) do
+    case Map.get(meta, :session_id) do
+      nil ->
+        {state, []}
+
+      session_id ->
+        ctx = %{
+          parent_session: nil,
+          kind: :computer_use,
+          name: nil,
+          input: nil,
+          trace_metadata: computer_use_metadata(meta),
+          at: at.at,
+          mono: at.mono
+        }
+
+        {state, _ref} = ensure_session(state, session_id, ctx)
+        {state, []}
+    end
+  end
+
+  # `session_error` carries the emitter's bounded reason, and `error_info` is
+  # what makes a session that died on its sidecar filterable in Opik rather than
+  # findable only by reading the output text.
+  def apply_event(state, [:fermix, :computer_use, verb], meas, meta, at)
+      when verb in [:session_complete, :session_error] do
+    reason = stringify(Map.get(meta, :reason))
+
+    close_root(state, meta, at, %{
+      output: reason,
+      status: if(verb == :session_error, do: "error", else: "ok"),
+      error_info: computer_use_error_info(verb, reason),
+      metadata:
+        compact(
+          Map.merge(computer_use_metadata(meta), %{
+            actions: Map.get(meas, :actions),
+            duration_ms: Map.get(meas, :duration_ms)
+          })
+        )
+    })
+  end
+
+  # Pause and resume are in-run lifecycle markers, not actions: point spans under
+  # the session's own wrapper (the `[:fermix, :meeting, :phase]` shape). A marker
+  # arriving after the run closed hits the tombstone and is dropped rather than
+  # resurrecting the run as an empty second root — the JSONL stream still has it.
+  #
+  # The parent is dropped for the same reason the opener never sets one: without
+  # this, a marker that has to CREATE the run (its root already swept and the
+  # tombstone pruned, while the opening turn is still open) would build it inside
+  # the turn's trace, and the next bookend's `close_root` would ship that turn
+  # early. A marker can open or join the run's own root, and nothing else.
+  def apply_event(state, [:fermix, :computer_use, verb], meas, meta, at)
+      when verb in [:session_pause, :session_resume] do
+    meta = Map.put(meta, :parent_session, nil)
+
+    add_child_span(
+      state,
+      meta,
+      at,
+      &Mapper.computer_use_span(meta, meas, Keyword.put(&1, :phase, verb))
+    )
+  end
+
   def apply_event(state, _event, _meas, _meta, _at), do: {state, []}
 
   @doc """
@@ -1344,6 +1427,10 @@ defmodule FermixOpik.Aggregation do
   # cycle, parented to it: its own kind, so a rewrite of current work is never
   # read as one more window summary.
   defp infer_kind("computer_history_rollup:" <> _), do: :computer_history_rollup
+  # A computer-use session. The prefix is minted in `ComputerUse.Session`; without
+  # this clause a completion whose opener was missed reads as a `:subagent`
+  # phantom root, which is what the voice-call clauses above exist to prevent.
+  defp infer_kind("cua_" <> _), do: :computer_use
   defp infer_kind("doctor:" <> _), do: :doctor
   defp infer_kind("job:" <> _), do: :management_job
   defp infer_kind(_other), do: :subagent
@@ -1375,6 +1462,10 @@ defmodule FermixOpik.Aggregation do
   # Same shape: the agent name is "computer_history_rollup" and so is the session
   # prefix — the generic "<kind>:<name>" would say it twice.
   defp wrapper_name(:computer_history_rollup, name, session), do: name || session
+  # A computer-use session's `agent` is the TURN's name ("main"), which says
+  # nothing about which session it was — so the id identifies it, as for a voice
+  # delegation. One conversation can run several sessions in a day.
+  defp wrapper_name(:computer_use, _name, session), do: "computer_use:#{session}"
   defp wrapper_name(kind, nil, session), do: "#{kind}:#{session}"
   defp wrapper_name(kind, name, _session), do: "#{kind}:#{name}"
 
@@ -1487,6 +1578,23 @@ defmodule FermixOpik.Aggregation do
       participants_peak: Map.get(measurements, :participants_peak)
     }
   end
+
+  # The computer-use bookends' correlation allowlist, shared by the opener and
+  # the closers so a run whose opener never arrived still carries its labels.
+  # `parent_session` is the turn that opened the session — correlation only, and
+  # the reverse of the `cu_session` key the turn's own tool spans carry.
+  defp computer_use_metadata(metadata) do
+    compact(%{
+      mode: stringify(Map.get(metadata, :mode)),
+      origin: stringify(Map.get(metadata, :origin)),
+      parent_session: Map.get(metadata, :parent_session)
+    })
+  end
+
+  defp computer_use_error_info(:session_error, reason),
+    do: error_info("ComputerUseError", reason)
+
+  defp computer_use_error_info(_verb, _reason), do: nil
 
   defp meeting_error_info(:run_error, metadata),
     do: error_info("MeetingError", stringify(Map.get(metadata, :error)))

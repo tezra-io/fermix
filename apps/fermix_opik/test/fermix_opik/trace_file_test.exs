@@ -320,6 +320,129 @@ defmodule FermixOpik.TraceFileTest do
     assert meta.status == "failed"
   end
 
+  # A computer-use session's whole record in the JSONL is these five rows, and
+  # replay has to rebuild every one of them — including `parent_session`, which
+  # is the only link back to the turn that opened the session.
+  test "normalizes every computer_use agent_event row back into its event" do
+    base = %{"ts" => "2026-09-19T12:00:00.000Z", "type" => "agent_event"}
+
+    verbs = [
+      {"computer_use_session_start", :session_start},
+      {"computer_use_session_complete", :session_complete},
+      {"computer_use_session_error", :session_error},
+      {"computer_use_session_pause", :session_pause},
+      {"computer_use_session_resume", :session_resume}
+    ]
+
+    for {row_event, verb} <- verbs do
+      row =
+        Map.merge(base, %{
+          "event" => row_event,
+          "session_id" => "cua_ab12",
+          "parent_session" => "main-9",
+          "agent" => "main",
+          "mode" => "host",
+          "origin" => "interactive"
+        })
+
+      assert {[:fermix, :computer_use, ^verb], _meas, meta} =
+               TraceFile.normalize("agent_event", row)
+
+      assert meta.session_id == "cua_ab12"
+      assert meta.parent_session == "main-9"
+      assert meta.mode == "host"
+      assert meta.origin == "interactive"
+    end
+  end
+
+  test "a computer_use_session_complete row replays its action and duration counts" do
+    base = %{"ts" => "2026-09-19T12:00:00.000Z", "type" => "agent_event"}
+
+    assert {[:fermix, :computer_use, :session_complete], measurements, meta} =
+             TraceFile.normalize(
+               "agent_event",
+               Map.merge(base, %{
+                 "event" => "computer_use_session_complete",
+                 "session_id" => "cua_ab12",
+                 "actions" => 7,
+                 "duration_ms" => 4_200
+               })
+             )
+
+    assert measurements == %{actions: 7, duration_ms: 4_200}
+    assert meta.session_id == "cua_ab12"
+  end
+
+  test "a computer_use_session_error row replays the bounded reason" do
+    base = %{"ts" => "2026-09-19T12:00:00.000Z", "type" => "agent_event"}
+
+    assert {[:fermix, :computer_use, :session_error], %{}, meta} =
+             TraceFile.normalize(
+               "agent_event",
+               Map.merge(base, %{
+                 "event" => "computer_use_session_error",
+                 "session_id" => "cua_ab12",
+                 "reason" => "{:sidecar_exited, 1}"
+               })
+             )
+
+    assert meta.reason == "{:sidecar_exited, 1}"
+  end
+
+  # The computer-use run is its own root, so these two keys are the only link
+  # from a replayed action back to the session that performed it. The screen
+  # snippet must still drop: this stays an allowlist, not a passthrough.
+  test "tool_exec normalize keeps the computer-use session id and outcome" do
+    row = %{
+      "ts" => "2026-09-19T12:00:00.000Z",
+      "type" => "tool_exec",
+      "tool" => "computer_use",
+      "agent" => "main",
+      "session_id" => "main-9",
+      "success" => true,
+      "duration_ms" => 40,
+      "action" => "click",
+      "cu_session" => "cua_ab12",
+      "outcome" => "performed_unverified",
+      "screen_text" => "Transfer $4,000 to account 12345"
+    }
+
+    assert {[:fermix, :tool, :exec], %{duration_ms: 40}, meta} =
+             TraceFile.normalize("tool_exec", row)
+
+    assert meta.cu_session == "cua_ab12"
+    assert meta.outcome == "performed_unverified"
+    refute Map.has_key?(meta, :screen_text)
+  end
+
+  # The atom/string seam, end to end: the live emitter sends `outcome: :performed`
+  # and `Trace` writes it through Jason, so the row on disk holds a string and
+  # replay hands the aggregation a string where live traffic handed it an atom.
+  # Both render identically downstream, but nothing proved the round trip until
+  # here — so the row is built the way the daemon writes one.
+  test "a tool_exec row written from an atom outcome replays as its string" do
+    row =
+      Jason.decode!(
+        Jason.encode!(%{
+          ts: "2026-09-19T12:00:00.000Z",
+          type: "tool_exec",
+          tool: "computer_use",
+          agent: "main",
+          session_id: "main-9",
+          success: true,
+          duration_ms: 40,
+          cu_session: "cua_ab12",
+          outcome: :performed
+        })
+      )
+
+    assert {[:fermix, :tool, :exec], %{duration_ms: 40}, meta} =
+             TraceFile.normalize("tool_exec", row)
+
+    assert meta.cu_session == "cua_ab12"
+    assert meta.outcome == "performed"
+  end
+
   defp write(dir, file, rows) do
     content = Enum.map_join(rows, &(Jason.encode!(&1) <> "\n"))
     File.write!(Path.join(dir, file), content)

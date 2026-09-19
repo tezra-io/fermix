@@ -1983,4 +1983,205 @@ defmodule FermixOpik.AggregationTest do
       assert trace.name == "voice_live:1"
     end
   end
+
+  @cu_start [:fermix, :computer_use, :session_start]
+  @cu_complete [:fermix, :computer_use, :session_complete]
+  @cu_error [:fermix, :computer_use, :session_error]
+  @cu_pause [:fermix, :computer_use, :session_pause]
+  @cu_resume [:fermix, :computer_use, :session_resume]
+  @cu_session "cua_ab12"
+  @cu_turn "main-9"
+
+  # The emitter's own metadata shape (FermixCore.ComputerUse.Telemetry), mirrored
+  # by hand like `voice_live_meta/1` above — `fermix_opik` declares no dependency
+  # on `fermix_core`.
+  defp computer_use_meta(extra) do
+    Map.merge(
+      %{
+        agent: "main",
+        session_id: @cu_session,
+        parent_session: @cu_turn,
+        mode: :host,
+        origin: :interactive
+      },
+      extra
+    )
+  end
+
+  describe "computer-use sessions" do
+    test "the reporter subscribes to every computer_use event" do
+      for event <- [@cu_start, @cu_complete, @cu_error, @cu_pause, @cu_resume] do
+        assert event in FermixOpik.Reporter.events(),
+               "#{inspect(event)} is not subscribed, so the run is invisible to Opik"
+      end
+    end
+
+    # The session is keyed by conversation and reused across turns, so it opens
+    # its own root: `parent_session` rides as correlation metadata only. The tool
+    # exec that drove it stays under the TURN, joined by `cu_session` — that is
+    # the whole correlation, and both halves are asserted here together.
+    test "a session is its own root, its tool exec stays under the turn, and the two join by cu_session" do
+      {state, closed} =
+        run([
+          {@cu_start, %{}, computer_use_meta(%{})},
+          {[:fermix, :tool, :exec], %{duration_ms: 120},
+           %{
+             tool: "computer_use",
+             agent: "main",
+             success: true,
+             session_id: @cu_turn,
+             action: "click",
+             cu_session: @cu_session,
+             outcome: "performed"
+           }},
+          {@cu_pause, %{}, computer_use_meta(%{})},
+          {@cu_resume, %{}, computer_use_meta(%{})},
+          {@cu_complete, %{actions: 3, duration_ms: 4_200}, computer_use_meta(%{})},
+          {[:fermix, :agent, :message], %{iterations: 2, total_tokens: 90},
+           %{channel: :telegram, chat_id: "c1", sender: "u1", session_id: @cu_turn, agent: "main"}}
+        ])
+
+      assert state.traces == %{}
+      assert [%{trace: cu_trace, spans: cu_spans}, %{trace: turn, spans: turn_spans}] = closed
+
+      assert cu_trace.name == "computer_use:#{@cu_session}"
+      assert cu_trace.tags == ["computer_use"]
+      assert cu_trace.metadata.mode == "host"
+      assert cu_trace.metadata.origin == "interactive"
+      assert cu_trace.metadata.parent_session == @cu_turn
+      assert cu_trace.metadata.actions == 3
+      assert cu_trace.metadata.duration_ms == 4_200
+
+      # A root even though it names a parent: the session outlives the turn.
+      root = span_named(cu_spans, "computer_use:#{@cu_session}")
+      refute Map.has_key?(root, :parent_span_id)
+
+      paused = span_named(cu_spans, "computer_use:session_pause")
+      assert paused.parent_span_id == root.id
+      assert paused.metadata.mode == "host"
+      assert span_named(cu_spans, "computer_use:session_resume").parent_span_id == root.id
+
+      # The action is the TURN's tool call, where every trace reader looks for it.
+      assert spans_of_type(cu_spans, "tool") == []
+      assert turn.name == "agent:main"
+      [tool] = spans_of_type(turn_spans, "tool")
+      assert tool.name == "computer_use"
+      assert tool.metadata.cu_session == @cu_session
+      assert tool.metadata.outcome == "performed"
+    end
+
+    # The error fires mid-turn (a sidecar exit, a poison reset). Closing the
+    # turn's trace here would ship it early and tombstone the rest of the turn.
+    test "a session_error closes only the computer-use root, leaving the turn open" do
+      {state, closed} =
+        run([
+          {[:fermix, :provider, :call], %{duration_ms: 10},
+           %{provider: :openai, model: "gpt-5", status: :ok, session_id: @cu_turn}},
+          {@cu_start, %{}, computer_use_meta(%{})},
+          {@cu_error, %{}, computer_use_meta(%{reason: "{:sidecar_exited, 1}"})},
+          {[:fermix, :provider, :call], %{duration_ms: 12},
+           %{provider: :openai, model: "gpt-5", status: :ok, session_id: @cu_turn}},
+          {[:fermix, :agent, :message], %{iterations: 2, total_tokens: 20},
+           %{channel: :telegram, chat_id: "c1", sender: "u1", session_id: @cu_turn, agent: "main"}}
+        ])
+
+      assert state.traces == %{}
+      assert state.dropped_after_close == 0
+
+      assert [%{trace: cu_trace}, %{trace: turn, spans: turn_spans}] = closed
+      assert cu_trace.name == "computer_use:#{@cu_session}"
+      assert cu_trace.metadata.status == "error"
+      assert cu_trace.output == %{text: "{:sidecar_exited, 1}"}
+      assert cu_trace.error_info.exception_type == "ComputerUseError"
+
+      # The turn kept both of its model calls, including the one after the error.
+      assert turn.name == "agent:main"
+      assert length(spans_of_type(turn_spans, "llm")) == 2
+    end
+
+    # The marker clause is the one door into this family that does not force the
+    # parent away, so it is the one that can still nest the run under the turn —
+    # the exact shape the opener forbids. Reached when the run's root was swept
+    # and its tombstone has since expired while the opening turn is still open:
+    # `/pause` would create the run inside the turn's trace, and the following
+    # bookend would then ship that turn early.
+    test "a pause with no open run never attaches to the turn that opened the session" do
+      {state, closed} =
+        run([
+          {[:fermix, :provider, :call], %{duration_ms: 10},
+           %{provider: :openai, model: "gpt-5", status: :ok, session_id: @cu_turn}},
+          {@cu_pause, %{}, computer_use_meta(%{})},
+          {@cu_complete, %{actions: 2, duration_ms: 900}, computer_use_meta(%{})}
+        ])
+
+      # The bookend closed the computer-use run and nothing else.
+      assert [%{trace: cu_trace, spans: cu_spans}] = closed
+      assert cu_trace.name == "computer_use:#{@cu_session}"
+      assert cu_trace.metadata.actions == 2
+      assert span_named(cu_spans, "computer_use:session_pause")
+
+      # The turn is untouched: still open, still holding its own model call.
+      assert map_size(state.traces) == 1
+      [turn_acc] = Map.values(state.traces)
+      assert turn_acc.root_session == @cu_turn
+      assert turn_acc.open?
+    end
+
+    # The NORMAL case, not an edge. Between its opener and its bookend the root
+    # receives nothing (the actions ride the turn) and a session outlives the turn
+    # by design, so the idle TTL ships the root first and the bookend opens a
+    # CONTINUATION root under the same id, carrying the counts. Pinned here so the
+    # documented behaviour cannot drift silently.
+    test "an idle session ships its root, and its bookend opens a continuation root" do
+      agg = Aggregation.new(project: "fermix", ttl_ms: 1)
+
+      at = fn seconds ->
+        %{
+          at: DateTime.add(~U[2026-09-19 12:00:00.000Z], seconds, :second),
+          mono: seconds * 1_000_000
+        }
+      end
+
+      {agg, []} = Aggregation.apply_event(agg, @cu_start, %{}, computer_use_meta(%{}), at.(0))
+
+      {agg, [%{trace: first}]} = Aggregation.sweep(agg, 2_000_000)
+      assert first.name == "computer_use:#{@cu_session}"
+      assert first.metadata.mode == "host"
+      refute Map.has_key?(first.metadata, :actions)
+
+      # While the tombstone stands a marker is dropped from Opik; the JSONL
+      # stream still carries it.
+      {agg, []} = Aggregation.apply_event(agg, @cu_pause, %{}, computer_use_meta(%{}), at.(3))
+      assert agg.dropped_after_close == 1
+
+      {_agg, [%{trace: second}]} =
+        Aggregation.apply_event(
+          agg,
+          @cu_complete,
+          %{actions: 5, duration_ms: 90_000},
+          computer_use_meta(%{}),
+          at.(4)
+        )
+
+      # A second root under the same id: this is where the run's counts live.
+      assert second.name == "computer_use:#{@cu_session}"
+      assert second.id != first.id
+      assert second.metadata.actions == 5
+      assert second.metadata.duration_ms == 90_000
+    end
+
+    # Without the prefix clause a completion arriving after a daemon restart would
+    # mint a root `infer_kind/1` reads as `:subagent` — a stray computer-use run
+    # rendered as a sub-agent of nothing.
+    test "a session_complete with no opener still closes as a computer_use root" do
+      {_state, closed} =
+        run([
+          {@cu_complete, %{actions: 1, duration_ms: 500}, computer_use_meta(%{})}
+        ])
+
+      assert [%{trace: trace}] = closed
+      assert trace.tags == ["computer_use"]
+      assert trace.name == "computer_use:#{@cu_session}"
+    end
+  end
 end
