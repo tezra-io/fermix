@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Form fixture — five fields and a confirmation code</title>
+<!-- An empty data: icon, so the page requests nothing at all: a browser's
+     automatic /favicon.ico fetch would 404 and put a console error in front of
+     anyone debugging a failing case. -->
+<link rel="icon" href="data:,">
+<style>
+  body { font: 16px/1.5 system-ui, sans-serif; margin: 2rem auto; max-width: 40rem; }
+  label { display: block; margin-top: 0.75rem; font-weight: 600; }
+  input { display: block; width: 100%; font: inherit; padding: 0.3rem; box-sizing: border-box; }
+  button { margin-top: 1rem; font: inherit; padding: 0.3rem 1rem; }
+  #confirmation { font-size: 1.5rem; font-weight: 700; }
+</style>
+</head>
+<body>
+<h1>Conference registration (fixture)</h1>
+<p>
+  Five labelled fields and one Save button. The confirmation code is computed
+  from all five values at once, so it can only be read by putting the right
+  value in each field and saving — nothing on the page discloses it beforehand,
+  and a value in the wrong field produces a different code.
+</p>
+
+<form id="registration" autocomplete="off">
+  <label for="full-name">Full name</label>
+  <input id="full-name" name="full_name" type="text">
+
+  <label for="city">City</label>
+  <input id="city" name="city" type="text">
+
+  <label for="organisation">Organisation</label>
+  <input id="organisation" name="organisation" type="text">
+
+  <label for="role">Role</label>
+  <input id="role" name="role" type="text">
+
+  <label for="dietary-note">Dietary note</label>
+  <input id="dietary-note" name="dietary_note" type="text">
+
+  <button type="submit" id="save">Save</button>
+</form>
+
+<p id="confirmation">Not saved yet.</p>
+
+<script>
+// Fixture for the `browser` tool's `fill_form` act kind. Served by
+// benchmark/bin/browser_fixture.py on loopback; named by suites/browser.yaml and
+// suites/capability/candidates/browser_forms.yaml.
+//
+// Five fields, one Save, one derived confirmation code. The code is the outcome
+// floor those cases gate on: it is reachable only by filling every field with
+// the right value and pressing Save, it is not in either prompt, and it is not
+// in the page before a save.
+//
+// THE CODE. Each value is normalised (trimmed, lower-cased, internal whitespace
+// collapsed to one space) so that capitalisation or a stray space in what the
+// model typed cannot change the answer. Then, over the five normalised values in
+// field order, with i the zero-based field index and c each character's code
+// point:
+//
+//     h = 17;  h = (h * 31 + c * (i + 1)) % 90000   for every character
+//     code = h + 10000
+//
+// The `(i + 1)` weight is what makes the field a value lands in matter: swapping
+// two of the five values yields a different code. `+ 10000` keeps the code five
+// digits wide on every input. The whole accumulator stays far inside JS's safe
+// integer range, so this is exactly reproducible off-page.
+//
+// Nothing is stored and nothing is sent: no localStorage, no sessionStorage, no
+// cookies, no network, and the form never submits to a server. Every page load
+// starts empty, so a trial cannot inherit the previous trial's state.
+(function () {
+  "use strict";
+
+  const FIELD_IDS = ['full-name', 'city', 'organisation', 'role', 'dietary-note'];
+  const form = document.getElementById('registration');
+  const confirmation = document.getElementById('confirmation');
+  let code = null;
+  let saves = 0;
+
+  function normalise(value) {
+    return String(value == null ? '' : value).trim().toLowerCase().replace(/\s+/g, ' ');
+  }
+
+  function values() {
+    return FIELD_IDS.map((id) => normalise(document.getElementById(id).value));
+  }
+
+  function confirmationCode(vals) {
+    let h = 17;
+    vals.forEach(function (value, index) {
+      for (const ch of value) {
+        h = (h * 31 + ch.codePointAt(0) * (index + 1)) % 90000;
+      }
+    });
+    return h + 10000;
+  }
+
+  // The page's own state, readable without trusting what the tool reported.
+  window.__fixture = {
+    page: 'form',
+    fields: FIELD_IDS,
+    get values() { return values(); },
+    get code() { return code; },
+    get saves() { return saves; },
+  };
+
+  form.addEventListener('submit', function (event) {
+    // Never actually submit: a navigation here would reload the page and clear
+    // the very fields the case is about.
+    event.preventDefault();
+    saves += 1;
+    code = confirmationCode(values());
+    confirmation.textContent = 'Saved. Confirmation: ' + code;
+  });
+}());
+</script>
+</body>
+</html>

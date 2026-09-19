@@ -636,17 +636,28 @@ exploits that feedback. Opik is not used at all: scoring reads the daemon's loca
 
 ---
 
-## 5d. WebMCP fixture pages (`bin/webmcp_fixture.py`)
+## 5d. Browser fixture pages (`bin/browser_fixture.py`)
 
-The cases for the browser tool's `webmcp` action need a page that offers WebMCP
-tools. Two are bundled under `suites/fixtures/webmcp/`, each owning one counter it
-also renders, and each exposing `counter_add` and `counter_read` over it:
-`shimmed.html` installs the page-side shim so its tools exist in any browser, and
-`native_only.html` registers nothing unless the browser already provides the
-WebMCP API — so it is the standing check that the managed Chrome's
-`--enable-features=WebMCP` launch flag still applies, and the alarm the day a
-Chrome release renames that feature. Neither page carries a button or a form
-field, so their counters are unreachable by snapshot-and-click.
+Some browser cases need a page whose behaviour is pinned rather than borrowed
+from a live site. Four are bundled under `suites/fixtures/browser/`, and each
+holds the answer its cases gate on nowhere but in the page:
+
+- `shimmed.html` and `native_only.html` each own one counter they also render,
+  and offer `counter_add` and `counter_read` over it as WebMCP tools.
+  `shimmed.html` installs the page-side shim so its tools exist in any browser;
+  `native_only.html` registers nothing unless the browser already provides the
+  WebMCP API — so it is the standing check that the managed Chrome's
+  `--enable-features=WebMCP` launch flag still applies, and the alarm the day a
+  Chrome release renames that feature. Neither page carries a button or a form
+  field, so their counters are unreachable by snapshot-and-click.
+- `form.html` has five labelled fields and one Save button, and derives a
+  five-digit confirmation code from all five values together — so the code is
+  reachable only by putting the right value in each field and saving, and a
+  swapped pair produces a different code. It is what `fill_form` is measured on.
+- `search.html` lists nothing until it is searched, then renders the matches as
+  links, then replaces them with a detail view carrying a part code that is on
+  the page nowhere else. Two structural changes, one per action, so a run
+  exercises an action reporting back the page it changed.
 
 **No runner starts this server.** `run_eval.py` and `run_capability.py` have no
 fixture-server seam, and a suite's `query` is authored text with no URL
@@ -654,16 +665,19 @@ placeholder, so the port is fixed at 8977 and the suites name it literally. Star
 it first, leave it up, stop it after:
 
 ```sh
-benchmark/bin/webmcp_fixture.py                 # serves both pages on 127.0.0.1:8977
+benchmark/bin/browser_fixture.py                # serves all four pages on 127.0.0.1:8977
 
 uv run bin/run_eval.py --suite browser --scenario page_offered_tools --judge
+uv run bin/run_eval.py --suite browser --scenario form_and_result_pages --judge
 uv run bin/run_capability.py --candidates --suite cap_browser_webmcp --trials 3 \
+  --confirm-daemon-isolated --confirm-isolated-env
+uv run bin/run_capability.py --candidates --suite cap_browser_forms --trials 3 \
   --confirm-daemon-isolated --confirm-isolated-env
 ```
 
-Forget it and both scenarios fail on a connection refused, which reads as the
-model failing to open a page. `cap_browser_webmcp` lives under
-`suites/capability/candidates/` for exactly that reason — a precondition no
+Forget it and those scenarios fail on a connection refused, which reads as the
+model failing to open a page. `cap_browser_webmcp` and `cap_browser_forms` live
+under `suites/capability/candidates/` for exactly that reason — a precondition no
 unattended sweep can satisfy must stay out of the default glob, or one forgotten
 process scores the headline number down with nothing wrong in the product.
 

@@ -14,7 +14,7 @@ description: >
   WHY THIS SUITE LIVES UNDER candidates/ AND NOT BESIDE THE OTHERS. It is not an
   unvalidated draft — it is a task with a precondition no unattended sweep can
   satisfy. The pages are served by a loopback fixture server the OPERATOR starts
-  (`benchmark/bin/webmcp_fixture.py`); neither runner has a fixture-server seam,
+  (`benchmark/bin/browser_fixture.py`); neither runner has a fixture-server seam,
   and a suite's `query` is authored text with no URL placeholder to hand it a
   port. In `suites/capability/` it would join `make capability` /
   `make capability-auto`, where a forgotten server scores every trial 0 and drags
@@ -25,7 +25,7 @@ description: >
   PRECONDITIONS: the disposable capability daemon (bin/capability-daemon.sh up)
   with a working Chrome, and the fixture server running on its default port:
 
-      benchmark/bin/webmcp_fixture.py
+      benchmark/bin/browser_fixture.py
       cd benchmark && uv run bin/run_capability.py --candidates \
         --suite cap_browser_webmcp --trials 3 \
         --confirm-daemon-isolated --confirm-isolated-env

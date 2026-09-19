@@ -2,22 +2,30 @@
 # /// script
 # requires-python = ">=3.11"
 # ///
-"""Serve the two WebMCP counter fixture pages on loopback, for the browser evals.
+"""Serve the browser eval's fixture pages on loopback.
 
-The `webmcp` action's eval cases need a page that offers WebMCP tools. Loopback
-HTTP is the only page transport the browser policy allows without configuration
-(`file://` and `data:` are hard-blocked), and it is a secure context, which the
-WebMCP API requires. Start this before the run, leave it up, stop it after:
+Several browser cases need a page whose behaviour is pinned rather than borrowed
+from a live site: two that offer WebMCP tools, a five-field form whose
+confirmation code is derived from what was typed, and a search page that changes
+structure twice. Loopback HTTP is the only page transport the browser policy
+allows without configuration (`file://` and `data:` are hard-blocked), and it is
+a secure context, which the WebMCP API requires. Start this before the run, leave
+it up, stop it after:
 
-    benchmark/bin/webmcp_fixture.py
+    benchmark/bin/browser_fixture.py
 
     # behavioral (needs the dev daemon + --judge)
     cd benchmark && uv run bin/run_eval.py --suite browser \\
       --scenario page_offered_tools --judge
+    cd benchmark && uv run bin/run_eval.py --suite browser \\
+      --scenario form_and_result_pages --judge
 
     # capability (needs the disposable capability daemon)
     cd benchmark && uv run bin/run_capability.py --candidates \\
       --suite cap_browser_webmcp --trials 3 \\
+      --confirm-daemon-isolated --confirm-isolated-env
+    cd benchmark && uv run bin/run_capability.py --candidates \\
+      --suite cap_browser_forms --trials 3 \\
       --confirm-daemon-isolated --confirm-isolated-env
 
 Unlike `aimlib.server` (which `run_aim.py` owns, starts on an ephemeral port and
@@ -25,12 +33,12 @@ hands the resulting URL to the prompt it generates), this server is NOT started
 by a runner: neither `run_eval.py` nor `run_capability.py` has a fixture-server
 seam, and a suite's `query` is authored text with no URL placeholder. So the port
 is FIXED and the suites name it literally. `--port` exists for a clash, and moving
-it means editing those two suites in the same change.
+it means editing those suites in the same change.
 
-Exactly three responses exist: `GET /shimmed.html`, `GET /native-only.html`, and
-404 for everything else. Both documents are read once at startup — there is no
-directory serving, no filesystem read per request, and no route that reflects
-request input into the body. Edit a page, restart the server.
+The responses are exactly one per entry in ROUTES, plus 404 for everything else.
+Every document is read once at startup — there is no directory serving, no
+filesystem read per request, and no route that reflects request input into the
+body. Edit a page, restart the server.
 """
 
 from __future__ import annotations
@@ -43,13 +51,18 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 BIND_HOST = "127.0.0.1"
 DEFAULT_PORT = 8977
 PAGES_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "suites", "fixtures", "webmcp")
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "suites", "fixtures", "browser")
 # The whole routing table: request path -> the document that answers it.
-ROUTES = {"/shimmed.html": "shimmed.html", "/native-only.html": "native_only.html"}
+ROUTES = {
+    "/shimmed.html": "shimmed.html",
+    "/native-only.html": "native_only.html",
+    "/form.html": "form.html",
+    "/search.html": "search.html",
+}
 
 
 def die(msg: str) -> None:
-    print(f"webmcp_fixture: {msg}", file=sys.stderr)
+    print(f"browser_fixture: {msg}", file=sys.stderr)
     raise SystemExit(1)
 
 
@@ -93,7 +106,7 @@ def make_handler(pages: dict[str, str]):
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Serve the WebMCP counter fixture pages on loopback.")
+        description="Serve the browser eval's fixture pages on loopback.")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT,
                         help=f"loopback port (default {DEFAULT_PORT}); the suites name the "
                              "default literally, so another port needs them edited too")

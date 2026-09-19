@@ -1,0 +1,92 @@
+suite: cap_browser_forms
+risk: isolated_mutation
+title: "Capability — fill a form in one call, and read what an action changed (fixture server required)"
+description: >
+  Ground-truth score for two `browser` economies that replace model turns with
+  one call: the `fill_form` act kind, which takes several fields from one
+  snapshot and fills them in order, and the page observation an action hands back
+  after a click, a submit or an Enter, which is meant to remove the separate
+  `snapshot` that used to follow. Both golds are unreachable without the tool:
+  the form's confirmation code is derived from all five values at once and
+  rendered only after Save, the catalogue's part code is rendered only into the
+  detail view of the entry that was opened, neither number is in its prompt, and
+  `requires_tools: [browser]` zeroes any trial that answered without reaching the
+  page.
+
+  WHY THIS SUITE LIVES UNDER candidates/ AND NOT BESIDE THE OTHERS. Same reason
+  as its `cap_browser_webmcp` sibling: it is not an unvalidated draft, it is a
+  task with a precondition no unattended sweep can satisfy. The pages are served
+  by a loopback fixture server the OPERATOR starts
+  (`benchmark/bin/browser_fixture.py`); neither runner has a fixture-server seam,
+  and a suite's `query` is authored text with no URL placeholder to hand it a
+  port. In `suites/capability/` it would join `make capability` /
+  `make capability-auto`, where a forgotten server scores every trial 0 and drags
+  the headline number with nothing wrong in the product. Under candidates/ it is
+  excluded from the default glob and runs only when asked for by name. Promote it
+  the day a runner owns the fixture server's lifecycle.
+
+  PRECONDITIONS: the disposable capability daemon (bin/capability-daemon.sh up)
+  with a working Chrome, and the fixture server running on its default port:
+
+      benchmark/bin/browser_fixture.py
+      cd benchmark && uv run bin/run_capability.py --candidates \
+        --suite cap_browser_forms --trials 3 \
+        --confirm-daemon-isolated --confirm-isolated-env
+
+  Nothing needs pre-granting in bin/seed_capability_home.py: `browser` is always
+  advertised (it has no enable or consent gate — `[fermix_core.browser]`'s only
+  key is `allowed_hosts`), loopback stays allowed whatever that list says, and
+  neither `fill_form` nor the post-action observation adds a configuration key.
+
+  SAFETY GATE: deliberately none, exactly as in `cap_browser_webmcp`. Neither
+  case declares `tools_none`, `tools_none_succeeded` or `reply_not_matches`, so
+  the runner reports safety as NOT EVALUATED and the release gate exits 5 — the
+  same by-design exit every shipped capability suite produces today. Adding a
+  gate these tasks could never trip would turn that honest hole into a reassuring
+  checkmark. The gate this surface actually wants is an instruction injected into
+  page text, which belongs in a safety pack beside the other injection cases, not
+  here.
+defaults:
+  judge: false
+  timeout_ms: 240000
+
+scenarios:
+  - id: one_call_instead_of_several_turns
+    # isolated_mutation, stated on the scenario rather than inherited: an omitted
+    # risk becomes `unclassified`, which the capability runner refuses outright.
+    # The mutation is typing and clicking inside two ephemeral pages that never
+    # post and never navigate, so it stays inside the disposable daemon's
+    # throwaway browser profile — the class the --confirm-daemon-isolated /
+    # --confirm-isolated-env attestations cover.
+    risk: isolated_mutation
+    title: "Fill five fields in one call, and read what an action changed"
+    severity: normal
+    # `fixture-server` marks the operator precondition above.
+    tags: [capability, browser, form, fixture-server]
+    cases:
+      - id: form_confirmation_code
+        # 74576 is a function of all five normalised values in field order, so a
+        # value that lands in the wrong field, or a field left empty, yields a
+        # different number. It is nowhere in this prompt and nowhere on the page
+        # until Save is pressed, so it cannot be reached from parametric recall
+        # or from reading the form.
+        query: >
+          Open http://127.0.0.1:8977/form.html in the browser and fill the
+          registration form in: full name Ada Lovelace, city Turin, organisation
+          Analytical Engines, role Programmer, dietary note no shellfish. Save
+          it, then report the confirmation code the page shows. Reply with ONLY
+          that number.
+        score: { match: numeric, expected: 74576, tolerance: 0 }
+        requires_tools: [browser]
+
+      - id: part_code_from_detail_view
+        # The catalogue lists nothing until it is searched, and a part code is
+        # rendered only into the detail view of the entry that was opened, so
+        # 6208 takes both steps. `escapement` matches two entries, so the wrong
+        # link scores 0 on its own code rather than by luck.
+        query: >
+          Open http://127.0.0.1:8977/search.html in the browser. Search the parts
+          catalogue for escapement, open the Silver escapement entry, and report
+          the part code shown on it. Reply with ONLY that number.
+        score: { match: numeric, expected: 6208, tolerance: 0 }
+        requires_tools: [browser]
