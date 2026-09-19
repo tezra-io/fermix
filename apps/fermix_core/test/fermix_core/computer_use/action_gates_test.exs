@@ -254,15 +254,17 @@ defmodule FermixCore.ComputerUse.ActionGatesTest do
     end
   end
 
-  # A mutating action ends in a look, so the model reads what its input did rather
-  # than assuming; a read-only one is already the look.
+  # A mutating action ends in evidence, so the model reads what its input did
+  # rather than assuming; a read-only one is already the look. Which evidence is
+  # this side's rule, never the model's: the view for anything that went out over
+  # the pointer or the keyboard, the control itself for an accessibility action.
   test "every action that is not read-only is counted and answered with a check" do
     for action <- @mutating do
       session = start_session([])
       {:ok, :auto, request} = Session.classify(session, request_for(action))
 
-      assert request["screenshot_after"] == true,
-             "#{action} returns no check image, so its effect is never seen"
+      assert request["check"] in ~w(image semantic),
+             "#{action} asks for no evidence, so what it did is never seen"
 
       assert {:ok, _result} = Session.execute(session, request)
       assert Session.action_count(session) == 1, "#{action} costs nothing against the budget"

@@ -29,6 +29,8 @@ defmodule FermixCore.ComputerUse.Observations do
   "oldest out" without a second counter, and `id => entry` is a lookup over it.
   """
 
+  alias Compux.Protocol
+
   # Three, matching the helper's own cap: an id this side kept past the helper's
   # window would only be refused a round trip later, and an id the helper kept
   # past this side's would lose its marks and its crop.
@@ -107,7 +109,7 @@ defmodule FermixCore.ComputerUse.Observations do
       when is_list(table) and is_map(request) and is_binary(id) and is_integer(now_ms) do
     entry = %{
       kind: response["observation_kind"],
-      region: recorded_region(request, response),
+      region: recorded_region(table, request, response),
       dims: dims(response),
       marks: marks(response),
       recorded_at_ms: now_ms
@@ -296,18 +298,35 @@ defmodule FermixCore.ComputerUse.Observations do
 
   defp put_target(request, fields), do: request |> Map.delete("mark") |> Map.merge(fields)
 
-  # A crop is an image a rectangle was ASKED for (the request), positioned where
+  # A LOOK is a crop when a rectangle was ASKED for (the request), positioned where
   # the helper RESOLVED it to (the reply, in full-display image pixels). A capture
   # that asked for no rectangle is the whole display and holds none, whatever the
-  # reply echoes back. A helper that answers a crop with no rectangle has told us
-  # nothing to position it by, so it is not treated as one: the tripwire stays
-  # quiet and the check falls back to the helper's own full-display capture, both
-  # of which are the safe side of that ignorance.
-  defp recorded_region(%{"region" => asked}, %{"region" => resolved})
+  # reply echoes back — every image payload echoes one, the full display's included.
+  # A helper that answers a crop with no rectangle has told us nothing to position
+  # it by, so it is not treated as one and the tripwire stays quiet, which is the
+  # safe side of that ignorance.
+  defp recorded_region(_table, %{"region" => asked}, %{"region" => resolved})
        when is_map(asked) and is_map(resolved),
        do: resolved
 
-  defp recorded_region(_request, _response), do: nil
+  # A CHECK asked for no rectangle — a mutating action carries none by protocol —
+  # and is a re-capture of the image the action was aimed in, so it is a crop
+  # exactly when THAT image was one. Only the table knows, which is why the reply's
+  # rectangle is taken only once the named observation says this is a crop at all:
+  # a check of the full display echoes the whole display's rectangle, and recording
+  # that would have the wrong-grid tripwire judging every later point against the
+  # screen itself.
+  defp recorded_region(table, %{"action" => action} = request, %{"region" => resolved})
+       when is_map(resolved) do
+    with false <- Protocol.read_only?(action),
+         {:ok, %{region: region}} when is_map(region) <- fetch(table, request["observation_id"]) do
+      resolved
+    else
+      _not_a_crop_check -> nil
+    end
+  end
+
+  defp recorded_region(_table, _request, _response), do: nil
 
   defp dims(%{"width" => w, "height" => h}) when is_integer(w) and is_integer(h), do: {w, h}
   defp dims(_response), do: nil

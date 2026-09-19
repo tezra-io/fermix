@@ -5,9 +5,12 @@ daemon wrote under `<FERMIX_HOME>/traces/YYYY-MM-DD/`, `rows_for_anchored_turn`
 narrows to one batch (anchored by the fixture URL its `open` row carries), and `classify_row` labels each row as a delivered click, another
 pointer action, a screenshot, or a typed refusal. `parse_cursor_echo`,
 `parse_not_delivered`, `parse_sent_dims` and `classify_refusal` read the exact
-strings the daemon renders (each anchor below carries its file:line), and
-`parse_elixir_input` decodes the `input` field — which Fermix writes as an Elixir
-`inspect` map, not JSON.
+strings the daemon renders. Each anchor below names the FUNCTION that renders it,
+not a line: line numbers rot silently and a rotted anchor here is a parser that
+quietly matches nothing (`parse_not_delivered` read a sentence M42 slice 3 had
+already reworded, so every unconfirmed aim scored as a clean delivery). Re-read
+the named function before trusting a pattern. `parse_elixir_input` decodes the
+`input` field — which Fermix writes as an Elixir `inspect` map, not JSON.
 
 Two trace preconditions are separate on purpose (they have different causes and
 different fixes): `check_trace_visibility` asks whether the run's rows are on disk
@@ -25,9 +28,10 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 
-# `session.ex:341-345` — the complete pointer-action set. Only the three that put a
-# button down count as a probe's click; the rest are recorded and never matched,
-# so a stray scroll can never masquerade as an off-page click (F6).
+# The complete pointer-action set (`Compux.Protocol` `@addressed`, minus the two
+# that name a control rather than a point). Only the three that put a button down
+# count as a probe's click; the rest are recorded and never matched, so a stray
+# scroll can never masquerade as an off-page click (F6).
 DELIVERED_ACTIONS = frozenset({"left_click", "right_click", "double_click"})
 OTHER_POINTER_ACTIONS = frozenset({"mouse_move", "left_click_drag", "scroll", "inspect"})
 CLICK_EVENTS_PER_ACTION = {"left_click": 1, "right_click": 0, "double_click": 2}
@@ -49,19 +53,26 @@ MAIN_AGENT = "main"
 
 MAX_ROWS = 500_000
 
-# Rendered by `computer_use/session.ex`. Since M42 slice 3 every image leads with
-# its own identity, so the dims ride that sentence rather than a bare "screenshot
-# WxH"; the cursor echo and the delivery marker follow it.
+# Rendered by `computer_use/session.ex`, one function per pattern. Since M42 slice
+# 3 every image leads with its own identity (`image_lead/2`), so the dims ride that
+# sentence rather than a bare "screenshot WxH"; the cursor echo (`cursor_suffix/1`)
+# and the aim marker (`delivery_suffix/1`) follow it, and the badge table is
+# `marks_suffix/1`.
 _DIMS_RE = re.compile(r"Image [^,]+, (\d+)x(\d+) \(display (\d+)\)")
 _CURSOR_RE = re.compile(r"Cursor at \((-?\d+),(-?\d+)\)")
-_NOT_DELIVERED_RE = re.compile(r"NOT delivered at \((-?\d+),(-?\d+)\)")
+# `delivery_suffix/1`. The sentence hedges deliberately — a human moving the mouse
+# after a click that DID land leaves the same trace — so this reads "the cursor did
+# not end up where we aimed", which is exactly what an aim harness measures, and
+# never "the input was dropped". It said "NOT delivered at" until slice 3.
+_NOT_DELIVERED_RE = re.compile(r"Aim NOT confirmed at \((-?\d+),(-?\d+)\)")
 _MARKS_ZERO = "0 accessibility marks"
 _MARKS_RE = re.compile(r"(\d+) numbered mark\(s\) badged on the image")
 
-# Typed refusals, anchored on `tools/computer_use.ex` and on the helper's own
-# codes. The region-mismatch and stale-mark refusals are gone with the rectangle
-# they were about: an action names the image its coordinates were read in, so the
-# questions left are "did it name one" and "is that image still the helper's".
+# Typed refusals, anchored on `Tools.ComputerUse.refusal_message/1` (this side's
+# own gates) and `action_error_message/1` (the helper's codes). The region-mismatch
+# and stale-mark refusals are gone with the rectangle they were about: an action
+# names the image its coordinates were read in, so the questions left are "did it
+# name one" and "is that image still the helper's".
 _REFUSALS = (
     ("ambiguous_coordinates", "ambiguous coordinates: "),
     ("observation_required", "it names no `observation_id`"),
@@ -303,6 +314,9 @@ def full_sent_echo(output: str, had_region: bool) -> tuple[int, int] | None:
 
 
 def parse_not_delivered(output: str) -> tuple[int, int] | None:
+    """The point an action aimed at whose cursor was NOT confirmed there
+    (`session.ex` `delivery_suffix/1`). Present means the check's cursor was
+    elsewhere, which for this harness is a probe that did not reach its target."""
     match = _NOT_DELIVERED_RE.search(output or "")
     return (int(match.group(1)), int(match.group(2))) if match else None
 

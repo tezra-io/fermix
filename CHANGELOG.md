@@ -34,6 +34,22 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   managed browser instead. Install the bridge with
   `fermix browser bridge install --browser chrome --extension-id <id>`; the
   extension and how to load it live in `apps/fermix_core/priv/browser_extension/`.
+- **A click's picture now waits for the screen to react.** The image a computer-use
+  action came back with was taken the instant the input went out, before the
+  application had done anything, so a button that takes a moment to repaint looked
+  as though nothing had happened and got clicked again. The check now waits for
+  that view to stop changing before it is captured, and says so when it never did.
+  It also says when nothing visible changed since the picture the action was aimed
+  at — in plain words, and as a fact about the view rather than a verdict on the
+  click, because an action that changes nothing on screen is often an action that
+  worked. When three actions in a row leave the view unchanged, the result says so
+  and names the ways out: a fresh full screenshot, a list of the controls, or
+  telling the user. Nothing is blocked by it. Pressing a control by name no longer
+  takes a picture at all — the control itself is read again and its state reported
+  in one line, including when it has gone entirely, which usually means the press
+  worked and dismissed it — and a zoomed action no longer costs a second round trip
+  to the helper for its picture, because an action and its check are one exchange.
+
 - **Buttons can be pressed by name instead of aimed at.** The element listing now
   gives each control a short reference and says what that control itself can do —
   whether it is enabled, whether it can be pressed, whether its value can be set —

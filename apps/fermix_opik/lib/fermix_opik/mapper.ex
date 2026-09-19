@@ -207,7 +207,18 @@ defmodule FermixOpik.Mapper do
             # closed enums; the VALUE a `set_value` carried is content and never
             # appears here, whatever the capture posture.
             :input_method,
-            :effect
+            :effect,
+            # The check (M42 slice 6): which evidence the action came back with,
+            # whether the view it acted in differs from the one it acted on, and
+            # what each phase of it cost. A closed enum, a boolean and four
+            # millisecond counts — nothing read off the screen, so they ride
+            # outside the content-capture gate like the rest of this family.
+            :check_kind,
+            :check_changed,
+            :cu_input_ms,
+            :cu_settle_ms,
+            :cu_capture_ms,
+            :cu_encode_ms
           ])
         )
     }

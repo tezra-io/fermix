@@ -451,6 +451,45 @@ defmodule FermixOpik.MapperTest do
            }
   end
 
+  # M42 slice 6: the check and the phase costs. Which evidence the action came
+  # back with, whether the view it acted in had changed since the one it acted on,
+  # and what each phase of it cost — a closed enum, a boolean and four millisecond
+  # counts, so a run can be counted and timed without a pixel or a sentence.
+  test "tool_span keeps the check and the phase timings, and nothing from the screen" do
+    metadata = %{
+      tool: "computer_use",
+      success: true,
+      cu_session: "cua_ab12",
+      outcome: :performed,
+      check_kind: "image",
+      check_changed: false,
+      cu_input_ms: 12,
+      cu_settle_ms: 180,
+      cu_capture_ms: 40,
+      cu_encode_ms: 9,
+      element_after: %{"value" => "hunter2"},
+      screen_text: "Transfer $4,000 to account 12345"
+    }
+
+    span =
+      Mapper.tool_span(metadata, %{duration_ms: 241},
+        trace_id: "t",
+        project_name: "fermix",
+        ended: @ended
+      )
+
+    assert span.metadata == %{
+             cu_session: "cua_ab12",
+             outcome: :performed,
+             check_kind: "image",
+             check_changed: false,
+             cu_input_ms: 12,
+             cu_settle_ms: 180,
+             cu_capture_ms: 40,
+             cu_encode_ms: 9
+           }
+  end
+
   test "tool_span keeps the outbound MCP server identity" do
     metadata = %{tool: "acme_get_note_markdown", success: true, mcp_server: "acme"}
 

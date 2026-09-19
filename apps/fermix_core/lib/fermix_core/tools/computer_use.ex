@@ -83,13 +83,17 @@ defmodule FermixCore.Tools.ComputerUse do
       "its controls end the call you are on. If it covers your target, ask the human to move it. " <>
       "`screenshot` to see the screen, then act on it (click, type, key, scroll, drag) using " <>
       "pixel coordinates read in the image that screenshot names. Every " <>
-      "mutating action returns a fresh check screenshot — of the same crop when the action " <>
-      "was aimed in a zoomed image, of the full screen otherwise — and that check names a " <>
-      "NEW image: READ it, and aim your next action in it. " <>
-      "It shows what the screen looks like now, not whether your input arrived, so " <>
-      "repeat an action only when the image shows its effect is missing. A DELIVERED click " <>
-      "that changes nothing is NOT a miss — do not repeat " <>
-      "it; verify the effect through the surface's own structure where it has one (a " <>
+      "mutating action comes back with its own check, and you never ask for one: a click, " <>
+      "drag, scroll, keystroke or paste returns the VIEW it acted in — the same crop when the " <>
+      "action was aimed in a zoomed image, the full screen otherwise — captured once that " <>
+      "view stopped changing, and naming a NEW image: READ it, and aim your next action in " <>
+      "it. A `press` or `set_value` returns the CONTROL instead, read again after the action: " <>
+      "that is its state, never a picture and never proof the action had its effect. " <>
+      "A check shows what the screen looks like now, not whether your input arrived, so " <>
+      "repeat an action only when it shows the effect is missing. When the check says nothing " <>
+      "visible changed, that is a fact about the VIEW and not a miss: do not repeat the " <>
+      "action for it. " <>
+      "Verify the effect through the surface's own structure where it has one (a " <>
       "`browser` snapshot or `get` for a page that browser drives), and change MECHANISM " <>
       "— element click, keyboard, the browser's own click — not aim. " <>
       "`inspect` (read-only) reports the UI element under a point — its role and label — so you " <>
@@ -378,7 +382,7 @@ defmodule FermixCore.Tools.ComputerUse do
       %{
         tag: "performed, not verified",
         description:
-          "the action was sent but its check screenshot could not be captured; take a " <>
+          "the action was sent but its check could not be obtained; take a " <>
             "screenshot to see the result instead of re-sending the action"
       },
       %{
@@ -705,11 +709,12 @@ defmodule FermixCore.Tools.ComputerUse do
 
   defp perform(session, request) do
     case Session.execute(session, request) do
-      {:ok, %{image: nil, summary: summary} = result} ->
-        {{:ok, Tool.success(summary)}, action_telemetry(result)}
+      {:ok, %{image: nil} = result} ->
+        {{:ok, Tool.success(action_summary(result))}, action_telemetry(result)}
 
-      {:ok, %{image: image, summary: summary} = result} ->
-        {{:ok, Tool.success_with_images(summary, [image])}, action_telemetry(result)}
+      {:ok, %{image: image} = result} ->
+        {{:ok, Tool.success_with_images(action_summary(result), [image])},
+         action_telemetry(result)}
 
       {:error, :user_active} ->
         {{:ok, Tool.error(action_error_message(:user_active))}, refused(:yielded)}
@@ -738,22 +743,65 @@ defmodule FermixCore.Tools.ComputerUse do
     end
   end
 
+  # The two codes whose sentence ends by promising the helper's own numbers: the
+  # image's size for a point off its edge, and both measurements for a geometry
+  # mismatch. Quoting the helper beats re-deriving them here — one authority for a
+  # fact, and the operator reads the words the helper actually used.
+  # The platform's own words belong beside these, because an AXError number is
+  # what a bug report needs — appended, never rendered AS the message.
+  @detailed_codes ~w(point_outside_observation capture_geometry_mismatch
+                     ax_timed_out ax_action_failed)
+
+  # A check the helper refused after the input had already gone out is a SUCCESS
+  # here — the action happened — so the code it refused with would otherwise reach
+  # neither the model's sentence nor the row. Both matter: `capture_geometry_mismatch`
+  # is an operator fault whose own sentence says "do not retry, tell the user", and
+  # the generic unverified lead ends in "take a fresh `screenshot`" — the exact
+  # retry that code forbids. One authority per code, so the sentence comes from the
+  # same `action_error_message/1` a refusal would have used, with the helper's
+  # numbers after it exactly as `failure_message/1` places them.
+  defp action_summary(%{summary: summary, check_code: code} = result)
+       when code in @detailed_codes do
+    summary <> " " <> action_error_message(code) <> check_detail(result)
+  end
+
+  defp action_summary(%{summary: summary}), do: summary
+
+  defp check_detail(%{check_detail: detail}) when is_binary(detail), do: " (#{detail})"
+  defp check_detail(_result), do: ""
+
   # The session decided the outcome of a reply it produced (it knows whether the
-  # check came back); the tool only classifies the error tuples.
+  # check came back); the tool only classifies the error tuples. A check the helper
+  # refused carries its code here too, so an operator fault stays countable on the
+  # row whichever side of dispatch it landed on.
   defp action_telemetry(%{outcome: outcome} = result) do
     %{courtesy: courtesy_of(result), outcome: outcome}
     |> put_age(Map.get(result, :observation_age_ms))
+    |> geometry_refusal(Map.get(result, :check_code))
     |> put_receipt_facts(result)
   end
 
-  # By which mechanism the input went out (`ax` or `foreground_hid`) and what the
-  # helper observed of it. Two closed enums the session read off the receipt — the
-  # value a `set_value` carried is NOT among them and never reaches a row: it is
-  # content, and content rides the capture gate, not always-on metadata.
+  # What the session read off the receipt: by which mechanism the input went out
+  # (`ax` or `foreground_hid`), what the helper observed of it, which evidence the
+  # action came back with, and what each phase of it cost (M42 slice 6). Closed
+  # enums, a boolean and four millisecond counts — the value a `set_value` carried
+  # is NOT among them and never reaches a row, because it is content, and content
+  # rides the capture gate rather than always-on metadata.
+  @receipt_facts [
+    :input_method,
+    :effect,
+    :check_kind,
+    :check_changed,
+    :cu_input_ms,
+    :cu_settle_ms,
+    :cu_capture_ms,
+    :cu_encode_ms
+  ]
+
   defp put_receipt_facts(telemetry, source) do
-    telemetry
-    |> put_enum(:input_method, Map.get(source, :input_method))
-    |> put_enum(:effect, Map.get(source, :effect))
+    Enum.reduce(@receipt_facts, telemetry, fn key, acc ->
+      put_enum(acc, key, Map.get(source, key))
+    end)
   end
 
   defp put_enum(telemetry, _key, nil), do: telemetry
@@ -1062,15 +1110,6 @@ defmodule FermixCore.Tools.ComputerUse do
           "shows it did not take effect.",
       else: "action failed: #{format_reason(reason)}"
   end
-
-  # The two codes whose sentence ends by promising the helper's own numbers: the
-  # image's size for a point off its edge, and both measurements for a geometry
-  # mismatch. Quoting the helper beats re-deriving them here — one authority for a
-  # fact, and the operator reads the words the helper actually used.
-  # The platform's own words belong beside these, because an AXError number is
-  # what a bug report needs — appended, never rendered AS the message.
-  @detailed_codes ~w(point_outside_observation capture_geometry_mismatch
-                     ax_timed_out ax_action_failed)
 
   # The two codes whose sentence cannot be read off the code alone.
   @ax_failures ~w(ax_timed_out ax_action_failed)

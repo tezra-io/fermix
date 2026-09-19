@@ -61,7 +61,7 @@ defmodule FermixCore.ComputerUse.Session do
   # human's reclaim, which can land mid-action — out of the round trip: a snapshot
   # is a moment older than this process, and applying one wholesale would silently
   # un-pause a machine the human just took back.
-  @pipeline_keys [:action_count, :last_action_at, :observations]
+  @pipeline_keys [:action_count, :last_action_at, :observations, :no_change_streak]
 
   # The enclosing budget for a control call. The driver's own acknowledgement
   # ceiling is 5 s (an answer the helper gives from its control reader without
@@ -87,14 +87,38 @@ defmodule FermixCore.ComputerUse.Session do
   # accessibility call is the one that timed out after it was made.
   @type effect :: :verified | :not_observed | :unknown
 
-  # The receipt as this side reads it: the dispatch verdict, plus the two closed
-  # facts a trace and a sentence both need, plus whether the action pulled its
-  # application to the front.
+  # Which evidence the action came back with (M42 slice 6 §2.1), as the receipt
+  # reports it: the kind the helper actually carried, whether the view had stopped
+  # moving when it was captured, and whether it differs from the image the model
+  # acted on. `settle` and `changed` are absent on the kinds and the frames that
+  # cannot answer them, and absent means unknown here as everywhere else.
+  @type check :: %{
+          kind: String.t(),
+          settle: String.t() | nil,
+          changed: boolean() | nil
+        }
+
+  # How long each phase of a mutating action took, from the helper's monotonic
+  # clock (M42 slice 6 §2.5). Bounded non-negative integers; a phase the helper did
+  # not run, or did not time, is absent rather than zero.
+  @type timings :: %{
+          optional(:input) => non_neg_integer(),
+          optional(:settle) => non_neg_integer(),
+          optional(:capture) => non_neg_integer(),
+          optional(:encode) => non_neg_integer()
+        }
+
+  # The receipt as this side reads it: the dispatch verdict, plus the facts a trace
+  # and a sentence both need — by which mechanism the input went out, what the
+  # helper observed of it, whether the action pulled its application to the front,
+  # which evidence came back with it, and what each phase cost.
   @type receipt :: %{
           dispatch: dispatch(),
           effect: effect() | nil,
           input_method: String.t() | nil,
-          foreground_changed: boolean() | nil
+          foreground_changed: boolean() | nil,
+          check: check() | nil,
+          timings: timings() | nil
         }
 
   # What happened to the INPUT — the closed set every `computer_use` tool exec
@@ -105,7 +129,9 @@ defmodule FermixCore.ComputerUse.Session do
   @type outcome :: :refused | :performed | :performed_unverified | :unknown | :read
 
   # `observation_age_ms` is how old the image this action aimed at was when it was
-  # sent, for the tool exec row; absent on a reply that named no observation.
+  # sent, for the tool exec row; absent on a reply that named no observation. The
+  # `cu_*_ms` pair with it: bounded phase costs, and the two closed facts about the
+  # evidence the action came back with.
   @type action_result :: %{
           required(:summary) => String.t(),
           required(:image) => map() | nil,
@@ -113,7 +139,13 @@ defmodule FermixCore.ComputerUse.Session do
           required(:outcome) => outcome(),
           optional(:input_method) => String.t(),
           optional(:effect) => effect(),
-          optional(:observation_age_ms) => non_neg_integer()
+          optional(:observation_age_ms) => non_neg_integer(),
+          optional(:check_kind) => String.t(),
+          optional(:check_changed) => boolean(),
+          optional(:cu_input_ms) => non_neg_integer(),
+          optional(:cu_settle_ms) => non_neg_integer(),
+          optional(:cu_capture_ms) => non_neg_integer(),
+          optional(:cu_encode_ms) => non_neg_integer()
         }
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -254,7 +286,12 @@ defmodule FermixCore.ComputerUse.Session do
         # newest first, mirroring what the helper retains. It replaces the single
         # tracked view region — a coordinate now names the image it was read in,
         # so there is no rectangle to carry forward and none to forget.
-        observations: Observations.new()
+        observations: Observations.new(),
+        # Consecutive mutating actions whose check said this view did not change
+        # (M42 slice 6 §3). It only ever produces a SENTENCE — the action budget
+        # stays the one hard limit — so a model repeating something that reaches
+        # nothing is told, rather than silently spending its budget on it.
+        no_change_streak: 0
       }
 
       publish_identity(state)
@@ -736,7 +773,7 @@ defmodule FermixCore.ComputerUse.Session do
   defp run_action(request, state, courtesy) do
     case state.driver_mod.execute(state.driver_state, request) do
       {:ok, response} -> receipt_action(request, response, state, courtesy)
-      {:error, {:action_failed, payload}} -> refused_action(request, payload, state)
+      {:error, {:action_failed, payload}} -> refused_action(request, payload, state, courtesy)
       {:error, reason} -> action_failure(reason, state)
     end
   end
@@ -748,14 +785,40 @@ defmodule FermixCore.ComputerUse.Session do
   # is for a helper that did not answer at all. The session lives: a refusal is a
   # live helper doing its job. There is no after-image on this path, so a dispatch
   # of `sent` is performed-and-unverified rather than performed.
-  defp refused_action(request, payload, state) do
+  defp refused_action(request, payload, state, courtesy) do
     state = forget_observation(request, payload, state)
 
     case action_receipt(request, payload) do
-      {:ok, receipt} -> {:reply, {:error, failure(payload, receipt)}, state}
+      {:ok, receipt} -> refusal_reply(request, payload, state, courtesy, receipt)
       :error -> missing_receipt(state)
     end
   end
+
+  # An image check the input already went out for, and no image on the frame: what
+  # failed is the LOOK, not the input. Before this slice that look was a second
+  # driver call and a capture the helper refused answered exactly this way; on one
+  # frame it has to answer the same way, or a click that landed would read to the
+  # model as a click that failed and buy a second real one. The helper's code and
+  # detail ride the result STRUCTURED, so the tool can add that code's own operator
+  # sentence and the trace can count by it.
+  defp refusal_reply(request, payload, state, courtesy, %{dispatch: :sent} = receipt) do
+    if request["check"] == "image" and not carried?(receipt, "image") do
+      code = refused_check(payload)
+      result = unverified_result(code, courtesy, receipt, {code, payload["detail"]})
+      {:reply, {:ok, result}, count_action(state, request)}
+    else
+      {:reply, {:error, failure(payload, receipt)}, state}
+    end
+  end
+
+  defp refusal_reply(_request, payload, state, _courtesy, receipt),
+    do: {:reply, {:error, failure(payload, receipt)}, state}
+
+  defp carried?(%{check: %{kind: kind}}, kind), do: true
+  defp carried?(_receipt, _kind), do: false
+
+  defp refused_check(%{"error" => code}) when is_binary(code), do: code
+  defp refused_check(_payload), do: "the helper did not say why"
 
   # The helper is the authority on which observations still resolve — it holds the
   # transform and re-reads the display's geometry before every pointer action — so
@@ -789,14 +852,14 @@ defmodule FermixCore.ComputerUse.Session do
      }}
   end
 
-  # The receipt is read BEFORE the check, because the check swaps the response the
-  # model reads (`crop_check/3`) and the receipt belongs to the ACTION. A mutating
-  # action that arrives without one is a protocol fault, not a case to infer
-  # around: inferring dispatch from what the check happened to return is exactly
-  # the habit receipts exist to end.
+  # The receipt is read first, because everything else on the frame is read
+  # through it: which evidence the check carries, and therefore what the reply may
+  # claim. A mutating action that arrives without one is a protocol fault, not a
+  # case to infer around — inferring dispatch from what the check happened to
+  # return is exactly the habit receipts exist to end.
   defp receipt_action(request, response, state, courtesy) do
     case action_receipt(request, response) do
-      {:ok, receipt} -> check_action(request, response, state, courtesy, receipt)
+      {:ok, receipt} -> reply_action(request, response, state, courtesy, receipt)
       :error -> missing_receipt(state)
     end
   end
@@ -812,7 +875,14 @@ defmodule FermixCore.ComputerUse.Session do
   end
 
   defp read_receipt,
-    do: %{dispatch: :read, effect: nil, input_method: nil, foreground_changed: nil}
+    do: %{
+      dispatch: :read,
+      effect: nil,
+      input_method: nil,
+      foreground_changed: nil,
+      check: nil,
+      timings: nil
+    }
 
   defp parse_receipt(%{"dispatch" => dispatch} = receipt)
        when dispatch in ~w(not_sent sent partial unknown) do
@@ -821,11 +891,60 @@ defmodule FermixCore.ComputerUse.Session do
        dispatch: String.to_existing_atom(dispatch),
        effect: effect(receipt["effect"]),
        input_method: input_method(receipt["input_method"]),
-       foreground_changed: foreground_changed(receipt["foreground_changed"])
+       foreground_changed: foreground_changed(receipt["foreground_changed"]),
+       check: check(receipt["check"]),
+       timings: timings(receipt["timings_ms"])
      }}
   end
 
   defp parse_receipt(_absent_or_malformed), do: :error
+
+  # Which evidence the frame carries. `kind` is a closed set, so anything else is
+  # no answer at all and the reply says nothing about a check; `settle` and
+  # `changed` are read only where they are the shapes the wire promises, because a
+  # sentence about the view has to be quoting the helper and not a coercion.
+  defp check(%{"kind" => kind} = check) when kind in ~w(image semantic none) do
+    %{kind: kind, settle: settle(check["settle"]), changed: changed(check["changed"])}
+  end
+
+  defp check(_absent_or_malformed), do: nil
+
+  defp settle(settle) when settle in ~w(stable timeout), do: settle
+  defp settle(_absent_or_unknown), do: nil
+
+  defp changed(changed) when is_boolean(changed), do: changed
+  defp changed(_absent), do: nil
+
+  # What each phase of the action cost, for the trace (M42 slice 6 §2.5). Only the
+  # four named phases, only non-negative integers: a measurement that is not a
+  # count of milliseconds is dropped rather than carried into a row that is meant
+  # to be countable.
+  @timing_phases [:input, :settle, :capture, :encode]
+
+  # Set from the outer tool deadline at COMPILE time so the bound is a constant a
+  # guard can use; `Timeouts` is the one authority for the number itself.
+  @max_phase_ms Timeouts.cu_session_call()
+
+  defp timings(timings) when is_map(timings) do
+    measured =
+      for phase <- @timing_phases,
+          ms = phase_ms(timings[Atom.to_string(phase)]),
+          into: %{},
+          do: {phase, ms}
+
+    if map_size(measured) == 0, do: nil, else: measured
+  end
+
+  defp timings(_absent), do: nil
+
+  # The ceiling is the deadline the caller waited under: no phase OF one action can
+  # outlast the call that was waiting for the whole of it, so a larger number is a
+  # helper misreporting rather than a slow phase. It is DROPPED, not clamped — a
+  # clamped reading is indistinguishable in the trace from a real one at the
+  # ceiling, and these numbers exist to be believed. Same rule as `effect/1` and
+  # `input_method/1`: a value outside the contract is not carried.
+  defp phase_ms(ms) when is_integer(ms) and ms >= 0 and ms <= @max_phase_ms, do: ms
+  defp phase_ms(_absent_or_out_of_range), do: nil
 
   # ABSENT is unknown, never false: the helper leaves the field off when the
   # platform would not say. Collapsing that to `false` would turn "we do not know"
@@ -855,43 +974,65 @@ defmodule FermixCore.ComputerUse.Session do
     {:stop, {:shutdown, :protocol_error}, {:error, {:protocol_error, :missing_receipt}}, state}
   end
 
-  # The action came back; its post-action check still may not. A check whose driver
-  # call timed out or died poisoned the Port, but the ACTION already ran — so the
-  # reply still reports what the receipt said about the input, and the session stops
-  # AFTER that reply. Reply-then-stop is the existing timeout shape, not a second
-  # mechanism, and the action is counted because it happened.
-  defp check_action(request, response, state, courtesy, receipt) do
-    case crop_check(request, response, state) do
-      {:ok, view_request, view_response} ->
-        reply_action(request, view_request, view_response, state, courtesy, receipt)
-
-      {:check_lost, reason} ->
-        {:stop, driver_stop_reason(reason), {:ok, lost_check_result(reason, courtesy, receipt)},
-         count_action(state, request)}
-    end
-  end
-
-  defp reply_action(request, view_request, view_response, state, courtesy, receipt) do
-    note_capture_health(view_response)
+  # The action and its check are one frame now, so there is nothing left to lose
+  # between them: whatever the helper brought back is read here, recorded, and
+  # rendered.
+  defp reply_action(request, response, state, courtesy, receipt) do
+    note_capture_health(response)
     age = observation_age_ms(request, state)
+    response = note_aim(request, response)
 
     state =
       state
       |> count_action(request)
-      |> record_observation(view_request, view_response)
+      |> record_observation(request, response)
+      |> track_no_change(request, response, receipt)
 
     request
-    |> reply_result(view_request, view_response, state, courtesy, receipt)
+    |> reply_result(response, state, courtesy, receipt)
     |> put_observation_age(age)
   end
 
+  # Aim evidence needs BOTH halves: an aimed point, and a picture of where it
+  # landed. The image check is the view the coordinates were read in, so the cursor
+  # in it is comparable with them; a semantic check has no cursor and a read-only
+  # look has no aim, and running the comparison there put an `aimed_at` on an
+  # `inspect` reply that nothing renders and nothing could mean.
+  defp note_aim(%{"check" => "image"} = request, response), do: note_delivery(request, response)
+  defp note_aim(_request, response), do: response
+
   # Whatever last handed the model coordinates becomes addressable, under the id
-  # the helper minted for it. The (request, response) pair is the one `crop_check/3`
-  # swapped in, so an action verified by its own crop screenshot records THAT image
-  # — the one the model actually reads — and not the action it followed.
+  # the helper minted for it — a mutating action's check image included, which is
+  # the image the model actually reads next.
   defp record_observation(state, request, response) do
     %{state | observations: Observations.record(state.observations, request, response, now_ms())}
   end
+
+  # Consecutive mutating actions whose check said this view did not change (M42
+  # slice 6 §3).
+  #
+  # Only evidence moves it. A check that says `changed: false` adds one; one that
+  # says `true` clears it; a look that hands back a fresh view clears it, because
+  # taking one is the first of the ways out the sentence names and it is the only
+  # thing that can show the model something new. Everything else leaves it exactly
+  # where it was: a check that could not say, and a refusal that dispatched
+  # nothing, are both silence — three no-change clicks with a refusal between them
+  # are still three no-change clicks, and neither silence may manufacture the
+  # sentence nor erase it.
+  defp track_no_change(state, request, response, receipt) do
+    cond do
+      Protocol.read_only?(request["action"]) -> looked(state, response)
+      receipt.check == nil -> state
+      receipt.check.changed == false -> %{state | no_change_streak: state.no_change_streak + 1}
+      receipt.check.changed == true -> %{state | no_change_streak: 0}
+      true -> state
+    end
+  end
+
+  defp looked(state, %{"observation_id" => id}) when is_binary(id),
+    do: %{state | no_change_streak: 0}
+
+  defp looked(state, _response), do: state
 
   # How stale the image an action aimed at was when it was sent. A bounded number
   # this side knows exactly, because this side stamped the observation when it
@@ -914,19 +1055,15 @@ defmodule FermixCore.ComputerUse.Session do
 
   defp put_observation_age(outcome, _age), do: outcome
 
-  # The check itself was refused by a live helper. Both its outcome and its
-  # sentence follow the ACTION's receipt, never the check's failure: what failed
-  # here is the look.
-  defp reply_result(_request, _view_req, %{"check_failed" => detail}, state, courtesy, receipt) do
-    {:reply, {:ok, unverified_result(detail, courtesy, receipt)}, state}
-  end
-
-  defp reply_result(request, view_request, view_response, state, courtesy, receipt) do
-    case normalize_response(view_response, view_request["display"] || 0) do
+  defp reply_result(request, response, state, courtesy, receipt) do
+    case normalize_response(response, request["display"] || 0) do
       {:ok, result} ->
+        notes =
+          check_note(response, receipt) <> receipt_note(request, receipt) <> loop_note(state)
+
         result =
           result
-          |> Map.update!(:summary, &(&1 <> receipt_note(request, receipt)))
+          |> Map.update!(:summary, &(&1 <> notes))
           |> Map.put(:courtesy, courtesy)
           |> Map.put(:outcome, action_outcome(receipt))
           |> put_receipt_facts(receipt)
@@ -938,15 +1075,39 @@ defmodule FermixCore.ComputerUse.Session do
     end
   end
 
-  # The two closed receipt facts, on the result so the tool exec row can carry
-  # them: by which mechanism the input went out, and what the helper observed of
-  # it. Never the value that was set — content stays on the model's side of the
-  # wire.
+  # The closed receipt facts, on the result so the tool exec row can carry them: by
+  # which mechanism the input went out, what the helper observed of it, which
+  # evidence it came back with, and what each phase cost. Never the value that was
+  # set, and never anything read off the screen — content stays on the model's side
+  # of the wire.
   defp put_receipt_facts(result, receipt) do
     result
     |> put_unless_nil(:input_method, receipt.input_method)
     |> put_unless_nil(:effect, receipt.effect)
+    |> put_check_facts(receipt.check)
+    |> put_timings(receipt.timings)
   end
+
+  defp put_check_facts(result, %{kind: kind, changed: changed}) do
+    result |> Map.put(:check_kind, kind) |> put_unless_nil(:check_changed, changed)
+  end
+
+  defp put_check_facts(result, nil), do: result
+
+  @timing_fields [
+    input: :cu_input_ms,
+    settle: :cu_settle_ms,
+    capture: :cu_capture_ms,
+    encode: :cu_encode_ms
+  ]
+
+  defp put_timings(result, timings) when is_map(timings) do
+    Enum.reduce(@timing_fields, result, fn {phase, field}, acc ->
+      put_unless_nil(acc, field, timings[phase])
+    end)
+  end
+
+  defp put_timings(result, nil), do: result
 
   defp put_unless_nil(map, _key, nil), do: map
   defp put_unless_nil(map, key, value), do: Map.put(map, key, value)
@@ -995,6 +1156,96 @@ defmodule FermixCore.ComputerUse.Session do
   defp ax_outcome(:verified), do: :performed
   defp ax_outcome(:unknown), do: :unknown
   defp ax_outcome(_not_observed_or_absent), do: :performed_unverified
+
+  # What the CHECK says about itself (M42 slice 6 §3). An image check answers two
+  # separate questions — had the view stopped moving when it was captured, and is
+  # it the same view the model acted on — and a semantic check answers neither,
+  # because it is a reading of one control and never a picture.
+  defp check_note(response, %{check: %{kind: "semantic"}}),
+    do: element_after_note(response["element_after"])
+
+  defp check_note(_response, %{check: %{kind: "image"} = check}),
+    do: settle_note(check.settle) <> changed_note(check.changed)
+
+  defp check_note(_response, _receipt), do: ""
+
+  # The control as the helper read it back AFTER the action — its own state, not a
+  # picture of it, and not proof the action had its effect. Its role, label and
+  # value are APPLICATION text and are neutralised exactly as an `elements` listing
+  # is: one line, no forged rows.
+  defp element_after_note(%{"present" => true} = element) do
+    named =
+      [role_of(element), quoted(element["label"])] |> Enum.reject(&(&1 == "")) |> Enum.join(" ")
+
+    rest = Enum.reject([enabled_word(element), value_after(element)], &(&1 == ""))
+
+    " The control now reads: " <> Enum.join([named | rest], ", ") <> "."
+  end
+
+  # A control that no longer answers, which is the most informative thing this
+  # check has to say and the one silence used to throw away: a dialog that closed,
+  # a row that went away, a window rebuilt under the reference. It is evidence and
+  # not proof — the tree says the control is gone, not that this action removed it
+  # — so the outcome is untouched and the next move is to LOOK rather than to press
+  # something that may no longer be there.
+  defp element_after_note(%{"present" => false}) do
+    " The control this action named no longer answers, so it is gone from the accessibility " <>
+      "tree — often because the action worked and dismissed it, and sometimes because the " <>
+      "window was rebuilt underneath it. Take `elements` or a `screenshot` to see what is " <>
+      "there now; do not press it again."
+  end
+
+  defp element_after_note(_absent_or_malformed), do: ""
+
+  # Absent is unknown, as everywhere else: a control the helper could not say was
+  # enabled is not described as either.
+  defp enabled_word(%{"enabled" => true}), do: "enabled"
+  defp enabled_word(%{"enabled" => false}), do: "disabled"
+  defp enabled_word(_element), do: ""
+
+  # A secure field's contents are never read back, so it simply carries no value.
+  defp value_after(element) do
+    case value_part(element["value"]) do
+      "" -> ""
+      part -> "value " <> String.trim_leading(part, "= ")
+    end
+  end
+
+  # The view had not stopped moving when the helper had to capture it (a caret, a
+  # spinner, a video). An observation about the picture, never a reason to send the
+  # input again.
+  defp settle_note("timeout") do
+    " This view was still changing when this image was captured, so it may show a moment " <>
+      "part way through rather than the settled result — look again before concluding anything " <>
+      "from it."
+  end
+
+  defp settle_note(_stable_or_unknown), do: ""
+
+  # The settled check hashes the same as the image the model acted on. It is
+  # evidence about the VIEW and not about the input, and the sentence says so:
+  # repeating a click because the picture is identical is how a delivered action
+  # becomes two.
+  defp changed_note(false) do
+    " Nothing visible changed in this view since the image you acted on — that alone does not " <>
+      "mean the action failed, and it is not a reason to repeat it."
+  end
+
+  defp changed_note(_changed_or_unknown), do: ""
+
+  # A run of actions reaching nothing (M42 slice 6 §3). It names the ways out and
+  # nothing is blocked: the action budget stays the one hard limit, so this is the
+  # model's judgment to make with a fact it would otherwise have to count itself.
+  @no_change_limit 3
+
+  defp loop_note(%{no_change_streak: streak}) when streak >= @no_change_limit do
+    " #{streak} actions in a row have left this view unchanged, so whatever you are doing is " <>
+      "not reaching it. Do not simply send another one: take a fresh full `screenshot` to see " <>
+      "the whole screen rather than this view, take `elements` and act on a control by name, " <>
+      "or tell the user what is not working."
+  end
+
+  defp loop_note(_state), do: ""
 
   # What the receipt adds to the check image the model is about to read. Both
   # halves can be true of one action, so both are appended rather than chosen
@@ -1079,14 +1330,6 @@ defmodule FermixCore.ComputerUse.Session do
   defp driver_stop_reason({:sidecar_exited, status}), do: sidecar_exit_reason(status)
   defp driver_stop_reason(:sidecar_unavailable), do: {:shutdown, :sidecar_unavailable}
 
-  # Plain words for the faults that end a session, so no model-facing sentence ever
-  # renders a raw Erlang term.
-  defp driver_fault({:timeout, :cu_sidecar_action, ms}),
-    do: "the helper stopped responding after #{ms} ms"
-
-  defp driver_fault({:sidecar_exited, status}), do: "the helper exited with status #{status}"
-  defp driver_fault(:sidecar_unavailable), do: "the helper was not running"
-
   # EX_TEMPFAIL (75) is compux's INTENTIONAL capture-stall fail-fast: the sidecar
   # already flushed a typed `capture_stalled` reply to the in-flight action, then
   # exited so a fresh sidecar respawns on the next action. Wrap it `{:shutdown, _}`
@@ -1095,118 +1338,6 @@ defmodule FermixCore.ComputerUse.Session do
   # non-zero status is a genuine sidecar crash and stays a bare error reason.
   defp sidecar_exit_reason(75), do: {:shutdown, {:sidecar_exited, 75}}
   defp sidecar_exit_reason(status), do: {:sidecar_exited, status}
-
-  # A zoomed mutating action is verified in the space it acted in. compux's own
-  # post-action check is always the FULL display — useless for a small target on
-  # a large display (observed live 2026-07-26: the board was ~100px tall in it,
-  # so the model re-zoomed after every single click, doubling its actions and its
-  # narration) — so `put_screenshot_after/2` skips it and the session takes a
-  # SAME-region screenshot as the check. Swapping the (request, response) pair
-  # means the tracking and the notice below describe the check screenshot, which
-  # is what the model actually reads: crop-space content, crop notice, view =
-  # region — the invariant "a request carrying a region yields crop-space
-  # content" holds everywhere.
-  defp crop_check(request, response, state) do
-    case check_view(request, state) do
-      nil -> {:ok, request, response}
-      view -> take_crop_check(request, view, state)
-    end
-  end
-
-  # The observation an action was aimed in, when this session owes it a check of
-  # its own: a mutating action, the operator's check switch on, and an image that
-  # is a CROP. `nil` otherwise — an action aimed at a full-screen image keeps
-  # compux's own check, which already shows the whole display, and an image this
-  # side no longer holds cannot be re-captured through.
-  defp check_view(request, state) do
-    if state.config.screenshot_after? and not Protocol.read_only?(request["action"]),
-      do: zoomed_view(request, state),
-      else: nil
-  end
-
-  defp zoomed_view(request, state) do
-    case Observations.fetch(state.observations, request["observation_id"]) do
-      {:ok, %{region: region, dims: {_w, _h}} = view} when is_map(region) -> view
-      _other -> nil
-    end
-  end
-
-  # JPEG for the check: same pixels the model needs, ~an order of magnitude less
-  # payload than PNG — the single largest per-action latency lever on a voice call.
-  @check_jpeg_quality 85
-
-  # The action's own ack (`{"ok": true}`) is discarded: the check screenshot IS
-  # the result the model reads, and it mints the observation the model's next
-  # action names. A check the helper refused returns no image and no id, so
-  # nothing new becomes addressable and the model keeps the image it already has.
-  #
-  # The check asks for the WHOLE of the image the action was aimed in, in that
-  # image's own pixels, and names it. The helper then maps the rectangle through
-  # the transform it stored when it made the image, so the check is the same crop
-  # of the same screen without this side re-deriving a screen rectangle — and
-  # without depending on the image THAT crop was taken from still existing.
-  defp take_crop_check(request, %{dims: {w, h}}, state) do
-    check = %{
-      "action" => "screenshot",
-      "observation_id" => request["observation_id"],
-      "region" => %{"x" => 0, "y" => 0, "w" => w, "h" => h},
-      "display" => request["display"],
-      "jpeg_quality" => @check_jpeg_quality,
-      # M28 B1/B2: the check carries its own coordinate grid AND the executed
-      # point drawn into the image, so the model SEES where its click landed
-      # relative to the target instead of only reading its number echoed back.
-      # Its point needs no conversion: the check is the same crop at the same size.
-      "rulers" => true
-    }
-
-    check = put_annotate_point(check, request)
-
-    # The check request IS what was asked for, so it is what the new observation is
-    # recorded against: it carries a rectangle (this is a crop), and the helper
-    # answers with that rectangle resolved onto the full-display image — the same
-    # place the image being re-captured sits. The inheritance is the helper's
-    # arithmetic, not a copy made here.
-    case state.driver_mod.execute(state.driver_state, check) do
-      {:ok, response} -> {:ok, check, note_delivery(request, response)}
-      {:error, reason} -> check_failure(request, reason)
-    end
-  end
-
-  # A check whose driver call timed out or died is a helper that stopped answering,
-  # so the session takes a fresh one — the caller replies first, because the action
-  # ran. Any other error is one capture a live sidecar refused: the session stays,
-  # and the response handed back carries no image and no observation id, so nothing
-  # new becomes addressable and the model keeps the image it was already reading.
-  defp check_failure(_request, {:timeout, :cu_sidecar_action, _ms} = reason),
-    do: {:check_lost, reason}
-
-  defp check_failure(_request, {:sidecar_exited, _status} = reason), do: {:check_lost, reason}
-  defp check_failure(_request, :sidecar_unavailable = reason), do: {:check_lost, reason}
-
-  # A capture a live helper refused names its own reason on the wire; rendering the
-  # whole frame would put an Erlang term in a sentence the model reads.
-  defp check_failure(request, {:action_failed, payload}),
-    do: {:ok, request, %{"check_failed" => payload["error"]}}
-
-  defp check_failure(request, reason),
-    do: {:ok, request, %{"check_failed" => inspect(reason)}}
-
-  defp put_annotate_point(check, request) do
-    case executed_point(request) do
-      nil -> check
-      {x, y} -> Map.put(check, "annotate_point", %{"x" => x, "y" => y})
-    end
-  end
-
-  # The point the action executed at: the drag destination for drags, x/y
-  # otherwise. Mirrors `note_delivery/2`'s notion of where evidence should be.
-  defp executed_point(%{"x" => x, "y" => y}) when is_number(x) and is_number(y),
-    do: {round(x), round(y)}
-
-  defp executed_point(%{"to" => %{"x" => x, "y" => y}}) when is_number(x) and is_number(y),
-    do: {round(x), round(y)}
-
-  defp executed_point(_request), do: nil
 
   # The pointer warp puts the cursor at the target before the button/scroll events
   # post, so the check's cursor tells where those events went — as long as macOS
@@ -1285,18 +1416,44 @@ defmodule FermixCore.ComputerUse.Session do
     # check; other actions ignore it). The ambient screen feed never sets it —
     # `Realtime.ScreenCapture` builds its own request.
     |> Map.put("rulers", true)
-    |> put_screenshot_after(state)
+    |> put_check(state)
   end
 
-  # An action aimed at a zoomed image gets its check from `crop_check/3` in that
-  # image's own crop, so compux is told not to take its full-screen one; an action
-  # aimed at a full-screen image keeps it.
-  defp put_screenshot_after(request, state) do
-    cond do
-      Protocol.read_only?(request["action"]) -> request
-      check_view(request, state) -> Map.put(request, "screenshot_after", false)
-      true -> Map.put(request, "screenshot_after", state.config.screenshot_after?)
-    end
+  # Which evidence this action comes back with (M42 slice 6 §3) — decided HERE, by
+  # rule, and never offered to the model: what an action's result has to prove is
+  # not something the thing being checked gets to choose. A read-only action is
+  # already the look and asks for nothing.
+  defp put_check(request, state) do
+    if Protocol.read_only?(request["action"]),
+      do: request,
+      else: Map.put(request, "check", check_kind(request, state))
+  end
+
+  # `press` and `set_value` reach their control through accessibility, so the check
+  # is that control read again: no capture, no encode, and a fact about the control
+  # rather than a picture of the screen. The operator's switch has nothing to say
+  # about it — that switch turns off an IMAGE, and this is not one.
+  @ax_addressed ~w(press set_value)
+
+  defp check_kind(%{"action" => action}, _state) when action in @ax_addressed, do: "semantic"
+
+  # Everything else went out over the pointer or the keyboard, where the only
+  # evidence is the view it acted in. A pointer action addressed by `element_ref`
+  # is one of these: its control's bounds are re-read, but the POINTER does the
+  # clicking, so what it did is visible and nothing is read back.
+  defp check_kind(_request, %{config: %{screenshot_after?: true}}), do: "image"
+  defp check_kind(_request, _state), do: "none"
+
+  # The human took the machine back while this action's view was settling. Every
+  # other unverified route ends in "take a fresh `screenshot`" — which is the one
+  # thing a paused session refuses, so saying it here would send the model at a
+  # door that is shut. The recovery is not a look; it is waiting.
+  defp unverified_summary("cancelled", :performed_unverified) do
+    "the input was sent, and computer use was then PAUSED before its check could be taken, " <>
+      "so what it did on screen was never seen. The user has the machine back — computer-use " <>
+      "actions, a `screenshot` included, are refused until they run /resume. Do not repeat " <>
+      "this action: it already went out. Tell them where you got to, and wait until they run " <>
+      "/resume."
   end
 
   # The one sentence for a performed-but-unverified action, on all three routes to
@@ -1320,8 +1477,16 @@ defmodule FermixCore.ComputerUse.Session do
       "screenshot names."
   end
 
-  defp unverified_result(detail, courtesy, receipt) do
+  # `code` and `detail` are the helper's own, on the two routes where a helper
+  # named them. They stay STRUCTURED on the result rather than being folded into
+  # the sentence here, because the tool owns every code's operator wording (one
+  # authority for one code) and the trace counts by the code, not by the sentence:
+  # a `capture_geometry_mismatch` that reached only this generic lead left the
+  # operator with "take a fresh screenshot" — the exact retry its own sentence
+  # forbids — and left the row uncountable.
+  defp unverified_result(detail, courtesy, receipt, helper \\ {nil, nil}) do
     outcome = unverified_outcome(receipt)
+    {code, helper_detail} = helper
 
     %{
       summary: unverified_summary(detail, outcome),
@@ -1330,18 +1495,8 @@ defmodule FermixCore.ComputerUse.Session do
       outcome: outcome
     }
     |> put_receipt_facts(receipt)
-  end
-
-  # The check never came back at all, so this session is also ending. Same receipt,
-  # plus the one thing the model must know to plan its next call.
-  defp lost_check_result(reason, courtesy, receipt) do
-    reason
-    |> driver_fault()
-    |> unverified_result(courtesy, receipt)
-    |> Map.update!(
-      :summary,
-      &(&1 <> " The computer-use session was reset, so your next action starts a fresh helper.")
-    )
+    |> put_unless_nil(:check_code, code)
+    |> put_unless_nil(:check_detail, helper_detail)
   end
 
   # A response carrying base64 image bytes becomes an image content part (the

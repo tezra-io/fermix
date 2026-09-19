@@ -77,14 +77,23 @@ defmodule FermixTestSupport.ComputerUseObservations do
     end
   end
 
-  defp region_of("obs-" <> rest) do
+  @doc """
+  The rectangle an id encodes, or `nil` when it encodes none (the full display,
+  and the plain `"obs-1"` the simple doubles mint).
+
+  A mutating action's check re-captures the view the action was aimed in, so a
+  double answering one reads that view's rectangle back out of the id it was given
+  rather than keeping a table of its own.
+  """
+  @spec region_of(String.t()) :: map() | nil
+  def region_of("obs-" <> rest) do
     case Enum.map(String.split(rest, "-"), &Integer.parse/1) do
       [{x, ""}, {y, ""}, {w, ""}, {h, ""}] -> %{"x" => x, "y" => y, "w" => w, "h" => h}
       _other -> nil
     end
   end
 
-  defp region_of(_id), do: nil
+  def region_of(_id), do: nil
 
   defp kind(action) when action in @image, do: "image"
   defp kind(action) when action in @semantic, do: "semantic"

@@ -4,9 +4,9 @@ defmodule FermixCore.ComputerUse.MarksTest do
   the badge's exact point HERE, keeping the wire x/y-only and the respawnable
   sidecar stateless), mark staleness (a badge from a view the model has left is a
   wrong-element click waiting to happen — refused, never guessed), and the
-  grounding-integrity stamps the session adds to its own capture requests
-  (`rulers` on every tool capture, `annotate_point` on the crop check so the
-  model SEES where its click landed).
+  grounding-integrity stamps the session adds to its own requests (`rulers` on
+  every tool request, the action's included, so the check image the helper draws
+  carries its own coordinate grid).
   """
 
   use ExUnit.Case, async: true
@@ -15,7 +15,7 @@ defmodule FermixCore.ComputerUse.MarksTest do
   alias FermixCore.ComputerUse.Session
 
   # Mirrors compux's screenshot payload for the incident display: dims plus the
-  # minted `observation_id` (protocol 9), and a canned mark table when
+  # minted `observation_id` (protocol 10), and a canned mark table when
   # `marks: true` rides the request.
   defmodule MarksDriver do
     @behaviour Compux.Driver
@@ -262,7 +262,11 @@ defmodule FermixCore.ComputerUse.MarksTest do
   end
 
   describe "grounding stamps (B1/B2)" do
-    test "every tool capture carries rulers; the crop check adds the executed point" do
+    # Both stamps ride the ACTION now (M42 slice 6): there is no second request to
+    # carry them. `rulers` is what the check image is drawn with, and the executed
+    # point is the helper's to place — it holds the transform the check was made
+    # with, so the marker lands where the input landed.
+    test "every tool request carries rulers, the action included" do
       session = start_session()
       {:ok, _} = run(session, %{"action" => "screenshot", "region" => @incident_region})
       assert_receive {:driver_execute, %{"action" => "screenshot", "rulers" => true}}
@@ -277,32 +281,10 @@ defmodule FermixCore.ComputerUse.MarksTest do
 
       {:ok, _} = Session.execute(session, click)
 
-      assert_receive {:driver_execute, %{"action" => "left_click", "rulers" => true}}
-
       assert_receive {:driver_execute,
-                      %{
-                        "action" => "screenshot",
-                        "rulers" => true,
-                        "annotate_point" => %{"x" => 1060, "y" => 714}
-                      }}
-    end
+                      %{"action" => "left_click", "rulers" => true, "check" => "image"}}
 
-    test "a drag's check marks the drag DESTINATION" do
-      session = start_session()
-      {:ok, _} = run(session, %{"action" => "screenshot", "region" => @incident_region})
-
-      {:ok, :auto, drag} =
-        Session.classify(session, %{
-          "action" => "left_click_drag",
-          "from" => %{"x" => 600, "y" => 400},
-          "to" => %{"x" => 900, "y" => 500},
-          "observation_id" => image_of(@incident_region)
-        })
-
-      {:ok, _} = Session.execute(session, drag)
-
-      assert_receive {:driver_execute,
-                      %{"action" => "screenshot", "annotate_point" => %{"x" => 900, "y" => 500}}}
+      refute_receive {:driver_execute, %{"action" => "screenshot", "annotate_point" => _}}, 50
     end
   end
 

@@ -257,15 +257,15 @@ defmodule FermixCore.ComputerUse.SessionTest do
   end
 
   describe "classify/2" do
-    test "a read-only action auto-runs and gets a display default but no screenshot_after" do
+    test "a read-only action auto-runs and gets a display default but no check" do
       session = start_session([])
 
       assert {:ok, :auto, request} = Session.classify(session, %{"action" => "screenshot"})
       assert request["display"] == 0
-      refute Map.has_key?(request, "screenshot_after")
+      refute Map.has_key?(request, "check")
     end
 
-    test "a mutating action auto-runs under standard access and gets screenshot_after from config" do
+    test "a mutating action auto-runs under standard access and gets its check from config" do
       session = start_session([])
 
       assert {:ok, :auto, request} =
@@ -276,7 +276,7 @@ defmodule FermixCore.ComputerUse.SessionTest do
                  "y" => 20
                })
 
-      assert request["screenshot_after"] == true
+      assert request["check"] == "image"
     end
 
     test "a mutating action is refused under strict access (the look-only floor)" do
@@ -1549,31 +1549,25 @@ defmodule FermixCore.ComputerUse.SessionTest do
       assert {:ok, %{outcome: :performed}} = Session.execute(session, request)
     end
 
-    # The swallowed timeout: the check turned `{:timeout, …}` into a string, so the
-    # reset never fired and the session carried on against a helper that had stopped
-    # answering.
-    test "a check timeout says the action was performed, unverified, then resets the session" do
+    # An action and its check are ONE frame (M42 slice 6), so a helper that goes
+    # quiet takes both with it and the dispatch is genuinely unknowable — there is
+    # no half of this in which the input is known to have gone out. The caller is
+    # answered BEFORE the session stops: one killed with its session loses the tool
+    # call it was recording.
+    test "a mutating action whose helper goes quiet is unknown, replied, then reset" do
       {session, ref} =
-        start_scripted(%{"screenshot" => {:error, {:timeout, :cu_sidecar_action, 30_000}}})
+        start_scripted(%{"left_click" => {:error, {:timeout, :cu_sidecar_action, 30_000}}})
 
-      assert {:ok, result} = click_in_region(session)
-      assert result.outcome == :performed_unverified
-      assert result.summary =~ "action performed"
-      assert result.summary =~ "the action itself was sent"
-      assert result.summary =~ "session was reset"
-      refute result.summary =~ "action failed"
+      assert {:error, {:timeout, :cu_sidecar_action, 30_000}} = click_in_region(session)
 
-      # Reply FIRST, then stop: an error reply would have bought a second real click.
       assert_receive {:DOWN, ^ref, :process, ^session, {:shutdown, :sidecar_timeout}}
       assert_receive :driver_stop
     end
 
-    test "a check whose helper exits says the same and resets the session" do
-      {session, ref} = start_scripted(%{"screenshot" => {:error, {:sidecar_exited, 2}}})
+    test "a mutating action whose helper exits says the same and resets the session" do
+      {session, ref} = start_scripted(%{"left_click" => {:error, {:sidecar_exited, 2}}})
 
-      assert {:ok, result} = click_in_region(session)
-      assert result.outcome == :performed_unverified
-      assert result.summary =~ "the action itself was sent"
+      assert {:error, {:sidecar_exited, 2}} = click_in_region(session)
 
       assert_receive {:DOWN, ^ref, :process, ^session, {:sidecar_exited, 2}}
     end
@@ -1622,7 +1616,13 @@ defmodule FermixCore.ComputerUse.SessionTest do
     test "a check image that cannot be read still reports the action performed" do
       {session, _ref} =
         start_scripted(%{
-          "screenshot" => {:ok, %{"data" => "!!!not-base64!!!", "mime" => "image/png"}}
+          "left_click" =>
+            {:ok,
+             %{
+               "data" => "!!!not-base64!!!",
+               "mime" => "image/png",
+               "receipt" => receipt(:sent)
+             }}
         })
 
       assert {:ok, result} = click_in_region(session)
@@ -1867,8 +1867,13 @@ defmodule FermixCore.ComputerUse.SessionTest do
     test "a check that failed after a half-sent action never claims the input was sent" do
       {session, _ref} =
         start_scripted(%{
-          "left_click" => {:ok, %{"ok" => true, "receipt" => receipt(:partial)}},
-          "screenshot" => {:ok, %{"data" => "!!!not-base64!!!", "mime" => "image/png"}}
+          "left_click" =>
+            {:ok,
+             %{
+               "data" => "!!!not-base64!!!",
+               "mime" => "image/png",
+               "receipt" => receipt(:partial)
+             }}
         })
 
       assert {:ok, result} = click_in_region(session)
