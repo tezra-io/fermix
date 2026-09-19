@@ -6,7 +6,7 @@ allowed_tools: ["browser", "web_fetch", "web_search"]
 
 # Browser Guidance
 
-Use `browser` for JavaScript-capable pages. Choose the right web tool once, read with `snapshot`, act with current refs, then verify with `wait`/`get`.
+Use `browser` for JavaScript-capable pages. Choose the right web tool once, read with `snapshot`, act with current refs, then read what the action reports back.
 
 ## Tool Routing
 
@@ -22,14 +22,16 @@ Use `browser` for JavaScript-capable pages. Choose the right web tool once, read
 1. Use the default profile unless login state, user observation, or a headless-only blocker requires another.
 2. `open`/`navigate`, then `snapshot`; snapshot refs are valid only for that page state.
 3. Pass the intended `target` when multiple tabs exist.
-4. After page-changing actions, verify with `wait`/`get`; snapshot again only when refs or structure changed.
+4. `click`, `submit`, `click_coords` and a `press` of Enter report `page` on a tab you have already snapshotted — read that instead of snapshotting again. After anything else, verify with `wait`/`get`.
 
 ## Actions
 
 - `fill` sets a field value; `type` appends.
+- `fill_form` takes `fields: [{ref, text}]` (up to 12) — several fields from ONE snapshot in a single call, filled in order, one value receipt each. It only fills: no click, no submit, no navigation, so follow it with `submit` or a `click`. An unknown ref refuses the whole call before anything is typed; snapshot again and resend the call rather than dropping back to one `fill` per field.
 - `submit` uses a field ref from the form and clicks the primary submit/search control.
-- `click`/`submit` may return sampled `url`; `fill`/`type` may return sampled `value`. Receipts are immediate observations, not proof that async navigation or rendering finished.
-- Use `wait` for expected URL/text/element/load changes; use `get` for cheap URL/title/text/ready-state reads.
+- `click`/`submit` may return sampled `url`; `fill`/`type`/`fill_form` may return sampled `value`. Receipts are immediate observations, not proof that async navigation or rendering finished.
+- On a tab you have already snapshotted, `click`, `submit`, `click_coords` and a `press` of Enter also report `page`: `changed` carries the fresh snapshot and replaces your refs — do NOT call `snapshot` again; `unchanged` means your existing refs are still good; `unobserved` means the browser could not look (it ran out of time, hit an error, or the page gave it nothing to read), so look yourself with `snapshot` or `wait`; `read_blocked` or `read_origin_blocked` means the page moved somewhere the read policy refuses, and `page_reason` says why. When `page` is `changed` or `unchanged`, the `url` in the result is the address the page settled on, not the one it was leaving. A tab with no snapshot yet reports no `page` at all — that means nothing was looked at, never that nothing changed.
+- Use `wait` for expected URL/text/element/load changes, including a change that lands after a `page: "unchanged"`; use `get` for cheap URL/title/text/ready-state reads.
 
 ## Pages That Offer Tools
 

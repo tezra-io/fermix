@@ -8,6 +8,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Several form fields can be filled in one browser step.** The `browser`
+  tool's `act` gains a `fill_form` kind that takes up to twelve fields from one
+  snapshot and fills them in order, so a five-field form is one step instead of
+  five. It only fills: it never clicks or submits. Every field is checked against
+  the page before anything is typed, so a field that is no longer there refuses
+  the whole call instead of leaving the form half filled.
 - **The browser can use the tools a page offers to agents over WebMCP.** A page
   that registers WebMCP tools (a game, a docs search, a booking form) can now be
   driven with one typed call per step instead of a snapshot and a click. The
@@ -173,6 +179,17 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **A browser click now reports what it did to the page.** After a `click`, a
+  `submit`, a `click_coords` or an Enter on a page the assistant has already
+  read, the result says whether the page is `unchanged` (the elements it knows
+  are still good) or `changed`, and a changed page comes back with its fresh
+  snapshot, so the assistant no longer spends a whole extra step looking again.
+  The address in the result is the one the page settled on, not the one it was
+  leaving. Looking is bounded to about a second and a half and never fails the
+  click: when the page cannot be read in time the result says `unobserved`, and
+  when it moved somewhere the read policy refuses it says so and returns no page
+  text. A snapshot no longer repeats every element in a separate list beside the
+  text that already names it, which makes every later step in the turn smaller.
 - **The shipped persona and operating rules are shorter and sharper.** `SOUL.md`
   now asks for judgment with confidence that follows evidence rather than a
   forced side, dry wit with clear limits instead of stock praise, and scoped
@@ -236,6 +253,15 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A long page's snapshot and its element list can no longer disagree.** The
+  snapshot text was cut to size after the elements had been collected, so the
+  assistant could be handed elements whose lines it never saw. The text is now
+  cut at whole lines and only the elements on surviving lines can be acted on.
+- **A page with no accessibility tree no longer takes the browser down.** A
+  snapshot reply with no tree raised inside the browser profile's process. It
+  now answers `snapshot_unavailable`.
+- **A coordinate click that landed is no longer reported as failed** when the
+  address could not be read afterwards.
 - **A plugin tool call now records what it was asked to do.** Every built-in
   tool traced its arguments, but the two plugin paths (declared HTTP tools and
   local plugin processes) traced only the result. A vendor can accept a call
