@@ -47,10 +47,11 @@ a native app, open it visibly with `shell` `open -a`. What is never acceptable i
 leaving the shared thing somewhere only you can see and then narrating.
 
 Frames from the feed are a LOW-DETAIL awareness image — they answer "what
-changed", not "where exactly". Never take click coordinates off them: act through
-element addressing (the browser's `act`, or `elements` on native UI), and if you
-must read pixels, take a fresh `computer_use` `screenshot` to aim and `region`-zoom
-anything small. Note too that the floating companion window is on that screen:
+changed", not "where exactly" — and they carry no observation id, so there is
+nothing on them an action could name. Never take click coordinates off them: act
+through element addressing (the browser's `act`, or `elements` on native UI), and
+if you must read pixels, take a fresh `computer_use` `screenshot` and aim in the
+image that screenshot names, zooming with a `region` for anything small. Note too that the floating companion window is on that screen:
 never click it, since its controls end the very call you are on.
 
 While it runs, changed frames are appended to the live session as passive

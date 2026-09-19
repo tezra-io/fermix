@@ -7,6 +7,11 @@ defmodule FermixCore.Tools.ComputerUseTest do
   alias FermixCore.ComputerUse.Supervisor, as: CuSupervisor
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Tools.ComputerUse
+  alias FermixTestSupport.ComputerUseObservations
+
+  # The image a pointer action names. Addressing is checked before any driver
+  # call, so every click in this file carries one.
+  @obs ComputerUseObservations.id()
 
   defmodule StubDriver do
     @behaviour Compux.Driver
@@ -25,16 +30,16 @@ defmodule FermixCore.Tools.ComputerUseTest do
       # sidecar's does: the session derives the tool's `outcome` from its dispatch
       # and treats an absent one as a protocol fault rather than inferring it.
       {:ok,
-       FermixTestSupport.ComputerUseReceipts.stamp(
-         %{
-           "ok" => true,
-           "data" => Base.encode64(@png),
-           "mime" => "image/png",
-           "width" => 800,
-           "height" => 600
-         },
-         request
-       )}
+       %{
+         "ok" => true,
+         "data" => Base.encode64(@png),
+         "mime" => "image/png",
+         "width" => 800,
+         "height" => 600,
+         "region" => ComputerUseObservations.resolved_region(request)
+       }
+       |> ComputerUseObservations.stamp(request)
+       |> FermixTestSupport.ComputerUseReceipts.stamp(request)}
     end
 
     @impl true
@@ -229,7 +234,11 @@ defmodule FermixCore.Tools.ComputerUseTest do
       assert action =~ "pixel"
       assert region =~ "full-screen"
       assert region =~ "elements"
-      assert x =~ "latest coordinate source"
+      # One rule, and the schema says it on every field that carries a coordinate.
+      assert x =~ "in the image named by observation_id"
+      assert params["properties"]["y"]["description"] =~ "in the image named by observation_id"
+      assert params["properties"]["observation_id"]["type"] == "string"
+      assert params["properties"]["observation_id"]["description"] =~ "REQUIRED"
     end
 
     test "failure_modes are tagged maps" do
@@ -323,7 +332,9 @@ defmodule FermixCore.Tools.ComputerUseTest do
       assert data == StubDriver.png()
     end
 
-    test "a coordinate mismatch names the latest coordinate source", %{
+    # Addressing (M42 slice 3): coordinates that name no image are refused before
+    # any input is dispatched, and the sentence names the one next move.
+    test "a click that names no image is refused with the recovery named", %{
       session: session,
       config: config
     } do
@@ -339,8 +350,9 @@ defmodule FermixCore.Tools.ComputerUseTest do
                ComputerUse.execute(%{"action" => "left_click", "x" => 10, "y" => 20}, context)
 
       assert result.success == false
-      assert result.error =~ "latest coordinate source"
-      refute result.error =~ "last screenshot"
+      assert result.error =~ "it names no `observation_id`"
+      assert result.error =~ "send this action again with the `observation_id` that reply names"
+      refute_received {:driver_execute, %{"action" => "left_click"}}
     end
 
     test "standard access: a mutating action auto-runs without confirmation", %{
@@ -350,7 +362,10 @@ defmodule FermixCore.Tools.ComputerUseTest do
       context = Map.merge(@context, %{computer_use_session: session, computer_use_config: config})
 
       assert {:ok, result} =
-               ComputerUse.execute(%{"action" => "left_click", "x" => 10, "y" => 20}, context)
+               ComputerUse.execute(
+                 %{"action" => "left_click", "observation_id" => @obs, "x" => 10, "y" => 20},
+                 context
+               )
 
       assert result.success == true
       assert [%{type: :image}] = result.images
@@ -378,7 +393,10 @@ defmodule FermixCore.Tools.ComputerUseTest do
       context = Map.merge(@context, %{computer_use_session: session})
 
       assert {:ok, result} =
-               ComputerUse.execute(%{"action" => "left_click", "x" => 1, "y" => 1}, context)
+               ComputerUse.execute(
+                 %{"action" => "left_click", "observation_id" => @obs, "x" => 1, "y" => 1},
+                 context
+               )
 
       assert result.success == false
       assert result.error =~ "strict"
@@ -509,7 +527,7 @@ defmodule FermixCore.Tools.ComputerUseTest do
 
       assert {:ok, %{success: true}} =
                ComputerUse.execute(
-                 %{"action" => "left_click", "x" => 3, "y" => 4},
+                 %{"action" => "left_click", "observation_id" => @obs, "x" => 3, "y" => 4},
                  tool_context(session, config, turn)
                )
 
@@ -520,7 +538,7 @@ defmodule FermixCore.Tools.ComputerUseTest do
     test "a refusal before any input records outcome :refused", %{config: config, turn: turn} do
       assert {:ok, %{success: false}} =
                ComputerUse.execute(
-                 %{"action" => "left_click", "x" => 1, "y" => 1},
+                 %{"action" => "left_click", "observation_id" => @obs, "x" => 1, "y" => 1},
                  tool_context(strict_session(), config, turn)
                )
 
@@ -539,7 +557,7 @@ defmodule FermixCore.Tools.ComputerUseTest do
 
       assert {:ok, result} =
                ComputerUse.execute(
-                 %{"action" => "left_click", "x" => 1, "y" => 2},
+                 %{"action" => "left_click", "observation_id" => @obs, "x" => 1, "y" => 2},
                  tool_context(session, config, turn)
                )
 
@@ -565,7 +583,7 @@ defmodule FermixCore.Tools.ComputerUseTest do
 
       assert {:ok, result} =
                ComputerUse.execute(
-                 %{"action" => "left_click", "x" => 1, "y" => 2},
+                 %{"action" => "left_click", "observation_id" => @obs, "x" => 1, "y" => 2},
                  tool_context(session, config, turn)
                )
 
@@ -594,7 +612,7 @@ defmodule FermixCore.Tools.ComputerUseTest do
 
       assert {:ok, result} =
                ComputerUse.execute(
-                 %{"action" => "left_click", "x" => 1, "y" => 2},
+                 %{"action" => "left_click", "observation_id" => @obs, "x" => 1, "y" => 2},
                  tool_context(session, config, turn)
                )
 
@@ -618,7 +636,7 @@ defmodule FermixCore.Tools.ComputerUseTest do
 
       assert {:ok, result} =
                ComputerUse.execute(
-                 %{"action" => "left_click", "x" => 1, "y" => 2},
+                 %{"action" => "left_click", "observation_id" => @obs, "x" => 1, "y" => 2},
                  tool_context(session, config, turn)
                )
 
@@ -642,7 +660,7 @@ defmodule FermixCore.Tools.ComputerUseTest do
 
       assert {:ok, result} =
                ComputerUse.execute(
-                 %{"action" => "left_click", "x" => 1, "y" => 2},
+                 %{"action" => "left_click", "observation_id" => @obs, "x" => 1, "y" => 2},
                  tool_context(session, config, turn)
                )
 
@@ -664,7 +682,7 @@ defmodule FermixCore.Tools.ComputerUseTest do
 
       assert {:ok, result} =
                ComputerUse.execute(
-                 %{"action" => "left_click", "x" => 1, "y" => 2},
+                 %{"action" => "left_click", "observation_id" => @obs, "x" => 1, "y" => 2},
                  tool_context(session, config, turn)
                )
 
@@ -688,7 +706,7 @@ defmodule FermixCore.Tools.ComputerUseTest do
 
       assert {:ok, result} =
                ComputerUse.execute(
-                 %{"action" => "left_click", "x" => 1, "y" => 2},
+                 %{"action" => "left_click", "observation_id" => @obs, "x" => 1, "y" => 2},
                  tool_context(session, config, turn)
                )
 
@@ -711,7 +729,7 @@ defmodule FermixCore.Tools.ComputerUseTest do
     } do
       not_sent = error_session("no_active_display", dispatch: "not_sent")
       partial = error_session("no_active_display", dispatch: "partial")
-      click = %{"action" => "left_click", "x" => 1, "y" => 2}
+      click = %{"action" => "left_click", "observation_id" => @obs, "x" => 1, "y" => 2}
 
       assert {:ok, _} = ComputerUse.execute(click, tool_context(not_sent, config, turn))
       assert_receive {:tool_exec, %{outcome: :refused}}
@@ -729,7 +747,7 @@ defmodule FermixCore.Tools.ComputerUseTest do
     } do
       named = error_session("no_active_display", detail: "CGDisplayCreateImage returned null")
       unnamed = error_session("ax_timeout", detail: "the element tree took 1500 ms")
-      click = %{"action" => "left_click", "x" => 1, "y" => 2}
+      click = %{"action" => "left_click", "observation_id" => @obs, "x" => 1, "y" => 2}
 
       assert {:ok, named_result} = ComputerUse.execute(click, tool_context(named, config, turn))
       assert named_result.error =~ "no capturable display"
@@ -747,7 +765,7 @@ defmodule FermixCore.Tools.ComputerUseTest do
       config: config,
       turn: turn
     } do
-      click = %{"action" => "left_click", "x" => 1, "y" => 2}
+      click = %{"action" => "left_click", "observation_id" => @obs, "x" => 1, "y" => 2}
 
       for {code, expected} <- [
             {"busy", "already running another action"},
@@ -766,6 +784,136 @@ defmodule FermixCore.Tools.ComputerUseTest do
       end
     end
 
+    # Addressing (M42 slice 3): each of the helper's own refusals gets a sentence
+    # naming the next move, and a countable code on the exec row — never the bare
+    # token, and never the catch-all's raw term.
+    test "the addressing and geometry refusals each get a sentence and a countable code", %{
+      config: config,
+      turn: turn
+    } do
+      click = %{"action" => "left_click", "observation_id" => @obs, "x" => 1, "y" => 2}
+
+      for {code, expected} <- [
+            {"unknown_observation", "no longer one the computer-use helper holds"},
+            {"expired_observation", "no longer one the computer-use helper holds"},
+            {"stale_observation", "no longer one the computer-use helper holds"},
+            {"point_outside_observation", "outside the image its `observation_id` names"},
+            {"capture_geometry_mismatch", "do not match the picture it captured"}
+          ] do
+        session = error_session(code)
+        assert {:ok, result} = ComputerUse.execute(click, tool_context(session, config, turn))
+
+        assert result.error =~ expected, "#{code} rendered as: #{result.error}"
+        refute result.error =~ "action failed", "#{code} fell to the catch-all"
+        refute result.error =~ code, "#{code} echoed its own token at the model"
+
+        assert_receive {:tool_exec, %{outcome: :refused, geometry_refusal: ^code}}
+      end
+    end
+
+    # A geometry mismatch arrives on BOTH sides of dispatch: on the action, where
+    # nothing was sent, and on the check capture that follows a click the helper
+    # already dispatched. One sentence serves both because it claims nothing about
+    # dispatch — the receipt decides the outcome, and a sentence that said "this
+    # action was not sent" would tell the model a dispatched click never happened.
+    test "a geometry mismatch reads the same whichever receipt it carries", %{
+      config: config,
+      turn: turn
+    } do
+      for {dispatch, outcome} <- [{"not_sent", :refused}, {"sent", :performed_unverified}] do
+        session = error_session("capture_geometry_mismatch", dispatch: dispatch)
+
+        assert {:ok, result} =
+                 ComputerUse.execute(
+                   %{"action" => "left_click", "observation_id" => @obs, "x" => 1, "y" => 2},
+                   tool_context(session, config, turn)
+                 )
+
+        assert result.error =~ "do not match the picture it captured"
+        assert result.error =~ "Do not retry."
+        assert result.error =~ "give them both sizes below"
+        refute result.error =~ "was not sent", "#{dispatch}: the sentence may not claim dispatch"
+        refute result.error =~ "action failed"
+
+        assert_receive {:tool_exec,
+                        %{outcome: ^outcome, geometry_refusal: "capture_geometry_mismatch"}}
+      end
+    end
+
+    # `capture_geometry_mismatch` is an operator fault, so the helper's own numbers
+    # reach the person who has to act on them rather than being re-derived here.
+    test "a geometry mismatch carries the helper's own measurements", %{
+      config: config,
+      turn: turn
+    } do
+      session =
+        error_session("capture_geometry_mismatch",
+          detail: "geometry 1512x982, captured 3024x1964"
+        )
+
+      assert {:ok, result} =
+               ComputerUse.execute(
+                 %{"action" => "left_click", "observation_id" => @obs, "x" => 1, "y" => 2},
+                 tool_context(session, config, turn)
+               )
+
+      assert result.error =~ "Do not retry."
+      assert result.error =~ "(geometry 1512x982, captured 3024x1964)"
+    end
+
+    # Fermix stamped the observation when it recorded it, so it knows exactly how
+    # stale the image an action aimed at was. A millisecond count and nothing else.
+    test "a click's exec row carries how stale the image it aimed at was", %{
+      config: config,
+      turn: turn
+    } do
+      session =
+        start_supervised!(
+          {Session,
+           [
+             config: config,
+             driver: {StubDriver, [test_pid: self()]},
+             origin: :interactive,
+             session_id: "cua_observation_age"
+           ]}
+        )
+
+      context = tool_context(session, config, turn)
+
+      assert {:ok, %{success: true}} = ComputerUse.execute(%{"action" => "screenshot"}, context)
+      assert_receive {:tool_exec, %{outcome: :read} = read}
+      refute Map.has_key?(read, :observation_age_ms), "a look aims at nothing"
+
+      assert {:ok, %{success: true}} =
+               ComputerUse.execute(
+                 %{"action" => "left_click", "observation_id" => @obs, "x" => 1, "y" => 2},
+                 context
+               )
+
+      assert_receive {:tool_exec, %{outcome: :performed, observation_age_ms: age}}
+      assert is_integer(age) and age >= 0
+    end
+
+    # This side's own addressing gate: nothing was sent, so nothing reaches the
+    # driver, and the row carries the same countable code as the helper's five.
+    test "a click that names no image records the refusal without a driver call", %{
+      config: config,
+      turn: turn
+    } do
+      session = error_session("paused")
+
+      assert {:ok, result} =
+               ComputerUse.execute(
+                 %{"action" => "left_click", "x" => 1, "y" => 2},
+                 tool_context(session, config, turn)
+               )
+
+      assert result.success == false
+      assert result.error =~ "it names no `observation_id`"
+
+      assert_receive {:tool_exec, %{outcome: :refused, geometry_refusal: "observation_required"}}
+    end
+
     # The blocker this fix pass exists for, from the tool's side. `Session.execute/2`
     # catches only its OWN deadline, so a session that dies without answering kills
     # the tool process — and `Tools.Telemetry.exec/5` never runs, so the turn that
@@ -778,7 +926,7 @@ defmodule FermixCore.Tools.ComputerUseTest do
 
       assert {:ok, result} =
                ComputerUse.execute(
-                 %{"action" => "left_click", "x" => 1, "y" => 2},
+                 %{"action" => "left_click", "observation_id" => @obs, "x" => 1, "y" => 2},
                  tool_context(session, config, turn)
                )
 
@@ -802,7 +950,7 @@ defmodule FermixCore.Tools.ComputerUseTest do
 
       assert {:ok, result} =
                ComputerUse.execute(
-                 %{"action" => "left_click", "x" => 1, "y" => 2},
+                 %{"action" => "left_click", "observation_id" => @obs, "x" => 1, "y" => 2},
                  tool_context(session, config, turn)
                )
 
@@ -818,7 +966,7 @@ defmodule FermixCore.Tools.ComputerUseTest do
 
       assert {:ok, result} =
                ComputerUse.execute(
-                 %{"action" => "left_click", "x" => 1, "y" => 2},
+                 %{"action" => "left_click", "observation_id" => @obs, "x" => 1, "y" => 2},
                  tool_context(session, config, turn)
                )
 
@@ -871,7 +1019,7 @@ defmodule FermixCore.Tools.ComputerUseTest do
 
       assert {:ok, result} =
                ComputerUse.execute(
-                 %{"action" => "left_click", "x" => 1, "y" => 1},
+                 %{"action" => "left_click", "observation_id" => @obs, "x" => 1, "y" => 1},
                  tool_context(session, config, turn)
                )
 
@@ -892,7 +1040,10 @@ defmodule FermixCore.Tools.ComputerUseTest do
       context = tool_context(session, config, turn)
 
       assert {:ok, result} =
-               ComputerUse.execute(%{"action" => "left_click", "x" => 1, "y" => 1}, context)
+               ComputerUse.execute(
+                 %{"action" => "left_click", "observation_id" => @obs, "x" => 1, "y" => 1},
+                 context
+               )
 
       assert result.success == false
       assert result.error =~ "outcome unknown"
@@ -914,7 +1065,7 @@ defmodule FermixCore.Tools.ComputerUseTest do
 
       assert {:ok, result} =
                ComputerUse.execute(
-                 %{"action" => "left_click", "x" => 1, "y" => 1},
+                 %{"action" => "left_click", "observation_id" => @obs, "x" => 1, "y" => 1},
                  tool_context(session, config, turn)
                )
 

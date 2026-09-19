@@ -17,7 +17,9 @@ defmodule FermixCore.ComputerUse.PortDriverTest do
     assert %{transport: transport, session_id: nil} = state
     assert is_pid(transport)
 
-    assert {:ok, %{"ok" => true, "pong" => true}} =
+    # A reply that hands back coordinates names the image they belong to
+    # (protocol 8), which the fake mints exactly as the helper does.
+    assert {:ok, %{"ok" => true, "observation_id" => "boot-fake-1"}} =
              PortDriver.execute(state, %{"action" => "screenshot"})
 
     assert :ok = PortDriver.stop(state)
@@ -110,12 +112,102 @@ defmodule FermixCore.ComputerUse.PortDriverTest do
     {:ok, state} = PortDriver.start(binary_path: @fake)
 
     assert {:ok, %{"receipt" => %{"dispatch" => "sent"}}} =
-             PortDriver.execute(state, %{"action" => "left_click", "x" => 1, "y" => 2})
+             PortDriver.execute(state, %{
+               "action" => "left_click",
+               "observation_id" => "boot-fake-1",
+               "x" => 1,
+               "y" => 2
+             })
 
     assert {:ok, response} = PortDriver.execute(state, %{"action" => "screenshot"})
     refute Map.has_key?(response, "receipt")
 
     assert :ok = PortDriver.stop(state)
+  end
+
+  # The addressing half of protocol 8, at the wire: a pointer action must name the
+  # image its coordinates were read in and must not carry a rectangle, and every
+  # refusal of one dispatched nothing. The fake answers exactly as the helper does,
+  # so the session's sentences are exercised against a real Port rather than a map.
+  test "a pointer action that names no image is refused with a not_sent receipt" do
+    {:ok, state} = PortDriver.start(binary_path: @fake)
+
+    assert {:error, {:action_failed, payload}} =
+             PortDriver.execute(state, %{"action" => "left_click", "x" => 1, "y" => 2})
+
+    assert payload["error"] == "observation_required"
+    assert payload["receipt"]["dispatch"] == "not_sent"
+
+    assert :ok = PortDriver.stop(state)
+  end
+
+  test "a pointer action carrying a rectangle is refused as an unknown field" do
+    {:ok, state} = PortDriver.start(binary_path: @fake)
+
+    assert {:error, {:action_failed, %{"error" => "unknown_field"}}} =
+             PortDriver.execute(state, %{
+               "action" => "left_click",
+               "observation_id" => "boot-fake-1",
+               "region" => %{"x" => 0, "y" => 0, "w" => 10, "h" => 10},
+               "x" => 1,
+               "y" => 2
+             })
+
+    assert :ok = PortDriver.stop(state)
+  end
+
+  # The other side of the same rule: an action that reads no coordinates must not
+  # name an image either. A fake that refused only the addressed actions would let
+  # a request shape the real helper rejects pass every test in this repo.
+  test "an action that reads no coordinates is refused for naming an image" do
+    {:ok, state} = PortDriver.start(binary_path: @fake)
+
+    for request <- [
+          %{"action" => "type", "text" => "e4", "observation_id" => "boot-fake-1"},
+          %{"action" => "key", "chord" => "enter", "observation_id" => "boot-fake-1"},
+          %{"action" => "windows", "observation_id" => "boot-fake-1"}
+        ] do
+      assert {:error, {:action_failed, %{"error" => "unknown_field"}}} =
+               PortDriver.execute(state, request),
+             "#{request["action"]} must be refused for naming an image"
+    end
+
+    # A viewing action MAY name one: its rectangle is then read in that image.
+    assert {:ok, %{"observation_id" => _}} =
+             PortDriver.execute(state, %{
+               "action" => "screenshot",
+               "observation_id" => "boot-fake-1",
+               "region" => %{"x" => 0, "y" => 0, "w" => 10, "h" => 10}
+             })
+
+    assert :ok = PortDriver.stop(state)
+  end
+
+  # Each of the helper's own addressing and geometry refusals, which the session
+  # renders into a sentence of its own and drops the named image for.
+  for code <- ~w(unknown_observation expired_observation stale_observation
+                 point_outside_observation capture_geometry_mismatch) do
+    test "the helper's #{code} arrives with a not_sent receipt" do
+      {:ok, state} =
+        PortDriver.start(
+          binary_path: @fake,
+          env: [{~c"FAKE_OBSERVATION_ERROR", ~c"#{unquote(code)}"}]
+        )
+
+      assert {:error, {:action_failed, payload}} =
+               PortDriver.execute(state, %{
+                 "action" => "left_click",
+                 "observation_id" => "boot-fake-1",
+                 "x" => 1,
+                 "y" => 2
+               })
+
+      assert payload["error"] == unquote(code)
+      assert payload["detail"] == "the fake sidecar refused it"
+      assert payload["receipt"]["dispatch"] == "not_sent"
+
+      assert :ok = PortDriver.stop(state)
+    end
   end
 
   # The one message that says the sidecar is gone, and the only place a status the

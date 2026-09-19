@@ -389,6 +389,37 @@ defmodule FermixOpik.MapperTest do
            }
   end
 
+  # M42 slice 3: the addressing pair. A millisecond count and a closed enum — the
+  # id itself never leaves the session, and the screen never enters a span — so a
+  # trace can be counted by "how stale was the image" and "which refusal" without
+  # reading a sentence or a pixel.
+  test "tool_span keeps the observation age and the addressing refusal, and nothing else" do
+    metadata = %{
+      tool: "computer_use",
+      success: false,
+      cu_session: "cua_ab12",
+      outcome: :refused,
+      observation_age_ms: 41_200,
+      geometry_refusal: "expired_observation",
+      observation_id: "7c1e-12",
+      screen_text: "Transfer $4,000 to account 12345"
+    }
+
+    span =
+      Mapper.tool_span(metadata, %{duration_ms: 12},
+        trace_id: "t",
+        project_name: "fermix",
+        ended: @ended
+      )
+
+    assert span.metadata == %{
+             cu_session: "cua_ab12",
+             outcome: :refused,
+             observation_age_ms: 41_200,
+             geometry_refusal: "expired_observation"
+           }
+  end
+
   test "tool_span keeps the outbound MCP server identity" do
     metadata = %{tool: "acme_get_note_markdown", success: true, mcp_server: "acme"}
 

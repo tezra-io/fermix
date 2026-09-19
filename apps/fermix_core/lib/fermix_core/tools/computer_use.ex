@@ -51,32 +51,42 @@ defmodule FermixCore.Tools.ComputerUse do
       "target window to the FRONT and unobstructed; do not maximize it for aiming's sake — a " <>
       "window that fits the capture budget arrives at native detail, a maximized one gets " <>
       "downscaled. " <>
-      "AIMING: prefer exact targets where a surface exposes them (`browser` element " <>
+      "AIMING — ONE RULE: coordinates are pixels in the image you name. Every reply that " <>
+      "gives you coordinates names its image: `screenshot`, `elements` and `windows` each " <>
+      "return an `observation_id`, and every click, move, drag, scroll and inspect must " <>
+      "carry the id of the image its x,y were read in. There is no region to copy onto an " <>
+      "action, and coordinates read in one image NEVER apply to another — read and aim in " <>
+      "the same image, in the same breath. Only the last few images stay addressable and " <>
+      "only for about half a minute; if an id is refused as unknown, expired or stale, take " <>
+      "a fresh `screenshot` and read the coordinates again in IT, never re-send the old ones. " <>
+      "Prefer exact targets where a surface exposes them (`browser` element " <>
       "actions, numbered `marks`, `elements` click points). Take a `screenshot` with " <>
-      "`\"marks\": true` and act with `mark: <id>` — the exact point is resolved for you, " <>
+      "`\"marks\": true` and act with `mark: <id>` plus that image's `observation_id` — the " <>
+      "exact point is resolved for you, " <>
       "which beats any pixel estimate. `elements`/`marks` are best-effort accessibility " <>
       "metadata: an empty result means no accessibility-backed points were exposed, not that " <>
       "visible content cannot accept pixel interaction. In the MANAGED browser, use `get " <>
       "field=rect` + `click_coords` for a visible DOM target; THIS tool's pixels are for " <>
       "every other surface. " <>
-      "A screen-share frame is a LOW-DETAIL awareness image, never a source of click " <>
-      "coordinates: take a fresh `screenshot` to aim. " <>
+      "A screen-share frame is a LOW-DETAIL awareness image with no observation_id, so it is " <>
+      "never a source of click coordinates: take a fresh `screenshot` to aim. " <>
       "ZOOM TO THE WINDOW, not just to small controls. A full-screen capture is downscaled to " <>
       "fit one size budget, so on a large or ultrawide display most of that budget goes to " <>
       "desktop you do not care about and the app you DO care about arrives too small to aim " <>
       "in. A `region` crop is rescaled to that same budget on its own, so cropping to the " <>
       "window you are working in can multiply your effective resolution several times over. " <>
       "Call `windows` to get the exact bounds — it returns a ready-made `region` per window, " <>
-      "so you never estimate them — then pass that region on every look AND every click " <>
-      "inside it, reading coordinates in the magnified crop; zoom further for a small " <>
-      "control within it. " <>
+      "so you never estimate them — then pass that region to `screenshot` and aim in the " <>
+      "magnified image it returns, naming that image's id on every action inside it; zoom " <>
+      "further for a small control within it. " <>
       "Fermix's own floating voice companion may be visible on that screen — never click it; " <>
       "its controls end the call you are on. If it covers your target, ask the human to move it. " <>
       "`screenshot` to see the screen, then act on it (click, type, key, scroll, drag) using " <>
-      "pixel coordinates from the latest screenshot. Every " <>
-      "mutating action returns a fresh check screenshot — of the SAME magnified crop when a " <>
-      "region rode the action, of the full screen otherwise: READ it before you repeat " <>
-      "anything. It shows what the screen looks like now, not whether your input arrived, so " <>
+      "pixel coordinates read in the image that screenshot names. Every " <>
+      "mutating action returns a fresh check screenshot — of the same crop when the action " <>
+      "was aimed in a zoomed image, of the full screen otherwise — and that check names a " <>
+      "NEW image: READ it, and aim your next action in it. " <>
+      "It shows what the screen looks like now, not whether your input arrived, so " <>
       "repeat an action only when the image shows its effect is missing. A DELIVERED click " <>
       "that changes nothing is NOT a miss — do not repeat " <>
       "it; verify the effect through the surface's own structure where it has one (a " <>
@@ -105,15 +115,20 @@ defmodule FermixCore.Tools.ComputerUse do
           "enum" => Protocol.actions(),
           "description" => base_action_description()
         },
+        "observation_id" => %{
+          "type" => "string",
+          "description" =>
+            "The image these coordinates were read in — the id a `screenshot`, `elements` " <>
+              "or `windows` reply named. REQUIRED on click/move/drag/scroll/inspect; an id " <>
+              "from one image never applies to another"
+        },
         "x" => %{
           "type" => "integer",
-          "description" =>
-            "X pixel for click/move/scroll/inspect from the latest coordinate source"
+          "description" => "X pixel in the image named by observation_id"
         },
         "y" => %{
           "type" => "integer",
-          "description" =>
-            "Y pixel for click/move/scroll/inspect from the latest coordinate source"
+          "description" => "Y pixel in the image named by observation_id"
         },
         "display" => %{
           "type" => "integer",
@@ -124,8 +139,9 @@ defmodule FermixCore.Tools.ComputerUse do
           "items" => %{"type" => "string", "enum" => @modifiers},
           "description" => "Held modifier keys for a click (e.g. [\"cmd\"])"
         },
-        "from" => point_schema("Drag start point"),
-        "to" => point_schema("Drag end point"),
+        "from" =>
+          point_schema("Drag start point, in pixels of the image named by observation_id"),
+        "to" => point_schema("Drag end point, in pixels of the image named by observation_id"),
         "direction" => %{
           "type" => "string",
           "enum" => @scroll_directions,
@@ -160,10 +176,12 @@ defmodule FermixCore.Tools.ComputerUse do
           },
           "required" => ["x", "y", "w", "h"],
           "description" =>
-            "Optional zoom rectangle {x,y,w,h} in the latest full-screen screenshot's pixel " <>
-              "space. On `screenshot` it returns a magnified crop; on `elements` it returns " <>
-              "points in that crop's transformed space. Pass the SAME region with any " <>
-              "inspect/click/move/drag/scroll that uses coordinates from the crop or those points."
+            "Optional zoom rectangle {x,y,w,h}, for `screenshot`, `elements` and " <>
+              "`wait_for_change` only. With `observation_id` it is in that image's pixels; " <>
+              "without one it is in a full-screen screenshot's pixels (the space `windows` " <>
+              "answers in). The reply names a NEW image — aim in that one. A click, move, " <>
+              "drag, scroll or inspect never carries a region: it names its image with " <>
+              "`observation_id` instead."
         },
         "confirm_grid" => %{
           "type" => "boolean",
@@ -181,8 +199,9 @@ defmodule FermixCore.Tools.ComputerUse do
         "mark" => %{
           "type" => "integer",
           "description" =>
-            "Act on a numbered mark from the LATEST marks screenshot (instead of x/y) — the " <>
-              "exact click point is resolved for you. Marks expire when the view changes"
+            "Act on a numbered mark instead of x/y — the exact click point is resolved for " <>
+              "you. A mark belongs to the image it was badged on, so send it with that " <>
+              "image's `observation_id`"
         }
       }
     }
@@ -252,13 +271,16 @@ defmodule FermixCore.Tools.ComputerUse do
   @impl true
   def examples do
     [
-      %{args: %{"action" => "screenshot"}, note: "look at the screen before acting"},
       %{
-        args: %{"action" => "left_click", "x" => 640, "y" => 360},
-        note: "click at a screenshot pixel"
+        args: %{"action" => "screenshot"},
+        note: "look at the screen — the reply names the image to aim in"
       },
       %{
-        args: %{"action" => "inspect", "x" => 640, "y" => 360},
+        args: %{"action" => "left_click", "observation_id" => "7c1e-12", "x" => 640, "y" => 360},
+        note: "click a pixel of the image that screenshot named"
+      },
+      %{
+        args: %{"action" => "inspect", "observation_id" => "7c1e-12", "x" => 640, "y" => 360},
         note: "check what UI element is under a point before clicking it"
       },
       %{args: %{"action" => "type", "text" => "hello"}, note: "type into the focused field"}
@@ -318,6 +340,31 @@ defmodule FermixCore.Tools.ComputerUse do
         description:
           "the action was sent but its check screenshot could not be captured; take a " <>
             "screenshot to see the result instead of re-sending the action"
+      },
+      %{
+        tag: "observation_required",
+        description:
+          "a click/move/drag/scroll/inspect that named no observation_id; nothing was " <>
+            "sent. Take a screenshot and send the action with the id it names"
+      },
+      %{
+        tag: "unknown/expired/stale observation",
+        description:
+          "the image the action named is no longer addressable — replaced, aged out, or " <>
+            "its display changed; nothing was sent. Take a fresh screenshot and re-read " <>
+            "the coordinates in it"
+      },
+      %{
+        tag: "point_outside_observation",
+        description:
+          "the point is off the edge of the image it named, so it was probably read in a " <>
+            "different one; nothing was sent and nothing was clamped onto an edge"
+      },
+      %{
+        tag: "capture_geometry_mismatch",
+        description:
+          "the helper's measurements of the display disagree with the picture it " <>
+            "captured, so nothing was sent; an operator fault, not a retryable one"
       }
     ]
   end
@@ -430,9 +477,21 @@ defmodule FermixCore.Tools.ComputerUse do
         perform(session, request)
 
       {:error, reason} ->
-        {{:ok, Tool.error(refusal_message(reason))}, refused(refusal_courtesy(reason))}
+        {{:ok, Tool.error(refusal_message(reason))}, refusal_telemetry(reason)}
     end
   end
+
+  defp refusal_telemetry(reason) do
+    reason
+    |> refusal_courtesy()
+    |> refused()
+    |> geometry_refusal(refusal_code(reason))
+  end
+
+  # The one gate on this side that belongs to the addressing family, so a trace
+  # counts it beside the helper's own five.
+  defp refusal_code(:observation_required), do: "observation_required"
+  defp refusal_code(_reason), do: nil
 
   # The human reclaimed the machine with /pause — the one refusal with its own
   # courtesy dimension, so a trace shows the hold rather than a generic denial.
@@ -482,16 +541,15 @@ defmodule FermixCore.Tools.ComputerUse do
       "stop and tell them you'll continue when they run /resume."
   end
 
-  # The coordinate-space guard: the latest usable image or element points used
-  # a region, so bare x,y would be read in full-screen space and land elsewhere.
-  # Name the exact region to re-send rather than guessing which source was used.
-  defp refusal_message({:region_mismatch, region}) do
-    "your latest coordinate source uses region #{format_region(region)}, so the x,y " <>
-      "you just sent would be read in full-screen space and miss. Re-send this action " <>
-      "with " <>
-      ~s(`"region": #{format_region(region)}`) <>
-      " and the coordinates from that source — or take a fresh full `screenshot` " <>
-      "first and use full-screen coordinates."
+  # Addressing (M42 slice 3): coordinates mean nothing without the image they were
+  # read in, and this side refuses before any input is dispatched rather than
+  # guessing which of the last few images the model meant — a wrong guess is a
+  # click on the wrong thing, the one outcome a GUI driver must never produce.
+  defp refusal_message(:observation_required) do
+    "this action was not sent: it names no `observation_id`, so there is no image its " <>
+      "coordinates belong to. Take a `screenshot` (or `elements`, or `windows`), then send " <>
+      "this action again with the `observation_id` that reply names and the coordinates you " <>
+      "read in it."
   end
 
   # The wrong-grid tripwire (M28): the coordinates are plausible on BOTH live
@@ -504,18 +562,12 @@ defmodule FermixCore.Tools.ComputerUse do
   # was badged on — a stale or unknown id is refused, never guessed, because
   # clicking a stale badge point is a wrong-element click.
   defp refusal_message(:no_marks) do
-    "no live marks — take a fresh `screenshot` with `\"marks\": true` and use the " <>
-      "mark numbers it returns."
-  end
-
-  defp refusal_message({:stale_marks, _region}) do
-    "the marks were taken on a view you have since left, so their numbers no longer " <>
-      "point where the badges showed. Take a fresh `screenshot` with `\"marks\": true` " <>
-      "and use ITS mark numbers."
+    "the image you named carries no marks — take a `screenshot` with `\"marks\": true` and " <>
+      "send the mark numbers it returns with THAT image's `observation_id`."
   end
 
   defp refusal_message({:unknown_mark, id, count}) do
-    "mark #{id} does not exist — the latest marks screenshot has #{count} mark(s). " <>
+    "mark #{id} does not exist — the image you named has #{count} mark(s). " <>
       "Use one of its numbers, or take a fresh `screenshot` with `\"marks\": true`."
   end
 
@@ -527,16 +579,19 @@ defmodule FermixCore.Tools.ComputerUse do
   # The refusal text IS the recovery recipe, so the conversion in it must be exact:
   # crop_xy = (xy − region origin) × kz. A wrong recipe here would teach the model
   # the very grid error the tripwire exists to catch.
-  defp ambiguous_grid_message(%{region: region, view: view, kz: kz, points: points} = info) do
+  defp ambiguous_grid_message(
+         %{id: id, region: region, view: view, kz: kz, points: points} = info
+       ) do
     kz_text = :erlang.float_to_binary(kz, decimals: 2)
 
-    "ambiguous coordinates: #{format_points(points)} fits both this " <>
-      "#{view["w"]}x#{view["h"]} magnified crop and the on-screen region box " <>
-      "#{format_region(region)}. Your latest view is the CROP. If you meant pixels of that " <>
-      "magnified image, re-send the SAME action with " <>
+    "ambiguous coordinates: #{format_points(points)} fits both image #{id}, which is a " <>
+      "#{view["w"]}x#{view["h"]} magnified crop, and the on-screen region box " <>
+      "#{format_region(region)} that crop was taken from. If you meant pixels of image " <>
+      "#{id}, re-send the SAME action with " <>
       ~s(`"confirm_grid": true`) <>
       ". If you read the full screen instead, convert — subtract the region origin, then " <>
-      "multiply by #{kz_text}: that lands at #{format_points(info.crop_equivalents)} in this crop."
+      "multiply by #{kz_text}: that lands at #{format_points(info.crop_equivalents)} in " <>
+      "image #{id}."
   end
 
   defp format_points([{x, y}]), do: "(#{x},#{y})"
@@ -557,7 +612,8 @@ defmodule FermixCore.Tools.ComputerUse do
       # input. Its error code picks the sentence; its receipt — which the session
       # has already read — is the outcome. Nothing here infers either.
       {:error, {:action_failed, failure}} ->
-        {{:ok, Tool.error(failure_message(failure))}, %{courtesy: :na, outcome: failure.outcome}}
+        {{:ok, Tool.error(failure_message(failure))},
+         geometry_refusal(%{courtesy: :na, outcome: failure.outcome}, failure.code)}
 
       # A `/pause` cast can land between classify and execute, so the SAME refusal
       # can arrive here. It gets the same sentence and the same courtesy dimension
@@ -574,8 +630,31 @@ defmodule FermixCore.Tools.ComputerUse do
 
   # The session decided the outcome of a reply it produced (it knows whether the
   # check came back); the tool only classifies the error tuples.
-  defp action_telemetry(%{outcome: outcome} = result),
-    do: %{courtesy: courtesy_of(result), outcome: outcome}
+  defp action_telemetry(%{outcome: outcome} = result) do
+    %{courtesy: courtesy_of(result), outcome: outcome}
+    |> put_age(Map.get(result, :observation_age_ms))
+  end
+
+  # How stale the image an action aimed at was, in milliseconds. A bounded number
+  # and nothing else: no id (it does not outlive the session), no size, no pixels.
+  # It is the measurement that says whether expiry refusals are the model reading
+  # slowly or the window being too short.
+  defp put_age(telemetry, nil), do: telemetry
+
+  defp put_age(telemetry, age) when is_integer(age),
+    do: Map.put(telemetry, :observation_age_ms, age)
+
+  # The addressing and geometry refusals as their own countable field: a closed set
+  # of wire codes, so a trace can be counted by them without parsing a sentence.
+  # `capture_geometry_mismatch` is the one that is never the model's doing, which
+  # is exactly why it has to be countable.
+  @geometry_refusals ~w(observation_required unknown_observation expired_observation
+                        stale_observation point_outside_observation capture_geometry_mismatch)
+
+  defp geometry_refusal(telemetry, code) when code in @geometry_refusals,
+    do: Map.put(telemetry, :geometry_refusal, code)
+
+  defp geometry_refusal(telemetry, _code), do: telemetry
 
   # A refusal is a refusal whatever the action: nothing ran and nothing was looked
   # at, so a refused `screenshot` must never trace as a read that happened (it would
@@ -713,6 +792,49 @@ defmodule FermixCore.Tools.ComputerUse do
       "conversation. Take a `screenshot` to see the current screen, then send the action again."
   end
 
+  # The image the action named is not one the helper can still map a point through:
+  # it has been replaced, it timed out, or the display's geometry moved under it.
+  # One sentence for all three, because the recovery is one move and the difference
+  # between them tells the model nothing it can act on differently.
+  defp action_error_message(code)
+       when code in ["unknown_observation", "expired_observation", "stale_observation"] do
+    "this action was not sent: the image its `observation_id` names is no longer one the " <>
+      "computer-use helper holds — it has been replaced by newer ones, it aged out, or the " <>
+      "display it was taken from moved or changed size. Take a fresh `screenshot`, read the " <>
+      "coordinates again in the image IT names, and send the action with that id. Do not " <>
+      "re-send the old coordinates."
+  end
+
+  # The point is off the edge of the image it named. Nothing is clamped onto an
+  # edge: a point that does not exist on the image it claims to come from was
+  # almost certainly read on a different one, and clicking the nearest edge pixel
+  # is a wrong click that looks like a right one.
+  defp action_error_message("point_outside_observation") do
+    "this action was not sent: the point lies outside the image its `observation_id` names, " <>
+      "so there is nowhere on that image to put it — it was most likely read in a different " <>
+      "image. Take a `screenshot`, read the point again in the image it names, and send the " <>
+      "action with that id."
+  end
+
+  # Not a model error at all: the helper's picture of the display disagrees with
+  # the display it captured, so every coordinate it mapped would land somewhere
+  # else. There is nothing to retry and nothing to re-aim — it is an operator fact
+  # and it carries both sizes so the operator can act on it.
+  #
+  # It says NOTHING about dispatch, because it arrives on both sides of it: on the
+  # action, where nothing was sent, and on the CHECK capture that follows a click
+  # the helper already dispatched (receipt `sent`, outcome `performed_unverified`).
+  # The receipt is what knows which, and the outcome wording is what carries it; a
+  # sentence opening "this action was not sent" told the model a dispatched click
+  # had not happened, which is the one claim that buys a second real click.
+  defp action_error_message("capture_geometry_mismatch") do
+    "the computer-use helper's measurements of this display do not match the picture it " <>
+      "captured, so any point it mapped would land somewhere else on screen. This is not " <>
+      "something you did wrong and not something a different image fixes. Do not retry. " <>
+      "Tell the user the computer-use helper is reading this display's geometry wrongly, " <>
+      "and give them both sizes below."
+  end
+
   # The build and the installed helper disagree about what a request may contain.
   # No retry can fix that, and it is an operator fact, not a model one.
   defp action_error_message("unknown_field") do
@@ -771,13 +893,20 @@ defmodule FermixCore.Tools.ComputerUse do
       else: "action failed: #{format_reason(reason)}"
   end
 
+  # The two codes whose sentence ends by promising the helper's own numbers: the
+  # image's size for a point off its edge, and both measurements for a geometry
+  # mismatch. Quoting the helper beats re-deriving them here — one authority for a
+  # fact, and the operator reads the words the helper actually used.
+  @detailed_codes ~w(point_outside_observation capture_geometry_mismatch)
+
   # A refusal the helper named. Its code selects the sentence above; a `detail`
-  # only ever reaches the model on a code with no sentence of its own, where the
-  # alternative is a bare token the operator cannot act on.
+  # reaches the model on a code whose sentence asked for it, and on a code with no
+  # sentence of its own, where the alternative is a bare token the operator cannot
+  # act on.
   defp failure_message(%{code: code, detail: detail}) do
     message = action_error_message(code)
 
-    if is_binary(detail) and message =~ "action failed:",
+    if is_binary(detail) and (code in @detailed_codes or message =~ "action failed:"),
       do: message <> " (#{detail})",
       else: message
   end

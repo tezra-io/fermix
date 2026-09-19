@@ -100,7 +100,12 @@ defmodule FermixOpik.TraceFile do
        # actually did. The lifecycle run is its own root trace, so these are the
        # only link between a replayed action and its session.
        :cu_session,
-       :outcome
+       :outcome,
+       # Addressing (M42 slice 3): how stale the image an action aimed at was, and
+       # the code when it named no addressable one. A millisecond count and a
+       # closed enum — never an id, a size, or anything from the screen.
+       :observation_age_ms,
+       :geometry_refusal
      ])}
   end
 

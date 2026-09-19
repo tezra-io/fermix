@@ -404,6 +404,10 @@ defmodule FermixOpik.TraceFileTest do
       "action" => "click",
       "cu_session" => "cua_ab12",
       "outcome" => "performed_unverified",
+      # Addressing (M42 slice 3): how stale the image the action aimed at was, and
+      # the code when it named no addressable one.
+      "observation_age_ms" => 5_100,
+      "geometry_refusal" => "expired_observation",
       "screen_text" => "Transfer $4,000 to account 12345"
     }
 
@@ -412,6 +416,8 @@ defmodule FermixOpik.TraceFileTest do
 
     assert meta.cu_session == "cua_ab12"
     assert meta.outcome == "performed_unverified"
+    assert meta.observation_age_ms == 5_100
+    assert meta.geometry_refusal == "expired_observation"
     refute Map.has_key?(meta, :screen_text)
   end
 

@@ -49,23 +49,27 @@ MAIN_AGENT = "main"
 
 MAX_ROWS = 500_000
 
-# Rendered by `computer_use/session.ex`: screenshot dims `:920` area, cursor echo
-# `:981`, full-screen equivalent `:993`, delivery marker `:965`.
-_DIMS_RE = re.compile(r"screenshot (\d+)x(\d+) \(display (\d+)\)")
+# Rendered by `computer_use/session.ex`. Since M42 slice 3 every image leads with
+# its own identity, so the dims ride that sentence rather than a bare "screenshot
+# WxH"; the cursor echo and the delivery marker follow it.
+_DIMS_RE = re.compile(r"Image [^,]+, (\d+)x(\d+) \(display (\d+)\)")
 _CURSOR_RE = re.compile(r"Cursor at \((-?\d+),(-?\d+)\)")
-_FULLSCREEN_RE = re.compile(r"= \((-?\d+),(-?\d+)\) on the full screen")
 _NOT_DELIVERED_RE = re.compile(r"NOT delivered at \((-?\d+),(-?\d+)\)")
 _MARKS_ZERO = "0 accessibility marks"
 _MARKS_RE = re.compile(r"(\d+) numbered mark\(s\) badged on the image")
 
-# Typed refusals, anchored on `tools/computer_use.ex`: ambiguous `:454`,
-# region mismatch `:410`, no marks `:428`, stale marks `:433`, unknown mark `:439`.
+# Typed refusals, anchored on `tools/computer_use.ex` and on the helper's own
+# codes. The region-mismatch and stale-mark refusals are gone with the rectangle
+# they were about: an action names the image its coordinates were read in, so the
+# questions left are "did it name one" and "is that image still the helper's".
 _REFUSALS = (
     ("ambiguous_coordinates", "ambiguous coordinates: "),
-    ("region_mismatch", "your latest coordinate source uses region "),
-    ("no_marks", "no live marks — take a fresh "),
-    ("stale_marks", "the marks were taken on a view you have since left"),
-    ("unknown_mark", " does not exist — the latest marks screenshot has "),
+    ("observation_required", "it names no `observation_id`"),
+    ("unaddressable_observation", "no longer one the computer-use helper holds"),
+    ("point_outside_observation", "outside the image its `observation_id` names"),
+    ("capture_geometry_mismatch", "do not match the picture it captured"),
+    ("no_marks", "the image you named carries no marks"),
+    ("unknown_mark", " does not exist — the image you named has "),
 )
 
 
@@ -289,19 +293,12 @@ def parse_cursor_echo(output: str) -> tuple[int, int] | None:
     return (int(match.group(1)), int(match.group(2))) if match else None
 
 
-def parse_fullscreen_echo(output: str) -> tuple[int, int] | None:
-    """The `= (fx,fy) on the full screen` half, present only on a magnified crop."""
-    match = _FULLSCREEN_RE.search(output or "")
-    return (int(match.group(1)), int(match.group(2))) if match else None
-
-
 def full_sent_echo(output: str, had_region: bool) -> tuple[int, int] | None:
-    """The cursor position in the FULL-SENT grid, whichever half carries it: the
-    explicit full-screen equivalent on a crop, else the bare echo on a full
-    capture (which is already that grid). Never mixes the two spaces."""
-    explicit = parse_fullscreen_echo(output)
-    if explicit is not None:
-        return explicit
+    """The cursor position in the FULL-SENT grid, when the summary carries it: a
+    full capture's bare echo already IS that grid. A crop's is not, and since M42
+    slice 3 the summary no longer discloses a second grid beside the first — a
+    coordinate belongs to the image the text names and to no other — so a crop
+    answers None rather than a converted number. Never mixes the two spaces."""
     return None if had_region else parse_cursor_echo(output)
 
 

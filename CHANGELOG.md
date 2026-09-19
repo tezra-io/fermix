@@ -34,6 +34,21 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   managed browser instead. Install the bridge with
   `fermix browser bridge install --browser chrome --extension-id <id>`; the
   extension and how to load it live in `apps/fermix_core/priv/browser_extension/`.
+- **Every screenshot now has a name, and a click says which picture it came
+  from.** Before, coordinates read on a zoomed crop only landed correctly if the
+  same `region` rectangle was repeated on the click that followed, and forgetting
+  it sent the pointer somewhere else entirely — a whole class of clicks that
+  looked confirmed and missed. Now each screenshot, element listing and window
+  listing comes back with an id, the text beside the picture says so, and every
+  click, move, drag, scroll and inspect names the image its coordinates were read
+  in. A pointer action that names none is refused before anything reaches the
+  screen, and the refusal says exactly what to do next. Only the last few images
+  stay usable, and only for about half a minute: naming one that has been
+  replaced, has aged out, or belongs to a display that moved or changed size is
+  refused rather than clicked, and a point off the edge of the image it names is
+  refused rather than nudged onto the edge. A numbered mark now belongs to the
+  picture it was badged on, so its number keeps working while that picture does.
+
 - **Only one conversation drives the cursor and keyboard at a time.** Two
   conversations acting on the same desktop each moved the pointer the other had
   just aimed and read a screen the other was changing, so both concluded their
@@ -347,6 +362,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   clicked onto a host the browser policy refuses logs there too — so `console`
   was returning bytes the same tab's `snapshot` had just refused. It is now
   refused the same way, in every browser profile.
+- **A screenshot dropped from the conversation no longer leaves text describing
+  it as if it were still there.** Older screenshots are removed to keep the
+  conversation within its budget, but the words beside them stayed in the present
+  tense — "this is what is really on screen" — so the assistant could reason about
+  a picture it could no longer see. The note left in the image's place now says
+  the text is a record of a past look and that nothing in it can be acted on.
 - **`/pause` can no longer be raced, and says when an action is still
   finishing.** A pause that landed between the assistant deciding on an action and
   sending it was ignored for that action. It is now checked again at the moment
