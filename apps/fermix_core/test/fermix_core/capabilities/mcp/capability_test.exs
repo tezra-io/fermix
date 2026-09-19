@@ -407,6 +407,38 @@ defmodule FermixCore.Capabilities.MCP.CapabilityTest do
       refute metadata |> Map.values() |> Enum.any?(&(&1 == "note body"))
     end
 
+    # A local plugin's call can succeed with the wrong arguments (a command the
+    # car accepts and then does something else with), and the arguments are the
+    # only record of what was asked. They are content, so they ride the capture
+    # gate; the always-on metadata above stays the correlatable subset.
+    test "records the model's arguments as the input preview under content capture" do
+      establish_capture_content(true)
+      descriptor = %{name: "set_seat_heater", description: "x", input_schema: %{}}
+      cap = McpCapability.from_tool_descriptor("tesla", descriptor, caller: StubCaller)
+      :ok = StubCaller.set_response({:operator, "tesla"}, "set_seat_heater", {:ok, "done"})
+
+      args = %{"seat" => "front_left", "level" => 2}
+      context = %{agent_name: "main", session_id: "input-preview-on"}
+      assert {:ok, %{success: true}} = Capability.execute(cap, args, context)
+
+      assert_receive {:tool_exec, _measurements, %{session_id: "input-preview-on"} = metadata}
+      assert metadata.input =~ "front_left"
+      assert metadata.input =~ "level"
+    end
+
+    test "records no arguments while content capture is off" do
+      establish_capture_content(false)
+      descriptor = %{name: "set_seat_heater", description: "x", input_schema: %{}}
+      cap = McpCapability.from_tool_descriptor("tesla", descriptor, caller: StubCaller)
+      :ok = StubCaller.set_response({:operator, "tesla"}, "set_seat_heater", {:ok, "done"})
+
+      context = %{agent_name: "main", session_id: "input-preview-off"}
+      assert {:ok, %{success: true}} = Capability.execute(cap, %{"seat" => "front_left"}, context)
+
+      assert_receive {:tool_exec, _measurements, %{session_id: "input-preview-off"} = metadata}
+      refute Map.has_key?(metadata, :input)
+    end
+
     test "model arguments cannot supply or override the invoke context" do
       policy = %{
         profile: "retrieval",
@@ -446,5 +478,13 @@ defmodule FermixCore.Capabilities.MCP.CapabilityTest do
       assert invoke_context.replay_safe == false
       assert invoke_context.session_id == "turn-real"
     end
+  end
+
+  # The capture gate is global app env, and an earlier module can leave it
+  # either way in this VM, so each test establishes the posture it asserts.
+  defp establish_capture_content(value) when is_boolean(value) do
+    previous = Application.get_env(:fermix_core, :telemetry, [])
+    Application.put_env(:fermix_core, :telemetry, Keyword.put(previous, :capture_content, value))
+    on_exit(fn -> Application.put_env(:fermix_core, :telemetry, previous) end)
   end
 end

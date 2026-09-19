@@ -1594,6 +1594,82 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
       assert is_integer(measurements.duration_ms)
       refute_received {:telemetry, [:fermix, :tool, :exec], _measurements, _metadata}
     end
+
+    # A call the vendor accepted with the wrong text reads as `success: true`
+    # with a healthy output, so the arguments are the only record of what was
+    # actually asked for. They ride the same content gate every builtin uses.
+    test "records the model's arguments as the input preview under content capture" do
+      establish_capture_content(true)
+      name = setup_regional_fixture()
+      tool = regional_fixture_tool(name)
+      handler = attach_exec_telemetry(tool["name"])
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      assert {:ok, %{success: true}} =
+               ToolExecutor.execute(
+                 %{"vin" => "5YJ3E1EA7JF000316"},
+                 regional_context(&regional_ok/1, "eu"),
+                 name,
+                 tool
+               )
+
+      assert_receive {:telemetry, [:fermix, :tool, :exec], _measurements, metadata}
+      assert metadata.input =~ "5YJ3E1EA7JF000316"
+      assert metadata.input =~ "vin"
+    end
+
+    test "records no arguments while content capture is off" do
+      establish_capture_content(false)
+      name = setup_regional_fixture()
+      tool = regional_fixture_tool(name)
+      handler = attach_exec_telemetry(tool["name"])
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      assert {:ok, %{success: true}} =
+               ToolExecutor.execute(
+                 %{"vin" => "5YJ3E1EA7JF000316"},
+                 regional_context(&regional_ok/1, "eu"),
+                 name,
+                 tool
+               )
+
+      assert_receive {:telemetry, [:fermix, :tool, :exec], _measurements, metadata}
+      refute Map.has_key?(metadata, :input)
+    end
+
+    test "a value the turn marks for redaction never reaches the input preview" do
+      establish_capture_content(true)
+      name = setup_regional_fixture()
+      tool = regional_fixture_tool(name)
+      handler = attach_exec_telemetry(tool["name"])
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      context =
+        (&regional_ok/1)
+        |> regional_context("eu")
+        |> Map.put(:redact_values, ["5YJ3E1EA7JF000316"])
+
+      assert {:ok, %{success: true}} =
+               ToolExecutor.execute(%{"vin" => "5YJ3E1EA7JF000316"}, context, name, tool)
+
+      assert_receive {:telemetry, [:fermix, :tool, :exec], _measurements, metadata}
+      refute metadata.input =~ "5YJ3E1EA7JF000316"
+      assert metadata.input =~ "«redacted»"
+    end
+  end
+
+  defp regional_ok(conn) do
+    conn
+    |> Plug.Conn.put_resp_content_type("application/json")
+    |> Plug.Conn.send_resp(200, Jason.encode!(%{"state" => "asleep"}))
+  end
+
+  # The capture gate is global app env, and an earlier module can leave it
+  # either way in this VM, so each test establishes the posture it asserts.
+  defp establish_capture_content(value) when is_boolean(value) do
+    previous = Application.get_env(:fermix_core, :telemetry, [])
+    Application.put_env(:fermix_core, :telemetry, Keyword.put(previous, :capture_content, value))
+    on_exit(fn -> Application.put_env(:fermix_core, :telemetry, previous) end)
   end
 
   describe "a tool gated on requires_setting" do

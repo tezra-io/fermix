@@ -15,11 +15,14 @@ defmodule FermixCore.Capabilities.MCP.Capability do
   cannot supply or override its own identity, profile, scope, or policy. There
   is no path from `args` into the closure.
 
-  Telemetry rides the shared `Tools.Telemetry.exec/5` emitter and carries only
-  the redacted correlatable subset — capability name, plugin, source-qualified
-  server id, the turn `session_id` (never the MCP session id), profile,
-  `workspace_scope: single_selected` (never the workspace id), the signed flags,
-  attempt number, outcome, duration.
+  Telemetry rides the shared `Tools.Telemetry.exec/5` emitter. Its always-on
+  metadata is only the redacted correlatable subset — capability name, plugin,
+  source-qualified server id, the turn `session_id` (never the MCP session id),
+  profile, `workspace_scope: single_selected` (never the workspace id), the
+  signed flags, attempt number, outcome, duration. The model's arguments and the
+  result are content: the emitter attaches them as `:input`/`:output` previews
+  only under content capture, scrubbed of the turn's redact values, exactly as
+  it does for every builtin tool.
 
   Default policy class is `:external_api`. MCP tools are visible to the agent by
   default (`hidden_from_agent?: false`); operators can hide individual tools by
@@ -147,6 +150,7 @@ defmodule FermixCore.Capabilities.MCP.Capability do
 
     ToolTelemetry.exec(spec.sanitized, context, success, duration,
       metadata: exec_metadata(spec, result),
+      input: args,
       result: result
     )
 

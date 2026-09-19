@@ -122,7 +122,7 @@ defmodule FermixCore.Plugins.ToolExecutor do
       when is_map(args) and is_map(context) and is_binary(plugin_name) and is_map(tool) do
     start = System.monotonic_time(:millisecond)
     result = do_execute(args, context, plugin_name, tool)
-    emit_telemetry(result, context, plugin_name, Map.get(tool, "name"), start)
+    emit_telemetry(result, args, context, plugin_name, Map.get(tool, "name"), start)
     result
   end
 
@@ -1024,12 +1024,17 @@ defmodule FermixCore.Plugins.ToolExecutor do
   defp format_auth_error(_plugin_name, reason),
     do: "plugin auth unavailable: #{Redaction.format(reason)}"
 
-  defp emit_telemetry({:ok, result}, context, plugin_name, tool_name, start) do
+  # The model's arguments ride as the `:input` preview, which the emitter
+  # attaches only under content capture and scrubs of the turn's redact values.
+  # A vendor can accept a call made with the wrong value and answer success, so
+  # without them the trace cannot say what was actually asked for.
+  defp emit_telemetry({:ok, result}, args, context, plugin_name, tool_name, start) do
     duration = System.monotonic_time(:millisecond) - start
     success = Map.get(result, :success) == true
 
     ToolTelemetry.exec(tool_name || plugin_name, context, success, duration,
       metadata: %{plugin: plugin_name},
+      input: args,
       result: {:ok, result}
     )
   end

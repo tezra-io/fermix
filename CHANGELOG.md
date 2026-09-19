@@ -236,6 +236,15 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A plugin tool call now records what it was asked to do.** Every built-in
+  tool traced its arguments, but the two plugin paths (declared HTTP tools and
+  local plugin processes) traced only the result. A vendor can accept a call
+  made with the wrong value and answer success, so a wrong navigation
+  destination or a wrong seat read as a healthy call with nothing to explain it.
+  Plugin arguments now ride the same trace field as every other tool's: only
+  while content capture is on, and scrubbed of the values a turn marks for
+  redaction.
+
 - **A click is no longer sent twice when the browser dies mid-action.** When a
   browser profile's process died with an action in flight, the same request was
   re-sent up to three times, which for a click, a form fill, an upload or a page
