@@ -19,6 +19,33 @@ defmodule FermixCore.ComputerUse.SessionManagerTest do
     def stop(_state), do: :ok
   end
 
+  # A Driver whose action blocks until the test releases it, so an action IN FLIGHT
+  # can be observed from outside the session — which is, by construction, unable to
+  # answer any call while it is blocked in the driver. Bounded: a never-released
+  # action gives up rather than hanging the suite.
+  defmodule BlockingDriver do
+    @behaviour Compux.Driver
+
+    @impl true
+    def start(opts), do: {:ok, %{test_pid: Keyword.fetch!(opts, :test_pid)}}
+
+    @impl true
+    def execute(_state, %{"action" => "probe"}), do: {:ok, %{"input_control" => true}}
+
+    def execute(%{test_pid: pid}, request) do
+      send(pid, {:driver_entered, request, self()})
+
+      receive do
+        :driver_release -> {:ok, %{"ok" => true}}
+      after
+        5_000 -> {:error, :test_driver_never_released}
+      end
+    end
+
+    @impl true
+    def stop(_state), do: :ok
+  end
+
   setup do
     start_supervised!(CuSupervisor)
     %{config: Config.normalize(enabled: true)}
@@ -150,6 +177,70 @@ defmodule FermixCore.ComputerUse.SessionManagerTest do
     assert :resumed = SessionManager.resume(ctx)
     refute Session.paused?(pid)
     assert {:ok, ^pid} = SessionManager.lookup(ctx)
+  end
+
+  # `/pause` must tell the human the truth, and it cannot ask the session: while an
+  # action is in flight the session is blocked in the driver for up to the whole
+  # sidecar budget. The fact is published on the session's registry entry instead.
+  test "pause reports an action already in flight, and the flag never sticks", %{config: config} do
+    ctx = context(%{computer_use_origin: :interactive})
+    {:ok, pid} = SessionManager.ensure(config, ctx, driver: {BlockingDriver, [test_pid: self()]})
+
+    assert :paused = SessionManager.pause(ctx)
+    assert :resumed = SessionManager.resume(ctx)
+
+    action =
+      Task.async(fn ->
+        {:ok, :auto, request} = Session.classify(pid, %{"action" => "screenshot"})
+        Session.execute(pid, request)
+      end)
+
+    assert_receive {:driver_entered, %{"action" => "screenshot"}, ^pid}, 1_000
+
+    assert :paused_in_flight = SessionManager.pause(ctx)
+
+    send(pid, :driver_release)
+    assert {:ok, _result} = Task.await(action)
+
+    # The cast goes out BEFORE the flag is read, so the guard is armed the moment the
+    # in-flight action finishes — not only once its reply has been delivered.
+    assert Session.paused?(pid)
+
+    # Cleared on the way out, so the next `/pause` is the idle sentence again.
+    :resumed = SessionManager.resume(ctx)
+    assert :paused = SessionManager.pause(ctx)
+  end
+
+  test "session_id answers nil for anything that is not a live registered session" do
+    # A tool context may carry any `GenServer.server()`; raising here would lose the
+    # exec event for an action that already ran.
+    assert SessionManager.session_id(:not_a_session) == nil
+    assert SessionManager.session_id(make_ref()) == nil
+    assert SessionManager.session_id({:via, Registry, {CuSupervisor.registry(), :nope}}) == nil
+  end
+
+  test "a running session publishes its lifecycle id where a tool exec can read it", %{
+    config: config
+  } do
+    ctx = context(%{computer_use_origin: :interactive})
+    {:ok, pid} = SessionManager.ensure(config, ctx, driver: stub_driver())
+
+    assert "cua_" <> _ = SessionManager.session_id(pid)
+  end
+
+  test "session_id is nil for a session started outside the registry" do
+    session =
+      start_supervised!(
+        {Session,
+         [
+           config: Config.normalize(enabled: true),
+           driver: stub_driver(),
+           origin: :interactive,
+           session_id: "cua_unregistered"
+         ]}
+      )
+
+    assert SessionManager.session_id(session) == nil
   end
 
   test "pause/resume are :no_session no-ops when nothing is running" do

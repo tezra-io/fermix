@@ -445,8 +445,12 @@ defmodule FermixCore.ComputerUse.ViewRegionTest do
 
     assert {:ok, result} = Session.execute(session, click)
     assert result.image == nil
+    assert result.outcome == :performed_unverified
     assert result.summary =~ "check capture failed"
+    assert result.summary =~ "the action itself was sent"
     assert result.summary =~ "SAME region"
+    # What failed is the LOOK. Saying the action failed buys a second real click.
+    refute result.summary =~ "action failed"
     # No image came back, so no text may claim the model is looking at one.
     refute result.summary =~ "MAGNIFIED CROP"
 
@@ -504,10 +508,12 @@ defmodule FermixCore.ComputerUse.ViewRegionTest do
   end
 
   # A click's check screenshot reports where the pointer ACTUALLY is, and the OS puts
-  # the mouse-button events at that same point — so cursor != aimed-at is proof the
-  # click was not delivered where asked. Observed live 2026-07-26: 4 of 7 clicks landed
-  # at the PREVIOUS click's point and every one of them reported success, which sent
-  # the model re-zooming and re-aiming at coordinates that were already correct.
+  # the mouse-button events at that same point — so cursor != aimed-at means the aim
+  # is NOT confirmed. Observed live 2026-07-26: 4 of 7 clicks landed at the PREVIOUS
+  # click's point and every one of them reported success, which sent the model
+  # re-zooming and re-aiming at coordinates that were already correct. The evidence is
+  # reported; the verdict is not, because a human moving the mouse after a click that
+  # DID land leaves exactly the same trace, and "it did nothing" buys a double submit.
   describe "click delivery" do
     defp click_with_cursor(cursor, click_at) do
       session =
@@ -537,8 +543,9 @@ defmodule FermixCore.ComputerUse.ViewRegionTest do
     test "a click whose pointer reached the target is reported plainly" do
       result = click_with_cursor(%{"x" => 180, "y" => 150}, %{"x" => 180, "y" => 150})
 
-      refute result.summary =~ "NOT delivered"
+      refute result.summary =~ "NOT confirmed"
       assert result.summary =~ "Cursor at (180,150)"
+      assert result.outcome == :performed
     end
 
     # Retina round-trip: `to_logical` quantizes a crop pixel to an integer logical
@@ -549,13 +556,28 @@ defmodule FermixCore.ComputerUse.ViewRegionTest do
     test "a cursor within the rounding tolerance still counts as delivered" do
       result = click_with_cursor(%{"x" => 181, "y" => 149}, %{"x" => 180, "y" => 150})
 
-      refute result.summary =~ "NOT delivered"
+      refute result.summary =~ "NOT confirmed"
     end
 
     test "a genuine miss outside the tolerance is still reported" do
       result = click_with_cursor(%{"x" => 184, "y" => 150}, %{"x" => 180, "y" => 150})
 
-      assert result.summary =~ "NOT delivered at (180,150)"
+      assert result.summary =~ "Aim NOT confirmed at (180,150)"
+    end
+
+    # The receipt reports the evidence; it must never turn that evidence into a
+    # verdict on the input. A dispatched click that a person then moved the mouse
+    # away from reads identically, and "this action did nothing. Re-send the SAME
+    # action" is an instruction to double-submit whatever DID land.
+    test "the aim notice never claims a dispatched action did nothing" do
+      result = click_with_cursor(%{"x" => 377, "y" => 472}, %{"x" => 169, "y" => 245})
+
+      refute result.summary =~ "did nothing"
+      refute result.summary =~ "never reached"
+      assert result.summary =~ "Read this image"
+      assert result.summary =~ "only if it shows the effect is missing"
+      # The action WAS dispatched, and the receipt says so.
+      assert result.outcome == :performed
     end
 
     # Drags carry from/to instead of x/y; their delivery evidence is the pointer
@@ -586,22 +608,22 @@ defmodule FermixCore.ComputerUse.ViewRegionTest do
 
       {:ok, result} = Session.execute(session, drag)
 
-      assert result.summary =~ "NOT delivered at (300,300)"
+      assert result.summary =~ "Aim NOT confirmed at (300,300)"
     end
 
-    test "a click the OS put somewhere else is reported as NOT delivered" do
+    test "a click the OS put somewhere else is reported as aim not confirmed" do
       result = click_with_cursor(%{"x" => 377, "y" => 472}, %{"x" => 169, "y" => 245})
 
-      assert result.summary =~ "NOT delivered at (169,245)"
+      assert result.summary =~ "Aim NOT confirmed at (169,245)"
       assert result.summary =~ "SAME region"
       # The true pointer position stays visible — it is the evidence.
       assert result.summary =~ "Cursor at (377,472)"
     end
 
-    test "a check that reports no cursor cannot prove delivery, so it says so" do
+    test "a check that reports no cursor cannot confirm the aim, so it says so" do
       result = click_with_cursor(nil, %{"x" => 169, "y" => 245})
 
-      assert result.summary =~ "NOT delivered at (169,245)"
+      assert result.summary =~ "Aim NOT confirmed at (169,245)"
     end
   end
 

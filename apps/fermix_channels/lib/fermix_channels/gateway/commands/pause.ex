@@ -31,5 +31,13 @@ defmodule FermixChannels.Gateway.Commands.Pause do
   defp reply(:paused),
     do: "Computer use paused — the cursor and keyboard are yours. Run /resume to let me continue."
 
+  # An action already handed to the helper cannot be recalled (one request, one
+  # response, no control channel), so promising the machine back immediately would
+  # be a lie the human watches being broken.
+  defp reply(:paused_in_flight),
+    do:
+      "Pausing. One action is already under way and will finish; nothing further will be " <>
+        "sent. The cursor and keyboard are yours once it completes."
+
   defp reply(:no_session), do: "No active computer-use session to pause."
 end

@@ -64,6 +64,35 @@ defmodule FermixCore.ComputerUse.SessionTest do
     end
   end
 
+  # A Driver whose reply is chosen PER ACTION, so a post-action check can fail while
+  # the action before it succeeded — the shape every truthful-receipt path needs.
+  # Anything unscripted answers a bare ack, which keeps the session's one-time
+  # input-control probe and the courtesy arbiter out of each test's way.
+  defmodule ScriptedDriver do
+    @behaviour Compux.Driver
+
+    @impl true
+    def start(opts) do
+      {:ok,
+       %{
+         test_pid: Keyword.fetch!(opts, :test_pid),
+         replies: Keyword.get(opts, :replies, %{})
+       }}
+    end
+
+    @impl true
+    def execute(%{test_pid: pid, replies: replies}, %{"action" => action} = request) do
+      send(pid, {:driver_execute, request})
+      Map.get(replies, action, {:ok, %{"ok" => true}})
+    end
+
+    @impl true
+    def stop(%{test_pid: pid}) do
+      send(pid, :driver_stop)
+      :ok
+    end
+  end
+
   defp start_session(opts) do
     config = Keyword.get(opts, :config, Config.normalize(enabled: true))
     driver_opts = [test_pid: self()] ++ Keyword.get(opts, :driver_opts, [])
@@ -533,7 +562,7 @@ defmodule FermixCore.ComputerUse.SessionTest do
       refute Session.paused?(session)
 
       :ok = Session.pause(session)
-      # cast lands before the next call (same mailbox, serialized)
+      # `paused?` is a call, so it also proves the cast has been processed
       assert Session.paused?(session)
 
       assert {:error, {:refused, :paused}} =
@@ -545,6 +574,260 @@ defmodule FermixCore.ComputerUse.SessionTest do
       :ok = Session.resume(session)
       refute Session.paused?(session)
       assert {:ok, :auto, _request} = Session.classify(session, %{"action" => "screenshot"})
+    end
+
+    # The race `/pause` exists to close: a turn classifies, the human pauses, and the
+    # already-classified request is executed anyway. Classify's check alone cannot
+    # see a pause that lands after it returned, so execute re-checks — the refusal
+    # must happen with NO driver call, not even the courtesy probe.
+    test "a pause landing between classify and execute refuses the action, untouched" do
+      session = start_session([])
+
+      {:ok, :auto, request} =
+        Session.classify(session, %{"action" => "left_click", "x" => 1, "y" => 2})
+
+      :ok = Session.pause(session)
+      assert Session.paused?(session)
+
+      assert {:error, {:refused, :paused}} = Session.execute(session, request)
+
+      refute_received {:driver_execute, %{"action" => "left_click"}}
+      refute_received {:driver_execute, %{"action" => "idle_ms"}}
+      # The refused action never counted against the budget either.
+      assert Session.action_count(session) == 0
+    end
+
+    test "pause and resume emit their lifecycle events, once per state change" do
+      test_pid = self()
+      handler = "cu-pause-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach_many(
+        handler,
+        [
+          [:fermix, :computer_use, :session_pause],
+          [:fermix, :computer_use, :session_resume]
+        ],
+        fn event, _m, meta, _ -> send(test_pid, {:lifecycle, List.last(event), meta}) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      session = start_session([])
+
+      :ok = Session.pause(session)
+      assert Session.paused?(session)
+      assert_receive {:lifecycle, :session_pause, %{session_id: "cua_test", mode: :host}}
+
+      # A repeated pause is not a second event — a trace showing two pauses and one
+      # resume would read as a session that is still held when it is running.
+      :ok = Session.pause(session)
+      assert Session.paused?(session)
+      refute_receive {:lifecycle, :session_pause, %{session_id: "cua_test"}}, 50
+
+      :ok = Session.resume(session)
+      refute Session.paused?(session)
+      assert_receive {:lifecycle, :session_resume, %{session_id: "cua_test"}}
+
+      :ok = Session.resume(session)
+      refute Session.paused?(session)
+      refute_receive {:lifecycle, :session_resume, %{session_id: "cua_test"}}, 50
+    end
+  end
+
+  # M42 slice 1 §4: a receipt says what is known. A check that never came back is not
+  # a failed action, a helper that died is not a session that may keep running, and a
+  # timeout on any driver call poisons the Port the same way — pairing is positional,
+  # so a late frame becomes the NEXT request's reply unless the session resets.
+  describe "truthful receipts" do
+    @region %{"x" => 0, "y" => 0, "w" => 600, "h" => 380}
+
+    defp start_scripted(replies) do
+      Process.flag(:trap_exit, true)
+
+      {:ok, session} =
+        Session.start_link(
+          config: Config.normalize(enabled: true),
+          driver: {ScriptedDriver, [test_pid: self(), replies: replies]},
+          session_id: "cua_receipts"
+        )
+
+      {session, Process.monitor(session)}
+    end
+
+    defp click_in_region(session) do
+      {:ok, :auto, click} =
+        Session.classify(session, %{
+          "action" => "left_click",
+          "x" => 40,
+          "y" => 30,
+          "region" => @region
+        })
+
+      Session.execute(session, click)
+    end
+
+    test "a read reports the read outcome" do
+      session = start_session([])
+      {:ok, :auto, request} = Session.classify(session, %{"action" => "screenshot"})
+
+      assert {:ok, %{outcome: :read}} = Session.execute(session, request)
+    end
+
+    test "a mutating action whose check came back reports performed" do
+      session = start_session([])
+
+      {:ok, :auto, request} =
+        Session.classify(session, %{"action" => "left_click", "x" => 1, "y" => 2})
+
+      assert {:ok, %{outcome: :performed}} = Session.execute(session, request)
+    end
+
+    # The swallowed timeout: the check turned `{:timeout, …}` into a string, so the
+    # poison-reset never fired and the late frame became the next action's reply.
+    test "a check timeout says the action was performed, unverified, then resets the session" do
+      {session, ref} =
+        start_scripted(%{"screenshot" => {:error, {:timeout, :cu_sidecar_action, 30_000}}})
+
+      assert {:ok, result} = click_in_region(session)
+      assert result.outcome == :performed_unverified
+      assert result.summary =~ "action performed"
+      assert result.summary =~ "the action itself was sent"
+      assert result.summary =~ "session was reset"
+      refute result.summary =~ "action failed"
+
+      # Reply FIRST, then stop: an error reply would have bought a second real click.
+      assert_receive {:DOWN, ^ref, :process, ^session, {:shutdown, :sidecar_timeout}}
+      assert_receive :driver_stop
+    end
+
+    test "a check whose helper exits says the same and resets the session" do
+      {session, ref} = start_scripted(%{"screenshot" => {:error, {:sidecar_exited, 2}}})
+
+      assert {:ok, result} = click_in_region(session)
+      assert result.outcome == :performed_unverified
+      assert result.summary =~ "the action itself was sent"
+
+      assert_receive {:DOWN, ^ref, :process, ^session, {:sidecar_exited, 2}}
+    end
+
+    # The courtesy probe ran BEFORE any input, so this action definitively did not
+    # happen — a different fact from an action that timed out, and a different
+    # sentence. The Port is poisoned either way, so the session still resets.
+    test "an idle-probe timeout dispatches nothing and resets the session" do
+      {session, ref} =
+        start_scripted(%{"idle_ms" => {:error, {:timeout, :cu_sidecar_action, 30_000}}})
+
+      {:ok, :auto, click} =
+        Session.classify(session, %{"action" => "left_click", "x" => 1, "y" => 2})
+
+      assert {:error, {:not_dispatched, {:timeout, :cu_sidecar_action, 30_000}}} =
+               Session.execute(session, click)
+
+      refute_received {:driver_execute, %{"action" => "left_click"}}
+      assert_receive {:DOWN, ^ref, :process, ^session, {:shutdown, :sidecar_timeout}}
+    end
+
+    # `Compux.PortDriver` consumes `{:exit_status, n}` inside its own receive and
+    # answers `{:error, {:sidecar_exited, n}}`, so the handle_info stop clause never
+    # fires for a sidecar that dies mid-action: without this the session survives on
+    # a dead Port and every later action answers `:sidecar_unavailable`.
+    test "a helper that exits on the action itself replies and stops the session" do
+      {session, ref} = start_scripted(%{"screenshot" => {:error, {:sidecar_exited, 2}}})
+
+      {:ok, :auto, request} = Session.classify(session, %{"action" => "screenshot"})
+
+      assert {:error, {:sidecar_exited, 2}} = Session.execute(session, request)
+      assert_receive {:DOWN, ^ref, :process, ^session, {:sidecar_exited, 2}}
+      assert_receive :driver_stop
+    end
+
+    # The check frame arrived whole and was paired, so the Port is healthy — but the
+    # image inside it cannot be decoded. For a READ that is the whole result and it
+    # still fails loud (see "invalid base64 from the sidecar fails loud"); for a
+    # mutating action the click was already sent, and reporting a failure would buy
+    # a second one.
+    test "a check image that cannot be read still reports the action performed" do
+      {session, _ref} =
+        start_scripted(%{
+          "screenshot" => {:ok, %{"data" => "!!!not-base64!!!", "mime" => "image/png"}}
+        })
+
+      assert {:ok, result} = click_in_region(session)
+      assert result.outcome == :performed_unverified
+      assert result.summary =~ "the action itself was sent"
+      assert result.summary =~ "invalid base64"
+      refute result.summary =~ "action failed"
+      # Nothing is desynchronised, so the session keeps its sidecar.
+      refute result.summary =~ "session was reset"
+      assert Process.alive?(session)
+    end
+
+    # `Compux.PortDriver` answers `:sidecar_unavailable` when the Port is already
+    # closed. Replying and living on meant every later action in the conversation
+    # answered the same thing forever — a zombie no caller could recover from.
+    test "a helper that is no longer running stops the session instead of zombieing it" do
+      {session, ref} = start_scripted(%{"screenshot" => {:error, :sidecar_unavailable}})
+      {:ok, :auto, request} = Session.classify(session, %{"action" => "screenshot"})
+
+      assert {:error, :sidecar_unavailable} = Session.execute(session, request)
+      assert_receive {:DOWN, ^ref, :process, ^session, {:shutdown, :sidecar_unavailable}}
+      assert_receive :driver_stop
+    end
+
+    # `{:shutdown, _}` keeps the supervisor quiet; it must not also make the run look
+    # healthy. A session that died on a poison reset leaving a row that says it
+    # finished normally defeats the whole point of the lifecycle family.
+    test "a poison reset leaves a session_error row, not a clean completion" do
+      test_pid = self()
+      handler = "cu-fault-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach_many(
+        handler,
+        [
+          [:fermix, :computer_use, :session_complete],
+          [:fermix, :computer_use, :session_error]
+        ],
+        fn event, _m, meta, _ -> send(test_pid, {:lifecycle, List.last(event), meta}) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      {session, ref} =
+        start_scripted(%{"screenshot" => {:error, {:timeout, :cu_sidecar_action, 30_000}}})
+
+      {:ok, :auto, request} = Session.classify(session, %{"action" => "screenshot"})
+
+      assert {:error, {:timeout, :cu_sidecar_action, 30_000}} = Session.execute(session, request)
+      assert_receive {:DOWN, ^ref, :process, ^session, {:shutdown, :sidecar_timeout}}
+
+      assert_receive {:lifecycle, :session_error, %{session_id: "cua_receipts"} = meta}
+      assert meta.reason =~ "sidecar_timeout"
+      refute_received {:lifecycle, :session_complete, %{session_id: "cua_receipts"}}
+    end
+
+    # 75 is compux's INTENTIONAL capture-stall fail-fast, so it stays a clean
+    # completion (`session_complete`, no crash report) on this path too.
+    test "a helper exiting 75 on the action is a clean completion" do
+      test_pid = self()
+      handler = "cu-exit75-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        handler,
+        [:fermix, :computer_use, :session_complete],
+        fn _e, _m, meta, _ -> send(test_pid, {:completed, meta}) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      {session, ref} = start_scripted(%{"screenshot" => {:error, {:sidecar_exited, 75}}})
+      {:ok, :auto, request} = Session.classify(session, %{"action" => "screenshot"})
+
+      assert {:error, {:sidecar_exited, 75}} = Session.execute(session, request)
+      assert_receive {:DOWN, ^ref, :process, ^session, {:shutdown, {:sidecar_exited, 75}}}
+      assert_receive {:completed, %{session_id: "cua_receipts"}}
     end
   end
 

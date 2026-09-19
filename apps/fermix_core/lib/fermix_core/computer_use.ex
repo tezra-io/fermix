@@ -111,10 +111,13 @@ defmodule FermixCore.ComputerUse do
   the human is reclaiming the machine. The session, its sidecar, and the task stay
   ALIVE and resumable — this only flips the session's guard so it refuses actions
   until `resume/1` (contrast the interactive `/stop`, which tears the session down).
-  Returns `:paused` if a session was running, `:no_session` otherwise. A safe no-op
-  when computer-use isn't running.
+  A safe no-op when computer-use isn't running.
+
+  Returns `:paused` when the session was idle, `:paused_in_flight` when one action is
+  already inside the helper and will finish (it cannot be recalled over this
+  protocol), or `:no_session`.
   """
-  @spec pause(map()) :: :paused | :no_session
+  @spec pause(map()) :: :paused | :paused_in_flight | :no_session
   def pause(context) when is_map(context), do: SessionManager.pause(context)
 
   @doc "Resume a paused computer-use session (`/resume`). `:resumed` or `:no_session`."

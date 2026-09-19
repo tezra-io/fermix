@@ -51,6 +51,51 @@ defmodule FermixCore.Tools.ComputerUseTest do
     def stop(_state), do: :ok
   end
 
+  # Answers the session's one-time input-control probe normally and fails a NAMED
+  # driver call: the courtesy probe (`on: :idle`, before any input reaches the
+  # screen) or the action itself. One module, because the difference under test is
+  # exactly which call failed.
+  defmodule FailingActionDriver do
+    @behaviour Compux.Driver
+
+    @impl true
+    def start(opts),
+      do: {:ok, %{error: Keyword.fetch!(opts, :error), on: Keyword.get(opts, :on, :action)}}
+
+    @impl true
+    def execute(_state, %{"action" => "probe"}), do: {:ok, %{"input_control" => true}}
+
+    def execute(%{error: error, on: :idle}, %{"action" => "idle_ms"}), do: {:error, error}
+    def execute(_state, %{"action" => "idle_ms"}), do: {:ok, %{"ok" => true, "idle_ms" => 10_000}}
+    def execute(%{error: error}, _request), do: {:error, error}
+
+    @impl true
+    def stop(_state), do: :ok
+  end
+
+  # A stand-in Session with a scripted `execute` reply. The two shapes it serves here
+  # cannot be produced from a driver: one needs a `/pause` cast to land in the window
+  # between classify and execute, the other is the outer 40 s `GenServer.call`
+  # deadline. Both are documented `Session.execute/2` returns (the second is what
+  # `Timeouts.expired/3` normalizes that call exit into), and it is the TOOL's
+  # rendering of them that is under test.
+  defmodule ScriptedSession do
+    use GenServer
+
+    def start_link(opts) do
+      GenServer.start_link(__MODULE__, Keyword.fetch!(opts, :reply),
+        name: Keyword.get(opts, :name)
+      )
+    end
+
+    @impl true
+    def init(reply), do: {:ok, reply}
+
+    @impl true
+    def handle_call({:classify, params}, _from, reply), do: {:reply, {:ok, :auto, params}, reply}
+    def handle_call({:execute, _request}, _from, reply), do: {:reply, reply, reply}
+  end
+
   @context %{agent_name: "main", conversation_key: {"cli", "chat-cu", :root}}
 
   defp action_desc(params), do: params["properties"]["action"]["description"]
@@ -71,6 +116,54 @@ defmodule FermixCore.Tools.ComputerUseTest do
          session_id: "cua_strict_#{System.unique_integer([:positive])}"
        ]}
     )
+  end
+
+  defp failing_action_session(opts) do
+    start_supervised!(
+      {Session,
+       [
+         config: Config.normalize(enabled: true),
+         driver: {FailingActionDriver, opts},
+         origin: :interactive,
+         session_id: "cua_fail_#{System.unique_integer([:positive])}"
+       ]}
+    )
+  end
+
+  defp scripted_session(opts) do
+    start_supervised!(%{
+      id: {ScriptedSession, System.unique_integer([:positive])},
+      start: {ScriptedSession, :start_link, [opts]}
+    })
+  end
+
+  defp tool_context(session, config, turn) do
+    Map.merge(@context, %{
+      computer_use_session: session,
+      computer_use_config: config,
+      session_id: turn
+    })
+  end
+
+  # Capture this tool's own exec events, pinned to the correlation id the calling
+  # test put on its context: a GLOBAL handler filtered by tool name alone can be
+  # satisfied by a neighbouring emitter's event, which is how an assertion passes
+  # while the thing under test emitted nothing.
+  defp capture_tool_exec(turn) do
+    test_pid = self()
+    handler = "cu-tool-exec-#{System.unique_integer([:positive])}"
+
+    :telemetry.attach(
+      handler,
+      [:fermix, :tool, :exec],
+      fn _event, _measurements, metadata, _config ->
+        if metadata[:tool] == "computer_use" and metadata[:session_id] == turn,
+          do: send(test_pid, {:tool_exec, metadata})
+      end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
   end
 
   defp error_session(error) do
@@ -326,6 +419,256 @@ defmodule FermixCore.Tools.ComputerUseTest do
       assert {:ok, result} = ComputerUse.execute(%{"action" => "screenshot"}, context)
       assert result.success == false
       assert result.error =~ "attended session"
+    end
+  end
+
+  # M42 slice 1 §3/§4.1: every computer_use exec records what happened to the INPUT
+  # (`outcome`, a closed five-value enum) and which lifecycle session it happened in
+  # (`cu_session`, an opaque id). Both are safe ungated — nothing read off the screen
+  # goes into always-on metadata.
+  describe "exec telemetry — outcome and cu_session" do
+    setup do
+      turn = "turn-cu-#{System.unique_integer([:positive])}"
+      capture_tool_exec(turn)
+      %{config: Config.normalize(enabled: true), turn: turn}
+    end
+
+    test "a read records outcome :read and the session's lifecycle id", %{
+      config: config,
+      turn: turn
+    } do
+      start_supervised!(CuSupervisor)
+      key = {"cli", "chat-outcome", :root}
+
+      start_supervised!(
+        {Session,
+         [
+           name: {:via, Registry, {CuSupervisor.registry(), key}},
+           config: config,
+           driver: {StubDriver, [test_pid: self()]},
+           origin: :interactive,
+           session_id: "cua_outcome_test"
+         ]}
+      )
+
+      context = %{
+        agent_name: "main",
+        conversation_key: key,
+        computer_use_config: config,
+        session_id: turn
+      }
+
+      assert {:ok, %{success: true}} = ComputerUse.execute(%{"action" => "screenshot"}, context)
+
+      assert_receive {:tool_exec, meta}
+      assert meta.outcome == :read
+      assert meta.cu_session == "cua_outcome_test"
+      assert meta.action == "screenshot"
+    end
+
+    test "a dispatched mutating action records outcome :performed", %{
+      config: config,
+      turn: turn
+    } do
+      session =
+        start_supervised!(
+          {Session,
+           [
+             config: config,
+             driver: {StubDriver, [test_pid: self()]},
+             origin: :interactive,
+             session_id: "cua_performed_test"
+           ]}
+        )
+
+      assert {:ok, %{success: true}} =
+               ComputerUse.execute(
+                 %{"action" => "left_click", "x" => 3, "y" => 4},
+                 tool_context(session, config, turn)
+               )
+
+      assert_receive {:tool_exec, meta}
+      assert meta.outcome == :performed
+    end
+
+    test "a refusal before any input records outcome :refused", %{config: config, turn: turn} do
+      assert {:ok, %{success: false}} =
+               ComputerUse.execute(
+                 %{"action" => "left_click", "x" => 1, "y" => 1},
+                 tool_context(strict_session(), config, turn)
+               )
+
+      assert_receive {:tool_exec, meta}
+      assert meta.outcome == :refused
+    end
+
+    # A `/pause` cast can land between classify and execute, so the refusal arrives
+    # from execute rather than classify. It must read as the SAME sentence: the model
+    # was told `action failed: {:refused, :paused}` for an action never attempted.
+    test "a pause that lands between classify and execute reads as the pause refusal", %{
+      config: config,
+      turn: turn
+    } do
+      session = scripted_session(reply: {:error, {:refused, :paused}})
+
+      assert {:ok, result} =
+               ComputerUse.execute(
+                 %{"action" => "left_click", "x" => 1, "y" => 2},
+                 tool_context(session, config, turn)
+               )
+
+      assert result.success == false
+      assert result.error =~ "computer use is paused"
+      assert result.error =~ "/resume"
+      refute result.error =~ "action failed"
+      refute result.error =~ "refused"
+
+      assert_receive {:tool_exec, meta}
+      assert meta.outcome == :refused
+      assert meta.courtesy == :paused
+    end
+
+    # The OUTER call deadline. An execute makes up to four driver calls inside one
+    # 40 s budget, so it can fire with the action already dispatched — and the
+    # session is still working, so nothing was reset.
+    test "the outer session deadline is unknown dispatch and never claims a reset", %{
+      config: config,
+      turn: turn
+    } do
+      session = scripted_session(reply: {:error, {:timeout, :cu_session_call, 40_000}})
+
+      assert {:ok, result} =
+               ComputerUse.execute(
+                 %{"action" => "left_click", "x" => 1, "y" => 2},
+                 tool_context(session, config, turn)
+               )
+
+      assert result.success == false
+      assert result.error =~ "outcome unknown"
+      assert result.error =~ "NOT reset"
+      assert result.error =~ "still busy"
+      refute result.error =~ "cu_session_call"
+      refute result.error =~ "action failed"
+
+      assert_receive {:tool_exec, meta}
+      assert meta.outcome == :unknown
+    end
+
+    # `read` is for a read that RAN. A refusal is a refusal whatever the action, or
+    # the same hold traces two different ways depending on where it was caught.
+    test "a refused read records :refused, not :read", %{config: config, turn: turn} do
+      session = scripted_session(reply: {:error, :action_budget_exhausted})
+
+      assert {:ok, %{success: false}} =
+               ComputerUse.execute(
+                 %{"action" => "screenshot"},
+                 tool_context(session, config, turn)
+               )
+
+      assert_receive {:tool_exec, meta}
+      assert meta.outcome == :refused
+    end
+
+    # A context may carry any `GenServer.server()`. Resolving the lifecycle id must
+    # never raise out of the tool — that would lose the exec event for an action
+    # that ran, which is the one row a reader has.
+    test "a session that is not a pid still records its exec, without an id", %{
+      config: config,
+      turn: turn
+    } do
+      scripted_session(reply: {:error, :action_budget_exhausted}, name: :fermix_cu_named_session)
+
+      assert {:ok, %{success: false}} =
+               ComputerUse.execute(
+                 %{"action" => "screenshot"},
+                 tool_context(:fermix_cu_named_session, config, turn)
+               )
+
+      assert_receive {:tool_exec, meta}
+      assert meta.outcome == :refused
+      refute Map.has_key?(meta, :cu_session)
+    end
+
+    test "a helper that was not running says nothing was sent", %{config: config, turn: turn} do
+      session = failing_action_session(error: :sidecar_unavailable)
+
+      assert {:ok, result} =
+               ComputerUse.execute(
+                 %{"action" => "left_click", "x" => 1, "y" => 1},
+                 tool_context(session, config, turn)
+               )
+
+      assert result.success == false
+      assert result.error =~ "was not sent"
+      assert result.error =~ "was not running"
+      refute result.error =~ "action failed"
+
+      assert_receive {:tool_exec, meta}
+      assert meta.outcome == :refused
+    end
+
+    test "a helper that stops answering ON the action records :unknown and says so", %{
+      config: config,
+      turn: turn
+    } do
+      session = failing_action_session(error: {:timeout, :cu_sidecar_action, 30_000})
+      context = tool_context(session, config, turn)
+
+      assert {:ok, result} =
+               ComputerUse.execute(%{"action" => "left_click", "x" => 1, "y" => 1}, context)
+
+      assert result.success == false
+      assert result.error =~ "outcome unknown"
+      assert result.error =~ "session was reset"
+      # The raw term never reaches the model, and nothing claims the click failed.
+      refute result.error =~ "cu_sidecar_action"
+      refute result.error =~ "action failed"
+
+      assert_receive {:tool_exec, meta}
+      assert meta.outcome == :unknown
+    end
+
+    test "a helper that fails BEFORE any input records :refused and says nothing was sent", %{
+      config: config,
+      turn: turn
+    } do
+      session =
+        failing_action_session(error: {:timeout, :cu_sidecar_action, 30_000}, on: :idle)
+
+      assert {:ok, result} =
+               ComputerUse.execute(
+                 %{"action" => "left_click", "x" => 1, "y" => 1},
+                 tool_context(session, config, turn)
+               )
+
+      assert result.success == false
+      assert result.error =~ "was not sent"
+      assert result.error =~ "send the action again"
+      refute result.error =~ "cu_sidecar_action"
+
+      assert_receive {:tool_exec, meta}
+      assert meta.outcome == :refused
+    end
+
+    # A read that RAN and failed at the helper is still a read: it dispatches no
+    # input, so its dispatch was never in doubt. (A read that was REFUSED is above.)
+    test "a read-only action that fails is still a read (it dispatches no input)", %{
+      config: config,
+      turn: turn
+    } do
+      session = failing_action_session(error: {:sidecar_exited, 2})
+
+      assert {:ok, result} =
+               ComputerUse.execute(
+                 %{"action" => "screenshot"},
+                 tool_context(session, config, turn)
+               )
+
+      assert result.success == false
+      assert result.error =~ "outcome unknown"
+
+      assert_receive {:tool_exec, meta}
+      assert meta.outcome == :read
     end
   end
 

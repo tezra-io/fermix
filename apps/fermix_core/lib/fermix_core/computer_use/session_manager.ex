@@ -70,24 +70,92 @@ defmodule FermixCore.ComputerUse.SessionManager do
   Pause the computer-use session for `context`'s conversation (`/pause`): the human
   is reclaiming the machine. Unlike `abort/1`, the session, its TCC-warm sidecar, and
   the task stay ALIVE and resumable — `pause` just flips the session's guard so it
-  refuses actions until `resume/1`. Returns `:paused` if one was running, `:no_session`
-  otherwise. Idempotent + race-safe (a clean no-op when the registry is absent).
+  refuses actions until `resume/1`. Idempotent + race-safe (a clean no-op when the
+  registry is absent).
+
+  Returns `:paused` when the session was idle, `:paused_in_flight` when one action is
+  already inside the helper — it cannot be recalled over this protocol and will
+  finish, which is the difference `/pause` has to tell the human — or `:no_session`.
+  The in-flight fact is read from the session's registry entry rather than asked of
+  the session, which is blocked in the driver for exactly as long as that action runs.
   """
-  @spec pause(map()) :: :paused | :no_session
-  def pause(context) when is_map(context), do: signal(context, &Session.pause/1, :paused)
+  @spec pause(map()) :: :paused | :paused_in_flight | :no_session
+  def pause(context) when is_map(context) do
+    case entry(context) do
+      {:ok, pid, _value} -> pause_session(pid, context)
+      :error -> :no_session
+    end
+  end
 
   @doc "Resume a paused session (`/resume`). Returns `:resumed` or `:no_session`."
   @spec resume(map()) :: :resumed | :no_session
-  def resume(context) when is_map(context), do: signal(context, &Session.resume/1, :resumed)
+  def resume(context) when is_map(context) do
+    case entry(context) do
+      {:ok, pid, _value} -> resume_session(pid)
+      :error -> :no_session
+    end
+  end
 
-  defp signal(context, fun, ok_tag) do
+  @doc """
+  The `cua_…` lifecycle id a running session was minted with, read from its registry
+  entry. `nil` for a session started outside the registry (tests, direct callers) and
+  while computer-use is not running.
+
+  Read rather than asked: the session may be blocked inside a driver call for the
+  whole sidecar budget, and recording which session a tool call ran in must never
+  wait on that.
+  """
+  @spec session_id(term()) :: String.t() | nil
+  def session_id(pid) when is_pid(pid) do
+    with true <- registry_running?(),
+         [key] <- Registry.keys(CuSupervisor.registry(), pid),
+         [{^pid, %{session_id: id}}] <- Registry.lookup(CuSupervisor.registry(), key) do
+      id
+    else
+      _ -> nil
+    end
+  end
+
+  # Total on purpose. A caller may put any `GenServer.server()` on the context as
+  # `:computer_use_session` (a name, a via tuple, a stale term), and this is called
+  # while RECORDING what a tool call did — raising here would lose the exec event
+  # for the action that ran. An unresolvable session simply has no id to record.
+  def session_id(_session), do: nil
+
+  # Cast FIRST, then read the flag. The order strictly narrows the window: every
+  # execute that has not yet passed its paused precheck when the cast lands is now
+  # refused, so the only action this can still report is one already past it —
+  # which is exactly what the flag says. Reading first left a gap where an execute
+  # started after the read and dispatched while `/pause` had already answered
+  # "yours". A session that ended in between has nothing under way.
+  defp pause_session(pid, context) do
+    Session.pause(pid)
+
+    case entry(context) do
+      {:ok, _pid, value} -> if in_flight?(value), do: :paused_in_flight, else: :paused
+      :error -> :paused
+    end
+  end
+
+  defp resume_session(pid) do
+    Session.resume(pid)
+    :resumed
+  end
+
+  # The value a session publishes for itself (`Session.publish_in_flight/2`). A
+  # session that has not published yet has no action under way.
+  defp in_flight?(%{in_flight?: true}), do: true
+  defp in_flight?(_value), do: false
+
+  # The registry ENTRY (pid + published value), not just the pid: `/pause` needs
+  # both, and reading them in one lookup keeps them from describing two moments.
+  defp entry(context) do
     with true <- registry_running?(),
          true <- Map.has_key?(context, :conversation_key),
-         {:ok, pid} <- lookup(context) do
-      fun.(pid)
-      ok_tag
+         [{pid, value}] <- Registry.lookup(CuSupervisor.registry(), conversation_key(context)) do
+      {:ok, pid, value}
     else
-      _ -> :no_session
+      _ -> :error
     end
   end
 

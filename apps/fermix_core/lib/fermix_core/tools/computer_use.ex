@@ -75,8 +75,10 @@ defmodule FermixCore.Tools.ComputerUse do
       "`screenshot` to see the screen, then act on it (click, type, key, scroll, drag) using " <>
       "pixel coordinates from the latest screenshot. Every " <>
       "mutating action returns a fresh check screenshot — of the SAME magnified crop when a " <>
-      "region rode the action, of the full screen otherwise: CHECK it and retry if the " <>
-      "click missed. A DELIVERED click that changes nothing is NOT a miss — do not repeat " <>
+      "region rode the action, of the full screen otherwise: READ it before you repeat " <>
+      "anything. It shows what the screen looks like now, not whether your input arrived, so " <>
+      "repeat an action only when the image shows its effect is missing. A DELIVERED click " <>
+      "that changes nothing is NOT a miss — do not repeat " <>
       "it; verify the effect through the surface's own structure where it has one (a " <>
       "`browser` snapshot or `get` for a page that browser drives), and change MECHANISM " <>
       "— element click, keyboard, the browser's own click — not aim. " <>
@@ -291,6 +293,19 @@ defmodule FermixCore.Tools.ComputerUse do
       %{
         tag: "paused",
         description: "the human paused computer use with /pause; refused until they run /resume"
+      },
+      %{
+        tag: "outcome unknown",
+        description:
+          "the helper stopped responding or exited during the action, so whether the input " <>
+            "reached the screen is not knowable; the session was reset — read a fresh " <>
+            "screenshot before repeating anything"
+      },
+      %{
+        tag: "performed, not verified",
+        description:
+          "the action was sent but its check screenshot could not be captured; take a " <>
+            "screenshot to see the result instead of re-sending the action"
       }
     ]
   end
@@ -302,15 +317,19 @@ defmodule FermixCore.Tools.ComputerUse do
   @spec execute(map(), Tool.context()) :: {:ok, Tool.tool_result()}
   def execute(params, context) when is_map(params) and is_map(context) do
     start = System.monotonic_time(:millisecond)
-    {result, courtesy} = dispatch(params, context)
+    {result, telemetry} = dispatch(params, context)
     duration = System.monotonic_time(:millisecond) - start
     success = match?({:ok, %{success: true}}, result)
 
     # `courtesy` records the coexistence outcome (V3 R0) so a trace shows when the
     # agent proceeded, deferred to, or yielded the seat to a present human — or
     # `:na` when courtesy didn't apply (unavailable session, strict refusal, etc.).
+    # `outcome` is the five-value verdict on the INPUT (M42 slice 1 §4.1) and
+    # `cu_session` the `cua_…` lifecycle session it ran in, so a row says what
+    # happened and where. Both are an enum and an opaque id — nothing from the
+    # screen ever enters always-on metadata.
     ToolTelemetry.exec("computer_use", context, success, duration,
-      metadata: %{action: Map.get(params, "action"), courtesy: courtesy},
+      metadata: Map.put(telemetry, :action, Map.get(params, "action")),
       input: params,
       result: result
     )
@@ -323,15 +342,28 @@ defmodule FermixCore.Tools.ComputerUse do
   # the tool starts/reuses it through `SessionManager.ensure/3` keyed by the turn's
   # `conversation_key` — so the OS-driver process opens only when the tool is actually
   # used, and is reused across actions in the same conversation.
-  # Returns `{tool_result, courtesy_outcome}`; the caller emits the courtesy dim.
+  # Returns `{tool_result, telemetry_metadata}`; the caller emits the one exec event.
   defp dispatch(params, context) do
     config = Map.get(context, :computer_use_config) || Config.current()
 
     case resolve_session(context, config) do
-      {:ok, session} -> run(session, params)
-      {:error, reason} -> {{:ok, Tool.error(unavailable_message(reason))}, :na}
+      {:ok, session} -> with_cu_session(run(session, params), session)
+      {:error, reason} -> {{:ok, Tool.error(unavailable_message(reason))}, refused(:na)}
     end
   end
+
+  # The lifecycle id is READ from the session's registry entry, never asked of the
+  # session itself: it may be blocked inside a driver call for the whole sidecar
+  # budget, and recording what a tool call did must never wait on that. A session
+  # started outside the registry has none, and the key is then simply absent.
+  defp with_cu_session({result, telemetry}, session) do
+    case SessionManager.session_id(session) do
+      nil -> {result, telemetry}
+      id -> {result, Map.put(telemetry, :cu_session, id)}
+    end
+  end
+
+  defp refused(courtesy), do: %{courtesy: courtesy, outcome: :refused}
 
   defp resolve_session(context, config) do
     case Map.get(context, :computer_use_session) do
@@ -371,8 +403,11 @@ defmodule FermixCore.Tools.ComputerUse do
 
   defp run(session, params) do
     case Session.classify(session, params) do
-      {:ok, :auto, request} -> perform(session, request)
-      {:error, reason} -> {{:ok, Tool.error(refusal_message(reason))}, refusal_courtesy(reason)}
+      {:ok, :auto, request} ->
+        perform(session, request)
+
+      {:error, reason} ->
+        {{:ok, Tool.error(refusal_message(reason))}, refused(refusal_courtesy(reason))}
     end
   end
 
@@ -466,18 +501,61 @@ defmodule FermixCore.Tools.ComputerUse do
   defp perform(session, request) do
     case Session.execute(session, request) do
       {:ok, %{image: nil, summary: summary} = result} ->
-        {{:ok, Tool.success(summary)}, courtesy_of(result)}
+        {{:ok, Tool.success(summary)}, action_telemetry(result)}
 
       {:ok, %{image: image, summary: summary} = result} ->
-        {{:ok, Tool.success_with_images(summary, [image])}, courtesy_of(result)}
+        {{:ok, Tool.success_with_images(summary, [image])}, action_telemetry(result)}
 
       {:error, :user_active} ->
-        {{:ok, Tool.error(action_error_message(:user_active))}, :yielded}
+        {{:ok, Tool.error(action_error_message(:user_active))}, refused(:yielded)}
+
+      # A `/pause` cast can land between classify and execute, so the SAME refusal
+      # can arrive here. It gets the same sentence and the same courtesy dimension
+      # as at classify — never "action failed" with a raw term for an action that
+      # was never attempted.
+      {:error, {:refused, _reason} = refusal} ->
+        {{:ok, Tool.error(refusal_message(refusal))}, refused(refusal_courtesy(refusal))}
 
       {:error, reason} ->
-        {{:ok, Tool.error(action_error_message(reason))}, :na}
+        {{:ok, Tool.error(action_error_message(reason))},
+         %{courtesy: :na, outcome: error_outcome(reason, request)}}
     end
   end
+
+  # The session decided the outcome of a reply it produced (it knows whether the
+  # check came back); the tool only classifies the error tuples.
+  defp action_telemetry(%{outcome: outcome} = result),
+    do: %{courtesy: courtesy_of(result), outcome: outcome}
+
+  # A refusal is a refusal whatever the action: nothing ran and nothing was looked
+  # at, so a refused `screenshot` must never trace as a read that happened (it would
+  # also disagree with the same refusal recorded at classify). Otherwise a read-only
+  # action dispatches no input at all, so it stays `read` however it failed; and for
+  # a mutating one, only a helper that stopped answering or died leaves dispatch
+  # genuinely unknown — every other error is a live helper answering "no".
+  defp error_outcome(reason, request) do
+    cond do
+      refusal?(reason) -> :refused
+      Protocol.read_only?(request["action"]) -> :read
+      unknown_dispatch?(reason) -> :unknown
+      true -> :refused
+    end
+  end
+
+  defp refusal?(:action_budget_exhausted), do: true
+  defp refusal?(:sidecar_unavailable), do: true
+  defp refusal?({:not_dispatched, _reason}), do: true
+  defp refusal?(_reason), do: false
+
+  # The action deadline is the helper going quiet mid-action; the SESSION deadline is
+  # the outer `GenServer.call` giving up while the session is still working (an
+  # execute makes up to four driver calls, and the cushion invariant covers one). In
+  # both the input was already on its way, so dispatch is unknown — which is the one
+  # verdict that must never be reported as "it did not happen".
+  defp unknown_dispatch?({:timeout, :cu_sidecar_action, _ms}), do: true
+  defp unknown_dispatch?({:timeout, :cu_session_call, _ms}), do: true
+  defp unknown_dispatch?({:sidecar_exited, _status}), do: true
+  defp unknown_dispatch?(_reason), do: false
 
   defp courtesy_of(%{courtesy: courtesy}) when is_atom(courtesy), do: courtesy
   defp courtesy_of(_result), do: :off
@@ -500,7 +578,60 @@ defmodule FermixCore.Tools.ComputerUse do
       "avoid taking the cursor from them. Wait for them to pause, or ask them to let you continue."
   end
 
+  # The helper never answered the action itself. A request and its reply pair by
+  # ORDER over this protocol, so a late frame would be read as the NEXT action's
+  # reply — the session is reset rather than carried on. Whether the input reached
+  # the screen is not knowable from here, and claiming it did nothing would invite
+  # a double submit on something that may already have happened.
+  defp action_error_message({:timeout, :cu_sidecar_action, ms}) do
+    "outcome unknown: the computer-use helper stopped responding #{ms} ms into this " <>
+      "action, so whether it reached the screen cannot be told from here. The session was " <>
+      "reset. Take a `screenshot` and read the current state before doing anything else; " <>
+      "repeat this action only if the screen shows it did not take effect."
+  end
+
+  defp action_error_message({:sidecar_exited, status}) do
+    "outcome unknown: the computer-use helper exited (status #{status}) during this action, " <>
+      "so whether it reached the screen cannot be told from here. The session was reset and " <>
+      "the next action starts a fresh helper. Take a `screenshot` and read the current state " <>
+      "before doing anything else; repeat this action only if the screen shows it did not " <>
+      "take effect."
+  end
+
+  # The OUTER call deadline, not the helper's. The session is still working — it was
+  # NOT reset, it did not die, and the next computer-use call queues behind the work
+  # still running — so telling the model to start over would be false, and repeating
+  # the action blindly is a double submit on something already dispatched.
+  defp action_error_message({:timeout, :cu_session_call, ms}) do
+    "outcome unknown: the computer-use session was still working #{ms} ms after this action " <>
+      "was sent, so whether it finished cannot be told from here. The session was NOT reset " <>
+      "— it is still busy, and your next computer-use call waits for it. Wait, then take a " <>
+      "`screenshot` and read the current state before doing anything else; repeat this " <>
+      "action only if the screen shows it did not take effect."
+  end
+
+  # The helper failed while the coexistence arbiter was checking whether the human
+  # was at the machine — BEFORE any input was dispatched. Nothing happened on the
+  # screen, so this one is safe to send again.
+  defp action_error_message({:not_dispatched, reason}) do
+    "this action was not sent: the computer-use helper failed before any input was " <>
+      "dispatched (#{helper_fault(reason)}). The session was reset — take a `screenshot` to " <>
+      "see the screen, then send the action again."
+  end
+
+  # The Port was already closed, so the action was never written to the helper.
+  defp action_error_message(:sidecar_unavailable) do
+    "this action was not sent: the computer-use helper was not running. The session was " <>
+      "reset — send the action again and a fresh helper starts."
+  end
+
   defp action_error_message(reason), do: "action failed: #{format_reason(reason)}"
+
+  defp helper_fault({:timeout, :cu_sidecar_action, ms}),
+    do: "it stopped responding after #{ms} ms"
+
+  defp helper_fault({:sidecar_exited, status}), do: "it exited with status #{status}"
+  defp helper_fault(:sidecar_unavailable), do: "it was not running"
 
   defp point_schema(description) do
     %{
