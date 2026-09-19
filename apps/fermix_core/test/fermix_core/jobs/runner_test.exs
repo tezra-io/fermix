@@ -2290,7 +2290,7 @@ defmodule FermixCore.Jobs.RunnerTest do
       File.write!(image_path, @png_fixture)
 
       # The scheduled loop context carries no `:sandbox_config`, so the run reads
-      # the global sandbox. Establish it here and restore it on exit (CLAUDE.md:
+      # the global sandbox. Establish it here and restore it on exit (AGENTS.md:
       # a test that reads global app env establishes its own precondition).
       Application.put_env(:fermix_core, :sandbox, %{
         mode: :strict,

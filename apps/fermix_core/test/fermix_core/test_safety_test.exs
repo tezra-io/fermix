@@ -3,7 +3,7 @@ defmodule FermixCore.TestSafetyTest do
   Umbrella-wide test-hygiene invariants, read off every `apps/*/test` file.
 
   Each one exists because the repo learned it the hard way and because prose in
-  CLAUDE.md is not a gate: a rule nothing checks is a rule the next test breaks.
+  AGENTS.md is not a gate: a rule nothing checks is a rule the next test breaks.
   Both scan the whole umbrella, not this app — `mix test` runs every child in
   one VM, so the hazards are umbrella-wide.
   """

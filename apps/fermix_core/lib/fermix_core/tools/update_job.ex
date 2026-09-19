@@ -141,7 +141,7 @@ defmodule FermixCore.Tools.UpdateJob do
 
   # Clearing a pin and setting one are mutually exclusive: clear_route_pin=true
   # un-pins to default routing, so combining it with a provider/model is an
-  # ambiguous request, not a fallback. Reject it loud (CLAUDE.md #12).
+  # ambiguous request, not a fallback. Reject it loud (AGENTS.md #12).
   defp validate_clear_route_pin(args) do
     clear? = Map.get(args, "clear_route_pin") == true
     has_pin? = Support.optional_string(args, "provider") || Support.optional_string(args, "model")

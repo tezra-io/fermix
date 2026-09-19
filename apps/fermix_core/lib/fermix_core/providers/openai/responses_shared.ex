@@ -33,7 +33,7 @@ defmodule FermixCore.Providers.OpenAI.ResponsesShared do
   in the `%{effort: ...}` shape both Responses adapters share. `:none` (and
   `nil`) omit the field; a level above the provider's ceiling clamps (e.g.
   `:max` -> `"xhigh"` on OpenAI). Invalid or provider-unsupported values
-  raise — config bugs we refuse to silently round-trip (CLAUDE.md #6, #12).
+  raise — config bugs we refuse to silently round-trip (AGENTS.md #6, #12).
   Per-*model* rejection (a model that doesn't accept `xhigh`) stays the
   API's 400 to decide.
   """

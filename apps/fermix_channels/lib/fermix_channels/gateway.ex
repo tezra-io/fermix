@@ -72,7 +72,7 @@ defmodule FermixChannels.Gateway do
   # capability to plain data (the allowed emoji set) here and hands that to core.
   # `nil` ⇒ the `react` tool is not advertised; the model just sends a short text
   # ack. Never a runtime react-then-degrade branch — this is the one computed
-  # decision (CLAUDE.md #12).
+  # decision (AGENTS.md #12).
   defp build_reaction_spec(channel) do
     if function_exported?(channel, :reaction_capability, 0) do
       reaction_spec_for(channel.reaction_capability())

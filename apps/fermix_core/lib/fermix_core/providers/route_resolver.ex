@@ -344,7 +344,7 @@ defmodule FermixCore.Providers.RouteResolver do
   # so omitted-here = "use the provider's server-side default".
   #
   # Validation happens here, at config-read time, not deep in the adapter
-  # (CLAUDE.md #6 — fail loud at the public boundary). A hand-edited
+  # (AGENTS.md #6 — fail loud at the public boundary). A hand-edited
   # config.toml with `reasoning_effort = "absurd"` raises here on the very
   # first call to `RouteResolver.resolve!/1`, not partway through a tool
   # loop. Wizard writes (Stage 4) are pre-validated, so legitimate flows

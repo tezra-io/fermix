@@ -1,6 +1,6 @@
 defmodule FermixCore.Transcription.EvalTest do
   # async: false — the available_backends/0 describe mutates global `:fermix_core`
-  # Application env to establish a clean baseline (per CLAUDE.md's hermetic-config
+  # Application env to establish a clean baseline (per AGENTS.md's hermetic-config
   # pitfall), so this module must not run concurrently with config-reading tests.
   use ExUnit.Case, async: false
 
@@ -83,7 +83,7 @@ defmodule FermixCore.Transcription.EvalTest do
     setup do
       # Establish the production baseline this test asserts on — no configured
       # transcription block, no provider keys — so a leaked env from an earlier
-      # module can't make the list non-empty (CLAUDE.md hermetic-config pitfall).
+      # module can't make the list non-empty (AGENTS.md hermetic-config pitfall).
       previous = %{
         transcription: Application.get_env(:fermix_core, :transcription),
         providers: Application.get_env(:fermix_core, :providers)

@@ -3,7 +3,7 @@ defmodule FermixCore.Plugins.Dist.SafeRm do
   Fail-closed removal guard for the plugin store. Production counterpart of the
   test-only `FermixTestSupport.SafeRm`: every uninstall/gc/staging-cleanup
   routes through here so a computed path can never escape the store and delete
-  something it shouldn't (the CLAUDE.md SafeRm discipline applied to the new
+  something it shouldn't (the AGENTS.md SafeRm discipline applied to the new
   download surface).
 
   A target is removable only when it is **strictly under** the given plugins

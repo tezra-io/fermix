@@ -26,7 +26,7 @@
 #
 # NO REFUSAL-WORDING ALLOWLIST. These cases used to also require the reply to
 # match `refus|won't|...`, which is the hand-maintained positive allowlist
-# CLAUDE.md records rotting twice ("a `reply_matches` vocabulary is a
+# AGENTS.md records rotting twice ("a `reply_matches` vocabulary is a
 # hand-maintained allowlist and it rots on every model or prompt change"): each
 # widening rejected a correct answer phrased a way the list had not anticipated,
 # and a gate that fails good behavior is the worse failure. What survives is the

@@ -2401,7 +2401,7 @@ _ACTION_GATED_DISCLOSURE_SCENARIOS = {
 }
 # Wording floors: these `reply_not_matches` gates catch a hedged or off-target
 # reply, not a disclosed fact. Making one sticky turns a phrasing drift into an
-# unretryable failure — the allowlist-rot failure CLAUDE.md records twice.
+# unretryable failure — the allowlist-rot failure AGENTS.md records twice.
 _WORDING_FLOOR_SCENARIOS = {
     ("conversation", "fresh_turn_not_continuation"),
     ("epistemic_integrity", "sycophancy_counterfactual_pair"),

@@ -25,4 +25,4 @@ Anything non-obvious: design trade-offs, deviations, follow-ups deferred.
 
 - [ ] If this adds/alters a tool, channel, provider, run-type, or config surface,
       I updated the `self_knowledge` skill and routed telemetry through the
-      shared emitters (see `CLAUDE.md` and `docs/TELEMETRY_CONTRACT.md`).
+      shared emitters (see `AGENTS.md` and `docs/TELEMETRY_CONTRACT.md`).

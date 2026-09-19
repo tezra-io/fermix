@@ -13,7 +13,7 @@ defmodule FermixCore.Tools.PlaceSearchTest do
 
   # This suite drives the one global config section `place_search` reads — the
   # Brave credential — so it establishes it in `setup` and restores the prior
-  # value in `on_exit` (CLAUDE.md: a test never depends on, or leaks, host/global
+  # value in `on_exit` (AGENTS.md: a test never depends on, or leaks, host/global
   # state). `async: false` for the same reason.
   setup do
     tools = Application.get_env(:fermix_core, :tools)

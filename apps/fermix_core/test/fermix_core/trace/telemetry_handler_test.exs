@@ -190,7 +190,7 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
     assert entry["session_id"] == "mcp-session"
   end
 
-  # Registry-completeness invariant (CLAUDE.md "gate on the whole feature
+  # Registry-completeness invariant (AGENTS.md "gate on the whole feature
   # surface"): the assertion is "NO phase this emitter can emit is missing from
   # the JSONL stream", written as a loop over `phases/0` so a phase added later
   # either joins the invariant or fails here.

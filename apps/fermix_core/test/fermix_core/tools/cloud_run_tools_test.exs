@@ -6,7 +6,7 @@ defmodule FermixCore.Tools.CloudRunToolsTest do
   # async: false — the first-use consent gate (design §23.3) reads the global
   # `[fermix_core.harness]` app env (`Config.approved?`) and the setup seeds it;
   # an async test mutating `:harness` would reintroduce the order-dependent-env
-  # flake (CLAUDE.md pitfall).
+  # flake (AGENTS.md pitfall).
   use ExUnit.Case, async: false
 
   alias FermixCore.Tools.CancelCodingRun

@@ -44,7 +44,7 @@ Warnings are treated as errors. A behavior change must come with a test.
 ## Code style
 
 The non-negotiable code rules — linear flow, small functions, bounded loops,
-no swallowed errors, no silent fallbacks — live in [CLAUDE.md](CLAUDE.md).
+no swallowed errors, no silent fallbacks — live in [AGENTS.md](AGENTS.md).
 Please read that section before submitting; reviews enforce it.
 
 ## Reporting bugs & security issues

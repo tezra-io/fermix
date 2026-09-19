@@ -110,7 +110,7 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       # An operator-authored `[fermix_core.browser]` section can be refused by
       # `Browser.Config.current/0`, and doctor is the command that explains such
       # an install: it must report the row, never die with a MatchError and print
-      # nothing (CLAUDE.md, the `df`/tree-less-CLI pitfall).
+      # nothing (AGENTS.md, the `df`/tree-less-CLI pitfall).
       test "an invalid browser config is a row, not a crashed doctor run" do
         previous = Application.get_env(:fermix_core, :browser)
         on_exit(fn -> restore_env(:fermix_core, :browser, previous) end)
