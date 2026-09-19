@@ -295,6 +295,18 @@ defmodule FermixCore.Tools.ComputerUse do
         description: "the human paused computer use with /pause; refused until they run /resume"
       },
       %{
+        tag: "input_busy",
+        description:
+          "another conversation is driving the cursor and keyboard; nothing was sent. " <>
+            "Read-only actions still work — wait rather than re-sending"
+      },
+      %{
+        tag: "busy",
+        description:
+          "the previous computer-use action in this conversation has not answered yet; " <>
+            "nothing was sent. Wait for it instead of re-sending"
+      },
+      %{
         tag: "outcome unknown",
         description:
           "the helper stopped responding or exited during the action, so whether the input " <>
@@ -431,6 +443,17 @@ defmodule FermixCore.Tools.ComputerUse do
       "Accessibility (`fermix doctor` names the entry), then retry."
   end
 
+  # There is one cursor, one keyboard and one focused window on the machine, and
+  # another conversation is driving them. Nothing was sent, and there is no queue:
+  # a click that lands minutes later, on a screen that has moved on, is worse than
+  # a refusal — so the next move is to wait or to ask, never to re-send.
+  defp refusal_message({:refused, :input_busy}) do
+    "another conversation is driving this machine's cursor and keyboard right now, so this " <>
+      "action was not sent. Read-only actions (screenshot, elements, inspect) still work. " <>
+      "Wait for that work to finish, or tell the user you need the machine, before sending " <>
+      "this again."
+  end
+
   # Stop; do NOT retry (a retry loop would burn iterations against a hold the
   # model can't clear).
   defp refusal_message({:refused, :paused}) do
@@ -544,6 +567,7 @@ defmodule FermixCore.Tools.ComputerUse do
 
   defp refusal?(:action_budget_exhausted), do: true
   defp refusal?(:sidecar_unavailable), do: true
+  defp refusal?(:busy), do: true
   defp refusal?({:not_dispatched, _reason}), do: true
   defp refusal?(_reason), do: false
 
@@ -555,6 +579,11 @@ defmodule FermixCore.Tools.ComputerUse do
   defp unknown_dispatch?({:timeout, :cu_sidecar_action, _ms}), do: true
   defp unknown_dispatch?({:timeout, :cu_session_call, _ms}), do: true
   defp unknown_dispatch?({:sidecar_exited, _status}), do: true
+  defp unknown_dispatch?({:helper_fault, _reason}), do: true
+  defp unknown_dispatch?({:protocol_error, _detail}), do: true
+  # A sequence the helper stopped part way through: some of the input was already
+  # posted, which is the definition of an unknown dispatch, not a refusal.
+  defp unknown_dispatch?("cancelled"), do: true
   defp unknown_dispatch?(_reason), do: false
 
   defp courtesy_of(%{courtesy: courtesy}) when is_atom(courtesy), do: courtesy
@@ -599,15 +628,53 @@ defmodule FermixCore.Tools.ComputerUse do
   end
 
   # The OUTER call deadline, not the helper's. The session is still working — it was
-  # NOT reset, it did not die, and the next computer-use call queues behind the work
-  # still running — so telling the model to start over would be false, and repeating
-  # the action blindly is a double submit on something already dispatched.
+  # NOT reset and it did not die — so telling the model to start over would be
+  # false, and repeating the action blindly is a double submit on something already
+  # dispatched. The next call is refused as busy rather than queued behind it,
+  # which is the one thing the model needs to plan around.
   defp action_error_message({:timeout, :cu_session_call, ms}) do
     "outcome unknown: the computer-use session was still working #{ms} ms after this action " <>
       "was sent, so whether it finished cannot be told from here. The session was NOT reset " <>
-      "— it is still busy, and your next computer-use call waits for it. Wait, then take a " <>
-      "`screenshot` and read the current state before doing anything else; repeat this " <>
-      "action only if the screen shows it did not take effect."
+      "— it is still busy, and computer-use calls are refused as busy until it finishes. " <>
+      "Wait, then take a `screenshot` and read the current state before doing anything else; " <>
+      "repeat this action only if the screen shows it did not take effect."
+  end
+
+  # One action at a time per conversation: the previous one is still inside the
+  # helper. Nothing was sent, so this is a wait, never a re-send.
+  defp action_error_message(:busy) do
+    "this action was not sent: the previous computer-use action in this conversation is " <>
+      "still running. Wait for it to answer before sending another one; do not re-send it."
+  end
+
+  # The helper stopped a sequence part way through (a `/pause` during a drag, a
+  # cancelled wait). Some input was already posted and some was not, which is why
+  # this is an unknown outcome and not a refusal.
+  defp action_error_message("cancelled") do
+    "outcome unknown: this action was stopped part way through, so some of its input reached " <>
+      "the screen and some did not. Take a `screenshot` and read the current state before " <>
+      "doing anything else; repeat this action only if the screen shows it did not take effect."
+  end
+
+  # The process running this session's actions died under it. The action was
+  # already on its way when that happened, so dispatch is unknowable — the same
+  # verdict, and the same recovery, as a helper that stopped answering.
+  defp action_error_message({:helper_fault, _reason}) do
+    "outcome unknown: the computer-use helper stopped during this action, so whether it " <>
+      "reached the screen cannot be told from here. The session was reset and the next " <>
+      "action starts a fresh helper. Take a `screenshot` and read the current state before " <>
+      "doing anything else; repeat this action only if the screen shows it did not take effect."
+  end
+
+  # The helper answered without saying what it did with the input, which the wire
+  # requires of it. There is nothing here to infer from, and inferring is what the
+  # receipt exists to replace, so it is reported as the fault it is.
+  defp action_error_message({:protocol_error, :missing_receipt}) do
+    "outcome unknown: the computer-use helper did not report whether it sent this input, so " <>
+      "whether it reached the screen cannot be told from here. The session was reset and the " <>
+      "next action starts a fresh helper. Take a `screenshot` and read the current state " <>
+      "before doing anything else; repeat this action only if the screen shows it did not " <>
+      "take effect."
   end
 
   # The helper failed while the coexistence arbiter was checking whether the human

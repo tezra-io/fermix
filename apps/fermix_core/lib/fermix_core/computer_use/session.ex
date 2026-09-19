@@ -1,18 +1,27 @@
 defmodule FermixCore.ComputerUse.Session do
   @moduledoc """
   A supervised, per-conversation computer-use session: it owns the long-lived
-  OS-driver backend (the Port to the sidecar) across many actions, enforces the
-  access gate (§14) and the action budget, and emits the `cua_<id>` lifecycle
-  telemetry (docs/design/COMPUTER_USE.md §5–§9).
+  OS-driver backend across many actions, enforces the access gate (§14) and the
+  action budget, and emits the `cua_<id>` lifecycle telemetry
+  (docs/design/COMPUTER_USE.md §5–§9).
 
   `classify/2` is a fast, non-blocking decision (validate + budget + access gate),
-  kept separate from `execute/2` so the GenServer mailbox never blocks — there is
-  no human-in-the-loop confirmation to wait on (`:standard`'s confirm-before-
-  irreversible is a prompt principle the agent applies conversationally, not a gate
-  here). A refused action under `:strict` returns `{:error, {:refused, :strict_mode}}`.
+  kept separate from `execute/2` — there is no human-in-the-loop confirmation to
+  wait on (`:standard`'s confirm-before-irreversible is a prompt principle the
+  agent applies conversationally, not a gate here). A refused action under
+  `:strict` returns `{:error, {:refused, :strict_mode}}`.
 
-  `terminate/2` always stops the driver (releasing held input) — the load-bearing
-  teardown guarantee — and emits the lifecycle bookend.
+  **This process never blocks on the sidecar** (M42 slice 2 §6). The driver, and
+  therefore the Port, is owned by a linked `ActionWorker`: `execute/2` admits the
+  action, hands it over, and answers its caller from `handle_info/2`, so `/pause`,
+  `paused?`, `action_count/1` and teardown are all processed while an action is
+  under way. A second execute while one is in flight is `{:error, :busy}` rather
+  than a queue behind up to four 30 s driver calls. The pipeline itself stays here
+  and stays linear — `run_pipeline/2` takes a state snapshot and returns the same
+  `{:reply, …}` / `{:stop, …}` tuple this module applies, keeping its own `paused`.
+
+  `terminate/2` always stops the worker, which stops the driver (releasing held
+  input) — the load-bearing teardown guarantee — and emits the lifecycle bookend.
 
   `restart: :temporary`: an on-demand, per-conversation resource must NOT be
   auto-restarted by its `:one_for_one` supervisor. On abort (conversation/call
@@ -26,16 +35,30 @@ defmodule FermixCore.ComputerUse.Session do
   use GenServer, restart: :temporary
 
   alias Compux.Protocol
+  alias FermixCore.ComputerUse.ActionWorker
   alias FermixCore.ComputerUse.CaptureHealth
   alias FermixCore.ComputerUse.Config
   alias FermixCore.ComputerUse.Courtesy
+  alias FermixCore.ComputerUse.InputOwner
   alias FermixCore.ComputerUse.Safety
   alias FermixCore.ComputerUse.Telemetry
   alias FermixCore.Timeouts
 
   require Logger
 
+  # The state the execute pipeline reads and writes. It is snapshotted into the
+  # worker and merged back on the way out, which is also what keeps `paused` — the
+  # human's reclaim, which can land mid-action — out of the round trip: a snapshot
+  # is a moment older than this process, and applying one wholesale would silently
+  # un-pause a machine the human just took back.
+  @pipeline_keys [:action_count, :last_action_at, :view_region, :view_dims, :marks]
+
   @type courtesy_outcome :: :off | :unavailable | :proceeded | :deferred
+
+  # What the sidecar says it did with the input, from the response's `receipt`
+  # (M42 slice 2 §3). `:read` is not on the wire — a read-only action carries no
+  # receipt because it dispatches nothing.
+  @type dispatch :: :read | :not_sent | :sent | :partial | :unknown
 
   # What happened to the INPUT — the closed set every `computer_use` tool exec
   # records (M42 slice 1 §4.1). A successful reply carries one of the three
@@ -73,11 +96,12 @@ defmodule FermixCore.ComputerUse.Session do
   @doc """
   Run a finalized request through the driver; increments the action count.
 
-  The outer call deadline (`Timeouts.cu_session_call/0`) is a backstop that
-  outlives the driver's own inner sidecar-action receive (the cushion invariant);
-  if it ever fires, the `GenServer.call` *exit* is normalized through
-  `Timeouts.expired/3` so it logs/traces and returns the same structured shape as
-  the inner timeout (§3.6).
+  The work happens in this session's `ActionWorker`, so a second execute while one
+  is in flight answers `{:error, :busy}` rather than queueing. The outer call
+  deadline (`Timeouts.cu_session_call/0`) is a backstop that outlives the driver's
+  own inner sidecar-action receive (the cushion invariant); if it ever fires, the
+  `GenServer.call` *exit* is normalized through `Timeouts.expired/3` so it
+  logs/traces and returns the same structured shape as the inner timeout (§3.6).
   """
   @spec execute(GenServer.server(), map()) :: {:ok, action_result()} | {:error, term()}
   def execute(server, request) when is_map(request) do
@@ -99,10 +123,11 @@ defmodule FermixCore.ComputerUse.Session do
   lands promptly between the turn's serialized classify/execute calls — and because
   it can land BETWEEN them, `execute/2` re-checks rather than trusting classify's.
 
-  An action already inside the driver cannot be recalled (protocol 6 is one request
-  and one response, with no control channel), so it finishes. That fact is published
-  on the session's `Registry` value for `/pause` to read without calling this process,
-  which is blocked for as long as the sidecar takes.
+  Processed while an action is under way, because the driver lives in the
+  `ActionWorker` and this process is never inside it. An action already there cannot
+  be recalled (protocol 6 is one request and one response, with no control channel),
+  so it finishes. That fact is published on the session's `Registry` value for
+  `/pause` to read.
   """
   @spec pause(GenServer.server()) :: :ok
   def pause(server), do: GenServer.cast(server, :pause)
@@ -129,10 +154,13 @@ defmodule FermixCore.ComputerUse.Session do
     # inside the driver can correlate (F2). put_new: a test/caller override wins.
     driver_opts = Keyword.put_new(driver_opts, :session_id, session_id)
 
-    with :ok <- ensure_host_start_allowed(config, origin),
-         {:ok, driver_state} <- driver_mod.start(driver_opts) do
-      Process.flag(:trap_exit, true)
+    # Before the worker is started, so a worker whose driver fails to start is an
+    # `{:error, reason}` here rather than an exit signal that takes this process
+    # down before it can report one.
+    Process.flag(:trap_exit, true)
 
+    with :ok <- ensure_host_start_allowed(config, origin),
+         {:ok, worker} <- start_worker(driver_mod, driver_opts) do
       state = %{
         config: config,
         origin: origin,
@@ -140,8 +168,11 @@ defmodule FermixCore.ComputerUse.Session do
         # drop the key itself. `nil` when a caller started one directly (tests,
         # and any future unregistered use) — there is then nothing to leave.
         registered_name: Keyword.get(opts, :registered_name),
-        driver_mod: driver_mod,
-        driver_state: driver_state,
+        # The linked process that owns the driver and its Port, and the caller
+        # waiting on the action it is running (`nil` when idle — which is also what
+        # makes a second execute `:busy` rather than a second action on one seat).
+        worker: worker,
+        pending: nil,
         # Read once at start, never prompted for. Since the pointer warp, a click's
         # check cursor lands on target even when macOS silently DROPS the button
         # events (Accessibility not granted — capture works, input does not), so
@@ -150,7 +181,7 @@ defmodule FermixCore.ComputerUse.Session do
         # into one typed refusal per mutating action. Absent/failed probe reads as
         # available: only the explicit denied state is refused, so drivers that
         # predate the probe keep working and a broken probe cannot brick looking.
-        input_control?: probe_input_control(driver_mod, driver_state),
+        input_control?: ActionWorker.input_control?(worker),
         action_count: 0,
         session_id: session_id,
         parent_session: Keyword.get(opts, :parent_session),
@@ -184,6 +215,13 @@ defmodule FermixCore.ComputerUse.Session do
     end
   end
 
+  # Linked, so the sidecar's Port still dies with its session, and so a worker that
+  # stops for any reason is a message this process handles rather than a silent
+  # loss of the thing that runs actions.
+  defp start_worker(driver_mod, driver_opts) do
+    ActionWorker.start_link(driver: {driver_mod, driver_opts}, session: self())
+  end
+
   @impl true
   def handle_call({:classify, params}, _from, state) do
     result =
@@ -198,9 +236,9 @@ defmodule FermixCore.ComputerUse.Session do
     {:reply, result, state}
   end
 
-  def handle_call({:execute, request}, _from, state) do
-    case execute_precheck(state) do
-      :ok -> execute_in_flight(request, state)
+  def handle_call({:execute, request}, from, state) do
+    case execute_precheck(request, state) do
+      :ok -> dispatch_execute(request, from, state)
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
@@ -227,20 +265,32 @@ defmodule FermixCore.ComputerUse.Session do
     {:noreply, %{state | paused: false}}
   end
 
-  # A late/stale sidecar response arriving after a prior action timed out. The
-  # protocol matches responses by Port order (no request-id today), so a stale
-  # one would desync onto the next action — drain it. Matches only the driver's
-  # own port; anything else falls to the catch-all. (Fixes the cryptic
-  # "received unexpected message in handle_info/2" the incident produced.)
+  # The worker finished the action: reply to the caller that has been waiting since
+  # `handle_call({:execute, …})` returned `{:noreply, …}`, then apply the pipeline's
+  # own state — the reply-then-stop tuple included, so the five sites that must
+  # answer before the session dies still do, in the same order.
   @impl true
-  def handle_info({port, {:data, _data}}, %{driver_state: %{port: port}} = state) do
-    Logger.debug("computer_use: dropping stale sidecar response after a prior timeout")
+  def handle_info({:action_result, {:reply, reply, exec_state}}, %{pending: from} = state)
+      when not is_nil(from) do
+    state = settle(state, exec_state)
+    GenServer.reply(from, reply)
     {:noreply, state}
   end
 
-  def handle_info({port, {:exit_status, status}}, %{driver_state: %{port: port}} = state) do
-    Logger.warning("computer_use: sidecar exited (status #{status}); stopping session")
-    {:stop, sidecar_exit_reason(status), state}
+  def handle_info({:action_result, {:stop, reason, reply, exec_state}}, %{pending: from} = state)
+      when not is_nil(from) do
+    state = settle(state, exec_state)
+    GenServer.reply(from, reply)
+    {:stop, reason, state}
+  end
+
+  # The worker is gone, so this session has no way to act. Its exit reason carries
+  # the fault (including the sidecar's own exit status, which is classified HERE
+  # because `note_capture_wedge/1` and `emit_lifecycle_end/2` read the same shapes),
+  # and a caller waiting on an action it will never finish is answered first.
+  def handle_info({:EXIT, worker, reason}, %{worker: worker} = state) do
+    Logger.warning("computer_use: action worker stopped (#{inspect(reason)}); stopping session")
+    {:stop, worker_stop_reason(reason), reply_pending(state, {:error, {:helper_fault, reason}})}
   end
 
   def handle_info({:EXIT, _pid, reason}, state) do
@@ -257,9 +307,25 @@ defmodule FermixCore.ComputerUse.Session do
   def terminate(reason, state) do
     deregister(state.registered_name)
     note_capture_wedge(reason)
-    state.driver_mod.stop(state.driver_state)
+    ActionWorker.stop(state.worker)
     emit_lifecycle_end(reason, state)
     :ok
+  end
+
+  # The worker's own exit status is the sidecar's; everything else is the worker's
+  # fault reason, passed through so the lifecycle row names it.
+  defp worker_stop_reason({:shutdown, {:sidecar_exit_status, status}}),
+    do: sidecar_exit_reason(status)
+
+  defp worker_stop_reason(reason), do: reason
+
+  defp reply_pending(%{pending: nil} = state, _reply), do: state
+
+  defp reply_pending(%{pending: from} = state, reply) do
+    GenServer.reply(from, reply)
+    state = %{state | pending: nil}
+    publish_in_flight(state, false)
+    state
   end
 
   # Leave the registry from inside the process that owns the entry, so the key is
@@ -353,30 +419,6 @@ defmodule FermixCore.ComputerUse.Session do
       else: {:error, {:refused, :input_control_denied}}
   end
 
-  # KNOWN GAP, left open deliberately: a probe that TIMED OUT (rather than answered
-  # an error) leaves the Port desynchronised — pairing is positional, so its late
-  # frame becomes the first action's reply — and this still logs and continues.
-  # Refusing here would fail `init` and re-design the fail-open gate above, and the
-  # whole desync class disappears once the wire carries request ids. Every driver
-  # call INSIDE an execute is routed to the poison reset; this one start-up call is
-  # the exception, and it is the exception on purpose.
-  defp probe_input_control(driver_mod, driver_state) do
-    case driver_mod.execute(driver_state, %{"action" => "probe"}) do
-      {:ok, %{"input_control" => false}} ->
-        false
-
-      {:ok, _probe} ->
-        true
-
-      {:error, reason} ->
-        Logger.warning(
-          "computer-use input-control probe failed (treated as granted): " <> inspect(reason)
-        )
-
-        true
-    end
-  end
-
   # Coordinate-space guard. A `region` screenshot returns a MAGNIFIED crop, and the
   # coordinates the model reads off it only mean something when the same region
   # rides the follow-up click — otherwise the sidecar reads them in full-screen
@@ -463,25 +505,56 @@ defmodule FermixCore.ComputerUse.Session do
     }
   end
 
-  # `/pause` is a cast, so it can land AFTER this request was classified and BEFORE
-  # it reaches `execute` — precisely the window the human is trying to close. The
-  # classify-time check alone leaves it open, so the same typed refusal is applied
-  # here too, before any driver call.
-  defp execute_precheck(%{paused: true}), do: {:error, {:refused, :paused}}
-  defp execute_precheck(state), do: check_budget(state)
+  # Admission, in the order the refusals matter. `/pause` is a cast, so it can land
+  # AFTER this request was classified and BEFORE it reaches `execute` — precisely
+  # the window the human is trying to close — so the classify-time check is
+  # repeated here, before anything reaches the worker. The native input seat is
+  # taken last, because it is the only step that changes anything outside this
+  # process and nothing after it can fail.
+  defp execute_precheck(_request, %{paused: true}), do: {:error, {:refused, :paused}}
 
-  # The whole execute — courtesy probes included, since each is a blocking driver
-  # call — runs with the in-flight flag published. `after`: no reply, stop, error or
-  # raise may leave it stuck true, because a stuck flag would make `/pause` claim an
-  # action is under way forever.
-  defp execute_in_flight(request, state) do
+  defp execute_precheck(_request, %{pending: from}) when not is_nil(from),
+    do: {:error, :busy}
+
+  defp execute_precheck(request, state) do
+    with :ok <- check_budget(state), do: acquire_input(request)
+  end
+
+  # One conversation drives the cursor at a time (M42 slice 2 §6). Read-only
+  # actions never take the seat — two conversations may look at the same screen —
+  # and `Courtesy`'s notion of disturbing is the right one here: `mouse_move`
+  # mutates nothing yet warps the pointer out from under whoever holds it.
+  defp acquire_input(request) do
+    if Courtesy.disturbing?(request["action"]),
+      do: input_seat(InputOwner.acquire(self())),
+      else: :ok
+  end
+
+  # A seat another conversation holds is a refusal like the access posture's and
+  # the pause's, so it renders through the one refusal path the tool already has
+  # and traces as `refused` rather than as a failed action.
+  defp input_seat(:ok), do: :ok
+  defp input_seat({:error, :input_busy}), do: {:error, {:refused, :input_busy}}
+
+  # Hand the action to the worker with the slice of state the pipeline needs, and
+  # leave the caller waiting. The in-flight flag is published BEFORE the hand-off,
+  # so a `/pause` landing in between still reports the action that will land, and
+  # it is cleared on both ways out of that window: the result arriving (`settle/2`)
+  # and the worker dying (`reply_pending/2`).
+  defp dispatch_execute(request, from, state) do
+    state = %{state | pending: from}
     publish_in_flight(state, true)
+    ActionWorker.execute(state.worker, request, Map.take(state, [:config | @pipeline_keys]))
+    {:noreply, state}
+  end
 
-    try do
-      execute_with_courtesy(request, state)
-    after
-      publish_in_flight(state, false)
-    end
+  # Apply what the pipeline changed, and nothing else: `paused` and the worker are
+  # this process's own, and the snapshot that came back is a moment older than they
+  # are.
+  defp settle(state, exec_state) do
+    state = Map.merge(%{state | pending: nil}, Map.take(exec_state, @pipeline_keys))
+    publish_in_flight(state, false)
+    state
   end
 
   # This session's `Registry` value is its call-free surface: the `cua_…` id (so a
@@ -505,6 +578,23 @@ defmodule FermixCore.ComputerUse.Session do
   end
 
   defp publish_in_flight(%{registered_name: nil}, _flag), do: :ok
+
+  @doc """
+  Run one admitted request: the courtesy arbiter, the action, its post-action
+  check, and normalisation.
+
+  Called by this session's `ActionWorker`, in the worker's process, because that is
+  where the driver handle lives — `state` is the snapshot `dispatch_execute/3` sent
+  with the driver keys merged in. It returns the same `{:reply, reply, state}` /
+  `{:stop, reason, reply, state}` tuple a `handle_call` would, and `handle_info/2`
+  applies it. The code stays here, where a reader looking for what an action does
+  will look, and stays linear: one state in, one tuple out, no callback machine.
+  """
+  @spec run_pipeline(map(), map()) ::
+          {:reply, term(), map()} | {:stop, term(), term(), map()}
+  def run_pipeline(request, state) when is_map(request) and is_map(state) do
+    execute_with_courtesy(request, state)
+  end
 
   # Coexistence gate (V3 R0): before a DISTURBING action, when courtesy is on, yield
   # to a present human. This is the one place that does the idle I/O — the decision
@@ -589,28 +679,66 @@ defmodule FermixCore.ComputerUse.Session do
 
   defp run_action(request, state, courtesy) do
     case state.driver_mod.execute(state.driver_state, request) do
-      {:ok, response} -> check_action(request, response, state, courtesy)
+      {:ok, response} -> receipt_action(request, response, state, courtesy)
       {:error, reason} -> action_failure(reason, state)
     end
   end
 
+  # The receipt is read BEFORE the check, because the check swaps the response the
+  # model reads (`crop_check/3`) and the receipt belongs to the ACTION. A mutating
+  # action that arrives without one is a protocol fault, not a case to infer
+  # around: inferring dispatch from what the check happened to return is exactly
+  # the habit receipts exist to end.
+  defp receipt_action(request, response, state, courtesy) do
+    case action_dispatch(request, response) do
+      {:ok, dispatch} -> check_action(request, response, state, courtesy, dispatch)
+      :error -> missing_receipt(state)
+    end
+  end
+
+  # What the sidecar says it did with the input (M42 slice 2 §3). A read-only
+  # action dispatches nothing and carries no receipt by protocol.
+  @spec action_dispatch(map(), map()) :: {:ok, dispatch()} | :error
+  defp action_dispatch(request, response) do
+    if Protocol.read_only?(request["action"]),
+      do: {:ok, :read},
+      else: receipt_dispatch(response["receipt"])
+  end
+
+  defp receipt_dispatch(%{"dispatch" => "not_sent"}), do: {:ok, :not_sent}
+  defp receipt_dispatch(%{"dispatch" => "sent"}), do: {:ok, :sent}
+  defp receipt_dispatch(%{"dispatch" => "partial"}), do: {:ok, :partial}
+  defp receipt_dispatch(%{"dispatch" => "unknown"}), do: {:ok, :unknown}
+  defp receipt_dispatch(_absent_or_malformed), do: :error
+
+  # The helper answered a mutating action without saying what it did with the
+  # input, which the wire requires of it. Nothing here can tell whether the click
+  # landed, so the caller gets an honest "unknown" and the session resets: a helper
+  # that breaks the contract on one action cannot be trusted with the next.
+  # Reply-then-stop, like the other five fault stops, so the caller is never left
+  # without a receipt.
+  defp missing_receipt(state) do
+    {:stop, {:shutdown, :protocol_error}, {:error, {:protocol_error, :missing_receipt}}, state}
+  end
+
   # The action came back; its post-action check still may not. A check whose driver
   # call timed out or died poisoned the Port, but the ACTION already ran — so the
-  # reply still reports it performed and unverified, and the session stops AFTER
-  # that reply. Reply-then-stop is the existing timeout shape, not a second
+  # reply still reports what the receipt said about the input, and the session stops
+  # AFTER that reply. Reply-then-stop is the existing timeout shape, not a second
   # mechanism, and the action is counted because it happened.
-  defp check_action(request, response, state, courtesy) do
+  defp check_action(request, response, state, courtesy, dispatch) do
     case crop_check(request, response, state) do
       {:ok, view_request, view_response} ->
-        reply_action(request, view_request, view_response, state, courtesy)
+        reply_action(request, view_request, view_response, state, courtesy, dispatch)
 
       {:check_lost, reason} ->
-        {:stop, driver_stop_reason(reason), {:ok, lost_check_result(reason, courtesy)},
+        {:stop, driver_stop_reason(reason),
+         {:ok, lost_check_result(reason, courtesy, unverified_outcome(dispatch))},
          count_action(state, request)}
     end
   end
 
-  defp reply_action(request, view_request, view_response, state, courtesy) do
+  defp reply_action(request, view_request, view_response, state, courtesy, dispatch) do
     note_capture_health(view_response)
 
     state =
@@ -624,12 +752,12 @@ defmodule FermixCore.ComputerUse.Session do
           result
           |> annotate_view(view_request, view_response)
           |> Map.put(:courtesy, courtesy)
-          |> Map.put(:outcome, action_outcome(request, view_response))
+          |> Map.put(:outcome, action_outcome(dispatch, view_response))
 
         {:reply, {:ok, result}, state}
 
       {:error, reason} ->
-        unreadable_check(request, reason, state, courtesy)
+        unreadable_check(request, reason, state, courtesy, dispatch)
     end
   end
 
@@ -639,10 +767,11 @@ defmodule FermixCore.ComputerUse.Session do
   # performed and unverified, never failed — a failure here buys a second real click
   # for a picture the helper mangled. The Port is healthy (a whole frame arrived and
   # was paired), so the session lives on.
-  defp unreadable_check(request, reason, state, courtesy) do
+  defp unreadable_check(request, reason, state, courtesy, dispatch) do
     if Protocol.read_only?(request["action"]),
       do: {:reply, {:error, reason}, state},
-      else: {:reply, {:ok, unverified_result(reason, courtesy)}, state}
+      else:
+        {:reply, {:ok, unverified_result(reason, courtesy, unverified_outcome(dispatch))}, state}
   end
 
   defp count_action(state, request) do
@@ -650,16 +779,27 @@ defmodule FermixCore.ComputerUse.Session do
     |> mark_action_time(request["action"])
   end
 
-  # What happened to the INPUT (§4.1). A read dispatches none; a mutating action
-  # whose check came back is `performed`; one whose check could not be captured is
-  # `performed_unverified` — never "failed", because the input was sent.
-  defp action_outcome(request, view_response) do
-    cond do
-      Protocol.read_only?(request["action"]) -> :read
-      Map.has_key?(view_response, "check_failed") -> :performed_unverified
-      true -> :performed
-    end
+  # What happened to the INPUT (§4.1), read off the sidecar's receipt rather than
+  # inferred (M42 slice 2 §6). A read dispatches none; input the helper never sent
+  # is a refusal; input it sent and then saw is `performed`, and `performed_unverified`
+  # when the after-image could not be captured — never "failed", because the input
+  # was sent. Input it half sent, or cannot account for, is exactly `unknown`.
+  @spec action_outcome(dispatch(), map()) :: outcome()
+  defp action_outcome(:read, _view_response), do: :read
+  defp action_outcome(:not_sent, _view_response), do: :refused
+  defp action_outcome(:partial, _view_response), do: :unknown
+  defp action_outcome(:unknown, _view_response), do: :unknown
+
+  defp action_outcome(:sent, view_response) do
+    if Map.has_key?(view_response, "check_failed"),
+      do: :performed_unverified,
+      else: :performed
   end
+
+  # The action returned but its check never arrived or could not be read. The
+  # receipt still rules: only input the helper says it SENT is performed-and-
+  # unverified; anything else keeps the verdict the receipt gave it.
+  defp unverified_outcome(dispatch), do: action_outcome(dispatch, %{"check_failed" => true})
 
   # A timeout or a sidecar death ON THE ACTION ITSELF: whether the input reached the
   # desktop is unknowable from here, and the Port is desynchronised (responses match
@@ -980,21 +1120,21 @@ defmodule FermixCore.ComputerUse.Session do
       "result before repeating it, and never re-send it blindly."
   end
 
-  defp unverified_result(detail, courtesy) do
+  defp unverified_result(detail, courtesy, outcome) do
     %{
       summary: unverified_summary(detail),
       image: nil,
       courtesy: courtesy,
-      outcome: :performed_unverified
+      outcome: outcome
     }
   end
 
   # The check never came back at all, so this session is also ending. Same receipt,
   # plus the one thing the model must know to plan its next call.
-  defp lost_check_result(reason, courtesy) do
+  defp lost_check_result(reason, courtesy, outcome) do
     reason
     |> driver_fault()
-    |> unverified_result(courtesy)
+    |> unverified_result(courtesy, outcome)
     |> Map.update!(
       :summary,
       &(&1 <> " The computer-use session was reset, so your next action starts a fresh helper.")

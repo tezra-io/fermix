@@ -48,11 +48,18 @@ defmodule FermixCore.ComputerUse.ViewRegionTest do
 
       case request["action"] do
         # Mirror compux: with `screenshot_after: false` a mutating action
-        # returns a bare ack — the session takes its own crop check.
+        # returns a bare ack — the session takes its own crop check. Either shape
+        # carries the wire's `receipt` (M42 slice 2 §3), which is what the
+        # session's `outcome` is derived from.
         action when action in ~w(left_click right_click double_click left_click_drag scroll) ->
           if request["screenshot_after"] == false,
-            do: {:ok, %{"ok" => true}},
-            else: {:ok, %{"data" => Base.encode64("png"), "mime" => "image/png"}}
+            do: {:ok, receipt_ack()},
+            else:
+              {:ok,
+               Map.merge(receipt_ack(), %{
+                 "data" => Base.encode64("png"),
+                 "mime" => "image/png"
+               })}
 
         # Only pixel-returning actions move the view; these must not.
         "elements" ->
@@ -87,6 +94,9 @@ defmodule FermixCore.ComputerUse.ViewRegionTest do
 
     @impl true
     def stop(_state), do: :ok
+
+    defp receipt_ack,
+      do: %{"ok" => true, "receipt" => FermixTestSupport.ComputerUseReceipts.receipt(:sent)}
   end
 
   # A driver whose screenshots report a FIXED cursor position, so a click's own check
@@ -105,7 +115,8 @@ defmodule FermixCore.ComputerUse.ViewRegionTest do
       {:ok, if(cursor, do: Map.put(base, "cursor", cursor), else: base)}
     end
 
-    def execute(_state, _request), do: {:ok, %{"ok" => true}}
+    def execute(_state, request),
+      do: {:ok, FermixTestSupport.ComputerUseReceipts.stamp(%{"ok" => true}, request)}
 
     @impl true
     def stop(_state), do: :ok
@@ -142,7 +153,8 @@ defmodule FermixCore.ComputerUse.ViewRegionTest do
         else: {:error, :capture_failed}
     end
 
-    def execute(_state, _request), do: {:ok, %{"ok" => true}}
+    def execute(_state, request),
+      do: {:ok, FermixTestSupport.ComputerUseReceipts.stamp(%{"ok" => true}, request)}
 
     @impl true
     def stop(_state), do: :ok

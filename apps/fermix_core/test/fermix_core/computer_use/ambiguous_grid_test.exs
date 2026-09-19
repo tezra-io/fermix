@@ -69,7 +69,10 @@ defmodule FermixCore.ComputerUse.AmbiguousGridTest do
     defp respond(_state, %{"action" => "elements"}),
       do: {:ok, %{"elements" => [%{"role" => "AXButton", "x" => 40, "y" => 50}]}}
 
-    defp respond(_state, _request), do: {:ok, %{"ok" => true}}
+    # Every mutating reply carries the wire's `receipt` (M42 slice 2 §3), which is
+    # what the session's `outcome` is derived from.
+    defp respond(_state, request),
+      do: {:ok, FermixTestSupport.ComputerUseReceipts.stamp(%{"ok" => true}, request)}
 
     @impl true
     def stop(_state), do: :ok
