@@ -69,8 +69,12 @@ defmodule FermixCore.Providers.Anthropic.Messages do
   @non_streaming_max_tokens 16_384
   @cache_control %{type: "ephemeral"}
   # Marker left in place of an older screenshot's image bytes once it falls
-  # outside the retention window (ScreenshotRetention) — keeps the textual trail.
-  @screenshot_elided "[earlier screenshot omitted to bound context]"
+  # outside the retention window (ScreenshotRetention) — it keeps the textual
+  # trail, so it has to VOID it: that text describes a picture in the present
+  # tense ("this is what is really on screen", "coordinates are pixels in this
+  # exact image") and, with the bytes gone, every one of those sentences is a
+  # claim about something the model can no longer see (M42 §6.1).
+  @screenshot_elided "[the image this text describes was dropped to bound context: it is a record of a past look, not a current view, and no coordinate or id in it can be used]"
   # Claude 4.7+ and the 5 generation reject sampling params
   # (temperature/top_p/top_k) with a 400 — §5.1.
   @no_sampling_substrings [

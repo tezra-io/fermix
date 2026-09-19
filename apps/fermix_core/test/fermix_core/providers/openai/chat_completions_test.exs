@@ -472,7 +472,7 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletionsTest do
 
   describe "continue/3 screenshot retention" do
     @screenshot_label "Image returned by the preceding tool call:"
-    @screenshot_elided "[earlier tool image omitted to bound context]"
+    @screenshot_elided "[the image the preceding tool result describes was dropped to bound context: it is a record of a past look, not a current view, and no coordinate or id in it can be used]"
 
     test "keeps only the most recent N screenshots; older image bytes are elided" do
       test_pid = self()
