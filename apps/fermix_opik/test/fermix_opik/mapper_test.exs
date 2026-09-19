@@ -420,6 +420,37 @@ defmodule FermixOpik.MapperTest do
            }
   end
 
+  # M42 slice 4: the reference pair. Which mechanism the input went out by, and
+  # what the helper observed of it, are two closed enums; the VALUE a `set_value`
+  # carried is content and must never ride always-on metadata, whatever the
+  # capture posture — a span that leaked one would put a password in a trace.
+  test "tool_span keeps the input method and the effect, and never the value" do
+    metadata = %{
+      tool: "computer_use",
+      success: true,
+      cu_session: "cua_ab12",
+      outcome: :performed,
+      input_method: "ax",
+      effect: :verified,
+      element_ref: "e4",
+      value: "hunter2"
+    }
+
+    span =
+      Mapper.tool_span(metadata, %{duration_ms: 12},
+        trace_id: "t",
+        project_name: "fermix",
+        ended: @ended
+      )
+
+    assert span.metadata == %{
+             cu_session: "cua_ab12",
+             outcome: :performed,
+             input_method: "ax",
+             effect: :verified
+           }
+  end
+
   test "tool_span keeps the outbound MCP server identity" do
     metadata = %{tool: "acme_get_note_markdown", success: true, mcp_server: "acme"}
 

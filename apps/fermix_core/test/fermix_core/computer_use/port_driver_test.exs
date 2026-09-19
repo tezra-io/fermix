@@ -18,7 +18,7 @@ defmodule FermixCore.ComputerUse.PortDriverTest do
     assert is_pid(transport)
 
     # A reply that hands back coordinates names the image they belong to
-    # (protocol 8), which the fake mints exactly as the helper does.
+    # (protocol 9), which the fake mints exactly as the helper does.
     assert {:ok, %{"ok" => true, "observation_id" => "boot-fake-1"}} =
              PortDriver.execute(state, %{"action" => "screenshot"})
 
@@ -125,7 +125,7 @@ defmodule FermixCore.ComputerUse.PortDriverTest do
     assert :ok = PortDriver.stop(state)
   end
 
-  # The addressing half of protocol 8, at the wire: a pointer action must name the
+  # The addressing half of the wire (protocol 9): a pointer action must name the
   # image its coordinates were read in and must not carry a rectangle, and every
   # refusal of one dispatched nothing. The fake answers exactly as the helper does,
   # so the session's sentences are exercised against a real Port rather than a map.
@@ -208,6 +208,113 @@ defmodule FermixCore.ComputerUse.PortDriverTest do
 
       assert :ok = PortDriver.stop(state)
     end
+  end
+
+  # References, at the wire (protocol 9). An accessibility action answers its own
+  # input method and the effect its read-back earned — never the HID receipt a
+  # click gets, which would make "the pointer did it" indistinguishable from "the
+  # control did it".
+  test "an accessibility action answers the ax input method and its own effect" do
+    {:ok, state} = PortDriver.start(binary_path: @fake)
+
+    assert {:ok, %{"receipt" => pressed}} =
+             PortDriver.execute(state, %{
+               "action" => "press",
+               "observation_id" => "boot-fake-1",
+               "element_ref" => "e1"
+             })
+
+    assert pressed["input_method"] == "ax"
+    assert pressed["dispatch"] == "sent"
+    assert pressed["effect"] == "not_observed"
+    assert pressed["foreground_changed"] == false
+
+    assert {:ok, %{"receipt" => %{"effect" => "verified"}}} =
+             PortDriver.execute(state, %{
+               "action" => "set_value",
+               "observation_id" => "boot-fake-1",
+               "element_ref" => "e2",
+               "value" => "chess"
+             })
+
+    # The secure field reads back masked, so the set is real and the read-back
+    # proves nothing.
+    assert {:ok, %{"receipt" => %{"effect" => "not_observed"}}} =
+             PortDriver.execute(state, %{
+               "action" => "set_value",
+               "observation_id" => "boot-fake-1",
+               "element_ref" => "e3",
+               "value" => "hunter2"
+             })
+
+    assert :ok = PortDriver.stop(state)
+  end
+
+  # Each refusal the references bring, with the receipt that says nothing was
+  # dispatched. A fake that refused less than the helper would let a shape the
+  # helper rejects pass every test in this repo.
+  test "the reference refusals all arrive with a not_sent receipt" do
+    {:ok, state} = PortDriver.start(binary_path: @fake)
+
+    refusals = [
+      {%{"action" => "press", "observation_id" => "boot-fake-1"}, "element_required"},
+      {%{"action" => "press", "observation_id" => "boot-fake-1", "element_ref" => "e99"},
+       "stale_element"},
+      {%{
+         "action" => "left_click",
+         "observation_id" => "boot-fake-1",
+         "element_ref" => "e1",
+         "x" => 1,
+         "y" => 2
+       }, "addressing_conflict"},
+      {%{"action" => "type", "text" => "hi", "element_ref" => "e1"}, "unknown_field"}
+    ]
+
+    for {request, code} <- refusals do
+      assert {:error, {:action_failed, payload}} = PortDriver.execute(state, request)
+      assert payload["error"] == code
+      assert payload["receipt"]["dispatch"] == "not_sent"
+    end
+
+    assert :ok = PortDriver.stop(state)
+  end
+
+  for code <- ~w(element_disabled ax_action_unsupported) do
+    test "the helper's #{code} arrives with a not_sent receipt" do
+      {:ok, state} =
+        PortDriver.start(
+          binary_path: @fake,
+          env: [{~c"FAKE_ELEMENT_ERROR", ~c"#{unquote(code)}"}]
+        )
+
+      assert {:error, {:action_failed, payload}} =
+               PortDriver.execute(state, %{
+                 "action" => "press",
+                 "observation_id" => "boot-fake-1",
+                 "element_ref" => "e1"
+               })
+
+      assert payload["error"] == unquote(code)
+      assert payload["receipt"]["dispatch"] == "not_sent"
+
+      assert :ok = PortDriver.stop(state)
+    end
+  end
+
+  test "an elements reply names its controls, what they support, and what it left out" do
+    {:ok, state} = PortDriver.start(binary_path: @fake)
+
+    assert {:ok, %{"elements" => [first | _rest] = elements} = reply} =
+             PortDriver.execute(state, %{"action" => "elements"})
+
+    assert is_binary(reply["observation_id"])
+    assert reply["truncated"] == "nodes"
+    assert first["element_ref"] == "e1"
+    assert first["label"] == "Save"
+    assert first["actions"] == ["press"]
+    assert Enum.any?(elements, &(&1["enabled"] == false)), "a disabled control is still listed"
+
+    assert :ok = PortDriver.stop(state)
   end
 
   # The one message that says the sidecar is gone, and the only place a status the

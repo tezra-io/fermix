@@ -408,6 +408,11 @@ defmodule FermixOpik.TraceFileTest do
       # the code when it named no addressable one.
       "observation_age_ms" => 5_100,
       "geometry_refusal" => "expired_observation",
+      # References (M42 slice 4): which mechanism the input went out by, and what
+      # the helper observed of it.
+      "input_method" => "ax",
+      "effect" => "verified",
+      "value" => "hunter2",
       "screen_text" => "Transfer $4,000 to account 12345"
     }
 
@@ -418,6 +423,9 @@ defmodule FermixOpik.TraceFileTest do
     assert meta.outcome == "performed_unverified"
     assert meta.observation_age_ms == 5_100
     assert meta.geometry_refusal == "expired_observation"
+    assert meta.input_method == "ax"
+    assert meta.effect == "verified"
+    refute Map.has_key?(meta, :value), "the value a set_value carried is content, not a row field"
     refute Map.has_key?(meta, :screen_text)
   end
 

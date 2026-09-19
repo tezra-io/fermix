@@ -15,12 +15,23 @@ defmodule FermixCore.ComputerUse.Courtesy do
   never brick computer-use, only drop it back to the pre-coexistence behavior.
   """
 
-  # Actions that move the cursor or type: they DISTURB a present human. Note this is
-  # deliberately BROADER than `Compux.Protocol.read_only?/1` — `mouse_move` is
-  # read-only there (it mutates no app state) yet it visibly warps the cursor, so the
-  # coexistence layer counts it as disturbing. "Disturbing" and "mutating" are two
-  # different properties; this is the split the V3 design calls for.
-  @disturbing ~w(left_click right_click double_click mouse_move left_click_drag scroll type key paste)
+  alias Compux.Protocol
+
+  # Actions that act on the machine the human is sitting at: they DISTURB them.
+  # DERIVED, not listed (M42 slice 4 §4): every action the library offers that is
+  # not read-only is disturbing, so an action added later — `press`, `set_value`,
+  # whatever follows — joins the courtesy wait, the input seat and the action stamp
+  # by construction rather than by someone remembering this list.
+  #
+  # Deliberately BROADER than `Compux.Protocol.read_only?/1` on one action:
+  # `mouse_move` is read-only there (it mutates no app state) yet it visibly warps
+  # the cursor, so the coexistence layer counts it. "Disturbing" and "mutating" are
+  # two different properties; this is the split the V3 design calls for.
+  @always_disturbing ~w(mouse_move)
+
+  @disturbing Enum.uniq(
+                Enum.reject(Protocol.actions(), &Protocol.read_only?/1) ++ @always_disturbing
+              )
 
   # Max time the agent waits in-turn for the human to go idle before it steps aside.
   # An internal tuning bound, not an operator knob — config exposes only whether

@@ -81,6 +81,22 @@ defmodule FermixCore.ComputerUse.Session do
   # receipt because it dispatches nothing.
   @type dispatch :: :read | :not_sent | :sent | :partial | :unknown
 
+  # What the helper OBSERVED of the action's result, and by which mechanism the
+  # input went out (M42 slice 4 §3.3). `:verified` is a read-back that matched;
+  # `:not_observed` is a result the method cannot answer for; `:unknown` on an
+  # accessibility call is the one that timed out after it was made.
+  @type effect :: :verified | :not_observed | :unknown
+
+  # The receipt as this side reads it: the dispatch verdict, plus the two closed
+  # facts a trace and a sentence both need, plus whether the action pulled its
+  # application to the front.
+  @type receipt :: %{
+          dispatch: dispatch(),
+          effect: effect() | nil,
+          input_method: String.t() | nil,
+          foreground_changed: boolean() | nil
+        }
+
   # What happened to the INPUT — the closed set every `computer_use` tool exec
   # records (M42 slice 1 §4.1). A successful reply carries one of the three
   # non-terminal values; `refused` and `unknown` describe the error tuples this
@@ -95,6 +111,8 @@ defmodule FermixCore.ComputerUse.Session do
           required(:image) => map() | nil,
           required(:courtesy) => courtesy_outcome(),
           required(:outcome) => outcome(),
+          optional(:input_method) => String.t(),
+          optional(:effect) => effect(),
           optional(:observation_age_ms) => non_neg_integer()
         }
 
@@ -496,6 +514,7 @@ defmodule FermixCore.ComputerUse.Session do
     confirm_grid? = params["confirm_grid"] == true
 
     with :ok <- Observations.check_addressing(state.observations, params),
+         :ok <- check_value_type(params),
          {:ok, params, mark_resolved?} <- Observations.resolve_mark(state.observations, params),
          {:ok, request} <- Protocol.validate(params),
          :ok <- check_budget(state),
@@ -507,6 +526,15 @@ defmodule FermixCore.ComputerUse.Session do
       end
     end
   end
+
+  # The schema says `value` is a string and models send numbers anyway. Caught
+  # here, with a sentence, rather than leaving it to a helper that can only answer
+  # with a code: a set of `42` and a set of `"42"` are different acts in a field
+  # that formats its input, so nothing coerces one into the other.
+  defp check_value_type(%{"action" => "set_value", "value" => value}) when not is_binary(value),
+    do: {:error, :value_must_be_text}
+
+  defp check_value_type(_params), do: :ok
 
   # Refuse what macOS would silently drop. Read-only actions never need the
   # input grant, so looking keeps working ungated.
@@ -723,8 +751,8 @@ defmodule FermixCore.ComputerUse.Session do
   defp refused_action(request, payload, state) do
     state = forget_observation(request, payload, state)
 
-    case action_dispatch(request, payload) do
-      {:ok, dispatch} -> {:reply, {:error, failure(payload, unverified_outcome(dispatch))}, state}
+    case action_receipt(request, payload) do
+      {:ok, receipt} -> {:reply, {:error, failure(payload, receipt)}, state}
       :error -> missing_receipt(state)
     end
   end
@@ -742,8 +770,23 @@ defmodule FermixCore.ComputerUse.Session do
 
   defp forget_observation(_request, _payload, state), do: state
 
-  defp failure(payload, outcome) do
-    {:action_failed, %{code: payload["error"], detail: payload["detail"], outcome: outcome}}
+  # A refusal is a receipt too: it says which mechanism was refused and, on the
+  # codes that reached the OS at all, what came of it. `dispatch` rides raw beside
+  # the derived outcome because ONE code — an accessibility call that failed —
+  # covers both "the platform refused the message before it went anywhere" and
+  # "it failed after the message had gone out", which are opposite facts about
+  # whether the control was touched. A sentence that guessed between them would
+  # send the model to repeat a press that may already have landed.
+  defp failure(payload, receipt) do
+    {:action_failed,
+     %{
+       code: payload["error"],
+       detail: payload["detail"],
+       dispatch: receipt.dispatch,
+       outcome: unverified_outcome(receipt),
+       input_method: receipt.input_method,
+       effect: receipt.effect
+     }}
   end
 
   # The receipt is read BEFORE the check, because the check swaps the response the
@@ -752,26 +795,55 @@ defmodule FermixCore.ComputerUse.Session do
   # around: inferring dispatch from what the check happened to return is exactly
   # the habit receipts exist to end.
   defp receipt_action(request, response, state, courtesy) do
-    case action_dispatch(request, response) do
-      {:ok, dispatch} -> check_action(request, response, state, courtesy, dispatch)
+    case action_receipt(request, response) do
+      {:ok, receipt} -> check_action(request, response, state, courtesy, receipt)
       :error -> missing_receipt(state)
     end
   end
 
-  # What the sidecar says it did with the input (M42 slice 2 §3). A read-only
-  # action dispatches nothing and carries no receipt by protocol.
-  @spec action_dispatch(map(), map()) :: {:ok, dispatch()} | :error
-  defp action_dispatch(request, response) do
+  # What the sidecar says it did with the input (M42 slice 2 §3, extended by slice
+  # 4 §3.3). A read-only action dispatches nothing and carries no receipt by
+  # protocol.
+  @spec action_receipt(map(), map()) :: {:ok, receipt()} | :error
+  defp action_receipt(request, response) do
     if Protocol.read_only?(request["action"]),
-      do: {:ok, :read},
-      else: receipt_dispatch(response["receipt"])
+      do: {:ok, read_receipt()},
+      else: parse_receipt(response["receipt"])
   end
 
-  defp receipt_dispatch(%{"dispatch" => "not_sent"}), do: {:ok, :not_sent}
-  defp receipt_dispatch(%{"dispatch" => "sent"}), do: {:ok, :sent}
-  defp receipt_dispatch(%{"dispatch" => "partial"}), do: {:ok, :partial}
-  defp receipt_dispatch(%{"dispatch" => "unknown"}), do: {:ok, :unknown}
-  defp receipt_dispatch(_absent_or_malformed), do: :error
+  defp read_receipt,
+    do: %{dispatch: :read, effect: nil, input_method: nil, foreground_changed: nil}
+
+  defp parse_receipt(%{"dispatch" => dispatch} = receipt)
+       when dispatch in ~w(not_sent sent partial unknown) do
+    {:ok,
+     %{
+       dispatch: String.to_existing_atom(dispatch),
+       effect: effect(receipt["effect"]),
+       input_method: input_method(receipt["input_method"]),
+       foreground_changed: foreground_changed(receipt["foreground_changed"])
+     }}
+  end
+
+  defp parse_receipt(_absent_or_malformed), do: :error
+
+  # ABSENT is unknown, never false: the helper leaves the field off when the
+  # platform would not say. Collapsing that to `false` would turn "we do not know"
+  # into "the front window was left alone", which is the claim that gets the next
+  # keystroke typed into the wrong application.
+  defp foreground_changed(changed) when is_boolean(changed), do: changed
+  defp foreground_changed(_absent), do: nil
+
+  # Both are closed sets on the wire and both ride the tool exec row, so anything
+  # else is dropped rather than carried: a trace field is only countable while its
+  # values are the ones the contract names.
+  defp effect("verified"), do: :verified
+  defp effect("not_observed"), do: :not_observed
+  defp effect("unknown"), do: :unknown
+  defp effect(_absent_or_unknown), do: nil
+
+  defp input_method(method) when method in ~w(ax foreground_hid), do: method
+  defp input_method(_absent_or_unknown), do: nil
 
   # The helper answered a mutating action without saying what it did with the
   # input, which the wire requires of it. Nothing here can tell whether the click
@@ -788,19 +860,18 @@ defmodule FermixCore.ComputerUse.Session do
   # reply still reports what the receipt said about the input, and the session stops
   # AFTER that reply. Reply-then-stop is the existing timeout shape, not a second
   # mechanism, and the action is counted because it happened.
-  defp check_action(request, response, state, courtesy, dispatch) do
+  defp check_action(request, response, state, courtesy, receipt) do
     case crop_check(request, response, state) do
       {:ok, view_request, view_response} ->
-        reply_action(request, view_request, view_response, state, courtesy, dispatch)
+        reply_action(request, view_request, view_response, state, courtesy, receipt)
 
       {:check_lost, reason} ->
-        {:stop, driver_stop_reason(reason),
-         {:ok, lost_check_result(reason, courtesy, unverified_outcome(dispatch))},
+        {:stop, driver_stop_reason(reason), {:ok, lost_check_result(reason, courtesy, receipt)},
          count_action(state, request)}
     end
   end
 
-  defp reply_action(request, view_request, view_response, state, courtesy, dispatch) do
+  defp reply_action(request, view_request, view_response, state, courtesy, receipt) do
     note_capture_health(view_response)
     age = observation_age_ms(request, state)
 
@@ -810,7 +881,7 @@ defmodule FermixCore.ComputerUse.Session do
       |> record_observation(view_request, view_response)
 
     request
-    |> reply_result(view_request, view_response, state, courtesy, dispatch)
+    |> reply_result(view_request, view_response, state, courtesy, receipt)
     |> put_observation_age(age)
   end
 
@@ -846,24 +917,39 @@ defmodule FermixCore.ComputerUse.Session do
   # The check itself was refused by a live helper. Both its outcome and its
   # sentence follow the ACTION's receipt, never the check's failure: what failed
   # here is the look.
-  defp reply_result(_request, _view_req, %{"check_failed" => detail}, state, courtesy, dispatch) do
-    {:reply, {:ok, unverified_result(detail, courtesy, unverified_outcome(dispatch))}, state}
+  defp reply_result(_request, _view_req, %{"check_failed" => detail}, state, courtesy, receipt) do
+    {:reply, {:ok, unverified_result(detail, courtesy, receipt)}, state}
   end
 
-  defp reply_result(request, view_request, view_response, state, courtesy, dispatch) do
+  defp reply_result(request, view_request, view_response, state, courtesy, receipt) do
     case normalize_response(view_response, view_request["display"] || 0) do
       {:ok, result} ->
         result =
           result
+          |> Map.update!(:summary, &(&1 <> receipt_note(request, receipt)))
           |> Map.put(:courtesy, courtesy)
-          |> Map.put(:outcome, action_outcome(dispatch))
+          |> Map.put(:outcome, action_outcome(receipt))
+          |> put_receipt_facts(receipt)
 
         {:reply, {:ok, result}, state}
 
       {:error, reason} ->
-        unreadable_check(request, reason, state, courtesy, dispatch)
+        unreadable_check(request, reason, state, courtesy, receipt)
     end
   end
+
+  # The two closed receipt facts, on the result so the tool exec row can carry
+  # them: by which mechanism the input went out, and what the helper observed of
+  # it. Never the value that was set — content stays on the model's side of the
+  # wire.
+  defp put_receipt_facts(result, receipt) do
+    result
+    |> put_unless_nil(:input_method, receipt.input_method)
+    |> put_unless_nil(:effect, receipt.effect)
+  end
+
+  defp put_unless_nil(map, _key, nil), do: map
+  defp put_unless_nil(map, key, value), do: Map.put(map, key, value)
 
   # The response came back but could not be read (corrupt base64). For a READ that
   # IS the result, so it fails loud as before. For a mutating action the input was
@@ -871,11 +957,10 @@ defmodule FermixCore.ComputerUse.Session do
   # performed and unverified, never failed — a failure here buys a second real click
   # for a picture the helper mangled. The Port is healthy (a whole frame arrived and
   # was paired), so the session lives on.
-  defp unreadable_check(request, reason, state, courtesy, dispatch) do
+  defp unreadable_check(request, reason, state, courtesy, receipt) do
     if Protocol.read_only?(request["action"]),
       do: {:reply, {:error, reason}, state},
-      else:
-        {:reply, {:ok, unverified_result(reason, courtesy, unverified_outcome(dispatch))}, state}
+      else: {:reply, {:ok, unverified_result(reason, courtesy, receipt)}, state}
   end
 
   defp count_action(state, request) do
@@ -887,19 +972,81 @@ defmodule FermixCore.ComputerUse.Session do
   # inferred (M42 slice 2 §6). A read dispatches none; input the helper never sent
   # is a refusal; input it sent and then showed us is `performed`; input it half
   # sent, or cannot account for, is exactly `unknown`.
-  @spec action_outcome(dispatch()) :: outcome()
-  defp action_outcome(:read), do: :read
-  defp action_outcome(:not_sent), do: :refused
-  defp action_outcome(:sent), do: :performed
-  defp action_outcome(:partial), do: :unknown
-  defp action_outcome(:unknown), do: :unknown
+  #
+  # `effect` is the helper's own reading of what the action DID, and only the
+  # accessibility method answers that question: a foreground click leaves nothing
+  # the helper can read back, so its effect field is not an answer and the
+  # dispatch verdict stands alone. An AX call answers it three ways — a value read
+  # back and matching is `performed`, a result the call cannot vouch for is
+  # performed-and-unverified, and `unknown` is the call that was made and never
+  # returned, which is exactly the outcome that must never read as "it happened"
+  # or as "it did not" (M42 slice 4 §3.3).
+  @spec action_outcome(receipt()) :: outcome()
+  defp action_outcome(%{dispatch: :read}), do: :read
+  defp action_outcome(%{dispatch: :not_sent}), do: :refused
+  defp action_outcome(%{dispatch: :partial}), do: :unknown
+  defp action_outcome(%{dispatch: :unknown}), do: :unknown
+
+  defp action_outcome(%{dispatch: :sent, input_method: "ax", effect: effect}),
+    do: ax_outcome(effect)
+
+  defp action_outcome(%{dispatch: :sent}), do: :performed
+
+  defp ax_outcome(:verified), do: :performed
+  defp ax_outcome(:unknown), do: :unknown
+  defp ax_outcome(_not_observed_or_absent), do: :performed_unverified
+
+  # What the receipt adds to the check image the model is about to read. Both
+  # halves can be true of one action, so both are appended rather than chosen
+  # between.
+  defp receipt_note(request, receipt),
+    do: effect_note(request, receipt) <> foreground_note(receipt)
+
+  # There is deliberately no note here for an accessibility call that was made and
+  # never came back: the helper ships that ONLY as a refusal (`ax_timed_out`, with
+  # a `sent` receipt), so it never reaches this success path. Its sentence lives
+  # with the other named failures, where the model can actually read it.
+  #
+  # `set_value` is the one action that reads its own result back, so a read-back
+  # that did not match is a fact the model must have before it builds on the value.
+  # A secure field always reads back masked, which is the common and harmless case.
+  defp effect_note(%{"action" => "set_value"}, %{dispatch: :sent, effect: :not_observed}) do
+    " The value was set, but reading the field back did not return it — a secure field always " <>
+      "reads back masked, so this is expected there and a real mismatch anywhere else. Read " <>
+      "the field before you rely on it: take `elements` again, or `inspect` the control."
+  end
+
+  defp effect_note(_request, _receipt), do: ""
+
+  # M42 treats an action that steals the foreground as a background-contract
+  # violation; this slice reports it truthfully and leaves de-qualifying the app to
+  # the support matrix. What the model needs from it is immediate: the window the
+  # human was in is no longer the one a keystroke reaches.
+  #
+  # ABSENT is unknown, not false: the helper leaves the field off when the platform
+  # would not say, and silence here is the only honest rendering of that. Saying
+  # "the front window was left alone" on an unanswered question is the claim that
+  # gets a keystroke typed into the wrong application.
+  defp foreground_note(%{foreground_changed: true}) do
+    " This brought its application to the FRONT, so the window the human was working in is no " <>
+      "longer the front one and anything typed now goes elsewhere. Say so, and take a fresh " <>
+      "`screenshot` before your next action."
+  end
+
+  defp foreground_note(_receipt), do: ""
 
   # The after-image never arrived, could not be read, or was refused — and a
   # refusal carries no after-image at all. Only input the helper SAYS it sent is
   # performed-and-unverified; anything else keeps the verdict the receipt gave it.
-  @spec unverified_outcome(dispatch()) :: outcome()
-  defp unverified_outcome(:sent), do: :performed_unverified
-  defp unverified_outcome(dispatch), do: action_outcome(dispatch)
+  @spec unverified_outcome(receipt()) :: outcome()
+  defp unverified_outcome(%{dispatch: :sent} = receipt) do
+    case action_outcome(receipt) do
+      :performed -> :performed_unverified
+      other -> other
+    end
+  end
+
+  defp unverified_outcome(receipt), do: action_outcome(receipt)
 
   # A timeout or a sidecar death ON THE ACTION ITSELF: whether the input reached the
   # desktop is unknowable from here — the frame that would have said so is the one
@@ -1173,21 +1320,24 @@ defmodule FermixCore.ComputerUse.Session do
       "screenshot names."
   end
 
-  defp unverified_result(detail, courtesy, outcome) do
+  defp unverified_result(detail, courtesy, receipt) do
+    outcome = unverified_outcome(receipt)
+
     %{
       summary: unverified_summary(detail, outcome),
       image: nil,
       courtesy: courtesy,
       outcome: outcome
     }
+    |> put_receipt_facts(receipt)
   end
 
   # The check never came back at all, so this session is also ending. Same receipt,
   # plus the one thing the model must know to plan its next call.
-  defp lost_check_result(reason, courtesy, outcome) do
+  defp lost_check_result(reason, courtesy, receipt) do
     reason
     |> driver_fault()
-    |> unverified_result(courtesy, outcome)
+    |> unverified_result(courtesy, receipt)
     |> Map.update!(
       :summary,
       &(&1 <> " The computer-use session was reset, so your next action starts a fresh helper.")
@@ -1225,7 +1375,7 @@ defmodule FermixCore.ComputerUse.Session do
   # than raw pixels. Same untrusted framing as inspect (labels are on-screen data).
   defp normalize_response(%{"elements" => elements} = response, _display)
        when is_list(elements) do
-    summary = semantic_lead(response) <> elements_summary(elements) <> ax_suffix(response)
+    summary = semantic_lead(response) <> elements_summary(response) <> ax_suffix(response)
     {:ok, %{summary: summary, image: nil}}
   end
 
@@ -1268,38 +1418,181 @@ defmodule FermixCore.ComputerUse.Session do
 
   defp window_line(_other), do: nil
 
-  defp elements_summary(elements) do
+  # The truncation note rides BOTH branches. A walk that was cut short with no
+  # usable control left reads, without it, as "this application exposes nothing" —
+  # and the model then stops asking accessibility anything and goes back to
+  # guessing pixels, on an app whose tree it simply never finished reading.
+  defp elements_summary(%{"elements" => elements} = response) do
     case usable_elements(elements) do
       [] ->
         "no accessibility-backed click targets were exposed. Visible content may still " <>
           "accept pixel interaction: on a page the managed `browser` drives, its " <>
           "`get field=rect` + `click_coords` hit the same target exactly; anywhere else " <>
-          "take a `screenshot` and use pixel coordinates read in the image it names."
+          "take a `screenshot` and use pixel coordinates read in the image it names." <>
+          truncated_note(response)
 
       usable ->
         lines = Enum.map(usable, &element_line/1)
 
-        "#{length(lines)} interactive element(s) — click at the given x,y:\n" <>
-          Enum.join(lines, "\n")
+        "#{length(lines)} interactive element(s). A control listing `press` is pressed BY " <>
+          "NAME — send `press` with its `element_ref` and this list's observation_id, which " <>
+          "moves no pointer and cannot miss; a `settable` field takes `set_value` the same " <>
+          "way. Otherwise click at the given x,y. Disabled controls are listed as disabled:\n" <>
+          Enum.join(lines, "\n") <> truncated_note(response)
     end
   end
 
+  # The helper's own element cap, applied again HERE: a misbehaving or mismatched
+  # helper that answered with thousands would otherwise flood the turn's context
+  # with a list nothing bounded on the way in.
+  @max_elements 250
+
+  # A control is usable when the model can reach it: by name, or by its point.
   defp usable_elements(elements) when is_list(elements),
-    do: Enum.filter(elements, &usable_element?/1)
+    do: elements |> Enum.filter(&usable_element?/1) |> Enum.take(@max_elements)
 
   defp usable_elements(_elements), do: []
 
   defp usable_element?(%{"x" => x, "y" => y}) when is_integer(x) and is_integer(y), do: true
-  defp usable_element?(_element), do: false
+  defp usable_element?(element), do: trimmed(element["element_ref"]) != ""
 
-  defp element_line(%{"x" => x, "y" => y} = element) when is_integer(x) and is_integer(y) do
-    role = element["role"] || "element"
-    label = element["title"]
-
-    if is_binary(label) and label != "",
-      do: "#{role} \"#{label}\" at (#{x},#{y})",
-      else: "#{role} at (#{x},#{y})"
+  # One line per control: what to call it, what it holds, where it sits, and what
+  # can be done with it. A DISABLED control is LISTED as disabled rather than
+  # dropped — a model that cannot see the greyed-out button invents a reason it is
+  # missing, and then invents a way around it.
+  defp element_line(element) do
+    [
+      trimmed(element["element_ref"]),
+      role_of(element),
+      quoted(element["label"]),
+      value_part(element["value"]),
+      path_part(element["path"])
+    ]
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.join(" ")
+    |> append_traits(element_traits(element))
   end
+
+  defp role_of(element) do
+    case safe_text(element["role"]) do
+      "" -> "element"
+      role -> role
+    end
+  end
+
+  defp append_traits(line, []), do: line
+  defp append_traits(line, traits), do: line <> " — " <> Enum.join(traits, ", ")
+
+  # What the control ITSELF says can be done with it. Nothing is inferred from a
+  # role name: `press` is listed only where the control's own action list carries
+  # it, and `settable` only where the helper asked and was told yes.
+  #
+  # Both claims also need a REFERENCE to be actable on, and an element can now
+  # legally arrive without one — the helper could not establish the owning process,
+  # so it retained nothing to act through. Such a control is clickable by point and
+  # nothing more; advertising `press` on it would name an action the model has no
+  # way to send.
+  defp element_traits(element) do
+    named? = trimmed(element["element_ref"]) != ""
+
+    Enum.reject(
+      [
+        disabled_trait(element),
+        press_trait(element, named?),
+        settable_trait(element, named?),
+        point_trait(element)
+      ],
+      &(&1 == "")
+    )
+  end
+
+  defp disabled_trait(%{"enabled" => false}), do: "DISABLED"
+  defp disabled_trait(_element), do: ""
+
+  defp press_trait(%{"actions" => actions}, true) when is_list(actions),
+    do: if("press" in actions, do: "press", else: "")
+
+  defp press_trait(_element, _named?), do: ""
+
+  defp settable_trait(%{"settable" => true}, true), do: "settable"
+  defp settable_trait(_element, _named?), do: ""
+
+  defp point_trait(%{"x" => x, "y" => y}) when is_integer(x) and is_integer(y),
+    do: "click at (#{x},#{y})"
+
+  defp point_trait(_element), do: ""
+
+  # A short path of ancestor labels, nearest last, so two "Save" buttons in one
+  # window are tellable apart.
+  defp path_part(path) when is_list(path) do
+    case path |> Enum.map(&safe_text/1) |> Enum.reject(&(&1 == "")) do
+      [] -> ""
+      labels -> "in " <> Enum.join(labels, " > ")
+    end
+  end
+
+  defp path_part(_absent), do: ""
+
+  defp quoted(label) do
+    case safe_text(label) do
+      "" -> ""
+      text -> ~s("#{text}")
+    end
+  end
+
+  defp value_part(value) do
+    case safe_text(value) do
+      "" -> ""
+      text -> ~s(= "#{text}")
+    end
+  end
+
+  # A reference is the helper's own token (`e1`, `e2`), but it is rendered where a
+  # forged one would be believed, so it is bounded to the shape a reference has
+  # rather than trusted for its provenance.
+  defp trimmed(value) when is_binary(value), do: safe_text(value)
+  defp trimmed(_absent), do: ""
+
+  # Labels, values, paths and roles are APPLICATION-controlled text, and this
+  # list's SHAPE is what the model reads targets off: one line per control, each
+  # opening with its reference. A newline inside a label forges a second line — a
+  # control that does not exist, carrying a reference the model would then send —
+  # so every such string is collapsed to a single line here, the quote character
+  # that delimits a label is neutralised, and the result is bounded. The helper
+  # does the same at the source; this side does not depend on that, because the
+  # half that RENDERS is the half that has to be safe.
+  @untrusted_text_max 120
+
+  defp safe_text(text) when is_binary(text) do
+    text
+    |> String.replace(~r/[[:space:][:cntrl:]]+/u, " ")
+    |> String.replace("\"", "'")
+    |> String.trim()
+    |> bound_text()
+  end
+
+  defp safe_text(_not_a_string), do: ""
+
+  defp bound_text(text) do
+    if String.length(text) > @untrusted_text_max,
+      do: String.slice(text, 0, @untrusted_text_max) <> "…",
+      else: text
+  end
+
+  # The walk stopped before it ran out of tree, so this list is not every control.
+  # Saying WHY names the fix: a smaller region finishes inside the caps, and the
+  # badges on a screenshot show what is in view without a walk at all.
+  defp truncated_note(%{"truncated" => reason}) when reason in ~w(nodes depth time) do
+    "\n(this is not every control — the walk stopped because #{truncation_cause(reason)}. " <>
+      "Narrow it with a `region` around the part of the window you need, or take a " <>
+      "`screenshot` with \"marks\": true to see the targets in view.)"
+  end
+
+  defp truncated_note(_response), do: ""
+
+  defp truncation_cause("nodes"), do: "it reached the element cap"
+  defp truncation_cause("depth"), do: "it reached the depth limit"
+  defp truncation_cause("time"), do: "it ran out of its time budget"
 
   defp inspect_summary(%{"found" => false}), do: "no UI element at that point"
 
@@ -1371,24 +1664,31 @@ defmodule FermixCore.ComputerUse.Session do
   defp marks_suffix(%{"marks" => []}),
     do: " 0 accessibility marks — AX exposed no click targets in this view."
 
+  # The helper's own badge cap, applied again here for the same reason the element
+  # cap is: a list nothing bounded on the way in must not flood the turn.
+  @max_marks 60
+
   defp marks_suffix(%{"marks" => marks} = response) when is_list(marks) do
-    lines = marks |> Enum.map(&mark_line/1) |> Enum.reject(&is_nil/1)
+    lines =
+      marks |> Enum.take(@max_marks) |> Enum.map(&mark_line/1) |> Enum.reject(&is_nil/1)
 
     " #{length(lines)} numbered mark(s) badged on the image — act on one by sending " <>
-      "`mark: <id>` instead of x,y:\n" <>
-      Enum.join(lines, "\n") <> truncated_marks_note(response)
+      "`mark: <id>` instead of x,y, or `press` for the control behind it:\n" <>
+      Enum.join(lines, "\n") <>
+      truncated_marks_note(response) <> truncated_walk_note(response)
   end
 
   defp marks_suffix(_response), do: ""
 
+  # A badge names its control with the same field an `elements` listing does, and
+  # its text is application-controlled in exactly the same way, so it is rendered
+  # through the same sanitiser.
   defp mark_line(%{"id" => id, "x" => x, "y" => y} = mark)
        when is_integer(id) and is_integer(x) and is_integer(y) do
-    role = mark["role"] || "element"
-    title = mark["title"]
-
-    if is_binary(title) and title != "",
-      do: "mark #{id}: #{role} \"#{title}\" at (#{x},#{y})",
-      else: "mark #{id}: #{role} at (#{x},#{y})"
+    case quoted(mark["label"]) do
+      "" -> "mark #{id}: #{role_of(mark)} at (#{x},#{y})"
+      label -> "mark #{id}: #{role_of(mark)} #{label} at (#{x},#{y})"
+    end
   end
 
   defp mark_line(_mark), do: nil
@@ -1397,6 +1697,17 @@ defmodule FermixCore.ComputerUse.Session do
     do: "\n(#{n} further element(s) not badged — zoom closer for the rest)"
 
   defp truncated_marks_note(_response), do: ""
+
+  # The badge cap says this image shows fewer controls than exist; the WALK's own
+  # bound says the tree was never read to its end, which no amount of zooming on
+  # this image fixes. Two different facts, so two sentences.
+  defp truncated_walk_note(%{"truncated" => reason}) when reason in ~w(nodes depth time),
+    do:
+      "\n(the element walk behind these marks also stopped early because " <>
+        "#{truncation_cause(reason)}, so controls outside it were never seen — narrow the " <>
+        "capture with a `region` around the part of the window you need)"
+
+  defp truncated_walk_note(_response), do: ""
 
   # B4: what accessibility activation did (or why it failed) — an empty element
   # list must never be silent about its cause again.

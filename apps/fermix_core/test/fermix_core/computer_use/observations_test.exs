@@ -214,12 +214,115 @@ defmodule FermixCore.ComputerUse.ObservationsTest do
         assert Observations.check_addressing(table, request) == :ok
       end
     end
+
+    # A ref is scoped to the observation that minted it, so on its own it says no
+    # more than a bare coordinate does (M42 slice 4 §3.2).
+    test "an accessibility action that names no image is refused too", %{table: table} do
+      for request <- [
+            %{"action" => "press", "element_ref" => "e1"},
+            %{"action" => "set_value", "element_ref" => "e1", "value" => "hi"}
+          ] do
+        assert Observations.check_addressing(table, request) == {:error, :observation_required},
+               "#{request["action"]} must name the image its element_ref came from"
+      end
+    end
+
+    test "a control named by element_ref in a named image is admitted", %{table: table} do
+      for request <- [
+            %{"action" => "press", "element_ref" => "e1", "observation_id" => "7c1e-12"},
+            %{"action" => "left_click", "element_ref" => "e1", "observation_id" => "7c1e-12"},
+            %{"action" => "left_click", "mark" => 1, "observation_id" => "7c1e-12"}
+          ] do
+        assert Observations.check_addressing(table, request) == :ok
+      end
+    end
+
+    # Two answers to "where" is the one thing a GUI driver may never guess at, so
+    # it is refused here, before any input is dispatched.
+    test "naming a target twice is refused, never resolved to one of them", %{table: table} do
+      for request <- [
+            %{
+              "action" => "left_click",
+              "element_ref" => "e1",
+              "x" => 1,
+              "y" => 2,
+              "observation_id" => "7c1e-12"
+            },
+            %{
+              "action" => "scroll",
+              "element_ref" => "e1",
+              "x" => 1,
+              "y" => 2,
+              "direction" => "down",
+              "amount" => 3,
+              "observation_id" => "7c1e-12"
+            },
+            %{
+              "action" => "left_click",
+              "element_ref" => "e1",
+              "mark" => 1,
+              "observation_id" => "7c1e-12"
+            },
+            %{
+              "action" => "press",
+              "element_ref" => "e1",
+              "mark" => 1,
+              "observation_id" => "7c1e-12"
+            },
+            %{
+              "action" => "set_value",
+              "element_ref" => "e1",
+              "value" => "hi",
+              "x" => 1,
+              "y" => 2,
+              "observation_id" => "7c1e-12"
+            }
+          ] do
+        assert Observations.check_addressing(table, request) == {:error, :addressing_conflict},
+               "#{request["action"]} named its target twice and was not refused"
+      end
+    end
+
+    # A drag names two points and `inspect` reports what is under one, so neither
+    # has a meaning for a reference at all. The library refuses one there with a
+    # sentence of its own, which is the RIGHT sentence: telling the model to pick
+    # between two forms would imply the reference alone would have worked.
+    test "an action that never takes a reference is left to the library", %{table: table} do
+      for request <- [
+            %{
+              "action" => "left_click_drag",
+              "element_ref" => "e1",
+              "from" => %{"x" => 1, "y" => 2},
+              "to" => %{"x" => 3, "y" => 4},
+              "observation_id" => "7c1e-12"
+            },
+            %{
+              "action" => "inspect",
+              "element_ref" => "e1",
+              "x" => 1,
+              "y" => 2,
+              "observation_id" => "7c1e-12"
+            }
+          ] do
+        assert Observations.check_addressing(table, request) == :ok
+
+        assert {:error, message} = Compux.Protocol.validate(request)
+        assert message =~ "takes no element_ref"
+      end
+    end
   end
 
   describe "resolve_mark/2" do
     @marks [
-      %{"id" => 1, "role" => "AXButton", "title" => "Start game", "x" => 200, "y" => 300},
-      %{"id" => 2, "role" => "AXLink", "title" => "Chess", "x" => 1100, "y" => 700}
+      %{
+        "id" => 1,
+        "role" => "AXButton",
+        "label" => "Start game",
+        "x" => 200,
+        "y" => 300,
+        "element_ref" => "e4"
+      },
+      %{"id" => 2, "role" => "AXLink", "label" => "Chess", "x" => 1100, "y" => 700}
     ]
 
     setup do
@@ -269,6 +372,47 @@ defmodule FermixCore.ComputerUse.ObservationsTest do
       request = %{"action" => "left_click", "x" => 1, "y" => 2, "observation_id" => "marked"}
 
       assert Observations.resolve_mark(table, request) == {:ok, request, false}
+    end
+
+    # A badge is a control, so the same number names it for the accessibility
+    # actions — resolved to the reference the helper minted for it, never to a
+    # point those actions cannot use.
+    test "a mark on press resolves to the badged control's reference", %{table: table} do
+      request = %{"action" => "press", "mark" => 1, "observation_id" => "marked"}
+
+      assert {:ok, resolved, true} = Observations.resolve_mark(table, request)
+      assert resolved["element_ref"] == "e4"
+      refute Map.has_key?(resolved, "x"), "press takes a control, never a point"
+      refute Map.has_key?(resolved, "mark"), "the helper must never see a mark id"
+    end
+
+    test "set_value keeps its value while the mark becomes a reference", %{table: table} do
+      request = %{
+        "action" => "set_value",
+        "mark" => 1,
+        "value" => "hello",
+        "observation_id" => "marked"
+      }
+
+      assert {:ok, resolved, true} = Observations.resolve_mark(table, request)
+      assert resolved["element_ref"] == "e4"
+      assert resolved["value"] == "hello"
+    end
+
+    # Mark 2 was badged without a reference. Clicking it instead would be this side
+    # choosing a mechanism the model did not ask for, on a control that may behave
+    # differently under the pointer.
+    test "a badge with no reference is refused rather than clicked", %{table: table} do
+      request = %{"action" => "press", "mark" => 2, "observation_id" => "marked"}
+
+      assert Observations.resolve_mark(table, request) == {:error, {:mark_not_pressable, 2}}
+    end
+
+    test "that same badge still resolves to a point for a click", %{table: table} do
+      request = %{"action" => "left_click", "mark" => 2, "observation_id" => "marked"}
+
+      assert {:ok, resolved, true} = Observations.resolve_mark(table, request)
+      assert {resolved["x"], resolved["y"]} == {1100, 700}
     end
   end
 

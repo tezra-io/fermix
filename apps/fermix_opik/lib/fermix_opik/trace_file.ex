@@ -105,7 +105,12 @@ defmodule FermixOpik.TraceFile do
        # the code when it named no addressable one. A millisecond count and a
        # closed enum — never an id, a size, or anything from the screen.
        :observation_age_ms,
-       :geometry_refusal
+       :geometry_refusal,
+       # References (M42 slice 4): by which mechanism the input went out, and what
+       # the helper observed of it. Two closed enums — never the value a
+       # `set_value` carried, which is content and rides the capture gate.
+       :input_method,
+       :effect
      ])}
   end
 
