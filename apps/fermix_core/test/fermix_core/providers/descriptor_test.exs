@@ -15,6 +15,7 @@ defmodule FermixCore.Providers.DescriptorTest do
              :xai,
              :openrouter,
              :mistral,
+             :venice,
              :ollama
            ]
   end

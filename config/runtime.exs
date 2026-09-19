@@ -213,6 +213,7 @@ existing_xai = Keyword.get(existing_providers, :xai, [])
 existing_openrouter = Keyword.get(existing_providers, :openrouter, [])
 existing_ollama = Keyword.get(existing_providers, :ollama, [])
 existing_mistral = Keyword.get(existing_providers, :mistral, [])
+existing_venice = Keyword.get(existing_providers, :venice, [])
 
 openai_api_key = System.get_env("OPENAI_API_KEY") || Keyword.get(existing_openai, :api_key, "")
 
@@ -261,6 +262,12 @@ merged_mistral =
   existing_mistral
   |> put_env_overlay.(:api_key, "MISTRAL_API_KEY")
 
+# Credential only: Venice's base URL stays a config value (M49 §3.1), so there
+# is no VENICE_BASE_URL overlay to drift from what setup persisted.
+merged_venice =
+  existing_venice
+  |> put_env_overlay.(:api_key, "VENICE_API_KEY")
+
 merged_providers =
   existing_providers
   |> Keyword.put(:openai, merged_openai)
@@ -270,6 +277,7 @@ merged_providers =
   |> Keyword.put(:openrouter, merged_openrouter)
   |> Keyword.put(:ollama, merged_ollama)
   |> Keyword.put(:mistral, merged_mistral)
+  |> Keyword.put(:venice, merged_venice)
 
 config :fermix_core, providers: merged_providers
 

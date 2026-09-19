@@ -143,6 +143,40 @@ defmodule FermixCore.Management.ProvidersTest do
       assert page["models"] == [%{"id" => "qwen3:32b", "label" => "Qwen3"}]
     end
 
+    # M49 §3.3: the daemon's order is the answer and the tier rides in the
+    # label, so a door that re-sorted or re-labelled would break both the
+    # family grouping and the only privacy indicator the wire carries.
+    test "a Venice listing keeps the daemon's order and its tier-suffixed labels" do
+      live = fn :venice, _opts ->
+        {:ok,
+         [
+           %{id: "kimi-k3", label: "Kimi K3 · Private", context_window: 1_000_000},
+           %{id: "claude-opus-5", label: "Claude Opus 5 · Anonymized", context_window: 1_000_000},
+           %{id: "e2ee-kimi-k3-p", label: "Kimi K3 · Private (TEE)", context_window: 1_000_000}
+         ]}
+      end
+
+      assert {:ok, page} =
+               Providers.models(%{"provider" => "venice", "live" => true}, live_models: live)
+
+      assert page["source"] == "live"
+
+      assert page["models"] == [
+               %{"id" => "kimi-k3", "label" => "Kimi K3 · Private"},
+               %{"id" => "claude-opus-5", "label" => "Claude Opus 5 · Anonymized"},
+               %{"id" => "e2ee-kimi-k3-p", "label" => "Kimi K3 · Private (TEE)"}
+             ]
+    end
+
+    test "the Venice catalog page publishes the tier in the label too" do
+      assert {:ok, page} = Providers.models(%{"provider" => "venice", "live" => false})
+
+      assert page["source"] == "catalog"
+      assert hd(page["models"]) == %{"id" => "grok-4-6", "label" => "Grok 4.6 · Private"}
+
+      assert Enum.all?(page["models"], &String.contains?(&1["label"], " · Private"))
+    end
+
     test "a listing with no live flag or an out-of-range limit is refused by field" do
       assert {:error, {:invalid_params, "live", _s}} =
                Providers.models(%{"provider" => "anthropic"})

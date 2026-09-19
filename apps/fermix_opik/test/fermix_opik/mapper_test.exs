@@ -273,6 +273,7 @@ defmodule FermixOpik.MapperTest do
     assert Mapper.provider_string(:openrouter) == "openrouter"
     assert Mapper.provider_string(:ollama) == "ollama"
     assert Mapper.provider_string(:mistral) == "mistral"
+    assert Mapper.provider_string(:venice) == "venice"
     # The transcription backends (M21) name themselves too, so a streaming STT
     # call is attributable to its backend in the export.
     assert Mapper.provider_string(:deepgram) == "deepgram"

@@ -12,6 +12,7 @@ defmodule FermixCore.Providers.ModelCatalogTest do
                :xai,
                :openrouter,
                :mistral,
+               :venice,
                :ollama
              ]
     end
@@ -281,6 +282,58 @@ defmodule FermixCore.Providers.ModelCatalogTest do
     test "claude-fable-5-1 is cataloged without changing the Anthropic default" do
       assert ModelCatalog.known_model?(:anthropic, "claude-fable-5-1")
       assert ModelCatalog.default_model_for(:anthropic) == "claude-sonnet-4-6"
+    end
+  end
+
+  # M49 §3.3: the curated Venice list is every-model-is-private, the head is the
+  # default, and the tier rides in the label because the label is the one model
+  # field both setup doors draw.
+  describe "the Venice catalog" do
+    test "defaults to grok-4-6 and lists family-then-newest after it" do
+      assert ModelCatalog.default_model_for(:venice) == "grok-4-6"
+
+      assert Enum.map(ModelCatalog.models_for(:venice), & &1.id) == [
+               "grok-4-6",
+               "deepseek-v4-1-flash",
+               "z-ai-glm-5-3-flash",
+               "z-ai-glm-5-3",
+               "e2ee-kimi-k3-p",
+               "kimi-k3",
+               "kimi-k2-6",
+               "minimax-m3-preview"
+             ]
+    end
+
+    test "every label carries its privacy tier, and the enclave model says TEE not E2EE" do
+      labels = Map.new(ModelCatalog.models_for(:venice), &{&1.id, &1.label})
+
+      for {id, label} <- labels do
+        assert String.contains?(label, " · Private"), "#{id} does not publish its privacy tier"
+      end
+
+      assert labels["e2ee-kimi-k3-p"] == "Kimi K3 · Private (TEE)"
+      refute Enum.any?(Map.values(labels), &String.contains?(&1, "E2EE"))
+    end
+
+    test "only the single-image model is text-only, and windows are the listed ones" do
+      by_id = Map.new(ModelCatalog.models_for(:venice), &{&1.id, &1})
+
+      refute ModelCatalog.vision?(:venice, "z-ai-glm-5-3")
+      assert ModelCatalog.vision?(:venice, "grok-4-6")
+      assert ModelCatalog.vision?(:venice, "e2ee-kimi-k3-p")
+
+      assert by_id["grok-4-6"].context_window == 500_000
+      assert by_id["z-ai-glm-5-3-flash"].context_window == 1_048_576
+      assert by_id["kimi-k2-6"].context_window == 256_000
+      assert by_id["minimax-m3-preview"].context_window == 524_288
+    end
+
+    # Venice takes the server default rather than a partial effort range (the
+    # descriptor's `effort?: false`), so no entry may carry a per-model cap.
+    test "no Venice entry declares a reasoning-effort ceiling" do
+      for entry <- ModelCatalog.models_for(:venice) do
+        assert ModelCatalog.model_effort_ceiling(:venice, entry.id) == nil
+      end
     end
   end
 

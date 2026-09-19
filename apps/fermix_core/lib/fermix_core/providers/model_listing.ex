@@ -2,10 +2,12 @@ defmodule FermixCore.Providers.ModelListing do
   @moduledoc """
   Live model discovery for setup surfaces (M12 follow-up).
 
-  Two providers can answer "which models can I actually use right now?"
+  Three providers can answer "which models can I actually use right now?"
   better than the static catalog: Ollama (only the locally installed
-  models matter) and OpenRouter (the upstream catalog moves weekly). The
-  static `ModelCatalog` stays authoritative for wizard defaults and
+  models matter), OpenRouter (the upstream catalog moves weekly) and
+  Venice (a moving catalog whose per-model privacy tier is what the
+  person picks by — M49 §3.3). The static `ModelCatalog` stays
+  authoritative for wizard defaults and
   context-window budgeting; this module only feeds setup-time pickers and
   the Ollama server-detection banner. One signal only: the configured URL
   either serves a model list or it doesn't — no host binary sniffing (a
@@ -29,13 +31,16 @@ defmodule FermixCore.Providers.ModelListing do
   @spec live?(atom()) :: boolean()
   def live?(:ollama), do: true
   def live?(:openrouter), do: true
+  def live?(:venice), do: true
   def live?(provider) when is_atom(provider), do: false
 
   @doc """
   Live models for a provider. Ollama lists the models actually installed
   on the configured server (`GET <root>/api/tags`); OpenRouter lists the
   public upstream catalog (`GET <base>/models`), tool-capable models only,
-  newest first. `base_url:`/`req_options:` are injectable; defaults come
+  newest first; Venice lists its text catalog
+  (`GET <base>/models?type=text`, public), tool-capable models only, by
+  family then newest. `base_url:`/`req_options:` are injectable; defaults come
   from the provider's config block, then its descriptor.
   """
   @spec live_models(atom(), keyword()) :: {:ok, [live_model()]} | {:error, String.t()}
@@ -60,9 +65,34 @@ defmodule FermixCore.Providers.ModelListing do
     end
   end
 
+  def live_models(:venice, opts) do
+    url = resolved_base_url(:venice, opts) <> "/models?type=text"
+
+    case get_json(url, opts) do
+      {:ok, %{"data" => models}} when is_list(models) -> {:ok, venice_entries(models)}
+      {:ok, _body} -> {:error, "unexpected response from #{url}"}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   def live_models(provider, _opts) when is_atom(provider) do
     raise ArgumentError,
           "no live model listing for #{inspect(provider)}; check live?/1 before calling"
+  end
+
+  @doc """
+  The family a Venice model's own `name` belongs to: its first run of ASCII
+  letters, downcased. "Kimi K3" and "Kimi K2.6" are both `kimi`, "GPT-6 Astra"
+  is `gpt`, "MiMo-V2.5" is `mimo`. The live listing groups by it (M49 §3.3), so
+  the newest model of every family heads its group. A name with no letters has
+  no family and sorts first under the empty string.
+  """
+  @spec model_family(String.t()) :: String.t()
+  def model_family(name) when is_binary(name) do
+    case Regex.run(~r/[A-Za-z]+/, name) do
+      [match] -> String.downcase(match)
+      nil -> ""
+    end
   end
 
   defp resolved_base_url(provider, opts) do
@@ -123,6 +153,68 @@ defmodule FermixCore.Providers.ModelListing do
       context_window: positive_integer(Map.get(model, "context_length"))
     }
   end
+
+  # Tool-capable only, for the reason openrouter_entries/1 filters: Fermix sends
+  # `tools` on every request, so a model that cannot call them cannot run the
+  # loop at all. Ordered by family ascending then `created` descending (M49
+  # §3.3), with the id breaking a same-day tie so the order is deterministic —
+  # that grouping is what makes a 100-plus-entry picker navigable, and both
+  # setup doors render it as-is.
+  defp venice_entries(models) do
+    models
+    |> Enum.flat_map(&venice_sortable/1)
+    |> Enum.sort_by(fn {family, created, id, _entry} -> {family, -created, id} end)
+    |> Enum.map(fn {_family, _created, _id, entry} -> entry end)
+  end
+
+  defp venice_sortable(%{"id" => id, "model_spec" => %{"name" => name} = spec} = model)
+       when is_binary(id) and is_binary(name) do
+    capabilities = Map.get(spec, "capabilities", %{})
+
+    venice_entry(
+      id,
+      name,
+      model,
+      venice_tier(spec, capabilities),
+      Map.get(capabilities, "supportsFunctionCalling") == true
+    )
+  end
+
+  defp venice_sortable(_malformed), do: []
+
+  defp venice_entry(_id, _name, _model, _tier, false), do: []
+
+  # A tier that cannot be read is a model that cannot be labelled truthfully,
+  # and the label is the only place the wire carries privacy. Offered without a
+  # suffix beside its labelled neighbours it would read as the private default,
+  # so it is dropped — the same answer openrouter_entries/1 gives a malformed
+  # entry.
+  defp venice_entry(_id, _name, _model, :unknown, true), do: []
+
+  defp venice_entry(id, name, model, tier, true) do
+    entry = %{
+      id: id,
+      label: name <> tier,
+      context_window: positive_integer(Map.get(model, "context_length"))
+    }
+
+    [{model_family(name), venice_created(model), id, entry}]
+  end
+
+  # The two words Venice publishes in `model_spec.privacy`, plus the enclave
+  # marker: "(TEE)" and never "E2EE", because an `e2ee-*` id called by a plain
+  # client runs in the enclave while Venice's own edge still sees plaintext.
+  defp venice_tier(%{"privacy" => "private"}, %{"supportsTeeAttestation" => true}),
+    do: " · Private (TEE)"
+
+  defp venice_tier(%{"privacy" => "private"}, _capabilities), do: " · Private"
+  defp venice_tier(%{"privacy" => "anonymized"}, _capabilities), do: " · Anonymized"
+  defp venice_tier(_spec, _capabilities), do: :unknown
+
+  # A model with no publication date sorts last inside its family rather than
+  # reordering the ones that have one.
+  defp venice_created(%{"created" => created}) when is_integer(created), do: created
+  defp venice_created(_model), do: 0
 
   # Quiet catalog lookup — context_window_for/2 emits unknown_model
   # telemetry, which a setup-page render must not spam.

@@ -20,7 +20,14 @@ defmodule FermixCore.Providers.ModelCatalog do
   alias FermixCore.Providers.ReasoningEffort
 
   @type provider ::
-          :openai | :openai_codex | :anthropic | :xai | :openrouter | :ollama | :mistral
+          :openai
+          | :openai_codex
+          | :anthropic
+          | :xai
+          | :openrouter
+          | :ollama
+          | :mistral
+          | :venice
   @type entry :: Entry.t()
 
   @unknown_model_default_ctx 100_000
@@ -297,6 +304,47 @@ defmodule FermixCore.Providers.ModelCatalog do
     }
   ]
 
+  # Venice publishes a privacy tier per model, and the label is the one model
+  # field both setup doors draw — so the tier rides in the label (M49 §3.3).
+  # Every curated entry is `private`: the prompt is processed on hardware Venice
+  # contracts and is not retained. `(TEE)` marks an enclave model and never says
+  # "E2EE" — called by a plain client, an `e2ee-*` id runs in the enclave while
+  # Venice's own edge still sees plaintext. The live listing offers the
+  # `anonymized` tier too; this curated list does not.
+  #
+  # From the listing of 2026-09-19, all tool-calling. The head is the default:
+  # the private model Venice itself tags `most_intelligent`. The rest follow the
+  # live listing's own order — by family, then newest first — so one ordering
+  # rule explains both surfaces. Windows are the listed `context_length`
+  # ([verify] on every addition: an overstated window defers compaction past the
+  # provider's real limit). `reasoning_effort` is omitted for every Venice model
+  # (see the descriptor entry), so no entry caps it. `vision?: false` marks the
+  # one model that takes no images, so an image turn routed to it fails loud at
+  # the capability gate (M14) instead of 400-ing downstream.
+  @venice [
+    %Entry{id: "grok-4-6", label: "Grok 4.6 · Private", context_window: 500_000},
+    %Entry{
+      id: "deepseek-v4-1-flash",
+      label: "DeepSeek V4.1 Flash · Private",
+      context_window: 1_000_000
+    },
+    %Entry{id: "z-ai-glm-5-3-flash", label: "GLM 5.3 Flash · Private", context_window: 1_048_576},
+    %Entry{
+      id: "z-ai-glm-5-3",
+      label: "GLM 5.3 · Private",
+      context_window: 1_000_000,
+      vision?: false
+    },
+    %Entry{id: "e2ee-kimi-k3-p", label: "Kimi K3 · Private (TEE)", context_window: 1_000_000},
+    %Entry{id: "kimi-k3", label: "Kimi K3 · Private", context_window: 1_000_000},
+    %Entry{id: "kimi-k2-6", label: "Kimi K2.6 · Private", context_window: 256_000},
+    %Entry{
+      id: "minimax-m3-preview",
+      label: "MiniMax M3 Preview · Private",
+      context_window: 524_288
+    }
+  ]
+
   # Ollama windows are model CAPABILITY; the local server may serve far
   # less (default num_ctx is small) and truncates silently — the doctor
   # probe checks the served num_ctx against these (M12 §3.2, [verify]
@@ -339,6 +387,7 @@ defmodule FermixCore.Providers.ModelCatalog do
   def models_for(:xai), do: @xai
   def models_for(:openrouter), do: @openrouter
   def models_for(:mistral), do: @mistral
+  def models_for(:venice), do: @venice
   def models_for(:ollama), do: @ollama
 
   @spec default_model_for(provider()) :: String.t()

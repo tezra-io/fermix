@@ -1346,6 +1346,7 @@
         "kind",
         "label",
         "footer",
+        "info",
         "value",
         "present",
         "options",
@@ -1364,6 +1365,10 @@
         "kind": { "enum": ["toggle", "choice", "text", "number", "secret", "list"] },
         "label": { "type": "string" },
         "footer": { "type": ["string", "null"] },
+        "info": {
+          "description": "A longer explanation a surface keeps behind an info control rather than showing inline; the footer stays the short inline line. Null on every row with nothing more to say.",
+          "type": ["string", "null"]
+        },
         "value": { "$ref": "#/$defs/settingValue" },
         "present": {
           "description": "Whether a credential sits at this key's own path. Null on every kind but secret; a secret row never carries a value.",

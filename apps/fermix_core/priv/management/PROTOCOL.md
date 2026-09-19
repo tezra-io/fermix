@@ -323,6 +323,12 @@ Notes that the shapes alone do not carry:
   while the sandbox mode and command profile rows still carry `true`.
 - **`read_only` marks a row `settings.apply` will not take**, rendered as a plain
   labelled row rather than a control whose save always refuses.
+- **`info` is the longer explanation, kept behind an info control.** `footer` is
+  the one short line under the control and is always shown; `info` is a
+  paragraph a client puts behind an `(i)` beside the row and reveals on demand.
+  It is `null` on every row with nothing more to say, which is most of them.
+  Today one row carries it: the Venice model row, where the privacy tier in each
+  model's label is two words that mean materially different things.
 - **The sandbox section publishes one row per environment variable name.**
   After `sandbox_env_allow` come the allowed names in allow-list order, then
   the names Fermix still stores but no longer allows, sorted. Each row's key is

@@ -452,6 +452,56 @@ defmodule FermixCore.Setup.DoctorTest do
     end
   end
 
+  # M49 §2: Venice's /models answers 200 with no key at all, so only an
+  # authenticated endpoint proves the credential. /api_keys/rate_limits is the
+  # cheapest one and costs nothing.
+  describe "probe_provider/2 — :venice" do
+    test "reads the key-scoped rate limits rather than the public model list" do
+      put_provider(:venice, api_key: "vk-key", default_model: "grok-4-6")
+
+      plug = fn conn ->
+        assert conn.method == "GET"
+        assert conn.request_path == "/api/v1/api_keys/rate_limits"
+        assert ["Bearer vk-key"] = Plug.Conn.get_req_header(conn, "authorization")
+        Plug.Conn.send_resp(conn, 200, ~s({"data":{"accessPermitted":true}}))
+      end
+
+      assert {:ok, %{provider: :venice, model: "grok-4-6"}} =
+               Doctor.probe_provider(:venice, req_options: [plug: plug])
+    end
+
+    test "classifies a 401 as auth_scope_mismatch with a Venice hint" do
+      put_provider(:venice, api_key: "vk-bad")
+
+      plug = fn conn -> Plug.Conn.send_resp(conn, 401, ~s({"error":"Authentication failed"})) end
+
+      assert {:error, {:auth_scope_mismatch, "venice.ai API key", hint}} =
+               Doctor.probe_provider(:venice, req_options: [plug: plug])
+
+      assert hint =~ "Venice API key rejected"
+    end
+
+    # An account with no credit left answers 402. It keeps the generic
+    # server_error kind every provider's non-auth status takes: the probe_error
+    # vocabulary is the management wire, and one provider's status code does not
+    # earn a kind of its own.
+    test "reports a 402 out-of-credit account as a server error carrying the status" do
+      put_provider(:venice, api_key: "vk-broke")
+
+      plug = fn conn -> Plug.Conn.send_resp(conn, 402, ~s({"error":"INSUFFICIENT_BALANCE"})) end
+
+      assert {:error, {:server_error, 402, _body}} =
+               Doctor.probe_provider(:venice, req_options: [plug: plug])
+    end
+
+    test "reports missing api_key as misconfigured" do
+      put_provider(:venice, [])
+
+      assert {:error, {:misconfigured, message}} = Doctor.probe_provider(:venice)
+      assert message =~ "venice provider has no api_key"
+    end
+  end
+
   describe "probe_provider/2 — :ollama" do
     test "probes /v1 keyless and accepts when /api/show reports a healthy num_ctx" do
       put_provider(:ollama, base_url: "http://localhost:11434/v1", default_model: "qwen3:32b")

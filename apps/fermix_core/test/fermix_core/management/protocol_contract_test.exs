@@ -22,6 +22,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
   alias FermixCore.Management.Protocol
   alias FermixCore.Management.Router
   alias FermixCore.Management.Settings
+  alias FermixCore.Management.Settings.Row
   alias FermixTestSupport.SafeRm
 
   @protocol_doc Application.app_dir(:fermix_core, "priv/management/PROTOCOL.md")
@@ -330,6 +331,19 @@ defmodule FermixCore.Management.ProtocolContractTest do
 
     assert row["kind"]["enum"] == Enum.map(kinds, &Atom.to_string/1)
     assert row["format"]["enum"] == Enum.map(formats, &Atom.to_string/1) ++ [nil]
+  end
+
+  # The row contract is "every field is always present", and the schema closes
+  # the object, so a field added in Elixir and not declared here is a frame the
+  # app's own validator refuses. Pinned to a built row rather than to a golden:
+  # the builder is what mints the shape, and a golden can only lag it.
+  test "the schema declares exactly the fields a row carries", %{schema: schema} do
+    settings_row = schema["$defs"]["settingsRow"]
+    fields = "key" |> Row.new(:text, "Label", restart: false) |> Map.keys() |> Enum.sort()
+
+    assert settings_row["additionalProperties"] == false
+    assert Enum.sort(settings_row["required"]) == fields
+    assert settings_row["properties"] |> Map.keys() |> Enum.sort() == fields
   end
 
   # Every job kind, status word and failure code a client may meet is pinned to

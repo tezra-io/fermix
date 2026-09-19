@@ -39,6 +39,7 @@ defmodule FermixCore.Setup.Wizard do
           | {:xai_api_key, String.t()}
           | {:openrouter_api_key, String.t()}
           | {:mistral_api_key, String.t()}
+          | {:venice_api_key, String.t()}
           | {:ollama_base_url, String.t()}
           | {:anthropic_auth_mode, auth_mode() | String.t()}
           | {:xai_auth_mode, auth_mode() | String.t()}

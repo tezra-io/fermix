@@ -58,6 +58,7 @@ defmodule FermixCore.Providers.Descriptor do
           config_keys: [atom(), ...],
           setup_fields: [setup_field()],
           effort?: boolean(),
+          model_info: String.t() | nil,
           default_req_options: keyword()
         }
 
@@ -83,6 +84,7 @@ defmodule FermixCore.Providers.Descriptor do
     :config_keys,
     :setup_fields,
     :effort?,
+    :model_info,
     default_req_options: []
   ]
 
@@ -214,8 +216,40 @@ defmodule FermixCore.Providers.Descriptor do
       # the field entirely (like OpenRouter) and take the server default.
       effort?: false
     },
+    %{
+      id: :venice,
+      label: "Venice",
+      adapter: FermixCore.Providers.OpenAI.ChatCompletions,
+      default_base_url: "https://api.venice.ai/api/v1",
+      locality: :remote,
+      auth_modes: [:api_key],
+      secrets: [:venice_api_key],
+      config_keys: [:api_key, :base_url, :default_model, :primary],
+      setup_fields: [
+        %{
+          key: :venice_api_key,
+          config_key: :api_key,
+          label: "Venice API key",
+          secret?: true,
+          default: nil
+        }
+      ],
+      # Venice support for `reasoning_effort` varies per model (it serves many
+      # open-weight families), so the field is omitted entirely and the server
+      # default stands — the same call OpenRouter makes (M49 §3.2).
+      effort?: false,
+      # The privacy tier rides in every model label, and the two words mean
+      # materially different things, so the sentence that explains them is
+      # declared here and published once: the management wire carries it as the
+      # model row's `info` and the web setup draws the same string beside the
+      # same control (M49 §3.4).
+      model_info:
+        "Private models run on hardware Venice controls, and the prompt is not kept. " <>
+          "Anonymized models are passed to their maker without your account, and the " <>
+          "maker still reads the prompt. TEE models run inside a sealed hardware enclave."
+    },
     # Ollama stays last: a local model is the last-resort fallback hop, so
-    # every cloud provider (Mistral included) is tried before it.
+    # every cloud provider (Mistral and Venice included) is tried before it.
     %{
       id: :ollama,
       label: "Ollama",

@@ -489,6 +489,7 @@ defmodule FermixOpik.Mapper do
   def provider_string(:openrouter), do: "openrouter"
   def provider_string(:ollama), do: "ollama"
   def provider_string(:mistral), do: "mistral"
+  def provider_string(:venice), do: "venice"
   # The transcription backends emit provider calls of their own (M21). Opik
   # prices neither, but the clause + test is the same documented contract as
   # above: `:local` in particular must read as the on-device backend rather than

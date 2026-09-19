@@ -13,6 +13,12 @@ defmodule FermixCore.Management.Settings.Row do
   would let a row claim "no restart needed" for a change that makes the very
   next `overview.get` ask for one.
 
+  `info` is the longer explanation a surface keeps behind an info control rather
+  than showing inline, and `footer` stays the one short line under the control.
+  A row whose subject needs a paragraph to be honest about it carries one; every
+  other row carries `null`, because a control the operator has to open for one
+  more sentence costs more than the sentence saves.
+
   `suggestions` says whether a choice row's `options` are the WHOLE value space
   or only what a client may offer inline. It is the field `settings.apply`
   validates against: without it every choice row accepted any string, and an
@@ -54,6 +60,7 @@ defmodule FermixCore.Management.Settings.Row do
       "kind" => Atom.to_string(kind),
       "label" => label,
       "footer" => Keyword.get(opts, :footer),
+      "info" => validate_info!(key, Keyword.get(opts, :info)),
       "value" => value(Keyword.get(opts, :value)),
       "present" => Keyword.get(opts, :present),
       "options" => Keyword.get(opts, :options, []),
@@ -118,5 +125,14 @@ defmodule FermixCore.Management.Settings.Row do
 
   defp validate_format!(key, format) do
     raise ArgumentError, "row #{key} declared an unpublished number format: #{inspect(format)}"
+  end
+
+  # An empty string is an info control with nothing behind it, which is worse
+  # than no control: `null` is the absent rendering every client already draws.
+  defp validate_info!(_key, nil), do: nil
+  defp validate_info!(_key, info) when is_binary(info) and info != "", do: info
+
+  defp validate_info!(key, info) do
+    raise ArgumentError, "row #{key} declared an unrenderable info: #{inspect(info)}"
   end
 end

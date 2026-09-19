@@ -132,12 +132,13 @@ defmodule FermixCore.Management.CopyTest do
       end
     end
 
-    test "every row label, footer, unit and option obeys the rules" do
+    test "every row label, footer, info, unit and option obeys the rules" do
       for section <- Settings.sections(), row <- rows(section.id) do
         where = "#{section.id}.#{row["key"]}"
 
         assert_clean(row["label"], :prose, row_names(row), "row label #{where}")
         assert_clean(row["footer"], :prose, [], "row footer #{where}")
+        assert_clean(row["info"], :prose, [], "row info #{where}")
         assert_clean(row["unit"], :name, [], "row unit #{where}")
 
         for option <- row["options"] do
@@ -160,6 +161,7 @@ defmodule FermixCore.Management.CopyTest do
 
         assert_clean(row["label"], :prose, row_names(row), "row label #{where}")
         assert_clean(row["footer"], :prose, [], "row footer #{where}")
+        assert_clean(row["info"], :prose, [], "row info #{where}")
         assert internal_terms(row["footer"] || "") == []
       end
     end
@@ -368,7 +370,7 @@ defmodule FermixCore.Management.CopyTest do
   defp section_copy do
     for section <- Settings.sections(),
         row <- rows(section.id),
-        text <- [row["label"], row["footer"], row["unit"]] ++ option_copy(row),
+        text <- [row["label"], row["footer"], row["info"], row["unit"]] ++ option_copy(row),
         is_binary(text) do
       text
     end

@@ -119,11 +119,15 @@ defmodule FermixCore.Management.Settings.Providers do
     )
   end
 
+  # `info` is the descriptor's own, so a provider whose model list needs more
+  # explaining than a label can carry declares it once and both doors draw it;
+  # every other provider publishes `null` and draws no control.
   defp model_row(descriptor, block, restart) do
     Row.new("default_model", :choice, "Model",
       value: Source.string(block, :default_model),
       options: model_options(descriptor.id),
       suggestions: true,
+      info: descriptor.model_info,
       restart: restart
     )
   end

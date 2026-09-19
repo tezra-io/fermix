@@ -170,6 +170,7 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletions do
 
     body =
       %{model: model, messages: format_messages(messages), temperature: temperature}
+      |> Map.merge(provider_body(provider))
       |> maybe_put_tools(to_provider_tools(capabilities))
       |> maybe_put(:response_format, response_format)
       |> maybe_put_reasoning_effort(provider, reasoning_effort)
@@ -415,6 +416,18 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletions do
   end
 
   defp provider_headers(_provider), do: []
+
+  # The body twin of provider_headers/1 (M49 §3.2, static, not configurable).
+  # Venice prepends its own system prompt beside the caller's unless told not
+  # to, and its reasoning models return thinking inline in `content` unless told
+  # to strip it — and this adapter reads `content` only, so without both fields
+  # Fermix's prompt is not the prompt and thinking text reaches the user. Other
+  # providers add nothing.
+  defp provider_body(:venice) do
+    %{venice_parameters: %{include_venice_system_prompt: false, strip_thinking_response: true}}
+  end
+
+  defp provider_body(_provider), do: %{}
 
   # Keyless providers (auth: :none, e.g. Ollama) demand no key and send no
   # authorization header — one explicit branch per configuration, not a

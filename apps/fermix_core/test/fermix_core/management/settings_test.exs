@@ -44,7 +44,7 @@ defmodule FermixCore.Management.SettingsTest do
   @channel_keys [:telegram, :whatsapp, :discord, :slack, :signal, :acp]
 
   @row_fields ~w(
-    key kind label footer value present options min max step restart read_only suggestions
+    key kind label footer info value present options min max step restart read_only suggestions
     unit format
   )
 
@@ -129,6 +129,32 @@ defmodule FermixCore.Management.SettingsTest do
         assert title != "", "#{id} has no title"
         refute title =~ "—", "#{id} title carries an em dash"
         refute title =~ "!", "#{id} title carries an exclamation mark"
+      end
+    end
+  end
+
+  # `info` is free text a call site hands in rather than a value this module
+  # derives, so the builder refuses what no surface can draw: an empty string is
+  # an info control with nothing behind it, and anything else is not the shape
+  # the wire publishes.
+  describe "the row builder" do
+    test "a row carries no explanation unless its call site declares one" do
+      assert Row.new("k", :text, "Label", restart: false)["info"] == nil
+    end
+
+    test "a declared explanation is published verbatim" do
+      row = Row.new("k", :text, "Label", restart: false, info: "The longer story.")
+
+      assert row["info"] == "The longer story."
+    end
+
+    test "an empty or non-string explanation fails at build time" do
+      assert_raise ArgumentError, ~r/row k declared/, fn ->
+        Row.new("k", :text, "Label", restart: false, info: "")
+      end
+
+      assert_raise ArgumentError, ~r/row k declared/, fn ->
+        Row.new("k", :text, "Label", restart: false, info: :venice)
       end
     end
   end
@@ -238,6 +264,22 @@ defmodule FermixCore.Management.SettingsTest do
 
       assert %{"value" => "claude-opus-5"} = row("providers.anthropic", "default_model")
       assert %{"value" => "oauth", "kind" => "choice"} = row("providers.anthropic", "auth_mode")
+    end
+
+    # The explanation behind the model row's info control is the descriptor's,
+    # so the one provider that declares it publishes it and every other one
+    # publishes null. A branch on the provider id here would be a second place
+    # the sentence lives, and the two would drift.
+    test "a model row publishes exactly the explanation its descriptor declares" do
+      for descriptor <- Descriptor.all() do
+        section = "providers.#{descriptor.id}"
+
+        assert row(section, "default_model")["info"] == descriptor.model_info,
+               "#{section} publishes an explanation its descriptor does not declare"
+      end
+
+      assert row("providers.venice", "default_model")["info"] =~ "Private models"
+      assert row("providers.openai", "default_model")["info"] == nil
     end
 
     test "a single-mode provider publishes no auth-mode row" do

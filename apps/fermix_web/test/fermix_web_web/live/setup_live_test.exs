@@ -14,6 +14,7 @@ defmodule FermixWebWeb.SetupLiveTest do
   alias FermixCore.Plugins.Dist.Store, as: DistStore
   alias FermixCore.Plugins.Registry, as: PluginRegistry
   alias FermixCore.Plugins.Status, as: PluginStatus
+  alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.RestartState
@@ -3070,6 +3071,58 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert Keyword.get(providers[:openrouter], :default_model) == "openai/gpt-5.5"
     end
 
+    # M49 §4: the Venice card is descriptor-driven like every other provider —
+    # this proves the pane, its key field and the save path with no
+    # Venice-specific code behind any of them.
+    test "venice pane renders its key field and saves the provider block", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup?tab=provider")
+
+      html =
+        view
+        |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: "venice"})
+        |> render_change()
+
+      assert html =~ "Configuring Venice"
+      assert html =~ ~s(name="provider_form[venice_api_key]")
+
+      view
+      |> form("form[phx-submit=\"save_provider\"]",
+        provider_form: %{
+          provider: "venice",
+          venice_api_key: "vk-live",
+          default_model: "grok-4-6"
+        }
+      )
+      |> render_submit()
+
+      {:ok, persisted} = ConfigStore.load_runtime_config()
+      providers = Keyword.get(persisted.fermix_core, :providers, [])
+
+      assert Keyword.get(providers[:venice], :api_key) == "vk-live"
+      assert Keyword.get(providers[:venice], :default_model) == "grok-4-6"
+    end
+
+    # M49 §3.4: the model explanation is the descriptor's, drawn beside "Default
+    # model" behind an info control rather than inline, and read out of the same
+    # field the management wire publishes as the row's `info`. A provider that
+    # declares none draws nothing.
+    test "the model info control renders for a provider that declares one", %{conn: conn} do
+      info = Descriptor.fetch!(:venice).model_info
+      {:ok, view, _html} = live(conn, "/setup?tab=provider")
+
+      venice = provider_pane_html(view, "venice")
+
+      assert venice =~ "hero-information-circle"
+      assert venice =~ ~s(data-tip="#{info}")
+      assert venice =~ ~s(<span class="sr-only">#{info}</span>)
+
+      openai = provider_pane_html(view, "openai")
+
+      assert openai =~ "Default model"
+      refute openai =~ info
+      refute openai =~ "hero-information-circle"
+    end
+
     test "Model behavior panel is hidden for effort-less providers", %{conn: conn} do
       {:ok, view, html} = live(conn, "/setup?tab=provider")
 
@@ -5718,6 +5771,13 @@ defmodule FermixWebWeb.SetupLiveTest do
       refute refused =~ "config_unreadable"
       refute refused =~ "Sandbox saved."
     end
+  end
+
+  # The provider pane as it renders once a provider is selected for editing.
+  defp provider_pane_html(view, provider) do
+    view
+    |> form(~s(form[phx-submit="save_provider"]), provider_form: %{provider: provider})
+    |> render_change()
   end
 
   # The rendered <option> nodes of one realtime select, in document order.

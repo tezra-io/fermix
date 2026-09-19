@@ -42,7 +42,14 @@ defmodule FermixCore.Setup.Doctor do
   alias FermixCore.Transcription.Local.SidecarInstaller, as: SttInstaller
 
   @type provider ::
-          :openai | :openai_codex | :anthropic | :xai | :openrouter | :ollama | :mistral
+          :openai
+          | :openai_codex
+          | :anthropic
+          | :xai
+          | :openrouter
+          | :ollama
+          | :mistral
+          | :venice
   @type probe_ok :: %{provider: provider(), model: String.t(), latency_ms: non_neg_integer()}
   @type channel_probe :: %{
           required(:channel) => atom(),
@@ -134,6 +141,7 @@ defmodule FermixCore.Setup.Doctor do
   @xai_default_base_url "https://api.x.ai/v1"
   @openrouter_default_base_url "https://openrouter.ai/api/v1"
   @mistral_default_base_url "https://api.mistral.ai/v1"
+  @venice_default_base_url "https://api.venice.ai/api/v1"
   @command_channels [:telegram, :whatsapp, :discord, :slack, :signal, :mobile]
   @web_search_probe_query "fermix web search health check"
   # A landmark, not a category: the place probe is never anchored (it must not
@@ -185,6 +193,7 @@ defmodule FermixCore.Setup.Doctor do
   def probe_provider(:openrouter, opts), do: probe_openrouter(opts)
   def probe_provider(:ollama, opts), do: probe_ollama(opts)
   def probe_provider(:mistral, opts), do: probe_mistral(opts)
+  def probe_provider(:venice, opts), do: probe_venice(opts)
 
   def probe_provider(other, _opts) do
     raise ArgumentError,
@@ -965,6 +974,33 @@ defmodule FermixCore.Setup.Doctor do
     end
   end
 
+  # Unlike the chat probes above, this one asks a key-scoped endpoint rather
+  # than the runtime's own: Venice's `/models` is public and answers 200 with no
+  # key at all (M49 §2), so calling it would prove nothing about the credential.
+  # `/api_keys/rate_limits` needs the key and is unmetered — 200 proves it, 401
+  # rejects it, 402 means the account has no credit left. The trade is that this
+  # probe does not exercise the configured model id the way a chat probe does,
+  # so a wrong Venice model surfaces on the first turn instead of here.
+  defp probe_venice(opts) do
+    config = provider_config(:venice)
+
+    case chat_completions_bearer(config, :venice) do
+      {:error, _} = err ->
+        err
+
+      {:ok, bearer} ->
+        url = "#{base_url(config, :venice, @venice_default_base_url)}/api_keys/rate_limits"
+        model = effective_model(config, :venice)
+
+        headers = [
+          {"authorization", "Bearer #{bearer}"},
+          {"content-type", "application/json"}
+        ]
+
+        do_get(:venice, url, headers, model, "venice.ai API key", opts)
+    end
+  end
+
   # Keyless local provider: 1-token chat completion through the same /v1
   # path the adapter uses, then a native /api/show check that the SERVED
   # context window is not silently below the catalog window (Ollama
@@ -1220,6 +1256,15 @@ defmodule FermixCore.Setup.Doctor do
     |> classify(provider, model, surface, start)
   end
 
+  defp do_get(provider, url, headers, model, surface, opts) do
+    start = System.monotonic_time(:millisecond)
+
+    Req.new(url: url, method: :get, headers: headers, retry: false)
+    |> Req.merge(probe_req_options(opts))
+    |> Req.request()
+    |> classify(provider, model, surface, start)
+  end
+
   defp probe_req_options(opts) do
     opts
     |> Keyword.get(:req_options, [])
@@ -1278,6 +1323,7 @@ defmodule FermixCore.Setup.Doctor do
     {"api.x.ai", "SpaceXAI API key rejected — verify it in the SpaceXAI console"},
     {"openrouter.ai", "OpenRouter API key rejected — verify it at openrouter.ai/settings/keys"},
     {"mistral.ai", "Mistral API key rejected — verify it at console.mistral.ai/api-keys"},
+    {"venice.ai", "Venice API key rejected — verify it at venice.ai/settings/api"},
     {"Ollama", "the Ollama server rejected the request — check its auth/proxy configuration"}
   ]
 

@@ -275,7 +275,16 @@ defmodule FermixCore.Tools.SubagentsTest do
       assert props.model.description =~ "Omit unless the user explicitly asked"
 
       assert props.provider.enum ==
-               ["openai_codex", "openai", "anthropic", "xai", "openrouter", "mistral", "ollama"]
+               [
+                 "openai_codex",
+                 "openai",
+                 "anthropic",
+                 "xai",
+                 "openrouter",
+                 "mistral",
+                 "venice",
+                 "ollama"
+               ]
 
       assert props.reasoning_effort.enum == ["none", "low", "medium", "high", "xhigh", "max"]
     end

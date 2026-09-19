@@ -368,7 +368,9 @@ defmodule FermixWebWeb.SetupLive.Components do
           <section class="min-w-0 space-y-5">
             <div class="grid gap-4 lg:grid-cols-2">
               <label class="form-control w-full">
-                <span class="label pb-1 text-sm font-medium">Default model</span>
+                <span class="label pb-1 text-sm font-medium">
+                  Default model <.model_info provider={@provider_form.provider} />
+                </span>
                 <.default_model_input
                   provider_form={@provider_form}
                   provider_models={@provider_models}
@@ -555,6 +557,23 @@ defmodule FermixWebWeb.SetupLive.Components do
   # Hide the "Model behavior" panel when the provider has no behavior
   # knobs (no reasoning effort; the codex fast toggle rides effort? too).
   defp provider_behavior?(provider), do: Descriptor.fetch!(provider).effort?
+
+  attr :provider, :atom, required: true
+
+  # Info "i" beside "Default model": the longer explanation a provider declares
+  # about its own model list, kept behind the control rather than shown inline.
+  # The string is the descriptor's — the same one the management wire publishes
+  # as the model row's `info` — so a provider that declares none draws nothing.
+  defp model_info(assigns) do
+    assigns = assign(assigns, info: Descriptor.fetch!(assigns.provider).model_info)
+
+    ~H"""
+    <span :if={@info} class="tooltip tooltip-right z-10 text-base-content/45" data-tip={@info}>
+      <.icon name="hero-information-circle" class="size-4" />
+      <span class="sr-only">{@info}</span>
+    </span>
+    """
+  end
 
   attr :provider_form, :map, required: true
   attr :provider_models, :list, required: true
