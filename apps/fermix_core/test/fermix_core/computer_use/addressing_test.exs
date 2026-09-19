@@ -46,8 +46,32 @@ defmodule FermixCore.ComputerUse.AddressingTest do
       respond(state, request)
     end
 
-    # With `screenshot_after: false` a mutating action returns a bare ack — the
-    # session takes its own check. Either shape carries the wire's `receipt`.
+    # A mutating action asking for an image check comes back AS that image: the
+    # view it acted in, re-captured by the helper on the action's own frame and
+    # minting an id of its own. Its rectangle is the one the named image was a crop
+    # of, because that is the view it re-captured.
+    defp respond(state, %{"action" => action, "check" => "image"} = request)
+         when action in ~w(left_click right_click double_click left_click_drag scroll) do
+      region = checked_region(request)
+      {w, h} = check_dims(region)
+
+      base =
+        %{
+          "ok" => true,
+          "data" => Base.encode64("png"),
+          "mime" => "image/png",
+          "width" => w,
+          "height" => h,
+          "region" => region,
+          "observation_id" => check_id(request["observation_id"]),
+          "observation_kind" => "image",
+          "captured_at_monotonic_ns" => 1_000
+        }
+        |> FermixTestSupport.ComputerUseReceipts.stamp(request)
+
+      {:ok, if(state.cursor, do: Map.put(base, "cursor", state.cursor), else: base)}
+    end
+
     defp respond(_state, %{"action" => action} = request)
          when action in ~w(left_click right_click double_click left_click_drag scroll) do
       {:ok, FermixTestSupport.ComputerUseReceipts.stamp(%{"ok" => true}, request)}
@@ -115,15 +139,24 @@ defmodule FermixCore.ComputerUse.AddressingTest do
     @impl true
     def stop(_state), do: :ok
 
-    # A check re-capture NAMES the image it re-captures and asks for the whole of
-    # it in that image's own pixels, so it comes back at that image's size. The
-    # full display sends 1366x384; a crop is magnified to 1200x760.
+    # A view named as an observation is re-read from its id, which encodes the
+    # rectangle it was a crop of; the full display sends 1366x384 and a crop is
+    # magnified to 1200x760.
     defp sent_dims(%{"observation_id" => id, "region" => %{"w" => w, "h" => h}})
          when is_binary(id),
          do: {w, h}
 
     defp sent_dims(%{"region" => region}) when is_map(region), do: {1200, 760}
     defp sent_dims(_request), do: {1366, 384}
+
+    # The check re-captures the view the action was aimed in, so it echoes THAT
+    # rectangle: the crop's own for a crop, the whole display's otherwise.
+    defp checked_region(%{"observation_id" => id}), do: ComputerUseObservations.region_of(id)
+
+    defp check_dims(nil), do: {1366, 384}
+    defp check_dims(_region), do: {1200, 760}
+
+    defp check_id(id), do: "#{id}-check"
 
     defdelegate image_id(region), to: ComputerUseObservations
   end
@@ -141,31 +174,38 @@ defmodule FermixCore.ComputerUse.AddressingTest do
     def stop(_state), do: :ok
   end
 
-  # Screenshots succeed a bounded number of times, then fail — how the check's own
-  # capture failure is exercised. Backed by an Agent so the budget survives the
-  # driver's stateless execute/2.
+  # Looking works; the capture an action's own check needs does not. The helper
+  # then answers the ACTION with a refusal whose receipt says the input already
+  # went out and which carries no check at all — the input landed, the look did
+  # not, and both halves are on one frame.
   defmodule FailingCheckDriver do
     @behaviour Compux.Driver
 
     @impl true
-    def start(opts), do: {:ok, %{shots: Keyword.fetch!(opts, :shots)}}
+    def start(_opts), do: {:ok, %{}}
 
     @impl true
-    def execute(%{shots: shots}, %{"action" => "screenshot"} = request) do
-      if Agent.get_and_update(shots, &{&1, &1 - 1}) > 0,
-        do:
-          {:ok,
-           ComputerUseObservations.stamp(
-             %{
-               "data" => Base.encode64("png"),
-               "mime" => "image/png",
-               "width" => 1200,
-               "height" => 760,
-               "region" => ComputerUseObservations.resolved_region(request)
-             },
-             request
-           )},
-        else: {:error, :capture_failed}
+    def execute(_state, %{"action" => "screenshot"} = request) do
+      {:ok,
+       ComputerUseObservations.stamp(
+         %{
+           "data" => Base.encode64("png"),
+           "mime" => "image/png",
+           "width" => 1200,
+           "height" => 760,
+           "region" => ComputerUseObservations.resolved_region(request)
+         },
+         request
+       )}
+    end
+
+    def execute(_state, %{"check" => "image"}) do
+      {:error,
+       {:action_failed,
+        %{
+          "error" => "capture_failed",
+          "receipt" => FermixTestSupport.ComputerUseReceipts.receipt(:sent, check: nil)
+        }}}
     end
 
     def execute(_state, request),
@@ -300,6 +340,7 @@ defmodule FermixCore.ComputerUse.AddressingTest do
     test "an action aimed in a crop is checked by a re-capture of that crop" do
       session = start_session()
       {:ok, _} = run(session, %{"action" => "screenshot", "region" => @region})
+      assert_receive {:driver_execute, %{"action" => "screenshot"}}
 
       {:ok, :auto, click} =
         Session.classify(session, %{
@@ -311,29 +352,20 @@ defmodule FermixCore.ComputerUse.AddressingTest do
 
       {:ok, result} = Session.execute(session, click)
 
-      assert_receive {:driver_execute, %{"action" => "left_click", "screenshot_after" => false}}
+      # One call. The helper holds the transform it made that image with, so the
+      # check is the same crop of the same screen without a second request and
+      # without this side re-deriving a screen rectangle.
+      assert_receive {:driver_execute, %{"action" => "left_click", "check" => "image"}}
+      refute_receive {:driver_execute, %{"action" => "screenshot"}}, 50
 
-      # The whole of the crop, in the crop's OWN pixels, naming it — so the helper
-      # maps the rectangle through the transform it stored, and this side never
-      # re-derives a screen rectangle.
-      assert_receive {:driver_execute,
-                      %{
-                        "action" => "screenshot",
-                        "observation_id" => @crop,
-                        "region" => %{"x" => 0, "y" => 0, "w" => 1200, "h" => 760},
-                        "annotate_point" => %{"x" => 900, "y" => 400},
-                        "rulers" => true,
-                        "jpeg_quality" => quality
-                      }}
-
-      assert is_integer(quality) and quality in 1..100
       assert %{data: "png"} = result.image
       assert result.summary =~ "Coordinates are pixels in this exact image"
     end
 
-    test "an action aimed in a full-screen image keeps the helper's own check" do
+    test "an action aimed in a full-screen image is checked in the full screen" do
       session = start_session()
       {:ok, _} = run(session, %{"action" => "screenshot"})
+      assert_receive {:driver_execute, %{"action" => "screenshot"}}
 
       {:ok, :auto, click} =
         Session.classify(session, %{
@@ -343,10 +375,11 @@ defmodule FermixCore.ComputerUse.AddressingTest do
           "y" => 300
         })
 
-      {:ok, _result} = Session.execute(session, click)
+      {:ok, result} = Session.execute(session, click)
 
-      assert_receive {:driver_execute, %{"action" => "left_click", "screenshot_after" => true}}
-      refute_receive {:driver_execute, %{"action" => "screenshot", "region" => _}}, 50
+      assert_receive {:driver_execute, %{"action" => "left_click", "check" => "image"}}
+      refute_receive {:driver_execute, %{"action" => "screenshot"}}, 50
+      assert result.summary =~ "1366x384"
     end
 
     # The check image is the one the model now reads, so it is the one the model's
@@ -366,7 +399,7 @@ defmodule FermixCore.ComputerUse.AddressingTest do
         })
 
       {:ok, result} = Session.execute(session, click)
-      check_id = ImageDriver.image_id(%{"x" => 0, "y" => 0, "w" => 1200, "h" => 760})
+      check_id = "#{@crop}-check"
 
       assert result.summary =~ "Image #{check_id}"
 
@@ -392,14 +425,12 @@ defmodule FermixCore.ComputerUse.AddressingTest do
     # double click on the real desktop). Report it done, say the check is missing,
     # and leave every image the model can still name where it was.
     test "a failed check reports the action done and unverified, addressing unchanged" do
-      shots = start_supervised!({Agent, fn -> 1 end})
-
       session =
         start_supervised!(
           {Session,
            [
              config: Config.normalize(enabled: true),
-             driver: {FailingCheckDriver, [shots: shots]},
+             driver: {FailingCheckDriver, []},
              origin: :interactive,
              session_id: "cua_check_fail",
              agent: "main"

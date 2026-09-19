@@ -84,8 +84,8 @@ def llm_row(*, at_ms: float, provider: str, model: str, effort: str | None = Non
 
 # --- fixture strings, copied from the daemon sources ------------------------
 
-# `computer_use/session.ex` `screenshot_summary/1`: the image's own identity and the
-# one rule, then the cursor echo, then the untrusted-image notice.
+# `computer_use/session.ex` `screenshot_summary/2`: `image_lead/2` (the image's own
+# identity and the one rule), then `cursor_suffix/1`, then the untrusted notice.
 FULL_SHOT_OUTPUT = ("Image 7c1e-12, 1931x543 (display 0). Coordinates are pixels in this exact "
                     "image: pass observation_id \"7c1e-12\" with any click, move, drag, scroll "
                     "or inspect. Cursor at (417,152). "
@@ -95,29 +95,44 @@ FULL_SHOT_OUTPUT = ("Image 7c1e-12, 1931x543 (display 0). Coordinates are pixels
 CROP_SHOT_OUTPUT = ("Image 7c1e-13, 1355x959 (display 0). Coordinates are pixels in this exact "
                     "image: pass observation_id \"7c1e-13\" with any click, move, drag, scroll "
                     "or inspect. Cursor at (700,400).")
-# session.ex:965 — the delivery marker.
-NOT_DELIVERED_OUTPUT = (" NOT delivered at (418,152) — the pointer never reached that point, so this "
-                        "action did nothing. Re-send the SAME action with the SAME region and coordinates.")
-# session.ex:926-927 — an empty marks table is a loud absence.
-NO_MARKS_OUTPUT = ("screenshot 1931x543 (display 0). 0 accessibility marks — AX exposed no "
+# `session.ex` `delivery_suffix/1` — the aim marker. It reports what was SEEN and
+# never a verdict on the input: a human who moved the mouse after a click that
+# landed leaves the same trace.
+NOT_DELIVERED_OUTPUT = (" Aim NOT confirmed at (418,152) — the check's cursor is elsewhere, which "
+                        "looks the same whether the input missed or someone moved the mouse after "
+                        "it landed. Read this image: repeat the action only if it shows the effect "
+                        "is missing, and then with the SAME coordinates, in the image named above.")
+# `session.ex` `marks_suffix/1` — an empty marks table is a loud absence.
+NO_MARKS_OUTPUT = ("Image 7c1e-12, 1931x543 (display 0). 0 accessibility marks — AX exposed no "
                    "click targets in this view.")
-MARKS_OUTPUT = ("screenshot 1931x543 (display 0). 12 numbered mark(s) badged on the image — "
-                "act on one by sending `mark: <id>` instead of x,y:\nmark 1: button \"Anchor\" at (300,300)")
+# `session.ex` `marks_suffix/1` + `mark_line/1`.
+MARKS_OUTPUT = ("Image 7c1e-12, 1931x543 (display 0). 12 numbered mark(s) badged on the image — "
+                "act on one by sending `mark: <id>` instead of x,y, or `press` for the control "
+                "behind it:\nmark 1: AXButton \"Anchor\" at (300,300)")
 
-# apps/fermix_core/lib/fermix_core/tools/computer_use.ex — the typed refusals this
-# side renders, plus the helper's own addressing and geometry codes.
-OBSERVATION_REQUIRED_REFUSAL = ("this action was not sent: it names no `observation_id`, so there is no image "
-                                "its coordinates belong to. Take a `screenshot` (or `elements`, or `windows`), "
-                                "then send this action again with the `observation_id` that reply names and the "
-                                "coordinates you read in it.")
+# `tools/computer_use.ex` — `refusal_message/1` for this side's own gates and
+# `action_error_message/1` for the helper's addressing and geometry codes.
+OBSERVATION_REQUIRED_REFUSAL = ("this action was not sent: it names no `observation_id`, so there is no reply "
+                                "its target belongs to — a coordinate and an `element_ref` alike mean something "
+                                "only in the image or listing they were read from. Take a `screenshot` (or "
+                                "`elements`, or `windows`), then send this action again with the "
+                                "`observation_id` that reply names and the target you read in it.")
 EXPIRED_OBSERVATION_REFUSAL = ("this action was not sent: the image its `observation_id` names is no longer one "
                                "the computer-use helper holds — it has been replaced by newer ones, it aged out, "
-                               "or the display it was taken from moved or changed size.")
+                               "or the display it was taken from moved or changed size. Take a fresh "
+                               "`screenshot`, read the coordinates again in the image IT names, and send the "
+                               "action with that id. Do not re-send the old coordinates.")
 OUTSIDE_OBSERVATION_REFUSAL = ("this action was not sent: the point lies outside the image its `observation_id` "
-                               "names, so there is nowhere on that image to put it.")
-GEOMETRY_MISMATCH_REFUSAL = ("this action was not sent: the computer-use helper's measurements of this display "
-                             "do not match the picture it captured, so any point it mapped would land somewhere "
-                             "else on screen.")
+                               "names, so there is nowhere on that image to put it — it was most likely read in "
+                               "a different image. Take a `screenshot`, read the point again in the image it "
+                               "names, and send the action with that id.")
+# Deliberately does NOT open "this action was not sent": it arrives on both sides
+# of dispatch, and claiming either would be a lie on one of them.
+GEOMETRY_MISMATCH_REFUSAL = ("the computer-use helper's measurements of this display do not match the picture "
+                             "it captured, so any point it mapped would land somewhere else on screen. This is "
+                             "not something you did wrong and not something a different image fixes. Do not "
+                             "retry. Tell the user the computer-use helper is reading this display's geometry "
+                             "wrongly, and give them both sizes below.")
 AMBIGUOUS_OUTPUT = ('ambiguous coordinates: (300,200) fits both image 7c1e-13, which is a 1355x959 magnified '
                     'crop, and the on-screen region box {"x": 100, "y": 50, "w": 482, "h": 341} that crop was '
                     'taken from. If you meant pixels of image 7c1e-13, re-send the SAME action with '
@@ -571,6 +586,18 @@ def test_every_typed_refusal_is_recognised():
     assert traces.classify_refusal(NO_MARKS_REFUSAL) == "no_marks"
     assert traces.classify_refusal(UNKNOWN_MARK_REFUSAL) == "unknown_mark"
     assert traces.classify_refusal("action failed: boom") is None
+
+
+def test_no_refusal_marker_is_left_without_a_fixture():
+    """Derived from the live marker table, never a hand-list beside it: a marker
+    with no fixture is one whose anchor can stop matching the daemon's wording
+    without a single test going red, which is how the aim marker spent a slice
+    reading a sentence the daemon had already reworded."""
+    fixtures = [AMBIGUOUS_OUTPUT, OBSERVATION_REQUIRED_REFUSAL, EXPIRED_OBSERVATION_REFUSAL,
+                OUTSIDE_OBSERVATION_REFUSAL, GEOMETRY_MISMATCH_REFUSAL, NO_MARKS_REFUSAL,
+                UNKNOWN_MARK_REFUSAL]
+    markers = {kind for kind, _ in traces._REFUSALS}
+    assert {traces.classify_refusal(text) for text in fixtures} == markers
 
 
 def test_marks_counts_parse_including_the_loud_zero():

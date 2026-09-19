@@ -2,17 +2,25 @@
 # Test-only fake compux sidecar for the fermix PortDriver adapter. Autoflush so a
 # one-line reply reaches the Port immediately.
 #
-# It speaks protocol 9 framing: every inbound line is a tagged `request` or
+# It speaks protocol 10 framing: every inbound line is a tagged `request` or
 # `control` frame carrying a `request_id`, and every reply echoes that id inside a
 # tagged `response` or `control_ack`. A reply that hands back coordinates mints an
 # `observation_id`; a pointer action that names none, or names one this fake has
 # retired, is refused with a `not_sent` receipt exactly as the helper does.
 #
-# Protocol 9 adds the references: `elements` hands back controls carrying an
+# Protocol 9 added the references: `elements` hands back controls carrying an
 # `element_ref`, `press` and `set_value` address one, and a pointer action may
 # address one INSTEAD of a point. Every refusal the helper has for them is here
 # too — a fake that refused LESS than the helper would let a request shape the
 # helper rejects pass every test in this repo.
+#
+# Protocol 10 replaces `screenshot_after` with `check`, and a mutating success
+# answers exactly what its request asked for: `image` returns the view the action
+# acted in (this fake settles instantly, so its timings are zero), `semantic`
+# returns the control read again as `element_after`, `none` returns the receipt
+# alone. Every mutating success carries `check` AND `timings_ms` — a fake that
+# omitted either, or that could never time out, would be KINDER than the helper
+# and every test built on it would prove nothing.
 #
 # The stdin loop NEVER blocks on a request it cannot answer yet, which is the
 # whole point of the control channel: `defer` records the id and keeps reading, so
@@ -27,14 +35,17 @@
 #   defer       record the id, answer only once a control releases it
 #   refuse      ok:false + error + a not_sent receipt (a refused mutation)
 #   no_receipt  ok:true with NO receipt on a mutating action (the protocol fault)
+#   cancel_check  ok:false + "cancelled" with a SENT receipt carrying no check:
+#                 the input went out and the settle was cancelled under it
 #   screenshot/windows -> a minted observation
 #   elements    -> a minted observation plus the controls it named, one of each
 #                  kind the summary has to render: pressable, settable, disabled
 #   press       -> an `ax` receipt, effect not_observed (an AX return is a
-#                  dispatch result, not an effect)
+#                  dispatch result, not an effect), plus the control read again
 #   set_value   -> an `ax` receipt, effect verified (or not_observed for the
 #                  secure field, which reads back masked)
-#   anything else -> ok + pong, with a receipt when the action is mutating
+#   anything else -> ok + pong, with a receipt when the action is mutating, and
+#                  with the evidence its `check` asked for
 #
 # Env: FAKE_PROTO (reported protocol_version), FAKE_SIDECAR_GENERATION,
 #      FAKE_CONTROL_MODE ("ack" default, "refuse" to answer ok:false),
@@ -42,17 +53,21 @@
 #      pointer action with, e.g. "expired_observation"),
 #      FAKE_ELEMENT_ERROR (an element code to refuse every referenced action
 #      with, e.g. "element_disabled"),
-#      FAKE_FOREGROUND_CHANGED (1 to report that an AX action took the front).
+#      FAKE_FOREGROUND_CHANGED (1 to report that an AX action took the front),
+#      FAKE_SETTLE ("stable" default, "timeout" for a view that never settled),
+#      FAKE_CHANGED (1 default, 0 for a view identical to the one acted on).
 use strict;
 use warnings;
 $| = 1;
 
-my $proto        = $ENV{FAKE_PROTO} // 9;
+my $proto        = $ENV{FAKE_PROTO} // 10;
 my $BOOT         = $ENV{FAKE_SIDECAR_GENERATION} // 'boot-fake';
 my $CONTROL_MODE = $ENV{FAKE_CONTROL_MODE} // 'ack';
 my $OBS_ERROR    = $ENV{FAKE_OBSERVATION_ERROR};
 my $ELEMENT_ERROR = $ENV{FAKE_ELEMENT_ERROR};
 my $FOREGROUND   = $ENV{FAKE_FOREGROUND_CHANGED} ? 'true' : 'false';
+my $SETTLE       = $ENV{FAKE_SETTLE} // 'stable';
+my $CHANGED      = (defined $ENV{FAKE_CHANGED} && $ENV{FAKE_CHANGED} eq '0') ? 'false' : 'true';
 
 # One counter per process, so an id from a sidecar that died can never resolve in
 # its successor: the boot generation is part of the id.
@@ -99,19 +114,41 @@ sub envelope {
     return qq("request_id":"$id","sidecar_generation":"$BOOT","session_generation":1);
 }
 
+# This fake settles instantly and encodes nothing, so every phase but the input
+# costs zero — reported, never omitted: a mutating success without `timings_ms` is
+# a shape the helper never sends.
+my $TIMINGS = qq("timings_ms":{"input":1,"settle":0,"capture":0,"encode":0});
+
+# The evidence a mutating success carries, which is the evidence its request asked
+# for. An image check also says whether the view settled and whether it differs
+# from the one acted on; a semantic check answers neither, being a reading of one
+# control rather than a picture.
+sub check_field {
+    my ($kind) = @_;
+    return qq("check":{"kind":"image","settle":"$SETTLE","changed":$CHANGED}) if $kind eq 'image';
+    return qq("check":{"kind":"$kind"});
+}
+
+sub requested_check {
+    my ($line) = @_;
+    my ($kind) = $line =~ /"check":"([^"]*)"/;
+    return defined $kind ? $kind : 'none';
+}
+
 sub receipt {
-    my ($dispatch) = @_;
+    my ($dispatch, $kind) = @_;
+    my $check = defined $kind ? ',' . check_field($kind) : '';
     return qq("receipt":{"dispatch":"$dispatch","effect":"unknown",)
-        . qq("input_method":"foreground_hid","timings_ms":{"input":1,"settle":0,"capture":0}});
+        . qq("input_method":"foreground_hid",$TIMINGS$check});
 }
 
 # The receipt an accessibility action earns: the `ax` method, the effect its own
-# read-back proved, and whether the action pulled its application to the front.
+# read-back proved, whether the action pulled its application to the front, and
+# the control read again.
 sub ax_receipt {
     my ($effect) = @_;
     return qq("receipt":{"dispatch":"sent","effect":"$effect","input_method":"ax",)
-        . qq("foreground_changed":$FOREGROUND,)
-        . qq("timings_ms":{"input":1,"settle":0,"capture":0}});
+        . qq("foreground_changed":$FOREGROUND,$TIMINGS,) . check_field('semantic') . qq(});
 }
 
 sub control {
@@ -133,7 +170,7 @@ sub control {
     }
 }
 
-# The addressing half of the wire (protocol 9), matching the helper on BOTH
+# The addressing half of the wire (protocol 10), matching the helper on BOTH
 # sides: an action aimed into an observation must name it and must not
 # carry a rectangle; an action that aims at nothing must not name one at all; and
 # a target named twice, or named by a reference nobody minted, is refused before
@@ -182,6 +219,27 @@ sub observation {
         . qq("captured_at_monotonic_ns":1000);
 }
 
+# The picture a mutating action's `check: "image"` answers with: an image like any
+# other, minting its own id, which is the one the caller's next action names.
+sub check_image {
+    return observation('image')
+        . qq(,"data":"cG5n","mime":"image/jpeg","width":100,"height":80,)
+        . qq("region":{"x":0,"y":0,"w":100,"h":80});
+}
+
+# The control a `check: "semantic"` answers with, read again after the action.
+# `present` is ALWAYS there and is the first thing the consumer reads: a control
+# that no longer answers is `{"present": false}` and nothing else, which is the
+# most informative thing the re-read has to say. A control whose value is withheld
+# carries none at all rather than a masked one.
+sub element_after {
+    my ($role, $label, $enabled, $value) = @_;
+    return qq("element_after":{"present":false}) unless defined $role;
+    my $named = defined $label ? qq(,"label":"$label") : '';
+    my $held  = defined $value ? qq(,"value":"$value") : '';
+    return qq("element_after":{"present":true,"role":"$role"$named,"enabled":$enabled$held});
+}
+
 # One control of each kind the summary has to render, exactly as the helper lists
 # them: a pressable button, a settable field, a secure field, a disabled button,
 # and one that offers no accessibility action at all.
@@ -221,7 +279,8 @@ sub request {
     # side come to depend on fields the helper never sends.
     if ($action eq 'press') {
         print qq({"type":"response",) . envelope($id)
-            . qq(,"ok":true,) . ax_receipt('not_observed') . qq(}\n);
+            . qq(,"ok":true,) . element_after('AXButton', 'Save', 'true', undef) . qq(,)
+            . ax_receipt('not_observed') . qq(}\n);
         return;
     }
     if ($action eq 'set_value') {
@@ -232,8 +291,14 @@ sub request {
         my $effect    = $secure ? 'not_observed' : 'verified';
         my $verified  = $secure ? 'false' : 'true';
         my $read_back = $secure ? '' : qq("value":"$value",);
+        # A secure control's value is never read back, so its `element_after`
+        # carries none either — the same withholding, on both halves of the frame.
+        my $after = $secure
+            ? element_after('AXTextField', 'Password', 'true', undef)
+            : element_after('AXTextField', 'Search', 'true', $value);
         print qq({"type":"response",) . envelope($id)
-            . qq(,"ok":true,"verified":$verified,$read_back) . ax_receipt($effect) . qq(}\n);
+            . qq(,"ok":true,"verified":$verified,$read_back$after,)
+            . ax_receipt($effect) . qq(}\n);
         return;
     }
 
@@ -267,9 +332,24 @@ sub request {
     elsif ($action eq 'no_receipt') {
         print qq({"type":"response",) . envelope($id) . qq(,"ok":true,"pong":true}\n);
     }
+    elsif ($action eq 'cancel_check') {
+        # The input went out in full and the settle was cancelled under it, so the
+        # frame is a refusal whose receipt says `sent` and carries NO check. The
+        # helper is honest about both halves; so is this.
+        print qq({"type":"response",) . envelope($id)
+            . qq(,"ok":false,"error":"cancelled","detail":"the settle was cancelled",)
+            . receipt('sent') . qq(}\n);
+    }
+    elsif ($READ_ONLY{$action}) {
+        print qq({"type":"response",) . envelope($id) . qq(,"ok":true,"pong":true}\n);
+    }
     else {
-        my $receipt = $READ_ONLY{$action} ? '' : ',' . receipt('sent');
-        print qq({"type":"response",) . envelope($id) . qq(,"ok":true,"pong":true$receipt}\n);
+        # A mutating success answers the evidence its request asked for, and always
+        # says which evidence that was.
+        my $kind = requested_check($line);
+        my $body = ($kind eq 'image') ? ',' . check_image() : '';
+        print qq({"type":"response",) . envelope($id)
+            . qq(,"ok":true,"pong":true$body,) . receipt('sent', $kind) . qq(}\n);
     }
 }
 

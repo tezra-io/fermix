@@ -839,33 +839,63 @@ defmodule FermixCore.Tools.ComputerUseTest do
     end
 
     # A geometry mismatch arrives on BOTH sides of dispatch: on the action, where
-    # nothing was sent, and on the check capture that follows a click the helper
-    # already dispatched. One sentence serves both because it claims nothing about
-    # dispatch — the receipt decides the outcome, and a sentence that said "this
-    # action was not sent" would tell the model a dispatched click never happened.
-    test "a geometry mismatch reads the same whichever receipt it carries", %{
+    # nothing was sent, and on the CHECK that follows a click the helper already
+    # dispatched. Neither reading may claim the wrong thing about dispatch — the
+    # RECEIPT decides, never the code — so the two are told apart here. Before the
+    # action and its check became one frame (M42 slice 6) the check was a separate
+    # capture, and a refused one answered exactly as the second half does.
+    test "a geometry mismatch before dispatch is an operator fault, told plainly", %{
       config: config,
       turn: turn
     } do
-      for {dispatch, outcome} <- [{"not_sent", :refused}, {"sent", :performed_unverified}] do
-        session = error_session("capture_geometry_mismatch", dispatch: dispatch)
+      session = error_session("capture_geometry_mismatch", dispatch: "not_sent")
 
-        assert {:ok, result} =
-                 ComputerUse.execute(
-                   %{"action" => "left_click", "observation_id" => @obs, "x" => 1, "y" => 2},
-                   tool_context(session, config, turn)
-                 )
+      assert {:ok, result} =
+               ComputerUse.execute(mismatch_click(), tool_context(session, config, turn))
 
-        assert result.error =~ "do not match the picture it captured"
-        assert result.error =~ "Do not retry."
-        assert result.error =~ "give them both sizes below"
-        refute result.error =~ "was not sent", "#{dispatch}: the sentence may not claim dispatch"
-        refute result.error =~ "action failed"
+      assert result.error =~ "do not match the picture it captured"
+      assert result.error =~ "Do not retry."
+      assert result.error =~ "give them both sizes below"
+      refute result.error =~ "action failed"
 
-        assert_receive {:tool_exec,
-                        %{outcome: ^outcome, geometry_refusal: "capture_geometry_mismatch"}}
-      end
+      assert_receive {:tool_exec,
+                      %{outcome: :refused, geometry_refusal: "capture_geometry_mismatch"}}
     end
+
+    test "the same code after dispatch is a check that failed, not a click that did", %{
+      config: config,
+      turn: turn
+    } do
+      session =
+        error_session("capture_geometry_mismatch",
+          dispatch: "sent",
+          detail: "geometry 1512x982, captured 3024x1964"
+        )
+
+      assert {:ok, result} =
+               ComputerUse.execute(mismatch_click(), tool_context(session, config, turn))
+
+      assert result.output =~ "action performed, but its check capture failed"
+      assert result.output =~ "the action itself was sent"
+      # The code's OWN operator sentence follows, with the helper's numbers where
+      # that sentence promises them, and the row stays countable by the code: an
+      # operator fault must not degrade into "take a fresh screenshot" just
+      # because it landed after dispatch rather than before it.
+      assert result.output =~ "do not match the picture it captured"
+      assert result.output =~ "Do not retry."
+      assert result.output =~ "(geometry 1512x982, captured 3024x1964)"
+      refute result.output =~ "was not sent"
+      refute result.output =~ "action failed"
+
+      assert_receive {:tool_exec,
+                      %{
+                        outcome: :performed_unverified,
+                        geometry_refusal: "capture_geometry_mismatch"
+                      }}
+    end
+
+    defp mismatch_click,
+      do: %{"action" => "left_click", "observation_id" => @obs, "x" => 1, "y" => 2}
 
     # `capture_geometry_mismatch` is an operator fault, so the helper's own numbers
     # reach the person who has to act on them rather than being re-derived here.

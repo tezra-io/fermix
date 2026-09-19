@@ -412,6 +412,14 @@ defmodule FermixOpik.TraceFileTest do
       # the helper observed of it.
       "input_method" => "ax",
       "effect" => "verified",
+      # The check (M42 slice 6): which evidence came back, whether the view it
+      # acted in changed, and what each phase of it cost.
+      "check_kind" => "image",
+      "check_changed" => false,
+      "cu_input_ms" => 12,
+      "cu_settle_ms" => 180,
+      "cu_capture_ms" => 40,
+      "cu_encode_ms" => 9,
       "value" => "hunter2",
       "screen_text" => "Transfer $4,000 to account 12345"
     }
@@ -425,6 +433,12 @@ defmodule FermixOpik.TraceFileTest do
     assert meta.geometry_refusal == "expired_observation"
     assert meta.input_method == "ax"
     assert meta.effect == "verified"
+    assert meta.check_kind == "image"
+    assert meta.check_changed == false
+    assert meta.cu_input_ms == 12
+    assert meta.cu_settle_ms == 180
+    assert meta.cu_capture_ms == 40
+    assert meta.cu_encode_ms == 9
     refute Map.has_key?(meta, :value), "the value a set_value carried is content, not a row field"
     refute Map.has_key?(meta, :screen_text)
   end

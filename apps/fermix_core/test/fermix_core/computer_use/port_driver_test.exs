@@ -18,7 +18,7 @@ defmodule FermixCore.ComputerUse.PortDriverTest do
     assert is_pid(transport)
 
     # A reply that hands back coordinates names the image they belong to
-    # (protocol 9), which the fake mints exactly as the helper does.
+    # (protocol 10), which the fake mints exactly as the helper does.
     assert {:ok, %{"ok" => true, "observation_id" => "boot-fake-1"}} =
              PortDriver.execute(state, %{"action" => "screenshot"})
 
@@ -125,7 +125,7 @@ defmodule FermixCore.ComputerUse.PortDriverTest do
     assert :ok = PortDriver.stop(state)
   end
 
-  # The addressing half of the wire (protocol 9): a pointer action must name the
+  # The addressing half of the wire (protocol 10): a pointer action must name the
   # image its coordinates were read in and must not carry a rectangle, and every
   # refusal of one dispatched nothing. The fake answers exactly as the helper does,
   # so the session's sentences are exercised against a real Port rather than a map.
@@ -210,24 +210,123 @@ defmodule FermixCore.ComputerUse.PortDriverTest do
     end
   end
 
-  # References, at the wire (protocol 9). An accessibility action answers its own
+  # The check, at the wire (protocol 10). A mutating success answers the evidence
+  # its request asked for, on its OWN frame — an image check comes back as that
+  # image, minting an id of its own — and always says which evidence that was and
+  # what each phase cost. A fake that omitted either would be kinder than the
+  # helper, and this side would come to depend on a frame that never arrives.
+  test "an image check rides the action's own frame, with its settle and its timings" do
+    {:ok, state} = PortDriver.start(binary_path: @fake)
+
+    assert {:ok, response} =
+             PortDriver.execute(state, %{
+               "action" => "left_click",
+               "observation_id" => "boot-fake-1",
+               "x" => 1,
+               "y" => 2,
+               "check" => "image"
+             })
+
+    assert is_binary(response["data"])
+    assert is_binary(response["observation_id"])
+    assert response["observation_kind"] == "image"
+
+    assert response["receipt"]["check"] == %{
+             "kind" => "image",
+             "settle" => "stable",
+             "changed" => true
+           }
+
+    assert response["receipt"]["timings_ms"] == %{
+             "input" => 1,
+             "settle" => 0,
+             "capture" => 0,
+             "encode" => 0
+           }
+
+    assert :ok = PortDriver.stop(state)
+  end
+
+  test "a check of none is the receipt alone, and says so" do
+    {:ok, state} = PortDriver.start(binary_path: @fake)
+
+    assert {:ok, response} =
+             PortDriver.execute(state, %{"action" => "type", "text" => "e4", "check" => "none"})
+
+    refute Map.has_key?(response, "data")
+    assert response["receipt"]["check"] == %{"kind" => "none"}
+
+    assert :ok = PortDriver.stop(state)
+  end
+
+  # A view that never stopped moving, and one identical to the image acted on:
+  # both are observations about the picture, and both reach this side as the
+  # helper's own words rather than as an absence.
+  test "a settle that timed out and a view that did not change arrive as they are" do
+    {:ok, state} =
+      PortDriver.start(
+        binary_path: @fake,
+        env: [{~c"FAKE_SETTLE", ~c"timeout"}, {~c"FAKE_CHANGED", ~c"0"}]
+      )
+
+    assert {:ok, %{"receipt" => %{"check" => check}}} =
+             PortDriver.execute(state, %{
+               "action" => "left_click",
+               "observation_id" => "boot-fake-1",
+               "x" => 1,
+               "y" => 2,
+               "check" => "image"
+             })
+
+    assert check == %{"kind" => "image", "settle" => "timeout", "changed" => false}
+
+    assert :ok = PortDriver.stop(state)
+  end
+
+  # The input went out and the settle was cancelled under it: a refusal whose
+  # receipt says `sent` and carries no check at all.
+  test "a cancelled settle is a sent receipt with no check" do
+    {:ok, state} = PortDriver.start(binary_path: @fake)
+
+    assert {:error, {:action_failed, payload}} =
+             PortDriver.execute(state, %{"action" => "cancel_check"})
+
+    assert payload["error"] == "cancelled"
+    assert payload["receipt"]["dispatch"] == "sent"
+    refute Map.has_key?(payload["receipt"], "check")
+
+    assert :ok = PortDriver.stop(state)
+  end
+
+  # References, at the wire (protocol 10). An accessibility action answers its own
   # input method and the effect its read-back earned — never the HID receipt a
   # click gets, which would make "the pointer did it" indistinguishable from "the
   # control did it".
   test "an accessibility action answers the ax input method and its own effect" do
     {:ok, state} = PortDriver.start(binary_path: @fake)
 
-    assert {:ok, %{"receipt" => pressed}} =
+    assert {:ok, %{"receipt" => pressed, "element_after" => after_press}} =
              PortDriver.execute(state, %{
                "action" => "press",
                "observation_id" => "boot-fake-1",
-               "element_ref" => "e1"
+               "element_ref" => "e1",
+               "check" => "semantic"
              })
+
+    # `present` first, always: the control still answers, and here is its state.
+    assert after_press == %{
+             "present" => true,
+             "role" => "AXButton",
+             "label" => "Save",
+             "enabled" => true
+           }
 
     assert pressed["input_method"] == "ax"
     assert pressed["dispatch"] == "sent"
     assert pressed["effect"] == "not_observed"
     assert pressed["foreground_changed"] == false
+    # Its check is the control read again, never a picture.
+    assert pressed["check"] == %{"kind" => "semantic"}
 
     assert {:ok, %{"receipt" => %{"effect" => "verified"}}} =
              PortDriver.execute(state, %{
