@@ -62,8 +62,9 @@ so effort is not part of the key.
 
 --- Rates: sources and as-of date ---------------------------------------------
 All figures are published list prices in US dollars per MILLION tokens, standard
-(non-batch, non-priority) processing, read 2026-09-05 and re-checked against
-first-party vendor pricing the same day:
+(non-batch, non-priority) processing. Every block but Venice's was read
+2026-09-05 and re-checked against first-party vendor pricing the same day;
+Venice's was read 2026-09-19 and carries its own line below:
 
   OpenAI      https://developers.openai.com/api/docs/pricing (first-party;
               input / cached input / output for every slug). Cache WRITES are
@@ -95,15 +96,29 @@ first-party vendor pricing the same day:
               FLOOR rather than a fixed rate: K3 is open-weight and served by
               roughly 15 endpoints, and the page's headline is the cheapest of
               them, so that one entry can UNDER-state what the account paid.
+  Venice      `GET https://api.venice.ai/api/v1/models?type=text` (first-party
+              and public — the listing answers 200 with no key), read
+              2026-09-19. Every figure is the vendor's own
+              `model_spec.pricing.{input,output,cache_input}.usd`, already in
+              dollars per MTok, so these are transcribed from the API rather
+              than from a marketing page. Venice DOES publish a `cache_write`
+              leg, on 26 of its 117 text models — and every one of those 26 is
+              an `anonymized` id proxied to another vendor (Claude, GPT,
+              Gemini, Qwen). Not one of the 68 `private` models publishes that
+              leg, and all eight carded here are private. An absent key is the
+              vendor saying nothing, not the vendor saying "no premium", so
+              those write legs are unestablished.
 
 Two known bounds, both accepted rather than modelled:
 
   * LONG-CONTEXT TIERS ARE NOT APPLIED. OpenAI reprices a request above 272k
-    input tokens at 2x input/cache and 1.5x output for the whole request, and
-    xAI doubles every rate at 200k. A card entry is the standard tier, so a
-    turn that crosses either cliff is UNDER-stated here. This partly offsets the
-    cache-blind overstatement above; both disappear from the comparison only if
-    the reporting layer starts carrying tiers.
+    input tokens at 2x input/cache and 1.5x output for the whole request, xAI
+    doubles every rate at 200k, and Venice publishes an `extended` tier on 19
+    of its text models (grok-4-6 among them) that roughly doubles all three
+    legs above a 200k input threshold. A card entry is the standard tier, so a
+    turn that crosses any of those cliffs is UNDER-stated here. This partly
+    offsets the cache-blind overstatement above; both disappear from the
+    comparison only if the reporting layer starts carrying tiers.
   * `gpt-5.6-sol` is the card's ONE promotional rate: 4.00 input is published
     as running at least through 2026-11-21, and its cache-write leg is 1.25x
     whatever input is, so it becomes 6.25 if input reverts to 5.00. Re-read that
@@ -127,7 +142,7 @@ from typing import Protocol
 # onto a stored row. It is not an ordered sequence and the values in between
 # need not exist: `.1` never did, and renaming `.2` now would make a token that
 # is already on disk mean two different tables.
-CARD_VERSION = "2026-09-05.3"
+CARD_VERSION = "2026-09-19"
 
 
 class LlmSpanUsage(Protocol):
@@ -351,6 +366,36 @@ _OPENROUTER_RATES: dict[str, Rate] = {
     "x-ai/grok-4.3": Rate(1.25, 2.50, 0.20),
 }
 
+# The curated `@venice` catalog list, all eight of them `private` open-weight
+# models on Venice-contracted GPUs. Venice's cached-input discount is PER MODEL,
+# not a house rate: it runs from -98% (deepseek-v4-1-flash, 0.0075 against 0.375
+# input) through -90% (the Kimi K3 pair) to -75% (grok-4-6). No ratio derives one
+# leg from another, so every figure is transcribed from the listing's own
+# `model_spec.pricing`; do not "fix" deepseek's 0.0075 up to a tenth of input.
+#
+# Every write leg is `None` — unestablished, and deliberately not
+# BILLS_AT_INPUT_RATE. Venice publishes `cache_write` on 26 text models, every
+# one of them an `anonymized` proxied id, and on none of its 68 `private` ones,
+# which is all eight below. The adapter emits no write count today, so the
+# absence costs nothing until one arrives, at which point the card refuses
+# rather than invents.
+#
+# `e2ee-kimi-k3-p` and `kimi-k3` share one rate because Venice prices the TEE
+# surface identically to the plain one; it is not a copy-paste slip.
+_VENICE_RATES: dict[str, Rate] = {
+    # Standard tier only, like every entry here: Venice reprices grok-4-6 above
+    # a 200k input threshold (4.53 in / 1.13 cached / 13.60 out), the same
+    # long-context cliff the card deliberately does not model for OpenAI or xAI.
+    "grok-4-6": Rate(2.27, 6.80, 0.57),
+    "deepseek-v4-1-flash": Rate(0.375, 1.50, 0.0075),
+    "z-ai-glm-5-3-flash": Rate(0.15, 0.50, 0.03),
+    "z-ai-glm-5-3": Rate(1.75, 5.50, 0.325),
+    "e2ee-kimi-k3-p": Rate(3.75, 18.75, 0.375),
+    "kimi-k3": Rate(3.75, 18.75, 0.375),
+    "kimi-k2-6": Rate(0.75, 3.50, 0.16),
+    "minimax-m3-preview": Rate(0.30, 1.20, 0.06),
+}
+
 CARD: dict[tuple[str, str], Rate] = {
     **{("openai", model): rate for model, rate in _OPENAI_RATES.items()},
     **{("openai", model): rate for model, rate in _OPENAI_LEGACY_RATES.items()},
@@ -359,6 +404,7 @@ CARD: dict[tuple[str, str], Rate] = {
     **{("xai", model): rate for model, rate in _XAI_RATES.items()},
     **{("mistral", model): rate for model, rate in _MISTRAL_RATES.items()},
     **{("openrouter", model): rate for model, rate in _OPENROUTER_RATES.items()},
+    **{("venice", model): rate for model, rate in _VENICE_RATES.items()},
 }
 
 # Routes seen in live spans or offered by the product's model catalog for which

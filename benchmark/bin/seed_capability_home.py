@@ -95,6 +95,7 @@ _ENV_KEY_PROVIDERS = {
     "xai": "XAI_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",
     "mistral": "MISTRAL_API_KEY",
+    "venice": "VENICE_API_KEY",
 }
 
 
