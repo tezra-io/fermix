@@ -151,8 +151,12 @@ defmodule FermixCore.Providers.OpenAI.ResponsesShared do
   @image_followup_label "Image returned by the preceding tool call:"
   @image_followup_placeholder "[image in the following message]"
   # Replaces a screenshot input item once it ages out of the retention window
-  # (ScreenshotRetention) — image bytes drop, the textual trail stays.
-  @image_followup_elided "[earlier tool image omitted to bound context]"
+  # (ScreenshotRetention). The image bytes drop and the textual trail stays — on
+  # the preceding `function_call_output`, which this marker is read right after —
+  # so the marker has to void it: that text describes a picture in the present
+  # tense and every such sentence is now a claim about something the model cannot
+  # see (M42 §6.1).
+  @image_followup_elided "[the image the preceding tool result describes was dropped to bound context: it is a record of a past look, not a current view, and no coordinate or id in it can be used]"
 
   @spec build_function_call_outputs([tool_result()]) :: [map()]
   def build_function_call_outputs(tool_results) when is_list(tool_results) do

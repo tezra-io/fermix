@@ -685,6 +685,83 @@ defmodule FermixCore.Providers.Anthropic.MessagesTest do
       assert length(image_blocks) == 1
     end
 
+    # M42 §6.1. The text a screenshot carries is deixis: it leads with the image's
+    # id and says coordinates are pixels IN IT, and it ends by saying this is what
+    # is really on screen. Elide the bytes and leave that text as it stands and the
+    # model reads a fully present-tense narration of a picture it cannot see — and,
+    # since slice 3, an id it could address. The marker rides in the same block, so
+    # it has to void the sentences it sits beside.
+    test "an elided screenshot's own text is voided, not left reading as current" do
+      png = <<137, 80, 78, 71>>
+      test_pid = self()
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:body, Jason.decode!(body)})
+        Req.Test.json(conn, text_response_body())
+      end)
+
+      narration =
+        ~S|Image 7c1e-12, 1366x768 (display 0). Coordinates are pixels in this exact image: | <>
+          ~S|pass observation_id "7c1e-12" with any click, move, drag, scroll or inspect. | <>
+          "This is what is really on screen."
+
+      old_shot = %{
+        role: "user",
+        content: [
+          %{
+            type: "tool_result",
+            tool_use_id: "old",
+            content: [
+              %{type: "text", text: narration},
+              %{
+                type: "image",
+                source: %{type: "base64", media_type: "image/png", data: Base.encode64(png)}
+              }
+            ]
+          }
+        ]
+      }
+
+      provider_state = %{
+        system: nil,
+        messages: [%{role: "user", content: "Hi"}, old_shot],
+        assistant_content: [%{"type" => "text", "text" => "ok"}],
+        tools: [],
+        capabilities: []
+      }
+
+      tool_results = [
+        %{
+          call_id: "new",
+          output: "captured",
+          images: [%{type: :image, mime_type: "image/png", data: png}]
+        }
+      ]
+
+      assert {:ok, _turn} =
+               Messages.continue(
+                 provider_state,
+                 tool_results,
+                 Keyword.put(chat_opts(), :max_retained_screenshots, 1)
+               )
+
+      assert_receive {:body, decoded}
+
+      elided =
+        decoded["messages"]
+        |> Enum.flat_map(fn m -> List.wrap(m["content"]) end)
+        |> Enum.filter(&match?(%{"type" => "tool_result"}, &1))
+        |> Enum.map(& &1["content"])
+        |> Enum.find(&(is_binary(&1) and &1 =~ "7c1e-12"))
+
+      # The trail stays — the model still knows a look happened and what it said.
+      assert elided =~ "Coordinates are pixels in this exact image"
+      # …and the same block says it is a past look whose id is unusable.
+      assert elided =~ "a record of a past look, not a current view"
+      assert elided =~ "no coordinate or id in it can be used"
+    end
+
     test "a text-only tool result keeps a plain string content (byte-identical to pre-image)" do
       test_pid = self()
 
