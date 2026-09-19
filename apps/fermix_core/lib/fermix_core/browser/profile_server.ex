@@ -20,7 +20,10 @@ defmodule FermixCore.Browser.ProfileServer do
 
   use GenServer
 
+  alias FermixCore.Browser.Bridge.Grants
+  alias FermixCore.Browser.Capabilities
   alias FermixCore.Browser.CDP.Connection
+  alias FermixCore.Browser.CDP.ExtensionTransport
   alias FermixCore.Browser.ChromeLauncher
   alias FermixCore.Browser.Config
   alias FermixCore.Browser.Error
@@ -69,15 +72,24 @@ defmodule FermixCore.Browser.ProfileServer do
   def init(opts) do
     Process.flag(:trap_exit, true)
 
+    profile = Keyword.fetch!(opts, :profile)
+
     state = %{
       owner_key: Keyword.fetch!(opts, :owner_key),
       profile_name: Keyword.fetch!(opts, :profile_name),
-      profile: Keyword.fetch!(opts, :profile),
+      profile: profile,
+      # What this profile's browser can be asked to do, resolved once: the mode
+      # never changes for the life of the server (§3.3).
+      caps: Capabilities.for_mode(Map.get(profile, :mode)),
       config: Keyword.fetch!(opts, :config),
       registry: Keyword.get(opts, :registry),
       key: Keyword.get(opts, :key),
       launcher: Keyword.get(opts, :launcher, ChromeLauncher),
-      conn_mod: Keyword.get(opts, :connection, Connection),
+      grants: Keyword.get(opts, :grants, Grants),
+      conn_mod: Keyword.get(opts, :connection, transport_for(profile)),
+      # Why the granted tab went away, so the next request says what happened
+      # rather than asking for a click that was already made.
+      detached: nil,
       now_fn: Keyword.get(opts, :now_fn, fn -> System.monotonic_time(:millisecond) end),
       runtime: nil,
       targets: %{},
@@ -100,6 +112,9 @@ defmodule FermixCore.Browser.ProfileServer do
 
     {:ok, schedule_idle(state)}
   end
+
+  defp transport_for(%{mode: :attached_tab}), do: ExtensionTransport
+  defp transport_for(_profile), do: Connection
 
   @impl true
   def handle_call(:status, _from, state), do: {:reply, status_map(state), state}
@@ -132,6 +147,13 @@ defmodule FermixCore.Browser.ProfileServer do
     {:noreply, record_event(method, event, state)}
   end
 
+  # The person took the granted tab back (or closed it, or dismissed Chrome's
+  # debugging bar). The transport exits right behind this message; recording the
+  # reason first is what lets the next request say which of those happened.
+  def handle_info({:cdp_detached, reason}, state) do
+    {:noreply, %{stop_runtime(state) | detached: reason}}
+  end
+
   def handle_info({_port, {:data, _data}}, state), do: {:noreply, state}
 
   def handle_info({_port, {:exit_status, status}}, state) do
@@ -162,6 +184,10 @@ defmodule FermixCore.Browser.ProfileServer do
     with_running(state, context, fn state -> {{:ok, status_map(state)}, state} end)
   end
 
+  defp run_request(%{action: "open"}, %{caps: %{new_tab: false}} = state) do
+    {Capabilities.refuse(:new_tab), state}
+  end
+
   defp run_request(%{action: "open", args: args, context: context}, state) do
     case Policy.validate_url(args["url"], state.config) do
       {:ok, uri} -> with_running(state, context, fn s -> finish(create_tab(uri, s), s) end)
@@ -187,6 +213,18 @@ defmodule FermixCore.Browser.ProfileServer do
       {:error, error} ->
         {{:error, error}, state}
     end
+  end
+
+  # The tab set never changes in attached mode — there is one tab — but its url
+  # and title do. The cached pair is what the page looked like when the person
+  # clicked the extension, so it is read live and through the same verdict every
+  # other read faces: a blocked or unreadable page yields the tab id and the
+  # verdict, never its address or its title.
+  defp run_request(
+         %{action: "tabs", context: context},
+         %{caps: %{target_discovery: false}} = state
+       ) do
+    with_running(state, context, fn s -> finish(granted_tab_row(s), s) end)
   end
 
   defp run_request(%{action: "tabs", context: context}, state) do
@@ -219,6 +257,32 @@ defmodule FermixCore.Browser.ProfileServer do
 
   defp ensure_running(%{runtime: %{connection: pid}} = state, _context) when is_pid(pid) do
     {:ok, state}
+  end
+
+  # A tab this server BOUND and then lost is answered before anything else can be
+  # claimed. Without this, a second grant appearing anywhere — another browser,
+  # another tab — would be bound by the very next request and the conversation
+  # would carry on in a different page having been told nothing. The reason is
+  # cleared as the refusal is delivered, so the step after it may claim afresh.
+  defp ensure_running(%{profile: %{mode: :attached_tab}, detached: reason} = state, _context)
+       when not is_nil(reason) do
+    {:error, Error.new("attached_tab_detached", detached_sentence(reason)),
+     %{state | detached: nil}}
+  end
+
+  # A granted tab is not launched and cannot be re-attached to by probing the
+  # process list, so it skips both: there is nothing here that repeated failures
+  # would be right to cool down, and "click the extension" must stay the answer
+  # however many times it is asked.
+  defp ensure_running(%{profile: %{mode: :attached_tab}} = state, context) do
+    case start_runtime(state) do
+      {:ok, state} ->
+        emit(context, "browser_attach_tab", state, %{})
+        {:ok, state}
+
+      {:error, error} ->
+        {:error, error, state}
+    end
   end
 
   # Re-attach to an already-running managed Chrome for this profile before
@@ -313,6 +377,30 @@ defmodule FermixCore.Browser.ProfileServer do
     )
   end
 
+  # The grant IS the runtime: there is no process to spawn and no port to wait
+  # for, only a tab the person has already handed over. Claiming it here is what
+  # makes it this conversation's for as long as this server lives.
+  defp start_runtime(%{profile: %{mode: :attached_tab}} = state) do
+    case claim_grant(state) do
+      {:ok, grant} ->
+        runtime = %{
+          ws_url: "bridge:#{grant.tab_id}",
+          grant: grant,
+          headless: false,
+          port: nil,
+          os_pid: nil
+        }
+
+        finish_runtime(runtime, seed_granted_tab(state, grant))
+
+      {:error, :no_grant} ->
+        {:error, no_grant_error()}
+
+      {:error, :bridge_unavailable} ->
+        {:error, bridge_unavailable_error()}
+    end
+  end
+
   defp start_runtime(%{profile: %{mode: :managed}} = state) do
     case state.launcher.start(state.config, state.profile, state.owner_key, state.profile_name) do
       {:ok, runtime} -> finish_runtime(runtime, state)
@@ -328,12 +416,23 @@ defmodule FermixCore.Browser.ProfileServer do
     {:error, Error.new("profile_unavailable", "Profile requires a configured CDP URL")}
   end
 
+  # The grants table lives in the daemon's browser tree and nowhere else, so a
+  # tree without it — a source boot, a test tree, any process that is not the
+  # daemon — must answer a sentence rather than take this server and its caller
+  # down with an exit. A gate has to work in every world it can be reached from.
+  defp claim_grant(state) do
+    Grants.claim(state.grants, state.owner_key)
+  catch
+    :exit, {:noproc, _call} -> {:error, :bridge_unavailable}
+    :exit, {:normal, _call} -> {:error, :bridge_unavailable}
+  end
+
   # Connect to the just-spawned (or attached) browser and finish setup. If any
   # step after a managed launch fails, tear the runtime down HERE — the with
   # chain's local state would otherwise be discarded with Chrome still alive,
   # orphaning the process and leaking the CDP port.
   defp finish_runtime(runtime, state) do
-    case connect(runtime.ws_url, state.config, state.conn_mod) do
+    case connect(runtime, state) do
       {:ok, connection} ->
         ready = %{state | runtime: Map.put(runtime, :connection, connection)}
 
@@ -359,6 +458,66 @@ defmodule FermixCore.Browser.ProfileServer do
     end
   end
 
+  # The one tab the person granted, seeded as this profile's whole tab set: the
+  # extension's debugger answers no `Target` domain, so there is nothing to
+  # enumerate and nothing to choose between.
+  defp seed_granted_tab(state, grant) do
+    target_id = "extension-tab-#{grant.tab_id}"
+    id = tab_id(target_id)
+
+    tab = %{
+      id: id,
+      target_id: target_id,
+      session_id: nil,
+      url: grant.url,
+      title: grant.title,
+      type: "page"
+    }
+
+    %{state | targets: %{id => tab}, active_target: id, tab_order: [id], detached: nil}
+  end
+
+  defp no_grant_error do
+    Error.new(
+      "attached_tab_not_granted",
+      "No browser tab is granted yet. Click the Fermix extension on the tab you want me to " <>
+        "work in, then ask again."
+    )
+  end
+
+  defp bridge_unavailable_error do
+    Error.new(
+      "browser_bridge_unavailable",
+      "The browser bridge is not running here, so no tab can be handed over. Use the managed " <>
+        "browser profile instead."
+    )
+  end
+
+  defp detached_sentence("tab_closed") do
+    "That tab is closed, so the grant went with it. Click the Fermix extension on another " <>
+      "tab when you want me to work in one."
+  end
+
+  defp detached_sentence("debugger_detached") do
+    "Chrome's debugging bar was dismissed on that tab, so I am no longer attached to it. " <>
+      "Click the Fermix extension on the tab again to hand it back."
+  end
+
+  defp detached_sentence("devtools_opened") do
+    "DevTools took the debugger on that tab, so I lost it. Close DevTools and click the " <>
+      "Fermix extension on the tab again."
+  end
+
+  defp detached_sentence("bridge_closed") do
+    "The browser extension disconnected, so the granted tab is gone. Check the browser is " <>
+      "running, then click the Fermix extension on the tab again."
+  end
+
+  defp detached_sentence(_reason) do
+    "You took that tab back, so I am no longer attached to it. Click the Fermix extension " <>
+      "on the tab you want me to work in, then ask again."
+  end
+
   # Reap a partially-started runtime: close the CDP connection (if any) and kill
   # the spawned Chrome via the launcher (a no-op for attach-only profiles whose
   # os_pid/port_ref are nil, so a user's own Chrome is never killed).
@@ -368,8 +527,18 @@ defmodule FermixCore.Browser.ProfileServer do
     :ok
   end
 
-  defp connect(url, config, conn_mod) do
-    case conn_mod.start_link(url, owner: self(), keepalive_ms: config.cdp_keepalive_ms) do
+  # `:grants` and `:grant` are only read by `ExtensionTransport`, and `Connection`
+  # ignores them: one options list, so a transport swapped in here needs no
+  # second call site.
+  defp connect(runtime, state) do
+    opts = [
+      owner: self(),
+      keepalive_ms: state.config.cdp_keepalive_ms,
+      grants: state.grants,
+      grant: Map.get(runtime, :grant)
+    ]
+
+    case state.conn_mod.start_link(runtime.ws_url, opts) do
       {:ok, pid} ->
         {:ok, pid}
 
@@ -645,6 +814,21 @@ defmodule FermixCore.Browser.ProfileServer do
      )}
   end
 
+  # The browser-wide verbs, refused for a granted tab before anything is sent.
+  # One clause each rather than a lookup, so the action that is refused and the
+  # capability that refuses it are readable on one line.
+  defp run_advanced("focus", _args, %{caps: %{focus_tab: false}}),
+    do: Capabilities.refuse(:focus_tab)
+
+  defp run_advanced("close", _args, %{caps: %{close_tab: false}}),
+    do: Capabilities.refuse(:close_tab)
+
+  defp run_advanced("cookies", _args, %{caps: %{cookies: false}}),
+    do: Capabilities.refuse(:cookies)
+
+  defp run_advanced("download", _args, %{caps: %{downloads: false}}),
+    do: Capabilities.refuse(:downloads)
+
   defp run_advanced("focus", args, state) do
     with {:ok, tab, state} <- resolve_tab(Map.get(args, "target"), state),
          {:ok, _} <- command(state, "Target.activateTarget", %{targetId: tab.target_id}) do
@@ -663,9 +847,11 @@ defmodule FermixCore.Browser.ProfileServer do
   defp run_advanced("screenshot", args, state), do: capture_screenshot(args, state)
   defp run_advanced("pdf", args, state), do: print_pdf(args, state)
 
-  defp run_advanced("console", _args, state),
-    do: {:ok, %{"ok" => true, "entries" => Enum.reverse(state.console)}, state}
-
+  # Console entries are page text — a page chooses what it logs, and a page that
+  # redirected or was clicked onto a blocked host logs there too. It reads like a
+  # browser-scoped buffer, which is exactly why it was the one read verb serving
+  # bytes the gate had already refused for the same tab.
+  defp run_advanced("console", args, state), do: read_page(args, state, &console_entries/2)
   defp run_advanced("dialog", args, state), do: handle_dialog(args, state)
   defp run_advanced("cookies", args, state), do: handle_cookies(args, state)
   defp run_advanced("storage", args, state), do: handle_storage(args, state)
@@ -675,6 +861,9 @@ defmodule FermixCore.Browser.ProfileServer do
 
   defp run_advanced("webmcp", args, state),
     do: read_page(args, state, &webmcp_page(args, &1, &2))
+
+  defp console_entries(_tab, state),
+    do: {:ok, %{"ok" => true, "entries" => Enum.reverse(state.console)}, state}
 
   defp capture_screenshot(args, state), do: read_page(args, state, &screenshot_page(args, &1, &2))
 
@@ -2020,6 +2209,10 @@ defmodule FermixCore.Browser.ProfileServer do
 
   defp refresh_targets(%{runtime: nil} = state), do: {:ok, state}
 
+  # Nothing to enumerate: the granted tab was seeded at attach and is the whole
+  # tab set until the grant ends.
+  defp refresh_targets(%{caps: %{target_discovery: false}} = state), do: {:ok, state}
+
   defp refresh_targets(state) do
     with {:ok, %{"targetInfos" => infos}} <- command(state, "Target.getTargets", %{}) do
       targets = infos |> selectable_targets() |> Map.new(&target_entry/1)
@@ -2092,9 +2285,13 @@ defmodule FermixCore.Browser.ProfileServer do
     end
   end
 
+  defp attach(%{attached: true} = tab, state), do: {:ok, tab, state}
+
   defp attach(%{session_id: session_id} = tab, state) when is_binary(session_id) do
     {:ok, tab, state}
   end
+
+  defp attach(tab, %{caps: %{target_attach: false}} = state), do: attach_in_place(tab, state)
 
   defp attach(tab, state) do
     params = %{targetId: tab.target_id, flatten: true}
@@ -2105,6 +2302,16 @@ defmodule FermixCore.Browser.ProfileServer do
       enable_page(tab, state)
       {:ok, tab, state}
     end
+  end
+
+  # The extension is already attached — that is what the person's click did —
+  # and every command addresses the tab rather than a session, so this only
+  # turns on the domains the runtime reads.
+  defp attach_in_place(tab, state) do
+    tab = Map.put(tab, :attached, true)
+    state = put_in(state.targets[tab.id], tab)
+    enable_page(tab, state)
+    {:ok, tab, state}
   end
 
   defp enable_page(tab, state) do
@@ -2126,6 +2333,11 @@ defmodule FermixCore.Browser.ProfileServer do
       state.config.cdp_response_grace_ms
     )
   end
+
+  # Chrome's extension debugger exposes no `Browser` domain at all, so there is
+  # no download behaviour to redirect: the person's own browser downloads where
+  # it always does, and the `download` action says so rather than waiting.
+  defp configure_downloads(%{caps: %{download_redirect: false}} = state), do: {:ok, state}
 
   defp configure_downloads(state) do
     dir = download_dir(state)
@@ -2174,6 +2386,22 @@ defmodule FermixCore.Browser.ProfileServer do
        title: info["title"] || "",
        type: info["type"] || "page"
      }}
+  end
+
+  defp granted_tab_row(state) do
+    with {:ok, tab, state} <- resolve_tab(nil, state),
+         {:ok, tab, state} <- attach(tab, state) do
+      {:ok, %{"ok" => true, "tabs" => [live_row(tab, state)]}, state}
+    end
+  end
+
+  # The verdict vocabulary `act` already reports under `page`: one word for what
+  # the read policy said, and nothing of the page beside it when it said no.
+  defp live_row(tab, state) do
+    case live_page(tab, state) do
+      {:ok, live} -> tab_result(live)
+      {:error, %Error{code: code}} -> %{"id" => tab.id, "target" => tab.id, "page" => code}
+    end
   end
 
   defp tab_values(state) do

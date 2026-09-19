@@ -3,8 +3,11 @@ defmodule FermixCore.Browser.CDP.Connection do
 
   use WebSockex
 
+  @behaviour FermixCore.Browser.CDP.Transport
+
   alias FermixCore.Browser.Error
 
+  @impl FermixCore.Browser.CDP.Transport
   @spec start_link(String.t(), keyword()) :: GenServer.on_start()
   def start_link(url, opts \\ []) when is_binary(url) and is_list(opts) do
     owner = Keyword.get(opts, :owner, self())
@@ -17,6 +20,7 @@ defmodule FermixCore.Browser.CDP.Connection do
     })
   end
 
+  @impl FermixCore.Browser.CDP.Transport
   @spec command(pid(), String.t(), map() | nil, String.t() | nil, pos_integer(), pos_integer()) ::
           {:ok, map() | list() | nil} | {:error, Error.t()}
   def command(pid, method, params, session_id, timeout_ms, grace_ms)
@@ -33,16 +37,17 @@ defmodule FermixCore.Browser.CDP.Connection do
     end
   end
 
+  @impl FermixCore.Browser.CDP.Transport
   @spec close(pid()) :: :ok
   def close(pid) when is_pid(pid), do: WebSockex.cast(pid, :close)
 
-  @impl true
+  @impl WebSockex
   def handle_connect(_conn, state) do
     schedule_keepalive(state.keepalive_ms)
     {:ok, state}
   end
 
-  @impl true
+  @impl WebSockex
   def handle_cast({:command, caller, ref, method, params, session_id, timeout_ms}, state) do
     id = state.next_id
     payload = payload(id, method, params, session_id)
@@ -53,12 +58,12 @@ defmodule FermixCore.Browser.CDP.Connection do
 
   def handle_cast(:close, state), do: {:close, state}
 
-  @impl true
+  @impl WebSockex
   def handle_frame({:text, payload}, state), do: handle_payload(payload, state)
   def handle_frame({:binary, payload}, state), do: handle_payload(payload, state)
   def handle_frame(_frame, state), do: {:ok, state}
 
-  @impl true
+  @impl WebSockex
   def handle_info(:keepalive, state) do
     schedule_keepalive(state.keepalive_ms)
     {:reply, {:ping, ""}, state}
@@ -80,7 +85,7 @@ defmodule FermixCore.Browser.CDP.Connection do
     end
   end
 
-  @impl true
+  @impl WebSockex
   def handle_disconnect(_status, state) do
     Enum.each(state.pending, fn {_id, {caller, ref}} ->
       send(

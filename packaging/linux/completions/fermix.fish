@@ -1,7 +1,7 @@
 # fish completion for fermix, installed by the fermix package.
 # The verb list is the one `fermix help` prints; a test keeps them in step.
 
-set -l fermix_verbs setup auth ask chat run sandbox grant revoke service start stop restart status health voice acp agents capabilities skills plugins pair devices memory logs upgrade uninstall migrate-to-app doctor diagnostics version help
+set -l fermix_verbs setup auth ask chat run sandbox grant revoke service start stop restart status health voice acp browser browser-bridge agents capabilities skills plugins pair devices memory logs upgrade uninstall migrate-to-app doctor diagnostics version help
 
 complete -c fermix -f
 
@@ -21,6 +21,8 @@ complete -c fermix -n "not __fish_seen_subcommand_from $fermix_verbs" -a status 
 complete -c fermix -n "not __fish_seen_subcommand_from $fermix_verbs" -a health -d "Show daemon health"
 complete -c fermix -n "not __fish_seen_subcommand_from $fermix_verbs" -a voice -d "Show voice companion status"
 complete -c fermix -n "not __fish_seen_subcommand_from $fermix_verbs" -a acp -d "Bridge an agent client to the daemon"
+complete -c fermix -n "not __fish_seen_subcommand_from $fermix_verbs" -a browser -d "Manage the browser extension bridge"
+complete -c fermix -n "not __fish_seen_subcommand_from $fermix_verbs" -a browser-bridge -d "Pump a browser extension to the daemon"
 complete -c fermix -n "not __fish_seen_subcommand_from $fermix_verbs" -a agents -d "Show agent status"
 complete -c fermix -n "not __fish_seen_subcommand_from $fermix_verbs" -a capabilities -d "Show registered capabilities"
 complete -c fermix -n "not __fish_seen_subcommand_from $fermix_verbs" -a skills -d "Inspect and reload skills"
@@ -43,6 +45,7 @@ complete -c fermix -n "__fish_seen_subcommand_from skills" -a "list view reload"
 complete -c fermix -n "__fish_seen_subcommand_from plugins" -a "list catalog install enable disable auth"
 complete -c fermix -n "__fish_seen_subcommand_from devices" -a "list revoke"
 complete -c fermix -n "__fish_seen_subcommand_from memory" -a "review restore"
+complete -c fermix -n "__fish_seen_subcommand_from browser" -a "bridge install uninstall status" -d "Browser bridge subcommand"
 complete -c fermix -n "__fish_seen_subcommand_from acp" -a "forget"
 complete -c fermix -n "__fish_seen_subcommand_from diagnostics" -a "export"
 complete -c fermix -n "__fish_seen_subcommand_from diagnostics" -l offline -d "Collect without a running daemon"

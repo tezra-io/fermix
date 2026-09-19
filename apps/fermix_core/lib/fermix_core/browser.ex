@@ -6,6 +6,7 @@ defmodule FermixCore.Browser do
   alias FermixCore.Browser.Error
   alias FermixCore.Browser.ProfileManager
   alias FermixCore.Browser.Scope
+  alias FermixCore.Temporal.Access
 
   @actions ~w(doctor status start stop open navigate snapshot tabs focus close screenshot act pdf
               console dialog cookies storage upload download webmcp)
@@ -67,10 +68,31 @@ defmodule FermixCore.Browser do
          {:ok, config} <- Config.current(),
          {:ok, owner_key} <- Scope.owner_key(context),
          {:ok, profile, profile_name} <- Config.profile(config, Map.get(args, "profile")),
+         :ok <- allowed_turn(profile, context),
          :ok <- validate_args(action, args) do
       dispatch(action, args, context, owner_key, profile_name, profile, config)
     end
   end
+
+  # A granted tab is the person's own browser, signed in as them, so it is used
+  # only on a turn they are present for. `Temporal.Access` already answers
+  # "attended, top-level, the owner's" for every other surface with that rule;
+  # the sentence is this feature's because the next move is.
+  defp allowed_turn(%{mode: :attached_tab}, context) do
+    if Access.attended_operator_turn?(context) do
+      :ok
+    else
+      {:error,
+       Error.new(
+         "attached_tab_not_allowed",
+         "Your own browser tab is used only on a turn you are present for. Guest, " <>
+           "scheduled, background, delegated and coding-continuation runs use the managed " <>
+           "browser profile instead."
+       )}
+    end
+  end
+
+  defp allowed_turn(_profile, _context), do: :ok
 
   defp dispatch("doctor", _args, _context, _owner, _profile_name, _profile, config) do
     {:ok, encode(%{"ok" => true, "chrome" => chrome_diagnostics(config)})}

@@ -108,14 +108,18 @@ defmodule FermixCore.Browser.Config do
   # reaching for `action_timeout_ms` is told it is not settable instead of
   # editing a line that silently does nothing.
   @config_keys [:allowed_hosts]
+  # `selected_tab` is the tab the person grants with the browser extension
+  # (M42 slice 7). It is built in rather than configured because there is
+  # nothing to configure: the grant names the tab, and the person makes it.
   @default_profiles %{
     "fermix" => %{mode: :managed, headless: :auto, cdp_port: :auto},
     "fermix_visible" => %{mode: :managed, headless: false, cdp_port: :auto},
-    "fermix_headless" => %{mode: :managed, headless: true, cdp_port: :auto}
+    "fermix_headless" => %{mode: :managed, headless: true, cdp_port: :auto},
+    "selected_tab" => %{mode: :attached_tab, headless: false, cdp_port: :auto}
   }
 
   @type profile :: %{
-          required(:mode) => :managed | :existing_session | :remote_cdp,
+          required(:mode) => :managed | :existing_session | :remote_cdp | :attached_tab,
           required(:headless) => boolean() | :auto,
           required(:cdp_port) => :auto | pos_integer(),
           optional(:cdp_url) => String.t(),
@@ -454,6 +458,13 @@ defmodule FermixCore.Browser.Config do
         {:error, error} -> {:halt, {:error, error}}
       end
     end)
+  end
+
+  # No endpoint, no port and no window of our own: the grant is the connection.
+  defp validate_profile(%{mode: :attached_tab, cdp_port: :auto}), do: :ok
+
+  defp validate_profile(%{mode: :attached_tab}) do
+    {:error, Error.new("invalid_config", "attached_tab profiles cannot set cdp_port")}
   end
 
   defp validate_profile(%{mode: :managed, headless: headless, cdp_port: port})

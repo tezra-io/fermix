@@ -142,6 +142,84 @@ esac
 grep -Fq "delete-generic-password -a fermix -s fermix:$profile:FERMIX_PLUGIN_DISCORD" "$keychain_log" 2>/dev/null ||
   fail "plugins auth clear never ran the stand-in keychain helper, so this stage proved nothing"
 
+# ── the browser-bridge pump, run from this artifact ─────────────────────────
+# `fermix browser-bridge` is the class of verb that works from source and breaks
+# packaged: it is started by Chrome with no shell environment, its stdout IS the
+# native-messaging wire, and a release installs its own stdout log handler after
+# the config provider has already logged. So this stage installs the host
+# manifest into a throwaway HOME, then starts the pump from the staged artifact
+# twice — once admitted and once with an origin the manifest does not list — and
+# requires stdout to be EMPTY both times. Nothing is connected: with no daemon
+# the pump refuses, which is the point. It runs before the migrate-to-app stage
+# because that stage ends the script on a Linux target.
+bridge_home="$runtime_root/bridge-home"
+browser_home="$runtime_root/browser-home"
+mkdir -m 700 "$bridge_home" "$browser_home"
+bridge_extension="abcdefghijklmnopabcdefghijklmnop"
+bridge_origin="chrome-extension://$bridge_extension/"
+
+install_output="$(
+  env -u FERMIX_OPIK_ENABLED \
+    HOME="$browser_home" \
+    FERMIX_HOME="$bridge_home" \
+    "$artifact" browser bridge install --browser chrome --extension-id "$bridge_extension" 2>&1
+)" || fail "browser bridge install failed from the packaged artifact: $install_output"
+printf '%s\n' "$install_output"
+
+case "$target" in
+  macos_aarch64|macos_x86_64)
+    bridge_manifest="$browser_home/Library/Application Support/Google/Chrome/NativeMessagingHosts/ai.fermix.bridge.json"
+    ;;
+  *)
+    bridge_manifest="$browser_home/.config/google-chrome/NativeMessagingHosts/ai.fermix.bridge.json"
+    ;;
+esac
+[ -f "$bridge_manifest" ] || fail "browser bridge install wrote no manifest at $bridge_manifest"
+
+bridge_wrapper="$bridge_home/bin/fermix-browser-bridge-chrome"
+[ -x "$bridge_wrapper" ] || fail "browser bridge install wrote no executable wrapper at $bridge_wrapper"
+# The launcher the wrapper execs has to be the packaged wrapper binary, not the
+# extracted release launcher inside the Burrito cache (which rejects our verbs).
+bridge_launcher="$(sed -n "s/^exec '\(.*\)' browser-bridge .*/\1/p" "$bridge_wrapper" | head -1)"
+[ -n "$bridge_launcher" ] || fail "the browser bridge wrapper names no launcher"
+[ -x "$bridge_launcher" ] || fail "the browser bridge wrapper names a launcher that does not exist: $bridge_launcher"
+
+status_output="$(
+  env -u FERMIX_OPIK_ENABLED HOME="$browser_home" FERMIX_HOME="$bridge_home" \
+    "$artifact" browser bridge status --browser chrome 2>&1
+)" || fail "browser bridge status failed from the packaged artifact: $status_output"
+printf '%s\n' "$status_output"
+case "$status_output" in
+  *"chrome: installed"*) ;;
+  *) fail "browser bridge status did not report the install it just made" ;;
+esac
+case "$status_output" in
+  *MISSING*) fail "browser bridge status reports a missing launcher right after installing one" ;;
+esac
+
+# Admitted origin, no daemon: exit 1, the reason on stderr, and NOTHING on stdout.
+bridge_out="$runtime_root/bridge.out"
+bridge_err="$runtime_root/bridge.err"
+bridge_status=0
+env -u FERMIX_OPIK_ENABLED HOME="$browser_home" FERMIX_HOME="$bridge_home" \
+  "$artifact" browser-bridge --manifest "$bridge_manifest" "$bridge_origin" \
+  < /dev/null > "$bridge_out" 2> "$bridge_err" || bridge_status=$?
+printf '%s\n' "$(cat "$bridge_err")"
+[ "$bridge_status" -eq 1 ] || fail "the browser-bridge pump must exit 1 with no daemon, got $bridge_status"
+[ ! -s "$bridge_out" ] || fail "the browser-bridge pump wrote to stdout, which is the native-messaging wire: $(cat "$bridge_out")"
+grep -Fq "the Fermix daemon is not running" "$bridge_err" ||
+  fail "the browser-bridge pump did not say why it could not start: $(cat "$bridge_err")"
+
+# An origin the installed manifest does not list is refused, and still silent.
+bridge_status=0
+env -u FERMIX_OPIK_ENABLED HOME="$browser_home" FERMIX_HOME="$bridge_home" \
+  "$artifact" browser-bridge --manifest "$bridge_manifest" "chrome-extension://ponmlkjihgfedcbaponmlkjihgfedcba/" \
+  < /dev/null > "$bridge_out" 2> "$bridge_err" || bridge_status=$?
+[ "$bridge_status" -eq 1 ] || fail "the browser-bridge pump admitted an unlisted origin (exit $bridge_status)"
+[ ! -s "$bridge_out" ] || fail "the browser-bridge pump wrote to stdout while refusing an origin"
+grep -Fq "is not listed in" "$bridge_err" ||
+  fail "the browser-bridge pump admitted an unlisted origin: $(cat "$bridge_err")"
+
 # ── migrate-to-app preflight, run from this artifact ────────────────────────
 # `fermix migrate-to-app` with no `--yes` is a plan: it inspects the account
 # and mutates nothing. It is also the one verb that reads PATH, the process

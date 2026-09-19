@@ -16,7 +16,7 @@ defmodule Fermix.CLI.Service do
   contracts, and computes the install target paths.
   """
 
-  alias Burrito.Util.Args, as: BurritoArgs
+  alias Fermix.CLI.LauncherPath
   alias Fermix.CLI.Service.Launchd
   alias Fermix.CLI.Service.Packaged
   alias Fermix.CLI.Service.Systemd
@@ -390,42 +390,9 @@ defmodule Fermix.CLI.Service do
     Keyword.get(opts, :unit_path) || "/etc/systemd/system/#{@linux_unit}"
   end
 
-  # When running inside the Burrito wrapper, `System.find_executable/1`
-  # returns the *extracted* release launcher inside the Burrito cache,
-  # which only understands the standard mix-release verbs (`start`,
-  # `daemon`, `eval`) and rejects our `fermix run` subcommand. We need
-  # the wrapper binary itself — the one launchd or systemd should
-  # invoke — and Burrito exposes that via `__BURRITO_BIN_PATH`.
-  defp fermix_path(opts) do
-    resolved =
-      Keyword.get(opts, :fermix_path) || burrito_bin_path() ||
-        System.find_executable("fermix") ||
-        raise(ArgumentError, "fermix binary not on PATH; pass :fermix_path explicitly")
-
-    stable_path(resolved)
-  end
-
-  # A Homebrew install resolves to a versioned Cellar path
-  # (e.g. /opt/homebrew/Cellar/fermix/0.1.0/bin/fermix). Pin the service unit to
-  # the stable `<prefix>/bin/<name>` symlink so `brew upgrade` does not strand the
-  # unit on a removed version; non-Cellar paths pass through unchanged.
-  defp stable_path(path) do
-    case Regex.run(~r{^(.*)/Cellar/[^/]+/[^/]+/bin/([^/]+)$}, path) do
-      [_full, prefix, name] ->
-        symlink = Path.join([prefix, "bin", name])
-        if File.exists?(symlink), do: symlink, else: path
-
-      _no_match ->
-        path
-    end
-  end
-
-  defp burrito_bin_path do
-    case BurritoArgs.get_bin_path() do
-      :not_in_burrito -> nil
-      path when is_binary(path) -> path
-    end
-  end
+  # The launcher the unit invokes, resolved by the one module that answers that
+  # question for every file that writes a fermix path down.
+  defp fermix_path(opts), do: LauncherPath.resolve(opts)
 
   defp fermix_home(opts) do
     Keyword.get(opts, :fermix_home, default_fermix_home())
