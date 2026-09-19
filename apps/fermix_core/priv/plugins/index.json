@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-09-18T03:23:46Z",
+  "generated_at": "2026-09-19T15:17:56Z",
   "plugins": [
     {
       "name": "agentmail",
@@ -357,9 +357,45 @@
         "http",
         "mcp"
       ],
-      "latest": "1.0.1",
+      "latest": "1.1.0",
       "yanked": [],
       "versions": [
+        {
+          "version": "1.1.0",
+          "published_at": "2026-09-19T15:15:51Z",
+          "min_core_version": "0.11.0",
+          "plugin_api": 2,
+          "artifacts": [
+            {
+              "target": "linux-aarch64",
+              "url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.1.0/tesla-1.1.0-linux-aarch64.tar.gz",
+              "sha256": "5fe0433cab5f028d0d2c8677899f13f426bd55f38874dcb0aa840d0e518c6ae9",
+              "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.1.0/tesla-1.1.0-linux-aarch64.tar.gz.sig",
+              "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.1.0/tesla-1.1.0-linux-aarch64.tar.gz.pem"
+            },
+            {
+              "target": "linux-x86_64",
+              "url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.1.0/tesla-1.1.0-linux-x86_64.tar.gz",
+              "sha256": "8ff191406aecdfd7b413c5b4741be0d04c53ee982462e37393de95e74e4a25b6",
+              "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.1.0/tesla-1.1.0-linux-x86_64.tar.gz.sig",
+              "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.1.0/tesla-1.1.0-linux-x86_64.tar.gz.pem"
+            },
+            {
+              "target": "macos-aarch64",
+              "url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.1.0/tesla-1.1.0-macos-aarch64.tar.gz",
+              "sha256": "30c8bd50d2534e9d4332e4fbacfb76d6abcb458e2b9c33602a9e48cb0a6c2fb5",
+              "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.1.0/tesla-1.1.0-macos-aarch64.tar.gz.sig",
+              "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.1.0/tesla-1.1.0-macos-aarch64.tar.gz.pem"
+            },
+            {
+              "target": "macos-x86_64",
+              "url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.1.0/tesla-1.1.0-macos-x86_64.tar.gz",
+              "sha256": "91e25085ca0eb322b05947814ca8a5386df17dd6c603504c071fc9947a27b40d",
+              "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.1.0/tesla-1.1.0-macos-x86_64.tar.gz.sig",
+              "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.1.0/tesla-1.1.0-macos-x86_64.tar.gz.pem"
+            }
+          ]
+        },
         {
           "version": "1.0.1",
           "published_at": "2026-09-13T21:12:44Z",
