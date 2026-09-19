@@ -13,6 +13,8 @@ defmodule FermixCore.ComputerUse.SessionManager do
   fully exercised without the binary.
   """
 
+  require Logger
+
   alias FermixCore.ComputerUse
   alias FermixCore.ComputerUse.CaptureHealth
   alias FermixCore.ComputerUse.Config
@@ -66,32 +68,39 @@ defmodule FermixCore.ComputerUse.SessionManager do
     end
   end
 
+  @typedoc "What a `/pause` or `/resume` may tell the human about this conversation."
+  @type verdict :: Session.control_verdict() | :no_session
+
   @doc """
   Pause the computer-use session for `context`'s conversation (`/pause`): the human
   is reclaiming the machine. Unlike `abort/1`, the session, its TCC-warm sidecar, and
-  the task stay ALIVE and resumable — `pause` just flips the session's guard so it
-  refuses actions until `resume/1`. Idempotent + race-safe (a clean no-op when the
-  registry is absent).
+  the task stay ALIVE and resumable — `pause` installs a barrier in the helper and
+  flips the session's own guard so it refuses actions until `resume/1`. Idempotent +
+  race-safe (a clean no-op when the registry is absent).
 
-  Returns `:paused` when the session was idle, `:paused_in_flight` when one action is
-  already inside the helper — it cannot be recalled over this protocol and will
-  finish, which is the difference `/pause` has to tell the human — or `:no_session`.
-  The in-flight fact is read from the session's registry entry rather than asked of
-  the session, which is blocked in the driver for exactly as long as that action runs.
+  The verdict is the helper's ACKNOWLEDGEMENT of the barrier: `:paused`,
+  `:paused_in_flight` when the ack names an action already under way that will finish
+  (which is the difference `/pause` has to tell the human), `:unconfirmed` when the
+  barrier could not be proven installed — the session is then reset, which
+  definitively returns the machine — or `:no_session`.
   """
-  @spec pause(map()) :: :paused | :paused_in_flight | :no_session
+  @spec pause(map()) :: verdict()
   def pause(context) when is_map(context) do
-    case entry(context) do
-      {:ok, pid, _value} -> pause_session(pid, context)
+    case session(context) do
+      {:ok, pid} -> control(pid, &Session.pause/1)
       :error -> :no_session
     end
   end
 
-  @doc "Resume a paused session (`/resume`). Returns `:resumed` or `:no_session`."
-  @spec resume(map()) :: :resumed | :no_session
+  @doc """
+  Resume a paused session (`/resume`). `:resumed`; `:unconfirmed` when lifting the
+  barrier was not acknowledged, in which case the session is reset so the next action
+  starts a helper with no barrier on it; or `:no_session`.
+  """
+  @spec resume(map()) :: verdict()
   def resume(context) when is_map(context) do
-    case entry(context) do
-      {:ok, pid, _value} -> resume_session(pid)
+    case session(context) do
+      {:ok, pid} -> control(pid, &Session.resume/1)
       :error -> :no_session
     end
   end
@@ -122,38 +131,38 @@ defmodule FermixCore.ComputerUse.SessionManager do
   # for the action that ran. An unresolvable session simply has no id to record.
   def session_id(_session), do: nil
 
-  # Cast FIRST, then read the flag. The order strictly narrows the window: every
-  # execute that has not yet passed its paused precheck when the cast lands is now
-  # refused, so the only action this can still report is one already past it —
-  # which is exactly what the flag says. Reading first left a gap where an execute
-  # started after the read and dispatched while `/pause` had already answered
-  # "yours". A session that ended in between has nothing under way.
-  defp pause_session(pid, context) do
-    Session.pause(pid)
-
-    case entry(context) do
-      {:ok, _pid, value} -> if in_flight?(value), do: :paused_in_flight, else: :paused
-      :error -> :paused
-    end
+  # A control is a call now, because the answer is the helper's acknowledgement and
+  # the session has to wait for it. Two exits are possible between the registry read
+  # and the reply, and they mean opposite things: a session that ENDED has already
+  # handed the machine back (its teardown releases held input and ends the helper),
+  # while a session that did not answer at all leaves the barrier unproven.
+  defp control(pid, verb) do
+    verb.(pid)
+  catch
+    :exit, {reason, _call} when reason in [:noproc, :normal, :shutdown] -> :no_session
+    :exit, _reason -> abandon(pid)
   end
 
-  defp resume_session(pid) do
-    Session.resume(pid)
-    :resumed
+  # `:unconfirmed` means ONE thing on every surface that renders it — the helper
+  # was shut down — so it has to be true here too. A session that did not answer
+  # inside the control budget is wedged on something other than the barrier, and
+  # leaving it alive while telling the human it was ended is exactly the lie this
+  # verdict exists to avoid. Synchronous and bounded by the session's own child
+  # spec shutdown, so it returns only once the machine really is back.
+  defp abandon(pid) do
+    Logger.warning("computer_use: a session did not answer a control; ending it")
+    DynamicSupervisor.terminate_child(CuSupervisor.session_supervisor(), pid)
+    :unconfirmed
   end
 
-  # The value a session publishes for itself (`Session.publish_in_flight/2`). A
-  # session that has not published yet has no action under way.
-  defp in_flight?(%{in_flight?: true}), do: true
-  defp in_flight?(_value), do: false
-
-  # The registry ENTRY (pid + published value), not just the pid: `/pause` needs
-  # both, and reading them in one lookup keeps them from describing two moments.
-  defp entry(context) do
+  # The running session for this conversation, guarded: the registry only exists
+  # while computer-use is enabled + ready, and a context need not carry a
+  # conversation at all.
+  defp session(context) do
     with true <- registry_running?(),
          true <- Map.has_key?(context, :conversation_key),
-         [{pid, value}] <- Registry.lookup(CuSupervisor.registry(), conversation_key(context)) do
-      {:ok, pid, value}
+         [{pid, _value}] <- Registry.lookup(CuSupervisor.registry(), conversation_key(context)) do
+      {:ok, pid}
     else
       _ -> :error
     end

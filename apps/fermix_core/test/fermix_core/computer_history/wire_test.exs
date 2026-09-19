@@ -166,18 +166,57 @@ defmodule FermixCore.ComputerHistory.WireTest do
           "type" => "ack",
           "action" => "observe_start",
           "ok" => true,
-          "protocol_version" => 6
+          "protocol_version" => 7
         })
 
       assert {:ack, ack} = Wire.decode(frame)
       assert ack.action == "observe_start"
       assert ack.ok == true
-      assert ack.protocol_version == 6
+      assert ack.protocol_version == 7
     end
 
     test "ok defaults to false when absent or non-true" do
       assert {:ack, %{ok: false}} =
                Wire.decode(line(%{"type" => "ack", "action" => "observe_stop"}))
+    end
+  end
+
+  # The event envelope carries its own `v`, which this decoder deliberately never
+  # reads: the `type` discriminator and the required fields are the contract, and
+  # a rail that refused an envelope revision it did not recognise would drop a
+  # record it can in fact read. Nothing else in Fermix asserts the number, so it
+  # would move without a single test noticing — this is that test, on the consumer
+  # side, pinning both halves: the version the sidecar sends today, and the fact
+  # that the decoder does not gate on it.
+  describe "the event envelope version" do
+    @envelope_version 1
+
+    test "a frame at the current envelope version decodes" do
+      assert {:event, event} = Wire.decode(line(event_frame(%{"v" => @envelope_version})))
+      assert event.source_seq == 1
+    end
+
+    test "the decoder does not gate on it — a later envelope still decodes" do
+      assert {:event, event} = Wire.decode(line(event_frame(%{"v" => @envelope_version + 1})))
+      assert event.source_seq == 1
+    end
+
+    test "an envelope with no version at all still decodes" do
+      assert {:event, _event} = Wire.decode(line(Map.delete(event_frame(), "v")))
+    end
+
+    defp event_frame(extra \\ %{}) do
+      Map.merge(
+        %{
+          "type" => "event",
+          "v" => @envelope_version,
+          "ts" => 1_770_000_000_000,
+          "seq" => 1,
+          "boot_id" => "boot-t",
+          "kind" => "app.activated"
+        },
+        extra
+      )
     end
   end
 

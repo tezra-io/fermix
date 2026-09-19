@@ -27,5 +27,13 @@ defmodule FermixChannels.Gateway.Commands.Resume do
   defp reply(:resumed),
     do: "Computer use resumed — tell me what to do next and I'll pick it back up."
 
+  # Lifting the barrier was not acknowledged, so it may still be installed — and a
+  # helper that is still barred would refuse every action while this side believed
+  # it was free. It is shut down instead; the next action starts a clean one.
+  defp reply(:unconfirmed),
+    do:
+      "The computer-use helper did not confirm the resume, so it was shut down. Tell me what " <>
+        "to do next and a fresh one starts."
+
   defp reply(:no_session), do: "No paused computer-use session to resume."
 end

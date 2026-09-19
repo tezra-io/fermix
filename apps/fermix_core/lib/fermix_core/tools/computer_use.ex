@@ -409,6 +409,17 @@ defmodule FermixCore.Tools.ComputerUse do
     "the computer-use helper isn't installed — install it from setup, then try again"
   end
 
+  # The handshake refused the installed helper: this build and that binary do not
+  # speak the same wire, which is what a partly completed upgrade leaves behind.
+  # Both shapes are the same operator fact and the same next move, and neither is
+  # anything a model can retry its way out of.
+  defp unavailable_message({mismatch, %{library: _ours, sidecar: _theirs}})
+       when mismatch in [:protocol_mismatch, :session_generation_mismatch] do
+    "the computer-use helper speaks a different version of the wire than this build of " <>
+      "Fermix, so it was refused rather than run. Do not retry. Tell the user to reinstall " <>
+      "the computer-use helper, or update Fermix, so the two match."
+  end
+
   defp unavailable_message(reason) do
     "computer-use session unavailable: #{format_reason(reason)}"
   end
@@ -452,6 +463,16 @@ defmodule FermixCore.Tools.ComputerUse do
       "action was not sent. Read-only actions (screenshot, elements, inspect) still work. " <>
       "Wait for that work to finish, or tell the user you need the machine, before sending " <>
       "this again."
+  end
+
+  # WHICH conversation holds the cursor could not be established. A different fact
+  # from `input_busy`, and it needs a different next move: telling the model to
+  # wait for other work to finish would point it at work that may not exist.
+  defp refusal_message({:refused, :input_unavailable}) do
+    "this action was not sent: which conversation holds this machine's cursor and keyboard " <>
+      "could not be established, and driving it without knowing risks two agents fighting " <>
+      "for one pointer. Read-only actions (screenshot, elements, inspect) still work. Tell " <>
+      "the user computer use needs a restart rather than retrying this."
   end
 
   # Stop; do NOT retry (a retry loop would burn iterations against a hold the
@@ -532,6 +553,12 @@ defmodule FermixCore.Tools.ComputerUse do
       {:error, :user_active} ->
         {{:ok, Tool.error(action_error_message(:user_active))}, refused(:yielded)}
 
+      # The helper answered "no", and said on the same frame what it did with the
+      # input. Its error code picks the sentence; its receipt — which the session
+      # has already read — is the outcome. Nothing here infers either.
+      {:error, {:action_failed, failure}} ->
+        {{:ok, Tool.error(failure_message(failure))}, %{courtesy: :na, outcome: failure.outcome}}
+
       # A `/pause` cast can land between classify and execute, so the SAME refusal
       # can arrive here. It gets the same sentence and the same courtesy dimension
       # as at classify — never "action failed" with a raw term for an action that
@@ -581,10 +608,19 @@ defmodule FermixCore.Tools.ComputerUse do
   defp unknown_dispatch?({:sidecar_exited, _status}), do: true
   defp unknown_dispatch?({:helper_fault, _reason}), do: true
   defp unknown_dispatch?({:protocol_error, _detail}), do: true
-  # A sequence the helper stopped part way through: some of the input was already
-  # posted, which is the definition of an unknown dispatch, not a refusal.
-  defp unknown_dispatch?("cancelled"), do: true
-  defp unknown_dispatch?(_reason), do: false
+  defp unknown_dispatch?(reason), do: wire_fault?(reason)
+
+  # The frame families the transport poisons itself over. After one, the wire is
+  # unusable and the session takes a fresh helper — and the frame that would have
+  # said what happened to the input is precisely the one that could not be read,
+  # so the dispatch is unknown rather than refused.
+  defp wire_fault?({:unknown_request_id, _id}), do: true
+  defp wire_fault?({:stale_generation, _id}), do: true
+  defp wire_fault?({:malformed_frame, _detail}), do: true
+  defp wire_fault?({:unexpected_frame, _family}), do: true
+  defp wire_fault?(:sidecar_response_too_large), do: true
+  defp wire_fault?(:request_too_large), do: true
+  defp wire_fault?(_reason), do: false
 
   defp courtesy_of(%{courtesy: courtesy}) when is_atom(courtesy), do: courtesy
   defp courtesy_of(_result), do: :off
@@ -656,6 +692,35 @@ defmodule FermixCore.Tools.ComputerUse do
       "doing anything else; repeat this action only if the screen shows it did not take effect."
   end
 
+  # The HELPER refused because its own barrier is installed. The same fact as
+  # Fermix's pause refusal, from the other side of the wire, so it reads the same:
+  # one hold, one sentence, whichever half of it the action met first.
+  defp action_error_message("paused"), do: refusal_message({:refused, :paused})
+
+  # The helper is already running something for someone else. Same shape as this
+  # session's own busy refusal: nothing was sent, so wait rather than re-send.
+  defp action_error_message("busy") do
+    "this action was not sent: the computer-use helper is already running another action. " <>
+      "Wait for it to finish before sending this again; do not re-send it now."
+  end
+
+  # The request belonged to a conversation, or to a sequence, the helper has moved
+  # past — a session that was reset under it. Nothing was sent, and the next action
+  # starts on a fresh helper, so it is safe to send again after a look.
+  defp action_error_message(code) when code in ["stale_generation", "stale_mutation"] do
+    "this action was not sent: it reached the computer-use helper out of step with the " <>
+      "session it belongs to, which happens when the helper was restarted under this " <>
+      "conversation. Take a `screenshot` to see the current screen, then send the action again."
+  end
+
+  # The build and the installed helper disagree about what a request may contain.
+  # No retry can fix that, and it is an operator fact, not a model one.
+  defp action_error_message("unknown_field") do
+    "this action was not sent: the computer-use helper does not understand part of the " <>
+      "request this build sends, which means the helper and Fermix are different versions. " <>
+      "Do not retry. Tell the user the computer-use helper needs reinstalling to match."
+  end
+
   # The process running this session's actions died under it. The action was
   # already on its way when that happened, so dispatch is unknowable — the same
   # verdict, and the same recovery, as a helper that stopped answering.
@@ -692,7 +757,30 @@ defmodule FermixCore.Tools.ComputerUse do
       "reset — send the action again and a fresh helper starts."
   end
 
-  defp action_error_message(reason), do: "action failed: #{format_reason(reason)}"
+  # The wire itself broke. The frame that would have said what happened to the
+  # input is the one that could not be read, so this is an unknown outcome and not
+  # a failed action — and the raw frame error is a diagnostic, never a sentence.
+  defp action_error_message(reason) do
+    if wire_fault?(reason),
+      do:
+        "outcome unknown: the computer-use helper sent something this build cannot read, so " <>
+          "whether this action reached the screen cannot be told from here. The session was " <>
+          "reset and the next action starts a fresh helper. Take a `screenshot` and read the " <>
+          "current state before doing anything else; repeat this action only if the screen " <>
+          "shows it did not take effect.",
+      else: "action failed: #{format_reason(reason)}"
+  end
+
+  # A refusal the helper named. Its code selects the sentence above; a `detail`
+  # only ever reaches the model on a code with no sentence of its own, where the
+  # alternative is a bare token the operator cannot act on.
+  defp failure_message(%{code: code, detail: detail}) do
+    message = action_error_message(code)
+
+    if is_binary(detail) and message =~ "action failed:",
+      do: message <> " (#{detail})",
+      else: message
+  end
 
   defp helper_fault({:timeout, :cu_sidecar_action, ms}),
     do: "it stopped responding after #{ms} ms"

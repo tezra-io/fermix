@@ -17,8 +17,11 @@ defmodule FermixCore.ComputerUse.ActionWorker do
   tuple the Session applies. Keeping it there keeps one reader's path through an
   action, and keeps this module to the one thing it is for: owning the driver.
 
-  **Ownership.** `driver_mod.start/1` runs in `init/1`, so the Port is opened here
-  and every `{port, …}` message and the sidecar's exit status arrive here. The
+  **Ownership.** `driver_mod.start/1` runs in `init/1`, so this process is the
+  driver's owner, and the sidecar's death is reported here as
+  `{:compux_sidecar_exit, transport, status}`. That message is load-bearing: the
+  capture-stall self-reap flushes its response and only THEN exits 75, so the exit
+  arrives with nothing outstanding and no reply could ever have carried it. The
   worker traps exits, so a `Session` that dies — gracefully, on a poison reset, or
   killed outright — still leaves a process that runs `terminate/2` and stops the
   driver. That stop closes the Port AND kills the OS process, which is the
@@ -51,6 +54,20 @@ defmodule FermixCore.ComputerUse.ActionWorker do
   """
   @spec input_control?(GenServer.server()) :: boolean()
   def input_control?(worker), do: GenServer.call(worker, :input_control?)
+
+  @doc """
+  The `{driver_module, driver_state}` a caller needs to send a CONTROL while this
+  worker is blocked inside an action.
+
+  Read once, by the `Session`, while this worker is still idle at start-up. It is
+  sound to copy because a `Compux.Driver` handle is opaque and immutable by
+  contract — every `execute/2`, `control/2` and `stop/1` takes the same term
+  `start/1` returned, and for the production driver it is the transport's pid.
+  Sending the control from the Session rather than through here is the whole
+  point: a Pause that has to queue behind the action it is pausing is not a pause.
+  """
+  @spec control_handle(GenServer.server()) :: {module(), Compux.Driver.state()}
+  def control_handle(worker), do: GenServer.call(worker, :control_handle)
 
   @doc """
   Run one finalized request. `exec_state` is the slice of session state the
@@ -108,6 +125,9 @@ defmodule FermixCore.ComputerUse.ActionWorker do
   @impl true
   def handle_call(:input_control?, _from, state), do: {:reply, state.input_control?, state}
 
+  def handle_call(:control_handle, _from, state),
+    do: {:reply, {state.driver_mod, state.driver_state}, state}
+
   @impl true
   def handle_cast({:execute, request, exec_state}, state) do
     result = Session.run_pipeline(request, with_driver(exec_state, state))
@@ -115,22 +135,23 @@ defmodule FermixCore.ComputerUse.ActionWorker do
     {:noreply, state}
   end
 
-  # A late/stale sidecar response arriving after a prior call timed out. Responses
-  # match by Port order (no request id today), so a stale one would desync onto the
-  # next request — drop it. Matches only this driver's own port; a stub driver has
-  # none, so its state simply never matches.
+  # The sidecar ended. The transport sends this once, after completing everything
+  # outstanding, so a caller waiting on an action already has its reply. Reported
+  # onward as the raw status rather than classified: the `Session` owns what an
+  # exit status MEANS (75 is compux's designed capture-stall self-reap), because
+  # that is where the capture-wedge counter and the lifecycle bookend read it.
   @impl true
-  def handle_info({port, {:data, _data}}, %{driver_state: %{port: port}} = state) do
-    Logger.debug("computer_use: dropping stale sidecar response after a prior timeout")
-    {:noreply, state}
+  def handle_info({:compux_sidecar_exit, _transport, status}, state) do
+    Logger.warning("computer_use: sidecar ended (#{inspect(status)}); stopping the action worker")
+    {:stop, {:shutdown, {:sidecar_exit_status, status}}, state}
   end
 
-  # Reported as the raw status, not classified: the `Session` owns the meaning of
-  # an exit status (75 is compux's designed capture-stall self-reap), because that
-  # is where the capture-wedge counter and the lifecycle bookend read it.
-  def handle_info({port, {:exit_status, status}}, %{driver_state: %{port: port}} = state) do
-    Logger.warning("computer_use: sidecar exited (status #{status}); stopping the action worker")
-    {:stop, {:shutdown, {:sidecar_exit_status, status}}, state}
+  # Decoded and forwarded by the transport; nothing emits one at this protocol
+  # version. Named rather than left to the catch-all so the day something does
+  # emit one, the log says what arrived instead of "unexpected message".
+  def handle_info({:compux_session_event, _transport, event}, state) do
+    Logger.debug("computer_use: ignoring a sidecar session event (#{inspect(event.kind)})")
+    {:noreply, state}
   end
 
   # The session (the only process linked to this one) went away. Stop with its
@@ -148,13 +169,11 @@ defmodule FermixCore.ComputerUse.ActionWorker do
     :ok
   end
 
-  # KNOWN GAP, left open deliberately: a probe that TIMED OUT (rather than answered
-  # an error) leaves the Port desynchronised — pairing is positional, so its late
-  # frame becomes the first action's reply — and this still logs and continues.
-  # Refusing here would fail the session's init and re-design the fail-open gate in
-  # `Session.check_input_control/2`, and the whole desync class disappears once the
-  # wire carries request ids. Every driver call INSIDE an execute is routed to the
-  # poison reset; this one start-up call is the exception, and it is so on purpose.
+  # Absent or failed probe reads as GRANTED: only the explicit denied state is
+  # refused, so a driver that predates the probe keeps working and a broken probe
+  # cannot brick looking. A probe that times out is no longer a hazard beyond that
+  # — the wire correlates a reply to the request that asked for it, so its late
+  # frame is dropped by id and can never answer the first action.
   defp probe_input_control(driver_mod, driver_state) do
     case driver_mod.execute(driver_state, %{"action" => "probe"}) do
       {:ok, %{"input_control" => false}} ->

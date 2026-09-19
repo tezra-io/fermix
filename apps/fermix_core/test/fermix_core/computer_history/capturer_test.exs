@@ -2,7 +2,7 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
   @moduledoc """
   MILESTONE_32 §8.4a / §6.4 — the capture rail against a fake compux sidecar
   (`fake_capture_sidecar.pl`). Proves the async event push end-to-end: handshake
-  (protocol v6 ack), buffered flush into `Ingest` → `Repo`, protocol-mismatch and
+  (the protocol ack), buffered flush into `Ingest` → `Repo`, protocol-mismatch and
   refused-start degradation, the machine-wide singleton stand-down, and that a
   malformed frame becomes a gap rather than a crash — all with an injected repo
   and an injected lock path so the suite never touches the real machine lock.
@@ -17,6 +17,12 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
   alias FermixCore.Memory.Repo
 
   @fake Path.expand("fake_capture_sidecar.pl", __DIR__)
+
+  # The rail requires exactly the wire the compiled-in library speaks. Pinned here
+  # rather than written as a number, because a hand-written integer in the test is
+  # how the two constants drift apart in the first place; the test below proves
+  # the capturer agrees.
+  @protocol Compux.Protocol.protocol_version()
 
   setup do
     unique = System.unique_integer([:positive])
@@ -106,10 +112,78 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
     )
   end
 
+  defp read_pid_file(path) do
+    with {:ok, contents} <- File.read(path),
+         {os_pid, _rest} <- Integer.parse(String.trim(contents)) do
+      {:ok, os_pid}
+    else
+      _not_yet -> :retry
+    end
+  end
+
+  defp os_process_alive?(os_pid) do
+    {_output, status} =
+      System.cmd("kill", ["-0", Integer.to_string(os_pid)], stderr_to_stdout: true)
+
+    status == 0
+  end
+
   # --- tests -------------------------------------------------------------
 
+  # Open → close on every path. A degrade is the one path that can run moments
+  # after the OS process was spawned, and the handle has to be in state ALREADY
+  # when it does, or the sidecar is dropped rather than reaped and the capturer
+  # sits `:degraded` holding an orphan — the leak `Compux.Port` exists to prevent.
+  # The fake records its own pid, so this asserts the process is GONE rather than
+  # merely forgotten.
+  describe "the spawned sidecar is reaped on every exit" do
+    test "a capturer that degrades before any ack leaves no live OS process", ctx do
+      pid_file =
+        Path.join(
+          System.tmp_dir!(),
+          "fermix-ch-pid-#{ctx.tmp}-#{System.unique_integer([:positive])}"
+        )
+
+      on_exit(fn -> FermixTestSupport.SafeRm.rm(pid_file) end)
+
+      # Never answers `observe_start`, so it stays ALIVE until something kills it:
+      # a capturer that merely forgot the handle would leave this process running.
+      pid =
+        start_capturer(ctx,
+          handshake_timeout_ms: 150,
+          sidecar_env: [
+            {~c"FAKE_SILENT", ~c"1"},
+            {~c"FAKE_PID_FILE", String.to_charlist(pid_file)}
+          ]
+        )
+
+      os_pid = eventually(fn -> read_pid_file(pid_file) end)
+
+      eventually(fn ->
+        if Capturer.status(pid).mode == :degraded, do: {:ok, :degraded}, else: :retry
+      end)
+
+      eventually(fn -> if os_process_alive?(os_pid), do: :retry, else: {:ok, :reaped} end)
+    end
+  end
+
   describe "handshake + event flow" do
-    test "acked v6 frames flow through Ingest into the repo", ctx do
+    # One constant, two halves: the capture rail's required version and the
+    # library's own. They live in different modules and are compared only here, so
+    # without this a protocol bump that misses one of them ships a capture rail
+    # that degrades on every healthy sidecar.
+    test "the required capture protocol equals the library's own", ctx do
+      pid = start_capturer(ctx, sidecar_env: [{~c"FAKE_PROTO", ~c"#{@protocol + 1}"}])
+
+      status =
+        eventually(fn ->
+          if Capturer.status(pid).mode == :degraded, do: {:ok, Capturer.status(pid)}, else: :retry
+        end)
+
+      assert {:protocol_mismatch, %{required: @protocol}} = status.reason
+    end
+
+    test "acked frames flow through Ingest into the repo", ctx do
       frames = [
         app_event(1),
         app_event(2, %{
@@ -292,7 +366,7 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
           if Capturer.status(pid).mode == :degraded, do: {:ok, Capturer.status(pid)}, else: :retry
         end)
 
-      assert {:protocol_mismatch, %{required: 6, sidecar: 5}} = status.reason
+      assert {:protocol_mismatch, %{required: @protocol, sidecar: 5}} = status.reason
       assert stored(ctx.repo) == []
     end
 
@@ -301,7 +375,7 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
     # "type", which the decoder refuses. Filed as a gap, the capturer waited
     # forever for an ack that can never come — heartbeating the machine-wide lock
     # the whole time, so the other daemon on the Mac stood down for good.
-    test "a typeless reply to observe_start is a pre-v6 mismatch, not a gap", ctx do
+    test "a typeless reply to observe_start is an old-sidecar mismatch, not a gap", ctx do
       pid = start_capturer(ctx, sidecar_env: [{~c"FAKE_TYPELESS_ACK", ~c"1"}])
 
       status =
@@ -309,7 +383,7 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
           if Capturer.status(pid).mode == :degraded, do: {:ok, Capturer.status(pid)}, else: :retry
         end)
 
-      assert status.reason == {:protocol_mismatch, %{required: 6, sidecar: :pre_v6}}
+      assert status.reason == {:protocol_mismatch, %{required: @protocol, sidecar: :pre_v6}}
       # Released, so a healthy daemon on this Mac can take over.
       refute File.exists?(ctx.lock_path)
       # The wire was never verified, so there is no captured discontinuity to

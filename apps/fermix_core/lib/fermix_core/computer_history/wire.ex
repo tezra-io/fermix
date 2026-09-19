@@ -1,12 +1,16 @@
 defmodule FermixCore.ComputerHistory.Wire do
   @moduledoc """
-  The Fermix side of the compux capture-mode wire (MILESTONE_32 §8.4a,
-  `protocol_version` 6). The sidecar pushes NDJSON frames on its Port after
-  `observe_start`; each line is one JSON object discriminated by `"type"`:
+  The Fermix side of the compux capture-mode wire (MILESTONE_32 §8.4a). The
+  sidecar pushes NDJSON frames on its Port after `observe_start`; each line is one
+  JSON object discriminated by `"type"`:
 
     * `{"type":"event", ...}` — an unsolicited captured interaction event
-    * `{"type":"ack", "action":..., "protocol_version":6, ...}` — a solicited
+    * `{"type":"ack", "action":..., "protocol_version":7, ...}` — a solicited
       response to `observe_start`/`observe_stop`
+
+  These two families are unchanged by the action wire's move to tagged, correlated
+  frames: only the version integer inside the ack moves. The `Capturer` pins it
+  against `Compux.Protocol.protocol_version/0` so the two constants cannot drift.
 
   This module is a **pure codec**: it decodes one line into a typed result and
   maps an `event` frame onto the atom-keyed event map `Ingest` consumes (the

@@ -4,7 +4,9 @@ defmodule FermixCore.Realtime.ScreenCaptureTest do
   alias FermixCore.Realtime.ScreenCapture
 
   # A driver stub in place of the compux sidecar: no Port, no binary, no TCC grant
-  # (the hermetic-tests rule — this suite must never touch host state).
+  # (the hermetic-tests rule — this suite must never touch host state). It carries
+  # no `:port`: the Port belongs to the transport now, and the sidecar's death
+  # reaches this process as a message rather than as a Port event.
   defmodule FakeDriver do
     def start(opts) do
       case Keyword.get(opts, :start) do
@@ -12,7 +14,7 @@ defmodule FermixCore.Realtime.ScreenCaptureTest do
           {:error, reason}
 
         _ok ->
-          {:ok, %{port: nil, responses: Keyword.get(opts, :responses, []), owner: opts[:owner]}}
+          {:ok, %{responses: Keyword.get(opts, :responses, []), owner: opts[:owner]}}
       end
     end
 
@@ -114,5 +116,34 @@ defmodule FermixCore.Realtime.ScreenCaptureTest do
     capture = start_capture([])
     assert :ok = ScreenCapture.stop(capture)
     assert :ok = ScreenCapture.stop(capture)
+  end
+
+  # The sidecar's death reaches this process as a message from the transport, not
+  # as a Port event: this process no longer owns a Port. The stop reason has to
+  # stay the shape `ScreenFeed.wedge?/1` reads, or the capture-stall self-reap
+  # (75) stops feeding the breaker and a wedged host is handed fresh sidecars
+  # forever — the amplification that reverted the `watch` construct.
+  describe "the sidecar ending" do
+    test "a capture-stall exit stops capture with the reason the feed counts as a wedge" do
+      Process.flag(:trap_exit, true)
+      pid = start_capture([])
+
+      send(pid, {:compux_sidecar_exit, self(), 75})
+
+      assert_receive {:EXIT, ^pid, {:shutdown, {:sidecar_exited, 75}}}
+      assert_receive :stopped
+    end
+
+    # A transport that ended an unusable wire is a fault, and its payload is a
+    # term — so it can never be mistaken for the 75 the sidecar chooses itself.
+    test "a poisoned wire stops capture without looking like a capture stall" do
+      Process.flag(:trap_exit, true)
+      pid = start_capture([])
+
+      send(pid, {:compux_sidecar_exit, self(), {:poisoned, {:malformed_frame, :nope}}})
+
+      assert_receive {:EXIT, ^pid,
+                      {:shutdown, {:sidecar_exited, {:poisoned, {:malformed_frame, :nope}}}}}
+    end
   end
 end
