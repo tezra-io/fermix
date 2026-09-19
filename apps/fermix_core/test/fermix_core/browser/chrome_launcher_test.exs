@@ -102,6 +102,32 @@ defmodule FermixCore.Browser.ChromeLauncherTest do
     end
   end
 
+  describe "launch_args/3" do
+    # WebMCP is an experimental feature name, so a site that registers its tools
+    # only when the native API exists is invisible without this flag. Chrome
+    # ignores a feature name it does not know, so a rename degrades to
+    # `webmcp_unavailable` on those sites and breaks nothing else.
+    test "asks Chrome to expose the WebMCP API" do
+      args = ChromeLauncher.launch_args(@dir, 0, true)
+
+      assert "--enable-features=WebMCP" in args
+      # Separate lists: enabling one feature must not drop the disabled ones.
+      assert "--disable-features=Translate,MediaRouter" in args
+    end
+
+    # Reuse detection matches the --user-data-dir TOKEN, so a flag added to the
+    # list must not shift what that comparison sees.
+    test "leaves the user-data-dir token reuse detection matches" do
+      args = ChromeLauncher.launch_args(@dir, 9_222, false)
+
+      line =
+        "4242 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome " <>
+          Enum.join(args, " ")
+
+      assert {:ok, 4242} = ChromeLauncher.parse_ps_pid(line, @dir)
+    end
+  end
+
   describe "spawn_plan/4 (macOS disclaim shim wrapping)" do
     @chrome "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
     @chrome_args ["--remote-debugging-port=0", "about:blank"]

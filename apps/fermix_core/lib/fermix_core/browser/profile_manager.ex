@@ -38,10 +38,15 @@ defmodule FermixCore.Browser.ProfileManager do
   `opts` may carry `:registry` and `:server` to target a non-default
   registry/manager (used by isolated tests); both default to the production
   singletons so the lookup table and the manager process always agree.
+
+  `request` must carry `:mutating` (`FermixCore.Browser.mutating?/2` stamps it):
+  without it the retry above cannot tell a request that never ran from one that
+  may have half-run, and there is no safe default.
   """
   @spec dispatch(String.t(), String.t(), map(), Config.t(), map(), keyword()) ::
           {:ok, map()} | {:error, Error.t()}
-  def dispatch(owner, profile_name, profile, config, request, opts \\ []) do
+  def dispatch(owner, profile_name, profile, config, request, opts \\ [])
+      when is_map_key(request, :mutating) do
     registry = Keyword.get(opts, :registry, @registry)
     server = Keyword.get(opts, :server, __MODULE__)
 
@@ -123,11 +128,17 @@ defmodule FermixCore.Browser.ProfileManager do
     {:noreply, state}
   end
 
+  @outcome_unknown "The browser stopped while this action was in flight, so it may or may not " <>
+                     "have happened. Take a snapshot to check before repeating it."
+
   defp do_dispatch(owner, profile_name, profile, config, request, registry, server, retries) do
     with {:ok, pid} <- ensure(owner, profile_name, profile, config, registry, server) do
       case safe_request(pid, request) do
-        {:error, :server_gone} when retries > 0 ->
-          do_dispatch(
+        {:error, :undelivered} ->
+          retry(owner, profile_name, profile, config, request, registry, server, retries)
+
+        {:error, :died_in_flight} ->
+          in_flight_death(
             owner,
             profile_name,
             profile,
@@ -135,15 +146,35 @@ defmodule FermixCore.Browser.ProfileManager do
             request,
             registry,
             server,
-            retries - 1
+            retries
           )
-
-        {:error, :server_gone} ->
-          {:error, Error.new("browser_unavailable", "Browser profile became unavailable")}
 
         other ->
           other
       end
+    end
+  end
+
+  # The server was already gone when the call was sent (an idle-reaped or
+  # evicted profile), so nothing ran: re-ensure and send the same request again.
+  defp retry(owner, profile_name, profile, config, request, registry, server, retries)
+       when retries > 0 do
+    do_dispatch(owner, profile_name, profile, config, request, registry, server, retries - 1)
+  end
+
+  defp retry(_owner, _profile_name, _profile, _config, _request, _registry, _server, _retries) do
+    {:error, Error.new("browser_unavailable", "Browser profile became unavailable")}
+  end
+
+  # The server died WITH the request in flight, so whatever it had already done
+  # is done. Re-sending a mutation is a second click, a second upload, a second
+  # tool call — report the unknown outcome instead and let the model look. A
+  # read repeats nothing, so it retries as before (M47 §3.4).
+  defp in_flight_death(owner, profile_name, profile, config, request, registry, server, retries) do
+    if Map.fetch!(request, :mutating) do
+      {:error, Error.new("outcome_unknown", @outcome_unknown)}
+    else
+      retry(owner, profile_name, profile, config, request, registry, server, retries)
     end
   end
 
@@ -157,10 +188,31 @@ defmodule FermixCore.Browser.ProfileManager do
     end
   end
 
+  # Two different failures arrive as the same `:exit`, and the reason is what
+  # separates them.
+  #
+  # `:noproc` means the call never reached the server. `:normal` and `:shutdown`
+  # mean it reached a server that stopped BETWEEN callbacks, with the request
+  # still queued — `stop_owner/2` is a cast and teardown takes seconds, so the
+  # lookup keeps handing out a pid that is on its way out. Both are provably
+  # "never ran", and the proof is three properties of `ProfileServer`: it traps
+  # exits (profile_server.ex `init/1`), its `handle_call/3` NEVER returns
+  # `:stop` (the only `:stop` is `handle_info(:idle_timeout, _)`), and a nested
+  # CDP call blocks in a selective receive, so a parent EXIT is processed only
+  # between callbacks. A `{:stop, ...}` added to `handle_call/3` would break
+  # that and put a half-run mutation in this branch.
+  #
+  # Everything else — `:killed` from a supervisor out of patience, a crash —
+  # means the server died holding the request, and only the page knows how far
+  # it got.
   defp safe_request(pid, request) do
     ProfileServer.request(pid, request)
   catch
-    :exit, _reason -> {:error, :server_gone}
+    :exit, {:noproc, _call} -> {:error, :undelivered}
+    :exit, {:normal, _call} -> {:error, :undelivered}
+    :exit, {:shutdown, _call} -> {:error, :undelivered}
+    :exit, {{:shutdown, _term}, _call} -> {:error, :undelivered}
+    :exit, _reason -> {:error, :died_in_flight}
   end
 
   defp ensure_started(_key, _profile, _config, _state, 0) do

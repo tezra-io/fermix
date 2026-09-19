@@ -248,6 +248,20 @@ defmodule FermixCore.Browser.ProfileServerGuardsTest do
     end
   end
 
+  # The invariant walk above calls `webmcp` with no arguments, which proves the
+  # gate runs before `op` is looked at. This is the other half: a fully formed
+  # `call` on a blocked page is refused with nothing dispatched into the page.
+  test "a fully formed webmcp call is refused on a policy-blocked page" do
+    pid = start_page("http://169.254.169.254/latest/", public_config(), :guards_webmcp)
+    assert {:ok, _} = req(pid, "start")
+    flush_cdp()
+
+    assert {:error, %Error{code: "read_blocked"}} =
+             req(pid, "webmcp", %{"op" => "call", "name" => "steal", "input" => %{}})
+
+    refute_receive {:cdp, _owner, "Runtime.callFunctionOn", _params}, 100
+  end
+
   # The gate must not over-block: the same verbs still serve an allowed page.
   test "every read verb still returns content for a page the policy allows" do
     pid = start_page("https://example.com/results", public_config(), :guards_allowed)

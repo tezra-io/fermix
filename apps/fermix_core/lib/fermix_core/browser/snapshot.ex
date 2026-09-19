@@ -153,7 +153,27 @@ defmodule FermixCore.Browser.Snapshot do
   defp ax_value(%{"value" => value}), do: to_string(value)
   defp ax_value(_value), do: nil
 
-  defp boundary(text), do: "<browser_page_content>\n#{text}\n</browser_page_content>"
+  @doc """
+  Wrap page-controlled text in the delimiters that mark it as content the model
+  reads as data, never as instructions.
+
+  Public because `webmcp` results are page bytes too and must carry the same
+  marking — one boundary literal, not two.
+  """
+  @spec boundary(String.t()) :: String.t()
+  def boundary(text) when is_binary(text),
+    do: "<browser_page_content>\n#{neutralize_delimiters(text)}\n</browser_page_content>"
+
+  # Defang a delimiter the PAGE itself carries, so page text cannot close the
+  # block early and have the rest of itself read outside the marking. Same shape
+  # as `Capabilities.UntrustedContent.neutralize_delimiters/1` — a space after
+  # the angle bracket keeps the text readable while leaving the appended tag as
+  # the only real one. Case-insensitive because the attacker picks the spelling.
+  defp neutralize_delimiters(text) do
+    text
+    |> String.replace(~r{</browser_page_content}i, "</ browser_page_content")
+    |> String.replace(~r{<browser_page_content}i, "< browser_page_content")
+  end
 
   # Truncate on character (grapheme) boundaries so the result is always valid
   # UTF-8 — a byte-offset cut can split a codepoint and make Jason.encode! raise.
