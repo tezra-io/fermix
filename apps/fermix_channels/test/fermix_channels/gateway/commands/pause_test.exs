@@ -106,7 +106,9 @@ defmodule FermixChannels.Gateway.Commands.PauseTest do
     end
 
     # The honest limit: an action already handed to the helper cannot be recalled,
-    # so promising the cursor back this instant is a promise the human watches break.
+    # so promising the cursor back this instant is a promise the human watches
+    # break. The driver runs in the session's `ActionWorker`, so the pid the
+    # double reports is that worker, and the release goes there.
     test "an action already under way is named, not glossed over", %{ctx: ctx, session: session} do
       action =
         Task.async(fn ->
@@ -114,14 +116,14 @@ defmodule FermixChannels.Gateway.Commands.PauseTest do
           Session.execute(session, request)
         end)
 
-      assert_receive {:driver_entered, %{"action" => "screenshot"}, ^session}, 1_000
+      assert_receive {:driver_entered, %{"action" => "screenshot"}, worker}, 1_000
 
       assert :ok = Pause.execute(message(), reply_fn(self()), ctx)
 
       assert_receive {:reply,
                       "Pausing. One action is already under way and will finish; nothing further will be sent. The cursor and keyboard are yours once it completes."}
 
-      send(session, :driver_release)
+      send(worker, :driver_release)
       assert {:ok, _result} = Task.await(action)
     end
   end

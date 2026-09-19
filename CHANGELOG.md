@@ -34,6 +34,14 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   managed browser instead. Install the bridge with
   `fermix browser bridge install --browser chrome --extension-id <id>`; the
   extension and how to load it live in `apps/fermix_core/priv/browser_extension/`.
+- **Only one conversation drives the cursor and keyboard at a time.** Two
+  conversations acting on the same desktop each moved the pointer the other had
+  just aimed and read a screen the other was changing, so both concluded their
+  clicks had missed and repeated them. A disturbing action from a second
+  conversation is now refused straight away, with a sentence saying to wait
+  rather than re-send; looking is never blocked, so both can still take
+  screenshots. The hold lapses once its conversation has dispatched nothing for
+  a minute, so a conversation that went quiet cannot keep the machine.
 - **Computer-use sessions now appear in traces.** A session starting, being
   paused and resumed, finishing, or dying on its helper used to leave no record
   anywhere: the events were emitted and nothing listened. They now reach the
@@ -212,6 +220,22 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Computer use answers `/pause` while it is acting.** A single computer-use
+  action can make four calls to the helper, each with a thirty-second budget,
+  and the session used to sit inside them — so `/pause`, `/resume` and shutting
+  the session down waited for the very action they exist to interrupt. The
+  helper now runs in its own process and the session stays answerable
+  throughout. A second action sent while the first is still running is refused
+  as busy instead of queueing behind it, so a long action no longer silently
+  delays everything after it.
+- **What a computer-use action reports is what the helper said it did.** The
+  outcome of a click or a keystroke — sent, not sent, half sent — used to be
+  inferred from whether the check screenshot came back, which could report an
+  action as performed when nothing reached the screen. The helper now states it
+  on every mutating action and that statement is what the result and the trace
+  record. A helper that does not state it is treated as a broken helper: the
+  outcome is reported as unknown and the session takes a fresh one, rather than
+  a guess being reported as fact.
 - **Computer use tells the assistant the truth about what happened to an
   action.** A click whose helper timed out used to come back as "action failed"
   with a raw error term, and a check image whose cursor had moved used to say the

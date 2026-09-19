@@ -179,9 +179,10 @@ defmodule FermixCore.ComputerUse.SessionManagerTest do
     assert {:ok, ^pid} = SessionManager.lookup(ctx)
   end
 
-  # `/pause` must tell the human the truth, and it cannot ask the session: while an
-  # action is in flight the session is blocked in the driver for up to the whole
-  # sidecar budget. The fact is published on the session's registry entry instead.
+  # `/pause` must tell the human the truth about an action already inside the
+  # helper, which cannot be recalled over this protocol. The fact is published on
+  # the session's registry entry, read without a call: the driver lives in the
+  # session's `ActionWorker`, so `self()` inside the double below is that worker.
   test "pause reports an action already in flight, and the flag never sticks", %{config: config} do
     ctx = context(%{computer_use_origin: :interactive})
     {:ok, pid} = SessionManager.ensure(config, ctx, driver: {BlockingDriver, [test_pid: self()]})
@@ -195,11 +196,12 @@ defmodule FermixCore.ComputerUse.SessionManagerTest do
         Session.execute(pid, request)
       end)
 
-    assert_receive {:driver_entered, %{"action" => "screenshot"}, ^pid}, 1_000
+    assert_receive {:driver_entered, %{"action" => "screenshot"}, worker}, 1_000
+    assert worker != pid
 
     assert :paused_in_flight = SessionManager.pause(ctx)
 
-    send(pid, :driver_release)
+    send(worker, :driver_release)
     assert {:ok, _result} = Task.await(action)
 
     # The cast goes out BEFORE the flag is read, so the guard is armed the moment the

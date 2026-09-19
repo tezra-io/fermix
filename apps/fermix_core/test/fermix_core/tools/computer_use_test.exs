@@ -21,14 +21,20 @@ defmodule FermixCore.Tools.ComputerUseTest do
     def execute(%{test_pid: pid}, request) do
       send(pid, {:driver_execute, request})
 
+      # A mutating reply carries the wire's `receipt` (M42 slice 2 §3), as a real
+      # sidecar's does: the session derives the tool's `outcome` from its dispatch
+      # and treats an absent one as a protocol fault rather than inferring it.
       {:ok,
-       %{
-         "ok" => true,
-         "data" => Base.encode64(@png),
-         "mime" => "image/png",
-         "width" => 800,
-         "height" => 600
-       }}
+       FermixTestSupport.ComputerUseReceipts.stamp(
+         %{
+           "ok" => true,
+           "data" => Base.encode64(@png),
+           "mime" => "image/png",
+           "width" => 800,
+           "height" => 600
+         },
+         request
+       )}
     end
 
     @impl true
@@ -547,7 +553,127 @@ defmodule FermixCore.Tools.ComputerUseTest do
       assert result.error =~ "outcome unknown"
       assert result.error =~ "NOT reset"
       assert result.error =~ "still busy"
+      # The session no longer queues a second action behind the first, so telling
+      # the model its next call "waits for it" would be a promise the tool breaks.
+      assert result.error =~ "refused as busy"
+      refute result.error =~ "waits for it"
       refute result.error =~ "cu_session_call"
+      refute result.error =~ "action failed"
+
+      assert_receive {:tool_exec, meta}
+      assert meta.outcome == :unknown
+    end
+
+    # One action at a time per conversation: the previous one is still inside the
+    # helper. Nothing was sent, so the answer is a wait, never a re-send.
+    test "a second action while one is running is a refusal that says to wait", %{
+      config: config,
+      turn: turn
+    } do
+      session = scripted_session(reply: {:error, :busy})
+
+      assert {:ok, result} =
+               ComputerUse.execute(
+                 %{"action" => "left_click", "x" => 1, "y" => 2},
+                 tool_context(session, config, turn)
+               )
+
+      assert result.success == false
+      assert result.error =~ "was not sent"
+      assert result.error =~ "still running"
+      assert result.error =~ "do not re-send"
+      refute result.error =~ "action failed"
+
+      assert_receive {:tool_exec, meta}
+      assert meta.outcome == :refused
+    end
+
+    # There is one cursor on the machine and another conversation has it. Nothing
+    # was sent, looking still works, and re-sending would only fight for the seat.
+    test "another conversation holding the cursor names the next move", %{
+      config: config,
+      turn: turn
+    } do
+      session = scripted_session(reply: {:error, {:refused, :input_busy}})
+
+      assert {:ok, result} =
+               ComputerUse.execute(
+                 %{"action" => "left_click", "x" => 1, "y" => 2},
+                 tool_context(session, config, turn)
+               )
+
+      assert result.success == false
+      assert result.error =~ "another conversation"
+      assert result.error =~ "was not sent"
+      assert result.error =~ "Read-only actions"
+      refute result.error =~ "action failed"
+
+      assert_receive {:tool_exec, meta}
+      assert meta.outcome == :refused
+    end
+
+    # A helper that will not say what it did with the input has broken the contract
+    # the verdict rests on. That is unknown dispatch, not a failure to retry.
+    test "a helper that reports no receipt is unknown, and never a raw term", %{
+      config: config,
+      turn: turn
+    } do
+      session = scripted_session(reply: {:error, {:protocol_error, :missing_receipt}})
+
+      assert {:ok, result} =
+               ComputerUse.execute(
+                 %{"action" => "left_click", "x" => 1, "y" => 2},
+                 tool_context(session, config, turn)
+               )
+
+      assert result.success == false
+      assert result.error =~ "outcome unknown"
+      assert result.error =~ "did not report whether it sent this input"
+      assert result.error =~ "session was reset"
+      refute result.error =~ "protocol_error"
+
+      assert_receive {:tool_exec, meta}
+      assert meta.outcome == :unknown
+    end
+
+    test "the process running the actions dying mid-action is unknown dispatch", %{
+      config: config,
+      turn: turn
+    } do
+      session = scripted_session(reply: {:error, {:helper_fault, :killed}})
+
+      assert {:ok, result} =
+               ComputerUse.execute(
+                 %{"action" => "left_click", "x" => 1, "y" => 2},
+                 tool_context(session, config, turn)
+               )
+
+      assert result.success == false
+      assert result.error =~ "outcome unknown"
+      assert result.error =~ "stopped during this action"
+      refute result.error =~ "helper_fault"
+
+      assert_receive {:tool_exec, meta}
+      assert meta.outcome == :unknown
+    end
+
+    # Some of the input was posted and some was not — the definition of an unknown
+    # dispatch. Reporting it as a plain failure would buy a second real drag.
+    test "a sequence the helper stopped part way through is unknown, not failed", %{
+      config: config,
+      turn: turn
+    } do
+      session = failing_action_session(error: "cancelled")
+
+      assert {:ok, result} =
+               ComputerUse.execute(
+                 %{"action" => "left_click", "x" => 1, "y" => 2},
+                 tool_context(session, config, turn)
+               )
+
+      assert result.success == false
+      assert result.error =~ "outcome unknown"
+      assert result.error =~ "stopped part way through"
       refute result.error =~ "action failed"
 
       assert_receive {:tool_exec, meta}

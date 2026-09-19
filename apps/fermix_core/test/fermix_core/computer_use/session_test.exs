@@ -2,10 +2,16 @@ defmodule FermixCore.ComputerUse.SessionTest do
   use ExUnit.Case, async: false
 
   alias FermixCore.ComputerUse.Config
+  alias FermixCore.ComputerUse.InputOwner
   alias FermixCore.ComputerUse.Session
+  alias FermixTestSupport.ComputerUseReceipts
 
   # A stub Driver: no native code, speaks the Protocol response shape. It records
-  # execute/stop calls to the test pid and returns a configurable response.
+  # execute/stop calls to the test pid and returns a configurable response. Every
+  # reply to a MUTATING action carries the wire's `receipt` (M42 slice 2 §3), as a
+  # real sidecar's does: the session derives its `outcome` from the receipt's
+  # dispatch and refuses to infer one, so a double without it would be describing
+  # a sidecar that cannot exist.
   defmodule StubDriver do
     @behaviour Compux.Driver
 
@@ -42,7 +48,9 @@ defmodule FermixCore.ComputerUse.SessionTest do
 
     defp response_for(state, %{"action" => "idle_ms"}), do: state.idle_response
     defp response_for(state, %{"action" => "wait_for_idle"}), do: state.wait_for_idle_response
-    defp response_for(state, _request), do: state.response
+
+    defp response_for(state, request),
+      do: FermixTestSupport.ComputerUseReceipts.stamp(state.response, request)
   end
 
   # A Driver whose action always reports the inner sidecar timeout (the shape
@@ -83,7 +91,44 @@ defmodule FermixCore.ComputerUse.SessionTest do
     @impl true
     def execute(%{test_pid: pid, replies: replies}, %{"action" => action} = request) do
       send(pid, {:driver_execute, request})
-      Map.get(replies, action, {:ok, %{"ok" => true}})
+
+      case Map.fetch(replies, action) do
+        {:ok, scripted} -> scripted
+        :error -> {:ok, FermixTestSupport.ComputerUseReceipts.stamp(%{"ok" => true}, request)}
+      end
+    end
+
+    @impl true
+    def stop(%{test_pid: pid}) do
+      send(pid, :driver_stop)
+      :ok
+    end
+  end
+
+  # A Driver whose action call BLOCKS until the test releases it, so the window
+  # "an action is inside the driver" can be held open and the session probed while
+  # it is. The one-time probe and the courtesy arbiter answer immediately, so only
+  # the model's own action blocks.
+  defmodule BlockingDriver do
+    @behaviour Compux.Driver
+
+    @impl true
+    def start(opts), do: {:ok, %{test_pid: Keyword.fetch!(opts, :test_pid)}}
+
+    @impl true
+    def execute(_state, %{"action" => "probe"}), do: {:ok, %{"input_control" => true}}
+
+    def execute(_state, %{"action" => "idle_ms"}),
+      do: {:ok, %{"ok" => true, "idle_ms" => 10_000}}
+
+    def execute(%{test_pid: pid}, request) do
+      send(pid, {:driver_blocked, request, self()})
+
+      receive do
+        {:driver_release, response} -> {:ok, response}
+      after
+        5_000 -> {:error, :test_driver_never_released}
+      end
     end
 
     @impl true
@@ -450,13 +495,17 @@ defmodule FermixCore.ComputerUse.SessionTest do
     end
   end
 
+  # The Port belongs to the `ActionWorker` now — it is the process that opened it —
+  # so both port-matched clauses moved there with it. The session-level consequence
+  # is what these pin: the sidecar's exit status still classifies HERE, where the
+  # wedge counter and the lifecycle bookend read the same shapes.
   describe "handle_info" do
     test "drains a stale sidecar response after a prior timeout without crashing" do
       port = make_ref()
       session = start_session(driver_opts: [port: port])
 
       # the cryptic-incident message: a late {port,{:data,_}} after a timeout
-      send(session, {port, {:data, {:eol, "stale"}}})
+      send(worker(session), {port, {:data, {:eol, "stale"}}})
 
       # still alive and serving (no crash, no unexpected-message error)
       assert Session.action_count(session) == 0
@@ -466,7 +515,7 @@ defmodule FermixCore.ComputerUse.SessionTest do
       port = make_ref()
       {session, ref} = start_monitored(StubDriver, port: port)
 
-      send(session, {port, {:exit_status, 2}})
+      send(worker(session), {port, {:exit_status, 2}})
 
       assert_receive {:DOWN, ^ref, :process, ^session, {:sidecar_exited, 2}}
     end
@@ -632,6 +681,155 @@ defmodule FermixCore.ComputerUse.SessionTest do
       :ok = Session.resume(session)
       refute Session.paused?(session)
       refute_receive {:lifecycle, :session_resume, %{session_id: "cua_test"}}, 50
+    end
+  end
+
+  # M42 slice 2 §6: one execute makes up to FOUR blocking driver calls, each with a
+  # 30 s budget. While the Session owned the driver it sat inside them, so `/pause`,
+  # `paused?` and teardown queued behind the very action they exist to interrupt.
+  # The driver now lives in an `ActionWorker` and the Session answers its caller
+  # from `handle_info`, so the control surface is live for the whole action.
+  describe "a Session that stays responsive" do
+    defp start_blocking do
+      Process.flag(:trap_exit, true)
+
+      {:ok, session} =
+        Session.start_link(
+          config: Config.normalize(enabled: true),
+          driver: {BlockingDriver, [test_pid: self()]},
+          session_id: "cua_busy"
+        )
+
+      {session, Process.monitor(session)}
+    end
+
+    # The request is classified here rather than in the spawned caller so the test
+    # controls exactly when the execute lands.
+    defp execute_async(session, params) do
+      {:ok, :auto, request} = Session.classify(session, params)
+      Task.async(fn -> Session.execute(session, request) end)
+    end
+
+    defp await_blocked do
+      assert_receive {:driver_blocked, request, worker}
+      {request, worker}
+    end
+
+    test "pause, paused? and action_count are answered while an action is inside the driver" do
+      {session, _ref} = start_blocking()
+      caller = execute_async(session, %{"action" => "left_click", "x" => 1, "y" => 2})
+      {_request, worker} = await_blocked()
+
+      # Every one of these is a call or a cast that had to queue behind a 30 s
+      # driver receive before the split.
+      refute Session.paused?(session)
+      assert Session.action_count(session) == 0
+      :ok = Session.pause(session)
+      assert Session.paused?(session)
+
+      send(worker, {:driver_release, %{"ok" => true, "receipt" => sent_receipt()}})
+      assert {:ok, %{outcome: :performed}} = Task.await(caller)
+
+      # The Session keeps ITS OWN pause across the hand-off: the worker's state
+      # snapshot is a moment older than the session's, and applying it wholesale
+      # would silently un-pause the machine the human just took back.
+      assert Session.paused?(session)
+      assert Session.action_count(session) == 1
+    end
+
+    test "a second execute while one is in flight is refused as busy, not queued" do
+      {session, _ref} = start_blocking()
+      caller = execute_async(session, %{"action" => "left_click", "x" => 1, "y" => 2})
+      {_request, worker} = await_blocked()
+
+      {:ok, :auto, second} = Session.classify(session, %{"action" => "screenshot"})
+      assert {:error, :busy} = Session.execute(session, second)
+
+      send(worker, {:driver_release, %{"ok" => true, "receipt" => sent_receipt()}})
+      assert {:ok, _result} = Task.await(caller)
+
+      # …and the seat frees the moment the first one is answered.
+      retry = Task.async(fn -> Session.execute(session, second) end)
+      {_request, worker} = await_blocked()
+      send(worker, {:driver_release, %{"ok" => true}})
+
+      assert {:ok, %{outcome: :read}} = Task.await(retry)
+    end
+
+    # A caller always gets its receipt before the session dies, on every one of the
+    # five reply-then-stop sites — and the worker dying under the action is a sixth
+    # way the answer can go missing.
+    test "a worker that dies mid-action answers its caller, then stops the session" do
+      {session, ref} = start_blocking()
+      caller = execute_async(session, %{"action" => "left_click", "x" => 1, "y" => 2})
+      {_request, worker} = await_blocked()
+
+      Process.exit(worker, :kill)
+
+      assert {:error, {:helper_fault, :killed}} = Task.await(caller)
+      assert_receive {:DOWN, ^ref, :process, ^session, :killed}
+    end
+
+    # The session's teardown guarantee now spans two processes: whatever kills the
+    # Session, the worker must still release the sidecar.
+    test "a Session killed outright still leaves no sidecar behind" do
+      {session, _ref} = start_blocking()
+      Process.exit(session, :kill)
+
+      assert_receive :driver_stop
+    end
+  end
+
+  # M42 slice 2 §6: one cursor, one keyboard, one focused window. Two conversations
+  # driving them at once is not concurrency — each moves the pointer the other just
+  # aimed and reads a screen the other is changing.
+  describe "the native input seat" do
+    setup do
+      start_supervised!(InputOwner)
+      :ok
+    end
+
+    test "a disturbing action is refused while another conversation holds the seat" do
+      session = start_session([])
+      assert :ok = InputOwner.acquire(spawn_holder())
+
+      {:ok, :auto, click} =
+        Session.classify(session, %{"action" => "left_click", "x" => 1, "y" => 2})
+
+      assert {:error, {:refused, :input_busy}} = Session.execute(session, click)
+
+      # Nothing reached the driver — not the action, and not the courtesy probe
+      # that precedes it — and the refusal did not spend the action budget.
+      refute_received {:driver_execute, %{"action" => "left_click"}}
+      refute_received {:driver_execute, %{"action" => "idle_ms"}}
+      assert Session.action_count(session) == 0
+    end
+
+    # Two conversations may LOOK at the same screen all they like; only input is
+    # exclusive.
+    test "a read-only action never needs the seat" do
+      session = start_session([])
+      assert :ok = InputOwner.acquire(spawn_holder())
+
+      {:ok, :auto, request} = Session.classify(session, %{"action" => "screenshot"})
+
+      assert {:ok, %{outcome: :read}} = Session.execute(session, request)
+    end
+
+    test "the session that holds the seat keeps acting on it" do
+      session = start_session([])
+
+      {:ok, :auto, click} =
+        Session.classify(session, %{"action" => "left_click", "x" => 1, "y" => 2})
+
+      assert {:ok, %{outcome: :performed}} = Session.execute(session, click)
+      assert {:ok, %{outcome: :performed}} = Session.execute(session, click)
+    end
+
+    defp spawn_holder do
+      pid = spawn(fn -> receive do: (:done -> :ok) end)
+      on_exit(fn -> send(pid, :done) end)
+      pid
     end
   end
 
@@ -807,6 +1005,83 @@ defmodule FermixCore.ComputerUse.SessionTest do
       refute_received {:lifecycle, :session_complete, %{session_id: "cua_receipts"}}
     end
 
+    # M42 slice 2 §6: the five outcomes are READ off the wire's receipt now, not
+    # inferred from what the check happened to return. Inferring is what produced a
+    # run of clicks all reporting success while none of them landed.
+    test "a receipt saying the input was never sent reports a refusal" do
+      {session, _ref} =
+        start_scripted(%{
+          "left_click" => {:ok, %{"ok" => true, "receipt" => receipt(:not_sent)}}
+        })
+
+      {:ok, :auto, click} =
+        Session.classify(session, %{"action" => "left_click", "x" => 1, "y" => 2})
+
+      assert {:ok, %{outcome: :refused}} = Session.execute(session, click)
+    end
+
+    test "a receipt saying the input was only half sent reports an unknown outcome" do
+      {session, _ref} =
+        start_scripted(%{
+          "left_click" => {:ok, %{"ok" => true, "receipt" => receipt(:partial)}}
+        })
+
+      {:ok, :auto, click} =
+        Session.classify(session, %{"action" => "left_click", "x" => 1, "y" => 2})
+
+      assert {:ok, %{outcome: :unknown}} = Session.execute(session, click)
+    end
+
+    test "a receipt that cannot account for the input reports an unknown outcome" do
+      {session, _ref} =
+        start_scripted(%{
+          "left_click" => {:ok, %{"ok" => true, "receipt" => receipt(:unknown)}}
+        })
+
+      {:ok, :auto, click} =
+        Session.classify(session, %{"action" => "left_click", "x" => 1, "y" => 2})
+
+      assert {:ok, %{outcome: :unknown}} = Session.execute(session, click)
+    end
+
+    # A read-only action dispatches nothing and carries no receipt by protocol, so
+    # requiring one would refuse every look.
+    test "a read-only action needs no receipt" do
+      {session, _ref} = start_scripted(%{"screenshot" => {:ok, %{"ok" => true}}})
+      {:ok, :auto, request} = Session.classify(session, %{"action" => "screenshot"})
+
+      assert {:ok, %{outcome: :read}} = Session.execute(session, request)
+      assert Process.alive?(session)
+    end
+
+    # No fallback to the slice-1 inference: a helper that will not say what it did
+    # with the input has broken the contract the whole verdict rests on, so it is
+    # reported as the fault it is and the session takes a fresh helper. The caller
+    # still gets its receipt first.
+    test "a mutating action with no receipt is a protocol fault, never an inference" do
+      {session, ref} = start_scripted(%{"left_click" => {:ok, %{"ok" => true}}})
+
+      {:ok, :auto, click} =
+        Session.classify(session, %{"action" => "left_click", "x" => 1, "y" => 2})
+
+      assert {:error, {:protocol_error, :missing_receipt}} = Session.execute(session, click)
+      assert_receive {:DOWN, ^ref, :process, ^session, {:shutdown, :protocol_error}}
+      assert_receive :driver_stop
+    end
+
+    test "a receipt whose dispatch is not a value the wire defines is the same fault" do
+      {session, ref} =
+        start_scripted(%{
+          "left_click" => {:ok, %{"ok" => true, "receipt" => %{"dispatch" => "probably"}}}
+        })
+
+      {:ok, :auto, click} =
+        Session.classify(session, %{"action" => "left_click", "x" => 1, "y" => 2})
+
+      assert {:error, {:protocol_error, :missing_receipt}} = Session.execute(session, click)
+      assert_receive {:DOWN, ^ref, :process, ^session, {:shutdown, :protocol_error}}
+    end
+
     # 75 is compux's INTENTIONAL capture-stall fail-fast, so it stays a clean
     # completion (`session_complete`, no crash report) on this path too.
     test "a helper exiting 75 on the action is a clean completion" do
@@ -845,6 +1120,18 @@ defmodule FermixCore.ComputerUse.SessionTest do
 
     {session, Process.monitor(session)}
   end
+
+  # The `ActionWorker` a session started. Read out of the session's state rather
+  # than published as an API: it is the driver's owner, so the Port-matched
+  # clauses live there, and nothing in production has any business addressing it.
+  defp worker(session), do: :sys.get_state(session).worker
+
+  # The receipt a real sidecar returns on every mutating action (M42 slice 2 §3):
+  # dispatch is what the session's `outcome` is derived from, and an absent one is
+  # a protocol fault, so a double that answers a mutating action must carry it.
+  defp sent_receipt, do: ComputerUseReceipts.receipt(:sent)
+
+  defp receipt(dispatch), do: ComputerUseReceipts.receipt(dispatch)
 
   # classify an action and return just the request (helper for execute tests)
   defp wrap_classify(session, params) do

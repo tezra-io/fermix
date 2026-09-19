@@ -54,7 +54,11 @@ defmodule FermixCore.ComputerUse.MarksTest do
     end
 
     defp respond(state, %{"action" => "elements"}), do: {:ok, %{"elements" => state.elements}}
-    defp respond(_state, _request), do: {:ok, %{"ok" => true}}
+
+    # Every mutating reply carries the wire's `receipt` (M42 slice 2 §3), which is
+    # what the session's `outcome` is derived from.
+    defp respond(_state, request),
+      do: {:ok, FermixTestSupport.ComputerUseReceipts.stamp(%{"ok" => true}, request)}
 
     @impl true
     def stop(_state), do: :ok
