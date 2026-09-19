@@ -39,7 +39,10 @@ defmodule FermixCore.MixProject do
       {:anubis_mcp, "~> 1.6"},
       {:floki, "~> 0.36"},
       {:jason, "~> 1.4"},
-      {:compux, github: "tezra-io/compux", ref: "22f601c409034541d64ed94b10c967767f0bbbd7"},
+      # DO NOT MERGE — M42 slice 2 builds against the local compux checkout for
+      # protocol 7. The released tag + checksum replaces this after the owner's
+      # compux release; `checksum-integrity` fails on this commit by design.
+      {:compux, path: "../../../compux"},
       # Native kill(2) process-group shim used by the command-sweep (ProcessGroup).
       {:fermix_nif, in_umbrella: true},
       {:plug, "~> 1.15", only: :test},
