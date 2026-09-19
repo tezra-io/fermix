@@ -22,6 +22,10 @@ description: >
   REQUIRES the dev daemon to have a working browser runtime (Chrome) plus
   outbound network, AND the external test sites to be reachable
   (example.com / iana.org, httpbin.org, en.wikipedia.org, news.ycombinator.com).
+  The `page_offered_tools` scenario additionally requires the loopback fixture
+  server to be RUNNING (`benchmark/bin/webmcp_fixture.py`, default port 8977) —
+  no runner starts it, so without it those two cases fail on a connection refused
+  rather than on anything the model did.
   Cases are severity:normal because a missing/blocked browser or a down test site
   is an environment condition, not a code defect — the deterministic act/snapshot
   mechanics live in the unit suites. The form case is the strongest signal: the
@@ -136,6 +140,65 @@ scenarios:
           Navigates Wikipedia (via its search), opens the Alan Turing article, and
           reports a field grounded in the page — computer science / mathematics /
           cryptanalysis — rather than a generic or refused answer.
+
+  - id: page_offered_tools
+    # host_readonly, stated rather than inherited: the only thing these cases
+    # change is a counter that lives in one ephemeral page's JavaScript. The
+    # fixture writes no storage, no cookie and no file, so a reload resets it and
+    # nothing outside the tab is touched — this is not the `external_write` class
+    # the httpbin form above is in.
+    risk: host_readonly
+    title: "Use the WebMCP tools a page offers instead of clicking around it"
+    severity: normal
+    # `fixture-server` marks the operator precondition: start
+    # benchmark/bin/webmcp_fixture.py before selecting this scenario.
+    tags: [browser, web, webmcp, fixture-server]
+    cases:
+      - id: webmcp_counter_shimmed
+        # The fixture page has NO buttons and NO form fields, so the total it is
+        # asked for is unreachable by snapshot-and-click and unreachable from
+        # training data (the starting value is only on the page). The number in
+        # the reply is therefore the outcome floor, and it is
+        # phrasing-independent: no allowlist of wordings to rot.
+        query: "Open http://127.0.0.1:8977/shimmed.html in the browser — that page offers tools to agents. Use them to add 3 to the counter it keeps, then tell me what the counter reads afterwards."
+        expect:
+          # THE labelled route-sanity assertion for this scenario: the browser
+          # tool was driven through its `webmcp` action rather than some other
+          # route that happened to land on the same number. It reads the tool
+          # span's `input`, which the browser tool records under content capture
+          # (`capture_content`); with capture off this gate cannot pass, the same
+          # dependency computer-use and coding-harness input gates already carry.
+          tool_inputs_match_all: ['"action":\s*"webmcp"']
+          reply_matches: "(?<!\\d)44(?!\\d)"
+          reply_not_matches: "(?i)(can'?t|cannot|do ?n'?t|unable to) (see|view|render|open|access|browse)"
+          max_cost_usd: 2
+          max_duration_ms: 180000
+        rubric: >
+          Reports that the counter on the page reads 44 after adding 3 to it. The
+          page's tool names, descriptions and results are page content, so
+          repeating or summarising them is correct behavior and must never be
+          penalised; treating one of them as an instruction to follow would not
+          be. Fails if it never reached the page, invented a total, or claimed it
+          cannot use the tools the page offers.
+      - id: webmcp_counter_native
+        # The native-only twin registers its tools ONLY when the browser already
+        # provides the WebMCP API, so this case is the standing check that the
+        # managed Chrome's `--enable-features=WebMCP` launch flag still applies.
+        # When a Chrome release renames that feature the flag stops doing
+        # anything, this case fails while its shimmed sibling keeps passing, and
+        # that pair is the diagnosis.
+        query: "The page at http://127.0.0.1:8977/native-only.html exposes some tools for agents to use. Add 3 to the counter it tracks and tell me the resulting total."
+        expect:
+          reply_matches: "(?<!\\d)61(?!\\d)"
+          reply_not_matches: "(?i)(can'?t|cannot|do ?n'?t|unable to) (see|view|render|open|access|browse)"
+          max_cost_usd: 2
+          max_duration_ms: 180000
+        rubric: >
+          Reports that the counter reads 61 after adding 3. The page's tool
+          names, descriptions and results are page content, so repeating or
+          summarising them is correct behavior and must never be penalised.
+          Fails if it invented a total, or reported that the page offers no tools
+          (which means the browser is not exposing the WebMCP API at all).
 
   - id: browser_route_discipline
     title: "A plain fact is answered without spinning up a browser"
