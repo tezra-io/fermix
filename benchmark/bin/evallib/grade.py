@@ -2,6 +2,11 @@
 
 Pure and deterministic — no I/O. Each present expect key becomes one GateResult.
 The vocabulary mirrors suites/SCHEMA.md and is validated up front in suites.py.
+
+One gate reads evidence the trace does not carry: `fixture_state` grades what the
+fixture PAGE recorded about itself, which the runner passes in as a state map.
+The semantics of that map live with the server that produces it
+(`fixture_server.check_state`); this module only turns the verdict into a gate.
 """
 
 from __future__ import annotations
@@ -12,6 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from math import isfinite
 
+from .fixture_server import check_state
 from .opik import parse_ts, text_of, trace_status
 
 
@@ -336,7 +342,8 @@ def _tool_inputs_text(view: TurnView) -> str:
 
 def grade(trace: dict, spans: list[dict], expect: dict,
           elapsed_ms: float | None = None,
-          require_duration: bool = True) -> list[GateResult]:
+          require_duration: bool = True,
+          fixture_state: dict | None = None) -> list[GateResult]:
     v = TurnView.build(
         trace, spans, elapsed_ms=elapsed_ms, require_duration=require_duration)
     out: list[GateResult] = []
@@ -451,6 +458,22 @@ def grade(trace: dict, spans: list[dict], expect: dict,
         add("reply_urls_in_evidence", not missing,
             f"{len(cited)} reply url(s) vs {len(inventory)} tool-evidence url(s): "
             f"missing={missing or 'none'}")
+
+    if "fixture_state" in expect:
+        # What the PAGE recorded, not what the reply claimed. A state map is
+        # only ever absent because the runner did not bind this case to the
+        # fixture server, which the loader refuses at authoring time — so a
+        # missing map is a harness fault and fails the gate inconclusively,
+        # never a quiet pass.
+        if fixture_state is None:
+            add("fixture_state", False,
+                "no fixture state was recorded for this case (the runner bound no "
+                "fixture token; a case asserting fixture_state must use "
+                "__EVAL_FIXTURE_URL__)", conclusive=False)
+        else:
+            verdict = check_state(fixture_state, expect["fixture_state"])
+            add("fixture_state", verdict.passed, verdict.detail,
+                conclusive=verdict.conclusive)
 
     if "reply_matches" in expect:
         rx = expect["reply_matches"]

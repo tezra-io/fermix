@@ -21,11 +21,13 @@
 </p>
 <p>Counter: <span id="counter">41</span></p>
 <p id="status">Registering tools…</p>
+<p id="fixture-status"></p>
 
+<script src="fixture.js"></script>
 <script>
-// Fixture for the `browser` tool's `webmcp` action. Served by
-// benchmark/bin/browser_fixture.py on loopback; named by suites/browser.yaml and
-// suites/capability/candidates/browser_webmcp.yaml.
+// Fixture for the `browser` tool's `webmcp` action. Served by the runner-owned
+// fixture server under this case attempt's token; the suites address it with
+// __EVAL_FIXTURE_URL__ (suites/browser.yaml, suites/capability/browser_webmcp.yaml).
 //
 // This is the SHIMMED page: it installs the page-side shim, so its tools exist
 // in any browser whether or not Chrome exposes the native WebMCP API. Its twin,
@@ -72,6 +74,9 @@
     count += amount;
     calls.push({ tool: 'counter_add', ok: true, amount: amount, value: count });
     render();
+    // What the page RECORDED: the total it now holds, for a `fixture_state`
+    // assertion that does not have to trust the reply or the tool's return.
+    fixtureReport('counter.value', count);
     return { ok: true, value: count };
   }
 

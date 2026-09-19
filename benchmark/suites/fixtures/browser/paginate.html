@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Pagination fixture — page through a register, then open an entry</title>
+<link rel="icon" href="data:,">
+<style>
+  body { font: 16px/1.5 system-ui, sans-serif; margin: 2rem auto; max-width: 42rem; }
+  button { font: inherit; padding: 0.3rem 0.8rem; }
+  #entries li { margin: 0.35rem 0; }
+  #reference { font-size: 1.5rem; font-weight: 700; }
+  nav { margin-top: 1rem; display: flex; gap: 0.5rem; align-items: center; }
+</style>
+</head>
+<body>
+<h1>Shipment register (fixture)</h1>
+<p>
+  Four entries to a page, five pages, and no search. An entry's reference code
+  appears only in its own detail view, so reaching it means paging to it and
+  opening it.
+</p>
+
+<div id="panel"></div>
+
+<nav aria-label="Register pages">
+  <button type="button" id="previous">Previous page</button>
+  <span id="page-indicator">Page 1 of 5</span>
+  <button type="button" id="next">Next page</button>
+</nav>
+<p id="fixture-status"></p>
+
+<script src="fixture.js"></script>
+<script>
+// Corpus fixture: PAGINATE TO AN ITEM, then open it. Served by the runner-owned
+// fixture server under this case attempt's token; the suites address it with
+// __EVAL_FIXTURE_URL__.
+//
+// The register has no search box and no "show all", so an entry on page four is
+// reachable only by paging. The reference code is rendered into the detail view
+// of the entry that was opened and exists nowhere else on the page, so a reply
+// carrying one is proof that both steps landed.
+//
+// WHAT THE PAGE RECORDS (suites/SCHEMA.md `fixture_state`):
+//   page.reached  — the highest page number the run actually reached
+//   entry.opened  — {id, vessel, reference} of the entry opened
+//
+// Nothing is stored and nothing is sent beyond those reports, and neither the
+// pager nor an entry navigates: every load starts on page one with nothing open.
+(function () {
+  "use strict";
+
+  const PER_PAGE = 4;
+  const ENTRIES = [
+    { id: 'shp-01', vessel: 'Aldebaran', port: 'Bergen', reference: 1174 },
+    { id: 'shp-02', vessel: 'Beluga', port: 'Gdansk', reference: 2285 },
+    { id: 'shp-03', vessel: 'Corvus', port: 'Leith', reference: 3396 },
+    { id: 'shp-04', vessel: 'Dorado', port: 'Aveiro', reference: 4407 },
+    { id: 'shp-05', vessel: 'Eider', port: 'Rotterdam', reference: 5518 },
+    { id: 'shp-06', vessel: 'Fulmar', port: 'Trieste', reference: 6629 },
+    { id: 'shp-07', vessel: 'Gannet', port: 'Cork', reference: 7731 },
+    { id: 'shp-08', vessel: 'Halcyon', port: 'Riga', reference: 8842 },
+    { id: 'shp-09', vessel: 'Ibis', port: 'Split', reference: 9953 },
+    { id: 'shp-10', vessel: 'Jackdaw', port: 'Oporto', reference: 1064 },
+    { id: 'shp-11', vessel: 'Kestrel', port: 'Galway', reference: 2175 },
+    { id: 'shp-12', vessel: 'Linnet', port: 'Malmo', reference: 3286 },
+    { id: 'shp-13', vessel: 'Merlin', port: 'Bilbao', reference: 4397 },
+    { id: 'shp-14', vessel: 'Nightjar', port: 'Varna', reference: 5408 },
+    { id: 'shp-15', vessel: 'Osprey', port: 'Brest', reference: 6519 },
+    { id: 'shp-16', vessel: 'Petrel', port: 'Genoa', reference: 7620 },
+    { id: 'shp-17', vessel: 'Quail', port: 'Dover', reference: 8731 },
+    { id: 'shp-18', vessel: 'Redshank', port: 'Tallinn', reference: 9842 },
+    { id: 'shp-19', vessel: 'Shearwater', port: 'Cadiz', reference: 1953 },
+    { id: 'shp-20', vessel: 'Teal', port: 'Aarhus', reference: 2064 },
+  ];
+  const PAGES = Math.ceil(ENTRIES.length / PER_PAGE);
+
+  const panel = document.getElementById('panel');
+  const indicator = document.getElementById('page-indicator');
+  let page = 1;
+  let reached = 1;
+  let opened = null;
+
+  function renderDetail(entry) {
+    opened = entry;
+    panel.replaceChildren();
+    const heading = document.createElement('h2');
+    heading.textContent = entry.vessel + ' (' + entry.id + ')';
+    const port = document.createElement('p');
+    port.textContent = 'Discharge port: ' + entry.port;
+    const reference = document.createElement('p');
+    reference.id = 'reference';
+    reference.textContent = 'Reference: ' + entry.reference;
+    panel.append(heading, port, reference);
+    fixtureReport('entry.opened', {
+      id: entry.id, vessel: entry.vessel, reference: entry.reference,
+    });
+  }
+
+  function renderPage() {
+    opened = null;
+    reached = Math.max(reached, page);
+    indicator.textContent = 'Page ' + page + ' of ' + PAGES;
+    panel.replaceChildren();
+    const list = document.createElement('ul');
+    list.id = 'entries';
+    ENTRIES.slice((page - 1) * PER_PAGE, page * PER_PAGE).forEach(function (entry) {
+      const item = document.createElement('li');
+      const open = document.createElement('button');
+      open.type = 'button';
+      open.textContent = 'Open ' + entry.vessel;
+      open.addEventListener('click', function () { renderDetail(entry); });
+      const label = document.createElement('span');
+      label.textContent = ' ' + entry.id + ' — ' + entry.port + ' ';
+      item.append(open, label);
+      list.append(item);
+    });
+    panel.append(list);
+    fixtureReport('page.reached', reached);
+  }
+
+  function step(delta) {
+    const next = Math.min(PAGES, Math.max(1, page + delta));
+    if (next === page) {
+      return;
+    }
+    page = next;
+    renderPage();
+  }
+
+  // The page's own state, readable without trusting what a tool reported.
+  window.__fixture = {
+    page: 'paginate',
+    get current() { return page; },
+    get reached() { return reached; },
+    get opened() { return opened; },
+  };
+
+  document.getElementById('next').addEventListener('click', function () { step(1); });
+  document.getElementById('previous').addEventListener('click', function () { step(-1); });
+  renderPage();
+}());
+</script>
+</body>
+</html>

@@ -64,6 +64,8 @@ sys.path.insert(0, HERE)
 from evallib import (aggregate, checker, config as cfgmod, driver, grade, judge, leaderboard,
                      pricing, release_gate, safe_rm, scoring, uplift)
 from evallib.experiments import ExperimentWriter, OpikWriteError, stable_id
+from evallib.fixture_server import (FIXTURE_URL_PLACEHOLDER, FixtureServer,
+                                    ServerError, case_uses_fixture, check_state)
 from evallib.opik import OpikClient, OpikError
 from evallib.session_ids import sess
 from evallib.suites import UNCLASSIFIED_RISK, SuiteError, load_all
@@ -82,7 +84,12 @@ SAFETY_GATES = ("tools_none", "tools_none_succeeded", "reply_not_matches")
 # the stamping and that decision.
 HASH_VERSION = leaderboard.CURRENT_HASH_VERSION
 CAP_DIR = os.path.join(SKILL_DIR, "suites", "capability")
+FIXTURE_PAGES_DIR = os.path.join(SKILL_DIR, "suites", "fixtures", "browser")
 DATASET = "fermix-capability"
+# `fixture_state` is this tier's third ground-truth scorer (beside `score:` and
+# `checker:`), never a constraint: the page's own record IS the task outcome, so
+# grading it twice would report a correct task as a `constraint_fail`.
+FIXTURE_SCORE_GATE = "fixture_state"
 
 
 def now_utc() -> datetime:
@@ -257,6 +264,16 @@ class JudgeUnavailable(RuntimeError):
 
 # --- selection --------------------------------------------------------------
 
+def fixture_clauses(case) -> list | None:
+    """The `fixture_state` clauses this case is scored on, or None.
+
+    Read off the case-level expect (the map graded on the final turn), which is
+    where the loader allows it — a suite default is refused, so a case cannot
+    inherit another case's page assertions."""
+    clauses = case.expect.get(FIXTURE_SCORE_GATE)
+    return clauses or None
+
+
 def capability_cases(suites, want_suites, want_tags, max_tasks, want_judge):
     """Select scored cases. A rubric-only case (no `score:` block) is gradeable
     only with the judge on; with judge off it would silently score 0 and drag the
@@ -276,7 +293,7 @@ def capability_cases(suites, want_suites, want_tags, max_tasks, want_judge):
             if want_tags and not (set(want_tags) & set(scn.tags)):
                 continue
             for case in scn.cases:
-                if case.score_spec or case.checker_spec:
+                if case.score_spec or case.checker_spec or fixture_clauses(case):
                     out.append((s, scn, case))
                 elif case.rubric and want_judge:
                     out.append((s, scn, case))
@@ -299,6 +316,21 @@ def _undriven_case_error(cases) -> str | None:
     return ("multi-turn capability cases are not driven (only a cross_session pair is): "
             + ", ".join(undriven)
             + " — split them into single turns or declare cross_session")
+
+
+def _fixture_scoring_error(cases) -> str | None:
+    """A case whose page state is the ground truth AND which carries another
+    oracle. One task, one oracle: silently preferring one of two declared
+    scorers publishes a number nobody can attribute to what the suite asked
+    for. (The behavioral runner has no such rule — there `fixture_state` is a
+    gate and a rubric judges prose, which is two different questions.)"""
+    conflicted = sorted(
+        f"{suite.name}/{case.id}" for suite, _scn, case in cases
+        if fixture_clauses(case) and (case.score_spec or case.checker_spec or case.rubric))
+    if not conflicted:
+        return None
+    return ("a capability case scored by `fixture_state` must not also carry "
+            "score/checker/rubric: " + ", ".join(conflicted))
 
 
 def _selection_policy_error(cases) -> str | None:
@@ -354,8 +386,13 @@ def _failed_constraints(trace, spans, expect, elapsed_ms: float) -> list[str]:
     A capability case that declares `tools_all` or `max_tool_calls` is stating what
     completing the task requires; scoring the answer while ignoring that turns a
     declared requirement into decoration. A failure here zeroes the task under its own
-    status (`constraint_fail`), distinct from a safety violation."""
-    relevant = {k: v for k, v in expect.items() if k not in SAFETY_GATES}
+    status (`constraint_fail`), distinct from a safety violation.
+
+    `fixture_state` is excluded: in this tier it IS the scorer (`_task_success`),
+    so grading it here too would report a task the model simply got wrong as a
+    constraint failure."""
+    relevant = {k: v for k, v in expect.items()
+                if k not in SAFETY_GATES and k != FIXTURE_SCORE_GATE}
     if not relevant:
         return []
     gates = grade.grade(trace, spans, relevant, elapsed_ms=elapsed_ms)
@@ -385,7 +422,15 @@ def _gradeable(view) -> bool:
 
 
 def _task_success(cfg, case, reply, want_judge, tag,
-                  candidate_routes) -> tuple[float, str]:
+                  candidate_routes, fixture_state=None) -> tuple[float, str]:
+    clauses = fixture_clauses(case)
+    if clauses:
+        # Ground truth from the PAGE, not from the reply: all clauses hold -> 1.0,
+        # else 0.0. A missing state map is a harness fault, not a model failure,
+        # and reads as such in the detail — `_standard_trial` only reaches here
+        # with a binding, because the loader refuses the case without one.
+        verdict = check_state(fixture_state, clauses)
+        return (1.0 if verdict.passed else 0.0), f"fixture_state: {verdict.detail}"
     if case.score_spec:
         s = scoring.score_answer(reply, case.score_spec)
         return s.score, s.detail
@@ -571,6 +616,7 @@ def _finish_trial(case, ep: _Episode, succ: float, label: str = "",
         cost=usage["cost"], duration_ms=usage["duration_ms"], tokens=usage["tokens"],
         tool_calls=usage["tool_calls"], status=status, trace_id=trace_id,
         cost_known=usage["cost_known"], status_detail=final.detail,
+        main_llm_calls=usage["main_llm_calls"],
         **_episode_pricing(ep))
     if constraints:
         print(f"    · {label or case.id}: constraint fail — {'; '.join(constraints)}",
@@ -588,6 +634,11 @@ def _episode_usage(ep: _Episode) -> dict:
         "duration_ms": sum(cap.elapsed_ms for cap in ep.caps),
         "tokens": sum(view.tokens for view in views),
         "tool_calls": sum(len(view.tool_spans) for view in views),
+        # MAIN-agent llm calls (subagent workers excluded, exactly as
+        # `main_models` splits them): the turn-economy column an arms comparison
+        # reports beside success. None when no turn was observed, never 0.
+        "main_llm_calls": (sum(len(view.main_models) for view in views)
+                           if views else None),
     }
 
 
@@ -784,11 +835,51 @@ def _reset_declared_state(fermix_home: str, paths) -> None:
             os.remove(resolved)
 
 
+def fixture_token(s_name: str, case_id: str, run_id: str, i: int) -> str:
+    """The fixture-server token ONE trial records its page state under. Unique per
+    run, task and trial, and `sess` keeps the trial suffix when the middle has to
+    be compressed, so two trials of one task can never read each other's page."""
+    return sess("fx", run_id, s_name, case_id, f"t{i}")
+
+
+def _bind_page(fixtures, s_name: str, case, run_id: str, i: int):
+    """This trial's fixture binding, or None when the case never addresses the
+    fixture server. Distinct from `fixture_path`/`_fixture_digest` in this file,
+    which name a CHECKER's seeded workspace tree."""
+    if fixtures is None or not case_uses_fixture(case):
+        return None
+    return fixtures.bind(fixture_token(s_name, case.id, run_id, i))
+
+
+def _page_state(binding) -> dict | None:
+    """The page's recorded state, once its reports have stopped arriving.
+
+    Reporting is fire-and-forget by design — a page must not block a click on a
+    round trip — so the last report of a turn can still be in flight when the
+    reply lands and the trial is scored. `settle` is the whole tolerance for it:
+    bounded, and paid only by a task that uses the fixture server."""
+    if binding is None:
+        return None
+    binding.settle()
+    return binding.state()
+
+
+def _with_fixture_url(query: str, binding) -> str:
+    url = binding.url if binding is not None else None
+    rendered = query if url is None else query.replace(FIXTURE_URL_PLACEHOLDER, url)
+    if FIXTURE_URL_PLACEHOLDER in rendered:
+        raise RuntimeError(
+            f"{FIXTURE_URL_PLACEHOLDER} was not bound to a fixture server for this "
+            "trial; the sweep must start one before driving it")
+    return rendered
+
+
 def _standard_trial(cfg, opik, s, case, run_id, i, is_checker, task_key, fixture_path,
-                    cleanup_root, want_judge):
+                    cleanup_root, want_judge, fixtures=None):
     session = sess("e2e-cap", run_id, s.name, case.id, f"t{i}")
     token = trial_token(s.name, case.id, run_id, i)
-    query = case.turns[-1].query.replace("{token}", token)
+    binding = _bind_page(fixtures, s.name, case, run_id, i)
+    query = _with_fixture_url(case.turns[-1].query.replace("{token}", token), binding)
     scoped = checker.scoped_dir(cfg.daemon.fermix_home, task_key, i) if is_checker else None
     try:
         if is_checker:
@@ -805,8 +896,11 @@ def _standard_trial(cfg, opik, s, case, run_id, i, is_checker, task_key, fixture
             return _fail_trial(case, ep, label)
         if is_checker:
             return _checker_trial(cfg, case, ep, scoped, run_id, i, session, token, label)
+        # Read AFTER the turn settled, so everything the turn made the page do is
+        # in the state this trial is scored on.
         succ, _detail = _task_success(
-            cfg, case, cap.view.reply, want_judge, session, _candidate_routes(cap.view))
+            cfg, case, cap.view.reply, want_judge, session, _candidate_routes(cap.view),
+            _page_state(binding))
         succ = _provenance_gate(case, ep, succ, label)
         return _finish_trial(case, ep, succ, label)
     finally:
@@ -848,7 +942,7 @@ def _provenance_gate(case, ep: _Episode, succ: float, label: str) -> float:
     return 0.0
 
 
-def _cross_session_trial(cfg, opik, s, case, run_id, i):
+def _cross_session_trial(cfg, opik, s, case, run_id, i, fixtures=None):
     """Store a tokened fact in session A, then recall it in a FRESH session B (same
     owner). Because B shares NO conversation context, a correct recall can only come
     from owner-scoped DURABLE memory carried across sessions — the one thing the
@@ -856,8 +950,13 @@ def _cross_session_trial(cfg, opik, s, case, run_id, i):
     (the uplift signal)."""
     token = _xsession_token(s.name, case.id, run_id, i)
     subject = _xsession_subject(s.name, case.id, run_id, i)
-    store_q = case.turns[0].query.replace("{subject}", subject).replace("{token}", token)
-    recall_q = case.turns[1].query.replace("{subject}", subject).replace("{token}", token)
+    # Both turns address the SAME token: a cross-session pair is one episode, so
+    # what the store turn made the page record is still there for the recall one.
+    binding = _bind_page(fixtures, s.name, case, run_id, i)
+    store_q = _with_fixture_url(
+        case.turns[0].query.replace("{subject}", subject).replace("{token}", token), binding)
+    recall_q = _with_fixture_url(
+        case.turns[1].query.replace("{subject}", subject).replace("{token}", token), binding)
     sess_a = sess("e2e-cap", run_id, s.name, case.id, f"t{i}", "store")
     sess_b = sess("e2e-cap", run_id, s.name, case.id, f"t{i}", "recall")
 
@@ -878,7 +977,7 @@ def _cross_session_trial(cfg, opik, s, case, run_id, i):
 
 
 def run_task(cfg, opik, s, scn, case, trials, k, threshold, run_id,
-             want_judge) -> TaskOutcome:
+             want_judge, fixtures=None) -> TaskOutcome:
     is_checker = case.checker_spec is not None
     task_key = f"{s.name}-{case.id}"
     fixture_path = case.checker_spec.get("seed") if is_checker else None
@@ -891,11 +990,12 @@ def run_task(cfg, opik, s, scn, case, trials, k, threshold, run_id,
     for i in range(trials):
         try:
             if case.cross_session:
-                tr, trace_id, tmodels = _cross_session_trial(cfg, opik, s, case, run_id, i)
+                tr, trace_id, tmodels = _cross_session_trial(
+                    cfg, opik, s, case, run_id, i, fixtures)
             else:
                 tr, trace_id, tmodels = _standard_trial(
                     cfg, opik, s, case, run_id, i, is_checker, task_key, fixture_path,
-                    cleanup_root, want_judge)
+                    cleanup_root, want_judge, fixtures)
         except driver.UsageLimitHit as hit:
             hit.locate(s.name, case.id, i)   # stamp the resume pointer, then abort the sweep
             raise
@@ -1107,13 +1207,22 @@ def _safety_line(score) -> str:
 
 def write_results_json(path, arm, config_id, k, threshold, outcomes, valid: bool) -> None:
     """Write per-task success for the Fermix arm via the shared uplift format —
-    the unit run_uplift.py pairs against a baseline arm's results.json.
+    the unit run_uplift.py pairs against a baseline arm's results.json, and
+    run_arms.py compares one configuration's arm with the control's.
 
     `valid` travels with the numbers so an arm cannot be paired without the pairing
-    seeing what the run itself concluded."""
+    seeing what the run itself concluded.
+
+    Beside success, each task carries the two columns a configuration comparison
+    reports: every trial's wall clock (`durations_ms`, so the comparison pools its
+    own p50/p95 rather than re-deriving one from a summary) and the mean
+    main-model calls. Both are OPTIONAL in the format — an arm written by
+    `run_baseline.py` has neither — and `uplift.compare_arms` never reads them."""
     tasks = {f"{s}/{cid}": {"mean_success": round(o.stats.mean_success, 4),
                             "pass_hat_k": round(o.stats.pass_hat_k, 4),
-                            "n": o.stats.n_trials}
+                            "n": o.stats.n_trials,
+                            "durations_ms": [round(ms, 1) for ms in o.stats.durations_ms],
+                            "mean_main_llm_calls": o.stats.mean_main_llm_calls}
              for s, cid, o in outcomes}
     uplift.write_arm(path, arm=arm, config_id=config_id,
                      suite=",".join(sorted({s for s, _c, _o in outcomes})),
@@ -1403,6 +1512,11 @@ def build_args(argv):
                    help="run an operator-supplied held-out split (FERMIX_EVAL_HOLDOUT_DIR / --private-data)")
     p.add_argument("--private-data",
                    help="dir of held-out suites OUTSIDE the repo (or set FERMIX_EVAL_HOLDOUT_DIR)")
+    p.add_argument("--results-out",
+                   help="also write this run's per-task results here (the arm file "
+                        "run_arms.py/run_uplift.py pair on). Written ONLY for a valid "
+                        "measurement: an invalid sweep keeps results.invalid.json under "
+                        "its report dir, so a comparison can never pick one up by habit")
     p.add_argument("--rank-only", action="store_true", help="re-render the leaderboard, drive nothing")
     p.add_argument("--estimate", action="store_true", help="print the turn-count/cost plan and exit")
     p.add_argument("--check", action="store_true", help="preconditions only")
@@ -1436,6 +1550,12 @@ def _argument_error(args) -> str | None:
         return (f"--k {args.k} needs 1 <= k <= --trials ({args.trials}): pass^k over "
                 "more trials than were run is not measurable, and a clamped pass^3 "
                 "must never be published in a pass^5 column")
+    if args.results_out:
+        parent = os.path.dirname(os.path.abspath(args.results_out)) or "."
+        if not os.path.isdir(parent):
+            # Checked before any spend: discovering an unwritable destination after
+            # a metered sweep loses the arm the sweep was run to produce.
+            return f"--results-out directory does not exist: {parent}"
     return None
 
 
@@ -1503,6 +1623,10 @@ def _planning_gate(cfg, cases, want_judge) -> int | None:
     undriven = _undriven_case_error(cases)
     if undriven:
         print(f"capability runner refused selection: {undriven}", file=sys.stderr)
+        return 2
+    two_oracles = _fixture_scoring_error(cases)
+    if two_oracles:
+        print(f"capability runner refused selection: {two_oracles}", file=sys.stderr)
         return 2
     judge_error = _independent_judge_error(cfg, want_judge)
     if judge_error:
@@ -1608,9 +1732,16 @@ def _sweep(cfg, args, lb_path, cases, want_judge) -> int:
     print(f"capability eval · {len(cases)} task(s) × {run.trials} trial(s) · "
           f"judge={'on' if want_judge else 'off'} · axis={args.axis}")
     try:
+        fixtures = _start_fixture_server(cases)
+    except ServerError as exc:
+        # A precondition, not a measurement: without the pages every trial would
+        # score 0 on a connection refused, which reads as the model failing.
+        print(f"fixture server could not start: {exc}", file=sys.stderr)
+        return 3
+    try:
         for s, scn, case in cases:
             out = run_task(cfg, opik, s, scn, case, run.trials, run.k, args.threshold,
-                           run.run_id, want_judge)
+                           run.run_id, want_judge, fixtures)
             run.outcomes.append((s.name, case.id, out))
             run.all_models += out.models
             run.task_stats.append(out.stats)
@@ -1627,7 +1758,24 @@ def _sweep(cfg, args, lb_path, cases, want_judge) -> int:
         return _abort_judge_unavailable(unavailable, len(run.outcomes), len(cases))
     except PricingContractError as broken:
         return _abort_pricing_contract(broken, len(run.outcomes), len(cases))
+    finally:
+        if fixtures is not None:
+            fixtures.stop()
     return _report(cfg, args, lb_path, run)
+
+
+def _start_fixture_server(cases) -> FixtureServer | None:
+    """Start the fixture server if and only if a selected task addresses it, and
+    before any spend: a sweep whose pages cannot be served must fail on the
+    server, not trial by trial on a connection refused that scores as the model
+    failing to open a page."""
+    if not any(case_uses_fixture(case) for _s, _scn, case in cases):
+        return None
+    fixtures = FixtureServer(FIXTURE_PAGES_DIR)
+    port = fixtures.start()
+    print(f"  fixture server: 127.0.0.1:{port} "
+          f"({len(fixtures.documents)} document(s), one token per trial)")
+    return fixtures
 
 
 def _report(cfg, args, lb_path, run: _Run) -> int:
@@ -1660,9 +1808,12 @@ def _report(cfg, args, lb_path, run: _Run) -> int:
               f"{out_dir}", file=sys.stderr)
         return 4
     # Per-task results = the Fermix arm of an uplift pairing (run_uplift.py reads this
-    # against a baseline arm).
+    # against a baseline arm; run_arms.py against the control configuration's).
     write_results_json(os.path.join(out_dir, "results.json"), "fermix", config_id,
                        run.k, args.threshold, run.outcomes, valid=True)
+    if args.results_out:
+        write_results_json(args.results_out, "fermix", config_id,
+                           run.k, args.threshold, run.outcomes, valid=True)
     gate = release_gate.evaluate(score)
     meta["release_gate"] = {"passed": gate.passed, "reasons": gate.reasons}
     md = _publish(cfg, args, lb_path, config_id, score, meta, run)

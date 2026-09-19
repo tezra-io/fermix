@@ -90,6 +90,10 @@ class TrialResult:
     # must not record "every declared gate passed".
     safety_ok: bool | None = None
     cost_known: bool = True
+    # Main-agent llm calls in this trial's episode — the turn-economy column an
+    # arms comparison reports beside success. None = the caller did not record it
+    # (a baseline arm or a row written before the column existed), never 0.
+    main_llm_calls: int | None = None
     # --- per-model pricing, all TRI-STATE: None = never reported, never 0. ---
     # The split of this trial's llm-span usage. `total_input_tokens` is the span
     # contract's `prompt_tokens` and keeps its BLENDED semantics (Anthropic folds
@@ -149,6 +153,7 @@ class TaskStats:
     n_invalid: int = 0              # trials whose evidence was missing (INVALID_STATUSES)
     durations_ms: list[float] = field(default_factory=list)  # trial-level, for a pooled p95
     cost_known: bool = True
+    mean_main_llm_calls: float | None = None  # None = no trial recorded one
     # --- per-model pricing, folded from this task's trials. See _pricing_columns. ---
     total_input_tokens: int | None = None
     total_output_tokens: int | None = None
@@ -253,7 +258,7 @@ class RankedConfig:
 def score_trial(task_id: str, *, task_success: float, safety_ok: bool | None, cost: float,
                 duration_ms: float, tokens: int, tool_calls: int, status: str,
                 trace_id: str | None = None, cost_known: bool = True,
-                status_detail: str = "",
+                status_detail: str = "", main_llm_calls: int | None = None,
                 total_input_tokens: int | None = None,
                 total_output_tokens: int | None = None,
                 total_cached_input_tokens: int | None = None,
@@ -294,6 +299,8 @@ def score_trial(task_id: str, *, task_success: float, safety_ok: bool | None, co
                        tool_calls=int(tool_calls), status=status, trace_id=trace_id,
                        safety_ok=safety_ok, cost_known=bool(cost_known),
                        status_detail=str(status_detail),
+                       main_llm_calls=(None if main_llm_calls is None
+                                       else int(main_llm_calls)),
                        total_input_tokens=total_input_tokens,
                        total_output_tokens=total_output_tokens,
                        total_cached_input_tokens=total_cached_input_tokens,
@@ -486,8 +493,17 @@ def aggregate_task(trials: list[TrialResult], k: int, threshold: float,
         n_invalid=sum(1 for t in trials if not t.valid),
         durations_ms=durations,
         cost_known=all(t.cost_known for t in trials),
+        mean_main_llm_calls=_mean_main_llm_calls(trials),
         **_pricing_columns(trials),
     )
+
+
+def _mean_main_llm_calls(trials: list[TrialResult]) -> float | None:
+    """Mean main-agent llm calls over the trials that RECORDED one; None when none
+    did. Tri-state like every other optional column: an arm that never recorded
+    the count must not report a zero turn economy."""
+    reported = [t.main_llm_calls for t in trials if t.main_llm_calls is not None]
+    return sum(reported) / len(reported) if reported else None
 
 
 def aggregate_config(config_id: str, task_stats: list[TaskStats]) -> ConfigScore:

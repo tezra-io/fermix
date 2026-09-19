@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Duplicate labels fixture — two Save buttons, one right answer</title>
+<link rel="icon" href="data:,">
+<style>
+  body { font: 16px/1.5 system-ui, sans-serif; margin: 2rem auto; max-width: 40rem; }
+  section { border-top: 1px solid #ccc; margin-top: 1.5rem; padding-top: 0.5rem; }
+  label { display: block; margin-top: 0.75rem; font-weight: 600; }
+  input { display: block; width: 100%; font: inherit; padding: 0.3rem; box-sizing: border-box; }
+  button { font: inherit; padding: 0.3rem 1rem; margin-top: 1rem; }
+  #outcome { font-size: 1.25rem; font-weight: 700; margin-top: 1.5rem; }
+</style>
+</head>
+<body>
+<h1>Account settings (fixture)</h1>
+<p>
+  Two sections, each with its own Save. The buttons are worded identically, so
+  which one to press follows from the heading of the section it sits in.
+</p>
+
+<section aria-labelledby="section-one-heading">
+  <h2 id="section-one-heading">Personal details</h2>
+  <form class="settings" autocomplete="off">
+    <label for="personal-name">Name</label>
+    <input id="personal-name" name="name" type="text" value="Ada Lovelace">
+
+    <label for="personal-phone">Phone</label>
+    <input id="personal-phone" name="phone" type="text" value="0161 496 0000">
+
+    <button type="submit">Save</button>
+  </form>
+</section>
+
+<section aria-labelledby="section-two-heading">
+  <h2 id="section-two-heading">Billing address</h2>
+  <form class="settings" autocomplete="off">
+    <label for="billing-street">Street</label>
+    <input id="billing-street" name="street" type="text" value="12 Dean Street">
+
+    <label for="billing-postcode">Postcode</label>
+    <input id="billing-postcode" name="postcode" type="text" value="M1 4AA">
+
+    <button type="submit">Save</button>
+  </form>
+</section>
+
+<p id="outcome">Nothing saved yet.</p>
+<p id="fixture-status"></p>
+
+<script src="fixture.js"></script>
+<script>
+// Corpus fixture: TWO CONTROLS WITH THE SAME LABEL. Served by the runner-owned
+// fixture server under this case attempt's token; the suites address it with
+// __EVAL_FIXTURE_URL__.
+//
+// Both buttons read exactly "Save", and nothing in the markup names which
+// section a form belongs to — no id, no title, no data attribute. The page
+// itself reads its section off the visible <h2>, which is the same context a
+// careful reader uses. A fixture that hid the answer in an id would be testing
+// whether the tool leaks ids, not whether the model read the page.
+//
+// WHAT THE PAGE RECORDS (suites/SCHEMA.md `fixture_state`):
+//   saved.section — "personal" or "billing", whichever Save was pressed
+//   saved.values  — that section's field values at the moment it was saved
+// Reported only on a save, so a case can assert the other section was never
+// saved by asserting a value the wrong section could not produce.
+//
+// Nothing is stored and nothing is sent beyond those reports; neither form
+// submits to a server, so every load starts from the same two sections.
+(function () {
+  "use strict";
+
+  const outcome = document.getElementById('outcome');
+  let saved = null;
+
+  window.__fixture = {
+    page: 'duplicate_labels',
+    get saved() { return saved; },
+  };
+
+  function sectionOf(form) {
+    // The VISIBLE heading is the only disambiguator, here as for the reader.
+    const heading = form.closest('section').querySelector('h2').textContent;
+    return heading.trim().toLowerCase().startsWith('billing') ? 'billing' : 'personal';
+  }
+
+  function values(form) {
+    const out = {};
+    form.querySelectorAll('input').forEach(function (input) {
+      out[input.name] = input.value.trim().toLowerCase();
+    });
+    return out;
+  }
+
+  document.querySelectorAll('.settings').forEach(function (form) {
+    form.addEventListener('submit', function (event) {
+      // Never submit: a navigation would reload both sections and drop the edit.
+      event.preventDefault();
+      const section = sectionOf(form);
+      saved = { section: section, values: values(form) };
+      outcome.textContent = 'Saved the ' + section + ' section.';
+      fixtureReport('saved.section', section);
+      fixtureReport('saved.values', saved.values);
+    });
+  });
+}());
+</script>
+</body>
+</html>

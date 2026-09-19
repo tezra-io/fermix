@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Filter fixture — narrow a list, then open one row</title>
+<!-- An empty data: icon, so the page requests nothing at all: a browser's
+     automatic /favicon.ico fetch would 404 and put a console error in front of
+     anyone debugging a failing case. -->
+<link rel="icon" href="data:,">
+<style>
+  body { font: 16px/1.5 system-ui, sans-serif; margin: 2rem auto; max-width: 42rem; }
+  label { font-weight: 600; }
+  select, button { font: inherit; padding: 0.3rem; }
+  table { border-collapse: collapse; margin-top: 1rem; width: 100%; }
+  th, td { border-bottom: 1px solid #ccc; padding: 0.35rem 0.5rem; text-align: left; }
+  #amount { font-size: 1.5rem; font-weight: 700; }
+</style>
+</head>
+<body>
+<h1>Invoices (fixture)</h1>
+<p>
+  Every invoice is listed until the status filter is applied. Opening a row shows
+  its detail, and the amount owed is on the page nowhere but in that detail.
+</p>
+
+<form id="filters" autocomplete="off">
+  <label for="status">Status</label>
+  <select id="status" name="status">
+    <option value="all">All statuses</option>
+    <option value="overdue">Overdue</option>
+    <option value="paid">Paid</option>
+    <option value="draft">Draft</option>
+  </select>
+  <button type="submit" id="apply">Apply filter</button>
+</form>
+
+<div id="panel"></div>
+<p id="fixture-status"></p>
+
+<script src="fixture.js"></script>
+<script>
+// Corpus fixture: FILTER A LIST, then open one of the rows that survived it.
+// Served by the runner-owned fixture server under this case attempt's token; the
+// suites address it with __EVAL_FIXTURE_URL__.
+//
+// The filter matters: three suppliers appear under more than one status, so the
+// row a case names is ambiguous until the list is narrowed, and the amount lives
+// only in a row's detail view.
+//
+// WHAT THE PAGE RECORDS (suites/SCHEMA.md `fixture_state`):
+//   filter.applied  — the status last applied (reported only when Apply is used)
+//   list.opened     — {id, supplier, status, amount} of the row opened
+// Both are reported only when they happen, so a case can assert that a row was
+// never opened by asserting the path is absent.
+//
+// Nothing is stored and nothing is sent beyond those reports: no localStorage,
+// no sessionStorage, no cookies, and neither the filter nor a row navigates.
+(function () {
+  "use strict";
+
+  const INVOICES = [
+    { id: 'inv-4101', supplier: 'Halden Foundry', status: 'overdue', amount: 1840 },
+    { id: 'inv-4102', supplier: 'Halden Foundry', status: 'paid', amount: 960 },
+    { id: 'inv-4103', supplier: 'Marrow & Sons', status: 'draft', amount: 415 },
+    { id: 'inv-4104', supplier: 'Marrow & Sons', status: 'overdue', amount: 2270 },
+    { id: 'inv-4105', supplier: 'Quill Instruments', status: 'paid', amount: 1325 },
+    { id: 'inv-4106', supplier: 'Quill Instruments', status: 'overdue', amount: 730 },
+    { id: 'inv-4107', supplier: 'Tessier Glass', status: 'draft', amount: 585 },
+    { id: 'inv-4108', supplier: 'Tessier Glass', status: 'paid', amount: 2040 },
+  ];
+
+  const form = document.getElementById('filters');
+  const select = document.getElementById('status');
+  const panel = document.getElementById('panel');
+  let applied = 'all';
+  let opened = null;
+
+  function visible() {
+    return applied === 'all'
+      ? INVOICES
+      : INVOICES.filter(function (row) { return row.status === applied; });
+  }
+
+  function renderDetail(row) {
+    opened = row;
+    panel.replaceChildren();
+    const heading = document.createElement('h2');
+    heading.textContent = row.supplier + ' — ' + row.id;
+    const status = document.createElement('p');
+    status.textContent = 'Status: ' + row.status;
+    const amount = document.createElement('p');
+    amount.id = 'amount';
+    amount.textContent = 'Amount due: ' + row.amount;
+    panel.append(heading, status, amount);
+    fixtureReport('list.opened', {
+      id: row.id, supplier: row.supplier, status: row.status, amount: row.amount,
+    });
+  }
+
+  function renderList() {
+    opened = null;
+    panel.replaceChildren();
+    const caption = document.createElement('p');
+    const rows = visible();
+    caption.textContent = rows.length + ' invoice(s) shown (' + applied + ').';
+    const table = document.createElement('table');
+    const head = document.createElement('tr');
+    ['Invoice', 'Supplier', 'Status', ''].forEach(function (text) {
+      const cell = document.createElement('th');
+      cell.textContent = text;
+      head.append(cell);
+    });
+    table.append(head);
+    rows.forEach(function (row) {
+      const line = document.createElement('tr');
+      [row.id, row.supplier, row.status].forEach(function (text) {
+        const cell = document.createElement('td');
+        cell.textContent = text;
+        line.append(cell);
+      });
+      const action = document.createElement('td');
+      const open = document.createElement('button');
+      open.type = 'button';
+      open.textContent = 'Open ' + row.id;
+      open.addEventListener('click', function () { renderDetail(row); });
+      action.append(open);
+      line.append(action);
+      table.append(line);
+    });
+    panel.append(caption, table);
+  }
+
+  // The page's own state, readable without trusting what a tool reported.
+  window.__fixture = {
+    page: 'filter',
+    get applied() { return applied; },
+    get opened() { return opened; },
+  };
+
+  form.addEventListener('submit', function (event) {
+    // Never submit: a navigation would reload the list the case just narrowed.
+    event.preventDefault();
+    applied = select.value;
+    renderList();
+    fixtureReport('filter.applied', applied);
+  });
+
+  renderList();
+}());
+</script>
+</body>
+</html>

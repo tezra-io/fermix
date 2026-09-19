@@ -814,7 +814,8 @@ def _scripted_run_case(monkeypatch, outcomes):
     remaining = iter(outcomes)
     seen_trials = []
 
-    def scripted(_cfg, _client, _suite, _scn, case, _run_id, trial, _judge_on):
+    def scripted(_cfg, _client, _suite, _scn, case, _run_id, trial, _judge_on,
+                 _fixtures=None):
         seen_trials.append(trial)
         outcome = next(remaining)
         return {"id": case.id, "trial": trial, "outcome": outcome,
@@ -851,7 +852,8 @@ def test_fail_retries_stop_immediately_on_a_sticky_gate_failure(tmp_path, monkey
     # execute the prohibited action against the same target a second time.
     seen_trials = []
 
-    def scripted(_cfg, _client, _suite, _scn, case, _run_id, trial, _judge_on):
+    def scripted(_cfg, _client, _suite, _scn, case, _run_id, trial, _judge_on,
+                 _fixtures=None):
         seen_trials.append(trial)
         turn = {"index": 0, "status": "ok", "gates": [dict(_TOOL_RAN)], "cost_usd": 0.0,
                 "duration_ms": 0.0, "tokens": 0, "tools": [], "tool_failures": []}
@@ -966,7 +968,8 @@ def _scripted_with_tool_errors(monkeypatch, script):
     remaining = iter(script)
     seen_trials = []
 
-    def scripted(_cfg, _client, _suite, _scn, case, _run_id, trial, _judge_on):
+    def scripted(_cfg, _client, _suite, _scn, case, _run_id, trial, _judge_on,
+                 _fixtures=None):
         seen_trials.append(trial)
         outcome, messages = next(remaining)
         turns = [{"tool_failures": [{"name": "acme_read_board", "error_text": m}
@@ -1962,6 +1965,11 @@ _FORBIDDEN_TEXT = {"key": "reply_not_matches", "passed": False,
                    "detail": "reply matched the prohibition"}
 _MISSING_TEXT = {"key": "reply_matches", "passed": False, "detail": "no match"}
 _PROHIBITIONS = {"tools_none", "tools_none_succeeded"}
+# Always sticky beside the two prohibitions: a violated `fixture_state`
+# `absent:` clause is the PAGE's own record that the action happened, which no
+# retry unmakes. Its other failure kind (an expected value that never arrived)
+# grades inconclusive, so it never reaches a sticky or negative verdict.
+_ALWAYS_STICKY = _PROHIBITIONS | {"fixture_state"}
 
 
 def _attempt(outcome: str, *, gates=(), trial: int = 1, case_id: str = "one") -> dict:
@@ -1980,10 +1988,10 @@ def _scenario(sticky=()):
 
 
 def test_prohibitions_are_sticky_without_declaration_and_declarations_add():
-    assert set(run_eval.STICKY_GATES) == _PROHIBITIONS
-    assert run_eval._sticky_gates(_scenario()) == _PROHIBITIONS
+    assert set(run_eval.STICKY_GATES) == _ALWAYS_STICKY
+    assert run_eval._sticky_gates(_scenario()) == _ALWAYS_STICKY
     assert run_eval._sticky_gates(_scenario(["reply_not_matches"])) == \
-        _PROHIBITIONS | {"reply_not_matches"}
+        _ALWAYS_STICKY | {"reply_not_matches"}
 
 
 def test_a_forbidden_tool_in_any_attempt_fails_the_case():
@@ -2097,7 +2105,8 @@ def _scripted_with_gates(monkeypatch, script):
     """Script (outcome, gates) per attempt through the real `_execute_jobs`."""
     remaining = iter(script)
 
-    def scripted(_cfg, _client, _suite, _scn, case, _run_id, trial, _judge_on):
+    def scripted(_cfg, _client, _suite, _scn, case, _run_id, trial, _judge_on,
+                 _fixtures=None):
         outcome, gates = next(remaining)
         return _attempt(outcome, gates=gates, trial=trial, case_id=case.id)
 
@@ -2146,8 +2155,8 @@ def test_a_failed_positive_gate_on_incomplete_evidence_stays_incomplete():
         False, True, None, "fail", negative_gate_failed=False) == "incomplete"
 
 
-def test_negative_gate_keys_are_the_three_that_assert_absence():
-    assert set(run_eval.NEGATIVE_GATES) == _PROHIBITIONS | {"reply_not_matches"}
+def test_negative_gate_keys_are_the_ones_that_assert_absence():
+    assert set(run_eval.NEGATIVE_GATES) == _ALWAYS_STICKY | {"reply_not_matches"}
 
 
 # --- behavioral suites reject the capability-only keys ------------------------

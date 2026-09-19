@@ -235,6 +235,31 @@ def tasks_success(payload: dict) -> dict:
     return {key: float(v["mean_success"]) for key, v in payload.get("tasks", {}).items()}
 
 
+# The OPTIONAL per-task columns. `write_arm` passes the tasks map through
+# untouched, so an arm may carry more than success: `durations_ms` (every trial's
+# driver wall clock) and `mean_main_llm_calls`. A baseline arm records neither,
+# and no pairing rule reads either — they are reported beside the claim, never
+# folded into it. Both readers answer None/[] for an arm that did not record
+# them, so a missing column reads as "not recorded" and never as zero.
+
+def pooled_durations_ms(payload: dict) -> list[float]:
+    """Every trial's wall clock across the arm's tasks, for a pooled percentile.
+
+    Pooled from the trials on purpose: a percentile of per-task summaries reads
+    like a tail number and tracks the typical task instead."""
+    return [float(ms)
+            for task in payload.get("tasks", {}).values()
+            for ms in (task.get("durations_ms") or [])]
+
+
+def mean_main_llm_calls(payload: dict) -> float | None:
+    """Mean main-model calls per task over the tasks that recorded one."""
+    reported = [float(task["mean_main_llm_calls"])
+                for task in payload.get("tasks", {}).values()
+                if task.get("mean_main_llm_calls") is not None]
+    return sum(reported) / len(reported) if reported else None
+
+
 def render_md(r: UpliftResult, *, label: str, baseline_label: str, suite: str,
               k: int, trials: int, task_ids: list[str]) -> str:
     """The defensible claim line (§6 marketing discipline) — scope always attached.
