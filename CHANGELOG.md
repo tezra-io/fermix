@@ -4,7 +4,7 @@ All notable changes to Fermix are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.11.0] - 2026-09-20
 
 ### Added
 
@@ -286,6 +286,22 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   daemon.
 - **Behavioral eval suite** `tesla` (reads, command safety, explicit wake
   and command cases).
+- **A call can be spoken by GPT-Live.** The voice companion has a second
+  engine. `openai_realtime` stays the default and keeps the `screen_share`
+  tool; `openai_live` hands the speaking to GPT-Live while Fermix does the
+  work behind it, and has no screen sharing of its own. The engine is chosen
+  per call, the setup and doctor surfaces report which one a host can run, and
+  every trace and Opik export names the engine the call ran on.
+- **Computer history records every site visited in the browsers you allow.** A
+  settled navigation in an allowed browser is stored as its address reduced to
+  scheme, host and path, with the page and window titles beside it; the
+  per-site allowlist is retired, and an existing configuration boots, warns
+  once, and drops the key on its next save. Typed text is sent only from a
+  window that can be positively judged not private — the Chrome family carries
+  a marker that makes that judgement possible, while Safari, Edge and Firefox
+  answer "unknown", so their addresses are recorded, their typed text is
+  withheld, and `/history status` names them. The scrubber also learned
+  Luhn-checked card numbers and registry-checked IBANs.
 
 ### Changed
 
@@ -570,6 +586,51 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   as a dumped response struct rather than the child's text.
 - **A configured OAuth `region` was silently dropped** on the way through
   the config store, so an explicit setting could never take effect.
+- **A spoken request finished a few seconds early is no longer refused.** A
+  Live delegation decided whether it had anything to read from a two-second
+  window around its own timeline offset, so a sentence finished slightly
+  before the voice model raised the delegation came back as "did not catch
+  that". It now reads the same thirty-second window the request itself is
+  built from.
+- **A long, dated page address is no longer redacted down to its host.** The
+  high-entropy detectors that hunt secrets in free text treated a whole URL
+  path as one opaque token and redacted any long path containing a digit —
+  which removed precisely the article, results and dated pages the feature
+  exists to recall. A normalised address, whose query string is already gone,
+  is now scrubbed with the named-secret patterns instead, while typed text,
+  window and page titles keep both detectors at full strength.
+- **A weekly capability run that stops at the release gate now says so.** The
+  eval box publishes one exit code for the tier it ran, and the expression that
+  chose it took the first *truthy* value — where the string `0` is truthy. A
+  capability run whose deterministic sweep passed and whose judged axis stopped
+  at a red release gate published the `0`, so the alert filed a generic "the
+  tier is failing" and dropped the paragraph explaining that the gate is
+  fail-closed by design. The choice now lives in a script with its own tests:
+  the first step that failed decides, a step that died before publishing
+  anything stops the job publishing a code at all rather than letting a later
+  step speak for its run, and `0` is published only when every step that ran
+  passed.
+- **A capability sweep no longer scores a task the machine could not run.** The
+  coding-harness tasks need a vendor coding CLI on the daemon's path when it
+  boots; a hosted CI box has none, so the tools were never offered, the model
+  could not delegate however well it reasoned, and the sweep recorded two zeros
+  that read as the model failing. A task whose required tools the daemon does
+  not advertise is now held out before anything is spent and reported as NOT
+  EVALUATED — named in the run, in the report, on the leaderboard and in the
+  release gate, and never rendered as a pass. Holding tasks out changes the
+  measured task set, so those rows sit in their own cohort and are not ranked
+  against runs that scored the full set.
+- **An instruction hidden in relayed content is named, not adopted.** Asked to
+  summarize something someone else wrote — a pasted note, a forwarded message —
+  and say what needs doing, Fermix could hand the instruction the note addressed
+  to it straight back as an assigned task. The operating rules said to ignore
+  embedded commands but left the summarize-and-triage path undecided, and that
+  is the one place an instruction has to be described without being taken on.
+  An instruction addressed to Fermix inside content that came from somewhere
+  else is now named as what it is — an attempt to direct it from outside your
+  conversation — never carried out, and never handed back as anyone's task,
+  however trusted its source looks. A request someone makes of *you* in the same
+  content is still triaged into your own to-dos as before.
 
 ## [0.10.5] - 2026-09-17
 
