@@ -39,7 +39,9 @@ on:
         # the release gate is red) and cannot see it any other way: a caller's
         # `needs.<job>.outputs` reads only what `on.workflow_call.outputs` declares.
         # Each tier step gets the code intact because it runs benchmark/bin/tier.sh,
-        # which execs the runner; `make` would report every outcome as 2.
+        # which execs the runner; `make` would report every outcome as 2. When a
+        # tier runs more than one step, benchmark/bin/tier_exit_code.sh decides
+        # which of their codes this output carries.
         description: "Exit code of the tier's runner (empty if the tier never ran)"
         value: ${{ jobs.box.outputs.exit_code }}
   workflow_dispatch:
@@ -70,12 +72,13 @@ jobs:
     name: eval-box (${{ inputs.tier }})
     runs-on: ubuntu-24.04
     outputs:
-      # Exactly one tier step runs per invocation, so the non-empty one wins.
-      exit_code: >-
-        ${{ steps.regression.outputs.exit_code
-            || steps.capability_deterministic.outputs.exit_code
-            || steps.capability_judged.outputs.exit_code
-            || steps.dangerous.outputs.exit_code }}
+      # Chosen by benchmark/bin/tier_exit_code.sh in the step of that name: the
+      # code of the tier step that failed, and 0 only when every step that ran
+      # exited 0. This was a `||` chain over the four steps until a capability
+      # run proved it wrong — `||` yields the first TRUTHY operand and the string
+      # "0" is truthy, so the green deterministic axis published "0" and the
+      # judged axis's 5 (release gate RED) never left the job.
+      exit_code: ${{ steps.tier_exit_code.outputs.exit_code }}
     # Per-tier runaway backstop (M22 §3.2): a hung regression must not burn
     # capability-sized wall-clock/tokens.
     timeout-minutes: ${{ inputs.tier == 'capability' && 180 || inputs.tier == 'regression' && 60 || 30 }}
@@ -257,6 +260,35 @@ jobs:
             --confirm-daemon-isolated --confirm-isolated-env --confirm-private-data || rc=$?
           echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
           exit $rc
+
+      - name: Publish the deciding tier exit code
+        id: tier_exit_code
+        # Its whole job is to report a FAILING tier's code, so it has to outlive
+        # the step that failed: an `if:` without a status function implicitly
+        # ANDs success(). A cancelled run publishes nothing, which is exactly
+        # what the callers classify as "produced no evidence".
+        if: ${{ !cancelled() }}
+        working-directory: benchmark
+        env:
+          # <outcome>:<code> per step. The outcome is what separates a step that
+          # never ran from one that FAILED before its runner published — the
+          # second decided the run and has no code, and must not be spoken for
+          # by a later step's.
+          REGRESSION: ${{ steps.regression.outcome }}:${{ steps.regression.outputs.exit_code }}
+          CAPABILITY_DETERMINISTIC: ${{ steps.capability_deterministic.outcome }}:${{ steps.capability_deterministic.outputs.exit_code }}
+          CAPABILITY_JUDGED: ${{ steps.capability_judged.outcome }}:${{ steps.capability_judged.outputs.exit_code }}
+          DANGEROUS: ${{ steps.dangerous.outcome }}:${{ steps.dangerous.outputs.exit_code }}
+        run: |
+          set -euo pipefail
+          # Named in the order the steps ran: that order is the precedence rule.
+          # A plain assignment propagates the script's status, so an unusable set
+          # of codes fails this step instead of publishing a guess.
+          code="$(bin/tier_exit_code.sh \
+            regression="$REGRESSION" \
+            capability_deterministic="$CAPABILITY_DETERMINISTIC" \
+            capability_judged="$CAPABILITY_JUDGED" \
+            dangerous="$DANGEROUS")"
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
 
       - name: Save capability leaderboard
         # Keyed to the deterministic axis, which is what writes the board — a
