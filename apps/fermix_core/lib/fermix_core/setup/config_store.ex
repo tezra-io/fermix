@@ -1379,6 +1379,18 @@ defmodule FermixCore.Setup.ConfigStore do
     |> RealtimeConfig.to_keyword()
   end
 
+  # `[fermix_core.computer_use]`. Value validation lives in
+  # `ComputerUseConfig.normalize/1` (fail-loud per key); the persist path runs
+  # `to_keyword/1` after it so the section survives save→load→apply.
+  #
+  # NO unknown-key refusal here, deliberately, unlike `computer_history` and
+  # `harness`. This section has PERSISTED keys it no longer honors — every host
+  # whose `config.toml` predates their removal still carries `display_width_px`,
+  # `allowed_apps`, `confirm_consequential` and the rest — and `brew upgrade`
+  # never rewrites `config.toml`. A refusal here would crash those daemons at
+  # boot with no way back, and a curated list of retired keys only moves the
+  # risk to whichever one is forgotten. `normalize/1` reads the keys it knows
+  # and ignores the rest, which self-heals on the next save.
   defp normalize_computer_use(config) do
     config
     |> ComputerUseConfig.normalize()

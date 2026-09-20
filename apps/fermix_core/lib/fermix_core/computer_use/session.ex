@@ -45,11 +45,15 @@ defmodule FermixCore.ComputerUse.Session do
 
   alias Compux.Protocol
   alias FermixCore.ComputerUse.ActionWorker
+  alias FermixCore.ComputerUse.Background
+  alias FermixCore.ComputerUse.Capabilities
   alias FermixCore.ComputerUse.CaptureHealth
   alias FermixCore.ComputerUse.Config
   alias FermixCore.ComputerUse.Courtesy
   alias FermixCore.ComputerUse.InputOwner
+  alias FermixCore.ComputerUse.Notice
   alias FermixCore.ComputerUse.Observations
+  alias FermixCore.ComputerUse.OperatorStop
   alias FermixCore.ComputerUse.Safety
   alias FermixCore.ComputerUse.Telemetry
   alias FermixCore.Timeouts
@@ -61,7 +65,40 @@ defmodule FermixCore.ComputerUse.Session do
   # human's reclaim, which can land mid-action — out of the round trip: a snapshot
   # is a moment older than this process, and applying one wholesale would silently
   # un-pause a machine the human just took back.
-  @pipeline_keys [:action_count, :last_action_at, :observations, :no_change_streak]
+  @pipeline_keys [
+    :action_count,
+    :last_action_at,
+    :observations,
+    :no_change_streak,
+    :target,
+    :target_generation
+  ]
+
+  # Read by the pipeline, never written by it: the config and whether the bound
+  # window surface is live for this session (the flag AND a helper that can carry
+  # one). They ride beside the pipeline keys because the worker runs in its own
+  # process and has no other way to see them.
+  @pipeline_reads [:config, :background?]
+
+  # Read at COMPILE time from the one module that owns what the flag reveals, so
+  # a guard can use them and so there is no second copy to drift.
+  @background_actions Background.actions()
+
+  # The actions that may carry a bound window's id. `Compux.Protocol` refuses one
+  # anywhere else and keeps no public predicate, so the exclusions are named here
+  # with its own reasons: `windows` enumerates the DESKTOP's windows, which is how
+  # a target is found in the first place, and `wait`, `wait_for_change` and the
+  # two target verbs have no target to name. Derived from the shipped action list
+  # rather than listed, so an action added later is carried by default and refused
+  # loudly by the helper if it should not have been.
+  @untargetable ~w(windows wait wait_for_change) ++ @background_actions
+  @targetable Enum.reject(Protocol.actions(), &(&1 in @untargetable))
+
+  # The actions that reach their control through accessibility rather than the
+  # pointer. One list, two readers: it decides which evidence an action comes back
+  # with (M42 slice 6) and, since a bound window, how wide the contention question
+  # is (M42 §5.3).
+  @ax_addressed ~w(press set_value)
 
   # The enclosing budget for a control call. The driver's own acknowledgement
   # ceiling is 5 s (an answer the helper gives from its control reader without
@@ -145,7 +182,24 @@ defmodule FermixCore.ComputerUse.Session do
           optional(:cu_input_ms) => non_neg_integer(),
           optional(:cu_settle_ms) => non_neg_integer(),
           optional(:cu_capture_ms) => non_neg_integer(),
-          optional(:cu_encode_ms) => non_neg_integer()
+          optional(:cu_encode_ms) => non_neg_integer(),
+          optional(:target_kind) => String.t(),
+          optional(:cu_mode) => String.t()
+        }
+
+  # What this session is bound to (M42 slice 5 §4). `nil` is "nothing chosen yet";
+  # `:desktop` is the whole screen, chosen explicitly, which is today's foreground
+  # mode; `:window` is one window the helper holds, whose id rides every request
+  # that can name one. `generation` counts the bindings this session has had, so a
+  # reply about a target that has since been replaced can be told from one about
+  # the current binding.
+  @type target :: %{
+          kind: :window | :desktop,
+          id: String.t() | nil,
+          label: String.t(),
+          methods: [String.t()],
+          ax_binding: String.t() | nil,
+          generation: pos_integer()
         }
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -246,6 +300,15 @@ defmodule FermixCore.ComputerUse.Session do
 
     with :ok <- ensure_host_start_allowed(config, origin),
          {:ok, worker} <- start_worker(driver_mod, driver_opts) do
+      # Asked only where the operator switched the experiment on. A handshake
+      # identity is free to read, but a session that will never offer the surface
+      # has no question to ask — and a driver that answers nothing else would
+      # otherwise be asked one it was never written for.
+      capabilities =
+        if Background.enabled?(config),
+          do: ActionWorker.capabilities(worker),
+          else: Capabilities.none()
+
       state = %{
         config: config,
         origin: origin,
@@ -272,6 +335,25 @@ defmodule FermixCore.ComputerUse.Session do
         # available: only the explicit denied state is refused, so drivers that
         # predate the probe keep working and a broken probe cannot brick looking.
         input_control?: ActionWorker.input_control?(worker),
+        # What the installed helper says it can do, read once from its handshake
+        # identity. The doctor row reads the same facts through its own spawn; a
+        # session reads them from the helper it is actually driving.
+        capabilities: capabilities,
+        # Whether the bound-window surface is live HERE (M42 slice 5 §1). Two
+        # answers, both required: the operator turned the experiment on, and this
+        # helper can carry a target with an indicator on screen. A helper that
+        # cannot is not degraded into display-level work — the actions are
+        # refused with the reason, and `fermix doctor` says the same thing to the
+        # operator.
+        background?: Background.enabled?(config) and Background.available?(capabilities),
+        # The window this session is bound to, or the desktop it explicitly chose
+        # (M42 slice 5 §4). A fresh session — including the one that follows a
+        # helper restart — holds nothing, so the first mutating action under the
+        # flag is refused until the model selects.
+        target: nil,
+        # How many bindings this session has had, so a target carries the
+        # generation it was bound at and a release still moves the count on.
+        target_generation: 0,
         action_count: 0,
         session_id: session_id,
         parent_session: Keyword.get(opts, :parent_session),
@@ -339,12 +421,12 @@ defmodule FermixCore.ComputerUse.Session do
   # `/pause` re-sends the control — it re-confirms a barrier and can still report
   # an action under way — but emits no second lifecycle event.
   def handle_call(:pause, _from, state) do
-    state = mark_paused(state)
+    state = mark_paused(state, :command)
     control_verdict(send_control(state, :pause), state, &paused_verdict/1)
   end
 
   def handle_call(:resume, _from, state) do
-    state = mark_resumed(state)
+    state = mark_resumed(state, :command)
     control_verdict(send_control(state, :resume), state, fn _ack -> :resumed end)
   end
 
@@ -365,6 +447,49 @@ defmodule FermixCore.ComputerUse.Session do
     state = settle(state, exec_state)
     GenServer.reply(from, reply)
     {:stop, reason, state}
+  end
+
+  # The on-screen indicator's buttons (M42 slice 5 §3.3), forwarded by the worker
+  # that owns the transport.
+  #
+  # **No control goes back.** The person pressed a button wired to the helper's
+  # own gate, so the barrier is already installed by the time this arrives —
+  # sending one would install a second over it and make an acknowledgement, not
+  # the person, the authority on a hold that is already in place. Everything else
+  # is the chat command's path exactly: the same state change, the same lifecycle
+  # row, and the same refusal of every later action.
+  def handle_info({:operator_control, :pause}, state),
+    do: {:noreply, mark_paused(state, :indicator)}
+
+  def handle_info({:operator_control, :resume}, state),
+    do: {:noreply, mark_resumed(state, :indicator)}
+
+  # Stop ends the session, which is what `SessionManager.abort/1` does from every
+  # other surface: `terminate/2` writes the lifecycle bookend, releases held
+  # input and reaps the helper.
+  #
+  # The helper cannot end a session — it applies a PAUSE to its own gate and
+  # reports the Stop — so this side records the hold first: the window between
+  # the two refuses everything, exactly as a `/pause` does, and the trace says
+  # the machine was handed back before the session ended.
+  #
+  # **The waiting caller is answered HERE, not by `terminate/2`.** Its backstop
+  # reply is the generic helper fault, whose sentence ends "the next action
+  # starts a fresh helper … repeat this action only if" — an invitation to carry
+  # on, handed to a model in the middle of a turn the person has just stopped.
+  # The reply below says the opposite, and `OperatorStop` makes it stick: every
+  # later `computer_use` call from this same turn is refused before a driver is
+  # started, because ending a session is not the same as stopping the work and
+  # the turn cancellation that would stop it lives a layer above core.
+  def handle_info({:operator_control, :stop}, state) do
+    state =
+      state
+      |> mark_paused(:indicator)
+      |> reply_pending({:error, {:operator_stopped, :unknown}})
+
+    OperatorStop.record(conversation_key(state.registered_name), state.parent_session)
+    announce_operator_stop(state)
+    {:stop, :normal, state}
   end
 
   # The worker is gone, so this session has no way to act. Its exit reason carries
@@ -444,20 +569,61 @@ defmodule FermixCore.ComputerUse.Session do
   defp log_release({:error, reason}),
     do: Logger.warning("computer_use: held input was not released (#{inspect(reason)})")
 
+  # The person pressed Stop on the badge, which the model cannot see and the
+  # conversation would otherwise learn about only at its next action — minutes
+  # later, or never. Best effort and bounded: a conversation this daemon cannot
+  # deliver to is logged, never a reason to hold up the teardown that gives the
+  # machine back.
+  @operator_stop_message "Computer use stopped from the on-screen controls. The cursor and keyboard are yours, and nothing further will be sent. Tell me when you want me to pick it back up."
+
+  # Run in an UNLINKED process, like `release_input/1` and for the same reason: a
+  # channel that is slow, or an adapter that raises, must not delay the reply the
+  # caller is waiting on, the lifecycle row, or handing the input seat back. The
+  # outcome is logged rather than waited for — this is a courtesy to the person,
+  # already delivered to the model by the refusal above.
+  defp announce_operator_stop(state) do
+    conversation = conversation_key(state.registered_name)
+    message = @operator_stop_message
+
+    spawn(fn ->
+      case Notice.deliver(conversation, message) do
+        :ok ->
+          :ok
+
+        {:error, reason} ->
+          Logger.warning(
+            "computer_use: an operator stop was not announced to its conversation " <>
+              "(#{inspect(reason)})"
+          )
+      end
+    end)
+
+    :ok
+  end
+
+  defp conversation_key({:via, Registry, {_registry, key}}), do: key
+  defp conversation_key(nil), do: nil
+
   # Emitted on the STATE CHANGE only: a repeated `/pause` is not a second event,
   # and a trace that showed two pauses and one resume would read as a session that
   # is still held when it is running.
-  defp mark_paused(%{paused: true} = state), do: state
+  #
+  # `origin` is who asked — the chat command, or the on-screen indicator's own
+  # button — and it is the ONE thing that differs between them. The flag, the
+  # telemetry row and everything that reads the flag are this one function for
+  # both, because a hold with two implementations is a hold that behaves
+  # differently depending on which door the person used.
+  defp mark_paused(%{paused: true} = state, _origin), do: state
 
-  defp mark_paused(state) do
-    Telemetry.session_pause(meta(state))
+  defp mark_paused(state, origin) do
+    Telemetry.session_pause(meta(state, origin))
     %{state | paused: true}
   end
 
-  defp mark_resumed(%{paused: false} = state), do: state
+  defp mark_resumed(%{paused: false} = state, _origin), do: state
 
-  defp mark_resumed(state) do
-    Telemetry.session_resume(meta(state))
+  defp mark_resumed(state, origin) do
+    Telemetry.session_resume(meta(state, origin))
     %{state | paused: false}
   end
 
@@ -550,12 +716,14 @@ defmodule FermixCore.ComputerUse.Session do
     # fields, which is also what guarantees the sidecar never sees this flag.
     confirm_grid? = params["confirm_grid"] == true
 
-    with :ok <- Observations.check_addressing(state.observations, params),
+    with :ok <- check_background_surface(params, state),
+         :ok <- Observations.check_addressing(state.observations, params),
          :ok <- check_value_type(params),
          {:ok, params, mark_resolved?} <- Observations.resolve_mark(state.observations, params),
-         {:ok, request} <- Protocol.validate(params),
+         {:ok, request} <- validate_request(params),
          :ok <- check_budget(state),
          :ok <- check_input_control(request, state),
+         :ok <- check_target(request, state),
          :ok <- check_ambiguous_grid(request, confirm_grid? or mark_resolved?, state) do
       case Safety.gate(request["action"], state.config) do
         :auto -> {:ok, :auto, finalize_request(request, state)}
@@ -563,6 +731,57 @@ defmodule FermixCore.ComputerUse.Session do
       end
     end
   end
+
+  # The bound-window actions exist in the library at every build; whether this
+  # session offers them is the flag's answer and the helper's. Refused HERE rather
+  # than left to `Protocol.validate` — which would happily accept one — so a model
+  # that names an action this daemon does not advertise is told why instead of
+  # binding a window nothing on screen can show the person.
+  defp check_background_surface(%{"action" => action}, %{background?: false} = state)
+       when action in @background_actions do
+    if Background.enabled?(state.config),
+      do: {:error, {:background_unavailable, Background.unavailable_reason(state.capabilities)}},
+      else: {:error, :background_disabled}
+  end
+
+  defp check_background_surface(_params, _state), do: :ok
+
+  # `select_target` naming the desktop is Fermix's own word, not the helper's:
+  # there is no desktop target on the wire, there is the ABSENCE of one (M42
+  # slice 5 §4). It is intercepted before validation because the library takes a
+  # window id and would refuse the word.
+  defp validate_request(%{"action" => "select_target"} = params) do
+    case Map.get(params, "window_id") do
+      id when is_integer(id) and id >= 0 ->
+        Protocol.validate(params)
+
+      id ->
+        if Background.desktop?(id),
+          do:
+            {:ok, %{"action" => "select_target", "window_id" => Background.desktop_window_id()}},
+          else: {:error, :window_id_required}
+    end
+  end
+
+  defp validate_request(params), do: Protocol.validate(params)
+
+  # With the surface live, a mutating action says which window it acts in — or
+  # says, explicitly, that it means the whole desktop. Refused before any driver
+  # call: the alternative is running it display-level while the model believes it
+  # is working inside a window, which is a click on whatever happens to be in
+  # front. A look is never refused: finding the window is how one is chosen.
+  defp check_target(request, %{background?: true, target: nil} = _state) do
+    if Protocol.read_only?(request["action"]), do: :ok, else: {:error, :target_required}
+  end
+
+  # A display-level wait cannot be aimed inside a bound window — the helper takes
+  # no target on it — so running it would watch the whole screen and answer in a
+  # coordinate space that is not the one the model is reading. Refused here, with
+  # the alternative, rather than sent as a question about a different picture.
+  defp check_target(%{"action" => "wait_for_change"}, %{target: %{kind: :window}}),
+    do: {:error, :wait_for_change_unbound}
+
+  defp check_target(_request, _state), do: :ok
 
   # The schema says `value` is a string and models send numbers anyway. Caught
   # here, with a sentence, rather than leaving it to a helper that can only answer
@@ -633,7 +852,12 @@ defmodule FermixCore.ComputerUse.Session do
   # for `/pause` to read: the helper's own acknowledgement names the request it is
   # still running, which is the same fact from the side that actually knows it.
   defp dispatch_execute(request, from, state) do
-    ActionWorker.execute(state.worker, request, Map.take(state, [:config | @pipeline_keys]))
+    ActionWorker.execute(
+      state.worker,
+      request,
+      Map.take(state, @pipeline_reads ++ @pipeline_keys)
+    )
+
     {:noreply, %{state | pending: from}}
   end
 
@@ -708,14 +932,24 @@ defmodule FermixCore.ComputerUse.Session do
 
   defp apply_courtesy(request, state) do
     if state.config.courtesy == :yield and Courtesy.disturbing?(request["action"]),
-      do: arbitrate(state),
+      do: arbitrate(request, state),
       else: {:proceed, :off}
   end
 
-  defp arbitrate(state) do
+  # How wide the contention question is depends on what this action takes (M42
+  # §5.3). A control pressed by name inside a bound window takes nothing the
+  # person is holding, so only activity in THAT window's application is
+  # contention; everything else takes the one cursor or the one keyboard, and any
+  # activity at all is.
+  defp arbitrate(request, state) do
+    scope = Courtesy.scope(ax_addressed?(request), bound_kind(state.target))
+
     case idle_probe(state) do
-      {:ok, idle_ms} ->
-        if Courtesy.human_active?(idle_ms, since_agent_ms(state), state.config.courtesy_idle_ms),
+      {:ok, idle_ms, front_is_target} ->
+        active? =
+          Courtesy.human_active?(idle_ms, since_agent_ms(state), state.config.courtesy_idle_ms)
+
+        if Courtesy.contends?(scope, active?, front_is_target),
           do: defer_to_human(state),
           else: {:proceed, :proceeded}
 
@@ -723,6 +957,11 @@ defmodule FermixCore.ComputerUse.Session do
         courtesy_error(reason)
     end
   end
+
+  defp ax_addressed?(%{"action" => action}), do: action in @ax_addressed
+
+  defp bound_kind(%{kind: kind}), do: kind
+  defp bound_kind(nil), do: nil
 
   defp defer_to_human(state) do
     case wait_for_idle(state) do
@@ -745,13 +984,25 @@ defmodule FermixCore.ComputerUse.Session do
   defp courtesy_error(:sidecar_unavailable = reason), do: {:abort, reason}
   defp courtesy_error(_reason), do: {:proceed, :unavailable}
 
+  # `front_is_target` is the helper's reading of whether the application in front
+  # is the bound one (M42 slice 5 §3.1). Absent is unknown, as everywhere else,
+  # and unknown is not contention: a bound window exists so that work inside it
+  # survives the person using something else.
   defp idle_probe(state) do
     case state.driver_mod.execute(state.driver_state, %{"action" => "idle_ms"}) do
-      {:ok, %{"idle_ms" => ms}} when is_integer(ms) and ms >= 0 -> {:ok, ms}
-      {:ok, _other} -> {:error, :malformed_idle_response}
-      {:error, reason} -> {:error, reason}
+      {:ok, %{"idle_ms" => ms} = reply} when is_integer(ms) and ms >= 0 ->
+        {:ok, ms, front_is_target(reply["front_is_target"])}
+
+      {:ok, _other} ->
+        {:error, :malformed_idle_response}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
+
+  defp front_is_target(front) when is_boolean(front), do: front
+  defp front_is_target(_absent), do: nil
 
   defp wait_for_idle(state) do
     request = %{
@@ -770,7 +1021,29 @@ defmodule FermixCore.ComputerUse.Session do
   defp since_agent_ms(%{last_action_at: :never}), do: :never
   defp since_agent_ms(%{last_action_at: at}), do: now_ms() - at
 
-  defp run_action(request, state, courtesy) do
+  # Choosing the whole desktop is a Fermix-side decision: the helper has no
+  # desktop target, so what it needs from us is only the binding it is holding,
+  # dropped. One driver call when there is one to drop and none when there is not
+  # — not two paths for one behaviour, but the cleanup a binding requires.
+  defp run_action(%{"action" => "select_target", "window_id" => window_id} = request, state, cy) do
+    cond do
+      not Background.desktop?(window_id) -> dispatch_action(request, state, cy)
+      match?(%{kind: :window}, state.target) -> release_for_desktop(request, state, cy)
+      true -> reply_target(request, %{}, state, cy, read_receipt())
+    end
+  end
+
+  defp run_action(request, state, courtesy), do: dispatch_action(request, state, courtesy)
+
+  defp release_for_desktop(request, state, courtesy) do
+    case state.driver_mod.execute(state.driver_state, %{"action" => "release_target"}) do
+      {:ok, response} -> reply_target(request, response, state, courtesy, read_receipt())
+      {:error, {:action_failed, payload}} -> refused_action(request, payload, state, courtesy)
+      {:error, reason} -> action_failure(reason, state)
+    end
+  end
+
+  defp dispatch_action(request, state, courtesy) do
     case state.driver_mod.execute(state.driver_state, request) do
       {:ok, response} -> receipt_action(request, response, state, courtesy)
       {:error, {:action_failed, payload}} -> refused_action(request, payload, state, courtesy)
@@ -804,7 +1077,7 @@ defmodule FermixCore.ComputerUse.Session do
   defp refusal_reply(request, payload, state, courtesy, %{dispatch: :sent} = receipt) do
     if request["check"] == "image" and not carried?(receipt, "image") do
       code = refused_check(payload)
-      result = unverified_result(code, courtesy, receipt, {code, payload["detail"]})
+      result = unverified_result(code, courtesy, receipt, state, {code, payload["detail"]})
       {:reply, {:ok, result}, count_action(state, request)}
     else
       {:reply, {:error, failure(payload, receipt)}, state}
@@ -974,6 +1247,15 @@ defmodule FermixCore.ComputerUse.Session do
     {:stop, {:shutdown, :protocol_error}, {:error, {:protocol_error, :missing_receipt}}, state}
   end
 
+  # Binding and unbinding change what this session is pointed at, not what is on
+  # the screen, so they answer with the binding rather than through the image
+  # pipeline. The table is cleared first and the reply's own first observation
+  # recorded after it: an id read inside the old target names a picture whose
+  # coordinates mean nothing in the new one.
+  defp reply_action(%{"action" => action} = request, response, state, courtesy, receipt)
+       when action in @background_actions,
+       do: reply_target(request, response, state, courtesy, receipt)
+
   # The action and its check are one frame now, so there is nothing left to lose
   # between them: whatever the helper brought back is read here, recorded, and
   # rendered.
@@ -1000,6 +1282,175 @@ defmodule FermixCore.ComputerUse.Session do
   # `inspect` reply that nothing renders and nothing could mean.
   defp note_aim(%{"check" => "image"} = request, response), do: note_delivery(request, response)
   defp note_aim(_request, response), do: response
+
+  defp reply_target(request, response, state, courtesy, receipt) do
+    state =
+      state
+      |> count_action(request)
+      |> apply_target(request, response)
+      |> record_observation(request, response)
+
+    case decode_image(response) do
+      {:ok, image} ->
+        result = target_result(request, response, state, courtesy, receipt, image)
+        {:reply, {:ok, result}, state}
+
+      :none ->
+        result = target_result(request, response, state, courtesy, receipt, nil)
+        {:reply, {:ok, result}, state}
+
+      :error ->
+        {:reply, {:error, "sidecar returned an invalid base64 screenshot"}, state}
+    end
+  end
+
+  defp target_result(request, response, state, courtesy, receipt, image) do
+    summary =
+      target_summary(request, response, state) <>
+        image_lead_note(response, request) <>
+        children_note(response)
+
+    %{summary: summary, image: image, courtesy: courtesy, outcome: action_outcome(receipt)}
+    |> put_receipt_facts(receipt)
+    |> put_target_facts(state, receipt)
+  end
+
+  # The first look inside the window the helper just bound is an image like any
+  # other, so it leads with its own identity and the one aiming rule. A binding
+  # that came back without one simply says nothing about images.
+  defp image_lead_note(%{"observation_id" => id} = response, request) when is_binary(id),
+    do: " " <> screenshot_summary(response, request["display"] || 0)
+
+  defp image_lead_note(_response, _request), do: ""
+
+  # What this session is now pointed at, and what that changes. Application text
+  # is neutralised here exactly as an `elements` listing is: a window title is
+  # whatever the application chose to call itself.
+  defp target_summary(%{"action" => "release_target"}, _response, _state) do
+    "The window binding is released. Actions now go to the whole desktop again, in front of " <>
+      "whatever the person is looking at, so take a fresh `screenshot` before aiming; " <>
+      "`select_target` binds a window again."
+  end
+
+  defp target_summary(_request, _response, %{target: %{kind: :desktop}}) do
+    "Working on the WHOLE DESKTOP, which is a different mode from working inside a window: " <>
+      "the pointer moves, the front window can change, and the person sees everything you do. " <>
+      "Take a fresh `screenshot` before aiming, and `select_target` a window when the task is " <>
+      "inside one."
+  end
+
+  defp target_summary(_request, response, %{target: %{kind: :window} = target}) do
+    "Bound to #{safe_text(response["app"])} \"#{safe_text(response["title"])}\" as target " <>
+      "#{target.id}. Actions in this window are answered from the window's own picture even " <>
+      "when something covers it, and its coordinates are that window's. " <>
+      methods_sentence(target) <>
+      " `release_target` gives the window back, and `select_target` on another window swaps it."
+  end
+
+  # What the helper says it can reach this window by. `ax` is the one that works
+  # without the pointer, so its presence or absence is the fact the model plans
+  # around rather than discovers at the first refusal.
+  defp methods_sentence(%{methods: methods}) do
+    if "ax" in methods,
+      do:
+        "Controls here can be pressed BY NAME with `press` and filled with `set_value`, which " <>
+          "moves no pointer and leaves the person's own window in front.",
+      else:
+        "This window exposes no controls that can be named, so everything here goes through " <>
+          "the pointer and the keyboard, which the person sees."
+  end
+
+  # The helper's own cap, applied again here for the same reason the element cap
+  # is: a list nothing bounded on the way in must not flood the turn.
+  @max_children 10
+
+  # The other windows this application has opened since the binding — a sheet, a
+  # dialog, a second document. Reported, never guessed at: an action does not
+  # silently follow a window nobody selected, so the model picks one explicitly.
+  defp children_note(%{"children" => [_ | _] = children}) do
+    lines =
+      children |> Enum.take(@max_children) |> Enum.map(&child_line/1) |> Enum.reject(&is_nil/1)
+
+    if lines == [] do
+      ""
+    else
+      " This application has opened #{length(lines)} other window(s) since you bound this one. " <>
+        "Nothing follows them for you: `select_target` the one you need.\n" <>
+        Enum.join(lines, "\n")
+    end
+  end
+
+  defp children_note(_response), do: ""
+
+  defp child_line(%{"window_id" => id} = child) when is_integer(id),
+    do: ~s(window #{id}: #{safe_text(child["app"])} "#{safe_text(child["title"])}")
+
+  defp child_line(_child), do: nil
+
+  # The binding this reply establishes, cleared or replaced. The observation table
+  # goes with it: a coordinate read in the old target's picture means something
+  # else in the new one, and the wrong-grid tripwire judges against a rectangle
+  # that is no longer the same window's.
+  defp apply_target(state, %{"action" => "release_target"}, _response), do: clear_target(state)
+
+  defp apply_target(state, %{"action" => "select_target", "window_id" => id}, response) do
+    if Background.desktop?(id),
+      do:
+        bind_target(state, %{
+          kind: :desktop,
+          id: nil,
+          label: "desktop",
+          methods: [],
+          ax_binding: nil
+        }),
+      else: bind_window(state, response)
+  end
+
+  defp apply_target(state, _request, _response), do: state
+
+  defp bind_window(state, %{"target_id" => id} = response) when is_binary(id) do
+    bind_target(state, %{
+      kind: :window,
+      id: id,
+      label: safe_text(response["app"]),
+      methods: methods(response["methods"]),
+      ax_binding: ax_binding(response["ax_binding"])
+    })
+  end
+
+  # A `select_target` the helper answered without naming a target is a protocol
+  # fault, not a binding: nothing is recorded, so the next mutating action is
+  # refused for want of one rather than running display-level under a model that
+  # believes it is inside a window.
+  defp bind_window(state, _response), do: clear_target(state)
+
+  defp bind_target(state, target) do
+    generation = state.target_generation + 1
+
+    %{
+      state
+      | target: Map.put(target, :generation, generation),
+        target_generation: generation,
+        observations: Observations.new()
+    }
+  end
+
+  defp clear_target(state) do
+    %{
+      state
+      | target: nil,
+        target_generation: state.target_generation + 1,
+        observations: Observations.new()
+    }
+  end
+
+  defp methods(methods) when is_list(methods),
+    do: Enum.filter(methods, &(&1 in ~w(ax foreground_hid)))
+
+  defp methods(_absent), do: []
+
+  defp ax_binding(binding) when binding in ~w(bound ambiguous unavailable), do: binding
+  defp ax_binding(_absent_or_unknown), do: nil
 
   # Whatever last handed the model coordinates becomes addressable, under the id
   # the helper minted for it — a mutating action's check image included, which is
@@ -1059,7 +1510,8 @@ defmodule FermixCore.ComputerUse.Session do
     case normalize_response(response, request["display"] || 0) do
       {:ok, result} ->
         notes =
-          check_note(response, receipt) <> receipt_note(request, receipt) <> loop_note(state)
+          check_note(response, receipt) <>
+            receipt_note(request, receipt) <> children_note(response) <> loop_note(state)
 
         result =
           result
@@ -1067,6 +1519,7 @@ defmodule FermixCore.ComputerUse.Session do
           |> Map.put(:courtesy, courtesy)
           |> Map.put(:outcome, action_outcome(receipt))
           |> put_receipt_facts(receipt)
+          |> put_target_facts(state, receipt)
 
         {:reply, {:ok, result}, state}
 
@@ -1087,6 +1540,29 @@ defmodule FermixCore.ComputerUse.Session do
     |> put_check_facts(receipt.check)
     |> put_timings(receipt.timings)
   end
+
+  # What this action was pointed at, and how it reached the screen (M42 slice 5
+  # §4). Two closed words each: a window or the desktop, and background — no
+  # pointer, no focus taken — or foreground. `cu_mode`, not `mode`: the tool
+  # metadata allowlist is global and this family spells its own fields `cu_*`.
+  # Never the window's title and never the application's name; a row says which
+  # MODE ran, not what was on screen.
+  defp put_target_facts(result, %{target: target}, receipt) do
+    result
+    |> put_unless_nil(:target_kind, target_kind(target))
+    |> Map.put(:cu_mode, cu_mode(target, receipt))
+  end
+
+  defp target_kind(%{kind: :window}), do: "window"
+  defp target_kind(%{kind: :desktop}), do: "desktop"
+  defp target_kind(nil), do: nil
+
+  # Background is the narrow claim, so it is made only where both halves are
+  # true: a bound window, and input that went out through accessibility. A
+  # pointer click inside a bound window still warps the cursor, so it is
+  # foreground work however the window was chosen.
+  defp cu_mode(%{kind: :window}, %{input_method: "ax"}), do: "background"
+  defp cu_mode(_target, _receipt), do: "foreground"
 
   defp put_check_facts(result, %{kind: kind, changed: changed}) do
     result |> Map.put(:check_kind, kind) |> put_unless_nil(:check_changed, changed)
@@ -1121,7 +1597,7 @@ defmodule FermixCore.ComputerUse.Session do
   defp unreadable_check(request, reason, state, courtesy, receipt) do
     if Protocol.read_only?(request["action"]),
       do: {:reply, {:error, reason}, state},
-      else: {:reply, {:ok, unverified_result(reason, courtesy, receipt)}, state}
+      else: {:reply, {:ok, unverified_result(reason, courtesy, receipt, state)}, state}
   end
 
   defp count_action(state, request) do
@@ -1411,6 +1887,7 @@ defmodule FermixCore.ComputerUse.Session do
   defp finalize_request(request, state) do
     request
     |> Map.put_new("display", state.config.display)
+    |> put_target_id(state.target)
     # M28 B2: every tool-path capture carries its own coordinate grid (the
     # sidecar reads this on `screenshot`, `wait_for_change`, and the post-action
     # check; other actions ignore it). The ambient screen feed never sets it —
@@ -1418,6 +1895,17 @@ defmodule FermixCore.ComputerUse.Session do
     |> Map.put("rulers", true)
     |> put_check(state)
   end
+
+  # The bound window rides EVERY request that can name one, so what the helper
+  # looks at and what a coordinate means are the same window for the whole task —
+  # a look that quietly answered from the display while the clicks went to a
+  # window would hand the model coordinates in the wrong picture. The desktop
+  # choice stamps nothing: it IS the absence of a target.
+  defp put_target_id(%{"action" => action} = request, %{kind: :window, id: id})
+       when action in @targetable and is_binary(id),
+       do: Map.put(request, "target_id", id)
+
+  defp put_target_id(request, _target), do: request
 
   # Which evidence this action comes back with (M42 slice 6 §3) — decided HERE, by
   # rule, and never offered to the model: what an action's result has to prove is
@@ -1433,8 +1921,6 @@ defmodule FermixCore.ComputerUse.Session do
   # is that control read again: no capture, no encode, and a fact about the control
   # rather than a picture of the screen. The operator's switch has nothing to say
   # about it — that switch turns off an IMAGE, and this is not one.
-  @ax_addressed ~w(press set_value)
-
   defp check_kind(%{"action" => action}, _state) when action in @ax_addressed, do: "semantic"
 
   # Everything else went out over the pointer or the keyboard, where the only
@@ -1484,7 +1970,7 @@ defmodule FermixCore.ComputerUse.Session do
   # a `capture_geometry_mismatch` that reached only this generic lead left the
   # operator with "take a fresh screenshot" — the exact retry its own sentence
   # forbids — and left the row uncountable.
-  defp unverified_result(detail, courtesy, receipt, helper \\ {nil, nil}) do
+  defp unverified_result(detail, courtesy, receipt, state, helper \\ {nil, nil}) do
     outcome = unverified_outcome(receipt)
     {code, helper_detail} = helper
 
@@ -1495,6 +1981,7 @@ defmodule FermixCore.ComputerUse.Session do
       outcome: outcome
     }
     |> put_receipt_facts(receipt)
+    |> put_target_facts(state, receipt)
     |> put_unless_nil(:check_code, code)
     |> put_unless_nil(:check_detail, helper_detail)
   end
@@ -1504,16 +1991,9 @@ defmodule FermixCore.ComputerUse.Session do
   # Invalid base64 from the sidecar fails loud rather than shipping garbage.
   defp normalize_response(%{"data" => data, "mime" => mime} = response, display)
        when is_binary(data) and is_binary(mime) do
-    case Base.decode64(data) do
-      {:ok, bytes} ->
-        {:ok,
-         %{
-           summary: screenshot_summary(response, display),
-           image: %{type: :image, mime_type: mime, data: bytes}
-         }}
-
-      :error ->
-        {:error, "sidecar returned an invalid base64 screenshot"}
+    case decode_image(response) do
+      {:ok, image} -> {:ok, %{summary: screenshot_summary(response, display), image: image}}
+      :error -> {:error, "sidecar returned an invalid base64 screenshot"}
     end
   end
 
@@ -1542,6 +2022,18 @@ defmodule FermixCore.ComputerUse.Session do
   end
 
   defp normalize_response(_response, _display), do: {:ok, %{summary: "ok", image: nil}}
+
+  # The image part of a reply that carries one. `:none` is a reply with no
+  # picture in it at all — a `release_target`, a bare ack — which is a different
+  # answer from bytes that would not decode.
+  defp decode_image(%{"data" => data, "mime" => mime}) when is_binary(data) and is_binary(mime) do
+    case Base.decode64(data) do
+      {:ok, bytes} -> {:ok, %{type: :image, mime_type: mime, data: bytes}}
+      :error -> :error
+    end
+  end
+
+  defp decode_image(_response), do: :none
 
   # Each window arrives with its bounds already shaped as a `region`, so the model
   # copies one rather than estimating it off a downscaled screen. A region is in
@@ -1933,6 +2425,12 @@ defmodule FermixCore.ComputerUse.Session do
       origin: state.origin
     }
   end
+
+  # `origin` on a computer-use lifecycle row is already the SESSION's attended
+  # origin (`:interactive`, `:voice`), so which door a control came through gets
+  # its own field rather than overwriting a fact the whole family reads.
+  defp meta(state, control_origin),
+    do: Map.put(meta(state), :control_origin, control_origin)
 
   defp mint_session_id do
     "cua_" <> (9 |> :crypto.strong_rand_bytes() |> Base.url_encode64(padding: false))

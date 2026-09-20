@@ -101,6 +101,10 @@ defmodule FermixOpik.TraceFile do
        # only link between a replayed action and its session.
        :cu_session,
        :outcome,
+       # Coexistence (V3 R0): what the courtesy arbiter did about a person at
+       # the machine — proceeded, waited for them, or stepped aside. A closed
+       # enum; without it a replayed row cannot say why nothing was dispatched.
+       :courtesy,
        # Addressing (M42 slice 3): how stale the image an action aimed at was, and
        # the code when it named no addressable one. A millisecond count and a
        # closed enum — never an id, a size, or anything from the screen.
@@ -119,7 +123,12 @@ defmodule FermixOpik.TraceFile do
        :cu_input_ms,
        :cu_settle_ms,
        :cu_capture_ms,
-       :cu_encode_ms
+       :cu_encode_ms,
+       # Bound windows (M42 slice 5): what the action was pointed at, and how it
+       # reached the screen. Two closed words — never a window title and never an
+       # application name.
+       :target_kind,
+       :cu_mode
      ])}
   end
 

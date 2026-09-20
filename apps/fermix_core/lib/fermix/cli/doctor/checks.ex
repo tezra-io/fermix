@@ -28,6 +28,7 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias FermixCore.ComputerHistory
   alias FermixCore.ComputerHistory.Config, as: ComputerHistoryConfig
   alias FermixCore.ComputerHistory.Gate, as: ComputerHistoryGate
+  alias FermixCore.ComputerUse.Background
   alias FermixCore.Config, as: CoreConfig
   alias FermixCore.Harness.Artifacts, as: HarnessArtifacts
   alias FermixCore.Harness.Config, as: HarnessConfig
@@ -1426,6 +1427,79 @@ defmodule Fermix.CLI.Doctor.Checks do
   defp platform_name("linux", "aarch64"), do: "arm64 Linux"
   defp platform_name("macos", "x86_64"), do: "Intel macOS"
   defp platform_name(os, arch), do: "#{os}-#{arch}"
+
+  @doc """
+  The experimental bound-window surface (M42 slice 5 §4): the flag, and what the
+  installed helper says it can do.
+
+  Facts come from `Setup.Doctor.computer_use_background/0` — the same positional
+  seam `computer_use_permissions/2` takes — so the row is pure formatting and the
+  tests inject every state. Read-only by construction: the deepest it goes is the
+  `hello` the helper answers from its handshake identity, which captures nothing,
+  clicks nothing and opens no consent dialog, and it only goes there when the flag
+  is on.
+  """
+  @spec computer_use_background({:ok, map()} | {:error, term()}) :: result()
+  def computer_use_background(result \\ ProviderProbe.computer_use_background()) do
+    case result do
+      {:ok, %{state: :disabled}} ->
+        ok("window binding", "computer use is off, so there is nothing to bind")
+
+      {:ok, %{state: :off}} ->
+        ok("window binding", "off (experimental; enable it in setup once qualified)")
+
+      {:ok, %{state: :not_installed}} ->
+        warn("window binding", "on, but the computer-use helper isn't installed")
+
+      {:ok, %{state: :read, capabilities: capabilities}} ->
+        background_capability_result(capabilities)
+
+      {:error, reason} ->
+        fail("window binding", "could not read what the helper supports: #{inspect(reason)}")
+    end
+  end
+
+  # The flag is on; whether the surface RUNS is the helper's answer. Both halves
+  # are named, because "nothing happens" with one of them missing is exactly the
+  # silence this row exists to break.
+  defp background_capability_result(capabilities) do
+    case Background.unavailable_reason(capabilities) do
+      nil ->
+        ok(
+          "window binding",
+          "on; the helper can bind a window and its on-screen indicator is present" <>
+            method_suffix(capabilities) <> sidecar_version_suffix()
+        )
+
+      reason ->
+        warn("window binding", background_unavailable_hint(reason) <> sidecar_version_suffix())
+    end
+  end
+
+  defp background_unavailable_hint(:no_targets) do
+    "on, but this computer-use helper cannot bind a window — it publishes no target support, " <>
+      "so every select_target is refused. Update the helper from setup."
+  end
+
+  defp background_unavailable_hint(:indicator_missing) do
+    "on, but this computer-use helper's bundle has no on-screen indicator, and Fermix will " <>
+      "not work inside a window without one visible. Reinstall the helper from setup."
+  end
+
+  defp background_unavailable_hint(:indicator_unknown) do
+    "on, but this computer-use helper does not report an on-screen indicator, and Fermix will " <>
+      "not work inside a window without one visible. Update the helper from setup."
+  end
+
+  # Which mechanisms the build really has, named rather than assumed: a helper
+  # that cannot capture a window, or cannot act through accessibility, binds a
+  # window that nothing can then be done in.
+  defp method_suffix(%{capture_methods: capture, input_methods: input}) do
+    " · capture #{method_list(capture)} · input #{method_list(input)}"
+  end
+
+  defp method_list([]), do: "none reported"
+  defp method_list(methods), do: Enum.join(methods, "+")
 
   defp sidecar_target(opts) do
     Keyword.get_lazy(opts, :sidecar_target, &Compux.Binary.target/0)

@@ -22,6 +22,9 @@ defmodule FermixCore.ComputerUse.ConfigTest do
       # present human out of the box; the idle threshold defaults to 1s.
       assert config.courtesy == :yield
       assert config.courtesy_idle_ms == 1_000
+      # M42 slice 5: the experimental bound-window surface stays off until the
+      # owner's live check qualifies it.
+      assert config.background? == false
     end
 
     test "nil normalizes to defaults" do
@@ -59,6 +62,54 @@ defmodule FermixCore.ComputerUse.ConfigTest do
       round = Config.normalize(kw)
       assert round.courtesy == :off
       assert round.courtesy_idle_ms == 1_500
+    end
+  end
+
+  describe "background (the experimental bound-window surface)" do
+    test "reads a boolean or its TOML string, and defaults off" do
+      assert Config.normalize(background: true).background? == true
+      assert Config.normalize(%{"background" => "true"}).background? == true
+      assert Config.normalize(background: false).background? == false
+      assert Config.normalize([]).background? == false
+    end
+
+    test "a value that is not a boolean fails loud" do
+      assert_raise ArgumentError, ~r/computer_use.background must be a boolean/, fn ->
+        Config.normalize(background: "sometimes")
+      end
+    end
+
+    # `normalize/1` is one-way, so the persist path needs its inverse and the
+    # proof is a round trip seeded with the shape setup actually writes: the
+    # NORMALIZED app-env keyword, not a TOML string (the 2026-08-19 lesson).
+    test "save then load is a fixed point over the normalized app-env shape" do
+      persisted = Config.to_keyword(Config.normalize(enabled: true, background: true))
+
+      assert Keyword.get(persisted, :background) == true
+      assert Config.normalize(persisted).background? == true
+      assert Config.to_keyword(Config.normalize(persisted)) == persisted
+    end
+
+    test "to_keyword writes exactly the keys this section honors" do
+      assert Keyword.keys(Config.to_keyword(Config.normalize([]))) == Config.config_keys()
+    end
+
+    # Nothing refuses a key outside that list: a host's config.toml still carries
+    # keys this section retired, and `brew upgrade` never rewrites it.
+    test "a section full of retired keys normalizes rather than raising" do
+      config =
+        Config.normalize(
+          enabled: true,
+          background: true,
+          mode: "browser",
+          display_width_px: 1366,
+          allowed_apps: ["Safari"],
+          confirm_consequential: true
+        )
+
+      assert config.enabled? == true
+      assert config.background? == true
+      refute Keyword.has_key?(Config.to_keyword(config), :mode)
     end
   end
 

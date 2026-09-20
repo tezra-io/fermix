@@ -201,6 +201,14 @@ def render_config(
     # If a future capability task legitimately needs recall_activity, seed a
     # synthetic spool instead of enabling live capture.
     lines += ["[fermix_core.computer_history]", "enabled = false", ""]
+    # Computer use is not seeded at all, so its experimental `background` gate
+    # (M42 slice 5) is off here as it is everywhere — deliberately, and recorded
+    # so its absence never reads as an oversight either. It is the second
+    # exception to pre-grant-every-gate: the surface needs a real window on a real
+    # display and a person watching an on-screen panel appear over it, which is
+    # exactly what a disposable home has none of, and the whole computer-use suite
+    # is risk `desktop_input`, a class `make capability-auto` never loads. Its one
+    # bound-window behavioural case is labelled attended and is run by hand.
     # Skill curation stays OFF in eval homes (MILESTONE_26_SKILL_CURATION §11):
     # the +15d first cycle already makes scheduled firing impossible during an
     # eval window, but a disabled entry also keeps /skills inert if a candidate

@@ -565,6 +565,12 @@
       "why": "ADDED to every settings row: the longer explanation a surface keeps behind an info control rather than showing inline, while `footer` stays the one short line under the control. It is null on every row with nothing more to say, which is every row the draft draws. The one row that carries a string today is the Venice model row, where each option's label ends in the model's privacy tier and the two words mean materially different things: a private model's prompt is not kept, an anonymized model's prompt is read by the model's own maker. Saying that inline under the picker is three sentences of footer nobody asked for. E5: draw an (i) beside a row that carries one and reveal the text on demand; an absent key, null and an empty string all mean the row has none."
     },
     {
+      "method": "settings.get:computer_use",
+      "field": "rows:computer_use_background",
+      "kind": "engine_only",
+      "why": "M42 slice 5 adds the experimental bound-window toggle to the computer-use section. The draft predates it, so the app re-vendors this export before it can render the row; until then the engine simply publishes one row the app does not draw."
+    },
+    {
       "method": "settings.get:generate_image",
       "field": "rows:google_api_key",
       "kind": "draft_only",

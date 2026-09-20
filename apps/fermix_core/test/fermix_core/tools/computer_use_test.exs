@@ -2,6 +2,7 @@ defmodule FermixCore.Tools.ComputerUseTest do
   use ExUnit.Case, async: false
 
   alias Compux.Protocol
+  alias FermixCore.ComputerUse.Background
   alias FermixCore.ComputerUse.Config
   alias FermixCore.ComputerUse.Session
   alias FermixCore.ComputerUse.Supervisor, as: CuSupervisor
@@ -12,6 +13,10 @@ defmodule FermixCore.Tools.ComputerUseTest do
   # The image a pointer action names. Addressing is checked before any driver
   # call, so every click in this file carries one.
   @obs ComputerUseObservations.id()
+
+  # What the tool advertises with the experimental bound-window flag off, which
+  # is how it ships and how every test in this file runs.
+  defp offered_actions, do: Enum.reject(Protocol.actions(), &(&1 in Background.actions()))
 
   defmodule StubDriver do
     @behaviour Compux.Driver
@@ -219,7 +224,10 @@ defmodule FermixCore.Tools.ComputerUseTest do
       params = ComputerUse.parameters()
       assert params["type"] == "object"
       assert params["required"] == ["action"]
-      assert params["properties"]["action"]["enum"] == Protocol.actions()
+      # Every action the library offers EXCEPT the two the experimental
+      # bound-window flag reveals, which is off here as it is by default. The
+      # whole-surface invariant lives in `ComputerUse.BackgroundGateTest`.
+      assert params["properties"]["action"]["enum"] == offered_actions()
     end
 
     test "static guidance treats accessibility metadata as optional pixel targeting help" do
@@ -317,7 +325,7 @@ defmodule FermixCore.Tools.ComputerUseTest do
 
       # action enum is unchanged either way
       assert ComputerUse.dynamic_parameters(%{})["properties"]["action"]["enum"] ==
-               Protocol.actions()
+               offered_actions()
     end
   end
 

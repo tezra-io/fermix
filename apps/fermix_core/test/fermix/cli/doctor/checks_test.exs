@@ -374,6 +374,86 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     end
   end
 
+  describe "computer_use_background/1" do
+    alias FermixCore.ComputerUse.Capabilities
+
+    test "computer use off says there is nothing to bind" do
+      result = Checks.computer_use_background({:ok, %{state: :disabled}})
+
+      assert result.name == "window binding"
+      assert result.status == :ok
+      assert result.detail =~ "computer use is off"
+    end
+
+    test "the flag off is reported as off and experimental, not as a fault" do
+      result = Checks.computer_use_background({:ok, %{state: :off}})
+
+      assert result.status == :ok
+      assert result.detail =~ "off (experimental"
+    end
+
+    test "the flag on with no helper installed is a warning that names the install" do
+      result = Checks.computer_use_background({:ok, %{state: :not_installed}})
+
+      assert result.status == :warn
+      assert result.detail =~ "isn't installed"
+    end
+
+    test "a capable helper reports the indicator and the methods it really has" do
+      result =
+        Checks.computer_use_background(
+          read(%{
+            "targets" => true,
+            "indicator" => "present",
+            "capture_methods" => ["display", "window"],
+            "input_methods" => ["foreground_hid", "ax"]
+          })
+        )
+
+      assert result.status == :ok
+      assert result.detail =~ "on-screen indicator is present"
+      assert result.detail =~ "capture display+window"
+      assert result.detail =~ "input foreground_hid+ax"
+    end
+
+    test "a helper that cannot bind a window says so rather than staying silent" do
+      result = Checks.computer_use_background(read(%{"indicator" => "present"}))
+
+      assert result.status == :warn
+      assert result.detail =~ "cannot bind a window"
+    end
+
+    test "a helper with no on-screen indicator says which half is missing" do
+      result =
+        Checks.computer_use_background(read(%{"targets" => true, "indicator" => "missing"}))
+
+      assert result.status == :warn
+      assert result.detail =~ "no on-screen indicator"
+    end
+
+    test "a helper that does not mention an indicator is not read as having one" do
+      result = Checks.computer_use_background(read(%{"targets" => true}))
+
+      assert result.status == :warn
+      assert result.detail =~ "does not report an on-screen indicator"
+    end
+
+    test "a helper that could not be read fails loudly" do
+      result = Checks.computer_use_background({:error, :sidecar_unavailable})
+
+      assert result.status == :fail
+      assert result.detail =~ "could not read what the helper supports"
+    end
+
+    defp read(capabilities) do
+      {:ok,
+       %{
+         state: :read,
+         capabilities: Capabilities.from_identity(%{"capabilities" => capabilities})
+       }}
+    end
+  end
+
   describe "bootstrap_template_drift/1" do
     alias FermixCore.Memory.Repo, as: MemoryRepo
     alias FermixCore.Prompt.Defaults

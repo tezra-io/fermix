@@ -41,7 +41,8 @@ defmodule FermixCore.ComputerUse.Config do
           max_actions: pos_integer(),
           max_retained_screenshots: pos_integer(),
           courtesy: courtesy(),
-          courtesy_idle_ms: pos_integer()
+          courtesy_idle_ms: pos_integer(),
+          background?: boolean()
         }
 
   defstruct enabled?: false,
@@ -51,7 +52,27 @@ defmodule FermixCore.ComputerUse.Config do
             max_actions: 80,
             max_retained_screenshots: 3,
             courtesy: :yield,
-            courtesy_idle_ms: 1_000
+            courtesy_idle_ms: 1_000,
+            background?: false
+
+  # Live keys, in the order `to_keyword/1` writes them. Nothing refuses a key
+  # outside this list: the section has persisted keys it no longer honors on
+  # every host whose `config.toml` predates their removal, and `brew upgrade`
+  # never rewrites that file (see `ConfigStore.normalize_computer_use/1`).
+  @config_keys [
+    :enabled,
+    :display,
+    :screenshot_after,
+    :max_actions,
+    :max_retained_screenshots,
+    :courtesy,
+    :courtesy_idle_ms,
+    :background
+  ]
+
+  @doc "The keys this section honors; anything else in the file is ignored."
+  @spec config_keys() :: [atom()]
+  def config_keys, do: @config_keys
 
   @spec current() :: t()
   def current do
@@ -78,11 +99,25 @@ defmodule FermixCore.ComputerUse.Config do
       max_actions: positive_int(config, :max_actions, 80),
       max_retained_screenshots: positive_int(config, :max_retained_screenshots, 3),
       courtesy: courtesy(config),
-      courtesy_idle_ms: positive_int(config, :courtesy_idle_ms, 1_000)
+      courtesy_idle_ms: positive_int(config, :courtesy_idle_ms, 1_000),
+      background?: bool(config, :background, false)
     }
 
     validate!(cu)
   end
+
+  @doc """
+  Whether the experimental bound-window surface is switched on (M42 slice 5 §1).
+
+  Off by default, and the ONE switch for the whole surface: the `select_target`
+  and `release_target` actions, the target parameter, the steering that explains
+  them and the doctor row that reports them. Nothing in it is advertised, and
+  nothing new runs in the helper, until an operator turns it on — it exists
+  because none of it can be qualified without a real screen, a real window and a
+  person watching.
+  """
+  @spec background?() :: boolean()
+  def background?, do: current().background?
 
   @doc """
   Round-trips a normalized config back to the persisted keyword shape (TOML keys
@@ -99,7 +134,8 @@ defmodule FermixCore.ComputerUse.Config do
       max_retained_screenshots: cu.max_retained_screenshots,
       # Persist as a string — TOML has no atom type; `courtesy/1` reads it back.
       courtesy: Atom.to_string(cu.courtesy),
-      courtesy_idle_ms: cu.courtesy_idle_ms
+      courtesy_idle_ms: cu.courtesy_idle_ms,
+      background: cu.background?
     ]
   end
 

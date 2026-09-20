@@ -490,6 +490,60 @@ defmodule FermixOpik.MapperTest do
            }
   end
 
+  # Bound windows (M42 slice 5): what the action was pointed at, and how it
+  # reached the screen. The window's TITLE and the application's NAME are content
+  # and must never ride the row, whatever the capture posture.
+  test "tool_span keeps the target kind and the mode, and never the window's name" do
+    metadata = %{
+      tool: "computer_use",
+      success: true,
+      cu_session: "cua_ab12",
+      outcome: :performed,
+      target_kind: "window",
+      cu_mode: "background",
+      app: "Mail",
+      title: "Inbox (3) — work@example.com"
+    }
+
+    span =
+      Mapper.tool_span(metadata, %{duration_ms: 20},
+        trace_id: "t",
+        project_name: "fermix",
+        ended: @ended
+      )
+
+    assert span.metadata == %{
+             cu_session: "cua_ab12",
+             outcome: :performed,
+             target_kind: "window",
+             cu_mode: "background"
+           }
+  end
+
+  # Coexistence (V3 R0): what the courtesy arbiter did about a person at the
+  # machine. A closed enum and nothing else — without it a trace cannot say
+  # whether the agent proceeded, waited, or stepped aside, which is the whole
+  # question the arbiter exists to answer.
+  test "tool_span keeps the courtesy outcome" do
+    metadata = %{
+      tool: "computer_use",
+      success: true,
+      cu_session: "cua_ab12",
+      outcome: :refused,
+      courtesy: :yielded,
+      screen_text: "Transfer $4,000 to account 12345"
+    }
+
+    span =
+      Mapper.tool_span(metadata, %{duration_ms: 20},
+        trace_id: "t",
+        project_name: "fermix",
+        ended: @ended
+      )
+
+    assert span.metadata == %{cu_session: "cua_ab12", outcome: :refused, courtesy: :yielded}
+  end
+
   test "tool_span keeps the outbound MCP server identity" do
     metadata = %{tool: "acme_get_note_markdown", success: true, mcp_server: "acme"}
 

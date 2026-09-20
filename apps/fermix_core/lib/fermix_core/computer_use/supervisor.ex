@@ -16,6 +16,7 @@ defmodule FermixCore.ComputerUse.Supervisor do
 
   alias FermixCore.ComputerUse.CaptureHealth
   alias FermixCore.ComputerUse.InputOwner
+  alias FermixCore.ComputerUse.OperatorStop
 
   @registry FermixCore.ComputerUse.SessionRegistry
   @session_supervisor FermixCore.ComputerUse.SessionSupervisor
@@ -36,6 +37,7 @@ defmodule FermixCore.ComputerUse.Supervisor do
     children = [
       CaptureHealth,
       InputOwner,
+      OperatorStop,
       {Registry, keys: :unique, name: @registry},
       {DynamicSupervisor, name: @session_supervisor, strategy: :one_for_one}
     ]

@@ -58,6 +58,7 @@ defmodule FermixCore.Setup.Wizard do
           | {:realtime_max_cost_cents, pos_integer() | String.t()}
           | {:realtime_persist_transcripts, boolean() | String.t()}
           | {:computer_use_enabled, boolean() | String.t()}
+          | {:computer_use_background, boolean() | String.t()}
           | {:computer_history_enabled, boolean() | String.t()}
           | {:computer_history_apps, [String.t()] | String.t()}
           | {:web_search_backend, atom() | String.t()}
@@ -1811,29 +1812,34 @@ defmodule FermixCore.Setup.Wizard do
     end
   end
 
-  # Computer use exposes a single setup knob: the on/off flag. The sidecar binary
-  # and OS permissions are prerequisites the card surfaces separately; flipping this
-  # flag is what `ComputerUse.ready?/0` (and thus tool registration) gates on. All
-  # other fields keep their config defaults until an operator hand-edits config.toml.
+  # Computer use exposes two setup knobs: the on/off flag, and the experimental
+  # bound-window surface (M42 slice 5). The sidecar binary and OS permissions are
+  # prerequisites the card surfaces separately; flipping `enabled` is what
+  # `ComputerUse.ready?/0` (and thus tool registration) gates on. All other fields
+  # keep their config defaults until an operator hand-edits config.toml.
+  #
+  # Each knob is applied on its own: a save that carries only one must not drop
+  # the other, and a save that carries neither must leave the section alone.
   defp put_computer_use_config(snapshot, answers) do
-    case normalize_realtime_bool(
-           Keyword.get(answers, :computer_use_enabled),
-           :computer_use_enabled
-         ) do
-      nil ->
-        snapshot
+    enabled? = normalize_realtime_bool(Keyword.get(answers, :computer_use_enabled), :enabled)
 
-      enabled? ->
-        fermix_core = Map.get(snapshot, :fermix_core, [])
-        existing = Keyword.get(fermix_core, :computer_use, [])
+    background? =
+      normalize_realtime_bool(Keyword.get(answers, :computer_use_background), :background)
 
-        computer_use =
-          existing
-          |> Keyword.put(:enabled, enabled?)
-          |> ComputerUseConfig.normalize()
-          |> ComputerUseConfig.to_keyword()
+    if is_nil(enabled?) and is_nil(background?) do
+      snapshot
+    else
+      fermix_core = Map.get(snapshot, :fermix_core, [])
 
-        Map.put(snapshot, :fermix_core, Keyword.put(fermix_core, :computer_use, computer_use))
+      computer_use =
+        fermix_core
+        |> Keyword.get(:computer_use, [])
+        |> put_unless_nil(:enabled, enabled?)
+        |> put_unless_nil(:background, background?)
+        |> ComputerUseConfig.normalize()
+        |> ComputerUseConfig.to_keyword()
+
+      Map.put(snapshot, :fermix_core, Keyword.put(fermix_core, :computer_use, computer_use))
     end
   end
 

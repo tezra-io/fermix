@@ -608,6 +608,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
   max_retained_screenshots = 3
   courtesy = "yield"
   courtesy_idle_ms = 1000
+  background = false
 
   [fermix_core.computer_history]
   enabled = true
@@ -2096,7 +2097,8 @@ defmodule FermixCore.Setup.ConfigStoreTest do
           enabled: true,
           screenshot_after: false,
           max_retained_screenshots: 5,
-          max_actions: 25
+          max_actions: 25,
+          background: true
         ]
       ],
       fermix_channels: [],
@@ -2122,6 +2124,49 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert Keyword.get(computer_use, :screenshot_after) == false
     assert Keyword.get(computer_use, :max_retained_screenshots) == 5
     assert Keyword.get(computer_use, :max_actions) == 25
+    # M42 slice 5: a flag that vanished on save would leave the surface
+    # advertised in setup and dead on the next boot.
+    assert contents =~ "background = true"
+    assert Keyword.get(computer_use, :background) == true
+  end
+
+  # Every key this section has ever persisted and since retired is still sitting
+  # in the `config.toml` of every host that installed before it went — and
+  # `brew upgrade` never rewrites that file. A parse boundary that refused them
+  # would crash those daemons at boot with no way back, so the old keys are read
+  # past and a new one parses beside them.
+  test "a config.toml full of retired computer_use keys still boots, and background parses" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.computer_use]
+    enabled = true
+    mode = "browser"
+    display_width_px = 1366
+    display_height_px = 768
+    allowed_apps = ["Safari"]
+    allowed_domains = ["example.com"]
+    confirm_consequential = true
+    approval_timeout_ms = 30000
+    background = true
+    """)
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config()
+    computer_use = Keyword.get(loaded.fermix_core, :computer_use, [])
+
+    assert Keyword.get(computer_use, :enabled) == true
+    assert Keyword.get(computer_use, :background) == true
+
+    # Read past, never written back: the next save self-heals the file.
+    for retired <- ~w(mode display_width_px display_height_px allowed_apps
+                      allowed_domains confirm_consequential approval_timeout_ms)a do
+      refute Keyword.has_key?(computer_use, retired)
+    end
   end
 
   test "apply_snapshot writes computer_use config into Application env" do
