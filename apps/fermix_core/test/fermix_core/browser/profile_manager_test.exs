@@ -271,6 +271,23 @@ defmodule FermixCore.Browser.ProfileManagerTest do
     refute_receive {:delivered, _request}, 100
   end
 
+  # A navigation looks at the page before it answers (M47 §3.6), which puts that
+  # look inside the window where the server can die holding the request. The
+  # navigation still happened, so the verdict is the click's: what became of it
+  # is unknown, and re-sending it would be a second navigation.
+  test "a navigation that dies while looking at the page is NOT re-sent", ctx do
+    opts = scripted_manager([{:exit_after, :killed_mid_request}])
+    request = %{action: "navigate", args: %{"url" => "https://example.com"}, mutating: true}
+
+    {result, _log} = with_log(fn -> scripted_dispatch(opts, request, ctx.config) end)
+
+    assert {:error, %Error{code: "outcome_unknown"} = error} = result
+    assert error.message =~ "may or may not have happened"
+
+    assert_received {:delivered, %{action: "navigate"}}
+    refute_receive {:delivered, _request}, 100
+  end
+
   # The other half: a read repeats nothing, so the existing retry stays.
   test "a read IS retried when the server dies in flight", ctx do
     opts = scripted_manager([{:exit_after, :killed_mid_request}])

@@ -36,6 +36,11 @@ defmodule FermixCore.Browser.BrowserObserveTest do
         tree: :before,
         url: ["https://example.com/form"],
         ready: ["complete"],
+        # Whether each live-URL probe answers at all — same queue discipline.
+        # `:error` is what Chrome returns in the moments right after a commit
+        # ("Execution context was destroyed"), which is exactly when the settle
+        # polls.
+        meta: [:ok],
         ax: :ok,
         href: :ok,
         probes: 0
@@ -66,6 +71,10 @@ defmodule FermixCore.Browser.BrowserObserveTest do
     end
 
     defp run(_pid, _page, "Target.attachToTarget", _params), do: {:ok, %{"sessionId" => "S1"}}
+
+    # The tab `open` creates is the one tab this page has: Chrome answers the
+    # create before the request commits, which is what the url queue models.
+    defp run(_pid, _page, "Target.createTarget", _params), do: {:ok, %{"targetId" => "T1"}}
 
     defp run(_pid, %{ax: :error}, "Accessibility.getFullAXTree", _params),
       do: {:error, Error.new("cdp_timeout", "Accessibility.getFullAXTree timed out")}
@@ -111,16 +120,30 @@ defmodule FermixCore.Browser.BrowserObserveTest do
 
     defp run(_pid, _page, _method, _params), do: {:ok, %{}}
 
-    # One probe of the live URL: it reports the heads of both queues and then
+    # One probe of the live URL: it reports the heads of the queues and then
     # advances them, and it counts itself so a test can bound the poll loop.
     defp live_meta(pid, page) do
+      answer = probe_answer(page)
+      Agent.update(pid, &advance_probe/1)
+      answer
+    end
+
+    defp probe_answer(%{meta: [:error | _rest]}),
+      do: {:error, Error.new("cdp_error", "Execution context was destroyed.")}
+
+    defp probe_answer(page) do
       meta = %{"url" => current(page.url), "title" => "Form", "ready" => current(page.ready)}
-
-      Agent.update(pid, fn state ->
-        %{state | url: advance(state.url), ready: advance(state.ready), probes: state.probes + 1}
-      end)
-
       {:ok, %{"result" => %{"value" => meta}}}
+    end
+
+    defp advance_probe(state) do
+      %{
+        state
+        | url: advance(state.url),
+          ready: advance(state.ready),
+          meta: advance(state.meta),
+          probes: state.probes + 1
+      }
     end
 
     defp current([head | _rest]), do: head
@@ -461,17 +484,23 @@ defmodule FermixCore.Browser.BrowserObserveTest do
   # A document that never reaches "complete" is routine (a hung subresource, a
   # streaming response). It answers every probe instantly, so nothing but an
   # explicit deadline ends the poll — and `request/2` is an :infinity call, so
-  # an unbounded loop is a wedged profile, not a slow one.
-  test "a page that never settles gives up inside the budget", %{pid: pid} do
+  # an unbounded loop is a wedged profile, not a slow one. At that deadline the
+  # page is still ANSWERING, so what is there is rendered rather than withheld:
+  # `ready_state` is how the model knows it is looking at a page that was still
+  # building (§3.6, revised).
+  test "a page still building at the cap is handed back as it stands", %{pid: pid} do
     snapshotted(pid)
-    Agent.update(@page, &%{&1 | ready: ["loading"], probes: 0})
+    change_page()
+    Agent.update(@page, &%{&1 | ready: ["interactive"], probes: 0})
 
     started = System.monotonic_time(:millisecond)
     assert {:ok, result} = req(pid, "act", %{"kind" => "click", "ref" => "textbox_1"})
     elapsed = System.monotonic_time(:millisecond) - started
 
     assert result["ok"] == true
-    assert result["page"] == "unobserved"
+    assert result["page"] == "changed"
+    assert result["snapshot"] =~ "Book this flight"
+    assert result["ready_state"] == "interactive"
 
     budget = Config.act_limits().settle_budget_ms
     assert elapsed < budget * 2, "the settle loop ran for #{elapsed} ms"
@@ -480,6 +509,50 @@ defmodule FermixCore.Browser.BrowserObserveTest do
     max_probes = div(budget, 100) + 2
     assert probes <= max_probes, "the settle loop probed #{probes} times"
     assert probes > 1, "the settle loop never polled at all"
+  end
+
+  # The other half of the same rule: a page that settled says so, so a reader
+  # can tell a finished page from one that ran out of time.
+  test "a settled observation reports the document as complete", %{pid: pid} do
+    snapshotted(pid)
+    change_page()
+
+    assert {:ok, result} = req(pid, "act", %{"kind" => "click", "ref" => "textbox_1"})
+
+    assert result["page"] == "changed"
+    assert result["ready_state"] == "complete"
+  end
+
+  # "Execution context was destroyed" is routine in the moments after a commit,
+  # which is exactly when this probe runs: one such answer must not end the look
+  # the whole feature is.
+  test "a transient error during the settle is retried, not the answer", %{pid: pid} do
+    snapshotted(pid)
+    change_page()
+    Agent.update(@page, &%{&1 | meta: [:error, :ok]})
+
+    assert {:ok, result} = req(pid, "act", %{"kind" => "click", "ref" => "textbox_1"})
+
+    assert result["page"] == "changed"
+    assert result["snapshot"] =~ "Book this flight"
+  end
+
+  # And a page that never answers is still bounded: the last error, with the
+  # budget spent, is the verdict.
+  test "a page that never answers the probe is unobserved, inside the budget", %{pid: pid} do
+    snapshotted(pid)
+    Agent.update(@page, &%{&1 | meta: [:error], probes: 0})
+
+    started = System.monotonic_time(:millisecond)
+    assert {:ok, result} = req(pid, "act", %{"kind" => "click", "ref" => "textbox_1"})
+    elapsed = System.monotonic_time(:millisecond) - started
+
+    assert result["ok"] == true
+    assert result["page"] == "unobserved"
+    refute Map.has_key?(result, "snapshot")
+
+    budget = Config.act_limits().settle_budget_ms
+    assert elapsed < budget * 2, "the settle loop ran for #{elapsed} ms"
   end
 
   # A page holding a JS dialog answers nothing, and a dialog opened by the click
@@ -510,6 +583,264 @@ defmodule FermixCore.Browser.BrowserObserveTest do
         assert timeout <= budget,
                "`#{method}` was given #{timeout} ms, not the #{budget} ms settle budget"
       end
+    end
+  end
+
+  # ── `open` and `navigate` hand back the page (M47 §3.6) ────────────────────
+
+  # The whole point: the page a navigation was asked for arrives with it, so the
+  # turn that used to be a bare `snapshot` is gone.
+  test "an open returns the page it loaded, and refs that work", %{pid: pid} do
+    assert {:ok, _} = req(pid, "start")
+    flush_cdp()
+
+    assert {:ok, result} = req(pid, "open", %{"url" => "https://example.com/form"})
+
+    assert result["page"] == "changed"
+    assert result["snapshot"] =~ ~s(@textbox_1 [textbox] "Where to?")
+    assert result["truncated"] == false
+    assert result["url"] == "https://example.com/form"
+
+    # The ref map was installed exactly as a `snapshot` call would install it.
+    assert {:ok, %{"action" => "click"}} =
+             req(pid, "act", %{"kind" => "click", "ref" => "textbox_1"})
+  end
+
+  # A new tab answers from its initial empty document until the request commits,
+  # and that document is complete and its url is stable — so a settle that did
+  # not know what it was leaving would hand back the blank page the open exists
+  # to replace, and call it `changed`.
+  test "an open does not answer with the blank page a new tab starts on", %{pid: pid} do
+    assert {:ok, _} = req(pid, "start")
+
+    Agent.update(
+      @page,
+      &%{&1 | url: ["about:blank", "about:blank", "https://example.com/form"]}
+    )
+
+    assert {:ok, result} = req(pid, "open", %{"url" => "https://example.com/form"})
+
+    assert result["page"] == "changed"
+    assert result["url"] == "https://example.com/form"
+    assert result["snapshot"] =~ "Where to?"
+  end
+
+  # The bound on that wait: a request that never commits costs the navigation
+  # budget and not the turn. The blank page it never left is not the page that
+  # was asked for, so there is nothing honest to render at the cap either.
+  test "a request that never commits gives up inside the budget", %{pid: pid} do
+    assert {:ok, _} = req(pid, "start")
+    Agent.update(@page, &%{&1 | url: ["about:blank"]})
+
+    started = System.monotonic_time(:millisecond)
+    assert {:ok, result} = req(pid, "open", %{"url" => "https://example.com/form"})
+    elapsed = System.monotonic_time(:millisecond) - started
+
+    assert result["page"] == "unobserved"
+    refute Map.has_key?(result, "snapshot")
+
+    budget = Config.act_limits().navigation_budget_ms
+    assert elapsed < budget * 2, "the settle loop ran for #{elapsed} ms"
+  end
+
+  # The defect this cap exists for: an ordinary site takes seconds to reach
+  # `complete`, and answering `unobserved` with no snapshot would spend the wait
+  # AND still cost the snapshot turn. The page is rendered as it stands, and
+  # `ready_state` says it was still building.
+  test "an open of a page still loading at the cap hands back what is there", %{pid: pid} do
+    assert {:ok, _} = req(pid, "start")
+    Agent.update(@page, &%{&1 | ready: ["interactive"], probes: 0})
+
+    started = System.monotonic_time(:millisecond)
+    assert {:ok, result} = req(pid, "open", %{"url" => "https://example.com/form"})
+    elapsed = System.monotonic_time(:millisecond) - started
+
+    assert result["page"] == "changed"
+    assert result["snapshot"] =~ "Where to?"
+    assert result["ready_state"] == "interactive"
+    # The row's address is the one the page is actually on, not the pre-commit
+    # sample the tab list carried.
+    assert result["url"] == "https://example.com/form"
+
+    budget = Config.act_limits().navigation_budget_ms
+    assert elapsed >= budget, "the look gave up after #{elapsed} ms, before the cap"
+    assert elapsed < budget * 2, "the settle loop ran for #{elapsed} ms"
+  end
+
+  # And a page that finishes inside the cap is answered when it finishes, not at
+  # the cap: the budget is a ceiling, never a wait.
+  test "a page that completes inside the cap is answered as soon as it does", %{pid: pid} do
+    assert {:ok, _} = req(pid, "start")
+    Agent.update(@page, &%{&1 | ready: List.duplicate("interactive", 15) ++ ["complete"]})
+
+    started = System.monotonic_time(:millisecond)
+    assert {:ok, result} = req(pid, "open", %{"url" => "https://example.com/form"})
+    elapsed = System.monotonic_time(:millisecond) - started
+
+    assert result["page"] == "changed"
+    assert result["ready_state"] == "complete"
+
+    budget = Config.act_limits().navigation_budget_ms
+    assert elapsed < budget, "the look waited #{elapsed} ms, out to the cap"
+    assert elapsed > 1_000, "the look answered in #{elapsed} ms without waiting at all"
+  end
+
+  # A page that cannot be looked at AT ALL is still `unobserved`: a dialog opened
+  # on load blocks page script, so every probe fails and the budget bounds it.
+  test "a page that answers nothing on load is unobserved, inside the budget", %{pid: pid} do
+    assert {:ok, _} = req(pid, "start")
+    Agent.update(@page, &%{&1 | meta: [:error]})
+
+    started = System.monotonic_time(:millisecond)
+    assert {:ok, result} = req(pid, "open", %{"url" => "https://example.com/form"})
+    elapsed = System.monotonic_time(:millisecond) - started
+
+    assert result["page"] == "unobserved"
+    refute Map.has_key?(result, "snapshot")
+
+    budget = Config.act_limits().navigation_budget_ms
+    assert elapsed < budget * 2, "the settle loop ran for #{elapsed} ms"
+  end
+
+  # The session `open` created is part of the state the look returns, whichever
+  # way the look ended: dropping it leaks a CDP session and makes the next call
+  # attach a second time.
+  test "an unobserved open keeps the session it attached", %{pid: pid} do
+    assert {:ok, _} = req(pid, "start")
+    Agent.update(@page, &%{&1 | ax: :error})
+
+    assert {:ok, %{"page" => "unobserved"}} =
+             req(pid, "open", %{"url" => "https://example.com/form"})
+
+    Agent.update(@page, &%{&1 | ax: :ok})
+    flush_cdp()
+
+    assert {:ok, _} = req(pid, "snapshot")
+    refute_received {:cdp, "Target.attachToTarget", _params, _timeout}
+  end
+
+  # The floor under a direct call, as `fill_form` has: the facade teaches the
+  # shape, and a value that is not a boolean must not be read as "observe after
+  # all".
+  test "a non-boolean observe is refused by the server too", %{pid: pid} do
+    assert {:ok, _} = req(pid, "start")
+    flush_cdp()
+
+    for action <- ["open", "navigate"] do
+      assert {:error, %Error{code: "invalid_arg"} = error} =
+               req(pid, action, %{"url" => "https://example.com/form", "observe" => "no"})
+
+      assert error.message =~ "true or false"
+    end
+
+    refute_received {:cdp, "Target.createTarget", _params, _timeout}
+    refute_received {:cdp, "Page.navigate", _params, _timeout}
+  end
+
+  # The one page there is nothing to leave for: opening the blank page settles
+  # on it rather than waiting out the budget for a commit that never comes.
+  test "an open of the blank page settles on it", %{pid: pid} do
+    assert {:ok, _} = req(pid, "start")
+    Agent.update(@page, &%{&1 | url: ["about:blank"]})
+
+    assert {:ok, result} = req(pid, "open", %{"url" => "about:blank"})
+
+    assert result["page"] == "changed"
+    assert result["url"] == "about:blank"
+  end
+
+  # The opt-out, for a page opened to be screenshotted, printed or driven
+  # through its own tools: today's result, and nothing looked at.
+  test "observe false returns the tab alone and reads no page", %{pid: pid} do
+    assert {:ok, _} = req(pid, "start")
+    assert {:ok, %{"tabs" => [tab]}} = req(pid, "tabs")
+    flush_cdp()
+
+    assert {:ok, opened} =
+             req(pid, "open", %{"url" => "https://example.com/form", "observe" => false})
+
+    assert {:ok, navigated} =
+             req(pid, "navigate", %{"url" => "https://example.com/form", "observe" => false})
+
+    # Byte for byte the tab row both verbs answered with before this change.
+    assert opened == tab
+    assert navigated == tab
+
+    refute_received {:cdp, "Accessibility.getFullAXTree", _params, _timeout}
+  end
+
+  # A tab already being read keeps being read the way the model asked for: the
+  # comparison is like for like, and a page that did not change says so.
+  test "a navigate reuses the options the tab was last read with", %{pid: pid} do
+    assert {:ok, _} = req(pid, "start")
+
+    assert {:ok, wide} = req(pid, "snapshot", %{"compact" => false, "interactive" => false})
+    assert wide["snapshot"] =~ "[RootWebArea]"
+    flush_cdp()
+
+    assert {:ok, result} = req(pid, "navigate", %{"url" => "https://example.com/form"})
+
+    # Rendered with the plain defaults instead, the text would be the one-line
+    # one and this would read `changed`.
+    assert result["page"] == "unchanged"
+    refute Map.has_key?(result, "snapshot")
+  end
+
+  # And a tab with no mark of its own is read with exactly what a bare
+  # `snapshot` resolves, not a second set of literals.
+  test "a tab with no snapshot of its own is read with the snapshot defaults", %{pid: pid} do
+    assert {:ok, _} = req(pid, "start")
+
+    assert {:ok, opened} = req(pid, "open", %{"url" => "https://example.com/form"})
+    assert {:ok, plain} = req(pid, "snapshot")
+
+    assert opened["snapshot"] == plain["snapshot"]
+  end
+
+  test "a navigate that lands on new content brings it back", %{pid: pid} do
+    snapshotted(pid)
+    change_page()
+
+    assert {:ok, result} = req(pid, "navigate", %{"url" => "https://example.com/results"})
+
+    assert result["page"] == "changed"
+    assert result["snapshot"] =~ "Book this flight"
+  end
+
+  # The navigation happened by the time the look runs, so a look that fails must
+  # not report it as failed.
+  test "an observation that fails does not fail the navigation", %{pid: pid} do
+    assert {:ok, _} = req(pid, "start")
+    Agent.update(@page, &%{&1 | ax: :error})
+
+    assert {:ok, opened} = req(pid, "open", %{"url" => "https://example.com/form"})
+    assert opened["page"] == "unobserved"
+    assert opened["target"] =~ "tab_"
+    refute Map.has_key?(opened, "snapshot")
+
+    assert {:ok, navigated} = req(pid, "navigate", %{"url" => "https://example.com/form"})
+    assert navigated["page"] == "unobserved"
+    assert navigated["url"] == "https://example.com/form"
+  end
+
+  # The look is bounded the way `act`'s is. The navigation's own commands are
+  # not: `Page.navigate` and the committed-URL read that the redirect check
+  # hangs on are the navigation, and they keep the timeouts they had.
+  test "the look after a navigation is bounded by its own budget", %{pid: pid, config: config} do
+    assert {:ok, _} = req(pid, "start")
+    budget = Config.act_limits().navigation_budget_ms
+    assert config.action_timeout_ms > budget
+    flush_cdp()
+
+    assert {:ok, _} = req(pid, "navigate", %{"url" => "https://example.com/form"})
+
+    bounded = ~w(Accessibility.disable Accessibility.enable Accessibility.getFullAXTree)
+    observed = for {method, timeout} <- drain_cdp(), method in bounded, do: {method, timeout}
+    refute observed == [], "the look never rendered the page"
+
+    for {method, timeout} <- observed do
+      assert timeout <= budget,
+             "`#{method}` was given #{timeout} ms, not the #{budget} ms settle budget"
     end
   end
 end

@@ -237,10 +237,22 @@ defmodule FermixCore.Browser.Config do
   # short: a page holding a JS dialog answers nothing at all, and this is what
   # bounds that wait. It bounds the WORK, not the wall clock — a command waits
   # its own timeout and the caller adds `cdp_response_grace_ms`, so the ceiling
-  # is this budget plus one poll plus one grace (see `ProfileServer.settle/4`).
-  # `form_fields` is how many fields one `fill_form` may carry, and `ref_chars`
-  # bounds a ref quoted back at the model in a refusal.
-  @act_limits %{settle_budget_ms: 1_500, form_fields: 12, ref_chars: 128}
+  # is this budget plus one poll plus one grace (see `ProfileServer.settle/5`).
+  # `navigation_budget_ms` is that same wait after an `open` or a `navigate`,
+  # and it is longer because there it is the ONLY load wait: `Target.createTarget`
+  # answers on creation and `Page.navigate` on commit, so nothing else waits for
+  # the page at all. Four seconds is still well under the model turn it
+  # replaces, and the same `handle_call` already blocks up to
+  # `navigation_timeout_ms` inside `Page.navigate` and `wait_max_ms` inside `act
+  # wait`, so it is not a new class of stall. `form_fields` is how many fields
+  # one `fill_form` may carry, and `ref_chars` bounds a ref quoted back at the
+  # model in a refusal.
+  @act_limits %{
+    settle_budget_ms: 1_500,
+    navigation_budget_ms: 4_000,
+    form_fields: 12,
+    ref_chars: 128
+  }
 
   @doc """
   Canonical list of allowed `[fermix_core.browser]` keys, used by the config
@@ -265,12 +277,13 @@ defmodule FermixCore.Browser.Config do
   def webmcp_limits, do: @webmcp_limits
 
   @doc """
-  Bounds on `act`: the total budget for observing the page after an action, the
-  number of fields one `fill_form` may carry, and how much of a ref a refusal
-  quotes back.
+  Bounds on `act`: the budget for observing the page after an action, the longer
+  one for observing it after a navigation, the number of fields one `fill_form`
+  may carry, and how much of a ref a refusal quotes back.
   """
   @spec act_limits() :: %{
           settle_budget_ms: pos_integer(),
+          navigation_budget_ms: pos_integer(),
           form_fields: pos_integer(),
           ref_chars: pos_integer()
         }

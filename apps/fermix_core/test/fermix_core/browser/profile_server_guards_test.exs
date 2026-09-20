@@ -75,6 +75,7 @@ defmodule FermixCore.Browser.ProfileServerGuardsTest do
     end
 
     defp run(_page, "Target.attachToTarget", _params), do: {:ok, %{"sessionId" => "S1"}}
+    defp run(_page, "Target.createTarget", _params), do: {:ok, %{"targetId" => "T1"}}
     defp run(_page, "Accessibility.getFullAXTree", _params), do: {:ok, %{"nodes" => ax_nodes()}}
     defp run(_page, "DOM.resolveNode", _params), do: {:ok, %{"object" => %{"objectId" => "OBJ1"}}}
 
@@ -214,8 +215,13 @@ defmodule FermixCore.Browser.ProfileServerGuardsTest do
     "status" => "profile liveness counters; reads no page",
     "start" => "lifecycle; reads no page",
     "stop" => "lifecycle; reads no page",
-    "open" => "a navigation — Policy.validate_url/2 refuses the destination first",
-    "navigate" => "a navigation — pre-checked, then re-checked on the committed URL",
+    "open" =>
+      "a navigation — the destination is refused by Policy.validate_url/2 first; the page it " <>
+        "hands back goes through the gate in the next test, and is withheld rather than " <>
+        "refusing the navigation that already happened",
+    "navigate" =>
+      "a navigation — pre-checked, then re-checked on the committed URL; its page is gated in " <>
+        "the next test, the same way",
     "tabs" =>
       "the tab inventory; refusing it would hide the blocked tab and leave no id to close",
     "focus" => "activates a tab; returns no page bytes",
@@ -310,6 +316,33 @@ defmodule FermixCore.Browser.ProfileServerGuardsTest do
 
       refute Map.has_key?(result, "snapshot"),
              "`act #{args["kind"]}` returned page text from a blocked host"
+    end
+  end
+
+  # `open` and `navigate` hand the page back now (M47 §3.6), so both are reads
+  # and both face the same gate. The destination was checked before the
+  # navigation; this is the half that check cannot see — where the page ENDS UP.
+  # The navigation itself happened, so the answer is the tab with the verdict on
+  # it, never an error that would have the model repeat a navigation it made.
+  # The row keeps the tab id, because a tab nobody can address is a tab nobody
+  # can close — but the blocked document's url and title go with its text, which
+  # is what `live_row/2` already does on this same verdict.
+  test "an open or a navigate that lands on a blocked host returns no page text" do
+    pid = start_page("https://example.com/form", public_config(), :guards_drift_nav, "drift")
+    ready(pid)
+
+    for action <- ["open", "navigate"] do
+      assert {:ok, result} = req(pid, action, %{"url" => "https://example.com/form"})
+
+      assert result["page"] == "read_blocked",
+             "`#{action}` observed a policy-blocked page: #{inspect(result)}"
+
+      assert result["target"] =~ "tab_", "`#{action}` left no id to address the tab with"
+
+      for withheld <- ~w(snapshot url title) do
+        refute Map.has_key?(result, withheld),
+               "`#{action}` returned the blocked page's #{withheld}"
+      end
     end
   end
 

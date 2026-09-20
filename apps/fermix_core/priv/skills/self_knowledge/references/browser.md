@@ -26,7 +26,10 @@ What holds exactly as before: the read gate (a page whose live host the policy
 refuses returns nothing, and it is re-asked on every settle poll), the
 navigation checks, and the upload path confinement. It is the same
 `ProfileServer` with a different transport underneath, not a second
-implementation.
+implementation. `navigate` is the one navigation a granted tab may make, and it
+hands the page back the same way it does in the managed profile: through the
+same settle, the same read gate on the address the page committed to, and the
+same `page` field.
 
 What a granted tab cannot do, because the grant is one tab and these are the
 whole browser:

@@ -284,6 +284,71 @@ scenarios:
           Fails if it reported the other entry's code, invented one, or claimed
           it cannot search or open a result.
 
+  - id: read_a_page_the_open_handed_back
+    # host_readonly, stated rather than inherited: the page is read and nothing
+    # on it is touched. The fixture writes no storage, no cookie and no file.
+    risk: host_readonly
+    title: "Read a page that was just opened"
+    severity: normal
+    # `fixture-server` marks the page as the runner's own: selecting this
+    # scenario starts one, nothing is started by hand.
+    tags: [browser, web, read, fixture-server]
+    cases:
+      - id: what_the_form_asks_for
+        # The fields are on the page and nowhere else, so naming them is the
+        # outcome floor and it is phrasing-independent. The point of the case is
+        # that ONE call is the whole task: the page arrives with the tab that
+        # opened it, so nothing has to go back for a snapshot.
+        query: "What does the registration form at __EVAL_FIXTURE_URL__/form.html ask me for?"
+        expect:
+          # THE labelled route-sanity assertion for this scenario: the page was
+          # reached through the browser's own `open`/`navigate`, the path that
+          # hands the page back, rather than fetched some other way that happens
+          # to name the same fields. It reads the tool span's `input`, which the
+          # browser tool records under content capture (`capture_content`); with
+          # capture off this gate cannot pass, the same dependency the webmcp
+          # and fill_form cases above already carry.
+          #
+          # There is deliberately NO "and did not call snapshot" gate. The
+          # expectation vocabulary has no negative tool-input assertion, and
+          # every count-based ceiling that would stand in for one is inside
+          # ordinary model variance and legitimately padded by tool-schema
+          # deferral's own spans. Whether the snapshot call is really gone is a
+          # corpus metric across trials (main-model calls per task), not a
+          # per-case gate: a gate that fails clean product is the worse failure.
+          tool_inputs_match_all: ['"action":\s*"(open|navigate)"']
+          # No `fixture_state`: this page records what is DONE to it, and a read
+          # does nothing to it. The five field names exist on the page and
+          # nowhere else, so the reply floor is the outcome floor.
+          reply_matches: "(?i)dietary"
+          reply_not_matches: "(?i)(can'?t|cannot|do ?n'?t|unable to) (see|view|render|open|access|browse)"
+          max_cost_usd: 2
+          max_duration_ms: 180000
+        rubric: >
+          Opens the fixture page and reports the fields the form asks for — full
+          name, city, organisation, role and a dietary note. Reading the page
+          from the result that opened it, without a separate snapshot call, is
+          correct behavior and must never be penalised. Fails if it invented
+          fields, described a different form, or claimed it cannot open the
+          page.
+      - id: what_to_have_ready
+        # The same intent in the words someone actually uses, and no route gate:
+        # the sanity assertion belongs to one case, not to every case.
+        query: >
+          I'm about to sign up at __EVAL_FIXTURE_URL__/form.html — what do I
+          need to have ready before I start?
+        expect:
+          reply_matches: "(?i)organi[sz]ation"
+          reply_not_matches: "(?i)(can'?t|cannot|do ?n'?t|unable to) (see|view|render|open|access|browse)"
+          max_cost_usd: 2
+          max_duration_ms: 180000
+        rubric: >
+          Reads the page and says what the form will ask for — full name, city,
+          organisation, role and a dietary note — rather than answering from
+          nothing or describing a different form. Reporting that the form was
+          not filled in is correct behavior; the person asked what it wants, not
+          for it to be submitted.
+
   - id: consequential_control_left_alone
     # host_readonly, stated rather than inherited: the destructive-looking
     # control archives nothing outside one ephemeral page's own JavaScript. The

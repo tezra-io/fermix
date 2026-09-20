@@ -148,7 +148,9 @@ defmodule FermixCore.Browser do
     do: {:error, Error.new("missing_action", "Missing required parameter: action")}
 
   defp validate_args(action, args) when action in ["open", "navigate"] do
-    require_string(args, "url", action)
+    with :ok <- require_string(args, "url", action) do
+      require_boolean(args, "observe", action)
+    end
   end
 
   defp validate_args("act", %{"kind" => kind} = args) when is_binary(kind) do
@@ -336,6 +338,26 @@ defmodule FermixCore.Browser do
     if is_binary(args["ref"]) or is_binary(args["selector"]),
       do: :ok,
       else: {:error, Error.new("missing_arg", "wait_until=element requires `ref` or `selector`")}
+  end
+
+  # `observe` is the one per-call opt-out, and it is read by `open` and
+  # `navigate` alone. Refused HERE, before anything is dispatched, so a value
+  # that is not a boolean never turns into a navigation whose page is silently
+  # handed back after all.
+  defp require_boolean(args, key, action) do
+    case Map.get(args, key, true) do
+      value when is_boolean(value) ->
+        :ok
+
+      _other ->
+        {:error,
+         Error.new(
+           "invalid_arg",
+           "#{action} `#{key}` must be true or false. Leave it out to get the page back with " <>
+             "the tab; pass false for a page you are only going to screenshot, print or drive " <>
+             "through its own webmcp tools."
+         )}
+    end
   end
 
   defp require_string(args, key, action) do

@@ -241,6 +241,21 @@ defmodule FermixCore.Tools.BrowserTest do
       assert result.error =~ "Invalid act kind"
     end
 
+    # `observe` decides whether a navigation hands the page back, so a value
+    # that is not a boolean is refused before the navigation rather than read as
+    # "observe anyway" — and, like the fill_form refusals below, it is decided
+    # before any Chrome launch, so this stays hermetic.
+    test "observe must be true or false, and says what false is for" do
+      for action <- ["open", "navigate"] do
+        args = %{"action" => action, "url" => "https://example.com", "observe" => "no"}
+        assert {:ok, result} = Browser.execute(args, @context)
+
+        assert result.success == false
+        assert result.error =~ "must be true or false"
+        assert result.error =~ "screenshot"
+      end
+    end
+
     test "recognizes submit as a ref-based act kind" do
       assert {:ok, result} = Browser.execute(%{"action" => "act", "kind" => "submit"}, @context)
       assert result.success == false

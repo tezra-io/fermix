@@ -44,6 +44,9 @@ defmodule FermixCore.Browser.ProfileServer do
   @observing_kinds ~w(click submit)
   @fill_form_shape "fill_form requires `fields`: a non-empty list of objects with `ref` and " <>
                      "`text`, the fields of one form taken from one snapshot."
+  @observe_shape "`observe` must be true or false. Leave it out to get the page back with the " <>
+                   "tab; pass false for a page you are only going to screenshot, print or drive " <>
+                   "through its own webmcp tools."
   @advanced_actions ~w(focus close screenshot pdf console dialog cookies storage upload download act
                        webmcp)
 
@@ -97,9 +100,12 @@ defmodule FermixCore.Browser.ProfileServer do
       tab_order: [],
       ref_maps: %{},
       # Per tab, what the model was last shown: the options that snapshot was
-      # taken with and a hash of its text. A post-action observation reuses the
-      # options so the comparison is like for like, and a tab with no entry is a
-      # tab that never asked to see the page (§3.1).
+      # taken with, a hash of its text, and the document a look must not stop on
+      # (only a navigation's own fresh mark carries one). A later observation
+      # reuses the options so the comparison is like for like; a tab with no
+      # entry is a tab that never asked to see the page, which is why `act`
+      # leaves it alone (§3.1) and `open`/`navigate` bring a mark of their own
+      # (§3.6).
       observations: %{},
       console: [],
       dialogs: [],
@@ -189,19 +195,22 @@ defmodule FermixCore.Browser.ProfileServer do
   end
 
   defp run_request(%{action: "open", args: args, context: context}, state) do
-    case Policy.validate_url(args["url"], state.config) do
-      {:ok, uri} -> with_running(state, context, fn s -> finish(create_tab(uri, s), s) end)
+    with {:ok, uri} <- Policy.validate_url(args["url"], state.config),
+         {:ok, mark} <- fresh_mark(args, leaving_document(uri), state) do
+      with_running(state, context, fn s -> finish(create_tab(uri, mark, s), s) end)
+    else
       {:error, error} -> {{:error, error}, state}
     end
   end
 
   defp run_request(%{action: "navigate", args: args, context: context}, state) do
-    case Policy.validate_url(args["url"], state.config) do
-      {:ok, uri} ->
-        with_running(state, context, fn s -> finish(navigate_chain(uri, args, s), s) end)
-
-      {:error, error} ->
-        {{:error, error}, state}
+    # Nothing to leave: `Page.navigate` answers on the commit, so the document
+    # the look polls is already the one the request landed on.
+    with {:ok, uri} <- Policy.validate_url(args["url"], state.config),
+         {:ok, mark} <- fresh_mark(args, nil, state) do
+      with_running(state, context, fn s -> finish(navigate_chain(uri, args, mark, s), s) end)
+    else
+      {:error, error} -> {{:error, error}, state}
     end
   end
 
@@ -551,14 +560,14 @@ defmodule FermixCore.Browser.ProfileServer do
     end
   end
 
-  defp create_tab(uri, state) do
+  defp create_tab(uri, mark, state) do
     params = %{url: URI.to_string(uri)}
 
     with {:ok, %{"targetId" => target_id}} <- command(state, "Target.createTarget", params),
          {:ok, state} <- refresh_targets(%{state | active_target: tab_id(target_id)}),
          {:ok, tab, state} <- resolve_tab(tab_id(target_id), state),
          {:ok, state} <- enforce_tab_cap(state) do
-      {:ok, tab_result(tab), state}
+      observe_navigation(tab_result(tab), tab, state, mark)
     end
   end
 
@@ -611,14 +620,14 @@ defmodule FermixCore.Browser.ProfileServer do
 
   defp managed?(state), do: Map.get(state.profile, :mode) == :managed
 
-  defp navigate_chain(uri, args, state) do
+  defp navigate_chain(uri, args, mark, state) do
     with {:ok, tab, state} <- resolve_tab(Map.get(args, "target"), state),
-         {:ok, result, state} <- navigate_tab(tab, uri, state) do
+         {:ok, result, state} <- navigate_tab(tab, uri, mark, state) do
       {:ok, result, state}
     end
   end
 
-  defp navigate_tab(tab, uri, state) do
+  defp navigate_tab(tab, uri, mark, state) do
     requested = URI.to_string(uri)
 
     with {:ok, tab, state} <- attach(tab, state),
@@ -634,8 +643,12 @@ defmodule FermixCore.Browser.ProfileServer do
          {:ok, final_url} <- committed_url(tab, requested, state),
          :ok <- final_url_allowed(final_url, state.config),
          {:ok, state} <- refresh_targets(state),
-         {:ok, tab, state} <- resolve_tab(tab.id, state) do
-      {:ok, tab_result(%{tab | url: final_url}), state}
+         {:ok, live, state} <- resolve_tab(tab.id, state) do
+      # The refreshed entry carries the tab's new title; the session the look
+      # reads through is on the attached one, because `refresh_targets/1`
+      # rebuilds the tab set from the browser and keeps no sessions.
+      settled = %{live | url: final_url, session_id: tab.session_id}
+      observe_navigation(tab_result(settled), settled, state, mark)
     end
   end
 
@@ -795,7 +808,8 @@ defmodule FermixCore.Browser.ProfileServer do
   # together, because they describe the same view of the same page.
   defp remember_snapshot(state, tab, opts, rendered) do
     refs = Map.new(rendered.refs, &{&1.ref, &1})
-    mark = %{opts: opts, hash: :crypto.hash(:sha256, rendered.text)}
+    # A mark taken from a page that is already loaded has no document to leave.
+    mark = %{opts: opts, hash: :crypto.hash(:sha256, rendered.text), leaving: nil}
 
     state
     |> put_in([:ref_maps, tab.id], refs)
@@ -1113,7 +1127,7 @@ defmodule FermixCore.Browser.ProfileServer do
       # accessibility tree, so observing every press would hand back a full
       # snapshot per keystroke.
       {result, state} =
-        observe_page(result, tab, state, observe_deadline(key == "Enter", tab, state))
+        observe_page(result, tab, state, :none, observe_deadline(key == "Enter", tab, state))
 
       {:ok, result, state}
     end
@@ -1141,7 +1155,7 @@ defmodule FermixCore.Browser.ProfileServer do
       # — a read that fails must not report the click as failed.
       |> Map.merge(url_receipt(state, tab, deadline))
 
-    {result, state} = observe_page(result, tab, state, deadline)
+    {result, state} = observe_page(result, tab, state, :none, deadline)
     {:ok, result, state}
   end
 
@@ -1157,7 +1171,7 @@ defmodule FermixCore.Browser.ProfileServer do
     with {:ok, result} <- run_ref_action(kind, args, tab, box, state, deadline),
          {:ok, state} <- refresh_targets(state) do
       result = Map.put(result, "tabs", tab_values(state))
-      {result, state} = observe_page(result, tab, state, deadline)
+      {result, state} = observe_page(result, tab, state, :none, deadline)
       {:ok, result, state}
     end
   end
@@ -1391,6 +1405,55 @@ defmodule FermixCore.Browser.ProfileServer do
 
   # ── what the action changed ────────────────────────────────────────────────
 
+  # The document a new tab answers from until its request commits. `open`
+  # creates the target and returns before that, and the empty document is
+  # complete and its url stable, so a settle that did not know what it was
+  # leaving would hand back the blank page the open exists to replace. Nothing
+  # to leave when the blank page IS the request.
+  @initial_document "about:blank"
+
+  defp leaving_document(uri) do
+    if URI.to_string(uri) == @initial_document, do: nil, else: @initial_document
+  end
+
+  # What a look after a navigation compares against when the tab holds no mark
+  # of its own. §3.1's "only a tab the model has already snapshotted" is `act`'s
+  # rule: a page loaded on request is a page the model asked to see, and a fresh
+  # tab would otherwise never qualify. `hash: nil` equals no rendering, which is
+  # why a fresh tab always reads as `changed`.
+  #
+  # Resolved HERE, before the navigation, exactly as the `snapshot` clause
+  # resolves its options: a refused argument costs nothing, and the options are
+  # the ones a bare `snapshot` call resolves rather than a second set of
+  # literals.
+  defp fresh_mark(%{"observe" => false}, _leaving, _state), do: {:ok, :none}
+
+  # The floor under a direct call, as `fill_form` has one:
+  # `FermixCore.Browser.validate_args/2` is what teaches the model the shape, and
+  # a value that is not a boolean is refused rather than read as "observe after
+  # all".
+  defp fresh_mark(%{"observe" => observe}, _leaving, _state) when not is_boolean(observe),
+    do: {:error, Error.new("invalid_arg", @observe_shape)}
+
+  defp fresh_mark(_args, leaving, state) do
+    with {:ok, opts} <- Config.snapshot_options(%{}, state.config) do
+      {:ok, %{opts: opts, hash: nil, leaving: leaving}}
+    end
+  end
+
+  # The look for the two verbs whose whole job is to put a page in front of the
+  # model. The budget opens HERE: everything above it is the navigation itself,
+  # which carries its own timeouts, and this budget bounds only the look. It is
+  # the longer of the two because here the settle is the ONLY load wait —
+  # `Target.createTarget` answers on creation and `Page.navigate` on commit.
+  defp observe_navigation(result, _tab, state, :none), do: {:ok, result, state}
+
+  defp observe_navigation(result, tab, state, mark) do
+    deadline = System.monotonic_time(:millisecond) + Config.act_limits().navigation_budget_ms
+    {result, state} = observe_page(result, tab, state, mark, deadline)
+    {:ok, result, state}
+  end
+
   # When the budget opens, or `:none` for work that will not be observed at all:
   # the action does not restructure pages (a fill, a hover, an arrow key), or
   # this tab never asked to see one. A canvas driven purely by `click_coords`
@@ -1404,22 +1467,35 @@ defmodule FermixCore.Browser.ProfileServer do
       else: :none
   end
 
-  defp observe_page(result, _tab, state, :none), do: {result, state}
+  defp observe_page(result, _tab, state, _fresh, :none), do: {result, state}
 
-  defp observe_page(result, tab, state, deadline) do
-    case Map.fetch(state.observations, tab.id) do
-      {:ok, mark} -> observe_settled(result, mark, tab, state, deadline)
-      # The action closed the tab it acted on, so `refresh_targets/1` pruned the
-      # mark between the deadline and here. There is nothing left to look at.
-      :error -> {result, state}
+  # `fresh` is what a caller brings for a tab that holds no mark: `act` brings
+  # `:none` (it looks only at a tab the model has already snapshotted, and an
+  # action that closed its tab has had the mark pruned by `refresh_targets/1`),
+  # a navigation brings one of its own.
+  defp observe_page(result, tab, state, fresh, deadline) do
+    case Map.get(state.observations, tab.id, fresh) do
+      :none -> {result, state}
+      mark -> observe_settled(result, mark, tab, state, deadline)
+    end
+  end
+
+  # The attach is a no-op for every caller that acted on the tab first; a tab
+  # `open` has just created has no session yet, and the look reads through one.
+  # Its state is threaded on EVERY path below, or a session this call opened
+  # would be dropped and the next one would attach a second time.
+  defp observe_settled(result, mark, tab, state, deadline) do
+    case attach(tab, state) do
+      {:ok, tab, state} -> observe_attached(result, mark, tab, state, deadline)
+      other -> {unobserved(result, other), state}
     end
   end
 
   # The action has already happened, so an observation failure must not fail it:
   # every branch below keeps the receipt and only says what could be seen. Same
   # rule as the receipts above — logged, never swallowed, never fatal.
-  defp observe_settled(result, mark, tab, state, deadline) do
-    with {:ok, tab} <- settle(tab, state, deadline, nil),
+  defp observe_attached(result, mark, tab, state, deadline) do
+    with {:ok, tab, deadline} <- rendered_view(settle(tab, state, mark, deadline, nil), deadline),
          {:ok, rendered} <- render_within(mark, tab, state, deadline) do
       observed(result, mark, rendered, tab, state)
     else
@@ -1434,44 +1510,85 @@ defmodule FermixCore.Browser.ProfileServer do
     end
   end
 
+  # One render, from one of two views of the page: the one that settled, or the
+  # one the budget ran out on while the page was still building. The second gets
+  # a fresh bound because the settle has just proved the page answers, and
+  # `render_within/4` will not start a render with a spent deadline — a look
+  # bounded to nothing is how the caller was handed nothing at all.
+  defp rendered_view({:partial, tab}, _deadline),
+    do: {:ok, tab, System.monotonic_time(:millisecond) + Config.act_limits().settle_budget_ms}
+
+  defp rendered_view({:ok, tab}, deadline), do: {:ok, tab, deadline}
+  defp rendered_view(other, _deadline), do: other
+
   # Poll until the document is complete and its url is unchanged across one
   # poll, bounded by the budget. Every probe carries what is LEFT of it: a JS
   # dialog opened BY this action is not visible to this callback (dialog events
   # are only processed between callbacks) and blocks page script entirely, so
   # without the bound the observation would sit out the whole action budget.
   #
-  # The real ceiling is not a flat 1,500 ms and this does not pretend otherwise:
-  # a command waits its own timeout and `command/5` adds `cdp_response_grace_ms`
-  # on top, and the last poll may begin just under the deadline — so the worst
-  # case is the budget plus one poll plus one grace. That is the price of
-  # letting the server-side timer fire first with a precise error, and it is
-  # still a second and a half rather than the eight the action alone carries.
-  defp settle(tab, state, deadline, previous_url) do
+  # The real ceiling is not a flat budget and this does not pretend otherwise: a
+  # command waits its own timeout and `command/5` adds `cdp_response_grace_ms`
+  # on top, the last poll may begin just under the deadline, and a page still
+  # building at the deadline is then rendered inside one more settle budget — so
+  # the worst case is the budget, plus one poll, plus one grace, plus that
+  # render. That is the price of letting the server-side timer fire first with a
+  # precise error, and of handing back a page that was nearly there rather than
+  # nothing at all.
+  defp settle(tab, state, mark, deadline, previous_url) do
     case live_meta_within(tab, state, deadline) do
-      {:ok, meta} -> settle_step(meta, tab, state, deadline, previous_url)
-      {:error, %Error{} = error} -> {:error, error.code}
-      {:error, reason} -> {:error, reason}
+      {:ok, meta} -> settle_step(meta, tab, state, mark, deadline, previous_url)
+      {:error, reason} -> settle_retry(reason, tab, state, mark, deadline, previous_url)
     end
   end
+
+  # A CDP error is a not-yet-ready poll, not the answer: "Execution context was
+  # destroyed" is routine in the moments after a commit, which is exactly when
+  # this probe runs (see `live_meta/2`). Only the LAST error, with the budget
+  # spent, is reported — and a page that answers nothing at all still ends here,
+  # because every probe carries what is left of the budget.
+  defp settle_retry(reason, tab, state, mark, deadline, previous_url) do
+    remaining = deadline - System.monotonic_time(:millisecond)
+
+    if remaining <= 0 do
+      {:error, settle_reason(reason)}
+    else
+      Process.sleep(min(state.config.wait_poll_interval_ms, remaining))
+      settle(tab, state, mark, deadline, previous_url)
+    end
+  end
+
+  defp settle_reason(%Error{code: code}), do: code
+  defp settle_reason(reason), do: reason
 
   # The read gate, re-asked on EVERY poll rather than once: a page that scripts
   # itself onto a private host mid-settle must not have its text returned, and
   # this is the same rule `wait` follows for the same reason.
-  defp settle_step(%{"url" => url} = meta, tab, state, deadline, previous_url)
+  defp settle_step(%{"url" => url} = meta, tab, state, mark, deadline, previous_url)
        when is_binary(url) do
     case Policy.read_verdict(url, state.config) do
-      :ok -> settle_ready(meta, url, tab, state, deadline, previous_url)
+      :ok -> settle_ready(meta, url, tab, state, mark, deadline, previous_url)
       {:error, %Error{} = error} -> {:blocked, error}
     end
   end
 
-  defp settle_step(meta, _tab, _state, _deadline, _previous_url),
+  defp settle_step(meta, _tab, _state, _mark, _deadline, _previous_url),
     do: {:error, {:live_url_unavailable, bounded_inspect(meta)}}
 
-  # Settled: the document is complete and the url read the same twice running.
-  # The repeated `url` binding IS the comparison.
-  defp settle_ready(%{"ready" => "complete"}, url, tab, _state, _deadline, url),
-    do: {:ok, %{tab | url: url}}
+  # Settled: the document is complete, the url read the same twice running, and
+  # it is not the one the caller said it was leaving. The repeated `url` binding
+  # IS the comparison.
+  defp settle_ready(
+         %{"ready" => "complete"} = meta,
+         url,
+         tab,
+         _state,
+         %{leaving: leaving},
+         _deadline,
+         url
+       )
+       when url != leaving,
+       do: {:ok, settled_tab(tab, url, meta)}
 
   # The loop's bound. A document that never reaches "complete" — a hung
   # subresource, a streaming response — answers every probe in microseconds, so
@@ -1479,15 +1596,33 @@ defmodule FermixCore.Browser.ProfileServer do
   # an unbounded loop here is a wedged profile, not a slow one. Checked BEFORE
   # the sleep, and the sleep never overruns the deadline, exactly as
   # `continue_wait/4` does for `act wait`.
-  defp settle_ready(_meta, url, tab, state, deadline, _previous_url) do
+  defp settle_ready(meta, url, tab, state, mark, deadline, _previous_url) do
     remaining = deadline - System.monotonic_time(:millisecond)
 
     if remaining <= 0 do
-      {:error, :settle_timeout}
+      settle_expired(meta, url, tab, mark)
     else
       Process.sleep(min(state.config.wait_poll_interval_ms, remaining))
-      settle(tab, state, deadline, url)
+      settle(tab, state, mark, deadline, url)
     end
+  end
+
+  # The budget is spent and the page is still answering. An ordinary site takes
+  # seconds to reach "complete", so withholding the page here would spend the
+  # whole wait AND still cost the snapshot turn this exists to remove: render
+  # what is there, and let `ready_state` on the result say it was still
+  # building. The exception is a tab that never left the document it was told to
+  # leave — the requested page is not on it at all, so there is nothing honest
+  # to hand back.
+  defp settle_expired(_meta, url, _tab, %{leaving: url}), do: {:error, :settle_timeout}
+  defp settle_expired(meta, url, tab, _mark), do: {:partial, settled_tab(tab, url, meta)}
+
+  # The address the look ended on, and the state the document was in when it
+  # did — the same field `snapshot_result/2` publishes, read the same way.
+  defp settled_tab(tab, url, meta) do
+    tab
+    |> Map.put(:url, url)
+    |> Map.put(:ready_state, Map.get(meta, "ready"))
   end
 
   defp live_meta_within(tab, state, deadline) do
@@ -1516,7 +1651,13 @@ defmodule FermixCore.Browser.ProfileServer do
   # it was sampled before the navigation committed, and this one is the address
   # the page settled on.
   defp observed(result, mark, rendered, tab, state) do
-    result = Map.put(result, "url", tab.url)
+    # `ready_state` rides every observed result, exactly as it rides a
+    # `snapshot`: "loading" or "interactive" is how the model knows a thin page
+    # is one that was still building when the budget ran out, rather than a page
+    # with nothing on it.
+    result =
+      Map.merge(result, %{"url" => tab.url, "ready_state" => Map.get(tab, :ready_state)})
+
     state = remember_snapshot(state, tab, mark.opts, rendered)
 
     if :crypto.hash(:sha256, rendered.text) == mark.hash do
@@ -1536,8 +1677,17 @@ defmodule FermixCore.Browser.ProfileServer do
   # that is not a web page at all are different failures with different fixes,
   # and one word for both sends the model looking for a host rule that was never
   # the problem.
-  defp page_refused(result, %Error{code: code} = error),
-    do: Map.merge(result, %{"page" => code, "page_reason" => error.message})
+  #
+  # The blocked document's address and title go with its text. A page's title is
+  # page text by this repo's own standard, and `live_row/2` has answered this
+  # same verdict with the tab id and nothing else since the gate was written; an
+  # action that lands on a refused page must not be the door around it. The id
+  # stays, because a tab nobody can address is a tab nobody can close.
+  defp page_refused(result, %Error{code: code} = error) do
+    result
+    |> Map.drop(["url", "title"])
+    |> Map.merge(%{"page" => code, "page_reason" => error.message})
+  end
 
   defp unobserved(result, reason) do
     Logger.warning(

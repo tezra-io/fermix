@@ -348,6 +348,28 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   when it moved somewhere the read policy refuses it says so and returns no page
   text. A snapshot no longer repeats every element in a separate list beside the
   text that already names it, which makes every later step in the turn smaller.
+- **Opening a page in the browser now hands the page back.** `open` and
+  `navigate` answered with the tab and nothing of what was on it, so the
+  assistant's next step was almost always a second call whose only job was to
+  look at the page it had just asked for. Both now wait for the page to settle
+  and come back with it, in the same words a click uses: `changed` with the
+  fresh snapshot, or `unchanged` when a navigation lands on content the
+  assistant already holds. The wait is bounded and never fails the navigation: a
+  site still building when the time is up is handed over as it stands, marked as
+  still loading, so an ordinary slow page costs the wait and not another step as
+  well; only a page that cannot be looked at at all — one holding a dialog, say
+  — comes back unobserved. A page that ends up somewhere the read policy refuses
+  returns the tab and the reason, and none of that page's text, address or
+  title. A page opened only to be screenshotted, printed or driven through the
+  tools the page itself offers can skip the look with `observe: false`. Your own
+  granted tab still cannot open a second tab; navigating it hands back its page
+  through the same checks.
+- **A click's look at the page no longer gives up on a page that is nearly
+  there.** The same rule applies after a click, a submit, an Enter or a
+  click_coords: a page still rendering when the look runs out of time comes back
+  as it stands, saying it was still building, instead of reporting that nothing
+  could be seen. A single momentary browser error during that look — routine in
+  the instant after a page commits — is retried rather than ending it.
 - **The shipped persona and operating rules are shorter and sharper.** `SOUL.md`
   now asks for judgment with confidence that follows evidence rather than a
   forced side, dry wit with clear limits instead of stock praise, and scoped

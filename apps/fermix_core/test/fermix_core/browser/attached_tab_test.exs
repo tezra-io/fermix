@@ -356,7 +356,9 @@ defmodule FermixCore.Browser.AttachedTabTest do
     "start" => "lifecycle; reads no page",
     "stop" => "lifecycle; reads no page",
     "open" => "refused as a browser-wide capability before any page is read",
-    "navigate" => "a navigation — the destination is refused first",
+    "navigate" =>
+      "a navigation — the destination is refused first; the page it hands back goes through " <>
+        "the gate in its own test below",
     "focus" => "refused as a browser-wide capability",
     "close" => "refused as a browser-wide capability",
     "dialog" => "answers or lists a JS dialog; needed to unblock a stuck page",
@@ -439,6 +441,40 @@ defmodule FermixCore.Browser.AttachedTabTest do
       assert match?({:error, %Error{code: "read_blocked"}}, result),
              "`act #{label}` did not refuse a policy-blocked URL: #{inspect(result)}"
     end
+  end
+
+  # `navigate` hands the page back now (M47 §3.6), and it is the one navigation
+  # a granted tab may make — `open` stays refused as a browser-wide capability.
+  # Observing is a read of the person's own tab, so it goes through the same
+  # gate, on the address the page actually committed to.
+  test "a navigate in the granted tab is observed through the read gate", ctx do
+    grant!(ctx.grants, @blocked, title: "Instance metadata")
+    pid = start_server(ctx, :attached_nav_gate)
+    assert {:ok, _} = req(pid, "start")
+
+    assert {:ok, result} = req(pid, "navigate", %{"url" => "https://example.com/allowed"})
+
+    assert result["page"] == "read_blocked"
+    assert result["page_reason"] =~ "browser policy"
+
+    # The id stays so the tab can still be addressed; the blocked document's
+    # text, address and title do not, exactly as `tabs` answers on this verdict.
+    assert result["target"] =~ "tab_"
+
+    for withheld <- ~w(snapshot url title) do
+      refute Map.has_key?(result, withheld), "navigate returned the blocked page's #{withheld}"
+    end
+  end
+
+  test "a navigate in the granted tab hands back the page it landed on", ctx do
+    grant!(ctx.grants, "https://example.com/dash")
+    pid = start_server(ctx, :attached_nav_page)
+    assert {:ok, _} = req(pid, "start")
+
+    assert {:ok, result} = req(pid, "navigate", %{"url" => "https://example.com/dash"})
+
+    assert result["page"] == "changed"
+    assert result["snapshot"] =~ ~s(@textbox_1 [textbox] "Where to?")
   end
 
   test "the gate does not over-block: an allowed page still reads", ctx do
