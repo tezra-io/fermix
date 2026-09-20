@@ -18,7 +18,10 @@ description: >
   (tool advertisement is a boot snapshot), authenticated via the operator's own
   ~/.codex and ~/.claude logins. Each trial spawns a real vendor CLI run under
   those subscription logins — vendor-side spend is real and is not visible in
-  Opik turn cost.
+  Opik turn cost. On a daemon that advertises neither run tool the runner holds
+  these cases out as NOT EVALUATED — out of every denominator, out of the
+  composite, and RED at the release gate — rather than scoring them 0.00, which
+  would report the missing CLIs as a model failure.
 defaults:
   judge: false
   timeout_ms: 600000

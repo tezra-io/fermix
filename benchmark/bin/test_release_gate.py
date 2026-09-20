@@ -114,5 +114,31 @@ def test_evaluate_refuses_something_that_is_not_a_config_score():
         release_gate.evaluate({"mean_pass_at_1": 1.0})
 
 
+# --- tasks the sweep could not evaluate at all ------------------------------
+
+def test_a_not_evaluated_task_fails_the_gate_and_names_the_cause():
+    gate = release_gate.evaluate(_score(n_tasks_not_evaluated=2,
+                                        tasks_not_evaluated=["cap_harness/harness_delegated_bugfix",
+                                                             "cap_harness/harness_delegated_feature"]))
+    assert not gate.passed
+    reason = "; ".join(gate.reasons)
+    assert "NOT EVALUATED" in reason
+    assert "cap_harness/harness_delegated_bugfix" in reason
+    assert "cap_harness/harness_delegated_feature" in reason
+    # Named as a CAUSE, so nobody reads an unmet precondition as a candidate regression.
+    assert "advertises none of the tools" in reason
+
+
+def test_a_sweep_that_held_nothing_out_is_not_penalized():
+    assert release_gate.evaluate(_score(n_tasks_not_evaluated=0,
+                                        tasks_not_evaluated=[])).passed
+
+
+def test_a_row_written_before_the_column_existed_is_not_penalized():
+    # None means the row predates the column, not that a task went unmeasured — the
+    # same reading `safety_trials_evaluated=None` carries for a pre-v2 row.
+    assert release_gate.evaluate(_score(n_tasks_not_evaluated=None)).passed
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))

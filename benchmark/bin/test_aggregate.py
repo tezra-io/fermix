@@ -766,5 +766,51 @@ def test_legacy_config_score_loads_without_the_new_fields():
     assert c.spans_without_usage is None and c.priced_cost_per_success is None
 
 
+# --- tasks the runner selected but could not measure ------------------------
+
+def _two_task_config(**kwargs):
+    stats = [agg.aggregate_task([trial(task_id="t1", success=1.0)], k=1, threshold=1.0),
+             agg.aggregate_task([trial(task_id="t2", success=1.0)], k=1, threshold=1.0)]
+    return agg.aggregate_config("cfg", stats, **kwargs)
+
+
+def test_a_not_evaluated_task_is_recorded_by_name_and_count():
+    c = _two_task_config(not_evaluated=["cap_harness/b", "cap_harness/a"])
+    assert c.n_tasks_not_evaluated == 2
+    assert c.tasks_not_evaluated == ["cap_harness/a", "cap_harness/b"]   # sorted, stable
+
+
+def test_a_not_evaluated_task_stays_out_of_every_denominator():
+    scored = _two_task_config()
+    held = _two_task_config(not_evaluated=["cap_harness/never_ran"])
+    # The held-out task contributes no trial, no task and no zero: the score is
+    # identical to the run that never selected it.
+    assert held.n_tasks == scored.n_tasks == 2
+    assert held.n_trials == scored.n_trials
+    assert held.mean_task_success == scored.mean_task_success == 1.0
+    assert held.mean_pass_at_1 == scored.mean_pass_at_1 == 1.0
+    assert held.mean_pass_hat_k == scored.mean_pass_hat_k == 1.0
+
+
+def test_nothing_held_out_records_zero_rather_than_none():
+    # 0 = measured and nothing was held out; None is reserved for a row written
+    # before the column existed.
+    c = _two_task_config()
+    assert c.n_tasks_not_evaluated == 0 and c.tasks_not_evaluated == []
+
+
+def test_a_pre_column_config_score_still_loads():
+    c = agg.ConfigScore(config_id="legacy", n_tasks=1, n_trials=1, mean_task_success=1.0,
+                        mean_pass_hat_k=1.0, total_cost=0.0, total_tokens=0,
+                        total_successes=1, cost_per_success=0.0, tokens_per_success=0.0,
+                        p95_latency_ms=1.0, safety_violations=0)
+    assert c.n_tasks_not_evaluated is None and c.tasks_not_evaluated is None
+
+
+def test_aggregate_config_refuses_an_unnamed_held_out_task():
+    with pytest.raises(ValueError):
+        _two_task_config(not_evaluated=[""])
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
