@@ -195,6 +195,10 @@ defmodule FermixOpik.Mapper do
             # text — so both ride outside the content-capture gate.
             :cu_session,
             :outcome,
+            # Coexistence (V3 R0): what the courtesy arbiter did about a person
+            # at the machine. A closed enum with nothing from the screen in it,
+            # so it rides outside the content-capture gate like the pair above.
+            :courtesy,
             # Addressing (M42 slice 3): how stale the image an action aimed at was
             # when it was sent, and the code when it named no addressable one. A
             # millisecond count and a closed enum — no id (it does not outlive a
@@ -218,7 +222,14 @@ defmodule FermixOpik.Mapper do
             :cu_input_ms,
             :cu_settle_ms,
             :cu_capture_ms,
-            :cu_encode_ms
+            :cu_encode_ms,
+            # Bound windows (M42 slice 5): what this action was pointed at (one
+            # window, or the whole desktop) and how it reached the screen
+            # (through accessibility inside a bound window, or in front of the
+            # person). Two closed words — never a window title and never an
+            # application name, which are content and stay off the row.
+            :target_kind,
+            :cu_mode
           ])
         )
     }

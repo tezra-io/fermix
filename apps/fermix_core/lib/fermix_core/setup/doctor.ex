@@ -24,6 +24,8 @@ defmodule FermixCore.Setup.Doctor do
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Auth.TokenSupervisor
   alias FermixCore.ComputerUse
+  alias FermixCore.ComputerUse.Capabilities, as: ComputerUseCapabilities
+  alias FermixCore.ComputerUse.Config, as: ComputerUseConfig
   alias FermixCore.ComputerUse.Probe, as: ComputerUseProbe
   alias FermixCore.ComputerUse.SidecarInstaller
   alias FermixCore.Meetings
@@ -240,6 +242,36 @@ defmodule FermixCore.Setup.Doctor do
   defp probe_computer_use do
     case ComputerUseProbe.run() do
       {:ok, result} -> {:ok, Map.put(result, :state, :probed)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  The experimental bound-window surface (M42 slice 5 §4), as four states:
+
+    * `%{state: :disabled}`      — computer use itself is off.
+    * `%{state: :off}`           — computer use is on, the flag is not.
+    * `%{state: :not_installed}` — the flag is on, the native helper is not there.
+    * `%{state: :read, capabilities: …}` — what the installed helper advertises.
+
+  Read-only on every path: the last one reads the `hello` the helper answers at
+  its handshake, which takes no capture, posts no input and opens no consent
+  dialog. The first three spawn nothing at all, so on a machine with the flag off
+  — which is every machine by default — the row costs nothing.
+  """
+  @spec computer_use_background() :: {:ok, map()} | {:error, term()}
+  def computer_use_background do
+    cond do
+      not ComputerUse.enabled?() -> {:ok, %{state: :disabled}}
+      not ComputerUseConfig.background?() -> {:ok, %{state: :off}}
+      not SidecarInstaller.installed?() -> {:ok, %{state: :not_installed}}
+      true -> read_background_capabilities()
+    end
+  end
+
+  defp read_background_capabilities do
+    case ComputerUseCapabilities.read() do
+      {:ok, capabilities} -> {:ok, %{state: :read, capabilities: capabilities}}
       {:error, reason} -> {:error, reason}
     end
   end

@@ -415,6 +415,12 @@
       "why": "ADDED to every settings row: whether a choice row's `options` are only what a client may offer inline rather than its whole value space. `settings.apply` validates a choice value against `options` unless this is true, so without the field every choice row accepted any string and an off-list word reached the writer's `String.to_existing_atom/1` and came back to the operator as an Elixir exception message under the control they had just used. True on timezone, communication_style and the four model rows (default_model, subagent_model, transcription_model, image_model), where a richer native picker legitimately sends a value the daemon has never listed; false on every other row and every non-choice kind. E5: render a suggestions row as an editable combo box, a plain choice row as a closed menu."
     },
     {
+      "method": "settings.get:computer_use",
+      "field": "rows:computer_use_background",
+      "kind": "engine_only",
+      "why": "M42 slice 5 adds the experimental bound-window toggle to the computer-use section. The draft predates it, so the app re-vendors this export before it can render the row; until then the engine simply publishes one row the app does not draw."
+    },
+    {
       "method": "settings.get:generate_image",
       "field": "rows:google_api_key",
       "kind": "draft_only",

@@ -8,6 +8,23 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Computer use can work inside one window, experimentally and off by default.**
+  With `background = true` under `[fermix_core.computer_use]` — a new setting that
+  ships switched off and stays off until it has been checked on a real desktop —
+  Fermix picks one window and works in it: it sees that window even when another
+  covers it, its coordinates are that window's rather than the screen's, and where
+  the window offers named controls it presses them without taking the pointer, so
+  you can keep working in front of it. The helper puts a small panel on screen
+  naming the window it is in, with pause and stop that reach it directly rather
+  than through the daemon. Stop there stops the work, not just the session: it
+  says so in the conversation, and it tells Fermix to put the task down and ask
+  you before going any further rather than carrying on with a fresh helper. Choosing the whole screen instead is an explicit move with
+  its own wording, so going from working quietly in one window to moving your
+  pointer around is never something that simply happens. While the setting is off
+  none of this is offered to the model and computer use behaves exactly as before;
+  the new `window binding` row in `fermix doctor` reports the setting, whether the
+  installed helper can bind a window, and whether its on-screen panel is there.
+
 - **A click's picture now waits for the screen to react.** The image a computer-use
   action came back with was taken the instant the input went out, before the
   application had done anything, so a button that takes a moment to repaint looked

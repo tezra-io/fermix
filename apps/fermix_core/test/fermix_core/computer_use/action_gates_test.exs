@@ -51,7 +51,13 @@ defmodule FermixCore.ComputerUse.ActionGatesTest do
     "paste" => :mutating,
     "key" => :mutating,
     "press" => :mutating,
-    "set_value" => :mutating
+    "set_value" => :mutating,
+    # M42 slice 5: binding a window and giving it back change what the helper is
+    # POINTED at. Nothing is dispatched, no pointer moves and no key goes down,
+    # so they are read-only in every sense the gates below key on — including the
+    # pause, which takes the keyboard back and not the bookkeeping.
+    "select_target" => :read_only,
+    "release_target" => :read_only
   }
 
   # One well-formed request per mutating action. An action the library gains and

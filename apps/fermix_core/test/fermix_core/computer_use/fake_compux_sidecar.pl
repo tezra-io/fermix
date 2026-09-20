@@ -2,7 +2,7 @@
 # Test-only fake compux sidecar for the fermix PortDriver adapter. Autoflush so a
 # one-line reply reaches the Port immediately.
 #
-# It speaks protocol 10 framing: every inbound line is a tagged `request` or
+# It speaks protocol 11 framing: every inbound line is a tagged `request` or
 # `control` frame carrying a `request_id`, and every reply echoes that id inside a
 # tagged `response` or `control_ack`. A reply that hands back coordinates mints an
 # `observation_id`; a pointer action that names none, or names one this fake has
@@ -14,7 +14,19 @@
 # too — a fake that refused LESS than the helper would let a request shape the
 # helper rejects pass every test in this repo.
 #
-# Protocol 10 replaces `screenshot_after` with `check`, and a mutating success
+# Protocol 11 adds the bound window: `select_target` binds one window from a
+# `windows` listing and answers a `target_id`, what it bound, by which methods it
+# can be reached, whether its accessibility window was bound, and a first
+# observation of that window alone; `release_target` ends it; every action inside
+# it carries `target_id`. Every refusal the helper has for a bound window is here
+# too — a window that went away, one that is minimized, one something covers, one
+# with no accessibility window, a missing on-screen indicator and the two capture
+# failures — because a fake that refused LESS than the helper would leave every
+# one of those paths unproven. `idle_ms` answers `front_is_target` beside its
+# reading, which is what tells the person working in THIS window from the person
+# working elsewhere.
+#
+# Protocol 10 replaced `screenshot_after` with `check`, and a mutating success
 # answers exactly what its request asked for: `image` returns the view the action
 # acted in (this fake settles instantly, so its timings are zero), `semantic`
 # returns the control read again as `element_after`, `none` returns the receipt
@@ -55,12 +67,20 @@
 #      with, e.g. "element_disabled"),
 #      FAKE_FOREGROUND_CHANGED (1 to report that an AX action took the front),
 #      FAKE_SETTLE ("stable" default, "timeout" for a view that never settled),
-#      FAKE_CHANGED (1 default, 0 for a view identical to the one acted on).
+#      FAKE_CHANGED (1 default, 0 for a view identical to the one acted on),
+#      FAKE_TARGET_ERROR (a bound-window code to refuse every action carrying a
+#      `target_id` with, e.g. "target_minimized" — each of the bound-window
+#      codes is a code of its own, never folded into a neighbour),
+#      FAKE_NO_TARGETS (1 for a build that advertises no window binding),
+#      FAKE_INDICATOR ("present" default, "missing" for a bundle with none),
+#      FAKE_AX_BINDING ("bound" default; "unavailable" drops `ax` from methods),
+#      FAKE_FRONT_IS_TARGET (1 to report the bound window as the front one),
+#      FAKE_TARGET_CHILDREN (1 to report a second window of the same process).
 use strict;
 use warnings;
 $| = 1;
 
-my $proto        = $ENV{FAKE_PROTO} // 10;
+my $proto        = $ENV{FAKE_PROTO} // 11;
 my $BOOT         = $ENV{FAKE_SIDECAR_GENERATION} // 'boot-fake';
 my $CONTROL_MODE = $ENV{FAKE_CONTROL_MODE} // 'ack';
 my $OBS_ERROR    = $ENV{FAKE_OBSERVATION_ERROR};
@@ -68,6 +88,19 @@ my $ELEMENT_ERROR = $ENV{FAKE_ELEMENT_ERROR};
 my $FOREGROUND   = $ENV{FAKE_FOREGROUND_CHANGED} ? 'true' : 'false';
 my $SETTLE       = $ENV{FAKE_SETTLE} // 'stable';
 my $CHANGED      = (defined $ENV{FAKE_CHANGED} && $ENV{FAKE_CHANGED} eq '0') ? 'false' : 'true';
+my $TARGET_ERROR = $ENV{FAKE_TARGET_ERROR};
+my $INDICATOR    = $ENV{FAKE_INDICATOR} // 'present';
+my $AX_BINDING   = $ENV{FAKE_AX_BINDING} // 'bound';
+my $FRONT        = $ENV{FAKE_FRONT_IS_TARGET} ? 'true' : 'false';
+my $TARGETS      = $ENV{FAKE_NO_TARGETS} ? 'false' : 'true';
+my $CHILDREN     = $ENV{FAKE_TARGET_CHILDREN}
+    ? qq(,"children":[{"window_id":9,"app":"Fixture","title":"Second window"}])
+    : '';
+
+# The targets this fake has bound, in the order they were asked for. Mirrors the
+# helper: one target at a time, and selecting again REPLACES it.
+my $TARGET_SEQ = 0;
+my $BOUND = 0;
 
 # One counter per process, so an id from a sidecar that died can never resolve in
 # its successor: the boot generation is part of the id.
@@ -106,7 +139,16 @@ my $deferred;
 # model actions: only a mutating action carries a receipt.
 my %READ_ONLY = map { $_ => 1 } qw(
     screenshot mouse_move wait inspect wait_for_change elements windows
+    select_target release_target
     hello probe idle_ms wait_for_idle hang defer no_receipt
+);
+
+# Mirrors the helper's targetable set: everything that looks at, or acts inside,
+# ONE window. `windows` enumerates the desktop's, `wait` and `wait_for_change`
+# have no target to name, and the two target verbs are not inside one.
+my %TARGETABLE = map { $_ => 1 } qw(
+    screenshot elements inspect left_click right_click double_click mouse_move
+    left_click_drag scroll type key paste press set_value
 );
 
 sub envelope {
@@ -170,7 +212,7 @@ sub control {
     }
 }
 
-# The addressing half of the wire (protocol 10), matching the helper on BOTH
+# The addressing half of the wire (protocol 11), matching the helper on BOTH
 # sides: an action aimed into an observation must name it and must not
 # carry a rectangle; an action that aims at nothing must not name one at all; and
 # a target named twice, or named by a reference nobody minted, is refused before
@@ -182,27 +224,35 @@ sub refuse_addressing {
     my $names_image = $line =~ /"observation_id":"[^"]/;
     my ($reference) = $line =~ /"element_ref":"([^"]*)"/;
     my $has_point = $line =~ /"(?:x|from|to)":/;
+    my ($target) = $line =~ /"target_id":"([^"]*)"/;
 
     my $code;
-    if ($ADDRESSED{$action}) {
-        if    ($line =~ /"region":/)                 { $code = 'unknown_field'; }
-        elsif (!$names_image)                        { $code = 'observation_required'; }
-        elsif (defined $reference && $has_point)     { $code = 'addressing_conflict'; }
-        elsif ($ELEMENT_ONLY{$action} && !defined $reference) { $code = 'element_required'; }
-        elsif (defined $reference && !$ELEMENTS{$reference})  { $code = 'stale_element'; }
-        elsif (defined $reference && $ELEMENT_ERROR) { $code = $ELEMENT_ERROR; }
-        elsif ($OBS_ERROR)                           { $code = $OBS_ERROR; }
-    }
-    elsif (defined $reference) {
-        # `type`, `key`, `wait`, `windows` and the viewing actions address no
-        # control, so a reference on one is a field the helper does not accept.
-        $code = 'unknown_field';
-    }
-    elsif ($names_image && !$VIEWING{$action}) {
-        # `type`, `key`, `wait`, `windows`, the operational verbs: they read no
-        # coordinates, so an observation_id on one is a field the helper does not
-        # accept there.
-        $code = 'unknown_field';
+    # v11: a target on an action that does not act inside one window is a field
+    # the helper does not accept there, and an action INSIDE a bound window
+    # carries every refusal the binding can produce.
+    if (defined $target && !$TARGETABLE{$action}) { $code = 'unknown_field'; }
+    elsif (defined $target && $TARGET_ERROR)      { $code = $TARGET_ERROR; }
+    if (!defined $code) {
+        if ($ADDRESSED{$action}) {
+            if    ($line =~ /"region":/)                 { $code = 'unknown_field'; }
+            elsif (!$names_image)                        { $code = 'observation_required'; }
+            elsif (defined $reference && $has_point)     { $code = 'addressing_conflict'; }
+            elsif ($ELEMENT_ONLY{$action} && !defined $reference) { $code = 'element_required'; }
+            elsif (defined $reference && !$ELEMENTS{$reference})  { $code = 'stale_element'; }
+            elsif (defined $reference && $ELEMENT_ERROR) { $code = $ELEMENT_ERROR; }
+            elsif ($OBS_ERROR)                           { $code = $OBS_ERROR; }
+        }
+        elsif (defined $reference) {
+            # `type`, `key`, `wait`, `windows` and the viewing actions address no
+            # control, so a reference on one is a field the helper does not accept.
+            $code = 'unknown_field';
+        }
+        elsif ($names_image && !$VIEWING{$action}) {
+            # `type`, `key`, `wait`, `windows`, the operational verbs: they read no
+            # coordinates, so an observation_id on one is a field the helper does not
+            # accept there.
+            $code = 'unknown_field';
+        }
     }
     return 0 unless $code;
 
@@ -265,10 +315,58 @@ sub elements_body {
         . qq(],"truncated":"nodes");
 }
 
+# The window this fake just bound, exactly as the helper answers one: what it
+# bound (labels, never keys), by which methods it can be reached, whether its
+# accessibility window was bound, and a first observation of that window alone.
+sub target_body {
+    my $methods = ($AX_BINDING eq 'bound')
+        ? '["foreground_hid","ax"]'
+        : '["foreground_hid"]';
+
+    return qq("target_id":"t$TARGET_SEQ","target_generation":$TARGET_SEQ,)
+        . qq("window_id":7,"app":"Fixture","title":"Fixture window",)
+        . qq("methods":$methods,"ax_binding":"$AX_BINDING"$CHILDREN,)
+        . observation('image')
+        . qq(,"data":"cG5n","mime":"image/png","width":100,"height":80,)
+        . qq("region":{"x":0,"y":0,"w":100,"h":80});
+}
+
 sub request {
     my ($id, $action, $line) = @_;
 
     return if refuse_addressing($id, $action, $line);
+
+    # v11: binding and unbinding dispatch nothing, so they carry no receipt.
+    if ($action eq 'select_target') {
+        # The helper takes an INTEGER window id and nothing else: there is no
+        # "desktop" window, there is the absence of a target.
+        unless ($line =~ /"window_id":\s*\d+/) {
+            print qq({"type":"response",) . envelope($id)
+                . qq(,"ok":false,"error":"invalid_argument",)
+                . qq("detail":"select_target needs window_id"}\n);
+            return;
+        }
+        if ($TARGET_ERROR) {
+            print qq({"type":"response",) . envelope($id)
+                . qq(,"ok":false,"error":"$TARGET_ERROR",)
+                . qq("detail":"the fake sidecar refused the binding"}\n);
+            return;
+        }
+        $TARGET_SEQ++;
+        $BOUND = 1;
+        print qq({"type":"response",) . envelope($id)
+            . qq(,"ok":true,) . target_body() . qq(}\n);
+        return;
+    }
+    if ($action eq 'release_target') {
+        # Idempotent, and a no-op when there was none: releasing nothing is what
+        # the caller asked for either way, so it says so rather than refusing.
+        my $released = $BOUND ? 'true' : 'false';
+        $BOUND = 0;
+        print qq({"type":"response",) . envelope($id)
+            . qq(,"ok":true,"released":$released}\n);
+        return;
+    }
 
     # An accessibility action reports what IT observed; a pointer action addressed
     # by a reference still went out over the pointer, so it keeps the HID receipt.
@@ -319,7 +417,15 @@ sub request {
             . qq(,"ok":true,"protocol_version":$proto,)
             . qq("compux_version":"0.0.0-fake","actions":[],)
             . qq("capabilities":{"input_methods":["foreground_hid"],)
+            . qq("capture_methods":["display","window"],)
+            . qq("targets":$TARGETS,"indicator":"$INDICATOR",)
             . qq("controls":["pause","resume","release"]}}\n);
+    }
+    elsif ($action eq 'idle_ms') {
+        # v11: `front_is_target` rides the idle reading, so a caller can tell the
+        # person working in THIS window from the person working elsewhere.
+        print qq({"type":"response",) . envelope($id)
+            . qq(,"ok":true,"idle_ms":10000,"front_is_target":$FRONT}\n);
     }
     elsif ($action eq 'hang')  { sleep 10; }
     elsif ($action eq 'boom')  { exit 7; }

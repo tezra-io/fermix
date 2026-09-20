@@ -15,7 +15,7 @@ defmodule FermixCore.ComputerUse.MarksTest do
   alias FermixCore.ComputerUse.Session
 
   # Mirrors compux's screenshot payload for the incident display: dims plus the
-  # minted `observation_id` (protocol 10), and a canned mark table when
+  # minted `observation_id` (protocol 11), and a canned mark table when
   # `marks: true` rides the request.
   defmodule MarksDriver do
     @behaviour Compux.Driver

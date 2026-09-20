@@ -18,7 +18,7 @@ defmodule FermixCore.ComputerUse.PortDriverTest do
     assert is_pid(transport)
 
     # A reply that hands back coordinates names the image they belong to
-    # (protocol 10), which the fake mints exactly as the helper does.
+    # (protocol 11), which the fake mints exactly as the helper does.
     assert {:ok, %{"ok" => true, "observation_id" => "boot-fake-1"}} =
              PortDriver.execute(state, %{"action" => "screenshot"})
 
@@ -125,7 +125,7 @@ defmodule FermixCore.ComputerUse.PortDriverTest do
     assert :ok = PortDriver.stop(state)
   end
 
-  # The addressing half of the wire (protocol 10): a pointer action must name the
+  # The addressing half of the wire (protocol 11): a pointer action must name the
   # image its coordinates were read in and must not carry a rectangle, and every
   # refusal of one dispatched nothing. The fake answers exactly as the helper does,
   # so the session's sentences are exercised against a real Port rather than a map.
@@ -210,7 +210,7 @@ defmodule FermixCore.ComputerUse.PortDriverTest do
     end
   end
 
-  # The check, at the wire (protocol 10). A mutating success answers the evidence
+  # The check, at the wire (protocol 11). A mutating success answers the evidence
   # its request asked for, on its OWN frame — an image check comes back as that
   # image, minting an id of its own — and always says which evidence that was and
   # what each phase cost. A fake that omitted either would be kinder than the
@@ -298,7 +298,7 @@ defmodule FermixCore.ComputerUse.PortDriverTest do
     assert :ok = PortDriver.stop(state)
   end
 
-  # References, at the wire (protocol 10). An accessibility action answers its own
+  # References, at the wire (protocol 11). An accessibility action answers its own
   # input method and the effect its read-back earned — never the HID receipt a
   # click gets, which would make "the pointer did it" indistinguishable from "the
   # control did it".
@@ -433,6 +433,105 @@ defmodule FermixCore.ComputerUse.PortDriverTest do
              PortDriver.start(binary_path: @fake, env: [{~c"FAKE_PROTO", ~c"999"}])
 
     assert lib == Compux.Protocol.protocol_version()
+  end
+
+  # Bound windows, at the wire (protocol 11). Binding and unbinding dispatch
+  # nothing, so neither earns a receipt; a bound window's id rides the actions
+  # that act inside it and is refused on the ones that do not; and every refusal
+  # the binding can produce arrives as a code with a not-sent receipt behind it.
+  test "a select_target answers what it bound, how to reach it, and a first look" do
+    {:ok, state} = PortDriver.start(binary_path: @fake)
+
+    assert {:ok, reply} =
+             PortDriver.execute(state, %{"action" => "select_target", "window_id" => 7})
+
+    assert reply["target_id"] == "t1"
+    assert reply["target_generation"] == 1
+    assert reply["window_id"] == 7
+    assert reply["app"] == "Fixture"
+    assert reply["methods"] == ["foreground_hid", "ax"]
+    assert reply["ax_binding"] == "bound"
+    assert is_binary(reply["observation_id"])
+    refute Map.has_key?(reply, "receipt"), "binding a window dispatches no input"
+
+    assert {:ok, %{"released" => true}} =
+             PortDriver.execute(state, %{"action" => "release_target"})
+
+    # Releasing nothing is what the caller asked for either way, so it answers a
+    # no-op rather than a refusal.
+    assert {:ok, %{"released" => false}} =
+             PortDriver.execute(state, %{"action" => "release_target"})
+
+    PortDriver.stop(state)
+  end
+
+  test "a select_target that names no window id is refused before anything is bound" do
+    {:ok, state} = PortDriver.start(binary_path: @fake)
+
+    assert {:error, {:action_failed, %{"error" => "invalid_argument"}}} =
+             PortDriver.execute(state, %{"action" => "select_target", "window_id" => "desktop"})
+
+    PortDriver.stop(state)
+  end
+
+  test "a window's id is accepted inside it and refused on an action that is not" do
+    {:ok, state} = PortDriver.start(binary_path: @fake)
+
+    assert {:ok, %{"observation_id" => _}} =
+             PortDriver.execute(state, %{"action" => "screenshot", "target_id" => "t1"})
+
+    assert {:error, {:action_failed, %{"error" => "unknown_field"}}} =
+             PortDriver.execute(state, %{"action" => "windows", "target_id" => "t1"})
+
+    PortDriver.stop(state)
+  end
+
+  test "every bound-window refusal arrives with a not_sent receipt" do
+    for code <- ~w(target_unavailable target_minimized target_obstructed
+                   ax_binding_unavailable control_surface_unavailable
+                   capture_unavailable capture_budget_exceeded
+                   screen_recording_not_granted) do
+      {:ok, state} =
+        PortDriver.start(
+          binary_path: @fake,
+          env: [{~c"FAKE_TARGET_ERROR", String.to_charlist(code)}]
+        )
+
+      assert {:error, {:action_failed, payload}} =
+               PortDriver.execute(state, %{
+                 "action" => "left_click",
+                 "observation_id" => "boot-fake-1",
+                 "target_id" => "t1",
+                 "x" => 1,
+                 "y" => 2
+               })
+
+      assert payload["error"] == code
+      assert payload["receipt"]["dispatch"] == "not_sent"
+
+      PortDriver.stop(state)
+    end
+  end
+
+  test "the idle reading says whether the bound window is the one in front" do
+    {:ok, state} = PortDriver.start(binary_path: @fake, env: [{~c"FAKE_FRONT_IS_TARGET", ~c"1"}])
+
+    assert {:ok, %{"idle_ms" => 10_000, "front_is_target" => true}} =
+             PortDriver.execute(state, %{"action" => "idle_ms"})
+
+    PortDriver.stop(state)
+  end
+
+  test "the handshake says whether this helper can bind a window and show it" do
+    {:ok, state} = PortDriver.start(binary_path: @fake)
+
+    assert {:ok, identity} = PortDriver.execute(state, %{"action" => "hello"})
+
+    assert identity["capabilities"]["targets"] == true
+    assert identity["capabilities"]["indicator"] == "present"
+    assert identity["capabilities"]["capture_methods"] == ["display", "window"]
+
+    PortDriver.stop(state)
   end
 
   test "maps a sidecar-action timeout to the fermix Timeouts shape" do

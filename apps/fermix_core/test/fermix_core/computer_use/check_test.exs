@@ -32,7 +32,7 @@ defmodule FermixCore.ComputerUse.CheckTest do
   @no_change %{"kind" => "image", "settle" => "stable", "changed" => false}
   @did_change %{"kind" => "image", "settle" => "stable", "changed" => true}
 
-  # Mirrors the helper under protocol 10: a mutating action answers the evidence
+  # Mirrors the helper under protocol 11: a mutating action answers the evidence
   # its request asked for, on its own frame. `check` and `timings` are the test's,
   # so every rung of the settle/changed ladder is walked without a real capture; a
   # list of checks held in an Agent walks several actions in one session.

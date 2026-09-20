@@ -404,6 +404,8 @@ defmodule FermixOpik.TraceFileTest do
       "action" => "click",
       "cu_session" => "cua_ab12",
       "outcome" => "performed_unverified",
+      # Coexistence (V3 R0): what the arbiter did about a present human.
+      "courtesy" => "deferred",
       # Addressing (M42 slice 3): how stale the image the action aimed at was, and
       # the code when it named no addressable one.
       "observation_age_ms" => 5_100,
@@ -420,6 +422,11 @@ defmodule FermixOpik.TraceFileTest do
       "cu_settle_ms" => 180,
       "cu_capture_ms" => 40,
       "cu_encode_ms" => 9,
+      # Bound windows (M42 slice 5): what the action was pointed at, and how it
+      # reached the screen.
+      "target_kind" => "window",
+      "cu_mode" => "background",
+      "title" => "Inbox (3) — work@example.com",
       "value" => "hunter2",
       "screen_text" => "Transfer $4,000 to account 12345"
     }
@@ -439,6 +446,10 @@ defmodule FermixOpik.TraceFileTest do
     assert meta.cu_settle_ms == 180
     assert meta.cu_capture_ms == 40
     assert meta.cu_encode_ms == 9
+    assert meta.target_kind == "window"
+    assert meta.cu_mode == "background"
+    assert meta.courtesy == "deferred"
+    refute Map.has_key?(meta, :title), "a window title is content, not a row field"
     refute Map.has_key?(meta, :value), "the value a set_value carried is content, not a row field"
     refute Map.has_key?(meta, :screen_text)
   end

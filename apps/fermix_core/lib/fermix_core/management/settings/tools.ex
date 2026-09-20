@@ -94,11 +94,21 @@ defmodule FermixCore.Management.Settings.Tools do
   @doc "The rows of one owned section."
   @spec rows(String.t(), Source.snapshot()) :: [Row.t()]
   def rows("computer_use", snapshot) do
+    block = Source.core(snapshot, :computer_use)
+    restart = Row.restart?(:computer_use)
+
     [
       Row.new("computer_use_enabled", :toggle, "Computer use",
         footer: "Runs as Fermix Computer Use, a separate signed helper.",
-        value: Source.boolean(Source.core(snapshot, :computer_use), :enabled, false),
-        restart: Row.restart?(:computer_use)
+        value: Source.boolean(block, :enabled, false),
+        restart: restart
+      ),
+      Row.new("computer_use_background", :toggle, "Work inside one window",
+        footer:
+          "Experimental. Fermix picks one window and works in it, and a small panel on " <>
+            "screen shows which one, with pause and stop.",
+        value: Source.boolean(block, :background, false),
+        restart: restart
       )
     ]
   end

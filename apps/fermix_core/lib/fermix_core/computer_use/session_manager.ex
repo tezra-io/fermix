@@ -18,6 +18,7 @@ defmodule FermixCore.ComputerUse.SessionManager do
   alias FermixCore.ComputerUse
   alias FermixCore.ComputerUse.CaptureHealth
   alias FermixCore.ComputerUse.Config
+  alias FermixCore.ComputerUse.OperatorStop
   alias FermixCore.ComputerUse.Safety
   alias FermixCore.ComputerUse.Session
   alias FermixCore.ComputerUse.Supervisor, as: CuSupervisor
@@ -30,9 +31,11 @@ defmodule FermixCore.ComputerUse.SessionManager do
   def ensure(%Config{} = config, context, opts \\ []) when is_map(context) do
     key = conversation_key(context)
 
-    case Registry.lookup(CuSupervisor.registry(), key) do
-      [{pid, _}] -> {:ok, pid}
-      [] -> start_session(key, config, context, opts)
+    with :ok <- OperatorStop.check(key, Map.get(context, :session_id)) do
+      case Registry.lookup(CuSupervisor.registry(), key) do
+        [{pid, _}] -> {:ok, pid}
+        [] -> start_session(key, config, context, opts)
+      end
     end
   end
 

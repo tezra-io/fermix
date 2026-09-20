@@ -9,6 +9,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
   alias FermixCore.Agents.AgentDefinition
   alias FermixCore.Capabilities.Deferral
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.ComputerUse.Config, as: ComputerUseConfig
   alias FermixCore.Harness.Config, as: HarnessConfig
   alias FermixCore.Tools.SearchCredential
 
@@ -109,7 +110,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
     - When you do spend pixels: coordinates are pixels in the image you name. Every `computer_use` reply that hands back coordinates carries an `observation_id`, and every click, move, drag, scroll and inspect must carry the id of the image its x,y were read in — read and aim in the same image, and never re-send coordinates from an image that has been refused as unknown, expired or stale.
     - Better still, don't aim at all — NAME the control. `computer_use`'s `elements` lists each control with a reference and says what that control itself supports: one that lists `press` is pressed by name (`press` with its `element_ref` and that listing's `observation_id`), which moves no pointer and cannot miss, and a `settable` field is filled with `set_value` instead of clicking it and typing. Spend pixels on what the accessibility tree does not expose.
     - Every mutating `computer_use` action comes back with its own check: the view it acted in, captured once that view stopped changing, or — for a `press` or `set_value` — the control read again. A check that says nothing visible changed is a fact about the view, not a miss, and never a reason to send the same action again; when a run of actions leaves the view unchanged, take a fresh full `screenshot`, take `elements` and act on a control by name, or tell the user what is not working.
-    - Web routing — pick ONE and commit; switch only on a new reason, never rotate through tools for the same goal:
+    #{background_computer_use_rule()}- Web routing — pick ONE and commit; switch only on a new reason, never rotate through tools for the same goal:
       - If a connected plugin owns the surface (e.g. `github_*` for GitHub, `notion_*` for Notion, `obsidian_*` for the vault, `x_*` for X/Twitter, the Google tools for mail/calendar/drive) use its tools — they hit the real API directly; do NOT open the browser or `web_search` for that surface. Any such plugin is listed under Plugins below.
       - `web_search` for a fact with no known URL — anything current, changing, or possibly moved since training (prices, rates, versions, who holds a role, schedules, hours, addresses, news) as well as plain lookups; a confident memory of a mutable fact is still a reason to search.
       - `web_fetch` for the readable text of ONE known URL whose content is in the server HTML.
@@ -173,6 +174,24 @@ defmodule FermixCore.Prompt.RuntimeSections do
 
       {:error, _reason} ->
         ""
+    end
+  end
+
+  # M42 slice 5 §1: rendered only where the operator switched the experimental
+  # bound-window surface on, exactly like the tool schema that offers it — the
+  # off-path prompt stays byte-identical to what shipped before it, so a daemon
+  # without the flag is never steered toward actions it does not advertise.
+  defp background_computer_use_rule do
+    if ComputerUseConfig.background?() do
+      "- `computer_use` can work INSIDE ONE WINDOW: `windows` to find it, `select_target` " <>
+        "with its `window_id` to bind it, and from then on every look and every action is " <>
+        "answered from that window's own picture, even when something covers it. Prefer it " <>
+        "for anything that lives in one application — the person keeps their own window in " <>
+        "front — and say " <>
+        ~s(`select_target` with `"window_id": "desktop"` when you really ) <>
+        "mean the whole screen, which moves the pointer where they can see it.\n"
+    else
+      ""
     end
   end
 

@@ -559,6 +559,46 @@ a **string** after replay, because the JSONL row it is read back from is JSON.
 Everything downstream treats the two alike; a consumer that compares `outcome`
 must accept both spellings rather than assume the live one.
 
+### What a `computer_use` exec row may carry
+
+The whole of it, derived from `Tools.ComputerUse`'s `@receipt_facts` and the two
+putters beside it. Every field below is a closed word, a boolean, a bounded
+count or an opaque id, and every one of them is named in **both** allowlists
+(`Mapper.tool_span/3` and `TraceFile.normalize("tool_exec", …)`) — a key that is
+in neither is written to the JSONL stream and then dropped by replay and by
+Opik, which is a field nobody can count. A field is **absent** rather than
+defaulted whenever its fact was not established.
+
+| Field | Values | Present when | Means |
+|---|---|---|---|
+| `action` | the model's action name | every call | which verb was asked for |
+| `cu_session` | `cua_…` string | the session was registry-registered | which session drove it |
+| `outcome` | `refused \| performed \| performed_unverified \| unknown \| read` | every call | what happened to the INPUT |
+| `courtesy` | `off \| na \| unavailable \| proceeded \| deferred \| yielded \| paused` | every call | what the coexistence arbiter did about a person at the machine: nothing to do, not applicable, no idle signal, went ahead, waited for them, stepped aside, or the seat was already handed back |
+| `observation_age_ms` | non-negative integer | the action named an image | how stale that image was when it was sent |
+| `geometry_refusal` | `observation_required \| addressing_conflict \| unknown_observation \| expired_observation \| stale_observation \| point_outside_observation \| capture_geometry_mismatch` | an addressing or geometry gate refused | which one, countable without parsing a sentence |
+| `input_method` | `ax \| foreground_hid` | the helper reported a receipt | by which mechanism the input went out |
+| `effect` | `verified \| not_observed \| unknown` | the helper observed the result | what it observed, never inferred |
+| `check_kind` | `image \| semantic \| none` | the action came back with a check | which evidence it carried |
+| `check_changed` | boolean | an image check could compare two hashes | whether that view differs from the one acted on |
+| `cu_input_ms` / `cu_settle_ms` / `cu_capture_ms` / `cu_encode_ms` | non-negative integers, dropped above the outer call deadline | the helper timed that phase | what each phase of the action cost |
+| `target_kind` | `window \| desktop` | a target is bound, which needs `[fermix_core.computer_use] background` on; absent on every row otherwise | what the action was pointed at |
+| `cu_mode` | `background \| foreground` | the action produced a result rather than a refusal; reads `foreground` until a window is bound, so `background` is the value that needs the flag | how the input reached the screen: inside a bound window through accessibility, or in front of the person |
+
+`control_origin` is the one addition to the **lifecycle** rows: on
+`session_pause` and `session_resume` it is `:command` when a chat `/pause` or
+`/resume` did it and `:indicator` when the person pressed the button on the
+helper's own on-screen panel. It is beside `origin`, never instead of it —
+`origin` is the session's attended origin (`:interactive`, `:voice`) on every row
+of the family, and overwriting it would make the row lie about where the session
+came from.
+
+**Nothing read off the screen is ever in any of these.** No window title, no
+application name, no control label, no typed text, no value a `set_value`
+carried, no image data — whatever the content-capture posture. Those are content:
+they ride the model's side of the wire and the capture gate, never always-on
+metadata.
+
 ## Content (prompts / responses / tool IO)
 
 Attach bodies **only** behind `FermixCore.Telemetry.capture_content?/0`, and

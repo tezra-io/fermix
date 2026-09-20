@@ -31,9 +31,20 @@ defmodule FermixCore.ComputerUse.ActionWorker do
 
   use GenServer, restart: :temporary
 
+  alias FermixCore.ComputerUse.Capabilities
   alias FermixCore.ComputerUse.Session
 
   require Logger
+
+  # What the on-screen indicator's buttons arrive as (M42 slice 5 §3.3). The
+  # helper has ALREADY applied each one to its own gate before it tells us, so
+  # these are notifications of a hold that is in place, never requests to install
+  # one.
+  @operator_events %{
+    "operator_pause" => :pause,
+    "operator_resume" => :resume,
+    "operator_stop" => :stop
+  }
 
   # How long `stop/1` waits for the worker to finish what it is doing before it
   # gives up waiting. The common case is microseconds (the worker is idle); the
@@ -68,6 +79,19 @@ defmodule FermixCore.ComputerUse.ActionWorker do
   """
   @spec control_handle(GenServer.server()) :: {module(), Compux.Driver.state()}
   def control_handle(worker), do: GenServer.call(worker, :control_handle)
+
+  @doc """
+  What the helper this worker is talking to says it can do, from the `hello` it
+  answered at the handshake.
+
+  Asked by the `Session` at start, and only where a surface that depends on the
+  answer is switched on: a capability the model is about to be offered has to be
+  a fact about THIS helper. The transport answers a second `hello` from its
+  cached identity, so this costs no round trip, and a helper that will not answer
+  is read as advertising nothing.
+  """
+  @spec capabilities(GenServer.server()) :: Capabilities.t()
+  def capabilities(worker), do: GenServer.call(worker, :capabilities)
 
   @doc """
   Run one finalized request. `exec_state` is the slice of session state the
@@ -128,6 +152,9 @@ defmodule FermixCore.ComputerUse.ActionWorker do
   def handle_call(:control_handle, _from, state),
     do: {:reply, {state.driver_mod, state.driver_state}, state}
 
+  def handle_call(:capabilities, _from, state),
+    do: {:reply, read_capabilities(state.driver_mod, state.driver_state), state}
+
   @impl true
   def handle_cast({:execute, request, exec_state}, state) do
     result = Session.run_pipeline(request, with_driver(exec_state, state))
@@ -146,11 +173,36 @@ defmodule FermixCore.ComputerUse.ActionWorker do
     {:stop, {:shutdown, {:sidecar_exit_status, status}}, state}
   end
 
-  # Decoded and forwarded by the transport; nothing emits one at this protocol
-  # version. Named rather than left to the catch-all so the day something does
-  # emit one, the log says what arrived instead of "unexpected message".
+  # The on-screen indicator's buttons (M42 slice 5 §3.3), decoded and forwarded by
+  # the transport. Handed to the `Session`, which owns what a pause, a resume and
+  # a stop MEAN — the same place the chat commands reach, so one hold has one
+  # implementation whichever surface asked for it.
+  #
+  # Delivered here whether this worker is idle or inside an action, exactly like
+  # the exit notice, and for the same reason it is safe: the helper applied the
+  # hold to its own gate BEFORE sending this, so nothing is being driven while
+  # the message waits. An action already under way therefore answers its caller
+  # first and the hold lands behind it, which is the order slice 2 audited.
+  def handle_info({:compux_session_event, _transport, %{"kind" => "indicator"} = event}, state) do
+    case Map.fetch(@operator_events, event["event"]) do
+      {:ok, control} ->
+        send(state.session, {:operator_control, control})
+
+      :error ->
+        # Loud rather than silent: a dropped Stop is a person pressing a button
+        # and watching nothing happen, which is the one failure this family
+        # exists to prevent.
+        Logger.warning("computer_use: unknown indicator event #{inspect(event["event"])}")
+    end
+
+    {:noreply, state}
+  end
+
+  # Another family the sidecar speaks unasked (`request_deferred` is the one that
+  # exists today). Named rather than left to the catch-all, so the log says what
+  # arrived instead of "unexpected message".
   def handle_info({:compux_session_event, _transport, event}, state) do
-    Logger.debug("computer_use: ignoring a sidecar session event (#{inspect(event.kind)})")
+    Logger.debug("computer_use: ignoring a sidecar session event (#{inspect(event["kind"])})")
     {:noreply, state}
   end
 
@@ -188,6 +240,25 @@ defmodule FermixCore.ComputerUse.ActionWorker do
         )
 
         true
+    end
+  end
+
+  # A helper that would not answer `hello` advertises nothing: the conservative
+  # reading is the same shape as a real one (`Capabilities.none/0`), so every
+  # consumer reads one map rather than remembering a `nil`. A driver double that
+  # predates the handshake lands here too, which is right — a double proves
+  # nothing about what the shipped helper can do.
+  defp read_capabilities(driver_mod, driver_state) do
+    case driver_mod.execute(driver_state, %{"action" => "hello"}) do
+      {:ok, identity} when is_map(identity) ->
+        Capabilities.from_identity(identity)
+
+      other ->
+        Logger.warning(
+          "computer-use helper did not report its capabilities (none assumed): " <> inspect(other)
+        )
+
+        Capabilities.none()
     end
   end
 

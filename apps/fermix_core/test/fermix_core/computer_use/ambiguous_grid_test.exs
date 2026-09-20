@@ -28,7 +28,7 @@ defmodule FermixCore.ComputerUse.AmbiguousGridTest do
 
   # Mirrors compux's real screenshot payload shape for the incident display
   # (3840x1080 @1x -> full sent image 1366x384): width/height plus the minted
-  # `observation_id` (protocol 10), so the session learns the image's identity and
+  # `observation_id` (protocol 11), so the session learns the image's identity and
   # dimensions exactly the way it does in production. `dims` maps a request region
   # (nil = full screen) to the sent image size.
   defmodule GeomDriver do
