@@ -28,7 +28,10 @@ time. Python still verifies the exact session, input, metadata and unique match;
 filtering does not relax correlation. Candidate pages contain at most 10 traces
 and omit output and unused feedback/annotation fields. The full selected trace
 is read by ID for grading. Normal polling no longer downloads the project's
-latest 100 traces to find one turn.
+latest 100 traces to find one turn. Opik creates a project with its first trace
+and returns 404 for it until then, so a poll on a fresh project checks the project
+list: if the project is not there, the poll finds no trace yet and keeps waiting.
+If the project is there, the poll reads once more, and a 404 from that read is an error.
 
 Settlement waits for a closed trace and a stable span count before fetching
 spans. Span reads use pages of at most 200, with separate tool and non-tool

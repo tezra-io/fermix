@@ -28,7 +28,9 @@ from datetime import datetime, timezone
 
 
 class OpikError(Exception):
-    pass
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
 
 
 _CORRELATION_KEYS = ("eval_run_id", "case_id", "turn_index")
@@ -165,10 +167,11 @@ class OpikClient:
                     return json.load(resp)
             except urllib.error.HTTPError as exc:
                 if exc.code not in RETRY_STATUSES:
-                    raise OpikError(f"GET {url}: HTTP {exc.code}: {exc.reason}") from exc
+                    raise OpikError(f"GET {url}: HTTP {exc.code}: {exc.reason}",
+                                    status=exc.code) from exc
                 if attempt + 1 == attempts:
                     raise OpikError(f"GET {url}: HTTP {exc.code}: {exc.reason} "
-                                    f"({attempts} attempts)") from exc
+                                    f"({attempts} attempts)", status=exc.code) from exc
                 time.sleep(_GET_RETRY_DELAYS_S[attempt])
             except (json.JSONDecodeError, UnicodeDecodeError) as exc:
                 raise OpikError(f"GET {url}: bad JSON: {exc}") from exc
@@ -198,7 +201,8 @@ class OpikClient:
         return True
 
     def project_exists(self) -> bool:
-        data = self._get("/projects", {"page": 1, "size": 100})
+        # `name` is a substring search; only the exact name is this project.
+        data = self._get("/projects", {"name": self.project, "page": 1, "size": 100})
         return any(p.get("name") == self.project for p in data.get("content", []))
 
     # --- traces / spans -------------------------------------------------------
@@ -243,6 +247,17 @@ class OpikClient:
                   "truncate": "false",
                   "exclude": json.dumps(["output", "feedback_scores", "span_feedback_scores",
                                          "comments", "guardrails_validations", "experiment"])}
+        try:
+            return self._read_pages("/traces", params, size=10, max_pages=10)
+        except OpikError as exc:
+            if exc.status != 404:
+                raise
+        # Opik creates a project with its first trace and 404s it until then, so a fresh
+        # project polled the moment its first turn ends has no candidates yet. The
+        # project list tells that apart from any other 404. A project created between
+        # the two requests gets one more read, and a 404 from that read raises.
+        if not self.project_exists():
+            return []
         return self._read_pages("/traces", params, size=10, max_pages=10)
 
     def get_spans(self, trace_id: str, size: int = 200) -> list[dict]:
