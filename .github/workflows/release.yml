@@ -594,6 +594,40 @@ jobs:
             "/repos/$REPO/releases/$RELEASE_ID" \
             --field draft=false >/dev/null
 
+  # The installer served at https://fermix.ai/install reads the public feed of
+  # the latest release, which a draft is not, so this is the first point at
+  # which it can be run for real. Nothing waits on it: a failure here says the
+  # advertised command is broken for a release that is already out.
+  installer:
+    name: Install the published release (${{ matrix.name }})
+    needs: promote
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: deb-linux-x64, os: ubuntu-24.04, kind: deb }
+          - { name: deb-linux-arm64, os: ubuntu-24.04-arm, kind: deb }
+          - { name: rpm-linux-x64, os: ubuntu-24.04, kind: rpm }
+          - { name: rpm-linux-arm64, os: ubuntu-24.04-arm, kind: rpm }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # With cosign present the installer checks the package signature instead
+      # of skipping the check, and the verification below requires that it did.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3.9.1
+
+      - name: Run the advertised installer against the published release
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          scripts/release/verify_installer.sh \
+            "${{ matrix.kind }}" \
+            "${TAG_NAME#v}"
+
   homebrew:
     name: Update and verify Homebrew formula
     needs: promote

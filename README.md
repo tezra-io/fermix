@@ -45,6 +45,14 @@ fermix: running (pid 12345, version 0.4.0, up 4s)
 
 ## Install
 
+### Linux package (Debian, Ubuntu, Fedora, RHEL, openSUSE)
+
+```bash
+curl -fsSL https://fermix.ai/install | sh
+```
+
+The installer picks the signed `.deb` or `.rpm` for this machine from the latest release, checks its sha256 (and its cosign signature when `cosign` is installed), installs it with `apt`, `dnf` or `zypper`, and runs `fermix setup` as your own account. The package owns the engine at `/usr/bin/fermix`, a systemd user unit and a bundled `cosign`. Run the same command again to update, then `fermix restart`. A Linux host with none of those package managers gets the standalone binary instead, and `--standalone` asks for it explicitly. The script is [`scripts/install.sh`](scripts/install.sh); the packages themselves are on every [release](https://github.com/tezra-io/fermix/releases).
+
 ### Homebrew (macOS, Linux)
 
 ```bash

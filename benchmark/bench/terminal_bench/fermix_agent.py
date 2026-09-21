@@ -40,7 +40,7 @@ def install_script() -> str:
     return f"""
 set -euo pipefail
 # 1. Fermix binary (replace with your install channel — brew tap / release tarball / build)
-curl -fsSL https://fermix.sh/install.sh | sh   # or COPY a prebuilt binary in
+curl -fsSL https://fermix.ai/install | sh -s -- --no-setup   # or COPY a prebuilt binary in
 # 2. minimal config: pin provider+model, enable shell + sandbox at the workspace floor
 mkdir -p "$HOME/.fermix"
 cat > "$HOME/.fermix/config.toml" <<TOML

@@ -198,6 +198,24 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   after verifying its digest, and removing the package leaves it there, because
   a Fermix that is still running opens that exact file whenever it starts a
   helper.
+- **One command installs the Linux package.**
+  `curl -fsSL https://fermix.ai/install | sh` installs the `.deb` through apt on
+  Debian and Ubuntu and the `.rpm` through dnf or zypper on Fedora, RHEL and
+  openSUSE, where it used to drop the standalone binary on every machine. It
+  picks the package for the machine's architecture out of `releases.json`,
+  checks its sha256, checks its cosign signature against the release tag when a
+  `cosign` is there to ask — on a machine that already has the package, the one
+  the package bundles — and hands the file to the package manager. Run again it
+  is the updater: it installs the newer package, starts no setup and says to run
+  `fermix restart`, and on the latest version it downloads nothing. An earlier
+  standalone `fermix` that still comes first on `PATH` is named, with the page
+  that moves it, instead of being set up by mistake. macOS, a Linux host with
+  none of the three package managers, and `--standalone` get the standalone
+  binary as before, and a package install that fails is never retried as a
+  standalone one. Every package in `releases.json` now names its signature and
+  its certificate the way the binaries do, and after publishing the release rail
+  runs the advertised installer against the release it just published, on all
+  four package targets.
 - **`fermix upgrade` tells a Linux operator the right command.** An engine this
   project built as a package refuses to update itself before it looks at a
   single file and names the command for the family — `sudo apt update && sudo
@@ -449,6 +467,14 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The installer's setup wizard reads the terminal, not the installer.** Under
+  `curl … | sh` standard input is the script itself, so on a host with no
+  display the terminal wizard `fermix setup` starts would have taken the rest of
+  the script as its answers. Setup is now handed the terminal; with no terminal
+  at all, as in a CI job, the installer prints `fermix setup` as the next command
+  rather than starting a wizard nobody can answer. The installer's usage also
+  named `fermix.sh`, a host that never served it; it is served at
+  `https://fermix.ai/install`.
 - **The browser's `console` action now faces the same read policy as every other
   page read.** Console entries are page text, and a page that redirected or was
   clicked onto a host the browser policy refuses logs there too — so `console`
