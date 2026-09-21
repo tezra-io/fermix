@@ -550,6 +550,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
   @roundtrip_toml """
   [fermix_core]
   profile = "general"
+  secret_store = "file"
 
   [fermix_core.providers.openai_codex]
   primary = true

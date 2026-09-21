@@ -839,10 +839,12 @@ defmodule FermixCore.Setup.Wizard do
   """
   @spec put_secret(atom(), String.t()) ::
           {:ok, report()} | {:error, {:secret_store_failed, atom(), term()} | term()}
-  def put_secret(key, value) when is_atom(key) and is_binary(value) and value != "" do
+  def put_secret(key, value, opts \\ [])
+
+  def put_secret(key, value, opts) when is_atom(key) and is_binary(value) and value != "" do
     secret = SecretPaths.fetch!(key)
 
-    case SecretWriteLog.put(key, value) do
+    case SecretWriteLog.put(key, value, opts) do
       :ok -> commit_secret_reference(secret, SecretWriter.sentinel())
       {:error, reason} -> {:error, {:secret_store_failed, key, reason}}
     end

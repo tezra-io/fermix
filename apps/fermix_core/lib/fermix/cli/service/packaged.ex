@@ -21,7 +21,8 @@ defmodule Fermix.CLI.Service.Packaged do
     6. require linger, which is fatal before enablement,
     7. reload, reset the start-limit budget, enable now,
     8. verify: the bound home's own socket answers `hello` as a packaged
-       engine, and that daemon's own web address answers, inside 90 seconds.
+       engine, and that daemon's own web address answers — both polled, out of
+       one 90-second budget they share rather than one each.
 
   Every command runs through `opts[:cmd]`, every socket call through
   `opts[:hello]` and every web probe through `opts[:health_probe]`, so the
@@ -47,6 +48,12 @@ defmodule Fermix.CLI.Service.Packaged do
   # 500 ms × 180 = 90 s, the activation ceiling §4.1 sets for one transaction.
   @poll_interval_ms 500
   @poll_attempts 180
+
+  # 500 ms × 20 = 10 s for the web endpoint, drawn from the same budget rather
+  # than stacked on top of it: §4.1's ceiling covers the transaction, not each
+  # step of it, so a slow activation shortens this wait instead of pushing the
+  # whole install past 90 seconds.
+  @health_attempts 20
 
   @type reason ::
           :user_manager_unreachable
@@ -263,6 +270,25 @@ defmodule Fermix.CLI.Service.Packaged do
     end
   end
 
+  # A package upgrade rewrites the vendor unit, and the postinstall cannot make
+  # this account's manager re-read it: running as root it has no session bus for
+  # the user instance, and there may be several accounts. Until something
+  # running as the owner reloads, systemd starts the unit text it last read, so
+  # a restart would faithfully relaunch the superseded command line. The owner's
+  # own restart is the first such moment, which makes it this function's job.
+  #
+  # `NeedDaemonReload` is systemd's own answer about its own state, so there is
+  # nothing to infer and nothing to poll. A refusal stops the restart rather
+  # than being logged past: restarting anyway is precisely the silent staleness
+  # this exists to end.
+  defp reload_if_stale(opts) do
+    case Systemd.show(@unit, opts) do
+      {:ok, %{"NeedDaemonReload" => "yes"}} -> Systemd.daemon_reload(opts)
+      {:ok, _current} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   defp migrate({:legacy_generated, path}, opts) do
     contents = read_unit(path)
 
@@ -295,10 +321,19 @@ defmodule Fermix.CLI.Service.Packaged do
   defp verify(home, opts) do
     attempts = Keyword.get(opts, :poll_attempts, @poll_attempts)
 
-    with {:ok, hello} <- await_packaged_hello(home, attempts, opts),
-         :ok <- probe_health(hello, opts) do
+    with {:ok, hello, left} <- await_packaged_hello(home, attempts, opts),
+         :ok <- probe_health(hello, health_attempts(left, opts), opts) do
       {:ok, hello}
     end
+  end
+
+  # What the hello wait left, capped at this step's own share — and never
+  # zero. `health_unavailable` says the web address did not answer, so it is
+  # never reported without asking: a hello that spent the whole budget still
+  # buys one probe, which overshoots §4.1's ceiling by that probe's two-second
+  # timeout and by nothing else.
+  defp health_attempts(left, opts) do
+    max(min(left, Keyword.get(opts, :health_attempts, @health_attempts)), 1)
   end
 
   defp await_packaged_hello(_home, attempts, _opts) when attempts <= 0 do
@@ -308,7 +343,7 @@ defmodule Fermix.CLI.Service.Packaged do
   defp await_packaged_hello(home, attempts, opts) do
     case hello(home, opts) do
       {:ok, %{"engine" => %{"distribution_identity" => "linux_package"}} = hello} ->
-        {:ok, hello}
+        {:ok, hello, attempts - 1}
 
       _not_yet ->
         sleep(opts).(@poll_interval_ms)
@@ -316,13 +351,36 @@ defmodule Fermix.CLI.Service.Packaged do
     end
   end
 
-  defp probe_health(hello, opts) do
-    origin = get_in(hello, ["setup", "origin"])
+  # The daemon binds its control socket before its web endpoint — a measured
+  # 57-65 ms warm and 315 ms cold — so the address that just answered `hello`
+  # is not listening yet. Asking once lands inside that window often enough to
+  # refuse a healthy install (one in four on ubuntu:26.04), so this polls on
+  # the same interval every other wait here uses.
+  #
+  # An absent origin is not that race: a daemon that published no address will
+  # not publish one by being asked again, so it refuses without spending the
+  # budget.
+  defp probe_health(hello, attempts, opts) do
+    case get_in(hello, ["setup", "origin"]) do
+      origin when is_binary(origin) -> poll_health(origin, attempts, opts)
+      _absent -> {:error, :health_unavailable}
+    end
+  end
 
+  defp poll_health(_origin, attempts, _opts) when attempts <= 0 do
+    {:error, :health_unavailable}
+  end
+
+  defp poll_health(origin, attempts, opts) do
     case health_probe(opts).(origin) do
       :ok -> :ok
-      {:error, _reason} -> {:error, :health_unavailable}
+      {:error, _not_yet} -> retry_health(origin, attempts, opts)
     end
+  end
+
+  defp retry_health(origin, attempts, opts) do
+    sleep(opts).(@poll_interval_ms)
+    poll_health(origin, attempts - 1, opts)
   end
 
   # Re-read after enablement, because the properties gathered at step 2 describe
@@ -387,7 +445,8 @@ defmodule Fermix.CLI.Service.Packaged do
   end
 
   defp issue_restart(previous, opts) do
-    with :ok <- Systemd.reset_failed(@unit, opts),
+    with :ok <- reload_if_stale(opts),
+         :ok <- Systemd.reset_failed(@unit, opts),
          :ok <- Systemd.restart(@unit, opts) do
       :ok
     else

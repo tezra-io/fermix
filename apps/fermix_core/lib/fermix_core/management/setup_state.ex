@@ -31,9 +31,11 @@ defmodule FermixCore.Management.SetupState do
   alias FermixCore.Readiness
   alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Setup.Coexistence
+  alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.RestartState
   alias FermixCore.Setup.SecretPaths
   alias FermixCore.Setup.SecretStore
+  alias FermixCore.Setup.SecretWriter.SecretService
   alias FermixCore.Transcription
 
   @personalization_keys [:user_name, :timezone, :communication_style]
@@ -57,8 +59,38 @@ defmodule FermixCore.Management.SetupState do
       "personalization" => project_personalization(),
       "features" => project_features(opts),
       "profile" => profile(),
+      "secrets" => project_secrets(opts),
       "coexistence" => project_coexistence(opts)
     }
+  end
+
+  # Two questions, two fields. `store` is where this home saves — the durable
+  # answer a Settings row renders, rather than whatever the last call happened
+  # to do. `availability` is whether a secret can be stored right NOW, which is
+  # a different question: a locked keyring saves to the keyring and cannot
+  # store, and reporting that as "no store" is the untruth this whole change
+  # removes.
+  defp project_secrets(opts) do
+    %{
+      "store" => Atom.to_string(source(opts, :secret_store, &current_store/0)),
+      "availability" => Atom.to_string(source(opts, :secret_availability, &availability/0))
+    }
+  end
+
+  defp current_store do
+    case ConfigStore.secret_store(ConfigStore.fermix_home()) do
+      {:ok, store} -> store
+      {:error, _unreadable} -> :keyring
+    end
+  end
+
+  # A home saving to the file store can always store, whatever the keyring is
+  # doing: that is what consenting to it bought.
+  defp availability do
+    case current_store() do
+      :file -> :ready
+      :keyring -> SecretService.state()
+    end
   end
 
   defp project_readiness(readiness) do

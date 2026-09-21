@@ -9,6 +9,7 @@ import shutil
 import signal
 import socket
 import stat
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -17,6 +18,8 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent / "fixtures"))
+import linux_engine  # noqa: E402
 import package_app_engine as package  # noqa: E402
 import verify_app_engine as verify  # noqa: E402
 
@@ -24,6 +27,9 @@ TARGET = "macos_aarch64"
 ARCHITECTURE = "arm64"
 VERSION = "0.9.0"
 SOURCE_COMMIT = "a" * 40
+LINUX_TARGET = "linux_x86_64"
+LINUX_ARCHITECTURE = "x86_64"
+UNIT_SOURCE = Path(__file__).resolve().parents[2] / "packaging/linux/systemd/fermix.service"
 
 
 class VerifyAppEngineTest(unittest.TestCase):
@@ -475,6 +481,174 @@ class VerifyAppEngineTest(unittest.TestCase):
             system=mock.Mock(return_value="Darwin"),
             machine=mock.Mock(return_value=machine),
         )
+
+
+class LinuxVerifyTest(unittest.TestCase):
+    """The Linux archive, whose engine runs installed rather than in place."""
+
+    SMOKE_OUTPUT = (
+        f"fermix {VERSION}\n"
+        '{"ok":false,"schema_version":1,"error":{"code":"user_manager_unreachable",'
+        '"sentence":"This session has no user service manager."}}\n'
+    )
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="fermix-linux-engine-verify-")
+        self.base = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+        self.release = self.base / "release"
+        self.loader_payload, self.loader_name = linux_engine.loader_bytes(LINUX_ARCHITECTURE)
+        self.interpreter = linux_engine.trusted_interpreter(self.loader_name)
+        self._write_release_tree()
+        self.archive = package.package_release(
+            self.release, LINUX_TARGET, self.base / "out", VERSION, SOURCE_COMMIT
+        )
+        self.timeouts = verify.Timeouts(container_timeout_seconds=5.0)
+
+    def test_validates_the_archive_and_runs_the_engine_it_installs(self):
+        runner = self._docker(0, self.SMOKE_OUTPUT)
+        result = verify.verify_app_engine(
+            self.archive,
+            LINUX_TARGET,
+            VERSION,
+            "container",
+            expected_source_commit=SOURCE_COMMIT,
+            temp_parent=self.base,
+            timeouts=self.timeouts,
+        )
+
+        self.assertEqual(result["target"], LINUX_TARGET)
+        self.assertEqual(result["architecture"], LINUX_ARCHITECTURE)
+        self.assertEqual(result["mode"], "container")
+
+        command = runner.call_args.args[0]
+        self.assertIn("--platform", command)
+        self.assertEqual(command[command.index("--platform") + 1], "linux/amd64")
+        self.assertIn(verify.LINUX_SMOKE_IMAGE, command)
+        # The archive's own extracted tree is what the container installs, and
+        # nothing else is bound: the home the wrapper unpacks into stays in the
+        # write layer, so the container's root leaves no file this account
+        # cannot remove.
+        mounts = [command[index + 1] for index, item in enumerate(command) if item == "-v"]
+        self.assertEqual(len(mounts), 1)
+        self.assertTrue(mounts[0].endswith(":/archive:ro"))
+        self.assertIn("/archive/maintainer/postinstall.sh", command[-1])
+
+    def test_refuses_a_mode_that_belongs_to_the_other_family(self):
+        with self.assertRaisesRegex(verify.VerificationError, "must be container"):
+            verify.verify_app_engine(
+                self.archive, LINUX_TARGET, VERSION, "native", temp_parent=self.base
+            )
+
+    def test_refuses_a_container_mode_for_a_macos_target(self):
+        with self.assertRaisesRegex(verify.VerificationError, "must be native or rosetta"):
+            verify._validate_mode(TARGET, "container")
+
+    def test_refuses_an_engine_that_reports_another_version(self):
+        output = self.SMOKE_OUTPUT.replace(VERSION, "0.0.1")
+
+        self._docker(0, output)
+
+        with self.assertRaisesRegex(verify.VerificationError, f"report version {VERSION}"):
+            self._verify()
+
+    def test_refuses_a_service_status_that_did_not_refuse(self):
+        output = f"fermix {VERSION}\n" '{"ok":true,"result":{"active":true}}\n'
+
+        self._docker(0, output)
+
+        with self.assertRaisesRegex(verify.VerificationError, "must refuse"):
+            self._verify()
+
+    def test_refuses_a_refusal_that_is_not_the_container_one(self):
+        output = f"fermix {VERSION}\n" '{"ok":false,"error":{"code":"something_else"}}\n'
+
+        self._docker(0, output)
+
+        with self.assertRaisesRegex(verify.VerificationError, "user_manager_unreachable"):
+            self._verify()
+
+    def test_reports_the_container_failure_rather_than_swallowing_it(self):
+        self._docker(2, "", stderr="fermix: the runtime payload directory is missing")
+
+        with self.assertRaisesRegex(verify.VerificationError, "runtime payload directory"):
+            self._verify()
+
+    def test_refuses_a_manifest_mismatch_before_the_container_runs(self):
+        runner = self._docker(0, self.SMOKE_OUTPUT)
+
+        with self.assertRaisesRegex(verify.VerificationError, "source_commit"):
+            verify.verify_app_engine(
+                self.archive,
+                LINUX_TARGET,
+                VERSION,
+                "container",
+                expected_source_commit="b" * 40,
+                temp_parent=self.base,
+                timeouts=self.timeouts,
+            )
+
+        runner.assert_not_called()
+
+    def _verify(self):
+        return verify.verify_app_engine(
+            self.archive,
+            LINUX_TARGET,
+            VERSION,
+            "container",
+            temp_parent=self.base,
+            timeouts=self.timeouts,
+        )
+
+    def _docker(self, returncode, stdout, stderr=""):
+        completed = subprocess.CompletedProcess(["docker"], returncode, stdout, stderr)
+        patch = mock.patch.object(verify.subprocess, "run", return_value=completed)
+        runner = patch.start()
+        self.addCleanup(patch.stop)
+        which = mock.patch.object(verify.shutil, "which", return_value="/usr/bin/docker")
+        which.start()
+        self.addCleanup(which.stop)
+        return runner
+
+    def _write_release_tree(self):
+        files = {
+            "tree/usr/bin/fermix": (
+                linux_engine.elf_bytes(LINUX_ARCHITECTURE, interpreter=self.interpreter),
+                0o755,
+            ),
+            "tree/usr/lib/fermix/cosign": (
+                linux_engine.elf_bytes(LINUX_ARCHITECTURE, padding=b"cosign\n"),
+                0o755,
+            ),
+            f"tree/usr/lib/fermix/runtime-payload/{self.loader_name}": (
+                self.loader_payload,
+                0o644,
+            ),
+            "tree/usr/lib/systemd/user/fermix.service": (UNIT_SOURCE.read_bytes(), 0o644),
+            "maintainer/postinstall.sh": (b"#!/bin/sh\nexit 0\n", 0o755),
+            "maintainer/postremove.sh": (b"#!/bin/sh\nexit 0\n", 0o755),
+            "nfpm-contents.yaml": (b"contents:\n", 0o644),
+        }
+        for relative, (payload, mode) in files.items():
+            path = self.release / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(payload)
+            path.chmod(mode)
+
+        manifest = package.build_manifest(
+            self.release,
+            LINUX_TARGET,
+            product_version=VERSION,
+            build_id="release-test",
+            source_commit=SOURCE_COMMIT,
+            protocols={
+                "management": {"current_version": 1, "minimum_version": 1, "maximum_version": 1},
+                "realtime": {"current_version": 1, "minimum_version": 1, "maximum_version": 1},
+            },
+        )
+        path = self.release / "engine-manifest.json"
+        path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        path.chmod(0o644)
 
 
 class RuntimeIdentityTest(unittest.TestCase):

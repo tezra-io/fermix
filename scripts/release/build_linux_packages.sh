@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
-# Build the `fermix` deb and rpm for one Linux target (M38 §2.2, §12.1).
+# Build the `fermix` deb, rpm and app-engine archive for one Linux target
+# (M38 §2.2, §12.1; single-package amendment §5.1).
+#
+# One compile produces all three: the engine tree is staged once and the
+# packages and the archive are both made from it, so the engine layout in the
+# headless package and in the desktop package cannot differ.
 #
 # The release build snapshots the exact commit and refuses a dirty checkout,
 # the way the app-engine build does. `--dev` builds the working tree instead
@@ -13,8 +18,11 @@ usage() {
   cat >&2 <<'USAGE'
 usage: build_linux_packages.sh <linux_x86_64|linux_aarch64> <version> <output-dir> [--container] [--dev]
 
+  Writes fermix_<version>_<arch>.deb, fermix-<version>-1.<arch>.rpm and
+  fermix_app_engine_<target>.tar.gz into <output-dir>.
+
   --container  build inside packaging/linux/docker/Dockerfile.build
-  --dev        build the working tree, stamped dev-<short-sha>-dirty
+  --dev        build the working tree, stamped dev-<short-sha>-dirty-<diff-sha>
 USAGE
   exit 2
 }
@@ -22,6 +30,25 @@ USAGE
 fail() {
   echo "build_linux_packages.sh: $1" >&2
   exit 1
+}
+
+# What a `--dev` build id must move with. The commit alone cannot tell two
+# dirty builds apart, and the manifest's build id is what a bug report quotes:
+# without this, an engine carrying a fix and the engine that lacks it claim the
+# same identity. The tracked diff plus the content of every untracked,
+# non-ignored file is the whole of what a snapshot build differs by.
+dirty_digest() {
+  local digest
+  # In the repository, because `ls-files` names its files relative to it.
+  digest="$(
+    cd "$repo_root" &&
+      {
+        git diff HEAD
+        git ls-files --others --exclude-standard -z | xargs -0 -r sha256sum
+      } | sha256sum | cut -c1-8
+  )" || fail "cannot digest the working tree's difference from HEAD"
+  [ -n "$digest" ] || fail "the working tree's difference digested to nothing"
+  printf '%s' "$digest"
 }
 
 image="fermix-linux-package-build"
@@ -80,7 +107,13 @@ if [ "$container" -eq 1 ]; then
 
   cache="$repo_root/packaging/linux/out/container-cache"
   container_home="$repo_root/packaging/linux/out/container-home"
-  mkdir -p "$cache" "$container_home"
+  # The build's scratch tree is a whole source snapshot with its own `deps`
+  # and `_build`, several gigabytes of it. Left in the container's writable
+  # layer it fills the Docker data root, which is usually a far smaller device
+  # than the checkout's, so it goes on the bind mount beside the cache and the
+  # home for the same reason they do.
+  container_tmp="$repo_root/packaging/linux/out/container-tmp"
+  mkdir -p "$cache" "$container_home" "$container_tmp"
 
   inner=("scripts/release/build_linux_packages.sh" "$target" "$version" "/work/$relative_output")
   [ "$dev" -eq 0 ] || inner+=("--dev")
@@ -96,6 +129,8 @@ if [ "$container" -eq 1 ]; then
     -e GIT_CONFIG_KEY_0=safe.directory \
     -e GIT_CONFIG_VALUE_0=/work \
     -e XDG_CACHE_HOME=/work/packaging/linux/out/container-cache \
+    -e HEX_HOME=/work/packaging/linux/out/container-cache/hex \
+    -e TMPDIR=/work/packaging/linux/out/container-tmp \
     -e "FERMIX_BUILD_ID=${FERMIX_BUILD_ID:-}" \
     -e "FERMIX_BUILD_SOURCE_COMMIT=${FERMIX_BUILD_SOURCE_COMMIT:-}" \
     "$image" \
@@ -112,7 +147,7 @@ fi
 if [ "$dev" -eq 1 ]; then
   short_sha="$(cd "$repo_root" && git rev-parse --short=12 HEAD)" ||
     fail "cannot resolve the working tree's commit"
-  FERMIX_BUILD_ID="dev-${short_sha}-dirty"
+  FERMIX_BUILD_ID="dev-${short_sha}-dirty-$(dirty_digest)"
   FERMIX_BUILD_SOURCE_COMMIT="$(cd "$repo_root" && git rev-parse HEAD)"
   export FERMIX_BUILD_ID FERMIX_BUILD_SOURCE_COMMIT
 else
@@ -186,10 +221,20 @@ mix compile --warnings-as-errors
 )
 mix release fermix_linux_package --overwrite
 
+# The app-engine manifest states the same protocol windows the macOS manifest
+# states, so they are read out of the engine that was just compiled rather than
+# restated in a packaging script that would drift away from the wire.
+protocols="$build_root/protocols.json"
+FERMIX_PROTOCOLS_OUT="$protocols" mix run --no-start -e \
+  'File.write!(System.fetch_env!("FERMIX_PROTOCOLS_OUT"), Jason.encode!(FermixCore.BuildInfo.protocols()))'
+[ -s "$protocols" ] || fail "the compiled engine reported no protocol windows"
+
 python3 "$source_root/scripts/release/linux_packages.py" \
   --target "$target" \
   --version "$version" \
   --output-dir "$output_dir" \
   --source-root "$source_root" \
   --build-id "$FERMIX_BUILD_ID" \
-  --source-commit "$FERMIX_BUILD_SOURCE_COMMIT"
+  --source-commit "$FERMIX_BUILD_SOURCE_COMMIT" \
+  --protocols "$protocols" \
+  --app-engine-dir "$output_dir"

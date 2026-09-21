@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-"""Verify one signed Fermix app-engine archive by launching its native runtime."""
+"""Verify one signed Fermix app-engine archive by running the engine it carries.
+
+A macOS archive boots from the tree in place, natively or under Rosetta. A
+Linux archive cannot: its ELF interpreters name a loader under
+`/var/lib/fermix/runtimes`, which only a root-owned maintainer script
+materialises, so it is installed into a throwaway container by its own
+`postinstall.sh` and the engine is then run from the installed paths. Either
+way the bytes under test are the archive's.
+"""
 
 import argparse
 import json
@@ -39,6 +47,41 @@ enabled = true
 VERSION_PATTERN = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[+-][0-9A-Za-z.-]+)?$")
 SOURCE_COMMIT_PATTERN = re.compile(r"^[0-9A-Fa-f]{40}$")
 
+# The Linux smoke (amendment §5.1). The engine cannot start from an unpacked
+# tree the way the macOS engine can: its ELF interpreters name
+# /var/lib/fermix/runtimes/<digest>/libc-musl.so, which only root can
+# materialise. So the archive's own tree is installed into a throwaway
+# container by the archive's own maintainer script, and the engine is then run
+# from the installed paths — the archive's bytes, not the deb's.
+LINUX_SMOKE_IMAGE = "debian:12"
+LINUX_SMOKE_PLATFORMS = {"linux_x86_64": "linux/amd64", "linux_aarch64": "linux/arm64"}
+LINUX_SMOKE_SCRIPT = """\
+set -eu
+cp -a /archive/tree/usr/. /usr/
+sh /archive/maintainer/postinstall.sh
+[ -f /var/lib/fermix/runtimes/*/libc-musl.so ]
+/usr/bin/fermix --version
+# stdout carries machine output and nothing else. This is gated here, on an
+# installed package, because no unit test can see it: the runtime wrapper runs
+# before the BEAM and has printed to stdout in front of the real output before
+# any Elixir code exists to intercept it. A `--json` consumer reading a
+# two-line preamble is a broken CLI that every other gate calls green.
+version_out="$(/usr/bin/fermix --version 2>/dev/null)"
+case "$version_out" in
+  "fermix "*) ;;
+  *) echo "stdout for --version is not the version alone: $version_out" >&2; exit 1 ;;
+esac
+# A container has no user service manager, so this verb exits non-zero by
+# design; its envelope is the assertion, and it is read rather than trusted.
+/usr/bin/fermix service status --json || true
+status_out="$(/usr/bin/fermix service status --json 2>/dev/null || true)"
+case "$status_out" in
+  "{"*) ;;
+  *) echo "stdout for service status --json is not JSON: $status_out" >&2; exit 1 ;;
+esac
+"""
+LINUX_SMOKE_REFUSAL = "user_manager_unreachable"
+
 
 class VerificationError(RuntimeError):
     """Raised when a published app-engine archive cannot be trusted or run."""
@@ -55,6 +98,7 @@ class Timeouts:
     management_timeout_seconds: float = 5.0
     stop_timeout_seconds: float = 15.0
     cleanup_timeout_seconds: float = 5.0
+    container_timeout_seconds: float = 900.0
 
 
 DEFAULT_TIMEOUTS = Timeouts()
@@ -93,8 +137,13 @@ def verify_app_engine(
     _validate_inputs(
         archive_path, target, version, mode, expected_source_commit, timeouts
     )
-    command_prefix = _command_prefix(target, mode)
     parent = _temporary_parent(temp_parent)
+    if target in package.LINUX_TARGETS:
+        return _verify_linux_archive(
+            archive_path, target, version, parent, expected_source_commit, timeouts
+        )
+
+    command_prefix = _command_prefix(target, mode)
 
     with tempfile.TemporaryDirectory(
         prefix=f"fermix-engine-smoke-{target}-", dir=parent
@@ -112,6 +161,104 @@ def verify_app_engine(
             expected_source_commit,
             timeouts,
         )
+
+
+def _verify_linux_archive(
+    archive_path, target, version, parent, expected_source_commit, timeouts
+):
+    """Validate one Linux archive and run the engine it carries, installed."""
+
+    with tempfile.TemporaryDirectory(
+        prefix=f"fermix-engine-smoke-{target}-", dir=parent
+    ) as temporary:
+        release_root = extract_archive(archive_path, Path(temporary) / "archive")
+        manifest = _validated_manifest(
+            release_root, target, version, expected_source_commit
+        )
+        # The wrapper unpacks its payload into the account's home, which stays
+        # in the container's own write layer: `--rm` discards it. A bind mount
+        # would instead leave a tree owned by the container's root inside this
+        # verifier's scratch, which the account running the verifier then
+        # cannot remove.
+        output = _linux_container_smoke(release_root, target, timeouts)
+        _validate_linux_smoke(output, manifest)
+
+    return {
+        "target": target,
+        "architecture": manifest["identity"]["architecture"],
+        "version": version,
+        "mode": "container",
+        "image": LINUX_SMOKE_IMAGE,
+    }
+
+
+def _linux_container_smoke(release_root, target, timeouts):
+    docker = shutil.which("docker")
+    if docker is None:
+        raise VerificationError("Linux app-engine verification requires docker")
+
+    command = [
+        docker,
+        "run",
+        "--rm",
+        "--platform",
+        LINUX_SMOKE_PLATFORMS[target],
+        "--network",
+        "none",
+        "-e",
+        "HOME=/root",
+        "-v",
+        f"{release_root}:/archive:ro",
+        LINUX_SMOKE_IMAGE,
+        "sh",
+        "-c",
+        LINUX_SMOKE_SCRIPT,
+    ]
+
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=timeouts.container_timeout_seconds,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise VerificationError(f"Linux app-engine smoke could not run: {error}") from error
+
+    if completed.returncode != 0:
+        raise VerificationError(
+            f"the installed engine failed in {LINUX_SMOKE_IMAGE} with code "
+            f"{completed.returncode}: {completed.stderr.strip() or completed.stdout.strip()}"
+        )
+    return completed.stdout
+
+
+def _validate_linux_smoke(output, manifest):
+    """The engine's own words, from the tree this archive carries.
+
+    `--version` proves the loader store, the patched interpreters and the ERTS
+    all work; `service status --json` proves the BEAM booted and ran the CLI,
+    and in a container with no user service manager its one honest answer is
+    the structured refusal, exactly as the rpm row asserts.
+    """
+    version = manifest["identity"]["product_version"]
+    lines = [line for line in output.splitlines() if line.strip()]
+    if not lines:
+        raise VerificationError("the installed engine printed nothing")
+    if not any(version in line for line in lines):
+        raise VerificationError(f"the installed engine did not report version {version}")
+
+    try:
+        envelope = json.loads(lines[-1])
+    except json.JSONDecodeError as error:
+        raise VerificationError(f"service status did not answer JSON: {lines[-1]}") from error
+    if not isinstance(envelope, dict) or envelope.get("ok") is not False:
+        raise VerificationError(f"service status in a container must refuse: {lines[-1]}")
+
+    code = envelope.get("error", {}).get("code") if isinstance(envelope.get("error"), dict) else None
+    if code != LINUX_SMOKE_REFUSAL:
+        raise VerificationError(f"service status must answer {LINUX_SMOKE_REFUSAL}: {lines[-1]}")
 
 
 def _verify_in_directories(
@@ -364,13 +511,26 @@ def _validate_inputs(
         raise VerificationError(f"unsupported app-engine target: {target}")
     if not isinstance(version, str) or not VERSION_PATTERN.fullmatch(version):
         raise VerificationError("version must be a semantic version without a leading v")
-    if mode not in ("native", "rosetta"):
-        raise VerificationError("execution mode must be native or rosetta")
+    _validate_mode(target, mode)
     if expected_source_commit is not None and not SOURCE_COMMIT_PATTERN.fullmatch(
         expected_source_commit
     ):
         raise VerificationError("expected source commit must be a full commit SHA")
     _validate_timeouts(timeouts)
+
+
+def _validate_mode(target, mode):
+    """One execution mode per family, so neither can be asked for the other's.
+
+    A macOS archive boots from the tree, natively or under Rosetta; a Linux
+    archive is installed into a container first, because its loader store only
+    exists once a root-owned maintainer script has made it.
+    """
+    allowed = ("container",) if target in package.LINUX_TARGETS else ("native", "rosetta")
+    if mode not in allowed:
+        raise VerificationError(
+            f"execution mode for {target} must be {' or '.join(allowed)}"
+        )
 
 
 def _validate_timeouts(timeouts):
@@ -383,6 +543,7 @@ def _validate_timeouts(timeouts):
         timeouts.management_timeout_seconds,
         timeouts.stop_timeout_seconds,
         timeouts.cleanup_timeout_seconds,
+        timeouts.container_timeout_seconds,
     )
     if any(isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in integer_fields):
         raise VerificationError("timeout attempt counts must be positive integers")
@@ -709,7 +870,7 @@ def _arguments(argv):
     parser.add_argument("target", choices=sorted(package.ARCHITECTURES))
     parser.add_argument("version")
     parser.add_argument("source_commit")
-    parser.add_argument("mode", choices=("native", "rosetta"))
+    parser.add_argument("mode", choices=("native", "rosetta", "container"))
     return parser.parse_args(argv)
 
 

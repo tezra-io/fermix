@@ -96,6 +96,13 @@ class BuildAppEngineTest(unittest.TestCase):
         self.assertIn("requires host architecture arm64", result.stderr)
         self.assertFalse(self.log.exists())
 
+    def test_sends_a_linux_target_to_the_build_that_owns_it(self):
+        result = self._run("linux_x86_64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("build_linux_packages.sh", result.stderr)
+        self.assertFalse(self.log.exists())
+
     def test_rejects_unknown_host_architecture_with_a_clear_error(self):
         self._write_fake_uname("riscv64")
 

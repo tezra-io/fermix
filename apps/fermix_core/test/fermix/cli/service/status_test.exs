@@ -92,11 +92,18 @@ defmodule Fermix.CLI.Service.StatusTest do
       assert Status.installed(@installed, {:error, :enoent})["integrity"] == "unreadable"
     end
 
-    test "the published identity is the compiled one, never the manifest's" do
+    # Reversed deliberately. This once asserted the opposite — that the
+    # published identity is the compiled one and the manifest is only evidence
+    # about it — which held while the answering code could be trusted to come
+    # from the installed package. It cannot: a Burrito payload extracted by an
+    # earlier package keeps running after an upgrade, so the compiled constants
+    # describe an engine that is no longer installed. What is INSTALLED is what
+    # the package put on disk, so the manifest is the identity.
+    test "the published identity is the manifest's, because that is what is installed" do
       manifest = %{@installed | "build_id" => "release-8"}
       installed = Status.installed(@installed, {:ok, manifest})
 
-      assert installed["build_id"] == "release-9"
+      assert installed["build_id"] == "release-8"
       assert Map.keys(installed) == Enum.sort(Map.keys(@installed) ++ ["integrity"])
     end
   end

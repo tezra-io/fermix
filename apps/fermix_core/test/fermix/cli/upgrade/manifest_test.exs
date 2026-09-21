@@ -105,6 +105,23 @@ defmodule Fermix.CLI.Upgrade.ManifestTest do
     test "errors on garbage" do
       assert {:error, _} = Manifest.compare_versions("not-semver", "0.2.0")
     end
+
+    # The packaged Linux release is assembled under a version carrying the build
+    # identity as semver BUILD METADATA, so that the runtime payload directory
+    # differs per payload. Semver ignores build metadata when comparing
+    # precedence, and this asserts our code agrees: a packaged engine must never
+    # read as newer than the published release it IS, or every owner would be
+    # told they are ahead of the latest version and offered a downgrade.
+    test "build metadata never makes a version newer, older, or unparseable" do
+      assert Manifest.compare_versions("0.10.5+dev.ecf56e55ead5.dirty.7267f94d", "0.10.5") ==
+               :eq
+
+      assert Manifest.compare_versions("0.10.5", "0.10.5+dev.ecf56e55ead5.dirty.7267f94d") ==
+               :eq
+
+      assert Manifest.compare_versions("0.10.5+build.1", "0.10.6") == :lt
+      assert Manifest.compare_versions("0.10.5+build.1", "0.10.4") == :gt
+    end
   end
 
   describe "select_artifact/2" do

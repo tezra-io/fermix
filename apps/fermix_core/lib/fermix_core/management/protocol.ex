@@ -56,6 +56,7 @@ defmodule FermixCore.Management.Protocol do
     {"settings.reload", 2},
     {"secret.set", 2},
     {"secret.clear", 2},
+    {"secret.migrate_to_keyring", 2},
     {"providers.set_primary", 2},
     {"providers.models.list", 2},
     {"providers.probe.start", 2},

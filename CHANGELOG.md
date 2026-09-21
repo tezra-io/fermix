@@ -8,6 +8,36 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Saving a secret works on a desktop whose keyring is locked.** A machine
+  that logs in by fingerprint never unlocks its login keyring, so saving a key
+  hit a password prompt nobody could answer and Fermix reported it as "this
+  host has no keyring" — which was untrue, and left nothing to do about it.
+  Fermix now reads the keyring's own lock state before writing and says which
+  of the two it is. A locked keyring can be unlocked and the save retried
+  (Fermix waits up to 90 seconds for the system prompt to be answered), or, if
+  you say so, the secret can be kept in a private file under your Fermix home
+  instead — `0600`, in a `0700` directory, and only ever because you chose it.
+  Fermix never makes that choice for you. The choice is remembered, and
+  reversible: unlock your keyring later and `secret.migrate_to_keyring`, or
+  `fermix setup --store keyring`, moves every secret back and deletes the file
+  copies. Each value is read back out of the keyring before its file copy is
+  removed, so no step of the move can leave you with no copy at all.
+
+- **Upgrading to a build with the same version number now actually runs that
+  build.** Fermix unpacks its engine into a cache directory named after the
+  product version, which meant two builds numbered the same shared one
+  directory — and the second one installed never unpacked. The owner went on
+  running the first engine, through restarts, indefinitely, while `fermix
+  service status` reported the new one as installed and aligned. The cache
+  directory is now named after the engine's own contents, so a different engine
+  can never land on top of an older one, and superseded copies are cleaned up
+  in the background (the two most recent are kept, and the one in use is never
+  removed). `fermix service status` now reads the installed identity from the
+  package on disk rather than from whichever engine answered, so a stale engine
+  is reported as needing a restart instead of agreeing with itself. Restarting
+  Fermix now also reloads systemd first when the unit file has changed, which
+  a package upgrade cannot do for you.
+
 - **Computer-use sessions now appear in traces.** A session starting, being
   paused and resumed, finishing, or dying on its helper used to leave no record
   anywhere: the events were emitted and nothing listened. They now reach the
@@ -268,6 +298,21 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   delete it.
 
 ### Fixed
+
+- **A secret saved on Linux no longer reports failure after succeeding.** With
+  an unlocked keyring, storing a secret wrote the item and then failed on the
+  way back: the value was in the keyring while Fermix said the save had not
+  worked. Anyone who believed it retyped the key, or chose somewhere else to
+  put it — and then held the same credential in two places, one of which they
+  did not know about. The store now reports the truth it already had.
+- **A locked keyring no longer reports itself differently depending on your
+  screen.** The answer came from how the `secret-tool` helper died, and that
+  depends on whether a password prompt can appear: on a desktop it waited on
+  the prompt and Fermix said the helper timed out, and on a machine with no
+  display it exited immediately and Fermix said there was no keyring. One
+  machine, one locked keyring, two different untrue answers. Fermix reads the
+  lock from the keyring itself, and once it knows the keyring is locked it does
+  not run the helper at all.
 
 - **`/pause` can no longer be raced, and says when an action is still
   finishing.** A pause that landed between the assistant deciding on an action and

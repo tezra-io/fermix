@@ -168,6 +168,18 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+      # The Linux app-engine archive comes off this same build: one compile
+      # stages one engine tree, and the deb and the archive are both made from
+      # it, so the engine layout cannot differ between them. It is uploaded
+      # under the app-engine name the signing job already collects.
+      - name: Upload app-engine archive for ${{ matrix.target }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: app-engine-${{ matrix.target }}
+          path: packaging/linux/out/packages/fermix_app_engine_${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
   app-engine:
     name: Build app engine (${{ matrix.target }})
     needs: preflight
@@ -274,8 +286,8 @@ jobs:
             case "$artifact" in *.sig|*.pem|*.sha256) continue ;; esac
             unsigned+=("$artifact")
           done
-          [ "${#unsigned[@]}" -eq 10 ] || {
-            echo "::error::Expected four standalone, four package and two app-engine artifacts, found ${#unsigned[@]}"
+          [ "${#unsigned[@]}" -eq 12 ] || {
+            echo "::error::Expected four standalone, four package and four app-engine artifacts, found ${#unsigned[@]}"
             exit 1
           }
           for artifact in "${unsigned[@]}"; do
@@ -329,6 +341,11 @@ jobs:
           - { name: engine-macos-arm64, os: macos-15, kind: app_engine, target: macos_aarch64, mode: native }
           - { name: engine-macos-x64, os: macos-15-intel, kind: app_engine, target: macos_x86_64, mode: native }
           - { name: engine-macos-x64-rosetta, os: macos-15, kind: app_engine, target: macos_x86_64, mode: rosetta }
+          # The Linux engine is installed into a throwaway container by the
+          # archive's own maintainer script and then run from the installed
+          # paths, because its loader store only root can materialise.
+          - { name: engine-linux-x64, os: ubuntu-24.04, kind: app_engine, target: linux_x86_64, mode: container }
+          - { name: engine-linux-arm64, os: ubuntu-24.04-arm, kind: app_engine, target: linux_aarch64, mode: container }
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
@@ -470,6 +487,11 @@ jobs:
           - { name: engine-macos-arm64, os: macos-15, kind: app_engine, target: macos_aarch64, mode: native }
           - { name: engine-macos-x64, os: macos-15-intel, kind: app_engine, target: macos_x86_64, mode: native }
           - { name: engine-macos-x64-rosetta, os: macos-15, kind: app_engine, target: macos_x86_64, mode: rosetta }
+          # The Linux engine is installed into a throwaway container by the
+          # archive's own maintainer script and then run from the installed
+          # paths, because its loader store only root can materialise.
+          - { name: engine-linux-x64, os: ubuntu-24.04, kind: app_engine, target: linux_x86_64, mode: container }
+          - { name: engine-linux-arm64, os: ubuntu-24.04-arm, kind: app_engine, target: linux_aarch64, mode: container }
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
@@ -593,6 +615,132 @@ jobs:
             --method PATCH \
             "/repos/$REPO/releases/$RELEASE_ID" \
             --field draft=false >/dev/null
+
+  # The desktop half of this release, in tezra-io/fermix-linux. That repository
+  # builds one package per family that carries this engine, so every engine
+  # release drives a desktop release and no person edits a pin.
+  #
+  # It runs after `promote` because the payload names assets by digest and a
+  # dispatch for a still-staged release would name assets nothing can download.
+  # The digests are read from the published release's own .sha256 sidecars
+  # rather than from this run's artifacts, so what is dispatched is what a
+  # downloader will actually get.
+  #
+  # The token is a GitHub App installation token, not GITHUB_TOKEN: GitHub
+  # starts no workflow run from an event the default token produced, so a
+  # dispatch sent with it would be accepted and start nothing. That failure is
+  # silent, which is why this job would rather fail loudly than skip.
+  dispatch-linux-desktop:
+    name: Dispatch the Linux desktop release
+    needs: promote
+    # A prerelease produces no Linux packages at all, so there is nothing for
+    # the desktop repository to pair with.
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: The digests the release actually published
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          RELEASE_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          identity="https://github.com/$REPO/.github/workflows/release.yml@refs/tags/$TAG"
+
+          sidecars="$(mktemp -d)"
+          trap 'rm -rf -- "$sidecars"' EXIT
+
+          targets=(linux_x86_64 linux_aarch64)
+          for target in "${targets[@]}"; do
+            asset="fermix_app_engine_${target}.tar.gz"
+            gh release download "$TAG" --repo "$REPO" \
+              --dir "$sidecars" --pattern "${asset}.sha256" || {
+              echo "::error::The published release $TAG carries no ${asset}.sha256"
+              exit 1
+            }
+          done
+
+          # One JSON document, built by a parser rather than by string joining,
+          # and validated here so that a malformed payload fails in the
+          # repository that produced it rather than in the one that receives it.
+          # The whole request body is written to a file, because a nested object
+          # cannot be passed through `gh api --field`.
+          SIDECARS="$sidecars" TAG="$TAG" VERSION="$version" \
+          RELEASE_COMMIT="$RELEASE_COMMIT" IDENTITY="$identity" \
+            python3 - > dispatch.json <<'PY'
+          import json
+          import os
+          import re
+          import sys
+
+          tag = os.environ["TAG"]
+          commit = os.environ["RELEASE_COMMIT"]
+          if not re.fullmatch(r"v\d+\.\d+\.\d+", tag):
+              sys.exit(f"{tag} is not an engine release tag")
+          if not re.fullmatch(r"[0-9a-f]{40}", commit):
+              sys.exit(f"{commit} is not a 40-character commit")
+
+          artifacts = {}
+          for target in ("linux_x86_64", "linux_aarch64"):
+              asset = f"fermix_app_engine_{target}.tar.gz"
+              with open(f"{os.environ['SIDECARS']}/{asset}.sha256", encoding="utf-8") as handle:
+                  digest = handle.read().split()[0]
+              if not re.fullmatch(r"[0-9a-f]{64}", digest):
+                  sys.exit(f"{asset}.sha256 does not carry a sha256: {digest!r}")
+              artifacts[target] = {"asset": asset, "sha256": digest}
+
+          json.dump(
+              {
+                  "event_type": "engine-released",
+                  "client_payload": {
+                      "tag": tag,
+                      "version": os.environ["VERSION"],
+                      "source_commit": commit,
+                      "certificate_identity": os.environ["IDENTITY"],
+                      "artifacts": artifacts,
+                  },
+              },
+              sys.stdout,
+          )
+          PY
+          cat dispatch.json
+
+      # Contents: write on tezra-io/fermix-linux only, which is what
+      # repository_dispatch requires, and the token expires in an hour.
+      #
+      # The SHA below was resolved from the tag through the GitHub API on
+      # 2026-09-19, not copied from documentation and not recalled:
+      # `gh api repos/actions/create-github-app-token/git/ref/tags/v3.2.0`
+      # answered bcd2ba49218906704ab6c1aa796996da409d3eb1. A gate can prove this
+      # reference is an immutable commit claiming to be v3.2.0; nothing here can
+      # prove that commit is what the tag pointed at, so it was confirmed by a
+      # second independent resolution rather than by review: the coordinating
+      # session resolved the same tag separately on 2026-09-19 and got the same
+      # commit, and the moving v3 tag resolved to it as well. Re-confirm at the
+      # first real release, because this action is the one on the credential
+      # path, and record that here.
+      - name: Mint an installation token for the desktop repository
+        id: token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.FERMIX_RELEASE_APP_ID }}
+          private-key: ${{ secrets.FERMIX_RELEASE_APP_PRIVATE_KEY }}
+          owner: tezra-io
+          repositories: fermix-linux
+
+      - name: Tell the desktop repository this engine is published
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+        run: |
+          set -euo pipefail
+          gh api --method POST /repos/tezra-io/fermix-linux/dispatches \
+            --input dispatch.json >/dev/null
+          echo "dispatched engine-released to tezra-io/fermix-linux"
 
   homebrew:
     name: Update and verify Homebrew formula

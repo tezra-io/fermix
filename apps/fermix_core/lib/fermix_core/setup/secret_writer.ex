@@ -13,6 +13,8 @@ defmodule FermixCore.Setup.SecretWriter do
   alias FermixCore.Sandbox.ExternalEnv
   alias FermixCore.Setup.SecretPaths
 
+  require Logger
+
   @sentinel "@keyring"
   @default_profile "general"
   @compiled_env Mix.env()
@@ -64,9 +66,72 @@ defmodule FermixCore.Setup.SecretWriter do
     end
   end
 
+  @doc """
+  Stores `value` in the OS keyring, or in the private file store when — and
+  only when — `store: :file` carries the owner's consent for this call.
+
+  There is no automatic fallback. A keyring this engine cannot reach is a
+  refusal the caller must carry to the owner, because putting a credential
+  somewhere else on their behalf is a decision about their machine that they
+  have not made.
+
+  A keyring write that succeeds is also the way back: the file copy of that
+  key, if there is one, is deleted, so an owner who unlocks their keyring
+  later stops having two copies of the same secret.
+  """
   @spec put(secret_key(), String.t(), keyword()) :: :ok | writer_error()
   def put(key, value, opts \\ []) when is_secret_key(key) and is_binary(value) do
-    impl(opts).put(key, value, opts)
+    case Keyword.get(opts, :store, :keyring) do
+      :file -> __MODULE__.FileStore.put(key, value, opts)
+      :keyring -> keyring_put(key, value, opts)
+    end
+  end
+
+  defp keyring_put(key, value, opts) do
+    case impl(opts).put(key, value, opts) do
+      {:error, reason} -> {:error, reason}
+      stored -> drop_file_copy(key, opts, stored)
+    end
+  end
+
+  # The file copy goes only once the keyring can PRODUCE the value, never on
+  # the strength of a write it accepted: a store that took the value and
+  # cannot read it back would otherwise leave no copy at all. An unverifiable
+  # keyring keeps the file copy and says so in the log — the value the caller
+  # asked to store is stored, so this is not their failure to hear about, but
+  # a second copy is a fact somebody must be able to find.
+  #
+  # A failed delete IS reported, because then two stores hold the credential
+  # and only one of them is the one the owner believes in.
+  defp drop_file_copy(key, opts, stored) do
+    case verified?(key, opts) do
+      true -> delete_file_copy(key, opts, stored)
+      false -> keep_file_copy(key, stored)
+    end
+  end
+
+  defp verified?(key, opts) do
+    case {__MODULE__.FileStore.get(key, opts), impl(opts).get(key, opts)} do
+      {{:ok, copy}, {:ok, stored}} -> copy == stored
+      {{:error, _no_copy}, _keyring} -> true
+      {_copy, _unreadable_keyring} -> false
+    end
+  end
+
+  defp delete_file_copy(key, opts, stored) do
+    case __MODULE__.FileStore.delete(key, opts) do
+      :ok -> stored
+      {:error, reason} -> {:error, {:file_copy_remains, reason}}
+    end
+  end
+
+  defp keep_file_copy(key, stored) do
+    Logger.warning(
+      "#{inspect(key)} was stored in the OS keyring but could not be read back, " <>
+        "so its private-file copy was kept"
+    )
+
+    stored
   end
 
   @spec get(secret_key(), keyword()) :: {:ok, String.t()} | writer_error()
@@ -149,6 +214,15 @@ defmodule FermixCore.Setup.SecretWriter do
 
   defp format_reason({:helper_failed, command, code, output}) do
     "#{command} exited #{code}: #{String.trim_trailing(output)}"
+  end
+
+  # Plain words, and both ways out: this sentence is what a person reading a
+  # terminal gets, so it says what happened and what they can do rather than
+  # naming a wire code at them.
+  defp format_reason(:keyring_locked) do
+    "your login keyring is locked. Unlock it and save again, or run " <>
+      "`fermix setup --store file` to keep this secret in a private file " <>
+      "under your Fermix home instead."
   end
 
   defp format_reason(:unavailable), do: "no supported OS secret helper is available"
@@ -234,26 +308,86 @@ defmodule FermixCore.Setup.SecretWriter.SecretTool do
   alias FermixCore.CommandRunner
   alias FermixCore.Setup.SecretWriter
 
+  alias FermixCore.Setup.SecretWriter.SecretService
+
   @account "fermix"
   @label "Fermix"
   @default_timeout_ms 3_000
+  # A person finding an unexpected password dialog and typing into it. Long
+  # enough for that, short enough that an owner who walked away gets a typed
+  # answer rather than a call that hangs, and it must stay under every client's
+  # own deadline so the person sees this refusal instead of their timeout.
+  @unlock_timeout_ms 90_000
+
+  @doc "The bound the unlock-and-retry path waits under."
+  @spec unlock_timeout_ms() :: pos_integer()
+  def unlock_timeout_ms, do: @unlock_timeout_ms
 
   @impl true
   def available?(_opts \\ []), do: not is_nil(secret_tool_binary()) and not is_nil(shell_binary())
 
+  @doc """
+  Stores `value`, or says which of the two refusals happened.
+
+  A locked collection and an absent Secret Service are different problems with
+  different answers, and `secret-tool` cannot tell them apart: on a locked
+  collection it blocks on a prompt rather than exiting, so the caller only ever
+  saw a timeout. The lock is read before the write instead.
+
+  `unlock: true` asks for the prompt and waits `unlock_timeout_ms/0` for the
+  owner to answer it. Without it, a locked collection is refused immediately
+  rather than raising a dialog nobody asked for — the caller may be a headless
+  daemon, and the owner may not be at the machine.
+  """
   @impl true
   def put(key, value, opts \\ []) when is_secret_key(key) and is_binary(value) do
-    with {:ok, binary} <- fetch_secret_tool_binary(),
-         {:ok, shell} <- fetch_shell_binary() do
-      with_temp_secret(value, fn secret_file ->
-        run_with_stdin(shell, secret_file, binary, put_args(key, opts), opts)
-      end)
+    case store_state(opts) do
+      :ready -> store(key, value, opts)
+      :locked -> store_when_unlocked(key, value, opts)
+      :unavailable -> {:error, :unavailable}
     end
+  end
+
+  defp store_when_unlocked(key, value, opts) do
+    case Keyword.get(opts, :unlock, false) do
+      true -> unlock_result(store(key, value, unlock_opts(opts)))
+      false -> {:error, :keyring_locked}
+    end
+  end
+
+  # At the cap the collection is still locked, which is what the caller is
+  # told: the observable state is the same as an unattempted lock, and a
+  # second code would only invite clients to treat them differently.
+  defp unlock_result(:ok), do: :ok
+  defp unlock_result({:error, _still_locked}), do: {:error, :keyring_locked}
+
+  defp unlock_opts(opts), do: Keyword.put(opts, :timeout_ms, @unlock_timeout_ms)
+
+  # `:ok`, not the helper's output. Every caller of the behaviour matches on
+  # `:ok` — `SecretWriteLog.put/3`, `Wizard.put_secret/2`, the env family in
+  # `Management.Secrets` — and the macOS writer has always answered that way,
+  # so returning `{:ok, output}` here made a SUCCESSFUL Linux store fall
+  # through a `case` that has no clause for it.
+  defp store(key, value, opts) do
+    with {:ok, binary} <- fetch_secret_tool_binary(opts),
+         {:ok, shell} <- fetch_shell_binary(opts),
+         {:ok, _output} <-
+           with_temp_secret(value, fn secret_file ->
+             run_with_stdin(shell, secret_file, binary, put_args(key, opts), opts)
+           end) do
+      :ok
+    end
+  end
+
+  # Injectable so the three outcomes are testable without a session bus, and
+  # so one probe can serve a caller that already made it.
+  defp store_state(opts) do
+    Keyword.get_lazy(opts, :secret_service_state, fn -> SecretService.state(opts) end)
   end
 
   @impl true
   def get(key, opts \\ []) when is_secret_key(key) do
-    with {:ok, binary} <- fetch_secret_tool_binary(),
+    with {:ok, binary} <- fetch_secret_tool_binary(opts),
          {:ok, output} <- run(binary, lookup_args(key, opts), opts) do
       output
       |> String.trim_trailing("\n")
@@ -268,7 +402,7 @@ defmodule FermixCore.Setup.SecretWriter.SecretTool do
   # item needs no special case here (unlike macOS `security`, which exits 44).
   @impl true
   def delete(key, opts \\ []) when is_secret_key(key) do
-    with {:ok, binary} <- fetch_secret_tool_binary(),
+    with {:ok, binary} <- fetch_secret_tool_binary(opts),
          {:ok, _output} <- run(binary, clear_args(key, opts), opts) do
       :ok
     end
@@ -304,15 +438,15 @@ defmodule FermixCore.Setup.SecretWriter.SecretTool do
     ["service", service, "account", @account, "env", SecretWriter.item_name(key)]
   end
 
-  defp fetch_secret_tool_binary do
-    case secret_tool_binary() do
+  defp fetch_secret_tool_binary(opts) do
+    case secret_tool_binary(opts) do
       nil -> {:error, :unavailable}
       binary -> {:ok, binary}
     end
   end
 
-  defp fetch_shell_binary do
-    case shell_binary() do
+  defp fetch_shell_binary(opts) do
+    case shell_binary(opts) do
       nil -> {:error, :unavailable}
       binary -> {:ok, binary}
     end
@@ -320,10 +454,16 @@ defmodule FermixCore.Setup.SecretWriter.SecretTool do
 
   defp secret_tool_binary, do: System.find_executable("secret-tool")
 
+  defp secret_tool_binary(opts) do
+    Keyword.get_lazy(opts, :secret_tool, &secret_tool_binary/0)
+  end
+
   defp shell_binary do
     System.find_executable("sh") ||
       if File.exists?("/bin/sh"), do: "/bin/sh"
   end
+
+  defp shell_binary(opts), do: Keyword.get_lazy(opts, :shell, &shell_binary/0)
 
   defp timeout(opts), do: Keyword.get(opts, :timeout_ms, @default_timeout_ms)
 
@@ -374,7 +514,7 @@ defmodule FermixCore.Setup.SecretWriter.SecretTool do
     timeout_ms = timeout(opts)
     command = Enum.join([binary | args], " ")
 
-    case CommandRunner.run(
+    case runner(opts).(
            binary,
            args,
            [timeout_ms: timeout_ms] ++ Keyword.take(opts, [:supervised])
@@ -395,6 +535,8 @@ defmodule FermixCore.Setup.SecretWriter.SecretTool do
         {:error, reason}
     end
   end
+
+  defp runner(opts), do: Keyword.get(opts, :runner, &CommandRunner.run/3)
 end
 
 defmodule FermixCore.Setup.SecretWriter.MacOS do

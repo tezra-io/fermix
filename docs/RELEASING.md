@@ -46,6 +46,49 @@ container, where there is no user service manager and `service status --json`
 must answer the structured `user_manager_unreachable` error. `stage-release`
 attaches the packages to the draft.
 
+**The app-engine archive for Linux.** The same `linux-packages` job also
+publishes `fermix_app_engine_linux_x86_64.tar.gz` and
+`fermix_app_engine_linux_aarch64.tar.gz`, cosign-signed beside the macOS
+app-engine tarballs, which is how the engine reaches the Linux desktop package
+without anybody scraping a `.deb`. Inside each archive: `engine-manifest.json`,
+the staged `tree/`, the two `maintainer/` scripts and `nfpm-contents.yaml`, the
+package's own `contents:` block with its paths made relative to the archive. The
+tree comes from the same staging function the deb is built from — the one
+documented difference is `changelog.Debian.gz`, which the archive omits because
+the combined desktop package ships one changelog, its own.
+
+`verify-candidate` and `verify-published` each run the archive's own engine:
+`scripts/release/verify_app_engine.sh <archive> linux_<arch> <version> <commit>
+container` validates the manifest, the tree digest and the ELF inventory, then
+installs the archive's `tree/` into a `debian:12` container with the archive's
+own `postinstall.sh` and runs `fermix --version` and `fermix service status
+--json` from the installed paths. A container has no user service manager, so
+the second command's one honest answer is `user_manager_unreachable`. Docker is
+required; the macOS rows are unaffected and still boot the tree in place.
+
+**Every engine release drives a Linux desktop release.** After `promote`, the
+`dispatch-linux-desktop` job reads the two archives' published `.sha256`
+sidecars, builds one payload of the tag, the version, the source commit, the
+certificate identity this tag signs as and each archive's name and digest, and
+sends it to `tezra-io/fermix-linux` as a `repository_dispatch` of type
+`engine-released`. That repository writes its own `engine/PIN.json` from the
+payload, verifies the pin it just wrote by downloading and checking the archives,
+and opens an auto-merging pull request. No person edits a pin.
+
+Two things about that job are deliberate. It runs after `promote` rather than
+beside it, because a payload that names assets of a still-staged release names
+assets nothing can download. And it sends the dispatch with a GitHub App
+installation token, minted from `FERMIX_RELEASE_APP_ID` and
+`FERMIX_RELEASE_APP_PRIVATE_KEY`, rather than with `GITHUB_TOKEN`: GitHub starts
+no workflow run from an event the default token produced, so the dispatch would
+be accepted, nothing would run, and the chain would stop with everything green.
+The App is installed on `tezra-io/fermix-linux` alone, with Contents write and
+Pull requests write and nothing else; it cannot merge anything, because that
+repository's branch protection requires the full check set and the App holds no
+Administration permission. A prerelease tag sends no dispatch, because it
+produces no Linux packages to pair with. Re-running the job is the whole retry:
+the desktop side is idempotent per tag.
+
 **The version rule, and what it costs.** Neither package may carry a Debian
 revision or an rpm epoch, because `fermix-desktop` pins `Depends: fermix (= <v>)`
 and `Requires: fermix = <v>` and the two spellings must mean the same thing. The

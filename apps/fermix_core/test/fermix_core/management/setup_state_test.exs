@@ -41,7 +41,8 @@ defmodule FermixCore.Management.SetupStateTest do
              "profile",
              "providers",
              "readiness",
-             "restart"
+             "restart",
+             "secrets"
            ]
   end
 

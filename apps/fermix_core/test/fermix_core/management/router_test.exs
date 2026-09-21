@@ -499,18 +499,53 @@ defmodule FermixCore.Management.RouterTest do
     end
 
     test "a secret is stored by id and answered with presence alone" do
-      writer = fn "openai_api_key", "sk-live" ->
-        {:ok, %{"id" => "openai_api_key", "present" => true}}
+      writer = fn "openai_api_key", "sk-live", opts ->
+        # No consent and no unlock were asked for, so neither is invented.
+        send(self(), {:wrote, opts})
+        {:ok, %{"id" => "openai_api_key", "present" => true, "store" => "keyring"}}
       end
 
       params = %{"id" => "openai_api_key", "value" => "sk-live"}
 
-      assert {:ok, %{"id" => "openai_api_key", "present" => true}} =
+      assert {:ok, %{"id" => "openai_api_key", "present" => true, "store" => "keyring"}} =
+               Router.route(v2("secret.set", params), secret_writer: writer)
+
+      assert_received {:wrote, opts}
+      assert Keyword.get(opts, :store) == :keyring
+      assert Keyword.get(opts, :unlock) == false
+    end
+
+    test "the owner's consent and unlock request reach the writer as they were sent" do
+      writer = fn _id, _value, opts ->
+        send(self(), {:wrote, opts})
+        {:ok, %{"id" => "openai_api_key", "present" => true, "store" => "file"}}
+      end
+
+      params = %{
+        "id" => "openai_api_key",
+        "value" => "sk-live",
+        "store" => "file",
+        "unlock" => true
+      }
+
+      assert {:ok, %{"store" => "file"}} =
+               Router.route(v2("secret.set", params), secret_writer: writer)
+
+      assert_received {:wrote, opts}
+      assert Keyword.get(opts, :store) == :file
+      assert Keyword.get(opts, :unlock) == true
+    end
+
+    test "a store nobody implements is refused rather than passed to the writer" do
+      writer = fn _id, _value, _opts -> flunk("reached the writer") end
+      params = %{"id" => "openai_api_key", "value" => "sk-live", "store" => "kwallet"}
+
+      assert {:error, :invalid_params, _details} =
                Router.route(v2("secret.set", params), secret_writer: writer)
     end
 
     test "a keyring refusal is its own code, with the published reason word" do
-      writer = fn _id, _value ->
+      writer = fn _id, _value, _opts ->
         {:error, {:secret_store_failed, "openai_api_key", "locked"}}
       end
 

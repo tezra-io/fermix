@@ -38,6 +38,9 @@ defmodule Fermix.CLI.Service.Status do
 
   @type user_unit :: :absent | :legacy_generated | :foreign
 
+  # What "which engine is this" means on the wire, in one place.
+  @identity_keys ["build_id", "product_version", "distribution_identity", "architecture"]
+
   @doc "The vendor unit path the Linux package owns."
   @spec vendor_unit_path() :: Path.t()
   def vendor_unit_path, do: @vendor_unit_path
@@ -57,14 +60,34 @@ defmodule Fermix.CLI.Service.Status do
   @doc """
   The installed identity, with the verdict on its own installed manifest.
 
-  The published fields are the compiled ones. The manifest is evidence about
-  them, so a manifest that disagrees is an integrity failure to report rather
-  than a second identity to publish.
+  What is INSTALLED is what the package put on disk, so the manifest is the
+  identity and the compiled constants are only the fallback for a manifest that
+  cannot be read. Publishing the compiled ones made a stale engine describe
+  itself as the install: the code answering had been extracted from an earlier
+  package, so `integrity` said "mismatched" while alignment — comparing that
+  same stale identity against itself — said "aligned", and no surface could
+  tell the owner they were running an engine they had already replaced.
   """
   @spec installed(map(), {:ok, map()} | {:error, term()}) :: map()
   def installed(compiled, manifest) when is_map(compiled) do
-    Map.put(compiled, "integrity", integrity(compiled, manifest))
+    compiled
+    |> published_identity(manifest)
+    |> Map.put("integrity", integrity(compiled, manifest))
   end
+
+  # Only the four identity keys are taken from the manifest, and only when it
+  # carries them: everything else a caller publishes about the install stays as
+  # the build reported it.
+  defp published_identity(compiled, {:ok, manifest}) when is_map(manifest) do
+    Enum.reduce(@identity_keys, compiled, fn key, acc ->
+      case Map.get(manifest, key) do
+        nil -> acc
+        value -> Map.put(acc, key, value)
+      end
+    end)
+  end
+
+  defp published_identity(compiled, _unreadable), do: compiled
 
   @doc "Whether a user unit is absent, the unit this binary used to write, or foreign."
   @spec classify_unit(String.t() | nil) :: user_unit()
@@ -204,12 +227,9 @@ defmodule Fermix.CLI.Service.Status do
 
   defp integrity(compiled, {:ok, manifest}) when is_map(manifest) do
     matching? =
-      Enum.all?(
-        ["build_id", "product_version", "distribution_identity", "architecture"],
-        fn key ->
-          Map.get(manifest, key) == Map.get(compiled, key)
-        end
-      )
+      Enum.all?(@identity_keys, fn key ->
+        Map.get(manifest, key) == Map.get(compiled, key)
+      end)
 
     if matching?, do: "verified", else: "mismatched"
   end

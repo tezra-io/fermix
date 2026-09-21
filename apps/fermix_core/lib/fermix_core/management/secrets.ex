@@ -47,6 +47,7 @@ defmodule FermixCore.Management.Secrets do
   alias FermixCore.Setup.SecretPaths
   alias FermixCore.Setup.SecretStore
   alias FermixCore.Setup.SecretWriter
+  alias FermixCore.Setup.SecretWriter.Migration
   alias FermixCore.Setup.Wizard
 
   require Logger
@@ -118,26 +119,45 @@ defmodule FermixCore.Management.Secrets do
   defp oauth_client_provider(_path), do: nil
 
   @doc "Stores one secret and answers with its presence, never its value."
-  @spec set(String.t(), String.t()) :: {:ok, map()} | {:error, error()}
-  def set(@setup_token_id = id, value) when is_binary(value) do
+  @spec set(String.t(), String.t(), keyword()) :: {:ok, map()} | {:error, error()}
+  def set(id, value, opts \\ [])
+
+  def set(@setup_token_id = id, value, _opts) when is_binary(value) do
     with :ok <- validate_value(value) do
       store_setup_token(id, String.trim(value))
     end
   end
 
   # M45 §4.3 step 1: every refusal that needs no storage call comes first.
-  def set(@env_prefix <> name = id, value) when is_binary(value) do
+  def set(@env_prefix <> name = id, value, opts) when is_binary(value) do
     with :ok <- validate_env_name(name),
          :ok <- validate_env_value(value),
          {:ok, new_entry?} <- env_storable(name) do
-      store_env(id, name, value, new_entry?)
+      store_env(id, name, value, new_entry?, opts)
     end
   end
 
-  def set(id, value) when is_binary(id) and is_binary(value) do
+  def set(id, value, opts) when is_binary(id) and is_binary(value) do
     with {:ok, key} <- fetch_key(id),
          :ok <- validate_value(value) do
-      commit(id, key, fn -> Wizard.put_secret(key, value) end)
+      commit_stored(id, key, fn -> Wizard.put_secret(key, value, opts) end, store_of(opts))
+    end
+  end
+
+  @doc """
+  Moves every file-stored secret into the OS keyring and returns to saving
+  there. The way back for an owner who unlocked their keyring after consenting
+  to the file store: no value is a parameter, because no client can read one
+  out of that store to hand back.
+  """
+  @spec migrate_to_keyring(keyword()) :: {:ok, map()} | {:error, error()}
+  def migrate_to_keyring(opts \\ []) when is_list(opts) do
+    case Migration.to_keyring(opts) do
+      {:ok, %{moved: moved, store: store}} ->
+        {:ok, %{"moved" => Enum.map(moved, &Atom.to_string/1), "store" => Atom.to_string(store)}}
+
+      {:error, reason} ->
+        {:error, {:secret_store_failed, "secret.migrate_to_keyring", store_reason(reason)}}
     end
   end
 
@@ -151,7 +171,7 @@ defmodule FermixCore.Management.Secrets do
 
   def clear(id) when is_binary(id) do
     with {:ok, key} <- fetch_key(id) do
-      commit(id, key, fn -> Wizard.clear_secret(key) end)
+      commit(id, key, fn -> Wizard.clear_secret(key) end, current_store())
     end
   end
 
@@ -197,10 +217,10 @@ defmodule FermixCore.Management.Secrets do
 
   # Steps 2 and 3: a store that exists, then the write. A write the store
   # refused left nothing behind, so there is nothing to undo.
-  defp store_env(id, name, value, new_entry?) do
+  defp store_env(id, name, value, new_entry?, opts) do
     with :ok <- env_store_available(),
-         :ok <- SecretWriter.put(ExternalEnv.key(name), value) do
-      commit_env(id, name, value, new_entry?)
+         :ok <- SecretWriter.put(ExternalEnv.key(name), value, opts) do
+      commit_env(id, name, value, new_entry?, store_of(opts))
     else
       {:error, reason} -> {:error, env_error(id, name, reason)}
     end
@@ -210,10 +230,11 @@ defmodule FermixCore.Management.Secrets do
   # points at it, and one commit allows and references the name. A failure
   # after the write deletes an item this call created, once; an item the file
   # already pointed at stays, because the entry names it.
-  defp commit_env(id, name, value, new_entry?) do
+  defp commit_env(id, name, value, new_entry?, store) do
     with :ok <- verify_env(ExternalEnv.key(name), value),
          {:ok, _report} <- Wizard.update_sandbox_env(&ExternalEnv.put_managed(&1, name)) do
-      {:ok, env_view(id, name)}
+      _ = remember_store(store)
+      {:ok, Map.put(env_view(id, name), "store", Atom.to_string(store))}
     else
       {:error, reason} ->
         :ok = undo_new_env(name, new_entry?)
@@ -333,19 +354,50 @@ defmodule FermixCore.Management.Secrets do
   defp kind(reason) when is_tuple(reason), do: elem(reason, 0)
   defp kind(_reason), do: :unexpected
 
-  defp commit(id, key, write) do
+  defp commit(id, key, write, store) do
     case write.() do
-      {:ok, _report} -> {:ok, view(id, key)}
+      {:ok, _report} -> {:ok, view(id, key, store)}
       {:error, reason} -> {:error, error(id, reason)}
     end
   end
 
-  defp view(id, key) do
+  # Remembered only where the owner chose, never on a clear: forgetting one
+  # secret is not a decision about where the next one goes.
+  defp commit_stored(id, key, write, store) do
+    case commit(id, key, write, store) do
+      {:ok, view} -> {:ok, tap(view, fn _view -> remember_store(store) end)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # Where the value actually landed, so a client never infers it from what it
+  # asked for.
+  defp view(id, key, store) do
     %{
       "id" => id,
       "present" => present?(key),
+      "store" => Atom.to_string(store),
       "restart" => Settings.restart()
     }
+  end
+
+  defp store_of(opts), do: Keyword.get(opts, :store, :keyring)
+
+  # What this home saves to now. An unreadable or unknown setting is reported
+  # as the default rather than raising inside a view, and the save path refuses
+  # such a file on its own account.
+  defp current_store do
+    case ConfigStore.secret_store(ConfigStore.fermix_home()) do
+      {:ok, store} -> store
+      {:error, _unreadable} -> :keyring
+    end
+  end
+
+  defp remember_store(store) do
+    case ConfigStore.put_secret_store(ConfigStore.fermix_home(), store) do
+      :ok -> :ok
+      {:error, reason} -> Logger.warning("secret store choice not recorded: #{inspect(reason)}")
+    end
   end
 
   defp present?(key) do
@@ -398,6 +450,12 @@ defmodule FermixCore.Management.Secrets do
   # locked case on every platform Fermix writes secrets on: macOS `security`
   # exits non-zero on a locked or denied keychain, and `secret-tool` on an
   # unavailable collection.
+  # A lock this engine MEASURED, from the default collection's own property,
+  # rather than inferred from how a helper died. It must be spelled first:
+  # `:keyring_locked` is an atom, and the catch-all below would otherwise call
+  # a locked keyring "unavailable" — the untrue word this whole change exists
+  # to stop saying.
+  defp store_reason(:keyring_locked), do: "locked"
   defp store_reason({:helper_timeout, _command, _timeout}), do: "timeout"
   defp store_reason({:helper_failed, _command, _code, _output}), do: "locked"
   defp store_reason(_reason), do: "unavailable"

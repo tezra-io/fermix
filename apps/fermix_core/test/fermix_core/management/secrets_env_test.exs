@@ -225,7 +225,7 @@ defmodule FermixCore.Management.SecretsEnvTest do
 
       assert view["id"] == "env:ALPACA_API_KEY"
       assert view["present"] == true
-      assert Map.keys(view) |> Enum.sort() == ~w(id present restart)
+      assert Map.keys(view) |> Enum.sort() == ~w(id present restart store)
 
       assert_received {:writer, :put, {:external_env, "ALPACA_API_KEY"}}
       assert_received {:writer, :get, {:external_env, "ALPACA_API_KEY"}}

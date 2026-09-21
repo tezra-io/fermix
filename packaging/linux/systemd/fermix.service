@@ -6,6 +6,16 @@ StartLimitBurst=5
 [Service]
 Type=simple
 ExecStart=/usr/bin/fermix service run
+# The payload directory is deliberately NOT the one a CLI invocation uses.
+# Burrito's wrapper runs deps/burrito/src/maintenance.zig's do_clean_old_versions
+# on every launch (wrapper.zig:110), deleting every sibling extraction of this
+# app whose version is semantically older than the one being launched. If the
+# service and the CLI shared a base, then during an upgrade -- new CLI on disk,
+# old daemon still running -- any `fermix` command the owner typed would delete
+# the running daemon's payload out from under it, and the daemon would die
+# later, at the first lazy module load, far from the cause. Measured: a bare
+# `fermix --version` removed a 0.10.4 sibling and logged "Uninstalled older
+# version". Two roots is the protection, not an accident.
 Environment=FERMIX_LINUX_PACKAGE_INSTALL_DIR=%h/.cache/fermix/runtime
 EnvironmentFile=-%h/.config/fermix/env
 Restart=always

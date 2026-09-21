@@ -22,6 +22,11 @@ version="$3"
 case "$target" in
   macos_aarch64) expected_arch="arm64" ;;
   macos_x86_64) expected_arch="x86_64" ;;
+  # The Linux app-engine archive is staged from the same tree the `fermix` deb
+  # is built from, by the same compile, so it is produced by that build rather
+  # than by a second one here.
+  linux_x86_64 | linux_aarch64)
+    fail "$target is built by scripts/release/build_linux_packages.sh, which produces the packages and the archive from one compile" ;;
   *) fail "unsupported target: $target" ;;
 esac
 

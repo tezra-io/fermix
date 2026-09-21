@@ -11,6 +11,7 @@ defmodule Fermix.CLI.Setup do
   alias Fermix.CLI.ServiceCommand
   alias Fermix.CLI.Setup.WebLauncher
   alias FermixCore.BuildInfo
+  alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.Runtime
   alias FermixCore.Setup.ServiceActivation
   alias FermixCore.Setup.Wizard
@@ -69,7 +70,8 @@ defmodule Fermix.CLI.Setup do
     no_service: :boolean,
     system: :boolean,
     user: :boolean,
-    rotate_token: :boolean
+    rotate_token: :boolean,
+    store: :string
   ]
 
   @spec run([String.t()]) :: non_neg_integer()
@@ -116,7 +118,8 @@ defmodule Fermix.CLI.Setup do
 
   defp dispatch(opts, run_opts) do
     with {:ok, scoped_opts} <- resolve_scope(opts),
-         :ok <- validate_mode(scoped_opts) do
+         :ok <- validate_mode(scoped_opts),
+         :ok <- record_store(scoped_opts, run_opts) do
       run_dispatch(scoped_opts, run_opts)
     else
       {:error, reason} -> abort(reason)
@@ -292,6 +295,33 @@ defmodule Fermix.CLI.Setup do
 
   defp present_env?(name) do
     System.get_env(name) not in [nil, ""]
+  end
+
+  # `--store file` is the terminal's spelling of the consent the app asks for
+  # in a dialog: it says where this home saves from now on, and it is recorded
+  # before any answer is written so the save that follows goes to the store the
+  # person just named. Absent, nothing is recorded and the home keeps whatever
+  # it had — running setup is not a decision about where secrets live.
+  defp record_store(opts, run_opts) do
+    case Keyword.get(opts, :store) do
+      nil -> :ok
+      "keyring" -> put_store(:keyring, run_opts)
+      "file" -> put_store(:file, run_opts)
+      other -> {:error, "--store is keyring or file, not #{inspect(other)}"}
+    end
+  end
+
+  defp put_store(store, run_opts) do
+    recorder = Keyword.get(run_opts, :put_secret_store, &default_put_secret_store/1)
+
+    case recorder.(store) do
+      :ok -> :ok
+      {:error, reason} -> {:error, "the store choice could not be recorded: #{inspect(reason)}"}
+    end
+  end
+
+  defp default_put_secret_store(store) do
+    ConfigStore.put_secret_store(ConfigStore.fermix_home(), store)
   end
 
   defp resolve_scope(opts) do

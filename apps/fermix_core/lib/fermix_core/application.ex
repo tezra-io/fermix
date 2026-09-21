@@ -48,6 +48,7 @@ defmodule FermixCore.Application do
   alias FermixCore.Providers.Selection
   alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Realtime.Supervisor, as: RealtimeSupervisor
+  alias FermixCore.Runtime.PayloadPrune
   alias FermixCore.Sandbox.CommandCapabilities
   alias FermixCore.Sandbox.DecisionTelemetry
   alias FermixCore.Setup.BootReport
@@ -111,7 +112,23 @@ defmodule FermixCore.Application do
   # and it is the daemon run under another name: the binding that names this
   # service's home is resolved in `config/runtime.exs`, before any configuration
   # is read, so by the time dispatch happens there is nothing left to decide.
-  defp cli_dispatch(profile, ["service", "run" | rest]), do: run_daemon(profile, ["run" | rest])
+  #
+  # The prune runs here and nowhere else. This is the one moment that knows
+  # which payload directory is in use and that the generation which owned any
+  # other one has already been stopped by systemd; a prune from an ordinary CLI
+  # invocation could delete the payload out from under a live daemon.
+  defp cli_dispatch(profile, ["service", "run" | rest]) do
+    # Reported, never fatal: housekeeping must not be a reason the daemon
+    # refuses to start, and a refusal nobody can see is the pattern this fix
+    # exists to end.
+    case PayloadPrune.run_for_launch() do
+      {:ok, _report} -> :ok
+      :not_packaged -> :ok
+      {:error, reason} -> Logger.warning("runtime payload prune refused: #{inspect(reason)}")
+    end
+
+    run_daemon(profile, ["run" | rest])
+  end
 
   # `setup`: the service-first web path avoids the local tree and starts
   # the real daemon instead. Terminal setup still builds the tree needed

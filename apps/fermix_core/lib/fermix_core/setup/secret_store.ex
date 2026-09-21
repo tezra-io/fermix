@@ -19,7 +19,12 @@ defmodule FermixCore.Setup.SecretStore do
   @spec secure_snapshot(snapshot(), keyword()) :: {:ok, snapshot()} | {:error, String.t()}
   def secure_snapshot(snapshot, opts \\ []) when is_map(snapshot) and is_list(opts) do
     previous = Keyword.get(opts, :previous)
-    write_opts = [profile: profile_of(snapshot)] ++ Keyword.take(opts, [:supervised])
+    # The home's own choice rides on every write, so a home that consented to
+    # the file store keeps saving there — through the wizard, a settings save
+    # and a boot-time rotation alike, not only through the call that consented.
+    write_opts =
+      [profile: profile_of(snapshot), store: store_choice(opts)] ++
+        Keyword.take(opts, [:supervised])
 
     Enum.reduce_while(SecretPaths.all(), {:ok, snapshot}, fn secret, {:ok, acc} ->
       case secure_secret(acc, previous, secret, write_opts) do
@@ -234,6 +239,15 @@ defmodule FermixCore.Setup.SecretStore do
       {:ok, _other} -> write_secret(snapshot, secret, value, write_opts)
       {:error, _reason} -> {:ok, keep_sentinel(snapshot, secret)}
     end
+  end
+
+  defp store_choice(opts) do
+    Keyword.get_lazy(opts, :store, fn ->
+      case ConfigStore.secret_store(ConfigStore.fermix_home()) do
+        {:ok, store} -> store
+        {:error, _unreadable} -> :keyring
+      end
+    end)
   end
 
   defp keep_sentinel(snapshot, secret) do

@@ -89,6 +89,7 @@ defmodule Fermix.MixProject do
       fermix_linux_package: [
         applications: applications,
         include_executables_for: [:unix],
+        version: packaged_release_version(),
         steps: [&__MODULE__.validate_linux_package/1, :assemble, &Burrito.wrap/1],
         burrito: [
           targets: [
@@ -102,6 +103,43 @@ defmodule Fermix.MixProject do
         ]
       ]
     ]
+  end
+
+  # The version the packaged Linux release is assembled under, which is NOT the
+  # version anyone sees. Burrito extracts its payload into a directory named
+  # `<release>_erts-<erts>_<app_version>` (deps/burrito/src/wrapper.zig:160-166)
+  # and reuses it whenever a metadata file is present, so two builds sharing a
+  # product version shared an extraction and the second one installed never
+  # unpacked: the owner kept running the first engine across restarts. Appending
+  # the build identity here is what makes that directory differ per payload.
+  #
+  # It is deliberately semver BUILD METADATA (after `+`). Build metadata is
+  # ignored when comparing precedence, so `0.10.5+dev.abc` is neither newer nor
+  # older than `0.10.5` and no upgrade check can read it as a new version. The
+  # product version stays `0.10.5` everywhere a person or a protocol sees it:
+  # `fermix --version`, engine.json's product_version and the deb and rpm
+  # versions all come from elsewhere, never from this string.
+  #
+  # Setting it in the release rather than in the environment is the whole point.
+  # Burrito prints two lines to STDOUT on every invocation when its
+  # `*_INSTALL_DIR` variable is set (logger.zig sends `info` to stdout, with no
+  # quiet switch and no way for Elixir to intercept it, since the zig wrapper
+  # runs before the BEAM), which put a two-line preamble in front of every
+  # `--json` command. Naming the default directory costs nothing on stdout.
+  defp packaged_release_version do
+    case System.get_env("FERMIX_BUILD_ID") do
+      nil -> "0.10.5"
+      "" -> "0.10.5"
+      build_id -> "0.10.5+" <> semver_metadata(build_id)
+    end
+  end
+
+  # Semver build metadata is dot-separated alphanumerics and hyphens, so every
+  # other character folds to a hyphen. The build id's own alphabet is already
+  # nearly this (`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`); in practice only `:`
+  # is rewritten.
+  defp semver_metadata(build_id) do
+    String.replace(build_id, ~r/[^0-9A-Za-z.-]/, "-")
   end
 
   @doc false

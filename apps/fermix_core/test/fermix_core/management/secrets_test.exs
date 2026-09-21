@@ -96,7 +96,7 @@ defmodule FermixCore.Management.SecretsTest do
       assert {:ok, view} = Secrets.set("openai_api_key", "sk-live")
 
       assert %{"required" => _required, "reasons" => _reasons} = view["restart"]
-      assert Map.keys(view) |> Enum.sort() == ~w(id present restart)
+      assert Map.keys(view) |> Enum.sort() == ~w(id present restart store)
       refute inspect(view) =~ "sk-live"
     end
 
@@ -299,6 +299,40 @@ defmodule FermixCore.Management.SecretsTest do
     test "it is enumerable beside the registry keys" do
       assert "anthropic_setup_token" in Secrets.ids()
       assert Secrets.ids() == Enum.uniq(Secrets.ids())
+    end
+  end
+
+  describe "a keyring the engine cannot reach" do
+    defmodule LockedKeyring do
+      @behaviour FermixCore.Setup.SecretWriter
+
+      @impl true
+      def available?(_opts \\ []), do: true
+
+      @impl true
+      def put(_key, _value, _opts \\ []), do: {:error, :keyring_locked}
+
+      @impl true
+      def get(_key, _opts \\ []), do: {:error, :missing_secret}
+
+      @impl true
+      def delete(_key, _opts \\ []), do: :ok
+
+      @impl true
+      def command_source(_key, _opts \\ []), do: %{source: :command, command: "x", args: []}
+    end
+
+    # The measured lock has to survive the trip to the wire. `:keyring_locked`
+    # is an atom, and the mapping's catch-all answers "unavailable" — so a
+    # locked keyring reached the person as "no store on this host", which is
+    # the untrue sentence this whole change exists to remove.
+    test "a measured lock reaches the wire as locked, not unavailable" do
+      previous = Application.get_env(:fermix_core, :secret_writer)
+      Application.put_env(:fermix_core, :secret_writer, LockedKeyring)
+      on_exit(fn -> Application.put_env(:fermix_core, :secret_writer, previous) end)
+
+      assert {:error, {:secret_store_failed, "openai_api_key", "locked"}} =
+               Secrets.set("openai_api_key", "sk-live")
     end
   end
 

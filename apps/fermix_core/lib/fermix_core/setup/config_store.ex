@@ -457,7 +457,8 @@ defmodule FermixCore.Setup.ConfigStore do
           snapshot
           |> Map.get(:fermix_core, [])
           |> Keyword.get(:profile, "general")
-          |> normalize_profile()
+          |> normalize_profile(),
+        secret_store: snapshot |> Map.get(:fermix_core, []) |> Keyword.get(:secret_store)
       ],
       sandbox:
         snapshot
@@ -633,6 +634,62 @@ defmodule FermixCore.Setup.ConfigStore do
     end
   end
 
+  @doc """
+  Which secret store this home saves to: `:keyring` (the default, and what an
+  absent setting means) or `:file`.
+
+  A value the engine does not recognise is an error rather than a fallback to
+  the default: a settings file naming a store this engine cannot use is a
+  question for the owner, not something to answer by quietly using another one.
+  """
+  @spec secret_store(Path.t()) :: {:ok, :keyring | :file} | {:error, term()}
+  def secret_store(home) when is_binary(home) do
+    with {:ok, contents} <- read_home_document(home) do
+      contents
+      |> parse_document()
+      |> get_in([:fermix_core, :secret_store])
+      |> parse_secret_store()
+    end
+  end
+
+  defp parse_secret_store(nil), do: {:ok, :keyring}
+  defp parse_secret_store("keyring"), do: {:ok, :keyring}
+  defp parse_secret_store("file"), do: {:ok, :file}
+  defp parse_secret_store(other), do: {:error, {:unknown_secret_store, other}}
+
+  @doc """
+  Records which store this home saves to, so a later save and a sentinel
+  resolution use the one the owner chose without being asked again.
+
+  Same read-change-render path as `put_web_port/2`, and the same refusal for a
+  settings file this renderer cannot round-trip.
+  """
+  @spec put_secret_store(Path.t(), :keyring | :file) :: :ok | {:error, term()}
+  def put_secret_store(home, kind) when is_binary(home) and kind in [:keyring, :file] do
+    with {:ok, contents} <- read_home_document(home),
+         :ok <- renderable_document(contents),
+         :ok <- File.mkdir_p(home) do
+      document = contents |> parse_document() |> put_secret_store_section(kind)
+
+      File.write(home_document_path(home), dump_snapshot(persistable_snapshot(document)))
+    end
+  end
+
+  # The default is expressed by absence, so returning to the keyring leaves no
+  # setting behind saying which store a home once used.
+  defp put_secret_store_section(document, :keyring) do
+    Map.update(document, :fermix_core, [], &Keyword.delete(&1, :secret_store))
+  end
+
+  defp put_secret_store_section(document, :file) do
+    Map.update(
+      document,
+      :fermix_core,
+      [secret_store: "file"],
+      &Keyword.put(&1, :secret_store, "file")
+    )
+  end
+
   defp validate_web_port(port) do
     if WebListener.valid_configured_port?(port),
       do: :ok,
@@ -768,6 +825,12 @@ defmodule FermixCore.Setup.ConfigStore do
   end
 
   defp normalize_profile(_value), do: "general"
+
+  # The default store is expressed by absence, so a home that saves to the
+  # keyring carries no setting naming it.
+  defp secret_store_render(nil), do: []
+  defp secret_store_render("keyring"), do: []
+  defp secret_store_render(store) when is_binary(store), do: [secret_store: store]
 
   defp profile_render(profile) when profile in [nil, "", "general"], do: []
   defp profile_render(profile) when is_binary(profile), do: [profile: profile]
@@ -982,7 +1045,10 @@ defmodule FermixCore.Setup.ConfigStore do
       "# Managed by mix fermix.setup",
       "# Built-in tools ship inside Fermix and are always available when registered.",
       "# Skills are separate SKILL.md directories under ~/.fermix/skills and plugin roots.",
-      render_section(["fermix_core"], profile_render(profile)),
+      render_section(
+        ["fermix_core"],
+        profile_render(profile) ++ secret_store_render(Keyword.get(fermix_core, :secret_store))
+      ),
       render_section(["fermix_core", "agent"], agent),
       Enum.map(Descriptor.ids(), fn id ->
         render_section(
@@ -1241,7 +1307,8 @@ defmodule FermixCore.Setup.ConfigStore do
         oauth: normalize_oauth(get_in(document, ["fermix_core", "oauth"])),
         plugin_secrets:
           normalize_plugin_secrets(get_in(document, ["fermix_core", "plugin_secrets"])),
-        profile: normalize_profile(get_in(document, ["fermix_core", "profile"]))
+        profile: normalize_profile(get_in(document, ["fermix_core", "profile"])),
+        secret_store: get_in(document, ["fermix_core", "secret_store"])
       ],
       sandbox: SandboxConfig.normalize(Map.get(document, "sandbox")),
       fermix_channels: [

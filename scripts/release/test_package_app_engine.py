@@ -13,12 +13,21 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent / "fixtures"))
+import linux_engine  # noqa: E402
 import package_app_engine as package  # noqa: E402
 
 
 TARGET = "macos_aarch64"
 ARCHITECTURE = "arm64"
 VERSION = "0.9.0"
+LINUX_TARGET = "linux_x86_64"
+LINUX_ARCHITECTURE = "x86_64"
+PROTOCOLS = {
+    "management": {"current_version": 2, "minimum_version": 1, "maximum_version": 2},
+    "realtime": {"current_version": 1, "minimum_version": 1, "maximum_version": 1},
+}
+UNIT_SOURCE = Path(__file__).resolve().parents[2] / "packaging/linux/systemd/fermix.service"
 
 
 class PackageAppEngineTest(unittest.TestCase):
@@ -303,6 +312,166 @@ class PackageAppEngineTest(unittest.TestCase):
     @staticmethod
     def _sha256(path):
         return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+class LinuxAppEngineTest(unittest.TestCase):
+    """The Linux archive, whose manifest this module builds as well as checks."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="fermix-linux-engine-package-")
+        self.base = Path(self.tmp.name)
+        self.release = self.base / "release"
+        self.out = self.base / "out"
+        self.loader_payload, self.loader_name = linux_engine.loader_bytes(LINUX_ARCHITECTURE)
+        self.interpreter = linux_engine.trusted_interpreter(self.loader_name)
+        self._write_release_tree()
+        self._write_manifest()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_builds_a_manifest_the_validator_then_accepts(self):
+        archive = package.package_release(
+            self.release, LINUX_TARGET, self.out, VERSION, "a" * 40
+        )
+
+        self.assertEqual(archive.name, "fermix_app_engine_linux_x86_64.tar.gz")
+        manifest = self._manifest()
+        self.assertEqual(manifest["identity"]["distribution_identity"], "linux_package")
+        self.assertEqual(manifest["identity"]["architecture"], LINUX_ARCHITECTURE)
+        self.assertEqual(manifest["protocols"], PROTOCOLS)
+
+    def test_the_inventory_lists_every_elf_and_nothing_else(self):
+        entries = {entry["path"]: entry for entry in self._manifest()["inventory"]["entries"]}
+
+        self.assertEqual(
+            sorted(entries),
+            sorted(
+                [
+                    "maintainer/postinstall.sh",
+                    "maintainer/postremove.sh",
+                    "tree/usr/bin/fermix",
+                    "tree/usr/lib/fermix/cosign",
+                    f"tree/usr/lib/fermix/runtime-payload/{self.loader_name}",
+                ]
+            ),
+        )
+        self.assertEqual(entries["tree/usr/bin/fermix"]["kind"], "elf")
+        self.assertEqual(entries["tree/usr/bin/fermix"]["architectures"], [LINUX_ARCHITECTURE])
+        self.assertEqual(entries["tree/usr/bin/fermix"]["interpreter"], self.interpreter)
+        self.assertIsNone(entries["tree/usr/lib/fermix/cosign"]["interpreter"])
+        self.assertEqual(entries["maintainer/postinstall.sh"]["kind"], "script")
+
+    def test_rejects_an_elf_built_for_the_other_architecture(self):
+        self._replace(
+            "tree/usr/bin/fermix",
+            linux_engine.elf_bytes("arm64", interpreter=self.interpreter),
+        )
+
+        with self.assertRaisesRegex(package.PackageError, "ELF architecture mismatch"):
+            package.package_release(self.release, LINUX_TARGET, self.out, VERSION, "a" * 40)
+
+    def test_rejects_an_interpreter_that_is_not_the_staged_loader(self):
+        self._replace(
+            "tree/usr/bin/fermix",
+            linux_engine.elf_bytes(
+                LINUX_ARCHITECTURE, interpreter=f"/var/lib/fermix/runtimes/{'b' * 64}/libc-musl.so"
+            ),
+        )
+
+        with self.assertRaisesRegex(package.PackageError, "does not name the staged loader"):
+            package.package_release(self.release, LINUX_TARGET, self.out, VERSION, "a" * 40)
+
+    def test_rejects_a_loader_whose_bytes_are_not_its_name(self):
+        payload = self.release / f"tree/usr/lib/fermix/runtime-payload/{self.loader_name}"
+        payload.write_bytes(self.loader_payload + b"tampered")
+        self._restamp()
+
+        with self.assertRaisesRegex(package.PackageError, "is named"):
+            package.package_release(self.release, LINUX_TARGET, self.out, VERSION, "a" * 40)
+
+    def test_rejects_a_systemd_unit_that_is_not_the_packaged_one(self):
+        self._replace("tree/usr/lib/systemd/user/fermix.service", b"[Unit]\nDescription=other\n")
+
+        with self.assertRaisesRegex(package.PackageError, "systemd unit"):
+            package.package_release(self.release, LINUX_TARGET, self.out, VERSION, "a" * 40)
+
+    def test_rejects_a_macos_distribution_identity_on_a_linux_target(self):
+        manifest = self._manifest()
+        manifest["identity"]["distribution_identity"] = "macos_app"
+        self._store_manifest(manifest)
+
+        with self.assertRaisesRegex(package.PackageError, "distribution_identity"):
+            package.package_release(self.release, LINUX_TARGET, self.out, VERSION, "a" * 40)
+
+    def test_refuses_to_build_a_macos_manifest(self):
+        with self.assertRaisesRegex(package.PackageError, "comes from the release step"):
+            package.build_manifest(
+                self.release,
+                TARGET,
+                product_version=VERSION,
+                build_id="release-test",
+                source_commit="a" * 40,
+                protocols=PROTOCOLS,
+            )
+
+    def _write_release_tree(self):
+        files = {
+            "tree/usr/bin/fermix": (
+                linux_engine.elf_bytes(LINUX_ARCHITECTURE, interpreter=self.interpreter),
+                0o755,
+            ),
+            "tree/usr/lib/fermix/cosign": (
+                linux_engine.elf_bytes(LINUX_ARCHITECTURE, padding=b"cosign\n"),
+                0o755,
+            ),
+            f"tree/usr/lib/fermix/runtime-payload/{self.loader_name}": (
+                self.loader_payload,
+                0o644,
+            ),
+            "tree/usr/lib/systemd/user/fermix.service": (UNIT_SOURCE.read_bytes(), 0o644),
+            "tree/usr/share/fermix/engine.json": (b"{}\n", 0o644),
+            "maintainer/postinstall.sh": (b"#!/bin/sh\nexit 0\n", 0o755),
+            "maintainer/postremove.sh": (b"#!/bin/sh\nexit 0\n", 0o755),
+            "nfpm-contents.yaml": (b"contents:\n", 0o644),
+        }
+        for relative, (payload, mode) in files.items():
+            path = self.release / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(payload)
+            path.chmod(mode)
+
+    def _write_manifest(self):
+        manifest = package.build_manifest(
+            self.release,
+            LINUX_TARGET,
+            product_version=VERSION,
+            build_id="release-test",
+            source_commit="a" * 40,
+            protocols=PROTOCOLS,
+        )
+        self._store_manifest(manifest)
+
+    def _replace(self, relative, payload):
+        """Swap one staged file and rebuild the manifest around it.
+
+        A tampered tree that still carries the old manifest refuses on the
+        digest, which would pass every case below for the wrong reason. The
+        builder states what the tree says; the validator is what is under test.
+        """
+        (self.release / relative).write_bytes(payload)
+        self._restamp()
+
+    def _restamp(self):
+        self._write_manifest()
+
+    def _manifest(self):
+        return json.loads((self.release / "engine-manifest.json").read_text(encoding="utf-8"))
+
+    def _store_manifest(self, manifest):
+        path = self.release / "engine-manifest.json"
+        path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        path.chmod(0o644)
 
 
 if __name__ == "__main__":

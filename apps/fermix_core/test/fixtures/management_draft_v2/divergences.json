@@ -569,6 +569,60 @@
       "field": "plugin.settings[].kind",
       "kind": "engine_only",
       "why": "The same field on the row this write answers with, for the same reason: the app redraws the control from the row it is handed, so a kind present in the listing and absent here would make the field change shape on save."
+    },
+    {
+      "method": "secret.set",
+      "field": "store",
+      "kind": "engine_only",
+      "why": "Where the value actually landed, so a client never infers it from what it asked for. The keyring is not reachable on every Linux desktop — a fingerprint login leaves the login collection locked — so a save may go to the consented private-file store instead, and a client that assumed the keyring would describe the wrong place to the person who owns the machine. The draft predates the file store. Optional on the wire: an older engine publishes none and means keyring."
+    },
+    {
+      "method": "secret.clear",
+      "field": "store",
+      "kind": "engine_only",
+      "why": "The same field on the result of forgetting one, so the store a home is using does not appear and disappear between two calls about the same secret. A clear reports the store in use and never changes it: forgetting one secret is not a decision about where the next one goes."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:secret.migrate_to_keyring",
+      "kind": "engine_only",
+      "why": "The way back from the private-file store to the keyring. An owner who consented to the file store while their keyring was locked, and unlocked it later, cannot return by saving: saving means retyping a value no client can read out of that store. So the engine moves them, reading each value back from the keyring before deleting its file copy. The draft predates the file store and therefore the way back from it."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:secret.migrate_to_keyring=2",
+      "kind": "engine_only",
+      "why": "The way back from the private-file store to the keyring. An owner who consented to the file store while their keyring was locked, and unlocked it later, cannot return by saving: saving means retyping a value no client can read out of that store. So the engine moves them, reading each value back from the keyring before deleting its file copy. The draft predates the file store and therefore the way back from it."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.secret.migrate_to_keyring",
+      "kind": "engine_only",
+      "why": "The way back from the private-file store to the keyring. An owner who consented to the file store while their keyring was locked, and unlocked it later, cannot return by saving: saving means retyping a value no client can read out of that store. So the engine moves them, reading each value back from the keyring before deleting its file copy. The draft predates the file store and therefore the way back from it."
+    },
+    {
+      "method": "secret.migrate_to_keyring",
+      "field": "params:unlock",
+      "kind": "engine_only",
+      "why": "The same unlock request `secret.set` takes, on the same 90-second bound: a migration hits the same locked collection a save does, and an owner who is willing to answer the prompt should not have to answer it once per secret."
+    },
+    {
+      "method": "setup.state.get",
+      "field": "secrets",
+      "kind": "engine_only",
+      "why": "The secrets row. The draft predates the private-file store, which exists because a desktop that logs in by fingerprint leaves the login keyring locked and a save cannot reach it."
+    },
+    {
+      "method": "setup.state.get",
+      "field": "secrets.store",
+      "kind": "engine_only",
+      "why": "Where this home saves: keyring, or the file store the owner consented to. The durable answer a Settings row renders, rather than whatever the last call happened to do."
+    },
+    {
+      "method": "setup.state.get",
+      "field": "secrets.availability",
+      "kind": "engine_only",
+      "why": "Whether a secret can be stored right now: ready, locked, unavailable. A separate question from `store`, and the reason the two are separate fields — a locked keyring still SAVES TO the keyring, so a single field would have to report it as having no store, which is the untrue sentence this whole change exists to remove."
     }
   ]
 }

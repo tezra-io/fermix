@@ -19,6 +19,8 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent / "fixtures"))
+import linux_engine  # noqa: E402
 import linux_packages as packages  # noqa: E402
 
 
@@ -37,8 +39,13 @@ def _silent_main(argv, **kwargs):
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = Path(__file__).with_name("build_linux_packages.sh")
 TARGET = "linux_aarch64"
+ARCHITECTURE = "arm64"
 VERSION = "9.9.9"
 SOURCE_COMMIT = "a" * 40
+PROTOCOLS = {
+    "management": {"current_version": 2, "minimum_version": 1, "maximum_version": 2},
+    "realtime": {"current_version": 1, "minimum_version": 1, "maximum_version": 1},
+}
 
 
 def digest_of(payload: bytes) -> str:
@@ -257,18 +264,27 @@ class BuildTest(unittest.TestCase):
 
         self._write_source_tree()
 
-        self.loader_payload = b"the musl loader"
+        # The wrapper, the loader and cosign are ELF files the packager reads
+        # the machine and the interpreter out of, so the fixtures carry exactly
+        # that much of an ELF and nothing more.
+        self.loader_payload, loader_name = linux_engine.loader_bytes(ARCHITECTURE)
         self.loader_digest = digest_of(self.loader_payload)
+        self.interpreter = linux_engine.trusted_interpreter(loader_name)
         loader_dir = self.source / "packaging/linux/out" / TARGET
         loader_dir.mkdir(parents=True)
-        (loader_dir / f"libc-musl-{self.loader_digest}.so").write_bytes(self.loader_payload)
+        (loader_dir / loader_name).write_bytes(self.loader_payload)
 
+        self.wrapper_payload = linux_engine.elf_bytes(ARCHITECTURE, interpreter=self.interpreter)
         self.wrapper = self.source / "burrito_out" / f"fermix_linux_package_{TARGET}"
         self.wrapper.parent.mkdir(parents=True)
-        self.wrapper.write_bytes(b"the burrito wrapper")
+        self.wrapper.write_bytes(self.wrapper_payload)
 
         self.nfpm_archive = self._nfpm_archive()
-        self.cosign_payload = b"the pinned cosign"
+        self.cosign_payload = linux_engine.elf_bytes(ARCHITECTURE, padding=b"cosign\n")
+
+        self.protocols = self.base / "protocols.json"
+        self.protocols.write_text(json.dumps(PROTOCOLS), encoding="utf-8")
+        self.app_engine_out = self.base / "app-engine-out"
 
         # The pins are data, and the verifier that reads them is what is under
         # test: the fixtures get their own digests so `download_verified` still
@@ -299,7 +315,9 @@ class BuildTest(unittest.TestCase):
         packaging = self.source / "packaging/linux"
         for relative, contents in {
             "nfpm-fermix.yaml.tmpl": (ROOT / "packaging/linux/nfpm-fermix.yaml.tmpl").read_text(),
-            "systemd/fermix.service": "[Unit]\n",
+            # The archive's manifest is checked against the packaged unit
+            # itself, so the fixture is that file rather than a stand-in.
+            "systemd/fermix.service": (ROOT / "packaging/linux/systemd/fermix.service").read_text(),
             "completions/fermix.bash": "# bash\n",
             "completions/_fermix": "# zsh\n",
             "completions/fermix.fish": "# fish\n",
@@ -381,7 +399,26 @@ class BuildTest(unittest.TestCase):
             "--host-machine",
             overrides.get("host_machine", "aarch64"),
         ]
+        if overrides.get("app_engine"):
+            argv += [
+                "--app-engine-dir",
+                str(self.app_engine_out),
+                "--protocols",
+                str(self.protocols),
+            ]
         return _silent_main(argv, opener=self._opener, runner=self._runner)
+
+    def _archive_root(self):
+        """The archive this build produced, unpacked for inspection."""
+
+        self.assertEqual(self._build(app_engine=True), 0)
+        archive = self.app_engine_out / f"fermix_app_engine_{TARGET}.tar.gz"
+        self.assertTrue(archive.is_file())
+
+        unpacked = self.base / "unpacked"
+        with tarfile.open(archive, "r:gz") as tar:
+            tar.extractall(unpacked, filter="data")
+        return unpacked / "fermix_app_engine"
 
     # ── the cases ───────────────────────────────────────────────────────────
 
@@ -396,7 +433,11 @@ class BuildTest(unittest.TestCase):
     def test_the_debian_package_name_carries_no_revision(self):
         self.assertEqual(self._build(), 0)
 
-        produced = sorted(path.name for path in self.out.iterdir())
+        # Dotfiles are build bookkeeping, not packages: the payload key ledger
+        # lives here so it persists across builds of the same output directory.
+        produced = sorted(
+            path.name for path in self.out.iterdir() if not path.name.startswith(".")
+        )
         self.assertEqual(produced, [f"fermix-{VERSION}-1.aarch64.rpm", f"fermix_{VERSION}_arm64.deb"])
         self.assertNotIn("-1_", produced[1])
 
@@ -423,8 +464,76 @@ class BuildTest(unittest.TestCase):
 
         payload = self.staged / "usr/lib/fermix/runtime-payload" / f"libc-musl-{self.loader_digest}.so"
         self.assertEqual(payload.read_bytes(), self.loader_payload)
-        self.assertEqual((self.staged / "usr/bin/fermix").read_bytes(), b"the burrito wrapper")
+        self.assertEqual((self.staged / "usr/bin/fermix").read_bytes(), self.wrapper_payload)
         self.assertEqual((self.staged / "usr/lib/fermix/cosign").read_bytes(), self.cosign_payload)
+
+    def test_the_archive_carries_the_shape_the_desktop_build_consumes(self):
+        root = self._archive_root()
+
+        self.assertTrue((root / "engine-manifest.json").is_file())
+        self.assertTrue((root / "nfpm-contents.yaml").is_file())
+        self.assertTrue((root / "maintainer/postinstall.sh").is_file())
+        self.assertTrue((root / "maintainer/postremove.sh").is_file())
+        self.assertEqual(
+            (root / "maintainer/postinstall.sh").read_bytes(),
+            (self.source / "packaging/linux/scripts/postinstall.sh").read_bytes(),
+        )
+        self.assertEqual((root / "tree/usr/bin/fermix").read_bytes(), self.wrapper_payload)
+
+    def test_the_archive_tree_is_the_package_tree_without_the_changelog(self):
+        root = self._archive_root()
+        tree = root / "tree"
+
+        for installed, mode in packages.STAGED_MODES.items():
+            with self.subTest(installed=installed):
+                staged = self.staged / installed
+                if installed == packages.CHANGELOG_PATH:
+                    self.assertFalse((tree / installed).exists())
+                    continue
+                self.assertEqual((tree / installed).read_bytes(), staged.read_bytes())
+                self.assertEqual(stat.S_IMODE((tree / installed).stat().st_mode), mode)
+
+    def test_the_resolved_contents_block_points_at_the_archives_own_tree(self):
+        contents = (self._archive_root() / "nfpm-contents.yaml").read_text(encoding="utf-8")
+
+        self.assertTrue(contents.startswith("#"))
+        self.assertIn("contents:\n", contents)
+        self.assertIn("  - src: tree/usr/bin/fermix\n", contents)
+        self.assertIn("    dst: /usr/bin/fermix\n", contents)
+        self.assertNotIn("dst: /usr/share/doc/fermix/changelog.Debian.gz", contents)
+        self.assertNotIn("scripts:", contents)
+        self.assertNotIn(str(self.source), contents)
+
+    def test_the_archive_manifest_carries_the_engines_own_protocol_windows(self):
+        manifest = json.loads(
+            (self._archive_root() / "engine-manifest.json").read_text(encoding="utf-8")
+        )
+
+        self.assertEqual(manifest["protocols"], PROTOCOLS)
+        self.assertEqual(manifest["identity"]["distribution_identity"], "linux_package")
+        self.assertEqual(manifest["identity"]["artifact_target"], TARGET)
+        self.assertEqual(manifest["identity"]["architecture"], ARCHITECTURE)
+        self.assertEqual(manifest["identity"]["source_commit"], SOURCE_COMMIT)
+        entries = {entry["path"]: entry for entry in manifest["inventory"]["entries"]}
+        self.assertEqual(entries["tree/usr/bin/fermix"]["interpreter"], self.interpreter)
+
+    def test_the_archive_refuses_a_protocol_file_that_is_not_two_windows(self):
+        self.protocols.write_text(json.dumps({"management": {}}), encoding="utf-8")
+
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            self.assertEqual(self._build(app_engine=True), 1)
+
+        self.assertIn("management and a realtime protocol window", stderr.getvalue())
+
+    def test_a_second_build_replaces_the_archive_beside_the_packages(self):
+        self.assertEqual(self._build(app_engine=True), 0)
+        archive = self.app_engine_out / f"fermix_app_engine_{TARGET}.tar.gz"
+        first = archive.read_bytes()
+
+        self.assertEqual(self._build(app_engine=True), 0)
+
+        self.assertEqual(archive.read_bytes(), first)
 
     def test_the_staged_manifest_reports_the_installed_identity(self):
         self._build()
@@ -433,7 +542,7 @@ class BuildTest(unittest.TestCase):
         self.assertEqual(manifest["distribution_identity"], "linux_package")
         self.assertEqual(manifest["artifact_target"], TARGET)
         self.assertEqual(manifest["loader_sha256"], self.loader_digest)
-        self.assertEqual(manifest["binary_sha256"], digest_of(b"the burrito wrapper"))
+        self.assertEqual(manifest["binary_sha256"], digest_of(self.wrapper_payload))
 
     def test_the_staged_documentation_is_gzipped(self):
         self._build()
@@ -560,7 +669,7 @@ class BuildScriptTest(unittest.TestCase):
         lines = self.log.read_text(encoding="utf-8").splitlines()
         self.assertEqual(
             [line.split("|", 1)[0] for line in lines],
-            ["deps.get", "compile", "assets.setup", "assets.deploy", "release", "package"],
+            ["deps.get", "compile", "assets.setup", "assets.deploy", "release", "run", "package"],
         )
 
         release = lines[4].split("|")
@@ -569,14 +678,45 @@ class BuildScriptTest(unittest.TestCase):
         self.assertEqual(release[3], "linux_package")
         self.assertEqual(release[4], TARGET)
         self.assertEqual(release[5], TARGET)
-        self.assertRegex(release[6], r"^dev-[0-9a-f]{12}-dirty$")
+        self.assertRegex(release[6], r"^dev-[0-9a-f]{12}-dirty-[0-9a-f]{8}$")
         self.assertRegex(release[7], r"^[0-9a-f]{40}$")
+        # The trailing digest is the working tree's difference from that
+        # commit, so two dirty builds of different code cannot claim one
+        # identity.
+        self.assertTrue(release[6].endswith(f"-{self._dirty_digest()}"))
 
-        package = lines[5].split("|")
+        package = lines[6].split("|")
         self.assertEqual(package[1], TARGET)
         self.assertEqual(package[2], VERSION)
         self.assertEqual(package[3], str(self.out.resolve()))
-        self.assertRegex(package[4], r"^dev-[0-9a-f]{12}-dirty$")
+        self.assertRegex(package[4], r"^dev-[0-9a-f]{12}-dirty-[0-9a-f]{8}$")
+        self.assertEqual(package[4], release[6])
+        # The archive lands beside the packages, from this one build.
+        self.assertEqual(package[6], str(self.out.resolve()))
+
+    def _dirty_digest(self):
+        """The same difference the script hashes, read the same way."""
+        diff = subprocess.run(
+            ["git", "-C", str(ROOT), "diff", "HEAD"],
+            capture_output=True,
+            check=True,
+        ).stdout
+        untracked = subprocess.run(
+            ["git", "-C", str(ROOT), "ls-files", "--others", "--exclude-standard", "-z"],
+            capture_output=True,
+            check=True,
+        ).stdout
+        names = [name for name in untracked.split(b"\0") if name]
+        listing = b""
+        if names:
+            listing = subprocess.run(
+                ["xargs", "-0", "-r", "sha256sum"],
+                input=untracked,
+                capture_output=True,
+                check=True,
+                cwd=ROOT,
+            ).stdout
+        return hashlib.sha256(diff + listing).hexdigest()[:8]
 
     def test_dev_mode_builds_a_snapshot_rather_than_the_checkout(self):
         result = self._run(TARGET, VERSION, "--dev")
@@ -685,6 +825,9 @@ if [ "$command" = "release" ]; then
   printf 'release|%s|%s|%s|%s|%s|%s|%s\\n' \\
     "$1" "$2" "$FERMIX_BUILD_DISTRIBUTION" "$FERMIX_BUILD_TARGET" "$BURRITO_TARGET" \\
     "$FERMIX_BUILD_ID" "$FERMIX_BUILD_SOURCE_COMMIT" >> "$COMMAND_LOG"
+elif [ "$command" = "run" ]; then
+  printf '%s' '{"management":{},"realtime":{}}' > "$FERMIX_PROTOCOLS_OUT"
+  printf 'run|%s|%s\\n' "$PWD" "$FERMIX_PROTOCOLS_OUT" >> "$COMMAND_LOG"
 else
   printf '%s|%s|%s\\n' "$command" "$PWD" "$*" >> "$COMMAND_LOG"
 fi
@@ -707,10 +850,13 @@ esac
 [ "$1" = "--output-dir" ]; output="$2"; shift 2
 [ "$1" = "--source-root" ]; source_root="$2"; shift 2
 [ "$1" = "--build-id" ]; build_id="$2"; shift 2
-[ "$1" = "--source-commit" ]; source_commit="$2"
+[ "$1" = "--source-commit" ]; source_commit="$2"; shift 2
+[ "$1" = "--protocols" ]; protocols="$2"; shift 2
+[ "$1" = "--app-engine-dir" ]; app_engine="$2"
 [ -f "$source_root/burrito_out/fermix_linux_package_$target" ]
-printf 'package|%s|%s|%s|%s|%s\\n' \\
-  "$target" "$version" "$output" "$build_id" "$source_commit" >> "$COMMAND_LOG"
+[ -s "$protocols" ]
+printf 'package|%s|%s|%s|%s|%s|%s\\n' \\
+  "$target" "$version" "$output" "$build_id" "$source_commit" "$app_engine" >> "$COMMAND_LOG"
 """,
         )
 
@@ -722,3 +868,48 @@ printf 'package|%s|%s|%s|%s|%s\\n' \\
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PayloadKeyTest(unittest.TestCase):
+    """The guard that one payload key never names two different payloads."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="fermix-payload-key-")
+        self.output = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+
+    def test_a_first_build_records_its_key(self):
+        packages.check_payload_key(self.output, "release-1", "a" * 64)
+
+        ledger = json.loads((self.output / packages.KEY_LEDGER_NAME).read_text())
+        self.assertEqual(ledger, {"release-1": "a" * 64})
+
+    def test_rebuilding_the_same_payload_under_the_same_key_is_fine(self):
+        packages.check_payload_key(self.output, "release-1", "a" * 64)
+        packages.check_payload_key(self.output, "release-1", "a" * 64)
+
+    def test_two_payloads_under_one_key_refuse_the_build(self):
+        """A release rebuild of the same tag, with our non-reproducible builds."""
+
+        packages.check_payload_key(self.output, "release-1", "a" * 64)
+
+        with self.assertRaises(packages.BuildError) as refusal:
+            packages.check_payload_key(self.output, "release-1", "b" * 64)
+
+        self.assertIn("release-1", str(refusal.exception))
+        self.assertIn("never unpack", str(refusal.exception))
+
+    def test_a_different_key_for_a_different_payload_is_the_point(self):
+        packages.check_payload_key(self.output, "release-1", "a" * 64)
+        packages.check_payload_key(self.output, "release-2", "b" * 64)
+
+        ledger = json.loads((self.output / packages.KEY_LEDGER_NAME).read_text())
+        self.assertEqual(len(ledger), 2)
+
+    def test_an_unreadable_ledger_refuses_rather_than_starting_over(self):
+        (self.output / packages.KEY_LEDGER_NAME).write_text("{not json")
+
+        with self.assertRaises(packages.BuildError) as refusal:
+            packages.check_payload_key(self.output, "release-1", "a" * 64)
+
+        self.assertIn("unreadable", str(refusal.exception))

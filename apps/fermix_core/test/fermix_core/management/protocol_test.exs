@@ -79,6 +79,7 @@ defmodule FermixCore.Management.ProtocolTest do
              "settings.reload",
              "secret.set",
              "secret.clear",
+             "secret.migrate_to_keyring",
              "providers.set_primary",
              "providers.models.list",
              "providers.probe.start",

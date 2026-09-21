@@ -198,8 +198,9 @@ daemon onto anything else.
 | `settings.get` | `section` | One section's rows. Exactly one section per call, which is what keeps every result inside the published depth budget. Minimum version `2`. |
 | `settings.apply` | `section`, `values` | Applies the changed keys of one section and answers with what landed, the restart state, a readiness summary, and the changes the operator did not type. Minimum version `2`. |
 | `settings.reload` | none | Re-reads the settings file, pushes it into the running configuration, and re-records the baseline. The one action behind `Reload settings from disk`. Minimum version `2`. |
-| `secret.set` | `id`, `value` | Stores one secret and answers with its presence, never its value. Minimum version `2`. |
-| `secret.clear` | `id` | Forgets one secret: the keyring item, the reference that reads it, and the value in force. Minimum version `2`. |
+| `secret.set` | `id`, `value`, `store`, `unlock` | Stores one secret and answers with its presence and the store it landed in, never its value. `store` is `keyring` (the default) or `file`, and `file` IS the owner's consent to the private-file store — there is no automatic fallback. `unlock` asks to wait for the owner to answer the system unlock prompt. Both optional. Minimum version `2`. |
+| `secret.clear` | `id` | Forgets one secret: the keyring item, the reference that reads it, and the value in force. Reports the store in use and never changes it. Minimum version `2`. |
+| `secret.migrate_to_keyring` | `unlock` | Moves every file-stored secret into the OS keyring and returns this home to saving there. No value parameter: nothing can read a value out of the file store to hand back, which is why the verb exists. Answers `moved` — the ids this method's own family takes, never the environment name a store files a value under — and `store`. Minimum version `2`. |
 | `setup.detect` | `targets` | One row per target asked for: whether this Mac already has it, and a short detail where there is one. The harness target also reports vendor installation, version and authentication status, with guidance. The `meetbot` target reports whether both halves of the meeting notetaker are installed, its detail carries the state of the notetaker's Google sign-in as a sentence, and `signed_in` carries the same state as a boolean, null while the notetaker is absent. Never a credential value. Minimum version `2`. |
 | `providers.set_primary` | `provider` | Makes one configured provider the primary and answers with the restart state and any change the operator did not type. Minimum version `2`. |
 | `providers.models.list` | `provider`, `live`, `query`, `cursor`, `limit` | One page of models, from the catalog this build ships or from the provider's own live listing, with the cursor for the next page. Minimum version `2`. |
@@ -375,6 +376,35 @@ Notes that the shapes alone do not carry:
   `auth.logout anthropic`. Its `present` is "a setup token is stored", not "an
   Anthropic sign-in exists": an adopted Claude Code login lives under the same
   profile and is reported by `setup.state.get`'s account row instead.
+- **`setup.state.get` carries a `secrets` row of two fields, because there are
+  two questions.** `store` is where this home SAVES — `keyring` or `file` —
+  and it is the durable answer a settings surface renders, rather than whatever
+  the last call happened to do. `availability` is whether a secret can be
+  stored right now: `ready`, `locked`, `unavailable`. They are separate because
+  a locked keyring still saves to the keyring, so one field would have to
+  report it as having no store at all. A home on the file store is always
+  `ready`, whatever the keyring is doing: that is what consenting to it bought.
+
+- **A locked keyring is a different answer from no keyring, and Linux now
+  measures which it is.** `secret-tool` cannot tell them apart: on a locked
+  collection it blocks on the password prompter where a display exists and
+  exits non-zero where one does not, so the same machine state produced
+  `timeout` on a desktop and `unavailable` on a headless session — two untrue
+  words, chosen by the environment. The engine reads the `Locked` property of
+  whatever collection `ReadAlias("default")` names, before writing, and once
+  that property says locked it does not run the helper at all, so no exit code
+  can colour the answer. Where the property cannot be read on a machine that
+  has a Secret Service, the answer is `unavailable`: a lock is never claimed
+  without being observed.
+- **`store: "file"` is consent, carried per call, and the choice is
+  remembered.** A keyring this engine cannot reach is a refusal, never a
+  reason to put a credential somewhere the owner did not choose. A successful
+  `store: "file"` write records `secret_store` in the settings file, so later
+  saves and sentinel resolution use it without asking again;
+  `secret.migrate_to_keyring` is the way back, and a successful keyring write
+  also deletes that key's file copy. A file copy goes only once the keyring can
+  READ BACK the value, never on the strength of a write it accepted.
+
 - **`env:<NAME>` stores a value every sandboxed command receives as `NAME`.**
   It is the key of the sandbox section's name rows, and the family is open:
   `NAME` is any name matching `^[A-Za-z_][A-Za-z0-9_]{0,127}$` exactly, except
@@ -523,7 +553,7 @@ Notes that the shapes alone do not carry:
 | `unknown_session` | The Doctor session is not retained by this daemon. |
 | `unknown_job` | The job is not retained by this daemon. `details.job_id` names it. |
 | `cursor_expired` | The log cursor predates a rotation and cannot be resumed. |
-| `secret_store_failed` | The OS keyring refused the write. `details.reason` is `unavailable`, `locked` or `timeout`. |
+| `secret_store_failed` | The OS keyring refused the write. `details.reason` is `unavailable`, `locked` or `timeout`. On Linux `locked` is MEASURED — the default collection's `Locked` property, read over the session bus before the write — rather than inferred from how the helper died; macOS keeps its inference, where a non-zero `security` exit does mean a locked or denied keychain. `timeout` narrows accordingly to a helper that did not answer while the collection was not locked. |
 | `external_change` | The settings file was changed outside Fermix. `details.section` names the section the refused write targeted; `settings.reload` clears the state. |
 | `config_unreadable` | The settings file could not be read or parsed. `details.sentence` is the parser's own message, and no reload is offered for it. |
 

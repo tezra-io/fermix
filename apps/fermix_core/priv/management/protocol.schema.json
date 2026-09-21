@@ -88,6 +88,7 @@
     "settings.reload": 2,
     "secret.set": 2,
     "secret.clear": 2,
+    "secret.migrate_to_keyring": 2,
     "providers.set_primary": 2,
     "providers.models.list": 2,
     "providers.probe.start": 2,
@@ -141,6 +142,7 @@
             "settings.reload",
             "secret.set",
             "secret.clear",
+            "secret.migrate_to_keyring",
             "providers.set_primary",
             "providers.models.list",
             "providers.probe.start",
@@ -267,6 +269,15 @@
         {
           "if": { "required": ["method"], "properties": { "method": { "const": "secret.clear" } } },
           "then": { "properties": { "params": { "$ref": "#/$defs/secret_clear_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "secret.migrate_to_keyring" } }
+          },
+          "then": {
+            "properties": { "params": { "$ref": "#/$defs/secret_migrate_to_keyring_params" } }
+          }
         },
         {
           "if": {
@@ -514,6 +525,7 @@
         { "$ref": "#/$defs/settings_reload_result" },
         { "$ref": "#/$defs/secret_set_result" },
         { "$ref": "#/$defs/secret_clear_result" },
+        { "$ref": "#/$defs/secret_migrate_to_keyring_result" },
         { "$ref": "#/$defs/setup_detect_result" },
         { "$ref": "#/$defs/providers_set_primary_result" },
         { "$ref": "#/$defs/providers_models_list_result" },
@@ -1276,10 +1288,21 @@
         "personalization",
         "features",
         "profile",
+        "secrets",
         "coexistence"
       ],
       "additionalProperties": false,
       "properties": {
+        "secrets": {
+          "description": "Two questions, two answers. `store` is where this home saves; `availability` is whether a secret can be stored right now. A locked keyring still saves TO the keyring, so one field could not carry both without reporting a locked keyring as no keyring.",
+          "type": "object",
+          "required": ["store", "availability"],
+          "additionalProperties": false,
+          "properties": {
+            "store": { "$ref": "#/$defs/secretStore" },
+            "availability": { "enum": ["ready", "locked", "unavailable"] }
+          }
+        },
         "readiness": {
           "type": "object",
           "required": ["status", "failures"],
@@ -1484,13 +1507,19 @@
         "config_state": { "$ref": "#/$defs/configState" }
       }
     },
+    "secretStore": {
+      "description": "Where secrets are stored. `file` is the private-file store under the Fermix home, used only where the owner consented to it. There is no third value: a machine that can store nothing still SAVES TO the keyring, and the save refuses.",
+      "enum": ["keyring", "file"]
+    },
     "secret_set_params": {
       "type": "object",
       "required": ["id", "value"],
       "additionalProperties": false,
       "properties": {
         "id": { "type": "string", "minLength": 1, "maxLength": 256 },
-        "value": { "type": "string", "minLength": 1, "maxLength": 8192 }
+        "value": { "type": "string", "minLength": 1, "maxLength": 8192 },
+        "store": { "$ref": "#/$defs/secretStore" },
+        "unlock": { "type": "boolean" }
       }
     },
     "secret_set_result": {
@@ -1500,7 +1529,26 @@
       "properties": {
         "id": { "type": "string" },
         "present": { "type": "boolean" },
+        "store": { "$ref": "#/$defs/secretStore" },
         "restart": { "$ref": "#/$defs/restartState" }
+      }
+    },
+    "secret_migrate_to_keyring_params": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": { "unlock": { "type": "boolean" } }
+    },
+    "secret_migrate_to_keyring_result": {
+      "type": "object",
+      "required": ["moved", "store"],
+      "additionalProperties": false,
+      "properties": {
+        "moved": {
+          "description": "The secrets that actually moved, named the way `secret.set` and `secret.clear` name them. Empty when there was nothing in the file store.",
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "store": { "$ref": "#/$defs/secretStore" }
       }
     },
     "secret_clear_params": {
@@ -1516,6 +1564,7 @@
       "properties": {
         "id": { "type": "string" },
         "present": { "type": "boolean" },
+        "store": { "$ref": "#/$defs/secretStore" },
         "restart": { "$ref": "#/$defs/restartState" }
       }
     },

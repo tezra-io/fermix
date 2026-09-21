@@ -141,11 +141,32 @@ class ReleaseWorkflowTest(unittest.TestCase):
         # package materialises; without it the release step refuses.
         self.assertIn("patchelf", self.release)
 
+    def test_the_linux_app_engine_archive_comes_off_the_package_build(self):
+        # One compile per target stages one engine tree; the deb and the
+        # archive are both made from it, so the release never builds the Linux
+        # engine twice and the two layouts cannot drift.
+        self.assertNotIn("target: linux_x86_64 }", self.release.split("app-engine:")[1])
+        self.assertIn(
+            "name: app-engine-${{ matrix.target }}\n"
+            "          path: packaging/linux/out/packages/fermix_app_engine_"
+            "${{ matrix.target }}.tar.gz",
+            self.release,
+        )
+        self.assertIn("app_engine_out/fermix_app_engine_*.tar.gz", self.release)
+
+    def test_both_verification_jobs_run_the_linux_engine_from_the_archive(self):
+        for row in (
+            "{ name: engine-linux-x64, os: ubuntu-24.04, kind: app_engine, target: linux_x86_64, mode: container }",
+            "{ name: engine-linux-arm64, os: ubuntu-24.04-arm, kind: app_engine, target: linux_aarch64, mode: container }",
+        ):
+            with self.subTest(row=row):
+                self.assertEqual(self.release.count(row), 2)
+
     def test_every_package_is_signed_beside_the_binaries_of_the_same_tag(self):
         self.assertIn("needs: [standalone, linux-packages, app-engine]", self.release)
         self.assertIn("linux_packages/fermix_*.deb", self.release)
         self.assertIn("linux_packages/fermix-*.rpm", self.release)
-        self.assertIn('[ "${#unsigned[@]}" -eq 10 ]', self.release)
+        self.assertIn('[ "${#unsigned[@]}" -eq 12 ]', self.release)
         self.assertIn("linux_packages/fermix*", self.release)
 
     def test_the_release_feed_is_generated_where_both_halves_are_present(self):
@@ -195,6 +216,42 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertIn("scripts/release/build_linux_packages.sh", self.linux_packages)
         self.assertNotIn("cosign", self.linux_packages)
         self.assertNotIn("softprops/action-gh-release", self.linux_packages)
+
+    def test_a_published_engine_release_dispatches_the_linux_desktop_release(self):
+        self.assertIn(
+            "\n  dispatch-linux-desktop:\n"
+            "    name: Dispatch the Linux desktop release\n"
+            "    needs: promote\n",
+            self.release,
+        )
+        dispatch = self.release.split("\n  dispatch-linux-desktop:")[1].split(
+            "\n  homebrew:"
+        )[0]
+
+        # It runs after promote, so every asset the payload names is already
+        # downloadable, and the digests come from the published release's own
+        # sidecars rather than from this run's artifacts.
+        self.assertIn('gh release download "$TAG" --repo "$REPO"', dispatch)
+        self.assertIn("targets=(linux_x86_64 linux_aarch64)", dispatch)
+        self.assertIn('asset="fermix_app_engine_${target}.tar.gz"', dispatch)
+        self.assertIn('--pattern "${asset}.sha256"', dispatch)
+
+        # GITHUB_TOKEN starts no workflow run from the event it produces, so a
+        # dispatch sent with it would be accepted and start nothing. That is the
+        # silent failure the App installation token exists to avoid.
+        self.assertIn("actions/create-github-app-token@", dispatch)
+        self.assertIn("app-id: ${{ secrets.FERMIX_RELEASE_APP_ID }}", dispatch)
+        self.assertIn(
+            "private-key: ${{ secrets.FERMIX_RELEASE_APP_PRIVATE_KEY }}", dispatch
+        )
+        self.assertIn("repositories: fermix-linux", dispatch)
+        self.assertIn("GH_TOKEN: ${{ steps.token.outputs.token }}", dispatch)
+        self.assertIn("/repos/tezra-io/fermix-linux/dispatches", dispatch)
+        self.assertIn('"event_type": "engine-released"', dispatch)
+
+        # The job reads the release and writes nothing in this repository.
+        self.assertRegex(dispatch, r"permissions:\n\s+contents: read\n")
+        self.assertNotIn("contents: write", dispatch)
 
     def test_homebrew_formula_is_installed_and_reports_the_release_version(self):
         self.assertIn("runs-on: macos-15", self.release)

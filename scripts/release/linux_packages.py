@@ -41,6 +41,9 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import package_app_engine  # noqa: E402
+
 SCHEMA_VERSION = 1
 ENGINE_ID = "fermix-core"
 DISTRIBUTION_IDENTITY = "linux_package"
@@ -87,11 +90,26 @@ VERSION_PATTERN = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 PLACEHOLDER_PATTERN = re.compile(r"\{\{([A-Z_]+)\}\}")
 CHANGELOG_HEADING = re.compile(r"^## \[(?P<version>[^\]]+)\](?: - (?P<date>[0-9-]+))?\s*$")
 
+# The app-engine archive's own names (amendment §5.1).
+ARCHIVE_TREE = "tree"
+ARCHIVE_MAINTAINER = "maintainer"
+NFPM_CONTENTS_NAME = "nfpm-contents.yaml"
+NFPM_CONTENTS_HEADER = """\
+# The `contents:` block of the `fermix` engine package, resolved.
+#
+# Every `src:` is relative to the root of this archive, so a build that runs
+# nFPM from the unpacked `fermix_app_engine/` directory installs the engine's
+# files at the paths and modes the headless `fermix` package installs them at.
+# /usr/share/doc/fermix/changelog.Debian.gz is deliberately absent: the
+# combined desktop package ships one changelog, its own.
+"""
+
 # Installed path -> mode. Every file the package installs at a fixed path is
 # here, and staging refuses when one of them is missing, so a file added to the
 # nfpm template and not to the tree fails the build rather than shipping a
 # package that quietly lacks it. The runtime payload is the one entry whose
 # name carries a digest, so it is staged and moded beside this list.
+CHANGELOG_PATH = "usr/share/doc/fermix/changelog.Debian.gz"
 STAGED_MODES = {
     "usr/bin/fermix": 0o755,
     "usr/lib/fermix/cosign": 0o755,
@@ -102,7 +120,7 @@ STAGED_MODES = {
     "usr/share/fish/vendor_completions.d/fermix.fish": 0o644,
     "usr/share/man/man1/fermix.1.gz": 0o644,
     "usr/share/doc/fermix/copyright": 0o644,
-    "usr/share/doc/fermix/changelog.Debian.gz": 0o644,
+    CHANGELOG_PATH: 0o644,
 }
 
 
@@ -163,6 +181,48 @@ def engine_manifest(
         "loader_sha256": loader_sha256,
         "binary_sha256": binary_sha256,
     }
+
+
+KEY_LEDGER_NAME = ".engine-payload-keys.json"
+
+
+def check_payload_key(output_dir: Path, build_id: str, binary_sha256: str) -> None:
+    """Refuse when one payload key would name two different payloads.
+
+    The extracted runtime directory is named after the release version, which
+    carries the build id, so the build id IS the cache key. Two builds sharing
+    it must therefore be the same bytes, or the second one silently inherits
+    the first one's extraction -- the defect this keying exists to end.
+
+    For a dev build the id already folds in a digest of the working tree, so
+    editing anything moves it. For a release build the id comes from CI, and a
+    rebuild of the same tag can produce different bytes, because our builds are
+    not yet bit-reproducible. This is the guard that catches that case instead
+    of trusting it: a ledger beside the produced packages records what each key
+    was last built from, and a key that comes back with different bytes stops
+    the build rather than shipping a package that will not unpack.
+    """
+
+    ledger_path = output_dir / KEY_LEDGER_NAME
+    try:
+        ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        ledger = {}
+    except (OSError, json.JSONDecodeError) as broken:
+        raise BuildError(f"the payload key ledger {ledger_path} is unreadable: {broken}")
+
+    recorded = ledger.get(build_id)
+    if recorded is not None and recorded != binary_sha256:
+        raise BuildError(
+            f"the build id {build_id} already named a different payload "
+            f"({recorded[:12]}…, now {binary_sha256[:12]}…): two payloads sharing one key "
+            "would share one extracted runtime directory, so the second would never unpack. "
+            "Give this build its own id."
+        )
+
+    ledger[build_id] = binary_sha256
+    output_dir.mkdir(parents=True, exist_ok=True)
+    ledger_path.write_text(json.dumps(ledger, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def resolve_target(target: str):
@@ -353,7 +413,7 @@ def resolve_cosign(target: str, cache: Path, opener) -> Path:
 # ── the staging tree ────────────────────────────────────────────────────────
 
 
-def stage(
+def stage_engine_tree(
     *,
     stage_root: Path,
     source_root: Path,
@@ -361,8 +421,16 @@ def stage(
     loader: Path,
     cosign: Path,
     manifest: dict,
-    changelog: str,
+    changelog: str | None,
 ) -> None:
+    """Stage the engine's installed layout once, for both things that carry it.
+
+    The deb and the rpm are built from this tree, and so is the `tree/` the
+    app-engine archive hands the desktop package, which is what makes "the
+    engine layout is identical in both packages" true by construction. A
+    `changelog` of None is the one documented difference: the archive omits it
+    because the combined desktop package ships one changelog, its own.
+    """
     packaging = source_root / "packaging/linux"
 
     copies = {
@@ -388,24 +456,126 @@ def stage(
         stage_root / "usr/share/man/man1/fermix.1.gz",
         gzip_bytes((packaging / "man/fermix.1").read_bytes()),
     )
-    _write(
-        stage_root / "usr/share/doc/fermix/changelog.Debian.gz",
-        gzip_bytes(changelog.encode("utf-8")),
-    )
+    if changelog is not None:
+        _write(
+            stage_root / "usr/share/doc/fermix/changelog.Debian.gz",
+            gzip_bytes(changelog.encode("utf-8")),
+        )
     payload = stage_root / "usr/lib/fermix/runtime-payload" / loader.name
     _write(payload, loader.read_bytes())
     payload.chmod(0o644)
 
-    for installed, mode in STAGED_MODES.items():
+    for installed, mode in staged_modes(changelog is not None).items():
         path = stage_root / installed
         if not path.is_file():
             raise BuildError(f"/{installed} was not staged")
         path.chmod(mode)
 
 
+def staged_modes(with_changelog: bool) -> dict:
+    if with_changelog:
+        return STAGED_MODES
+    return {path: mode for path, mode in STAGED_MODES.items() if path != CHANGELOG_PATH}
+
+
 def _write(path: Path, payload: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(payload)
+
+
+# ── the app-engine archive ──────────────────────────────────────────────────
+
+
+def nfpm_contents(rendered: str, *, omit: set[str]) -> str:
+    """The `contents:` block on its own, with the paths this archive omits gone.
+
+    The desktop package concatenates this into its own nFPM configuration
+    instead of restating every path and mode, so the two packages install the
+    engine's files at the same places with the same modes or neither builds.
+    """
+    _head, marker, rest = rendered.partition("\ncontents:\n")
+    body, scripts, _tail = rest.partition("\nscripts:\n")
+    if not marker or not scripts:
+        raise BuildError("the nfpm template no longer has a contents block before its scripts")
+
+    blocks = [block for block in body.split("\n\n") if block.strip()]
+    kept = [block for block in blocks if _destination(block) not in omit]
+    if len(blocks) - len(kept) != len(omit):
+        raise BuildError(f"the nfpm template's contents block does not carry all of {sorted(omit)}")
+
+    return NFPM_CONTENTS_HEADER + "contents:\n" + "\n\n".join(kept) + "\n"
+
+
+def _destination(block: str) -> str:
+    match = re.search(r"^\s*dst:\s*(\S+)\s*$", block, re.MULTILINE)
+    if not match:
+        raise BuildError(f"an nfpm contents entry names no destination:\n{block}")
+    return match.group(1)
+
+
+def stage_app_engine(
+    *,
+    release_root: Path,
+    source_root: Path,
+    target: str,
+    version: str,
+    build_id: str,
+    source_commit: str,
+    wrapper: Path,
+    loader: Path,
+    cosign: Path,
+    manifest: dict,
+    contents: str,
+    protocols: dict,
+) -> None:
+    """Assemble the archive root the desktop build consumes (amendment §5.1)."""
+
+    stage_engine_tree(
+        stage_root=release_root / ARCHIVE_TREE,
+        source_root=source_root,
+        wrapper=wrapper,
+        loader=loader,
+        cosign=cosign,
+        manifest=manifest,
+        changelog=None,
+    )
+
+    for name in ("postinstall.sh", "postremove.sh"):
+        script = release_root / ARCHIVE_MAINTAINER / name
+        _write(script, (source_root / "packaging/linux/scripts" / name).read_bytes())
+        script.chmod(0o755)
+
+    _write(release_root / NFPM_CONTENTS_NAME, contents.encode("utf-8"))
+    (release_root / NFPM_CONTENTS_NAME).chmod(0o644)
+
+    built = package_app_engine.build_manifest(
+        release_root,
+        target,
+        product_version=version,
+        build_id=build_id,
+        source_commit=source_commit,
+        protocols=protocols,
+    )
+    engine_manifest_path = release_root / package_app_engine.MANIFEST_NAME
+    _write(engine_manifest_path, (json.dumps(built, indent=2, sort_keys=True) + "\n").encode())
+    engine_manifest_path.chmod(0o644)
+
+
+def read_protocols(path: Path) -> dict:
+    """The management and Realtime windows the compiled engine reports.
+
+    They are read out of the engine by the build script rather than restated
+    here, so the archive's manifest and the macOS manifest can only ever
+    disagree if the wire authorities themselves do.
+    """
+    try:
+        protocols = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise BuildError(f"cannot read the protocol windows from {path}: {error}") from error
+
+    if not isinstance(protocols, dict) or set(protocols) != {"management", "realtime"}:
+        raise BuildError(f"{path} does not carry a management and a realtime protocol window")
+    return protocols
 
 
 # ── packaging ───────────────────────────────────────────────────────────────
@@ -468,7 +638,20 @@ def main(argv=None, *, opener=urllib.request.urlopen, runner=subprocess.run) -> 
     parser.add_argument("--burrito-out", type=Path)
     parser.add_argument("--tool-cache", type=Path)
     parser.add_argument("--host-machine", default=os.uname().machine)
+    parser.add_argument(
+        "--app-engine-dir",
+        type=Path,
+        help="also build fermix_app_engine_<target>.tar.gz into this directory",
+    )
+    parser.add_argument(
+        "--protocols",
+        type=Path,
+        help="JSON the build script read out of the compiled engine; required by --app-engine-dir",
+    )
     arguments = parser.parse_args(argv)
+
+    if arguments.app_engine_dir and not arguments.protocols:
+        parser.error("--app-engine-dir needs --protocols")
 
     try:
         packages = run_build(arguments, opener=opener, runner=runner)
@@ -483,7 +666,7 @@ def main(argv=None, *, opener=urllib.request.urlopen, runner=subprocess.run) -> 
             file=sys.stderr,
         )
         return 1
-    except OSError as error:
+    except (OSError, package_app_engine.PackageError) as error:
         print(f"linux_packages.py: {error}", file=sys.stderr)
         return 1
 
@@ -515,6 +698,10 @@ def run_build(arguments, *, opener, runner) -> list[Path]:
         binary_sha256=sha256_file(wrapper),
     )
 
+    check_payload_key(
+        arguments.output_dir.resolve(), arguments.build_id, manifest["binary_sha256"]
+    )
+
     changelog = debian_changelog((source_root / "CHANGELOG.md").read_text(encoding="utf-8"), version)
 
     nfpm = resolve_nfpm(arguments.host_machine, cache, opener, runner)
@@ -522,47 +709,153 @@ def run_build(arguments, *, opener, runner) -> list[Path]:
 
     work = Path(tempfile.mkdtemp(prefix=f"fermix-linux-package-{target}-"))
     try:
-        stage_root = work / "stage"
-        stage(
-            stage_root=stage_root,
+        return produce_artifacts(
+            arguments,
+            work=work,
             source_root=source_root,
+            version=version,
             wrapper=wrapper,
             loader=loader,
             cosign=cosign,
             manifest=manifest,
             changelog=changelog,
-        )
-
-        template = (source_root / "packaging/linux/nfpm-fermix.yaml.tmpl").read_text(
-            encoding="utf-8"
-        )
-        nfpm_arch, _, _, _ = resolve_target(target)
-        config = source_root / "packaging/linux/out" / target / "nfpm-fermix.yaml"
-        config.write_text(
-            render_template(
-                template,
-                {
-                    "VERSION": version,
-                    "ARCH": nfpm_arch,
-                    "STAGE": stage_root,
-                    "LOADER": loader.name,
-                    "POSTINSTALL": source_root / "packaging/linux/scripts/postinstall.sh",
-                    "POSTREMOVE": source_root / "packaging/linux/scripts/postremove.sh",
-                },
-            ),
-            encoding="utf-8",
-        )
-
-        return build_packages(
             nfpm=nfpm,
-            config=config,
-            output_dir=arguments.output_dir.resolve(),
-            version=version,
-            target=target,
             runner=runner,
         )
     finally:
         shutil.rmtree(work, ignore_errors=True)
+
+
+def produce_artifacts(
+    arguments,
+    *,
+    work: Path,
+    source_root: Path,
+    version: str,
+    wrapper: Path,
+    loader: Path,
+    cosign: Path,
+    manifest: dict,
+    changelog: str,
+    nfpm: Path,
+    runner,
+) -> list[Path]:
+    """The deb, the rpm and, when asked for, the archive — from one staged tree."""
+
+    target = arguments.target
+    stage_root = work / "stage"
+    stage_engine_tree(
+        stage_root=stage_root,
+        source_root=source_root,
+        wrapper=wrapper,
+        loader=loader,
+        cosign=cosign,
+        manifest=manifest,
+        changelog=changelog,
+    )
+
+    template = (source_root / "packaging/linux/nfpm-fermix.yaml.tmpl").read_text(encoding="utf-8")
+    config = source_root / "packaging/linux/out" / target / "nfpm-fermix.yaml"
+    config.write_text(
+        render_config(template, source_root, target, version, stage_root, loader.name),
+        encoding="utf-8",
+    )
+
+    packages = build_packages(
+        nfpm=nfpm,
+        config=config,
+        output_dir=arguments.output_dir.resolve(),
+        version=version,
+        target=target,
+        runner=runner,
+    )
+
+    if arguments.app_engine_dir is None:
+        return packages
+
+    archive = build_app_engine_archive(
+        arguments,
+        work=work,
+        source_root=source_root,
+        template=template,
+        wrapper=wrapper,
+        loader=loader,
+        cosign=cosign,
+        manifest=manifest,
+        version=version,
+    )
+    return [*packages, archive]
+
+
+def render_config(
+    template: str,
+    source_root: Path,
+    target: str,
+    version: str,
+    stage_root: Path,
+    loader_name: str,
+) -> str:
+    nfpm_arch, _, _, _ = resolve_target(target)
+    return render_template(
+        template,
+        {
+            "VERSION": version,
+            "ARCH": nfpm_arch,
+            "STAGE": stage_root,
+            "LOADER": loader_name,
+            "POSTINSTALL": source_root / "packaging/linux/scripts/postinstall.sh",
+            "POSTREMOVE": source_root / "packaging/linux/scripts/postremove.sh",
+        },
+    )
+
+
+def build_app_engine_archive(
+    arguments,
+    *,
+    work: Path,
+    source_root: Path,
+    template: str,
+    wrapper: Path,
+    loader: Path,
+    cosign: Path,
+    manifest: dict,
+    version: str,
+) -> Path:
+    """Stage and package `fermix_app_engine_<target>.tar.gz` from this build."""
+
+    target = arguments.target
+    release_root = work / "app-engine"
+    contents = nfpm_contents(
+        render_config(template, source_root, target, version, Path(ARCHIVE_TREE), loader.name),
+        omit={f"/{CHANGELOG_PATH}"},
+    )
+
+    stage_app_engine(
+        release_root=release_root,
+        source_root=source_root,
+        target=target,
+        version=version,
+        build_id=arguments.build_id,
+        source_commit=arguments.source_commit,
+        wrapper=wrapper,
+        loader=loader,
+        cosign=cosign,
+        manifest=manifest,
+        contents=contents,
+        protocols=read_protocols(arguments.protocols),
+    )
+
+    output = arguments.app_engine_dir.resolve()
+    destination = output / f"fermix_app_engine_{target}.tar.gz"
+    # The packages beside it are replaced on every run, and this archive is
+    # produced by the same build from the same tree, so it follows the same
+    # rule rather than refusing a second run in the same output directory.
+    if destination.exists() or destination.is_symlink():
+        destination.unlink()
+
+    return package_app_engine.package_release(
+        release_root, target, output, version, arguments.source_commit
+    )
 
 
 if __name__ == "__main__":

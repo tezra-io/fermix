@@ -86,5 +86,6 @@ jobs:
           path: |
             packaging/linux/out/packages/*.deb
             packaging/linux/out/packages/*.rpm
+            packaging/linux/out/packages/fermix_app_engine_*.tar.gz
           if-no-files-found: error
           retention-days: 7

@@ -356,6 +356,127 @@ defmodule Fermix.CLI.Service.PackagedTest do
 
       assert Packaged.install(opts) == {:error, :health_unavailable}
     end
+
+    # The daemon binds its control socket before its web endpoint — a measured
+    # 57-65 ms warm and 315 ms cold — so the address that answered `hello` is
+    # not listening yet. One unretried request lands in that window, and
+    # refused one healthy install in four on ubuntu:26.04.
+    test "a web address that answers late is waited for, not refused", context do
+      test = self()
+      counter = :counters.new(1, [])
+
+      probe = fn origin ->
+        :counters.add(counter, 1, 1)
+        send(test, {:probed, origin})
+        if :counters.get(counter, 1) < 3, do: {:error, :econnrefused}, else: :ok
+      end
+
+      opts =
+        opts(context,
+          home: context.home,
+          health_probe: probe,
+          sleep: fn ms -> send(test, {:slept, ms}) end
+        )
+
+      assert {:ok, _status} = Packaged.install(opts)
+      assert :counters.get(counter, 1) == 3
+      assert_received {:probed, "http://127.0.0.1:4030"}
+      assert_received {:slept, 500}
+    end
+
+    test "an address that never answers refuses at the bound, having tried it", context do
+      counter = :counters.new(1, [])
+
+      probe = fn _origin ->
+        :counters.add(counter, 1, 1)
+        {:error, :econnrefused}
+      end
+
+      opts =
+        opts(context,
+          home: context.home,
+          health_probe: probe,
+          poll_attempts: 40,
+          health_attempts: 6
+        )
+
+      assert Packaged.install(opts) == {:error, :health_unavailable}
+      assert :counters.get(counter, 1) == 6
+    end
+
+    # `health_unavailable` says the address did not answer, so it is never
+    # reported without asking — even when the hello wait spent the budget.
+    test "a hello that spends the whole budget still buys one probe", context do
+      counter = :counters.new(1, [])
+
+      hello = fn _socket ->
+        if :counters.get(counter, 1) == 0, do: {:ok, hello()}, else: {:error, :not_running}
+      end
+
+      probe = fn _origin ->
+        :counters.add(counter, 1, 1)
+        {:error, :econnrefused}
+      end
+
+      opts =
+        opts(context, home: context.home, hello: hello, health_probe: probe, poll_attempts: 1)
+
+      assert Packaged.install(opts) == {:error, :health_unavailable}
+      assert :counters.get(counter, 1) == 1
+    end
+
+    # §4.1 sets one 90-second ceiling for the whole transaction, so the health
+    # wait spends what the hello wait left rather than stacking a second
+    # budget on top of it.
+    test "the health wait draws from the budget the hello wait left", context do
+      hellos = :counters.new(1, [])
+      probes = :counters.new(1, [])
+
+      hello = fn _socket ->
+        :counters.add(hellos, 1, 1)
+        if :counters.get(hellos, 1) < 3, do: {:error, :not_running}, else: {:ok, hello()}
+      end
+
+      probe = fn _origin ->
+        :counters.add(probes, 1, 1)
+        {:error, :econnrefused}
+      end
+
+      opts =
+        opts(context,
+          home: context.home,
+          hello: hello,
+          health_probe: probe,
+          poll_attempts: 5,
+          health_attempts: 20
+        )
+
+      assert Packaged.install(opts) == {:error, :health_unavailable}
+      # Three of the five attempts went to `hello`; the health wait got the
+      # two that were left, not twenty of its own.
+      assert :counters.get(probes, 1) == 2
+    end
+
+    # A daemon that published no origin will not publish one by being asked
+    # again, so this refuses on the spot rather than spending the budget.
+    test "a daemon that publishes no web address refuses without polling", context do
+      counter = :counters.new(1, [])
+
+      probe = fn _origin ->
+        :counters.add(counter, 1, 1)
+        {:error, :no_origin}
+      end
+
+      opts =
+        opts(context,
+          home: context.home,
+          hello: fn _socket -> {:ok, put_in(hello(), ["setup", "origin"], nil)} end,
+          health_probe: probe
+        )
+
+      assert Packaged.install(opts) == {:error, :health_unavailable}
+      assert :counters.get(counter, 1) == 0
+    end
   end
 
   describe "install/1 legacy migration" do
@@ -504,6 +625,44 @@ defmodule Fermix.CLI.Service.PackagedTest do
       assert_receive {:ran, "systemctl", ["--user", "restart", @unit]}
     end
 
+    # A package upgrade rewrites the vendor unit, and nothing running as root
+    # can reload a user manager: the postinstall has no session bus for this
+    # account. So the owner's own restart is the first moment anything running
+    # as the owner can do it, and until it does, systemd starts the unit text it
+    # last read -- which on this upgrade is the one without the launcher.
+    test "reloads the manager first when the unit on disk has not been read", context do
+      opts =
+        restart_opts(context, pids: ["100", "412"], properties: needs_reload_properties())
+
+      assert {:ok, _result} = Packaged.restart(opts)
+
+      assert_receive {:ran, "systemctl", ["--user", "daemon-reload"]}
+      assert_receive {:ran, "systemctl", ["--user", "reset-failed", @unit]}
+      assert_receive {:ran, "systemctl", ["--user", "restart", @unit]}
+    end
+
+    test "does not reload a manager that is already current", context do
+      assert {:ok, _result} = Packaged.restart(restart_opts(context, pids: ["100", "412"]))
+
+      refute_received {:ran, "systemctl", ["--user", "daemon-reload"]}
+    end
+
+    # Never swallowed: a restart that silently kept the stale unit is exactly
+    # the failure this whole change exists to end.
+    test "a refused reload fails the restart and names it", context do
+      opts =
+        restart_opts(context,
+          pids: ["100", "412"],
+          properties: needs_reload_properties(),
+          daemon_reload: {"Access denied\n", 1}
+        )
+
+      assert {:error, reason} = Packaged.restart(opts)
+      assert inspect(reason) =~ "Access denied"
+
+      refute_received {:ran, "systemctl", ["--user", "restart", @unit]}
+    end
+
     # `lifecycle.commit` means "stop yourself", and asking for that while systemd
     # is restarting the unit is the one thing §4.1 forbids.
     test "never commits the lease it took", context do
@@ -527,6 +686,7 @@ defmodule Fermix.CLI.Service.PackagedTest do
           pids: ["100"],
           cmd: fn
             "systemctl", ["--user", "restart", _unit] -> {"Job failed.", 1}
+            "systemctl", ["--user", "show" | _rest] -> {active_properties(), 0}
             "systemctl", _args -> {"", 0}
             _executable, _args -> {"", 0}
           end
@@ -547,6 +707,9 @@ defmodule Fermix.CLI.Service.PackagedTest do
             "systemctl", ["--user", "restart", _unit] ->
               raise "the restart must not be issued after a failed reset"
 
+            "systemctl", ["--user", "show" | _rest] ->
+              {active_properties(), 0}
+
             _executable, _args ->
               {"", 0}
           end
@@ -565,6 +728,9 @@ defmodule Fermix.CLI.Service.PackagedTest do
           cmd: fn
             "systemctl", ["--user", "reset-failed", _unit] ->
               {"Unit fermix.service not loaded.", 1}
+
+            "systemctl", ["--user", "show" | _rest] ->
+              {active_properties(), 0}
 
             _executable, _args ->
               {"", 0}
@@ -673,7 +839,7 @@ defmodule Fermix.CLI.Service.PackagedTest do
       end
 
     context
-    |> opts(wrapped_cmd)
+    |> opts(wrapped_cmd ++ Keyword.take(overrides, [:properties, :daemon_reload]))
     |> Keyword.merge(hello: hello, request: wrapped_request, poll_attempts: 4)
   end
 
@@ -689,7 +855,8 @@ defmodule Fermix.CLI.Service.PackagedTest do
           properties: Keyword.get(overrides, :properties, active_properties()),
           linger_state: Keyword.get(overrides, :linger_state, {"yes\n", 0}),
           enable_linger: Keyword.get(overrides, :enable_linger, {"", 0}),
-          reset_failed: Keyword.get(overrides, :reset_failed, {"", 0})
+          reset_failed: Keyword.get(overrides, :reset_failed, {"", 0}),
+          daemon_reload: Keyword.get(overrides, :daemon_reload, {"", 0})
         ),
       username: fn _opts -> "operator" end,
       find_executable: fn _name -> "/usr/bin/loginctl" end,
@@ -700,7 +867,7 @@ defmodule Fermix.CLI.Service.PackagedTest do
     ]
 
     overrides
-    |> Keyword.drop([:properties, :linger_state, :enable_linger, :reset_failed])
+    |> Keyword.drop([:properties, :linger_state, :enable_linger, :reset_failed, :daemon_reload])
     |> Keyword.merge(defaults, fn _key, override, _default -> override end)
   end
 
@@ -718,6 +885,9 @@ defmodule Fermix.CLI.Service.PackagedTest do
 
   defp answer("loginctl", ["show-user" | _rest], fixtures),
     do: Keyword.fetch!(fixtures, :linger_state)
+
+  defp answer("systemctl", ["--user", "daemon-reload" | _rest], fixtures),
+    do: Keyword.fetch!(fixtures, :daemon_reload)
 
   defp answer("systemctl", ["--user", "reset-failed" | _rest], fixtures),
     do: Keyword.fetch!(fixtures, :reset_failed)
@@ -739,6 +909,12 @@ defmodule Fermix.CLI.Service.PackagedTest do
   # `systemctl show` answers `Key=Value` in systemd's own property order, which
   # is not the order the properties were asked for. This is systemd 257's order,
   # recorded from a real user manager in a Debian trixie container.
+  # The state a package upgrade leaves behind: the unit on disk is newer than
+  # the one this account's manager has read.
+  defp needs_reload_properties do
+    String.replace(active_properties(), "NeedDaemonReload=no", "NeedDaemonReload=yes")
+  end
+
   defp active_properties do
     """
     MainPID=4711

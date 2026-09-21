@@ -41,7 +41,8 @@ defmodule FermixCore.Management.Router do
   @doctor_scopes %{"local" => :local, "network" => :network}
   @settings_get_params ~w(section)
   @settings_apply_params ~w(section values)
-  @secret_set_params ~w(id value)
+  @secret_set_params ~w(id value store unlock)
+  @secret_migrate_params ~w(unlock)
   @secret_clear_params ~w(id)
   @detect_params ~w(targets)
   @job_id_params ~w(job_id)
@@ -120,6 +121,10 @@ defmodule FermixCore.Management.Router do
   defp route_known("settings.reload", %{}, opts), do: settings_reload(opts)
   defp route_known("secret.set", params, opts), do: secret_set(params, opts)
   defp route_known("secret.clear", params, opts), do: secret_clear(params, opts)
+
+  defp route_known("secret.migrate_to_keyring", params, opts),
+    do: secret_migrate(params, opts)
+
   defp route_known("setup.detect", params, opts), do: setup_detect(params, opts)
   defp route_known("providers.set_primary", params, opts), do: providers_primary(params, opts)
   defp route_known("providers.models.list", params, opts), do: providers_models(params, opts)
@@ -391,12 +396,45 @@ defmodule FermixCore.Management.Router do
   end
 
   defp secret_set(params, opts) do
-    writer = Keyword.get(opts, :secret_writer, &Secrets.set/2)
+    writer = Keyword.get(opts, :secret_writer, &Secrets.set/3)
 
     with :ok <- reject_unknown_params(params, @secret_set_params),
          {:ok, id} <- fetch_string(params, "id", @secret_set_params),
-         {:ok, value} <- fetch_secret_value(params) do
-      operation_result(writer.(id, value))
+         {:ok, value} <- fetch_secret_value(params),
+         {:ok, store} <- fetch_store(params),
+         {:ok, unlock} <- fetch_unlock(params) do
+      operation_result(writer.(id, value, store: store, unlock: unlock))
+    end
+  end
+
+  # `store: "file"` IS the owner's consent, carried per call: absent means the
+  # keyring, and a store this engine does not implement is refused here rather
+  # than becoming a silent keyring write.
+  defp fetch_store(params) do
+    case Map.get(params, "store") do
+      nil -> {:ok, :keyring}
+      "keyring" -> {:ok, :keyring}
+      "file" -> {:ok, :file}
+      _other -> {:error, :invalid_params, %{"field" => "store", "expected" => "keyring or file"}}
+    end
+  end
+
+  defp fetch_unlock(params) do
+    case Map.get(params, "unlock") do
+      nil -> {:ok, false}
+      unlock when is_boolean(unlock) -> {:ok, unlock}
+      _other -> {:error, :invalid_params, %{"field" => "unlock", "expected" => "a boolean"}}
+    end
+  end
+
+  # No value parameter, by design: the owner cannot retype what no client can
+  # read out of the file store, which is the whole reason this verb exists.
+  defp secret_migrate(params, opts) do
+    migrator = Keyword.get(opts, :secret_migrator, &Secrets.migrate_to_keyring/1)
+
+    with :ok <- reject_unknown_params(params, @secret_migrate_params),
+         {:ok, unlock} <- fetch_unlock(params) do
+      operation_result(migrator.(unlock: unlock))
     end
   end
 

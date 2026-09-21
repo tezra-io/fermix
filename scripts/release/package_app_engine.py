@@ -18,7 +18,19 @@ from pathlib import Path, PurePosixPath
 ARCHITECTURES = {
     "macos_aarch64": "arm64",
     "macos_x86_64": "x86_64",
+    "linux_aarch64": "arm64",
+    "linux_x86_64": "x86_64",
 }
+# The macOS engine is the application's own; the Linux engine inside this
+# archive is the engine the `fermix` deb installs, built from the same staging
+# function, so it carries the identity that package's engine carries.
+DISTRIBUTION_IDENTITIES = {
+    "macos_aarch64": "macos_app",
+    "macos_x86_64": "macos_app",
+    "linux_aarch64": "linux_package",
+    "linux_x86_64": "linux_package",
+}
+LINUX_TARGETS = ("linux_aarch64", "linux_x86_64")
 ARCHIVE_ROOT = "fermix_app_engine"
 ENGINE_ID = "fermix-core"
 MANIFEST_NAME = "engine-manifest.json"
@@ -55,8 +67,27 @@ CPU_ARCHITECTURES = {
     0x0100000C: "arm64",
 }
 MAX_MACH_O_ARCHITECTURES = 16
+ELF_MAGIC = b"\x7fELF"
+ELF_HEADER_BYTES = 64
+ELF_PROGRAM_HEADER_BYTES = 56
+ELF_MACHINES = {62: "x86_64", 183: "arm64"}
+MAX_ELF_PROGRAM_HEADERS = 128
+MAX_ELF_INTERPRETER_BYTES = 4_096
+PT_INTERP = 3
 OIDC_ISSUER = "https://token.actions.githubusercontent.com"
 WORKFLOW_IDENTITY = "https://github.com/tezra-io/fermix/.github/workflows/release.yml"
+
+# The Linux archive's own shape (amendment §5.1). `tree/` is the staged tree
+# the `fermix` deb is built from, so these three paths are fixed by that
+# package rather than by this script.
+LINUX_TREE = "tree"
+LINUX_UNIT_FILE = f"{LINUX_TREE}/usr/lib/systemd/user/fermix.service"
+LINUX_PAYLOAD_DIRECTORY = f"{LINUX_TREE}/usr/lib/fermix/runtime-payload"
+LINUX_LOADER_STORE = "/var/lib/fermix/runtimes"
+LINUX_LOADER_PATTERN = re.compile(r"^libc-musl-([0-9a-f]{64})\.so$")
+PACKAGED_UNIT_SOURCE = (
+    Path(__file__).resolve().parents[2] / "packaging/linux/systemd/fermix.service"
+)
 
 
 class PackageError(RuntimeError):
@@ -103,6 +134,89 @@ def validate_release(
         expected_source_commit,
     )
     return manifest
+
+
+def build_manifest(
+    release_root,
+    target,
+    *,
+    product_version,
+    build_id,
+    source_commit,
+    protocols,
+):
+    """Build the manifest for one staged Linux archive root.
+
+    The macOS manifest is written by the release step inside the engine, where
+    the protocol windows are the wire authorities' own. A Linux archive is
+    staged by the packaging scripts rather than assembled by a release step, so
+    the manifest is built here — from those same windows, handed in by the
+    build script that read them out of the compiled engine.
+    """
+    if target in LINUX_TARGETS:
+        return _linux_manifest(
+            _release_root(release_root), target, product_version, build_id, source_commit, protocols
+        )
+    raise PackageError(
+        f"build_manifest builds Linux manifests; the {target} manifest comes from the release step"
+    )
+
+
+def _linux_manifest(root, target, product_version, build_id, source_commit, protocols):
+    architecture = ARCHITECTURES[target]
+    entries = _scan_tree(root, excluded={MANIFEST_NAME})
+    return {
+        "schema_version": 1,
+        "identity": {
+            "engine_id": ENGINE_ID,
+            "product_version": product_version,
+            "build_id": build_id,
+            "source_commit": source_commit,
+            "distribution_identity": DISTRIBUTION_IDENTITIES[target],
+            "artifact_target": target,
+            "architecture": architecture,
+        },
+        "protocols": protocols,
+        "provenance": {
+            "oidc_issuer": OIDC_ISSUER,
+            "certificate_identity": f"{WORKFLOW_IDENTITY}@refs/tags/v{product_version}",
+        },
+        "tree_sha256": compute_tree_digest(root),
+        "inventory": {
+            "artifact_target": target,
+            "architecture": architecture,
+            "entries": [
+                _linux_inventory_entry(entry, architecture)
+                for entry in entries
+                if _inventory_required(entry, target)
+            ],
+        },
+    }
+
+
+def _linux_inventory_entry(entry, architecture):
+    if entry.kind == "symlink":
+        return {"path": entry.relative, "kind": "symlink", "mode": "0777", "target": entry.target}
+
+    interpreter = _script_interpreter(_read_prefix(entry.path))
+    if interpreter is not None:
+        return {
+            "path": entry.relative,
+            "kind": "script",
+            "mode": _mode(entry.mode),
+            "interpreter": interpreter,
+            "sha256": _file_sha256(entry.path),
+        }
+    if not _is_elf(entry.path):
+        raise PackageError(f"staged executable is neither a script nor an ELF: {entry.relative}")
+    return {
+        "path": entry.relative,
+        "kind": "elf",
+        "mode": _mode(entry.mode),
+        "architectures": [_elf_architecture(entry.path)],
+        "interpreter": _elf_interpreter(entry.path),
+        "sha256": _file_sha256(entry.path),
+    }
 
 
 def package_release(
@@ -196,6 +310,8 @@ def _validate_manifest(
 
     entries = _scan_tree(root, excluded={MANIFEST_NAME})
     _validate_inventory(manifest["inventory"], entries, target, architecture)
+    if target in LINUX_TARGETS:
+        _validate_linux_tree(root, manifest["inventory"]["entries"])
 
 
 def _validate_identity(
@@ -228,8 +344,9 @@ def _validate_identity(
         raise PackageError("identity.source_commit must be a full 40-character hexadecimal commit")
     if expected_source_commit is not None and commit.lower() != expected_source_commit.lower():
         raise PackageError("identity.source_commit does not match the requested source commit")
-    if identity["distribution_identity"] != "macos_app":
-        raise PackageError("identity.distribution_identity must be macos_app")
+    distribution = DISTRIBUTION_IDENTITIES[target]
+    if identity["distribution_identity"] != distribution:
+        raise PackageError(f"identity.distribution_identity must be {distribution}")
     if identity["artifact_target"] != target:
         raise PackageError(f"identity.artifact_target must be {target}")
     if identity["architecture"] != architecture:
@@ -271,7 +388,7 @@ def _validate_inventory(inventory, entries, target, architecture):
 
     actual = {entry.relative: entry for entry in entries}
     listed = _inventory_by_path(inventory["entries"])
-    required = {path for path, entry in actual.items() if _inventory_required(entry)}
+    required = {path for path, entry in actual.items() if _inventory_required(entry, target)}
     missing = sorted(required - set(listed))
     extra = sorted(set(listed) - required)
     if missing:
@@ -280,7 +397,7 @@ def _validate_inventory(inventory, entries, target, architecture):
         raise PackageError(f"inventory lists non-executable content: {extra[0]}")
 
     for path in sorted(listed):
-        _validate_inventory_entry(listed[path], actual[path], architecture)
+        _validate_inventory_entry(listed[path], actual[path], architecture, target)
 
 
 def _inventory_by_path(entries):
@@ -300,7 +417,7 @@ def _inventory_by_path(entries):
     return result
 
 
-def _validate_inventory_entry(value, entry, architecture):
+def _validate_inventory_entry(value, entry, architecture, target):
     if entry.kind == "symlink":
         _exact_keys(value, {"path", "kind", "mode", "target"}, f"inventory entry {entry.relative}")
         if value["kind"] != "symlink" or value["mode"] != "0777" or value["target"] != entry.target:
@@ -310,8 +427,11 @@ def _validate_inventory_entry(value, entry, architecture):
     if value.get("kind") == "script":
         _validate_script_inventory(value, entry)
         return
-    if value.get("kind") == "mach_o":
+    if value.get("kind") == "mach_o" and target not in LINUX_TARGETS:
         _validate_mach_o_inventory(value, entry, architecture)
+        return
+    if value.get("kind") == "elf" and target in LINUX_TARGETS:
+        _validate_elf_inventory(value, entry, architecture)
         return
     raise PackageError(f"unknown inventory kind for {entry.relative}")
 
@@ -337,6 +457,74 @@ def _validate_mach_o_inventory(value, entry, architecture):
     _validate_file_metadata(value, entry)
 
 
+def _validate_elf_inventory(value, entry, architecture):
+    keys = {"path", "kind", "mode", "architectures", "interpreter", "sha256"}
+    _exact_keys(value, keys, f"inventory entry {entry.relative}")
+    if not _is_elf(entry.path):
+        raise PackageError(f"ELF inventory mismatch: {entry.relative}")
+
+    observed = [_elf_architecture(entry.path)]
+    if observed != [architecture] or value["architectures"] != observed:
+        raise PackageError(f"ELF architecture mismatch: {entry.relative}")
+    if value["interpreter"] != _elf_interpreter(entry.path):
+        raise PackageError(f"ELF interpreter mismatch: {entry.relative}")
+    _validate_file_metadata(value, entry)
+
+
+def _validate_linux_tree(root, entries):
+    """The three Linux facts the manifest alone cannot state (amendment §5.2).
+
+    The unit file is the package's own and nothing else; the loader payload's
+    bytes are the digest its name carries; and every interpreter that is
+    inspectable from outside the Burrito wrapper names that loader's address in
+    the store the maintainer script materialises. What the wrapper compresses
+    inside itself cannot be read here, and is not claimed to be.
+    """
+    _validate_packaged_unit(root)
+    digest = _staged_loader_digest(root)
+    trusted = f"{LINUX_LOADER_STORE}/{digest}/libc-musl.so"
+
+    for value in entries:
+        interpreter = value.get("interpreter") if value.get("kind") == "elf" else None
+        if interpreter is not None and interpreter != trusted:
+            raise PackageError(
+                f"{value['path']} does not name the staged loader: {interpreter}"
+            )
+
+
+def _validate_packaged_unit(root):
+    unit = root / LINUX_UNIT_FILE
+    if unit.is_symlink() or not unit.is_file():
+        raise PackageError(f"the packaged systemd unit is missing: {LINUX_UNIT_FILE}")
+    try:
+        expected = PACKAGED_UNIT_SOURCE.read_bytes()
+    except OSError as error:
+        raise PackageError(f"cannot read the packaged systemd unit source: {error}") from error
+    if unit.read_bytes() != expected:
+        raise PackageError(
+            "the packaged systemd unit is not packaging/linux/systemd/fermix.service"
+        )
+
+
+def _staged_loader_digest(root):
+    directory = root / LINUX_PAYLOAD_DIRECTORY
+    candidates = sorted(path for path in directory.glob("libc-musl-*.so") if path.is_file())
+    if len(candidates) != 1:
+        raise PackageError(
+            f"expected exactly one loader in {LINUX_PAYLOAD_DIRECTORY}, found {len(candidates)}"
+        )
+
+    loader = candidates[0]
+    match = LINUX_LOADER_PATTERN.match(loader.name)
+    if not match:
+        raise PackageError(f"{loader.name} does not name a sha256 digest")
+
+    digest = _file_sha256(loader)
+    if digest != match.group(1):
+        raise PackageError(f"{loader.name} has digest {digest} and is named {match.group(1)}")
+    return digest
+
+
 def _validate_file_metadata(value, entry):
     if value["mode"] != _mode(entry.mode):
         raise PackageError(f"file mode mismatch: {entry.relative}")
@@ -344,12 +532,13 @@ def _validate_file_metadata(value, entry):
         raise PackageError(f"file sha256 mismatch: {entry.relative}")
 
 
-def _inventory_required(entry):
+def _inventory_required(entry, target):
     if entry.kind == "symlink":
         return True
     if entry.kind != "file":
         return False
-    return bool(entry.mode & 0o111) or entry.path.suffix in NATIVE_EXTENSIONS or _is_mach_o(entry.path)
+    native = _is_elf if target in LINUX_TARGETS else _is_mach_o
+    return bool(entry.mode & 0o111) or entry.path.suffix in NATIVE_EXTENSIONS or native(entry.path)
 
 
 def _scan_tree(root, excluded):
@@ -608,6 +797,77 @@ def _cpu_architecture(cpu_type, path):
 
 def _is_mach_o(path):
     return _read_prefix(path, 4) in MACH_O_MAGICS
+
+
+def _is_elf(path):
+    return _read_prefix(path, 4) == ELF_MAGIC
+
+
+def _elf_header(path):
+    header = _read_prefix(path, ELF_HEADER_BYTES)
+    if len(header) < ELF_HEADER_BYTES or header[:4] != ELF_MAGIC:
+        raise PackageError(f"ELF header is truncated: {path.name}")
+    if header[4] != 2 or header[5] != 1:
+        raise PackageError(f"ELF is not 64-bit little-endian: {path.name}")
+    return header
+
+
+def _elf_architecture(path):
+    machine = int.from_bytes(_elf_header(path)[18:20], "little")
+    try:
+        return ELF_MACHINES[machine]
+    except KeyError as error:
+        raise PackageError(f"ELF machine is unsupported: {path.name}") from error
+
+
+def _elf_interpreter(path):
+    """The `PT_INTERP` string this ELF names, or None when it names none.
+
+    Every shared object and every static executable answers None; so does the
+    Burrito wrapper, whose payload carries its own interpreters where nothing
+    outside the wrapper can read them.
+    """
+    header = _elf_header(path)
+    offset = int.from_bytes(header[32:40], "little")
+    entry_size = int.from_bytes(header[54:56], "little")
+    count = int.from_bytes(header[56:58], "little")
+    if count > MAX_ELF_PROGRAM_HEADERS:
+        raise PackageError(f"ELF declares too many program headers: {path.name}")
+    if count and entry_size != ELF_PROGRAM_HEADER_BYTES:
+        raise PackageError(f"ELF program header size is unsupported: {path.name}")
+
+    with _opened(path) as stream:
+        for index in range(count):
+            stream.seek(offset + index * entry_size)
+            segment = stream.read(entry_size)
+            if len(segment) < entry_size:
+                raise PackageError(f"ELF program header is truncated: {path.name}")
+            if int.from_bytes(segment[:4], "little") == PT_INTERP:
+                return _elf_interpreter_string(stream, segment, path)
+    return None
+
+
+def _elf_interpreter_string(stream, segment, path):
+    offset = int.from_bytes(segment[8:16], "little")
+    size = int.from_bytes(segment[32:40], "little")
+    if not 1 <= size <= MAX_ELF_INTERPRETER_BYTES:
+        raise PackageError(f"ELF interpreter length is unsupported: {path.name}")
+
+    stream.seek(offset)
+    payload = stream.read(size)
+    if len(payload) < size or not payload.endswith(b"\0"):
+        raise PackageError(f"ELF interpreter is truncated: {path.name}")
+    try:
+        return payload[:-1].decode("ascii", errors="strict")
+    except UnicodeDecodeError as error:
+        raise PackageError(f"ELF interpreter is not ASCII: {path.name}") from error
+
+
+def _opened(path):
+    try:
+        return path.open("rb")
+    except OSError as error:
+        raise PackageError(f"cannot inspect release file {path.name}: {error}") from error
 
 
 def _read_prefix(path, size=512):
