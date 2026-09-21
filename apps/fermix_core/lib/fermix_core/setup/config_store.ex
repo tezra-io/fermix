@@ -14,6 +14,7 @@ defmodule FermixCore.Setup.ConfigStore do
   alias FermixCore.Harness.Config, as: HarnessConfig
   alias FermixCore.MCP.Inbound.Config, as: InboundMcpConfig
   alias FermixCore.Memory.CompactionConfig
+  alias FermixCore.Plugins.Retired
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.ReasoningEffort
   alias FermixCore.Realtime.Config, as: RealtimeConfig
@@ -1689,13 +1690,38 @@ defmodule FermixCore.Setup.ConfigStore do
         ])
       )
 
+    # `enabled` is nil when the key is absent, which is not the same as an empty
+    # list — `put_if_present` has to keep seeing nil — so the two are dropped apart.
+    retired =
+      Enum.filter(Enum.uniq(List.wrap(enabled) ++ Map.keys(entries)), &Retired.retired?/1)
+
+    warn_retired_plugins(retired)
+
     []
-    |> put_if_present(:enabled, enabled)
+    |> put_if_present(:enabled, drop_retired_names(enabled))
     |> put_if_present(:dev_local, dev_local)
-    |> put_if_present(:entries, entries)
+    |> put_if_present(:entries, Map.drop(entries, retired))
   end
 
   defp normalize_plugins(_config), do: []
+
+  # Named at the read boundary, so the one message reaches every caller that
+  # loads config, and the operator learns the plugin is gone rather than broken.
+  defp drop_retired_names(nil), do: nil
+
+  defp drop_retired_names(names) when is_list(names),
+    do: Enum.reject(names, &Retired.retired?/1)
+
+  defp warn_retired_plugins([]), do: :ok
+
+  defp warn_retired_plugins(names) do
+    Logger.warning(
+      "retired plugin(s) #{inspect(Enum.sort(names))} dropped from [fermix_core.plugins]: " <>
+        "this build no longer offers them, so they are not started and the next config save " <>
+        "writes the file without them. Any credential you stored for them is left exactly as " <>
+        "it is — revoke it at the source if you have not already."
+    )
+  end
 
   defp normalize_oauth(nil), do: %{}
 
@@ -1710,9 +1736,28 @@ defmodule FermixCore.Setup.ConfigStore do
     secrets
     |> Enum.sort_by(fn {key, _value} -> to_string(key) end)
     |> Enum.into(%{}, fn {key, value} -> {to_string(key), to_string(value)} end)
+    |> drop_retired_secrets()
   end
 
   defp normalize_plugin_secrets(_secrets), do: %{}
+
+  # The mapping goes with the plugin; the secret it points at does not. Deleting
+  # a stored credential is the operator's call, so this names the plugin and
+  # leaves the value where it is.
+  defp drop_retired_secrets(secrets) do
+    case Enum.filter(Map.keys(secrets), &Retired.retired?/1) do
+      [] ->
+        secrets
+
+      names ->
+        Logger.warning(
+          "retired plugin(s) #{inspect(Enum.sort(names))} dropped from " <>
+            "[fermix_core.plugin_secrets]: the stored value itself is untouched."
+        )
+
+        Map.drop(secrets, names)
+    end
+  end
 
   defp normalize_named_sections(nil, _ignored_keys), do: %{}
 

@@ -1488,6 +1488,87 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     refute Enum.any?(tesla, fn {key, _value} -> is_binary(key) end)
   end
 
+  # A plugin this build retired is not a plugin the operator removed: the config
+  # on disk still enables it, still carries its section, and still maps its
+  # stored key. Nothing downstream may start it, and the operator has to be told
+  # by name — a retired remote-MCP plugin whose upstream moved on otherwise logs
+  # a discovery failure on every boot forever, which reads as "broken", not "gone".
+  test "a retired plugin is dropped from enabled, from its section and from its stored-key mapping, and named once" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-retired-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    File.mkdir_p!(tmp_home)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.plugins]
+    enabled = ["github", "eden"]
+
+    [fermix_core.plugins.github]
+    auth_profile = "github:primary"
+
+    [fermix_core.plugins.eden]
+    access_profile = "retrieval"
+    auth_profile = "eden:primary"
+    workspace_id = "46f02381-bbd6-4e8f-918e-0754e09dff2b"
+
+    [fermix_core.plugin_secrets]
+    eden = "@keyring"
+    """)
+
+    {result, log} =
+      with_log(fn -> ConfigStore.load_runtime_config(resolve_secrets: false) end)
+
+    assert {:ok, loaded} = result
+    plugins = Keyword.get(loaded.fermix_core, :plugins, [])
+
+    # The live plugin is untouched; only the retired one goes.
+    assert Keyword.get(plugins, :enabled) == ["github"]
+    entries = Keyword.get(plugins, :entries, %{})
+    assert Map.has_key?(entries, "github")
+    refute Map.has_key?(entries, "eden")
+    refute Map.has_key?(Keyword.get(loaded.fermix_core, :plugin_secrets, %{}), "eden")
+
+    # Named, so the operator can revoke the credential this does not touch.
+    assert log =~ "eden"
+    assert log =~ "retired"
+  end
+
+  test "the next save writes the file without the retired plugin" do
+    tmp_home =
+      Path.join(
+        System.tmp_dir!(),
+        "fermix-config-retired-save-#{System.unique_integer([:positive])}"
+      )
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    File.mkdir_p!(tmp_home)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.plugins]
+    enabled = ["github", "eden"]
+
+    [fermix_core.plugins.eden]
+    auth_profile = "eden:primary"
+    """)
+
+    {:ok, loaded} =
+      with_log(fn -> ConfigStore.load_runtime_config(resolve_secrets: false) end) |> elem(0)
+
+    assert :ok =
+             ConfigStore.save_snapshot(%{
+               fermix_core: loaded.fermix_core,
+               fermix_channels: [],
+               fermix_web: []
+             })
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    refute contents =~ "eden"
+    assert contents =~ ~s(enabled = ["github"])
+  end
+
   test "load/save round-trips plugins dev_local as a top-level scalar" do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")

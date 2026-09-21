@@ -631,6 +631,18 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   conversation — never carried out, and never handed back as anyone's task,
   however trusted its source looks. A request someone makes of *you* in the same
   content is still triaged into your own to-dos as before.
+- **A plugin this build no longer offers is not left running.** Retiring a
+  plugin used to be a catalog decision only: a fresh install stopped being
+  offered it, and an install that already had it kept it enabled, kept its
+  stored key mapping, and kept starting it — so a retired hosted plugin whose
+  provider had moved on logged a connection failure on every start, forever,
+  and that error read as "this plugin is broken" when it meant "this plugin is
+  gone". Fermix now knows the retired names as it reads your configuration: the
+  plugin is dropped from the enabled list, its own section and its stored-key
+  entry go with it, and it is named once in the log, so nothing starts it and
+  the next save writes the file without it. The stored credential is left
+  exactly as it is — forgetting it locally and revoking it with the provider
+  stay two separate, deliberate acts.
 
 ## [0.10.5] - 2026-09-17
 
