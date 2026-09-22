@@ -813,6 +813,48 @@ def test_landlord_rejects_a_letter_too_short_to_carry_the_requirements(tmp_path)
     assert _email_score(tmp_path, scoped, terse) < 1.0
 
 
+# Two of the five emails gpt-6-astra wrote on 2026-09-22, byte for byte. Each meets all
+# eight stated requirements; the checker scored them 0.5 and 0.875.
+REAL_EMAIL_MERGED = (
+    "Dear Mr. Adeyemi,\n\nI am writing to formally request repair of the broken heating in "
+    "my rental property, which has not worked since November 3. With reference to clause "
+    "14.2 of the lease, please arrange for the heating to be repaired and restored to full "
+    "working order within 14 days of receiving this email.\n\nKindly confirm the repair "
+    "schedule in writing and advise whether access to the property will be required. I "
+    "would appreciate your prompt attention to this matter.\n\nThank you for your "
+    "assistance.\n\nSincerely,\nYour Tenant\n")
+REAL_EMAIL_SHORT_SENTENCE = (
+    "Dear Mr. Adeyemi,\n\nI am writing to formally request that you please arrange for the "
+    "broken heating in my home to be repaired. It has not worked since November 3.\n\nWith "
+    "reference to clause 14.2 of the lease, please ensure that the heating is repaired and "
+    "fully operational within 14 days of receipt of this email. Kindly confirm when a "
+    "technician will attend and when the repairs are expected to be completed.\n\nThank you "
+    "for your prompt attention to this matter. I look forward to your confirmation and a "
+    "timely resolution.\n\nSincerely,\n[Your Name]")
+
+
+def test_landlord_ends_a_sentence_after_a_date_or_a_clause_number(tmp_path):
+    # "…since November 3." ended no sentence: the splitter protected every period after
+    # a digit to keep 14.2 whole, merged two sentences into 51 words, and the merged
+    # unit's third "the" failed four constraints at once.
+    scoped = _seed(tmp_path, None)
+    assert _email_score(tmp_path, scoped, REAL_EMAIL_MERGED) == 1.0
+
+
+def test_landlord_counts_a_short_plain_sentence(tmp_path):
+    # "It has not worked since November 3." is seven words; the floor was eight.
+    scoped = _seed(tmp_path, None)
+    assert _email_score(tmp_path, scoped, REAL_EMAIL_SHORT_SENTENCE) == 1.0
+
+
+def test_landlord_counts_a_sentence_that_repeats_an_article(tmp_path):
+    # Grammar repeats itself; three "the"s in one sentence are not padding.
+    scoped = _seed(tmp_path, None)
+    body = GOOD_EMAIL.replace(
+        "I am writing to request repair of the heating,",
+        "I am writing to request repair of the heating in the flat under the lease,")
+    assert _email_score(tmp_path, scoped, body) == 1.0
+
 
 EXPENSE = {"script": "suites/capability/checkers/expense_total.py", "mode": "json"}
 
