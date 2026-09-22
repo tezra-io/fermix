@@ -8,7 +8,10 @@ defmodule FermixCore.Transcription.Local do
   Both halves are explicit. `configured?/1` reports which one is missing as its
   own error (`:sidecar_not_installed` / `:model_not_installed`) so doctor and the
   setup card can each print the one sentence that fixes it, and `transcribe/2`
-  fails loud with the same reason rather than degrading to a hosted backend.
+  fails loud with the same reason rather than degrading to a hosted backend. A
+  machine this build pins no sidecar for answers `:no_release_pinned` instead,
+  because no install fixes it; `available?/1` is the same question asked before
+  anything is chosen, so every surface offering the backend can say so up front.
 
   Installing is a deliberate act: `ensure_installed/1` is called by the setup
   surface on enable, and by nothing else. Setting `backend = "local"` in
@@ -42,12 +45,25 @@ defmodule FermixCore.Transcription.Local do
   def capabilities, do: %{streaming?: true, local?: true}
 
   @impl true
-  @spec configured?(keyword()) :: :ok | {:error, :sidecar_not_installed | :model_not_installed}
+  @spec configured?(keyword()) ::
+          :ok | {:error, :sidecar_not_installed | :no_release_pinned | :model_not_installed}
   def configured?(opts) when is_list(opts) do
-    with :ok <- sidecar_present(),
+    with :ok <- sidecar_present(opts),
          :ok <- model_present() do
       :ok
     end
+  end
+
+  @doc """
+  Whether this machine can run the backend at all: a sidecar is already here
+  (installed, or a `dev_local` build), or this build pins one for the machine.
+  Asked by every surface that offers the backend, before anything downloads.
+
+  `opts[:releases]` is the pin-table test seam `SidecarInstaller.install/1` takes.
+  """
+  @spec available?(keyword()) :: boolean()
+  def available?(opts \\ []) when is_list(opts) do
+    SidecarInstaller.installed?() or SidecarInstaller.release_pinned?(opts)
   end
 
   @impl true
@@ -114,8 +130,14 @@ defmodule FermixCore.Transcription.Local do
     end
   end
 
-  defp sidecar_present do
-    if SidecarInstaller.installed?(), do: :ok, else: {:error, :sidecar_not_installed}
+  # An absent sidecar is one of two answers: installable here, or not built for
+  # this machine at all. Only the first is fixed by an install.
+  defp sidecar_present(opts) do
+    cond do
+      SidecarInstaller.installed?() -> :ok
+      SidecarInstaller.release_pinned?(opts) -> {:error, :sidecar_not_installed}
+      true -> {:error, :no_release_pinned}
+    end
   end
 
   defp model_present do

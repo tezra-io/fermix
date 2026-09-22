@@ -10,9 +10,12 @@ defmodule FermixCore.Management.SettingsTest do
 
   use ExUnit.Case, async: false
 
+  alias FermixCore.Management.Copy
   alias FermixCore.Management.Secrets
   alias FermixCore.Management.Settings
+  alias FermixCore.Management.Settings.AnswerMap
   alias FermixCore.Management.Settings.Row
+  alias FermixCore.Management.Settings.Voice
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Readiness
   alias FermixCore.Realtime.Config, as: RealtimeConfig
@@ -20,6 +23,7 @@ defmodule FermixCore.Management.SettingsTest do
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.RestartState
   alias FermixCore.Setup.SecretWriter
+  alias FermixCore.Transcription.Local.SidecarInstaller, as: SttInstaller
   alias FermixTestSupport.SafeRm
   alias FermixTestSupport.SecretWriterStub
 
@@ -155,6 +159,17 @@ defmodule FermixCore.Management.SettingsTest do
 
       assert_raise ArgumentError, ~r/row k declared/, fn ->
         Row.new("k", :text, "Label", restart: false, info: :venice)
+      end
+    end
+
+    # A choice greyed out with no reason is one the operator cannot act on.
+    test "a disabled option must say why" do
+      assert Row.option("v", "Label", disabled: true, hint: "Not here.")["hint"] == "Not here."
+
+      for hint <- [nil, ""] do
+        assert_raise ArgumentError, ~r/option v is disabled without a hint/, fn ->
+          Row.option("v", "Label", disabled: true, hint: hint)
+        end
       end
     end
   end
@@ -303,6 +318,49 @@ defmodule FermixCore.Management.SettingsTest do
   # which voices exist, whether reasoning effort is a setting at all, and whether
   # the backend that answers is worth naming. A client renders whichever list it
   # is handed, so the engine-scoped half is pinned here rather than trusted.
+  # On-device speech runs only where this build pins a sidecar for the machine.
+  # It is offered and disabled rather than hidden, so a pane says why, and the
+  # write refuses the disabled choice instead of trusting every client to grey
+  # it out.
+  describe "the on-device transcription option" do
+    @backend_rows [
+      {"transcription", "transcription_backend"},
+      {"meetings", "meetings_transcription_backend"}
+    ]
+
+    test "is offered by name on a machine this build has a sidecar for" do
+      pinned = [releases: FermixTestSupport.SttPins.for_this_host()]
+
+      for {section, key} <- @backend_rows do
+        option = local_option(section, key, pinned)
+
+        assert option["label"] == "On this device"
+        assert option["disabled"] == false
+        assert option["hint"] == nil
+      end
+    end
+
+    test "is disabled, with the reason, on a machine with no sidecar" do
+      for {section, key} <- @backend_rows do
+        option = local_option(section, key, releases: %{})
+
+        assert option["disabled"] == true
+        assert option["hint"] == SttInstaller.error_message(:no_release_pinned)
+        assert Copy.violations(option["hint"], :prose) == []
+      end
+    end
+
+    test "the write refuses a disabled option in the reason's own words" do
+      row = backend_row("transcription", "transcription_backend", releases: %{})
+
+      assert AnswerMap.answer("transcription", row, "local") ==
+               {:error, SttInstaller.error_message(:no_release_pinned)}
+
+      assert AnswerMap.answer("transcription", row, "deepgram") ==
+               {:ok, {:transcription_backend, "deepgram"}}
+    end
+  end
+
   describe "the voice section under each engine" do
     test "the default engine publishes the effort row and no engine row" do
       Application.put_env(:fermix_core, :realtime, enabled: true)
@@ -1003,6 +1061,19 @@ defmodule FermixCore.Management.SettingsTest do
   defp rows(id) do
     {:ok, %{"rows" => rows}} = Settings.get(id)
     rows
+  end
+
+  defp backend_row(section, key, opts) do
+    section
+    |> Voice.rows(ConfigStore.current_snapshot(), opts)
+    |> Enum.find(&(&1["key"] == key))
+  end
+
+  defp local_option(section, key, opts) do
+    section
+    |> backend_row(key, opts)
+    |> Map.fetch!("options")
+    |> Enum.find(&(&1["value"] == "local"))
   end
 
   # Every §4.4 name state at once: stored and allowed, allowed with no source,

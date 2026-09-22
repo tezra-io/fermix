@@ -47,15 +47,43 @@ defmodule FermixCore.Transcription.LocalTest do
     end
   end
 
+  describe "available?/1" do
+    test "a machine this build pins a sidecar for can run the backend before any install" do
+      assert Local.available?(pinned())
+    end
+
+    test "a machine with no pinned sidecar cannot" do
+      refute Local.available?(releases: %{})
+    end
+
+    test "a sidecar already present is available whatever the pins say", %{home: home} do
+      install_sidecar(home)
+
+      assert Local.available?(releases: %{})
+    end
+  end
+
   describe "configured?/1" do
     test "reports a missing sidecar distinctly from a missing model", %{home: home} do
-      assert Local.configured?([]) == {:error, :sidecar_not_installed}
+      assert Local.configured?(pinned()) == {:error, :sidecar_not_installed}
 
       install_sidecar(home)
-      assert Local.configured?([]) == {:error, :model_not_installed}
+      assert Local.configured?(pinned()) == {:error, :model_not_installed}
 
       install_model(home)
-      assert Local.configured?([]) == :ok
+      assert Local.configured?(pinned()) == :ok
+    end
+
+    # No install fixes a machine the build has no sidecar for, so it is not
+    # reported as one that is merely not installed yet.
+    test "a machine with no pinned sidecar reports that, not a missing install" do
+      assert Local.configured?(releases: %{}) == {:error, :no_release_pinned}
+    end
+
+    test "a present sidecar moves past the pin question to the model", %{home: home} do
+      install_sidecar(home)
+
+      assert Local.configured?(releases: %{}) == {:error, :model_not_installed}
     end
 
     test "an incomplete model directory is not configured", %{home: home} do
@@ -73,14 +101,18 @@ defmodule FermixCore.Transcription.LocalTest do
 
   describe "transcribe/2" do
     test "fails loud with the missing half named, and never falls back to a hosted backend" do
-      assert Local.transcribe("/tmp/note.ogg") == {:error, :sidecar_not_installed}
+      assert Local.transcribe("/tmp/note.ogg", pinned()) == {:error, :sidecar_not_installed}
+    end
+
+    test "fails loud on a machine with no pinned sidecar" do
+      assert Local.transcribe("/tmp/note.ogg", releases: %{}) == {:error, :no_release_pinned}
     end
 
     test "an unconfigured call still emits an errored provider span" do
       handler = attach_span_handler()
       on_exit(fn -> :telemetry.detach(handler) end)
 
-      assert Local.transcribe("/tmp/note.ogg") == {:error, :sidecar_not_installed}
+      assert Local.transcribe("/tmp/note.ogg", pinned()) == {:error, :sidecar_not_installed}
 
       assert_receive {:span, _measurements, metadata}
       assert metadata.provider == :local
@@ -109,7 +141,11 @@ defmodule FermixCore.Transcription.LocalTest do
 
   describe "open_stream/2" do
     test "refuses before starting a process when nothing is installed" do
-      assert Local.open_stream(self(), []) == {:error, :sidecar_not_installed}
+      assert Local.open_stream(self(), pinned()) == {:error, :sidecar_not_installed}
+    end
+
+    test "refuses before starting a process on a machine with no pinned sidecar" do
+      assert Local.open_stream(self(), releases: %{}) == {:error, :no_release_pinned}
     end
   end
 
@@ -177,6 +213,9 @@ defmodule FermixCore.Transcription.LocalTest do
     {:ok, target} = SidecarInstaller.target()
     target
   end
+
+  # A machine this build pins a sidecar for, whichever one the suite runs on.
+  defp pinned, do: [releases: FermixTestSupport.SttPins.for_this_host()]
 
   defp attach_span_handler do
     handler = "stt-local-#{System.unique_integer([:positive])}"

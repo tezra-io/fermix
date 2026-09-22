@@ -14,6 +14,7 @@ defmodule FermixCore.Management.InstallsTest do
   alias FermixCore.Management.ComputerUse
   alias FermixCore.Management.Jobs
   alias FermixCore.Management.Meetings
+  alias FermixCore.Transcription.Local.SidecarInstaller, as: SttInstaller
 
   setup context do
     tasks = :"install_tasks_#{:erlang.phash2(context.test)}"
@@ -95,6 +96,21 @@ defmodule FermixCore.Management.InstallsTest do
 
       assert done["status"] == "failed"
       assert done["failure"]["sentence"] =~ "No meetbot sidecar release is pinned"
+    end
+
+    # The app's install row runs on every Mac, so a machine this build has no
+    # sidecar for is answered in the words the rest of setup uses for it.
+    test "an on-device speech install on a machine with no build says so", %{jobs: jobs} do
+      install = fn _opts -> {:error, :no_release_pinned} end
+
+      assert {:ok, started} =
+               Capabilities.install_start("local_stt", jobs: jobs, install: install)
+
+      assert {:ok, done} = terminal(jobs, started["job_id"])
+
+      assert done["status"] == "failed"
+
+      assert done["failure"]["sentence"] == SttInstaller.error_message(:no_release_pinned)
     end
 
     test "the on-device speech install reports its two stages as phases", %{jobs: jobs} do

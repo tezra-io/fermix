@@ -65,11 +65,27 @@ defmodule FermixCore.Transcription.Local.SidecarInstallerTest do
              ) == {:error, :no_release_pinned}
     end
 
+    # The sentence reaches operators on every surface that refuses on-device
+    # speech, so it names what they can do and never the sidecar-author loop.
     test "carries the operator copy doctor and setup render verbatim" do
       assert SidecarInstaller.error_message(:no_release_pinned) ==
-               "fermix-stt has no pinned release yet. Build it locally and point " <>
-                 "[fermix_core.plugins] dev_local at a checkout containing " <>
-                 "stt_sidecar/bin/<target>/fermix-stt."
+               "On-device speech isn't available on this machine. " <>
+                 "Choose another transcription backend."
+
+      refute SidecarInstaller.error_message(:no_release_pinned) =~ "dev_local"
+    end
+  end
+
+  describe "release_pinned?/1" do
+    test "answers from the injected table, the same seam install/1 takes" do
+      refute SidecarInstaller.release_pinned?(releases: %{})
+      assert SidecarInstaller.release_pinned?(releases: FermixTestSupport.SttPins.for_this_host())
+    end
+
+    test "a table pinning only other targets does not pin this one" do
+      refute SidecarInstaller.release_pinned?(
+               releases: %{"solaris-sparc" => %{url: "http://x/y", sha256: @artifact_sha256}}
+             )
     end
   end
 

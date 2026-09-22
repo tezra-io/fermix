@@ -1280,14 +1280,22 @@ defmodule Fermix.CLI.Doctor.Checks do
     warn("acp surface", "unexpected reply: #{inspect(other)}")
   end
 
-  @spec transcription() :: result()
-  def transcription do
-    ProviderProbe.transcription_report()
+  @doc "`opts` reach `Doctor.transcription_report/1`, whose seams stand for the host."
+  @spec transcription(keyword()) :: result()
+  def transcription(opts \\ []) when is_list(opts) do
+    opts
+    |> ProviderProbe.transcription_report()
     |> format_transcription()
   end
 
   defp format_transcription(%{status: :error, error: error}) do
     warn("transcription", error)
+  end
+
+  # A machine with no build is missing no half: nothing to install fixes it, so
+  # the row carries the refusal sentence alone rather than naming an install.
+  defp format_transcription(%{status: :needs_install, missing: :no_release_pinned} = report) do
+    warn("transcription", "backend local — #{report.remedy}")
   end
 
   # The on-device backend fails on installation state, not on a key, so the row
@@ -1309,8 +1317,7 @@ defmodule Fermix.CLI.Doctor.Checks do
     ok("transcription", "backend #{backend} configured")
   end
 
-  defp missing_half(missing) when missing in [:sidecar_not_installed, :no_release_pinned],
-    do: "needs its sidecar"
+  defp missing_half(:sidecar_not_installed), do: "needs its sidecar"
 
   defp missing_half(missing) when missing in [:model_not_installed, :model_pins_missing],
     do: "needs its speech model"

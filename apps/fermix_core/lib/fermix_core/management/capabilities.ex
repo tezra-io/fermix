@@ -18,6 +18,7 @@ defmodule FermixCore.Management.Capabilities do
   alias FermixCore.Meetings.BrowserInstall
   alias FermixCore.Meetings.SidecarInstaller, as: MeetbotInstaller
   alias FermixCore.Transcription.Local, as: LocalTranscription
+  alias FermixCore.Transcription.Local.SidecarInstaller, as: LocalSttInstaller
 
   require Logger
 
@@ -122,8 +123,10 @@ defmodule FermixCore.Management.Capabilities do
   defp sentence(:not_installed),
     do: "The helper this step needs is not installed yet."
 
+  # Only the on-device speech installer refuses this way, so it answers in the
+  # words every other surface uses for a machine with no build.
   defp sentence(:no_release_pinned),
-    do: "This build pins no release of that helper yet."
+    do: LocalSttInstaller.error_message(:no_release_pinned)
 
   defp sentence({:no_pinned_artifact, _tag, _target}),
     do: "The pinned release carries no build for this Mac."

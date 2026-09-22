@@ -503,6 +503,18 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **On-device speech says plainly where it can't run, and no longer shows up as
+  a notetaker failure.** On a machine this build has no on-device speech engine
+  for, choosing On-device for voice notes printed a developer instruction about
+  building the engine from source, and the Integrations page repeated it under
+  the Meeting Notetaker card, where it read as the notetaker's own error. The
+  choice is now listed but disabled, with the reason beside it in the browser
+  setup and on hover in the macOS app, and choosing it anyway, in the browser
+  setup or either app, is refused with that reason; the Integrations page no
+  longer shows it. `fermix doctor` says on-device speech isn't available on this
+  machine instead of naming an install, and a voice note sent while it is
+  selected gets a reply saying to choose another backend rather than to try
+  again. The choice is labelled "On this device", not "On this Mac".
 - **The installer's setup wizard reads the terminal, not the installer.** Under
   `curl … | sh` standard input is the script itself, so on a host with no
   display the terminal wizard `fermix setup` starts would have taken the rest of

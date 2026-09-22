@@ -40,8 +40,14 @@ selected. Writing `backend = "local"` into `config.toml` by hand installs
 nothing — every call then fails naming the missing half, and boot never
 downloads. A `fermix-stt` release is pinned for `macos-aarch64` only — binary
 and model checksums both — so on that host enabling downloads and verifies both
-halves on-device, and every other host refuses honestly instead of fetching an
-unverified binary or unverified weights.
+halves on-device. Any other machine has no on-device speech rather than an
+unverified binary: setup still lists `local` but it cannot be chosen there (the
+browser setup says why beside the option, the macOS app on hover), and choosing
+it anyway in the browser setup or either app is refused with that reason (the
+`fermix setup --transcription-*` flags still write it). Wherever it is in force
+on such a machine, `fermix doctor` says it is not available here, and a voice
+note sent while it is selected gets a reply saying to choose another backend.
+None of those point at an install, because no install fixes it.
 
 ## Files versus live streams
 
@@ -61,5 +67,6 @@ like any other provider call.
 
 When transcription isn't configured, the file is over the size cap, or the
 provider errors, the sender gets a specific reply instead of a silent drop — not
-configured → run `fermix setup`; too large → the size-cap limit; other failures →
-transcription failed, try again — and no turn is scheduled.
+configured → run `fermix setup`; too large → the size-cap limit; on-device
+selected on a machine with no build for it → choose another backend; other
+failures → transcription failed, try again — and no turn is scheduled.

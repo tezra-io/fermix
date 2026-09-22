@@ -436,37 +436,43 @@ defmodule FermixWebWeb.SetupLive do
   end
 
   def handle_event("transcription_changed", %{"transcription_form" => params}, socket) do
-    previous = socket.assigns.transcription_form.backend
+    form = socket.assigns.transcription_form
+    previous = form.backend
     backend = normalize_transcription_backend(Map.get(params, "backend"))
 
-    form =
-      update_transcription_selection(
-        socket.assigns.transcription_form,
-        backend,
-        Map.get(params, "model")
-      )
+    if unavailable_local?(backend, previous, form.local_available?) do
+      {:noreply, refuse_unavailable_local(socket)}
+    else
+      form = update_transcription_selection(form, backend, Map.get(params, "model"))
 
-    {:noreply,
-     socket
-     |> assign(:transcription_form, form)
-     |> maybe_install_local_stt(previous, backend)}
+      {:noreply,
+       socket
+       |> assign(:transcription_form, form)
+       |> maybe_install_local_stt(previous, backend)}
+    end
   end
 
   def handle_event("save_transcription", %{"transcription_form" => params} = root, socket) do
-    # The single `api_key` field carries the selected backend's transcription key;
-    # the wizard routes it to that backend's slot (openai/xai override the reused
-    # chat key, deepgram is its only source). `model` is snapped to the selected
-    # backend's default by the wizard when no explicit model rides along, so a
-    # backend switch never leaves an OpenAI-shaped model on Deepgram (xai is
-    # modelless and sends none).
-    answers =
-      []
-      |> maybe_put_string(:transcription_backend, params["backend"])
-      |> maybe_put_string(:transcription_model, params["model"])
-      |> maybe_put_string(:transcription_api_key, params["api_key"])
+    form = socket.assigns.transcription_form
 
-    # Backends read [fermix_core.transcription] per call, so no daemon restart.
-    {:noreply, save_answers(socket, answers, "Transcription saved.", Map.get(root, "__nav"))}
+    if unavailable_local?(params["backend"], form.backend, form.local_available?) do
+      {:noreply, refuse_unavailable_local(socket)}
+    else
+      # The single `api_key` field carries the selected backend's transcription key;
+      # the wizard routes it to that backend's slot (openai/xai override the reused
+      # chat key, deepgram is its only source). `model` is snapped to the selected
+      # backend's default by the wizard when no explicit model rides along, so a
+      # backend switch never leaves an OpenAI-shaped model on Deepgram (xai is
+      # modelless and sends none).
+      answers =
+        []
+        |> maybe_put_string(:transcription_backend, params["backend"])
+        |> maybe_put_string(:transcription_model, params["model"])
+        |> maybe_put_string(:transcription_api_key, params["api_key"])
+
+      # Backends read [fermix_core.transcription] per call, so no daemon restart.
+      {:noreply, save_answers(socket, answers, "Transcription saved.", Map.get(root, "__nav"))}
+    end
   end
 
   # Text and toggle values are always written (a cleared `announce_message` means
@@ -474,20 +480,30 @@ defmodule FermixWebWeb.SetupLive do
   # secret is written only when the operator typed one, so an untouched password
   # field keeps the stored credential.
   def handle_event("save_meetings", %{"meetings_form" => params} = root, socket) do
-    changes =
-      [
-        enabled: checked?(params["enabled"]),
-        bot_name: safe_string(params["bot_name"]),
-        announce: checked?(params["announce"]),
-        announce_message: safe_string(params["announce_message"]),
-        transcription_backend: normalize_meetings_backend(params["transcription_backend"]),
-        zoom_account_id: safe_string(params["zoom_account_id"]),
-        zoom_client_id: safe_string(params["zoom_client_id"]),
-        zoom_ws_subscription_id: safe_string(params["zoom_ws_subscription_id"])
-      ]
-      |> maybe_put_string(:zoom_client_secret, params["zoom_client_secret"])
+    form = socket.assigns.meetings_form
 
-    {:noreply, save_meetings(socket, changes, Map.get(root, "__nav"))}
+    if unavailable_local?(
+         params["transcription_backend"],
+         form.transcription_backend,
+         form.local_available?
+       ) do
+      {:noreply, refuse_unavailable_local(socket)}
+    else
+      changes =
+        [
+          enabled: checked?(params["enabled"]),
+          bot_name: safe_string(params["bot_name"]),
+          announce: checked?(params["announce"]),
+          announce_message: safe_string(params["announce_message"]),
+          zoom_account_id: safe_string(params["zoom_account_id"]),
+          zoom_client_id: safe_string(params["zoom_client_id"]),
+          zoom_ws_subscription_id: safe_string(params["zoom_ws_subscription_id"])
+        ]
+        |> put_meetings_backend(params)
+        |> maybe_put_string(:zoom_client_secret, params["zoom_client_secret"])
+
+      {:noreply, save_meetings(socket, changes, Map.get(root, "__nav"))}
+    end
   end
 
   # `set_oauth_provider/2` rebuilds the provider block from `opts` alone, so a
@@ -947,7 +963,10 @@ defmodule FermixWebWeb.SetupLive do
   # Re-read only the readiness line: rebuilding the whole report here would
   # throw away the backend the operator just picked but has not saved yet.
   def handle_async(:local_install, {:ok, :ok}, socket) do
-    form = %{socket.assigns.transcription_form | local_state: LocalTranscription.configured?([])}
+    form = %{
+      socket.assigns.transcription_form
+      | local_state: LocalTranscription.configured?(local_transcription_opts())
+    }
 
     {:noreply,
      socket
@@ -1810,12 +1829,14 @@ defmodule FermixWebWeb.SetupLive do
     transcription = get_fermix_core(snapshot, :transcription)
     backend = normalize_transcription_backend(Keyword.get(transcription, :backend))
     options = transcription_models_for(backend)
+    local_opts = local_transcription_opts()
 
     %{
       backend: backend,
       model_options: options,
       model: transcription_model_for_options(Keyword.get(transcription, :model), options),
-      local_state: LocalTranscription.configured?([]),
+      local_available?: LocalTranscription.available?(local_opts),
+      local_state: LocalTranscription.configured?(local_opts),
       openai_api_key_set: secret_set?(transcription, :openai_api_key),
       xai_api_key_set: secret_set?(transcription, :xai_api_key),
       deepgram_api_key_set: secret_set?(transcription, :deepgram_api_key)
@@ -1874,6 +1895,7 @@ defmodule FermixWebWeb.SetupLive do
       transcription_backend:
         normalize_meetings_backend(Keyword.get(meetings, :transcription_backend)),
       backend_options: meetings_backend_options(),
+      local_available?: LocalTranscription.available?(local_transcription_opts()),
       zoom_account_id: safe_string(Keyword.get(meetings, :zoom_account_id)),
       zoom_client_id: safe_string(Keyword.get(meetings, :zoom_client_id)),
       zoom_ws_subscription_id: safe_string(Keyword.get(meetings, :zoom_ws_subscription_id)),
@@ -1894,6 +1916,14 @@ defmodule FermixWebWeb.SetupLive do
     name = safe_string(value)
     if name in meetings_backend_options(), do: name, else: ""
   end
+
+  # A browser leaves a disabled selected option (on-device speech on a machine
+  # with no build for it) out of the submission, so an absent field is the
+  # operator not touching it, never a clear back to the voice-notes default.
+  defp put_meetings_backend(changes, %{"transcription_backend" => value}),
+    do: Keyword.put(changes, :transcription_backend, normalize_meetings_backend(value))
+
+  defp put_meetings_backend(changes, _params), do: changes
 
   # `[fermix_core.meetings]` is written as a section rather than through wizard
   # answers, but through the same shared write tail every other setup writer
@@ -2027,7 +2057,7 @@ defmodule FermixWebWeb.SetupLive do
   # selects say so instead of re-running the installer.
   defp maybe_install_local_stt(socket, previous, :local) when previous != :local do
     cond do
-      LocalTranscription.configured?([]) == :ok ->
+      LocalTranscription.configured?(local_transcription_opts()) == :ok ->
         assign(socket, :local_install, done(@local_ready_message))
 
       installing?(socket.assigns.local_install) ->
@@ -2056,6 +2086,24 @@ defmodule FermixWebWeb.SetupLive do
   # rendered without a half-installed host.
   defp local_installer do
     Application.get_env(:fermix_web, :local_installer, &LocalTranscription.ensure_installed/1)
+  end
+
+  # The disabled control is presentation; the handlers are the boundary. A
+  # request that switches to on-device speech on a machine with no build for it
+  # is refused in the sentence every surface uses, whatever sent it. A value
+  # already in force passes through, so the rest of a form still saves.
+  defp unavailable_local?(requested, in_force, available?) do
+    to_string(requested) == "local" and to_string(in_force) != "local" and not available?
+  end
+
+  defp refuse_unavailable_local(socket),
+    do: flash_error(socket, LocalSttInstaller.error_message(:no_release_pinned))
+
+  # Injectable like `:doctor_probe_opts`: whether on-device speech runs here is a
+  # fact about the machine, so a LiveView test names the machine it means (its
+  # `releases:` pin) instead of inheriting the CI host's. Production passes none.
+  defp local_transcription_opts do
+    Application.get_env(:fermix_web, :local_transcription_opts, [])
   end
 
   defp local_progress_message({:sidecar, :downloading}), do: "Downloading the speech engine…"
@@ -2233,8 +2281,8 @@ defmodule FermixWebWeb.SetupLive do
   # The native-driver features: capabilities that run on a bundled sidecar rather
   # than a plugin, presented together so their toggles sit in one place instead of
   # scattered across tabs. Computer-history is macOS-only (`ComputerHistory.macos?/0`,
-  # where its AXObserver capture runs); the speech and meeting notetakers install
-  # their sidecar on enable and refuse loud until a release is pinned.
+  # where its AXObserver capture runs); the meeting notetaker installs its sidecar
+  # on enable. On-device speech is not a card: it is a backend on the Voice notes tab.
   defp core_feature_cards(snapshot) do
     [computer_use_card(snapshot)] ++
       if(ComputerHistory.macos?(), do: [computer_history_card(snapshot)], else: []) ++

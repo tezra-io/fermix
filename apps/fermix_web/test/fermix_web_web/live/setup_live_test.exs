@@ -139,6 +139,7 @@ defmodule FermixWebWeb.SetupLiveTest do
     doctor_probe_opts = Application.get_env(:fermix_web, :doctor_probe_opts)
     computer_use_grant_impl = Application.get_env(:fermix_web, :computer_use_grant_impl)
     local_installer = Application.get_env(:fermix_web, :local_installer)
+    local_transcription_opts = Application.get_env(:fermix_web, :local_transcription_opts)
     meetbot_installer = Application.get_env(:fermix_web, :meetbot_installer)
     meetbot_signin_runner = Application.get_env(:fermix_web, :meetbot_signin_runner)
     harness_detector = Application.get_env(:fermix_web, :harness_detector)
@@ -205,6 +206,12 @@ defmodule FermixWebWeb.SetupLiveTest do
     Application.delete_env(:fermix_web, :doctor_probe_opts)
     Application.delete_env(:fermix_web, :computer_use_grant_impl)
     Application.delete_env(:fermix_web, :local_installer)
+    # A machine this build pins an on-device speech sidecar for, whichever one
+    # the suite runs on; the cases about a machine with none say so themselves.
+    Application.put_env(:fermix_web, :local_transcription_opts,
+      releases: FermixTestSupport.SttPins.for_this_host()
+    )
+
     Application.delete_env(:fermix_web, :meetbot_installer)
     Application.delete_env(:fermix_web, :meetbot_signin_runner)
     # Hermetic harness detection: never spawn the real codex/claude `--version`
@@ -232,6 +239,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       restore_env(:fermix_web, :doctor_probe_opts, doctor_probe_opts)
       restore_env(:fermix_web, :computer_use_grant_impl, computer_use_grant_impl)
       restore_env(:fermix_web, :local_installer, local_installer)
+      restore_env(:fermix_web, :local_transcription_opts, local_transcription_opts)
       restore_env(:fermix_web, :meetbot_installer, meetbot_installer)
       restore_env(:fermix_web, :meetbot_signin_runner, meetbot_signin_runner)
       restore_env(:fermix_web, :harness_detector, harness_detector)
@@ -2141,6 +2149,89 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert render_async(view) =~ escaped(LocalSttInstaller.error_message(:no_release_pinned))
     end
 
+    # Offered and disabled rather than hidden: the operator learns why, and a
+    # disabled control cannot start an install that could only refuse.
+    test "on a machine with no build the choice is disabled and says why", %{conn: conn} do
+      Application.put_env(:fermix_web, :local_transcription_opts, releases: %{})
+
+      {:ok, view, _html} = live(conn, "/setup")
+
+      html = view |> element("button[phx-value-tab=\"transcription\"]") |> render_click()
+
+      assert has_element?(
+               view,
+               ~s(input[name="transcription_form[backend]"][value="local"][disabled])
+             )
+
+      assert html =~ escaped(LocalSttInstaller.error_message(:no_release_pinned))
+    end
+
+    # The disabled control is presentation; the handlers are the boundary, so a
+    # request no control can send is refused rather than installed or saved.
+    test "on such a machine a hand-made request for the choice is refused", %{conn: conn} do
+      Application.put_env(:fermix_web, :local_transcription_opts, releases: %{})
+      owner = self()
+
+      Application.put_env(:fermix_web, :local_installer, fn _opts ->
+        send(owner, :install_started)
+        :ok
+      end)
+
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element("button[phx-value-tab=\"transcription\"]") |> render_click()
+
+      render_change(view, "transcription_changed", %{
+        "transcription_form" => %{"backend" => "local"}
+      })
+
+      render_async(view)
+      refute_received :install_started
+      refusal = LocalSttInstaller.error_message(:no_release_pinned)
+      assert has_element?(view, ~s([role="alert"]), refusal)
+
+      assert has_element?(
+               view,
+               ~s(input[name="transcription_form[backend]"][value="openai"][checked])
+             )
+
+      render_submit(view, "save_transcription", %{"transcription_form" => %{"backend" => "local"}})
+
+      assert Keyword.get(Application.get_env(:fermix_core, :transcription, []), :backend) ==
+               "openai"
+    end
+
+    test "an on-device choice already in force on such a machine names that, not an install",
+         %{conn: conn} do
+      Application.put_env(:fermix_web, :local_transcription_opts, releases: %{})
+      Application.put_env(:fermix_core, :transcription, backend: "local", max_file_mb: 20)
+
+      {:ok, view, _html} = live(conn, "/setup")
+
+      html = view |> element("button[phx-value-tab=\"transcription\"]") |> render_click()
+
+      assert html =~ escaped(LocalSttInstaller.error_message(:no_release_pinned))
+      refute html =~ "the speech engine is missing"
+    end
+
+    # The install result belongs to the tab that started it. The Integrations
+    # page once showed it too, under the notetaker card, where it read as the
+    # notetaker's own failure.
+    test "the Integrations page does not repeat the on-device install result", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      view |> element("button[phx-value-tab=\"transcription\"]") |> render_click()
+
+      view
+      |> form("form[phx-submit=\"save_transcription\"]", transcription_form: %{backend: "local"})
+      |> render_change()
+
+      assert render_async(view) =~ escaped(LocalSttInstaller.error_message(:no_release_pinned))
+
+      html = view |> element("button[phx-value-tab=\"plugins\"]") |> render_click()
+
+      refute html =~ escaped(LocalSttInstaller.error_message(:no_release_pinned))
+    end
+
     test "an unpinned model renders the model-pins copy verbatim", %{conn: conn} do
       Application.put_env(:fermix_web, :local_installer, fn _opts ->
         {:error, :model_pins_missing}
@@ -2232,6 +2323,19 @@ defmodule FermixWebWeb.SetupLiveTest do
   defp open_meetings_config(view) do
     view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
     view |> element(~s|button[phx-click="open_meetings_config"]|) |> render_click()
+  end
+
+  # The meetings form as a browser submits it, with the transcription choice given.
+  defp meetings_params(transcription_backend) do
+    %{
+      "meetings_form" => %{
+        "enabled" => "false",
+        "bot_name" => "Notes Bot",
+        "announce" => "true",
+        "announce_message" => "",
+        "transcription_backend" => transcription_backend
+      }
+    }
   end
 
   # A dev_local meetbot binary makes `SidecarInstaller.installed?/0` true without
@@ -2492,6 +2596,84 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert html =~ "Meetings saved."
       # The restart signal is the flash clause, not the toggle's explanatory hint.
       refute html =~ "Meetings saved. Restart to apply"
+    end
+
+    test "on a machine with no on-device build, that transcription choice is disabled", %{
+      conn: conn
+    } do
+      Application.put_env(:fermix_web, :local_transcription_opts, releases: %{})
+
+      {:ok, view, _html} = live(conn, "/setup")
+      open_meetings_config(view)
+
+      assert has_element?(
+               view,
+               ~s(select[name="meetings_form[transcription_backend]"] option[value="local"][disabled])
+             )
+
+      refute has_element?(
+               view,
+               ~s(select[name="meetings_form[transcription_backend]"] option[value="deepgram"][disabled])
+             )
+    end
+
+    # A browser leaves a disabled selected option out of the submission, so an
+    # absent transcription field is the operator not touching it, never a clear.
+    test "a save without the transcription field keeps the choice in force", %{conn: conn} do
+      Application.put_env(:fermix_core, :meetings, enabled: false, transcription_backend: "local")
+
+      {:ok, view, _html} = live(conn, "/setup")
+      open_meetings_config(view)
+
+      render_submit(view, "save_meetings", %{
+        "meetings_form" => %{
+          "enabled" => "false",
+          "bot_name" => "Notes Bot",
+          "announce" => "true",
+          "announce_message" => ""
+        }
+      })
+
+      meetings = Application.get_env(:fermix_core, :meetings, [])
+      assert Keyword.get(meetings, :bot_name) == "Notes Bot"
+      assert Keyword.get(meetings, :transcription_backend) == "local"
+    end
+
+    test "on a machine with no build, a hand-made switch to on-device speech is refused", %{
+      conn: conn
+    } do
+      Application.put_env(:fermix_web, :local_transcription_opts, releases: %{})
+
+      {:ok, view, _html} = live(conn, "/setup")
+      open_meetings_config(view)
+
+      render_submit(view, "save_meetings", meetings_params("local"))
+
+      assert has_element?(
+               view,
+               ~s([role="alert"]),
+               LocalSttInstaller.error_message(:no_release_pinned)
+             )
+
+      meetings = Application.get_env(:fermix_core, :meetings, [])
+      refute Keyword.get(meetings, :bot_name) == "Notes Bot"
+      refute Keyword.get(meetings, :transcription_backend) == "local"
+    end
+
+    # Only a change to it is refused: the rest of the form still saves around a
+    # choice that is already in force.
+    test "an on-device choice already in force passes through a save", %{conn: conn} do
+      Application.put_env(:fermix_web, :local_transcription_opts, releases: %{})
+      Application.put_env(:fermix_core, :meetings, enabled: false, transcription_backend: "local")
+
+      {:ok, view, _html} = live(conn, "/setup")
+      open_meetings_config(view)
+
+      render_submit(view, "save_meetings", meetings_params("local"))
+
+      meetings = Application.get_env(:fermix_core, :meetings, [])
+      assert Keyword.get(meetings, :bot_name) == "Notes Bot"
+      assert Keyword.get(meetings, :transcription_backend) == "local"
     end
 
     test "submitting persists the section and secures the Zoom secret", %{

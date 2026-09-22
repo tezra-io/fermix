@@ -4,6 +4,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   alias FermixCore.Auth.Redaction
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.ModelCatalog
+  alias FermixCore.Transcription.Local.SidecarInstaller, as: LocalSttInstaller
 
   @local_process_consent "Runs a local process with direct access to the folders you configure."
 
@@ -1281,12 +1282,10 @@ defmodule FermixWebWeb.SetupLive.Components do
         <div class="space-y-2">
           <.core_feature_card :for={card <- @plugin_summary.core_features} card={card} />
         </div>
-        <div
-          :if={transient_status?(@local_install) or transient_status?(@meetbot_install)}
-          class="mt-2 space-y-1"
-        >
-          <.install_banner :if={transient_status?(@local_install)} state={@local_install} />
-          <.install_banner :if={transient_status?(@meetbot_install)} state={@meetbot_install} />
+        <%!-- Only the cards on this page install from here. On-device speech
+             installs from the Voice notes tab and reports there. --%>
+        <div :if={transient_status?(@meetbot_install)} class="mt-2 space-y-1">
+          <.install_banner state={@meetbot_install} />
         </div>
         <hr class="my-6 border-base-300" />
       </div>
@@ -1776,8 +1775,9 @@ defmodule FermixWebWeb.SetupLive.Components do
             <.transcription_backend_option
               value="local"
               label="On-device"
-              description="Parakeet on this machine · no key, no audio leaves the host"
+              description={local_backend_description(@transcription_form.local_available?)}
               checked={@transcription_form.backend == :local}
+              disabled={not @transcription_form.local_available?}
             />
           </div>
         </fieldset>
@@ -1822,7 +1822,12 @@ defmodule FermixWebWeb.SetupLive.Components do
             </p>
           </div>
 
-          <div :if={@transcription_form.backend == :local} class="space-y-2">
+          <%!-- On a machine with no build the option card above carries the
+               reason, and nothing below would be true there. --%>
+          <div
+            :if={@transcription_form.backend == :local and @transcription_form.local_available?}
+            class="space-y-2"
+          >
             <p class="text-sm text-base-content/70">
               No key needed. Selecting this backend installs the speech engine and its
               model into your Fermix home; nothing is downloaded until you pick it.
@@ -2026,8 +2031,9 @@ defmodule FermixWebWeb.SetupLive.Components do
                 :for={option <- @meetings_form.backend_options}
                 value={option}
                 selected={option == @meetings_form.transcription_backend}
+                disabled={option == "local" and not @meetings_form.local_available?}
               >
-                {meetings_backend_label(option)}
+                {meetings_backend_label(option, @meetings_form.local_available?)}
               </option>
             </select>
             <span class="label pt-1 text-xs text-base-content/60">
@@ -3576,14 +3582,21 @@ defmodule FermixWebWeb.SetupLive.Components do
     """
   end
 
+  attr :value, :string, required: true
+  attr :label, :string, required: true
+  attr :description, :string, required: true
+  attr :checked, :boolean, required: true
+  attr :disabled, :boolean, default: false
+
   defp transcription_backend_option(assigns) do
     ~H"""
-    <label class={search_backend_option_class(@checked)}>
+    <label class={transcription_backend_option_class(@checked, @disabled)}>
       <input
         type="radio"
         name="transcription_form[backend]"
         value={@value}
         checked={@checked}
+        disabled={@disabled}
         class="radio radio-primary radio-sm mt-0.5"
       />
       <span class="min-w-0">
@@ -4112,8 +4125,9 @@ defmodule FermixWebWeb.SetupLive.Components do
   defp local_state_class(:ok), do: "text-sm text-success"
   defp local_state_class({:error, _reason}), do: "text-sm text-warning"
 
-  defp meetings_backend_label(""), do: "Global default"
-  defp meetings_backend_label(name), do: name
+  defp meetings_backend_label("", _local_available?), do: "Global default"
+  defp meetings_backend_label("local", false), do: "local (not available on this machine)"
+  defp meetings_backend_label(name, _local_available?), do: name
 
   # Shown under the disabled sign-in button when the sidecar is not installed.
   # If the notetaker is already enabled, opening this panel starts (or resumes)
@@ -4187,6 +4201,24 @@ defmodule FermixWebWeb.SetupLive.Components do
   defp search_backend_option_class(false) do
     "flex min-w-0 cursor-pointer gap-3 rounded-field border border-base-300 bg-base-100 p-3 text-sm hover:border-base-content/30"
   end
+
+  # A backend this machine cannot run stays in the list, dimmed and inert, so
+  # the operator sees it and why rather than wondering where it went.
+  defp transcription_backend_option_class(checked, false),
+    do: search_backend_option_class(checked)
+
+  defp transcription_backend_option_class(true, true) do
+    "flex min-w-0 cursor-not-allowed gap-3 rounded-field border border-primary bg-primary/10 p-3 text-sm opacity-60"
+  end
+
+  defp transcription_backend_option_class(false, true) do
+    "flex min-w-0 cursor-not-allowed gap-3 rounded-field border border-base-300 bg-base-100 p-3 text-sm opacity-60"
+  end
+
+  defp local_backend_description(true),
+    do: "Parakeet on this machine · no key, no audio leaves the host"
+
+  defp local_backend_description(false), do: LocalSttInstaller.error_message(:no_release_pinned)
 
   defp step_marker_class(tab, active_tab, report) do
     base = "grid size-6 shrink-0 place-items-center rounded-full text-xs font-semibold"

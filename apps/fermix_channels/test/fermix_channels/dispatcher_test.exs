@@ -141,6 +141,12 @@ defmodule FermixChannels.DispatcherTest do
     def transcribe(_path, _opts), do: {:error, :model_not_installed}
   end
 
+  # The on-device backend selected on a machine this build has no sidecar for.
+  defmodule NoBuildBackend do
+    def name, do: :local
+    def transcribe(_path, _opts), do: {:error, :no_release_pinned}
+  end
+
   # Fails the download with the channel byte-cap tuple (as Telegram's getFile
   # preflight would for an over-20-MB file).
   defmodule CapExceededChannel do
@@ -789,6 +795,30 @@ defmodule FermixChannels.DispatcherTest do
       assert reply =~ "speech model is not installed"
       assert reply =~ "fermix setup"
       refute reply =~ "try again"
+      refute_received {:agent_message, _agent_message}
+    end
+
+    # Neither a retry nor an install fixes a machine with no build; the only
+    # remedy is choosing another backend.
+    test "on-device speech on a machine with no build names another backend, not an install" do
+      test_pid = self()
+
+      capture_log(fn ->
+        assert :ok =
+                 Dispatcher.dispatch([audio_message()],
+                   channel: AudioChannel,
+                   agent: CapturingAgent,
+                   agent_server: test_pid,
+                   transcription: [backend: NoBuildBackend],
+                   reply_fn: capture_reply(test_pid)
+                 )
+      end)
+
+      assert_receive {:ingress_reply, reply}
+      assert reply =~ "isn't available on this machine"
+      assert reply =~ "another transcription backend"
+      refute reply =~ "try again"
+      refute reply =~ "Install"
       refute_received {:agent_message, _agent_message}
     end
 

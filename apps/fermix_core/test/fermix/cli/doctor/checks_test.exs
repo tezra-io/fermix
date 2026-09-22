@@ -997,15 +997,23 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     # The row must not say "set a key": the on-device backend has none, and an
     # operator sent looking for one never finds it.
     test "names the missing sidecar and carries the installer's own fix line" do
-      result = Checks.transcription()
+      result = Checks.transcription(releases: FermixTestSupport.SttPins.for_this_host())
 
       assert result.status == :warn
       assert result.detail =~ "backend local needs its sidecar"
-      # The remedy wording is host-dependent (a pinned target — macos-aarch64 —
-      # names the setup card; an unpinned one names dev_local), and both remedy
-      # sentences are covered host-independently by the doctor/installer seam
-      # tests. Here the row must only carry a fix and never say "set a key".
       refute result.detail =~ "set a key"
+    end
+
+    # Nothing to install fixes a machine with no build, so the row must not send
+    # the operator to an install, and never to the sidecar-author loop.
+    test "a machine with no build says so instead of naming an install" do
+      result = Checks.transcription(releases: %{})
+
+      assert result.status == :warn
+      assert result.detail =~ "isn't available on this machine"
+      assert result.detail =~ "Choose another transcription backend"
+      refute result.detail =~ "needs its sidecar"
+      refute result.detail =~ "dev_local"
     end
 
     test "names the missing model once the sidecar is present", ctx do

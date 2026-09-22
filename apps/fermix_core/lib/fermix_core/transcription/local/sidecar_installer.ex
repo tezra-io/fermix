@@ -6,12 +6,16 @@ defmodule FermixCore.Transcription.Local.SidecarInstaller do
   **fermix pins the checksums.** Unlike the compux sidecar — whose Elixir
   library half carries its own `checksum-compux.exs` — fermix-stt is a plain
   Rust artifact with no library to own the pin, so the release choreography ends
-  in a PR against `@releases` here. Until the first `tezra-io/fermix-stt`
-  release exists that table is empty and `install/1` refuses loud rather than
-  downloading something unpinned.
+  in a PR against `@releases` here. A target with no pin has no build this fermix
+  can install: `install/1` refuses loud rather than downloading something
+  unpinned, and `release_pinned?/1` answers the same question for every surface
+  deciding whether to offer on-device speech at all.
 
   Resolution prefers a `dev_local` build (the sidecar-author loop) so a locally
-  built binary can be driven without a release. `binary_path/0` and
+  built binary can be driven without a release, on any target: set
+  `[fermix_core.plugins] dev_local` to a checkout holding
+  `stt_sidecar/bin/<target>/fermix-stt`. That loop is for sidecar authors, so it
+  is documented here and never in operator copy. `binary_path/0` and
   `installed?/0` never download — they run on the readiness and spawn hot paths.
   `install/1` is called only from the setup surface, never from a session or
   from boot.
@@ -38,9 +42,10 @@ defmodule FermixCore.Transcription.Local.SidecarInstaller do
     }
   }
 
-  @no_release_pinned_message "fermix-stt has no pinned release yet. Build it locally and point " <>
-                               "[fermix_core.plugins] dev_local at a checkout containing " <>
-                               "stt_sidecar/bin/<target>/fermix-stt."
+  # What an operator on a machine with no pinned build can act on: nothing to
+  # install, one other choice to make.
+  @no_release_pinned_message "On-device speech isn't available on this machine. " <>
+                               "Choose another transcription backend."
 
   @typedoc "A pinned artifact for one host target."
   @type release :: %{url: String.t(), sha256: String.t()}
@@ -49,19 +54,26 @@ defmodule FermixCore.Transcription.Local.SidecarInstaller do
   @spec plugin_name() :: String.t()
   def plugin_name, do: @plugin_name
 
-  @doc "Operator-facing copy for an install refusal, rendered verbatim by doctor and setup."
+  @doc """
+  Operator-facing copy for a machine this build has no sidecar for, rendered
+  verbatim wherever on-device speech is refused: doctor, both setup doors, the
+  install job and the disabled choice.
+  """
   @spec error_message(:no_release_pinned) :: String.t()
   def error_message(:no_release_pinned), do: @no_release_pinned_message
 
   @doc """
-  Whether this build pins a release artifact for the host target — what the
-  doctor asks before telling an operator to install anything, so "not installed"
-  and "not installable yet" stay different answers.
+  Whether this build pins a release artifact for the host target, so "not
+  installed" and "not installable here" stay different answers.
+
+  `releases:` is the same test seam `install/1` takes.
   """
-  @spec release_pinned?() :: boolean()
-  def release_pinned? do
+  @spec release_pinned?(keyword()) :: boolean()
+  def release_pinned?(opts \\ []) when is_list(opts) do
+    releases = Keyword.get(opts, :releases, @releases)
+
     case target() do
-      {:ok, target} -> Map.has_key?(@releases, target)
+      {:ok, target} -> Map.has_key?(releases, target)
       {:error, _reason} -> false
     end
   end
