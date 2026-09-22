@@ -58,7 +58,9 @@ defmodule FermixCore.Transcription.Support do
     |> sentinel()
   end
 
-  defp sentinel(value) when is_binary(value) and value not in ["", "@keyring"], do: {:ok, value}
+  defp sentinel(value) when is_binary(value) and value not in ["", "@keyring", "@file"],
+    do: {:ok, value}
+
   defp sentinel(_value), do: :absent
 
   @doc """

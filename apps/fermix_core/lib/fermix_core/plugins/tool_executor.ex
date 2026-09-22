@@ -23,7 +23,7 @@ defmodule FermixCore.Plugins.ToolExecutor do
   @gmail_metadata_headers ["From", "To", "Subject", "Date"]
   @max_mime_depth 8
   @rate_limit_reasons ~w(rateLimitExceeded userRateLimitExceeded dailyLimitExceeded quotaExceeded)
-  @sentinel FermixCore.Setup.SecretWriter.sentinel()
+  @sentinels FermixCore.Setup.SecretWriter.sentinels()
 
   @spec parameters(String.t()) :: map()
   def parameters("gmail_search_messages") do
@@ -902,7 +902,7 @@ defmodule FermixCore.Plugins.ToolExecutor do
 
   defp default_plugin_secret(name) do
     case Config.plugin_secret(name) do
-      @sentinel -> :error
+      sentinel when sentinel in @sentinels -> :error
       secret when is_binary(secret) and secret != "" -> {:ok, secret}
       _missing -> :error
     end

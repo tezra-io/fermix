@@ -38,6 +38,9 @@ defmodule FermixCore.Management.SecretsEnvTest do
     def available?(opts \\ []), do: SecretWriterStub.available?(opts)
 
     @impl true
+    def probe(opts \\ []), do: SecretWriterStub.probe(opts)
+
+    @impl true
     def put(key, value, opts \\ []) do
       send(self(), {:writer, :put, key})
       SecretWriterStub.put(key, value, opts)
@@ -152,6 +155,11 @@ defmodule FermixCore.Management.SecretsEnvTest do
 
     @impl true
     def available?(_opts \\ []), do: true
+
+    # A probe reads nothing; this double stands in for a store that answers.
+    @impl true
+    def probe(opts \\ []),
+      do: %{store: Keyword.get(opts, :store, :keyring), state: :available, sentence: "double"}
 
     @impl true
     def put(key, value, opts \\ []) do

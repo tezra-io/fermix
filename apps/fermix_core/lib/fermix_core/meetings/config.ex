@@ -33,7 +33,7 @@ defmodule FermixCore.Meetings.Config do
   # A configured value equal to one of these carries no credential: "" is unset
   # and "@keyring" is the marker for a secret that never resolved out of the
   # keyring. Neither may reach a signature or a bearer token.
-  @sentinels ["", "@keyring"]
+  @sentinels ["", "@keyring", "@file"]
 
   # The Server-to-Server OAuth secret mints tokens for the whole Zoom account,
   # and this struct lives in the state of the Session and RtmsSource GenServers —

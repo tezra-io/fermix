@@ -217,6 +217,35 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   its certificate the way the binaries do, and after publishing the release rail
   runs the advertised installer against the release it just published, on all
   four package targets.
+- **A keyring that cannot be used is a verdict, not a hang, and the file store
+  is the other choice.** On Linux the login keyring stays locked after a
+  fingerprint or automatic login (it is encrypted with the password), and
+  Fermix used to treat an installed `secret-tool` as a usable keyring: every
+  save pushed the secret at the lock, GNOME raised its unlock dialog, the
+  three-second timeout fired, and the save failed with macOS wording. Before
+  a write, and before the daemon reads a secret at boot, Fermix now asks the
+  Secret Service three read-only questions over `busctl --user` — is a keyring
+  running, which collection is the default, is it locked — and never a secret
+  read, so a background daemon never raises that dialog. A save with a new
+  secret is refused with the store's own sentence (`the login keyring is
+  locked. Unlock it in Passwords and Keys, or log in with your password once;
+  fingerprint and automatic login leave it locked`); an unchanged value is kept
+  rather than pushed at the lock; at boot the secrets in an unusable store stay
+  unresolved with one log line naming them. `fermix doctor` gains a `secret
+  store` row that names the configured store, its verdict and how many secrets
+  each store holds.
+  The second store is declared, never slid into: `[fermix_core] secret_store =
+  "file"` keeps each secret as one `0600` file under `<FERMIX_HOME>/secrets/`
+  (the directory `0700`; readable only by that account and not encrypted at
+  rest, the posture `auth.json` already has). `fermix setup --secret-store
+  file|keyring` chooses it, and when the keyring refuses a save the terminal
+  wizard asks once — a no leaves the refusal exactly as it was. New secrets go
+  to the configured store and are persisted as its sentinel, `@file` beside
+  `@keyring`; each is read back from the store it names, so a home can hold
+  both. `fermix setup --migrate-secrets` now moves every secret that is not in
+  the configured store into it — plaintext and the other store's alike, one
+  confirmation each — and refuses up front when the store a secret must leave
+  cannot be read.
 - **`fermix upgrade` tells a Linux operator the right command.** An engine this
   project built as a package refuses to update itself before it looks at a
   single file and names the command for the family — `sudo apt update && sudo

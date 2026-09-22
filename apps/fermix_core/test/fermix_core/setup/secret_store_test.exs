@@ -16,6 +16,11 @@ defmodule FermixCore.Setup.SecretStoreTest do
     @impl true
     def available?(_opts \\ []), do: true
 
+    # A probe reads nothing; these doubles stand in for a store that answers.
+    @impl true
+    def probe(opts \\ []),
+      do: %{store: Keyword.get(opts, :store, :keyring), state: :available, sentence: "double"}
+
     @impl true
     def get(_key, _opts \\ []), do: {:error, {:helper_timeout, "/usr/bin/security", 3_000}}
 
@@ -79,6 +84,11 @@ defmodule FermixCore.Setup.SecretStoreTest do
     @impl true
     def available?(_opts \\ []), do: true
 
+    # A probe reads nothing; these doubles stand in for a store that answers.
+    @impl true
+    def probe(opts \\ []),
+      do: %{store: Keyword.get(opts, :store, :keyring), state: :available, sentence: "double"}
+
     @impl true
     def get(key, _opts \\ []) do
       :ets.insert(@table, {key, self()})
@@ -122,6 +132,11 @@ defmodule FermixCore.Setup.SecretStoreTest do
 
     @impl true
     def available?(_opts \\ []), do: true
+
+    # A probe reads nothing; these doubles stand in for a store that answers.
+    @impl true
+    def probe(opts \\ []),
+      do: %{store: Keyword.get(opts, :store, :keyring), state: :available, sentence: "double"}
 
     @impl true
     def get(key, opts \\ []) do
@@ -389,6 +404,169 @@ defmodule FermixCore.Setup.SecretStoreTest do
 
       assert resolve(profiled_snapshot("work", SecretWriter.sentinel())) == "work-token"
       assert resolve(profiled_snapshot("general", SecretWriter.sentinel())) == "general-token"
+    end
+  end
+
+  # A stand-in for the desktop whose login keyring is locked: `secret-tool` is
+  # installed, so the tool is "available", and every read or write of it would
+  # raise the unlock dialog. Nothing in Fermix may reach it while the probe
+  # says so — the doubles below raise if it does.
+  defmodule LockedKeyringWriter do
+    @behaviour FermixCore.Setup.SecretWriter
+
+    @impl true
+    def available?(_opts \\ []), do: true
+
+    @impl true
+    def probe(opts \\ []) do
+      case Keyword.get(opts, :store, :keyring) do
+        :keyring -> %{store: :keyring, state: :locked, sentence: "the login keyring is locked"}
+        :file -> %{store: :file, state: :available, sentence: "files answer"}
+      end
+    end
+
+    @impl true
+    def get(key, opts \\ []) do
+      if Keyword.get(opts, :store, :keyring) == :keyring,
+        do: raise("a read of the locked keyring raises the unlock dialog"),
+        else: FermixTestSupport.SecretWriterStub.get(key, opts)
+    end
+
+    @impl true
+    def put(key, value, opts \\ []) do
+      if Keyword.get(opts, :store, :keyring) == :keyring,
+        do: raise("a write to the locked keyring raises the unlock dialog"),
+        else: FermixTestSupport.SecretWriterStub.put(key, value, opts)
+    end
+
+    @impl true
+    def delete(key, opts \\ []), do: FermixTestSupport.SecretWriterStub.delete(key, opts)
+
+    @impl true
+    def command_source(key, opts \\ []),
+      do: FermixTestSupport.SecretWriterStub.command_source(key, opts)
+  end
+
+  describe "a locked keyring (M38 §7.2)" do
+    setup do
+      Application.put_env(:fermix_core, :secret_writer, LockedKeyringWriter)
+      :ok
+    end
+
+    test "a save with a NEW secret is refused with the verdict, and nothing touches the keyring" do
+      assert {:error, sentence} = SecretStore.secure_snapshot(snapshot_with("new-token"))
+      assert sentence =~ "TELEGRAM_BOT_TOKEN could not be stored"
+      assert sentence =~ "the login keyring is locked"
+    end
+
+    test "a save whose plaintext is unchanged keeps it instead of pushing it at the lock" do
+      # This was the desktop symptom: `secret-tool` present, keyring locked, and
+      # every unrelated save re-pushed the same plaintext into the dialog.
+      assert {:ok, secured} =
+               SecretStore.secure_snapshot(snapshot_with("same"), previous: snapshot_with("same"))
+
+      assert SecretStore.get_snapshot_value(secured, @path) == "same"
+    end
+
+    test "a save that carries a @keyring sentinel keeps it without reading the keyring" do
+      assert {:ok, secured} =
+               SecretStore.secure_snapshot(snapshot_with("resolved-token"),
+                 previous: snapshot_with(SecretWriter.sentinel())
+               )
+
+      assert SecretStore.get_snapshot_value(secured, @path) == SecretWriter.sentinel()
+    end
+
+    test "at boot the sentinels stay, no read happens, and one line names the secrets" do
+      log =
+        capture_log(fn ->
+          resolved =
+            SecretStore.resolve_sentinels(snapshot_with(SecretWriter.sentinel()),
+              warn_plaintext: true
+            )
+
+          assert SecretStore.get_snapshot_value(resolved, @path) == SecretWriter.sentinel()
+        end)
+
+      assert log =~ "keyring secret store is not usable"
+      assert log =~ "the login keyring is locked"
+      assert log =~ "TELEGRAM_BOT_TOKEN"
+    end
+
+    test "with the file store configured, a new secret lands there as @file" do
+      snapshot = %{
+        fermix_core: [secret_store: :file],
+        fermix_channels: [telegram: [bot_token: "new-token"]]
+      }
+
+      assert {:ok, secured} = SecretStore.secure_snapshot(snapshot)
+      assert SecretStore.get_snapshot_value(secured, @path) == SecretWriter.file_sentinel()
+      assert resolve(SecretStore.put_snapshot_value(snapshot, @path, "@file")) == "new-token"
+    end
+  end
+
+  describe "two stores, one home" do
+    test "each sentinel resolves from the store it names" do
+      :ok = SecretWriter.put(:telegram_bot_token, "in-keyring", store: :keyring)
+      :ok = SecretWriter.put(:openai_api_key, "in-file", store: :file)
+
+      snapshot = %{
+        fermix_core: [providers: [openai: [api_key: "@file"]]],
+        fermix_channels: [telegram: [bot_token: "@keyring"]]
+      }
+
+      resolved = SecretStore.resolve_sentinels(snapshot, warn_plaintext: false)
+      assert SecretStore.get_snapshot_value(resolved, @path) == "in-keyring"
+
+      assert SecretStore.get_snapshot_value(resolved, [
+               :fermix_core,
+               :providers,
+               :openai,
+               :api_key
+             ]) ==
+               "in-file"
+    end
+
+    test "a secret kept as @file is not looked for in the keyring" do
+      :ok = SecretWriter.put(:telegram_bot_token, "stale-keyring-copy", store: :keyring)
+      :ok = SecretWriter.put(:telegram_bot_token, "current", store: :file)
+
+      assert resolve(snapshot_with("@file")) == "current"
+    end
+
+    test "a rotation while the other store is configured moves the sentinel and the value" do
+      :ok = SecretWriter.put(:telegram_bot_token, "old", store: :keyring)
+
+      snapshot = %{
+        fermix_core: [secret_store: :file],
+        fermix_channels: [telegram: [bot_token: "rotated"]]
+      }
+
+      assert {:ok, secured} =
+               SecretStore.secure_snapshot(snapshot,
+                 previous: snapshot_with(SecretWriter.sentinel())
+               )
+
+      assert SecretStore.get_snapshot_value(secured, @path) == SecretWriter.file_sentinel()
+      assert {:ok, "rotated"} = SecretWriter.get(:telegram_bot_token, store: :file)
+      assert {:error, :missing_secret} = SecretWriter.get(:telegram_bot_token, store: :keyring)
+    end
+
+    test "masking puts back whichever sentinel the persisted config holds" do
+      persisted = snapshot_with(SecretWriter.file_sentinel())
+      masked = SecretStore.mask_resolved_secrets(snapshot_with("resolved"), persisted)
+      assert SecretStore.get_snapshot_value(masked, @path) == SecretWriter.file_sentinel()
+    end
+
+    test "a store nobody declared is refused by name, never read as the keyring" do
+      snapshot = %{
+        fermix_core: [secret_store: "vault"],
+        fermix_channels: [telegram: [bot_token: "new-token"]]
+      }
+
+      assert_raise ArgumentError, ~r/secret_store must be "keyring" or "file"/, fn ->
+        SecretStore.secure_snapshot(snapshot)
+      end
     end
   end
 

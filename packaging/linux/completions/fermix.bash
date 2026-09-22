@@ -14,7 +14,7 @@ _fermix() {
 
   case "${COMP_WORDS[1]}" in
     setup)
-      mapfile -t COMPREPLY < <(compgen -W "--web --cli --terminal --no-browser --no-service --user --system --rotate-token --print-state --reconfigure --migrate-secrets --import-codex --provider --default-model --reasoning-effort --fast --no-fast" -- "$current")
+      mapfile -t COMPREPLY < <(compgen -W "--web --cli --terminal --no-browser --no-service --user --system --rotate-token --print-state --reconfigure --migrate-secrets --secret-store --import-codex --provider --default-model --reasoning-effort --fast --no-fast" -- "$current")
       ;;
     auth)
       mapfile -t COMPREPLY < <(compgen -W "login status logout --no-browser --port --timeout" -- "$current")

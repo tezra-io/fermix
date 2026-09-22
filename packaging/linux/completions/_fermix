@@ -21,7 +21,7 @@ _fermix() {
         setup)
           _values 'option' '--web' '--cli' '--terminal' '--no-browser' '--no-service' \
             '--user' '--system' '--rotate-token' '--print-state' '--reconfigure' \
-            '--migrate-secrets' '--import-codex' '--provider' '--default-model' \
+            '--migrate-secrets' '--secret-store' '--import-codex' '--provider' '--default-model' \
             '--reasoning-effort' '--fast' '--no-fast'
           ;;
         auth)

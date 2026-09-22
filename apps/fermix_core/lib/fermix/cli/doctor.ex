@@ -123,6 +123,7 @@ defmodule Fermix.CLI.Doctor do
       Checks.home_permissions(),
       Checks.cosign(),
       Checks.auth_token_expiry(),
+      Checks.secret_store(),
       Checks.plaintext_secrets(),
       Checks.linger(),
       Checks.web_search(full?),

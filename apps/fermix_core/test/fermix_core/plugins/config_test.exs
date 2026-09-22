@@ -23,6 +23,9 @@ defmodule FermixCore.Plugins.ConfigTest do
     def available?(opts \\ []), do: SecretWriterStub.available?(opts)
 
     @impl true
+    def probe(opts \\ []), do: SecretWriterStub.probe(opts)
+
+    @impl true
     def put(key, value, opts \\ []), do: SecretWriterStub.put(key, value, opts)
 
     @impl true
@@ -49,6 +52,9 @@ defmodule FermixCore.Plugins.ConfigTest do
 
     @impl true
     def available?(opts \\ []), do: SecretWriterStub.available?(opts)
+
+    @impl true
+    def probe(opts \\ []), do: SecretWriterStub.probe(opts)
 
     @impl true
     def put(key, value, opts \\ []) do

@@ -89,6 +89,11 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     @impl true
     def available?(_opts \\ []), do: true
 
+    # A probe reads nothing; these doubles stand in for a store that answers.
+    @impl true
+    def probe(opts \\ []),
+      do: %{store: Keyword.get(opts, :store, :keyring), state: :available, sentence: "double"}
+
     @impl true
     def get(key, opts \\ []) do
       :ets.insert(@table, {key, opts})
@@ -288,6 +293,52 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert Keyword.get(personalization, :timezone) == "Asia/Singapore"
     assert Keyword.get(personalization, :communication_style) == "blunt"
     assert Keyword.get(agent, :name) == "aira"
+  end
+
+  # The store choice is a setting like the profile: it must survive a save
+  # and a load, be applied to app env by the load, and stay out of a file
+  # that never chose it. Pinned with the normalized shapes the load path
+  # produces (see the config round-trip pitfall).
+  test "save/load round-trips the secret store, applies it, and omits the default" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn ->
+      FermixTestSupport.SafeRm.rm_rf!(tmp_home)
+      Application.delete_env(:fermix_core, :secret_store)
+    end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    default = %{fermix_core: [agent: [name: "aira"]], fermix_channels: [], fermix_web: []}
+    assert :ok = ConfigStore.save_snapshot(default)
+    refute File.read!(Path.join(tmp_home, "config.toml")) =~ "secret_store"
+    assert {:ok, loaded} = ConfigStore.load_runtime_config()
+    assert Keyword.get(loaded.fermix_core, :secret_store) == :keyring
+
+    chosen = %{fermix_core: [secret_store: :file], fermix_channels: [], fermix_web: []}
+    assert :ok = ConfigStore.save_snapshot(chosen)
+    assert File.read!(Path.join(tmp_home, "config.toml")) =~ ~s(secret_store = "file")
+    assert {:ok, loaded} = ConfigStore.load_runtime_config()
+    assert Keyword.get(loaded.fermix_core, :secret_store) == :file
+    assert :ok = ConfigStore.apply_snapshot(loaded)
+    assert Application.get_env(:fermix_core, :secret_store) == :file
+  end
+
+  test "an unknown secret store is refused by name when the file is loaded" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+    File.write!(Path.join(tmp_home, "config.toml"), ~s([fermix_core]\nsecret_store = "vault"\n))
+
+    assert_raise ArgumentError,
+                 ~r/secret_store must be "keyring" or "file", and "vault" is neither/,
+                 fn ->
+                   ConfigStore.load_runtime_config()
+                 end
   end
 
   test "save/load round-trips provider primary flags" do

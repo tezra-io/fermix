@@ -59,6 +59,7 @@ defmodule Fermix.CLI.Setup do
     print_state: :boolean,
     reconfigure: :boolean,
     migrate_secrets: :boolean,
+    secret_store: :string,
     import_codex: :boolean,
     no_browser: :boolean,
     skip_probe: :boolean,
@@ -308,6 +309,9 @@ defmodule Fermix.CLI.Setup do
     cond do
       Keyword.get(opts, :web, false) and Keyword.get(opts, :no_service, false) ->
         {:error, "--web and --no-service are mutually exclusive"}
+
+      Keyword.get(opts, :secret_store) not in [nil, "keyring", "file"] ->
+        {:error, "--secret-store must be keyring or file"}
 
       Keyword.get(opts, :web, false) and explicit_terminal?(Keyword.drop(opts, [:no_service])) ->
         {:error, "--web cannot be combined with --cli or --terminal"}

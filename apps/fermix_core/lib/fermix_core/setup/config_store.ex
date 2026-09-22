@@ -22,6 +22,7 @@ defmodule FermixCore.Setup.ConfigStore do
   alias FermixCore.Sandbox.EnvHealth
   alias FermixCore.Setup.RestartState
   alias FermixCore.Setup.SecretStore
+  alias FermixCore.Setup.SecretWriter
   alias FermixCore.Setup.WebListener
   alias FermixCore.SkillCuration.Config, as: SkillCurationConfig
   alias FermixCore.Transcription.Registry, as: TranscriptionRegistry
@@ -132,7 +133,8 @@ defmodule FermixCore.Setup.ConfigStore do
         plugins: Application.get_env(:fermix_core, :plugins, []),
         oauth: Application.get_env(:fermix_core, :oauth, %{}),
         plugin_secrets: Application.get_env(:fermix_core, :plugin_secrets, %{}),
-        profile: Application.get_env(:fermix_core, :profile, "general")
+        profile: Application.get_env(:fermix_core, :profile, "general"),
+        secret_store: Application.get_env(:fermix_core, :secret_store, :keyring)
       ],
       sandbox: Application.get_env(:fermix_core, :sandbox, SandboxConfig.default()),
       fermix_channels: [
@@ -227,6 +229,7 @@ defmodule FermixCore.Setup.ConfigStore do
     apply_oauth_config(Keyword.get(persisted.fermix_core, :oauth, %{}))
     apply_plugin_secrets_config(Keyword.get(persisted.fermix_core, :plugin_secrets, %{}))
     apply_profile_config(Keyword.get(persisted.fermix_core, :profile, "general"))
+    apply_secret_store_config(Keyword.get(persisted.fermix_core, :secret_store, :keyring))
     apply_sandbox_config(Map.get(persisted, :sandbox, SandboxConfig.default()))
 
     apply_channel_config(:telegram, Keyword.get(persisted.fermix_channels, :telegram, []))
@@ -458,7 +461,12 @@ defmodule FermixCore.Setup.ConfigStore do
           snapshot
           |> Map.get(:fermix_core, [])
           |> Keyword.get(:profile, "general")
-          |> normalize_profile()
+          |> normalize_profile(),
+        secret_store:
+          snapshot
+          |> Map.get(:fermix_core, [])
+          |> Keyword.get(:secret_store, :keyring)
+          |> normalize_secret_store()
       ],
       sandbox:
         snapshot
@@ -574,7 +582,8 @@ defmodule FermixCore.Setup.ConfigStore do
         plugins: [],
         oauth: %{},
         plugin_secrets: %{},
-        profile: "general"
+        profile: "general",
+        secret_store: :keyring
       ],
       sandbox: SandboxConfig.default(),
       fermix_channels: [
@@ -772,6 +781,25 @@ defmodule FermixCore.Setup.ConfigStore do
 
   defp profile_render(profile) when profile in [nil, "", "general"], do: []
   defp profile_render(profile) when is_binary(profile), do: [profile: profile]
+
+  defp apply_secret_store_config(store) do
+    Application.put_env(:fermix_core, :secret_store, normalize_secret_store(store))
+    :ok
+  end
+
+  # Where new secrets are written: the OS keyring (the default and the
+  # unconfigured case) or the file store under the Fermix home. An unknown
+  # value is refused by name rather than read as the keyring, because a
+  # secret written to a store nobody chose is a secret nobody will find.
+  defp normalize_secret_store(value) do
+    case SecretWriter.parse_store(value) do
+      {:ok, store} -> store
+      {:error, sentence} -> raise ArgumentError, sentence
+    end
+  end
+
+  defp secret_store_render(:keyring), do: []
+  defp secret_store_render(:file), do: [secret_store: "file"]
 
   defp apply_agent_config(agent_config) do
     merged =
@@ -975,6 +1003,7 @@ defmodule FermixCore.Setup.ConfigStore do
     oauth = Keyword.get(fermix_core, :oauth, %{})
     plugin_secrets = Keyword.get(fermix_core, :plugin_secrets, %{})
     profile = Keyword.get(fermix_core, :profile, "general")
+    secret_store = fermix_core |> Keyword.get(:secret_store, :keyring) |> normalize_secret_store()
     sandbox = Map.get(snapshot, :sandbox, [])
     channels = Map.get(snapshot, :fermix_channels, [])
     web = snapshot |> Map.get(:fermix_web, []) |> normalize_web() |> web_to_keyword()
@@ -983,7 +1012,10 @@ defmodule FermixCore.Setup.ConfigStore do
       "# Managed by mix fermix.setup",
       "# Built-in tools ship inside Fermix and are always available when registered.",
       "# Skills are separate SKILL.md directories under ~/.fermix/skills and plugin roots.",
-      render_section(["fermix_core"], profile_render(profile)),
+      render_section(
+        ["fermix_core"],
+        profile_render(profile) ++ secret_store_render(secret_store)
+      ),
       render_section(["fermix_core", "agent"], agent),
       Enum.map(Descriptor.ids(), fn id ->
         render_section(
@@ -1242,7 +1274,8 @@ defmodule FermixCore.Setup.ConfigStore do
         oauth: normalize_oauth(get_in(document, ["fermix_core", "oauth"])),
         plugin_secrets:
           normalize_plugin_secrets(get_in(document, ["fermix_core", "plugin_secrets"])),
-        profile: normalize_profile(get_in(document, ["fermix_core", "profile"]))
+        profile: normalize_profile(get_in(document, ["fermix_core", "profile"])),
+        secret_store: normalize_secret_store(get_in(document, ["fermix_core", "secret_store"]))
       ],
       sandbox: SandboxConfig.normalize(Map.get(document, "sandbox")),
       fermix_channels: [

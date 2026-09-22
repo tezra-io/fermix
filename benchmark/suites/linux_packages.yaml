@@ -137,3 +137,49 @@ scenarios:
           the user to run `fermix restart` as the account that runs the service.
           Does not tell the user to reinstall the package, and does not send
           them to `fermix upgrade`.
+
+  - id: secrets_without_a_usable_keyring
+    title: "A Linux keyring that cannot be used, and the file store as the declared other choice"
+    severity: normal
+    risk: host_readonly
+    tags: [linux-packages, secrets, self-knowledge]
+    cases:
+      # The one answer general knowledge gets wrong: it says "put the token in
+      # an environment variable", and the Telegram token is the one secret that
+      # is never read from the environment.
+      - id: fingerprint_login_keyring_locked
+        query: >
+          I'm on Pop!_OS and log in with my fingerprint. When I try to save my
+          Telegram bot token in the setup page it refuses and says the login
+          keyring is locked, and I honestly don't know that keyring's password
+          any more. Is there any way to get Fermix running without it?
+        expect:
+          reply_matches: 'secret-store\s+file'
+          reply_not_matches: '(?i)\bTELEGRAM_BOT_TOKEN=|export\s+TELEGRAM'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Explains why: fingerprint login leaves the GNOME login keyring locked
+          because it is encrypted with the password, and Fermix will not save a
+          secret into a keyring it cannot use. Offers both ways out: unlock or
+          reset the keyring in Passwords and Keys, or choose the file store with
+          `fermix setup --secret-store file`, describing it truthfully as files
+          under the Fermix home readable only by that account and not encrypted
+          at rest. Does not suggest an environment variable for the Telegram
+          token, and does not claim Fermix will fall back to a file on its own.
+      - id: headless_server_channel_token
+        query: >
+          Fermix runs on a headless Ubuntu server for me, from the .deb. Setup
+          over SSH won't take my Discord bot token, it complains there's no
+          keyring. Where am I supposed to put it?
+        expect:
+          reply_matches: 'secret-store\s+file'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Says a server has no keyring to save into and that Fermix has a
+          second, declared store for exactly this: `fermix setup --secret-store
+          file`, after which the token is saved as a file under the Fermix home
+          that only that account can read. Mentions that `fermix doctor` shows
+          which store is in use. Does not invent a keyring package to install as
+          the only answer, and does not describe the file store as automatic.

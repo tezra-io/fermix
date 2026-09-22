@@ -40,14 +40,47 @@ defmodule FermixTestSupport.SecretWriterStub do
   alias FermixCore.Setup.SecretWriter
 
   @table __MODULE__
+  @verdict_row :__probe_verdict__
 
   @impl true
   def available?(_opts \\ []), do: true
 
+  # The verdict a test pinned with `set_verdict/1` for that store, else
+  # available: the stub stands in for a keyring that answers, until a test
+  # says it is locked.
+  @impl true
+  def probe(opts \\ []) do
+    ensure_table()
+    store = SecretWriter.store(opts)
+
+    case :ets.lookup(@table, {@verdict_row, store}) do
+      [{_row, verdict}] -> verdict
+      [] -> %{store: store, state: :available, sentence: "stub store answers"}
+    end
+  end
+
+  @doc "Pins the verdict `probe/1` answers for `verdict.store` until `clear_verdict/1`."
+  @spec set_verdict(SecretWriter.verdict()) :: :ok
+  def set_verdict(%{store: store} = verdict) do
+    ensure_table()
+    :ets.insert(@table, {{@verdict_row, store}, verdict})
+    :ok
+  end
+
+  @spec clear_verdict(SecretWriter.store()) :: :ok
+  def clear_verdict(store) do
+    ensure_table()
+    :ets.delete(@table, {@verdict_row, store})
+    :ok
+  end
+
+  # Items are namespaced by store as well as profile, the way the real stores
+  # are two places: a secret written to the file store is not found by a read
+  # of the keyring, so a test observes that reads follow each sentinel.
   @impl true
   def put(key, value, opts \\ []) when is_secret_key(key) and is_binary(value) do
     ensure_table()
-    :ets.insert(@table, {{profile(opts), key}, value})
+    :ets.insert(@table, {{profile(opts), SecretWriter.store(opts), key}, value})
     :ok
   end
 
@@ -55,7 +88,7 @@ defmodule FermixTestSupport.SecretWriterStub do
   def get(key, opts \\ []) when is_secret_key(key) do
     ensure_table()
 
-    case :ets.lookup(@table, {profile(opts), key}) do
+    case :ets.lookup(@table, {profile(opts), SecretWriter.store(opts), key}) do
       [{_entry, value}] -> {:ok, value}
       [] -> {:error, :missing_secret}
     end
@@ -66,7 +99,7 @@ defmodule FermixTestSupport.SecretWriterStub do
   @impl true
   def delete(key, opts \\ []) when is_secret_key(key) do
     ensure_table()
-    :ets.delete(@table, {profile(opts), key})
+    :ets.delete(@table, {profile(opts), SecretWriter.store(opts), key})
     :ok
   end
 
@@ -116,8 +149,13 @@ defmodule FermixTestSupport.UnavailableSecretWriter do
 
   @behaviour FermixCore.Setup.SecretWriter
 
+  alias FermixCore.Setup.SecretWriter
+
   @impl true
   def available?(_opts \\ []), do: false
+
+  @impl true
+  def probe(_opts \\ []), do: SecretWriter.None.probe()
 
   @impl true
   def put(_key, _value, _opts \\ []), do: {:error, :unavailable}
@@ -167,6 +205,11 @@ defmodule FermixTestSupport.CountingSecretWriter do
 
   @impl true
   def available?(_opts \\ []), do: true
+
+  # A probe reads no secret, so it is not reported as a read.
+  @impl true
+  def probe(opts \\ []),
+    do: %{store: SecretWriter.store(opts), state: :available, sentence: "counting"}
 
   @impl true
   def put(key, _value, _opts \\ []) when is_secret_key(key), do: :ok
@@ -245,6 +288,9 @@ defmodule FermixTestSupport.TreeLessSecretWriter do
 
   @impl true
   def available?(opts \\ []), do: SecretWriterStub.available?(opts)
+
+  @impl true
+  def probe(opts \\ []), do: SecretWriterStub.probe(opts)
 
   @impl true
   def put(key, value, opts \\ []) when is_secret_key(key) and is_binary(value) do

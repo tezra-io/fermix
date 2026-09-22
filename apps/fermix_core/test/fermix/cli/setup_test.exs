@@ -231,6 +231,35 @@ defmodule Fermix.CLI.SetupTest do
     assert stderr =~ "--web cannot be combined"
   end
 
+  test "--secret-store reaches the terminal runtime as an answer, and refuses a store nobody declared" do
+    parent = self()
+
+    assert 0 =
+             Setup.run(["--secret-store", "file"],
+               standalone?: fn -> true end,
+               display?: fn -> false end,
+               setup_ready?: fn -> false end,
+               runtime: runtime(parent),
+               web_launcher: unexpected_web_launcher(parent)
+             )
+
+    assert_receive {:runtime, opts}
+    assert Keyword.get(opts, :secret_store) == "file"
+
+    stderr =
+      capture_io(:stderr, fn ->
+        assert 1 =
+                 Setup.run(["--secret-store", "vault"],
+                   standalone?: fn -> true end,
+                   display?: fn -> false end,
+                   runtime: unexpected_runtime(parent)
+                 )
+      end)
+
+    assert stderr =~ "--secret-store must be keyring or file"
+    refute_receive {:runtime, _opts}
+  end
+
   test "rejects web setup without service activation" do
     stderr =
       ExUnit.CaptureIO.capture_io(:stderr, fn ->

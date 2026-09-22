@@ -8,6 +8,7 @@ defmodule FermixCore.Setup.WizardTest do
   alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Setup.ConfigStore
+  alias FermixCore.Setup.SecretWriter
   alias FermixCore.Setup.Wizard
 
   # Reports every keychain read to the pid in `:wizard_test_reporter`, so a test
@@ -17,6 +18,11 @@ defmodule FermixCore.Setup.WizardTest do
 
     @impl true
     def available?(_opts \\ []), do: true
+
+    # A probe reads nothing; these doubles stand in for a store that answers.
+    @impl true
+    def probe(opts \\ []),
+      do: %{store: Keyword.get(opts, :store, :keyring), state: :available, sentence: "double"}
 
     @impl true
     def get(key, _opts \\ []) do
@@ -1200,8 +1206,11 @@ defmodule FermixCore.Setup.WizardTest do
              Wizard.report().wizard
              |> Wizard.save_answers(openai_api_key: "sk-no-helper")
 
-    assert sentence ==
-             "This machine has no secret store, so the credential could not be saved."
+    # The refusal carries the store's own verdict, names the secret, and names
+    # the other declared store, since the keyring is what refused.
+    assert sentence =~ "OPENAI_API_KEY could not be saved: this machine has no keyring client"
+    assert sentence =~ "run: fermix setup --secret-store file"
+    refute sentence =~ ".."
 
     # Nothing at all is written: a save either stores every secret in it or
     # stores none of them, so a half-applied document cannot be left behind.
@@ -2546,6 +2555,122 @@ defmodule FermixCore.Setup.WizardTest do
 
       assert {:ok, "sk-already-on-disk"} =
                FermixTestSupport.SecretWriterStub.get(:openai_api_key)
+    end
+  end
+
+  describe "the secret store answer (M38 §7, owner decision 8)" do
+    setup do
+      start_memory_repo!()
+      on_exit(fn -> Application.delete_env(:fermix_core, :secret_store) end)
+      %{home: System.fetch_env!("FERMIX_HOME")}
+    end
+
+    defp config_contents(home), do: File.read!(Path.join(home, "config.toml"))
+
+    test "choosing the file store is recorded on its own, with no secret in the save", %{
+      home: home
+    } do
+      assert {:ok, _report} = Wizard.report().wizard |> Wizard.save_answers(secret_store: "file")
+
+      assert config_contents(home) =~ ~s(secret_store = "file")
+      assert Application.get_env(:fermix_core, :secret_store) == :file
+    end
+
+    test "a secret saved together with the choice lands in the chosen store as @file", %{
+      home: home
+    } do
+      assert {:ok, _report} =
+               Wizard.report().wizard
+               |> Wizard.save_answers(secret_store: "file", openai_api_key: "sk-in-a-file")
+
+      contents = config_contents(home)
+      assert contents =~ ~s(secret_store = "file")
+      assert contents =~ ~s(api_key = "@file")
+      refute contents =~ "sk-in-a-file"
+
+      assert {:ok, "sk-in-a-file"} = SecretWriter.get(:openai_api_key, store: :file)
+      assert {:error, :missing_secret} = SecretWriter.get(:openai_api_key, store: :keyring)
+    end
+
+    test "choosing the keyring again writes new secrets there, and touches nothing stored", %{
+      home: home
+    } do
+      {:ok, _} =
+        Wizard.report().wizard
+        |> Wizard.save_answers(secret_store: "file", openai_api_key: "sk-file")
+
+      {:ok, _} =
+        Wizard.report().wizard
+        |> Wizard.save_answers(secret_store: "keyring", xai_api_key: "xai-ring")
+
+      contents = config_contents(home)
+      refute contents =~ "secret_store"
+      assert contents =~ ~s(api_key = "@file")
+      assert contents =~ ~s(api_key = "@keyring")
+      assert {:ok, "sk-file"} = SecretWriter.get(:openai_api_key, store: :file)
+      assert {:ok, "xai-ring"} = SecretWriter.get(:xai_api_key, store: :keyring)
+    end
+
+    test "a store nobody declared is refused before anything is written", %{home: home} do
+      assert {:error, sentence} =
+               Wizard.report().wizard
+               |> Wizard.save_answers(secret_store: "vault", openai_api_key: "sk-x")
+
+      assert sentence =~ ~s(secret_store must be "keyring" or "file")
+      refute File.exists?(Path.join(home, "config.toml")) and config_contents(home) =~ "sk-x"
+      assert {:error, :missing_secret} = SecretWriter.get(:openai_api_key, store: :keyring)
+    end
+
+    test "a locked keyring refuses a secret with its verdict and names the file store" do
+      FermixTestSupport.SecretWriterStub.set_verdict(%{
+        store: :keyring,
+        state: :locked,
+        sentence: "the login keyring is locked"
+      })
+
+      on_exit(fn -> FermixTestSupport.SecretWriterStub.clear_verdict(:keyring) end)
+
+      assert {:error, {:secret_store_failed, :telegram_bot_token, sentence}} =
+               Wizard.report().wizard |> Wizard.save_answers(telegram_bot_token: "123:abc")
+
+      assert sentence =~ "TELEGRAM_BOT_TOKEN could not be saved: the login keyring is locked."
+      assert sentence =~ "fermix setup --secret-store file"
+      assert {:error, :missing_secret} = SecretWriter.get(:telegram_bot_token, store: :keyring)
+    end
+
+    test "with the keyring locked, the same save succeeds once the file store is chosen", %{
+      home: home
+    } do
+      FermixTestSupport.SecretWriterStub.set_verdict(%{
+        store: :keyring,
+        state: :locked,
+        sentence: "the login keyring is locked"
+      })
+
+      on_exit(fn -> FermixTestSupport.SecretWriterStub.clear_verdict(:keyring) end)
+
+      assert {:ok, _report} =
+               Wizard.report().wizard
+               |> Wizard.save_answers(secret_store: "file", telegram_bot_token: "123:abc")
+
+      assert config_contents(home) =~ ~s(bot_token = "@file")
+      assert {:ok, "123:abc"} = SecretWriter.get(:telegram_bot_token, store: :file)
+    end
+
+    test "the file store's own refusal names no other store" do
+      FermixTestSupport.SecretWriterStub.set_verdict(%{
+        store: :file,
+        state: :unavailable,
+        sentence: "the Fermix home does not exist"
+      })
+
+      on_exit(fn -> FermixTestSupport.SecretWriterStub.clear_verdict(:file) end)
+      {:ok, _} = Wizard.report().wizard |> Wizard.save_answers(secret_store: "file")
+
+      assert {:error, {:secret_store_failed, :openai_api_key, sentence}} =
+               Wizard.report().wizard |> Wizard.save_answers(openai_api_key: "sk-x")
+
+      assert sentence == "OPENAI_API_KEY could not be saved: the Fermix home does not exist."
     end
   end
 

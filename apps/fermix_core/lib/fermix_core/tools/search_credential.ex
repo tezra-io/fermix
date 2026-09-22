@@ -56,6 +56,7 @@ defmodule FermixCore.Tools.SearchCredential do
     case String.trim(value) do
       "" -> {:error, @missing_error}
       "@keyring" -> {:error, @missing_error}
+      "@file" -> {:error, @missing_error}
       _present -> {:ok, value}
     end
   end
