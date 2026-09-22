@@ -37,9 +37,12 @@ scenarios:
 
       - id: wiki_elixir_creator
         query: >
-          Using the browser, open the Wikipedia article for the Elixir programming language
-          (en.wikipedia.org) and find who created / designed it. Reply with ONLY the
-          creator's full name.
-        # José Valim. Matches on surname to tolerate accents/formatting.
+          Use the browser to go to en.wikipedia.org, search for the Elixir programming
+          language, open its article, and find who created / designed it. Reply with ONLY
+          the creator's full name.
+        # José Valim. Matches on surname to tolerate accents/formatting. Asked as the
+        # search -> open -> read flow this suite exists for: handed one known URL, the
+        # model reads it with web_fetch, as Fermix's routing says to, and the browser
+        # gate zeroed five correct answers on 2026-09-22.
         score: { match: contains, expected: "Valim" }
         requires_tools: [browser]
