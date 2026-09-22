@@ -1278,7 +1278,7 @@ defmodule FermixCore.Browser.ProfileServer do
     end
   end
 
-  defp known_ref?(ref, tab, state), do: not is_nil(get_in(state.ref_maps, [tab.id, ref]))
+  defp known_ref?(ref, tab, state), do: match?({:ok, _}, ref_data(tab, ref, state))
 
   # Same verdict and same recovery as `stale_ref` on a single ref, plus the one
   # fact that only this call can report: nothing was typed.
@@ -2636,8 +2636,12 @@ defmodule FermixCore.Browser.ProfileServer do
 
   defp no_box_hint(_ref, error), do: error
 
+  defp ref_data(_tab, ref, _state) when not is_binary(ref),
+    do:
+      {:error, Error.new("invalid_arg", "`ref` must be an element ref from the latest snapshot.")}
+
   defp ref_data(tab, ref, state) do
-    case get_in(state.ref_maps, [tab.id, ref]) do
+    case get_in(state.ref_maps, [tab.id, Snapshot.ref_key(ref)]) do
       nil ->
         {:error,
          Error.new(

@@ -523,6 +523,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The browser acts on an element named the way its page snapshot shows it.** A
+  snapshot lists each control as `@link_3 [link] "Search"`, but an action naming
+  `@link_3` was refused as out of date ("the page has changed since"), and the
+  fresh snapshot it asked for showed `@link_3` again, so the assistant could loop
+  on a page it had just opened until it gave up. A ref is now accepted as the
+  snapshot shows it, with or without the `@`, in every action that takes one.
 - **On-device speech says plainly where it can't run, and no longer shows up as
   a notetaker failure.** On a machine this build has no on-device speech engine
   for, choosing On-device for voice notes printed a developer instruction about

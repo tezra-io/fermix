@@ -8,6 +8,9 @@ defmodule FermixCore.Browser.Snapshot do
   @structural_roles MapSet.new(~w(generic group list table row rowgroup grid document
                                   RootWebArea WebArea none presentation))
 
+  # Marks a ref in the text (`@link_3 [link] "Search"`); it is not part of the ref.
+  @ref_sigil "@"
+
   @spec render([map()], map()) :: {:ok, map()}
   def render(nodes, opts) when is_list(nodes) and is_map(opts) do
     index = Map.new(nodes, &{to_string(Map.get(&1, "nodeId")), &1})
@@ -89,11 +92,19 @@ defmodule FermixCore.Browser.Snapshot do
       name = "#{role}_#{count}"
       ref = %{ref: name, role: role, name: name(node), backend_node_id: node["backendDOMNodeId"]}
 
-      {"@#{name} ", ref, %{state | counts: Map.put(state.counts, role, count)}}
+      {"#{@ref_sigil}#{name} ", ref, %{state | counts: Map.put(state.counts, role, count)}}
     else
       {"", nil, state}
     end
   end
+
+  @doc """
+  The ref-map key for a ref a model sends back. A model copies the ref as the text
+  prints it, sigil included, so the sigil comes off here; a bare ref is the key.
+  """
+  @spec ref_key(String.t()) :: String.t()
+  def ref_key(@ref_sigil <> ref), do: ref
+  def ref_key(ref) when is_binary(ref), do: ref
 
   defp compact_skip?(node, opts) do
     Map.get(opts, :compact) and role(node) in @structural_roles and name(node) == ""
