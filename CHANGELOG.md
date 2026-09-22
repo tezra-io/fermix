@@ -217,6 +217,16 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   its certificate the way the binaries do, and after publishing the release rail
   runs the advertised installer against the release it just published, on all
   four package targets.
+- **On-device speech runs on Linux.** Choosing On-device for voice notes on a
+  Linux machine (x86_64 or arm64) now works as it does on an Apple Silicon Mac:
+  Fermix downloads the speech engine and its model, checks both against the
+  checksums this build pins, and transcribes without the audio leaving the
+  machine. Every platform's engine now comes from fermix-stt 0.1.1, built and
+  published by its release workflow; a Mac that already has the engine keeps
+  it. The Linux engine runs on Ubuntu 22.04, Debian 12, Fedora 36, openSUSE Leap
+  15.6 and newer. It does not start on RHEL 9 or its rebuilds, whose C++ runtime
+  is older than it needs, nor on older distributions. Intel Macs still have no
+  engine, and setup says so.
 - **A keyring that cannot be used is a verdict, not a hang, and the file store
   is the other choice.** On Linux the login keyring stays locked after a
   fingerprint or automatic login (it is encrypted with the password), and
@@ -515,16 +525,6 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   machine instead of naming an install, and a voice note sent while it is
   selected gets a reply saying to choose another backend rather than to try
   again. The choice is labelled "On this device", not "On this Mac".
-- **The installer's setup wizard reads the terminal, not the installer.** Under
-  `curl … | sh` standard input is the script itself, so on a host with no
-  display the terminal wizard `fermix setup` starts would have taken the rest of
-  the script as its answers. Setup is now handed the terminal; with no terminal
-  at all, as in a CI job, the installer prints `fermix setup` as the next command
-  rather than starting a wizard nobody can answer. The installer's usage also
-  named `fermix.sh`, a host that never served it; it is served at
-  `https://fermix.ai/install`.
-- **The browser's `console` action now faces the same read policy as every other
-  page read.** Console entries are page text, and a page that redirected or was
 - **The meeting notetaker's Google sign-in works on a fresh desktop again.**
   The pinned `meetbot` sidecar moves to a release whose sign-in window no
   longer announces itself as automated. Google Accounts refuses a browser that
@@ -537,6 +537,16 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the join runs, and a human still types the password. Enabling the notetaker
   installs the new sidecar; an existing install picks it up the next time the
   card's install runs.
+- **The installer's setup wizard reads the terminal, not the installer.** Under
+  `curl … | sh` standard input is the script itself, so on a host with no
+  display the terminal wizard `fermix setup` starts would have taken the rest of
+  the script as its answers. Setup is now handed the terminal; with no terminal
+  at all, as in a CI job, the installer prints `fermix setup` as the next command
+  rather than starting a wizard nobody can answer. The installer's usage also
+  named `fermix.sh`, a host that never served it; it is served at
+  `https://fermix.ai/install`.
+- **The browser's `console` action now faces the same read policy as every other
+  page read.** Console entries are page text, and a page that redirected or was
   clicked onto a host the browser policy refuses logs there too — so `console`
   was returning bytes the same tab's `snapshot` had just refused. It is now
   refused the same way, in every browser profile.
