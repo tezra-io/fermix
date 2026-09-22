@@ -324,7 +324,9 @@ defmodule FermixCore.Prompt.RuntimeSections do
         "Reserve your own direct tools for the genuinely incidental: running a quick " <>
         "calculation or one-off script via the shell, reading a file to answer a " <>
         "question, scratch work outside any project. For repository work the harness " <>
-        "is the default; your own hands are for the small, non-repo touches."
+        "is the default; your own hands are for the small, non-repo touches. An " <>
+        "explicit request outranks this default: when the user asks you to do the " <>
+        "work yourself, do it with your own hands."
 
     "#{base}#{vendor_preference(capabilities)}\n"
   end

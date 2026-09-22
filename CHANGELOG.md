@@ -523,6 +523,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Asking the assistant to make a code change itself is no longer overridden.**
+  With a coding agent set up, repository work such as a bug fix goes to a Codex
+  or Claude Code run by default, and that default outranked the request: told
+  "do this yourself, don't delegate", the assistant delegated anyway and said its
+  instructions required it. An explicit request to do the work directly now
+  wins.
 - **The browser acts on an element named the way its page snapshot shows it.** A
   snapshot lists each control as `@link_3 [link] "Search"`, but an action naming
   `@link_3` was refused as out of date ("the page has changed since"), and the
