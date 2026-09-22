@@ -525,6 +525,18 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `https://fermix.ai/install`.
 - **The browser's `console` action now faces the same read policy as every other
   page read.** Console entries are page text, and a page that redirected or was
+- **The meeting notetaker's Google sign-in works on a fresh desktop again.**
+  The pinned `meetbot` sidecar moves to a release whose sign-in window no
+  longer announces itself as automated. Google Accounts refuses a browser that
+  does ("Couldn't sign you in. This browser or app may not be secure"), and
+  the sign-in window, unlike the join, launched with Playwright's
+  `--enable-automation` on, so on a fresh Linux profile Google blocked the bot
+  account's sign-in outright. The window is otherwise what it was: the
+  sidecar's own pinned Chromium on the persistent profile the join reopens,
+  never the default browser, because the signed-in state has to live where
+  the join runs, and a human still types the password. Enabling the notetaker
+  installs the new sidecar; an existing install picks it up the next time the
+  card's install runs.
   clicked onto a host the browser policy refuses logs there too — so `console`
   was returning bytes the same tab's `snapshot` had just refused. It is now
   refused the same way, in every browser profile.

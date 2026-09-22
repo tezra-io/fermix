@@ -29,16 +29,29 @@ defmodule FermixCore.Transcription.Local.SidecarInstaller do
   @command "fermix-stt"
   @plugin_name "stt_sidecar"
 
-  # target => %{url: String.t(), sha256: String.t()}. Pinned per released
-  # target (v0.1.0 ships macos-aarch64; other targets land as CI builds them).
-  # A pin is never hand-written — it lands with the release choreography, which
-  # downloads the artifact and hashes it. An unpinned target refuses via
-  # `@no_release_pinned_message`.
+  # target => %{url: String.t(), sha256: String.t()}. Every target is pinned to
+  # the one release, v0.1.1, taken from its own SHA256SUMS and checked against
+  # the downloaded binaries. A pin is never hand-written — it lands with the
+  # release choreography. macos-x86_64 has none because GitHub retired its Intel
+  # macOS runners, so the release builds no such artifact; an unpinned target
+  # refuses via `@no_release_pinned_message`. The install path is not versioned,
+  # so moving a pin changes what a new install downloads and nothing already on
+  # disk.
   @releases %{
     "macos-aarch64" => %{
       url:
-        "https://github.com/tezra-io/fermix-stt/releases/download/v0.1.0/fermix-stt-macos-aarch64",
-      sha256: "55e115c3c4fab23dd9758ec57299b9ace0f6bfd5215eb1755c6f496d1bae3b95"
+        "https://github.com/tezra-io/fermix-stt/releases/download/v0.1.1/fermix-stt-macos-aarch64",
+      sha256: "1f3156bcae4f385032649d0d897cd1a8c50689117df2caa0f27775f2e9a0b074"
+    },
+    "linux-x86_64" => %{
+      url:
+        "https://github.com/tezra-io/fermix-stt/releases/download/v0.1.1/fermix-stt-linux-x86_64",
+      sha256: "943e7ab99fc4681997bf38e1c5bbf8a3a44f2cdd9a28a1e8c5136d0d7390d56e"
+    },
+    "linux-aarch64" => %{
+      url:
+        "https://github.com/tezra-io/fermix-stt/releases/download/v0.1.1/fermix-stt-linux-aarch64",
+      sha256: "6ceffd39a8af16b28d4bb204b6024d6b3ac2ba2a1088e2ce0301a45f93853f91"
     }
   }
 

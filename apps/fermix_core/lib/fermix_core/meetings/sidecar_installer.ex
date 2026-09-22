@@ -13,7 +13,7 @@ defmodule FermixCore.Meetings.SidecarInstaller do
   library half carries its own `checksum-compux.exs` — meetbot is a Node
   artifact with no library to own the pin, so the release choreography ends in
   a PR against `@releases` here (tag → notarized artifacts → checksum PR →
-  pin). `v0.3.3` is pinned for `macos-aarch64` and both Linux targets; a target
+  pin). `v0.3.4` is pinned for `macos-aarch64` and both Linux targets; a target
   with no pin refuses loud rather than downloading something unpinned.
 
   Resolution prefers a `dev_local` build (the sidecar-author loop) so a locally
@@ -39,13 +39,13 @@ defmodule FermixCore.Meetings.SidecarInstaller do
   # macos-x86_64 has none because GitHub retired its Intel macOS runners, so
   # the release builds no such artifact.
   @releases %{
-    "v0.3.3" => %{
-      "macos-aarch64" => "cb6885cab31fbe65ae885dbd2e14c9f8e8c158514e941937885d0748fb768da9",
-      "linux-aarch64" => "7d1af59423cebb7d2bdd57e84d431073e1de971075974051d9bb431552126daf",
-      "linux-x86_64" => "773aeac2f58cd321245ab3e38c69e8093539a4f3705f3d7c237d1f5316c9292c"
+    "v0.3.4" => %{
+      "macos-aarch64" => "a3f1ac8dff8a571336aff4c8dd9374b63b6bfa428bccad63a6560f9fc52f96ca",
+      "linux-aarch64" => "1ecfa83a821aa4de89d1ef77db738fe7a534d86020ebbf3b97f7241342832ec6",
+      "linux-x86_64" => "5699c01878d0d4a6dd26dc3048d3bdfd89e6269d5268a92c38ef79ac75741639"
     }
   }
-  @pinned_tag "v0.3.3"
+  @pinned_tag "v0.3.4"
 
   # A sibling of `bin/` and `profile/` recording that an interactive sign-in
   # succeeded. It lives OUTSIDE the profile because the daemon never reads
