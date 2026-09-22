@@ -75,9 +75,10 @@ scenarios:
           script: "suites/capability/checkers/cron_job_output.py"
           mode: json
           timeout_ms: 60000
-        # ALL-of: the artifact must come from a run that actually happened. An any-of
-        # gate passed on the tool name merely appearing, errored call included.
-        requires_tools_all: [run_job_now]
+        # The job must have been scheduled; the checker proves its run completed. Not
+        # run_job_now: a job due now is started by its own schedule, and run_job_now is
+        # then correctly refused as a duplicate while the job does the work.
+        requires_tools_all: [schedule_job]
 
       - id: job_writes_token_alt
         query: >
@@ -89,9 +90,10 @@ scenarios:
           script: "suites/capability/checkers/cron_job_output.py"
           mode: json
           timeout_ms: 60000
-        # ALL-of: the artifact must come from a run that actually happened. An any-of
-        # gate passed on the tool name merely appearing, errored call included.
-        requires_tools_all: [run_job_now]
+        # The job must have been scheduled; the checker proves its run completed. Not
+        # run_job_now: a job due now is started by its own schedule, and run_job_now is
+        # then correctly refused as a duplicate while the job does the work.
+        requires_tools_all: [schedule_job]
 
   - id: self_modify_skill
     title: "Author a new skill for itself and confirm it registered live"

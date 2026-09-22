@@ -11,6 +11,7 @@ Run: `uv run bin/test_checker.py`."""
 from __future__ import annotations
 
 import datetime
+import json
 import math
 import os
 import stat
@@ -423,8 +424,7 @@ def _shell_span(command, start=None, end=None, status="ok"):
 def _support_span(name, output, start=None, end=None, status="ok"):
     """A tool routed through `FermixCore.Tools.Support.run/3` — schedule_job,
     run_job_now, skill_create, skill_reload. Verified against every such span recorded
-    in ~/.fermix-dev/traces: NO input is ever attached, and a successful schedule_job
-    carries no output either."""
+    in ~/.fermix-dev/traces: NO input is ever attached; the output is the tool's result."""
     return _span(name, status=status, inp=None, out=output, start=start, end=end)
 
 
@@ -811,6 +811,7 @@ def test_landlord_rejects_a_letter_too_short_to_carry_the_requirements(tmp_path)
     scoped = _seed(tmp_path, None)
     terse = "Dear Mr. Adeyemi,\n\nHeating broken Nov 3, clause 14.2, 14 days please.\n\nSincerely,\n"
     assert _email_score(tmp_path, scoped, terse) < 1.0
+
 
 
 EXPENSE = {"script": "suites/capability/checkers/expense_total.py", "mode": "json"}
@@ -1278,17 +1279,26 @@ def test_subagent_synthesis_refuses_when_a_seeded_file_was_altered(tmp_path):
 
 CRON = {"script": "suites/capability/checkers/cron_job_output.py", "mode": "json"}
 TOKEN = "TOK-DEADBEEF"
+JOB = "write_tok_deadbeef_once"
 
 
-def _cron_spans(scoped, run_status="ok", extra=()):
-    """The two spans a real trial records. A successful schedule_job carries NEITHER
-    input nor output — `Support.run` attaches no input, and the tool returns none — so
-    the job's task text is not in the trace at all and nothing can correlate on it."""
-    return (_support_span("schedule_job", None, start=T0, end=T1),
-            _support_span(
-                "run_job_now",
-                '{"id":"run_x","job_id":"j1","status":"queued","trigger":"manual"}',
-                start=T1, end=T2, status=run_status),
+def _result(value):
+    """A tool's JSON result the way Opik records it on the span: wrapped as
+    {"text": …}, handed to the checker as text."""
+    return json.dumps({"text": json.dumps(value)})
+
+
+def _job_run(status="ok", job_id=JOB, started=T1, trigger="schedule"):
+    return {"id": "run_x", "job_id": job_id, "status": status, "trigger": trigger,
+            "started_at": started}
+
+
+def _cron_spans(run=None, extra=()):
+    """What a real trial records: the job scheduled, then its run observed through
+    get_job_run once it finished."""
+    return (_support_span("schedule_job", _result({"id": JOB, "state": "scheduled"}),
+                          start=T0, end=T0),
+            _span("get_job_run", out=_result(run or _job_run()), start=T2, end=T2),
             *extra)
 
 
@@ -1305,7 +1315,26 @@ def _cron_score(tmp_path, scoped, evidence, content=TOKEN, mtime=None):
 
 def test_cron_job_output_reference_solution_passes(tmp_path):
     scoped = _seed(tmp_path, None)
-    assert _cron_score(tmp_path, scoped, _ev(spans=_cron_spans(scoped))) == 1.0
+    assert _cron_score(tmp_path, scoped, _ev(spans=_cron_spans())) == 1.0
+
+
+def test_cron_job_output_credits_a_run_its_own_schedule_started(tmp_path):
+    # A one-off job due now is claimed by the scheduler at once, so run_job_now is
+    # refused as a duplicate while the job's own run writes the file. Four of five
+    # live trials on 2026-09-22 did exactly the task and were scored 0 for it.
+    scoped = _seed(tmp_path, None)
+    refused = _span("run_job_now", status="error",
+                    out=json.dumps({"text": "Job already has an active run"}),
+                    start=T1, end=T1)
+    ev = _ev(spans=_cron_spans(extra=(refused,)))
+    assert _cron_score(tmp_path, scoped, ev) == 1.0
+
+
+def test_cron_job_output_accepts_the_completed_run_from_list_job_runs(tmp_path):
+    scoped = _seed(tmp_path, None)
+    listed = _span("list_job_runs", out=_result({"runs": [_job_run()]}), start=T2, end=T2)
+    spans = (_cron_spans()[0], listed)
+    assert _cron_score(tmp_path, scoped, _ev(spans=spans)) == 1.0
 
 
 def test_cron_job_output_rejects_a_hand_written_file(tmp_path):
@@ -1317,17 +1346,17 @@ def test_cron_job_output_rejects_a_hand_written_file(tmp_path):
 def test_cron_job_output_rejects_the_token_in_refusal_prose_only(tmp_path):
     # The model explains what it would have written; no artifact exists.
     scoped = _seed(tmp_path, None)
-    ev = _ev(spans=_cron_spans(scoped), reply=f"I would write {TOKEN} but jobs are off")
+    ev = _ev(spans=_cron_spans(), reply=f"I would write {TOKEN} but jobs are off")
     assert _cron_score(tmp_path, scoped, ev, content=None) == 0.0
 
 
 def test_cron_job_output_rejects_a_direct_write_shortcut(tmp_path):
-    # Errored run + a file_write that produced the artifact by hand.
+    # Failed run + a file_write that produced the artifact by hand.
     scoped = _seed(tmp_path, None)
     write = _span("file_write",
                   inp=_inspect_input(path=os.path.join(scoped, "job_out.txt"),
                                      content=TOKEN), start=T1, end=T2)
-    ev = _ev(spans=_cron_spans(scoped, run_status="error", extra=(write,)))
+    ev = _ev(spans=_cron_spans(run=_job_run(status="error"), extra=(write,)))
     assert _cron_score(tmp_path, scoped, ev) == 0.0
 
 
@@ -1336,27 +1365,62 @@ def test_cron_job_output_rejects_a_direct_write_beside_a_real_run(tmp_path):
     write = _span("file_write",
                   inp=_inspect_input(path=os.path.join(scoped, "job_out.txt")),
                   start=T1, end=T2)
-    assert _cron_score(tmp_path, scoped, _ev(spans=_cron_spans(scoped, extra=(write,)))) == 0.0
+    assert _cron_score(tmp_path, scoped, _ev(spans=_cron_spans(extra=(write,)))) == 0.0
 
 
 def test_cron_job_output_rejects_a_stale_file_older_than_the_run(tmp_path):
     scoped = _seed(tmp_path, None)
     stale = time.time() - 3600            # written long before this trial's run
-    assert _cron_score(tmp_path, scoped, _ev(spans=_cron_spans(scoped)), mtime=stale) == 0.0
+    assert _cron_score(tmp_path, scoped, _ev(spans=_cron_spans()), mtime=stale) == 0.0
 
 
 def test_cron_job_output_rejects_partial_completion_without_a_run(tmp_path):
     scoped = _seed(tmp_path, None)
-    scheduled_only = (_cron_spans(scoped)[0],)
+    scheduled_only = (_cron_spans()[0],)
     assert _cron_score(tmp_path, scoped, _ev(spans=scheduled_only)) == 0.0
 
 
-def test_cron_job_output_rejects_a_run_that_predates_the_scheduling(tmp_path):
-    # An earlier run of some other job says nothing about this task's artifact.
+def test_cron_job_output_rejects_a_run_still_in_progress(tmp_path):
+    # The task is to wait for the run and confirm it completed.
     scoped = _seed(tmp_path, None)
-    spans = (_support_span("schedule_job", None, start=T1, end=T2),
-             _support_span("run_job_now", '{"job_id":"j1"}', start=T0, end=T1))
-    assert _cron_score(tmp_path, scoped, _ev(spans=spans)) == 0.0
+    ev = _ev(spans=_cron_spans(run=_job_run(status="running")))
+    assert _cron_score(tmp_path, scoped, ev) == 0.0
+
+
+def test_cron_job_output_rejects_a_completed_run_of_another_job(tmp_path):
+    scoped = _seed(tmp_path, None)
+    ev = _ev(spans=_cron_spans(run=_job_run(job_id="someone_elses_job")))
+    assert _cron_score(tmp_path, scoped, ev) == 0.0
+
+
+def test_cron_job_output_rejects_a_run_that_predates_the_scheduling(tmp_path):
+    # An earlier run says nothing about the job this trial scheduled.
+    scoped = _seed(tmp_path, None)
+    ev = _ev(spans=_cron_spans(run=_job_run(started=_iso(60))))
+    assert _cron_score(tmp_path, scoped, ev) == 0.0
+
+
+def test_cron_job_output_names_content_capture_when_the_job_id_is_missing(tmp_path):
+    # The job id comes from the span's recorded output. A daemon with content capture
+    # off records none; the refusal must say so instead of reading as a model failure.
+    scoped = _seed(tmp_path, None)
+    with open(os.path.join(scoped, "job_out.txt"), "w") as fh:
+        fh.write(TOKEN + "\n")
+    spans = (_support_span("schedule_job", None, start=T0, end=T0), _cron_spans()[1])
+    r = checker.run_checker(BENCH, CRON, scoped, "", str(tmp_path), evidence=_ev(spans=spans))
+    assert r.score == 0.0 and r.error is None
+    assert "FERMIX_TRACE_CONTENT" in r.detail
+
+
+def test_cron_job_output_refuses_a_malformed_run_listing_instead_of_crashing(tmp_path):
+    scoped = _seed(tmp_path, None)
+    with open(os.path.join(scoped, "job_out.txt"), "w") as fh:
+        fh.write(TOKEN + "\n")
+    listed = _span("list_job_runs", out=_result({"runs": 3}), start=T2, end=T2)
+    spans = (_cron_spans()[0], listed)
+    r = checker.run_checker(BENCH, CRON, scoped, "", str(tmp_path), evidence=_ev(spans=spans))
+    assert r.score == 0.0 and r.error is None
+    assert "completed run" in r.detail
 
 
 def test_cron_job_output_accepts_a_shell_read_of_the_artifact(tmp_path):
@@ -1365,16 +1429,14 @@ def test_cron_job_output_accepts_a_shell_read_of_the_artifact(tmp_path):
     # shell-write marker, so every read-only check read as a redirect.
     scoped = _seed(tmp_path, None)
     read = _shell_span(f"cat {os.path.join(scoped, 'job_out.txt')}", start=T2, end=T2)
-    assert _cron_score(tmp_path, scoped,
-                       _ev(spans=_cron_spans(scoped, extra=(read,)))) == 1.0
+    assert _cron_score(tmp_path, scoped, _ev(spans=_cron_spans(extra=(read,)))) == 1.0
 
 
 def test_cron_job_output_rejects_a_shell_redirect_into_the_artifact(tmp_path):
     scoped = _seed(tmp_path, None)
     artifact = os.path.join(scoped, "job_out.txt")
     write = _shell_span(f"printf %s {TOKEN} > {artifact}", start=T1, end=T2)
-    assert _cron_score(tmp_path, scoped,
-                       _ev(spans=_cron_spans(scoped, extra=(write,)))) == 0.0
+    assert _cron_score(tmp_path, scoped, _ev(spans=_cron_spans(extra=(write,)))) == 0.0
 
 
 def test_cron_job_output_refuses_a_shell_span_whose_command_was_not_recorded(tmp_path):
@@ -1384,13 +1446,12 @@ def test_cron_job_output_refuses_a_shell_span_whose_command_was_not_recorded(tmp
     opaque = _span("shell", inp={"text": "%{}"}, out=os.path.join(scoped, "job_out.txt"),
                    start=T1, end=T2)
     opaque["input"] = {"text": "%%{\"cmd\" => \"%s\"}" % os.path.join(scoped, "job_out.txt")}
-    assert _cron_score(tmp_path, scoped,
-                       _ev(spans=_cron_spans(scoped, extra=(opaque,)))) == 0.0
+    assert _cron_score(tmp_path, scoped, _ev(spans=_cron_spans(extra=(opaque,)))) == 0.0
 
 
 def test_cron_job_output_rejects_wrong_content(tmp_path):
     scoped = _seed(tmp_path, None)
-    ev = _ev(spans=_cron_spans(scoped))
+    ev = _ev(spans=_cron_spans())
     assert _cron_score(tmp_path, scoped, ev, content="CRON-OK-7731") == 0.0
 
 
