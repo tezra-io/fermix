@@ -2657,6 +2657,21 @@ defmodule FermixCore.Setup.WizardTest do
       assert {:ok, "123:abc"} = SecretWriter.get(:telegram_bot_token, store: :file)
     end
 
+    test "the management door's put_secret asks the store first, and carries the verdict" do
+      FermixTestSupport.SecretWriterStub.set_verdict(%{
+        store: :keyring,
+        state: :locked,
+        sentence: "the login keyring is locked"
+      })
+
+      on_exit(fn -> FermixTestSupport.SecretWriterStub.clear_verdict(:keyring) end)
+
+      assert {:error, {:secret_store_failed, :telegram_bot_token, {:verdict, %{state: :locked}}}} =
+               Wizard.put_secret(:telegram_bot_token, "123:abc")
+
+      assert {:error, :missing_secret} = SecretWriter.get(:telegram_bot_token, store: :keyring)
+    end
+
     test "the file store's own refusal names no other store" do
       FermixTestSupport.SecretWriterStub.set_verdict(%{
         store: :file,

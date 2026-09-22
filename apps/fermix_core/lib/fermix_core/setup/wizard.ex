@@ -898,11 +898,24 @@ defmodule FermixCore.Setup.Wizard do
           {:ok, report()} | {:error, {:secret_store_failed, atom(), term()} | term()}
   def put_secret(key, value) when is_atom(key) and is_binary(value) and value != "" do
     secret = SecretPaths.fetch!(key)
+    verdict = SecretWriter.probe()
 
-    case SecretWriteLog.put(key, value) do
-      :ok -> commit_secret_reference(secret, SecretWriter.current_sentinel())
+    # The store is asked first, as every other writer asks it: a locked keyring
+    # is reported as one, and the desktop's unlock dialog is never raised by a
+    # write the daemon makes on the app's behalf.
+    with :ok <- usable_or_verdict(key, verdict),
+         :ok <- SecretWriteLog.put(key, value) do
+      commit_secret_reference(secret, SecretWriter.current_sentinel())
+    else
+      {:error, {:secret_store_failed, _key, _reason} = failure} -> {:error, failure}
       {:error, reason} -> {:error, {:secret_store_failed, key, reason}}
     end
+  end
+
+  defp usable_or_verdict(key, verdict) do
+    if SecretWriter.usable?(verdict),
+      do: :ok,
+      else: {:error, {:secret_store_failed, key, {:verdict, verdict}}}
   end
 
   @doc """
