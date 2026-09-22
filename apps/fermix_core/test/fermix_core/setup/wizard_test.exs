@@ -2621,7 +2621,7 @@ defmodule FermixCore.Setup.WizardTest do
       assert {:error, :missing_secret} = SecretWriter.get(:openai_api_key, store: :keyring)
     end
 
-    test "a locked keyring refuses a secret with its verdict and names the file store" do
+    test "a locked keyring whose unlock prompt is cancelled refuses with the verdict and names the file store" do
       FermixTestSupport.SecretWriterStub.set_verdict(%{
         store: :keyring,
         state: :locked,
@@ -2633,9 +2633,46 @@ defmodule FermixCore.Setup.WizardTest do
       assert {:error, {:secret_store_failed, :telegram_bot_token, sentence}} =
                Wizard.report().wizard |> Wizard.save_answers(telegram_bot_token: "123:abc")
 
-      assert sentence =~ "TELEGRAM_BOT_TOKEN could not be saved: the login keyring is locked."
+      assert sentence =~
+               "TELEGRAM_BOT_TOKEN could not be saved: the login keyring is locked, and the " <>
+                 "unlock prompt was cancelled or left unanswered."
+
       assert sentence =~ "fermix setup --secret-store file"
+      FermixTestSupport.SecretWriterStub.clear_verdict(:keyring)
       assert {:error, :missing_secret} = SecretWriter.get(:telegram_bot_token, store: :keyring)
+    end
+
+    test "a locked keyring whose unlock prompt is answered saves to the keyring, as before", %{
+      home: home
+    } do
+      FermixTestSupport.SecretWriterStub.set_verdict(
+        %{store: :keyring, state: :locked, sentence: "the login keyring is locked"},
+        unlock_on_prompt: true
+      )
+
+      on_exit(fn -> FermixTestSupport.SecretWriterStub.clear_verdict(:keyring) end)
+
+      assert {:ok, _report} =
+               Wizard.report().wizard |> Wizard.save_answers(telegram_bot_token: "123:abc")
+
+      assert config_contents(home) =~ ~s(bot_token = "@keyring")
+      assert {:ok, "123:abc"} = SecretWriter.get(:telegram_bot_token, store: :keyring)
+    end
+
+    test "a store with nothing to answer is refused before any write, with its verdict" do
+      FermixTestSupport.SecretWriterStub.set_verdict(%{
+        store: :keyring,
+        state: :service_absent,
+        sentence: "no keyring service (Secret Service) is running on this session bus"
+      })
+
+      on_exit(fn -> FermixTestSupport.SecretWriterStub.clear_verdict(:keyring) end)
+
+      assert {:error, {:secret_store_failed, :telegram_bot_token, sentence}} =
+               Wizard.report().wizard |> Wizard.save_answers(telegram_bot_token: "123:abc")
+
+      assert sentence =~ "TELEGRAM_BOT_TOKEN could not be saved: no keyring service"
+      assert sentence =~ "fermix setup --secret-store file"
     end
 
     test "with the keyring locked, the same save succeeds once the file store is chosen", %{
@@ -2666,9 +2703,22 @@ defmodule FermixCore.Setup.WizardTest do
 
       on_exit(fn -> FermixTestSupport.SecretWriterStub.clear_verdict(:keyring) end)
 
-      assert {:error, {:secret_store_failed, :telegram_bot_token, {:verdict, %{state: :locked}}}} =
+      # Locked is tried (the prompt), and the cancelled prompt is the failure.
+      assert {:error, {:secret_store_failed, :telegram_bot_token, {:helper_failed, _, 1, _}}} =
                Wizard.put_secret(:telegram_bot_token, "123:abc")
 
+      FermixTestSupport.SecretWriterStub.set_verdict(%{
+        store: :keyring,
+        state: :service_absent,
+        sentence: "no keyring service"
+      })
+
+      # Nothing to answer: refused with the verdict, no write tried.
+      assert {:error,
+              {:secret_store_failed, :telegram_bot_token, {:verdict, %{state: :service_absent}}}} =
+               Wizard.put_secret(:telegram_bot_token, "123:abc")
+
+      FermixTestSupport.SecretWriterStub.clear_verdict(:keyring)
       assert {:error, :missing_secret} = SecretWriter.get(:telegram_bot_token, store: :keyring)
     end
 

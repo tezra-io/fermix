@@ -226,20 +226,26 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a write, and before the daemon reads a secret at boot, Fermix now asks the
   Secret Service three read-only questions over `busctl --user` — is a keyring
   running, which collection is the default, is it locked — and never a secret
-  read, so a background daemon never raises that dialog. A save with a new
-  secret is refused with the store's own sentence (`the login keyring is
-  locked. Unlock it in Passwords and Keys, or log in with your password once;
-  fingerprint and automatic login leave it locked`); an unchanged value is kept
-  rather than pushed at the lock; at boot the secrets in an unusable store stay
-  unresolved with one log line naming them. `fermix doctor` gains a `secret
-  store` row that names the configured store, its verdict and how many secrets
-  each store holds.
+  read, so a background daemon never raises that dialog. A save you make
+  yourself still gets the prompt, and now gets time to answer it: the write
+  used to be killed after three seconds, before anyone could type, so the
+  dialog was never answerable. Only a store with nothing to answer (no keyring
+  service, no session bus, no `secret-tool`) is refused before the write, with
+  its own sentence; a locked keyring is tried, and a cancelled or unanswered
+  prompt is refused with `the login keyring is locked, and the unlock prompt
+  was cancelled or left unanswered. Unlock it when the prompt appears, or in
+  Passwords and Keys; fingerprint and automatic login leave it locked`. An
+  unchanged value is kept rather than pushed at the lock; at boot the secrets
+  in an unusable store stay unresolved with one log line naming them. `fermix
+  doctor` gains a `secret store` row that names the configured store, its
+  verdict and how many secrets each store holds.
   The second store is declared, never slid into: `[fermix_core] secret_store =
   "file"` keeps each secret as one `0600` file under `<FERMIX_HOME>/secrets/`
   (the directory `0700`; readable only by that account and not encrypted at
   rest, the posture `auth.json` already has). `fermix setup --secret-store
   file|keyring` chooses it, and when the keyring refuses a save the terminal
-  wizard asks once — a no leaves the refusal exactly as it was. New secrets go
+  wizard asks once — a no leaves the refusal exactly as it was. It is the way
+  in for a machine whose keyring cannot be unlocked at all. New secrets go
   to the configured store and are persisted as its sentinel, `@file` beside
   `@keyring`; each is read back from the store it names, so a home can hold
   both. `fermix setup --migrate-secrets` now moves every secret that is not in

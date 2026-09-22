@@ -394,7 +394,7 @@ defmodule FermixCore.Management.SecretsEnvTest do
   end
 
   describe "a locked keyring (M38 §7.2)" do
-    test "answers locked, writes nothing, and never touches the keyring", %{home: home} do
+    test "a cancelled unlock prompt answers locked, and nothing was written", %{home: home} do
       SecretWriterStub.set_verdict(%{
         store: :keyring,
         state: :locked,
@@ -406,9 +406,22 @@ defmodule FermixCore.Management.SecretsEnvTest do
       assert {:error, {:secret_store_failed, "env:ALPACA_API_KEY", "locked"}} =
                Secrets.set("env:ALPACA_API_KEY", @value)
 
+      SecretWriterStub.clear_verdict(:keyring)
       assert SecretWriterStub.get({:external_env, "ALPACA_API_KEY"}) == {:error, :missing_secret}
       assert SandboxConfig.current().env.allow == []
       refute File.exists?(Path.join(home, "config.toml"))
+    end
+
+    test "an answered unlock prompt stores the key, as it always did" do
+      SecretWriterStub.set_verdict(
+        %{store: :keyring, state: :locked, sentence: "the login keyring is locked"},
+        unlock_on_prompt: true
+      )
+
+      on_exit(fn -> SecretWriterStub.clear_verdict(:keyring) end)
+
+      assert {:ok, _view} = Secrets.set("env:ALPACA_API_KEY", @value)
+      assert {:ok, @value} = SecretWriterStub.get({:external_env, "ALPACA_API_KEY"})
     end
   end
 

@@ -63,19 +63,20 @@ defmodule FermixCore.Setup.SecretMigration do
 
   defp ensure_store_usable([], _store), do: :ok
 
+  # The operator is at the terminal, so a locked keyring may be tried on either
+  # side of a move: the desktop raises its unlock prompt once, and the reads and
+  # writes that follow wait for it. A store with nothing to answer is refused
+  # up front, by name.
   defp ensure_store_usable(secrets, store) do
     verdict = SecretWriter.probe(store: store)
 
-    if SecretWriter.usable?(verdict) do
+    if SecretWriter.attemptable?(verdict) do
       ensure_sources_readable(secrets)
     else
       {:error, "The #{store} store cannot take secrets right now: #{verdict.sentence}."}
     end
   end
 
-  # A secret in the other store has to be read before it can be moved, and a
-  # locked keyring is refused up front rather than raising its dialog once per
-  # secret.
   defp ensure_sources_readable(secrets) do
     secrets
     |> Enum.map(& &1.from)
@@ -84,7 +85,7 @@ defmodule FermixCore.Setup.SecretMigration do
     |> Enum.find_value(:ok, fn from ->
       verdict = SecretWriter.probe(store: from)
 
-      if SecretWriter.usable?(verdict),
+      if SecretWriter.attemptable?(verdict),
         do: nil,
         else: {:error, "The #{from} store cannot be read right now: #{verdict.sentence}."}
     end)
@@ -151,7 +152,11 @@ defmodule FermixCore.Setup.SecretMigration do
   end
 
   defp read_source(%{from: :plaintext, value: value}), do: {:ok, value}
-  defp read_source(%{from: store, key: key}), do: SecretWriter.get(key, store: store)
+
+  # A read that may have to wait for the unlock prompt the move just raised.
+  defp read_source(%{from: store, key: key}) do
+    SecretWriter.get(key, store: store, timeout_ms: SecretWriter.unlock_prompt_timeout_ms())
+  end
 
   # The copy left behind in the store a secret came from is removed; when it
   # cannot be, the move still happened and the log says what remains.

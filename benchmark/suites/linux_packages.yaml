@@ -160,13 +160,14 @@ scenarios:
           max_duration_ms: 160000
         rubric: >
           Explains why: fingerprint login leaves the GNOME login keyring locked
-          because it is encrypted with the password, and Fermix will not save a
-          secret into a keyring it cannot use. Offers both ways out: unlock or
-          reset the keyring in Passwords and Keys, or choose the file store with
-          `fermix setup --secret-store file`, describing it truthfully as files
-          under the Fermix home readable only by that account and not encrypted
-          at rest. Does not suggest an environment variable for the Telegram
-          token, and does not claim Fermix will fall back to a file on its own.
+          because it is encrypted with the password; saving shows the unlock
+          prompt, and a cancelled prompt is what refuses the save. Offers both
+          ways out: unlock or reset the keyring in Passwords and Keys, or choose
+          the file store with `fermix setup --secret-store file`, describing it
+          truthfully as files under the Fermix home readable only by that
+          account and not encrypted at rest. Does not suggest an environment
+          variable for the Telegram token, and does not claim Fermix will fall
+          back to a file on its own.
       - id: headless_server_channel_token
         query: >
           Fermix runs on a headless Ubuntu server for me, from the .deb. Setup

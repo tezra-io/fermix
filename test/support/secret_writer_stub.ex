@@ -41,6 +41,7 @@ defmodule FermixTestSupport.SecretWriterStub do
 
   @table __MODULE__
   @verdict_row :__probe_verdict__
+  @unlock_row :__unlock_on_prompt__
 
   @impl true
   def available?(_opts \\ []), do: true
@@ -59,11 +60,19 @@ defmodule FermixTestSupport.SecretWriterStub do
     end
   end
 
-  @doc "Pins the verdict `probe/1` answers for `verdict.store` until `clear_verdict/1`."
-  @spec set_verdict(SecretWriter.verdict()) :: :ok
-  def set_verdict(%{store: store} = verdict) do
+  @doc """
+  Pins the verdict `probe/1` answers for `verdict.store` until `clear_verdict/1`.
+
+  A pinned store that is not usable behaves like the real thing behind it: a
+  write or a read fails the way a cancelled unlock prompt fails. With
+  `unlock_on_prompt: true` the first write instead succeeds and clears the
+  verdict, the way a keyring the operator just unlocked answers from then on.
+  """
+  @spec set_verdict(SecretWriter.verdict(), keyword()) :: :ok
+  def set_verdict(%{store: store} = verdict, opts \\ []) do
     ensure_table()
     :ets.insert(@table, {{@verdict_row, store}, verdict})
+    :ets.insert(@table, {{@unlock_row, store}, Keyword.get(opts, :unlock_on_prompt, false)})
     :ok
   end
 
@@ -71,6 +80,7 @@ defmodule FermixTestSupport.SecretWriterStub do
   def clear_verdict(store) do
     ensure_table()
     :ets.delete(@table, {@verdict_row, store})
+    :ets.delete(@table, {@unlock_row, store})
     :ok
   end
 
@@ -80,17 +90,55 @@ defmodule FermixTestSupport.SecretWriterStub do
   @impl true
   def put(key, value, opts \\ []) when is_secret_key(key) and is_binary(value) do
     ensure_table()
-    :ets.insert(@table, {{profile(opts), SecretWriter.store(opts), key}, value})
-    :ok
+    store = SecretWriter.store(opts)
+
+    case prompt_outcome(store) do
+      :cancelled ->
+        {:error, {:helper_failed, "stub-keyring store", 1, "the unlock prompt was cancelled"}}
+
+      outcome ->
+        if outcome == :unlocked, do: clear_verdict(store)
+        :ets.insert(@table, {{profile(opts), store, key}, value})
+        :ok
+    end
   end
 
   @impl true
   def get(key, opts \\ []) when is_secret_key(key) do
     ensure_table()
+    store = SecretWriter.store(opts)
 
-    case :ets.lookup(@table, {profile(opts), SecretWriter.store(opts), key}) do
-      [{_entry, value}] -> {:ok, value}
-      [] -> {:error, :missing_secret}
+    case prompt_outcome(store) do
+      :cancelled ->
+        {:error, {:helper_failed, "stub-keyring lookup", 1, "the keyring is locked"}}
+
+      _answers ->
+        case :ets.lookup(@table, {profile(opts), store, key}) do
+          [{_entry, value}] -> {:ok, value}
+          [] -> {:error, :missing_secret}
+        end
+    end
+  end
+
+  # :answers when the store needs no prompt, :unlocked when a pinned prompt is
+  # answered, :cancelled when it is not.
+  defp prompt_outcome(store) do
+    usable? =
+      case :ets.lookup(@table, {@verdict_row, store}) do
+        [{_row, verdict}] -> SecretWriter.usable?(verdict)
+        [] -> true
+      end
+
+    unlock? =
+      case :ets.lookup(@table, {@unlock_row, store}) do
+        [{_row, flag}] -> flag
+        [] -> false
+      end
+
+    cond do
+      usable? -> :answers
+      unlock? -> :unlocked
+      true -> :cancelled
     end
   end
 

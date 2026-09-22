@@ -195,9 +195,27 @@ defmodule FermixCore.Setup.SecretWriter do
   @spec probe(keyword()) :: verdict()
   def probe(opts \\ []) when is_list(opts), do: impl(opts).probe(opts)
 
-  @doc "Whether an operation may go ahead on this verdict."
+  @doc "Whether an operation may go ahead on this verdict without anyone's help."
   @spec usable?(verdict()) :: boolean()
   def usable?(%{state: state}), do: state in [:available, :unknown]
+
+  @doc """
+  Whether a write someone is present for may be tried on this verdict. A
+  locked keyring is the one state a person can change at the moment of the
+  write: the desktop raises its unlock prompt, and the write succeeds once
+  they answer it. Every other refused state has nothing to answer.
+  """
+  @spec attemptable?(verdict()) :: boolean()
+  def attemptable?(%{state: state} = verdict), do: usable?(verdict) or state == :locked
+
+  # A write gives the operator time to answer the desktop's unlock prompt; a
+  # read never waits for one, because the reads that happen with nobody
+  # present (boot) are refused by the probe before they are tried.
+  @unlock_prompt_timeout_ms 120_000
+
+  @doc "How long a write waits for the operator to answer an unlock prompt."
+  @spec unlock_prompt_timeout_ms() :: pos_integer()
+  def unlock_prompt_timeout_ms, do: @unlock_prompt_timeout_ms
 
   @spec command_source(secret_key()) :: map()
   def command_source(key) when is_secret_key(key), do: impl([]).command_source(key, [])
@@ -389,10 +407,12 @@ defmodule FermixCore.Setup.SecretWriter.SecretTool do
 
   @impl true
   def put(key, value, opts \\ []) when is_secret_key(key) and is_binary(value) do
+    write_opts = Keyword.put_new(opts, :timeout_ms, SecretWriter.unlock_prompt_timeout_ms())
+
     with {:ok, binary} <- fetch_secret_tool_binary(),
          {:ok, shell} <- fetch_shell_binary() do
       with_temp_secret(value, fn secret_file ->
-        run_with_stdin(shell, secret_file, binary, put_args(key, opts), opts)
+        run_with_stdin(shell, secret_file, binary, put_args(key, opts), write_opts)
       end)
     end
   end
@@ -573,6 +593,8 @@ defmodule FermixCore.Setup.SecretWriter.MacOS do
 
   @impl true
   def put(key, value, opts \\ []) when is_secret_key(key) and is_binary(value) do
+    write_opts = Keyword.put_new(opts, :timeout_ms, SecretWriter.unlock_prompt_timeout_ms())
+
     with {:ok, binary} <- fetch_security_binary() do
       [delete, add] = put_commands(key, value, opts)
       # Best-effort delete FIRST so the add re-creates the item fresh with `-A`'s
@@ -580,7 +602,7 @@ defmodule FermixCore.Setup.SecretWriter.MacOS do
       # through; the add still stores the value.
       _ = run(binary, delete, opts)
 
-      case run(binary, add, opts) do
+      case run(binary, add, write_opts) do
         {:ok, _output} -> :ok
         error -> error
       end

@@ -265,12 +265,18 @@ defmodule FermixCore.Setup.SecretStore do
       SecretWriter.usable?(verdict) ->
         write_secret(snapshot, secret, value, write_opts)
 
-      # The store cannot be used, and this exact plaintext is already what's
-      # on disk: keep it rather than failing an unrelated save (the load-time
-      # plaintext warning keeps nagging), and never push it at a locked or
-      # absent store. Only NEW or CHANGED secrets fail loud, below.
+      # The store cannot be used without help, and this exact plaintext is
+      # already what's on disk: keep it rather than raising an unlock prompt
+      # from a save that was about something else (the load-time plaintext
+      # warning keeps nagging). Only a NEW or CHANGED value goes further.
       value == old_value ->
         {:ok, snapshot}
+
+      # A locked keyring and a new value: the write raises the desktop's unlock
+      # prompt and waits for the operator; a cancelled prompt is the write's
+      # own failure, reported as such.
+      SecretWriter.attemptable?(verdict) ->
+        write_secret(snapshot, secret, value, write_opts)
 
       true ->
         {:error, SecretWriter.format_store_error(secret.key, {:verdict, verdict})}
@@ -325,7 +331,7 @@ defmodule FermixCore.Setup.SecretStore do
     verdict = Map.fetch!(verdicts, write_opts[:store])
 
     cond do
-      not SecretWriter.usable?(verdict) ->
+      not SecretWriter.attemptable?(verdict) ->
         {:error, SecretWriter.format_store_error(secret.key, {:verdict, verdict})}
 
       read_opts[:store] == write_opts[:store] ->

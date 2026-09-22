@@ -124,7 +124,45 @@ defmodule FermixCore.Setup.SecretMigrationTest do
     assert {:error, :missing_secret} = SecretWriter.get(:telegram_bot_token, store: :keyring)
   end
 
-  test "run refuses up front when the store a secret must leave cannot be read", %{home: home} do
+  test "run refuses up front when the store a secret must leave has nothing to answer", %{
+    home: home
+  } do
+    File.write!(Path.join(home, "config.toml"), """
+    [fermix_core]
+    secret_store = "file"
+
+    [fermix_channels.telegram]
+    bot_token = "@keyring"
+    """)
+
+    Application.put_env(:fermix_core, :secret_store, :file)
+
+    FermixTestSupport.SecretWriterStub.set_verdict(%{
+      store: :keyring,
+      state: :service_absent,
+      sentence: "no keyring service (Secret Service) is running on this session bus"
+    })
+
+    on_exit(fn ->
+      Application.delete_env(:fermix_core, :secret_store)
+      FermixTestSupport.SecretWriterStub.clear_verdict(:keyring)
+    end)
+
+    assert {:error, sentence} =
+             SecretMigration.run([],
+               puts: fn _ -> :ok end,
+               prompt: fn _label -> raise "nothing should be asked" end
+             )
+
+    assert sentence ==
+             "The keyring store cannot be read right now: no keyring service (Secret Service) " <>
+               "is running on this session bus."
+
+    assert File.read!(ConfigStore.path()) =~ ~s(bot_token = "@keyring")
+  end
+
+  test "a locked keyring is tried (the unlock prompt), and a cancelled prompt stops the move by name",
+       %{home: home} do
     File.write!(Path.join(home, "config.toml"), """
     [fermix_core]
     secret_store = "file"
@@ -147,12 +185,10 @@ defmodule FermixCore.Setup.SecretMigrationTest do
     end)
 
     assert {:error, sentence} =
-             SecretMigration.run([],
-               puts: fn _ -> :ok end,
-               prompt: fn _label -> raise "nothing should be asked" end
-             )
+             SecretMigration.run([], puts: fn _ -> :ok end, prompt: fn _label -> "y" end)
 
-    assert sentence == "The keyring store cannot be read right now: the login keyring is locked."
+    assert sentence =~ "TELEGRAM_BOT_TOKEN could not be resolved"
+    assert sentence =~ "the keyring is locked"
     assert File.read!(ConfigStore.path()) =~ ~s(bot_token = "@keyring")
   end
 

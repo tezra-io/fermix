@@ -221,11 +221,12 @@ defmodule FermixCore.Management.Secrets do
     end
   end
 
-  # The store's verdict, not the tool's presence: an installed `secret-tool` in
-  # front of a locked keyring is "locked", and a write is never tried on it.
+  # The store's verdict, not the tool's presence. A locked keyring is tried:
+  # the person saving from the app answers the desktop's unlock prompt, and a
+  # cancelled prompt is the write's own `locked` failure.
   defp env_store_available do
     verdict = SecretWriter.probe()
-    if SecretWriter.usable?(verdict), do: :ok, else: {:error, {:verdict, verdict}}
+    if SecretWriter.attemptable?(verdict), do: :ok, else: {:error, {:verdict, verdict}}
   end
 
   defp verify_env(key, value) do

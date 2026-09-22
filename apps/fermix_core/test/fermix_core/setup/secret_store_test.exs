@@ -407,10 +407,11 @@ defmodule FermixCore.Setup.SecretStoreTest do
     end
   end
 
-  # A stand-in for the desktop whose login keyring is locked: `secret-tool` is
-  # installed, so the tool is "available", and every read or write of it would
-  # raise the unlock dialog. Nothing in Fermix may reach it while the probe
-  # says so — the doubles below raise if it does.
+  # A stand-in for the desktop whose login keyring is locked and whose operator
+  # cancels the unlock prompt: `secret-tool` is installed, so the tool is
+  # "available"; a write raises the prompt and fails when it is cancelled; a
+  # read would raise the prompt too, and nothing in Fermix may read while the
+  # probe says locked, so the read double raises.
   defmodule LockedKeyringWriter do
     @behaviour FermixCore.Setup.SecretWriter
 
@@ -435,7 +436,7 @@ defmodule FermixCore.Setup.SecretStoreTest do
     @impl true
     def put(key, value, opts \\ []) do
       if Keyword.get(opts, :store, :keyring) == :keyring,
-        do: raise("a write to the locked keyring raises the unlock dialog"),
+        do: {:error, {:helper_failed, "secret-tool store", 1, "The unlock prompt was cancelled"}},
         else: FermixTestSupport.SecretWriterStub.put(key, value, opts)
     end
 
@@ -453,10 +454,10 @@ defmodule FermixCore.Setup.SecretStoreTest do
       :ok
     end
 
-    test "a save with a NEW secret is refused with the verdict, and nothing touches the keyring" do
+    test "a save with a NEW secret tries the write, and a cancelled unlock prompt is the failure" do
       assert {:error, sentence} = SecretStore.secure_snapshot(snapshot_with("new-token"))
-      assert sentence =~ "TELEGRAM_BOT_TOKEN could not be stored"
-      assert sentence =~ "the login keyring is locked"
+      assert sentence =~ "TELEGRAM_BOT_TOKEN could not be stored in the OS keyring"
+      assert sentence =~ "The unlock prompt was cancelled"
     end
 
     test "a save whose plaintext is unchanged keeps it instead of pushing it at the lock" do

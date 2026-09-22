@@ -137,6 +137,12 @@ defmodule FermixCore.Setup.Wizard do
   @file_store_hint "To keep secrets in a file under your Fermix home instead " <>
                      "(readable only by your account), run: fermix setup --secret-store file"
 
+  # What a locked keyring's refusal says once the write was tried: the
+  # desktop asked, and nobody unlocked it.
+  @locked_after_prompt "the login keyring is locked, and the unlock prompt was cancelled or " <>
+                         "left unanswered. Unlock it when the prompt appears, or in Passwords " <>
+                         "and Keys; fingerprint and automatic login leave it locked"
+
   # Derived from `Channels.Inventory` — the one channel table — rather than a
   # third list of the same five channels.
   @channel_enable_keys Enum.map(Inventory.channels(), &{&1, Inventory.enabled_key(&1)})
@@ -637,13 +643,31 @@ defmodule FermixCore.Setup.Wizard do
     {store_answer, answers} = Keyword.pop(answers, :secret_store)
 
     with {:ok, state, store_report} <- apply_secret_store_answer(state, store_answer),
-         :ok <- refuse_unstorable_secrets(answers) do
+         {:ok, verdict} <- refuse_unstorable_secrets(answers) do
       case {answers, store_report} do
         {[], %{} = report} -> {:ok, report}
-        _ -> commit_answers(state, answers)
+        _ -> commit_answers_or_refuse(state, answers, verdict)
       end
     end
   end
+
+  # A secret write inside the commit pipeline that fails (an unlock prompt
+  # cancelled, a helper that errored) unwinds here as the same typed refusal
+  # the pre-check gives, with the verdict's own words when the store was
+  # locked: the pipeline is a snapshot builder, so a failed write leaves the
+  # file exactly as it was.
+  defp commit_answers_or_refuse(state, answers, verdict) do
+    commit_answers(state, answers)
+  catch
+    :throw, {:secret_store_failed, key, reason} ->
+      {:error, {:secret_store_failed, key, write_failure_sentence(key, reason, verdict)}}
+  end
+
+  defp write_failure_sentence(key, _reason, %{store: :keyring, state: :locked} = verdict) do
+    refusal_sentence(key, %{verdict | sentence: @locked_after_prompt})
+  end
+
+  defp write_failure_sentence(key, reason, _verdict), do: SecretWriter.format_error(key, reason)
 
   # The store choice lands first, as its own commit, so every secret in the
   # same save is written to the store the operator just chose: the writes
@@ -678,16 +702,20 @@ defmodule FermixCore.Setup.Wizard do
   # snapshot is built, so a save either stores every secret in it or stores
   # nothing — and it carries the store's own verdict (M38 §7.2), so a locked
   # keyring is named as one rather than timed out on.
+  # A locked keyring is not refused here: someone is saving, so the write may
+  # raise the desktop's unlock prompt and wait for them (`SecretWriter.put/3`
+  # gives it the time). Every other unusable state has nothing to answer and is
+  # refused before the snapshot is built.
   defp refuse_unstorable_secrets(answers) do
     case first_secret_answer(answers) do
-      nil -> :ok
-      key -> refuse_unless_usable(key, SecretWriter.probe())
+      nil -> {:ok, nil}
+      key -> refuse_unless_attemptable(key, SecretWriter.probe())
     end
   end
 
-  defp refuse_unless_usable(key, verdict) do
-    if SecretWriter.usable?(verdict) do
-      :ok
+  defp refuse_unless_attemptable(key, verdict) do
+    if SecretWriter.attemptable?(verdict) do
+      {:ok, verdict}
     else
       {:error, {:secret_store_failed, key, refusal_sentence(key, verdict)}}
     end
@@ -900,10 +928,10 @@ defmodule FermixCore.Setup.Wizard do
     secret = SecretPaths.fetch!(key)
     verdict = SecretWriter.probe()
 
-    # The store is asked first, as every other writer asks it: a locked keyring
-    # is reported as one, and the desktop's unlock dialog is never raised by a
-    # write the daemon makes on the app's behalf.
-    with :ok <- usable_or_verdict(key, verdict),
+    # The store is asked first, as every other writer asks it: a store with
+    # nothing to answer is refused with its verdict, and a locked keyring gets
+    # the write, which raises the unlock prompt for the person saving.
+    with :ok <- attemptable_or_verdict(key, verdict),
          :ok <- SecretWriteLog.put(key, value) do
       commit_secret_reference(secret, SecretWriter.current_sentinel())
     else
@@ -912,8 +940,8 @@ defmodule FermixCore.Setup.Wizard do
     end
   end
 
-  defp usable_or_verdict(key, verdict) do
-    if SecretWriter.usable?(verdict),
+  defp attemptable_or_verdict(key, verdict) do
+    if SecretWriter.attemptable?(verdict),
       do: :ok,
       else: {:error, {:secret_store_failed, key, {:verdict, verdict}}}
   end
@@ -2471,8 +2499,10 @@ defmodule FermixCore.Setup.Wizard do
     Map.put(snapshot, :fermix_channels, Keyword.put(existing_channels, channel, config))
   end
 
-  # A writer-less host is refused by `refuse_unstorable_secrets/1` before this
-  # pipeline runs, so there is one path here and it stores the value.
+  # A store with nothing to answer is refused by `refuse_unstorable_secrets/1`
+  # before this pipeline runs, so a write here either stores the value or is
+  # the operator's own doing (a cancelled unlock prompt); a failure unwinds to
+  # `commit_answers_or_refuse/3`, which turns it into the typed refusal.
   defp secret_snapshot_value(_key, value) when value in [nil, ""], do: nil
 
   defp secret_snapshot_value(key, value) when is_atom(key) and is_binary(value),
@@ -2481,7 +2511,7 @@ defmodule FermixCore.Setup.Wizard do
   defp write_secret_sentinel!(key, value) do
     case SecretWriteLog.put(key, value) do
       :ok -> SecretWriter.current_sentinel()
-      {:error, reason} -> raise ArgumentError, SecretWriter.format_error(key, reason)
+      {:error, reason} -> throw({:secret_store_failed, key, reason})
     end
   end
 
