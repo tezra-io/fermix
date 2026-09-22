@@ -90,9 +90,9 @@ provider's wire field (`reasoning.effort` for OpenAI, Codex and SpaceXAI;
 `low` and the API default is `high`. A level above a provider's ceiling clamps.
 
 On top of the provider subset a model can carry its own ceiling in the catalog.
-The current OpenAI and Codex generations (GPT-6 Astra, GPT-5.6) reach `max` while
-`gpt-5.5`, `gpt-5.4` and `gpt-5.4-mini` top out at `xhigh`, and every Grok but
-4.6 tops out at `high`. An over-reaching config self-heals down to that model
+The current OpenAI and Codex generations (GPT-6 Astra, Sol and Luna; GPT-5.6)
+reach `max` while `gpt-5.5`, `gpt-5.4` and `gpt-5.4-mini` top out at `xhigh`, and
+every Grok before 4.6 tops out at `high`. An over-reaching config self-heals down to that model
 ceiling at route resolution instead of 400-ing at the provider. A model with no
 catalog ceiling passes through untouched, leaving Anthropic's per-model nuance to
 the provider's own 400.

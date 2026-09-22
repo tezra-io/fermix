@@ -8,6 +8,16 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Grok 4.7, Claude Opus 5.5, and GPT-6 Sol and Luna are in the model
+  pickers.** They appear in the browser setup and in the macOS app. Grok 4.7
+  goes to the head of the SpaceXAI list and becomes its default, so an
+  install that never picked a Grok model moves to it on upgrade. To stay on
+  Grok 4.6, pick it in setup. Claude Opus 5.5 joins the Anthropic list, and
+  the Anthropic default stays Claude Sonnet 4.6. GPT-6 Sol and GPT-6 Luna join
+  both the OpenAI API list and the ChatGPT-subscription (Codex) list, after
+  GPT-6 Astra, which stays the default on both. Opus 5.5 always thinks and
+  refuses forced tool use, and Fermix already sends it requests that follow
+  both rules.
 - **Venice is a provider, and every model says how private it is.** Save a
   Venice API key under Providers and Venice joins the fallback chain after
   Mistral, ahead of the local Ollama hop. The model picker lists every

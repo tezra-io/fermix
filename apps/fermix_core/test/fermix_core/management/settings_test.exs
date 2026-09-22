@@ -281,6 +281,21 @@ defmodule FermixCore.Management.SettingsTest do
       assert %{"value" => "oauth", "kind" => "choice"} = row("providers.anthropic", "auth_mode")
     end
 
+    # The macOS app draws its model picker from these options, so a catalog
+    # model reaches the app only if it is published here.
+    test "a model row offers the newest catalog models to the app" do
+      published = fn section ->
+        section |> row("default_model") |> Map.fetch!("options") |> Enum.map(& &1["value"])
+      end
+
+      assert "claude-opus-5-5" in published.("providers.anthropic")
+      assert "grok-4.7" in published.("providers.xai")
+
+      for section <- ["providers.openai", "providers.openai_codex"] do
+        assert ["gpt-6-sol", "gpt-6-luna"] -- published.(section) == []
+      end
+    end
+
     # The explanation behind the model row's info control is the descriptor's,
     # so the one provider that declares it publishes it and every other one
     # publishes null. A branch on the provider id here would be a second place
