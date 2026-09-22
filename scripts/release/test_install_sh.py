@@ -162,7 +162,9 @@ class InstallerTest(unittest.TestCase):
         self.assertEqual(calls[0], f"curl {MANIFEST_URL}")
         self.assertIn(f"curl {ORIGIN}/v{VERSION}/fermix_{VERSION}_amd64.deb", calls)
         install = self._one(calls, "apt-get ")
-        self.assertRegex(install, r"^apt-get install -y /\S+/fermix\.deb$")
+        # --no-remove: an installed package that pins the exact old engine
+        # version stops the install instead of being removed to make room.
+        self.assertRegex(install, r"^apt-get install -y --no-remove /\S+/fermix\.deb$")
         self.assertIn(f"sudo {install}", calls)
         self.assertIn(f"Done. fermix is installed at {self.root}/usr/bin/fermix.", result.stdout)
 

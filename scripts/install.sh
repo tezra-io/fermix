@@ -298,8 +298,12 @@ installed_package_version() {
 install_package() {
   file="$1"
 
+  # Nothing else on the machine is removed to make room: a package that
+  # depends on the exact engine version already installed, as the desktop
+  # companion does, stops the install with apt's own words rather than being
+  # taken away silently. dnf refuses that case by default.
   case "$PACKAGE_MANAGER" in
-    apt) run_as_root apt-get install -y "$file" ;;
+    apt) run_as_root apt-get install -y --no-remove "$file" ;;
     dnf) run_as_root dnf install -y "$file" ;;
     # The rpm carries no GPG signature of its own; the sha256 and cosign checks
     # above are what vouched for this file, so zypper is told not to stop on it.

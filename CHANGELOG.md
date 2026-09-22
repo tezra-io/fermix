@@ -205,7 +205,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   picks the package for the machine's architecture out of `releases.json`,
   checks its sha256, checks its cosign signature against the release tag when a
   `cosign` is there to ask — on a machine that already has the package, the one
-  the package bundles — and hands the file to the package manager. Run again it
+  the package bundles — and hands the file to the package manager, which is
+  told to remove nothing else to make room. Run again it
   is the updater: it installs the newer package, starts no setup and says to run
   `fermix restart`, and on the latest version it downloads nothing. An earlier
   standalone `fermix` that still comes first on `PATH` is named, with the page
