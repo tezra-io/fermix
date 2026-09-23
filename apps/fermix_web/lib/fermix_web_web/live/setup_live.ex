@@ -440,23 +440,26 @@ defmodule FermixWebWeb.SetupLive do
     previous = form.backend
     backend = normalize_transcription_backend(Map.get(params, "backend"))
 
-    if unavailable_local?(backend, previous, form.local_available?) do
-      {:noreply, refuse_unavailable_local(socket)}
+    refusal = local_switch_refusal(backend, previous, form.local_offer)
+
+    if is_binary(refusal) do
+      {:noreply, flash_error(socket, refusal)}
     else
-      form = update_transcription_selection(form, backend, Map.get(params, "model"))
+      selected = update_transcription_selection(form, backend, Map.get(params, "model"))
 
       {:noreply,
        socket
-       |> assign(:transcription_form, form)
+       |> assign(:transcription_form, selected)
        |> maybe_install_local_stt(previous, backend)}
     end
   end
 
   def handle_event("save_transcription", %{"transcription_form" => params} = root, socket) do
     form = socket.assigns.transcription_form
+    refusal = local_switch_refusal(params["backend"], form.backend, form.local_offer)
 
-    if unavailable_local?(params["backend"], form.backend, form.local_available?) do
-      {:noreply, refuse_unavailable_local(socket)}
+    if is_binary(refusal) do
+      {:noreply, flash_error(socket, refusal)}
     else
       # The single `api_key` field carries the selected backend's transcription key;
       # the wizard routes it to that backend's slot (openai/xai override the reused
@@ -482,12 +485,15 @@ defmodule FermixWebWeb.SetupLive do
   def handle_event("save_meetings", %{"meetings_form" => params} = root, socket) do
     form = socket.assigns.meetings_form
 
-    if unavailable_local?(
-         params["transcription_backend"],
-         form.transcription_backend,
-         form.local_available?
-       ) do
-      {:noreply, refuse_unavailable_local(socket)}
+    refusal =
+      local_switch_refusal(
+        params["transcription_backend"],
+        form.transcription_backend,
+        form.local_offer
+      )
+
+    if is_binary(refusal) do
+      {:noreply, flash_error(socket, refusal)}
     else
       changes =
         [
@@ -1835,7 +1841,7 @@ defmodule FermixWebWeb.SetupLive do
       backend: backend,
       model_options: options,
       model: transcription_model_for_options(Keyword.get(transcription, :model), options),
-      local_available?: LocalTranscription.available?(local_opts),
+      local_offer: LocalTranscription.offer(transcription, Atom.to_string(backend), local_opts),
       local_state: LocalTranscription.configured?(local_opts),
       openai_api_key_set: secret_set?(transcription, :openai_api_key),
       xai_api_key_set: secret_set?(transcription, :xai_api_key),
@@ -1886,16 +1892,23 @@ defmodule FermixWebWeb.SetupLive do
   # the shipped backend names rather than repeating the global default here.
   defp build_meetings_form(snapshot) do
     meetings = get_fermix_core(snapshot, :meetings)
+    in_force = normalize_meetings_backend(Keyword.get(meetings, :transcription_backend))
+
+    offer =
+      LocalTranscription.offer(
+        get_fermix_core(snapshot, :transcription),
+        in_force,
+        local_transcription_opts()
+      )
 
     %{
       enabled: Keyword.get(meetings, :enabled, false) == true,
       bot_name: safe_string(Keyword.get(meetings, :bot_name, "Fermix Notetaker")),
       announce: Keyword.get(meetings, :announce, true) == true,
       announce_message: safe_string(Keyword.get(meetings, :announce_message)),
-      transcription_backend:
-        normalize_meetings_backend(Keyword.get(meetings, :transcription_backend)),
-      backend_options: meetings_backend_options(),
-      local_available?: LocalTranscription.available?(local_transcription_opts()),
+      transcription_backend: in_force,
+      backend_options: meetings_backend_options(offer),
+      local_offer: offer,
       zoom_account_id: safe_string(Keyword.get(meetings, :zoom_account_id)),
       zoom_client_id: safe_string(Keyword.get(meetings, :zoom_client_id)),
       zoom_ws_subscription_id: safe_string(Keyword.get(meetings, :zoom_ws_subscription_id)),
@@ -1906,7 +1919,19 @@ defmodule FermixWebWeb.SetupLive do
     }
   end
 
-  defp meetings_backend_options do
+  # The blank global-default entry, then every shipped backend the notetaker can
+  # be pointed at. On-device speech is listed only where it is not hidden, the
+  # same rule the Voice notes tab follows.
+  defp meetings_backend_options(local_offer) do
+    Enum.reject(
+      meetings_backend_names(),
+      &(&1 == "local" and match?({:hidden, _sentence}, local_offer))
+    )
+  end
+
+  # Every name the picker may carry, which is also the vocabulary a submitted
+  # value is normalized against: what setup OFFERS is narrower.
+  defp meetings_backend_names do
     ["" | Enum.map(TranscriptionRegistry.backends(), fn {name, _module} -> to_string(name) end)]
   end
 
@@ -1914,7 +1939,7 @@ defmodule FermixWebWeb.SetupLive do
   # entry, so anything else off the wire is normalized back to the blank.
   defp normalize_meetings_backend(value) do
     name = safe_string(value)
-    if name in meetings_backend_options(), do: name, else: ""
+    if name in meetings_backend_names(), do: name, else: ""
   end
 
   # A browser leaves a disabled selected option (on-device speech on a machine
@@ -2088,16 +2113,18 @@ defmodule FermixWebWeb.SetupLive do
     Application.get_env(:fermix_web, :local_installer, &LocalTranscription.ensure_installed/1)
   end
 
-  # The disabled control is presentation; the handlers are the boundary. A
-  # request that switches to on-device speech on a machine with no build for it
-  # is refused in the sentence every surface uses, whatever sent it. A value
-  # already in force passes through, so the rest of a form still saves.
-  defp unavailable_local?(requested, in_force, available?) do
-    to_string(requested) == "local" and to_string(in_force) != "local" and not available?
+  # The control is presentation; the handlers are the boundary. A request that
+  # switches to on-device speech while it is not offered, or on a machine with
+  # no build for it, is refused in the sentence that says which — whatever sent
+  # it. A value already in force passes through, so the rest of a form saves.
+  defp local_switch_refusal(requested, in_force, local_offer) do
+    if to_string(requested) == "local" and to_string(in_force) != "local" do
+      refusal_sentence(local_offer)
+    end
   end
 
-  defp refuse_unavailable_local(socket),
-    do: flash_error(socket, LocalSttInstaller.error_message(:no_release_pinned))
+  defp refusal_sentence(:offer), do: nil
+  defp refusal_sentence({_listing, sentence}), do: sentence
 
   # Injectable like `:doctor_probe_opts`: whether on-device speech runs here is a
   # fact about the machine, so a LiveView test names the machine it means (its

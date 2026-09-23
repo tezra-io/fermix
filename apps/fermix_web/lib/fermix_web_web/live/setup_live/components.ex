@@ -4,7 +4,6 @@ defmodule FermixWebWeb.SetupLive.Components do
   alias FermixCore.Auth.Redaction
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.ModelCatalog
-  alias FermixCore.Transcription.Local.SidecarInstaller, as: LocalSttInstaller
 
   @local_process_consent "Runs a local process with direct access to the folders you configure."
 
@@ -1773,11 +1772,12 @@ defmodule FermixWebWeb.SetupLive.Components do
               checked={@transcription_form.backend == :deepgram}
             />
             <.transcription_backend_option
+              :if={local_listed?(@transcription_form.local_offer)}
               value="local"
               label="On-device"
-              description={local_backend_description(@transcription_form.local_available?)}
+              description={local_backend_description(@transcription_form.local_offer)}
               checked={@transcription_form.backend == :local}
-              disabled={not @transcription_form.local_available?}
+              disabled={@transcription_form.local_offer != :offer}
             />
           </div>
         </fieldset>
@@ -1822,10 +1822,10 @@ defmodule FermixWebWeb.SetupLive.Components do
             </p>
           </div>
 
-          <%!-- On a machine with no build the option card above carries the
+          <%!-- Where the choice cannot be made the option card above carries the
                reason, and nothing below would be true there. --%>
           <div
-            :if={@transcription_form.backend == :local and @transcription_form.local_available?}
+            :if={@transcription_form.backend == :local and @transcription_form.local_offer == :offer}
             class="space-y-2"
           >
             <p class="text-sm text-base-content/70">
@@ -2031,9 +2031,9 @@ defmodule FermixWebWeb.SetupLive.Components do
                 :for={option <- @meetings_form.backend_options}
                 value={option}
                 selected={option == @meetings_form.transcription_backend}
-                disabled={option == "local" and not @meetings_form.local_available?}
+                disabled={option == "local" and @meetings_form.local_offer != :offer}
               >
-                {meetings_backend_label(option, @meetings_form.local_available?)}
+                {meetings_backend_label(option, @meetings_form.local_offer)}
               </option>
             </select>
             <span class="label pt-1 text-xs text-base-content/60">
@@ -4125,9 +4125,10 @@ defmodule FermixWebWeb.SetupLive.Components do
   defp local_state_class(:ok), do: "text-sm text-success"
   defp local_state_class({:error, _reason}), do: "text-sm text-warning"
 
-  defp meetings_backend_label("", _local_available?), do: "Global default"
-  defp meetings_backend_label("local", false), do: "local (not available on this machine)"
-  defp meetings_backend_label(name, _local_available?), do: name
+  defp meetings_backend_label("", _local_offer), do: "Global default"
+  defp meetings_backend_label("local", :offer), do: "local"
+  defp meetings_backend_label("local", _local_offer), do: "local (cannot be chosen)"
+  defp meetings_backend_label(name, _local_offer), do: name
 
   # Shown under the disabled sign-in button when the sidecar is not installed.
   # If the notetaker is already enabled, opening this panel starts (or resumes)
@@ -4215,10 +4216,14 @@ defmodule FermixWebWeb.SetupLive.Components do
     "flex min-w-0 cursor-not-allowed gap-3 rounded-field border border-base-300 bg-base-100 p-3 text-sm opacity-60"
   end
 
-  defp local_backend_description(true),
+  # A choice that cannot be made carries the reason where its description goes.
+  defp local_listed?({:hidden, _sentence}), do: false
+  defp local_listed?(_local_offer), do: true
+
+  defp local_backend_description(:offer),
     do: "Parakeet on this machine · no key, no audio leaves the host"
 
-  defp local_backend_description(false), do: LocalSttInstaller.error_message(:no_release_pinned)
+  defp local_backend_description({_listing, sentence}), do: sentence
 
   defp step_marker_class(tab, active_tab, report) do
     base = "grid size-6 shrink-0 place-items-center rounded-full text-xs font-semibold"

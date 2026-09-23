@@ -82,11 +82,19 @@ defmodule FermixCore.Management.Capabilities do
     end
   end
 
+  # Setup does not offer on-device speech yet, and an install nobody can then
+  # select would spend a long download on a backend that cannot be chosen, so
+  # the job refuses in the same sentence the panes show.
   defp install_run("local_stt", opts) do
     install = Keyword.get(opts, :install, &LocalTranscription.ensure_installed/1)
+    offered? = Keyword.get(opts, :offered?, LocalTranscription.offered?())
 
     fn _job_id, report ->
-      done("local_stt", install.(progress: local_progress(report)))
+      if offered? do
+        done("local_stt", install.(progress: local_progress(report)))
+      else
+        {:error, {:unavailable, LocalTranscription.unoffered_message()}}
+      end
     end
   end
 

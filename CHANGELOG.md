@@ -227,16 +227,17 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   its certificate the way the binaries do, and after publishing the release rail
   runs the advertised installer against the release it just published, on all
   four package targets.
-- **On-device speech runs on Linux.** Choosing On-device for voice notes on a
-  Linux machine (x86_64 or arm64) now works as it does on an Apple Silicon Mac:
-  Fermix downloads the speech engine and its model, checks both against the
-  checksums this build pins, and transcribes without the audio leaving the
-  machine. Every platform's engine now comes from fermix-stt 0.1.1, built and
-  published by its release workflow; a Mac that already has the engine keeps
-  it. The Linux engine runs on Ubuntu 22.04, Debian 12, Fedora 36, openSUSE Leap
-  15.6 and newer. It does not start on RHEL 9 or its rebuilds, whose C++ runtime
-  is older than it needs, nor on older distributions. Intel Macs still have no
-  engine, and setup says so.
+- **The on-device speech engine is built for Linux, and setup does not offer it
+  yet.** The `local` transcription backend now has a pinned, checksum-verified
+  engine for Linux (x86_64 and arm64) as well as Apple Silicon Macs, all three
+  from fermix-stt 0.1.1. Choosing it downloads a speech model on the spot, and
+  that flow has not been proven end to end, so no picker lists it: not the
+  browser setup's Voice notes tab, not either app, not the meeting notetaker's
+  own backend choice, and the macOS app's install for it refuses. A
+  configuration that already names it keeps transcribing on-device and is shown
+  the choice, disabled, saying it cannot be chosen. `local_offered = true` under
+  `[fermix_core.transcription]` puts it back, which is how the flow is walked
+  before it ships.
 - **A keyring that cannot be used is a verdict, not a hang, and the file store
   is the other choice.** On Linux the login keyring stays locked after a
   fingerprint or automatic login (it is encrypted with the password), and
@@ -540,10 +541,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   for, choosing On-device for voice notes printed a developer instruction about
   building the engine from source, and the Integrations page repeated it under
   the Meeting Notetaker card, where it read as the notetaker's own error. The
-  choice is now listed but disabled, with the reason beside it in the browser
-  setup and on hover in the macOS app, and choosing it anyway, in the browser
-  setup or either app, is refused with that reason; the Integrations page no
-  longer shows it. `fermix doctor` says on-device speech isn't available on this
+  Integrations page no longer shows that result at all, and wherever the choice
+  is still shown it carries the reason it cannot be chosen — beside it in the
+  browser setup, on hover in the macOS app — and asking for it anyway is refused
+  in that sentence. `fermix doctor` says on-device speech isn't available on this
   machine instead of naming an install, and a voice note sent while it is
   selected gets a reply saying to choose another backend rather than to try
   again. The choice is labelled "On this device", not "On this Mac".

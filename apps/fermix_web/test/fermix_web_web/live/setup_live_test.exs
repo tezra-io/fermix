@@ -18,6 +18,7 @@ defmodule FermixWebWeb.SetupLiveTest do
   alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.RestartState
+  alias FermixCore.Transcription.Local, as: LocalTranscription
   alias FermixCore.Transcription.Local.ModelStore, as: LocalModelStore
   alias FermixCore.Transcription.Local.SidecarInstaller, as: LocalSttInstaller
   alias FermixCore.Transcription.Registry, as: TranscriptionRegistry
@@ -2116,12 +2117,15 @@ defmodule FermixWebWeb.SetupLiveTest do
   describe "Transcription form — on-device backend (M21 2b)" do
     # A release is pinned, so the real installer would download; every test here
     # drives the UI, not the network, so default the seam to the fail-loud refusal
-    # (tests that assert a different outcome override it).
+    # (tests that assert a different outcome override it). Setup does not offer
+    # the backend in a shipped build, so these cases say so: they are about the
+    # flow behind `local_offered`, and the cases below cover the shipped posture.
     setup do
       Application.put_env(:fermix_web, :local_installer, fn _opts ->
         {:error, :no_release_pinned}
       end)
 
+      offer_local()
       :ok
     end
 
@@ -2203,7 +2207,7 @@ defmodule FermixWebWeb.SetupLiveTest do
     test "an on-device choice already in force on such a machine names that, not an install",
          %{conn: conn} do
       Application.put_env(:fermix_web, :local_transcription_opts, releases: %{})
-      Application.put_env(:fermix_core, :transcription, backend: "local", max_file_mb: 20)
+      offer_local(backend: "local")
 
       {:ok, view, _html} = live(conn, "/setup")
 
@@ -2318,11 +2322,84 @@ defmodule FermixWebWeb.SetupLiveTest do
     end
   end
 
+  # The shipped posture: picking on-device speech downloads a model on the spot
+  # and that flow is unproven, so nothing offers the choice.
+  describe "Transcription form — on-device speech a shipped build does not offer" do
+    test "neither picker lists it", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      html = view |> element("button[phx-value-tab=\"transcription\"]") |> render_click()
+
+      refute html =~ ~s(value="local")
+      refute has_element?(view, ~s(input[name="transcription_form[backend]"][value="local"]))
+
+      open_meetings_config(view)
+
+      refute has_element?(
+               view,
+               ~s(select[name="meetings_form[transcription_backend]"] option[value="local"])
+             )
+    end
+
+    test "a hand-made request for it is refused in the reason's own words", %{conn: conn} do
+      owner = self()
+
+      Application.put_env(:fermix_web, :local_installer, fn _opts ->
+        send(owner, :install_started)
+        :ok
+      end)
+
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element("button[phx-value-tab=\"transcription\"]") |> render_click()
+
+      render_change(view, "transcription_changed", %{
+        "transcription_form" => %{"backend" => "local"}
+      })
+
+      render_async(view)
+      refute_received :install_started
+      assert has_element?(view, ~s([role="alert"]), LocalTranscription.unoffered_message())
+
+      render_submit(view, "save_transcription", %{"transcription_form" => %{"backend" => "local"}})
+
+      assert Keyword.get(Application.get_env(:fermix_core, :transcription, []), :backend) ==
+               "openai"
+    end
+
+    # A home that already selects it keeps transcribing on-device, so the pane
+    # shows what is in force rather than a picker with nothing selected.
+    test "a configuration already naming it shows it, disabled, with that reason", %{conn: conn} do
+      Application.put_env(:fermix_core, :transcription, backend: "local", max_file_mb: 20)
+
+      {:ok, view, _html} = live(conn, "/setup")
+
+      html = view |> element("button[phx-value-tab=\"transcription\"]") |> render_click()
+
+      assert has_element?(
+               view,
+               ~s(input[name="transcription_form[backend]"][value="local"][disabled][checked])
+             )
+
+      assert html =~ escaped(LocalTranscription.unoffered_message())
+      refute html =~ "Parakeet on this machine"
+    end
+  end
+
   # The meetings config lives in a modal opened from the Plugins-tab card, not a
   # tab. Navigate there and open it, returning the rendered html.
   defp open_meetings_config(view) do
     view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
     view |> element(~s|button[phx-click="open_meetings_config"]|) |> render_click()
+  end
+
+  # Puts the on-device backend back in setup's pickers, which a shipped build
+  # does not do: `local_offered` is how its whole flow is walked before it ships.
+  defp offer_local(transcription \\ []) do
+    Application.put_env(
+      :fermix_core,
+      :transcription,
+      Keyword.merge([backend: "openai", max_file_mb: 20, local_offered: true], transcription)
+    )
   end
 
   # The meetings form as a browser submits it, with the transcription choice given.
@@ -2387,10 +2464,11 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert html =~ "meetings_form[zoom_client_secret]"
       assert html =~ "meetings_form[zoom_ws_subscription_id]"
 
-      # Blank = the Transcription tab's choice; every shipped backend is offered.
+      # Blank = the Voice notes choice; every backend setup offers is listed.
       assert html =~ "Global default"
+      refute html =~ ~s(value="local")
 
-      for {name, _module} <- TranscriptionRegistry.backends() do
+      for {name, _module} <- TranscriptionRegistry.backends(), name != :local do
         assert html =~ ~s(value="#{name}")
       end
 
@@ -2602,6 +2680,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       conn: conn
     } do
       Application.put_env(:fermix_web, :local_transcription_opts, releases: %{})
+      offer_local()
 
       {:ok, view, _html} = live(conn, "/setup")
       open_meetings_config(view)
@@ -2643,6 +2722,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       conn: conn
     } do
       Application.put_env(:fermix_web, :local_transcription_opts, releases: %{})
+      offer_local()
 
       {:ok, view, _html} = live(conn, "/setup")
       open_meetings_config(view)

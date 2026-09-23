@@ -14,6 +14,7 @@ defmodule FermixCore.Management.InstallsTest do
   alias FermixCore.Management.ComputerUse
   alias FermixCore.Management.Jobs
   alias FermixCore.Management.Meetings
+  alias FermixCore.Transcription.Local, as: LocalTranscription
   alias FermixCore.Transcription.Local.SidecarInstaller, as: SttInstaller
 
   setup context do
@@ -104,13 +105,35 @@ defmodule FermixCore.Management.InstallsTest do
       install = fn _opts -> {:error, :no_release_pinned} end
 
       assert {:ok, started} =
-               Capabilities.install_start("local_stt", jobs: jobs, install: install)
+               Capabilities.install_start("local_stt",
+                 jobs: jobs,
+                 install: install,
+                 offered?: true
+               )
 
       assert {:ok, done} = terminal(jobs, started["job_id"])
 
       assert done["status"] == "failed"
 
       assert done["failure"]["sentence"] == SttInstaller.error_message(:no_release_pinned)
+    end
+
+    # The macOS app draws the install row whatever setup offers, so the job is
+    # the gate: a long download for a backend nobody can select is refused.
+    test "an on-device speech install is refused while setup does not offer it", %{jobs: jobs} do
+      install = fn _opts -> flunk("installed a backend setup does not offer") end
+
+      assert {:ok, started} =
+               Capabilities.install_start("local_stt",
+                 jobs: jobs,
+                 install: install,
+                 offered?: false
+               )
+
+      assert {:ok, done} = terminal(jobs, started["job_id"])
+
+      assert done["status"] == "failed"
+      assert done["failure"]["sentence"] == LocalTranscription.unoffered_message()
     end
 
     test "the on-device speech install reports its two stages as phases", %{jobs: jobs} do
@@ -133,7 +156,11 @@ defmodule FermixCore.Management.InstallsTest do
       end
 
       assert {:ok, started} =
-               Capabilities.install_start("local_stt", jobs: jobs, install: install)
+               Capabilities.install_start("local_stt",
+                 jobs: jobs,
+                 install: install,
+                 offered?: true
+               )
 
       assert_receive {:staged, pid}
       assert {:ok, first} = Jobs.get(started["job_id"], jobs)

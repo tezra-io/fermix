@@ -24,7 +24,6 @@ defmodule FermixCore.Management.Settings.Voice do
   alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Transcription.Local, as: LocalTranscription
-  alias FermixCore.Transcription.Local.SidecarInstaller, as: SttInstaller
   alias FermixCore.Transcription.Registry, as: TranscriptionRegistry
 
   @sections [
@@ -103,18 +102,22 @@ defmodule FermixCore.Management.Settings.Voice do
     block = Source.core(snapshot, :transcription)
     backend = Source.string(block, :backend, "openai")
     restart = Row.restart?(:transcription)
+    options = backend_options(block, backend, opts)
 
-    transcription_choice_rows(block, backend, backend_options(opts), restart) ++
+    transcription_choice_rows(block, backend, options, restart) ++
       transcription_key_row(snapshot, backend, restart)
   end
 
   def rows("meetings", snapshot, opts) do
     block = Source.core(snapshot, :meetings)
+    transcription = Source.core(snapshot, :transcription)
+    in_force = Source.string(block, :transcription_backend)
     restart = Row.restart?(:meetings)
+    options = backend_options(transcription, in_force, opts)
 
     meetings_bot_rows(block, restart) ++
       meetings_zoom_rows(block, snapshot, restart) ++
-      [meetings_backend_row(block, backend_options(opts), restart)]
+      [meetings_backend_row(block, options, restart)]
   end
 
   defp realtime_switch_rows(config, restart) do
@@ -348,22 +351,22 @@ defmodule FermixCore.Management.Settings.Voice do
     Enum.map(TranscriptionRegistry.backends(), fn {name, _module} -> Atom.to_string(name) end)
   end
 
-  # Every shipped backend. On-device speech is offered on every machine and can
-  # be chosen only where this build has a sidecar for it, so a pane says why
-  # rather than hiding the choice, and `settings.apply` refuses the disabled one.
-  defp backend_options(opts) do
-    local_available? = LocalTranscription.available?(opts)
-    Enum.map(backend_names(), &backend_option(&1, local_available?))
+  # Every shipped backend setup offers, plus the one a configuration already
+  # names. On-device speech is not offered yet, so a pane lists it only where it
+  # is in force, disabled with the reason it cannot be chosen — and
+  # `settings.apply` refuses a disabled option in that same sentence.
+  defp backend_options(transcription, in_force, opts) do
+    offer = LocalTranscription.offer(transcription, in_force, opts)
+
+    backend_names()
+    |> Enum.reject(&(&1 == "local" and match?({:hidden, _sentence}, offer)))
+    |> Enum.map(&backend_option(&1, offer))
   end
 
-  defp backend_option("local", false) do
-    Row.option("local", backend_label("local"),
-      disabled: true,
-      hint: SttInstaller.error_message(:no_release_pinned)
-    )
-  end
+  defp backend_option("local", {:shown, sentence}),
+    do: Row.option("local", backend_label("local"), disabled: true, hint: sentence)
 
-  defp backend_option(backend, _local_available?), do: Row.option(backend, backend_label(backend))
+  defp backend_option(backend, _offer), do: Row.option(backend, backend_label(backend))
 
   defp backend_label(backend), do: Map.fetch!(@backend_labels, backend)
 

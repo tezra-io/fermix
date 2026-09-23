@@ -1480,7 +1480,11 @@ defmodule FermixCore.Setup.ConfigStore do
   # Each backend has its own optional API-key slot (secure-on-save): openai/xai
   # keys OVERRIDE the reused chat-provider key; deepgram has no chat provider to
   # reuse, so its key is the only source.
-  @transcription_keys ~w(backend model openai_api_key xai_api_key deepgram_api_key max_file_mb)
+  # `local_offered` is the one switch that puts the on-device backend back in
+  # setup's pickers while its download-on-select flow is proven; it is absent
+  # from a shipped configuration and defaults to false.
+  @transcription_keys ~w(backend model openai_api_key xai_api_key deepgram_api_key max_file_mb
+                         local_offered)
 
   defp normalize_transcription(nil), do: []
 
@@ -1508,6 +1512,10 @@ defmodule FermixCore.Setup.ConfigStore do
     |> put_if_present(
       :max_file_mb,
       normalize_transcription_max_file_mb(lookup(config, "max_file_mb", :max_file_mb))
+    )
+    |> put_if_present(
+      :local_offered,
+      normalize_boolean(lookup(config, "local_offered", :local_offered))
     )
   end
 

@@ -35,21 +35,28 @@ never leaves the machine and there is no key to configure. What it needs instead
 is an installed binary AND an installed model, and it reports which half is
 missing rather than degrading to a hosted backend.
 
-Installing is a deliberate act, done from the Voice notes tab when `local` is
-selected. Writing `backend = "local"` into `config.toml` by hand installs
-nothing — every call then fails naming the missing half, and boot never
-downloads. A `fermix-stt` release is pinned for `macos-aarch64`, `linux-x86_64`
-and `linux-aarch64` — binary and model checksums both — so on those machines
-enabling downloads and verifies both halves on-device. Any other machine (an
-Intel Mac, for one: the release builds nothing for it) has no on-device speech
-rather than an unverified binary. Setup still lists `local` there but it cannot
-be chosen (the browser setup says why beside the option, the macOS app on
-hover), and choosing it anyway in the browser setup or either app is refused
-with that reason (the `fermix setup --transcription-*` flags still write it).
-Wherever it is in force on such a machine, `fermix doctor` says it is not
-available here, and a voice note sent while it is selected gets a reply saying
-to choose another backend. None of those point at an install, because no
-install fixes it.
+**Setup does not offer this backend.** Picking it downloads a speech model on
+the spot, and that flow has never been walked end to end, so no picker lists
+`local`: not the Voice notes tab, not either app, not the notetaker's own
+backend choice. A configuration that already names it keeps transcribing
+on-device and is shown in the pickers, disabled, saying it cannot be chosen; a
+request that asks for it anyway is refused in that same sentence, and the
+install the macOS app's Voice pane offers refuses too. Setting `local_offered =
+true` under `[fermix_core.transcription]` puts the choice back, which is how the
+whole flow is walked before it ships.
+
+Behind that, the backend is whole. Installing is a deliberate act, done from the
+Voice notes tab when `local` is selected. Writing `backend = "local"` into
+`config.toml` by hand installs nothing — every call then fails naming the
+missing half, and boot never downloads. A `fermix-stt` release is pinned for
+`macos-aarch64`, `linux-x86_64` and `linux-aarch64` — binary and model checksums
+both. Any other machine (an Intel Mac, for one: the release builds nothing for
+it) has no on-device speech rather than an unverified binary, and the Linux
+build needs a recent C library: on an older distribution it installs and then
+cannot start. Wherever it is in force on a machine that cannot run it, `fermix
+doctor` says it is not available here, and a voice note sent while it is
+selected gets a reply saying to choose another backend. None of those point at
+an install, because no install fixes it.
 
 ## Files versus live streams
 

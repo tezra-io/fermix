@@ -23,6 +23,7 @@ defmodule FermixCore.Management.SettingsTest do
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.RestartState
   alias FermixCore.Setup.SecretWriter
+  alias FermixCore.Transcription.Local, as: LocalTranscription
   alias FermixCore.Transcription.Local.SidecarInstaller, as: SttInstaller
   alias FermixTestSupport.SafeRm
   alias FermixTestSupport.SecretWriterStub
@@ -343,11 +344,38 @@ defmodule FermixCore.Management.SettingsTest do
       {"meetings", "meetings_transcription_backend"}
     ]
 
-    test "is offered by name on a machine this build has a sidecar for" do
-      pinned = [releases: FermixTestSupport.SttPins.for_this_host()]
+    # The shipped posture: picking on-device downloads a speech model on the
+    # spot, a flow that has not been proven, so no pane lists the choice.
+    test "is not published at all while this build does not offer it" do
+      put_transcription(backend: "openai")
 
       for {section, key} <- @backend_rows do
-        option = local_option(section, key, pinned)
+        refute local_option(section, key, pinned()),
+               "#{section}/#{key} publishes a choice setup does not offer"
+      end
+    end
+
+    # A configuration that already names it keeps transcribing on-device, so the
+    # pane shows what is in force rather than a picker with nothing selected.
+    test "is shown, disabled, where a configuration already names it" do
+      put_transcription(backend: "local")
+      put_meetings(transcription_backend: "local")
+
+      for {section, key} <- @backend_rows do
+        option = local_option(section, key, pinned())
+
+        assert option["label"] == "On this device"
+        assert option["disabled"] == true
+        assert option["hint"] == LocalTranscription.unoffered_message()
+        assert Copy.violations(option["hint"], :prose) == []
+      end
+    end
+
+    test "is offered by name once the build offers it, on a machine with a sidecar" do
+      put_transcription(backend: "openai", local_offered: true)
+
+      for {section, key} <- @backend_rows do
+        option = local_option(section, key, pinned())
 
         assert option["label"] == "On this device"
         assert option["disabled"] == false
@@ -355,7 +383,9 @@ defmodule FermixCore.Management.SettingsTest do
       end
     end
 
-    test "is disabled, with the reason, on a machine with no sidecar" do
+    test "is disabled, with the machine's own reason, where it is offered but has no sidecar" do
+      put_transcription(backend: "openai", local_offered: true)
+
       for {section, key} <- @backend_rows do
         option = local_option(section, key, releases: %{})
 
@@ -366,13 +396,24 @@ defmodule FermixCore.Management.SettingsTest do
     end
 
     test "the write refuses a disabled option in the reason's own words" do
-      row = backend_row("transcription", "transcription_backend", releases: %{})
+      put_transcription(backend: "local")
+      row = backend_row("transcription", "transcription_backend", pinned())
 
       assert AnswerMap.answer("transcription", row, "local") ==
-               {:error, SttInstaller.error_message(:no_release_pinned)}
+               {:error, LocalTranscription.unoffered_message()}
 
       assert AnswerMap.answer("transcription", row, "deepgram") ==
                {:ok, {:transcription_backend, "deepgram"}}
+    end
+
+    # Nothing published, nothing writable: the generic refusal is what a client
+    # asking for an unlisted value gets.
+    test "the write refuses it outright where it is not published" do
+      put_transcription(backend: "openai")
+      row = backend_row("transcription", "transcription_backend", pinned())
+
+      assert AnswerMap.answer("transcription", row, "local") ==
+               {:error, "This setting takes one of its published values."}
     end
   end
 
@@ -1090,6 +1131,13 @@ defmodule FermixCore.Management.SettingsTest do
     |> Map.fetch!("options")
     |> Enum.find(&(&1["value"] == "local"))
   end
+
+  # A machine this build pins a sidecar for, whichever one the suite runs on.
+  defp pinned, do: [releases: FermixTestSupport.SttPins.for_this_host()]
+
+  defp put_transcription(config), do: Application.put_env(:fermix_core, :transcription, config)
+
+  defp put_meetings(config), do: Application.put_env(:fermix_core, :meetings, config)
 
   # Every §4.4 name state at once: stored and allowed, allowed with no source,
   # allowed through a helper, allowed through an alias, and two stored names no

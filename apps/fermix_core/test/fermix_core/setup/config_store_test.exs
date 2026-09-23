@@ -948,7 +948,8 @@ defmodule FermixCore.Setup.ConfigStoreTest do
           openai_api_key: "@keyring",
           xai_api_key: "@keyring",
           deepgram_api_key: "@keyring",
-          max_file_mb: 25
+          max_file_mb: 25,
+          local_offered: true
         ]
       ],
       fermix_channels: [],
@@ -962,6 +963,8 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert contents =~ ~s(backend = "deepgram")
     assert contents =~ ~s(model = "nova-3")
     assert contents =~ "max_file_mb = 25"
+    # The one switch that puts on-device speech back in setup's pickers.
+    assert contents =~ "local_offered = true"
     # Each per-backend keyring sentinel round-trips (never plaintext).
     assert contents =~ ~s(openai_api_key = "@keyring")
     assert contents =~ ~s(xai_api_key = "@keyring")
@@ -976,6 +979,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert Keyword.get(transcription, :xai_api_key) == "@keyring"
     assert Keyword.get(transcription, :deepgram_api_key) == "@keyring"
     assert Keyword.get(transcription, :max_file_mb) == 25
+    assert Keyword.get(transcription, :local_offered) == true
   end
 
   test "load refuses to boot on an unknown transcription key (M21)" do

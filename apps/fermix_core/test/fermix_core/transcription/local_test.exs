@@ -63,6 +63,35 @@ defmodule FermixCore.Transcription.LocalTest do
     end
   end
 
+  # Setup does not offer the backend yet: the model download that a selection
+  # starts has never been walked end to end, so the choice is listed only where
+  # a configuration already names it.
+  describe "offer/3" do
+    test "is hidden, with the sentence a door answers with, by default" do
+      assert Local.offer([], "openai", pinned()) ==
+               {:hidden, Local.unoffered_message()}
+    end
+
+    test "is shown and refused where a configuration already names it" do
+      assert Local.offer([], "local", pinned()) == {:shown, Local.unoffered_message()}
+    end
+
+    test "is offered once the build offers it and the machine has a sidecar" do
+      assert Local.offer([local_offered: true], "openai", pinned()) == :offer
+    end
+
+    test "offered on a machine with no sidecar is shown with that reason instead" do
+      assert Local.offer([local_offered: true], "openai", releases: %{}) ==
+               {:shown, SidecarInstaller.error_message(:no_release_pinned)}
+    end
+
+    test "offered? reads the one setting that puts it back" do
+      refute Local.offered?([])
+      refute Local.offered?(local_offered: false)
+      assert Local.offered?(local_offered: true)
+    end
+  end
+
   describe "configured?/1" do
     test "reports a missing sidecar distinctly from a missing model", %{home: home} do
       assert Local.configured?(pinned()) == {:error, :sidecar_not_installed}
