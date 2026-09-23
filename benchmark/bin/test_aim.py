@@ -84,39 +84,63 @@ def llm_row(*, at_ms: float, provider: str, model: str, effort: str | None = Non
 
 # --- fixture strings, copied from the daemon sources ------------------------
 
-# apps/fermix_core/lib/fermix_core/computer_use/session.ex:920 area (screenshot_summary
-# dims) + :981 (cursor echo) + the trailing untrusted-image notice.
-FULL_SHOT_OUTPUT = ("screenshot 1931x543 (display 0). Cursor at (417,152). "
+# `computer_use/session.ex` `screenshot_summary/2`: `image_lead/2` (the image's own
+# identity and the one rule), then `cursor_suffix/1`, then the untrusted notice.
+FULL_SHOT_OUTPUT = ("Image 7c1e-12, 1931x543 (display 0). Coordinates are pixels in this exact "
+                    "image: pass observation_id \"7c1e-12\" with any click, move, drag, scroll "
+                    "or inspect. Cursor at (417,152). "
                     "This is what is really on screen — read it and act on what it shows.")
-# session.ex:993 — the full-screen equivalent, present only on a magnified crop.
-CROP_SHOT_OUTPUT = ("screenshot 1355x959 (display 0). Cursor at (700,400)"
-                    " = (830,495) on the full screen.")
-# session.ex:965 — the delivery marker.
-NOT_DELIVERED_OUTPUT = (" NOT delivered at (418,152) — the pointer never reached that point, so this "
-                        "action did nothing. Re-send the SAME action with the SAME region and coordinates.")
-# session.ex:926-927 — an empty marks table is a loud absence.
-NO_MARKS_OUTPUT = ("screenshot 1931x543 (display 0). 0 accessibility marks — AX exposed no "
+# A magnified crop: it names its own image like any other, and its cursor echo is
+# a point in THAT image — there is no second grid in the sentence any more.
+CROP_SHOT_OUTPUT = ("Image 7c1e-13, 1355x959 (display 0). Coordinates are pixels in this exact "
+                    "image: pass observation_id \"7c1e-13\" with any click, move, drag, scroll "
+                    "or inspect. Cursor at (700,400).")
+# `session.ex` `delivery_suffix/1` — the aim marker. It reports what was SEEN and
+# never a verdict on the input: a human who moved the mouse after a click that
+# landed leaves the same trace.
+NOT_DELIVERED_OUTPUT = (" Aim NOT confirmed at (418,152) — the check's cursor is elsewhere, which "
+                        "looks the same whether the input missed or someone moved the mouse after "
+                        "it landed. Read this image: repeat the action only if it shows the effect "
+                        "is missing, and then with the SAME coordinates, in the image named above.")
+# `session.ex` `marks_suffix/1` — an empty marks table is a loud absence.
+NO_MARKS_OUTPUT = ("Image 7c1e-12, 1931x543 (display 0). 0 accessibility marks — AX exposed no "
                    "click targets in this view.")
-MARKS_OUTPUT = ("screenshot 1931x543 (display 0). 12 numbered mark(s) badged on the image — "
-                "act on one by sending `mark: <id>` instead of x,y:\nmark 1: button \"Anchor\" at (300,300)")
+# `session.ex` `marks_suffix/1` + `mark_line/1`.
+MARKS_OUTPUT = ("Image 7c1e-12, 1931x543 (display 0). 12 numbered mark(s) badged on the image — "
+                "act on one by sending `mark: <id>` instead of x,y, or `press` for the control "
+                "behind it:\nmark 1: AXButton \"Anchor\" at (300,300)")
 
-# apps/fermix_core/lib/fermix_core/tools/computer_use.ex — the five typed refusals:
-# region mismatch :410, ambiguous :454, no marks :428, stale marks :433, unknown mark :439.
-REGION_MISMATCH_OUTPUT = ('your latest coordinate source uses region {"x": 100, "y": 50, "w": 482, "h": 341}, '
-                          "so the x,y you just sent would be read in full-screen space and miss. Re-send this "
-                          'action with `"region": {"x": 100, "y": 50, "w": 482, "h": 341}` and the coordinates '
-                          "from that source — or take a fresh full `screenshot` first and use full-screen coordinates.")
-AMBIGUOUS_OUTPUT = ('ambiguous coordinates: (300,200) fits both this 1355x959 magnified crop and the on-screen '
-                    'region box {"x": 100, "y": 50, "w": 482, "h": 341}. Your latest view is the CROP. If you '
-                    'meant pixels of that magnified image, re-send the SAME action with `"confirm_grid": true`. '
-                    "If you read the full screen instead, convert — subtract the region origin, then multiply "
-                    "by 2.81: that lands at (562,421) in this crop.")
-NO_MARKS_REFUSAL = ("no live marks — take a fresh `screenshot` with `\"marks\": true` and use the mark "
-                    "numbers it returns.")
-STALE_MARKS_REFUSAL = ("the marks were taken on a view you have since left, so their numbers no longer point "
-                       "where the badges showed. Take a fresh `screenshot` with `\"marks\": true` and use ITS "
-                       "mark numbers.")
-UNKNOWN_MARK_REFUSAL = ("mark 19 does not exist — the latest marks screenshot has 12 mark(s). Use one of its "
+# `tools/computer_use.ex` — `refusal_message/1` for this side's own gates and
+# `action_error_message/1` for the helper's addressing and geometry codes.
+OBSERVATION_REQUIRED_REFUSAL = ("this action was not sent: it names no `observation_id`, so there is no reply "
+                                "its target belongs to — a coordinate and an `element_ref` alike mean something "
+                                "only in the image or listing they were read from. Take a `screenshot` (or "
+                                "`elements`, or `windows`), then send this action again with the "
+                                "`observation_id` that reply names and the target you read in it.")
+EXPIRED_OBSERVATION_REFUSAL = ("this action was not sent: the image its `observation_id` names is no longer one "
+                               "the computer-use helper holds — it has been replaced by newer ones, it aged out, "
+                               "or the display it was taken from moved or changed size. Take a fresh "
+                               "`screenshot`, read the coordinates again in the image IT names, and send the "
+                               "action with that id. Do not re-send the old coordinates.")
+OUTSIDE_OBSERVATION_REFUSAL = ("this action was not sent: the point lies outside the image its `observation_id` "
+                               "names, so there is nowhere on that image to put it — it was most likely read in "
+                               "a different image. Take a `screenshot`, read the point again in the image it "
+                               "names, and send the action with that id.")
+# Deliberately does NOT open "this action was not sent": it arrives on both sides
+# of dispatch, and claiming either would be a lie on one of them.
+GEOMETRY_MISMATCH_REFUSAL = ("the computer-use helper's measurements of this display do not match the picture "
+                             "it captured, so any point it mapped would land somewhere else on screen. This is "
+                             "not something you did wrong and not something a different image fixes. Do not "
+                             "retry. Tell the user the computer-use helper is reading this display's geometry "
+                             "wrongly, and give them both sizes below.")
+AMBIGUOUS_OUTPUT = ('ambiguous coordinates: (300,200) fits both image 7c1e-13, which is a 1355x959 magnified '
+                    'crop, and the on-screen region box {"x": 100, "y": 50, "w": 482, "h": 341} that crop was '
+                    'taken from. If you meant pixels of image 7c1e-13, re-send the SAME action with '
+                    '`"confirm_grid": true`. If you read the full screen instead, convert — subtract the region '
+                    "origin, then multiply by 2.81: that lands at (562,421) in image 7c1e-13.")
+NO_MARKS_REFUSAL = ("the image you named carries no marks — take a `screenshot` with `\"marks\": true` and "
+                    "send the mark numbers it returns with THAT image's `observation_id`.")
+UNKNOWN_MARK_REFUSAL = ("mark 19 does not exist — the image you named has 12 mark(s). Use one of its "
                         "numbers, or take a fresh `screenshot` with `\"marks\": true`.")
 
 # `Telemetry.preview/1` writes `input` with Elixir's `inspect/2`, not JSON.
@@ -538,15 +562,14 @@ def _sample(t: float, focused: bool, visible: bool = True,
 def test_screenshot_dims_and_cursor_echo_parse_from_the_real_summary():
     assert traces.parse_sent_dims(FULL_SHOT_OUTPUT) == (1931, 543)
     assert traces.parse_cursor_echo(FULL_SHOT_OUTPUT) == (417, 152)
-    assert traces.parse_fullscreen_echo(FULL_SHOT_OUTPUT) is None
+    assert traces.parse_sent_dims(CROP_SHOT_OUTPUT) == (1355, 959)
 
 
-def test_full_sent_echo_uses_the_right_half_for_each_space():
-    # A full capture's bare echo IS the full-sent grid; a crop's is not.
+def test_full_sent_echo_answers_only_where_the_summary_is_that_grid():
+    # A full capture's bare echo IS the full-sent grid; a crop's is not, and the
+    # summary no longer converts it, so a crop answers nothing rather than a guess.
     assert traces.full_sent_echo(FULL_SHOT_OUTPUT, had_region=False) == (417, 152)
-    assert traces.full_sent_echo(CROP_SHOT_OUTPUT, had_region=True) == (830, 495)
-    assert traces.full_sent_echo("screenshot 100x100 (display 0). Cursor at (5,5).",
-                                 had_region=True) is None
+    assert traces.full_sent_echo(CROP_SHOT_OUTPUT, had_region=True) is None
 
 
 def test_not_delivered_marker_parses():
@@ -556,11 +579,25 @@ def test_not_delivered_marker_parses():
 
 def test_every_typed_refusal_is_recognised():
     assert traces.classify_refusal(AMBIGUOUS_OUTPUT) == "ambiguous_coordinates"
-    assert traces.classify_refusal(REGION_MISMATCH_OUTPUT) == "region_mismatch"
+    assert traces.classify_refusal(OBSERVATION_REQUIRED_REFUSAL) == "observation_required"
+    assert traces.classify_refusal(EXPIRED_OBSERVATION_REFUSAL) == "unaddressable_observation"
+    assert traces.classify_refusal(OUTSIDE_OBSERVATION_REFUSAL) == "point_outside_observation"
+    assert traces.classify_refusal(GEOMETRY_MISMATCH_REFUSAL) == "capture_geometry_mismatch"
     assert traces.classify_refusal(NO_MARKS_REFUSAL) == "no_marks"
-    assert traces.classify_refusal(STALE_MARKS_REFUSAL) == "stale_marks"
     assert traces.classify_refusal(UNKNOWN_MARK_REFUSAL) == "unknown_mark"
     assert traces.classify_refusal("action failed: boom") is None
+
+
+def test_no_refusal_marker_is_left_without_a_fixture():
+    """Derived from the live marker table, never a hand-list beside it: a marker
+    with no fixture is one whose anchor can stop matching the daemon's wording
+    without a single test going red, which is how the aim marker spent a slice
+    reading a sentence the daemon had already reworded."""
+    fixtures = [AMBIGUOUS_OUTPUT, OBSERVATION_REQUIRED_REFUSAL, EXPIRED_OBSERVATION_REFUSAL,
+                OUTSIDE_OBSERVATION_REFUSAL, GEOMETRY_MISMATCH_REFUSAL, NO_MARKS_REFUSAL,
+                UNKNOWN_MARK_REFUSAL]
+    markers = {kind for kind, _ in traces._REFUSALS}
+    assert {traces.classify_refusal(text) for text in fixtures} == markers
 
 
 def test_marks_counts_parse_including_the_loud_zero():
@@ -1018,7 +1055,7 @@ def test_a_trailing_refusal_leaves_the_probe_unrecovered_and_the_rest_unscored()
     rows, hits = _clean_run(plan, [(0, 0)] * 4)
     rows = rows[:4]                                   # only two probes ran
     rows.append(cu_row(at_ms=BASE_MS + 25_000, action="left_click", success=False,
-                       output=STALE_MARKS_REFUSAL))
+                       output=EXPIRED_OBSERVATION_REFUSAL))
     result = score.score_batch(_batch(plan, rows, hits[:2]))
     outcomes = [p["outcome"] for p in result["probes"]]
     assert outcomes == ["hit", "hit", "refused_unrecovered", "unscored"]
@@ -1086,7 +1123,12 @@ def test_not_delivered_rows_are_refusals_and_do_not_consume_a_probe():
     assert [p["outcome"] for p in result["probes"]] == ["hit"] * 4
     refusal = result["probes"][0]["refusals"][0]
     assert (refusal["kind"], refusal["recovered"]) == ("other", True)
-    assert "NOT delivered" in refusal["message"]
+    # The recorded message is a BOUNDED preview of the row's output, and the
+    # delivery marker trails the image's own identity in a real summary — so the
+    # marker is asserted where the harness reads it (the whole output), not where
+    # the report happens to cut.
+    assert traces.parse_not_delivered(FULL_SHOT_OUTPUT + NOT_DELIVERED_OUTPUT) == (418, 152)
+    assert refusal["message"]
 
 
 # --- fired columns ----------------------------------------------------------

@@ -335,7 +335,12 @@ defmodule FermixCore.Browser.ChromeLauncher do
     if File.regular?(path), do: path, else: nil
   end
 
-  defp launch_args(profile_dir, port, headless) do
+  @doc """
+  The argv a managed Chrome is launched with. Exposed for tests.
+  """
+  @spec launch_args(String.t(), non_neg_integer(), boolean()) :: [String.t()]
+  def launch_args(profile_dir, port, headless)
+      when is_binary(profile_dir) and is_integer(port) and is_boolean(headless) do
     [
       "--remote-debugging-port=#{port}",
       "--user-data-dir=#{profile_dir}",
@@ -347,6 +352,11 @@ defmodule FermixCore.Browser.ChromeLauncher do
       "--disable-component-update",
       "--disable-default-apps",
       "--disable-features=Translate,MediaRouter",
+      # A site that registers its WebMCP tools only when the native API exists
+      # is invisible to the `webmcp` action without this. Separate list from the
+      # disabled features above; Chrome ignores a feature name it does not know,
+      # so a rename degrades to `webmcp_unavailable` and breaks nothing else.
+      "--enable-features=WebMCP",
       # Teardown SIGKILLs Chrome, so every relaunch would otherwise open with a
       # "Restore pages?" bubble the agent then has to see past (or click away).
       "--hide-crash-restore-bubble",

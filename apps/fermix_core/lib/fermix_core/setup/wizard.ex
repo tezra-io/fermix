@@ -39,6 +39,7 @@ defmodule FermixCore.Setup.Wizard do
           | {:xai_api_key, String.t()}
           | {:openrouter_api_key, String.t()}
           | {:mistral_api_key, String.t()}
+          | {:venice_api_key, String.t()}
           | {:ollama_base_url, String.t()}
           | {:anthropic_auth_mode, auth_mode() | String.t()}
           | {:xai_auth_mode, auth_mode() | String.t()}
@@ -50,11 +51,14 @@ defmodule FermixCore.Setup.Wizard do
           | {:review_interval_hours, non_neg_integer() | String.t()}
           | {:realtime_enabled, boolean() | String.t()}
           | {:realtime_api_key, String.t()}
+          | {:realtime_engine, String.t()}
+          | {:realtime_model, String.t()}
           | {:realtime_voice, String.t()}
           | {:realtime_max_session_minutes, pos_integer() | String.t()}
           | {:realtime_max_cost_cents, pos_integer() | String.t()}
           | {:realtime_persist_transcripts, boolean() | String.t()}
           | {:computer_use_enabled, boolean() | String.t()}
+          | {:computer_use_background, boolean() | String.t()}
           | {:computer_history_enabled, boolean() | String.t()}
           | {:computer_history_apps, [String.t()] | String.t()}
           | {:web_search_backend, atom() | String.t()}
@@ -127,7 +131,17 @@ defmodule FermixCore.Setup.Wizard do
 
   # The one sentence a save refuses with when this host has nowhere to put a
   # credential. Published to both doors, so neither composes its own.
-  @no_secret_store_sentence "This machine has no secret store, so the credential could not be saved."
+  # Appended to a keyring refusal so the operator learns the other declared
+  # store exists; the choice itself is theirs, made with the flag or the
+  # terminal wizard's question, never by this save.
+  @file_store_hint "To keep secrets in a file under your Fermix home instead " <>
+                     "(readable only by your account), run: fermix setup --secret-store file"
+
+  # What a locked keyring's refusal says once the write was tried: the
+  # desktop asked, and nobody unlocked it.
+  @locked_after_prompt "the login keyring is locked, and the unlock prompt was cancelled or " <>
+                         "left unanswered. Unlock it when the prompt appears, or in Passwords " <>
+                         "and Keys; fingerprint and automatic login leave it locked"
 
   # Derived from `Channels.Inventory` — the one channel table — rather than a
   # third list of the same five channels.
@@ -626,27 +640,100 @@ defmodule FermixCore.Setup.Wizard do
 
   @spec save_answers(WizardState.t(), [answer()]) :: {:ok, report()} | {:error, term()}
   def save_answers(%WizardState{} = state, answers) when is_list(answers) do
-    with :ok <- refuse_unstorable_secrets(answers) do
-      commit_answers(state, answers)
+    {store_answer, answers} = Keyword.pop(answers, :secret_store)
+
+    with {:ok, state, store_report} <- apply_secret_store_answer(state, store_answer),
+         {:ok, verdict} <- refuse_unstorable_secrets(answers) do
+      case {answers, store_report} do
+        {[], %{} = report} -> {:ok, report}
+        _ -> commit_answers_or_refuse(state, answers, verdict)
+      end
+    end
+  end
+
+  # A secret write inside the commit pipeline that fails (an unlock prompt
+  # cancelled, a helper that errored) unwinds here as the same typed refusal
+  # the pre-check gives, with the verdict's own words when the store was
+  # locked: the pipeline is a snapshot builder, so a failed write leaves the
+  # file exactly as it was.
+  defp commit_answers_or_refuse(state, answers, verdict) do
+    commit_answers(state, answers)
+  catch
+    :throw, {:secret_store_failed, key, reason} ->
+      {:error, {:secret_store_failed, key, write_failure_sentence(key, reason, verdict)}}
+  end
+
+  defp write_failure_sentence(key, _reason, %{store: :keyring, state: :locked} = verdict) do
+    refusal_sentence(key, %{verdict | sentence: @locked_after_prompt})
+  end
+
+  defp write_failure_sentence(key, reason, _verdict), do: SecretWriter.format_error(key, reason)
+
+  # The store choice lands first, as its own commit, so every secret in the
+  # same save is written to the store the operator just chose: the writes
+  # below read the configured store from the loaded config, and a save that
+  # carries no secret still records the choice.
+  defp apply_secret_store_answer(state, nil), do: {:ok, state, nil}
+
+  defp apply_secret_store_answer(%WizardState{} = state, answer) do
+    with {:ok, store} <- SecretWriter.parse_store(answer) do
+      if store == SecretWriter.store() do
+        {:ok, state, nil}
+      else
+        commit_secret_store(state, store)
+      end
+    end
+  end
+
+  defp commit_secret_store(%WizardState{} = state, store) do
+    snapshot =
+      SecretStore.put_snapshot_value(state.config_snapshot, [:fermix_core, :secret_store], store)
+
+    with {:ok, report} <- commit_snapshot(snapshot) do
+      {:ok, %WizardState{state | config_snapshot: ConfigStore.current_snapshot()}, report}
     end
   end
 
   # Design §7.4: a save that cannot store a secret says so. Every secret answer
-  # is persisted as the `@keyring` sentinel, which is only meaningful once the
-  # value is actually in the OS keyring; with no writer on this host the value
-  # used to be dropped with a log line while the save reported success, so the
-  # operator saw a stored key and the runtime had none. The refusal is here,
-  # before the snapshot is built, so a save either stores every secret in it or
-  # stores nothing.
+  # is persisted as a store's sentinel, which is only meaningful once the value
+  # is actually in that store; with no writer on this host the value used to be
+  # dropped with a log line while the save reported success, so the operator
+  # saw a stored key and the runtime had none. The refusal is here, before the
+  # snapshot is built, so a save either stores every secret in it or stores
+  # nothing — and it carries the store's own verdict (M38 §7.2), so a locked
+  # keyring is named as one rather than timed out on.
+  # A locked keyring is not refused here: someone is saving, so the write may
+  # raise the desktop's unlock prompt and wait for them (`SecretWriter.put/3`
+  # gives it the time). Every other unusable state has nothing to answer and is
+  # refused before the snapshot is built.
   defp refuse_unstorable_secrets(answers) do
-    case unstorable_secret_key(answers) do
-      nil -> :ok
-      key -> {:error, {:secret_store_failed, key, @no_secret_store_sentence}}
+    case first_secret_answer(answers) do
+      nil -> {:ok, nil}
+      key -> refuse_unless_attemptable(key, SecretWriter.probe())
     end
   end
 
-  defp unstorable_secret_key(answers) do
-    if SecretWriter.available?(), do: nil, else: first_secret_answer(answers)
+  defp refuse_unless_attemptable(key, verdict) do
+    if SecretWriter.attemptable?(verdict) do
+      {:ok, verdict}
+    else
+      {:error, {:secret_store_failed, key, refusal_sentence(key, verdict)}}
+    end
+  end
+
+  @doc """
+  The sentence a save refused by the secret store's verdict carries: what the
+  store said, and, for the keyring, that the file store is the other choice.
+  """
+  @spec refusal_sentence(atom(), SecretWriter.verdict()) :: String.t()
+  def refusal_sentence(key, %{store: store, sentence: sentence}) when is_atom(key) do
+    env = SecretPaths.fetch!(key).env
+    lead = "#{env} could not be saved: #{String.trim_trailing(sentence, ".")}."
+
+    case store do
+      :keyring -> lead <> " " <> @file_store_hint
+      :file -> lead
+    end
   end
 
   defp first_secret_answer(answers) do
@@ -751,15 +838,41 @@ defmodule FermixCore.Setup.Wizard do
   end
 
   @doc """
+  Rewrites the sandbox environment policy alone, through the shared write tail.
+
+  The entry for `secret.set` and `secret.clear` on the `env:<NAME>` family
+  (M45 §4.3): the external-change refusal, the save, the live apply and the
+  env-only drop are the ones every sibling writer runs. `update` receives the
+  policy in force when this write reads the snapshot and returns the new one,
+  so a change made between the caller's own checks and this write is not
+  reverted by it.
+  """
+  @spec update_sandbox_env((SandboxConfig.env_config() -> SandboxConfig.env_config())) ::
+          {:ok, report()} | {:error, term()}
+  def update_sandbox_env(update) when is_function(update, 1) do
+    snapshot = ConfigStore.current_snapshot()
+    sandbox = snapshot |> Map.get(:sandbox) |> SandboxConfig.normalize()
+
+    snapshot
+    |> Map.put(:sandbox, %{sandbox | env: update.(sandbox.env)})
+    |> drop_unanswered_env_only_secrets([])
+    |> commit_snapshot()
+  end
+
+  @doc """
   Sets a provider's `auth_mode` (`:api_key` or `:oauth`) without going through
   the prompt-driven `save_answers/2` path. Used by the CLI `fermix auth
   login/logout` commands so the OAuth token write and the config route selector
   stay in sync (a stored token is inert unless `auth_mode = "oauth"`). Routes
   through the same save → apply → seed → report cycle as `save_answers/2`.
+
+  `opts` carries the caller's world to that cycle: the tree-less CLI passes
+  `supervised: false` (see `commit_snapshot/2`).
   """
-  @spec set_provider_auth_mode(provider(), auth_mode() | String.t()) ::
+  @spec set_provider_auth_mode(provider(), auth_mode() | String.t(), keyword()) ::
           {:ok, report()} | {:error, term()}
-  def set_provider_auth_mode(provider, mode) when is_atom(provider) do
+  def set_provider_auth_mode(provider, mode, opts \\ [])
+      when is_atom(provider) and is_list(opts) do
     if not Descriptor.multi_auth_mode?(Descriptor.fetch!(provider)) do
       raise ArgumentError,
             "provider #{inspect(provider)} has a fixed auth mode; auth_mode is not configurable"
@@ -768,7 +881,7 @@ defmodule FermixCore.Setup.Wizard do
     ConfigStore.current_snapshot()
     |> put_provider_auth_mode(provider, mode)
     |> drop_unanswered_env_only_secrets([])
-    |> commit_snapshot()
+    |> commit_snapshot(opts)
   end
 
   @doc """
@@ -813,11 +926,24 @@ defmodule FermixCore.Setup.Wizard do
           {:ok, report()} | {:error, {:secret_store_failed, atom(), term()} | term()}
   def put_secret(key, value) when is_atom(key) and is_binary(value) and value != "" do
     secret = SecretPaths.fetch!(key)
+    verdict = SecretWriter.probe()
 
-    case SecretWriteLog.put(key, value) do
-      :ok -> commit_secret_reference(secret, SecretWriter.sentinel())
+    # The store is asked first, as every other writer asks it: a store with
+    # nothing to answer is refused with its verdict, and a locked keyring gets
+    # the write, which raises the unlock prompt for the person saving.
+    with :ok <- attemptable_or_verdict(key, verdict),
+         :ok <- SecretWriteLog.put(key, value) do
+      commit_secret_reference(secret, SecretWriter.current_sentinel())
+    else
+      {:error, {:secret_store_failed, _key, _reason} = failure} -> {:error, failure}
       {:error, reason} -> {:error, {:secret_store_failed, key, reason}}
     end
+  end
+
+  defp attemptable_or_verdict(key, verdict) do
+    if SecretWriter.attemptable?(verdict),
+      do: :ok,
+      else: {:error, {:secret_store_failed, key, {:verdict, verdict}}}
   end
 
   @doc """
@@ -929,14 +1055,22 @@ defmodule FermixCore.Setup.Wizard do
   public entries plus the management writers reach the file through it. Putting
   the refusal in one of those entries instead would leave the other three able
   to revert an outside edit silently, which is the exact defect it exists for.
+
+  The save and the apply can both run a keychain helper, so they run in the
+  caller's world: a tree-less CLI verb passes `supervised: false` and each
+  helper runs inline, while the daemon passes nothing and keeps its supervised
+  command host (`CommandRunner.run/3`).
   """
-  @spec commit_snapshot(ConfigStore.runtime_config()) :: {:ok, report()} | {:error, term()}
-  def commit_snapshot(snapshot) when is_map(snapshot) do
+  @spec commit_snapshot(ConfigStore.runtime_config(), keyword()) ::
+          {:ok, report()} | {:error, term()}
+  def commit_snapshot(snapshot, opts \\ []) when is_map(snapshot) and is_list(opts) do
+    supervised = Keyword.take(opts, [:supervised])
+
     # `save_snapshot/2` records the new baseline itself, so there is one
     # recording site for every writer rather than one per tail.
     with :ok <- RestartState.writable(),
-         :ok <- ConfigStore.save_snapshot(snapshot),
-         :ok <- ConfigStore.apply_snapshot(snapshot),
+         :ok <- ConfigStore.save_snapshot(snapshot, supervised),
+         :ok <- ConfigStore.apply_snapshot(snapshot, supervised),
          {:ok, seeding_results} <- maybe_seed_prompt_files(snapshot) do
       {:ok, BootReport.refresh_if_started(seeding_results) || report(seeding_results)}
     end
@@ -1628,74 +1762,180 @@ defmodule FermixCore.Setup.Wizard do
   end
 
   defp put_realtime_config(snapshot, answers) do
-    values =
-      [
-        enabled:
-          normalize_realtime_bool(Keyword.get(answers, :realtime_enabled), :realtime_enabled),
-        model: normalize_realtime_string(Keyword.get(answers, :realtime_model), :realtime_model),
-        reasoning_effort:
-          normalize_realtime_string(
-            Keyword.get(answers, :realtime_reasoning_effort),
-            :realtime_reasoning_effort
-          ),
-        voice: normalize_realtime_string(Keyword.get(answers, :realtime_voice), :realtime_voice),
-        max_session_minutes:
-          normalize_realtime_positive_int(
-            Keyword.get(answers, :realtime_max_session_minutes),
-            :realtime_max_session_minutes
-          ),
-        max_estimated_cost_cents_per_session:
-          normalize_realtime_positive_int(
-            Keyword.get(answers, :realtime_max_cost_cents),
-            :realtime_max_cost_cents
-          ),
-        persist_transcripts:
-          normalize_realtime_bool(
-            Keyword.get(answers, :realtime_persist_transcripts),
-            :realtime_persist_transcripts
-          )
-      ]
-      |> reject_nil_values()
-
-    if values == [] do
-      snapshot
-    else
-      fermix_core = Map.get(snapshot, :fermix_core, [])
-      existing = Keyword.get(fermix_core, :realtime, [])
-
-      realtime =
-        existing
-        |> Keyword.merge(values)
-        |> RealtimeConfig.normalize()
-        |> RealtimeConfig.to_keyword()
-
-      Map.put(snapshot, :fermix_core, Keyword.put(fermix_core, :realtime, realtime))
+    case realtime_values(answers) do
+      [] -> snapshot
+      values -> commit_realtime_config(snapshot, values)
     end
   end
 
-  # Computer use exposes a single setup knob: the on/off flag. The sidecar binary
-  # and OS permissions are prerequisites the card surfaces separately; flipping this
-  # flag is what `ComputerUse.ready?/0` (and thus tool registration) gates on. All
-  # other fields keep their config defaults until an operator hand-edits config.toml.
+  defp realtime_values(answers) do
+    [
+      enabled:
+        normalize_realtime_bool(Keyword.get(answers, :realtime_enabled), :realtime_enabled),
+      engine: realtime_engine_answer(answers),
+      model: normalize_realtime_string(Keyword.get(answers, :realtime_model), :realtime_model),
+      reasoning_effort:
+        normalize_realtime_string(
+          Keyword.get(answers, :realtime_reasoning_effort),
+          :realtime_reasoning_effort
+        ),
+      voice: normalize_realtime_string(Keyword.get(answers, :realtime_voice), :realtime_voice),
+      max_session_minutes:
+        normalize_realtime_positive_int(
+          Keyword.get(answers, :realtime_max_session_minutes),
+          :realtime_max_session_minutes
+        ),
+      max_estimated_cost_cents_per_session:
+        normalize_realtime_positive_int(
+          Keyword.get(answers, :realtime_max_cost_cents),
+          :realtime_max_cost_cents
+        ),
+      persist_transcripts:
+        normalize_realtime_bool(
+          Keyword.get(answers, :realtime_persist_transcripts),
+          :realtime_persist_transcripts
+        )
+    ]
+    |> reject_nil_values()
+  end
+
+  # The model is the operator-facing choice and the engine follows from it, so
+  # an answer set that names only the model still writes the engine the
+  # configuration stores. `:realtime_engine` stays an accepted answer for the
+  # doors that send both, and then the two have to agree: resolving a
+  # disagreement in favour of either one would write a pair the operator never
+  # chose, so it is refused with both named. A model no engine ships leaves the
+  # engine alone and is refused by name in `RealtimeConfig.normalize/1`.
+  defp realtime_engine_answer(answers) do
+    engine = normalize_realtime_string(Keyword.get(answers, :realtime_engine), :realtime_engine)
+    model = normalize_realtime_string(Keyword.get(answers, :realtime_model), :realtime_model)
+
+    derive_realtime_engine(engine, model)
+  end
+
+  defp derive_realtime_engine(engine, nil), do: engine
+
+  defp derive_realtime_engine(engine, model) do
+    case RealtimeConfig.engine_for_model(model) do
+      {:ok, derived} -> agree_realtime_engine!(engine, derived, model)
+      :error -> engine
+    end
+  end
+
+  defp agree_realtime_engine!(nil, derived, _model), do: derived
+  defp agree_realtime_engine!(engine, engine, _model), do: engine
+
+  defp agree_realtime_engine!(engine, derived, model) do
+    raise ArgumentError,
+          ~s(realtime.model #{model} requires engine "#{derived}", got "#{engine}"; ) <>
+            "the model selects the engine, so send the model on its own or send the engine it names"
+  end
+
+  defp commit_realtime_config(snapshot, values) do
+    fermix_core = Map.get(snapshot, :fermix_core, [])
+    existing = Keyword.get(fermix_core, :realtime, [])
+
+    realtime =
+      existing
+      |> switch_realtime_engine(Keyword.get(values, :engine))
+      |> Keyword.merge(values)
+      |> RealtimeConfig.normalize()
+      |> RealtimeConfig.to_keyword()
+
+    Map.put(snapshot, :fermix_core, Keyword.put(fermix_core, :realtime, realtime))
+  end
+
+  # The one seam every door reaches: an explicit engine switch carries the keys
+  # the engine owns with it. Live refuses the Realtime-only settings at the
+  # configuration boundary and a Realtime engine refuses a Live model, so
+  # answering the operator's switch with a validation error is the defect this
+  # exists to prevent. It rewrites what they did NOT type: an answer naming one
+  # of these keys is merged on top and is refused by name if it disagrees.
+  defp switch_realtime_engine(existing, nil), do: existing
+
+  defp switch_realtime_engine(existing, engine) do
+    if realtime_engine(existing) == engine do
+      existing
+    else
+      move_realtime_engine(existing, engine)
+    end
+  end
+
+  defp move_realtime_engine(existing, "openai_live") do
+    existing
+    |> Keyword.drop([:reasoning_effort, :transcription_model, :max_response_output_tokens])
+    |> put_realtime_model("openai_live")
+    |> put_realtime_voice("openai_live")
+  end
+
+  defp move_realtime_engine(existing, "openai_realtime") do
+    existing
+    |> Keyword.put_new(:reasoning_effort, "low")
+    |> put_realtime_model("openai_realtime")
+    |> put_realtime_voice("openai_realtime")
+  end
+
+  # An engine name no release knows is left for `RealtimeConfig.normalize/1` to
+  # refuse by name: deriving a model from a typo would answer it with a silent
+  # configuration change.
+  defp move_realtime_engine(existing, _engine), do: existing
+
+  defp put_realtime_model(existing, engine) do
+    if Keyword.get(existing, :model) in RealtimeConfig.valid_models(engine) do
+      existing
+    else
+      Keyword.put(existing, :model, RealtimeConfig.default_model(engine))
+    end
+  end
+
+  # Live ships every Realtime voice plus twelve of its own, so only the return
+  # journey can strand one. The struct default is the voice both catalogs open
+  # with, which is what makes it the one value a switch can always land on.
+  defp put_realtime_voice(existing, engine) do
+    if Keyword.get(existing, :voice) in RealtimeConfig.valid_voices(engine) do
+      existing
+    else
+      Keyword.put(existing, :voice, %RealtimeConfig{}.voice)
+    end
+  end
+
+  # An absent engine is the struct default, which is how a configuration written
+  # before the engine axis existed reads as Realtime rather than as a switch.
+  defp realtime_engine(existing) do
+    case Keyword.get(existing, :engine) do
+      engine when is_binary(engine) -> engine
+      _absent -> %RealtimeConfig{}.engine
+    end
+  end
+
+  # Computer use exposes two setup knobs: the on/off flag, and the experimental
+  # bound-window surface (M42 slice 5). The sidecar binary and OS permissions are
+  # prerequisites the card surfaces separately; flipping `enabled` is what
+  # `ComputerUse.ready?/0` (and thus tool registration) gates on. All other fields
+  # keep their config defaults until an operator hand-edits config.toml.
+  #
+  # Each knob is applied on its own: a save that carries only one must not drop
+  # the other, and a save that carries neither must leave the section alone.
   defp put_computer_use_config(snapshot, answers) do
-    case normalize_realtime_bool(
-           Keyword.get(answers, :computer_use_enabled),
-           :computer_use_enabled
-         ) do
-      nil ->
-        snapshot
+    enabled? = normalize_realtime_bool(Keyword.get(answers, :computer_use_enabled), :enabled)
 
-      enabled? ->
-        fermix_core = Map.get(snapshot, :fermix_core, [])
-        existing = Keyword.get(fermix_core, :computer_use, [])
+    background? =
+      normalize_realtime_bool(Keyword.get(answers, :computer_use_background), :background)
 
-        computer_use =
-          existing
-          |> Keyword.put(:enabled, enabled?)
-          |> ComputerUseConfig.normalize()
-          |> ComputerUseConfig.to_keyword()
+    if is_nil(enabled?) and is_nil(background?) do
+      snapshot
+    else
+      fermix_core = Map.get(snapshot, :fermix_core, [])
 
-        Map.put(snapshot, :fermix_core, Keyword.put(fermix_core, :computer_use, computer_use))
+      computer_use =
+        fermix_core
+        |> Keyword.get(:computer_use, [])
+        |> put_unless_nil(:enabled, enabled?)
+        |> put_unless_nil(:background, background?)
+        |> ComputerUseConfig.normalize()
+        |> ComputerUseConfig.to_keyword()
+
+      Map.put(snapshot, :fermix_core, Keyword.put(fermix_core, :computer_use, computer_use))
     end
   end
 
@@ -2259,8 +2499,10 @@ defmodule FermixCore.Setup.Wizard do
     Map.put(snapshot, :fermix_channels, Keyword.put(existing_channels, channel, config))
   end
 
-  # A writer-less host is refused by `refuse_unstorable_secrets/1` before this
-  # pipeline runs, so there is one path here and it stores the value.
+  # A store with nothing to answer is refused by `refuse_unstorable_secrets/1`
+  # before this pipeline runs, so a write here either stores the value or is
+  # the operator's own doing (a cancelled unlock prompt); a failure unwinds to
+  # `commit_answers_or_refuse/3`, which turns it into the typed refusal.
   defp secret_snapshot_value(_key, value) when value in [nil, ""], do: nil
 
   defp secret_snapshot_value(key, value) when is_atom(key) and is_binary(value),
@@ -2268,8 +2510,8 @@ defmodule FermixCore.Setup.Wizard do
 
   defp write_secret_sentinel!(key, value) do
     case SecretWriteLog.put(key, value) do
-      :ok -> SecretWriter.sentinel()
-      {:error, reason} -> raise ArgumentError, SecretWriter.format_error(key, reason)
+      :ok -> SecretWriter.current_sentinel()
+      {:error, reason} -> throw({:secret_store_failed, key, reason})
     end
   end
 

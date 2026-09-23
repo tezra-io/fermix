@@ -13,9 +13,12 @@ defmodule FermixCore.ComputerUse.SessionManager do
   fully exercised without the binary.
   """
 
+  require Logger
+
   alias FermixCore.ComputerUse
   alias FermixCore.ComputerUse.CaptureHealth
   alias FermixCore.ComputerUse.Config
+  alias FermixCore.ComputerUse.OperatorStop
   alias FermixCore.ComputerUse.Safety
   alias FermixCore.ComputerUse.Session
   alias FermixCore.ComputerUse.Supervisor, as: CuSupervisor
@@ -28,9 +31,11 @@ defmodule FermixCore.ComputerUse.SessionManager do
   def ensure(%Config{} = config, context, opts \\ []) when is_map(context) do
     key = conversation_key(context)
 
-    case Registry.lookup(CuSupervisor.registry(), key) do
-      [{pid, _}] -> {:ok, pid}
-      [] -> start_session(key, config, context, opts)
+    with :ok <- OperatorStop.check(key, Map.get(context, :session_id)) do
+      case Registry.lookup(CuSupervisor.registry(), key) do
+        [{pid, _}] -> {:ok, pid}
+        [] -> start_session(key, config, context, opts)
+      end
     end
   end
 
@@ -66,28 +71,103 @@ defmodule FermixCore.ComputerUse.SessionManager do
     end
   end
 
+  @typedoc "What a `/pause` or `/resume` may tell the human about this conversation."
+  @type verdict :: Session.control_verdict() | :no_session
+
   @doc """
   Pause the computer-use session for `context`'s conversation (`/pause`): the human
   is reclaiming the machine. Unlike `abort/1`, the session, its TCC-warm sidecar, and
-  the task stay ALIVE and resumable — `pause` just flips the session's guard so it
-  refuses actions until `resume/1`. Returns `:paused` if one was running, `:no_session`
-  otherwise. Idempotent + race-safe (a clean no-op when the registry is absent).
+  the task stay ALIVE and resumable — `pause` installs a barrier in the helper and
+  flips the session's own guard so it refuses actions until `resume/1`. Idempotent +
+  race-safe (a clean no-op when the registry is absent).
+
+  The verdict is the helper's ACKNOWLEDGEMENT of the barrier: `:paused`,
+  `:paused_in_flight` when the ack names an action already under way that will finish
+  (which is the difference `/pause` has to tell the human), `:unconfirmed` when the
+  barrier could not be proven installed — the session is then reset, which
+  definitively returns the machine — or `:no_session`.
   """
-  @spec pause(map()) :: :paused | :no_session
-  def pause(context) when is_map(context), do: signal(context, &Session.pause/1, :paused)
+  @spec pause(map()) :: verdict()
+  def pause(context) when is_map(context) do
+    case session(context) do
+      {:ok, pid} -> control(pid, &Session.pause/1)
+      :error -> :no_session
+    end
+  end
 
-  @doc "Resume a paused session (`/resume`). Returns `:resumed` or `:no_session`."
-  @spec resume(map()) :: :resumed | :no_session
-  def resume(context) when is_map(context), do: signal(context, &Session.resume/1, :resumed)
+  @doc """
+  Resume a paused session (`/resume`). `:resumed`; `:unconfirmed` when lifting the
+  barrier was not acknowledged, in which case the session is reset so the next action
+  starts a helper with no barrier on it; or `:no_session`.
+  """
+  @spec resume(map()) :: verdict()
+  def resume(context) when is_map(context) do
+    case session(context) do
+      {:ok, pid} -> control(pid, &Session.resume/1)
+      :error -> :no_session
+    end
+  end
 
-  defp signal(context, fun, ok_tag) do
+  @doc """
+  The `cua_…` lifecycle id a running session was minted with, read from its registry
+  entry. `nil` for a session started outside the registry (tests, direct callers) and
+  while computer-use is not running.
+
+  Read rather than asked: the session may be blocked inside a driver call for the
+  whole sidecar budget, and recording which session a tool call ran in must never
+  wait on that.
+  """
+  @spec session_id(term()) :: String.t() | nil
+  def session_id(pid) when is_pid(pid) do
+    with true <- registry_running?(),
+         [key] <- Registry.keys(CuSupervisor.registry(), pid),
+         [{^pid, %{session_id: id}}] <- Registry.lookup(CuSupervisor.registry(), key) do
+      id
+    else
+      _ -> nil
+    end
+  end
+
+  # Total on purpose. A caller may put any `GenServer.server()` on the context as
+  # `:computer_use_session` (a name, a via tuple, a stale term), and this is called
+  # while RECORDING what a tool call did — raising here would lose the exec event
+  # for the action that ran. An unresolvable session simply has no id to record.
+  def session_id(_session), do: nil
+
+  # A control is a call now, because the answer is the helper's acknowledgement and
+  # the session has to wait for it. Two exits are possible between the registry read
+  # and the reply, and they mean opposite things: a session that ENDED has already
+  # handed the machine back (its teardown releases held input and ends the helper),
+  # while a session that did not answer at all leaves the barrier unproven.
+  defp control(pid, verb) do
+    verb.(pid)
+  catch
+    :exit, {reason, _call} when reason in [:noproc, :normal, :shutdown] -> :no_session
+    :exit, _reason -> abandon(pid)
+  end
+
+  # `:unconfirmed` means ONE thing on every surface that renders it — the helper
+  # was shut down — so it has to be true here too. A session that did not answer
+  # inside the control budget is wedged on something other than the barrier, and
+  # leaving it alive while telling the human it was ended is exactly the lie this
+  # verdict exists to avoid. Synchronous and bounded by the session's own child
+  # spec shutdown, so it returns only once the machine really is back.
+  defp abandon(pid) do
+    Logger.warning("computer_use: a session did not answer a control; ending it")
+    DynamicSupervisor.terminate_child(CuSupervisor.session_supervisor(), pid)
+    :unconfirmed
+  end
+
+  # The running session for this conversation, guarded: the registry only exists
+  # while computer-use is enabled + ready, and a context need not carry a
+  # conversation at all.
+  defp session(context) do
     with true <- registry_running?(),
          true <- Map.has_key?(context, :conversation_key),
-         {:ok, pid} <- lookup(context) do
-      fun.(pid)
-      ok_tag
+         [{pid, _value}] <- Registry.lookup(CuSupervisor.registry(), conversation_key(context)) do
+      {:ok, pid}
     else
-      _ -> :no_session
+      _ -> :error
     end
   end
 

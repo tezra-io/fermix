@@ -19,7 +19,7 @@ defmodule FermixCore.Capabilities.MCP.TelemetryTest do
 
   # Synthetic stand-ins for the three classes of material a remote MCP client
   # holds that must never reach a trace. None is a real credential.
-  @bearer "Bearer eden_pat_fakevalue_do_not_log"
+  @bearer "Bearer acme_pat_fakevalue_do_not_log"
   @mcp_session_id "mcp-sess-01JFAKE0000000000000000000"
   @workspace_id "ws_fake_0123456789"
 
@@ -52,7 +52,7 @@ defmodule FermixCore.Capabilities.MCP.TelemetryTest do
   defp emit_error(reason) do
     MCPClientTelemetry.emit_lifecycle(
       :initialize,
-      %{source_id: {:plugin, "eden"}},
+      %{source_id: {:plugin, "acme"}},
       {:error, reason},
       9
     )
@@ -67,15 +67,15 @@ defmodule FermixCore.Capabilities.MCP.TelemetryTest do
     test "emits the stable event with a string-serialized source_id" do
       MCPClientTelemetry.emit_lifecycle(
         :ready,
-        %{source_id: {:plugin, "eden"}, plugin: "eden"},
+        %{source_id: {:plugin, "acme"}, plugin: "acme"},
         :ok,
         142
       )
 
       assert_receive {:mcp_client, event, %{duration_ms: 142}, metadata}
       assert event == [:fermix, :mcp_client, :lifecycle]
-      assert metadata.source_id == "plugin:eden"
-      assert metadata.plugin == "eden"
+      assert metadata.source_id == "plugin:acme"
+      assert metadata.plugin == "acme"
       assert metadata.phase == :ready
       assert metadata.result == :ok
       refute Map.has_key?(metadata, :error_class)
@@ -90,7 +90,7 @@ defmodule FermixCore.Capabilities.MCP.TelemetryTest do
     end
 
     test "correlation ids ride only when the caller has a turn" do
-      source = %{source_id: {:plugin, "eden"}}
+      source = %{source_id: {:plugin, "acme"}}
 
       MCPClientTelemetry.emit_lifecycle(:security_block, source, {:error, :tool_not_allowed}, 1,
         session_id: "main-7",
@@ -113,7 +113,7 @@ defmodule FermixCore.Capabilities.MCP.TelemetryTest do
 
     test "every declared phase emits" do
       for phase <- @phases do
-        MCPClientTelemetry.emit_lifecycle(phase, %{source_id: {:plugin, "eden"}}, :ok, 0)
+        MCPClientTelemetry.emit_lifecycle(phase, %{source_id: {:plugin, "acme"}}, :ok, 0)
         assert_receive {:mcp_client, _event, _measurements, %{phase: ^phase}}
       end
     end
@@ -124,13 +124,13 @@ defmodule FermixCore.Capabilities.MCP.TelemetryTest do
 
     test "an unknown phase is refused loudly" do
       assert_raise FunctionClauseError, fn ->
-        MCPClientTelemetry.emit_lifecycle(:handshake, %{source_id: {:plugin, "eden"}}, :ok, 1)
+        MCPClientTelemetry.emit_lifecycle(:handshake, %{source_id: {:plugin, "acme"}}, :ok, 1)
       end
     end
 
     test "a malformed source_id is refused loudly" do
       assert_raise ArgumentError, fn ->
-        MCPClientTelemetry.emit_lifecycle(:ready, %{source_id: "plugin:eden"}, :ok, 1)
+        MCPClientTelemetry.emit_lifecycle(:ready, %{source_id: "plugin:acme"}, :ok, 1)
       end
 
       assert_raise ArgumentError, fn ->
@@ -140,7 +140,7 @@ defmodule FermixCore.Capabilities.MCP.TelemetryTest do
 
     test "a non-positive attempt is refused loudly" do
       assert_raise ArgumentError, fn ->
-        MCPClientTelemetry.emit_lifecycle(:reconnect, %{source_id: {:plugin, "eden"}}, :ok, 1,
+        MCPClientTelemetry.emit_lifecycle(:reconnect, %{source_id: {:plugin, "acme"}}, :ok, 1,
           attempt: 0
         )
       end
@@ -148,7 +148,7 @@ defmodule FermixCore.Capabilities.MCP.TelemetryTest do
 
     test "a negative duration is refused loudly" do
       assert_raise FunctionClauseError, fn ->
-        MCPClientTelemetry.emit_lifecycle(:ready, %{source_id: {:plugin, "eden"}}, :ok, -1)
+        MCPClientTelemetry.emit_lifecycle(:ready, %{source_id: {:plugin, "acme"}}, :ok, -1)
       end
     end
   end
@@ -163,7 +163,7 @@ defmodule FermixCore.Capabilities.MCP.TelemetryTest do
     end
 
     test "a tagged tuple reason reduces to its atom head" do
-      emit_error({:contract_drift, "tool eden_get_note_markdown changed shape"})
+      emit_error({:contract_drift, "tool acme_get_note_markdown changed shape"})
 
       assert_receive {:mcp_client, _event, _measurements, metadata}
       assert metadata.error_class == "contract_drift"
@@ -173,7 +173,7 @@ defmodule FermixCore.Capabilities.MCP.TelemetryTest do
     # reason body is exactly where an endpoint URL or a credential would hide, so
     # it is flattened rather than passed through.
     test "a free-form reason body never reaches the class" do
-      emit_error("401 Unauthorized for https://mcp.eden.so/mcp with #{@bearer}")
+      emit_error("401 Unauthorized for https://mcp.acme.example/mcp with #{@bearer}")
 
       assert_receive {:mcp_client, _event, _measurements, metadata}
       assert metadata.error_class == "unclassified"
@@ -187,7 +187,7 @@ defmodule FermixCore.Capabilities.MCP.TelemetryTest do
     end
 
     test "an ok result carries no class" do
-      MCPClientTelemetry.emit_lifecycle(:ready, %{source_id: {:plugin, "eden"}}, {:ok, 12}, 4)
+      MCPClientTelemetry.emit_lifecycle(:ready, %{source_id: {:plugin, "acme"}}, {:ok, 12}, 4)
 
       assert_receive {:mcp_client, _event, _measurements, metadata}
       assert metadata.result == :ok
@@ -208,7 +208,7 @@ defmodule FermixCore.Capabilities.MCP.TelemetryTest do
 
       MCPClientTelemetry.emit_lifecycle(
         :discover,
-        %{source_id: {:plugin, "eden"}, plugin: "eden"},
+        %{source_id: {:plugin, "acme"}, plugin: "acme"},
         {:error, {:http_status, "#{@bearer} #{@mcp_session_id} #{@workspace_id}"}},
         87,
         session_id: "main-3",
@@ -230,7 +230,7 @@ defmodule FermixCore.Capabilities.MCP.TelemetryTest do
     end
 
     test "content capture cannot widen the metadata — there is no gated field" do
-      source = %{source_id: {:plugin, "eden"}, plugin: "eden"}
+      source = %{source_id: {:plugin, "acme"}, plugin: "acme"}
 
       Application.put_env(:fermix_core, :telemetry, capture_content: false)
       MCPClientTelemetry.emit_lifecycle(:ready, source, :ok, 10)
@@ -287,7 +287,7 @@ defmodule FermixCore.Capabilities.MCP.TelemetryTest do
     # of the metadata — an agent_field naming a key the emitter never sets would
     # silently produce "unknown" rows.
     test "every agent_field is a key the emitter actually sets" do
-      MCPClientTelemetry.emit_lifecycle(:ready, %{source_id: {:plugin, "eden"}}, :ok, 1)
+      MCPClientTelemetry.emit_lifecycle(:ready, %{source_id: {:plugin, "acme"}}, :ok, 1)
       assert_receive {:mcp_client, _event, _measurements, lifecycle_metadata}
       assert Map.has_key?(lifecycle_metadata, :source_id)
 

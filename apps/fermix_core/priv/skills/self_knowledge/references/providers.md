@@ -6,7 +6,7 @@ mechanics underneath.
 
 ## Per-provider blocks
 
-All seven run turns. The registry behind them is
+All eight run turns. The registry behind them is
 `FermixCore.Providers.Descriptor` — one declarative entry per provider, holding
 labels, auth modes, setup fields, and config-key allowlists. Unknown TOML keys in
 any provider block, and an unknown `[fermix_core.agent] provider`, fail loud at
@@ -50,6 +50,16 @@ config load rather than being silently dropped.
   `content` alongside `tool_calls`, so the shared Chat Completions adapter omits
   the `content` key whenever tool calls are present — a wire shape valid on every
   Chat Completions provider.
+- **Venice** (`[fermix_core.providers.venice]`: `api_key` via `VENICE_API_KEY`,
+  optional `base_url`, `default_model`, `primary`) also rides the Chat
+  Completions wire, against `https://api.venice.ai/api/v1`, with a plain Bearer
+  key, no attribution headers, and no reasoning-effort field. Two constants, not
+  settings, ride every request: Venice is told not to prepend its own system
+  prompt, and to strip inline thinking out of the reply. Fermix does not use
+  Venice's end-to-end encrypted mode, because that mode turns off tool calling
+  and system prompts. The default model is `grok-4-6`, a private one. The doctor
+  probe asks `/api_keys/rate_limits` rather than the model list, which is public
+  and answers without a key.
 - **Ollama** (`[fermix_core.providers.ollama]`: `base_url`, whose presence is what
   marks it configured, env `OLLAMA_BASE_URL`; `default_model`; `primary`) is
   **keyless** — `auth_mode :none` internally, no Authorization header and no
@@ -69,9 +79,9 @@ primary choice does. CLI OAuth login never changes primary.
 ## Reasoning effort
 
 `reasoning_effort` is accepted only for the effort-capable providers — OpenAI,
-Codex, Anthropic, and SpaceXAI. An OpenRouter, Mistral, or Ollama block rejects
-the key at config load, routing-level effort overlays skip their routes, and
-their telemetry reports `reasoning_effort: nil`.
+Codex, Anthropic, and SpaceXAI. An OpenRouter, Mistral, Venice, or Ollama block
+rejects the key at config load, routing-level effort overlays skip their routes,
+and their telemetry reports `reasoning_effort: nil`.
 
 Effort is one canonical vocabulary — `FermixCore.Providers.ReasoningEffort`:
 `none|low|medium|high|xhigh|max` — with per-provider subsets, mapped to each
@@ -80,9 +90,9 @@ provider's wire field (`reasoning.effort` for OpenAI, Codex and SpaceXAI;
 `low` and the API default is `high`. A level above a provider's ceiling clamps.
 
 On top of the provider subset a model can carry its own ceiling in the catalog.
-The current OpenAI and Codex generations (GPT-6 Astra, GPT-5.6) reach `max` while
-`gpt-5.5`, `gpt-5.4` and `gpt-5.4-mini` top out at `xhigh`, and every Grok but
-4.6 tops out at `high`. An over-reaching config self-heals down to that model
+The current OpenAI and Codex generations (GPT-6 Astra, Sol and Luna; GPT-5.6)
+reach `max` while `gpt-5.5`, `gpt-5.4` and `gpt-5.4-mini` top out at `xhigh`, and
+every Grok before 4.6 tops out at `high`. An over-reaching config self-heals down to that model
 ceiling at route resolution instead of 400-ing at the provider. A model with no
 catalog ceiling passes through untouched, leaving Anthropic's per-model nuance to
 the provider's own 400.
@@ -111,8 +121,15 @@ the provider's own 400.
   current model is selectable; on fetch failure it shows the error and a
   free-form input (`FermixCore.Providers.ModelListing`). The static catalog stays
   authoritative for defaults and context windows.
+- The Venice pane fetches Venice's **live model list** the same way (every
+  tool-calling model), ordered by model family and then newest first, and every
+  label ends with that model's privacy tier: `Private` (the prompt is not kept),
+  `Anonymized` (passed to the model's maker without the account, and the maker
+  still reads the prompt), or `Private (TEE)` for a model inside a hardware
+  enclave. An info control beside the Model row carries the same explanation, on
+  the web page and in the macOS app.
 - The "Model behavior" panel — reasoning effort and Codex `fast` — is hidden for
-  providers with no behavior knobs: OpenRouter, Mistral, and Ollama.
+  providers with no behavior knobs: OpenRouter, Mistral, Venice, and Ollama.
 - Both the CLI wizard and the web page offer effort for the effort-capable
   providers only, and list only the levels the selected model accepts.
 - The web setup Media tab exposes an editable OpenAI/SpaceXAI key field inline

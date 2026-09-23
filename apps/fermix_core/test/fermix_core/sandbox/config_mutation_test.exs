@@ -41,6 +41,11 @@ defmodule FermixCore.Sandbox.ConfigMutationTest do
     @impl true
     def available?(_opts \\ []), do: true
 
+    # A probe reads nothing; this double stands in for a store that answers.
+    @impl true
+    def probe(opts \\ []),
+      do: %{store: Keyword.get(opts, :store, :keyring), state: :available, sentence: "double"}
+
     @impl true
     def get(_key, opts \\ []), do: {:ok, "rotated-#{record(:get, opts)}"}
 

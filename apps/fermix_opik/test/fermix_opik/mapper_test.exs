@@ -167,6 +167,21 @@ defmodule FermixOpik.MapperTest do
            }
   end
 
+  # Variable names are operator configuration, not user content, so the list of
+  # allowed variables the sandbox could not pass survives a content-free export.
+  test "tool_span exports the allowed variables the sandbox could not pass" do
+    metadata = %{tool: "shell", success: true, env_unresolved: ["FERMIX_PROD_ALPACA_API_KEY"]}
+
+    span =
+      Mapper.tool_span(metadata, %{duration_ms: 1},
+        trace_id: "t",
+        project_name: "fermix",
+        ended: @ended
+      )
+
+    assert span.metadata == %{env_unresolved: ["FERMIX_PROD_ALPACA_API_KEY"]}
+  end
+
   test "tool_span routes error_code/error_summary into error_info" do
     metadata = %{
       tool: "browser",
@@ -258,6 +273,7 @@ defmodule FermixOpik.MapperTest do
     assert Mapper.provider_string(:openrouter) == "openrouter"
     assert Mapper.provider_string(:ollama) == "ollama"
     assert Mapper.provider_string(:mistral) == "mistral"
+    assert Mapper.provider_string(:venice) == "venice"
     # The transcription backends (M21) name themselves too, so a streaming STT
     # call is attributable to its backend in the export.
     assert Mapper.provider_string(:deepgram) == "deepgram"
@@ -373,8 +389,163 @@ defmodule FermixOpik.MapperTest do
            }
   end
 
+  # M42 slice 3: the addressing pair. A millisecond count and a closed enum — the
+  # id itself never leaves the session, and the screen never enters a span — so a
+  # trace can be counted by "how stale was the image" and "which refusal" without
+  # reading a sentence or a pixel.
+  test "tool_span keeps the observation age and the addressing refusal, and nothing else" do
+    metadata = %{
+      tool: "computer_use",
+      success: false,
+      cu_session: "cua_ab12",
+      outcome: :refused,
+      observation_age_ms: 41_200,
+      geometry_refusal: "expired_observation",
+      observation_id: "7c1e-12",
+      screen_text: "Transfer $4,000 to account 12345"
+    }
+
+    span =
+      Mapper.tool_span(metadata, %{duration_ms: 12},
+        trace_id: "t",
+        project_name: "fermix",
+        ended: @ended
+      )
+
+    assert span.metadata == %{
+             cu_session: "cua_ab12",
+             outcome: :refused,
+             observation_age_ms: 41_200,
+             geometry_refusal: "expired_observation"
+           }
+  end
+
+  # M42 slice 4: the reference pair. Which mechanism the input went out by, and
+  # what the helper observed of it, are two closed enums; the VALUE a `set_value`
+  # carried is content and must never ride always-on metadata, whatever the
+  # capture posture — a span that leaked one would put a password in a trace.
+  test "tool_span keeps the input method and the effect, and never the value" do
+    metadata = %{
+      tool: "computer_use",
+      success: true,
+      cu_session: "cua_ab12",
+      outcome: :performed,
+      input_method: "ax",
+      effect: :verified,
+      element_ref: "e4",
+      value: "hunter2"
+    }
+
+    span =
+      Mapper.tool_span(metadata, %{duration_ms: 12},
+        trace_id: "t",
+        project_name: "fermix",
+        ended: @ended
+      )
+
+    assert span.metadata == %{
+             cu_session: "cua_ab12",
+             outcome: :performed,
+             input_method: "ax",
+             effect: :verified
+           }
+  end
+
+  # M42 slice 6: the check and the phase costs. Which evidence the action came
+  # back with, whether the view it acted in had changed since the one it acted on,
+  # and what each phase of it cost — a closed enum, a boolean and four millisecond
+  # counts, so a run can be counted and timed without a pixel or a sentence.
+  test "tool_span keeps the check and the phase timings, and nothing from the screen" do
+    metadata = %{
+      tool: "computer_use",
+      success: true,
+      cu_session: "cua_ab12",
+      outcome: :performed,
+      check_kind: "image",
+      check_changed: false,
+      cu_input_ms: 12,
+      cu_settle_ms: 180,
+      cu_capture_ms: 40,
+      cu_encode_ms: 9,
+      element_after: %{"value" => "hunter2"},
+      screen_text: "Transfer $4,000 to account 12345"
+    }
+
+    span =
+      Mapper.tool_span(metadata, %{duration_ms: 241},
+        trace_id: "t",
+        project_name: "fermix",
+        ended: @ended
+      )
+
+    assert span.metadata == %{
+             cu_session: "cua_ab12",
+             outcome: :performed,
+             check_kind: "image",
+             check_changed: false,
+             cu_input_ms: 12,
+             cu_settle_ms: 180,
+             cu_capture_ms: 40,
+             cu_encode_ms: 9
+           }
+  end
+
+  # Bound windows (M42 slice 5): what the action was pointed at, and how it
+  # reached the screen. The window's TITLE and the application's NAME are content
+  # and must never ride the row, whatever the capture posture.
+  test "tool_span keeps the target kind and the mode, and never the window's name" do
+    metadata = %{
+      tool: "computer_use",
+      success: true,
+      cu_session: "cua_ab12",
+      outcome: :performed,
+      target_kind: "window",
+      cu_mode: "background",
+      app: "Mail",
+      title: "Inbox (3) — work@example.com"
+    }
+
+    span =
+      Mapper.tool_span(metadata, %{duration_ms: 20},
+        trace_id: "t",
+        project_name: "fermix",
+        ended: @ended
+      )
+
+    assert span.metadata == %{
+             cu_session: "cua_ab12",
+             outcome: :performed,
+             target_kind: "window",
+             cu_mode: "background"
+           }
+  end
+
+  # Coexistence (V3 R0): what the courtesy arbiter did about a person at the
+  # machine. A closed enum and nothing else — without it a trace cannot say
+  # whether the agent proceeded, waited, or stepped aside, which is the whole
+  # question the arbiter exists to answer.
+  test "tool_span keeps the courtesy outcome" do
+    metadata = %{
+      tool: "computer_use",
+      success: true,
+      cu_session: "cua_ab12",
+      outcome: :refused,
+      courtesy: :yielded,
+      screen_text: "Transfer $4,000 to account 12345"
+    }
+
+    span =
+      Mapper.tool_span(metadata, %{duration_ms: 20},
+        trace_id: "t",
+        project_name: "fermix",
+        ended: @ended
+      )
+
+    assert span.metadata == %{cu_session: "cua_ab12", outcome: :refused, courtesy: :yielded}
+  end
+
   test "tool_span keeps the outbound MCP server identity" do
-    metadata = %{tool: "eden_get_note_markdown", success: true, mcp_server: "eden"}
+    metadata = %{tool: "acme_get_note_markdown", success: true, mcp_server: "acme"}
 
     span =
       Mapper.tool_span(metadata, %{duration_ms: 30},
@@ -383,7 +554,77 @@ defmodule FermixOpik.MapperTest do
         ended: @ended
       )
 
-    assert span.metadata.mcp_server == "eden"
+    assert span.metadata.mcp_server == "acme"
+  end
+
+  # The computer-use run is its own root trace, so these two keys are the ONLY
+  # link from a turn's action back to the session that performed it, and the only
+  # record of what the action actually did. An id and an enum, so they ride
+  # outside the content gate — no page or screen text goes in either. The screen
+  # snippet below must still drop: this stays an allowlist, not a passthrough.
+  test "tool_span keeps the computer-use session id and outcome, and nothing else" do
+    metadata = %{
+      tool: "computer_use",
+      success: true,
+      action: "click",
+      cu_session: "cua_ab12",
+      outcome: "performed_unverified",
+      screen_text: "Transfer $4,000 to account 12345"
+    }
+
+    span =
+      Mapper.tool_span(metadata, %{duration_ms: 40},
+        trace_id: "t",
+        project_name: "fermix",
+        ended: @ended
+      )
+
+    assert span.metadata == %{
+             action: "click",
+             cu_session: "cua_ab12",
+             outcome: "performed_unverified"
+           }
+  end
+
+  # The live emitter sends `outcome` as an ATOM (`cu_session` is always a string),
+  # and `Map.take` hands both to Opik as they came — Jason renders the atom as the
+  # same word a replayed string produces. The type differs by seam, so it is
+  # pinned on both sides (see the trace-file round trip).
+  test "tool_span keeps an atom outcome exactly as the emitter sent it" do
+    metadata = %{tool: "computer_use", success: false, cu_session: "cua_ab12", outcome: :refused}
+
+    span =
+      Mapper.tool_span(metadata, %{duration_ms: 3},
+        trace_id: "t",
+        project_name: "fermix",
+        ended: @ended
+      )
+
+    assert span.metadata == %{cu_session: "cua_ab12", outcome: :refused}
+    assert Jason.encode!(span.metadata.outcome) == ~s("refused")
+  end
+
+  test "computer_use_span records the phase inside the session's own run" do
+    metadata = %{
+      agent: "main",
+      session_id: "cua_ab12",
+      parent_session: "main-9",
+      mode: :host,
+      origin: :interactive
+    }
+
+    span =
+      Mapper.computer_use_span(metadata, %{},
+        trace_id: "t",
+        parent_span_id: "wrap-1",
+        project_name: "fermix",
+        ended: @ended,
+        phase: :session_pause
+      )
+
+    assert span.name == "computer_use:session_pause"
+    assert span.type == "general"
+    assert span.metadata == %{mode: "host", origin: "interactive"}
   end
 
   # `Gateway.DraftStream` emits :rotate with duration_us + edit_index; while those
@@ -416,8 +657,8 @@ defmodule FermixOpik.MapperTest do
   describe "mcp_client_span/3" do
     test "builds a general lifecycle point span from the emitter's allowlist" do
       metadata = %{
-        source_id: "plugin:eden",
-        plugin: "eden",
+        source_id: "plugin:acme",
+        plugin: "acme",
         phase: :security_block,
         result: :error,
         error_class: "tool_not_allowed",
@@ -441,8 +682,8 @@ defmodule FermixOpik.MapperTest do
       assert span.end_time == "2026-06-02T12:00:03.200Z"
 
       assert span.metadata == %{
-               source_id: "plugin:eden",
-               plugin: "eden",
+               source_id: "plugin:acme",
+               plugin: "acme",
                phase: "security_block",
                result: "error",
                error_class: "tool_not_allowed",
@@ -454,13 +695,13 @@ defmodule FermixOpik.MapperTest do
     # silently dropped, and that is what must stay true for anything sensitive.
     test "an unlisted metadata key never exports" do
       metadata = %{
-        source_id: "plugin:eden",
+        source_id: "plugin:acme",
         phase: :ready,
         result: :ok,
-        authorization: "Bearer eden_pat_fakevalue",
+        authorization: "Bearer acme_pat_fakevalue",
         mcp_session_id: "mcp-sess-01JFAKE",
         workspace_id: "ws_fake_0123456789",
-        base_url: "https://mcp.eden.so/mcp"
+        base_url: "https://mcp.acme.example/mcp"
       }
 
       span =
@@ -470,11 +711,92 @@ defmodule FermixOpik.MapperTest do
           ended: @ended
         )
 
-      assert span.metadata == %{source_id: "plugin:eden", phase: "ready", result: "ok"}
-      refute String.contains?(inspect(span), "eden_pat_fakevalue")
+      assert span.metadata == %{source_id: "plugin:acme", phase: "ready", result: "ok"}
+      refute String.contains?(inspect(span), "acme_pat_fakevalue")
       refute String.contains?(inspect(span), "mcp-sess")
       refute String.contains?(inspect(span), "ws_fake")
-      refute String.contains?(inspect(span), "mcp.eden.so")
+      refute String.contains?(inspect(span), "mcp.acme.example")
+    end
+  end
+
+  describe "voice_live_span/3" do
+    test "builds a general phase point span with the delegation correlation ids" do
+      span =
+        Mapper.voice_live_span(
+          %{
+            device_id: "dev-1",
+            model: "gpt-live-1",
+            voice: "marin",
+            provider_session_id: "sess_live_abc",
+            delegation_id: "dlg_1",
+            revision: 2,
+            turn_session_id: "voice_delegation_7",
+            status: "completed"
+          },
+          %{duration_ms: 1_200},
+          trace_id: "trace-1",
+          parent_span_id: "wrap-1",
+          project_name: "fermix",
+          ended: @ended,
+          phase: :delegation_stop
+        )
+
+      assert span.name == "voice_live:delegation_stop"
+      assert span.type == "general"
+      assert span.trace_id == "trace-1"
+      assert span.parent_span_id == "wrap-1"
+      assert span.metadata.delegation_id == "dlg_1"
+      assert span.metadata.revision == 2
+      assert span.metadata.turn_session_id == "voice_delegation_7"
+      assert span.metadata.status == "completed"
+      assert span.metadata.provider_session_id == "sess_live_abc"
+      assert span.metadata.model == "gpt-live-1"
+
+      # The delegation's elapsed time is the span's own extent, not a dropped
+      # measurement: a point span would erase how long the backend turn took.
+      assert span.start_time == Mapper.iso(Mapper.start_of(@ended, 1_200))
+      assert span.end_time == Mapper.iso(@ended)
+    end
+
+    test "a phase with no duration is a point span and drops absent keys" do
+      span =
+        Mapper.voice_live_span(
+          %{model: "gpt-live-1", reason: "moderation cut the reply"},
+          %{},
+          trace_id: "trace-1",
+          parent_span_id: "wrap-1",
+          project_name: "fermix",
+          ended: @ended,
+          phase: :provider_error
+        )
+
+      assert span.name == "voice_live:provider_error"
+      assert span.start_time == span.end_time
+      assert span.metadata == %{model: "gpt-live-1", reason: "moderation cut the reply"}
+    end
+
+    # There is no global metadata allowlist: this builder's key set is the whole
+    # contract, and a caption or transcript fragment must never reach a span.
+    test "exports no spoken content" do
+      span =
+        Mapper.voice_live_span(
+          %{
+            model: "gpt-live-1",
+            caption: "my card number is 4111 1111 1111 1111",
+            transcript: "book the flight",
+            instructions: "You are a live voice companion"
+          },
+          %{},
+          trace_id: "trace-1",
+          parent_span_id: "wrap-1",
+          project_name: "fermix",
+          ended: @ended,
+          phase: :session_started
+        )
+
+      refute String.contains?(inspect(span), "4111")
+      refute String.contains?(inspect(span), "book the flight")
+      refute String.contains?(inspect(span), "live voice companion")
     end
   end
 end

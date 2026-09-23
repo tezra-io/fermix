@@ -102,6 +102,27 @@ defmodule FermixCore.Setup.ServiceActivationTest do
     assert_receive {:service, :start, :user, []}
   end
 
+  # M38 §4.4: a packaged install answers with the status it verified rather than
+  # a bare `:ok`, and reading that as a failure would make every packaged setup
+  # launch report `install_failed` on a service it had just enabled.
+  test "accepts the published status a packaged install and restart answer with" do
+    status = {:ok, %{"alignment" => "aligned"}}
+    fresh = fake_service(installed?: false, install: status)
+
+    assert {:ok, %{scope: :user, action: :installed_started}} =
+             ServiceActivation.ensure_running(:user, service: fresh, standalone?: fn -> true end)
+
+    running = fake_service(installed?: true, drifted?: false, restart: status)
+
+    assert {:ok, %{scope: :user, action: :restarted}} =
+             ServiceActivation.ensure_running(:user,
+               service: running,
+               standalone?: fn -> true end
+             )
+
+    assert_receive {:service, :restart, :user, []}
+  end
+
   test "returns install errors without starting" do
     service = fake_service(installed?: false, install: {:error, :denied})
 

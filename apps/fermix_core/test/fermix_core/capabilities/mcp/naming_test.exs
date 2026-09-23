@@ -137,28 +137,28 @@ defmodule FermixCore.Capabilities.MCP.NamingTest do
 
   describe "mode: :preserve" do
     test "keeps the exact upstream name, never a second prefix" do
-      assert Naming.candidate("eden", "eden_get_note", mode: :preserve) == "eden_get_note"
+      assert Naming.candidate("acme", "acme_get_note", mode: :preserve) == "acme_get_note"
     end
 
     test "does not sanitize case or punctuation away" do
-      assert Naming.candidate("eden", "eden_getNote-v2", mode: :preserve) == "eden_getNote-v2"
+      assert Naming.candidate("acme", "acme_getNote-v2", mode: :preserve) == "acme_getNote-v2"
     end
 
     test "raises rather than repairing a name that fails validation" do
       assert_raise ArgumentError, fn ->
-        Naming.candidate("eden", "eden get note", mode: :preserve)
+        Naming.candidate("acme", "acme get note", mode: :preserve)
       end
     end
 
     test "existing prefix mode is unchanged" do
-      assert Naming.candidate("eden", "eden_get_note", prefix: "eden_") ==
-               "eden_eden_get_note"
+      assert Naming.candidate("acme", "acme_get_note", prefix: "acme_") ==
+               "acme_acme_get_note"
     end
   end
 
   describe "validate_name/1" do
     test "accepts the capability charset up to 64 bytes" do
-      assert :ok = Naming.validate_name("eden_get_note")
+      assert :ok = Naming.validate_name("acme_get_note")
       assert :ok = Naming.validate_name(String.duplicate("a", 64))
     end
 
@@ -168,21 +168,21 @@ defmodule FermixCore.Capabilities.MCP.NamingTest do
       assert {:error, {:capability_name_too_long, _}} =
                Naming.validate_name(String.duplicate("a", 65))
 
-      assert {:error, {:invalid_capability_name, _}} = Naming.validate_name("eden get note")
+      assert {:error, {:invalid_capability_name, _}} = Naming.validate_name("acme get note")
     end
   end
 
   describe "reserve/3" do
     test "refuses a taken name instead of hash-renaming it" do
-      assert {:ok, "eden_get_note"} = Naming.reserve("eden", "eden_get_note", "eden_get_note")
+      assert {:ok, "acme_get_note"} = Naming.reserve("acme", "acme_get_note", "acme_get_note")
 
-      assert {:error, {:capability_conflict, "eden_get_note"}} =
-               Naming.reserve("other", "get_note", "eden_get_note")
+      assert {:error, {:capability_conflict, "acme_get_note"}} =
+               Naming.reserve("other", "get_note", "acme_get_note")
     end
 
     test "re-reserving the same pair is idempotent" do
-      assert {:ok, name} = Naming.reserve("eden", "eden_get_note", "eden_get_note")
-      assert {:ok, ^name} = Naming.reserve("eden", "eden_get_note", "eden_get_note")
+      assert {:ok, name} = Naming.reserve("acme", "acme_get_note", "acme_get_note")
+      assert {:ok, ^name} = Naming.reserve("acme", "acme_get_note", "acme_get_note")
     end
   end
 end

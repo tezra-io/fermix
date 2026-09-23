@@ -9,7 +9,12 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import socket
+import struct
 import sys
+import tempfile
+import threading
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -200,7 +205,7 @@ def test_capability_judge_preflight_delegates_to_the_judge_precondition(monkeypa
 
 def test_unevaluated_judge_aborts_instead_of_scoring_candidate_zero(monkeypatch):
     case = SimpleNamespace(
-        id="quality", score_spec=None, rubric="Judge quality.",
+        id="quality", score_spec=None, rubric="Judge quality.", expect={},
         turns=[SimpleNamespace(query="q")])
     cfg = SimpleNamespace(judge=SimpleNamespace(backend="openai", model="gpt-5.4-mini"))
     monkeypatch.setattr(
@@ -393,6 +398,25 @@ def test_capability_risk_requires_mutation_and_cost_confirmations():
     assert rc._confirmation_error(_risk_case("host_readonly"), confirmed) is None
     assert rc._confirmation_error(_risk_case("isolated_mutation"), confirmed) is None
     assert rc._confirmation_error(_risk_case("expensive"), confirmed) is None
+
+
+def test_the_default_sweep_is_the_ranking_task_set_and_nothing_else():
+    """The unattended sweep's task count IS the leaderboard's cohort: one more
+    task changes the composite, and every historical row was scored on the old
+    set. A suite also joins the ranking's PRECONDITIONS — the browser corpus
+    needs a working Chrome in the disposable home — so those suites stay parked
+    under candidates/ and are promoted by the owner, deliberately, rather than by
+    landing in the directory. This number is the guard on that."""
+    cap_dir = os.path.join(os.path.dirname(HERE), "suites", "capability")
+    default, _skipped = rc.capability_cases(
+        suites.load_all(cap_dir), None, None, None, False)
+    assert len(default) == 26
+    assert not [suite.name for suite, _scn, _case in default
+                if suite.name.startswith("cap_browser")]
+    parked, _skipped = rc.capability_cases(
+        suites.load_all(cap_dir, include_candidates=True), None, None, None, False)
+    assert {"cap_browser_corpus", "cap_browser_forms", "cap_browser_webmcp"} <= {
+        suite.name for suite, _scn, _case in parked}
 
 
 def test_all_shipped_capability_scenarios_declare_a_risk():
@@ -1379,14 +1403,19 @@ def test_planned_turns_counts_every_declared_turn():
     assert rc._planned_turns(cases) == 3        # not 2: the store turn is real work
 
 
-def test_the_shipped_default_sweep_plans_24_tasks_and_130_turns():
+def test_the_shipped_default_sweep_plans_every_declared_turn():
     # The pin the review's §10 called out: "120 turns" omitted the two memory store
-    # turns, understating the declared input by 10 turns at 5 trials.
+    # turns, understating the declared input by 10 turns at 5 trials. The defect was
+    # counting CASES where the plan must count declared TURNS, so that — not the
+    # catalog's size — is what this pins; literal totals only ever get re-pinned.
     cap_dir = os.path.join(os.path.dirname(HERE), "suites", "capability")
     selected, _skipped = rc.capability_cases(
         suites.load_all(cap_dir), None, None, None, False)
-    assert len(selected) == 24
-    assert rc._planned_turns(selected) * 5 == 130
+    declared = sum(len(case.turns) for _suite, _scenario, case in selected)
+    # The shipped catalog still carries multi-turn (cross-session) cases, so the
+    # one-turn-per-case undercount stays distinguishable from the right answer.
+    assert declared > len(selected)
+    assert rc._planned_turns(selected) == declared
 
 
 def test_selection_label_records_the_candidate_flag():
@@ -1415,7 +1444,7 @@ def test_confirmations_are_an_execution_concern_not_a_planning_one():
 # --- argument validation ----------------------------------------------------
 
 def _args(**overrides):
-    base = dict(trials=5, k=None, threshold=1.0)
+    base = dict(trials=5, k=None, threshold=1.0, results_out=None)
     base.update(overrides)
     return SimpleNamespace(**base)
 
@@ -1650,12 +1679,14 @@ def _report_cfg(tmp_path):
 
 def _report_args(**overrides):
     base = dict(config_id=None, threshold=1.0, private=False, no_opik=True,
-                axis="tokens", suite=None, tag=None, max_tasks=None, candidates=False)
+                axis="tokens", suite=None, tag=None, max_tasks=None, candidates=False,
+                results_out=None)
     base.update(overrides)
     return SimpleNamespace(**base)
 
 
-def _report_run(statuses, success=1.0, routes=("openai/gpt-x/high",), pricing_cols=None):
+def _report_run(statuses, success=1.0, routes=("openai/gpt-x/high",), pricing_cols=None,
+                not_evaluated=()):
     from evallib import aggregate
     trials = [aggregate.score_trial("c1", task_success=success, safety_ok=True, cost=0.01,
                                     duration_ms=10.0, tokens=5, tool_calls=1, status=st,
@@ -1678,7 +1709,7 @@ def _report_run(statuses, success=1.0, routes=("openai/gpt-x/high",), pricing_co
                    cases=[(SimpleNamespace(name="cap_x", soft=False), SimpleNamespace(id="s"), case)],
                    trials=len(statuses), k=1, want_judge=False,
                    outcomes=[("cap_x", "c1", out)], all_models=list(routes),
-                   task_stats=[stats])
+                   task_stats=[stats], not_evaluated=list(not_evaluated))
 
 
 def test_an_invalid_run_keeps_its_evidence_but_publishes_nothing(tmp_path, capsys):
@@ -1973,6 +2004,218 @@ def test_a_run_with_no_rate_card_result_says_so_rather_than_showing_nothing(tmp_
     out_dir = os.path.join(cfg.report_dir, "capability", run.run_id)
     with open(os.path.join(out_dir, "report.md")) as fh:
         assert "not priced" in fh.read()
+
+
+# --- unmet tool preconditions: NOT EVALUATED, never a scored zero -----------
+
+def _daemon_cfg(bin_path="fermix"):
+    return SimpleNamespace(daemon=SimpleNamespace(fermix_bin=bin_path), env={})
+
+
+def _req_case(case_id="harness_delegated_bugfix", *, any_of=(), all_of=()):
+    return SimpleNamespace(id=case_id, expect={}, requires_tools=list(any_of),
+                           requires_tools_all=tuple(all_of), cross_session=False,
+                           score_spec=None, rubric=None, checker_spec=None,
+                           turns=[SimpleNamespace(query="q", expect={})], timeout_ms=1000)
+
+
+def _selection(*cases, suite="cap_harness"):
+    s = SimpleNamespace(name=suite, soft=False)
+    scn = SimpleNamespace(id="scn", tags=[], risk="isolated_mutation")
+    return [(s, scn, case) for case in cases]
+
+
+def _registry(*names):
+    return json.dumps({"counts": {"total": len(names)},
+                       "capabilities": [{"name": n, "kind": "builtin"} for n in names]})
+
+
+def _capabilities_run(stdout="", returncode=0, stderr="", raises=None):
+    def run(cmd, **_kwargs):
+        if raises is not None:
+            raise raises
+        assert cmd[1:] == ["capabilities", "--json", "--kind", "all"], cmd
+        return SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
+    return run
+
+
+def test_advertised_tools_reads_the_daemons_own_capability_registry(monkeypatch):
+    monkeypatch.setattr(driver, "_run",
+                        _capabilities_run(_registry("shell", "file_read", "codex_run")))
+    assert driver.advertised_tools(_daemon_cfg()) == {"shell", "file_read", "codex_run"}
+
+
+def test_advertised_tools_refuses_an_empty_registry(monkeypatch):
+    # An empty set would silently excuse every provenance requirement in the suite,
+    # which is exactly the failure this signal exists to prevent.
+    monkeypatch.setattr(driver, "_run", _capabilities_run(_registry()))
+    with pytest.raises(driver.AdvertisedToolsUnavailable):
+        driver.advertised_tools(_daemon_cfg())
+
+
+def test_advertised_tools_refuses_a_failed_or_unreadable_query(monkeypatch):
+    monkeypatch.setattr(driver, "_run", _capabilities_run("", returncode=3, stderr="not running"))
+    with pytest.raises(driver.AdvertisedToolsUnavailable):
+        driver.advertised_tools(_daemon_cfg())
+    monkeypatch.setattr(driver, "_run", _capabilities_run("not json at all"))
+    with pytest.raises(driver.AdvertisedToolsUnavailable):
+        driver.advertised_tools(_daemon_cfg())
+    monkeypatch.setattr(driver, "_run",
+                        _capabilities_run(raises=FileNotFoundError("no such binary")))
+    with pytest.raises(driver.AdvertisedToolsUnavailable):
+        driver.advertised_tools(_daemon_cfg())
+
+
+def test_a_required_tool_the_daemon_never_advertised_is_an_unmet_precondition():
+    unmet = rc._unmet_tool_preconditions(
+        _selection(_req_case(any_of=("codex_run", "claude_code_run"))),
+        {"shell", "file_read", "subagents"})
+    assert [(suite, case_id) for suite, case_id, _r in unmet] == [
+        ("cap_harness", "harness_delegated_bugfix")]
+    assert "codex_run" in unmet[0][2] and "claude_code_run" in unmet[0][2]
+
+
+def test_an_advertised_required_tool_is_evaluated_however_the_trial_goes():
+    assert rc._unmet_tool_preconditions(
+        _selection(_req_case(any_of=("codex_run", "claude_code_run"))),
+        {"shell", "codex_run"}) == []
+
+
+def test_an_advertised_tool_the_model_never_reached_for_still_scores_zero():
+    """The provenance gate is NOT weakened: only a tool the daemon does not carry is a
+    precondition. A tool it advertises and the model ignored is a candidate failure."""
+    case = _req_case(any_of=("codex_run", "claude_code_run"))
+    assert rc._unmet_tool_preconditions(_selection(case), {"codex_run"}) == []
+    episode = _episode(_captured(spans=[_span("shell"), _span("file_read")]))
+    assert rc._provenance_gate(case, episode, 1.0, "harness_delegated_bugfix t0") == 0.0
+
+
+def test_requires_tools_all_is_unmet_when_one_named_tool_is_missing():
+    unmet = rc._unmet_tool_preconditions(
+        _selection(_req_case("two_step", all_of=("skill_create", "skill_reload"))),
+        {"skill_create", "shell"})
+    assert len(unmet) == 1
+    assert "does not advertise skill_reload" in unmet[0][2]
+
+
+def test_a_case_that_declares_no_tool_is_always_evaluated():
+    assert rc._unmet_tool_preconditions(_selection(_req_case("plain")), {"shell"}) == []
+
+
+def test_the_hold_out_notice_names_the_suite_case_and_the_missing_tools(monkeypatch, capsys):
+    monkeypatch.setattr(driver, "advertised_tools", lambda _cfg: {"shell", "file_read"})
+    cases = _selection(_req_case(any_of=("codex_run", "claude_code_run")), _req_case("plain"))
+
+    kept, unmet, refusal = rc._hold_out_unmet_preconditions(_daemon_cfg(), cases)
+
+    assert refusal is None
+    assert [case.id for _s, _scn, case in kept] == ["plain"]
+    assert len(unmet) == 1
+    out = capsys.readouterr().out
+    assert "NOT EVALUATED" in out
+    assert "cap_harness/harness_delegated_bugfix" in out
+    assert "codex_run" in out and "claude_code_run" in out
+    assert "composite" in out          # says where the task did NOT land
+
+
+def test_a_selection_with_no_declared_tools_never_queries_the_daemon(monkeypatch):
+    def refuse(_cfg):
+        raise AssertionError("the daemon must not be queried for a selection that "
+                             "declares no required tool")
+    monkeypatch.setattr(driver, "advertised_tools", refuse)
+    cases = _selection(_req_case("plain"))
+    assert rc._hold_out_unmet_preconditions(_daemon_cfg(), cases) == (cases, [], None)
+
+
+def test_a_daemon_that_cannot_say_what_it_advertises_refuses_the_sweep(monkeypatch, capsys):
+    def unavailable(_cfg):
+        raise driver.AdvertisedToolsUnavailable("`fermix capabilities` exited 3")
+    monkeypatch.setattr(driver, "advertised_tools", unavailable)
+    cases = _selection(_req_case(any_of=("codex_run",)))
+
+    kept, unmet, refusal = rc._hold_out_unmet_preconditions(_daemon_cfg(), cases)
+
+    # Neither answer may be assumed: nothing is driven and nothing is excused.
+    assert refusal == 3 and kept == [] and unmet == []
+    assert "advertised capabilities" in capsys.readouterr().err
+
+
+def test_a_selection_this_daemon_cannot_measure_at_all_refuses(monkeypatch, capsys):
+    monkeypatch.setattr(driver, "advertised_tools", lambda _cfg: {"shell"})
+    cases = _selection(_req_case(any_of=("codex_run", "claude_code_run")))
+
+    kept, unmet, refusal = rc._hold_out_unmet_preconditions(_daemon_cfg(), cases)
+
+    assert refusal == 3 and kept == []
+    assert len(unmet) == 1
+    assert "no capability task is measurable" in capsys.readouterr().err
+
+
+def test_a_held_out_task_is_named_in_the_report_and_never_scored(tmp_path, capsys):
+    cfg = _report_cfg(tmp_path)
+    lb_path = os.path.join(cfg.report_dir, "capability", "leaderboard.json")
+    run = _report_run(["ok", "ok"], not_evaluated=[
+        ("cap_harness", "harness_delegated_bugfix",
+         "needs any of claude_code_run, codex_run; this daemon advertises none of them")])
+
+    # Valid and recorded, but the gate is RED: a sweep cannot clear a bar for a task
+    # it never evaluated.
+    assert rc._report(cfg, _report_args(), lb_path, run) == 5
+
+    out_dir = os.path.join(cfg.report_dir, "capability", run.run_id)
+    with open(os.path.join(out_dir, "report.md")) as fh:
+        report = fh.read()
+    assert "not evaluated" in report.lower()
+    assert "cap_harness/harness_delegated_bugfix" in report
+    assert "codex_run" in report
+    with open(lb_path) as fh:
+        row = next(iter(json.load(fh)["rows"].values()))
+    # Out of the denominators: the scored task set is the one task that ran.
+    assert row["score"]["n_tasks"] == 1
+    assert row["score"]["n_tasks_not_evaluated"] == 1
+    assert row["score"]["tasks_not_evaluated"] == ["cap_harness/harness_delegated_bugfix"]
+    assert row["score"]["mean_task_success"] == 1.0          # never dragged by a 0.00
+    assert row["meta"]["not_evaluated"][0]["task"] == "cap_harness/harness_delegated_bugfix"
+    assert "NOT EVALUATED" in capsys.readouterr().err
+
+
+def _fake_capability_daemon(home, names):
+    """A one-request stand-in for the daemon's control socket, speaking the same
+    {packet, 4} framing the shim does. Bounded: one connection, then the thread ends."""
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(os.path.join(home, "daemon.sock"))
+    server.settimeout(10)
+    server.listen(1)
+
+    def serve():
+        with server, server.accept()[0] as conn:
+            length = struct.unpack(">I", conn.recv(4))[0]
+            conn.recv(length)
+            payload = json.dumps({"status": "ok", "capabilities": {
+                "counts": {"total": len(names)},
+                "capabilities": [{"name": n, "kind": "builtin"} for n in names]},
+            }).encode()
+            conn.sendall(struct.pack(">I", len(payload)) + payload)
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    return thread
+
+
+def test_the_bundled_shim_answers_the_capability_query_the_runner_reads():
+    """The two halves of the signal, pinned together: the shim speaks the daemon's
+    `capabilities` method and the runner parses exactly what it prints. A short temp
+    dir, because a unix socket path is length-bounded."""
+    home = tempfile.mkdtemp(prefix="fxcap")
+    try:
+        thread = _fake_capability_daemon(home, ["shell", "codex_run"])
+        cfg = SimpleNamespace(daemon=SimpleNamespace(fermix_bin=os.path.join(HERE, "fermix-shim")),
+                              env={**os.environ, "FERMIX_HOME": home})
+        assert driver.advertised_tools(cfg) == {"shell", "codex_run"}
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+    finally:
+        shutil.rmtree(home)
 
 
 if __name__ == "__main__":

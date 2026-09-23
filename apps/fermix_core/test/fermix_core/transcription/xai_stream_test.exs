@@ -545,12 +545,21 @@ defmodule FermixCore.Transcription.XAIStreamTest do
       )
 
       on_exit(fn -> :telemetry.detach(handler_id) end)
-      :ok
+
+      # The handler hears every provider call in the VM, and an earlier test's
+      # session can still be emitting: a session reports its terminal message to
+      # its consumer before its span, and one still open when its test ends emits
+      # `consumer_down` once that test process exits. Each test therefore opens
+      # its stream under its own session id and receives only the span carrying
+      # it, pinned in the pattern because a foreign span may carry no id at all.
+      {:ok, session_id: "xai-stream-#{System.unique_integer([:positive])}"}
     end
 
-    test "one span per stream lifetime, tagged with the shared modelless label" do
+    test "one span per stream lifetime, tagged with the shared modelless label", %{
+      session_id: session_id
+    } do
       Application.put_env(:fermix_core, :telemetry, capture_content: true)
-      {session, socket} = ready_session(session_id: "sess-xai")
+      {session, socket} = ready_session(session_id: session_id)
 
       inject(session, socket, fixture("transcript"))
       assert_receive {:transcript_segment, ^session, _segment}
@@ -559,7 +568,9 @@ defmodule FermixCore.Transcription.XAIStreamTest do
       inject(session, socket, fixture("transcript_done"))
       assert_receive {:transcript_stream_closed, ^session, _summary}
 
-      assert_receive {:provider_call, %{duration_ms: duration_ms}, metadata}
+      assert_receive {:provider_call, %{duration_ms: duration_ms},
+                      %{session_id: ^session_id} = metadata}
+
       assert is_integer(duration_ms) and duration_ms >= 0
       assert metadata.provider == :xai
       assert metadata.adapter == :xai
@@ -568,19 +579,20 @@ defmodule FermixCore.Transcription.XAIStreamTest do
       assert metadata.status == :ok
       assert metadata.purpose == :transcription
       assert metadata.tokens == %{}
-      assert metadata.session_id == "sess-xai"
       assert metadata.output == "hello there"
-      refute_received {:provider_call, _measurements, _metadata}
+      refute_received {:provider_call, _measurements, %{session_id: ^session_id}}
     end
 
-    test "a drain cut short reports an error span rather than a transcript preview" do
-      {session, socket} = ready_session()
+    test "a drain cut short reports an error span rather than a transcript preview", %{
+      session_id: session_id
+    } do
+      {session, socket} = ready_session(session_id: session_id)
 
       StreamSession.finish(session)
       send(session, {:transcription_ws, socket, {:disconnect, %{reason: {:error, :closed}}}})
       assert_receive {:transcript_stream_error, ^session, _reason}
 
-      assert_receive {:provider_call, _measurements, metadata}
+      assert_receive {:provider_call, _measurements, %{session_id: ^session_id} = metadata}
       assert metadata.status == :error
       assert metadata.error_summary =~ "drain_interrupted"
     end
@@ -588,28 +600,33 @@ defmodule FermixCore.Transcription.XAIStreamTest do
     # A consumer crash is the one terminal where post-mortem tracing matters
     # most: nobody is left to report the stream, so only the span says what it
     # cost and why it ended.
-    test "a consumer death still reports the stream's terminal span" do
+    test "a consumer death still reports the stream's terminal span", %{session_id: session_id} do
       consumer = spawn(fn -> Process.sleep(:infinity) end)
-      {:ok, session} = XAIStream.open(consumer, "xai-key", socket_mod: FakeWsSocket)
+
+      {:ok, session} =
+        XAIStream.open(consumer, "xai-key", socket_mod: FakeWsSocket, session_id: session_id)
+
       assert_receive {:ws_started, _socket, _url, _headers, ^session}
       ref = Process.monitor(session)
 
       Process.exit(consumer, :kill)
       assert_receive {:DOWN, ^ref, :process, ^session, :normal}
 
-      assert_receive {:provider_call, _measurements, metadata}
+      assert_receive {:provider_call, _measurements, %{session_id: ^session_id} = metadata}
       assert metadata.status == :error
       assert metadata.error_summary =~ "consumer_down"
     end
 
-    test "a vendor refusal reaches the span as an error, not a silent success" do
+    test "a vendor refusal reaches the span as an error, not a silent success", %{
+      session_id: session_id
+    } do
       Application.put_env(:fermix_core, :telemetry, capture_content: true)
-      {session, socket} = ready_session()
+      {session, socket} = ready_session(session_id: session_id)
 
       inject(session, socket, fixture("error"))
       assert_receive {:transcript_stream_error, ^session, _reason}
 
-      assert_receive {:provider_call, _measurements, metadata}
+      assert_receive {:provider_call, _measurements, %{session_id: ^session_id} = metadata}
       assert metadata.status == :error
       assert metadata.error_summary =~ "unsupported sample_rate"
     end

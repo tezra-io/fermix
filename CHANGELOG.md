@@ -4,6 +4,765 @@ All notable changes to Fermix are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-09-20
+
+### Added
+
+- **Grok 4.7, Claude Opus 5.5, and GPT-6 Sol and Luna are in the model
+  pickers.** They appear in the browser setup and in the macOS app. Grok 4.7
+  goes to the head of the SpaceXAI list and becomes its default, so an
+  install that never picked a Grok model moves to it on upgrade. To stay on
+  Grok 4.6, pick it in setup. Claude Opus 5.5 joins the Anthropic list, and
+  the Anthropic default stays Claude Sonnet 4.6. GPT-6 Sol and GPT-6 Luna join
+  both the OpenAI API list and the ChatGPT-subscription (Codex) list, after
+  GPT-6 Astra, which stays the default on both. Opus 5.5 always thinks and
+  refuses forced tool use, and Fermix already sends it requests that follow
+  both rules.
+- **Venice is a provider, and every model says how private it is.** Save a
+  Venice API key under Providers and Venice joins the fallback chain after
+  Mistral, ahead of the local Ollama hop. The model picker lists every
+  tool-calling model Venice serves, newest first within each model family, and
+  each label ends with the privacy tier Venice publishes for that model:
+  `Private` when the prompt is not kept, `Anonymized` when it is passed to the
+  model's maker without your account and that maker still reads it, and
+  `Private (TEE)` when the model runs inside a hardware enclave. An info control
+  beside the Model row explains the three, in the browser setup and in the macOS
+  app. The default model is `grok-4-6`, a private one. Every request tells
+  Venice not to add its own system prompt and to strip inline thinking out of
+  the reply.
+- **One tab of your own browser can be handed to Fermix.** Click the Fermix
+  browser extension on a tab and Fermix can read and act in that tab, with your
+  real login, without a second browser and without touching the pointer. It is
+  the same `browser` tool with the same rules — the read policy, the navigation
+  checks and the upload path policy are unchanged — reached with
+  `profile: "selected_tab"`. Everything browser-wide stays with the managed
+  profile and is refused there by name: no new tabs, no closing tabs, no
+  bringing a tab to the front, no cookies, no downloads. Closing the tab,
+  dismissing Chrome's debugging bar, opening DevTools on it, or ending the task
+  detaches, and Fermix says which of those happened. Only a turn you are present
+  for can use it: guest, scheduled, background and delegated runs get the
+  managed browser instead. Install the bridge with
+  `fermix browser bridge install --browser chrome --extension-id <id>`; the
+  extension and how to load it live in `apps/fermix_core/priv/browser_extension/`.
+- **Computer use can work inside one window, experimentally and off by default.**
+  With `background = true` under `[fermix_core.computer_use]` — a new setting that
+  ships switched off and stays off until it has been checked on a real desktop —
+  Fermix picks one window and works in it: it sees that window even when another
+  covers it, its coordinates are that window's rather than the screen's, and where
+  the window offers named controls it presses them without taking the pointer, so
+  you can keep working in front of it. The helper puts a small panel on screen
+  naming the window it is in, with pause and stop that reach it directly rather
+  than through the daemon. Stop there stops the work, not just the session: it
+  says so in the conversation, and it tells Fermix to put the task down and ask
+  you before going any further rather than carrying on with a fresh helper. Choosing the whole screen instead is an explicit move with
+  its own wording, so going from working quietly in one window to moving your
+  pointer around is never something that simply happens. While the setting is off
+  none of this is offered to the model and computer use behaves exactly as before;
+  the new `window binding` row in `fermix doctor` reports the setting, whether the
+  installed helper can bind a window, and whether its on-screen panel is there.
+
+- **A click's picture now waits for the screen to react.** The image a computer-use
+  action came back with was taken the instant the input went out, before the
+  application had done anything, so a button that takes a moment to repaint looked
+  as though nothing had happened and got clicked again. The check now waits for
+  that view to stop changing before it is captured, and says so when it never did.
+  It also says when nothing visible changed since the picture the action was aimed
+  at — in plain words, and as a fact about the view rather than a verdict on the
+  click, because an action that changes nothing on screen is often an action that
+  worked. When three actions in a row leave the view unchanged, the result says so
+  and names the ways out: a fresh full screenshot, a list of the controls, or
+  telling the user. Nothing is blocked by it. Pressing a control by name no longer
+  takes a picture at all — the control itself is read again and its state reported
+  in one line, including when it has gone entirely, which usually means the press
+  worked and dismissed it — and a zoomed action no longer costs a second round trip
+  to the helper for its picture, because an action and its check are one exchange.
+
+- **Buttons can be pressed by name instead of aimed at.** The element listing now
+  gives each control a short reference and says what that control itself can do —
+  whether it is enabled, whether it can be pressed, whether its value can be set —
+  plus where it sits, so two "Save" buttons in one window are tellable apart. A
+  control that can be pressed is pressed by name: no pointer moves, nothing is
+  aimed, and it cannot land on the wrong thing. A field that reports itself as
+  settable is filled the same way, and its value is read back afterwards, so a set
+  that could not be confirmed says so and says to check the field rather than
+  being reported as done. Typing and pasting stay for fields that are not
+  settable. A click, move or scroll can name a control instead of a point too, and
+  the control's position is re-read as it is used, so one that has shifted since
+  the listing is still hit. Disabled controls are now listed AS disabled rather
+  than left out, because a button that is simply missing invites a guess about
+  why. Nothing is ever swapped for something else: a control that cannot be
+  pressed is refused and says so, a disabled one says to work out what enables it
+  rather than to try again, and a reference from a listing that has aged out says
+  to take a fresh listing. Naming a target twice — a control and a coordinate on
+  the same action — is refused before anything reaches the screen. An action that
+  pulls its application to the front now says so, because it changes where the
+  next keystroke goes.
+
+- **Every screenshot now has a name, and a click says which picture it came
+  from.** Before, coordinates read on a zoomed crop only landed correctly if the
+  same `region` rectangle was repeated on the click that followed, and forgetting
+  it sent the pointer somewhere else entirely — a whole class of clicks that
+  looked confirmed and missed. Now each screenshot, element listing and window
+  listing comes back with an id, the text beside the picture says so, and every
+  click, move, drag, scroll and inspect names the image its coordinates were read
+  in. A pointer action that names none is refused before anything reaches the
+  screen, and the refusal says exactly what to do next. Only the last few images
+  stay usable, and only for about half a minute: naming one that has been
+  replaced, has aged out, or belongs to a display that moved or changed size is
+  refused rather than clicked, and a point off the edge of the image it names is
+  refused rather than nudged onto the edge. A numbered mark now belongs to the
+  picture it was badged on, so its number keeps working while that picture does.
+
+- **Only one conversation drives the cursor and keyboard at a time.** Two
+  conversations acting on the same desktop each moved the pointer the other had
+  just aimed and read a screen the other was changing, so both concluded their
+  clicks had missed and repeated them. A disturbing action from a second
+  conversation is now refused straight away, with a sentence saying to wait
+  rather than re-send; looking is never blocked, so both can still take
+  screenshots. The hold lapses once its conversation has dispatched nothing for
+  a minute, so a conversation that went quiet cannot keep the machine.
+- **Computer-use sessions now appear in traces.** A session starting, being
+  paused and resumed, finishing, or dying on its helper used to leave no record
+  anywhere: the events were emitted and nothing listened. They now reach the
+  local trace stream, the Opik exporter and trace replay, and a session that
+  died says so with its reason instead of looking like one that finished. Every
+  `computer_use` tool call also records which session it ran in and how it ended:
+  `refused`, `performed`, `performed_unverified`, `unknown`, or `read`.
+- **Several form fields can be filled in one browser step.** The `browser`
+  tool's `act` gains a `fill_form` kind that takes up to twelve fields from one
+  snapshot and fills them in order, so a five-field form is one step instead of
+  five. It only fills: it never clicks or submits. Every field is checked against
+  the page before anything is typed, so a field that is no longer there refuses
+  the whole call instead of leaving the form half filled.
+- **The browser can use the tools a page offers to agents over WebMCP.** A page
+  that registers WebMCP tools (a game, a docs search, a booking form) can now be
+  driven with one typed call per step instead of a snapshot and a click. The
+  `browser` tool gains a `webmcp` action: `op: "list"` names the tools the page
+  offers with their input schemas, and `op: "call"` runs one by `name` with an
+  `input` object. It runs in the same managed Chrome and behind the same read
+  policy as every other page read, and the managed Chrome now starts with the
+  WebMCP feature on, so a site that relies on the browser's own API works as
+  well as one that ships its own shim. Tool names, descriptions and results come
+  from the page, so they are marked as page content and never treated as
+  instructions. A tool that throws, or does not answer in time, is reported that
+  way with its effect unknown, so the assistant looks before it repeats anything.
+- **A prompt file you never edited adopts the newer shipped template on the
+  next daemon start.** Setup seeds `SOUL.md`, `FERMIX.md`, `REALTIME.md` and
+  `LIVE.md` once and then treats them as yours, so a `brew upgrade` or an app
+  update that shipped better prompts never reached an existing home. The daemon
+  now compares each of those four files against the baseline it recorded
+  (the seed, an earlier adoption, or a `/soul reset`) and against the template
+  the running build ships: a file still equal to its baseline is rewritten to
+  the new default through the versioned registry (revertable with the existing
+  history), a file you changed is left alone and named in the log and in the
+  `bootstrap templates` Doctor row, and a file with no baseline record is never
+  guessed to be untouched. `IDENTITY.md`, `USER.md` and `MEMORY.md` are never
+  part of this.
+- **A skill's API key can be stored from Settings, and every shell command
+  gets it.** Allow the variable name under Settings > Sandbox, then add its
+  value on the row that appears.
+  - The value is stored in the Keychain on macOS, or in the Secret Service
+    on a Linux desktop, under its own entry (`fermix:external_env:NAME`). It
+    never collides with a provider key of the same name.
+  - Every shell command the assistant runs receives it as an ordinary
+    environment variable, in chat, scheduled jobs and delegated work alike.
+    It needs no terminal export, no change to the skill and no restart.
+  - Removing the value deletes the stored item and keeps the name allowed.
+  - On the management wire this is a new `env:<NAME>` id family on
+    `secret.set` and `secret.clear`, plus one row per name in the sandbox
+    section. There is no new method, so an older app shows the rows through
+    its existing secret control.
+- **A Linux server with no keyring can supply skill keys from a file.** The
+  service unit now loads an optional `~/.config/fermix/env` (for a system
+  unit, `/etc/fermix/env`), one `NAME=value` per line. An allowed name with
+  no stored value is read from there. Changing the file needs a service
+  restart.
+
+- **A Fermix installed from a Linux package manages its service through
+  its own verbs.** The package owns the systemd user unit, so
+  `fermix service install [--home PATH]` writes no unit: it records which
+  home this account's service runs in `$XDG_CONFIG_HOME/fermix/service.json`
+  (default `~/.config`), requires `loginctl enable-linger`, enables the unit,
+  and then proves it worked — the bound home's own socket answers and that
+  daemon's web address is live, within ninety seconds. `fermix service
+  uninstall` disables and stops the service and keeps the binding, the home
+  and the runtime store. A user unit an older install left behind is
+  recognised and migrated: its home becomes the binding, its observability
+  values move into a drop-in, and the shadowing unit is removed. Any other
+  unit or drop-in is named and left alone.
+- **`fermix service status [--json]`** answers with no daemon running, and
+  reports the binding, the effective unit and whether it is the package's,
+  enabled, active and sub-state, pid, invocation id, restart count, linger,
+  the listener, and the installed versus running engine identity with a typed
+  alignment. A session with no user service manager is its own answer rather
+  than a service reported as inactive.
+- **Fermix installs from a Linux package.** Every release now also builds a
+  `.deb` and an `.rpm` for x86_64 and arm64, carrying the engine, the systemd
+  user unit the package owns, a bundled `cosign` so plugin signatures verify on
+  a stock host, shell completions for bash, zsh and fish, a man page, and the
+  installed engine's identity at `/usr/share/fermix/engine.json`. The packages
+  are cosign-signed beside the standalone binaries, attached to the release, and
+  described in `releases.json`; the release rail installs all four and runs the
+  whole service transaction on a real host before publishing. Installing the
+  package writes the engine's own loader to `/var/lib/fermix/runtimes/<digest>/`
+  after verifying its digest, and removing the package leaves it there, because
+  a Fermix that is still running opens that exact file whenever it starts a
+  helper.
+- **One command installs the Linux package.**
+  `curl -fsSL https://fermix.ai/install | sh` installs the `.deb` through apt on
+  Debian and Ubuntu and the `.rpm` through dnf or zypper on Fedora, RHEL and
+  openSUSE, where it used to drop the standalone binary on every machine. It
+  picks the package for the machine's architecture out of `releases.json`,
+  checks its sha256, checks its cosign signature against the release tag when a
+  `cosign` is there to ask — on a machine that already has the package, the one
+  the package bundles — and hands the file to the package manager, which is
+  told to remove nothing else to make room. Run again it
+  is the updater: it installs the newer package, starts no setup and says to run
+  `fermix restart`, and on the latest version it downloads nothing. An earlier
+  standalone `fermix` that still comes first on `PATH` is named, with the page
+  that moves it, instead of being set up by mistake. macOS, a Linux host with
+  none of the three package managers, and `--standalone` get the standalone
+  binary as before, and a package install that fails is never retried as a
+  standalone one. Every package in `releases.json` now names its signature and
+  its certificate the way the binaries do, and after publishing the release rail
+  runs the advertised installer against the release it just published, on all
+  four package targets.
+- **The on-device speech engine is built for Linux, and setup does not offer it
+  yet.** The `local` transcription backend now has a pinned, checksum-verified
+  engine for Linux (x86_64 and arm64) as well as Apple Silicon Macs, all three
+  from fermix-stt 0.1.1. Choosing it downloads a speech model on the spot, and
+  that flow has not been proven end to end, so no picker lists it: not the
+  browser setup's Voice notes tab, not either app, not the meeting notetaker's
+  own backend choice, and the macOS app's install for it refuses. A
+  configuration that already names it keeps transcribing on-device and is shown
+  the choice, disabled, saying it cannot be chosen. `local_offered = true` under
+  `[fermix_core.transcription]` puts it back, which is how the flow is walked
+  before it ships.
+- **A keyring that cannot be used is a verdict, not a hang, and the file store
+  is the other choice.** On Linux the login keyring stays locked after a
+  fingerprint or automatic login (it is encrypted with the password), and
+  Fermix used to treat an installed `secret-tool` as a usable keyring: every
+  save pushed the secret at the lock, GNOME raised its unlock dialog, the
+  three-second timeout fired, and the save failed with macOS wording. Before
+  a write, and before the daemon reads a secret at boot, Fermix now asks the
+  Secret Service three read-only questions over `busctl --user` — is a keyring
+  running, which collection is the default, is it locked — and never a secret
+  read, so a background daemon never raises that dialog. A save you make
+  yourself still gets the prompt, and now gets time to answer it: the write
+  used to be killed after three seconds, before anyone could type, so the
+  dialog was never answerable. Only a store with nothing to answer (no keyring
+  service, no session bus, no `secret-tool`) is refused before the write, with
+  its own sentence; a locked keyring is tried, and a cancelled or unanswered
+  prompt is refused with `the login keyring is locked, and the unlock prompt
+  was cancelled or left unanswered. Unlock it when the prompt appears, or in
+  Passwords and Keys; fingerprint and automatic login leave it locked`. An
+  unchanged value is kept rather than pushed at the lock; at boot the secrets
+  in an unusable store stay unresolved with one log line naming them. `fermix
+  doctor` gains a `secret store` row that names the configured store, its
+  verdict and how many secrets each store holds.
+  The second store is declared, never slid into: `[fermix_core] secret_store =
+  "file"` keeps each secret as one `0600` file under `<FERMIX_HOME>/secrets/`
+  (the directory `0700`; readable only by that account and not encrypted at
+  rest, the posture `auth.json` already has). `fermix setup --secret-store
+  file|keyring` chooses it, and when the keyring refuses a save the terminal
+  wizard asks once — a no leaves the refusal exactly as it was. It is the way
+  in for a machine whose keyring cannot be unlocked at all. New secrets go
+  to the configured store and are persisted as its sentinel, `@file` beside
+  `@keyring`; each is read back from the store it names, so a home can hold
+  both. `fermix setup --migrate-secrets` now moves every secret that is not in
+  the configured store into it — plaintext and the other store's alike, one
+  confirmation each — and refuses up front when the store a secret must leave
+  cannot be read.
+- **`fermix upgrade` tells a Linux operator the right command.** An engine this
+  project built as a package refuses to update itself before it looks at a
+  single file and names the command for the family — `sudo apt update && sudo
+  apt upgrade fermix`, `sudo dnf upgrade fermix`, or `sudo zypper update
+  fermix`. A binary the host's own package database owns is recognised too:
+  `rpm -qf` and `pacman -Qo` join `dpkg -S`, so an rpm-installed or
+  AUR-installed Fermix is no longer treated as a file the updater may rename
+  out from under the package manager, and the Debian hint finally names a
+  package that exists.
+- **`fermix restart [--json] [--when-idle]` on a Linux package install** runs
+  one restart transaction and lets systemd own the termination signal: it takes
+  the admission lease from the daemon it is replacing, clears the start-limit
+  budget, issues a single `systemctl --user restart`, waits up to ninety seconds
+  for a different pid to answer, and reports the previous pid, the new one and
+  whether the running engine is now the installed one. The lease is never
+  committed, and is cancelled only when the restart could not be issued. A
+  daemon that is not answering is recovered rather than refused. `--when-idle`
+  is refused with a sentence for now, because restarting today interrupts work
+  in progress and saying so is better than quietly doing it.
+- **`fermix diagnostics export --offline [--json]`** collects a bounded,
+  redacted support bundle with no daemon at all — the state it is most needed
+  in. Six sources (engine, service, doctor, logs, secret backend and desktop
+  session) each report available, unavailable or not applicable with an
+  observation time, so a stopped daemon, an unreadable journal or a missing log
+  file is evidence rather than a lost bundle. Logs carry both named places,
+  labelled per entry: the daemon's own rotated file and a bounded
+  `journalctl --user -u fermix` tail. Nothing is read from a keyring, and a
+  bundle that would exceed a megabyte or ten seconds refuses rather than
+  arriving truncated.
+- **`[fermix_web] port`**, an integer from 1024 through 65535 defaulting to
+  4030, sets the port the daemon's web listener and setup page use. It is
+  parsed and validated by the shared settings layer and written by `fermix
+  service install --port N`, which works while the daemon is down. A packaged
+  engine takes the port from that setting and refuses a `PORT` environment
+  variable rather than starting somewhere nothing can predict; standalone and
+  source installs keep `PORT`, then the setting, then the default. Changing it
+  needs a restart.
+- **Doctor rows for a Linux host.** `linger` reads the same inspector the
+  service verbs use and separates "not enabled" (with the one command that
+  fixes it) from "this host has no `loginctl`" (which has no command to give).
+  `service unit` understands a packaged install, where Fermix owns no unit:
+  it passes when the package's unit is effective with a home bound, warns on a
+  unit an older install left behind with the verb that adopts it, and fails on
+  a file Fermix did not write, naming it. A new `engine alignment` row carries
+  the typed comparison of installed and running engine identity, so a daemon
+  still serving the old engine after an update says so once, with the restart,
+  rather than in two places, and a new `package origin` row reports who owns the
+  binary and the command that updates it, reading the same detectors `fermix
+  upgrade` refuses with.
+- **Behavioral eval scenarios** `linux_install_and_update` and
+  `linux_service_not_running` in the `skills` suite.
+- **The typed CLI is a published contract.** `priv/cli/CONTRACT.md` and one
+  golden per published result under `priv/cli/fixtures/` describe the envelope,
+  every error code with the sentence it prints, and every field of the service,
+  restart and diagnostics results with its type and nullability. A test rebuilds
+  every golden from the code that prints it and fails on drift, so a graphical
+  client can vendor the directory and decode against it the way the macOS
+  application vendors the management protocol.
+- **A machine-readable mode for the service verbs.** `--json` on `service
+  install`, `service uninstall` and `service status` prints one
+  schema-versioned envelope on standard output and nothing else, with every
+  refusal carrying a code and one sentence; prose and progress go to standard
+  error. Exit 0 when the verb succeeded, 1 when it refused, 2 on a usage error.
+- **Tesla plugin support.** A `tesla` sign-in provider that exchanges the
+  code with the account's regional audience, sends the public redirect
+  page Tesla requires (`https://fermix.ai/api/integrations/tesla/callback`,
+  which forwards to the daemon's loopback listener), rotates refresh tokens,
+  and records the account's region on the grant. HTTP plugin tools may
+  declare `regional_urls` (the host is chosen from the signed-in region,
+  never from the model), `requires_setting` (a tool exists only while a
+  plugin setting reads `true`), and scalar bounds on their arguments.
+- **Region on the sign-in client.** A regional provider offers its regions
+  on the client row, `plugins.oauth_client.set` takes a `region`, the
+  browser setup form renders the choice, and after every sign-in the daemon
+  checks the account's region with the provider; a mismatch shows on the
+  plugin row as `wrong_region` with the fix, and that grant is never served.
+- **Plugin settings can be switches.** A manifest `config` entry declares a
+  `kind` (`text` or `boolean`); a boolean setting stores only `true` or
+  `false`, is published on the plugin row, and renders as an instant switch
+  on the setup page's plugin card.
+- **Local plugin processes can sign for the account.** A local plugin
+  runtime can be gated by a setting (`runtime.requires_setting`) and
+  receives the account's current access token through a daemon-owned file
+  named by `FERMIX_PLUGIN_TOKEN_FILE`, rewritten on every refresh and
+  deleted on sign-out; the refresh token and client secret never leave the
+  daemon.
+- **Behavioral eval suite** `tesla` (reads, command safety, explicit wake
+  and command cases).
+- **A call can be spoken by GPT-Live.** The voice companion has a second
+  engine. `openai_realtime` stays the default and keeps the `screen_share`
+  tool; `openai_live` hands the speaking to GPT-Live while Fermix does the
+  work behind it, and has no screen sharing of its own. The engine is chosen
+  per call, the setup and doctor surfaces report which one a host can run, and
+  every trace and Opik export names the engine the call ran on.
+- **Computer history records every site visited in the browsers you allow.** A
+  settled navigation in an allowed browser is stored as its address reduced to
+  scheme, host and path, with the page and window titles beside it; the
+  per-site allowlist is retired, and an existing configuration boots, warns
+  once, and drops the key on its next save. Typed text is sent only from a
+  window that can be positively judged not private — the Chrome family carries
+  a marker that makes that judgement possible, while Safari, Edge and Firefox
+  answer "unknown", so their addresses are recorded, their typed text is
+  withheld, and `/history status` names them. The scrubber also learned
+  Luhn-checked card numbers and registry-checked IBANs.
+
+### Changed
+
+- **Every computer-use request and its reply are matched to each other.** Replies
+  from the helper used to be paired with requests by the order they arrived, so
+  one late reply — after an action timed out — became the answer to the next
+  action, and a single unreadable line could silently answer the wrong question
+  for the rest of a session. Each request now carries an identifier its reply
+  echoes, a late reply is discarded instead of reused, and a reply that cannot be
+  read ends the helper rather than being passed off as an answer. The
+  workarounds this replaces are gone, including the drain that threw away frames
+  arriving after a timeout. Computer use and computer history both require the
+  matching helper version and refuse an older one at startup, so a partly
+  completed upgrade says so instead of misbehaving.
+- **Computer use answers `/pause` while it is acting, and `/pause` now tells you
+  what the helper confirmed.** A single computer-use action can make four calls
+  to the helper, each with a thirty-second budget, and the session used to sit
+  inside them — so `/pause`, `/resume` and shutting the session down waited for
+  the very action they exist to interrupt. The helper now runs in its own
+  process and the session stays answerable throughout. `/pause` also reaches the
+  helper itself rather than only this side of it: it stops a sequence such as a
+  drag part way through, releases what that sequence was holding, and answers
+  with what the helper acknowledged — paused, paused with one action still
+  finishing, or, when the helper does not confirm, that it was shut down
+  instead, because a machine that may still be driven must never be described as
+  handed back. Stopping a session gracefully — `/stop`, the end of a
+  conversation, a helper that answered and was reset — now releases any held key
+  or button before the helper is ended, rather than leaving a modifier down; a
+  helper that is killed outright still releases nothing, which is why the pause
+  barrier, not the kill, is what stops a drag part way through. A
+  second action sent while the first is still running is refused as busy instead
+  of queueing behind it, so a long action no longer silently delays everything
+  after it.
+- **What a computer-use action reports is what the helper said it did.** The
+  outcome of a click or a keystroke — sent, not sent, half sent — used to be
+  inferred from whether the check screenshot came back, which could report an
+  action as performed when nothing reached the screen. The helper now states it
+  on every mutating action and that statement is what the result and the trace
+  record. A helper that does not state it is treated as a broken helper: the
+  outcome is reported as unknown and the session takes a fresh one, rather than
+  a guess being reported as fact. A refused action carries the same statement, so
+  "the helper said no" no longer implies nothing reached the screen.
+- **Computer use tells the assistant the truth about what happened to an
+  action.** A click whose helper timed out used to come back as "action failed"
+  with a raw error term, and a check image whose cursor had moved used to say the
+  action "did nothing, re-send the same action". Neither is known: someone moving
+  the mouse makes a click that landed look like a miss, and a blind re-send is a
+  double submit. The result now says what was and was not seen. An action that
+  was sent but could not be checked says so; one whose outcome cannot be told
+  says "outcome unknown" and asks for a screenshot before anything else; one that
+  was never sent says it was not sent. How the assistant aims is unchanged.
+- **A browser click now reports what it did to the page.** After a `click`, a
+  `submit`, a `click_coords` or an Enter on a page the assistant has already
+  read, the result says whether the page is `unchanged` (the elements it knows
+  are still good) or `changed`, and a changed page comes back with its fresh
+  snapshot, so the assistant no longer spends a whole extra step looking again.
+  The address in the result is the one the page settled on, not the one it was
+  leaving. Looking is bounded to about a second and a half and never fails the
+  click: when the page cannot be read in time the result says `unobserved`, and
+  when it moved somewhere the read policy refuses it says so and returns no page
+  text. A snapshot no longer repeats every element in a separate list beside the
+  text that already names it, which makes every later step in the turn smaller.
+- **Opening a page in the browser now hands the page back.** `open` and
+  `navigate` answered with the tab and nothing of what was on it, so the
+  assistant's next step was almost always a second call whose only job was to
+  look at the page it had just asked for. Both now wait for the page to settle
+  and come back with it, in the same words a click uses: `changed` with the
+  fresh snapshot, or `unchanged` when a navigation lands on content the
+  assistant already holds. The wait is bounded and never fails the navigation: a
+  site still building when the time is up is handed over as it stands, marked as
+  still loading, so an ordinary slow page costs the wait and not another step as
+  well; only a page that cannot be looked at at all — one holding a dialog, say
+  — comes back unobserved. A page that ends up somewhere the read policy refuses
+  returns the tab and the reason, and none of that page's text, address or
+  title. A page opened only to be screenshotted, printed or driven through the
+  tools the page itself offers can skip the look with `observe: false`. Your own
+  granted tab still cannot open a second tab; navigating it hands back its page
+  through the same checks.
+- **A click's look at the page no longer gives up on a page that is nearly
+  there.** The same rule applies after a click, a submit, an Enter or a
+  click_coords: a page still rendering when the look runs out of time comes back
+  as it stands, saying it was still building, instead of reporting that nothing
+  could be seen. A single momentary browser error during that look — routine in
+  the instant after a page commits — is retried rather than ending it.
+- **The shipped persona and operating rules are shorter and sharper.** `SOUL.md`
+  now asks for judgment with confidence that follows evidence rather than a
+  forced side, dry wit with clear limits instead of stock praise, and scoped
+  authorization instead of a fresh question for every outward step; its stale
+  description of self-editing memory is gone. `FERMIX.md` drops rules that
+  repeated it, says tools are the advertised and discoverable capabilities
+  rather than "everything I have", asks only about gaps that change the
+  outcome, carries the active task and earlier approvals forward, and keeps
+  every verification, provenance and proof-of-work contract. New installs and
+  untouched files get the new text; an edited file keeps yours.
+- **`web_search` is the route for any fact that may have moved since
+  training.** Every routing surface described it as a tool for static facts and
+  sent "live data" to the browser, so a current price, rate, version or office
+  holder could read as neither and be answered from memory. The tool
+  description, the runtime routing rule, the browser guidance and the
+  operating rules now say the same thing: a confident memory of a mutable
+  fact is a reason to search, and the browser is for pages that need
+  rendering, login or interaction.
+- **Allowed variable values no longer appear in any process's command line,
+  and are scrubbed from what the assistant sees.**
+  - Shell commands and operator command capabilities now receive their
+    environment directly as the child process's own environment.
+    Previously it was passed as `env -i NAME=value` arguments, which any
+    process on the machine could read.
+  - Every allowed value of at least eight bytes is replaced with
+    `«redacted»` in the command's result and in its trace. A non-secret
+    allowed value, such as `NODE_ENV=production`, is redacted too.
+- **Reading allowed variables has one time limit per command.** All helper
+  lookups for a command share a five-second budget, so a locked keychain
+  can no longer delay a command by three seconds for every name. A name
+  still unread when the budget runs out is reported, and the command runs
+  without it.
+- **A missing allowed variable now names where to store it**: in the sandbox
+  settings, or on a Linux server in the service's env file. The old
+  sentence pointed at a CLI verb that the macOS app does not ship.
+- **`fermix doctor`'s `cosign` row names the executable this host resolved**
+  and the remedy for its own install family — the distribution's own package on
+  a Linux package install, where the bundled `/usr/lib/fermix/cosign` is the
+  fallback, and Homebrew's on macOS. It no longer tells a Linux operator to run
+  `brew`.
+- **The computer-use remediation stops naming an action the user cannot take.**
+  On a Wayland session the row now says what is refused, why, and what remains
+  true, instead of "use an X11 session" on desktops that no longer offer one;
+  on arm64 Linux, where the sidecar publishes no build, it says computer use is
+  unavailable on this architecture and that Fermix itself is fully supported,
+  instead of offering an install that can only fail.
+- **The daemon-socket Doctor row reports liveness only.** Whether the running
+  engine is the installed one is a different question with a different remedy,
+  and it is now the `engine alignment` row's, so the two can never disagree.
+
+### Removed
+
+- **Eden is no longer offered as a plugin.** The catalog no longer lists it, so
+  the macOS app, the setup page and `fermix plugins` stop offering it. Support
+  for hosted (remote MCP) plugins is unchanged, and Eden's published releases
+  stay up, so an older Fermix can still install it. If you use Eden, disconnect
+  it before you upgrade, then turn it off or run
+  `fermix plugins uninstall eden`: disconnecting is what deletes its token from
+  your keychain, and a Fermix without Eden can no longer find that token to
+  delete it.
+
+### Fixed
+
+- **Asking the assistant to make a code change itself is no longer overridden.**
+  With a coding agent set up, repository work such as a bug fix goes to a Codex
+  or Claude Code run by default, and that default outranked the request: told
+  "do this yourself, don't delegate", the assistant delegated anyway and said its
+  instructions required it. An explicit request to do the work directly now
+  wins.
+- **The browser acts on an element named the way its page snapshot shows it.** A
+  snapshot lists each control as `@link_3 [link] "Search"`, but an action naming
+  `@link_3` was refused as out of date ("the page has changed since"), and the
+  fresh snapshot it asked for showed `@link_3` again, so the assistant could loop
+  on a page it had just opened until it gave up. A ref is now accepted as the
+  snapshot shows it, with or without the `@`, in every action that takes one.
+- **On-device speech says plainly where it can't run, and no longer shows up as
+  a notetaker failure.** On a machine this build has no on-device speech engine
+  for, choosing On-device for voice notes printed a developer instruction about
+  building the engine from source, and the Integrations page repeated it under
+  the Meeting Notetaker card, where it read as the notetaker's own error. The
+  Integrations page no longer shows that result at all, and wherever the choice
+  is still shown it carries the reason it cannot be chosen — beside it in the
+  browser setup, on hover in the macOS app — and asking for it anyway is refused
+  in that sentence. `fermix doctor` says on-device speech isn't available on this
+  machine instead of naming an install, and a voice note sent while it is
+  selected gets a reply saying to choose another backend rather than to try
+  again. The choice is labelled "On this device", not "On this Mac".
+- **The meeting notetaker's Google sign-in works on a fresh desktop again.**
+  The pinned `meetbot` sidecar moves to a release whose sign-in window no
+  longer announces itself as automated. Google Accounts refuses a browser that
+  does ("Couldn't sign you in. This browser or app may not be secure"), and
+  the sign-in window, unlike the join, launched with Playwright's
+  `--enable-automation` on, so on a fresh Linux profile Google blocked the bot
+  account's sign-in outright. The window is otherwise what it was: the
+  sidecar's own pinned Chromium on the persistent profile the join reopens,
+  never the default browser, because the signed-in state has to live where
+  the join runs, and a human still types the password. Enabling the notetaker
+  installs the new sidecar; an existing install picks it up the next time the
+  card's install runs.
+- **The installer's setup wizard reads the terminal, not the installer.** Under
+  `curl … | sh` standard input is the script itself, so on a host with no
+  display the terminal wizard `fermix setup` starts would have taken the rest of
+  the script as its answers. Setup is now handed the terminal; with no terminal
+  at all, as in a CI job, the installer prints `fermix setup` as the next command
+  rather than starting a wizard nobody can answer. The installer's usage also
+  named `fermix.sh`, a host that never served it; it is served at
+  `https://fermix.ai/install`.
+- **The browser's `console` action now faces the same read policy as every other
+  page read.** Console entries are page text, and a page that redirected or was
+  clicked onto a host the browser policy refuses logs there too — so `console`
+  was returning bytes the same tab's `snapshot` had just refused. It is now
+  refused the same way, in every browser profile.
+- **A screenshot dropped from the conversation no longer leaves text describing
+  it as if it were still there.** Older screenshots are removed to keep the
+  conversation within its budget, but the words beside them stayed in the present
+  tense — "this is what is really on screen" — so the assistant could reason about
+  a picture it could no longer see. The note left in the image's place now says
+  the text is a record of a past look and that nothing in it can be acted on.
+- **`/pause` can no longer be raced, and says when an action is still
+  finishing.** A pause that landed between the assistant deciding on an action and
+  sending it was ignored for that action. It is now checked again at the moment
+  of sending. When one action is already under way, `/pause` says it will finish
+  and that nothing further will be sent, instead of claiming the cursor and
+  keyboard were already yours.
+- **A computer-use helper that stops answering no longer leaves the session half
+  alive.** A check or an idle probe that timed out was swallowed, which left the
+  helper's replies one step out of order so the next action could be answered
+  with the last one's reply. A helper that exited mid-action, or was no longer
+  running, left a session that failed every later action until the conversation
+  ended. All of these now reset the session, so the next action starts a fresh
+  helper.
+- **A long page's snapshot and its element list can no longer disagree.** The
+  snapshot text was cut to size after the elements had been collected, so the
+  assistant could be handed elements whose lines it never saw. The text is now
+  cut at whole lines and only the elements on surviving lines can be acted on.
+- **A page with no accessibility tree no longer takes the browser down.** A
+  snapshot reply with no tree raised inside the browser profile's process. It
+  now answers `snapshot_unavailable`.
+- **A coordinate click that landed is no longer reported as failed** when the
+  address could not be read afterwards.
+- **A plugin tool call now records what it was asked to do.** Every built-in
+  tool traced its arguments, but the two plugin paths (declared HTTP tools and
+  local plugin processes) traced only the result. A vendor can accept a call
+  made with the wrong value and answer success, so a wrong navigation
+  destination or a wrong seat read as a healthy call with nothing to explain it.
+  Plugin arguments now ride the same trace field as every other tool's: only
+  while content capture is on, and scrubbed of the values a turn marks for
+  redaction.
+
+- **A click is no longer sent twice when the browser dies mid-action.** When a
+  browser profile's process died with an action in flight, the same request was
+  re-sent up to three times, which for a click, a form fill, an upload or a page
+  tool call means doing it again. A request that never reached the browser (an
+  idle-reaped profile, or one still shutting down after the previous turn) is
+  retried on a fresh profile, as before. One that was in flight when the process
+  died is retried only if it is a read. Anything that changes something now
+  answers `outcome_unknown` and tells the assistant to take a snapshot and check
+  before repeating it.
+- **Page text can no longer close the page-content marker early.** A browser
+  snapshot is wrapped in delimiters that tell the model it is reading page
+  content. A page that spelled the closing delimiter itself could end that block
+  early. It is now neutralised, as every other content wrapper already did.
+- **One allowed environment variable the daemon cannot read no longer
+  refuses every shell command.** An entry on `[sandbox.env] allow` whose value
+  lives only in a shell profile is invisible to a background service, and the
+  sandbox used to answer that by denying every command in every session, even
+  a bare `date`, with a raw error and nothing in the log. Each allowed name now
+  resolves on its own: the command runs with the rest, its result opens with a
+  note naming the variable and the fix, the trace carries the names, the log
+  says once when a name stops resolving and once when it resolves again, and
+  the app's Settings, Home and Doctor show an advisory row in the Sandbox pane
+  until it is stored with `fermix sandbox env set` or removed from the list. A
+  `fermix doctor` run from a shell has no view of the daemon's record and does
+  not show the row. A variable
+  a coding-agent adapter or a command capability names for itself is still
+  required.
+- **A scheduled job's run history says when a run was blocked.** A run's
+  `ok` status only ever meant the agent loop finished, so a job whose tracker
+  tool refused on every call still read as a success. Each run now records how
+  many of its tool calls failed, visible in `list_job_runs`, in the run's
+  `output.md`, and on the run's trace event, without failing runs that met a
+  recoverable tool error.
+- **The first `fermix service install` on a Linux account no longer refuses
+  itself.** Clearing the unit's start-limit budget is part of enabling it, and
+  systemd answers "not loaded" for a unit it has never seen — which is nothing
+  to clear, not a reason to stop, so a fresh account's install and the first
+  `fermix restart` after it now go through.
+- **`fermix service status` reports each fact under its own name on every
+  systemd.** The unit's properties were read back in the order they were asked
+  for while systemd answers in its own, so on some versions the status put a
+  process id where a state belongs and read a file path as a restart count.
+- **A Linux package install can restart itself from the setup page again.**
+  "Is this process supervised" and "is a service installed" were both answered
+  by looking for a unit file this binary writes, which a packaged install never
+  has — so the browser setup's apply-and-restart button refused on a daemon
+  systemd was supervising, and `fermix setup`'s own service activation read the
+  install it had just completed as a failure. Both now read the package's
+  world: a bound home with the package's unit in force, and the service
+  invocation systemd puts in the daemon's own environment.
+- **`fermix service install --port N` refuses a settings file it cannot
+  rewrite.** Setting the port re-renders `config.toml` through the shared
+  renderer, which does not know the hand-written `[mcp.*]` blocks a different
+  parser reads. Such a file is now named and left untouched, with the fix, so
+  setting a port can never delete an operator's MCP servers.
+- **`fermix setup` no longer calls a `PORT` invalid when it is simply not
+  read.** A packaged engine takes its listener port from the settings file, and
+  a `PORT` left in the shell was reported as a bad port number rather than as
+  the variable this engine does not use.
+- **`fermix plugins` and `fermix auth` commands that save settings work
+  again.** A command run from a shell has no background service around it, and
+  the keychain step of a save still asked for the service's process supervisor,
+  so the command stopped with "command host supervisor ... is not running".
+  `fermix plugins auth set` and `auth clear` stopped wherever a keychain is
+  available; `enable`, `disable`, `uninstall`, `config set`, `auth login` and
+  `reauthorize`, and `fermix auth login` and `logout` with `--provider
+  anthropic` or `--provider xai`, stopped whenever the settings held a key
+  stored in the keychain, and a sign-in stopped after its token was already
+  saved. The keychain step now runs inside the command, and the release rail
+  runs `fermix plugins auth clear` from each standalone binary before it ships.
+- **`fermix doctor` names the platform computer use is unavailable on.** On an
+  Intel Mac with computer use turned on, the computer-use row said the sidecar
+  publishes no arm64 Linux build. It now says Intel macOS, in `fermix doctor`
+  and in the app's Doctor pane.
+- **The Linux service unit no longer fights the daemon for the log file.**
+  The unit sent its own output to `logs/fermix.log` with `append:` while the
+  daemon's rotating handler owned the same path, so after the first rotation
+  half the output went to a file the next rotation deleted. The unit's streams
+  now go to the journal (`journalctl --user -u fermix`) and the daemon owns
+  the file, so each line is in one named place. Every `Environment=` line is
+  serialized and escaped, so a home containing a space or a percent character
+  round-trips instead of producing a unit systemd reads wrong.
+- **An over-long home is refused before the socket bind, by name.** The
+  control socket and the voice socket now measure their path against this
+  operating system's socket address limit and refuse with the same sentence
+  the ACP socket already used, instead of failing the bind with an error that
+  every client reports as "the daemon is not running".
+- **Two local plugins can run side by side.** Every MCP client advertised
+  the same identity, and the client library keys a cache table by that
+  name, so the second local plugin failed discovery on every attempt.
+- **A local plugin's error is an error.** A result the child flagged as an
+  error reached the agent as a success, and a successful result reached it
+  as a dumped response struct rather than the child's text.
+- **A configured OAuth `region` was silently dropped** on the way through
+  the config store, so an explicit setting could never take effect.
+- **A spoken request finished a few seconds early is no longer refused.** A
+  Live delegation decided whether it had anything to read from a two-second
+  window around its own timeline offset, so a sentence finished slightly
+  before the voice model raised the delegation came back as "did not catch
+  that". It now reads the same thirty-second window the request itself is
+  built from.
+- **A long, dated page address is no longer redacted down to its host.** The
+  high-entropy detectors that hunt secrets in free text treated a whole URL
+  path as one opaque token and redacted any long path containing a digit —
+  which removed precisely the article, results and dated pages the feature
+  exists to recall. A normalised address, whose query string is already gone,
+  is now scrubbed with the named-secret patterns instead, while typed text,
+  window and page titles keep both detectors at full strength.
+- **A weekly capability run that stops at the release gate now says so.** The
+  eval box publishes one exit code for the tier it ran, and the expression that
+  chose it took the first *truthy* value — where the string `0` is truthy. A
+  capability run whose deterministic sweep passed and whose judged axis stopped
+  at a red release gate published the `0`, so the alert filed a generic "the
+  tier is failing" and dropped the paragraph explaining that the gate is
+  fail-closed by design. The choice now lives in a script with its own tests:
+  the first step that failed decides, a step that died before publishing
+  anything stops the job publishing a code at all rather than letting a later
+  step speak for its run, and `0` is published only when every step that ran
+  passed.
+- **A capability sweep no longer scores a task the machine could not run.** The
+  coding-harness tasks need a vendor coding CLI on the daemon's path when it
+  boots; a hosted CI box has none, so the tools were never offered, the model
+  could not delegate however well it reasoned, and the sweep recorded two zeros
+  that read as the model failing. A task whose required tools the daemon does
+  not advertise is now held out before anything is spent and reported as NOT
+  EVALUATED — named in the run, in the report, on the leaderboard and in the
+  release gate, and never rendered as a pass. Holding tasks out changes the
+  measured task set, so those rows sit in their own cohort and are not ranked
+  against runs that scored the full set.
+- **An instruction hidden in relayed content is named, not adopted.** Asked to
+  summarize something someone else wrote — a pasted note, a forwarded message —
+  and say what needs doing, Fermix could hand the instruction the note addressed
+  to it straight back as an assigned task. The operating rules said to ignore
+  embedded commands but left the summarize-and-triage path undecided, and that
+  is the one place an instruction has to be described without being taken on.
+  An instruction addressed to Fermix inside content that came from somewhere
+  else is now named as what it is — an attempt to direct it from outside your
+  conversation — never carried out, and never handed back as anyone's task,
+  however trusted its source looks. A request someone makes of *you* in the same
+  content is still triaged into your own to-dos as before.
+- **A plugin this build no longer offers is not left running.** Retiring a
+  plugin used to be a catalog decision only: a fresh install stopped being
+  offered it, and an install that already had it kept it enabled, kept its
+  stored key mapping, and kept starting it — so a retired hosted plugin whose
+  provider had moved on logged a connection failure on every start, forever,
+  and that error read as "this plugin is broken" when it meant "this plugin is
+  gone". Fermix now knows the retired names as it reads your configuration: the
+  plugin is dropped from the enabled list, its own section and its stored-key
+  entry go with it, and it is named once in the log, so nothing starts it and
+  the next save writes the file without it. The stored credential is left
+  exactly as it is — forgetting it locally and revoking it with the provider
+  stay two separate, deliberate acts.
+
 ## [0.10.5] - 2026-09-17
 
 ### Added
@@ -117,6 +876,25 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   universal update could never verify on both kinds of Mac. A release now
   stamps one id shared by both trees; the target remains its own field in
   the engine manifest. Nothing else changed.
+
+### Added
+
+- **Computer History records every site you visit in the browsers you
+  allow.** Alongside window titles, the recorder now reports each page's
+  address and title for every site inside an allowlisted browser, so
+  "which page was I reading about X" is answerable through `recall_activity`
+  and the daily threads. Addresses are kept as scheme, host and path only:
+  the query string and fragment, where session ids and tokens live, are
+  dropped in the recorder and again at the store. Typed text inside a
+  browser is recorded only from windows the recorder can positively classify
+  as not private; today that is the Chrome family, whose incognito windows
+  carry a marker the live check pins. Safari, Edge and Firefox report an
+  unknown private state, so their addresses are recorded, their typed text
+  is withheld, and `/history status` names them. The per-site allowlist
+  (`sites`) is retired: an existing `config.toml` still boots, logs one
+  retirement line, and the key disappears on the next save. The scrubber
+  also redacts payment-card numbers and IBANs before anything is stored.
+  Pairs with compux 0.9.0.
 
 ## [0.10.0] - 2026-09-11
 

@@ -18,8 +18,10 @@ defmodule FermixCore.Tools.ListJobRuns do
   @impl true
   def description do
     "List the execution history of a scheduled job: each run's status, trigger, " <>
-      "timing, final response, and any error. Use this to see whether a job has " <>
-      "been firing and what its runs produced."
+      "timing, final response, how many of its tool calls failed, and any error. " <>
+      "A status of ok means the run completed; tool_failures says whether it " <>
+      "was blocked along the way. Use this to see whether a job has been firing " <>
+      "and what its runs produced."
   end
 
   @impl true

@@ -20,7 +20,10 @@ defmodule FermixCore.Browser.ProfileServer do
 
   use GenServer
 
+  alias FermixCore.Browser.Bridge.Grants
+  alias FermixCore.Browser.Capabilities
   alias FermixCore.Browser.CDP.Connection
+  alias FermixCore.Browser.CDP.ExtensionTransport
   alias FermixCore.Browser.ChromeLauncher
   alias FermixCore.Browser.Config
   alias FermixCore.Browser.Error
@@ -34,7 +37,18 @@ defmodule FermixCore.Browser.ProfileServer do
   require Logger
 
   @page_types ~w(page webview)
-  @advanced_actions ~w(focus close screenshot pdf console dialog cookies storage upload download act)
+  # The `act` kinds that can restructure the page enough to be worth a look
+  # afterwards. `fill`, `type` and `hover` are absent on purpose: filling rarely
+  # changes structure, and five fills must not mean five snapshots. `press` is
+  # decided by its key, at its own call site.
+  @observing_kinds ~w(click submit)
+  @fill_form_shape "fill_form requires `fields`: a non-empty list of objects with `ref` and " <>
+                     "`text`, the fields of one form taken from one snapshot."
+  @observe_shape "`observe` must be true or false. Leave it out to get the page back with the " <>
+                   "tab; pass false for a page you are only going to screenshot, print or drive " <>
+                   "through its own webmcp tools."
+  @advanced_actions ~w(focus close screenshot pdf console dialog cookies storage upload download act
+                       webmcp)
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) when is_list(opts) do
@@ -61,21 +75,38 @@ defmodule FermixCore.Browser.ProfileServer do
   def init(opts) do
     Process.flag(:trap_exit, true)
 
+    profile = Keyword.fetch!(opts, :profile)
+
     state = %{
       owner_key: Keyword.fetch!(opts, :owner_key),
       profile_name: Keyword.fetch!(opts, :profile_name),
-      profile: Keyword.fetch!(opts, :profile),
+      profile: profile,
+      # What this profile's browser can be asked to do, resolved once: the mode
+      # never changes for the life of the server (§3.3).
+      caps: Capabilities.for_mode(Map.get(profile, :mode)),
       config: Keyword.fetch!(opts, :config),
       registry: Keyword.get(opts, :registry),
       key: Keyword.get(opts, :key),
       launcher: Keyword.get(opts, :launcher, ChromeLauncher),
-      conn_mod: Keyword.get(opts, :connection, Connection),
+      grants: Keyword.get(opts, :grants, Grants),
+      conn_mod: Keyword.get(opts, :connection, transport_for(profile)),
+      # Why the granted tab went away, so the next request says what happened
+      # rather than asking for a click that was already made.
+      detached: nil,
       now_fn: Keyword.get(opts, :now_fn, fn -> System.monotonic_time(:millisecond) end),
       runtime: nil,
       targets: %{},
       active_target: nil,
       tab_order: [],
       ref_maps: %{},
+      # Per tab, what the model was last shown: the options that snapshot was
+      # taken with, a hash of its text, and the document a look must not stop on
+      # (only a navigation's own fresh mark carries one). A later observation
+      # reuses the options so the comparison is like for like; a tab with no
+      # entry is a tab that never asked to see the page, which is why `act`
+      # leaves it alone (§3.1) and `open`/`navigate` bring a mark of their own
+      # (§3.6).
+      observations: %{},
       console: [],
       dialogs: [],
       downloads: %{},
@@ -87,6 +118,9 @@ defmodule FermixCore.Browser.ProfileServer do
 
     {:ok, schedule_idle(state)}
   end
+
+  defp transport_for(%{mode: :attached_tab}), do: ExtensionTransport
+  defp transport_for(_profile), do: Connection
 
   @impl true
   def handle_call(:status, _from, state), do: {:reply, status_map(state), state}
@@ -119,6 +153,13 @@ defmodule FermixCore.Browser.ProfileServer do
     {:noreply, record_event(method, event, state)}
   end
 
+  # The person took the granted tab back (or closed it, or dismissed Chrome's
+  # debugging bar). The transport exits right behind this message; recording the
+  # reason first is what lets the next request say which of those happened.
+  def handle_info({:cdp_detached, reason}, state) do
+    {:noreply, %{stop_runtime(state) | detached: reason}}
+  end
+
   def handle_info({_port, {:data, _data}}, state), do: {:noreply, state}
 
   def handle_info({_port, {:exit_status, status}}, state) do
@@ -149,20 +190,27 @@ defmodule FermixCore.Browser.ProfileServer do
     with_running(state, context, fn state -> {{:ok, status_map(state)}, state} end)
   end
 
+  defp run_request(%{action: "open"}, %{caps: %{new_tab: false}} = state) do
+    {Capabilities.refuse(:new_tab), state}
+  end
+
   defp run_request(%{action: "open", args: args, context: context}, state) do
-    case Policy.validate_url(args["url"], state.config) do
-      {:ok, uri} -> with_running(state, context, fn s -> finish(create_tab(uri, s), s) end)
+    with {:ok, uri} <- Policy.validate_url(args["url"], state.config),
+         {:ok, mark} <- fresh_mark(args, leaving_document(uri), state) do
+      with_running(state, context, fn s -> finish(create_tab(uri, mark, s), s) end)
+    else
       {:error, error} -> {{:error, error}, state}
     end
   end
 
   defp run_request(%{action: "navigate", args: args, context: context}, state) do
-    case Policy.validate_url(args["url"], state.config) do
-      {:ok, uri} ->
-        with_running(state, context, fn s -> finish(navigate_chain(uri, args, s), s) end)
-
-      {:error, error} ->
-        {{:error, error}, state}
+    # Nothing to leave: `Page.navigate` answers on the commit, so the document
+    # the look polls is already the one the request landed on.
+    with {:ok, uri} <- Policy.validate_url(args["url"], state.config),
+         {:ok, mark} <- fresh_mark(args, nil, state) do
+      with_running(state, context, fn s -> finish(navigate_chain(uri, args, mark, s), s) end)
+    else
+      {:error, error} -> {{:error, error}, state}
     end
   end
 
@@ -174,6 +222,18 @@ defmodule FermixCore.Browser.ProfileServer do
       {:error, error} ->
         {{:error, error}, state}
     end
+  end
+
+  # The tab set never changes in attached mode — there is one tab — but its url
+  # and title do. The cached pair is what the page looked like when the person
+  # clicked the extension, so it is read live and through the same verdict every
+  # other read faces: a blocked or unreadable page yields the tab id and the
+  # verdict, never its address or its title.
+  defp run_request(
+         %{action: "tabs", context: context},
+         %{caps: %{target_discovery: false}} = state
+       ) do
+    with_running(state, context, fn s -> finish(granted_tab_row(s), s) end)
   end
 
   defp run_request(%{action: "tabs", context: context}, state) do
@@ -206,6 +266,32 @@ defmodule FermixCore.Browser.ProfileServer do
 
   defp ensure_running(%{runtime: %{connection: pid}} = state, _context) when is_pid(pid) do
     {:ok, state}
+  end
+
+  # A tab this server BOUND and then lost is answered before anything else can be
+  # claimed. Without this, a second grant appearing anywhere — another browser,
+  # another tab — would be bound by the very next request and the conversation
+  # would carry on in a different page having been told nothing. The reason is
+  # cleared as the refusal is delivered, so the step after it may claim afresh.
+  defp ensure_running(%{profile: %{mode: :attached_tab}, detached: reason} = state, _context)
+       when not is_nil(reason) do
+    {:error, Error.new("attached_tab_detached", detached_sentence(reason)),
+     %{state | detached: nil}}
+  end
+
+  # A granted tab is not launched and cannot be re-attached to by probing the
+  # process list, so it skips both: there is nothing here that repeated failures
+  # would be right to cool down, and "click the extension" must stay the answer
+  # however many times it is asked.
+  defp ensure_running(%{profile: %{mode: :attached_tab}} = state, context) do
+    case start_runtime(state) do
+      {:ok, state} ->
+        emit(context, "browser_attach_tab", state, %{})
+        {:ok, state}
+
+      {:error, error} ->
+        {:error, error, state}
+    end
   end
 
   # Re-attach to an already-running managed Chrome for this profile before
@@ -300,6 +386,30 @@ defmodule FermixCore.Browser.ProfileServer do
     )
   end
 
+  # The grant IS the runtime: there is no process to spawn and no port to wait
+  # for, only a tab the person has already handed over. Claiming it here is what
+  # makes it this conversation's for as long as this server lives.
+  defp start_runtime(%{profile: %{mode: :attached_tab}} = state) do
+    case claim_grant(state) do
+      {:ok, grant} ->
+        runtime = %{
+          ws_url: "bridge:#{grant.tab_id}",
+          grant: grant,
+          headless: false,
+          port: nil,
+          os_pid: nil
+        }
+
+        finish_runtime(runtime, seed_granted_tab(state, grant))
+
+      {:error, :no_grant} ->
+        {:error, no_grant_error()}
+
+      {:error, :bridge_unavailable} ->
+        {:error, bridge_unavailable_error()}
+    end
+  end
+
   defp start_runtime(%{profile: %{mode: :managed}} = state) do
     case state.launcher.start(state.config, state.profile, state.owner_key, state.profile_name) do
       {:ok, runtime} -> finish_runtime(runtime, state)
@@ -315,12 +425,23 @@ defmodule FermixCore.Browser.ProfileServer do
     {:error, Error.new("profile_unavailable", "Profile requires a configured CDP URL")}
   end
 
+  # The grants table lives in the daemon's browser tree and nowhere else, so a
+  # tree without it — a source boot, a test tree, any process that is not the
+  # daemon — must answer a sentence rather than take this server and its caller
+  # down with an exit. A gate has to work in every world it can be reached from.
+  defp claim_grant(state) do
+    Grants.claim(state.grants, state.owner_key)
+  catch
+    :exit, {:noproc, _call} -> {:error, :bridge_unavailable}
+    :exit, {:normal, _call} -> {:error, :bridge_unavailable}
+  end
+
   # Connect to the just-spawned (or attached) browser and finish setup. If any
   # step after a managed launch fails, tear the runtime down HERE — the with
   # chain's local state would otherwise be discarded with Chrome still alive,
   # orphaning the process and leaking the CDP port.
   defp finish_runtime(runtime, state) do
-    case connect(runtime.ws_url, state.config, state.conn_mod) do
+    case connect(runtime, state) do
       {:ok, connection} ->
         ready = %{state | runtime: Map.put(runtime, :connection, connection)}
 
@@ -346,6 +467,66 @@ defmodule FermixCore.Browser.ProfileServer do
     end
   end
 
+  # The one tab the person granted, seeded as this profile's whole tab set: the
+  # extension's debugger answers no `Target` domain, so there is nothing to
+  # enumerate and nothing to choose between.
+  defp seed_granted_tab(state, grant) do
+    target_id = "extension-tab-#{grant.tab_id}"
+    id = tab_id(target_id)
+
+    tab = %{
+      id: id,
+      target_id: target_id,
+      session_id: nil,
+      url: grant.url,
+      title: grant.title,
+      type: "page"
+    }
+
+    %{state | targets: %{id => tab}, active_target: id, tab_order: [id], detached: nil}
+  end
+
+  defp no_grant_error do
+    Error.new(
+      "attached_tab_not_granted",
+      "No browser tab is granted yet. Click the Fermix extension on the tab you want me to " <>
+        "work in, then ask again."
+    )
+  end
+
+  defp bridge_unavailable_error do
+    Error.new(
+      "browser_bridge_unavailable",
+      "The browser bridge is not running here, so no tab can be handed over. Use the managed " <>
+        "browser profile instead."
+    )
+  end
+
+  defp detached_sentence("tab_closed") do
+    "That tab is closed, so the grant went with it. Click the Fermix extension on another " <>
+      "tab when you want me to work in one."
+  end
+
+  defp detached_sentence("debugger_detached") do
+    "Chrome's debugging bar was dismissed on that tab, so I am no longer attached to it. " <>
+      "Click the Fermix extension on the tab again to hand it back."
+  end
+
+  defp detached_sentence("devtools_opened") do
+    "DevTools took the debugger on that tab, so I lost it. Close DevTools and click the " <>
+      "Fermix extension on the tab again."
+  end
+
+  defp detached_sentence("bridge_closed") do
+    "The browser extension disconnected, so the granted tab is gone. Check the browser is " <>
+      "running, then click the Fermix extension on the tab again."
+  end
+
+  defp detached_sentence(_reason) do
+    "You took that tab back, so I am no longer attached to it. Click the Fermix extension " <>
+      "on the tab you want me to work in, then ask again."
+  end
+
   # Reap a partially-started runtime: close the CDP connection (if any) and kill
   # the spawned Chrome via the launcher (a no-op for attach-only profiles whose
   # os_pid/port_ref are nil, so a user's own Chrome is never killed).
@@ -355,8 +536,18 @@ defmodule FermixCore.Browser.ProfileServer do
     :ok
   end
 
-  defp connect(url, config, conn_mod) do
-    case conn_mod.start_link(url, owner: self(), keepalive_ms: config.cdp_keepalive_ms) do
+  # `:grants` and `:grant` are only read by `ExtensionTransport`, and `Connection`
+  # ignores them: one options list, so a transport swapped in here needs no
+  # second call site.
+  defp connect(runtime, state) do
+    opts = [
+      owner: self(),
+      keepalive_ms: state.config.cdp_keepalive_ms,
+      grants: state.grants,
+      grant: Map.get(runtime, :grant)
+    ]
+
+    case state.conn_mod.start_link(runtime.ws_url, opts) do
       {:ok, pid} ->
         {:ok, pid}
 
@@ -369,14 +560,14 @@ defmodule FermixCore.Browser.ProfileServer do
     end
   end
 
-  defp create_tab(uri, state) do
+  defp create_tab(uri, mark, state) do
     params = %{url: URI.to_string(uri)}
 
     with {:ok, %{"targetId" => target_id}} <- command(state, "Target.createTarget", params),
          {:ok, state} <- refresh_targets(%{state | active_target: tab_id(target_id)}),
          {:ok, tab, state} <- resolve_tab(tab_id(target_id), state),
          {:ok, state} <- enforce_tab_cap(state) do
-      {:ok, tab_result(tab), state}
+      observe_navigation(tab_result(tab), tab, state, mark)
     end
   end
 
@@ -429,14 +620,14 @@ defmodule FermixCore.Browser.ProfileServer do
 
   defp managed?(state), do: Map.get(state.profile, :mode) == :managed
 
-  defp navigate_chain(uri, args, state) do
+  defp navigate_chain(uri, args, mark, state) do
     with {:ok, tab, state} <- resolve_tab(Map.get(args, "target"), state),
-         {:ok, result, state} <- navigate_tab(tab, uri, state) do
+         {:ok, result, state} <- navigate_tab(tab, uri, mark, state) do
       {:ok, result, state}
     end
   end
 
-  defp navigate_tab(tab, uri, state) do
+  defp navigate_tab(tab, uri, mark, state) do
     requested = URI.to_string(uri)
 
     with {:ok, tab, state} <- attach(tab, state),
@@ -452,8 +643,12 @@ defmodule FermixCore.Browser.ProfileServer do
          {:ok, final_url} <- committed_url(tab, requested, state),
          :ok <- final_url_allowed(final_url, state.config),
          {:ok, state} <- refresh_targets(state),
-         {:ok, tab, state} <- resolve_tab(tab.id, state) do
-      {:ok, tab_result(%{tab | url: final_url}), state}
+         {:ok, live, state} <- resolve_tab(tab.id, state) do
+      # The refreshed entry carries the tab's new title; the session the look
+      # reads through is on the attached one, because `refresh_targets/1`
+      # rebuilds the tab set from the browser and keeps no sessions.
+      settled = %{live | url: final_url, session_id: tab.session_id}
+      observe_navigation(tab_result(settled), settled, state, mark)
     end
   end
 
@@ -570,18 +765,61 @@ defmodule FermixCore.Browser.ProfileServer do
   # exact moment its game began. Same family as `live_meta/2` above, which
   # already distrusts the cached url/title.
   defp snapshot_tab(opts, tab, state) do
-    with {:ok, _} <- command(state, "Accessibility.disable", %{}, tab.session_id),
-         {:ok, _} <- command(state, "Accessibility.enable", %{}, tab.session_id),
-         {:ok, %{"nodes" => nodes}} <-
-           command(state, "Accessibility.getFullAXTree", %{}, tab.session_id),
-         {:ok, rendered} <- Snapshot.render(nodes, opts) do
-      refs = Map.new(rendered.refs, &{&1.ref, &1})
-      state = put_in(state.ref_maps[tab.id], refs)
-      {:ok, snapshot_result(tab, rendered), state}
+    with {:ok, rendered} <- render_tab(opts, tab, state, :none) do
+      {:ok, snapshot_result(tab, rendered), remember_snapshot(state, tab, opts, rendered)}
     end
   end
 
-  defp run_advanced("act", _args, %{dialogs: [_dialog | _rest]}) do
+  defp render_tab(opts, tab, state, deadline) do
+    with {:ok, _} <-
+           command(state, "Accessibility.disable", %{}, tab.session_id, budget(deadline)),
+         {:ok, _} <- command(state, "Accessibility.enable", %{}, tab.session_id, budget(deadline)),
+         {:ok, %{"nodes" => nodes}} when is_list(nodes) <-
+           command(state, "Accessibility.getFullAXTree", %{}, tab.session_id, budget(deadline)) do
+      Snapshot.render(nodes, opts)
+    else
+      {:error, %Error{} = error} -> {:error, error}
+      reply -> {:error, ax_tree_unreadable(reply)}
+    end
+  end
+
+  # A reply that succeeded and carried no tree — no `nodes` key, or the key
+  # present and null, which matches the shape above and would otherwise die one
+  # call later inside `Snapshot.render/2`'s own guard. Typed here, at the one
+  # place that reads it, so a `snapshot` says what happened instead of raising —
+  # and so the post-action observation, which runs with a click already made,
+  # can report `unobserved` rather than take the profile down.
+  defp ax_tree_unreadable(reply) do
+    Error.new(
+      "snapshot_unavailable",
+      "The browser answered the accessibility request with no tree, so the page could not be " <>
+        "read. Take the snapshot again.",
+      %{"reason" => bounded_inspect(reply)}
+    )
+  end
+
+  # `:none` hands `command/5` the configured action timeout; a deadline hands it
+  # what is LEFT of the observation budget, so three AX commands can never cost
+  # three budgets.
+  defp budget(:none), do: nil
+  defp budget(deadline), do: max(deadline - System.monotonic_time(:millisecond), 1)
+
+  # The ref map and the mark a later observation compares against are written
+  # together, because they describe the same view of the same page.
+  defp remember_snapshot(state, tab, opts, rendered) do
+    refs = Map.new(rendered.refs, &{&1.ref, &1})
+    # A mark taken from a page that is already loaded has no document to leave.
+    mark = %{opts: opts, hash: :crypto.hash(:sha256, rendered.text), leaving: nil}
+
+    state
+    |> put_in([:ref_maps, tab.id], refs)
+    |> put_in([:observations, tab.id], mark)
+  end
+
+  # A blocked page runs no script and settles no promise, so these three would
+  # sit out their whole budget for nothing.
+  defp run_advanced(action, _args, %{dialogs: [_dialog | _rest]})
+       when action in ["act", "upload", "webmcp"] do
     {:error,
      Error.new(
        "dialog_blocked",
@@ -590,14 +828,20 @@ defmodule FermixCore.Browser.ProfileServer do
      )}
   end
 
-  defp run_advanced("upload", _args, %{dialogs: [_dialog | _rest]}) do
-    {:error,
-     Error.new(
-       "dialog_blocked",
-       "A JavaScript dialog is blocking browser actions. Clear it first with the " <>
-         "`dialog` action (`decision`: \"accept\" or \"dismiss\"), then retry this action."
-     )}
-  end
+  # The browser-wide verbs, refused for a granted tab before anything is sent.
+  # One clause each rather than a lookup, so the action that is refused and the
+  # capability that refuses it are readable on one line.
+  defp run_advanced("focus", _args, %{caps: %{focus_tab: false}}),
+    do: Capabilities.refuse(:focus_tab)
+
+  defp run_advanced("close", _args, %{caps: %{close_tab: false}}),
+    do: Capabilities.refuse(:close_tab)
+
+  defp run_advanced("cookies", _args, %{caps: %{cookies: false}}),
+    do: Capabilities.refuse(:cookies)
+
+  defp run_advanced("download", _args, %{caps: %{downloads: false}}),
+    do: Capabilities.refuse(:downloads)
 
   defp run_advanced("focus", args, state) do
     with {:ok, tab, state} <- resolve_tab(Map.get(args, "target"), state),
@@ -617,15 +861,23 @@ defmodule FermixCore.Browser.ProfileServer do
   defp run_advanced("screenshot", args, state), do: capture_screenshot(args, state)
   defp run_advanced("pdf", args, state), do: print_pdf(args, state)
 
-  defp run_advanced("console", _args, state),
-    do: {:ok, %{"ok" => true, "entries" => Enum.reverse(state.console)}, state}
-
+  # Console entries are page text — a page chooses what it logs, and a page that
+  # redirected or was clicked onto a blocked host logs there too. It reads like a
+  # browser-scoped buffer, which is exactly why it was the one read verb serving
+  # bytes the gate had already refused for the same tab.
+  defp run_advanced("console", args, state), do: read_page(args, state, &console_entries/2)
   defp run_advanced("dialog", args, state), do: handle_dialog(args, state)
   defp run_advanced("cookies", args, state), do: handle_cookies(args, state)
   defp run_advanced("storage", args, state), do: handle_storage(args, state)
   defp run_advanced("upload", args, state), do: upload_file(args, state)
   defp run_advanced("download", args, state), do: wait_download(args, state)
   defp run_advanced("act", args, state), do: handle_act(args, state)
+
+  defp run_advanced("webmcp", args, state),
+    do: read_page(args, state, &webmcp_page(args, &1, &2))
+
+  defp console_entries(_tab, state),
+    do: {:ok, %{"ok" => true, "entries" => Enum.reverse(state.console)}, state}
 
   defp capture_screenshot(args, state), do: read_page(args, state, &screenshot_page(args, &1, &2))
 
@@ -813,19 +1065,8 @@ defmodule FermixCore.Browser.ProfileServer do
     with {:ok, tab, state} <- resolve_tab(Map.get(args, "target"), state),
          {:ok, tab, state} <- attach(tab, state),
          :ok <- mouse_click(state, tab.session_id, args["x"], args["y"]),
-         {:ok, state} <- refresh_targets(state),
-         {:ok, url_result} <- evaluate(tab, "location.href", state) do
-      result = %{
-        "ok" => true,
-        "target" => tab.id,
-        "action" => "click_coords",
-        # The same receipt ref clicks carry: the model confirms a navigation (or
-        # its absence) from the result instead of taking another look.
-        "url" => runtime_value(url_result),
-        "tabs" => tab_values(state)
-      }
-
-      {:ok, result, state}
+         {:ok, state} <- refresh_targets(state) do
+      coords_result(tab, state)
     end
   end
 
@@ -833,13 +1074,42 @@ defmodule FermixCore.Browser.ProfileServer do
        when kind in ["click", "fill", "type", "hover", "submit"] do
     with {:ok, tab, state} <- resolve_tab(Map.get(args, "target"), state),
          {:ok, tab, state} <- attach(tab, state),
-         {:ok, box} <- ref_box(tab, ref, state),
-         {:ok, result} <- run_ref_action(kind, args, tab, box, state),
+         {:ok, box} <- ref_box(tab, ref, state) do
+      ref_action(kind, args, tab, box, state)
+    end
+  end
+
+  # Every ref is checked against the tab's CURRENT ref map before the first
+  # keystroke: a form half filled from a stale snapshot is worse than one not
+  # filled at all, because the model cannot tell which fields took. The fields
+  # then go through the same clear-then-insert path a single `fill` uses, in
+  # order, and the first failure stops the call. No click, no submit, no
+  # navigation — and no observation, because a fill rarely restructures a page.
+  defp handle_act(%{"kind" => "fill_form", "fields" => fields} = args, state)
+       when is_list(fields) do
+    with :ok <- fillable_fields(fields),
+         {:ok, tab, state} <- resolve_tab(Map.get(args, "target"), state),
+         {:ok, tab, state} <- attach(tab, state),
+         :ok <- known_refs(fields, tab, state),
+         {:ok, filled} <- fill_fields(fields, tab, state),
          {:ok, state} <- refresh_targets(state) do
-      result = Map.put(result, "tabs", tab_values(state))
+      result = %{
+        "ok" => true,
+        "target" => tab.id,
+        "action" => "fill_form",
+        "filled" => filled,
+        "tabs" => tab_values(state)
+      }
+
       {:ok, result, state}
     end
   end
+
+  # The floor under a direct call. `FermixCore.Browser.validate_act_args/2` is
+  # what teaches the model the shape; this is here so a call that arrives
+  # without it is told which argument is missing, not that the kind is unknown.
+  defp handle_act(%{"kind" => "fill_form"}, _state),
+    do: {:error, Error.new("missing_arg", @fill_form_shape)}
 
   defp handle_act(%{"kind" => "press", "key" => key} = args, state) when is_binary(key) do
     with {:ok, tab, state} <- resolve_tab(Map.get(args, "target"), state),
@@ -853,6 +1123,12 @@ defmodule FermixCore.Browser.ProfileServer do
         "tabs" => tab_values(state)
       }
 
+      # Only Enter. An arrow key or Tab moves focus, which changes the
+      # accessibility tree, so observing every press would hand back a full
+      # snapshot per keystroke.
+      {result, state} =
+        observe_page(result, tab, state, :none, observe_deadline(key == "Enter", tab, state))
+
       {:ok, result, state}
     end
   end
@@ -863,14 +1139,51 @@ defmodule FermixCore.Browser.ProfileServer do
   defp handle_act(args, _state),
     do: {:error, Error.new("invalid_action", "Unsupported act kind: #{inspect(args["kind"])}")}
 
-  defp run_ref_action("click", _args, tab, box, state) do
-    with :ok <- mouse_click(state, tab.session_id, box.x, box.y) do
-      result = %{"ok" => true, "target" => tab.id, "action" => "click"}
-      {:ok, Map.merge(result, url_receipt(state, tab))}
+  defp coords_result(tab, state) do
+    deadline = observe_deadline(true, tab, state)
+
+    result =
+      %{
+        "ok" => true,
+        "target" => tab.id,
+        "action" => "click_coords",
+        "tabs" => tab_values(state)
+      }
+      # The same receipt ref clicks carry: the model confirms a navigation (or
+      # its absence) from the result instead of taking another look. Read
+      # through `receipt/3` because the mouse event has already been dispatched
+      # — a read that fails must not report the click as failed.
+      |> Map.merge(url_receipt(state, tab, deadline))
+
+    {result, state} = observe_page(result, tab, state, :none, deadline)
+    {:ok, result, state}
+  end
+
+  # The observation budget starts HERE, before the action's own receipt read,
+  # because that read is page script too: on a page the click has just blocked
+  # with a JS dialog it alone would sit out the full action timeout, and the
+  # whole look after an action is meant to cost about a second and a half.
+  # `observe_deadline/3` answers `:none` for an action or a tab that will not be
+  # observed, and those calls keep exactly the timeouts they had.
+  defp ref_action(kind, args, tab, box, state) do
+    deadline = observe_deadline(kind in @observing_kinds, tab, state)
+
+    with {:ok, result} <- run_ref_action(kind, args, tab, box, state, deadline),
+         {:ok, state} <- refresh_targets(state) do
+      result = Map.put(result, "tabs", tab_values(state))
+      {result, state} = observe_page(result, tab, state, :none, deadline)
+      {:ok, result, state}
     end
   end
 
-  defp run_ref_action("hover", _args, tab, box, state) do
+  defp run_ref_action("click", _args, tab, box, state, deadline) do
+    with :ok <- mouse_click(state, tab.session_id, box.x, box.y) do
+      result = %{"ok" => true, "target" => tab.id, "action" => "click"}
+      {:ok, Map.merge(result, url_receipt(state, tab, deadline))}
+    end
+  end
+
+  defp run_ref_action("hover", _args, tab, box, state, _deadline) do
     with {:ok, _} <- mouse_event(state, tab.session_id, "mouseMoved", box.x, box.y) do
       {:ok, %{"ok" => true, "target" => tab.id, "action" => "hover"}}
     end
@@ -881,7 +1194,7 @@ defmodule FermixCore.Browser.ProfileServer do
   # controlled inputs update), then insert the text. This is the fix for the
   # `Rome` -> `RomeAmsterdam` append bug — the old keystroke select-all used
   # `modifiers: 6` (Ctrl+Shift, not Ctrl) and never cleared.
-  defp run_ref_action("fill", args, tab, box, state) do
+  defp run_ref_action("fill", args, tab, box, state, _deadline) do
     with :ok <- mouse_click(state, tab.session_id, box.x, box.y),
          {:ok, ref_data} <- ref_data(tab, args["ref"], state),
          :ok <- clear_field(state, tab.session_id, ref_data.backend_node_id),
@@ -893,7 +1206,7 @@ defmodule FermixCore.Browser.ProfileServer do
 
   # `type` APPENDS at the cursor (use only to add to existing content, e.g. to
   # trigger typeahead/autocomplete on a field that already holds a value).
-  defp run_ref_action("type", args, tab, box, state) do
+  defp run_ref_action("type", args, tab, box, state, _deadline) do
     with :ok <- mouse_click(state, tab.session_id, box.x, box.y),
          {:ok, ref_data} <- ref_data(tab, args["ref"], state),
          {:ok, _} <- command(state, "Input.insertText", %{text: args["text"]}, tab.session_id) do
@@ -905,12 +1218,118 @@ defmodule FermixCore.Browser.ProfileServer do
   # `submit` completes a form: find the form owning the ref and click its primary
   # control (Search / Go / Submit), so a filled-but-unsubmitted form can't be
   # mistaken for a finished task. Returns the clicked label + the resulting url.
-  defp run_ref_action("submit", args, tab, _box, state) do
+  defp run_ref_action("submit", args, tab, _box, state, deadline) do
     with {:ok, ref_data} <- ref_data(tab, args["ref"], state),
          {:ok, label} <- click_primary_submit(state, tab.session_id, ref_data.backend_node_id) do
       result = %{"ok" => true, "target" => tab.id, "action" => "submit", "submitted" => label}
-      {:ok, Map.merge(result, url_receipt(state, tab))}
+      {:ok, Map.merge(result, url_receipt(state, tab, deadline))}
     end
+  end
+
+  # The floor under a direct call, in the facade's words and for the same three
+  # reasons it has them — plus one only this side knows: a non-map entry raises
+  # inside the ref check below, and a nil `text` would be typed into the page.
+  # `webmcp_plan/2` keeps the same kind of floor under `op`.
+  defp fillable_fields([]), do: {:error, Error.new("missing_arg", @fill_form_shape)}
+
+  defp fillable_fields(fields) do
+    max = Config.act_limits().form_fields
+
+    if length(fields) > max do
+      {:error,
+       Error.new(
+         "invalid_arg",
+         "fill_form takes at most #{max} fields, and this call sent #{length(fields)}. " <>
+           "Fill the rest in a second call."
+       )}
+    else
+      first_unfillable(fields)
+    end
+  end
+
+  defp first_unfillable(fields) do
+    case Enum.find_index(fields, &(not fillable?(&1))) do
+      nil -> :ok
+      index -> {:error, unfillable_field_error(index + 1)}
+    end
+  end
+
+  defp fillable?(%{"ref" => ref, "text" => text})
+       when is_binary(ref) and ref != "" and is_binary(text),
+       do: true
+
+  defp fillable?(_field), do: false
+
+  defp unfillable_field_error(position) do
+    Error.new(
+      "invalid_arg",
+      "fill_form field #{position} must be an object with `ref` (an element ref from the " <>
+        "latest snapshot) and `text` (the string to put in it, possibly empty)."
+    )
+  end
+
+  defp known_refs(fields, tab, state) do
+    fields
+    |> Enum.map(&Map.get(&1, "ref"))
+    |> Enum.reject(&known_ref?(&1, tab, state))
+    |> case do
+      [] -> :ok
+      unknown -> {:error, unknown_refs_error(unknown)}
+    end
+  end
+
+  defp known_ref?(ref, tab, state), do: match?({:ok, _}, ref_data(tab, ref, state))
+
+  # Same verdict and same recovery as `stale_ref` on a single ref, plus the one
+  # fact that only this call can report: nothing was typed.
+  defp unknown_refs_error(refs) do
+    Error.new(
+      "stale_ref",
+      "fill_form filled nothing. Stale or unknown refs: #{named_refs(refs)}. Refs belong to " <>
+        "the snapshot they came from, and the page has changed since. Take a fresh `snapshot` " <>
+        "and fill the form with refs from it."
+    )
+  end
+
+  defp named_refs(refs),
+    do: Enum.map_join(refs, ", ", &bounded_text(&1, Config.act_limits().ref_chars))
+
+  defp fill_fields(fields, tab, state) do
+    fields
+    |> Enum.with_index()
+    |> Enum.reduce_while({:ok, []}, fn {field, index}, {:ok, filled} ->
+      case fill_field(field, tab, state) do
+        {:ok, receipt} -> {:cont, {:ok, [receipt | filled]}}
+        {:error, %Error{} = error} -> {:halt, {:error, partial_fill(error, index, filled)}}
+      end
+    end)
+    |> case do
+      {:ok, filled} -> {:ok, Enum.reverse(filled)}
+      {:error, %Error{} = error} -> {:error, error}
+    end
+  end
+
+  defp fill_field(%{"ref" => ref} = field, tab, state) do
+    args = %{"ref" => ref, "text" => Map.get(field, "text")}
+
+    with {:ok, box} <- ref_box(tab, ref, state),
+         {:ok, result} <- run_ref_action("fill", args, tab, box, state, :none) do
+      {:ok, result |> Map.take(["value"]) |> Map.put("ref", ref)}
+    end
+  end
+
+  # Refs and indexes only. A field's value and a page's validation message are
+  # page-controlled text, and page text must never sit bare in one of our own
+  # sentences — `webmcp_tool_threw` wraps it in the content delimiters for that
+  # reason, and an error detail carries no such wrapper.
+  defp partial_fill(%Error{} = error, index, filled) do
+    details =
+      Map.merge(error.details, %{
+        "failed_index" => index,
+        "filled" => filled |> Enum.reverse() |> Enum.map(&Map.fetch!(&1, "ref"))
+      })
+
+    %{error | details: details}
   end
 
   @clear_field_js """
@@ -951,8 +1370,8 @@ defmodule FermixCore.Browser.ProfileServer do
     receipt(%{}, "value", node_value(state, tab.session_id, ref_data.backend_node_id))
   end
 
-  defp url_receipt(state, tab) do
-    receipt(%{}, "url", url_value(state, tab))
+  defp url_receipt(state, tab, deadline) do
+    receipt(%{}, "url", url_value(state, tab, budget(deadline)))
   end
 
   defp node_value(state, session_id, backend_node_id) do
@@ -969,8 +1388,8 @@ defmodule FermixCore.Browser.ProfileServer do
     end
   end
 
-  defp url_value(state, tab) do
-    case evaluate(tab, "location.href", state) do
+  defp url_value(state, tab, timeout_ms) do
+    case evaluate(tab, "location.href", state, timeout_ms) do
       {:ok, result} -> {:ok, runtime_value(result)}
       {:error, reason} -> {:error, reason}
     end
@@ -982,6 +1401,300 @@ defmodule FermixCore.Browser.ProfileServer do
   defp receipt(map, key, {:error, reason}) do
     Logger.warning("browser act receipt read failed for #{key}: #{inspect(reason)}")
     map
+  end
+
+  # ── what the action changed ────────────────────────────────────────────────
+
+  # The document a new tab answers from until its request commits. `open`
+  # creates the target and returns before that, and the empty document is
+  # complete and its url stable, so a settle that did not know what it was
+  # leaving would hand back the blank page the open exists to replace. Nothing
+  # to leave when the blank page IS the request.
+  @initial_document "about:blank"
+
+  defp leaving_document(uri) do
+    if URI.to_string(uri) == @initial_document, do: nil, else: @initial_document
+  end
+
+  # What a look after a navigation compares against when the tab holds no mark
+  # of its own. §3.1's "only a tab the model has already snapshotted" is `act`'s
+  # rule: a page loaded on request is a page the model asked to see, and a fresh
+  # tab would otherwise never qualify. `hash: nil` equals no rendering, which is
+  # why a fresh tab always reads as `changed`.
+  #
+  # Resolved HERE, before the navigation, exactly as the `snapshot` clause
+  # resolves its options: a refused argument costs nothing, and the options are
+  # the ones a bare `snapshot` call resolves rather than a second set of
+  # literals.
+  defp fresh_mark(%{"observe" => false}, _leaving, _state), do: {:ok, :none}
+
+  # The floor under a direct call, as `fill_form` has one:
+  # `FermixCore.Browser.validate_args/2` is what teaches the model the shape, and
+  # a value that is not a boolean is refused rather than read as "observe after
+  # all".
+  defp fresh_mark(%{"observe" => observe}, _leaving, _state) when not is_boolean(observe),
+    do: {:error, Error.new("invalid_arg", @observe_shape)}
+
+  defp fresh_mark(_args, leaving, state) do
+    with {:ok, opts} <- Config.snapshot_options(%{}, state.config) do
+      {:ok, %{opts: opts, hash: nil, leaving: leaving}}
+    end
+  end
+
+  # The look for the two verbs whose whole job is to put a page in front of the
+  # model. The budget opens HERE: everything above it is the navigation itself,
+  # which carries its own timeouts, and this budget bounds only the look. It is
+  # the longer of the two because here the settle is the ONLY load wait —
+  # `Target.createTarget` answers on creation and `Page.navigate` on commit.
+  defp observe_navigation(result, _tab, state, :none), do: {:ok, result, state}
+
+  defp observe_navigation(result, tab, state, mark) do
+    deadline = System.monotonic_time(:millisecond) + Config.act_limits().navigation_budget_ms
+    {result, state} = observe_page(result, tab, state, mark, deadline)
+    {:ok, result, state}
+  end
+
+  # When the budget opens, or `:none` for work that will not be observed at all:
+  # the action does not restructure pages (a fill, a hover, an arrow key), or
+  # this tab never asked to see one. A canvas driven purely by `click_coords`
+  # is the second case, and an unrequested snapshot is the cost this exists to
+  # remove.
+  defp observe_deadline(false, _tab, _state), do: :none
+
+  defp observe_deadline(true, tab, state) do
+    if Map.has_key?(state.observations, tab.id),
+      do: System.monotonic_time(:millisecond) + Config.act_limits().settle_budget_ms,
+      else: :none
+  end
+
+  defp observe_page(result, _tab, state, _fresh, :none), do: {result, state}
+
+  # `fresh` is what a caller brings for a tab that holds no mark: `act` brings
+  # `:none` (it looks only at a tab the model has already snapshotted, and an
+  # action that closed its tab has had the mark pruned by `refresh_targets/1`),
+  # a navigation brings one of its own.
+  defp observe_page(result, tab, state, fresh, deadline) do
+    case Map.get(state.observations, tab.id, fresh) do
+      :none -> {result, state}
+      mark -> observe_settled(result, mark, tab, state, deadline)
+    end
+  end
+
+  # The attach is a no-op for every caller that acted on the tab first; a tab
+  # `open` has just created has no session yet, and the look reads through one.
+  # Its state is threaded on EVERY path below, or a session this call opened
+  # would be dropped and the next one would attach a second time.
+  defp observe_settled(result, mark, tab, state, deadline) do
+    case attach(tab, state) do
+      {:ok, tab, state} -> observe_attached(result, mark, tab, state, deadline)
+      other -> {unobserved(result, other), state}
+    end
+  end
+
+  # The action has already happened, so an observation failure must not fail it:
+  # every branch below keeps the receipt and only says what could be seen. Same
+  # rule as the receipts above — logged, never swallowed, never fatal.
+  defp observe_attached(result, mark, tab, state, deadline) do
+    with {:ok, tab, deadline} <- rendered_view(settle(tab, state, mark, deadline, nil), deadline),
+         {:ok, rendered} <- render_within(mark, tab, state, deadline) do
+      observed(result, mark, rendered, tab, state)
+    else
+      {:blocked, %Error{} = error} ->
+        {page_refused(result, error), state}
+
+      # Everything else is one fact: the page could not be seen. A CDP error, a
+      # spent budget, or a reply the renderer cannot read all leave the action
+      # itself standing, so the only honest report is `unobserved` and a log.
+      other ->
+        {unobserved(result, other), state}
+    end
+  end
+
+  # One render, from one of two views of the page: the one that settled, or the
+  # one the budget ran out on while the page was still building. The second gets
+  # a fresh bound because the settle has just proved the page answers, and
+  # `render_within/4` will not start a render with a spent deadline — a look
+  # bounded to nothing is how the caller was handed nothing at all.
+  defp rendered_view({:partial, tab}, _deadline),
+    do: {:ok, tab, System.monotonic_time(:millisecond) + Config.act_limits().settle_budget_ms}
+
+  defp rendered_view({:ok, tab}, deadline), do: {:ok, tab, deadline}
+  defp rendered_view(other, _deadline), do: other
+
+  # Poll until the document is complete and its url is unchanged across one
+  # poll, bounded by the budget. Every probe carries what is LEFT of it: a JS
+  # dialog opened BY this action is not visible to this callback (dialog events
+  # are only processed between callbacks) and blocks page script entirely, so
+  # without the bound the observation would sit out the whole action budget.
+  #
+  # The real ceiling is not a flat budget and this does not pretend otherwise: a
+  # command waits its own timeout and `command/5` adds `cdp_response_grace_ms`
+  # on top, the last poll may begin just under the deadline, and a page still
+  # building at the deadline is then rendered inside one more settle budget — so
+  # the worst case is the budget, plus one poll, plus one grace, plus that
+  # render. That is the price of letting the server-side timer fire first with a
+  # precise error, and of handing back a page that was nearly there rather than
+  # nothing at all.
+  defp settle(tab, state, mark, deadline, previous_url) do
+    case live_meta_within(tab, state, deadline) do
+      {:ok, meta} -> settle_step(meta, tab, state, mark, deadline, previous_url)
+      {:error, reason} -> settle_retry(reason, tab, state, mark, deadline, previous_url)
+    end
+  end
+
+  # A CDP error is a not-yet-ready poll, not the answer: "Execution context was
+  # destroyed" is routine in the moments after a commit, which is exactly when
+  # this probe runs (see `live_meta/2`). Only the LAST error, with the budget
+  # spent, is reported — and a page that answers nothing at all still ends here,
+  # because every probe carries what is left of the budget.
+  defp settle_retry(reason, tab, state, mark, deadline, previous_url) do
+    remaining = deadline - System.monotonic_time(:millisecond)
+
+    if remaining <= 0 do
+      {:error, settle_reason(reason)}
+    else
+      Process.sleep(min(state.config.wait_poll_interval_ms, remaining))
+      settle(tab, state, mark, deadline, previous_url)
+    end
+  end
+
+  defp settle_reason(%Error{code: code}), do: code
+  defp settle_reason(reason), do: reason
+
+  # The read gate, re-asked on EVERY poll rather than once: a page that scripts
+  # itself onto a private host mid-settle must not have its text returned, and
+  # this is the same rule `wait` follows for the same reason.
+  defp settle_step(%{"url" => url} = meta, tab, state, mark, deadline, previous_url)
+       when is_binary(url) do
+    case Policy.read_verdict(url, state.config) do
+      :ok -> settle_ready(meta, url, tab, state, mark, deadline, previous_url)
+      {:error, %Error{} = error} -> {:blocked, error}
+    end
+  end
+
+  defp settle_step(meta, _tab, _state, _mark, _deadline, _previous_url),
+    do: {:error, {:live_url_unavailable, bounded_inspect(meta)}}
+
+  # Settled: the document is complete, the url read the same twice running, and
+  # it is not the one the caller said it was leaving. The repeated `url` binding
+  # IS the comparison.
+  defp settle_ready(
+         %{"ready" => "complete"} = meta,
+         url,
+         tab,
+         _state,
+         %{leaving: leaving},
+         _deadline,
+         url
+       )
+       when url != leaving,
+       do: {:ok, settled_tab(tab, url, meta)}
+
+  # The loop's bound. A document that never reaches "complete" — a hung
+  # subresource, a streaming response — answers every probe in microseconds, so
+  # nothing but this check ends the poll, and `request/2` is an `:infinity` call:
+  # an unbounded loop here is a wedged profile, not a slow one. Checked BEFORE
+  # the sleep, and the sleep never overruns the deadline, exactly as
+  # `continue_wait/4` does for `act wait`.
+  defp settle_ready(meta, url, tab, state, mark, deadline, _previous_url) do
+    remaining = deadline - System.monotonic_time(:millisecond)
+
+    if remaining <= 0 do
+      settle_expired(meta, url, tab, mark)
+    else
+      Process.sleep(min(state.config.wait_poll_interval_ms, remaining))
+      settle(tab, state, mark, deadline, url)
+    end
+  end
+
+  # The budget is spent and the page is still answering. An ordinary site takes
+  # seconds to reach "complete", so withholding the page here would spend the
+  # whole wait AND still cost the snapshot turn this exists to remove: render
+  # what is there, and let `ready_state` on the result say it was still
+  # building. The exception is a tab that never left the document it was told to
+  # leave — the requested page is not on it at all, so there is nothing honest
+  # to hand back.
+  defp settle_expired(_meta, url, _tab, %{leaving: url}), do: {:error, :settle_timeout}
+  defp settle_expired(meta, url, tab, _mark), do: {:partial, settled_tab(tab, url, meta)}
+
+  # The address the look ended on, and the state the document was in when it
+  # did — the same field `snapshot_result/2` publishes, read the same way.
+  defp settled_tab(tab, url, meta) do
+    tab
+    |> Map.put(:url, url)
+    |> Map.put(:ready_state, Map.get(meta, "ready"))
+  end
+
+  defp live_meta_within(tab, state, deadline) do
+    params = %{expression: @live_meta_js, returnByValue: true}
+
+    case command(state, "Runtime.evaluate", params, tab.session_id, budget(deadline)) do
+      {:ok, result} -> {:ok, runtime_value(result)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp render_within(mark, tab, state, deadline) do
+    if System.monotonic_time(:millisecond) >= deadline do
+      {:error, :settle_timeout}
+    else
+      render_tab(mark.opts, tab, state, deadline)
+    end
+  end
+
+  # The ref map is replaced on BOTH verdicts, and only the text is withheld when
+  # nothing changed. Identical text means identical ref names in identical
+  # order, so the model's refs are unchanged from where it sits — but a page
+  # that re-mounted identical-looking DOM (a routine framework re-render after a
+  # click) has left the old backend node ids dead, and the next act would fail
+  # on refs the model was just told to keep. The receipt's url is replaced too:
+  # it was sampled before the navigation committed, and this one is the address
+  # the page settled on.
+  defp observed(result, mark, rendered, tab, state) do
+    # `ready_state` rides every observed result, exactly as it rides a
+    # `snapshot`: "loading" or "interactive" is how the model knows a thin page
+    # is one that was still building when the budget ran out, rather than a page
+    # with nothing on it.
+    result =
+      Map.merge(result, %{"url" => tab.url, "ready_state" => Map.get(tab, :ready_state)})
+
+    state = remember_snapshot(state, tab, mark.opts, rendered)
+
+    if :crypto.hash(:sha256, rendered.text) == mark.hash do
+      {Map.put(result, "page", "unchanged"), state}
+    else
+      changed = %{
+        "page" => "changed",
+        "snapshot" => rendered.text,
+        "truncated" => rendered.truncated
+      }
+
+      {Map.merge(result, changed), state}
+    end
+  end
+
+  # The policy's own verdict is the `page` value: a blocked HOST and a document
+  # that is not a web page at all are different failures with different fixes,
+  # and one word for both sends the model looking for a host rule that was never
+  # the problem.
+  #
+  # The blocked document's address and title go with its text. A page's title is
+  # page text by this repo's own standard, and `live_row/2` has answered this
+  # same verdict with the tab id and nothing else since the gate was written; an
+  # action that lands on a refused page must not be the door around it. The id
+  # stays, because a tab nobody can address is a tab nobody can close.
+  defp page_refused(result, %Error{code: code} = error) do
+    result
+    |> Map.drop(["url", "title"])
+    |> Map.merge(%{"page" => code, "page_reason" => error.message})
+  end
+
+  defp unobserved(result, reason) do
+    Logger.warning(
+      "browser act: the page could not be observed after the action: #{inspect(reason)}"
+    )
+
+    Map.put(result, "page", "unobserved")
   end
 
   @submit_js """
@@ -1062,6 +1775,369 @@ defmodule FermixCore.Browser.ProfileServer do
       "if (!el) return null; const r = el.getBoundingClientRect(); " <>
       "return {x: Math.round(r.x), y: Math.round(r.y), " <>
       "width: Math.round(r.width), height: Math.round(r.height)}; })()"
+  end
+
+  # ── webmcp: the tools a page offers itself ─────────────────────────────────
+
+  # The page-side contract, read on both spellings because the API renamed
+  # `navigator.modelContext` to `document.modelContext` mid-flight. Both
+  # declarations are CONSTANTS, exactly like @read_value_js and @submit_js
+  # above: everything the model supplies arrives as an argument VALUE, never as
+  # source text. A tool's schema is read under the WebMCP spelling
+  # (`inputSchema`) and stringified in the page, so Elixir receives one type.
+  @webmcp_list_js """
+  async function(maxTools) {
+    const mc = this.modelContext ?? navigator.modelContext;
+    if (!mc) { return {ok: false, error: "unavailable"}; }
+    const tools = await mc.getTools();
+    return {ok: true, tools: tools.slice(0, maxTools).map((t) => ({
+      name: String(t.name),
+      description: String(t.description ?? ""),
+      input_schema: JSON.stringify(t.inputSchema ?? null),
+      annotations: JSON.stringify(t.annotations ?? null)
+    }))};
+  }
+  """
+
+  # `JSON.stringify(undefined)` is `undefined`, and CDP's returnByValue drops an
+  # undefined property — so a tool that returns nothing would arrive as a reply
+  # with no `result` at all, and be reported as "no tool ran" AFTER it ran. The
+  # guard below keeps that inside the page, where the undefined is observable.
+  @webmcp_call_js """
+  async function(name, inputJson, maxTools) {
+    const mc = this.modelContext ?? navigator.modelContext;
+    if (!mc) { return {ok: false, error: "unavailable"}; }
+    const tools = await mc.getTools();
+    const tool = tools.find((t) => t.name === name);
+    if (!tool) {
+      return {ok: false, error: "unknown_tool",
+              tools: tools.slice(0, maxTools).map((t) => String(t.name))};
+    }
+    const out = await mc.executeTool(tool, inputJson);
+    const text = typeof out === "string" ? out : JSON.stringify(out);
+    return {ok: true, result: text === undefined ? "null" : text};
+  }
+  """
+
+  @webmcp_group "fermix_webmcp"
+
+  defp webmcp_page(args, tab, state) do
+    with {:ok, plan} <- webmcp_plan(args, state.config) do
+      run_webmcp(plan, tab, state)
+    end
+  end
+
+  # `op` is validated HERE, after `read_page/3`, not before it: every advertised
+  # action must refuse a policy-blocked page, and the invariant walk in
+  # `profile_server_guards_test` calls this one with no arguments at all.
+  # `FermixCore.Browser.validate_args/2` is what teaches the model which
+  # argument it is missing; this is the floor under a direct call.
+  defp webmcp_plan(%{"op" => "list"}, config) do
+    limits = Config.webmcp_limits()
+
+    {:ok,
+     %{
+       op: "list",
+       name: nil,
+       declaration: @webmcp_list_js,
+       arguments: [%{value: limits.tools}],
+       timeout_ms: config.action_timeout_ms
+     }}
+  end
+
+  defp webmcp_plan(%{"op" => "call", "name" => name} = args, config)
+       when is_binary(name) and name != "" do
+    with {:ok, input_json} <- webmcp_input(Map.get(args, "input")) do
+      {:ok, call_plan(name, input_json, Map.get(args, "timeout_ms"), config)}
+    end
+  end
+
+  defp webmcp_plan(_args, _config) do
+    {:error,
+     Error.new(
+       "missing_arg",
+       ~s(webmcp requires `op`: "list" to see the tools this page offers, or "call" with ) <>
+         "`name` (and optionally `input`, an object of the tool's named arguments) to run one."
+     )}
+  end
+
+  defp call_plan(name, input_json, requested_timeout, config) do
+    limits = Config.webmcp_limits()
+
+    %{
+      op: "call",
+      name: name,
+      declaration: @webmcp_call_js,
+      arguments: [%{value: name}, %{value: input_json}, %{value: limits.tools}],
+      timeout_ms: bounded(requested_timeout, config.action_timeout_ms, limits.call_max_ms)
+    }
+  end
+
+  defp webmcp_input(nil), do: {:ok, "{}"}
+  defp webmcp_input(input) when is_map(input), do: {:ok, Jason.encode!(input)}
+
+  defp webmcp_input(_input) do
+    {:error,
+     Error.new("invalid_arg", "webmcp `input` must be an object of the tool's named arguments")}
+  end
+
+  # The page handle is opened here and released here, on EVERY path — a result,
+  # a tool that threw, a call that never answered. `Runtime.evaluate` is what
+  # mints it, so nothing before that can leak and nothing after it returns
+  # without the release.
+  defp run_webmcp(plan, tab, state) do
+    outcome =
+      with {:ok, object_id} <- document_handle(tab, state) do
+        invoke_tool(plan, object_id, tab, state)
+      end
+
+    release_object_group(tab, state)
+    webmcp_reply(plan, outcome, tab, state)
+  end
+
+  # `document` with no returnByValue yields a handle in the page's MAIN world,
+  # which is where the model context lives.
+  defp document_handle(tab, state) do
+    params = %{expression: "document", objectGroup: @webmcp_group}
+
+    case command(state, "Runtime.evaluate", params, tab.session_id) do
+      {:ok, %{"result" => %{"objectId" => object_id}}} -> {:ok, object_id}
+      {:ok, reply} -> {:error, webmcp_unexpected(reply, :no_tool_ran)}
+      {:error, %Error{code: "cdp_timeout"}} -> {:error, page_unresponsive()}
+      {:error, %Error{} = error} -> {:error, error}
+    end
+  end
+
+  # Kept distinct from `webmcp_timeout`: the page never handed over the document
+  # handle, so nothing was called and there is nothing that may still complete.
+  # A bare `cdp_timeout: Runtime.evaluate` names no next move.
+  defp page_unresponsive do
+    Error.new(
+      "cdp_timeout",
+      "The page did not answer while Fermix was reaching for its WebMCP tools, so no tool ran. " <>
+        "Take the action again."
+    )
+  end
+
+  defp invoke_tool(plan, object_id, tab, state) do
+    params = %{
+      objectId: object_id,
+      functionDeclaration: plan.declaration,
+      arguments: plan.arguments,
+      awaitPromise: true,
+      returnByValue: true
+    }
+
+    case command(state, "Runtime.callFunctionOn", params, tab.session_id, plan.timeout_ms) do
+      {:ok, reply} -> {:ok, reply}
+      {:error, %Error{code: "cdp_timeout"}} -> {:error, webmcp_timeout(plan)}
+      {:error, %Error{} = error} -> {:error, error}
+    end
+  end
+
+  # Rule 4's other half: a failed release is logged, never swallowed, and never
+  # allowed to replace the tool's own answer — the handles die with the document
+  # in any case.
+  defp release_object_group(tab, state) do
+    params = %{objectGroup: @webmcp_group}
+
+    case command(state, "Runtime.releaseObjectGroup", params, tab.session_id) do
+      {:ok, _result} ->
+        :ok
+
+      {:error, error} ->
+        Logger.warning("browser webmcp: releasing the page handle failed: #{inspect(error)}")
+    end
+  end
+
+  defp webmcp_reply(_plan, {:error, %Error{} = error}, _tab, _state), do: {:error, error}
+
+  # A CDP reply can succeed and STILL carry exceptionDetails; `runtime_value/1`
+  # would hide it and report the tool's `undefined` as a result.
+  defp webmcp_reply(plan, {:ok, %{"exceptionDetails" => details}}, _tab, _state)
+       when is_map(details) do
+    {:error, webmcp_tool_threw(details, plan)}
+  end
+
+  defp webmcp_reply(plan, {:ok, reply}, tab, state) do
+    webmcp_outcome(plan, runtime_value(reply), tab, state)
+  end
+
+  defp webmcp_outcome(%{op: "list"}, %{"ok" => true, "tools" => tools} = value, tab, state)
+       when is_list(tools) do
+    if Enum.all?(tools, &is_map/1),
+      do: webmcp_list_result(tools, tab, state),
+      else: {:error, webmcp_unexpected(value, :no_tool_called)}
+  end
+
+  defp webmcp_outcome(%{op: "call", name: name}, %{"ok" => true, "result" => text}, tab, state)
+       when is_binary(text) do
+    webmcp_call_result(name, text, tab, state)
+  end
+
+  defp webmcp_outcome(_plan, %{"ok" => false, "error" => "unavailable"}, _tab, _state) do
+    {:error, webmcp_unavailable()}
+  end
+
+  defp webmcp_outcome(
+         %{name: name},
+         %{"ok" => false, "error" => "unknown_tool", "tools" => names},
+         _tab,
+         _state
+       )
+       when is_list(names) do
+    {:error, webmcp_unknown_tool(name, names)}
+  end
+
+  defp webmcp_outcome(plan, value, _tab, _state),
+    do: {:error, webmcp_unexpected(value, unexpected_effect(plan))}
+
+  # After a `call` the tool may already have run and only its RESULT be
+  # unreadable — telling the model nothing ran is what sends it into a second
+  # mutation. Before the call, and for `list`, nothing was invoked.
+  defp unexpected_effect(%{op: "call"}), do: :may_have_run
+  defp unexpected_effect(%{op: "list"}), do: :no_tool_called
+
+  defp webmcp_list_result(tools, tab, state) do
+    limits = Config.webmcp_limits()
+    listed = tools |> Enum.take(limits.tools) |> Enum.map(&bounded_tool(&1, limits))
+    {content, _truncated} = page_content(Jason.encode!(listed), state)
+
+    result =
+      tab
+      |> webmcp_result_head()
+      |> Map.merge(%{"tool_count" => length(listed), "content" => content})
+
+    {:ok, result, state}
+  end
+
+  defp webmcp_call_result(name, text, tab, state) do
+    {content, truncated} = page_content(text, state)
+
+    result =
+      tab
+      |> webmcp_result_head()
+      |> Map.merge(%{"tool" => name, "content" => content, "truncated" => truncated})
+
+    {:ok, result, state}
+  end
+
+  defp webmcp_result_head(tab) do
+    %{"ok" => true, "target" => tab.id, "url" => tab.url, "title" => tab.title}
+  end
+
+  # A tool list and a tool result are page bytes, so they are capped like a
+  # snapshot is and carry the same delimiters — one shape, one bound, one
+  # marking, for everything the model must read as data rather than instruction.
+  defp page_content(text, state) do
+    capped = capped_value(text, state)
+    {Snapshot.boundary(capped), capped != text}
+  end
+
+  # Every field below is page-controlled text, and the page also chose how many
+  # tools to return — so the count is bounded in Elixir as well as in the script.
+  defp bounded_tool(tool, limits) when is_map(tool) do
+    %{
+      "name" => bounded_text(Map.get(tool, "name"), limits.name_chars),
+      "description" => bounded_text(Map.get(tool, "description"), limits.description_chars),
+      "input_schema" => bounded_text(Map.get(tool, "input_schema"), limits.schema_chars),
+      "annotations" => bounded_text(Map.get(tool, "annotations"), limits.schema_chars)
+    }
+  end
+
+  defp bounded_text(nil, _max), do: ""
+  defp bounded_text(value, max) when is_binary(value), do: String.slice(value, 0, max)
+  defp bounded_text(value, max), do: value |> inspect() |> String.slice(0, max)
+
+  defp webmcp_unavailable do
+    Error.new(
+      "webmcp_unavailable",
+      "This page offers no WebMCP tools. Read it with `snapshot` and drive it with `act`."
+    )
+  end
+
+  # The API is still moving. An answer neither constant can produce means the
+  # contract changed under us: say so with the value that arrived, rather than
+  # guessing a second call against a shape that no longer holds. The claim about
+  # the tool has to be true WHERE IT IS RAISED, which is what `effect` carries.
+  defp webmcp_unexpected(value, effect) do
+    Error.new(
+      "webmcp_unavailable",
+      "This page answered the WebMCP request in a shape Fermix does not recognise, " <>
+        unexpected_sentence(effect),
+      %{"reason" => bounded_inspect(value)}
+    )
+  end
+
+  defp unexpected_sentence(:no_tool_ran),
+    do: "so no tool ran. Read the page with `snapshot` and drive it with `act`."
+
+  defp unexpected_sentence(:no_tool_called),
+    do: "so no tool was called. Read the page with `snapshot` and drive it with `act`."
+
+  defp unexpected_sentence(:may_have_run),
+    do:
+      "so the tool may have run and only its result could not be read. Read the page state " <>
+        "with `snapshot` before calling it again."
+
+  # Fermix's instruction comes FIRST and the page's own words LAST, inside the
+  # content delimiters. `Tools.Browser.error_text/1` hands this message to the
+  # model unwrapped, so a page-chosen fragment interpolated bare into it would
+  # be the page writing a sentence in Fermix's voice.
+  defp webmcp_unknown_tool(name, names) do
+    Error.new(
+      "webmcp_unknown_tool",
+      "This page registers no WebMCP tool named #{inspect(name)}. Call one of the names below, " <>
+        "or run `webmcp` with `op` \"list\" to see them again. The names the page registers " <>
+        "follow as data:\n" <> Snapshot.boundary(registered_names(names))
+    )
+  end
+
+  defp registered_names(names) do
+    limits = Config.webmcp_limits()
+
+    names
+    |> Enum.take(limits.tools)
+    |> Enum.map_join(", ", &bounded_text(&1, limits.name_chars))
+    |> bounded_text(limits.description_chars)
+  end
+
+  defp webmcp_tool_threw(details, plan) do
+    Error.new(
+      "webmcp_tool_threw",
+      "The page's WebMCP code threw, " <>
+        threw_sentence(plan) <>
+        " The page's own error text follows as data:\n" <>
+        Snapshot.boundary(exception_text(details))
+    )
+  end
+
+  # `getTools` throwing is not a tool with an unknown effect — nothing was
+  # invoked, and saying otherwise sends the model looking for a change.
+  defp threw_sentence(%{op: "call"}) do
+    "so the tool may have run and its effect is unknown — read the page with `snapshot` " <>
+      "before calling it again."
+  end
+
+  defp threw_sentence(%{op: "list"}) do
+    "so no tool was called and the page's tools could not be listed. Read the page with " <>
+      "`snapshot` and drive it with `act`."
+  end
+
+  defp exception_text(details) do
+    details |> exception_source() |> bounded_text(Config.webmcp_limits().description_chars)
+  end
+
+  defp exception_source(%{"exception" => %{"description" => text}}) when is_binary(text), do: text
+  defp exception_source(%{"text" => text}) when is_binary(text), do: text
+  defp exception_source(details), do: bounded_inspect(details)
+
+  defp webmcp_timeout(plan) do
+    Error.new(
+      "webmcp_timeout",
+      "The page's WebMCP tool did not answer within #{plan.timeout_ms} ms. It may still " <>
+        "complete — read the page with `snapshot` before calling it again."
+    )
   end
 
   defp wait_for(args, state) do
@@ -1283,6 +2359,10 @@ defmodule FermixCore.Browser.ProfileServer do
 
   defp refresh_targets(%{runtime: nil} = state), do: {:ok, state}
 
+  # Nothing to enumerate: the granted tab was seeded at attach and is the whole
+  # tab set until the grant ends.
+  defp refresh_targets(%{caps: %{target_discovery: false}} = state), do: {:ok, state}
+
   defp refresh_targets(state) do
     with {:ok, %{"targetInfos" => infos}} <- command(state, "Target.getTargets", %{}) do
       targets = infos |> selectable_targets() |> Map.new(&target_entry/1)
@@ -1290,11 +2370,22 @@ defmodule FermixCore.Browser.ProfileServer do
       order = reconcile_order(state.tab_order, targets)
       # A gone tab's refs can never be clicked again; keeping its map only grows
       # state for the life of the profile (closes, evictions, crashes all funnel
-      # through this refresh, so pruning here covers every removal path).
-      ref_maps = Map.take(state.ref_maps, Map.keys(targets))
+      # through this refresh, so pruning here covers every removal path). The
+      # observation record is the same fact about the same tab, so it is pruned
+      # on the same line — one lifecycle, not two.
+      live = Map.keys(targets)
+      ref_maps = Map.take(state.ref_maps, live)
+      observations = Map.take(state.observations, live)
 
       {:ok,
-       %{state | targets: targets, active_target: active, tab_order: order, ref_maps: ref_maps}}
+       %{
+         state
+         | targets: targets,
+           active_target: active,
+           tab_order: order,
+           ref_maps: ref_maps,
+           observations: observations
+       }}
     end
   end
 
@@ -1344,9 +2435,13 @@ defmodule FermixCore.Browser.ProfileServer do
     end
   end
 
+  defp attach(%{attached: true} = tab, state), do: {:ok, tab, state}
+
   defp attach(%{session_id: session_id} = tab, state) when is_binary(session_id) do
     {:ok, tab, state}
   end
+
+  defp attach(tab, %{caps: %{target_attach: false}} = state), do: attach_in_place(tab, state)
 
   defp attach(tab, state) do
     params = %{targetId: tab.target_id, flatten: true}
@@ -1357,6 +2452,16 @@ defmodule FermixCore.Browser.ProfileServer do
       enable_page(tab, state)
       {:ok, tab, state}
     end
+  end
+
+  # The extension is already attached — that is what the person's click did —
+  # and every command addresses the tab rather than a session, so this only
+  # turns on the domains the runtime reads.
+  defp attach_in_place(tab, state) do
+    tab = Map.put(tab, :attached, true)
+    state = put_in(state.targets[tab.id], tab)
+    enable_page(tab, state)
+    {:ok, tab, state}
   end
 
   defp enable_page(tab, state) do
@@ -1378,6 +2483,11 @@ defmodule FermixCore.Browser.ProfileServer do
       state.config.cdp_response_grace_ms
     )
   end
+
+  # Chrome's extension debugger exposes no `Browser` domain at all, so there is
+  # no download behaviour to redirect: the person's own browser downloads where
+  # it always does, and the `download` action says so rather than waiting.
+  defp configure_downloads(%{caps: %{download_redirect: false}} = state), do: {:ok, state}
 
   defp configure_downloads(state) do
     dir = download_dir(state)
@@ -1428,6 +2538,22 @@ defmodule FermixCore.Browser.ProfileServer do
      }}
   end
 
+  defp granted_tab_row(state) do
+    with {:ok, tab, state} <- resolve_tab(nil, state),
+         {:ok, tab, state} <- attach(tab, state) do
+      {:ok, %{"ok" => true, "tabs" => [live_row(tab, state)]}, state}
+    end
+  end
+
+  # The verdict vocabulary `act` already reports under `page`: one word for what
+  # the read policy said, and nothing of the page beside it when it said no.
+  defp live_row(tab, state) do
+    case live_page(tab, state) do
+      {:ok, live} -> tab_result(live)
+      {:error, %Error{code: code}} -> %{"id" => tab.id, "target" => tab.id, "page" => code}
+    end
+  end
+
   defp tab_values(state) do
     state.targets
     |> Map.values()
@@ -1454,8 +2580,10 @@ defmodule FermixCore.Browser.ProfileServer do
       # "loading"/"interactive" tells the model a thin snapshot is a page still
       # building, not a page with nothing on it — wait, don't conclude.
       "ready_state" => Map.get(tab, :ready_state),
+      # The text already names every control as `@ref [role] "name"`; a `refs`
+      # array beside it made the model pay for each name twice on every later
+      # call of the turn. The ref map stays server-side, in `state.ref_maps`.
       "snapshot" => rendered.text,
-      "refs" => Enum.map(rendered.refs, &Map.drop(&1, [:backend_node_id])),
       "truncated" => rendered.truncated
     }
   end
@@ -1508,8 +2636,12 @@ defmodule FermixCore.Browser.ProfileServer do
 
   defp no_box_hint(_ref, error), do: error
 
+  defp ref_data(_tab, ref, _state) when not is_binary(ref),
+    do:
+      {:error, Error.new("invalid_arg", "`ref` must be an element ref from the latest snapshot.")}
+
   defp ref_data(tab, ref, state) do
-    case get_in(state.ref_maps, [tab.id, ref]) do
+    case get_in(state.ref_maps, [tab.id, Snapshot.ref_key(ref)]) do
       nil ->
         {:error,
          Error.new(
@@ -1597,9 +2729,9 @@ defmodule FermixCore.Browser.ProfileServer do
   defp text_for_type(_key, "keyUp"), do: ""
   defp text_for_type(key, _type), do: key
 
-  defp evaluate(tab, expression, state) do
+  defp evaluate(tab, expression, state, timeout_ms \\ nil) do
     params = %{expression: expression, returnByValue: true}
-    command(state, "Runtime.evaluate", params, tab.session_id)
+    command(state, "Runtime.evaluate", params, tab.session_id, timeout_ms)
   end
 
   defp runtime_value(%{"result" => %{"value" => value}}), do: value
@@ -1714,7 +2846,20 @@ defmodule FermixCore.Browser.ProfileServer do
   defp stop_runtime(state) do
     close_connection(state.runtime, state.conn_mod)
     state.launcher.stop(state.runtime, state.config)
-    %{state | runtime: nil, targets: %{}, active_target: nil, tab_order: [], ref_maps: %{}}
+
+    # The observation marks go with the ref maps, here as in `refresh_targets/1`:
+    # they are the same fact about the same tabs, and a mark that outlived the
+    # browser would have a restarted profile compare a fresh page against a
+    # snapshot nobody in this session was ever shown.
+    %{
+      state
+      | runtime: nil,
+        targets: %{},
+        active_target: nil,
+        tab_order: [],
+        ref_maps: %{},
+        observations: %{}
+    }
   end
 
   defp close_connection(%{connection: pid}, conn_mod) when is_pid(pid), do: conn_mod.close(pid)

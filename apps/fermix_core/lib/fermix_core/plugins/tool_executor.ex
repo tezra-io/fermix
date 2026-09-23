@@ -10,6 +10,7 @@ defmodule FermixCore.Plugins.ToolExecutor do
   alias FermixCore.Net.Guard
   alias FermixCore.Plugins.Config
   alias FermixCore.Plugins.Http.Interpreter
+  alias FermixCore.Plugins.Http.Template
   alias FermixCore.Plugins.Registry
   alias FermixCore.Plugins.Status
   alias FermixCore.Tools.Telemetry, as: ToolTelemetry
@@ -22,7 +23,7 @@ defmodule FermixCore.Plugins.ToolExecutor do
   @gmail_metadata_headers ["From", "To", "Subject", "Date"]
   @max_mime_depth 8
   @rate_limit_reasons ~w(rateLimitExceeded userRateLimitExceeded dailyLimitExceeded quotaExceeded)
-  @sentinel FermixCore.Setup.SecretWriter.sentinel()
+  @sentinels FermixCore.Setup.SecretWriter.sentinels()
 
   @spec parameters(String.t()) :: map()
   def parameters("gmail_search_messages") do
@@ -121,14 +122,16 @@ defmodule FermixCore.Plugins.ToolExecutor do
       when is_map(args) and is_map(context) and is_binary(plugin_name) and is_map(tool) do
     start = System.monotonic_time(:millisecond)
     result = do_execute(args, context, plugin_name, tool)
-    emit_telemetry(result, context, plugin_name, Map.get(tool, "name"), start)
+    emit_telemetry(result, args, context, plugin_name, Map.get(tool, "name"), start)
     result
   end
 
   defp do_execute(args, context, plugin_name, tool) do
     with {:ok, plugin} <- Registry.find(plugin_name),
          :ok <- ensure_enabled(plugin),
+         :ok <- ensure_setting_on(plugin, tool),
          :ok <- ensure_granted(plugin, tool, context),
+         {:ok, tool} <- ensure_region(plugin, tool, context),
          auth_profile <- Config.auth_profile(plugin),
          {:ok, token} <- resolve_credential(plugin, auth_profile, context) do
       run_tool(args, context, plugin, plugin_name, auth_profile, token, tool)
@@ -136,6 +139,8 @@ defmodule FermixCore.Plugins.ToolExecutor do
       {:error, reason} -> {:ok, Tool.error(format_auth_error(plugin_name, reason))}
       {:missing_scope, result} -> {:ok, result}
       {:disabled, result} -> {:ok, result}
+      {:setting_off, result} -> {:ok, result}
+      {:no_region, result} -> {:ok, result}
       :error -> {:ok, Tool.error("unknown plugin: #{plugin_name}")}
     end
   end
@@ -154,6 +159,44 @@ defmodule FermixCore.Plugins.ToolExecutor do
     else
       :ok
     end
+  end
+
+  # The operator's per-tool consent gate (M40 §3.2). `Plugins.Capabilities`
+  # already withholds an unsatisfied tool, so reaching here means a stale tool
+  # list or a direct dispatch — enforced again rather than trusted, and before
+  # any credential is resolved.
+  defp ensure_setting_on(plugin, tool) do
+    if Status.tool_setting_satisfied?(plugin, tool) do
+      :ok
+    else
+      {:setting_off, Tool.error(format_setting_error(plugin, tool))}
+    end
+  end
+
+  # A `regional_urls` request has no host until the account's region picks one
+  # (M40 §4.3). The region is read from the plugin's own stored grant — never a
+  # model argument — and there is no default: an unknown or unsupported region
+  # refuses here, before the credential and before any transport.
+  defp ensure_region(plugin, tool, context) do
+    request = Map.get(tool, "request", %{})
+
+    if Template.regional?(request) do
+      select_region(plugin, tool, request, context)
+    else
+      {:ok, tool}
+    end
+  end
+
+  defp select_region(plugin, tool, request, context) do
+    case Template.resolve_region(request, plugin_region(plugin, context)) do
+      {:ok, resolved} -> {:ok, Map.put(tool, "request", resolved)}
+      {:error, reason} -> {:no_region, Tool.error(format_region_error(plugin.name, reason))}
+    end
+  end
+
+  defp plugin_region(plugin, context) do
+    getter = Map.get(context, :plugin_region_getter, &Status.region/1)
+    getter.(plugin)
   end
 
   # A tool with a declarative `request` template runs through the in-VM HTTP
@@ -859,7 +902,7 @@ defmodule FermixCore.Plugins.ToolExecutor do
 
   defp default_plugin_secret(name) do
     case Config.plugin_secret(name) do
-      @sentinel -> :error
+      sentinel when sentinel in @sentinels -> :error
       secret when is_binary(secret) and secret != "" -> {:ok, secret}
       _missing -> :error
     end
@@ -914,6 +957,25 @@ defmodule FermixCore.Plugins.ToolExecutor do
 
   defp reason_from(_entries), do: nil
 
+  defp format_setting_error(plugin, tool) do
+    name = Map.get(tool, "name")
+    key = Map.get(tool, "requires_setting")
+
+    "#{name} is off. Set #{key} to true in the #{plugin.name} plugin settings to allow it."
+  end
+
+  defp format_region_error(plugin_name, :region_unknown) do
+    "#{plugin_name} has no account region recorded, so there is no endpoint to call. " <>
+      "Run `fermix plugins auth reauthorize #{plugin_name}` and sign in again so Fermix " <>
+      "records the account region."
+  end
+
+  defp format_region_error(plugin_name, {:region_not_supported, region, supported}) do
+    "#{plugin_name} is signed in to the #{region} region, and this plugin has no endpoint " <>
+      "for region #{region} — it serves #{Enum.join(supported, ", ")}. Connect an account in " <>
+      "one of those regions."
+  end
+
   defp format_scope_error(plugin_name, tool) do
     scopes = tool |> Map.get("requires_scopes", []) |> Enum.join(", ")
 
@@ -923,6 +985,15 @@ defmodule FermixCore.Plugins.ToolExecutor do
 
   defp format_auth_error(plugin_name, :reauthorization_required) do
     "#{plugin_name} needs reconnection. Run `fermix plugins auth reauthorize #{plugin_name}`."
+  end
+
+  # No token is served for a grant minted in the wrong region, so this is what
+  # the model sees instead of a call to the wrong host. It names the half that
+  # is wrong: reconnecting under the same sign-in client mints the same grant.
+  defp format_auth_error(plugin_name, :wrong_region) do
+    "#{plugin_name} is signed in to a region the account is not in, so every call to it is " <>
+      "refused. Have the owner set the account's region on the sign-in client in setup, " <>
+      "then sign in again."
   end
 
   defp format_auth_error(plugin_name, :no_secret) do
@@ -953,12 +1024,17 @@ defmodule FermixCore.Plugins.ToolExecutor do
   defp format_auth_error(_plugin_name, reason),
     do: "plugin auth unavailable: #{Redaction.format(reason)}"
 
-  defp emit_telemetry({:ok, result}, context, plugin_name, tool_name, start) do
+  # The model's arguments ride as the `:input` preview, which the emitter
+  # attaches only under content capture and scrubs of the turn's redact values.
+  # A vendor can accept a call made with the wrong value and answer success, so
+  # without them the trace cannot say what was actually asked for.
+  defp emit_telemetry({:ok, result}, args, context, plugin_name, tool_name, start) do
     duration = System.monotonic_time(:millisecond) - start
     success = Map.get(result, :success) == true
 
     ToolTelemetry.exec(tool_name || plugin_name, context, success, duration,
       metadata: %{plugin: plugin_name},
+      input: args,
       result: {:ok, result}
     )
   end

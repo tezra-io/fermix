@@ -71,7 +71,7 @@ defmodule FermixCore.Plugins.Dist.ProvenanceTest do
   alias FermixTestSupport.DistFixtures
   alias FermixTestSupport.SafeRm
 
-  @name "eden"
+  @name "acme"
   @version "1.0.0"
 
   setup do
@@ -209,7 +209,7 @@ defmodule FermixCore.Plugins.Dist.ProvenanceTest do
       # to describe the tampered tree changes nothing the gate reads.
       %{sha: sha} = install_remote(ctx)
       allow_publisher()
-      File.write!(Path.join(active_dir(ctx), "plugin.json"), ~s({"name":"eden"}))
+      File.write!(Path.join(active_dir(ctx), "plugin.json"), ~s({"name":"acme"}))
       {:ok, forged} = TreeDigest.digest_tree(active_dir(ctx))
 
       :ok =
@@ -227,7 +227,7 @@ defmodule FermixCore.Plugins.Dist.ProvenanceTest do
       allow_publisher()
       planted = Store.version_dir(ctx.root, @name, "9.9.9")
       File.mkdir_p!(planted)
-      File.write!(Path.join(planted, "plugin.json"), ~s({"name":"eden","version":"9.9.9"}))
+      File.write!(Path.join(planted, "plugin.json"), ~s({"name":"acme","version":"9.9.9"}))
       :ok = Store.activate(ctx.root, @name, "9.9.9")
 
       assert {:error, {:evidence_unreadable, :archive, :enoent}} = verify(ctx)

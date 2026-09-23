@@ -24,6 +24,52 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
 
   defmodule AppBuildInfo do
     def app_engine?, do: true
+    def linux_package?, do: false
+  end
+
+  defmodule PackagedBuildInfo do
+    def app_engine?, do: false
+    def linux_package?, do: true
+
+    def public_identity do
+      %{
+        "engine_id" => "fermix-core",
+        "product_version" => "1.2.3",
+        "build_id" => "release-9",
+        "source_commit" => String.duplicate("a", 40),
+        "distribution_identity" => "linux_package",
+        "artifact_target" => "linux_x86_64",
+        "architecture" => "x86_64"
+      }
+    end
+  end
+
+  defmodule StandaloneBuildInfo do
+    def app_engine?, do: false
+    def linux_package?, do: false
+
+    def public_identity do
+      %{
+        "engine_id" => "fermix-core",
+        "product_version" => "0.5.7",
+        "build_id" => nil,
+        "source_commit" => nil,
+        "distribution_identity" => "standalone",
+        "artifact_target" => nil,
+        "architecture" => "arm64"
+      }
+    end
+  end
+
+  # `Checks.service_unit/1` calls `service.status/1`; these two stand in for
+  # `Fermix.CLI.Service` so every packaged state is reachable without a host
+  # service manager.
+  defmodule AnsweringService do
+    def status(_opts), do: {:ok, Process.get(:fake_service_status)}
+  end
+
+  defmodule RefusingService do
+    def status(_opts), do: {:error, :user_manager_unreachable}
   end
 
   defmodule HealthyChannel do
@@ -64,7 +110,7 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       # An operator-authored `[fermix_core.browser]` section can be refused by
       # `Browser.Config.current/0`, and doctor is the command that explains such
       # an install: it must report the row, never die with a MatchError and print
-      # nothing (CLAUDE.md, the `df`/tree-less-CLI pitfall).
+      # nothing (AGENTS.md, the `df`/tree-less-CLI pitfall).
       test "an invalid browser config is a row, not a crashed doctor run" do
         previous = Application.get_env(:fermix_core, :browser)
         on_exit(fn -> restore_env(:fermix_core, :browser, previous) end)
@@ -141,8 +187,18 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.detail =~ "disabled"
     end
 
+    # The not-installed row branches on the sidecar target, and the default
+    # target is the real host's: compux refuses linux-aarch64 and macos-x86_64,
+    # both first-class engine targets and both CI legs. A test of the install
+    # offer therefore establishes a supported target instead of reading the
+    # machine it happens to run on.
     test "enabled but no sidecar warns to install" do
-      result = Checks.computer_use_permissions({:ok, %{state: :not_installed}})
+      result =
+        Checks.computer_use_permissions(
+          {:ok, %{state: :not_installed}},
+          sidecar_target: {:ok, "macos-aarch64"}
+        )
+
       assert result.status == :warn
       assert result.detail =~ "install"
     end
@@ -164,7 +220,13 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
 
     test "the not-installed warning names the version that would install" do
       version = to_string(Application.spec(:compux, :vsn))
-      result = Checks.computer_use_permissions({:ok, %{state: :not_installed}})
+
+      result =
+        Checks.computer_use_permissions(
+          {:ok, %{state: :not_installed}},
+          sidecar_target: {:ok, "macos-aarch64"}
+        )
+
       assert result.detail =~ "installs compux v#{version}"
     end
 
@@ -183,11 +245,115 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.detail =~ "Screen Recording"
     end
 
-    test "wayland is refused with the X11 hint" do
+    # M38 §8.2. The shipped string told every Wayland user to "use an X11
+    # session" on desktops that no longer offer one, which is worse than naming
+    # no remedy at all. Each replacement says what is refused, why, and what
+    # remains true — and never instructs an impossible action.
+    test "wayland capture names the portal it needs and hedges the X11 advice" do
       probe = probed(platform: "linux", display_server: "wayland", screen_capture: false)
       result = Checks.computer_use_permissions({:ok, probe})
+
       assert result.status == :warn
-      assert result.detail =~ "X11"
+      assert result.detail =~ "screen capture unavailable on this Wayland session"
+      assert result.detail =~ "ScreenCast portal"
+      assert result.detail =~ "GNOME 50 and later do not"
+      refute result.detail =~ "Wayland is unsupported"
+    end
+
+    test "wayland input names libei and the RemoteDesktop portal" do
+      probe =
+        probed(
+          platform: "linux",
+          display_server: "wayland",
+          screen_capture: true,
+          input_control: false
+        )
+
+      result = Checks.computer_use_permissions({:ok, probe})
+
+      assert result.status == :warn
+      assert result.detail =~ "input control unavailable on this Wayland session"
+      assert result.detail =~ "RemoteDesktop portal"
+      assert result.detail =~ "libei"
+      refute result.detail =~ "global input injection is blocked"
+    end
+
+    # An install button whose only outcome is `{:error, {:unsupported_target,
+    # ...}}` is a lie told with a control: `linux_aarch64` is a first-class
+    # engine target and the sidecar publishes no arm64 Linux build.
+    test "arm64 Linux states the architecture refusal instead of offering an install" do
+      result =
+        Checks.computer_use_permissions(
+          {:ok, %{state: :not_installed}},
+          sidecar_target: {:error, {:unsupported_target, "linux", "aarch64"}}
+        )
+
+      assert result.status == :warn
+      assert result.detail =~ "computer use is unavailable on this architecture"
+      assert result.detail =~ "no arm64 Linux build"
+      assert result.detail =~ "Fermix itself is fully supported here"
+      refute result.detail =~ "install it from setup"
+    end
+
+    # compux refuses Intel macOS too, and `macos_x86_64` is a first-class engine
+    # target, so the refusal names the platform it refused. A fixed arm64 Linux
+    # sentence told every Intel Mac it was a Linux machine.
+    test "Intel macOS states its own architecture refusal, not arm64 Linux's" do
+      result =
+        Checks.computer_use_permissions(
+          {:ok, %{state: :not_installed}},
+          sidecar_target: {:error, {:unsupported_target, "macos", "x86_64"}}
+        )
+
+      assert result.status == :warn
+      assert result.detail =~ "computer use is unavailable on this architecture"
+      assert result.detail =~ "no Intel macOS build"
+      assert result.detail =~ "Fermix itself is fully supported here"
+      refute result.detail =~ "Linux"
+      refute result.detail =~ "install it from setup"
+    end
+
+    test "a probe that refuses Intel macOS names Intel macOS" do
+      result =
+        Checks.computer_use_permissions({:error, {:unsupported_target, "macos", "x86_64"}})
+
+      assert result.status == :warn
+      assert result.detail =~ "no Intel macOS build"
+      refute result.detail =~ "Linux"
+    end
+
+    # compux refuses exactly two pairs today, arm64 Linux and Intel macOS.
+    # Doctor is the command that explains a broken install, so a pair it has no
+    # name for still renders a row naming the refused target instead of
+    # crashing the whole run.
+    test "a refused pair with no plain name is named by its target" do
+      result =
+        Checks.computer_use_permissions(
+          {:ok, %{state: :not_installed}},
+          sidecar_target: {:error, {:unsupported_target, "linux", "riscv64"}}
+        )
+
+      assert result.status == :warn
+      assert result.detail =~ "publishes no linux-riscv64 build"
+    end
+
+    test "a probe that refuses the target answers the same way" do
+      result =
+        Checks.computer_use_permissions({:error, {:unsupported_target, "linux", "aarch64"}})
+
+      assert result.status == :warn
+      assert result.detail =~ "computer use is unavailable on this architecture"
+    end
+
+    test "a supported target still offers the install" do
+      result =
+        Checks.computer_use_permissions(
+          {:ok, %{state: :not_installed}},
+          sidecar_target: {:ok, "linux-x86_64"}
+        )
+
+      assert result.status == :warn
+      assert result.detail =~ "install it from setup"
     end
 
     test "probe error fails the check" do
@@ -208,62 +374,246 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     end
   end
 
+  describe "computer_use_background/1" do
+    alias FermixCore.ComputerUse.Capabilities
+
+    test "computer use off says there is nothing to bind" do
+      result = Checks.computer_use_background({:ok, %{state: :disabled}})
+
+      assert result.name == "window binding"
+      assert result.status == :ok
+      assert result.detail =~ "computer use is off"
+    end
+
+    test "the flag off is reported as off and experimental, not as a fault" do
+      result = Checks.computer_use_background({:ok, %{state: :off}})
+
+      assert result.status == :ok
+      assert result.detail =~ "off (experimental"
+    end
+
+    test "the flag on with no helper installed is a warning that names the install" do
+      result = Checks.computer_use_background({:ok, %{state: :not_installed}})
+
+      assert result.status == :warn
+      assert result.detail =~ "isn't installed"
+    end
+
+    test "a capable helper reports the indicator and the methods it really has" do
+      result =
+        Checks.computer_use_background(
+          read(%{
+            "targets" => true,
+            "indicator" => "present",
+            "capture_methods" => ["display", "window"],
+            "input_methods" => ["foreground_hid", "ax"]
+          })
+        )
+
+      assert result.status == :ok
+      assert result.detail =~ "on-screen indicator is present"
+      assert result.detail =~ "capture display+window"
+      assert result.detail =~ "input foreground_hid+ax"
+    end
+
+    test "a helper that cannot bind a window says so rather than staying silent" do
+      result = Checks.computer_use_background(read(%{"indicator" => "present"}))
+
+      assert result.status == :warn
+      assert result.detail =~ "cannot bind a window"
+    end
+
+    test "a helper with no on-screen indicator says which half is missing" do
+      result =
+        Checks.computer_use_background(read(%{"targets" => true, "indicator" => "missing"}))
+
+      assert result.status == :warn
+      assert result.detail =~ "no on-screen indicator"
+    end
+
+    test "a helper that does not mention an indicator is not read as having one" do
+      result = Checks.computer_use_background(read(%{"targets" => true}))
+
+      assert result.status == :warn
+      assert result.detail =~ "does not report an on-screen indicator"
+    end
+
+    test "a helper that could not be read fails loudly" do
+      result = Checks.computer_use_background({:error, :sidecar_unavailable})
+
+      assert result.status == :fail
+      assert result.detail =~ "could not read what the helper supports"
+    end
+
+    defp read(capabilities) do
+      {:ok,
+       %{
+         state: :read,
+         capabilities: Capabilities.from_identity(%{"capabilities" => capabilities})
+       }}
+    end
+  end
+
   describe "bootstrap_template_drift/1" do
     alias FermixCore.Memory.Repo, as: MemoryRepo
-    alias FermixCore.Prompt.TemplateRenderer
+    alias FermixCore.Prompt.Defaults
     alias FermixCore.Resource.Registry, as: ResourceRegistry
+
+    @drift_types [:fermix_md, :soul_md, :realtime_md, :live_md]
 
     setup do
       unique = System.unique_integer([:positive])
-      db_dir = FermixTestSupport.SafeRm.make_tmp_dir!("doctor-drift-#{unique}")
+      root = FermixTestSupport.SafeRm.make_tmp_dir!("doctor-drift-#{unique}")
+      bootstrap_dir = Path.join(root, "bootstrap")
+      agent_dir = Path.join(bootstrap_dir, "main")
       repo_name = :"drift_repo_#{unique}"
 
+      File.mkdir_p!(agent_dir)
+
       start_supervised!(
-        {MemoryRepo,
-         name: repo_name, enabled: true, database_path: Path.join(db_dir, "memory.db")}
+        {MemoryRepo, name: repo_name, enabled: true, database_path: Path.join(root, "memory.db")}
       )
 
-      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(db_dir) end)
-      %{repo: repo_name}
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(root) end)
+
+      %{
+        agent_dir: agent_dir,
+        opts: [repo: repo_name, bootstrap_dir: bootstrap_dir, agent_id: "main"],
+        repo: repo_name
+      }
     end
 
-    defp commit_seed(repo, type, content) do
+    defp drift_file(:fermix_md), do: "FERMIX.md"
+    defp drift_file(:soul_md), do: "SOUL.md"
+    defp drift_file(:realtime_md), do: "REALTIME.md"
+    defp drift_file(:live_md), do: "LIVE.md"
+
+    defp drift_default(:fermix_md), do: Defaults.fermix_md()
+    defp drift_default(:soul_md), do: Defaults.soul_md()
+    defp drift_default(:realtime_md), do: Defaults.realtime_md()
+    defp drift_default(:live_md), do: Defaults.live_md()
+
+    # The classifier reads the file AND the revision history, so a fixture that
+    # only commits a revision describes a home that cannot exist.
+    defp install(ctx, type, content) do
+      path = Path.join(ctx.agent_dir, drift_file(type))
+      File.write!(path, content)
+      path
+    end
+
+    defp seed(ctx, type, content) do
+      path = install(ctx, type, content)
+
       {:ok, _revision} =
         ResourceRegistry.commit("main", type, "global", content,
           mutation_source: :seed,
-          repo: repo
+          resource_path: path,
+          repo: ctx.opts[:repo]
         )
+
+      :ok
     end
 
-    test "ok when seeds match the current shipped templates", %{repo: repo} do
-      for {name, type} <- [fermix: :fermix_md, soul: :soul_md, realtime: :realtime_md] do
-        {:ok, current} = TemplateRenderer.render(name, %{})
-        commit_seed(repo, type, current)
-      end
+    defp seed_current(ctx) do
+      Enum.each(@drift_types, &seed(ctx, &1, drift_default(&1)))
+    end
 
-      result = Checks.bootstrap_template_drift(repo: repo)
+    test "ok when every installed file matches the current shipped templates", ctx do
+      seed_current(ctx)
+
+      result = Checks.bootstrap_template_drift(ctx.opts)
+      assert result.name == "bootstrap templates"
       assert result.status == :ok
-      assert result.detail =~ "current shipped templates"
+      assert result.detail =~ "match the shipped templates"
     end
 
-    test "warns when a shipped template changed since seed", %{repo: repo} do
-      {:ok, current_soul} = TemplateRenderer.render(:soul, %{})
-      {:ok, current_realtime} = TemplateRenderer.render(:realtime, %{})
+    test "warns that an untouched default will be adopted on the next daemon start", ctx do
+      seed_current(ctx)
+      seed(ctx, :fermix_md, "an older fermix template render")
 
-      commit_seed(repo, :fermix_md, "an older fermix template render")
-      commit_seed(repo, :soul_md, current_soul)
-      commit_seed(repo, :realtime_md, current_realtime)
-
-      result = Checks.bootstrap_template_drift(repo: repo)
+      result = Checks.bootstrap_template_drift(ctx.opts)
       assert result.status == :warn
-      assert result.detail =~ "fermix.md"
-      refute result.detail =~ "soul.md"
+      assert result.detail =~ "FERMIX.md"
+      assert result.detail =~ "untouched defaults"
+      assert result.detail =~ "adopt them on the next daemon start"
+      refute result.detail =~ "SOUL.md"
     end
 
-    test "reports unknown for installs seeded before revision tracking", %{repo: repo} do
-      result = Checks.bootstrap_template_drift(repo: repo)
+    test "warns that a customized file's shipped template moved", ctx do
+      seed_current(ctx)
+      seed(ctx, :live_md, "an older live template render")
+      install(ctx, :live_md, "my own live instructions")
+
+      result = Checks.bootstrap_template_drift(ctx.opts)
+      assert result.status == :warn
+      assert result.detail =~ "LIVE.md"
+      assert result.detail =~ "local edits"
+      assert result.detail =~ "diff them against the current template"
+      refute result.detail =~ "/soul reset"
+    end
+
+    test "offers /soul reset only when SOUL.md is the customized file", ctx do
+      seed_current(ctx)
+      seed(ctx, :soul_md, "an older soul template render")
+      install(ctx, :soul_md, "my own persona")
+
+      result = Checks.bootstrap_template_drift(ctx.opts)
+      assert result.status == :warn
+      assert result.detail =~ "SOUL.md"
+      assert result.detail =~ "/soul reset"
+    end
+
+    test "names both a pending adoption and a customized file in one warning", ctx do
+      seed_current(ctx)
+      seed(ctx, :fermix_md, "an older fermix template render")
+      seed(ctx, :live_md, "an older live template render")
+      install(ctx, :live_md, "my own live instructions")
+
+      result = Checks.bootstrap_template_drift(ctx.opts)
+      assert result.status == :warn
+      assert result.detail =~ "untouched defaults: FERMIX.md"
+      assert result.detail =~ "local edits: LIVE.md"
+    end
+
+    test "a customized file whose shipped template never moved is not drift", ctx do
+      seed_current(ctx)
+      install(ctx, :soul_md, "my own persona")
+
+      result = Checks.bootstrap_template_drift(ctx.opts)
+      assert result.status == :ok
+      assert result.detail =~ "match the shipped templates"
+    end
+
+    test "reports unknown for installs with no seed record", ctx do
+      @drift_types
+      |> Enum.reject(&(&1 == :fermix_md))
+      |> Enum.each(&seed(ctx, &1, drift_default(&1)))
+
+      install(ctx, :fermix_md, "content of unknown origin")
+
+      result = Checks.bootstrap_template_drift(ctx.opts)
       assert result.status == :ok
       assert result.detail =~ "no seed record"
+      assert result.detail =~ "FERMIX.md"
+    end
+
+    test "ok when no bootstrap file is installed yet", ctx do
+      result = Checks.bootstrap_template_drift(ctx.opts)
+      assert result.status == :ok
+      assert result.detail =~ "no bootstrap files installed yet"
+    end
+
+    test "ok and skipped when the resource registry is switched off", ctx do
+      seed_current(ctx)
+      disabled = :"drift_disabled_#{System.unique_integer([:positive])}"
+
+      start_supervised!(
+        Supervisor.child_spec({MemoryRepo, name: disabled, enabled: false}, id: disabled)
+      )
+
+      result = Checks.bootstrap_template_drift(Keyword.put(ctx.opts, :repo, disabled))
+      assert result.status == :ok
+      assert result.detail =~ "skipped (memory repo unavailable)"
     end
   end
 
@@ -532,6 +882,27 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.name == "realtime voice"
       assert result.status == :ok
       assert result.detail =~ "key present"
+      assert result.detail =~ "engine openai_realtime"
+      assert result.detail =~ "model gpt-realtime-2"
+    end
+
+    # Both engines authenticate with the same OpenAI Platform key, so the line
+    # that says the key is present has to say which wire it is present for:
+    # without it a Live install and a Realtime install read identically.
+    test "names the Live engine and its model when Live is selected" do
+      Application.put_env(:fermix_core, :realtime,
+        enabled: true,
+        engine: "openai_live",
+        model: "gpt-live-1"
+      )
+
+      Application.put_env(:fermix_core, :providers, openai: [api_key: "sk-test"])
+
+      result = Checks.realtime()
+
+      assert result.status == :ok
+      assert result.detail =~ "engine openai_live"
+      assert result.detail =~ "model gpt-live-1"
     end
 
     test "warns when enabled but the OpenAI key is missing" do
@@ -626,15 +997,23 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     # The row must not say "set a key": the on-device backend has none, and an
     # operator sent looking for one never finds it.
     test "names the missing sidecar and carries the installer's own fix line" do
-      result = Checks.transcription()
+      result = Checks.transcription(releases: FermixTestSupport.SttPins.for_this_host())
 
       assert result.status == :warn
       assert result.detail =~ "backend local needs its sidecar"
-      # The remedy wording is host-dependent (a pinned target — macos-aarch64 —
-      # names the setup card; an unpinned one names dev_local), and both remedy
-      # sentences are covered host-independently by the doctor/installer seam
-      # tests. Here the row must only carry a fix and never say "set a key".
       refute result.detail =~ "set a key"
+    end
+
+    # Nothing to install fixes a machine with no build, so the row must not send
+    # the operator to an install, and never to the sidecar-author loop.
+    test "a machine with no build says so instead of naming an install" do
+      result = Checks.transcription(releases: %{})
+
+      assert result.status == :warn
+      assert result.detail =~ "isn't available on this machine"
+      assert result.detail =~ "Choose another transcription backend"
+      refute result.detail =~ "needs its sidecar"
+      refute result.detail =~ "dev_local"
     end
 
     test "names the missing model once the sidecar is present", ctx do
@@ -871,14 +1250,17 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.detail =~ "running, version #{vsn}"
     end
 
-    test "warns when the daemon runs a different version than this binary" do
+    # The skew verdict moved to its own row (M38 §11.3): this row answers "is
+    # something answering", and one fact per row is what keeps the two from
+    # disagreeing.
+    test "reports liveness and leaves the engine comparison to its own row" do
       client = fn -> {:ok, hello("0.0.1")} end
 
       result = Checks.daemon_socket(client: client)
 
-      assert result.status == :warn
+      assert result.status == :ok
       assert result.detail =~ "running, version 0.0.1"
-      assert result.detail =~ "`fermix restart`"
+      refute result.detail =~ "`fermix restart`"
     end
 
     # A daemon that answers something other than management v1 is a failure with
@@ -1538,6 +1920,113 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     end
   end
 
+  describe "secret_store/1" do
+    setup do
+      previous_home = System.get_env("FERMIX_HOME")
+      home = FermixTestSupport.SafeRm.make_tmp_dir!("doctor-secret-store")
+      System.put_env("FERMIX_HOME", home)
+
+      on_exit(fn ->
+        case previous_home do
+          nil -> System.delete_env("FERMIX_HOME")
+          value -> System.put_env("FERMIX_HOME", value)
+        end
+
+        FermixTestSupport.SafeRm.rm_rf!(home)
+      end)
+
+      %{home: home}
+    end
+
+    defp verdict(store, state, sentence), do: %{store: store, state: state, sentence: sentence}
+
+    test "an unlocked keyring passes and says where the secrets are", %{home: home} do
+      File.write!(Path.join(home, "config.toml"), """
+      [fermix_core.providers.openai]
+      api_key = "@keyring"
+      """)
+
+      result =
+        Checks.secret_store(
+          store: :keyring,
+          verdict: verdict(:keyring, :available, "the keyring answers")
+        )
+
+      assert result.name == "secret store"
+      assert result.status == :ok
+      assert result.detail =~ "new secrets go to the OS keyring"
+      assert result.detail =~ "1 in the keyring, 0 in files"
+    end
+
+    test "a locked keyring with secrets waiting in it fails, with the count", %{home: home} do
+      File.write!(Path.join(home, "config.toml"), """
+      [fermix_core.providers.openai]
+      api_key = "@keyring"
+
+      [fermix_channels.telegram]
+      bot_token = "@keyring"
+      """)
+
+      result =
+        Checks.secret_store(
+          store: :keyring,
+          verdict: verdict(:keyring, :locked, "the login keyring is locked")
+        )
+
+      assert result.status == :fail
+      assert result.detail =~ "the login keyring is locked"
+      assert result.detail =~ "2 secret(s) stay unreadable"
+    end
+
+    test "a locked keyring holding nothing only warns", %{home: home} do
+      File.write!(Path.join(home, "config.toml"), "[fermix_core.agent]\nname = \"fermix\"\n")
+
+      result =
+        Checks.secret_store(
+          store: :keyring,
+          verdict: verdict(:keyring, :locked, "the login keyring is locked")
+        )
+
+      assert result.status == :warn
+    end
+
+    test "an unchecked keyring warns and carries the evidence", %{home: home} do
+      File.write!(Path.join(home, "config.toml"), "[fermix_core.agent]\nname = \"fermix\"\n")
+
+      unknown =
+        Map.put(
+          verdict(:keyring, :unknown, "the keyring's state could not be checked (Locked)"),
+          :evidence,
+          "exit 1: boom"
+        )
+
+      result = Checks.secret_store(store: :keyring, verdict: unknown)
+
+      assert result.status == :warn
+      assert result.detail =~ "(exit 1: boom)"
+    end
+
+    test "the file store names its directory and counts what each store holds", %{home: home} do
+      File.write!(Path.join(home, "config.toml"), """
+      [fermix_core]
+      secret_store = "file"
+
+      [fermix_core.providers.openai]
+      api_key = "@keyring"
+
+      [fermix_channels.telegram]
+      bot_token = "@file"
+      """)
+
+      result =
+        Checks.secret_store(store: :file, verdict: verdict(:file, :available, "files answer"))
+
+      assert result.status == :ok
+      assert result.detail =~ "new secrets go to files under #{Path.join(home, "secrets")}"
+      assert result.detail =~ "1 in the keyring, 1 in files"
+    end
+  end
+
   describe "plaintext_secrets/0" do
     setup do
       previous_home = System.get_env("FERMIX_HOME")
@@ -1851,20 +2340,22 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.detail =~ "off"
     end
 
-    test "macOS + enabled local summarizer reports on-device + allowlist sizes" do
+    test "macOS + enabled local summarizer reports on-device + the app allowlist size" do
       # The chain is injected because the row now reports the chain posture too:
       # without it this case would read whatever provider config ran before it.
       result =
         Checks.computer_history(
           macos?: true,
-          config: [enabled: true, apps: ["com.apple.Safari"], sites: [], summarizer: :local],
+          config: [enabled: true, apps: ["com.apple.Safari"], summarizer: :local],
           routes: {:ok, [loopback_route()]}
         )
 
       assert result.status == :ok
       assert result.detail =~ "on"
       assert result.detail =~ "on-device"
-      assert result.detail =~ "1 app(s)"
+      assert result.detail =~ "1 app(s) allowlisted"
+      # M32.1 §2.1: there is no per-site filter to count any more.
+      refute result.detail =~ "site"
     end
 
     test "macOS + Tier-3 summarizer flags the remote egress" do
@@ -2315,6 +2806,17 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.detail =~ "/opt/homebrew/bin/cosign"
     end
 
+    # M38 §11.3: the row reports the executable this host actually resolved. On a
+    # packaged install that can be the distribution's own cosign or the bundled
+    # one, and which answered is the fact the operator needs.
+    test "names the resolved bundled executable on a packaged host" do
+      result =
+        Checks.cosign(cosign_path: "/usr/lib/fermix/cosign", build_info: PackagedBuildInfo)
+
+      assert result.status == :ok
+      assert result.detail =~ "/usr/lib/fermix/cosign"
+    end
+
     # Both features fail closed without it, and the `curl | sh` install path
     # never supplies it — so the message has to name both, or the operator
     # learns about it from an unrelated-looking refusal much later.
@@ -2324,6 +2826,375 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.status == :warn
       assert result.detail =~ "fermix upgrade"
       assert result.detail =~ "fermix plugins install"
+    end
+
+    test "the macOS remedy stays Homebrew's" do
+      result = Checks.cosign(cosign_path: nil, build_info: StandaloneBuildInfo, linux?: false)
+
+      assert result.detail =~ "brew install cosign"
+      refute result.detail =~ "apt"
+    end
+
+    # A packaged host has no Homebrew, and telling its operator to run `brew` is
+    # the same class of defect as telling a Wayland user to switch to X11.
+    test "a packaged host is told its own families and the bundled fallback" do
+      result = Checks.cosign(cosign_path: nil, build_info: PackagedBuildInfo)
+
+      assert result.detail =~ "sudo apt install cosign"
+      assert result.detail =~ "sudo dnf install cosign"
+      assert result.detail =~ "sudo zypper install cosign"
+      assert result.detail =~ "/usr/lib/fermix/cosign"
+      refute result.detail =~ "brew"
+    end
+
+    test "a standalone Linux host is pointed at the upstream project" do
+      result = Checks.cosign(cosign_path: nil, build_info: StandaloneBuildInfo, linux?: true)
+
+      assert result.detail =~ "github.com/sigstore/cosign"
+      refute result.detail =~ "brew"
+    end
+  end
+
+  # M38 §9.2/§11.3. The verdict is `VersionSkew.compare/2`'s, so this row can
+  # never disagree with `fermix status` or `fermix service status --json`.
+  describe "engine_alignment/1" do
+    test "the installed engine answering is a pass" do
+      result =
+        Checks.engine_alignment(
+          build_info: PackagedBuildInfo,
+          client: fn -> {:ok, engine_hello(PackagedBuildInfo.public_identity())} end
+        )
+
+      assert result.name == "engine alignment"
+      assert result.status == :ok
+      assert result.detail =~ "1.2.3"
+    end
+
+    test "a different build id warns and names the restart" do
+      running = %{PackagedBuildInfo.public_identity() | "build_id" => "release-8"}
+
+      result =
+        Checks.engine_alignment(
+          build_info: PackagedBuildInfo,
+          client: fn -> {:ok, engine_hello(running)} end
+        )
+
+      assert result.status == :warn
+      assert result.detail =~ "Run `fermix restart` to load the installed engine."
+    end
+
+    # §9.2: an identity Fermix cannot establish is not evidence of skew, and
+    # warning on it would send an operator to restart a current daemon.
+    test "an absent build id stays a note rather than a warning" do
+      running = %{PackagedBuildInfo.public_identity() | "build_id" => nil}
+
+      result =
+        Checks.engine_alignment(
+          build_info: PackagedBuildInfo,
+          client: fn -> {:ok, engine_hello(running)} end
+        )
+
+      assert result.status == :not_applicable
+      assert result.detail =~ "no build id"
+      refute result.detail =~ "fermix restart"
+    end
+
+    test "a daemon of another distribution is a failure, not a restart" do
+      running = %{PackagedBuildInfo.public_identity() | "distribution_identity" => "standalone"}
+
+      result =
+        Checks.engine_alignment(
+          build_info: PackagedBuildInfo,
+          client: fn -> {:ok, engine_hello(running)} end
+        )
+
+      assert result.status == :fail
+      assert result.detail =~ "different Fermix build"
+      refute result.detail =~ "fermix restart"
+    end
+
+    test "nothing answering is not a comparison" do
+      result =
+        Checks.engine_alignment(
+          build_info: PackagedBuildInfo,
+          client: fn -> {:error, :not_running} end
+        )
+
+      assert result.status == :not_applicable
+      assert result.detail =~ "no daemon is answering"
+    end
+
+    # The brew-upgrade state on a standalone install: no build id on either
+    # side, so the product version is the generation and the row must still fire.
+    test "a standalone install compares product versions" do
+      running = %{StandaloneBuildInfo.public_identity() | "product_version" => "0.5.6"}
+
+      result =
+        Checks.engine_alignment(
+          build_info: StandaloneBuildInfo,
+          client: fn -> {:ok, engine_hello(running)} end
+        )
+
+      assert result.status == :warn
+      assert result.detail =~ "fermix restart"
+    end
+
+    defp engine_hello(engine) do
+      %{
+        "protocol" => %{"current_version" => 1, "minimum_version" => 1, "maximum_version" => 1},
+        "engine" => Map.put(engine, "pid", "1")
+      }
+    end
+  end
+
+  # M38 §9.3, §11.3: one answer to package ownership, shared with `fermix
+  # upgrade`, so the row and the refusal can never name different managers.
+  describe "package_origin/1" do
+    test "a packaged engine is named before any filesystem query" do
+      result =
+        Checks.package_origin(
+          build_info: PackagedBuildInfo,
+          resolve_self: fn -> raise "the path must not be resolved" end,
+          cmd: fn _executable, _args -> raise "no ownership tool may be run" end
+        )
+
+      assert result.name == "package origin"
+      assert result.status == :ok
+      assert result.detail =~ "this machine's package manager"
+      assert result.detail =~ "sudo apt update"
+      refute result.detail =~ "linux_package"
+    end
+
+    test "a host package database that owns the binary is reported with its command" do
+      result =
+        Checks.package_origin(
+          build_info: StandaloneBuildInfo,
+          binary_path: "/usr/bin/fermix",
+          find_executable: fn
+            "dpkg" -> "/usr/bin/dpkg"
+            _other -> nil
+          end,
+          cmd: fn "/usr/bin/dpkg", ["-S", "/usr/bin/fermix"] -> {"fermix: /usr/bin/fermix", 0} end
+        )
+
+      assert result.status == :ok
+      assert result.detail =~ "dpkg"
+      assert result.detail =~ "sudo apt update"
+    end
+
+    test "a binary nothing owns says the updater handles it" do
+      result =
+        Checks.package_origin(
+          build_info: StandaloneBuildInfo,
+          binary_path: "/opt/fermix/bin/fermix",
+          find_executable: fn _tool -> nil end
+        )
+
+      assert result.status == :ok
+      assert result.detail =~ "/opt/fermix/bin/fermix"
+      assert result.detail =~ "fermix upgrade"
+    end
+
+    test "a fermix that is not on PATH is a warning, not an invented owner" do
+      result =
+        Checks.package_origin(
+          build_info: StandaloneBuildInfo,
+          resolve_self: fn -> nil end,
+          find_executable: fn _tool -> nil end
+        )
+
+      assert result.status == :warn
+      assert result.detail =~ "not on PATH"
+    end
+  end
+
+  # M38 §4.3, §11.3. Every state goes through the shared inspector, so the row
+  # and `fermix service install` can never report different linger.
+  describe "linger/1" do
+    test "not applicable off Linux" do
+      assert Checks.linger(linux?: false, build_info: StandaloneBuildInfo) == nil
+    end
+
+    test "a packaged install is always in scope, unit probe or not" do
+      result =
+        Checks.linger(
+          linux?: true,
+          build_info: PackagedBuildInfo,
+          find_executable: fn _name -> "/usr/bin/loginctl" end,
+          username: fn _opts -> "ada" end,
+          cmd: fn "loginctl", _args -> {"yes\n", 0} end
+        )
+
+      assert result.name == "linger"
+      assert result.status == :ok
+      assert result.detail =~ "survives logout"
+    end
+
+    test "disabled fails with the one command that fixes it" do
+      result =
+        Checks.linger(
+          linux?: true,
+          build_info: PackagedBuildInfo,
+          find_executable: fn _name -> "/usr/bin/loginctl" end,
+          username: fn _opts -> "ada" end,
+          cmd: fn "loginctl", _args -> {"no\n", 0} end
+        )
+
+      assert result.status == :fail
+      assert result.detail =~ "sudo loginctl enable-linger ada"
+    end
+
+    # An absent login manager is a different outcome with NO command: there is
+    # nothing for the operator to run until systemd's login manager exists.
+    test "an absent loginctl warns and names no command" do
+      result =
+        Checks.linger(
+          linux?: true,
+          build_info: PackagedBuildInfo,
+          find_executable: fn _name -> nil end
+        )
+
+      assert result.status == :warn
+      assert result.detail =~ "Install systemd's login manager on this host."
+      refute result.detail =~ "enable-linger"
+    end
+
+    test "an account Fermix cannot determine is its own warning" do
+      result =
+        Checks.linger(
+          linux?: true,
+          build_info: PackagedBuildInfo,
+          find_executable: fn _name -> "/usr/bin/loginctl" end,
+          username: fn _opts -> nil end
+        )
+
+      assert result.status == :warn
+      assert result.detail =~ "which account"
+    end
+
+    test "a loginctl that will not answer quotes it rather than assuming off" do
+      result =
+        Checks.linger(
+          linux?: true,
+          build_info: PackagedBuildInfo,
+          find_executable: fn _name -> "/usr/bin/loginctl" end,
+          username: fn _opts -> "ada" end,
+          cmd: fn "loginctl", _args -> {"Failed to look up user", 1} end
+        )
+
+      assert result.status == :warn
+      assert result.detail =~ "Failed to look up user"
+    end
+  end
+
+  # M38 §4.5, §11.3. A packaged install owns no unit of its own, so the question
+  # is whether the package's unit is effective and a home is bound to it.
+  describe "service_unit/1 on a packaged install" do
+    test "the vendor unit with a bound home passes" do
+      result = packaged_unit_row(packaged_status())
+
+      assert result.status == :ok
+      assert result.detail =~ "/home/ada/.fermix"
+    end
+
+    test "a legacy generated unit warns with the adoption verb" do
+      status =
+        put_in(packaged_status(), ["unit"], %{
+          "effective_path" => "/home/ada/.config/systemd/user/fermix.service",
+          "vendor" => false,
+          "legacy_generated" => true,
+          "foreign" => false,
+          "need_daemon_reload" => false
+        })
+
+      result = packaged_unit_row(status)
+
+      assert result.status == :warn
+      assert result.detail =~ "Run `fermix service install` to adopt this service."
+      assert result.detail =~ "/home/ada/.config/systemd/user/fermix.service"
+    end
+
+    # A file Fermix did not write is named and left alone, never rewritten as
+    # drift: the standalone row's whole job is the opposite and must not leak.
+    test "a foreign unit fails naming its path" do
+      status =
+        put_in(packaged_status(), ["unit"], %{
+          "effective_path" => "/etc/systemd/user/fermix.service",
+          "vendor" => false,
+          "legacy_generated" => false,
+          "foreign" => true,
+          "need_daemon_reload" => false
+        })
+
+      result = packaged_unit_row(status)
+
+      assert result.status == :fail
+      assert result.detail =~ "/etc/systemd/user/fermix.service"
+      refute result.detail =~ "stale"
+    end
+
+    test "an unbound home warns rather than reporting a working service" do
+      status =
+        put_in(packaged_status(), ["binding"], %{
+          "state" => "unbound",
+          "home" => nil,
+          "reason" => nil
+        })
+
+      result = packaged_unit_row(status)
+
+      assert result.status == :warn
+      assert result.detail =~ "no home is bound"
+    end
+
+    test "a malformed binding fails with the reason the reader can act on" do
+      status =
+        put_in(packaged_status(), ["binding"], %{
+          "state" => "invalid",
+          "home" => nil,
+          "reason" => "the recorded home is not an absolute path"
+        })
+
+      result = packaged_unit_row(status)
+
+      assert result.status == :fail
+      assert result.detail =~ "not an absolute path"
+    end
+
+    test "a pending reload warns" do
+      status = put_in(packaged_status(), ["unit", "need_daemon_reload"], true)
+      result = packaged_unit_row(status)
+
+      assert result.status == :warn
+      assert result.detail =~ "reload"
+    end
+
+    # An unreachable user manager is not a broken unit: it is a session with no
+    # service manager, and it keeps the sentence the CLI already publishes.
+    test "an unreachable user manager warns with the published sentence" do
+      result = Checks.service_unit(build_info: PackagedBuildInfo, service: RefusingService)
+
+      assert result.status == :warn
+      assert result.detail =~ "no user service manager"
+    end
+
+    defp packaged_unit_row(status) do
+      Process.put(:fake_service_status, status)
+
+      Checks.service_unit(build_info: PackagedBuildInfo, service: AnsweringService)
+    end
+
+    defp packaged_status do
+      %{
+        "binding" => %{"state" => "bound", "home" => "/home/ada/.fermix", "reason" => nil},
+        "unit" => %{
+          "effective_path" => "/usr/lib/systemd/user/fermix.service",
+          "vendor" => true,
+          "legacy_generated" => false,
+          "foreign" => false,
+          "need_daemon_reload" => false
+        }
+      }
     end
   end
 end

@@ -101,6 +101,24 @@ defmodule FermixChannels.Gateway.ChannelRegistry do
       transport: :gateway,
       child: FermixChannels.Channels.Acp.Supervisor
     },
+    # The Live voice engine's delegation surface (M41 §7). `remote?: true` like
+    # ACP so a call's browser stays warm across delegations and a one-shot reap
+    # never pulls it mid-call. Trust comes from the transport — the daemon's own
+    # Live session, reached in process — not from a sender id, so there is no
+    # inbox and no allow-list; the slash-command pipeline is off, so spoken text
+    # can never reach daemon administration. No `child`: the session calls
+    # `Voice.Bridge` directly, and `Voice.Supervisor` (which owns the routing
+    # Registry) is started unconditionally by `FermixChannels.Application`.
+    %{
+      name: "voice",
+      config_key: nil,
+      adapter: FermixChannels.Channels.Voice,
+      remote?: true,
+      trust: :local_operator,
+      commands?: false,
+      transport: :loopback,
+      child: nil
+    },
     %{
       name: "mobile",
       config_key: :mobile,
@@ -195,10 +213,19 @@ defmodule FermixChannels.Gateway.ChannelRegistry do
     end
   end
 
-  @doc "Config keys of the remote channels (for ingress-authorization checks)."
+  @doc """
+  Config keys of the remote channels (for ingress-authorization checks).
+
+  A remote entry with no config key (the voice channel: remote lifecycle, local
+  operator trust, no inbox) has no ingress list to check, so it contributes no
+  key rather than a `nil` every caller would have to filter out itself.
+  """
   @spec remote_channels() :: [atom()]
   def remote_channels do
-    channels() |> Enum.filter(& &1.remote?) |> Enum.map(& &1.config_key)
+    channels()
+    |> Enum.filter(& &1.remote?)
+    |> Enum.map(& &1.config_key)
+    |> Enum.reject(&is_nil/1)
   end
 
   @doc """

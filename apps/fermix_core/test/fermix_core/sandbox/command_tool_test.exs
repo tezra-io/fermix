@@ -5,6 +5,7 @@ defmodule FermixCore.Sandbox.CommandToolTest do
   alias FermixCore.Sandbox.Config
   alias FermixCore.Sandbox.Env
   alias FermixCore.Sandbox.PathPolicy
+  alias FermixTestSupport.RunnerCallTrace
 
   test "denies blocked default working dir before spawning command and emits telemetry" do
     root = FermixTestSupport.SafeRm.make_tmp_dir!("sandbox-command-tool")
@@ -106,6 +107,73 @@ defmodule FermixCore.Sandbox.CommandToolTest do
       refute env_value(output, "PATH") == ctx.bin
     end
   end
+
+  # M45 §4.6 and §4.7 for operator command capabilities: a `pass_env` value
+  # reaches the command as its environment, never as argv, and an echo of it
+  # never reaches the model.
+  describe "a pass_env credential" do
+    @token_name "FERMIX_TEST_M45_TOKEN"
+    @token "m45Qz-fixture-token-7781"
+
+    setup do
+      root = FermixTestSupport.SafeRm.make_tmp_dir!("sandbox-command-tool-credential")
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(root) end)
+
+      config =
+        Config.normalize(
+          mode: :open,
+          workspace_root: root,
+          allowed_roots: [root],
+          env: [
+            allow: [@token_name],
+            sources: %{
+              @token_name => [source: :command, command: "/bin/echo", args: [@token]]
+            }
+          ]
+        )
+
+      %{context: %{sandbox_config: config}}
+    end
+
+    test "reaches the command as its environment and never as argv", ctx do
+      RunnerCallTrace.start()
+
+      assert {:ok, %{success: true}} =
+               CommandTool.execute(%{"prompt" => "argv-marker"}, ctx.context, sh_spec("true"))
+
+      {executable, args, opts} = RunnerCallTrace.call_with("argv-marker")
+      assert executable == "/bin/sh"
+      assert args == ["-c", "true", "argv-marker"]
+      refute Enum.any?([executable | args], &String.contains?(&1, @token))
+      assert Keyword.fetch!(opts, :env_mode) == :replace
+      assert {@token_name, @token} in Keyword.fetch!(opts, :env)
+    end
+
+    test "an echoed value is redacted from a successful result", ctx do
+      spec = sh_spec(~s(printf '%s' "$#{@token_name}"))
+
+      assert {:ok, %{success: true, output: output}} =
+               CommandTool.execute(%{"prompt" => "ignored"}, ctx.context, spec)
+
+      assert output == "«redacted»"
+    end
+
+    test "an echoed value is redacted from a failed result", ctx do
+      spec = sh_spec(~s(printf '%s' "$#{@token_name}"; exit 4))
+
+      assert {:ok, %{success: false, error: error}} =
+               CommandTool.execute(%{"prompt" => "ignored"}, ctx.context, spec)
+
+      assert error =~ "exit code 4"
+      assert error =~ "«redacted»"
+      refute error =~ @token
+    end
+  end
+
+  # `sh -c SCRIPT PROMPT`: the prompt arrives as `$0`, so the script decides
+  # what the command prints and how it exits.
+  defp sh_spec(script),
+    do: %{spec() | command: "/bin/sh", args: ["-c", script], pass_env: [@token_name]}
 
   # Resolved by bare name, so the overlay PATH is what makes it runnable.
   defp buzz_spec, do: %{spec() | command: "buzz"}

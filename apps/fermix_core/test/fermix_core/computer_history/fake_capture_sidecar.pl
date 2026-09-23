@@ -1,10 +1,13 @@
 #!/usr/bin/env perl
 # Test-only fake compux sidecar in CAPTURE mode (MILESTONE_32 §8.4a). Unlike the
 # computer-use fake (one request → one response), capture is an unsolicited push:
-# on an `observe_start` request it emits a type-discriminated ack frame, then
+# on an `observe_start` request (a protocol-7 tagged `request` frame, matched here
+# on the action name alone) it emits a type-discriminated ack frame, then
 # streams the newline-delimited event frames named by FAKE_EVENTS_FILE. Autoflush
 # so frames reach the Port immediately. Env knobs (passed via the Port `env:`):
-#   FAKE_PROTO        reported protocol_version in the ack (default 6)
+#   FAKE_PID_FILE     write this process's own OS pid here at start, so a test can
+#                     prove the capturer REAPED it rather than merely dropping it
+#   FAKE_PROTO        reported protocol_version in the ack (default 11)
 #   FAKE_ACK_OK       "false" to refuse the start (ack ok:false)
 #   FAKE_PRE_ACK_FILE NDJSON frames to stream BEFORE the ack (buffer-before-handshake)
 #   FAKE_EVENTS_FILE  NDJSON frames to stream AFTER a successful ack
@@ -18,7 +21,11 @@ use strict;
 use warnings;
 $| = 1;
 
-my $proto  = $ENV{FAKE_PROTO} // 6;
+if (defined $ENV{FAKE_PID_FILE}) {
+    if (open(my $p, ">", $ENV{FAKE_PID_FILE})) { print $p "$$"; close($p); }
+}
+
+my $proto  = $ENV{FAKE_PROTO} // 11;
 my $ack_ok = (($ENV{FAKE_ACK_OK} // "true") eq "false") ? "false" : "true";
 
 sub stream_file {
@@ -33,8 +40,18 @@ sub stream_file {
     close($fh);
 }
 
+# Protocol 7: the capturer's requests are TAGGED frames carrying a request id.
+# Matching the bare action name would let a regression that stopped emitting the
+# envelope pass every test, so the bytes it really writes are what is matched.
+sub request_for {
+    my ($line, $action) = @_;
+    return 0 unless $line =~ /"type":"request"/;
+    return 0 unless $line =~ /"request_id":"[^"]+"/;
+    return $line =~ /"action":"\Q$action\E"/;
+}
+
 while (my $line = <STDIN>) {
-    if ($line =~ /observe_start/) {
+    if (request_for($line, "observe_start")) {
         # Die before acking — models a sidecar that crashes on startup and never
         # completes a handshake, so the capturer's restart budget is not reset.
         exit(1) if ($ENV{FAKE_EXIT_BEFORE_ACK} // "") eq "1";
@@ -81,7 +98,7 @@ while (my $line = <STDIN>) {
             exit(0) if ($ENV{FAKE_EXIT_AFTER} // "") eq "1";
         }
     }
-    elsif ($line =~ /observe_stop/) {
+    elsif (request_for($line, "observe_stop")) {
         print qq({"type":"ack","action":"observe_stop","ok":true,"protocol_version":$proto}\n);
     }
 }

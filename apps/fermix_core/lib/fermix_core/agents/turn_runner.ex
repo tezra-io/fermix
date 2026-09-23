@@ -31,6 +31,7 @@ defmodule FermixCore.Agents.TurnRunner do
   alias FermixCore.Agents.IterationLimits
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Agents.RuntimeContext
+  alias FermixCore.Agents.VoiceCall
   alias FermixCore.ComputerHistory.Gate, as: ComputerHistoryGate
   alias FermixCore.ComputerHistory.RecentActivity
   alias FermixCore.ComputerHistory.Taint
@@ -90,13 +91,22 @@ defmodule FermixCore.Agents.TurnRunner do
 
   A detached `/background` run (`BackgroundRun.run/1`, channel `"background"`) has
   no live owner surface to observe or abort a host action, so it is `:unattended`
-  and fails closed. Every other turn reaching `run/3` is a foreground interaction —
-  a human in a chat or `fermix ask` — and is `:interactive`. Voice tags `:voice` on
-  its own path; scheduled jobs bypass `run/3` and default to `:unattended`.
+  and fails closed. A Live voice delegation (M41 §5.1) is `:voice` — an attended
+  surface whose owner is speaking and can interrupt. Every other turn reaching
+  `run/3` is a foreground interaction — a human in a chat or `fermix ask` — and is
+  `:interactive`. Scheduled jobs bypass `run/3` and default to `:unattended`.
+
+  Derived here rather than read off the message, so the three readers in this
+  module (the taint stamp, the frozen Computer History gate, and the loop
+  context) can never disagree about what kind of surface the turn ran on.
   """
-  @spec computer_use_origin(map()) :: :interactive | :unattended
+  @spec computer_use_origin(map()) :: :interactive | :unattended | :voice
   def computer_use_origin(%{channel: "background"}), do: :unattended
-  def computer_use_origin(_msg), do: :interactive
+
+  def computer_use_origin(msg) when is_map(msg), do: chat_origin(VoiceCall.from_message(msg))
+
+  defp chat_origin({:ok, _voice_call}), do: :voice
+  defp chat_origin(:none), do: :interactive
 
   @doc """
   Commit a delivered turn: persist the assistant message, dispatch a background
@@ -132,7 +142,11 @@ defmodule FermixCore.Agents.TurnRunner do
 
     ConversationStore.add_message(conversation_key, "assistant", response, add_message_opts)
 
-    maybe_start_memory_review(msg, turn_state)
+    # A Live voice delegation never dispatches a memory review (M41 §5.2): a
+    # spoken fragment is not a durable fact about the owner, and an ephemeral
+    # call has no history worth mining. `MainAgent` freezes the decision into
+    # the snapshot, so a mid-call config change cannot move it.
+    if Map.get(turn_state, :memory_review?, true), do: maybe_start_memory_review(msg, turn_state)
 
     result =
       maybe_auto_compact(
@@ -293,6 +307,9 @@ defmodule FermixCore.Agents.TurnRunner do
     %RuntimeContext{} = ctx = state.runtime_context
     cache_status = Map.get(msg, :__runtime_context_cache_status, :hit)
     source_trust = Map.get(msg, :source_trust)
+    # `:none` on every non-voice turn, which is what keeps each voice seam below
+    # a one-sided read rather than a branch in the shared turn path (M41 §7).
+    voice_call = VoiceCall.from_message(msg)
     # Computed BEFORE the profile is selected (MILESTONE_29 §17.6(b)): the
     # harness surface is decided by one input per turn, and both consumers of
     # that decision — this selection and each tool's `advertise?/1`, which reads
@@ -300,7 +317,15 @@ defmodule FermixCore.Agents.TurnRunner do
     # different map at each call site is how the prompt and the wire drift apart.
     session_env = session_env_for(source_trust, msg)
     advertise_context = %{channel: msg.channel, session_env: session_env}
-    profile = profile_for_trust(ctx, source_trust, state.capability_registry, advertise_context)
+
+    profile =
+      profile_for_turn(
+        ctx,
+        source_trust,
+        state.capability_registry,
+        advertise_context,
+        voice_call
+      )
 
     emit_runtime_context_cache_telemetry(state, cache_status, profile)
 
@@ -324,14 +349,28 @@ defmodule FermixCore.Agents.TurnRunner do
     masked_history =
       Taint.mask_for_chain(history, Map.get(state, :ordered_routes), history_gate_opts(state))
 
-    messages = RuntimeContext.messages_for(ctx, profile, masked_history, user_message)
+    messages =
+      RuntimeContext.messages_for(
+        ctx,
+        profile,
+        masked_history,
+        user_message,
+        extra_system_messages(voice_call)
+      )
+
     accounting = RuntimeContext.accounting_for(ctx, profile)
     emit_prompt_context_telemetry(state.memory_agent_id, messages, accounting, cache_status)
 
     context = %{
       agent_name: "main",
       conversation_key: conversation_key,
-      session_id: "main-#{System.unique_integer([:positive, :monotonic])}",
+      # A Live delegation's turn is a CHILD run of its voice call: the session
+      # the LIVE session minted correlates the turn, and `parent_session` is the
+      # call id, which is what nests the turn's provider spans under the
+      # `voice_live` root (M41 §9). `nil` on every other turn, so the loop's
+      # adapter opts are byte-identical to before.
+      session_id: session_id(voice_call),
+      parent_session: parent_session(voice_call),
       capability_registry: state.capability_registry,
       provider: state.provider,
       # Turn-start route-chain snapshot for subagents (§7): static for the
@@ -465,6 +504,20 @@ defmodule FermixCore.Agents.TurnRunner do
       _absent_or_invalid -> 0
     end
   end
+
+  # The Live backend addendum (M41 §6.3), spliced right after the runtime
+  # contract for this ONE turn. It rides the turn, never the cached profile, so
+  # a text conversation's prompt is untouched.
+  defp extra_system_messages({:ok, %{prompt_addendum: addendum}}),
+    do: [%{role: "system", content: addendum}]
+
+  defp extra_system_messages(:none), do: []
+
+  defp session_id({:ok, %{turn_session_id: turn_session_id}}), do: turn_session_id
+  defp session_id(:none), do: "main-#{System.unique_integer([:positive, :monotonic])}"
+
+  defp parent_session({:ok, %{call_id: call_id}}), do: call_id
+  defp parent_session(:none), do: nil
 
   defp request_cwd_for(:operator, msg), do: Map.get(msg, :request_cwd)
   defp request_cwd_for(_trust, _msg), do: nil
@@ -1238,6 +1291,27 @@ defmodule FermixCore.Agents.TurnRunner do
     RuntimeContext.profile_for(ctx, profile_trust(trust), registry,
       harness_tools?: HarnessSupport.harness_deliverable?(advertise_context)
     )
+  end
+
+  # The voice capability boundary (M41 §5.1): a Live delegation runs on the
+  # operator surface minus `VoiceCall.excluded_categories/0` — the SAME list
+  # `LivePrompt` advertises to the voice model, so prose and wire move together
+  # (the M28 lesson). One seam: a voice turn takes this profile, every other
+  # turn takes today's cached one, unchanged.
+  #
+  # Built per delegation rather than added to the per-epoch cache on purpose.
+  # A fourth cached variant would cost every install a build it never uses, and
+  # this one is a registry read plus string assembly (the expensive half — the
+  # file-backed prompt base — stays cached and is reused from `ctx`), against a
+  # delegation that is seconds of speech away from the next one.
+  defp profile_for_turn(ctx, trust, registry, _advertise_context, {:ok, _voice_call}) do
+    RuntimeContext.build_profile(profile_trust(trust), ctx.available_skills, registry,
+      excluded_categories: VoiceCall.excluded_categories()
+    )
+  end
+
+  defp profile_for_turn(ctx, trust, registry, advertise_context, :none) do
+    profile_for_trust(ctx, trust, registry, advertise_context)
   end
 
   defp profile_trust(:operator), do: :operator

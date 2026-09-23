@@ -15,6 +15,7 @@ defmodule FermixCore.Management.PluginsTest do
   alias FermixCore.Auth.ClientRejection
   alias FermixCore.Auth.Store, as: AuthStore
   alias FermixCore.Capabilities.MCP.RuntimeStatus
+  alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.ComputerUse.SidecarInstaller
   alias FermixCore.Management.Auth, as: ManagementAuth
   alias FermixCore.Management.Jobs
@@ -24,6 +25,7 @@ defmodule FermixCore.Management.PluginsTest do
   alias FermixCore.Management.Secrets
   alias FermixCore.Plugins.CanonicalJson
   alias FermixCore.Plugins.Config, as: PluginConfig
+  alias FermixCore.Plugins.Dist.McpSource
   alias FermixCore.Plugins.Dist.Store, as: DistStore
   alias FermixCore.Plugins.Registry, as: PluginRegistry
   alias FermixCore.Plugins.Status
@@ -37,6 +39,13 @@ defmodule FermixCore.Management.PluginsTest do
   @bundled "google_calendar"
   @remote "workspacedemo"
   @configurable "settingdemo"
+  @gated "gatedemo"
+  @regional "regiondemo"
+  @runtime_gated "rtgatedemo"
+
+  # A target no host is, so the daemon's own probe never finds this fixture's
+  # vendored binary and `mix test` cannot spawn an MCP child.
+  @runtime_target "fermix-test-target"
 
   setup do
     home = System.get_env("FERMIX_HOME")
@@ -173,13 +182,15 @@ defmodule FermixCore.Management.PluginsTest do
     # The consent sentence is the field the catalog shipped wrong once: a hosted
     # plugin rendering the local-process line tells the operator their content
     # stays on this Mac when it does not.
-    test "the consent sentence names where the plugin's code actually runs" do
-      {:ok, %{"plugins" => rows}} = Plugins.list()
+    test "the consent sentence names where the plugin's code actually runs", %{home: home} do
+      catalog = [index_opts: [seed_path: catalog_with_hosted(home)]]
+      {:ok, %{"plugins" => rows}} = Plugins.list(dist_opts: catalog)
 
       assert row(rows, @bundled)["consent_sentence"] == "Runs inside Fermix on this Mac."
       assert row(rows, @bundled)["remote_disclosure"] == nil
 
-      hosted = row(rows, "eden")
+      hosted = row(rows, "acme")
+      assert hosted["installed"] == false
       assert hosted["runtime_kind"] == "remote_mcp"
       assert hosted["consent_sentence"] == "Runs on the plugin's own servers, not on this Mac."
       assert hosted["remote_disclosure"] =~ "leave this Mac"
@@ -187,6 +198,21 @@ defmodule FermixCore.Management.PluginsTest do
       separate = row(rows, "obsidian")
       assert separate["runtime_kind"] == "local_stdio"
       assert separate["consent_sentence"] == "Runs on this Mac as a separate process."
+    end
+
+    # The catalog half above spells a local runtime as `local_stdio`; the
+    # installed half read the manifest, whose spelling is how the process
+    # starts, so every installed local plugin said it ran inside Fermix while
+    # its helper ran beside it.
+    test "an installed local plugin says it runs as a separate process", %{home: home} do
+      install_runtime_gated(home)
+
+      {:ok, %{"plugins" => rows}} = Plugins.list()
+      local = row(rows, @runtime_gated)
+
+      assert local["runtime_kind"] == "local_stdio"
+      assert local["consent_sentence"] == "Runs on this Mac as a separate process."
+      assert local["remote_disclosure"] == nil
     end
 
     test "an installed remote plugin publishes its access profiles and its binding", %{home: home} do
@@ -427,9 +453,38 @@ defmodule FermixCore.Management.PluginsTest do
                  "key" => "DEMO_FOLDER",
                  "label" => "Folder to read",
                  "value" => "/tmp/notes",
-                 "required" => true
+                 "required" => true,
+                 "kind" => "text"
+               },
+               %{
+                 "key" => "DEMO_WAKE",
+                 "label" => "Allow waking",
+                 "value" => nil,
+                 "required" => false,
+                 "kind" => "boolean"
                }
              ]
+    end
+
+    # The kind is what tells the app to draw a switch rather than a text field,
+    # so it is published per entry beside the value it describes.
+    test "a boolean setting writes its word and republishes its kind", %{home: home} do
+      install_configurable(home)
+
+      assert {:ok, %{"plugin" => row}} = Plugins.setting_set(@configurable, "DEMO_WAKE", "true")
+
+      assert %{"key" => "DEMO_WAKE", "value" => "true", "kind" => "boolean"} =
+               Enum.find(row["settings"], &(&1["key"] == "DEMO_WAKE"))
+    end
+
+    test "a boolean setting refuses a value that is not one of its two words", %{home: home} do
+      install_configurable(home)
+
+      assert {:error, {:invalid_params, "value", sentence}} =
+               Plugins.setting_set(@configurable, "DEMO_WAKE", "yes")
+
+      assert sentence == "This setting is a switch: send true or false."
+      assert PluginConfig.plugin_settings(@configurable) == %{}
     end
 
     test "a key the manifest does not declare is refused", %{home: home} do
@@ -452,10 +507,68 @@ defmodule FermixCore.Management.PluginsTest do
     end
   end
 
-  describe "oauth_client_set/4" do
+  # --- M40 §3.2: a tool gated on one manifest-declared setting -------------
+  #
+  # The write verb already reloads the runtime, so the gated tool must appear
+  # and disappear without a daemon restart. Asserted against the live registry
+  # the daemon itself reloads, because that is the set the agent reads.
+  describe "setting_set/4 on a tool-gating setting" do
+    test "turning it on advertises the gated tool and turning it off withdraws it", %{home: home} do
+      install_gated(home)
+      assert {:ok, _row} = Plugins.enable(@gated)
+
+      assert {:ok, _read} = CapabilityRegistry.find(CapabilityRegistry, "gatedemo_read")
+      assert :error = CapabilityRegistry.find(CapabilityRegistry, "gatedemo_wake")
+
+      assert {:ok, %{"plugin" => row}} = Plugins.setting_set(@gated, "ALLOW_WAKE", "true")
+      assert %{"key" => "ALLOW_WAKE", "value" => "true"} = hd(row["settings"])
+      assert {:ok, _wake} = CapabilityRegistry.find(CapabilityRegistry, "gatedemo_wake")
+
+      assert {:ok, _row} = Plugins.setting_set(@gated, "ALLOW_WAKE", "false")
+      assert :error = CapabilityRegistry.find(CapabilityRegistry, "gatedemo_wake")
+
+      # Leave the live registry the way this module's other write verbs do.
+      assert {:ok, _row} = Plugins.disable(@gated)
+      assert :error = CapabilityRegistry.find(CapabilityRegistry, "gatedemo_read")
+    end
+  end
+
+  # --- M8 §9.3: the local RUNTIME gated on one manifest-declared setting ----
+  #
+  # The tool gate above decides what is advertised; this one decides whether the
+  # plugin's helper process exists at all. Asserted against the desired server
+  # list `MCP.Supervisor.reload/2` consumes, because that is what the write verb
+  # actually changes. The vendored binary sits under a test-only target, so the
+  # daemon's own reload (which probes the real host target) materializes nothing
+  # and `mix test` never spawns a child.
+  describe "setting_set/4 on a runtime-gating setting" do
+    test "turning it on materializes the helper child and turning it off drops it", %{
+      home: home
+    } do
+      install_runtime_gated(home)
+      assert {:ok, _row} = Plugins.enable(@runtime_gated)
+
+      assert {:ok, []} = McpSource.server_specs(probe: [target: @runtime_target])
+
+      assert {:ok, %{"plugin" => row}} =
+               Plugins.setting_set(@runtime_gated, "ALLOW_HELPER", "true")
+
+      assert %{"key" => "ALLOW_HELPER", "value" => "true"} = hd(row["settings"])
+
+      assert {:ok, [spec]} = McpSource.server_specs(probe: [target: @runtime_target])
+      assert spec.source_id == {:plugin, @runtime_gated}
+
+      assert {:ok, _row} = Plugins.setting_set(@runtime_gated, "ALLOW_HELPER", "false")
+      assert {:ok, []} = McpSource.server_specs(probe: [target: @runtime_target])
+
+      assert {:ok, _row} = Plugins.disable(@runtime_gated)
+    end
+  end
+
+  describe "oauth_client_set/5" do
     test "refuses until the client secret has been stored" do
       assert {:error, {:invalid_params, "provider", sentence}} =
-               Plugins.oauth_client_set("google", "123.apps.googleusercontent.com", 1455)
+               Plugins.oauth_client_set("google", "123.apps.googleusercontent.com", 1455, nil)
 
       assert sentence == "Add this provider's client secret first."
     end
@@ -467,14 +580,16 @@ defmodule FermixCore.Management.PluginsTest do
       Application.put_env(:fermix_core, :oauth, %{"google" => [client_secret: "kept"]})
 
       assert {:ok, %{"oauth_client" => client}} =
-               Plugins.oauth_client_set("google", "123.apps.googleusercontent.com", 1455)
+               Plugins.oauth_client_set("google", "123.apps.googleusercontent.com", 1455, nil)
 
       assert client == %{
                "provider" => "google",
                "configured" => true,
                "redirect_port" => 1455,
                "client_id" => "123.apps.googleusercontent.com",
-               "secret_present" => true
+               "secret_present" => true,
+               "region" => nil,
+               "regions" => []
              }
 
       stored = Application.get_env(:fermix_core, :oauth)["google"]
@@ -488,7 +603,7 @@ defmodule FermixCore.Management.PluginsTest do
       })
 
       assert {:ok, %{"oauth_client" => client}} =
-               Plugins.oauth_client_set("google", "123.apps.googleusercontent.com", nil)
+               Plugins.oauth_client_set("google", "123.apps.googleusercontent.com", nil, nil)
 
       assert client["redirect_port"] == nil
     end
@@ -500,7 +615,7 @@ defmodule FermixCore.Management.PluginsTest do
       assert {:ok, _view} = Secrets.set("oauth_client:google", "client-secret")
 
       assert {:ok, %{"oauth_client" => client}} =
-               Plugins.oauth_client_set("google", "123.apps.googleusercontent.com", 1455)
+               Plugins.oauth_client_set("google", "123.apps.googleusercontent.com", 1455, nil)
 
       assert client["configured"] == true
 
@@ -511,9 +626,179 @@ defmodule FermixCore.Management.PluginsTest do
 
     test "a provider no plugin signs in through is refused" do
       assert {:error, {:invalid_params, "provider", sentence}} =
-               Plugins.oauth_client_set("linear", "id", nil)
+               Plugins.oauth_client_set("linear", "id", nil, nil)
 
       assert sentence == "No plugin on this Mac signs in through that."
+    end
+  end
+
+  # A regional provider's account lives in one region and refuses every call
+  # from another, so the region is chosen before connecting rather than
+  # discovered by the first tool call. It is part of the sign-in client because
+  # it is what the token exchange sends as its audience.
+  describe "a regional sign-in client" do
+    setup %{home: home} do
+      install_regional(home)
+      PluginConfig.enable(@regional)
+      :ok
+    end
+
+    test "publishes the regions the daemon offers, and no chosen one yet" do
+      {:ok, %{"oauth_clients" => clients}} = Plugins.list()
+      tesla = Enum.find(clients, &(&1["provider"] == "tesla"))
+
+      assert tesla["region"] == nil
+
+      assert tesla["regions"] == [
+               %{"id" => "na", "label" => "North America and Asia-Pacific"},
+               %{"id" => "eu", "label" => "Europe, Middle East and Africa"}
+             ]
+    end
+
+    test "publishes the chosen region once it is stored" do
+      Application.put_env(:fermix_core, :oauth, %{
+        "tesla" => [client_id: "tid", client_secret: "s", region: "eu"]
+      })
+
+      {:ok, %{"oauth_clients" => clients}} = Plugins.list()
+      tesla = Enum.find(clients, &(&1["provider"] == "tesla"))
+
+      assert tesla["region"] == "eu"
+      assert tesla["configured"] == true
+    end
+
+    test "a provider with one region offers none to choose" do
+      {:ok, %{"oauth_clients" => clients}} = Plugins.list()
+      google = Enum.find(clients, &(&1["provider"] == "google"))
+
+      assert google["region"] == nil
+      assert google["regions"] == []
+    end
+
+    test "a client saved without a region is refused, naming the field" do
+      Application.put_env(:fermix_core, :oauth, %{"tesla" => [client_secret: "kept"]})
+
+      assert {:error, {:invalid_params, "region", sentence}} =
+               Plugins.oauth_client_set("tesla", "tesla-client-id", nil, nil)
+
+      assert sentence == "Choose the account's region for this sign-in client."
+      refute Keyword.has_key?(PluginConfig.oauth_provider("tesla"), :client_id)
+    end
+
+    test "a region this provider does not offer is refused, naming the field" do
+      Application.put_env(:fermix_core, :oauth, %{"tesla" => [client_secret: "kept"]})
+
+      assert {:error, {:invalid_params, "region", sentence}} =
+               Plugins.oauth_client_set("tesla", "tesla-client-id", nil, "cn")
+
+      assert sentence == "That is not a region this provider offers."
+    end
+
+    # The daemon publishes an empty region list for these, so a region on the
+    # call is a client sending something this row never offered.
+    test "a region sent for a provider that offers none is refused" do
+      Application.put_env(:fermix_core, :oauth, %{"google" => [client_secret: "kept"]})
+
+      assert {:error, {:invalid_params, "region", sentence}} =
+               Plugins.oauth_client_set("google", "123.apps.googleusercontent.com", nil, "eu")
+
+      assert sentence == "This provider signs in to one region, so there is no region to choose."
+    end
+
+    test "a chosen region is persisted and echoed on the client row" do
+      Application.put_env(:fermix_core, :oauth, %{"tesla" => [client_secret: "kept"]})
+
+      assert {:ok, %{"oauth_client" => client}} =
+               Plugins.oauth_client_set("tesla", "tesla-client-id", 1461, "eu")
+
+      assert client["region"] == "eu"
+      assert client["configured"] == true
+      assert client["redirect_port"] == 1461
+
+      stored = PluginConfig.oauth_provider("tesla")
+      assert Keyword.get(stored, :region) == "eu"
+      assert Keyword.get(stored, :client_secret) == "kept"
+    end
+
+    # The one writer replaces the provider block whole, so every field this call
+    # does not carry has to be carried through or it is erased. The registered
+    # callback is one of them, and erasing it breaks the sign-in silently.
+    test "carries the stored redirect URI through the write" do
+      Application.put_env(:fermix_core, :oauth, %{
+        "tesla" => [
+          client_secret: "kept",
+          region: "na",
+          redirect_uri: "https://example.test/tesla/callback"
+        ]
+      })
+
+      assert {:ok, _client} = Plugins.oauth_client_set("tesla", "tesla-client-id", nil, "eu")
+
+      stored = PluginConfig.oauth_provider("tesla")
+      assert Keyword.get(stored, :redirect_uri) == "https://example.test/tesla/callback"
+      assert Keyword.get(stored, :region) == "eu"
+    end
+  end
+
+  # A grant minted for a region the account is not in is real, unexpired, and
+  # refused by the provider on every call. The row leads with the region on the
+  # sign-in client, not with a sign-in the provider will answer the same way.
+  describe "a row for a grant in the wrong region" do
+    setup %{home: home} do
+      install_regional(home)
+      PluginConfig.enable(@regional)
+
+      Application.put_env(:fermix_core, :oauth, %{
+        "tesla" => [client_id: "tid", client_secret: "s", region: "na"]
+      })
+
+      :ok
+    end
+
+    test "names the account's own region and leads with the client" do
+      store_regional_grant(region: "na", region_actual: "eu")
+
+      {:ok, %{"plugins" => rows}} = Plugins.list()
+      row = row(rows, @regional)
+
+      assert row["status"] == "wrong_region"
+
+      assert row["status_sentence"] ==
+               "The account belongs to the Europe, Middle East and Africa region. " <>
+                 "Choose it for the sign-in client and sign in again."
+
+      assert row["primary_verb"] == "Set up the sign-in client"
+      assert row["primary_action"] == "set_up_client"
+      assert "Sign in again" in row["verbs"]
+      assert Enum.all?(row["verbs"], &(&1 in Row.verbs()))
+    end
+
+    test "words the mismatch without a region when the provider named none" do
+      store_regional_grant(region: "na")
+
+      {:ok, %{"plugins" => rows}} = Plugins.list()
+      row = row(rows, @regional)
+
+      assert row["status"] == "wrong_region"
+
+      assert row["status_sentence"] ==
+               "The account is in a different region from the sign-in client. " <>
+                 "Choose the account's region and sign in again."
+
+      assert row["primary_verb"] == "Set up the sign-in client"
+    end
+
+    test "a health check refuses it in the row's own words" do
+      store_regional_grant(region: "na", region_actual: "eu")
+      check = fn _name, _opts -> {:error, {:not_ready, :wrong_region}} end
+
+      assert {:ok, view} = Plugins.check_start(@regional, jobs: jobs(), check: check)
+
+      finished = await(view, jobs())
+      assert finished["failure"]["code"] == "refused"
+
+      assert finished["failure"]["sentence"] =~
+               "The account belongs to the Europe, Middle East and Africa region."
     end
   end
 
@@ -767,6 +1052,48 @@ defmodule FermixCore.Management.PluginsTest do
     Enum.find(rows, &(&1["name"] == name)) || flunk("no row for #{name}")
   end
 
+  # The baked catalog offers no hosted plugin, so the catalog half's hosted
+  # sentence is proven on the baked entries plus one `remote_mcp` entry.
+  defp catalog_with_hosted(home) do
+    baked =
+      :fermix_core
+      |> Application.app_dir("priv/plugins/index.json")
+      |> File.read!()
+      |> Jason.decode!()
+
+    base = "https://example.com/acme-1.0.0"
+
+    hosted = %{
+      "name" => "acme",
+      "display_name" => "Acme",
+      "category" => "productivity",
+      "auth_type" => "api_key",
+      "rails" => ["mcp"],
+      "runtime_kind" => "remote_mcp",
+      "latest" => "1.0.0",
+      "yanked" => [],
+      "versions" => [
+        %{
+          "version" => "1.0.0",
+          "published_at" => "2026-06-07T00:00:00Z",
+          "min_core_version" => "0.1.0",
+          "plugin_api" => 3,
+          "artifacts" => [
+            %{
+              "target" => "any",
+              "url" => base <> ".tar.gz",
+              "sha256" => String.duplicate("a", 64),
+              "sig_url" => base <> ".tar.gz.sig",
+              "cert_url" => base <> ".tar.gz.pem"
+            }
+          ]
+        }
+      ]
+    }
+
+    DistFixtures.write_index(Path.join(home, "hosted-index.json"), baked["plugins"] ++ [hosted])
+  end
+
   # Read out of the baked catalog rather than named here: the entry that is in
   # the index and nowhere else changes with every catalog sync.
   defp catalog_only_name do
@@ -862,6 +1189,176 @@ defmodule FermixCore.Management.PluginsTest do
       })
   end
 
+  defp install_regional(_home) do
+    store = ConfigStore.workspace_paths().plugins
+    DistStore.ensure!(store)
+    dir = DistStore.version_dir(store, @regional, "1.0.0")
+    File.mkdir_p!(dir)
+    File.write!(Path.join(dir, "plugin.json"), Jason.encode!(regional_manifest()))
+    :ok = DistStore.activate(store, @regional, "1.0.0")
+
+    :ok =
+      DistStore.record(store, @regional, %{
+        "version" => "1.0.0",
+        "sha256" => String.duplicate("0", 64),
+        "h1" => String.duplicate("0", 64),
+        "plugin_api" => 2,
+        "min_core_version" => "0.1.0"
+      })
+  end
+
+  defp regional_manifest do
+    %{
+      "schema_version" => 2,
+      "name" => @regional,
+      "display_name" => "Region Demo",
+      "description" => "A plugin whose provider serves one account region at a time.",
+      "category" => "developer",
+      "version" => "1.0.0",
+      "min_core_version" => "0.1.0",
+      "plugin_api" => 2,
+      "auth" => %{
+        "type" => "oauth2",
+        "provider" => "tesla",
+        "profile_key" => @regional,
+        "account_mode" => "single",
+        "scopes" => ["openid"]
+      },
+      "health_check" => %{"kind" => "local_readiness", "requires_auth" => true},
+      "tools" => []
+    }
+  end
+
+  defp store_regional_grant(extra) do
+    :ok =
+      AuthStore.write(
+        "#{@regional}:primary",
+        Enum.into(extra, %{
+          auth_mode: "oauth2",
+          provider: "tesla",
+          granted_scopes: ["openid"],
+          tokens: %{access_token: "AT", refresh_token: "RT"},
+          expires_at: DateTime.add(DateTime.utc_now(), 3600, :second),
+          last_refresh: nil,
+          status: "wrong_region"
+        })
+      )
+  end
+
+  defp install_runtime_gated(_home) do
+    store = ConfigStore.workspace_paths().plugins
+    DistStore.ensure!(store)
+    dir = DistStore.version_dir(store, @runtime_gated, "1.0.0")
+    File.mkdir_p!(dir)
+    File.write!(Path.join(dir, "plugin.json"), Jason.encode!(runtime_gated_manifest()))
+
+    command = Path.join([dir, "bin", @runtime_target, "rtgatedemo-helper"])
+    File.mkdir_p!(Path.dirname(command))
+    File.write!(command, "#!/bin/sh\n")
+    File.chmod!(command, 0o755)
+
+    :ok = DistStore.activate(store, @runtime_gated, "1.0.0")
+
+    :ok =
+      DistStore.record(store, @runtime_gated, %{
+        "version" => "1.0.0",
+        "sha256" => String.duplicate("0", 64),
+        "h1" => String.duplicate("0", 64),
+        "plugin_api" => 2,
+        "min_core_version" => "0.1.0"
+      })
+  end
+
+  defp runtime_gated_manifest do
+    %{
+      "schema_version" => 2,
+      "name" => @runtime_gated,
+      "display_name" => "Runtime Gate Demo",
+      "description" => "A local plugin whose helper process is gated on a setting.",
+      "category" => "developer",
+      "version" => "1.0.0",
+      "min_core_version" => "0.1.0",
+      "plugin_api" => 2,
+      "auth" => %{"type" => "none"},
+      "runtime" => %{
+        "kind" => "binary",
+        "command" => "rtgatedemo-helper",
+        "vendored" => true,
+        "requires_setting" => "ALLOW_HELPER"
+      },
+      "config" => [
+        %{
+          "key" => "ALLOW_HELPER",
+          "prompt" => "Run the helper",
+          "required" => false,
+          "kind" => "boolean"
+        }
+      ],
+      "tools" => [
+        %{
+          "name" => "rtgatedemo_do",
+          "description" => "Do the thing.",
+          "read_only" => false,
+          "rail" => "mcp"
+        }
+      ],
+      "skills" => []
+    }
+  end
+
+  defp install_gated(_home) do
+    store = ConfigStore.workspace_paths().plugins
+    DistStore.ensure!(store)
+    dir = DistStore.version_dir(store, @gated, "1.0.0")
+    File.mkdir_p!(dir)
+    File.write!(Path.join(dir, "plugin.json"), Jason.encode!(gated_manifest()))
+    :ok = DistStore.activate(store, @gated, "1.0.0")
+
+    :ok =
+      DistStore.record(store, @gated, %{
+        "version" => "1.0.0",
+        "sha256" => String.duplicate("0", 64),
+        "h1" => String.duplicate("0", 64),
+        "plugin_api" => 2,
+        "min_core_version" => "0.1.0"
+      })
+  end
+
+  defp gated_manifest do
+    %{
+      "schema_version" => 2,
+      "name" => @gated,
+      "display_name" => "Gate Demo",
+      "description" => "A local plugin whose write tool is gated on a setting.",
+      "category" => "developer",
+      "version" => "1.0.0",
+      "min_core_version" => "0.1.0",
+      "plugin_api" => 2,
+      "auth" => %{"type" => "none"},
+      "config" => [%{"key" => "ALLOW_WAKE", "prompt" => "Allow waking", "required" => false}],
+      "tools" => [
+        %{
+          "name" => "gatedemo_read",
+          "description" => "Read state.",
+          "read_only" => true,
+          "rail" => "http",
+          "parameters" => %{"type" => "object", "properties" => %{}},
+          "request" => %{"method" => "GET", "url" => "https://provider.test/read"}
+        },
+        %{
+          "name" => "gatedemo_wake",
+          "description" => "Wake it.",
+          "read_only" => false,
+          "requires_setting" => "ALLOW_WAKE",
+          "rail" => "http",
+          "parameters" => %{"type" => "object", "properties" => %{}},
+          "request" => %{"method" => "POST", "url" => "https://provider.test/wake"}
+        }
+      ],
+      "skills" => []
+    }
+  end
+
   defp configurable_manifest do
     %{
       "schema_version" => 2,
@@ -873,7 +1370,15 @@ defmodule FermixCore.Management.PluginsTest do
       "min_core_version" => "0.1.0",
       "plugin_api" => 2,
       "auth" => %{"type" => "none"},
-      "config" => [%{"key" => "DEMO_FOLDER", "prompt" => "Folder to read", "required" => true}],
+      "config" => [
+        %{"key" => "DEMO_FOLDER", "prompt" => "Folder to read", "required" => true},
+        %{
+          "key" => "DEMO_WAKE",
+          "prompt" => "Allow waking",
+          "required" => false,
+          "kind" => "boolean"
+        }
+      ],
       "tools" => [],
       "skills" => []
     }

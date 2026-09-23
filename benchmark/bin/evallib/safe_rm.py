@@ -4,7 +4,7 @@
 A target is removable only when it contains no `..`, is STRICTLY under `root`, and
 sits at least `min_below` path components below it — so root itself, a parent, or a
 root-ish path is always rejected. Used for per-trial sandbox teardown: a
-computed-path delete once wiped a host (CLAUDE.md), so every checker teardown
+computed-path delete once wiped a host (AGENTS.md), so every checker teardown
 routes through here.
 """
 

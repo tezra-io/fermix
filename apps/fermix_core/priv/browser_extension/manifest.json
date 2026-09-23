@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "Fermix",
+  "version": "1.0.0",
+  "description": "Hand one tab of your own browser to Fermix, and take it back with a second click.",
+  "permissions": ["debugger", "nativeMessaging", "tabs"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Give this tab to Fermix"
+  }
+}

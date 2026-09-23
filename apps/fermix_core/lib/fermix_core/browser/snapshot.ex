@@ -8,20 +8,25 @@ defmodule FermixCore.Browser.Snapshot do
   @structural_roles MapSet.new(~w(generic group list table row rowgroup grid document
                                   RootWebArea WebArea none presentation))
 
+  # Marks a ref in the text (`@link_3 [link] "Search"`); it is not part of the ref.
+  @ref_sigil "@"
+
   @spec render([map()], map()) :: {:ok, map()}
   def render(nodes, opts) when is_list(nodes) and is_map(opts) do
     index = Map.new(nodes, &{to_string(Map.get(&1, "nodeId")), &1})
     roots = root_nodes(nodes)
-    state = %{refs: [], counts: %{}, lines: []}
+    state = %{counts: %{}, lines: []}
 
     rendered =
       Enum.reduce(roots, state, fn node, acc ->
         render_node(node, index, opts, 0, acc)
       end)
 
-    inner = rendered.lines |> Enum.reverse() |> Enum.join("\n")
-    {inner, truncated?} = truncate(inner, Map.fetch!(opts, :max_chars))
-    {:ok, %{text: boundary(inner), refs: Enum.reverse(rendered.refs), truncated: truncated?}}
+    lines = Enum.reverse(rendered.lines)
+    {kept, truncated?} = take_lines(lines, Map.fetch!(opts, :max_chars))
+    inner = Enum.map_join(kept, "\n", & &1.text)
+    refs = kept |> Enum.map(& &1.ref) |> Enum.reject(&is_nil/1)
+    {:ok, %{text: boundary(inner), refs: refs, truncated: truncated?}}
   end
 
   # Depth is counted in EMITTED nodes, not raw tree levels: a transparent
@@ -71,30 +76,35 @@ defmodule FermixCore.Browser.Snapshot do
     end
   end
 
+  # A line carries its own ref, so truncation keeps or drops both together.
   defp add_line(node, role, depth, opts, state) do
-    {prefix, state} = ref_prefix(node, role, state)
+    {prefix, ref, state} = ref_prefix(node, role, state)
 
     line =
       "#{String.duplicate("  ", depth)}#{prefix}[#{role}]#{name_part(node)}#{url_part(node, opts)}"
 
-    %{state | lines: [line | state.lines]}
+    %{state | lines: [%{text: line, ref: ref} | state.lines]}
   end
 
   defp ref_prefix(node, role, state) do
     if actionable?(node, role) and Map.has_key?(node, "backendDOMNodeId") do
       count = Map.get(state.counts, role, 0) + 1
-      ref = "#{role}_#{count}"
+      name = "#{role}_#{count}"
+      ref = %{ref: name, role: role, name: name(node), backend_node_id: node["backendDOMNodeId"]}
 
-      refs = [
-        %{ref: ref, role: role, name: name(node), backend_node_id: node["backendDOMNodeId"]}
-        | state.refs
-      ]
-
-      {"@#{ref} ", %{state | refs: refs, counts: Map.put(state.counts, role, count)}}
+      {"#{@ref_sigil}#{name} ", ref, %{state | counts: Map.put(state.counts, role, count)}}
     else
-      {"", state}
+      {"", nil, state}
     end
   end
+
+  @doc """
+  The ref-map key for a ref a model sends back. A model copies the ref as the text
+  prints it, sigil included, so the sigil comes off here; a bare ref is the key.
+  """
+  @spec ref_key(String.t()) :: String.t()
+  def ref_key(@ref_sigil <> ref), do: ref
+  def ref_key(ref) when is_binary(ref), do: ref
 
   defp compact_skip?(node, opts) do
     Map.get(opts, :compact) and role(node) in @structural_roles and name(node) == ""
@@ -153,16 +163,55 @@ defmodule FermixCore.Browser.Snapshot do
   defp ax_value(%{"value" => value}), do: to_string(value)
   defp ax_value(_value), do: nil
 
-  defp boundary(text), do: "<browser_page_content>\n#{text}\n</browser_page_content>"
+  @doc """
+  Wrap page-controlled text in the delimiters that mark it as content the model
+  reads as data, never as instructions.
 
-  # Truncate on character (grapheme) boundaries so the result is always valid
-  # UTF-8 — a byte-offset cut can split a codepoint and make Jason.encode! raise.
-  # The boundary markers are wrapped after truncation so the closing tag is kept.
-  defp truncate(text, max_chars) when is_integer(max_chars) and max_chars > 0 do
-    if String.length(text) <= max_chars do
-      {text, false}
-    else
-      {String.slice(text, 0, max_chars), true}
-    end
+  Public because `webmcp` results are page bytes too and must carry the same
+  marking — one boundary literal, not two.
+  """
+  @spec boundary(String.t()) :: String.t()
+  def boundary(text) when is_binary(text),
+    do: "<browser_page_content>\n#{neutralize_delimiters(text)}\n</browser_page_content>"
+
+  # Defang a delimiter the PAGE itself carries, so page text cannot close the
+  # block early and have the rest of itself read outside the marking. Same shape
+  # as `Capabilities.UntrustedContent.neutralize_delimiters/1` — a space after
+  # the angle bracket keeps the text readable while leaving the appended tag as
+  # the only real one. Case-insensitive because the attacker picks the spelling.
+  defp neutralize_delimiters(text) do
+    text
+    |> String.replace(~r{</browser_page_content}i, "</ browser_page_content")
+    |> String.replace(~r{<browser_page_content}i, "< browser_page_content")
   end
+
+  # Truncate by WHOLE LINES, which is what makes the text and the ref map one
+  # boundary: a ref is returned only when the line that shows it survived, so
+  # acting on a control the model never saw yields the stale_ref sentence instead
+  # of a click on something invisible. Counted in graphemes (never bytes) so the
+  # result is always valid UTF-8 — a byte-offset cut can split a codepoint and
+  # make Jason.encode! raise. The boundary markers are wrapped afterwards so the
+  # closing tag is always kept.
+  defp take_lines(lines, max_chars) when is_integer(max_chars) and max_chars > 0 do
+    {kept, _used} =
+      Enum.reduce_while(lines, {[], 0}, fn line, {kept, used} ->
+        next = used + String.length(line.text) + separator(kept)
+        if next <= max_chars, do: {:cont, {[line | kept], next}}, else: {:halt, {kept, used}}
+      end)
+
+    kept = Enum.reverse(kept)
+    {bounded_lines(kept, lines, max_chars), length(kept) < length(lines)}
+  end
+
+  defp separator([]), do: 0
+  defp separator(_kept), do: 1
+
+  # An accessible NAME is page-controlled and can be longer than the whole budget
+  # on its own, which would leave an empty snapshot that reads as "this page has
+  # nothing on it". Keep a head of that one line, and NOT its ref: the line the
+  # model sees is incomplete, so nothing on it is actionable.
+  defp bounded_lines([], [first | _rest], max_chars),
+    do: [%{text: String.slice(first.text, 0, max_chars), ref: nil}]
+
+  defp bounded_lines(kept, _lines, _max_chars), do: kept
 end

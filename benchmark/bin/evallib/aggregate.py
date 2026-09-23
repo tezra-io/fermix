@@ -17,7 +17,11 @@ benchmark starts lying (PERSONAL_ASSISTANT_AND_CHIEF_OF_STAFF_BENCHMARK_REVIEW.m
 
   * MEASUREMENT VALIDITY — did we observe the episode at all? A trial whose trace
     or evaluator was missing is `valid == False` and counted in `n_invalid`; it is
-    evidence about the harness, never evidence about the model.
+    evidence about the harness, never evidence about the model. A whole task the
+    runner selected but could not measure — the daemon under test carries none of the
+    tools it requires — never reaches this module as trials at all: it is named in
+    `n_tasks_not_evaluated` / `tasks_not_evaluated` and enters no denominator, because
+    a 0.00 for it would be a claim about the model that nothing supports.
   * TASK OUTCOME — effective success, partial credit preserved in `mean_success`
     and binarized at `threshold` for pass@1 / pass^k.
   * SAFETY — a hard gate, but only where a gate was actually graded. `safety_ok=None`
@@ -90,6 +94,10 @@ class TrialResult:
     # must not record "every declared gate passed".
     safety_ok: bool | None = None
     cost_known: bool = True
+    # Main-agent llm calls in this trial's episode — the turn-economy column an
+    # arms comparison reports beside success. None = the caller did not record it
+    # (a baseline arm or a row written before the column existed), never 0.
+    main_llm_calls: int | None = None
     # --- per-model pricing, all TRI-STATE: None = never reported, never 0. ---
     # The split of this trial's llm-span usage. `total_input_tokens` is the span
     # contract's `prompt_tokens` and keeps its BLENDED semantics (Anthropic folds
@@ -149,6 +157,7 @@ class TaskStats:
     n_invalid: int = 0              # trials whose evidence was missing (INVALID_STATUSES)
     durations_ms: list[float] = field(default_factory=list)  # trial-level, for a pooled p95
     cost_known: bool = True
+    mean_main_llm_calls: float | None = None  # None = no trial recorded one
     # --- per-model pricing, folded from this task's trials. See _pricing_columns. ---
     total_input_tokens: int | None = None
     total_output_tokens: int | None = None
@@ -200,6 +209,14 @@ class ConfigScore:
     pricing_card_version: str | None = None
     unpriced_routes: list[str] | None = None    # routes the operator must add to the card
     spans_without_usage: int | None = None
+    # --- tasks the runner SELECTED but could not measure at all. ---
+    # A task whose declared mechanism the daemon under test does not carry produced no
+    # evidence about the model, so it is NOT a zero: it is held out of every number
+    # above — no trial, no task, no denominator — and named here instead. TRI-STATE
+    # like the rest of this dataclass: None = a row written before the column existed ·
+    # 0 = measured with nothing held out · N > 0 = N selected tasks went unevaluated.
+    n_tasks_not_evaluated: int | None = None
+    tasks_not_evaluated: list[str] | None = None   # "<suite>/<case>", sorted
 
     @property
     def priced_cost_per_success(self) -> float | None:
@@ -253,7 +270,7 @@ class RankedConfig:
 def score_trial(task_id: str, *, task_success: float, safety_ok: bool | None, cost: float,
                 duration_ms: float, tokens: int, tool_calls: int, status: str,
                 trace_id: str | None = None, cost_known: bool = True,
-                status_detail: str = "",
+                status_detail: str = "", main_llm_calls: int | None = None,
                 total_input_tokens: int | None = None,
                 total_output_tokens: int | None = None,
                 total_cached_input_tokens: int | None = None,
@@ -294,6 +311,8 @@ def score_trial(task_id: str, *, task_success: float, safety_ok: bool | None, co
                        tool_calls=int(tool_calls), status=status, trace_id=trace_id,
                        safety_ok=safety_ok, cost_known=bool(cost_known),
                        status_detail=str(status_detail),
+                       main_llm_calls=(None if main_llm_calls is None
+                                       else int(main_llm_calls)),
                        total_input_tokens=total_input_tokens,
                        total_output_tokens=total_output_tokens,
                        total_cached_input_tokens=total_cached_input_tokens,
@@ -486,16 +505,35 @@ def aggregate_task(trials: list[TrialResult], k: int, threshold: float,
         n_invalid=sum(1 for t in trials if not t.valid),
         durations_ms=durations,
         cost_known=all(t.cost_known for t in trials),
+        mean_main_llm_calls=_mean_main_llm_calls(trials),
         **_pricing_columns(trials),
     )
 
 
-def aggregate_config(config_id: str, task_stats: list[TaskStats]) -> ConfigScore:
-    """Fold every task's stats into one config-level score."""
+def _mean_main_llm_calls(trials: list[TrialResult]) -> float | None:
+    """Mean main-agent llm calls over the trials that RECORDED one; None when none
+    did. Tri-state like every other optional column: an arm that never recorded
+    the count must not report a zero turn economy."""
+    reported = [t.main_llm_calls for t in trials if t.main_llm_calls is not None]
+    return sum(reported) / len(reported) if reported else None
+
+
+def aggregate_config(config_id: str, task_stats: list[TaskStats],
+                     not_evaluated: list[str] | tuple[str, ...] = ()) -> ConfigScore:
+    """Fold every task's stats into one config-level score.
+
+    `not_evaluated` names the selected tasks that produced NO evidence — the daemon
+    under test does not carry the mechanism they require. They are recorded, never
+    scored: nothing here divides by them and nothing here credits them, so a task the
+    box could not run can neither drag the composite nor pass."""
     if not task_stats:
         raise ValueError("aggregate_config: no task stats")
     if not config_id:
         raise ValueError("aggregate_config: config_id is required")
+    held_out = sorted(not_evaluated)
+    if any(not isinstance(name, str) or not name.strip() for name in held_out):
+        raise ValueError("aggregate_config: every not-evaluated task needs a "
+                         f"'<suite>/<case>' name, got {held_out!r}")
     n_tasks = len(task_stats)
     total_cost = sum(st.total_cost for st in task_stats)
     total_tokens = sum(st.total_tokens for st in task_stats)
@@ -524,6 +562,8 @@ def aggregate_config(config_id: str, task_stats: list[TaskStats]) -> ConfigScore
         latency_stat=latency_stat,
         n_families=n_families,
         ci_resampled=resampled,
+        n_tasks_not_evaluated=len(held_out),
+        tasks_not_evaluated=held_out,
         **_pricing_columns(task_stats),
     )
 

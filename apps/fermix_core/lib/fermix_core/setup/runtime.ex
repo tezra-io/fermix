@@ -20,6 +20,7 @@ defmodule FermixCore.Setup.Runtime do
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.Doctor
   alias FermixCore.Setup.SecretMigration
+  alias FermixCore.Setup.SecretWriter
   alias FermixCore.Setup.Wizard
 
   # answer key -> owning provider, derived from the descriptor registry —
@@ -39,6 +40,7 @@ defmodule FermixCore.Setup.Runtime do
                    :fast,
                    :realtime_enabled,
                    :realtime_api_key,
+                   :realtime_model,
                    :realtime_voice,
                    :realtime_max_session_minutes,
                    :realtime_max_cost_cents,
@@ -64,7 +66,8 @@ defmodule FermixCore.Setup.Runtime do
                    :slack_owner_user_id,
                    :signal_account,
                    :signal_owner_user_id,
-                   :acp_enabled
+                   :acp_enabled,
+                   :secret_store
                  ]
 
   @type puts_fun :: (String.t() -> any())
@@ -210,13 +213,65 @@ defmodule FermixCore.Setup.Runtime do
 
       # A save that could not store a credential already carries the daemon's
       # own sentence (design §7.4); the operator sees that rather than an
-      # inspected tuple naming an internal key.
+      # inspected tuple naming an internal key. When the keyring is what
+      # refused, the terminal wizard is the place the file store is offered.
       {:error, {:secret_store_failed, _key, sentence}} when is_binary(sentence) ->
-        {:error, sentence}
+        offer_file_store(report, opts, answers, sentence, puts, prompt)
 
       {:error, reason} ->
         {:error, "failed to save setup snapshot: #{inspect(reason)}"}
     end
+  end
+
+  # The keyring cannot hold this save's secrets, and nothing chose the file
+  # store yet: ask once, in the operator's terminal, and record the answer as
+  # `[fermix_core] secret_store` before the same answers are saved again. A no
+  # leaves the refusal exactly as the save gave it. A save that already named
+  # a store, or a store other than the keyring, is not asked.
+  defp offer_file_store(report, opts, answers, sentence, puts, prompt) do
+    verdict = SecretWriter.probe()
+
+    cond do
+      Keyword.has_key?(opts, :secret_store) or verdict.store != :keyring ->
+        {:error, sentence}
+
+      SecretWriter.usable?(verdict) ->
+        {:error, sentence}
+
+      not consents_to_file_store?(prompt, puts, sentence) ->
+        {:error, sentence}
+
+      true ->
+        save_in_file_store(report, opts, answers, puts, prompt)
+    end
+  end
+
+  # The answers already collected ride back in as provided options, so the
+  # second save asks nothing again; a second refusal is reported as itself.
+  defp save_in_file_store(report, opts, answers, puts, prompt) do
+    retry_opts = opts |> Keyword.put(:secret_store, "file") |> Keyword.merge(answers)
+
+    with {:ok, _chosen} <- Wizard.save_answers(report.wizard, secret_store: "file"),
+         {:ok, refreshed} <- load_report() do
+      save_and_print(refreshed, retry_opts, puts, prompt)
+    else
+      {:error, {:secret_store_failed, _key, sentence}} when is_binary(sentence) ->
+        {:error, sentence}
+
+      {:error, reason} ->
+        {:error, "failed to switch the secret store: #{inspect(reason)}"}
+    end
+  end
+
+  defp consents_to_file_store?(prompt, puts, sentence) do
+    puts.(sentence)
+
+    puts.(
+      "Fermix can keep secrets in files under #{ConfigStore.fermix_home()}/secrets instead: " <>
+        "readable only by your account, not encrypted at rest, and named by `fermix doctor`."
+    )
+
+    ask_yes_no(prompt, "Store secrets in that folder from now on? [y/N]: ", false)
   end
 
   defp ensure_codex_auth(report, opts, puts) do

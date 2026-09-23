@@ -36,6 +36,8 @@ sys.path.insert(0, HERE)
 
 from evallib import config as cfgmod
 from evallib import driver, grade, judge, report
+from evallib.fixture_server import (FIXTURE_URL_PLACEHOLDER, FixtureServer,
+                                    ServerError, case_uses_fixture)
 from evallib.opik import OpikClient, OpikError, valid_run_id
 from evallib.session_ids import sess
 from evallib.suites import (ALWAYS_STICKY_GATES, RISK_LEVELS, STICKY_GATE_KEYS,
@@ -47,6 +49,7 @@ _PROVIDER_LIMIT_RE = re.compile(
 )
 _DEFAULT_PROFILES = {"host_readonly"}
 _ISOLATED_PROFILES = {"isolated_mutation", "external_write", "desktop_input", "destructive"}
+FIXTURE_PAGES_DIR = os.path.join(SKILL_DIR, "suites", "fixtures", "browser")
 _EVIDENCE_TOOL_LIMIT = 12
 _EVIDENCE_TOOL_MAX_BYTES = 2_000
 _EVIDENCE_RECORD_MAX_BYTES = 30_000
@@ -73,17 +76,28 @@ def new_run_id() -> str:
     return now_utc().strftime("%Y%m%dT%H%M%SZ") + secrets.token_hex(4)
 
 
-def _placeholders(run_id: str, trial: int) -> dict[str, str]:
-    return {"__EVAL_RUN_ID__": run_id,
-            "__EVAL_TRIAL__": str(trial),
-            "__EVAL_REPO_ROOT__": REPO_ROOT.replace(os.sep, "/")}
+def _placeholders(run_id: str, trial: int, fixture_url: str | None = None) -> dict[str, str]:
+    values = {"__EVAL_RUN_ID__": run_id,
+              "__EVAL_TRIAL__": str(trial),
+              "__EVAL_REPO_ROOT__": REPO_ROOT.replace(os.sep, "/")}
+    if fixture_url is not None:
+        values[FIXTURE_URL_PLACEHOLDER] = fixture_url
+    return values
 
 
-def _render_query(query: str, run_id: str, trial: int) -> str:
+def _render_query(query: str, run_id: str, trial: int,
+                  fixture_url: str | None = None) -> str:
     if not isinstance(query, str) or not query.strip():
         raise ValueError("eval query must be a non-empty string")
-    for token, value in _placeholders(run_id, trial).items():
+    for token, value in _placeholders(run_id, trial, fixture_url).items():
         query = query.replace(token, value)
+    if FIXTURE_URL_PLACEHOLDER in query:
+        # The runner starts the fixture server iff a SELECTED case needs it, so a
+        # surviving placeholder means the prompt would be driven with a literal
+        # token in it and the case would fail as if the model could not open a
+        # page. Fail here instead, naming the real fault.
+        raise ValueError(f"{FIXTURE_URL_PLACEHOLDER} was not bound to a fixture server "
+                         "for this case; the run must start one before driving it")
     return query
 
 
@@ -123,6 +137,41 @@ def _render_gate_value(value, run_id: str, trial: int):
     if isinstance(value, dict):
         return {key: _render_gate_value(item, run_id, trial) for key, item in value.items()}
     return value
+
+
+def fixture_token(run_id: str, suite_name: str, scenario_id: str, case_id: str,
+                  trial: int) -> str:
+    """The fixture-server token one case ATTEMPT records its page state under.
+
+    Unique per run, case and attempt: `--repeat` and `--fail-retries` both drive
+    under their own trial number, so a retry reads its own page rather than the
+    attempt it exists to independently confirm. `sess` compresses the middle and
+    keeps the tail, so the attempt suffix survives the length cap — the cut-tail
+    defect session ids carry the lesson for.
+    """
+    return sess("fx", run_id, suite_name, scenario_id, case_id, f"t{trial}")
+
+
+def _bind_fixture(fixtures, suite, scenario, case, run_id: str, trial: int):
+    """This attempt's fixture binding, or None when the case never addresses the
+    fixture server (`fixtures` is None unless a selected case does)."""
+    if fixtures is None or not case_uses_fixture(case):
+        return None
+    return fixtures.bind(
+        fixture_token(run_id, suite.name, scenario.id, case.id, trial))
+
+
+def _fixture_state(fixture) -> dict | None:
+    """The page's recorded state, once its reports have stopped arriving.
+
+    Reporting is fire-and-forget by design — a page must not block a click on a
+    round trip — so the last report of a turn can still be in flight when the
+    reply lands and the turn is graded. `settle` is the whole tolerance for it:
+    bounded, and paid only by a case that uses the fixture server."""
+    if fixture is None:
+        return None
+    fixture.settle()
+    return fixture.state()
 
 
 def _provider_limit_reply(reply: str | None) -> bool:
@@ -672,7 +721,8 @@ def _record_opik_error(rec: dict, exc: OpikError) -> None:
     })
 
 
-def run_operator_case(cfg, client, suite, scn, case, run_id, trial, judge_on):
+def run_operator_case(cfg, client, suite, scn, case, run_id, trial, judge_on,
+                      fixture=None):
     """Drive one operator-assisted Telegram case.
 
     The runner cannot inject a Telegram inbound (real Bot API, polling), so the
@@ -684,7 +734,8 @@ def run_operator_case(cfg, client, suite, scn, case, run_id, trial, judge_on):
     import uuid
 
     marker = f"e2e-mark-{run_id}-{uuid.uuid4().hex[:6]}"
-    query = _render_query(case.turns[0].query, run_id, trial)
+    query = _render_query(case.turns[0].query, run_id, trial,
+                          fixture.url if fixture else None)
     message = f"{query} (eval:{marker})"
     # Human response time makes a CLI-equivalent wall clock unavailable. Keep
     # cost/trace gates, but do not invent latency from Opik or the operator wait.
@@ -740,7 +791,8 @@ def run_operator_case(cfg, client, suite, scn, case, run_id, trial, judge_on):
                 "incomplete": True, "gate_passed": False,
                 "turns": [rec], "rubric": None}
     gates = grade.grade(
-        trace, spans, eff, elapsed_ms=None, require_duration=False)
+        trace, spans, eff, elapsed_ms=None, require_duration=False,
+        fixture_state=_fixture_state(fixture))
     view = grade.TurnView.build(
         trace, spans, elapsed_ms=None, require_duration=False)
     rec.update({
@@ -929,9 +981,10 @@ def _rubric_record(cfg, case, scn, run_id, trial, judge_on, transcript, evidence
             "output_tokens": result.output_tokens, "total_tokens": result.total_tokens}
 
 
-def run_case(cfg, client, suite, scn, case, run_id, trial, judge_on):
+def run_case(cfg, client, suite, scn, case, run_id, trial, judge_on, fixture=None):
     budget = {"max_cost_usd": cfg.budgets.max_cost_usd,
               "max_duration_ms": cfg.budgets.max_duration_ms}
+    fixture_url = fixture.url if fixture else None
     session = sess("e2e", run_id, suite.name, scn.id, case.id, str(trial))
     timeout_ms = case.timeout_ms or cfg.daemon.default_timeout_ms
     poll_s = max(cfg.opik.poll_timeout_s, timeout_ms / 1000.0 + 60)
@@ -940,7 +993,7 @@ def run_case(cfg, client, suite, scn, case, run_id, trial, judge_on):
     gate_ok, incomplete = True, False
 
     for index, turn in enumerate(case.turns):
-        query = _render_query(turn.query, run_id, trial)
+        query = _render_query(turn.query, run_id, trial, fixture_url)
         expect = dict(budget)
         expect.update(_render_expect(turn.expect, run_id, trial))
         if index == len(case.turns) - 1:
@@ -983,7 +1036,10 @@ def run_case(cfg, client, suite, scn, case, run_id, trial, judge_on):
             incomplete = True
             break
         elapsed_ms = driver.settled_elapsed_ms(result, settle_started)
-        gates = grade.grade(trace, spans, expect, elapsed_ms=elapsed_ms)
+        # The page's own record is read AFTER the turn settled, so everything the
+        # turn made the page do is in it.
+        gates = grade.grade(trace, spans, expect, elapsed_ms=elapsed_ms,
+                            fixture_state=_fixture_state(fixture))
         view = grade.TurnView.build(trace, spans, elapsed_ms=elapsed_ms)
         reply = view.reply or result.response or ""
         transcript.append({"role": "assistant", "content": reply})
@@ -1360,6 +1416,12 @@ def _print_dry_run(chosen, profiles, judge_on: bool, args) -> int:
     print(f"dry-run OK — profiles={sorted(profiles)} · {suites_planned} suite(s), "
           f"{nsc} scenario(s), {driven} case trial(s) would run, "
           f"{skipped} operator trial(s) would skip, {nt} real turn(s).")
+    fixture_jobs = sum(1 for _suite, _scenario, case, _trial in jobs
+                       if case_uses_fixture(case))
+    if fixture_jobs:
+        # Validated, not started: a dry run binds nothing and serves nothing.
+        print(f"  fixture server: {fixture_jobs} case trial(s) address "
+              f"{FIXTURE_URL_PLACEHOLDER}; the run would start one on 127.0.0.1")
     for suite, scenario, case, trial in jobs:
         action = "run" if case.drive == "ask" or args.operator else "skip: needs --operator"
         print(f"  - {suite.name}/{scenario.id}/{case.id}#{trial} "
@@ -1390,8 +1452,9 @@ def _suite_result(entry: dict) -> dict:
 
 
 def _opik_incomplete_result(suite, scenario, case, run_id: str, trial: int,
-                            exc: OpikError) -> dict:
-    query = _render_query(case.turns[0].query, run_id, trial)
+                            exc: OpikError, fixture=None) -> dict:
+    query = _render_query(case.turns[0].query, run_id, trial,
+                          fixture.url if fixture else None)
     session = sess("e2e", run_id, suite.name, scenario.id, case.id, str(trial))
     rec = {
         "index": 0, "query": query, "session": session, "status": "error",
@@ -1407,14 +1470,19 @@ def _opik_incomplete_result(suite, scenario, case, run_id: str, trial: int,
 
 
 def _drive_case(cfg, client, suite, scenario, case, run_id: str, trial: int,
-                judge_on: bool) -> dict:
+                judge_on: bool, fixtures=None) -> dict:
+    # One binding per ATTEMPT, taken before the turn is driven: the prompt
+    # carries its URL and the gates read back that same token's state.
+    fixture = _bind_fixture(fixtures, suite, scenario, case, run_id, trial)
     try:
         if case.drive == "telegram_operator":
             return run_operator_case(
-                cfg, client, suite, scenario, case, run_id, trial, judge_on)
-        return run_case(cfg, client, suite, scenario, case, run_id, trial, judge_on)
+                cfg, client, suite, scenario, case, run_id, trial, judge_on, fixture)
+        return run_case(cfg, client, suite, scenario, case, run_id, trial, judge_on,
+                        fixture)
     except OpikError as exc:
-        return _opik_incomplete_result(suite, scenario, case, run_id, trial, exc)
+        return _opik_incomplete_result(
+            suite, scenario, case, run_id, trial, exc, fixture)
 
 
 def _sticky_gates(scenario) -> frozenset[str]:
@@ -1482,9 +1550,9 @@ def _abort_signal(suite, result: dict) -> dict | None:
 
     An exhausted external account is not a product signal. Every case driven
     after the balance hits zero fails `no_tool_errors` for a reason the daemon
-    did not cause, so those results are void, not red — an observed eden run
-    spent its EdenAI credits mid-suite and banked nine meaningless failures that
-    cost more to diagnose than the run was worth.
+    did not cause, so those results are void, not red — an observed run
+    exhausted a hosted plugin's credits mid-suite and banked nine meaningless
+    failures that cost more to diagnose than the run was worth.
     """
     for turn in result.get("turns", []):
         for failure in turn.get("tool_failures", []):
@@ -1513,7 +1581,7 @@ def _voided(result: dict) -> dict:
 
 
 def _drive_with_retries(cfg, client, suite, scenario, case, run_id, trial,
-                        judge_on, fail_retries: int, repeat: int):
+                        judge_on, fail_retries: int, repeat: int, fixtures=None):
     """Drive one case, re-driving an unconfirmed fail. Stops early on abort or on a
     sticky-gate failure.
 
@@ -1521,7 +1589,8 @@ def _drive_with_retries(cfg, client, suite, scenario, case, run_id, trial,
     to reproduce a failure already explained, so the signal short-circuits it.
     """
     sticky = _sticky_gates(scenario)
-    attempts = [_drive_case(cfg, client, suite, scenario, case, run_id, trial, judge_on)]
+    attempts = [_drive_case(cfg, client, suite, scenario, case, run_id, trial,
+                            judge_on, fixtures)]
     abort = _abort_signal(suite, attempts[-1]) if suite.abort_on_tool_error else None
     for retry in range(1, fail_retries + 1):
         outcomes = [attempt["outcome"] for attempt in attempts]
@@ -1536,13 +1605,13 @@ def _drive_with_retries(cfg, client, suite, scenario, case, run_id, trial,
         retry_trial = trial + repeat * retry
         print(f"    fail unconfirmed — retrying as #{retry_trial} …", flush=True)
         attempts.append(_drive_case(cfg, client, suite, scenario, case,
-                                    run_id, retry_trial, judge_on))
+                                    run_id, retry_trial, judge_on, fixtures))
         abort = _abort_signal(suite, attempts[-1]) if suite.abort_on_tool_error else None
     return attempts, abort
 
 
 def _execute_jobs(cfg, client, jobs, run_id: str, judge_on: bool, operator: bool,
-                  fail_retries: int = 0, repeat: int = 1):
+                  fail_retries: int = 0, repeat: int = 1, fixtures=None):
     tree: dict = {}
     skipped_required = 0
     aborted = None
@@ -1556,7 +1625,7 @@ def _execute_jobs(cfg, client, jobs, run_id: str, judge_on: bool, operator: bool
         print(f"  · {label} …", flush=True)
         attempts, abort = _drive_with_retries(
             cfg, client, suite, scenario, case, run_id, trial, judge_on,
-            fail_retries, repeat)
+            fail_retries, repeat, fixtures)
         result = _case_verdict(attempts, _sticky_gates(scenario))
         result = _voided(result) if abort else result
         _record_case(tree, suite, scenario, result)
@@ -1665,12 +1734,38 @@ def _run_selected(cfg, args, chosen, profiles, judge_on: bool) -> int:
                         api_key=cfg.opik.api_key, workspace=cfg.opik.workspace)
     run_id = new_run_id()
     started = now_utc()
-    suite_results, skipped_required, aborted = _execute_jobs(
-        cfg, client, jobs, run_id, judge_on, args.operator,
-        fail_retries=args.fail_retries, repeat=args.repeat)
+    try:
+        fixtures = _start_fixture_server(jobs)
+    except ServerError as exc:
+        # A precondition, and the one failure mode that would otherwise reach
+        # every selected case as a connection refused that reads as the model.
+        print(f"fixture server could not start: {exc}", file=sys.stderr)
+        return 3
+    try:
+        suite_results, skipped_required, aborted = _execute_jobs(
+            cfg, client, jobs, run_id, judge_on, args.operator,
+            fail_retries=args.fail_retries, repeat=args.repeat, fixtures=fixtures)
+    finally:
+        if fixtures is not None:
+            fixtures.stop()
     return _write_run_reports(
         cfg, args, chosen, profiles, run_id, started, suite_results, nc,
         skipped_required, aborted)
+
+
+def _start_fixture_server(jobs) -> FixtureServer | None:
+    """Start the fixture server if and only if a selected case addresses it.
+
+    Before anything is driven: a run whose pages cannot be served must fail on
+    the server, not case by case on a connection refused that reads as the model
+    failing to open a page."""
+    if not any(case_uses_fixture(case) for _suite, _scenario, case, _trial in jobs):
+        return None
+    fixtures = FixtureServer(FIXTURE_PAGES_DIR)
+    port = fixtures.start()
+    print(f"fixture server: 127.0.0.1:{port} "
+          f"({len(fixtures.documents)} document(s), one token per case attempt)")
+    return fixtures
 
 
 def main(argv=None) -> int:

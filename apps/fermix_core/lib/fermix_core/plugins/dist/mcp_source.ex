@@ -7,8 +7,8 @@ defmodule FermixCore.Plugins.Dist.McpSource do
 
   Every spec carries the source-qualified identity `{:plugin, name}` (M27
   §7.3). Operator TOML servers are `{:operator, name}`, so an operator server
-  that happens to be called `eden` can never be stopped, restarted, or
-  status-reported as the Eden plugin client.
+  that happens to share a plugin's name can never be stopped, restarted, or
+  status-reported as that plugin's client.
 
   ## Two mutually exclusive shapes
 
@@ -21,7 +21,8 @@ defmodule FermixCore.Plugins.Dist.McpSource do
       executable (`vendored: false`) or the absolute path under the plugin's
       `bin/<target>/` (`vendored: true`), relative `args` that exist under the
       plugin root are made absolute against it, `env` carries the plugin's
-      UPPER_SNAKE config values (`Plugins.Config.plugin_settings/1`), and `cwd`
+      UPPER_SNAKE config values (`Plugins.Config.plugin_settings/1`) plus the
+      daemon-owned `FERMIX_PLUGIN_TOKEN_FILE` for an `oauth2` plugin, and `cwd`
       is the plugin root.
 
     * **remote** (`runtime.kind: "remote_mcp"`) — `transport`,
@@ -47,28 +48,62 @@ defmodule FermixCore.Plugins.Dist.McpSource do
   host-runtime probe is `:missing_host_runtime`, a missing required config key
   `:needs_config` — loud in doctor/setup/prompt catalog, never a crash-looping
   child.
+
+  ## The runtime gate (M8 §9.3)
+
+  A manifest may set `runtime.requires_setting` to one of its own `config` keys.
+  The child spec is materialized only while that key reads exactly `"true"`, so
+  an operator switch decides whether a vendored helper process runs at all. The
+  gate is asked HERE and not in `Status`: it says a process is unwanted, not
+  that the install needs attention, so a gated-off plugin is still `:ready` and
+  its row still says nothing about the helper.
+
+  ## The token-file handoff (M8 §9.3)
+
+  A local child whose plugin declares `auth: oauth2` needs a short-lived bearer
+  it cannot refresh itself. Before its spec is built, the profile's
+  `Auth.TokenManager` is asked to project the current access token to
+  `$FERMIX_HOME/plugins/run/<auth_profile>.token` (`:` becomes `_`) and to keep
+  rewriting it on every refresh; the path rides the child env as
+  `FERMIX_PLUGIN_TOKEN_FILE`, merged so no plugin setting can redirect it. A
+  refused projection — no grant, a quarantined one, an unwritable file — drops
+  the spec rather than starting a helper that would 401 every call.
+
+  The inverse runs on the same pass: every profile that is NOT about to have a
+  child has its projection deleted, which is what disable, gate-off, loss of
+  readiness and uninstall all reduce to. `Dist.Installer` sweeps stale
+  projections at daemon boot, before this module can materialize a child.
+  v1 invariant: one `mcp` child per auth profile — two spawnable plugins sharing
+  one is refused outright (`:token_file_profile_conflict`) rather than letting
+  them overwrite each other's file.
   """
 
   require Logger
 
+  alias FermixCore.Auth.TokenSupervisor
   alias FermixCore.Capabilities.MCP.Remote.AuthRef
   alias FermixCore.Capabilities.MCP.Remote.Endpoint
   alias FermixCore.Capabilities.MCP.Remote.Session
   alias FermixCore.Plugins.Config
   alias FermixCore.Plugins.Dist.RuntimeProbe
+  alias FermixCore.Plugins.Dist.Store
   alias FermixCore.Plugins.Plugin
   alias FermixCore.Plugins.Registry
   alias FermixCore.Plugins.Status
+  alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.SecretWriter
 
   @remote_kind "remote_mcp"
 
+  # The one name the child reads its access-token projection from (M8 §9.3).
+  @token_file_env "FERMIX_PLUGIN_TOKEN_FILE"
+
   # Fields that only make sense for a local process. Their presence in a
   # `remote_mcp` runtime block is a half-local/half-remote manifest, refused
   # outright rather than half-honoured (§7.2 rule 1).
-  @local_only_runtime_fields ~w(command args env pass_env cwd vendored min_version)
+  @local_only_runtime_fields ~w(command args env pass_env cwd vendored min_version requires_setting)
 
-  @sentinel SecretWriter.sentinel()
+  @sentinels SecretWriter.sentinels()
 
   # Core's non-secret plugin config keys for the operator's Connect selection
   # (§7.5). The *values* are not hard-coded anywhere: the profile must name a
@@ -89,9 +124,18 @@ defmodule FermixCore.Plugins.Dist.McpSource do
   @spec server_specs(keyword()) :: {:ok, [map()]} | {:error, term()}
   def server_specs(opts \\ []) when is_list(opts) do
     case Config.enabled_plugins() do
-      [] -> {:ok, []}
+      [] -> {:ok, release_all_token_files()}
       enabled -> build_specs(enabled, opts)
     end
+  end
+
+  # Nothing is enabled, so no child is reading any projection. Said here rather
+  # than left to `build_specs/2` because that path is skipped entirely, and
+  # disabling the LAST mcp plugin is exactly when a stale access token would
+  # otherwise sit on disk until the next daemon boot.
+  defp release_all_token_files do
+    TokenSupervisor.release_token_files_except([])
+    []
   end
 
   @doc """
@@ -126,25 +170,46 @@ defmodule FermixCore.Plugins.Dist.McpSource do
 
   defp build_specs(enabled, opts) do
     with {:ok, plugins} <- Registry.list(Keyword.get(opts, :registry, [])) do
-      specs =
-        plugins
-        |> Enum.filter(&(&1.name in enabled and is_map(&1.runtime)))
-        |> Enum.flat_map(&materialize(&1, opts))
+      startable = Enum.filter(plugins, &(&1.name in enabled and is_map(&1.runtime)))
+      spawnable = Enum.filter(startable, &spawnable_local?(&1, opts))
 
-      {:ok, specs}
+      with :ok <- refuse_profile_collision(spawnable) do
+        release_token_files(spawnable)
+        wanted = MapSet.new(spawnable, & &1.name)
+        {:ok, Enum.flat_map(startable, &materialize(&1, wanted, opts))}
+      end
     end
   end
 
-  defp materialize(%Plugin{} = plugin, opts) do
-    if remote?(plugin),
-      do: materialize_remote(plugin),
-      else: materialize_local(plugin, opts)
+  # A local child is wanted when the plugin is startable AND its runtime gate is
+  # satisfied. The gate is asked here rather than in the status ladder because
+  # it says whether a process is wanted, not whether the install needs attention
+  # — a gated-off plugin stays `:ready` for its http tools.
+  defp spawnable_local?(%Plugin{} = plugin, opts) do
+    not remote?(plugin) and Status.status(plugin, status_opts(opts)) == :ready and
+      Status.runtime_setting_satisfied?(plugin)
   end
 
+  defp materialize(%Plugin{} = plugin, wanted, opts) do
+    cond do
+      remote?(plugin) -> materialize_remote(plugin)
+      MapSet.member?(wanted, plugin.name) -> materialize_local(plugin, opts)
+      true -> []
+    end
+  end
+
+  # A refusal is loud but not fatal, exactly as for a remote plugin: the child
+  # is not started and the plugin stays visible with its own status, rather than
+  # spawning a helper that cannot read the credential it exists to use.
   defp materialize_local(plugin, opts) do
-    if Status.status(plugin, status_opts(opts)) == :ready,
-      do: [spec(plugin, opts)],
-      else: []
+    case token_file_env(plugin) do
+      {:ok, env} ->
+        [spec(plugin, env, opts)]
+
+      {:error, reason} ->
+        Logger.warning("mcp plugin #{plugin.name} is not startable: #{inspect(reason)}")
+        []
+    end
   end
 
   # A refusal is loud but not fatal: the plugin stays visible in
@@ -163,7 +228,7 @@ defmodule FermixCore.Plugins.Dist.McpSource do
 
   defp status_opts(opts), do: Keyword.take(opts, [:probe])
 
-  defp spec(%Plugin{runtime: runtime} = plugin, opts) do
+  defp spec(%Plugin{runtime: runtime} = plugin, daemon_env, opts) do
     root = plugin.path |> Path.dirname()
 
     %{
@@ -172,7 +237,11 @@ defmodule FermixCore.Plugins.Dist.McpSource do
       prefix: plugin.name <> "_",
       command: command(runtime, root, opts),
       args: runtime |> Map.get("args", []) |> Enum.map(&resolve_arg(&1, root)),
-      env: Config.plugin_settings(plugin.name),
+      # Daemon-owned env wins over the operator's plugin settings: the token
+      # file path is an internal spawn-spec field, and a setting (or a
+      # hand-edited config.toml) must never point the child at a file the
+      # daemon does not keep fresh.
+      env: Map.merge(Config.plugin_settings(plugin.name), daemon_env),
       pass_env: Map.get(runtime, "pass_env", []),
       tools_overrides: %{},
       cwd: root,
@@ -198,6 +267,57 @@ defmodule FermixCore.Plugins.Dist.McpSource do
   defp command(%{"command" => command}, _root, _opts), do: command
 
   defp probe_opts(opts), do: Keyword.get(opts, :probe, [])
+
+  # --- the token-file handoff (M8 §9.3) ----------------------------------
+
+  # A plugin whose child authenticates as the operator's account gets one
+  # daemon-owned file to read the current access token from, and nothing else:
+  # no refresh token, no `auth.json`, no other provider's credentials. Every
+  # other auth type adds nothing to the child environment.
+  defp token_file_env(%Plugin{auth: %{type: :oauth2}} = plugin) do
+    profile = Config.auth_profile(plugin)
+    path = Store.token_file(plugins_root(), profile)
+
+    case TokenSupervisor.enable_token_file(profile, path) do
+      :ok -> {:ok, %{@token_file_env => path}}
+      {:error, reason} -> {:error, {:token_file_unavailable, profile, reason}}
+    end
+  end
+
+  defp token_file_env(%Plugin{}), do: {:ok, %{}}
+
+  # Every profile that is NOT about to have a child loses its projection:
+  # disabled, gated off, no longer ready, and uninstalled all mean the same
+  # thing — nothing is reading that file, so the daemon must stop keeping an
+  # access token on disk for it.
+  defp release_token_files(spawnable) do
+    spawnable
+    |> Enum.map(&oauth_profile/1)
+    |> Enum.reject(&is_nil/1)
+    |> TokenSupervisor.release_token_files_except()
+  end
+
+  # M8 §9.3 v1 invariant: one `mcp` child per auth profile. Two children sharing
+  # one profile would overwrite each other's projection and race the
+  # delete-on-disable, so the whole desired list is refused rather than letting
+  # one of them silently win. A refcount is what would lift this.
+  defp refuse_profile_collision(spawnable) do
+    spawnable
+    |> Enum.group_by(&oauth_profile/1, & &1.name)
+    |> Enum.find(fn {profile, names} -> not is_nil(profile) and length(names) > 1 end)
+    |> case do
+      nil -> :ok
+      {profile, names} -> {:error, {:token_file_profile_conflict, profile, Enum.sort(names)}}
+    end
+  end
+
+  defp oauth_profile(%Plugin{auth: %{type: :oauth2}} = plugin), do: Config.auth_profile(plugin)
+  defp oauth_profile(%Plugin{}), do: nil
+
+  # The one owner of `$FERMIX_HOME` plugin paths. `Dist.Installer` creates the
+  # `0700` `run/` directory at daemon boot and sweeps stale projections out of
+  # it before this module can materialize a single child.
+  defp plugins_root, do: ConfigStore.workspace_paths().plugins
 
   # Manifest args are install-relative (`src/index.js`); anything that exists
   # under the immutable plugin root becomes absolute so the child can be
@@ -289,7 +409,7 @@ defmodule FermixCore.Plugins.Dist.McpSource do
   # returned nothing is `:needs_secret`, not a client that starts and 401s.
   defp require_secret(%Plugin{name: name}) do
     case Config.plugin_secret(name) do
-      @sentinel -> {:error, {:needs_secret, name}}
+      sentinel when sentinel in @sentinels -> {:error, {:needs_secret, name}}
       secret when is_binary(secret) and secret != "" -> :ok
       _missing -> {:error, {:needs_secret, name}}
     end

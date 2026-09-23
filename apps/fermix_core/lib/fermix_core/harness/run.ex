@@ -276,9 +276,12 @@ defmodule FermixCore.Harness.Run do
   # it in `allowed_env`.
   defp resolve_env_names([]), do: {:ok, %{}}
 
+  # The declared names are requested explicitly, so one that cannot be read is
+  # still this error; an unrelated allow-list entry the daemon cannot read no
+  # longer refuses the run, it is simply not among the names taken.
   defp resolve_env_names(names) do
     case FermixCore.Sandbox.Env.build(FermixCore.Sandbox.Config.current(), names) do
-      {:ok, kv} -> {:ok, kv |> Map.new() |> Map.take(names)}
+      {:ok, %{env: kv}} -> {:ok, kv |> Map.new() |> Map.take(names)}
       {:error, reason} -> {:error, reason}
     end
   end

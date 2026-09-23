@@ -28,11 +28,12 @@ defmodule Mix.Tasks.Fermix.Eval.MatrixTest do
       assert by_id[:ollama].auth_modes == [:none]
 
       # effort? gates reasoning_effort: true for openai/codex/anthropic/xai,
-      # false for openrouter/mistral/ollama.
+      # false for openrouter/mistral/venice/ollama.
       assert by_id[:anthropic].effort
       assert by_id[:xai].effort
       refute by_id[:openrouter].effort
       refute by_id[:mistral].effort
+      refute by_id[:venice].effort
       refute by_id[:ollama].effort
     end
 

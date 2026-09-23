@@ -6,12 +6,24 @@ defmodule FermixCore.Management.Settings.Voice do
   The shared OpenAI key is named on the voice section rather than hidden: it is
   the same slot the OpenAI provider uses, and a pane that showed a second,
   unrelated-looking key row is what made operators store it twice.
+
+  The voice engine is not a row: it is derived from the model, which is the one
+  choice an operator makes. The rows below the model are still scoped to the
+  engine in force — each engine ships its own voices, reasoning effort is a
+  Realtime-only setting, and under Live the provider that answers is worth
+  naming because it is not the one that speaks. Publishing the other engine's
+  voices would offer a value `settings.apply` refuses at the configuration
+  boundary.
   """
 
   alias FermixCore.Management.Settings.Row
   alias FermixCore.Management.Settings.Source
   alias FermixCore.Meetings.Config, as: MeetingsConfig
+  alias FermixCore.Providers.Descriptor
+  alias FermixCore.Providers.ModelCatalog
+  alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Realtime.Config, as: RealtimeConfig
+  alias FermixCore.Transcription.Local, as: LocalTranscription
   alias FermixCore.Transcription.Registry, as: TranscriptionRegistry
 
   @sections [
@@ -24,15 +36,22 @@ defmodule FermixCore.Management.Settings.Voice do
     "openai" => "OpenAI",
     "xai" => "SpaceXAI",
     "deepgram" => "Deepgram",
-    "local" => "On this Mac"
+    "local" => "On this device"
   }
 
-  # The key slot each transcription backend reads. `local` runs on this Mac and
-  # authenticates with nothing, so it has no row rather than an empty one.
+  # The key slot each transcription backend reads. `local` runs on this machine
+  # and authenticates with nothing, so it has no row rather than an empty one.
   @backend_secrets %{
     "openai" => :transcription_openai_api_key,
     "xai" => :transcription_xai_api_key,
     "deepgram" => :deepgram_api_key
+  }
+
+  # The two engines in the order the configuration publishes them, each named by
+  # what it does for the operator rather than by its wire word.
+  @engine_labels %{
+    "openai_realtime" => "Realtime, integrated tools",
+    "openai_live" => "Live, with your Fermix agent"
   }
 
   @effort_labels %{
@@ -43,6 +62,16 @@ defmodule FermixCore.Management.Settings.Voice do
     "xhigh" => "Extra high"
   }
 
+  @doc """
+  The operator-facing name of one voice engine.
+
+  Published because both doors render it: the descriptor carries it to the app
+  and the browser setup pane reads it here, so a name fixed in one place is
+  fixed in both rather than drifting into two spellings of one engine.
+  """
+  @spec engine_label(String.t()) :: String.t()
+  def engine_label(engine) when is_binary(engine), do: Map.fetch!(@engine_labels, engine)
+
   @doc "Every section this module owns, in publication order."
   @spec sections() :: [%{id: String.t(), pane: String.t(), title: String.t()}]
   def sections, do: @sections
@@ -51,53 +80,91 @@ defmodule FermixCore.Management.Settings.Voice do
   @spec owns?(String.t()) :: boolean()
   def owns?(section) when is_binary(section), do: Enum.any?(@sections, &(&1.id == section))
 
-  @doc "The rows of one owned section."
-  @spec rows(String.t(), Source.snapshot()) :: [Row.t()]
-  def rows("realtime", snapshot) do
+  @doc """
+  The rows of one owned section.
+
+  `opts` reach `FermixCore.Transcription.Local.available?/1`, whose `releases:`
+  seam stands for the machine's pin. The settings methods pass none.
+  """
+  @spec rows(String.t(), Source.snapshot(), keyword()) :: [Row.t()]
+  def rows(section, snapshot, opts \\ [])
+
+  def rows("realtime", snapshot, _opts) do
     config = RealtimeConfig.normalize(Source.core(snapshot, :realtime))
     restart = Row.restart?(:realtime)
 
     realtime_switch_rows(config, restart) ++
+      realtime_engine_rows(config, snapshot, restart) ++
       realtime_key_row(snapshot) ++ realtime_budget_rows(config, restart)
   end
 
-  def rows("transcription", snapshot) do
+  def rows("transcription", snapshot, opts) do
     block = Source.core(snapshot, :transcription)
     backend = Source.string(block, :backend, "openai")
     restart = Row.restart?(:transcription)
+    options = backend_options(block, backend, opts)
 
-    transcription_choice_rows(block, backend, restart) ++
+    transcription_choice_rows(block, backend, options, restart) ++
       transcription_key_row(snapshot, backend, restart)
   end
 
-  def rows("meetings", snapshot) do
+  def rows("meetings", snapshot, opts) do
     block = Source.core(snapshot, :meetings)
+    transcription = Source.core(snapshot, :transcription)
+    in_force = Source.string(block, :transcription_backend)
     restart = Row.restart?(:meetings)
+    options = backend_options(transcription, in_force, opts)
 
     meetings_bot_rows(block, restart) ++
-      meetings_zoom_rows(block, snapshot, restart) ++ [meetings_backend_row(block, restart)]
+      meetings_zoom_rows(block, snapshot, restart) ++
+      [meetings_backend_row(block, options, restart)]
   end
 
   defp realtime_switch_rows(config, restart) do
     [
       Row.new("realtime_enabled", :toggle, "Talk to Fermix",
-        footer: "Lets the companion talk with you using OpenAI Realtime.",
+        footer: "Lets the companion talk with you using OpenAI voice models.",
         value: config.enabled?,
         restart: restart
       ),
       Row.new("realtime_model", :choice, "Model",
+        footer:
+          "Live delegates tools, memory and reasoning to your Fermix agent " <>
+            "and bills by the minute.",
         value: config.model,
-        options: Enum.map(RealtimeConfig.valid_models(), &Row.option(&1, &1)),
+        options: Enum.map(RealtimeConfig.all_models(), &model_option/1),
         restart: restart
       ),
       Row.new("realtime_voice", :choice, "Voice",
         value: config.voice,
-        options: Enum.map(RealtimeConfig.valid_voices(), &Row.option(&1, String.capitalize(&1))),
+        options: Enum.map(RealtimeConfig.valid_voices(config.engine), &voice_option/1),
         restart: restart
-      ),
+      )
+    ]
+  end
+
+  # Reasoning effort is a Realtime session setting with no Live equivalent, so
+  # under Live it is not a row with a disabled control: it is not a setting.
+  defp realtime_engine_rows(%{engine: "openai_realtime"} = config, _snapshot, restart) do
+    [
       Row.new("realtime_reasoning_effort", :choice, "Reasoning effort",
         value: config.reasoning_effort,
         options: Enum.map(RealtimeConfig.valid_reasoning_efforts(), &effort_option/1),
+        restart: restart
+      )
+    ]
+  end
+
+  # Live speaks; the operator's own primary provider answers. That split is the
+  # one thing about this engine an operator cannot infer from the pane, and it
+  # is changed in Providers, so the row is read-only rather than a control whose
+  # save always refuses.
+  defp realtime_engine_rows(%{engine: "openai_live"}, snapshot, restart) do
+    [
+      Row.new("realtime_backend", :text, "Backend",
+        footer: "Live speaks; your primary provider answers. Change it in Providers.",
+        value: realtime_backend(snapshot),
+        read_only: true,
         restart: restart
       )
     ]
@@ -140,11 +207,11 @@ defmodule FermixCore.Management.Settings.Voice do
     ]
   end
 
-  defp transcription_choice_rows(block, backend, restart) do
+  defp transcription_choice_rows(block, backend, backend_options, restart) do
     [
       Row.new("transcription_backend", :choice, "Transcribe with",
         value: backend,
-        options: Enum.map(backend_names(), &Row.option(&1, backend_label(&1))),
+        options: backend_options,
         restart: restart
       ),
       Row.new("transcription_model", :choice, "Model",
@@ -228,24 +295,78 @@ defmodule FermixCore.Management.Settings.Voice do
     ]
   end
 
-  defp meetings_backend_row(block, restart) do
-    options = [
-      Row.option("", "Same as voice notes")
-      | Enum.map(backend_names(), &Row.option(&1, backend_label(&1)))
-    ]
-
+  defp meetings_backend_row(block, backend_options, restart) do
     Row.new("meetings_transcription_backend", :choice, "Transcribe with",
       value: Source.string(block, :transcription_backend),
-      options: options,
+      options: [Row.option("", "Same as voice notes") | backend_options],
       restart: restart
     )
   end
 
+  # One list, both catalogs, each slug carrying the engine it selects. The
+  # engine is a consequence of the model rather than a control of its own, so
+  # the label is what tells an operator which wire they are choosing.
+  defp model_option(model) do
+    {:ok, engine} = RealtimeConfig.engine_for_model(model)
+
+    Row.option(model, "#{model} · #{engine_label(engine)}")
+  end
+
+  defp voice_option(voice), do: Row.option(voice, String.capitalize(voice))
+
   defp effort_option(level), do: Row.option(level, Map.fetch!(@effort_labels, level))
+
+  # The primary route in one line, read from the same snapshot the Providers
+  # pane projects and resolved by the same reader routing uses, so the two panes
+  # cannot disagree about who answers. The three refusals stay distinct: a host
+  # that never chose, a file with two primaries, and a hand-edited name no
+  # provider registry knows are different facts with different fixes.
+  defp realtime_backend(snapshot) do
+    providers = Source.core(snapshot, :providers)
+    agent = Source.core(snapshot, :agent)
+
+    case PrimaryConfig.chosen_in(providers, agent) do
+      {:ok, nil} -> "Not configured"
+      {:ok, provider} -> realtime_backend_route(snapshot, provider)
+      {:error, :multiple_primary} -> "More than one primary provider"
+    end
+  end
+
+  defp realtime_backend_route(snapshot, provider) do
+    case Descriptor.fetch(provider) do
+      {:ok, descriptor} -> "#{descriptor.label} · #{backend_model(snapshot, provider)}"
+      :error -> "Not a known provider"
+    end
+  end
+
+  # The model the route would actually use: the operator's own pin, else the
+  # catalog default the resolver falls back to, never a blank.
+  defp backend_model(snapshot, provider) do
+    snapshot
+    |> Source.provider(provider)
+    |> Source.string(:default_model, ModelCatalog.default_model_for(provider))
+  end
 
   defp backend_names do
     Enum.map(TranscriptionRegistry.backends(), fn {name, _module} -> Atom.to_string(name) end)
   end
+
+  # Every shipped backend setup offers, plus the one a configuration already
+  # names. On-device speech is not offered yet, so a pane lists it only where it
+  # is in force, disabled with the reason it cannot be chosen — and
+  # `settings.apply` refuses a disabled option in that same sentence.
+  defp backend_options(transcription, in_force, opts) do
+    offer = LocalTranscription.offer(transcription, in_force, opts)
+
+    backend_names()
+    |> Enum.reject(&(&1 == "local" and match?({:hidden, _sentence}, offer)))
+    |> Enum.map(&backend_option(&1, offer))
+  end
+
+  defp backend_option("local", {:shown, sentence}),
+    do: Row.option("local", backend_label("local"), disabled: true, hint: sentence)
+
+  defp backend_option(backend, _offer), do: Row.option(backend, backend_label(backend))
 
   defp backend_label(backend), do: Map.fetch!(@backend_labels, backend)
 

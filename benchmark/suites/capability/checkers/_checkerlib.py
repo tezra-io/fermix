@@ -9,9 +9,10 @@ and that must not drift between them:
   * the ONLY/EXACTLY artifact contract (`sole_line`) — a prompt that says
     "write ONLY the number" or "EXACTLY one line" is graded as written: one
     non-empty line, no preamble, no trailing "Done.".
-  * evidence access (`evidence`, `spans`, `span_text`, `span_output`, `span_start`,
-    `shell_command`) — the per-trial correlation record the runner writes outside the
-    workspace at FERMIX_EVAL_EVIDENCE. Absent evidence is refused, never assumed empty.
+  * evidence access (`evidence`, `spans`, `span_text`, `span_output`, `span_result`,
+    `span_start`, `epoch_seconds`, `shell_command`) — the per-trial correlation record the
+    runner writes outside the workspace at FERMIX_EVAL_EVIDENCE. Absent evidence is
+    refused, never assumed empty.
 
 INPUT AND OUTPUT ARE NOT INTERCHANGEABLE, and neither is JSON. A tool routed through
 `FermixCore.Tools.Support.run/3` (schedule_job, run_job_now, skill_create, skill_reload)
@@ -139,6 +140,19 @@ def span_output(span):
     return json.dumps(value)
 
 
+def span_result(span):
+    """A tool's JSON result object off its span, or None when the output is not one.
+    Opik records the result wrapped as {"text": "<the tool's JSON>"}; the runner hands
+    that over as text, so both layers are decoded."""
+    try:
+        outer = json.loads(span_output(span))
+        inner = outer.get("text") if isinstance(outer, dict) else None
+        result = json.loads(inner) if isinstance(inner, str) else outer
+    except ValueError:
+        return None
+    return result if isinstance(result, dict) else None
+
+
 _SHELL_COMMAND_RE = re.compile(r'"command"\s*=>\s*"((?:[^"\\]|\\.)*)"')
 
 
@@ -162,7 +176,11 @@ def shell_command(span):
 
 def span_start(span):
     """A span's start_time as epoch seconds, or None when it was not recorded."""
-    raw = span.get("start_time")
+    return epoch_seconds(span.get("start_time"))
+
+
+def epoch_seconds(raw):
+    """An ISO-8601 timestamp as epoch seconds, or None when it is absent or unreadable."""
     if not isinstance(raw, str) or not raw:
         return None
     text = raw[:-1] + "+00:00" if raw.endswith("Z") else raw

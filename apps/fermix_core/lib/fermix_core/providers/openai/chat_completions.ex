@@ -52,9 +52,13 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletions do
   # re-sent each turn (bounded by the screenshot-retention cap once it lands).
   @image_followup_label "Image returned by the preceding tool call:"
   @image_followup_placeholder "[image in the following message]"
-  # Replaces a screenshot follow-up turn once it ages out of the retention
-  # window (ScreenshotRetention) — the image bytes drop, the textual trail stays.
-  @image_followup_elided "[earlier tool image omitted to bound context]"
+  # Replaces a screenshot follow-up turn once it ages out of the retention window
+  # (ScreenshotRetention). The image bytes drop and the textual trail stays — on
+  # the PRECEDING tool message, which this marker is read right after — so the
+  # marker has to void it: that text describes a picture in the present tense and
+  # every such sentence is now a claim about something the model cannot see
+  # (M42 §6.1).
+  @image_followup_elided "[the image the preceding tool result describes was dropped to bound context: it is a record of a past look, not a current view, and no coordinate or id in it can be used]"
 
   @impl true
   def continue(
@@ -170,6 +174,7 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletions do
 
     body =
       %{model: model, messages: format_messages(messages), temperature: temperature}
+      |> Map.merge(provider_body(provider))
       |> maybe_put_tools(to_provider_tools(capabilities))
       |> maybe_put(:response_format, response_format)
       |> maybe_put_reasoning_effort(provider, reasoning_effort)
@@ -415,6 +420,18 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletions do
   end
 
   defp provider_headers(_provider), do: []
+
+  # The body twin of provider_headers/1 (M49 §3.2, static, not configurable).
+  # Venice prepends its own system prompt beside the caller's unless told not
+  # to, and its reasoning models return thinking inline in `content` unless told
+  # to strip it — and this adapter reads `content` only, so without both fields
+  # Fermix's prompt is not the prompt and thinking text reaches the user. Other
+  # providers add nothing.
+  defp provider_body(:venice) do
+    %{venice_parameters: %{include_venice_system_prompt: false, strip_thinking_response: true}}
+  end
+
+  defp provider_body(_provider), do: %{}
 
   # Keyless providers (auth: :none, e.g. Ollama) demand no key and send no
   # authorization header — one explicit branch per configuration, not a

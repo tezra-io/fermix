@@ -159,6 +159,43 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
              reference =~ "ever deletes a Fermix home"
   end
 
+  # No repository serves the packages, so the family commands `fermix upgrade`
+  # prints find nothing. An agent asked "how do I update you?" on a packaged
+  # host must not stop at `apt upgrade`.
+  test "documents the Linux package installer, and that running it again is the update" do
+    paragraph = service_paragraph()
+    reference = File.read!(service_unit_reference_path())
+
+    assert paragraph =~ "curl -fsSL https://fermix.ai/install | sh"
+    assert paragraph =~ "fermix restart"
+    assert paragraph =~ "until a repository is published"
+
+    for required <- [
+          "curl -fsSL https://fermix.ai/install | sh",
+          "sha256",
+          "cosign",
+          "`apt`, `dnf` or `zypper`",
+          "--standalone",
+          "not a repository",
+          "Until a repository is published, those lines find nothing",
+          "fermix restart"
+        ] do
+      assert reference =~ required, "service_unit reference does not mention #{required}"
+    end
+  end
+
+  defp service_paragraph do
+    self_knowledge_path()
+    |> File.read!()
+    |> String.split("\n")
+    |> Enum.filter(&String.starts_with?(&1, "- Service:"))
+    |> Enum.join("\n")
+  end
+
+  defp service_unit_reference_path do
+    Path.expand("../../../priv/skills/self_knowledge/references/service_unit.md", __DIR__)
+  end
+
   defp app_managed_paragraph do
     self_knowledge_path()
     |> File.read!()
@@ -235,8 +272,11 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     end
 
     # Every `file:` pointer named in the main body resolves to a real reference.
+    # The lookbehind is load-bearing: `profile: "selected_tab"` ends in `file:`
+    # and is an ordinary thing to write in the body, so without it an argument
+    # name reads as a dangling pointer.
     pointers =
-      ~r/file:\s*"([a-z0-9_]+)"/
+      ~r/(?<![a-z_])file:\s*"([a-z0-9_]+)"/
       |> Regex.scan(body)
       |> Enum.map(fn [_, name] -> name end)
       |> Enum.uniq()

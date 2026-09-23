@@ -94,3 +94,11 @@ __pycache__/
 
 #videos
 videos/
+Claude outputs/
+
+# Locally built Linux packages, the loader they carry, and the container build's
+# caches. The rail publishes these; a developer's copies stay out of the tree.
+packaging/linux/out/
+# The Zig setup action restores its cache into the workspace root, and the
+# package build refuses a checkout that is not exactly the commit.
+/.zig-cache/

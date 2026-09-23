@@ -1,7 +1,31 @@
 defmodule FermixCore.Tools.BrowserTest do
   use ExUnit.Case, async: false
 
+  alias FermixCore.Browser.Scope
   alias FermixCore.Tools.Browser
+
+  # A ProfileServer stand-in registered in the production registry under one
+  # conversation's owner key, so `ProfileManager.dispatch/6` finds it on the
+  # lock-free lookup and never starts a real profile. This is what lets a test
+  # drive `Tools.Browser.execute/2` all the way through dispatch with no Chrome:
+  # the manager consults its GenServer (and the launcher) only on a cold start.
+  defmodule StubProfileServer do
+    use GenServer
+
+    def start_link(opts) do
+      key = Keyword.fetch!(opts, :key)
+      now = System.monotonic_time(:millisecond)
+      registry = FermixCore.Browser.Registry
+      GenServer.start_link(__MODULE__, opts, name: {:via, Registry, {registry, key, now}})
+    end
+
+    @impl true
+    def init(_opts), do: {:ok, %{}}
+
+    @impl true
+    def handle_call({:request, %{args: args}}, _from, state),
+      do: {:reply, {:ok, %{"ok" => true, "served" => Map.get(args, "name")}}, state}
+  end
 
   # Unique chat id so the owner_key digest cannot collide with another test's
   # registration in the shared FermixCore.Browser.Registry.
@@ -23,6 +47,37 @@ defmodule FermixCore.Tools.BrowserTest do
     end
   end
 
+  # The turn `act` now saves is only saved if the model knows not to snapshot
+  # again after a result that already carries the page. Steering that nobody
+  # asserts rots silently.
+  describe "steering for the post-action page report" do
+    test "the prompt surface teaches `page` and one fill_form per form" do
+      guidance = Browser.description() <> " " <> Browser.when_to_use()
+
+      for word <-
+            ~w(changed unchanged unobserved read_blocked read_origin_blocked page_reason
+               click_coords fill_form) do
+        assert guidance =~ word, "the prompt surface never mentions `#{word}`"
+      end
+    end
+
+    # The precondition is the half a model cannot guess: a first click on a tab
+    # it has never snapshotted returns no `page` key at all, and a model that
+    # reads its absence as "nothing changed" stops looking.
+    test "both halves of the prompt state that `page` needs a prior snapshot" do
+      assert Browser.description() =~ "already snapshotted"
+      assert Browser.when_to_use() =~ "already snapshotted"
+    end
+
+    test "both read refusals are documented as act outcomes, not only refusals" do
+      for tag <- ~w(read_blocked read_origin_blocked) do
+        %{description: description} = Enum.find(Browser.failure_modes(), &(&1.tag == tag))
+
+        assert description =~ "act", "`#{tag}` is an act `page` value and does not say so"
+      end
+    end
+  end
+
   describe "parameters/0" do
     test "returns flat JSON Schema with action as required" do
       params = Browser.parameters()
@@ -37,7 +92,7 @@ defmodule FermixCore.Tools.BrowserTest do
       actions = params.properties.action.enum
 
       for action <-
-            ~w(doctor status start stop open navigate snapshot tabs focus close screenshot act pdf console dialog cookies storage upload download) do
+            ~w(doctor status start stop open navigate snapshot tabs focus close screenshot act pdf console dialog cookies storage upload download webmcp) do
         assert action in actions
       end
 
@@ -54,6 +109,37 @@ defmodule FermixCore.Tools.BrowserTest do
       assert Map.has_key?(params.properties, :compact)
       assert Map.has_key?(params.properties, :depth)
       assert Map.has_key?(params.properties, :include_urls)
+    end
+
+    # The model cannot call an argument it cannot see: `fill_form` is only worth
+    # having if `fields` is in the schema beside the kind that reads it.
+    test "carries the fill_form fields, and names the kind that takes them" do
+      params = Browser.parameters()
+
+      assert params.properties.fields.type == "array"
+      assert params.properties.fields.items.type == "object"
+      assert Map.has_key?(params.properties.fields.items.properties, :ref)
+      assert Map.has_key?(params.properties.fields.items.properties, :text)
+      assert params.properties.kind.description =~ "fill_form"
+    end
+
+    test "carries the webmcp arguments, with op as a closed enum" do
+      params = Browser.parameters()
+
+      assert params.properties.op.enum == ["list", "call"]
+      assert params.properties.name.type == "string"
+      assert params.properties.input.type == "object"
+    end
+  end
+
+  describe "failure_modes/0" do
+    test "names every refusal the new paths can return" do
+      tags = Enum.map(Browser.failure_modes(), & &1.tag)
+
+      for tag <- ~w(outcome_unknown webmcp_unavailable webmcp_unknown_tool webmcp_tool_threw
+                    webmcp_timeout) do
+        assert tag in tags, "`#{tag}` is returnable but undocumented"
+      end
     end
   end
 
@@ -155,10 +241,109 @@ defmodule FermixCore.Tools.BrowserTest do
       assert result.error =~ "Invalid act kind"
     end
 
+    # `observe` decides whether a navigation hands the page back, so a value
+    # that is not a boolean is refused before the navigation rather than read as
+    # "observe anyway" — and, like the fill_form refusals below, it is decided
+    # before any Chrome launch, so this stays hermetic.
+    test "observe must be true or false, and says what false is for" do
+      for action <- ["open", "navigate"] do
+        args = %{"action" => action, "url" => "https://example.com", "observe" => "no"}
+        assert {:ok, result} = Browser.execute(args, @context)
+
+        assert result.success == false
+        assert result.error =~ "must be true or false"
+        assert result.error =~ "screenshot"
+      end
+    end
+
     test "recognizes submit as a ref-based act kind" do
       assert {:ok, result} = Browser.execute(%{"action" => "act", "kind" => "submit"}, @context)
       assert result.success == false
       assert result.error =~ "submit requires ref"
+    end
+
+    # Every fill_form refusal is decided before any Chrome launch, so these stay
+    # hermetic while covering the shape the model has to get right.
+    test "fill_form without fields says what a field is" do
+      assert {:ok, result} =
+               Browser.execute(%{"action" => "act", "kind" => "fill_form"}, @context)
+
+      assert result.success == false
+      assert result.error =~ "fields"
+      assert result.error =~ "ref"
+      assert result.error =~ "text"
+      refute result.error =~ "Invalid act kind"
+    end
+
+    test "fill_form refuses an empty list, a bad entry, and more fields than the cap" do
+      empty = %{"action" => "act", "kind" => "fill_form", "fields" => []}
+      assert {:ok, result} = Browser.execute(empty, @context)
+      assert result.success == false
+      assert result.error =~ "fields"
+
+      bad = %{
+        "action" => "act",
+        "kind" => "fill_form",
+        "fields" => [%{"ref" => "textbox_1", "text" => "a"}, %{"ref" => "textbox_2"}]
+      }
+
+      assert {:ok, entry} = Browser.execute(bad, @context)
+      assert entry.success == false
+      assert entry.error =~ "field 2"
+      assert entry.error =~ "text"
+
+      many = %{
+        "action" => "act",
+        "kind" => "fill_form",
+        "fields" => Enum.map(1..13, &%{"ref" => "textbox_#{&1}", "text" => "x"})
+      }
+
+      assert {:ok, over} = Browser.execute(many, @context)
+      assert over.success == false
+      assert over.error =~ "12"
+    end
+
+    # Every webmcp refusal below is decided before any Chrome launch, so these
+    # stay hermetic while covering the whole validation surface.
+    test "webmcp without an op names both ops and what each one needs" do
+      assert {:ok, result} = Browser.execute(%{"action" => "webmcp"}, @context)
+
+      assert result.success == false
+      assert result.error =~ "op"
+      assert result.error =~ "list"
+      assert result.error =~ "call"
+      assert result.error =~ "name"
+    end
+
+    test "webmcp rejects an op it does not have" do
+      assert {:ok, result} =
+               Browser.execute(%{"action" => "webmcp", "op" => "invoke"}, @context)
+
+      assert result.success == false
+      assert result.error =~ "op"
+    end
+
+    test "webmcp op=call requires a name, bounded in length" do
+      assert {:ok, missing} = Browser.execute(%{"action" => "webmcp", "op" => "call"}, @context)
+      assert missing.success == false
+      assert missing.error =~ "name"
+
+      long = %{"action" => "webmcp", "op" => "call", "name" => String.duplicate("t", 200)}
+      assert {:ok, oversize} = Browser.execute(long, @context)
+      assert oversize.success == false
+      assert oversize.error =~ "name"
+    end
+
+    test "webmcp input must be a JSON object, bounded in size" do
+      args = %{"action" => "webmcp", "op" => "call", "name" => "t", "input" => "e2e4"}
+      assert {:ok, wrong_type} = Browser.execute(args, @context)
+      assert wrong_type.success == false
+      assert wrong_type.error =~ "object"
+
+      big = %{args | "input" => %{"fen" => String.duplicate("q", 9_000)}}
+      assert {:ok, oversize} = Browser.execute(big, @context)
+      assert oversize.success == false
+      assert oversize.error =~ "input"
     end
 
     test "surfaces the structured error code and details to the agent" do
@@ -229,6 +414,64 @@ defmodule FermixCore.Tools.BrowserTest do
       assert_receive {:telemetry, [:fermix, :tool, :exec], _measurements, metadata}
       assert metadata.action == "act"
       assert metadata.kind == "frobnicate"
+
+      :telemetry.detach(handler_id)
+    end
+
+    # `op` is a validated enum, so it is safe for the always-on trace; the tool
+    # NAME and its INPUT are page/model text and stay in the gated body.
+    # The call must REACH dispatch: with no conversation_key `execute/2` stops at
+    # the owner-key resolution, and this would pass with validation and dispatch
+    # both broken. It gets there against a stub profile registered under this
+    # test's own owner — the whole tool path, and still no Chrome.
+    test "records the webmcp op and keeps the tool name and input out of metadata" do
+      set_capture(false)
+      session = "webmcp-meta-#{System.unique_integer([:positive])}"
+      conversation = {"cli", "chat-webmcp-#{System.unique_integer([:positive])}", :root}
+      stub_profile!(conversation)
+      handler_id = attach_telemetry(session)
+
+      context = %{agent_name: "test_agent", conversation_key: conversation, session_id: session}
+
+      assert {:ok, %{success: true, output: output}} =
+               Browser.execute(
+                 %{
+                   "action" => "webmcp",
+                   "op" => "call",
+                   "name" => "chess_move",
+                   "input" => %{"to" => "e4"}
+                 },
+                 context
+               )
+
+      # The stub's answer, so validation passed and the request was dispatched.
+      assert {:ok, %{"served" => "chess_move"}} = Jason.decode(output)
+
+      assert_receive {:telemetry, [:fermix, :tool, :exec], _measurements, metadata}
+      assert metadata.action == "webmcp"
+      assert metadata.op == "call"
+      assert metadata.success == true
+      refute Map.has_key?(metadata, :name)
+      refute Map.has_key?(metadata, :input)
+
+      # One model tool call is exactly one tool exec.
+      refute_receive {:telemetry, [:fermix, :tool, :exec], _measurements, _metadata}, 100
+
+      :telemetry.detach(handler_id)
+    end
+
+    # A model can put anything in `op`. Only the two validated spellings are
+    # safe for the always-on trace; anything else rides the gated body or not
+    # at all.
+    test "an op outside the enum is kept out of the always-on metadata" do
+      set_capture(false)
+      handler_id = attach_telemetry()
+
+      Browser.execute(%{"action" => "webmcp", "op" => %{"sneaky" => "map"}}, @context)
+
+      assert_receive {:telemetry, [:fermix, :tool, :exec], _measurements, metadata}
+      assert metadata.action == "webmcp"
+      refute Map.has_key?(metadata, :op)
 
       :telemetry.detach(handler_id)
     end
@@ -368,7 +611,18 @@ defmodule FermixCore.Tools.BrowserTest do
     on_exit(fn -> Application.put_env(:fermix_core, :telemetry, prev) end)
   end
 
-  defp attach_telemetry do
+  # Its own conversation, so the registration cannot be the `status` test's
+  # profile — or any other module's — seen as running.
+  defp stub_profile!(conversation_key) do
+    {:ok, owner} = Scope.owner_key(%{conversation_key: conversation_key})
+    start_supervised!({StubProfileServer, key: {owner, "fermix"}}, id: {:stub_profile, owner})
+  end
+
+  defp attach_telemetry, do: attach_telemetry(nil)
+
+  # A globally attached handler sees every async module's events, so a test that
+  # counts them pins its own correlation id and lets the rest through.
+  defp attach_telemetry(session_id) do
     handler_id = "test-browser-#{System.unique_integer([:positive])}"
     test_pid = self()
 
@@ -376,7 +630,7 @@ defmodule FermixCore.Tools.BrowserTest do
       handler_id,
       [:fermix, :tool, :exec],
       fn event, measurements, metadata, _config ->
-        if metadata.tool == "browser" do
+        if metadata.tool == "browser" and mine?(metadata, session_id) do
           send(test_pid, {:telemetry, event, measurements, metadata})
         end
       end,
@@ -385,4 +639,7 @@ defmodule FermixCore.Tools.BrowserTest do
 
     handler_id
   end
+
+  defp mine?(_metadata, nil), do: true
+  defp mine?(metadata, session_id), do: Map.get(metadata, :session_id) == session_id
 end

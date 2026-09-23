@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "diagnostics_unavailable",
+    "sentence": "Fermix could not collect the diagnostic bundle. It said: collecting it took too long"
+  },
+  "ok": false,
+  "schema_version": 1
+}

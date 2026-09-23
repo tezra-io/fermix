@@ -226,6 +226,7 @@ defmodule FermixCore.Introspection.Overview do
       enabled: false,
       status: :unknown,
       provider: nil,
+      engine: nil,
       model: nil,
       socket_path: nil,
       socket_alive: nil,

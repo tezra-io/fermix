@@ -23,6 +23,7 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.Harness.Vendors, as: HarnessVendors
   alias FermixCore.Management.Protocol, as: ManagementProtocol
   alias FermixCore.Management.Settings, as: ManagementSettings
+  alias FermixCore.Management.Settings.Voice, as: VoiceSettings
   alias FermixCore.Meetings
   alias FermixCore.Meetings.BrowserInstall
   alias FermixCore.Meetings.Config, as: MeetingsConfig
@@ -109,8 +110,8 @@ defmodule FermixWebWeb.SetupLive do
   @meetbot_signin_timeout_message "Sign-in timed out. Open it again and complete the Google sign-in."
   # Providers the per-provider OAuth-client form supports — mirrors
   # FermixCore.Auth.OAuthProviders. Default ports: google 1455, github 1457,
-  # notion 1458, x 1459, slack 1460.
-  @oauth_client_providers ~w(google github notion x slack)
+  # notion 1458, x 1459, slack 1460, tesla 1461.
+  @oauth_client_providers ~w(google github notion x slack tesla)
   # Derived from the descriptor registry: every provider setup field plus
   # each multi-auth-mode provider's auth_mode answer (M12 §6.2).
   @provider_restart_keys [:provider, :default_model, :reasoning_effort, :fast] ++
@@ -124,6 +125,7 @@ defmodule FermixWebWeb.SetupLive do
   @realtime_restart_keys [
     :realtime_enabled,
     :realtime_api_key,
+    :realtime_engine,
     :realtime_model,
     :realtime_reasoning_effort,
     :realtime_voice,
@@ -331,13 +333,17 @@ defmodule FermixWebWeb.SetupLive do
     end
   end
 
+  def handle_event("change_realtime", %{"realtime_form" => params}, socket) do
+    form = edited_realtime_form(socket.assigns.realtime_form, params)
+    {:noreply, assign(socket, :realtime_form, form)}
+  end
+
   def handle_event("save_realtime", %{"realtime_form" => params} = root, socket) do
     answers =
       []
       |> maybe_put_string(:realtime_enabled, params["enabled"])
       |> maybe_put_string(:realtime_api_key, params["api_key"])
-      |> maybe_put_string(:realtime_model, params["model"])
-      |> maybe_put_string(:realtime_reasoning_effort, params["reasoning_effort"])
+      |> realtime_model_answers(params, socket.assigns.realtime_form)
       |> maybe_put_string(:realtime_voice, params["voice"])
       |> maybe_put_string(:realtime_max_session_minutes, params["max_session_minutes"])
       |> maybe_put_string(:realtime_max_cost_cents, params["max_cost_cents"])
@@ -430,37 +436,46 @@ defmodule FermixWebWeb.SetupLive do
   end
 
   def handle_event("transcription_changed", %{"transcription_form" => params}, socket) do
-    previous = socket.assigns.transcription_form.backend
+    form = socket.assigns.transcription_form
+    previous = form.backend
     backend = normalize_transcription_backend(Map.get(params, "backend"))
 
-    form =
-      update_transcription_selection(
-        socket.assigns.transcription_form,
-        backend,
-        Map.get(params, "model")
-      )
+    refusal = local_switch_refusal(backend, previous, form.local_offer)
 
-    {:noreply,
-     socket
-     |> assign(:transcription_form, form)
-     |> maybe_install_local_stt(previous, backend)}
+    if is_binary(refusal) do
+      {:noreply, flash_error(socket, refusal)}
+    else
+      selected = update_transcription_selection(form, backend, Map.get(params, "model"))
+
+      {:noreply,
+       socket
+       |> assign(:transcription_form, selected)
+       |> maybe_install_local_stt(previous, backend)}
+    end
   end
 
   def handle_event("save_transcription", %{"transcription_form" => params} = root, socket) do
-    # The single `api_key` field carries the selected backend's transcription key;
-    # the wizard routes it to that backend's slot (openai/xai override the reused
-    # chat key, deepgram is its only source). `model` is snapped to the selected
-    # backend's default by the wizard when no explicit model rides along, so a
-    # backend switch never leaves an OpenAI-shaped model on Deepgram (xai is
-    # modelless and sends none).
-    answers =
-      []
-      |> maybe_put_string(:transcription_backend, params["backend"])
-      |> maybe_put_string(:transcription_model, params["model"])
-      |> maybe_put_string(:transcription_api_key, params["api_key"])
+    form = socket.assigns.transcription_form
+    refusal = local_switch_refusal(params["backend"], form.backend, form.local_offer)
 
-    # Backends read [fermix_core.transcription] per call, so no daemon restart.
-    {:noreply, save_answers(socket, answers, "Transcription saved.", Map.get(root, "__nav"))}
+    if is_binary(refusal) do
+      {:noreply, flash_error(socket, refusal)}
+    else
+      # The single `api_key` field carries the selected backend's transcription key;
+      # the wizard routes it to that backend's slot (openai/xai override the reused
+      # chat key, deepgram is its only source). `model` is snapped to the selected
+      # backend's default by the wizard when no explicit model rides along, so a
+      # backend switch never leaves an OpenAI-shaped model on Deepgram (xai is
+      # modelless and sends none).
+      answers =
+        []
+        |> maybe_put_string(:transcription_backend, params["backend"])
+        |> maybe_put_string(:transcription_model, params["model"])
+        |> maybe_put_string(:transcription_api_key, params["api_key"])
+
+      # Backends read [fermix_core.transcription] per call, so no daemon restart.
+      {:noreply, save_answers(socket, answers, "Transcription saved.", Map.get(root, "__nav"))}
+    end
   end
 
   # Text and toggle values are always written (a cleared `announce_message` means
@@ -468,22 +483,38 @@ defmodule FermixWebWeb.SetupLive do
   # secret is written only when the operator typed one, so an untouched password
   # field keeps the stored credential.
   def handle_event("save_meetings", %{"meetings_form" => params} = root, socket) do
-    changes =
-      [
-        enabled: checked?(params["enabled"]),
-        bot_name: safe_string(params["bot_name"]),
-        announce: checked?(params["announce"]),
-        announce_message: safe_string(params["announce_message"]),
-        transcription_backend: normalize_meetings_backend(params["transcription_backend"]),
-        zoom_account_id: safe_string(params["zoom_account_id"]),
-        zoom_client_id: safe_string(params["zoom_client_id"]),
-        zoom_ws_subscription_id: safe_string(params["zoom_ws_subscription_id"])
-      ]
-      |> maybe_put_string(:zoom_client_secret, params["zoom_client_secret"])
+    form = socket.assigns.meetings_form
 
-    {:noreply, save_meetings(socket, changes, Map.get(root, "__nav"))}
+    refusal =
+      local_switch_refusal(
+        params["transcription_backend"],
+        form.transcription_backend,
+        form.local_offer
+      )
+
+    if is_binary(refusal) do
+      {:noreply, flash_error(socket, refusal)}
+    else
+      changes =
+        [
+          enabled: checked?(params["enabled"]),
+          bot_name: safe_string(params["bot_name"]),
+          announce: checked?(params["announce"]),
+          announce_message: safe_string(params["announce_message"]),
+          zoom_account_id: safe_string(params["zoom_account_id"]),
+          zoom_client_id: safe_string(params["zoom_client_id"]),
+          zoom_ws_subscription_id: safe_string(params["zoom_ws_subscription_id"])
+        ]
+        |> put_meetings_backend(params)
+        |> maybe_put_string(:zoom_client_secret, params["zoom_client_secret"])
+
+      {:noreply, save_meetings(socket, changes, Map.get(root, "__nav"))}
+    end
   end
 
+  # `set_oauth_provider/2` rebuilds the provider block from `opts` alone, so a
+  # key left out is erased: every stored value the form does not render
+  # (`redirect_uri`) or leaves blank (`region`) is carried through explicitly.
   def handle_event(
         "save_oauth_client",
         %{"provider" => provider, "oauth_client_form" => params},
@@ -499,7 +530,9 @@ defmodule FermixWebWeb.SetupLive do
         parse_int(
           params["redirect_port"],
           Keyword.get(current, :redirect_port, oauth_default_port(provider))
-        )
+        ),
+      region: present_or(params["region"], Keyword.get(current, :region)),
+      redirect_uri: Keyword.get(current, :redirect_uri)
     ]
 
     result = PluginConfig.set_oauth_provider(provider, opts)
@@ -626,6 +659,25 @@ defmodule FermixWebWeb.SetupLive do
       ) do
     case save_plugin_settings(name, params) do
       :ok ->
+        {:noreply, refresh_report(socket, "Plugin configuration saved.")}
+
+      {:error, reason} ->
+        {:noreply, save_refused(socket, reason)}
+    end
+  end
+
+  # A `kind: :boolean` manifest entry is a switch on the card, not a field in
+  # that form: the click carries the word it stores, so it applies at once. The
+  # card keeps the switch afterwards, since "off" is an answer the operator can
+  # give again.
+  def handle_event(
+        "set_plugin_switch",
+        %{"name" => name, "key" => key, "value" => value},
+        socket
+      )
+      when value in ["true", "false"] do
+    case PluginConfig.set_plugin_setting(name, key, value) do
+      {:ok, _snapshot} ->
         {:noreply, refresh_report(socket, "Plugin configuration saved.")}
 
       {:error, reason} ->
@@ -917,7 +969,10 @@ defmodule FermixWebWeb.SetupLive do
   # Re-read only the readiness line: rebuilding the whole report here would
   # throw away the backend the operator just picked but has not saved yet.
   def handle_async(:local_install, {:ok, :ok}, socket) do
-    form = %{socket.assigns.transcription_form | local_state: LocalTranscription.configured?([])}
+    form = %{
+      socket.assigns.transcription_form
+      | local_state: LocalTranscription.configured?(local_transcription_opts())
+    }
 
     {:noreply,
      socket
@@ -1158,10 +1213,25 @@ defmodule FermixWebWeb.SetupLive do
     "#{oauth_display_name(provider)} OAuth Client secret is required."
   end
 
+  # A regional provider's region is the token-exchange audience and the API
+  # host, so it is chosen before connecting and never defaulted.
+  defp format_config_error({:missing_oauth_region, provider})
+       when provider in @oauth_client_providers do
+    "Choose the account's region for the #{oauth_display_name(provider)} sign-in client."
+  end
+
+  defp format_config_error({:invalid_oauth_region, provider, region})
+       when provider in @oauth_client_providers and is_binary(region) do
+    "#{oauth_display_name(provider)} has no region named #{region}."
+  end
+
   defp format_config_error({:unknown_config_key, key}),
     do: "#{key} is not a config key this plugin declares."
 
   defp format_config_error({:blank_config_value, key}), do: "#{key} requires a value."
+
+  defp format_config_error({:invalid_config_value, key, :boolean}),
+    do: "#{key} is a switch: send true or false."
 
   # The two refusals the shared write tails raise. Both sentences are the
   # daemon's: the external-change one is read from the error catalog both
@@ -1215,6 +1285,7 @@ defmodule FermixWebWeb.SetupLive do
   defp oauth_default_port("notion"), do: 1458
   defp oauth_default_port("x"), do: 1459
   defp oauth_default_port("slack"), do: 1460
+  defp oauth_default_port("tesla"), do: 1461
 
   defp refresh_report(socket, message, opts \\ []) do
     Wizard.report()
@@ -1489,23 +1560,116 @@ defmodule FermixWebWeb.SetupLive do
   defp default_effort(:anthropic), do: :high
   defp default_effort(_provider), do: :none
 
+  # The model names its engine, so the two travel together and the pane never
+  # sends a pair the configuration would refuse. Reasoning effort is a
+  # Realtime-only session setting: the browser posts the effort select it last
+  # rendered, which under a Live model belongs to the engine the operator just
+  # left, so it is sent only when the chosen model is a Realtime one.
+  defp realtime_model_answers(answers, params, form) do
+    model = realtime_model_or(params["model"], form.model)
+    {:ok, engine} = RealtimeConfig.engine_for_model(model)
+
+    answers
+    |> maybe_put_string(:realtime_engine, engine)
+    |> maybe_put_string(:realtime_model, model)
+    |> realtime_effort_answer(engine, params)
+  end
+
+  defp realtime_effort_answer(answers, "openai_realtime", params),
+    do: maybe_put_string(answers, :realtime_reasoning_effort, params["reasoning_effort"])
+
+  defp realtime_effort_answer(answers, "openai_live", _params), do: answers
+
   defp build_realtime_form(snapshot) do
     config = snapshot |> get_fermix_core(:realtime) |> RealtimeConfig.normalize()
 
     %{
       enabled: config.enabled?,
-      model: config.model,
-      models: RealtimeConfig.valid_models(),
-      reasoning_effort: config.reasoning_effort,
+      models: realtime_model_options(),
       reasoning_efforts: RealtimeConfig.valid_reasoning_efforts(),
-      voice: config.voice,
-      voices: RealtimeConfig.valid_voices(),
       max_session_minutes: config.max_session_minutes,
       max_cost_cents: config.max_estimated_cost_cents_per_session,
       persist_transcripts: config.persist_transcripts?,
       api_key_set: api_key_configured?(snapshot)
     }
+    |> Map.merge(realtime_model_scope(config.model, config.voice, config.reasoning_effort))
   end
+
+  # `phx-change` posts every input the pane rendered, so the operator's unsaved
+  # edits travel back as typed and only the model-scoped fields are re-derived.
+  defp edited_realtime_form(form, params) do
+    model = realtime_model_or(params["model"], form.model)
+
+    form
+    |> Map.merge(%{
+      enabled: Map.get(params, "enabled", to_string(form.enabled)) == "true",
+      persist_transcripts:
+        Map.get(params, "persist_transcripts", to_string(form.persist_transcripts)) == "true",
+      max_session_minutes: Map.get(params, "max_session_minutes", form.max_session_minutes),
+      max_cost_cents: Map.get(params, "max_cost_cents", form.max_cost_cents)
+    })
+    |> Map.merge(
+      realtime_model_scope(
+        model,
+        params["voice"],
+        Map.get(params, "reasoning_effort", form.reasoning_effort)
+      )
+    )
+  end
+
+  # The model is the one voice choice the pane offers, so it is the axis
+  # everything else hangs off: the engine it belongs to, the voices that engine
+  # speaks, and whether reasoning effort is a setting at all. One derivation
+  # serves the saved config and an unsaved pick, so what the pane offers before
+  # a save is exactly what the save seam keeps.
+  defp realtime_model_scope(model, voice, effort) do
+    {:ok, engine} = RealtimeConfig.engine_for_model(model)
+    voices = RealtimeConfig.valid_voices(engine)
+
+    %{
+      engine: engine,
+      # `live?/1` reads the one field; asking Config keeps the engine's name out
+      # of this module.
+      live?: RealtimeConfig.live?(%RealtimeConfig{engine: engine}),
+      model: model,
+      voice: if(voice in voices, do: voice, else: %RealtimeConfig{}.voice),
+      voices: voices,
+      reasoning_effort: realtime_effort_for(engine, effort)
+    }
+  end
+
+  # Reasoning effort exists only under Realtime; Live normalizes it away. A
+  # return to a Realtime model therefore has nothing to restore and opens on the
+  # same default the save seam writes.
+  defp realtime_effort_for("openai_live", _effort), do: nil
+
+  defp realtime_effort_for("openai_realtime", effort) do
+    if effort in RealtimeConfig.valid_reasoning_efforts(),
+      do: effort,
+      else: %RealtimeConfig{}.reasoning_effort
+  end
+
+  # Both engines' models in one list, each option naming the engine it speaks
+  # through. The engine is a property of the model, never a second control the
+  # operator has to keep in agreement with the first.
+  defp realtime_model_options do
+    Enum.flat_map(RealtimeConfig.valid_engines(), fn engine ->
+      label = VoiceSettings.engine_label(engine)
+      Enum.map(RealtimeConfig.valid_models(engine), &%{id: &1, label: "#{&1} · #{label}"})
+    end)
+  end
+
+  # The <select> offers only models the catalog names, so anything else is a
+  # hand-crafted post: keep the model the pane is already scoped to rather than
+  # deriving an engine from a slug no release knows.
+  defp realtime_model_or(model, current) when is_binary(model) do
+    case RealtimeConfig.engine_for_model(model) do
+      {:ok, _engine} -> model
+      :error -> current
+    end
+  end
+
+  defp realtime_model_or(_model, current), do: current
 
   defp build_channels_form(snapshot) do
     channels = Map.get(snapshot, :fermix_channels, [])
@@ -1671,12 +1835,14 @@ defmodule FermixWebWeb.SetupLive do
     transcription = get_fermix_core(snapshot, :transcription)
     backend = normalize_transcription_backend(Keyword.get(transcription, :backend))
     options = transcription_models_for(backend)
+    local_opts = local_transcription_opts()
 
     %{
       backend: backend,
       model_options: options,
       model: transcription_model_for_options(Keyword.get(transcription, :model), options),
-      local_state: LocalTranscription.configured?([]),
+      local_offer: LocalTranscription.offer(transcription, Atom.to_string(backend), local_opts),
+      local_state: LocalTranscription.configured?(local_opts),
       openai_api_key_set: secret_set?(transcription, :openai_api_key),
       xai_api_key_set: secret_set?(transcription, :xai_api_key),
       deepgram_api_key_set: secret_set?(transcription, :deepgram_api_key)
@@ -1726,15 +1892,23 @@ defmodule FermixWebWeb.SetupLive do
   # the shipped backend names rather than repeating the global default here.
   defp build_meetings_form(snapshot) do
     meetings = get_fermix_core(snapshot, :meetings)
+    in_force = normalize_meetings_backend(Keyword.get(meetings, :transcription_backend))
+
+    offer =
+      LocalTranscription.offer(
+        get_fermix_core(snapshot, :transcription),
+        in_force,
+        local_transcription_opts()
+      )
 
     %{
       enabled: Keyword.get(meetings, :enabled, false) == true,
       bot_name: safe_string(Keyword.get(meetings, :bot_name, "Fermix Notetaker")),
       announce: Keyword.get(meetings, :announce, true) == true,
       announce_message: safe_string(Keyword.get(meetings, :announce_message)),
-      transcription_backend:
-        normalize_meetings_backend(Keyword.get(meetings, :transcription_backend)),
-      backend_options: meetings_backend_options(),
+      transcription_backend: in_force,
+      backend_options: meetings_backend_options(offer),
+      local_offer: offer,
       zoom_account_id: safe_string(Keyword.get(meetings, :zoom_account_id)),
       zoom_client_id: safe_string(Keyword.get(meetings, :zoom_client_id)),
       zoom_ws_subscription_id: safe_string(Keyword.get(meetings, :zoom_ws_subscription_id)),
@@ -1745,7 +1919,19 @@ defmodule FermixWebWeb.SetupLive do
     }
   end
 
-  defp meetings_backend_options do
+  # The blank global-default entry, then every shipped backend the notetaker can
+  # be pointed at. On-device speech is listed only where it is not hidden, the
+  # same rule the Voice notes tab follows.
+  defp meetings_backend_options(local_offer) do
+    Enum.reject(
+      meetings_backend_names(),
+      &(&1 == "local" and match?({:hidden, _sentence}, local_offer))
+    )
+  end
+
+  # Every name the picker may carry, which is also the vocabulary a submitted
+  # value is normalized against: what setup OFFERS is narrower.
+  defp meetings_backend_names do
     ["" | Enum.map(TranscriptionRegistry.backends(), fn {name, _module} -> to_string(name) end)]
   end
 
@@ -1753,8 +1939,16 @@ defmodule FermixWebWeb.SetupLive do
   # entry, so anything else off the wire is normalized back to the blank.
   defp normalize_meetings_backend(value) do
     name = safe_string(value)
-    if name in meetings_backend_options(), do: name, else: ""
+    if name in meetings_backend_names(), do: name, else: ""
   end
+
+  # A browser leaves a disabled selected option (on-device speech on a machine
+  # with no build for it) out of the submission, so an absent field is the
+  # operator not touching it, never a clear back to the voice-notes default.
+  defp put_meetings_backend(changes, %{"transcription_backend" => value}),
+    do: Keyword.put(changes, :transcription_backend, normalize_meetings_backend(value))
+
+  defp put_meetings_backend(changes, _params), do: changes
 
   # `[fermix_core.meetings]` is written as a section rather than through wizard
   # answers, but through the same shared write tail every other setup writer
@@ -1888,7 +2082,7 @@ defmodule FermixWebWeb.SetupLive do
   # selects say so instead of re-running the installer.
   defp maybe_install_local_stt(socket, previous, :local) when previous != :local do
     cond do
-      LocalTranscription.configured?([]) == :ok ->
+      LocalTranscription.configured?(local_transcription_opts()) == :ok ->
         assign(socket, :local_install, done(@local_ready_message))
 
       installing?(socket.assigns.local_install) ->
@@ -1917,6 +2111,26 @@ defmodule FermixWebWeb.SetupLive do
   # rendered without a half-installed host.
   defp local_installer do
     Application.get_env(:fermix_web, :local_installer, &LocalTranscription.ensure_installed/1)
+  end
+
+  # The control is presentation; the handlers are the boundary. A request that
+  # switches to on-device speech while it is not offered, or on a machine with
+  # no build for it, is refused in the sentence that says which — whatever sent
+  # it. A value already in force passes through, so the rest of a form saves.
+  defp local_switch_refusal(requested, in_force, local_offer) do
+    if to_string(requested) == "local" and to_string(in_force) != "local" do
+      refusal_sentence(local_offer)
+    end
+  end
+
+  defp refusal_sentence(:offer), do: nil
+  defp refusal_sentence({_listing, sentence}), do: sentence
+
+  # Injectable like `:doctor_probe_opts`: whether on-device speech runs here is a
+  # fact about the machine, so a LiveView test names the machine it means (its
+  # `releases:` pin) instead of inheriting the CI host's. Production passes none.
+  defp local_transcription_opts do
+    Application.get_env(:fermix_web, :local_transcription_opts, [])
   end
 
   defp local_progress_message({:sidecar, :downloading}), do: "Downloading the speech engine…"
@@ -2094,8 +2308,8 @@ defmodule FermixWebWeb.SetupLive do
   # The native-driver features: capabilities that run on a bundled sidecar rather
   # than a plugin, presented together so their toggles sit in one place instead of
   # scattered across tabs. Computer-history is macOS-only (`ComputerHistory.macos?/0`,
-  # where its AXObserver capture runs); the speech and meeting notetakers install
-  # their sidecar on enable and refuse loud until a release is pinned.
+  # where its AXObserver capture runs); the meeting notetaker installs its sidecar
+  # on enable. On-device speech is not a card: it is a backend on the Voice notes tab.
   defp core_feature_cards(snapshot) do
     [computer_use_card(snapshot)] ++
       if(ComputerHistory.macos?(), do: [computer_history_card(snapshot)], else: []) ++
@@ -2193,6 +2407,7 @@ defmodule FermixWebWeb.SetupLive do
 
   defp plugin_card(plugin, snapshot, yanked_installed) do
     {enabled?, status} = plugin_card_state(plugin, snapshot)
+    configured = PluginConfig.plugin_settings(plugin.name)
 
     %{
       name: plugin.name,
@@ -2211,7 +2426,8 @@ defmodule FermixWebWeb.SetupLive do
       # Manifest data, not a plugin name: a `resource_scope` is what earns the
       # card its workspace step (M27 §8.1).
       resource_scope?: plugin.resource_scope != nil,
-      missing_config: missing_config_entries(plugin),
+      config_entries: config_entries(plugin, configured, status),
+      config_switches: config_switches(plugin, configured, enabled?),
       yanked_version: Map.get(yanked_installed, plugin.name)
     }
   end
@@ -2248,14 +2464,55 @@ defmodule FermixWebWeb.SetupLive do
 
   defp client_rejection(_plugin, _status), do: nil
 
-  # The card's config form (§4.4): one input per missing required manifest
-  # config entry, labelled with the manifest prompt.
-  defp missing_config_entries(plugin) do
-    configured = PluginConfig.plugin_settings(plugin.name)
-
+  # The card's config form (§4.4): one input per manifest text entry the operator
+  # still owes, labelled with the manifest prompt. A boolean entry is never here
+  # — it is a switch, and a switch is answered in place.
+  defp config_entries(plugin, configured, status) do
     plugin.config
-    |> Enum.filter(&(&1.required and not Map.has_key?(configured, &1.key)))
-    |> Enum.map(&Map.take(&1, [:key, :prompt]))
+    |> Enum.filter(&owed_text_entry?(&1, configured, status))
+    |> Enum.map(&config_form_entry(&1, configured))
+  end
+
+  defp owed_text_entry?(%{kind: :boolean}, _configured, _status), do: false
+
+  defp owed_text_entry?(%{kind: :text} = entry, configured, status) do
+    status == :needs_config and entry.required and unanswered?(entry, configured)
+  end
+
+  # Every boolean entry an enabled plugin declares is an instant switch beside
+  # the card's other controls — "off" is a real answer, so a switch stays on the
+  # card after it is given instead of vanishing the way a filled-in path does.
+  # `next` is the word one click stores.
+  defp config_switches(_plugin, _configured, false), do: []
+
+  defp config_switches(plugin, configured, true) do
+    plugin.config
+    |> Enum.filter(&boolean_entry?/1)
+    |> Enum.map(&config_switch_entry(&1, configured))
+  end
+
+  defp boolean_entry?(%{kind: :boolean}), do: true
+  defp boolean_entry?(%{kind: :text}), do: false
+
+  defp unanswered?(entry, configured), do: not Map.has_key?(configured, entry.key)
+
+  defp config_form_entry(entry, configured) do
+    %{
+      key: entry.key,
+      prompt: entry.prompt,
+      value: Map.get(configured, entry.key, "")
+    }
+  end
+
+  defp config_switch_entry(entry, configured) do
+    checked? = Map.get(configured, entry.key) == "true"
+
+    %{
+      key: entry.key,
+      prompt: entry.prompt,
+      checked: checked?,
+      next: to_string(not checked?)
+    }
   end
 
   # A not-yet-installed catalog entry: branding straight from the index (§6 —
@@ -2382,7 +2639,9 @@ defmodule FermixWebWeb.SetupLive do
       display_name: oauth_display_name(provider),
       client_id: Keyword.get(config, :client_id, ""),
       client_secret_set: Keyword.get(config, :client_secret) |> present?(),
-      redirect_port: Keyword.get(config, :redirect_port, oauth_default_port(provider))
+      redirect_port: Keyword.get(config, :redirect_port, oauth_default_port(provider)),
+      region: Keyword.get(config, :region),
+      regions: OAuthProviders.regions(provider)
     }
   end
 
@@ -2774,9 +3033,9 @@ defmodule FermixWebWeb.SetupLive do
       display_name: "Computer History",
       description: "Passive activity memory from the apps you allow.",
       tooltip:
-        "Opt-in activity memory from the apps you allow: window titles and typed text; " <>
-          "inside browsers only window titles are captured today. " <>
-          "Passwords and secure fields are never captured. " <>
+        "Opt-in activity memory from the apps you allow: window titles, and in browsers " <>
+          "the page titles and addresses of every site you visit, plus typed text outside " <>
+          "private windows. Passwords and secure fields are never captured. " <>
           computer_history_summarizer_sentence(),
       docs_url: "https://fermix.ai/docs/computer-history/",
       enabled?: enabled?,
@@ -3764,6 +4023,7 @@ defmodule FermixWebWeb.SetupLive do
   defp present?(nil), do: false
   defp present?(""), do: false
   defp present?("@keyring"), do: false
+  defp present?("@file"), do: false
   defp present?(value) when is_binary(value), do: String.trim(value) != ""
   defp present?(value) when is_list(value), do: value != []
   defp present?(_), do: true

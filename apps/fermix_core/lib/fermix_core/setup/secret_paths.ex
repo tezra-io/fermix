@@ -45,6 +45,12 @@ defmodule FermixCore.Setup.SecretPaths do
       sandbox_env: true
     },
     %{
+      key: :venice_api_key,
+      env: "VENICE_API_KEY",
+      path: [:fermix_core, :providers, :venice, :api_key],
+      sandbox_env: true
+    },
+    %{
       key: :tavily_api_key,
       env: "TAVILY_API_KEY",
       path: [:fermix_core, :tools, :web_search, :tavily_api_key],
@@ -166,6 +172,11 @@ defmodule FermixCore.Setup.SecretPaths do
       path: [:fermix_core, :oauth, "slack", :client_secret]
     },
     %{
+      key: :tesla_oauth_client_secret,
+      env: "TESLA_OAUTH_CLIENT_SECRET",
+      path: [:fermix_core, :oauth, "tesla", :client_secret]
+    },
+    %{
       key: :telegram_bot_token,
       env: "TELEGRAM_BOT_TOKEN",
       path: [:fermix_channels, :telegram, :bot_token]
@@ -237,19 +248,6 @@ defmodule FermixCore.Setup.SecretPaths do
       path: [:fermix_core, :plugin_secrets, "slack"],
       plugin: "slack",
       functionality: "Slack plugin",
-      optional?: true
-    },
-    # M27 §7.5: the Eden personal access token. `env` is only the keyring
-    # account label SecretWriter stores under — there is deliberately no
-    # `System.get_env("FERMIX_PLUGIN_EDEN")` overlay and no `sandbox_env`
-    # export, so the keychain is the single credential source and "forget
-    # local credential" can be truthful.
-    %{
-      key: :eden_plugin_secret,
-      env: "FERMIX_PLUGIN_EDEN",
-      path: [:fermix_core, :plugin_secrets, "eden"],
-      plugin: "eden",
-      functionality: "Eden plugin",
       optional?: true
     }
   ]

@@ -1,0 +1,57 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: fermix
+Upstream-Contact: Tezra <hello@fermix.ai>
+Source: https://github.com/tezra-io/fermix
+
+Files: *
+Copyright: Tezra
+License: MIT
+
+License: MIT
+ Permission is hereby granted, free of charge, to any person obtaining a copy
+ of this software and associated documentation files (the "Software"), to deal
+ in the Software without restriction, including without limitation the rights
+ to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ copies of the Software, and to permit persons to whom the Software is
+ furnished to do so, subject to the following conditions:
+ .
+ The above copyright notice and this permission notice shall be included in all
+ copies or substantial portions of the Software.
+ .
+ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ SOFTWARE.
+
+Comment:
+ This package bundles third-party components, which Debian Policy and the
+ Fedora packaging guidelines ask a package to declare rather than hide. They
+ are listed here in full.
+ .
+ /usr/bin/fermix is a single self-extracting executable produced by Burrito.
+ It contains, in addition to this project's own compiled BEAM code:
+ .
+   * Erlang/OTP, including the ERTS, linked against musl libc, distributed
+     under the Apache License 2.0. Upstream: https://www.erlang.org
+   * The Elixir standard library, Apache License 2.0.
+     Upstream: https://elixir-lang.org
+   * musl libc, MIT License. Upstream: https://musl.libc.org
+   * OpenSSL, statically linked into the ERTS crypto driver, Apache License
+     2.0. Upstream: https://www.openssl.org
+   * The Burrito wrapper and its embedded XZ decoder (public domain).
+     Upstream: https://github.com/burrito-elixir/burrito
+   * The Elixir and Erlang libraries this project depends on, each under its
+     own licence; `fermix capabilities` and the project's mix.lock name them.
+ .
+ /usr/lib/fermix/runtime-payload/libc-musl-<digest>.so is the musl libc
+ dynamic loader the bundled ERTS was linked against, MIT License. The package
+ configuration step copies it to /var/lib/fermix/runtimes/<digest>/libc-musl.so
+ and leaves it there when the package is removed, because a Fermix release that
+ is still running asks the kernel for that exact file.
+ .
+ /usr/lib/fermix/cosign is a static build of Sigstore cosign, Apache License
+ 2.0, used to verify plugin and release signatures.
+ Upstream: https://github.com/sigstore/cosign

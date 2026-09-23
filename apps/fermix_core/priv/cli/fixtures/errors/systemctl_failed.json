@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "systemctl_failed",
+    "sentence": "The service manager refused the change. It said: Unit fermix.service not found."
+  },
+  "ok": false,
+  "schema_version": 1
+}

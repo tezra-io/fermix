@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "foreign_distribution",
+    "sentence": "This Fermix was not installed from a Linux package, so there is no packaged background service for it to manage."
+  },
+  "ok": false,
+  "schema_version": 1
+}

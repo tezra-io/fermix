@@ -11,6 +11,10 @@ defmodule FermixCore.Setup.SecretWriterTest do
     def available?(_opts \\ []), do: false
 
     @impl true
+    def probe(opts \\ []),
+      do: %{store: Keyword.get(opts, :store, :keyring), state: :unavailable, sentence: "double"}
+
+    @impl true
     def put(_key, _value, _opts \\ []), do: {:error, :unavailable}
 
     @impl true
@@ -29,6 +33,10 @@ defmodule FermixCore.Setup.SecretWriterTest do
 
     @impl true
     def available?(_opts \\ []), do: true
+
+    @impl true
+    def probe(opts \\ []),
+      do: %{store: Keyword.get(opts, :store, :keyring), state: :available, sentence: "double"}
 
     @impl true
     def put(_key, _value, _opts \\ []), do: :ok
@@ -137,6 +145,7 @@ defmodule FermixCore.Setup.SecretWriterTest do
     ])
 
     assert SecretWriter.available?()
+    assert %{state: :available} = SecretWriter.probe()
     assert :ok = SecretWriter.put(:openai_api_key, "sk-test")
     assert {:ok, "from-auto"} = SecretWriter.get(:openai_api_key)
 
@@ -326,6 +335,119 @@ defmodule FermixCore.Setup.SecretWriterTest do
                "env",
                "OPENAI_API_KEY"
              ]
+    end
+  end
+
+  # M45 §4.1: a skill's own credential is addressed by name, in a namespace of
+  # its own, so storing or removing a skill's `OPENAI_API_KEY` can never reach
+  # the provider's registry item of the same variable name.
+  describe "an external env key" do
+    setup do
+      previous_profile = Application.get_env(:fermix_core, :profile)
+      Application.delete_env(:fermix_core, :profile)
+
+      on_exit(fn ->
+        case previous_profile do
+          nil -> Application.delete_env(:fermix_core, :profile)
+          value -> Application.put_env(:fermix_core, :profile, value)
+        end
+      end)
+
+      :ok
+    end
+
+    test "round-trips through the facade beside a registry key of the same name" do
+      assert :ok = SecretWriter.put(:openai_api_key, "sk-provider")
+      assert :ok = SecretWriter.put({:external_env, "OPENAI_API_KEY"}, "sk-skill")
+
+      assert SecretWriter.get({:external_env, "OPENAI_API_KEY"}) == {:ok, "sk-skill"}
+      assert SecretWriter.get(:openai_api_key) == {:ok, "sk-provider"}
+
+      assert :ok = SecretWriter.delete({:external_env, "OPENAI_API_KEY"})
+      assert SecretWriter.get({:external_env, "OPENAI_API_KEY"}) == {:error, :missing_secret}
+      assert SecretWriter.get(:openai_api_key) == {:ok, "sk-provider"}
+    end
+
+    test "macOS addresses its own service, never the provider's" do
+      [delete, add] = SecretWriter.MacOS.put_commands({:external_env, "OPENAI_API_KEY"}, "v")
+
+      assert service_flag(delete) == "fermix:external_env:OPENAI_API_KEY"
+      assert service_flag(add) == "fermix:external_env:OPENAI_API_KEY"
+      assert account_flag(add) == "fermix"
+      assert "-A" in add and "-U" in add
+
+      refute service_flag(SecretWriter.MacOS.delete_command(:openai_api_key)) ==
+               service_flag(SecretWriter.MacOS.delete_command({:external_env, "OPENAI_API_KEY"}))
+
+      assert %{source: :command, args: lookup, timeout_ms: 3_000} =
+               SecretWriter.MacOS.command_source({:external_env, "OPENAI_API_KEY"})
+
+      assert lookup == [
+               "find-generic-password",
+               "-a",
+               "fermix",
+               "-s",
+               "fermix:external_env:OPENAI_API_KEY",
+               "-w"
+             ]
+    end
+
+    test "macOS scopes the service to a named profile" do
+      assert service_flag(
+               SecretWriter.MacOS.delete_command({:external_env, "X"}, profile: "work")
+             ) == "fermix:work:external_env:X"
+
+      Application.put_env(:fermix_core, :profile, "work")
+
+      assert service_flag(SecretWriter.MacOS.command_source({:external_env, "X"}).args) ==
+               "fermix:work:external_env:X"
+    end
+
+    test "secret-tool addresses the same logical reference by attribute" do
+      assert SecretWriter.SecretTool.clear_command({:external_env, "X"}) ==
+               ["clear", "service", "fermix", "account", "fermix", "env", "external_env:X"]
+
+      assert SecretWriter.SecretTool.clear_command({:external_env, "X"}, profile: "work") ==
+               ["clear", "service", "fermix:work", "account", "fermix", "env", "external_env:X"]
+
+      assert %{args: lookup} =
+               SecretWriter.SecretTool.command_source({:external_env, "X"}, profile: "work")
+
+      assert lookup ==
+               ["lookup", "service", "fermix:work", "account", "fermix", "env", "external_env:X"]
+    end
+
+    test "the auto writer routes an external key to the selected candidate" do
+      Application.put_env(:fermix_core, :secret_writer, SecretWriter.Auto)
+
+      Application.put_env(:fermix_core, :secret_writer_candidates, [
+        UnavailableCandidate,
+        AvailableCandidate
+      ])
+
+      assert :ok = SecretWriter.put({:external_env, "X"}, "v")
+      assert {:ok, "from-auto"} = SecretWriter.get({:external_env, "X"})
+      assert :ok = SecretWriter.delete({:external_env, "X"})
+    end
+
+    # A name is validated before any I/O by the management call; a caller that
+    # skipped it is a defect, and building a keychain address from it would be
+    # the silent half of that defect.
+    test "a name that fails validation never becomes an address" do
+      for name <- ["MY-VAR", "PATH", "", "LC_ALL"] do
+        assert_raise ArgumentError, fn ->
+          SecretWriter.MacOS.delete_command({:external_env, name})
+        end
+
+        assert_raise ArgumentError, fn ->
+          SecretWriter.SecretTool.clear_command({:external_env, name})
+        end
+      end
+    end
+
+    test "a key that is neither shape is refused at the facade" do
+      assert_raise FunctionClauseError, fn -> SecretWriter.get({:external_env, :X}) end
+      assert_raise FunctionClauseError, fn -> SecretWriter.put({:other, "X"}, "v") end
     end
   end
 

@@ -415,6 +415,162 @@
       "why": "ADDED to every settings row: whether a choice row's `options` are only what a client may offer inline rather than its whole value space. `settings.apply` validates a choice value against `options` unless this is true, so without the field every choice row accepted any string and an off-list word reached the writer's `String.to_existing_atom/1` and came back to the operator as an Elixir exception message under the control they had just used. True on timezone, communication_style and the four model rows (default_model, subagent_model, transcription_model, image_model), where a richer native picker legitimately sends a value the daemon has never listed; false on every other row and every non-choice kind. E5: render a suggestions row as an editable combo box, a plain choice row as a closed menu."
     },
     {
+      "method": "settings.get",
+      "field": "channels.discord:rows[].info",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: the longer explanation a surface keeps behind an info control rather than showing inline, while `footer` stays the one short line under the control. It is null on every row with nothing more to say, which is every row the draft draws. The one row that carries a string today is the Venice model row, where each option's label ends in the model's privacy tier and the two words mean materially different things: a private model's prompt is not kept, an anonymized model's prompt is read by the model's own maker. Saying that inline under the picker is three sentences of footer nobody asked for. E5: draw an (i) beside a row that carries one and reveal the text on demand; an absent key, null and an empty string all mean the row has none."
+    },
+    {
+      "method": "settings.get",
+      "field": "channels.signal:rows[].info",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: the longer explanation a surface keeps behind an info control rather than showing inline, while `footer` stays the one short line under the control. It is null on every row with nothing more to say, which is every row the draft draws. The one row that carries a string today is the Venice model row, where each option's label ends in the model's privacy tier and the two words mean materially different things: a private model's prompt is not kept, an anonymized model's prompt is read by the model's own maker. Saying that inline under the picker is three sentences of footer nobody asked for. E5: draw an (i) beside a row that carries one and reveal the text on demand; an absent key, null and an empty string all mean the row has none."
+    },
+    {
+      "method": "settings.get",
+      "field": "channels.slack:rows[].info",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: the longer explanation a surface keeps behind an info control rather than showing inline, while `footer` stays the one short line under the control. It is null on every row with nothing more to say, which is every row the draft draws. The one row that carries a string today is the Venice model row, where each option's label ends in the model's privacy tier and the two words mean materially different things: a private model's prompt is not kept, an anonymized model's prompt is read by the model's own maker. Saying that inline under the picker is three sentences of footer nobody asked for. E5: draw an (i) beside a row that carries one and reveal the text on demand; an absent key, null and an empty string all mean the row has none."
+    },
+    {
+      "method": "settings.get",
+      "field": "channels.telegram:rows[].info",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: the longer explanation a surface keeps behind an info control rather than showing inline, while `footer` stays the one short line under the control. It is null on every row with nothing more to say, which is every row the draft draws. The one row that carries a string today is the Venice model row, where each option's label ends in the model's privacy tier and the two words mean materially different things: a private model's prompt is not kept, an anonymized model's prompt is read by the model's own maker. Saying that inline under the picker is three sentences of footer nobody asked for. E5: draw an (i) beside a row that carries one and reveal the text on demand; an absent key, null and an empty string all mean the row has none."
+    },
+    {
+      "method": "settings.get",
+      "field": "channels.whatsapp:rows[].info",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: the longer explanation a surface keeps behind an info control rather than showing inline, while `footer` stays the one short line under the control. It is null on every row with nothing more to say, which is every row the draft draws. The one row that carries a string today is the Venice model row, where each option's label ends in the model's privacy tier and the two words mean materially different things: a private model's prompt is not kept, an anonymized model's prompt is read by the model's own maker. Saying that inline under the picker is three sentences of footer nobody asked for. E5: draw an (i) beside a row that carries one and reveal the text on demand; an absent key, null and an empty string all mean the row has none."
+    },
+    {
+      "method": "settings.get",
+      "field": "computer_history:rows[].info",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: the longer explanation a surface keeps behind an info control rather than showing inline, while `footer` stays the one short line under the control. It is null on every row with nothing more to say, which is every row the draft draws. The one row that carries a string today is the Venice model row, where each option's label ends in the model's privacy tier and the two words mean materially different things: a private model's prompt is not kept, an anonymized model's prompt is read by the model's own maker. Saying that inline under the picker is three sentences of footer nobody asked for. E5: draw an (i) beside a row that carries one and reveal the text on demand; an absent key, null and an empty string all mean the row has none."
+    },
+    {
+      "method": "settings.get",
+      "field": "computer_use:rows[].info",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: the longer explanation a surface keeps behind an info control rather than showing inline, while `footer` stays the one short line under the control. It is null on every row with nothing more to say, which is every row the draft draws. The one row that carries a string today is the Venice model row, where each option's label ends in the model's privacy tier and the two words mean materially different things: a private model's prompt is not kept, an anonymized model's prompt is read by the model's own maker. Saying that inline under the picker is three sentences of footer nobody asked for. E5: draw an (i) beside a row that carries one and reveal the text on demand; an absent key, null and an empty string all mean the row has none."
+    },
+    {
+      "method": "settings.get",
+      "field": "editors:rows[].info",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: the longer explanation a surface keeps behind an info control rather than showing inline, while `footer` stays the one short line under the control. It is null on every row with nothing more to say, which is every row the draft draws. The one row that carries a string today is the Venice model row, where each option's label ends in the model's privacy tier and the two words mean materially different things: a private model's prompt is not kept, an anonymized model's prompt is read by the model's own maker. Saying that inline under the picker is three sentences of footer nobody asked for. E5: draw an (i) beside a row that carries one and reveal the text on demand; an absent key, null and an empty string all mean the row has none."
+    },
+    {
+      "method": "settings.get",
+      "field": "generate_image:rows[].info",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: the longer explanation a surface keeps behind an info control rather than showing inline, while `footer` stays the one short line under the control. It is null on every row with nothing more to say, which is every row the draft draws. The one row that carries a string today is the Venice model row, where each option's label ends in the model's privacy tier and the two words mean materially different things: a private model's prompt is not kept, an anonymized model's prompt is read by the model's own maker. Saying that inline under the picker is three sentences of footer nobody asked for. E5: draw an (i) beside a row that carries one and reveal the text on demand; an absent key, null and an empty string all mean the row has none."
+    },
+    {
+      "method": "settings.get",
+      "field": "harness:rows[].info",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: the longer explanation a surface keeps behind an info control rather than showing inline, while `footer` stays the one short line under the control. It is null on every row with nothing more to say, which is every row the draft draws. The one row that carries a string today is the Venice model row, where each option's label ends in the model's privacy tier and the two words mean materially different things: a private model's prompt is not kept, an anonymized model's prompt is read by the model's own maker. Saying that inline under the picker is three sentences of footer nobody asked for. E5: draw an (i) beside a row that carries one and reveal the text on demand; an absent key, null and an empty string all mean the row has none."
+    },
+    {
+      "method": "settings.get",
+      "field": "meetings:rows[].info",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: the longer explanation a surface keeps behind an info control rather than showing inline, while `footer` stays the one short line under the control. It is null on every row with nothing more to say, which is every row the draft draws. The one row that carries a string today is the Venice model row, where each option's label ends in the model's privacy tier and the two words mean materially different things: a private model's prompt is not kept, an anonymized model's prompt is read by the model's own maker. Saying that inline under the picker is three sentences of footer nobody asked for. E5: draw an (i) beside a row that carries one and reveal the text on demand; an absent key, null and an empty string all mean the row has none."
+    },
+    {
+      "method": "settings.get",
+      "field": "memory:rows[].info",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: the longer explanation a surface keeps behind an info control rather than showing inline, while `footer` stays the one short line under the control. It is null on every row with nothing more to say, which is every row the draft draws. The one row that carries a string today is the Venice model row, where each option's label ends in the model's privacy tier and the two words mean materially different things: a private model's prompt is not kept, an anonymized model's prompt is read by the model's own maker. Saying that inline under the picker is three sentences of footer nobody asked for. E5: draw an (i) beside a row that carries one and reveal the text on demand; an absent key, null and an empty string all mean the row has none."
+    },
+    {
+      "method": "settings.get",
+      "field": "personalization:rows[].info",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: the longer explanation a surface keeps behind an info control rather than showing inline, while `footer` stays the one short line under the control. It is null on every row with nothing more to say, which is every row the draft draws. The one row that carries a string today is the Venice model row, where each option's label ends in the model's privacy tier and the two words mean materially different things: a private model's prompt is not kept, an anonymized model's prompt is read by the model's own maker. Saying that inline under the picker is three sentences of footer nobody asked for. E5: draw an (i) beside a row that carries one and reveal the text on demand; an absent key, null and an empty string all mean the row has none."
+    },
+    {
+      "method": "settings.get",
+      "field": "providers.anthropic:rows[].info",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: the longer explanation a surface keeps behind an info control rather than showing inline, while `footer` stays the one short line under the control. It is null on every row with nothing more to say, which is every row the draft draws. The one row that carries a string today is the Venice model row, where each option's label ends in the model's privacy tier and the two words mean materially different things: a private model's prompt is not kept, an anonymized model's prompt is read by the model's own maker. Saying that inline under the picker is three sentences of footer nobody asked for. E5: draw an (i) beside a row that carries one and reveal the text on demand; an absent key, null and an empty string all mean the row has none."
+    },
+    {
+      "method": "settings.get",
+      "field": "providers.mistral:rows[].info",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: the longer explanation a surface keeps behind an info control rather than showing inline, while `footer` stays the one short line under the control. It is null on every row with nothing more to say, which is every row the draft draws. The one row that carries a string today is the Venice model row, where each option's label ends in the model's privacy tier and the two words mean materially different things: a private model's prompt is not kept, an anonymized model's prompt is read by the model's own maker. Saying that inline under the picker is three sentences of footer nobody asked for. E5: draw an (i) beside a row that carries one and reveal the text on demand; an absent key, null and an empty string all mean the row has none."
+    },
+    {
+      "method": "settings.get",
+      "field": "providers.ollama:rows[].info",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: the longer explanation a surface keeps behind an info control rather than showing inline, while `footer` stays the one short line under the control. It is null on every row with nothing more to say, which is every row the draft draws. The one row that carries a string today is the Venice model row, where each option's label ends in the model's privacy tier and the two words mean materially different things: a private model's prompt is not kept, an anonymized model's prompt is read by the model's own maker. Saying that inline under the picker is three sentences of footer nobody asked for. E5: draw an (i) beside a row that carries one and reveal the text on demand; an absent key, null and an empty string all mean the row has none."
+    },
+    {
+      "method": "settings.get",
+      "field": "providers.openai:rows[].info",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: the longer explanation a surface keeps behind an info control rather than showing inline, while `footer` stays the one short line under the control. It is null on every row with nothing more to say, which is every row the draft draws. The one row that carries a string today is the Venice model row, where each option's label ends in the model's privacy tier and the two words mean materially different things: a private model's prompt is not kept, an anonymized model's prompt is read by the model's own maker. Saying that inline under the picker is three sentences of footer nobody asked for. E5: draw an (i) beside a row that carries one and reveal the text on demand; an absent key, null and an empty string all mean the row has none."
+    },
+    {
+      "method": "settings.get",
+      "field": "providers.openai_codex:rows[].info",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: the longer explanation a surface keeps behind an info control rather than showing inline, while `footer` stays the one short line under the control. It is null on every row with nothing more to say, which is every row the draft draws. The one row that carries a string today is the Venice model row, where each option's label ends in the model's privacy tier and the two words mean materially different things: a private model's prompt is not kept, an anonymized model's prompt is read by the model's own maker. Saying that inline under the picker is three sentences of footer nobody asked for. E5: draw an (i) beside a row that carries one and reveal the text on demand; an absent key, null and an empty string all mean the row has none."
+    },
+    {
+      "method": "settings.get",
+      "field": "providers.openrouter:rows[].info",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: the longer explanation a surface keeps behind an info control rather than showing inline, while `footer` stays the one short line under the control. It is null on every row with nothing more to say, which is every row the draft draws. The one row that carries a string today is the Venice model row, where each option's label ends in the model's privacy tier and the two words mean materially different things: a private model's prompt is not kept, an anonymized model's prompt is read by the model's own maker. Saying that inline under the picker is three sentences of footer nobody asked for. E5: draw an (i) beside a row that carries one and reveal the text on demand; an absent key, null and an empty string all mean the row has none."
+    },
+    {
+      "method": "settings.get",
+      "field": "providers.xai:rows[].info",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: the longer explanation a surface keeps behind an info control rather than showing inline, while `footer` stays the one short line under the control. It is null on every row with nothing more to say, which is every row the draft draws. The one row that carries a string today is the Venice model row, where each option's label ends in the model's privacy tier and the two words mean materially different things: a private model's prompt is not kept, an anonymized model's prompt is read by the model's own maker. Saying that inline under the picker is three sentences of footer nobody asked for. E5: draw an (i) beside a row that carries one and reveal the text on demand; an absent key, null and an empty string all mean the row has none."
+    },
+    {
+      "method": "settings.get",
+      "field": "realtime:rows[].info",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: the longer explanation a surface keeps behind an info control rather than showing inline, while `footer` stays the one short line under the control. It is null on every row with nothing more to say, which is every row the draft draws. The one row that carries a string today is the Venice model row, where each option's label ends in the model's privacy tier and the two words mean materially different things: a private model's prompt is not kept, an anonymized model's prompt is read by the model's own maker. Saying that inline under the picker is three sentences of footer nobody asked for. E5: draw an (i) beside a row that carries one and reveal the text on demand; an absent key, null and an empty string all mean the row has none."
+    },
+    {
+      "method": "settings.get",
+      "field": "routing:rows[].info",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: the longer explanation a surface keeps behind an info control rather than showing inline, while `footer` stays the one short line under the control. It is null on every row with nothing more to say, which is every row the draft draws. The one row that carries a string today is the Venice model row, where each option's label ends in the model's privacy tier and the two words mean materially different things: a private model's prompt is not kept, an anonymized model's prompt is read by the model's own maker. Saying that inline under the picker is three sentences of footer nobody asked for. E5: draw an (i) beside a row that carries one and reveal the text on demand; an absent key, null and an empty string all mean the row has none."
+    },
+    {
+      "method": "settings.get",
+      "field": "sandbox:rows[].info",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: the longer explanation a surface keeps behind an info control rather than showing inline, while `footer` stays the one short line under the control. It is null on every row with nothing more to say, which is every row the draft draws. The one row that carries a string today is the Venice model row, where each option's label ends in the model's privacy tier and the two words mean materially different things: a private model's prompt is not kept, an anonymized model's prompt is read by the model's own maker. Saying that inline under the picker is three sentences of footer nobody asked for. E5: draw an (i) beside a row that carries one and reveal the text on demand; an absent key, null and an empty string all mean the row has none."
+    },
+    {
+      "method": "settings.get",
+      "field": "transcription:rows[].info",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: the longer explanation a surface keeps behind an info control rather than showing inline, while `footer` stays the one short line under the control. It is null on every row with nothing more to say, which is every row the draft draws. The one row that carries a string today is the Venice model row, where each option's label ends in the model's privacy tier and the two words mean materially different things: a private model's prompt is not kept, an anonymized model's prompt is read by the model's own maker. Saying that inline under the picker is three sentences of footer nobody asked for. E5: draw an (i) beside a row that carries one and reveal the text on demand; an absent key, null and an empty string all mean the row has none."
+    },
+    {
+      "method": "settings.get",
+      "field": "web_search:rows[].info",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: the longer explanation a surface keeps behind an info control rather than showing inline, while `footer` stays the one short line under the control. It is null on every row with nothing more to say, which is every row the draft draws. The one row that carries a string today is the Venice model row, where each option's label ends in the model's privacy tier and the two words mean materially different things: a private model's prompt is not kept, an anonymized model's prompt is read by the model's own maker. Saying that inline under the picker is three sentences of footer nobody asked for. E5: draw an (i) beside a row that carries one and reveal the text on demand; an absent key, null and an empty string all mean the row has none."
+    },
+    {
+      "method": "settings.get:computer_use",
+      "field": "rows:computer_use_background",
+      "kind": "engine_only",
+      "why": "M42 slice 5 adds the experimental bound-window toggle to the computer-use section. The draft predates it, so the app re-vendors this export before it can render the row; until then the engine simply publishes one row the app does not draw."
+    },
+    {
       "method": "settings.get:generate_image",
       "field": "rows:google_api_key",
       "kind": "draft_only",
@@ -425,6 +581,42 @@
       "field": "rows:reasoning_effort",
       "kind": "engine_only",
       "why": "The OpenAI API-key provider carries a reasoning effort like the other reasoning providers; the draft drew the row only for the subscription providers. Adding it is a row the app renders through the descriptor form with no Swift work."
+    },
+    {
+      "method": "settings.get:providers.venice",
+      "field": "rows:venice_api_key",
+      "kind": "engine_only",
+      "why": "M49: Venice is a provider added after the draft was written, so the draft draws no providers.venice section at all. Its two rows are the ordinary descriptor shape (one secret field, one model choice) and the providers pane renders an unknown providers.<id> section generically, so this is a row the app draws with no Swift work."
+    },
+    {
+      "method": "settings.get:providers.venice",
+      "field": "rows:default_model",
+      "kind": "engine_only",
+      "why": "M49: the model row of the providers.venice section the draft predates. Its option labels carry the model's privacy tier after a middle dot (Private, Private (TEE), Anonymized) because the label is the one model field both doors draw; no new field and no Swift work."
+    },
+    {
+      "method": "settings.get:sandbox",
+      "field": "rows:env:ALPACA_API_KEY",
+      "kind": "engine_only",
+      "why": "M45 external skill credentials: the sandbox section publishes one row per allowed or stored environment variable name after the allow-list row, keyed env:<NAME> and labelled with the name. A stored name is a secret row stored and removed through secret.set and secret.clear with that key; an allowed name with no source is a secret row that is not present; a name read from a helper command or an alias is a read-only text row. The golden fixture illustrates each shape with example names. The draft predates the family, and the rows render through the generic secret and text row controls with no Swift work."
+    },
+    {
+      "method": "settings.get:sandbox",
+      "field": "rows:env:BROKER_API_KEY",
+      "kind": "engine_only",
+      "why": "M45 external skill credentials: the sandbox section publishes one row per allowed or stored environment variable name after the allow-list row, keyed env:<NAME> and labelled with the name. A stored name is a secret row stored and removed through secret.set and secret.clear with that key; an allowed name with no source is a secret row that is not present; a name read from a helper command or an alias is a read-only text row. The golden fixture illustrates each shape with example names. The draft predates the family, and the rows render through the generic secret and text row controls with no Swift work."
+    },
+    {
+      "method": "settings.get:sandbox",
+      "field": "rows:env:GITHUB_TOKEN",
+      "kind": "engine_only",
+      "why": "M45 external skill credentials: the sandbox section publishes one row per allowed or stored environment variable name after the allow-list row, keyed env:<NAME> and labelled with the name. A stored name is a secret row stored and removed through secret.set and secret.clear with that key; an allowed name with no source is a secret row that is not present; a name read from a helper command or an alias is a read-only text row. The golden fixture illustrates each shape with example names. The draft predates the family, and the rows render through the generic secret and text row controls with no Swift work."
+    },
+    {
+      "method": "settings.get:sandbox",
+      "field": "rows:env:POLYGON_API_KEY",
+      "kind": "engine_only",
+      "why": "M45 external skill credentials: the sandbox section publishes one row per allowed or stored environment variable name after the allow-list row, keyed env:<NAME> and labelled with the name. A stored name is a secret row stored and removed through secret.set and secret.clear with that key; an allowed name with no source is a secret row that is not present; a name read from a helper command or an alias is a read-only text row. The golden fixture illustrates each shape with example names. The draft predates the family, and the rows render through the generic secret and text row controls with no Swift work."
     },
     {
       "method": "settings.get:transcription",
@@ -503,6 +695,48 @@
       "field": "results[].signed_in",
       "kind": "engine_only",
       "why": "The meetbot row publishes its Google sign-in as a boolean beside the sentence it also carries, null while the notetaker is absent. A client that hides the sign-in control once the account is in place switches on this fact rather than on the words of the sentence it renders, which the app's rules forbid. The draft predates the row; the app adds the field when it re-vendors."
+    },
+    {
+      "method": "overview.get",
+      "field": "realtime.engine",
+      "kind": "engine_only",
+      "why": "ADDED with the Live voice engine (M41): the voice section now carries an engine beside its provider, openai_realtime for the Realtime API that runs tools inside the voice session and openai_live for the Live API that delegates every tool call back to the Fermix agent. Null while voice is disabled, exactly like provider and model. The draft was authored when there was one engine, so a client that reads only model cannot tell which wire a call will use or why the reasoning effort row disappeared. E5: show the engine beside the model in the voice status."
+    },
+    {
+      "method": "plugins.list",
+      "field": "oauth_clients[].region",
+      "kind": "engine_only",
+      "why": "The sign-in client row carries the account region it is bound to. Some providers serve one region per host and refuse every call from another, so the region is chosen as part of the client rather than discovered by the first tool call. The draft was authored before any provider had regions, so its client sheet offers no picker and a client written against it can register a client that can never sign in."
+    },
+    {
+      "method": "plugins.list",
+      "field": "oauth_clients[].regions",
+      "kind": "engine_only",
+      "why": "The choices for the field above, with the daemon's own labels. It is empty for a provider that serves one region, which is what tells the sheet to draw no picker at all; the draft has no such field, so an app built against it cannot tell the two cases apart."
+    },
+    {
+      "method": "plugins.oauth_client.set",
+      "field": "oauth_client.region",
+      "kind": "engine_only",
+      "why": "The sign-in client row carries the account region it is bound to. Some providers serve one region per host and refuse every call from another, so the region is chosen as part of the client rather than discovered by the first tool call. The draft was authored before any provider had regions, so its client sheet offers no picker and a client written against it can register a client that can never sign in."
+    },
+    {
+      "method": "plugins.oauth_client.set",
+      "field": "oauth_client.regions",
+      "kind": "engine_only",
+      "why": "The choices for the field above, with the daemon's own labels. It is empty for a provider that serves one region, which is what tells the sheet to draw no picker at all; the draft has no such field, so an app built against it cannot tell the two cases apart."
+    },
+    {
+      "method": "plugins.list",
+      "field": "plugins[].settings[].kind",
+      "kind": "engine_only",
+      "why": "Every setting entry now names the control it is: text is a free-text field, boolean a switch whose value is the string true or false and which plugins.setting.set refuses anything else for. The draft drew every setting as text, so an app built against it renders a consent switch as a box the operator has to type the word true into, which is the one spelling a gated tool reads. The field is optional on the wire, so an older engine that publishes none still decodes and means text."
+    },
+    {
+      "method": "plugins.setting.set",
+      "field": "plugin.settings[].kind",
+      "kind": "engine_only",
+      "why": "The same field on the row this write answers with, for the same reason: the app redraws the control from the row it is handed, so a kind present in the listing and absent here would make the field change shape on save."
     }
   ]
 }

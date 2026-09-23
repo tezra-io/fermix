@@ -1,0 +1,186 @@
+# Linux package installs — how one gets onto a machine and how it is updated,
+# graded through the real agent path.
+#
+# WHAT ROTS HERE. The `.deb` and `.rpm` are release assets, not a repository.
+# So the install is one command (`curl -fsSL https://fermix.ai/install | sh`),
+# and the update is that command again followed by `fermix restart` — while
+# `fermix upgrade` on a packaged engine prints `apt upgrade` / `dnf upgrade`
+# lines that find nothing until a repository exists. None of that is general
+# Linux knowledge; general Linux knowledge says the opposite ("it's a package,
+# so `apt upgrade` updates it"). It lives in the `self-knowledge` skill, which
+# the model has to reach and read. ExUnit proves the sentences are in the file;
+# this suite proves an owner asking in their own words gets them.
+#
+# WHY BEHAVIORAL AND NOT CAPABILITY. There is no end state to check: the answer
+# is advice, and running the installer is an external write the capability
+# runner refuses by class.
+#
+# THE DAEMON UNDER TEST IS NOT A PACKAGE INSTALL. `~/.fermix-dev` is a
+# formula/dev install on macOS, so every prompt states the packaged-Linux
+# premise itself. A reply that answers for a Homebrew or standalone install is
+# the exact failure this suite exists to catch.
+#
+# ROUTE ASSERTIONS. Exactly one — the labelled sanity case. Everything else
+# gates on the outcome.
+#
+# FLOORS, NOT VOCABULARIES. The `reply_matches` values are literals any correct
+# answer must contain — the installer's address, the restart command — not a
+# list of acceptable phrasings. `reply_not_matches` names only what a packaged
+# Linux answer has no reason to say in any polarity (`brew upgrade`). It does
+# NOT try to catch "just run apt upgrade": a correct answer says that command
+# finds nothing, and a pattern cannot tell the two apart. That is the rubric's.
+#
+# NO NEW CONSENT GATE. Nothing here is gated on a human decision, so
+# `bin/seed_capability_home.py` needs no pre-grant for this suite.
+suite: linux_packages
+risk: host_readonly
+title: "Linux packages — the one-command install, and how a packaged install updates"
+description: >
+  Ordinary owner questions about running Fermix from the `.deb` or `.rpm`: how
+  to install it on a Debian, Ubuntu or Fedora machine, and how to update it
+  once it is there. Each case gates on a literal any correct answer contains
+  plus the wrong-channel refusal; the rubric owns the wording. One labelled
+  sanity case pins that the answer comes from the self-knowledge skill rather
+  than from what the model assumes about packages in general.
+defaults:
+  timeout_ms: 180000
+  judge: true
+  expect:
+    status: ok
+    no_tool_errors: true
+
+scenarios:
+  - id: package_install
+    title: "One command installs the package on an apt, dnf or zypper machine"
+    severity: normal
+    risk: host_readonly
+    tags: [linux-packages, install, self-knowledge]
+    cases:
+      # SANITY CASE — the one route assertion in this suite. The installer's
+      # address is not something a model can know from general knowledge, so
+      # this case pins that it opened the skill to find it.
+      - id: install_on_ubuntu_server_sanity
+        query: >
+          I want to put you on a second machine, a headless Ubuntu server I
+          reach over SSH. No Homebrew on it and I'd rather not add it. What's
+          the proper way to install Fermix there?
+        expect:
+          tools_any: [skill_view]
+          reply_matches: 'fermix\.ai/install'
+          reply_not_matches: '(?i)\bbrew\s+(install|upgrade)\b'
+          max_tool_calls: 8
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Gives the one-command install, `curl -fsSL https://fermix.ai/install | sh`,
+          and says it installs the `.deb` package through apt on that machine.
+          Says `fermix setup` follows as the user's own account rather than
+          through sudo, and that on a server with no display setup is a terminal
+          wizard. Does not tell the user to install Homebrew, and does not
+          invent an apt repository or a `sources.list` line to add.
+      - id: install_on_fedora
+        query: >
+          Does Fermix have an rpm? I'm on Fedora and I'd like it installed as a
+          real package rather than a loose binary in my home directory.
+        expect:
+          reply_matches: 'fermix\.ai/install'
+          reply_not_matches: '(?i)\bbrew\s+(install|upgrade)\b'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Says yes: every release carries an `.rpm`, and the installer at
+          `https://fermix.ai/install` installs it through dnf after checking the
+          download. Mentions that the package owns the engine in `/usr/bin` and
+          a systemd user unit, or that `fermix setup` turns the service on
+          afterwards. Does not invent a dnf repository or a `.repo` file to add.
+
+  - id: package_update
+    title: "A packaged install updates by installing the newer package, then restarting"
+    severity: normal
+    risk: host_readonly
+    tags: [linux-packages, upgrade, self-knowledge]
+    cases:
+      - id: upgrade_printed_apt_and_found_nothing
+        query: >
+          I installed you from the .deb on my Debian box. `fermix upgrade`
+          refused and told me to run `sudo apt update && sudo apt upgrade
+          fermix`, which I did, and apt says there's nothing to upgrade. But I
+          know a newer release is out. How do I actually update?
+        expect:
+          reply_matches: '(?i)fermix\s+restart'
+          reply_not_matches: '(?i)\bbrew\s+(install|upgrade)\b'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Explains why apt found nothing: the package was installed from a file
+          and no Fermix apt repository is published, so apt has nowhere to see a
+          newer version. Gives a working update: run the installer again
+          (`curl -fsSL https://fermix.ai/install | sh`) or install the newer
+          `.deb` from the releases page by hand. Says to run `fermix restart`
+          afterwards because the running service keeps the old engine until
+          then. Does not tell the user to simply retry `apt upgrade`, and does
+          not suggest that `fermix upgrade` can be forced on a package install.
+      - id: updated_but_still_the_old_engine
+        query: >
+          I installed the newer Fermix rpm on my Fedora server yesterday, but
+          `fermix service status` says pending_restart and the bot still behaves
+          like the old version. Did the update not take?
+        expect:
+          reply_matches: '(?i)fermix\s+restart'
+          reply_not_matches: '(?i)\bbrew\s+(install|upgrade)\b'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Says the update did take: installing the package replaces the files on
+          disk and restarts nothing, so the running service keeps the old engine
+          until it is restarted, which is what `pending_restart` reports. Tells
+          the user to run `fermix restart` as the account that runs the service.
+          Does not tell the user to reinstall the package, and does not send
+          them to `fermix upgrade`.
+
+  - id: secrets_without_a_usable_keyring
+    title: "A Linux keyring that cannot be used, and the file store as the declared other choice"
+    severity: normal
+    risk: host_readonly
+    tags: [linux-packages, secrets, self-knowledge]
+    cases:
+      # The one answer general knowledge gets wrong: it says "put the token in
+      # an environment variable", and the Telegram token is the one secret that
+      # is never read from the environment.
+      - id: fingerprint_login_keyring_locked
+        query: >
+          I'm on Pop!_OS and log in with my fingerprint. When I try to save my
+          Telegram bot token in the setup page it refuses and says the login
+          keyring is locked, and I honestly don't know that keyring's password
+          any more. Is there any way to get Fermix running without it?
+        expect:
+          reply_matches: 'secret-store\s+file'
+          reply_not_matches: '(?i)\bTELEGRAM_BOT_TOKEN=|export\s+TELEGRAM'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Explains why: fingerprint login leaves the GNOME login keyring locked
+          because it is encrypted with the password; saving shows the unlock
+          prompt, and a cancelled prompt is what refuses the save. Offers both
+          ways out: unlock or reset the keyring in Passwords and Keys, or choose
+          the file store with `fermix setup --secret-store file`, describing it
+          truthfully as files under the Fermix home readable only by that
+          account and not encrypted at rest. Does not suggest an environment
+          variable for the Telegram token, and does not claim Fermix will fall
+          back to a file on its own.
+      - id: headless_server_channel_token
+        query: >
+          Fermix runs on a headless Ubuntu server for me, from the .deb. Setup
+          over SSH won't take my Discord bot token, it complains there's no
+          keyring. Where am I supposed to put it?
+        expect:
+          reply_matches: 'secret-store\s+file'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Says a server has no keyring to save into and that Fermix has a
+          second, declared store for exactly this: `fermix setup --secret-store
+          file`, after which the token is saved as a file under the Fermix home
+          that only that account can read. Mentions that `fermix doctor` shows
+          which store is in use. Does not invent a keyring package to install as
+          the only answer, and does not describe the file store as automatic.

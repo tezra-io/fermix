@@ -12,9 +12,12 @@ defmodule Fermix.CLI do
   alias Fermix.CLI.AcpCommand
   alias Fermix.CLI.AgentsCommand
   alias Fermix.CLI.AuthCommand
+  alias Fermix.CLI.BrowserBridgeCommand
+  alias Fermix.CLI.BrowserCommand
   alias Fermix.CLI.CapabilitiesCommand
   alias Fermix.CLI.ChatCommand
   alias Fermix.CLI.DevicesCommand
+  alias Fermix.CLI.DiagnosticsCommand
   alias Fermix.CLI.Doctor
   alias Fermix.CLI.HealthCommand
   alias Fermix.CLI.LogsCommand
@@ -73,6 +76,8 @@ defmodule Fermix.CLI do
   defp dispatch("health", rest), do: HealthCommand.run(rest)
   defp dispatch("voice", rest), do: VoiceCommand.run(rest)
   defp dispatch("acp", rest), do: AcpCommand.run(rest)
+  defp dispatch("browser", rest), do: BrowserCommand.run(rest)
+  defp dispatch("browser-bridge", rest), do: BrowserBridgeCommand.run(rest)
   defp dispatch("agents", rest), do: AgentsCommand.run(rest)
   defp dispatch("capabilities", rest), do: CapabilitiesCommand.run(rest)
   defp dispatch("skills", rest), do: SkillsCommand.run(rest)
@@ -85,6 +90,7 @@ defmodule Fermix.CLI do
   defp dispatch("uninstall", rest), do: UninstallCommand.run(rest)
   defp dispatch("migrate-to-app", rest), do: MigrateToApp.run(rest)
   defp dispatch("doctor", rest), do: Doctor.run(rest)
+  defp dispatch("diagnostics", rest), do: DiagnosticsCommand.run(rest)
   defp dispatch(unknown, _rest), do: unknown_command(unknown)
 
   @spec usage(non_neg_integer()) :: non_neg_integer()
@@ -97,6 +103,7 @@ defmodule Fermix.CLI do
     Usage:
       fermix setup [--web|--cli|--terminal] [--no-browser] [--no-service] [--user|--system] [--rotate-token]
                    [--print-state] [--reconfigure] [--migrate-secrets] [--import-codex]
+                   [--secret-store keyring|file]
                    [--openai-api-key VALUE] [--anthropic-api-key VALUE] [--xai-api-key VALUE]
                    [--provider #{Enum.map_join(ModelCatalog.providers(), "|", &Atom.to_string/1)}]
                    [--default-model VALUE] [--reasoning-effort none|low|medium|high|xhigh|max]
@@ -110,16 +117,21 @@ defmodule Fermix.CLI do
       fermix ask    [--stdin] [--session ID] [--timeout MS] [--json] MESSAGE...
       fermix chat   [--stdin] [--session ID] [--timeout MS] [--json] MESSAGE...
       fermix run                        Start the daemon in the foreground
-      fermix service install   [--user|--system]   Install OS service unit
-      fermix service uninstall [--user|--system]   Remove OS service unit
+      fermix service install   [--user|--system] [--json] [--home PATH] [--port N]
+      fermix service uninstall [--user|--system] [--json]
+      fermix service status    [--json]            Show service, binding and engine identity
+      fermix service run                           Launch entry point for the packaged service
       fermix start             [--user|--system]   Start the installed OS service
       fermix stop              [--user|--system]   Stop the installed OS service
       fermix restart           [--user|--system]   Restart the installed OS service
+      fermix restart           [--json] [--when-idle]  Restart a packaged engine's service
       fermix status [--full] [--json]             Show daemon and overview status
       fermix health [--json]                      Show daemon-evaluated health
       fermix voice status [--json]                Show local voice companion status
       fermix acp                                  Bridge an ACP client's stdio to the daemon
       fermix acp forget NPUB|--all                Disconnect a remembered ACP client identity
+      fermix browser bridge install|uninstall|status  Manage the browser extension bridge
+      fermix browser-bridge --manifest PATH ORIGIN  Pump the browser extension to the daemon
       fermix agents [--json]                      Show main-agent and worker status
       fermix capabilities [--kind KIND] [--json]  Show registered capabilities
       fermix skills [list|view NAME|reload] [--json]  Inspect and reload installed skills
@@ -134,6 +146,7 @@ defmodule Fermix.CLI do
       fermix uninstall                             Remove a Fermix.app-managed installation
       fermix migrate-to-app [--yes]                Move a Homebrew formula install to Fermix.app
       fermix doctor  [--full]                      Run post-install diagnostics
+      fermix diagnostics export --offline [--json] Collect a redacted support bundle with no daemon
       fermix version                               Print version
       fermix help                                  Show this message
     """)

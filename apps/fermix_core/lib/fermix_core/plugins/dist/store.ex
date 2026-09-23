@@ -81,6 +81,34 @@ defmodule FermixCore.Plugins.Dist.Store do
     :ok
   end
 
+  # An auth profile is `<profile_key>:primary`. `:` is legal on every filesystem
+  # Fermix runs on but is a separator in enough tooling to be worth avoiding, so
+  # it becomes `_`. Anything else that could escape `run/` is corrupt config,
+  # not a name to sanitize: an access token is never written somewhere else
+  # under a quietly rewritten name.
+  @token_profile_regex ~r/^[A-Za-z0-9_.:-]+$/
+
+  @doc """
+  Path of the daemon-owned access-token projection for one auth profile
+  (M8 §9.3), under `run/` so `sweep_transient!/1` collects it at boot.
+
+  Pure path resolution: `ensure!/1` owns the `0700` directory and
+  `Auth.TokenFile` owns the `0600` file.
+  """
+  @spec token_file(Path.t(), String.t()) :: Path.t()
+  def token_file(root, auth_profile) when is_binary(root) and is_binary(auth_profile) do
+    Path.join(paths(root).run, token_file_name(auth_profile))
+  end
+
+  defp token_file_name(auth_profile) do
+    if Regex.match?(@token_profile_regex, auth_profile) do
+      String.replace(auth_profile, ":", "_") <> ".token"
+    else
+      raise ArgumentError,
+            "unsafe auth profile for a plugin token file: #{inspect(auth_profile)}"
+    end
+  end
+
   @doc """
   Path for a per-attempt scratch directory under `run/`, named so
   `sweep_transient!/1` collects it if the VM dies mid-attempt. The caller

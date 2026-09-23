@@ -27,13 +27,12 @@ defmodule FermixCore.ComputerUse.AmbiguousGridTest do
   alias FermixCore.ComputerUse.Session
 
   # Mirrors compux's real screenshot payload shape for the incident display
-  # (3840x1080 @1x -> full sent image 1366x384): width/height + region echo, so
-  # the session learns the view's dims exactly the way it does in production.
-  # `dims` maps a request region (nil = full screen) to the sent image size.
+  # (3840x1080 @1x -> full sent image 1366x384): width/height plus the minted
+  # `observation_id` (protocol 11), so the session learns the image's identity and
+  # dimensions exactly the way it does in production. `dims` maps a request region
+  # (nil = full screen) to the sent image size.
   defmodule GeomDriver do
     @behaviour Compux.Driver
-
-    @full_region %{"x" => 0, "y" => 0, "w" => 1366, "h" => 384}
 
     @impl true
     def start(opts) do
@@ -52,27 +51,56 @@ defmodule FermixCore.ComputerUse.AmbiguousGridTest do
     end
 
     defp respond(state, %{"action" => "screenshot"} = request) do
-      {w, h} = Map.fetch!(state.dims, request["region"])
+      {w, h} = sent_dims(state, request)
 
-      base = %{
-        "ok" => true,
-        "data" => Base.encode64("png"),
-        "mime" => "image/png",
-        "width" => w,
-        "height" => h,
-        "region" => request["region"] || @full_region
-      }
+      base =
+        FermixTestSupport.ComputerUseObservations.stamp(
+          %{
+            "ok" => true,
+            "data" => Base.encode64("png"),
+            "mime" => "image/png",
+            "width" => w,
+            "height" => h,
+            # The helper always echoes the rectangle it RESOLVED, in full-display
+            # image pixels — the one space a crop can be positioned in.
+            "region" => FermixTestSupport.ComputerUseObservations.resolved_region(request)
+          },
+          request,
+          id: image_id(request["region"])
+        )
 
       {:ok, if(state.cursor, do: Map.put(base, "cursor", state.cursor), else: base)}
     end
 
-    defp respond(_state, %{"action" => "elements"}),
-      do: {:ok, %{"elements" => [%{"role" => "AXButton", "x" => 40, "y" => 50}]}}
+    defp respond(_state, %{"action" => "elements"} = request),
+      do:
+        {:ok,
+         FermixTestSupport.ComputerUseObservations.stamp(
+           %{"elements" => [%{"role" => "AXButton", "x" => 40, "y" => 50}]},
+           request,
+           id: "obs-elements"
+         )}
 
-    defp respond(_state, _request), do: {:ok, %{"ok" => true}}
+    # Every mutating reply carries the wire's `receipt` (M42 slice 2 §3), which is
+    # what the session's `outcome` is derived from.
+    defp respond(_state, request),
+      do: {:ok, FermixTestSupport.ComputerUseReceipts.stamp(%{"ok" => true}, request)}
 
     @impl true
     def stop(_state), do: :ok
+
+    # A check re-capture NAMES the image it re-captures and asks for the whole of
+    # it in that image's own pixels, so it comes back at that image's size; every
+    # other capture is a rectangle of the display, whose sent size the test maps.
+    defp sent_dims(_state, %{"observation_id" => id, "region" => %{"w" => w, "h" => h}})
+         when is_binary(id),
+         do: {w, h}
+
+    defp sent_dims(state, request), do: Map.fetch!(state.dims, request["region"])
+
+    # One id per rectangle, so a test can name the crop it is aiming in and two
+    # different crops are two different images — which is the whole point.
+    defdelegate image_id(region), to: FermixTestSupport.ComputerUseObservations
   end
 
   # The live incident geometry: region {23,11,482,341} in full-sent space came
@@ -119,6 +147,10 @@ defmodule FermixCore.ComputerUse.AmbiguousGridTest do
     session
   end
 
+  # The image a crop of `region` was returned as — every action aimed in it names
+  # this id, because coordinates are pixels in the image you name.
+  defp image_of(region), do: GeomDriver.image_id(region)
+
   describe "the wrong-grid tripwire (A1)" do
     test "the live incident click is refused with the exact conversion" do
       session = start_session() |> zoom_to(@incident_region)
@@ -128,7 +160,7 @@ defmodule FermixCore.ComputerUse.AmbiguousGridTest do
                  "action" => "left_click",
                  "x" => 400,
                  "y" => 265,
-                 "region" => @incident_region
+                 "observation_id" => image_of(@incident_region)
                })
 
       assert info.region == @incident_region
@@ -145,7 +177,7 @@ defmodule FermixCore.ComputerUse.AmbiguousGridTest do
                  "action" => "left_click",
                  "x" => 1060,
                  "y" => 714,
-                 "region" => @incident_region
+                 "observation_id" => image_of(@incident_region)
                })
     end
 
@@ -157,7 +189,7 @@ defmodule FermixCore.ComputerUse.AmbiguousGridTest do
                  "action" => "left_click",
                  "x" => 400,
                  "y" => 265,
-                 "region" => @incident_region,
+                 "observation_id" => image_of(@incident_region),
                  "confirm_grid" => true
                })
 
@@ -174,7 +206,7 @@ defmodule FermixCore.ComputerUse.AmbiguousGridTest do
                  "action" => "left_click",
                  "x" => 750,
                  "y" => 200,
-                 "region" => @offcenter_region
+                 "observation_id" => image_of(@offcenter_region)
                })
 
       # Left of the positioned rect — plausible ONLY as a crop pixel. An
@@ -184,7 +216,7 @@ defmodule FermixCore.ComputerUse.AmbiguousGridTest do
                  "action" => "left_click",
                  "x" => 400,
                  "y" => 265,
-                 "region" => @offcenter_region
+                 "observation_id" => image_of(@offcenter_region)
                })
     end
 
@@ -196,7 +228,7 @@ defmodule FermixCore.ComputerUse.AmbiguousGridTest do
                  "action" => "left_click",
                  "x" => 400,
                  "y" => 265,
-                 "region" => @mild_region
+                 "observation_id" => image_of(@mild_region)
                })
     end
 
@@ -208,7 +240,7 @@ defmodule FermixCore.ComputerUse.AmbiguousGridTest do
                  "action" => "left_click_drag",
                  "from" => %{"x" => 148, "y" => 279},
                  "to" => %{"x" => 148, "y" => 214},
-                 "region" => @incident_region
+                 "observation_id" => image_of(@incident_region)
                })
 
       assert length(info.crop_equivalents) == 2
@@ -218,7 +250,7 @@ defmodule FermixCore.ComputerUse.AmbiguousGridTest do
                  "action" => "left_click_drag",
                  "from" => %{"x" => 148, "y" => 279},
                  "to" => %{"x" => 900, "y" => 500},
-                 "region" => @incident_region
+                 "observation_id" => image_of(@incident_region)
                })
     end
 
@@ -232,7 +264,7 @@ defmodule FermixCore.ComputerUse.AmbiguousGridTest do
                  "y" => 170,
                  "direction" => "down",
                  "amount" => 3,
-                 "region" => @incident_region
+                 "observation_id" => image_of(@incident_region)
                })
 
       assert {:error, {:ambiguous_coordinates, _info}} =
@@ -240,14 +272,14 @@ defmodule FermixCore.ComputerUse.AmbiguousGridTest do
                  "action" => "inspect",
                  "x" => 240,
                  "y" => 170,
-                 "region" => @incident_region
+                 "observation_id" => image_of(@incident_region)
                })
     end
 
-    # The refusal exists to catch a model reading the wrong IMAGE grid; a view
-    # established by `elements` has no image dims, and its points are copied
+    # The refusal exists to catch a model reading the wrong IMAGE grid; a list
+    # `elements` returned has no image dimensions, and its points are copied
     # verbatim from the listing — nothing to trip on.
-    test "a view established by elements (no image dims) never trips" do
+    test "a list from elements (no image dims) never trips" do
       session = start_session()
 
       {:ok, :auto, elements} =
@@ -260,7 +292,7 @@ defmodule FermixCore.ComputerUse.AmbiguousGridTest do
                  "action" => "left_click",
                  "x" => 40,
                  "y" => 50,
-                 "region" => @incident_region
+                 "observation_id" => "obs-elements"
                })
     end
 
@@ -279,7 +311,7 @@ defmodule FermixCore.ComputerUse.AmbiguousGridTest do
             "action" => "left_click",
             "x" => x,
             "y" => y,
-            "region" => @incident_region
+            "observation_id" => image_of(@incident_region)
           })
 
         if inside do
@@ -291,8 +323,12 @@ defmodule FermixCore.ComputerUse.AmbiguousGridTest do
     end
   end
 
-  describe "dual-space cursor disclosure (A2)" do
-    test "a magnified view's cursor carries its full-screen equivalent" do
+  # M28 A2 disclosed the cursor's full-screen equivalent beside its crop
+  # coordinate, so a wrong-grid click's echo stopped being self-consistent. It is
+  # gone (M42 slice 3 §4.1): the echo is a point in the image the text leads with,
+  # and a second grid in the same sentence is the confusion, not the cure.
+  describe "the cursor echo" do
+    test "a cursor is reported in the pixels of the image that names it" do
       session = start_session(cursor: %{"x" => 400, "y" => 265})
 
       {:ok, :auto, request} =
@@ -300,17 +336,18 @@ defmodule FermixCore.ComputerUse.AmbiguousGridTest do
 
       {:ok, result} = Session.execute(session, request)
 
-      # 23 + 400/2.811 = 165, 11 + 265/2.811 = 105.
-      assert result.summary =~ "Cursor at (400,265) = (165,105) on the full screen"
+      assert result.summary =~ "Image obs-23-11-482-341, 1355x959"
+      assert result.summary =~ "Cursor at (400,265)."
+      refute result.summary =~ "on the full screen"
     end
 
-    test "a full-screen view discloses no second grid" do
+    test "a full-screen capture reads the same way" do
       session = start_session(cursor: %{"x" => 400, "y" => 265})
 
       {:ok, :auto, request} = Session.classify(session, %{"action" => "screenshot"})
       {:ok, result} = Session.execute(session, request)
 
-      assert result.summary =~ "Cursor at (400,265)"
+      assert result.summary =~ "Cursor at (400,265)."
       refute result.summary =~ "on the full screen"
     end
   end

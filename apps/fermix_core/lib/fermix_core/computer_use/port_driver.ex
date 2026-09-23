@@ -1,22 +1,26 @@
 defmodule FermixCore.ComputerUse.PortDriver do
   @moduledoc """
   The production computer-use `Driver`: a thin fermix adapter over
-  `Compux.PortDriver` (the crash-isolated Rust sidecar spawned over a Port).
+  `Compux.PortDriver` (the crash-isolated Rust sidecar, reached through
+  `Compux.Transport`).
 
-  compux owns the MECHANISM — transport framing, coordinate math, the wire
-  protocol. This adapter adds fermix POLICY on top:
+  compux owns the MECHANISM — the Port, the framing, request ids, generations,
+  one absolute deadline per request, and the `hello` handshake that refuses a
+  sidecar whose wire version is not this build's (`{:protocol_mismatch, …}` from
+  `start/1`). This adapter adds exactly one piece of fermix POLICY: a
+  sidecar-action timeout is surfaced through the centralized `Timeouts.expired/3`
+  (correlated by `:session_id`) and returns the
+  `{:error, {:timeout, :cu_sidecar_action, ms}}` shape the `Session`
+  poison-resets on. compux itself stays policy-free and only reports
+  `{:error, {:timeout, ms}}`.
 
-    * **version handshake** — `start/1` performs the `hello` round-trip and refuses
-      a sidecar whose `protocol_version` differs from
-      `Compux.Protocol.protocol_version/0`, so the compiled-in encoder and the
-      separately-installed binary can never silently drift.
-    * **timeout telemetry** — a sidecar-action timeout is surfaced through the
-      centralized `Timeouts.expired/3` (correlated by `:session_id`) and returns the
-      `{:error, {:timeout, :cu_sidecar_action, ms}}` shape the `Session` poison-resets
-      on. compux itself stays policy-free and only returns `{:error, {:timeout, ms}}`.
+  `control/2` passes straight through: the transport admits a control whatever is
+  in flight, which is what lets `Session` confirm a Pause while its `ActionWorker`
+  is blocked inside an action.
 
-  The state keeps `:port` at the top level so the owning `Session`'s `handle_info`
-  can match stale-response / exit-status messages by port.
+  The state is opaque — it holds the transport's pid, not a Port — plus the
+  `:session_id` this adapter needs for correlation. The sidecar's death reaches
+  the process that called `start/1` as `{:compux_sidecar_exit, transport, status}`.
   """
 
   @behaviour Compux.Driver
@@ -34,8 +38,7 @@ defmodule FermixCore.ComputerUse.PortDriver do
       env: Keyword.get(opts, :env, [])
     ]
 
-    with {:ok, cstate} <- Compux.PortDriver.start(compux_opts),
-         :ok <- handshake(cstate) do
+    with {:ok, cstate} <- Compux.PortDriver.start(compux_opts) do
       {:ok, Map.put(cstate, :session_id, Keyword.get(opts, :session_id))}
     end
   end
@@ -52,28 +55,9 @@ defmodule FermixCore.ComputerUse.PortDriver do
   end
 
   @impl true
+  def control(state, action) when action in [:pause, :resume, :release],
+    do: Compux.PortDriver.control(state, action)
+
+  @impl true
   def stop(state), do: Compux.PortDriver.stop(state)
-
-  # One hello round-trip: refuse a binary whose wire version we don't speak, and
-  # tear the freshly-started sidecar down on refusal so no orphaned Port leaks.
-  defp handshake(cstate) do
-    ours = Compux.Protocol.protocol_version()
-
-    case Compux.PortDriver.execute(cstate, %{"action" => "hello"}) do
-      {:ok, %{"protocol_version" => ^ours}} ->
-        :ok
-
-      {:ok, %{"protocol_version" => theirs}} ->
-        Compux.PortDriver.stop(cstate)
-        {:error, {:protocol_mismatch, %{library: ours, sidecar: theirs}}}
-
-      {:ok, _other} ->
-        Compux.PortDriver.stop(cstate)
-        {:error, {:protocol_mismatch, %{library: ours, sidecar: nil}}}
-
-      {:error, reason} ->
-        Compux.PortDriver.stop(cstate)
-        {:error, reason}
-    end
-  end
 end

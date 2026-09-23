@@ -32,8 +32,11 @@ defmodule FermixCore.Browser.ProfileServerGuardsTest do
 
     def close(pid), do: Agent.stop(pid)
 
+    @drifted "http://169.254.169.254/latest/meta-data/"
+    @drifted_origin "file:///etc/passwd"
+
     def command(pid, method, params, _session_id, _timeout_ms, _grace_ms) do
-      page = Agent.get(pid, & &1)
+      page = Agent.get_and_update(pid, &{&1, drift(&1, method, params)})
 
       if collector = Process.whereis(:browser_guard_collector) do
         send(collector, {:cdp, page.owner, method, params})
@@ -41,6 +44,26 @@ defmodule FermixCore.Browser.ProfileServerGuardsTest do
 
       run(page, method, params)
     end
+
+    # A tab that DRIFTS: the first live-URL read answers with the href it was
+    # opened on — so a snapshot lands and the model holds refs — and every later
+    # one answers with a private host, which is a page that navigated itself
+    # after the model last looked at it.
+    defp drift(%{mode: "drift"} = page, "Runtime.evaluate", %{expression: expression}) do
+      if String.contains?(expression, "document.location.href"),
+        do: %{page | href: @drifted},
+        else: page
+    end
+
+    # The other way a page can leave the readable world: not a blocked HOST but
+    # a document that is not an http(s) document at all.
+    defp drift(%{mode: "drift_origin"} = page, "Runtime.evaluate", %{expression: expression}) do
+      if String.contains?(expression, "document.location.href"),
+        do: %{page | href: @drifted_origin},
+        else: page
+    end
+
+    defp drift(page, _method, _params), do: page
 
     defp run(page, "Target.getTargets", _params) do
       {:ok,
@@ -52,8 +75,12 @@ defmodule FermixCore.Browser.ProfileServerGuardsTest do
     end
 
     defp run(_page, "Target.attachToTarget", _params), do: {:ok, %{"sessionId" => "S1"}}
+    defp run(_page, "Target.createTarget", _params), do: {:ok, %{"targetId" => "T1"}}
     defp run(_page, "Accessibility.getFullAXTree", _params), do: {:ok, %{"nodes" => ax_nodes()}}
     defp run(_page, "DOM.resolveNode", _params), do: {:ok, %{"object" => %{"objectId" => "OBJ1"}}}
+
+    defp run(_page, "DOM.getBoxModel", _params),
+      do: {:ok, %{"model" => %{"content" => [0, 0, 20, 0, 20, 20, 0, 20]}}}
 
     defp run(_page, "Page.captureScreenshot", _params),
       do: {:ok, %{"data" => Base.encode64("PNG-BYTES")}}
@@ -76,7 +103,7 @@ defmodule FermixCore.Browser.ProfileServerGuardsTest do
 
     defp run(_page, _method, _params), do: {:ok, %{}}
 
-    defp live_meta(%{mode: "live", href: href}) do
+    defp live_meta(%{mode: mode, href: href}) when mode in ["live", "drift", "drift_origin"] do
       {:ok,
        %{"result" => %{"value" => %{"url" => href, "title" => "Page", "ready" => "complete"}}}}
     end
@@ -188,13 +215,17 @@ defmodule FermixCore.Browser.ProfileServerGuardsTest do
     "status" => "profile liveness counters; reads no page",
     "start" => "lifecycle; reads no page",
     "stop" => "lifecycle; reads no page",
-    "open" => "a navigation — Policy.validate_url/2 refuses the destination first",
-    "navigate" => "a navigation — pre-checked, then re-checked on the committed URL",
+    "open" =>
+      "a navigation — the destination is refused by Policy.validate_url/2 first; the page it " <>
+        "hands back goes through the gate in the next test, and is withheld rather than " <>
+        "refusing the navigation that already happened",
+    "navigate" =>
+      "a navigation — pre-checked, then re-checked on the committed URL; its page is gated in " <>
+        "the next test, the same way",
     "tabs" =>
       "the tab inventory; refusing it would hide the blocked tab and leave no id to close",
     "focus" => "activates a tab; returns no page bytes",
     "close" => "closes a tab; must stay reachable so the blocked tab can be disposed of",
-    "console" => "browser-scoped event buffer, not a read of the addressed tab",
     "dialog" => "answers or lists a JS dialog; needed to unblock a stuck page",
     "upload" => "a write into a file input; confined by confined_upload_path/1 instead",
     "download" =>
@@ -246,6 +277,95 @@ defmodule FermixCore.Browser.ProfileServerGuardsTest do
       assert match?({:error, %Error{code: "read_blocked"}}, result),
              "`act #{label}` did not refuse a policy-blocked URL: #{inspect(result)}"
     end
+  end
+
+  # The invariant walk above calls `webmcp` with no arguments, which proves the
+  # gate runs before `op` is looked at. This is the other half: a fully formed
+  # `call` on a blocked page is refused with nothing dispatched into the page.
+  test "a fully formed webmcp call is refused on a policy-blocked page" do
+    pid = start_page("http://169.254.169.254/latest/", public_config(), :guards_webmcp)
+    assert {:ok, _} = req(pid, "start")
+    flush_cdp()
+
+    assert {:error, %Error{code: "read_blocked"}} =
+             req(pid, "webmcp", %{"op" => "call", "name" => "steal", "input" => %{}})
+
+    refute_receive {:cdp, _owner, "Runtime.callFunctionOn", _params}, 100
+  end
+
+  # An action that observes the page (M47 §3.1) is a READ of it, so it faces the
+  # same gate. The dangerous shape is precisely the one that can hold a mark: a
+  # tab snapshotted while it was on an allowed page, which then navigated itself
+  # onto a private host. The model's own click is not a door around the gate.
+  test "a click, submit, Enter or click_coords on a drifted tab returns no page text" do
+    pid = start_page("https://example.com/form", public_config(), :guards_drift, "drift")
+    ready(pid)
+
+    observing = [
+      %{"kind" => "click", "ref" => "textbox_1"},
+      %{"kind" => "submit", "ref" => "textbox_1"},
+      %{"kind" => "press", "key" => "Enter"},
+      %{"kind" => "click_coords", "x" => 5, "y" => 5}
+    ]
+
+    for args <- observing do
+      assert {:ok, result} = req(pid, "act", args)
+
+      assert result["page"] == "read_blocked",
+             "`act #{args["kind"]}` observed a policy-blocked page: #{inspect(result)}"
+
+      refute Map.has_key?(result, "snapshot"),
+             "`act #{args["kind"]}` returned page text from a blocked host"
+    end
+  end
+
+  # `open` and `navigate` hand the page back now (M47 §3.6), so both are reads
+  # and both face the same gate. The destination was checked before the
+  # navigation; this is the half that check cannot see — where the page ENDS UP.
+  # The navigation itself happened, so the answer is the tab with the verdict on
+  # it, never an error that would have the model repeat a navigation it made.
+  # The row keeps the tab id, because a tab nobody can address is a tab nobody
+  # can close — but the blocked document's url and title go with its text, which
+  # is what `live_row/2` already does on this same verdict.
+  test "an open or a navigate that lands on a blocked host returns no page text" do
+    pid = start_page("https://example.com/form", public_config(), :guards_drift_nav, "drift")
+    ready(pid)
+
+    for action <- ["open", "navigate"] do
+      assert {:ok, result} = req(pid, action, %{"url" => "https://example.com/form"})
+
+      assert result["page"] == "read_blocked",
+             "`#{action}` observed a policy-blocked page: #{inspect(result)}"
+
+      assert result["target"] =~ "tab_", "`#{action}` left no id to address the tab with"
+
+      for withheld <- ~w(snapshot url title) do
+        refute Map.has_key?(result, withheld),
+               "`#{action}` returned the blocked page's #{withheld}"
+      end
+    end
+  end
+
+  # The two refusals are different verdicts with different fixes — a blocked
+  # HOST is "navigate somewhere allowed", a refused ORIGIN is "this is not a web
+  # document, use the file tools". Collapsing both into `read_blocked` on an act
+  # result sends the model looking for a host rule that was never the problem.
+  test "an act on a tab that drifted off the web says so as read_origin_blocked" do
+    pid =
+      start_page(
+        "https://example.com/form",
+        public_config(),
+        :guards_drift_origin,
+        "drift_origin"
+      )
+
+    ready(pid)
+
+    assert {:ok, result} = req(pid, "act", %{"kind" => "click", "ref" => "textbox_1"})
+
+    assert result["page"] == "read_origin_blocked"
+    assert result["page_reason"] =~ "file tools"
+    refute Map.has_key?(result, "snapshot")
   end
 
   # The gate must not over-block: the same verbs still serve an allowed page.
@@ -484,10 +604,15 @@ defmodule FermixCore.Browser.ProfileServerGuardsTest do
     progress(pid, "G1", "inProgress", 2_000, 9_000_000)
 
     assert_receive {:cdp, _owner, "Browser.cancelDownload", %{guid: "G1"}}
-    refute File.exists?(partial)
 
     assert {:error, %Error{code: "download_too_large"} = error} =
              req(pid, "download", %{"timeout_ms" => 50})
+
+    # The partial is deleted AFTER the cancel command goes out, so the outbound
+    # notification proves nothing about the file. This `req/2` is a
+    # GenServer.call into the very process that does the delete, so it is the
+    # first point at which the partial's absence is a fact and not a race.
+    refute File.exists?(partial)
 
     assert error.details["guid"] == "G1"
     assert error.details["received_bytes"] == 2_000
@@ -559,10 +684,13 @@ defmodule FermixCore.Browser.ProfileServerGuardsTest do
     begin_download(pid, "G5", "http://192.168.1.1/config.bin", "config.bin")
 
     assert_receive {:cdp, _owner, "Browser.cancelDownload", %{guid: "G5"}}
-    refute File.exists?(partial)
 
     assert {:error, %Error{code: "download_blocked"} = error} =
              req(pid, "download", %{"timeout_ms" => 50})
+
+    # As above: the cancel notification is emitted before the delete runs, and
+    # this `req/2` is a GenServer.call into the process that performs it.
+    refute File.exists?(partial)
 
     assert error.details["url"] == "http://192.168.1.1/config.bin"
     assert error.message =~ "browser policy"

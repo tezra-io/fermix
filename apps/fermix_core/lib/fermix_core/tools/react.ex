@@ -12,7 +12,7 @@ defmodule FermixCore.Tools.React do
       capability was resolved. On a no-reaction channel (CLI) the tool is
       absent and the model just sends a short text ack in the same one call
       (docs/design/EMOJI_REACTION_ACKS.md §6/§11 Config B). No runtime
-      try-react-then-degrade branch (CLAUDE.md #12).
+      try-react-then-degrade branch (AGENTS.md #12).
 
     * `dynamic_parameters/1` — on a restricted platform (Telegram) the `emoji`
       parameter is an in-schema enum of exactly the channel's allowed set, so

@@ -80,6 +80,16 @@ defmodule FermixCore.Browser.Config do
 
     * `screenshot_max_side_px` — clamp on full-page capture width/height.
     * `screenshot_max_bytes` — reject captures larger than this.
+
+  ## WebMCP bounds
+
+  `webmcp_limits/0`, not struct fields: they bound text a PAGE controls and one
+  argument the model supplies, neither of which is an operator's business.
+
+  ## Act bounds
+
+  `act_limits/0`, not struct fields either: the post-action settle budget and
+  the `fill_form` field count are tuning, not posture.
   """
 
   alias FermixCore.Browser.Error
@@ -98,14 +108,18 @@ defmodule FermixCore.Browser.Config do
   # reaching for `action_timeout_ms` is told it is not settable instead of
   # editing a line that silently does nothing.
   @config_keys [:allowed_hosts]
+  # `selected_tab` is the tab the person grants with the browser extension
+  # (M42 slice 7). It is built in rather than configured because there is
+  # nothing to configure: the grant names the tab, and the person makes it.
   @default_profiles %{
     "fermix" => %{mode: :managed, headless: :auto, cdp_port: :auto},
     "fermix_visible" => %{mode: :managed, headless: false, cdp_port: :auto},
-    "fermix_headless" => %{mode: :managed, headless: true, cdp_port: :auto}
+    "fermix_headless" => %{mode: :managed, headless: true, cdp_port: :auto},
+    "selected_tab" => %{mode: :attached_tab, headless: false, cdp_port: :auto}
   }
 
   @type profile :: %{
-          required(:mode) => :managed | :existing_session | :remote_cdp,
+          required(:mode) => :managed | :existing_session | :remote_cdp | :attached_tab,
           required(:headless) => boolean() | :auto,
           required(:cdp_port) => :auto | pos_integer(),
           optional(:cdp_url) => String.t(),
@@ -199,12 +213,81 @@ defmodule FermixCore.Browser.Config do
     snapshot_max_children snapshot_max_chars screenshot_max_side_px screenshot_max_bytes
   )a
 
+  # Bounds on the `webmcp` action. Constants rather than struct fields: every
+  # one of them bounds page-controlled text (a tool's name, description, schema
+  # and result) or the one argument the model supplies, so there is no posture
+  # an operator would want to take on them — `[fermix_core.browser]` still
+  # accepts `allowed_hosts` alone. The call budget defaults to
+  # `action_timeout_ms` and is clamped to `call_max_ms`, which covers a page's
+  # own long waits without letting one hold the profile indefinitely.
+  @webmcp_limits %{
+    tools: 32,
+    name_chars: 128,
+    description_chars: 500,
+    schema_chars: 4_096,
+    input_bytes: 8_192,
+    call_max_ms: 60_000
+  }
+
+  # Bounds on the `act` action itself. Constants rather than struct fields, for
+  # the same reason as `@webmcp_limits`: neither is a posture an operator would
+  # want to take — `[fermix_core.browser]` still accepts `allowed_hosts` alone.
+  # `settle_budget_ms` is the cost of looking at the page after an action, and
+  # the poll runs inside the profile's `handle_call`, so it is deliberately
+  # short: a page holding a JS dialog answers nothing at all, and this is what
+  # bounds that wait. It bounds the WORK, not the wall clock — a command waits
+  # its own timeout and the caller adds `cdp_response_grace_ms`, so the ceiling
+  # is this budget plus one poll plus one grace (see `ProfileServer.settle/5`).
+  # `navigation_budget_ms` is that same wait after an `open` or a `navigate`,
+  # and it is longer because there it is the ONLY load wait: `Target.createTarget`
+  # answers on creation and `Page.navigate` on commit, so nothing else waits for
+  # the page at all. Four seconds is still well under the model turn it
+  # replaces, and the same `handle_call` already blocks up to
+  # `navigation_timeout_ms` inside `Page.navigate` and `wait_max_ms` inside `act
+  # wait`, so it is not a new class of stall. `form_fields` is how many fields
+  # one `fill_form` may carry, and `ref_chars` bounds a ref quoted back at the
+  # model in a refusal.
+  @act_limits %{
+    settle_budget_ms: 1_500,
+    navigation_budget_ms: 4_000,
+    form_fields: 12,
+    ref_chars: 128
+  }
+
   @doc """
   Canonical list of allowed `[fermix_core.browser]` keys, used by the config
   store to reject unsettable keys at the parse boundary.
   """
   @spec config_keys() :: [atom()]
   def config_keys, do: @config_keys
+
+  @doc """
+  Bounds on the `webmcp` action: how many of a page's tools are listed, how much
+  of each one's text is kept, how large an `input` may be, and the ceiling on a
+  single tool call.
+  """
+  @spec webmcp_limits() :: %{
+          tools: pos_integer(),
+          name_chars: pos_integer(),
+          description_chars: pos_integer(),
+          schema_chars: pos_integer(),
+          input_bytes: pos_integer(),
+          call_max_ms: pos_integer()
+        }
+  def webmcp_limits, do: @webmcp_limits
+
+  @doc """
+  Bounds on `act`: the budget for observing the page after an action, the longer
+  one for observing it after a navigation, the number of fields one `fill_form`
+  may carry, and how much of a ref a refusal quotes back.
+  """
+  @spec act_limits() :: %{
+          settle_budget_ms: pos_integer(),
+          navigation_budget_ms: pos_integer(),
+          form_fields: pos_integer(),
+          ref_chars: pos_integer()
+        }
+  def act_limits, do: @act_limits
 
   @doc """
   `[fermix_core.browser]` as a keyword list, keeping only the settable keys.
@@ -388,6 +471,13 @@ defmodule FermixCore.Browser.Config do
         {:error, error} -> {:halt, {:error, error}}
       end
     end)
+  end
+
+  # No endpoint, no port and no window of our own: the grant is the connection.
+  defp validate_profile(%{mode: :attached_tab, cdp_port: :auto}), do: :ok
+
+  defp validate_profile(%{mode: :attached_tab}) do
+    {:error, Error.new("invalid_config", "attached_tab profiles cannot set cdp_port")}
   end
 
   defp validate_profile(%{mode: :managed, headless: headless, cdp_port: port})

@@ -101,6 +101,37 @@ def test_render_config_always_roots_the_homes_skills_dir():
     assert doc["sandbox"]["allowed_roots"] == ["/tmp/x-eval/skills"]
 
 
+def test_render_config_allows_the_skill_credential_fixture():
+    # M45: the credential eval needs one allowed sandbox variable whose value a
+    # harmless `command` source prints — the same record shape a value stored
+    # from Settings > Sandbox has — so no keychain and no operator env is read.
+    cfg = seed.render_config("/tmp/x-eval", "openai", {"default_model": "m"}, None)
+    env = tomllib.loads(cfg)["sandbox"]["env"]
+    assert env["allow"] == [seed.SKILL_TOKEN_NAME]
+    source = env[seed.SKILL_TOKEN_NAME]
+    assert source["source"] == "command"
+    assert source["command"] == "/bin/cat"
+    assert source["args"] == ["/tmp/x-eval/eval-fixtures/skill_token"]
+    assert isinstance(source["timeout_ms"], int) and source["timeout_ms"] > 0
+
+
+def test_write_skill_token_writes_the_fixture_value_privately(tmp_path):
+    home = tmp_path / "x-eval"
+    home.mkdir()
+    path = seed.write_skill_token(str(home))
+    assert path == str(home / "eval-fixtures" / "skill_token")
+    # No trailing newline: the value the helper prints is byte-identical to it.
+    assert (home / "eval-fixtures" / "skill_token").read_text() == seed.SKILL_TOKEN_VALUE
+    assert os.stat(path).st_mode & 0o777 == 0o600
+    # Long enough that the shell's 8-byte redaction floor applies to it.
+    assert len(seed.SKILL_TOKEN_VALUE.encode()) >= 8
+
+
+def test_the_fixture_token_is_not_durable_state():
+    # Seeding rewrites it every time; reset_state must not be what removes it.
+    assert "eval-fixtures" not in seed.STATE_DIRS
+
+
 def _populate_state(home):
     """Every durable-state path a prior sweep's daemon leaves behind."""
     for name in seed.STATE_DIRS:

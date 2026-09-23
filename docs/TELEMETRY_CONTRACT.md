@@ -58,6 +58,18 @@ The fields are three fixed strings with no user content, so `Mapper.tool_span/3`
 exports them outside the content-capture gate — a blocked-before-execution claim
 must stay provable in a content-free export.
 
+### An allowed variable the sandbox could not pass
+
+The opposite claim, kept distinct on purpose. When an allow-listed environment
+variable cannot be read where the daemon runs, the shell command still executes
+without it, and the tool's `:metadata` carries `env_unresolved: [names]` (names
+only, no values, no reasons). It is **not** a policy denial and never carries
+`policy_enforcement`: the command ran. `Mapper.tool_span/3` exports the names
+outside the content-capture gate because they are operator configuration, not
+user content. The reason and the remedy sentence go to the model in the tool
+result and to the daemon log once per transition (`Sandbox.EnvHealth`), and
+readiness publishes the name in the sandbox pane until it resolves.
+
 ## Adding a provider / adapter
 
 Emit the LLM call via the single provider emitter, and pass the correlation ids
@@ -268,7 +280,7 @@ headers, the MCP session ID, the workspace ID, the endpoint URL, discovered
 schemas, tool arguments, and response bodies. `error_class` is *derived* from the
 `{:error, reason}` — an atom, or a tagged tuple's atom head; anything else
 (a message body, where a URL or token would hide) flattens to `"unclassified"`.
-`source_id` is serialized to a stable string (`"plugin:eden"`, `"operator:fs"`):
+`source_id` is serialized to a stable string (`"plugin:acme"`, `"operator:fs"`):
 a tuple raises on the daemon wire path and only `inspect`s into JSONL.
 
 Routing splits on **whether a turn exists**, not on a retry:
@@ -343,6 +355,64 @@ stream lifetime at terminal (`Transcription.Support.emit_stream_call/5`) — a
 stream session is *not* a run kind. Summarizer calls are ordinary llm spans
 inside the meeting session. Ingress voice-note transcription stays sessionless
 (pre-turn), unchanged.
+
+## Live voice runs
+
+A GPT-Live call is a **run kind**, and it is always a **root**. The local voice
+socket mints `session_id = "voice_live:<n>"` for the call; the Live session
+mints a *separate* `"voice_delegation_<n>"` for every backend turn it delegates
+to, with `parent_session` = the call id. That parent link is the **only**
+correlation between a call and its turns — a delegation shares no other field
+with the call it came from — so it is what nests the turn's `llm`/`tool` spans
+under the call's trace. A call opened from a turn may carry its own
+`parent_session` as correlation metadata, but it never nests: the call outlives
+the turn that asked for it (the meeting precedent).
+
+Every emission goes through `FermixCore.Realtime.LiveTelemetry` — never
+hand-rolled. The six events are `[:fermix, :voice_live, :call_start |
+:session_started | :delegation_start | :delegation_stop | :provider_error |
+:call_stop]`. Shared metadata: `agent: "voice_live"`, `session_id` (the call
+id), `engine: "openai_live"`, `device_id`, `model`, `voice`, and
+`provider_session_id` once `session.started` arrives — that last one is the only
+handle a vendor-side investigation has, and it exists nowhere else in the trace.
+Nils are dropped rather than emitted. `call_start` carries `max_duration_ms` —
+the Opik exporter's sweep floor for the root; omit it and a call that sits quiet
+between delegations is force-closed at the idle TTL, and its ledger-bearing
+`call_stop` then mints a second, empty root. The delegation events carry
+`delegation_id`, `revision` and `turn_session_id`, and `delegation_stop` adds
+the terminal word `status` (`completed | failed | cancelled`, never a bare "ok")
+with a `duration_ms` measurement. `provider_error` carries the vendor's bounded
+sentence and is **not** terminal: a Live moderation refusal cuts the audio and
+the session keeps running.
+
+`call_stop` is the run's whole cost record, and every value is a number:
+`voice_seconds`, `voice_cost_millicents`, `backend_turns`, and
+`accounting_complete` as `0`/`1`. Metadata carries `reason` — `call_stop`,
+`cost_limit`, `max_session_duration`, `provider_disconnected`,
+`session_expired` — because a ceiling kill that read as a hang-up is exactly
+what makes a torn-down call undiagnosable. A non-numeric measurement raises at
+the emitter rather than reaching a trace as an unpriceable field.
+
+**Voice is duration-priced and is never expressed as tokens.** A Live minute is
+billed by the clock, so the ledger is seconds plus **integer millicents**
+(1 cent = 1000) and there is no token count that could stand in for it;
+inventing one would fabricate a unit the invoice does not have. The nested
+delegation turns keep their own token usage on their own `llm` spans, so voice
+cost and backend cost stay separately attributed rather than double-counted, and
+an incomplete finalization stays visible as `accounting_complete: 0` rather than
+reading as a measured zero-cost call. Spoken content — captions, transcript
+fragments, the composed instructions — reaches no field on any of these events.
+
+Backend work inside a delegation rides the shared emitters as usual
+(`Providers.Telemetry.emit_call/3`, `Tools.Telemetry.exec/5`) with the
+delegation's own `session_id`, so a Live turn is priced and rendered exactly like
+any other turn. `Trace.TelemetryHandler` registers all six events as
+`agent_event` rows; `FermixOpik` binds them (`infer_kind("voice_live:" <> _)` →
+`:voice_live`, `infer_kind("voice_delegation_" <> _)` → `:voice_delegation`,
+root open and close in `Aggregation`, phase spans via `Mapper.voice_live_span/3`,
+replay in `TraceFile`). Both id prefixes are minted outside `fermix_opik`; keep
+them in lockstep with the exporter's clauses, or a `call_stop` arriving without
+its opener reads as a `:subagent` phantom root.
 
 ## Sessionless channel points (pairing, push, transport posture)
 
@@ -421,6 +491,113 @@ with no run identity, no cancellation and no budget of their own, so they mint n
 root span per settings read with nothing nested under it. If a new management
 method has to *wait* on a network, a download or a person, it is a job — start
 one and inherit the bookends rather than minting a sixth event.
+
+## Computer-use sessions
+
+A computer-use session is a **run kind**: `ComputerUse.Session` mints
+`session_id = "cua_<rand>"` for the one session per conversation, and every
+lifecycle emission goes through `FermixCore.ComputerUse.Telemetry` — never
+hand-rolled. The five verbs are `[:fermix, :computer_use, :session_start |
+:session_complete | :session_error | :session_pause | :session_resume]`. Shared
+metadata: `agent` (the turn's own agent name), `session_id`, `mode`, and the
+optional `parent_session` and `origin`. Pause and resume are lifecycle rather
+than actions — the operator took the seat back, or gave it up again — and a trace
+showing only start and complete cannot say why nothing was dispatched in between.
+
+**Which bookend closes the run is the diagnosis.** `session_complete` (measuring
+`actions` and `duration_ms`) is only for a session that ended on its own terms: a
+clean stop, or a sidecar exit with status 75. Every **fault** stop — a sidecar
+timeout and the poison reset it triggers, any other sidecar exit status, a failed
+probe, a lost check — closes with `session_error` and a bounded `reason`
+(previewed at the emitter, never a raw term). A session that died is therefore
+never reported as one that finished.
+
+The run is **always a root, and `parent_session` rides as correlation metadata,
+never as a parent**. The session is keyed by conversation and reused across
+turns, so it outlives the turn that opened it (the meeting/harness/voice-call
+reason): nesting it would let a mid-turn `session_error` — a sidecar exit, a
+poison reset — close and ship the *turn's* trace and tombstone everything the
+turn did afterwards, and a session ending after its turn would mint a phantom
+second root. `Trace.TelemetryHandler` registers all five as `agent_event` rows;
+`FermixOpik` binds them (`infer_kind("cua_" <> _)` → `:computer_use`, the root
+opening on `session_start` and closing through `close_root` on complete and
+error, pause and resume as phase spans via `Mapper.computer_use_span/3`, replay
+in `TraceFile`). The id prefix is minted outside `fermix_opik`; keep it in
+lockstep with the exporter's clause, or a `session_complete` arriving without its
+opener reads as a `:subagent` phantom root.
+
+**In Opik one session is normally more than one root, by design.** Between its
+opener and its bookend the run receives nothing — the actions ride the turn — and
+a session lives as long as the conversation wants it, so almost every real
+session sits idle past the exporter's idle TTL and its root ships then, with no
+counts and no status. A pause or resume arriving while that shipped root's
+tombstone stands is dropped from Opik (it is still in the JSONL stream). The
+closing bookend then opens a **continuation root** under the same `cua_…` id,
+and that continuation root is where `actions`, `duration_ms`, the status and any
+`error_info` live. This is not the meeting/voice-call situation: those runs pass
+a `max_duration_ms` sweep floor because they have a cap, and a computer-use
+session has none, so there is no honest number to pass and none is invented.
+**The JSONL stream is the complete record** — every verb, in order, under one
+`session_id`; read it, not Opik, when a session's whole life is the question.
+
+**The actions themselves stay under the turn.** One `computer_use` call is one
+ordinary `[:fermix, :tool, :exec]` under the *turn's* session, which is where the
+eval harness and every trace reader look for a turn's tool calls, so correlation
+runs the other way: each exec carries `cu_session` (the `cua_…` id) and
+`outcome` — one of `refused | performed | performed_unverified | unknown | read`
+— in its always-on metadata. An opaque id and a closed enum, with no page or
+screen text in either, so both ride outside the content gate. A metadata key no
+exporter names is silently dropped, so the pair is listed in both allowlists a
+tool key must pass: `Mapper.tool_span/3`'s `Map.take` and
+`TraceFile.normalize("tool_exec", …)`. The JSONL handler needs nothing — it
+writes a tool exec's metadata whole.
+
+Their **types differ by seam**, and both are pinned by tests. `cu_session` is
+always a string. `outcome` is an **atom** on the live path (the emitter's enum,
+carried through `Map.take` untouched and rendered by Jason as the bare word) and
+a **string** after replay, because the JSONL row it is read back from is JSON.
+Everything downstream treats the two alike; a consumer that compares `outcome`
+must accept both spellings rather than assume the live one.
+
+### What a `computer_use` exec row may carry
+
+The whole of it, derived from `Tools.ComputerUse`'s `@receipt_facts` and the two
+putters beside it. Every field below is a closed word, a boolean, a bounded
+count or an opaque id, and every one of them is named in **both** allowlists
+(`Mapper.tool_span/3` and `TraceFile.normalize("tool_exec", …)`) — a key that is
+in neither is written to the JSONL stream and then dropped by replay and by
+Opik, which is a field nobody can count. A field is **absent** rather than
+defaulted whenever its fact was not established.
+
+| Field | Values | Present when | Means |
+|---|---|---|---|
+| `action` | the model's action name | every call | which verb was asked for |
+| `cu_session` | `cua_…` string | the session was registry-registered | which session drove it |
+| `outcome` | `refused \| performed \| performed_unverified \| unknown \| read` | every call | what happened to the INPUT |
+| `courtesy` | `off \| na \| unavailable \| proceeded \| deferred \| yielded \| paused` | every call | what the coexistence arbiter did about a person at the machine: nothing to do, not applicable, no idle signal, went ahead, waited for them, stepped aside, or the seat was already handed back |
+| `observation_age_ms` | non-negative integer | the action named an image | how stale that image was when it was sent |
+| `geometry_refusal` | `observation_required \| addressing_conflict \| unknown_observation \| expired_observation \| stale_observation \| point_outside_observation \| capture_geometry_mismatch` | an addressing or geometry gate refused | which one, countable without parsing a sentence |
+| `input_method` | `ax \| foreground_hid` | the helper reported a receipt | by which mechanism the input went out |
+| `effect` | `verified \| not_observed \| unknown` | the helper observed the result | what it observed, never inferred |
+| `check_kind` | `image \| semantic \| none` | the action came back with a check | which evidence it carried |
+| `check_changed` | boolean | an image check could compare two hashes | whether that view differs from the one acted on |
+| `cu_input_ms` / `cu_settle_ms` / `cu_capture_ms` / `cu_encode_ms` | non-negative integers, dropped above the outer call deadline | the helper timed that phase | what each phase of the action cost |
+| `target_kind` | `window \| desktop` | a target is bound, which needs `[fermix_core.computer_use] background` on; absent on every row otherwise | what the action was pointed at |
+| `cu_mode` | `background \| foreground` | the action produced a result rather than a refusal; reads `foreground` until a window is bound, so `background` is the value that needs the flag | how the input reached the screen: inside a bound window through accessibility, or in front of the person |
+
+`control_origin` is the one addition to the **lifecycle** rows: on
+`session_pause` and `session_resume` it is `:command` when a chat `/pause` or
+`/resume` did it and `:indicator` when the person pressed the button on the
+helper's own on-screen panel. It is beside `origin`, never instead of it —
+`origin` is the session's attended origin (`:interactive`, `:voice`) on every row
+of the family, and overwriting it would make the row lie about where the session
+came from.
+
+**Nothing read off the screen is ever in any of these.** No window title, no
+application name, no control label, no typed text, no value a `set_value`
+carried, no image data — whatever the content-capture posture. Those are content:
+they ride the model's side of the wire and the capture gate, never always-on
+metadata.
 
 ## Content (prompts / responses / tool IO)
 

@@ -20,7 +20,14 @@ defmodule FermixCore.Providers.ModelCatalog do
   alias FermixCore.Providers.ReasoningEffort
 
   @type provider ::
-          :openai | :openai_codex | :anthropic | :xai | :openrouter | :ollama | :mistral
+          :openai
+          | :openai_codex
+          | :anthropic
+          | :xai
+          | :openrouter
+          | :ollama
+          | :mistral
+          | :venice
   @type entry :: Entry.t()
 
   @unknown_model_default_ctx 100_000
@@ -31,7 +38,8 @@ defmodule FermixCore.Providers.ModelCatalog do
   # models_for/1). This field is the compaction denominator
   # (`context_tokens / context_window >= compaction.threshold`, default 0.85 —
   # see `TurnRunner`), NOT a declared capability, so neither column is a
-  # straight copy of a published number. astra = frontier (default);
+  # straight copy of a published number. astra = frontier (default); GPT-6
+  # sol/luna = the generation's cheaper frontier/fast pair; the gpt-5.6
   # sol/terra/luna = frontier/balanced/fast of the prior generation.
   #
   # Codex column: the cache's `max_context_window` — the ceiling that path
@@ -58,14 +66,15 @@ defmodule FermixCore.Providers.ModelCatalog do
   #
   # Direct-API column: the published window from
   # developers.openai.com/api/docs/models/<id> for gpt-5.5, gpt-5.4 and
-  # gpt-5.4-mini only. The other four are deliberate deviations, because every
+  # gpt-5.4-mini only. The other six are deliberate deviations, because every
   # current model reprices a request above 272k INPUT tokens at 2x input/cache
   # and 1.5x output "for the full request" — a cliff rather than a ramp, so one
   # token over doubles the bill for everything before it:
   #
-  #   * astra 320_000 is NOT its real 1,050,000 window. 0.85 * 320_000 =
-  #     272_000 puts compaction exactly on that boundary, so the
-  #     standard-priced tier is used in full. Do not "correct" it upward.
+  #   * astra, and GPT-6 sol/luna, 320_000 is NOT their real 1,050,000
+  #     window. 0.85 * 320_000 = 272_000 puts compaction exactly on that
+  #     boundary, so the standard-priced tier is used in full. Do not
+  #     "correct" it upward.
   #
   #   * sol/terra/luna 272_000 predate that calibration and are NOT their
   #     published windows, which are also 1,050,000. They sit below the cliff
@@ -81,8 +90,8 @@ defmodule FermixCore.Providers.ModelCatalog do
   # a large tool result can cross 272k and be billed at 2x once before the next
   # preflight compaction trims it. Zero margin means nothing absorbs that lag.
   #
-  # `max` reasoning effort is a current-generation capability (GPT-6 Astra and
-  # the GPT-5.6 models), so those leave `max_reasoning_effort` unset (provider
+  # `max` reasoning effort is a current-generation capability (the GPT-6 and
+  # GPT-5.6 models), so those leave `max_reasoning_effort` unset (provider
   # ceiling = `:max`) while gpt-5.5/gpt-5.4/gpt-5.4-mini cap at `:xhigh`. An
   # over-reaching config self-heals down to the model's ceiling at route
   # resolution (see `clamp_effort/3`), it does not 400 at the provider. Astra's
@@ -91,6 +100,8 @@ defmodule FermixCore.Providers.ModelCatalog do
   # is deliberately absent from `ReasoningEffort`.
   @openai_codex [
     %Entry{id: "gpt-6-astra", label: "GPT-6 Astra (default, latest)", context_window: 872_000},
+    %Entry{id: "gpt-6-sol", label: "GPT-6 Sol", context_window: 872_000},
+    %Entry{id: "gpt-6-luna", label: "GPT-6 Luna (fast, cheaper)", context_window: 872_000},
     %Entry{id: "gpt-5.6-sol", label: "GPT-5.6 Sol", context_window: 872_000},
     %Entry{id: "gpt-5.6-terra", label: "GPT-5.6 Terra (balanced)", context_window: 872_000},
     %Entry{id: "gpt-5.6-luna", label: "GPT-5.6 Luna (fast, cheaper)", context_window: 872_000},
@@ -120,6 +131,8 @@ defmodule FermixCore.Providers.ModelCatalog do
       label: "GPT-6 Astra (default, recommended)",
       context_window: 320_000
     },
+    %Entry{id: "gpt-6-sol", label: "GPT-6 Sol", context_window: 320_000},
+    %Entry{id: "gpt-6-luna", label: "GPT-6 Luna (fast, cheaper)", context_window: 320_000},
     %Entry{id: "gpt-5.6-sol", label: "GPT-5.6 Sol", context_window: 272_000},
     %Entry{id: "gpt-5.6-terra", label: "GPT-5.6 Terra (balanced)", context_window: 272_000},
     %Entry{id: "gpt-5.6-luna", label: "GPT-5.6 Luna (fast, cheaper)", context_window: 272_000},
@@ -145,7 +158,7 @@ defmodule FermixCore.Providers.ModelCatalog do
 
   # Context windows are the API defaults the adapter actually gets (it does not
   # send the `context-1m` beta header, design doc §8) — compaction thresholds key
-  # off these. The 4.6+ generation (Opus 5, Fable 5.1, Fable 5, Opus 4.8,
+  # off these. The 4.6+ generation (Opus 5.5, Opus 5, Fable 5.1, Fable 5, Opus 4.8,
   # Sonnet 4.6) ships the full 1M window by default at standard pricing; only
   # Haiku 4.5 is 200k. (Older Sonnet 4/4.5 still need the beta for 1M, but they
   # are not in this catalog.)
@@ -155,7 +168,9 @@ defmodule FermixCore.Providers.ModelCatalog do
   # docs before the SSE follow-up raises the adapter's non-streaming cap above
   # them). Fable 5.1 is a Covered Model: an organization on zero data retention
   # gets a 400 on every request until Anthropic authorizes it, which is an
-  # account setting rather than a request-shape defect.
+  # account setting rather than a request-shape defect. Opus 5.5 shares Fable
+  # 5.1's request rules (thinking always on, no forced tool_choice); the
+  # adapter's "opus-5" substring already sends that shape.
   @anthropic [
     %Entry{
       id: "claude-sonnet-4-6",
@@ -176,8 +191,14 @@ defmodule FermixCore.Providers.ModelCatalog do
       max_output_tokens: 64_000
     },
     %Entry{
+      id: "claude-opus-5-5",
+      label: "Claude Opus 5.5 (best quality)",
+      context_window: 1_000_000,
+      max_output_tokens: 128_000
+    },
+    %Entry{
       id: "claude-opus-5",
-      label: "Claude Opus 5 (best quality)",
+      label: "Claude Opus 5",
       context_window: 1_000_000,
       max_output_tokens: 128_000
     },
@@ -204,19 +225,21 @@ defmodule FermixCore.Providers.ModelCatalog do
   # Grok 4.6 = 500k, Grok 4.5 = 500k, Grok 4.3 = 1M, Grok 4.20 = 1M,
   # code-fast = 256k. The 4.5 and 4.20 figures corrected long-stale values here
   # (they read 1M and 256k respectively) — a window that overstates the real one
-  # defers compaction past the provider's limit.
+  # defers compaction past the provider's limit. Grok 4.7 = 500k
+  # (docs.x.ai/developers/grok-4-7, 2026-09-22).
   #
   # `reasoning_effort?: false` marks the models that reject `reasoning.effort`
   # (design doc §6.2) — re-verify against current xAI docs when adding models.
   #
-  # `xhigh` is a Grok 4.6 capability, so 4.6 leaves `max_reasoning_effort` unset
+  # `xhigh` arrived with Grok 4.6, so 4.6+ leaves `max_reasoning_effort` unset
   # (provider ceiling = `:xhigh`) while every older Grok caps at `:high` — the
   # same shape as the gpt-5.6-vs-gpt-5.5 split above. xAI itself treats an
   # `xhigh` request to an older model as `high` rather than rejecting it, so the
   # cap is about not *offering* a level that would silently do nothing, not
   # about avoiding a 400.
   @xai [
-    %Entry{id: "grok-4.6", label: "Grok 4.6 (recommended, latest)", context_window: 500_000},
+    %Entry{id: "grok-4.7", label: "Grok 4.7 (recommended, latest)", context_window: 500_000},
+    %Entry{id: "grok-4.6", label: "Grok 4.6", context_window: 500_000},
     %Entry{
       id: "grok-4.5",
       label: "Grok 4.5",
@@ -297,6 +320,47 @@ defmodule FermixCore.Providers.ModelCatalog do
     }
   ]
 
+  # Venice publishes a privacy tier per model, and the label is the one model
+  # field both setup doors draw — so the tier rides in the label (M49 §3.3).
+  # Every curated entry is `private`: the prompt is processed on hardware Venice
+  # contracts and is not retained. `(TEE)` marks an enclave model and never says
+  # "E2EE" — called by a plain client, an `e2ee-*` id runs in the enclave while
+  # Venice's own edge still sees plaintext. The live listing offers the
+  # `anonymized` tier too; this curated list does not.
+  #
+  # From the listing of 2026-09-19, all tool-calling. The head is the default:
+  # the private model Venice itself tags `most_intelligent`. The rest follow the
+  # live listing's own order — by family, then newest first — so one ordering
+  # rule explains both surfaces. Windows are the listed `context_length`
+  # ([verify] on every addition: an overstated window defers compaction past the
+  # provider's real limit). `reasoning_effort` is omitted for every Venice model
+  # (see the descriptor entry), so no entry caps it. `vision?: false` marks the
+  # one model that takes no images, so an image turn routed to it fails loud at
+  # the capability gate (M14) instead of 400-ing downstream.
+  @venice [
+    %Entry{id: "grok-4-6", label: "Grok 4.6 · Private", context_window: 500_000},
+    %Entry{
+      id: "deepseek-v4-1-flash",
+      label: "DeepSeek V4.1 Flash · Private",
+      context_window: 1_000_000
+    },
+    %Entry{id: "z-ai-glm-5-3-flash", label: "GLM 5.3 Flash · Private", context_window: 1_048_576},
+    %Entry{
+      id: "z-ai-glm-5-3",
+      label: "GLM 5.3 · Private",
+      context_window: 1_000_000,
+      vision?: false
+    },
+    %Entry{id: "e2ee-kimi-k3-p", label: "Kimi K3 · Private (TEE)", context_window: 1_000_000},
+    %Entry{id: "kimi-k3", label: "Kimi K3 · Private", context_window: 1_000_000},
+    %Entry{id: "kimi-k2-6", label: "Kimi K2.6 · Private", context_window: 256_000},
+    %Entry{
+      id: "minimax-m3-preview",
+      label: "MiniMax M3 Preview · Private",
+      context_window: 524_288
+    }
+  ]
+
   # Ollama windows are model CAPABILITY; the local server may serve far
   # less (default num_ctx is small) and truncates silently — the doctor
   # probe checks the served num_ctx against these (M12 §3.2, [verify]
@@ -339,6 +403,7 @@ defmodule FermixCore.Providers.ModelCatalog do
   def models_for(:xai), do: @xai
   def models_for(:openrouter), do: @openrouter
   def models_for(:mistral), do: @mistral
+  def models_for(:venice), do: @venice
   def models_for(:ollama), do: @ollama
 
   @spec default_model_for(provider()) :: String.t()

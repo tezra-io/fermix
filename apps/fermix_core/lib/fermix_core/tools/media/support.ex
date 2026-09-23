@@ -65,7 +65,7 @@ defmodule FermixCore.Tools.Media.Support do
   def provider_credential(opts, provider, label)
       when is_list(opts) and is_atom(provider) and is_binary(label) do
     case Keyword.get(opts, :api_key) do
-      key when is_binary(key) and key not in ["", "@keyring"] -> {:ok, key}
+      key when is_binary(key) and key not in ["", "@keyring", "@file"] -> {:ok, key}
       _ -> configured_provider_key(provider, label)
     end
   end
@@ -80,7 +80,7 @@ defmodule FermixCore.Tools.Media.Support do
   def config_credential(opts, key, label)
       when is_list(opts) and is_atom(key) and is_binary(label) do
     case Keyword.get(opts, key) do
-      value when is_binary(value) and value not in ["", "@keyring"] -> {:ok, value}
+      value when is_binary(value) and value not in ["", "@keyring", "@file"] -> {:ok, value}
       _ -> {:error, "auth_failed: #{label} is not set. Run `fermix setup` to add it."}
     end
   end

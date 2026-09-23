@@ -215,7 +215,7 @@ defmodule FermixCore.Providers.OpenAI.ResponsesSharedTest do
 
   describe "retain_screenshots/2" do
     @label "Image returned by the preceding tool call:"
-    @elided "[earlier tool image omitted to bound context]"
+    @elided "[the image the preceding tool result describes was dropped to bound context: it is a record of a past look, not a current view, and no coordinate or id in it can be used]"
 
     defp screenshot_item(n) do
       %{

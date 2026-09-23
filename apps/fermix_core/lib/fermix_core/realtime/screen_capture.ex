@@ -15,9 +15,9 @@ defmodule FermixCore.Realtime.ScreenCapture do
     * **Contention.** That session serializes classify/execute, so a slow capture
       would delay actuation. Feed captures must never queue behind (or in front
       of) the model's actions.
-    * **Port ownership + blocking receive.** `Compux.PortDriver.execute/2` waits
-      for the reply IN THE CALLING PROCESS, and Port messages are delivered to
-      the process that opened the Port. Keeping both here leaves `ScreenFeed`
+    * **Its own driver, and its own blocking wait.** `Compux.PortDriver.execute/2`
+      waits for the reply IN THE CALLING PROCESS, and this process owns the driver,
+      so the sidecar's death is reported here. Keeping both here leaves `ScreenFeed`
       responsive to `stop` while a capture is stalled, and lets a wedged capture
       be killed without taking the feed — or the voice call — down.
 
@@ -65,10 +65,14 @@ defmodule FermixCore.Realtime.ScreenCapture do
     display = Keyword.fetch!(opts, :display)
     {driver_mod, driver_opts} = Keyword.fetch!(opts, :driver)
 
+    # Before the driver starts, not after: `start/1` links its transport to this
+    # process, so a transport that fails its handshake would otherwise take this
+    # process down before it could report the reason. `ComputerUse.Session.init/1`
+    # does the same, for the same reason; the two inits agree.
+    Process.flag(:trap_exit, true)
+
     case driver_mod.start(driver_opts) do
       {:ok, driver_state} ->
-        Process.flag(:trap_exit, true)
-
         {:ok,
          %{
            owner: owner,
@@ -88,18 +92,23 @@ defmodule FermixCore.Realtime.ScreenCapture do
     {:noreply, state}
   end
 
-  # A late sidecar response arriving after a prior capture timed out. Responses
-  # match by Port order (no request ids in the protocol), so a stale one would
-  # desync onto the next capture — drain it, exactly as `ComputerUse.Session` does.
+  # The sidecar ended. The transport sends this once, after completing anything
+  # outstanding, so a capture still waiting has already had its answer. An integer
+  # is the status the sidecar chose for itself — 75 is the capture-stall self-reap
+  # the feed's wedge counter reads; `{:poisoned, reason}` is this transport having
+  # ended an unusable wire, which is a fault rather than a stall.
   @impl true
-  def handle_info({port, {:data, _data}}, %{driver_state: %{port: port}} = state) do
-    Logger.debug("screen_capture: dropping stale sidecar response after a prior timeout")
-    {:noreply, state}
+  def handle_info({:compux_sidecar_exit, _transport, status}, state) do
+    Logger.warning("screen_capture: sidecar ended (#{inspect(status)}); stopping capture")
+    {:stop, {:shutdown, {:sidecar_exited, status}}, state}
   end
 
-  def handle_info({port, {:exit_status, status}}, %{driver_state: %{port: port}} = state) do
-    Logger.warning("screen_capture: sidecar exited (status #{status}); stopping capture")
-    {:stop, {:shutdown, {:sidecar_exited, status}}, state}
+  # Decoded and forwarded by the transport; nothing emits one at this protocol
+  # version. Named rather than swallowed by the catch-all, so the day something
+  # does emit one the log says what arrived.
+  def handle_info({:compux_session_event, _transport, event}, state) do
+    Logger.debug("screen_capture: ignoring a sidecar session event (#{inspect(event.kind)})")
+    {:noreply, state}
   end
 
   def handle_info({:EXIT, _pid, reason}, state) do

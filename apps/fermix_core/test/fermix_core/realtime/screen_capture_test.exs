@@ -4,7 +4,9 @@ defmodule FermixCore.Realtime.ScreenCaptureTest do
   alias FermixCore.Realtime.ScreenCapture
 
   # A driver stub in place of the compux sidecar: no Port, no binary, no TCC grant
-  # (the hermetic-tests rule — this suite must never touch host state).
+  # (the hermetic-tests rule — this suite must never touch host state). It carries
+  # no `:port`: the Port belongs to the transport now, and the sidecar's death
+  # reaches this process as a message rather than as a Port event.
   defmodule FakeDriver do
     def start(opts) do
       case Keyword.get(opts, :start) do
@@ -12,7 +14,7 @@ defmodule FermixCore.Realtime.ScreenCaptureTest do
           {:error, reason}
 
         _ok ->
-          {:ok, %{port: nil, responses: Keyword.get(opts, :responses, []), owner: opts[:owner]}}
+          {:ok, %{responses: Keyword.get(opts, :responses, []), owner: opts[:owner]}}
       end
     end
 
@@ -61,12 +63,45 @@ defmodule FermixCore.Realtime.ScreenCaptureTest do
     assert_receive {:executed, request}
     assert request["action"] == "screenshot"
     assert request["display"] == 0
-    refute Map.has_key?(request, "screenshot_after")
+    # The ambient feed is a look, and a look asks for no evidence of its own: it
+    # dispatches nothing, so there is nothing a check could be about.
+    refute Map.has_key?(request, "check")
     # Feed frames are awareness-only: never ruler-gridded, never mark-badged —
     # those grounding overlays belong to the tool path (M28), and drawing them
     # on ambient frames would present a pseudo-aiming surface.
     refute Map.has_key?(request, "rulers")
     refute Map.has_key?(request, "marks")
+    # M42 slice 3: this process owns its OWN helper, so the ids that helper mints
+    # belong to no conversation's table. It names none on the way out, and it must
+    # never send a pointer action — a frame the model was shown as awareness is
+    # not a surface it may aim in.
+    refute Map.has_key?(request, "observation_id")
+  end
+
+  # The ambient feed keeps no table, so a reply's observation fields are inert here
+  # — the frame decodes exactly as it did before they existed. Nothing may leak an
+  # id to the model through this path: the caption a frame carries is written by
+  # `Realtime.OpenAIClient`, not from the reply.
+  test "the new observation fields on a reply are ignored, and the frame still decodes" do
+    capture =
+      start_capture(
+        responses: [
+          {:ok,
+           %{
+             "data" => Base.encode64("pixels"),
+             "mime" => "image/png",
+             "observation_id" => "feed-1",
+             "observation_kind" => "image",
+             "captured_at_monotonic_ns" => 1_000,
+             "frame_seq" => 12
+           }}
+        ]
+      )
+
+    ScreenCapture.request(capture, 3)
+
+    assert_receive {:screen_capture, 3, {:ok, frame}}
+    assert frame == %{mime_type: "image/png", data: "pixels"}
   end
 
   test "a malformed frame fails loud rather than shipping garbage to the model" do
@@ -114,5 +149,34 @@ defmodule FermixCore.Realtime.ScreenCaptureTest do
     capture = start_capture([])
     assert :ok = ScreenCapture.stop(capture)
     assert :ok = ScreenCapture.stop(capture)
+  end
+
+  # The sidecar's death reaches this process as a message from the transport, not
+  # as a Port event: this process no longer owns a Port. The stop reason has to
+  # stay the shape `ScreenFeed.wedge?/1` reads, or the capture-stall self-reap
+  # (75) stops feeding the breaker and a wedged host is handed fresh sidecars
+  # forever — the amplification that reverted the `watch` construct.
+  describe "the sidecar ending" do
+    test "a capture-stall exit stops capture with the reason the feed counts as a wedge" do
+      Process.flag(:trap_exit, true)
+      pid = start_capture([])
+
+      send(pid, {:compux_sidecar_exit, self(), 75})
+
+      assert_receive {:EXIT, ^pid, {:shutdown, {:sidecar_exited, 75}}}
+      assert_receive :stopped
+    end
+
+    # A transport that ended an unusable wire is a fault, and its payload is a
+    # term — so it can never be mistaken for the 75 the sidecar chooses itself.
+    test "a poisoned wire stops capture without looking like a capture stall" do
+      Process.flag(:trap_exit, true)
+      pid = start_capture([])
+
+      send(pid, {:compux_sidecar_exit, self(), {:poisoned, {:malformed_frame, :nope}}})
+
+      assert_receive {:EXIT, ^pid,
+                      {:shutdown, {:sidecar_exited, {:poisoned, {:malformed_frame, :nope}}}}}
+    end
   end
 end

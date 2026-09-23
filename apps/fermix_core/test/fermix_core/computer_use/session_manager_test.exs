@@ -19,6 +19,50 @@ defmodule FermixCore.ComputerUse.SessionManagerTest do
     def stop(_state), do: :ok
   end
 
+  # Blocks inside the ACTION, and answers a control at once from a separate call —
+  # which is the shape the real wire has: the helper's control reader is not its
+  # action worker. The ack names the request still under way, which is the fact
+  # `/pause` has to tell the human, so the double tracks it in an Agent.
+  defmodule BlockingDriver do
+    @behaviour Compux.Driver
+
+    @impl true
+    def start(opts) do
+      {:ok, in_flight} = Agent.start_link(fn -> nil end)
+      {:ok, %{test_pid: Keyword.fetch!(opts, :test_pid), in_flight: in_flight}}
+    end
+
+    @impl true
+    def execute(_state, %{"action" => "probe"}), do: {:ok, %{"input_control" => true}}
+
+    def execute(%{test_pid: pid, in_flight: in_flight}, request) do
+      send(pid, {:driver_entered, request, self()})
+      Agent.update(in_flight, fn _ -> "r-" <> request["action"] end)
+
+      receive do
+        :driver_release ->
+          Agent.update(in_flight, fn _ -> nil end)
+          {:ok, %{"ok" => true}}
+      after
+        5_000 -> {:error, :test_driver_never_released}
+      end
+    end
+
+    @impl true
+    def control(%{in_flight: in_flight}, action) do
+      {:ok,
+       %{
+         action: action,
+         ok: true,
+         authorization_generation: 2,
+         in_flight_request_id: Agent.get(in_flight, & &1)
+       }}
+    end
+
+    @impl true
+    def stop(_state), do: :ok
+  end
+
   setup do
     start_supervised!(CuSupervisor)
     %{config: Config.normalize(enabled: true)}
@@ -150,6 +194,112 @@ defmodule FermixCore.ComputerUse.SessionManagerTest do
     assert :resumed = SessionManager.resume(ctx)
     refute Session.paused?(pid)
     assert {:ok, ^pid} = SessionManager.lookup(ctx)
+  end
+
+  # A session too wedged to answer a control at all. Every surface renders
+  # `:unconfirmed` as "the helper was shut down", so that has to be TRUE on this
+  # branch too — reporting it while leaving the session alive and paused is exactly
+  # the lie the verdict exists to avoid.
+  defmodule DeafSession do
+    use GenServer
+
+    def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: opts[:name])
+
+    @impl true
+    def init(_opts), do: {:ok, %{}}
+
+    @impl true
+    def handle_call(_message, _from, state) do
+      # Longer than any control budget, and bounded so the suite cannot hang.
+      Process.sleep(60_000)
+      {:reply, :paused, state}
+    end
+  end
+
+  test "a session that never answers a control is ended, so :unconfirmed stays true" do
+    ctx = context(%{computer_use_origin: :interactive})
+    key = ctx.conversation_key
+
+    {:ok, pid} =
+      DynamicSupervisor.start_child(CuSupervisor.session_supervisor(), %{
+        id: DeafSession,
+        start:
+          {DeafSession, :start_link, [[name: {:via, Registry, {CuSupervisor.registry(), key}}]]},
+        restart: :temporary,
+        shutdown: 1_000
+      })
+
+    ref = Process.monitor(pid)
+
+    assert :unconfirmed = SessionManager.pause(ctx)
+    assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 5_000
+  end
+
+  # `/pause` must tell the human the truth about an action already inside the
+  # helper. The fact now comes from the helper's own acknowledgement, which names
+  # the request it is still running — no Registry flag, no window between reading
+  # one and the action starting. The driver lives in the session's `ActionWorker`,
+  # so `self()` inside the double is that worker.
+  test "pause reports an action already in flight, from the helper's own ack", %{config: config} do
+    ctx = context(%{computer_use_origin: :interactive})
+    {:ok, pid} = SessionManager.ensure(config, ctx, driver: {BlockingDriver, [test_pid: self()]})
+
+    assert :paused = SessionManager.pause(ctx)
+    assert :resumed = SessionManager.resume(ctx)
+
+    action =
+      Task.async(fn ->
+        {:ok, :auto, request} = Session.classify(pid, %{"action" => "screenshot"})
+        Session.execute(pid, request)
+      end)
+
+    assert_receive {:driver_entered, %{"action" => "screenshot"}, worker}, 1_000
+    assert worker != pid
+
+    assert :paused_in_flight = SessionManager.pause(ctx)
+
+    send(worker, :driver_release)
+    assert {:ok, _result} = Task.await(action)
+
+    # The flag is set before the control goes out, so the guard is armed the moment
+    # the in-flight action finishes — not only once its reply has been delivered.
+    assert Session.paused?(pid)
+
+    # Nothing is under way any more, so the next `/pause` is the idle sentence.
+    :resumed = SessionManager.resume(ctx)
+    assert :paused = SessionManager.pause(ctx)
+  end
+
+  test "session_id answers nil for anything that is not a live registered session" do
+    # A tool context may carry any `GenServer.server()`; raising here would lose the
+    # exec event for an action that already ran.
+    assert SessionManager.session_id(:not_a_session) == nil
+    assert SessionManager.session_id(make_ref()) == nil
+    assert SessionManager.session_id({:via, Registry, {CuSupervisor.registry(), :nope}}) == nil
+  end
+
+  test "a running session publishes its lifecycle id where a tool exec can read it", %{
+    config: config
+  } do
+    ctx = context(%{computer_use_origin: :interactive})
+    {:ok, pid} = SessionManager.ensure(config, ctx, driver: stub_driver())
+
+    assert "cua_" <> _ = SessionManager.session_id(pid)
+  end
+
+  test "session_id is nil for a session started outside the registry" do
+    session =
+      start_supervised!(
+        {Session,
+         [
+           config: Config.normalize(enabled: true),
+           driver: stub_driver(),
+           origin: :interactive,
+           session_id: "cua_unregistered"
+         ]}
+      )
+
+    assert SessionManager.session_id(session) == nil
   end
 
   test "pause/resume are :no_session no-ops when nothing is running" do

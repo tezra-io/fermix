@@ -6,7 +6,7 @@ defmodule FermixCore.Plugins.Status do
   install/runtime states for `mcp`-rail plugins (`:missing_host_runtime`,
   `:needs_config`) → the remote-plugin ladder (§7.8, below) → the auth ladder
   (`:ready` for `auth: none`, else `:needs_client_config` / `:needs_auth` /
-  `:reauthorization_required`).
+  `:reauthorization_required` / `:wrong_region`).
 
   An enabled *name* with no loadable manifest is statusable too (the input
   shape for manifest-less names): `:not_installed` when the store has no
@@ -36,6 +36,7 @@ defmodule FermixCore.Plugins.Status do
   that table does not exist and its absence must never be read as `:ready`.
   """
 
+  alias FermixCore.Auth.OAuthProviders
   alias FermixCore.Auth.Store
   alias FermixCore.Plugins.Config
   alias FermixCore.Plugins.Dist.McpSource
@@ -45,7 +46,11 @@ defmodule FermixCore.Plugins.Status do
   alias FermixCore.Plugins.Registry
   alias FermixCore.Setup.ConfigStore
 
-  @sentinel FermixCore.Setup.SecretWriter.sentinel()
+  @sentinels FermixCore.Setup.SecretWriter.sentinels()
+
+  # The one spelling a `requires_setting` gate accepts. A second accepted
+  # spelling would be a second code path for one decision.
+  @setting_on "true"
 
   # Every atom the ladder below answers with, in ladder order. It is a published
   # vocabulary: `FermixCore.Management.Plugins` carries one sentence per status
@@ -62,6 +67,7 @@ defmodule FermixCore.Plugins.Status do
     :needs_client_config,
     :needs_auth,
     :reauthorization_required,
+    :wrong_region,
     :ready,
     :not_installed,
     :incompatible,
@@ -165,6 +171,89 @@ defmodule FermixCore.Plugins.Status do
     end
   end
 
+  @doc """
+  The account region recorded on the plugin's stored grant, or `nil`.
+
+  Read the same way `granted_scopes/1` reads its half of the grant, so it answers
+  identically in a tree-less CLI VM. It is what selects a `request.regional_urls`
+  host at call time (M40 §4.3): a provider whose accounts live in fixed regional
+  hosts records the region at sign-in, and `nil` means the plugin has no host to
+  call rather than a default one.
+  """
+  @spec region(Plugin.t()) :: String.t() | nil
+  def region(%Plugin{} = plugin) do
+    case Store.read(Config.auth_profile(plugin)) do
+      {:ok, entry} -> Map.get(entry, :region)
+      {:error, _reason} -> nil
+    end
+  end
+
+  @doc """
+  The account's own region, as a sign-in found it, when it is not the region the
+  sign-in client chose; `nil` otherwise.
+
+  Read the same way `region/1` reads its half of the grant, so it answers
+  identically in a tree-less CLI VM. It is only ever recorded beside a
+  `wrong_region` status, and it is what lets a row name the region the operator
+  should have chosen instead of asking them to guess. `nil` beside that status
+  means the provider refused without naming a region this registry knows.
+  """
+  @spec region_actual(Plugin.t()) :: String.t() | nil
+  def region_actual(%Plugin{} = plugin) do
+    case Store.read(Config.auth_profile(plugin)) do
+      {:ok, entry} -> Map.get(entry, :region_actual)
+      {:error, _reason} -> nil
+    end
+  end
+
+  @doc """
+  Whether one of a plugin's own `config` keys reads exactly `"true"`.
+
+  The one resolver behind both `requires_setting` gates — the per-tool one
+  (M40 §3.2) and the `runtime` one (M8 §9.3) — so a spelling can never mean
+  "on" for one and "off" for the other. One spelling only: `"TRUE"`, `"1"` and
+  `"yes"` are all off.
+  """
+  @spec setting_on?(Plugin.t(), String.t()) :: boolean()
+  def setting_on?(%Plugin{name: name}, key) when is_binary(key) and key != "",
+    do: Map.get(Config.plugin_settings(name), key) == @setting_on
+
+  @doc """
+  Whether a tool's `requires_setting` gate is satisfied (M40 §3.2).
+
+  A tool with no `requires_setting` is always satisfied. Two surfaces consult
+  this: `Plugins.Capabilities` to decide what to advertise, and
+  `Plugins.ToolExecutor` to refuse a call that arrived anyway.
+  """
+  @spec tool_setting_satisfied?(Plugin.t(), map()) :: boolean()
+  def tool_setting_satisfied?(%Plugin{} = plugin, tool) when is_map(tool) do
+    case Map.get(tool, "requires_setting") do
+      nil -> true
+      key when is_binary(key) -> setting_on?(plugin, key)
+    end
+  end
+
+  @doc """
+  Whether a plugin's local runtime may be spawned (M8 §9.3).
+
+  A manifest may gate its own child process on one of its `config` keys, so an
+  operator switch decides whether a vendored helper runs at all rather than only
+  which of its tools are advertised. A runtime with no gate — or no runtime
+  block — is always satisfied.
+
+  Deliberately NOT part of `status/2`: the gate says whether a process is
+  wanted, not whether the plugin is installed, configured and signed in. Folding
+  it into the ladder would make a row report `missing_host_runtime` or
+  `needs_config` because the operator left an optional helper switched off, and
+  every published status sentence would become untrue.
+  """
+  @spec runtime_setting_satisfied?(Plugin.t()) :: boolean()
+  def runtime_setting_satisfied?(%Plugin{runtime: %{"requires_setting" => key}} = plugin)
+      when is_binary(key),
+      do: setting_on?(plugin, key)
+
+  def runtime_setting_satisfied?(%Plugin{}), do: true
+
   # An enabled name with no `%Plugin{}` behind it: installed-but-incompatible
   # entries are visible only through the store (the registry excludes them);
   # anything else enabled-but-absent is simply not installed.
@@ -199,16 +288,28 @@ defmodule FermixCore.Plugins.Status do
   defp missing_client_config?(%Plugin{auth: %{provider: provider, type: :oauth2}})
        when is_binary(provider) do
     config = Config.oauth_provider(provider)
-    blank?(Keyword.get(config, :client_id)) or blank?(Keyword.get(config, :client_secret))
+
+    blank?(Keyword.get(config, :client_id)) or blank?(Keyword.get(config, :client_secret)) or
+      missing_client_region?(provider, config)
   end
 
   defp missing_client_config?(_plugin), do: false
+
+  # A regional provider's client is incomplete without a region: the region is
+  # the token-exchange audience, so a sign-in under a client that has none is
+  # refused before the browser opens. A provider this registry does not define
+  # offers no regions to choose, which is why membership is asked first rather
+  # than letting `regions/1` raise inside the ladder.
+  defp missing_client_region?(provider, config) do
+    provider in OAuthProviders.providers() and OAuthProviders.regions(provider) != [] and
+      blank?(Keyword.get(config, :region))
+  end
 
   # api_key plugins are ready once their static credential is keychained;
   # otherwise they need it set (`fermix plugins auth set <name>`).
   defp api_key_status(%Plugin{name: name}) do
     case Config.plugin_secret(name) do
-      @sentinel -> :needs_secret
+      sentinel when sentinel in @sentinels -> :needs_secret
       secret when is_binary(secret) and secret != "" -> :ready
       _missing -> :needs_secret
     end
@@ -240,6 +341,13 @@ defmodule FermixCore.Plugins.Status do
       # renew. `client_rejected?/1` tells the cause apart for the surfaces.
       {:ok, %{status: "client_rejected"}} ->
         :reauthorization_required
+
+      # The grant is real, and minted for a region the account is not in. Every
+      # call to the chosen region's host is refused by the provider, so the
+      # plugin is not ready and signing in again under the same client cannot
+      # help: the region on the sign-in client is the fix.
+      {:ok, %{status: "wrong_region"}} ->
+        :wrong_region
 
       {:ok, _entry} ->
         :ready

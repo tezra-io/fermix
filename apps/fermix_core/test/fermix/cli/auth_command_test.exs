@@ -224,6 +224,89 @@ defmodule Fermix.CLI.AuthCommandTest do
     end
   end
 
+  # `fermix auth` runs without the supervision tree, so on an installed binary
+  # no command host exists while it runs, and `mix test` always has one. The
+  # route save that follows a login or a logout must keep its keychain calls
+  # inline or the verb dies with the command host error after the token moved.
+  describe "in the tree-less CLI world" do
+    setup do
+      providers = Application.get_env(:fermix_core, :providers, [])
+      writer = Application.get_env(:fermix_core, :secret_writer)
+      FermixTestSupport.SecretWriterStub.reset()
+
+      on_exit(fn ->
+        Application.put_env(:fermix_core, :providers, providers)
+        restore_secret_writer(writer)
+        FermixTestSupport.SecretWriterStub.reset()
+      end)
+
+      # The home keeps one provider key in the keychain, stored the way the
+      # daemon stores one and read back when the verb's VM started.
+      Application.put_env(
+        :fermix_core,
+        :providers,
+        Keyword.put(providers, :openai, api_key: "sk-resolved")
+      )
+
+      :ok = ConfigStore.save_snapshot(ConfigStore.current_snapshot())
+
+      Application.put_env(:fermix_core, :secret_writer, FermixTestSupport.TreeLessSecretWriter)
+      :ok = FermixTestSupport.TreeLessSecretWriter.watch()
+    end
+
+    test "login and logout save the route with keychain calls inline" do
+      assert 0 ==
+               capture_out_status(fn ->
+                 AuthCommand.run([
+                   "login",
+                   "--provider",
+                   "anthropic",
+                   "--setup-token",
+                   "sk-ant-oat01"
+                 ])
+               end)
+
+      assert_received {:tree_less_keychain, :get, :openai_api_key}
+      assert provider_auth_mode(:anthropic) == :oauth
+
+      assert 0 ==
+               capture_out_status(fn ->
+                 AuthCommand.run(["logout", "--provider", "anthropic"])
+               end)
+
+      assert_received {:tree_less_keychain, :get, :openai_api_key}
+      assert provider_auth_mode(:anthropic) == :api_key
+    end
+
+    # The key could not be read when the verb's VM started, so the environment
+    # still holds `@keyring` and the save's apply asks the keychain again.
+    test "a key the keychain could not answer at start does not stop the route save" do
+      providers = Application.get_env(:fermix_core, :providers, [])
+
+      Application.put_env(
+        :fermix_core,
+        :providers,
+        Keyword.put(providers, :openai, api_key: "@keyring")
+      )
+
+      FermixTestSupport.SecretWriterStub.reset()
+
+      assert 0 ==
+               capture_out_status(fn ->
+                 AuthCommand.run([
+                   "login",
+                   "--provider",
+                   "anthropic",
+                   "--setup-token",
+                   "sk-ant-oat01"
+                 ])
+               end)
+
+      assert_received {:tree_less_keychain, :get, :openai_api_key}
+      assert provider_auth_mode(:anthropic) == :oauth
+    end
+  end
+
   describe "auth (no args)" do
     test "prints usage and returns 2" do
       assert 2 == capture_err_status(fn -> AuthCommand.run([]) end)
@@ -283,14 +366,18 @@ defmodule Fermix.CLI.AuthCommandTest do
     DateTime.utc_now() |> DateTime.add(seconds, :second) |> DateTime.to_iso8601()
   end
 
+  # An auth mode is not a secret, so reading it back resolves no keychain item.
   defp provider_auth_mode(provider) do
-    {:ok, snapshot} = ConfigStore.load_runtime_config()
+    {:ok, snapshot} = ConfigStore.load_runtime_config(resolve_secrets: false)
 
     snapshot.fermix_core
     |> Keyword.get(:providers, [])
     |> Keyword.get(provider, [])
     |> Keyword.get(:auth_mode)
   end
+
+  defp restore_secret_writer(nil), do: Application.delete_env(:fermix_core, :secret_writer)
+  defp restore_secret_writer(value), do: Application.put_env(:fermix_core, :secret_writer, value)
 
   defp capture_out(fun), do: ExUnit.CaptureIO.capture_io(:stdio, fun)
 

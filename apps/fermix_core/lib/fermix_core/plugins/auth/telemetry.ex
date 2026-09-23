@@ -19,7 +19,9 @@ defmodule FermixCore.Plugins.Auth.Telemetry do
 
   @ops [:login, :refresh, :logout, :set, :clear]
 
-  @success_tags [:ready, :logged_out]
+  # `:wrong_region` is a success: the grant is real and stored. It is its own tag
+  # because the trace is the one place a sign-in nobody can use has to say so.
+  @success_tags [:ready, :logged_out, :wrong_region]
 
   @trace_event_definitions [
     %{
@@ -30,7 +32,7 @@ defmodule FermixCore.Plugins.Auth.Telemetry do
     }
   ]
 
-  @type outcome :: {:ok, :ready | :logged_out} | {:error, term()}
+  @type outcome :: {:ok, :ready | :logged_out | :wrong_region} | {:error, term()}
 
   @doc "The stable plugin auth event name."
   @spec event() :: [atom()]
@@ -49,8 +51,9 @@ defmodule FermixCore.Plugins.Auth.Telemetry do
 
   @doc """
   Emit the outcome of one op on `plugin`, started at `started_ms` (from
-  `start/0`). `outcome` is `{:ok, :ready}`, `{:ok, :logged_out}` or
-  `{:error, reason}`; only the reason's derived class leaves this function.
+  `start/0`). `outcome` is `{:ok, :ready}`, `{:ok, :logged_out}`,
+  `{:ok, :wrong_region}` or `{:error, reason}`; only the reason's derived class
+  leaves this function.
   """
   @spec emit(atom(), String.t(), outcome(), integer()) :: :ok
   def emit(op, plugin, outcome, started_ms)

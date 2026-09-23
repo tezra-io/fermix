@@ -15,12 +15,23 @@ defmodule FermixCore.ComputerUse.Courtesy do
   never brick computer-use, only drop it back to the pre-coexistence behavior.
   """
 
-  # Actions that move the cursor or type: they DISTURB a present human. Note this is
-  # deliberately BROADER than `Compux.Protocol.read_only?/1` — `mouse_move` is
-  # read-only there (it mutates no app state) yet it visibly warps the cursor, so the
-  # coexistence layer counts it as disturbing. "Disturbing" and "mutating" are two
-  # different properties; this is the split the V3 design calls for.
-  @disturbing ~w(left_click right_click double_click mouse_move left_click_drag scroll type key paste)
+  alias Compux.Protocol
+
+  # Actions that act on the machine the human is sitting at: they DISTURB them.
+  # DERIVED, not listed (M42 slice 4 §4): every action the library offers that is
+  # not read-only is disturbing, so an action added later — `press`, `set_value`,
+  # whatever follows — joins the courtesy wait, the input seat and the action stamp
+  # by construction rather than by someone remembering this list.
+  #
+  # Deliberately BROADER than `Compux.Protocol.read_only?/1` on one action:
+  # `mouse_move` is read-only there (it mutates no app state) yet it visibly warps
+  # the cursor, so the coexistence layer counts it. "Disturbing" and "mutating" are
+  # two different properties; this is the split the V3 design calls for.
+  @always_disturbing ~w(mouse_move)
+
+  @disturbing Enum.uniq(
+                Enum.reject(Protocol.actions(), &Protocol.read_only?/1) ++ @always_disturbing
+              )
 
   # Max time the agent waits in-turn for the human to go idle before it steps aside.
   # An internal tuning bound, not an operator knob — config exposes only whether
@@ -30,6 +41,48 @@ defmodule FermixCore.ComputerUse.Courtesy do
   @doc "Whether an action disturbs a present human (moves the cursor or types)."
   @spec disturbing?(String.t()) :: boolean()
   def disturbing?(action) when is_binary(action), do: action in @disturbing
+
+  @typedoc """
+  How wide the contention question is for one action (M42 §5.3).
+
+    * `:desktop` — the action takes the one cursor, the one keyboard or the one
+      focused window, so ANY human activity is contention. Every foreground
+      action, and every action at all while no window is bound.
+    * `:target_process` — the action reaches a control inside ONE bound window by
+      name: no pointer moves, no focus is seized, so the person typing in another
+      application is not competing with it. Only activity in the target's own
+      process is contention, which is what `front_is_target` answers.
+  """
+  @type scope :: :desktop | :target_process
+
+  @doc """
+  The contention scope for this action, given whether it is addressed at a
+  control by name and what the session is bound to.
+
+  Deliberately conservative on both axes: an accessibility action with no bound
+  window still travels through the whole application, and a bound window does not
+  narrow a click, a keystroke or a scroll — those take the machine however they
+  are aimed.
+  """
+  @spec scope(boolean(), :window | :desktop | nil) :: scope()
+  def scope(true = _ax_addressed?, :window), do: :target_process
+  def scope(_ax_addressed?, _target_kind), do: :desktop
+
+  @doc """
+  Whether the agent should step aside, given the scope, whether the person is
+  active at all, and whether the front application is the bound target.
+
+  `front_is_target` is the helper's reading and may be absent: a probe that could
+  not say leaves it `nil`, which is NOT contention. Courtesy fails open
+  everywhere else (`Session`'s missing idle signal proceeds), and the whole point
+  of a bound window is that work inside it does not stop because somebody is
+  using a different application.
+  """
+  @spec contends?(scope(), boolean(), boolean() | nil) :: boolean()
+  def contends?(:desktop, human_active?, _front_is_target), do: human_active?
+
+  def contends?(:target_process, human_active?, front_is_target),
+    do: human_active? and front_is_target == true
 
   @doc """
   Is a human actively using the machine right now, given the idle probe?

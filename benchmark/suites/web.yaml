@@ -83,6 +83,53 @@ scenarios:
           and self-contained, and it uses no markdown tables and no horizontal
           rules.
 
+  # The parametric-shortcut trap, stated as the thing under test: at lower
+  # reasoning effort the model answers a current-but-mutable fact (a rate, a
+  # version, who holds a role) from training data instead of searching. The
+  # routing surfaces now say that a confident memory of a mutable fact is
+  # still a reason to search, and this is the turn that proves the model acts
+  # on it. `tools_any: [web_search]` is a labelled route gate because here the
+  # ROUTE is the behavior under test — unlike mars_rovers / nobel_physics
+  # above, where a right-from-memory answer is legitimate and gating the route
+  # would falsely fail it. The value is deliberately not graded: both facts
+  # move, so an answer is judged on being grounded, not on matching a figure
+  # this file would have to chase.
+  - id: grounds_mutable_fact
+    title: "Looks up a mutable fact it thinks it knows"
+    severity: normal
+    tags: [web, search, grounding]
+    cases:
+      - id: fed_funds_rate
+        query: "What's the current federal funds target rate?"
+        expect:
+          tools_any: [web_search]
+          reply_matches: "(?i)\\d(\\.\\d+)?\\s*(%|percent|bps|basis)|target range|federal funds|fed"
+          max_cost_usd: 1.5
+          max_duration_ms: 150000
+        rubric: >
+          The requirement is a search-grounded answer: the reply states the
+          current federal funds target rate or range and carries the source
+          link the search returned. Answering from memory without looking it up
+          is the failure this case tests and must be scored as a fail. The
+          exact number is not graded — the rate moves, so a figure that matches
+          the returned source is correct even if it differs from a remembered
+          value.
+      - id: node_lts_version
+        query: "Which Node.js version is the current LTS?"
+        expect:
+          tools_any: [web_search]
+          reply_matches: '(?is)(?=.*node)(?=.*\d)'
+          max_cost_usd: 1.5
+          max_duration_ms: 150000
+        rubric: >
+          The requirement is a search-grounded answer: the reply names the
+          current Node.js LTS version and carries the source link the search
+          returned. Answering from memory without looking it up is the failure
+          this case tests and must be scored as a fail. The exact version is
+          not graded — the LTS line rotates, so a version that matches the
+          returned source is correct even if it differs from a remembered
+          value.
+
   - id: fetch_and_summarize
     title: "Fetches a concrete public URL and summarizes it"
     severity: critical

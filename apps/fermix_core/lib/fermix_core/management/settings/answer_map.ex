@@ -101,11 +101,14 @@ defmodule FermixCore.Management.Settings.AnswerMap do
   defp coerce(%{"kind" => "choice", "suggestions" => true}, value) when is_binary(value),
     do: {:ok, value}
 
+  # A disabled option is published so a pane can say why it cannot be chosen,
+  # and refused here in that same sentence: a client that draws every option as
+  # choosable still cannot write one the daemon has ruled out.
   defp coerce(%{"kind" => "choice"} = row, value) when is_binary(value) do
-    if value in option_values(row) do
-      {:ok, value}
-    else
-      {:error, "This setting takes one of its published values."}
+    case Enum.find(Map.get(row, "options", []), &(&1["value"] == value)) do
+      %{"disabled" => true, "hint" => hint} -> {:error, hint}
+      %{} -> {:ok, value}
+      nil -> {:error, "This setting takes one of its published values."}
     end
   end
 
@@ -124,8 +127,6 @@ defmodule FermixCore.Management.Settings.AnswerMap do
   end
 
   defp coerce(%{"kind" => kind}, _value), do: {:error, "This setting takes #{expected(kind)}."}
-
-  defp option_values(row), do: row |> Map.get("options", []) |> Enum.map(& &1["value"])
 
   defp expected("toggle"), do: "true or false"
   defp expected("number"), do: "a number"

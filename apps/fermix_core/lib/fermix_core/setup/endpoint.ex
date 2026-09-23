@@ -2,16 +2,23 @@ defmodule FermixCore.Setup.Endpoint do
   @moduledoc """
   Resolves the daemon-hosted Setup endpoint and builds one-use launch URLs.
 
-  The explicit port wins over `PORT`; absent values use the loopback default.
-  Keeping this policy here prevents CLI and management clients from constructing
-  different Setup URLs.
+  An explicit `:port` wins, because a caller that already knows the listener is
+  not asking. Everything else is `FermixCore.Setup.WebListener`'s answer — the
+  one resolver the daemon's own endpoint, the browser launcher and `hello`'s
+  published origin share (M38 §4.7) — so the CLI and a management client can
+  never construct different Setup URLs, and a packaged engine's refusal of a
+  `PORT` override is the same refusal here as at boot.
   """
 
-  @default_port 4030
+  alias FermixCore.BuildInfo
+  alias FermixCore.Setup.WebListener
+
   @setup_path "/setup"
 
   @doc "Resolves the Setup listener port from explicit, environment, or default input."
-  @spec port(keyword()) :: {:ok, 1..65_535} | {:error, {:invalid_port, atom(), term()}}
+  @spec port(keyword()) ::
+          {:ok, 1..65_535}
+          | {:error, {:invalid_port, atom(), term()} | {:port_not_used, String.t()}}
   def port(opts \\ []) when is_list(opts) do
     case Keyword.get(opts, :port) do
       value when is_integer(value) -> validate_port(value, :explicit)
@@ -33,7 +40,9 @@ defmodule FermixCore.Setup.Endpoint do
   end
 
   @doc "Returns the public non-secret Setup endpoint descriptor."
-  @spec describe(keyword()) :: {:ok, map()} | {:error, {:invalid_port, atom(), term()}}
+  @spec describe(keyword()) ::
+          {:ok, map()}
+          | {:error, {:invalid_port, atom(), term()} | {:port_not_used, String.t()}}
   def describe(opts \\ []) when is_list(opts) do
     with {:ok, port} <- port(opts),
          {:ok, origin} <- origin(port) do
@@ -53,24 +62,27 @@ defmodule FermixCore.Setup.Endpoint do
   def launch_url(_port, _token), do: {:error, :invalid_launch_token}
 
   defp environment_port(opts) do
-    value =
-      if Keyword.has_key?(opts, :port_env),
-        do: Keyword.get(opts, :port_env),
-        else: System.get_env("PORT")
+    distribution = Keyword.get(opts, :distribution, BuildInfo.distribution_identity())
 
-    parse_environment_port(value)
-  end
-
-  defp parse_environment_port(value) when value in [nil, ""], do: {:ok, @default_port}
-
-  defp parse_environment_port(value) when is_binary(value) do
-    case Integer.parse(String.trim(value)) do
-      {port, ""} -> validate_port(port, :environment, value)
-      _invalid -> {:error, {:invalid_port, :environment, value}}
+    # A `PORT` a packaged engine refuses is not a `PORT` this CLI can parse and
+    # dislike: the value is fine, the variable is simply not what decides the
+    # listener. Rendering it as invalid would send an operator to fix a number
+    # that was never wrong, so the refusal keeps its own reason and sentence.
+    case WebListener.port(distribution, environment(opts), resolver_opts(opts)) do
+      {:ok, %{port: port}} -> {:ok, port}
+      {:error, failure} -> {:error, failure}
     end
   end
 
-  defp parse_environment_port(value), do: {:error, {:invalid_port, :environment, value}}
+  # `:port_env` is how a caller supplies the one variable this resolver reads
+  # without handing it the whole environment.
+  defp environment(opts) do
+    if Keyword.has_key?(opts, :port_env),
+      do: %{"PORT" => Keyword.get(opts, :port_env)},
+      else: System.get_env()
+  end
+
+  defp resolver_opts(opts), do: Keyword.take(opts, [:configured])
 
   defp validate_port(port, source, original \\ nil)
 

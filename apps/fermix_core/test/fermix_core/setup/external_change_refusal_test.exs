@@ -29,6 +29,8 @@ defmodule FermixCore.Setup.ExternalChangeRefusalTest do
     personalization = Application.get_env(:fermix_core, :personalization)
     plugins = Application.get_env(:fermix_core, :plugins)
     secret_writer = Application.get_env(:fermix_core, :secret_writer)
+    # Every successful sandbox override applies its mode to app env.
+    sandbox = Application.get_env(:fermix_core, :sandbox)
 
     Application.put_env(:fermix_core, :secret_writer, FermixTestSupport.SecretWriterStub)
     FermixTestSupport.SecretWriterStub.reset()
@@ -51,6 +53,7 @@ defmodule FermixCore.Setup.ExternalChangeRefusalTest do
       restore(:fermix_core, :personalization, personalization)
       restore(:fermix_core, :plugins, plugins)
       restore(:fermix_core, :secret_writer, secret_writer)
+      restore(:fermix_core, :sandbox, sandbox)
       FermixTestSupport.SecretWriterStub.reset()
 
       case home do

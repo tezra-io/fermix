@@ -175,4 +175,128 @@ defmodule FermixCore.Plugins.Http.TemplateTest do
                Template.static_validate(t, ["k"])
     end
   end
+
+  # --- M40 §3.2: per-region static hosts -----------------------------------
+
+  defp na_url, do: "https://fleet-api.prd.na.vn.cloud.tesla.com/api/1/vehicles/{vin}"
+  defp eu_url, do: "https://fleet-api.prd.eu.vn.cloud.tesla.com/api/1/vehicles/{vin}"
+
+  defp regional(urls \\ nil) do
+    %{
+      "method" => "GET",
+      "regional_urls" => urls || %{"na" => na_url(), "eu" => eu_url()},
+      "success" => [200]
+    }
+  end
+
+  describe "static_validate/2 regional_urls" do
+    test "accepts a regional map whose every url is https with a static host" do
+      assert :ok = Template.static_validate(regional(), ["vin"])
+    end
+
+    test "rejects a non-https entry anywhere in the regional map" do
+      urls = %{"na" => na_url(), "eu" => "http://fleet-api.prd.eu.vn.cloud.tesla.com/x"}
+
+      assert {:error, {:non_https_url, "http://fleet-api.prd.eu.vn.cloud.tesla.com/x"}} =
+               Template.static_validate(regional(urls), ["vin"])
+    end
+
+    test "rejects a placeholder in a regional host (SSRF)" do
+      urls = %{"na" => na_url(), "eu" => "https://{region}.vn.cloud.tesla.com/x"}
+
+      assert {:error, {:placeholder_in_host, "https://{region}.vn.cloud.tesla.com/x"}} =
+               Template.static_validate(regional(urls), ["vin", "region"])
+    end
+
+    test "rejects userinfo in a regional url (host-confusion SSRF)" do
+      urls = %{"na" => "https://good.tesla.com@evil.com/api"}
+
+      assert {:error, {:userinfo_in_url, _}} = Template.static_validate(regional(urls), [])
+    end
+
+    test "rejects an empty regional map" do
+      assert {:error, {:invalid_regional_urls, %{}}} =
+               Template.static_validate(regional(%{}), ["vin"])
+    end
+
+    test "rejects a regional map that is not a map" do
+      assert {:error, {:invalid_regional_urls, ["na"]}} =
+               Template.static_validate(regional(["na"]), ["vin"])
+    end
+
+    test "rejects a template carrying both url and regional_urls" do
+      both = Map.put(regional(), "url", na_url())
+
+      assert {:error, :regional_urls_and_url} = Template.static_validate(both, ["vin"])
+    end
+
+    test "rejects a template carrying neither url nor regional_urls" do
+      assert {:error, :missing_url} =
+               Template.static_validate(%{"method" => "GET", "success" => [200]}, [])
+    end
+
+    test "rejects a region label that is not two to eight lowercase letters" do
+      for label <- ["NA", "n", "na1", "north_america", "verylonglabel"] do
+        assert {:error, {:invalid_region_label, ^label}} =
+                 Template.static_validate(regional(%{label => na_url()}), ["vin"]),
+               "#{label} was accepted as a region label"
+      end
+    end
+
+    test "collects placeholders from every url in the regional map" do
+      urls = %{"na" => na_url(), "eu" => "https://fleet-api.prd.eu.vn.cloud.tesla.com/x/{other}"}
+
+      assert {:error, {:undeclared_placeholder, "other"}} =
+               Template.static_validate(regional(urls), ["vin"])
+    end
+  end
+
+  describe "resolve_region/2" do
+    test "selects the recorded region's url and drops the regional map" do
+      assert {:ok, resolved} = Template.resolve_region(regional(), "na")
+      assert resolved == %{"method" => "GET", "url" => na_url(), "success" => [200]}
+
+      assert {:ok, %{"url" => eu}} = Template.resolve_region(regional(), "eu")
+      assert eu == eu_url()
+    end
+
+    test "refuses a region the manifest has no endpoint for, naming the supported ones" do
+      assert {:error, {:region_not_supported, "cn", ["eu", "na"]}} =
+               Template.resolve_region(regional(), "cn")
+    end
+
+    test "refuses a nil region" do
+      assert {:error, :region_unknown} = Template.resolve_region(regional(), nil)
+    end
+
+    test "regional?/1 tells a regional request from a plain-url one" do
+      assert Template.regional?(regional())
+      refute Template.regional?(%{"url" => na_url()})
+    end
+
+    # The predicate and the resolver key on one condition, so a malformed map can
+    # never be called regional by one and refused by the other with a crash.
+    test "regional?/1 agrees with resolve_region/2 on a malformed regional map" do
+      refute Template.regional?(regional("na"))
+
+      assert {:error, :region_unresolved} = Template.build(regional("na"), %{}, nil)
+    end
+  end
+
+  describe "build/3 regional" do
+    test "builds the resolved regional url and keeps the origin guard" do
+      {:ok, resolved} = Template.resolve_region(regional(), "eu")
+
+      assert {:ok, req} = Template.build(resolved, %{"vin" => "5YJ3E1EA7JF00001"}, nil)
+
+      assert req.url ==
+               "https://fleet-api.prd.eu.vn.cloud.tesla.com/api/1/vehicles/5YJ3E1EA7JF00001"
+    end
+
+    # Never a host fallback: a request that reached build still carrying the
+    # regional map is refused, not built against an empty url.
+    test "refuses to build a request whose region was never resolved" do
+      assert {:error, :region_unresolved} = Template.build(regional(), %{"vin" => "x"}, nil)
+    end
+  end
 end

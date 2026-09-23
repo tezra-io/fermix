@@ -171,6 +171,47 @@ defmodule FermixCore.Tools.TelemetryTest do
     end
   end
 
+  # M45 §4.7: the one scrubber, callable from a tool so the model-visible
+  # result gets exactly the rule the exported event gets. No second copy.
+  describe "redact/2" do
+    test "replaces every occurrence of a value at or above the floor" do
+      assert ToolTelemetry.redact("key=#{@planted}; again #{@planted}", [@planted]) ==
+               "key=«redacted»; again «redacted»"
+    end
+
+    test "leaves a value under the eight-byte floor alone" do
+      assert ToolTelemetry.redact("abcdefg in text", ["abcdefg"]) == "abcdefg in text"
+      assert ToolTelemetry.redact("abcdefgh in text", ["abcdefgh"]) == "«redacted» in text"
+    end
+
+    # A value that contains another would otherwise leave its own tail behind
+    # once the shorter one had been replaced inside it.
+    test "replaces a longer value before a shorter one it contains" do
+      assert ToolTelemetry.redact("token-abcdefgh-tail", ["token-abc", "token-abcdefgh-tail"]) ==
+               "«redacted»"
+    end
+
+    test "ignores entries that are not strings and answers text unchanged with none" do
+      assert ToolTelemetry.redact("plain output", [nil, 42, :atom]) == "plain output"
+      assert ToolTelemetry.redact("plain output", []) == "plain output"
+    end
+
+    test "the emitter applies the same longest-first rule to its previews" do
+      set_capture_content(true)
+
+      context = %{
+        agent_name: "main",
+        session_id: "main-1",
+        redact_values: ["token-abc", "token-abcdefgh-tail"]
+      }
+
+      ToolTelemetry.exec("shell", context, true, 5, output: "token-abcdefgh-tail")
+
+      assert_receive {:tool_exec, _measurements, metadata}
+      assert metadata.output == "«redacted»"
+    end
+  end
+
   # The previews above are gated on `capture_content?/0`, but caller-supplied
   # `:metadata` is attached on EVERY emit — so a free-form metadata field is the
   # always-on leak path, and it gets the same redaction, floor and marker.

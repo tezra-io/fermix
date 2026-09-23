@@ -407,7 +407,8 @@ def test_malformed_spans_raise_rather_than_being_skipped():
 # checked against first-party vendor pricing; the card carries the reason beside
 # the entry, and the assertion here is what makes the reason enforceable.
 
-_OPENAI_CACHE_WRITE_MODELS = ("gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")
+_OPENAI_CACHE_WRITE_MODELS = ("gpt-6-astra", "gpt-6-sol", "gpt-6-luna",
+                              "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")
 
 
 @pytest.mark.parametrize("model", _OPENAI_CACHE_WRITE_MODELS)
@@ -574,14 +575,41 @@ def test_gpt_4o_sits_on_the_older_50_percent_caching_tier():
     assert rate.cached_input_per_mtok == pytest.approx(0.5 * rate.input_per_mtok)
 
 
+def test_gpt_6_sol_and_luna_undercut_their_gpt_5_6_namesakes_on_every_leg():
+    # Read first-party 2026-09-22, standard tier. Each GPT-6 tier is cheaper than
+    # its GPT-5.6 namesake on all four legs, so pricing one by analogy to its
+    # predecessor overstates it.
+    assert pricing.CARD[("openai", "gpt-6-sol")] == pricing.Rate(2.00, 10.00, 0.20, 2.50)
+    assert pricing.CARD[("openai", "gpt-6-luna")] == pricing.Rate(0.10, 0.50, 0.01, 0.125)
+    for new, old in (("gpt-6-sol", "gpt-5.6-sol"), ("gpt-6-luna", "gpt-5.6-luna")):
+        newer, older = pricing.CARD[("openai", new)], pricing.CARD[("openai", old)]
+        for leg in ("input_per_mtok", "output_per_mtok", "cached_input_per_mtok",
+                    "cache_write_per_mtok"):
+            assert getattr(newer, leg) < getattr(older, leg), f"{new}.{leg}"
+
+
 def test_fable_5_1_caches_at_a_tenth_of_its_siblings_read_rate():
     # Verified first-party: the vendor's table footnotes Fable 5.1 and Mythos
-    # 5.1 as the only models at 0.025x input; everything else is 0.1x.
+    # 5.1 as the only models at 0.025x input; everything else but Opus 5.5
+    # (0.05x) is 0.1x.
     special = pricing.CARD[("anthropic", "claude-fable-5-1")]
     sibling = pricing.CARD[("anthropic", "claude-fable-5")]
     assert special.input_per_mtok == sibling.input_per_mtok
     assert special.cached_input_per_mtok == pytest.approx(0.025 * special.input_per_mtok)
     assert sibling.cached_input_per_mtok == pytest.approx(0.1 * sibling.input_per_mtok)
+
+
+def test_opus_5_5_caches_at_half_the_standard_read_rate():
+    # Read first-party 2026-09-22: the vendor's table footnotes Opus 5.5 alone at
+    # 0.05x input for cache hits; its write leg is the standard 1.25x. It also
+    # undercuts Opus 5, so pricing it by analogy to its predecessor overstates it.
+    new = pricing.CARD[("anthropic", "claude-opus-5-5")]
+    old = pricing.CARD[("anthropic", "claude-opus-5")]
+    assert (new.input_per_mtok, new.output_per_mtok) == (4.00, 20.00)
+    assert new.cached_input_per_mtok == pytest.approx(0.05 * new.input_per_mtok)
+    assert new.cache_write_per_mtok == pytest.approx(1.25 * new.input_per_mtok)
+    assert new.input_per_mtok < old.input_per_mtok
+    assert new.output_per_mtok < old.output_per_mtok
 
 
 def test_claude_sonnet_5_carries_the_vendors_standard_price_on_every_leg():
@@ -661,6 +689,100 @@ def test_the_established_openrouter_routes_left_the_pending_table():
                 rate.cached_input_per_mtok) == expected, model
 
 
+# Venice's curated `@venice` catalog list, with the figures transcribed from
+# `model_spec.pricing` on the listing read 2026-09-19.
+_VENICE_LISTING_RATES = (
+    ("grok-4-6", (2.27, 6.80, 0.57)),
+    ("deepseek-v4-1-flash", (0.375, 1.50, 0.0075)),
+    ("z-ai-glm-5-3-flash", (0.15, 0.50, 0.03)),
+    ("z-ai-glm-5-3", (1.75, 5.50, 0.325)),
+    ("e2ee-kimi-k3-p", (3.75, 18.75, 0.375)),
+    ("kimi-k3", (3.75, 18.75, 0.375)),
+    ("kimi-k2-6", (0.75, 3.50, 0.16)),
+    ("minimax-m3-preview", (0.30, 1.20, 0.06)),
+)
+
+
+@pytest.mark.parametrize("model,expected", _VENICE_LISTING_RATES)
+def test_the_venice_route_carries_the_vendors_own_listing_figures(model, expected):
+    rate = pricing.CARD[("venice", model)]
+    assert (rate.input_per_mtok, rate.output_per_mtok,
+            rate.cached_input_per_mtok) == expected, model
+
+
+def test_venice_prices_the_tee_surface_exactly_like_the_plain_one():
+    # One rate on two ids, not a copy-paste slip: `e2ee-kimi-k3-p` called by a
+    # plain client runs TEE-only and Venice bills it as ordinary Kimi K3.
+    assert pricing.CARD[("venice", "e2ee-kimi-k3-p")] == pricing.CARD[("venice", "kimi-k3")]
+
+
+def test_venices_cached_input_discount_is_per_model_not_a_house_rate():
+    """No ratio derives one Venice leg from another, so none may be inferred.
+
+    The discount runs from -98% to -75% across these eight. A reader who
+    "corrects" deepseek-v4-1-flash's 0.0075 to a tenth of input — the house rate
+    every other vendor on this card happens to use — overstates a cached token
+    on it five-fold.
+    """
+    ratios = {model: pricing.CARD[("venice", model)].cached_input_per_mtok
+              / pricing.CARD[("venice", model)].input_per_mtok
+              for model, _ in _VENICE_LISTING_RATES}
+    assert len({round(r, 4) for r in ratios.values()}) > 1, ratios
+    assert ratios["deepseek-v4-1-flash"] == pytest.approx(0.02), ratios
+    assert ratios["kimi-k3"] == pytest.approx(0.10), ratios
+    assert ratios["grok-4-6"] == pytest.approx(0.2511, abs=1e-4), ratios
+
+
+def test_no_venice_entry_claims_a_cache_write_rate_the_listing_never_published():
+    # Venice publishes `cache_write` on 26 of its 117 text models, every one of
+    # them an `anonymized` id proxied to another vendor, and on none of its 68
+    # `private` ones — which is all eight of these. An absent key is the vendor
+    # saying nothing, so the leg is `None`. Spelling it BILLS_AT_INPUT_RATE
+    # would assert a "no premium" the vendor never stated, which is the Mistral
+    # defect with the sign flipped.
+    for model, _ in _VENICE_LISTING_RATES:
+        assert pricing.CARD[("venice", model)].cache_write_per_mtok is None, model
+
+
+def test_a_venice_cache_write_count_refuses_rather_than_guessing():
+    span = Span("kimi-k3", "venice", "chat_completions", prompt_tokens=1_000,
+                completion_tokens=10, cached_input_tokens=0, cache_write_tokens=100)
+    with pytest.raises(ValueError, match="cache-write rate"):
+        pricing.price([span])
+
+
+def test_a_venice_read_count_bills_at_the_discount_but_stays_ceiling():
+    """The cache-read handling these entries choose, both halves of it.
+
+    Venice's adapter is OpenAI chat-completions, so a span DOES carry
+    `cached_tokens`: the read leg prices at the published discount rather than
+    at input. The basis stays "ceiling" all the same, because the write leg is
+    unestablished and a missing write count settles nothing either way — the
+    same posture Mistral sits in, and the one `_cache_detailed` already defines.
+    """
+    read = Span("kimi-k3", "venice", "chat_completions", prompt_tokens=1_000_000,
+                completion_tokens=0, cached_input_tokens=800_000)
+    blind = Span("kimi-k3", "venice", "chat_completions", prompt_tokens=1_000_000,
+                 completion_tokens=0)
+    result = pricing.price([read])
+    # 200k uncached @ $3.75 + 800k cached @ $0.375
+    assert result.cost_usd == pytest.approx(0.75 + 0.30)
+    assert result.basis == "ceiling"
+    assert pricing.price([blind]).cost_usd == pytest.approx(3.75)
+
+
+def test_a_venice_model_outside_the_curated_list_is_unpriced_not_silently_zero():
+    # The picker offers every model Venice lists, not just the carded eight, so
+    # an operator can route to one that has no card entry. It must surface as an
+    # actionable route name, never as a $0 cell.
+    result = pricing.price([Span("qwen-3-8-max", "venice", "chat_completions",
+                                 prompt_tokens=1_000, completion_tokens=10)])
+    assert result.basis == "unpriced"
+    assert result.cost_usd is None
+    assert result.unpriced_routes == ("venice/qwen-3-8-max",)
+    assert pricing.classification("venice", "qwen-3-8-max") == "unknown"
+
+
 # --- table hygiene ----------------------------------------------------------
 
 def test_card_version_is_stamped_on_every_verdict():
@@ -713,7 +835,7 @@ def test_every_pending_rate_names_a_real_route_and_says_why():
 
 _CATALOG_PATH = ("apps/fermix_core/lib/fermix_core/providers/model_catalog.ex")
 _CATALOG_PROVIDERS = ("openai_codex", "openai", "anthropic", "xai", "openrouter",
-                      "mistral", "ollama")
+                      "mistral", "venice", "ollama")
 
 
 def _catalog_models() -> dict[str, list[str]]:

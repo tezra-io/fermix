@@ -1,19 +1,27 @@
 defmodule FermixCore.ComputerHistory.Capturer do
   @moduledoc """
   Owns the compux sidecar Port in **capture mode** (MILESTONE_32 §6.4, §8.4a).
-  Unlike computer-use (a positional request→response via `Compux.PortDriver.
-  execute/2`), capture is an **unsolicited event push**: after `observe_start`
-  is acked, the sidecar streams NDJSON event frames. So this process owns the
-  Port and `handle_info`s inbound lines — reusing only `Compux.PortDriver`'s
-  tested open + kill lifecycle, never its blocking receive.
+  Unlike computer-use (a correlated request→response through `Compux.Transport`),
+  capture is an **unsolicited event push**: after `observe_start` is acked, the
+  sidecar streams NDJSON event frames. So this process owns a RAW Port and
+  `handle_info`s inbound lines itself, reusing `Compux.Port`'s tested open + kill
+  lifecycle and `Compux.Frame` to encode its two requests — never a transport,
+  which would consume the very lines this rail exists to read.
+
+  Its two requests carry no generations and no deadline: they are not part of the
+  action wire's correlated conversation, and the sidecar reads them the same way
+  it always has. Its inbound `ack` and `event` families are unchanged by the
+  protocol bump apart from the version integer inside the ack, so
+  `ComputerHistory.Wire` stays the decoder — it maps an event onto the columns
+  `Ingest` writes, which a generic frame decoder does not.
 
   Lifecycle, all bounded and fail-visible:
 
     * **singleton** — acquires the machine-wide `SingletonLock` first; a second
       daemon on the same Mac **stands down** and re-acquires on a tick when the
       holder exits (§8.6). The holder heartbeats the lock to prove liveness.
-    * **handshake** — `observe_start`'s ack must report `protocol_version` 6
-      (the capture-mode compux); a mismatch, a refused start, or **no ack at all
+    * **handshake** — `observe_start`'s ack must report the `protocol_version`
+      this build speaks; a mismatch, a refused start, or **no ack at all
       within `@handshake_timeout_ms`** **degrades** loudly (doctor-visible)
       rather than crash-looping. The handshake is a mode of its own
       (`:handshaking`): capture does not read as running until the ack lands.
@@ -25,7 +33,7 @@ defmodule FermixCore.ComputerHistory.Capturer do
       distinct `boot_id` so it never collides with sidecar `(boot_id, seq)`),
       never a silent hole.
     * **teardown** — flushes the buffer, `observe_stop`s, kills the sidecar pid
-      (`Compux.PortDriver.stop`), and releases the lock, on every exit path.
+      (`Compux.Port.kill/1`), and releases the lock, on every exit path.
 
   It never uses `CaptureHealth` — that breaker guards ScreenCaptureKit wedges,
   and capture is Accessibility-only (no screen capture); this rail's health is
@@ -36,6 +44,8 @@ defmodule FermixCore.ComputerHistory.Capturer do
 
   require Logger
 
+  alias Compux.Frame
+  alias Compux.Port, as: SidecarPort
   alias FermixCore.ComputerHistory.Config
   alias FermixCore.ComputerHistory.Ingest
   alias FermixCore.ComputerHistory.SingletonLock
@@ -43,10 +53,11 @@ defmodule FermixCore.ComputerHistory.Capturer do
   alias FermixCore.ComputerUse.SidecarInstaller
   alias FermixCore.Memory.Repo
 
-  # The compux protocol_version that adds the capture mode (§8.4a). Equals
-  # `Compux.Protocol.protocol_version()` once the paired release lands; until
-  # then the installed v5 sidecar mismatches here and capture degrades loudly.
-  @capture_protocol_version 6
+  # The wire this rail requires, pinned EQUAL to the library's own
+  # `Compux.Protocol.protocol_version()` (a test proves it, so the two constants
+  # cannot drift). An installed sidecar from an older release mismatches here and
+  # capture degrades loudly rather than interpreting frames it does not speak.
+  @capture_protocol_version Compux.Protocol.protocol_version()
   @gap_boot_id "fermix-capturer"
 
   # An unacked handshake is bounded: a sidecar that answers `observe_start` with
@@ -105,13 +116,12 @@ defmodule FermixCore.ComputerHistory.Capturer do
       mode: :bootstrapping,
       repo: Keyword.get(opts, :repo, Repo),
       apps: Keyword.get_lazy(opts, :apps, &Config.apps/0),
-      sites: Keyword.get_lazy(opts, :sites, &Config.sites/0),
       binary_path: Keyword.get(opts, :binary_path),
       sidecar_env: Keyword.get(opts, :sidecar_env, []),
       lock_path: Keyword.get_lazy(opts, :lock_path, &SingletonLock.default_path/0),
       lock_held?: false,
       lock_holder: nil,
-      driver_state: nil,
+      sidecar: nil,
       buffer: [],
       partial: "",
       # A per-incarnation gap boot_id: a fixed prefix + a boot-unique suffix so a
@@ -172,29 +182,57 @@ defmodule FermixCore.ComputerHistory.Capturer do
     open_sidecar(%{state | restart_attempts: 0})
   end
 
+  # The OS process goes into state the instant it exists, before anything can fail
+  # against it. Sending `observe_start` can fail on a sidecar that died between the
+  # spawn and the write, and a degrade that could not see the port would leave that
+  # process running with nobody owning it — the leak `Compux.Port`'s own moduledoc
+  # warns about, from the one path where we had just created it. Open → close on
+  # every path, including this one.
   defp open_sidecar(state) do
     state = %{state | generation: state.generation + 1}
 
-    with {:ok, path} <- resolve_binary(state.binary_path),
-         {:ok, driver_state} <- Compux.PortDriver.start(binary_path: path, env: state.sidecar_env),
-         :ok <- send_observe_start(driver_state, state) do
-      schedule({:handshake_deadline, state.generation}, state.handshake_timeout_ms)
-      %{state | mode: :handshaking, driver_state: driver_state, protocol_ok?: false}
-    else
+    case resolve_binary(state.binary_path) do
+      {:ok, path} -> open_and_observe(state, path)
       {:error, reason} -> degrade(state, reason)
+    end
+  end
+
+  defp open_and_observe(state, path) do
+    case SidecarPort.open(binary_path: path, env: state.sidecar_env) do
+      {:ok, sidecar} -> start_observing(%{state | sidecar: sidecar}, sidecar)
+      {:error, reason} -> degrade(state, reason)
+    end
+  end
+
+  defp start_observing(state, sidecar) do
+    request = %{"action" => "observe_start", "params" => params(state)}
+
+    case send_frame(sidecar, "o-start", request) do
+      :ok ->
+        schedule({:handshake_deadline, state.generation}, state.handshake_timeout_ms)
+        %{state | mode: :handshaking, protocol_ok?: false}
+
+      # `degrade/1` reads `state.sidecar`, which is why it was put there first.
+      {:error, reason} ->
+        degrade(state, reason)
     end
   end
 
   defp resolve_binary(nil), do: SidecarInstaller.binary_path()
   defp resolve_binary(path) when is_binary(path), do: {:ok, path}
 
-  defp send_observe_start(driver_state, state) do
-    request = %{
-      "action" => "observe_start",
-      "params" => %{"apps" => state.apps, "sites" => state.sites}
-    }
+  # The sidecar reads its observe arguments from a nested `params` object, so the
+  # shape is preserved exactly across the framing change.
+  defp params(state), do: %{"apps" => state.apps}
 
-    Port.command(driver_state.port, Compux.Protocol.encode_request(request))
+  # A typed `request` frame with a request id and NOTHING else from the envelope:
+  # this rail is not part of the action wire's correlated conversation, so it mints
+  # no generations, no mutation sequence and no deadline, and the sidecar requires
+  # none of them. A frame that cannot be encoded is a bug here, not a sidecar
+  # fault, so it fails loud rather than degrading the rail.
+  defp send_frame(sidecar, request_id, args) do
+    {:ok, line} = Frame.encode(%Frame.Request{request_id: request_id, args: args})
+    Port.command(sidecar.port, line)
     :ok
   rescue
     ArgumentError -> {:error, :sidecar_unavailable}
@@ -203,7 +241,7 @@ defmodule FermixCore.ComputerHistory.Capturer do
   # --- inbound frames -----------------------------------------------------
 
   @impl true
-  def handle_info({port, {:data, {:eol, chunk}}}, %{driver_state: %{port: port}} = state) do
+  def handle_info({port, {:data, {:eol, chunk}}}, %{sidecar: %{port: port}} = state) do
     line = state.partial <> chunk
 
     # The Port's line limit is 16MB (compux sizes it for screenshot responses),
@@ -220,7 +258,7 @@ defmodule FermixCore.ComputerHistory.Capturer do
     {:noreply, %{new_state | partial: ""}}
   end
 
-  def handle_info({port, {:data, {:noeol, chunk}}}, %{driver_state: %{port: port}} = state) do
+  def handle_info({port, {:data, {:noeol, chunk}}}, %{sidecar: %{port: port}} = state) do
     partial = state.partial <> chunk
 
     if byte_size(partial) > @max_frame_bytes do
@@ -232,7 +270,7 @@ defmodule FermixCore.ComputerHistory.Capturer do
     end
   end
 
-  def handle_info({port, {:exit_status, status}}, %{driver_state: %{port: port}} = state) do
+  def handle_info({port, {:exit_status, status}}, %{sidecar: %{port: port}} = state) do
     # Flush verified content NOW, while `protocol_ok?` still holds — a restart that
     # later exhausts its budget must never silently drop already-verified events.
     gapped = buffer_gap(flush(state), "restart")
@@ -250,7 +288,7 @@ defmodule FermixCore.ComputerHistory.Capturer do
          gapped
          | mode: :restarting,
            protocol_ok?: false,
-           driver_state: nil,
+           sidecar: nil,
            restart_attempts: state.restart_attempts + 1
        }}
     else
@@ -341,11 +379,11 @@ defmodule FermixCore.ComputerHistory.Capturer do
     end
   end
 
-  # A pre-v6 sidecar has no `observe_start` verb and answers the unknown action
-  # with a POSITIONAL frame — no `"type"` — so a typeless line while the
-  # handshake is still outstanding IS the protocol mismatch, and gapping it left
-  # the rail waiting on an ack that could never come. Once the handshake has
-  # verified the wire, a typeless line is an ordinary hole in the record.
+  # A sidecar too old to know `observe_start` answers the unknown action with a
+  # POSITIONAL frame — no `"type"` — so a typeless line while the handshake is
+  # still outstanding IS the protocol mismatch, and gapping it left the rail
+  # waiting on an ack that could never come. Once the handshake has verified the
+  # wire, a typeless line is an ordinary hole in the record.
   defp handle_decode_error(%{protocol_ok?: false} = state, :missing_frame_type) do
     degrade(state, {:protocol_mismatch, %{required: @capture_protocol_version, sidecar: :pre_v6}})
   end
@@ -416,7 +454,7 @@ defmodule FermixCore.ComputerHistory.Capturer do
   defp do_flush(state, [], held), do: %{state | buffer: held}
 
   defp do_flush(state, writable, held) do
-    case Ingest.ingest(writable, repo: state.repo, apps: state.apps, sites: state.sites) do
+    case Ingest.ingest(writable, repo: state.repo, apps: state.apps) do
       {:ok, stats} ->
         log_ingest_stats(stats)
         %{state | buffer: held, overflow_pending?: false}
@@ -429,15 +467,31 @@ defmodule FermixCore.ComputerHistory.Capturer do
   end
 
   # Counts only, never content (§15.1). A flush that silently loses rows to the
-  # allowlist or to the title collapse is indistinguishable from a capture gap —
-  # the live spool ran at 99% collapsed frames with nothing anywhere to say so.
-  # A flush that wrote everything it was given says nothing.
-  defp log_ingest_stats(%{dropped: 0, collapsed: 0}), do: :ok
+  # allowlist, to the title collapse or to the private/URL gates is
+  # indistinguishable from a capture gap — the live spool ran at 99% collapsed
+  # frames with nothing anywhere to say so. A flush that wrote everything it was
+  # given says nothing. Refusals print BY KIND so "the recorder is sending private
+  # frames" and "the recorder is sending unusable addresses" stay distinguishable.
+  defp log_ingest_stats(%{dropped: 0, collapsed: 0, refused: refused} = stats) do
+    if refusals?(refused), do: log_stats(stats), else: :ok
+  end
 
-  defp log_ingest_stats(%{written: written, dropped: dropped, collapsed: collapsed}) do
+  defp log_ingest_stats(stats), do: log_stats(stats)
+
+  defp refusals?(refused), do: Enum.any?(refused, fn {_kind, count} -> count > 0 end)
+
+  defp log_stats(%{written: written, dropped: dropped, collapsed: collapsed, refused: refused}) do
     Logger.debug(
-      "computer_history ingest: written #{written}, dropped #{dropped}, collapsed #{collapsed}"
+      "computer_history ingest: written #{written}, dropped #{dropped}, " <>
+        "collapsed #{collapsed}#{refused_clause(refused)}"
     )
+  end
+
+  defp refused_clause(refused) do
+    case Enum.filter(refused, fn {_kind, count} -> count > 0 end) do
+      [] -> ""
+      kinds -> ", refused " <> Enum.map_join(kinds, " ", fn {k, n} -> "#{k} #{n}" end)
+    end
   end
 
   # A self-generated gap, bounded like the event path: at `max_queue` it coalesces
@@ -495,7 +549,7 @@ defmodule FermixCore.ComputerHistory.Capturer do
     flushed = flush(state)
     stop_driver(flushed)
     released = release_lock(flushed)
-    %{released | mode: :degraded, degraded_reason: reason, driver_state: nil, protocol_ok?: false}
+    %{released | mode: :degraded, degraded_reason: reason, sidecar: nil, protocol_ok?: false}
   end
 
   defp release_lock(%{lock_held?: true} = state) do
@@ -516,19 +570,12 @@ defmodule FermixCore.ComputerHistory.Capturer do
     :ok
   end
 
-  defp stop_driver(%{driver_state: %{} = driver_state}) do
-    _ = observe_stop(driver_state)
-    Compux.PortDriver.stop(driver_state)
+  defp stop_driver(%{sidecar: %SidecarPort{} = sidecar}) do
+    _ = send_frame(sidecar, "o-stop", %{"action" => "observe_stop"})
+    SidecarPort.kill(sidecar)
   end
 
   defp stop_driver(_state), do: :ok
-
-  defp observe_stop(driver_state) do
-    Port.command(driver_state.port, Compux.Protocol.encode_request(%{"action" => "observe_stop"}))
-    :ok
-  rescue
-    ArgumentError -> :ok
-  end
 
   defp schedule(message, delay_ms), do: Process.send_after(self(), message, delay_ms)
 end

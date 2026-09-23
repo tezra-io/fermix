@@ -8,7 +8,7 @@ defmodule FermixCore.Capabilities.MeetingsSeederInvariantTest do
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Meetings
 
-  # MILESTONE_21 C2 §14.1, written as the whole-surface invariant the CLAUDE.md
+  # MILESTONE_21 C2 §14.1, written as the whole-surface invariant the AGENTS.md
   # gate-on-the-whole-feature pitfall mandates: when `Meetings.ready?()` is
   # false, NO meetings tool is advertised. The assertion loops over the SEEDER's
   # family list and over everything the seeder actually registered, never over a

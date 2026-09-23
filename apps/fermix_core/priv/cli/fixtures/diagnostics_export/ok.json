@@ -1,0 +1,96 @@
+{
+  "ok": true,
+  "result": {
+    "generated_at": "2026-01-01T00:00:00Z",
+    "mode": "offline",
+    "schema_version": 1,
+    "sources": {
+      "desktop_session": {
+        "observed_at": "2026-01-01T00:00:00Z",
+        "reason": "session facts are supplied by the graphical client",
+        "status": "unavailable"
+      },
+      "doctor": {
+        "observed_at": "2026-01-01T00:00:00Z",
+        "reason": "Doctor runs against the daemon, which is not being contacted",
+        "status": "unavailable"
+      },
+      "engine": {
+        "data": {
+          "installed": {
+            "architecture": "x86_64",
+            "artifact_target": "linux_x86_64",
+            "build_id": "release-9",
+            "distribution_identity": "linux_package",
+            "engine_id": "fermix-core",
+            "integrity": "unreadable",
+            "pid": null,
+            "product_version": "1.2.3",
+            "source_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "running": null,
+          "running_status": "unavailable"
+        },
+        "observed_at": "2026-01-01T00:00:00Z",
+        "status": "available"
+      },
+      "logs": {
+        "data": {
+          "count": 2,
+          "entries": [
+            {
+              "level": "info",
+              "message": "started",
+              "source": "file",
+              "subsystem": "daemon",
+              "time": "2026-01-01T00:00:00Z"
+            },
+            {
+              "level": null,
+              "message": "host fermix[4711]: started",
+              "source": "journal",
+              "subsystem": null,
+              "time": "2026-01-01T00:00:00+0000"
+            }
+          ],
+          "file_status": "available",
+          "journal_reason": null,
+          "journal_status": "available"
+        },
+        "observed_at": "2026-01-01T00:00:00Z",
+        "status": "available"
+      },
+      "secret_backend": {
+        "data": {
+          "present": true,
+          "tool": "secret-tool"
+        },
+        "observed_at": "2026-01-01T00:00:00Z",
+        "status": "available"
+      },
+      "service": {
+        "data": {
+          "active": true,
+          "alignment": "aligned",
+          "binding_state": "bound",
+          "enabled": true,
+          "invocation_id": "4b1e9d1a",
+          "linger": "enabled",
+          "listener_port": 4030,
+          "listener_source": "daemon",
+          "path_source": "engine_baseline",
+          "pid": 4711,
+          "restart_count": 0,
+          "sub_state": "running",
+          "unit_foreign": false,
+          "unit_legacy_generated": false,
+          "unit_need_daemon_reload": false,
+          "unit_vendor": true
+        },
+        "observed_at": "2026-01-01T00:00:00Z",
+        "status": "available"
+      }
+    }
+  },
+  "schema_version": 1
+}

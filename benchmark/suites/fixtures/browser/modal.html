@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Modal fixture — dismiss the overlay, then use the control behind it</title>
+<link rel="icon" href="data:,">
+<style>
+  body { font: 16px/1.5 system-ui, sans-serif; margin: 2rem auto; max-width: 40rem; }
+  label { display: block; margin-top: 0.75rem; font-weight: 600; }
+  input { display: block; width: 100%; font: inherit; padding: 0.3rem; box-sizing: border-box; }
+  button { font: inherit; padding: 0.3rem 1rem; margin-top: 1rem; }
+  #scrim { position: fixed; inset: 0; background: rgba(20, 20, 20, 0.55); }
+  #notice { position: fixed; inset: 20% 15% auto 15%; background: #fff;
+            border: 2px solid #333; padding: 1.5rem; }
+  #booking { font-size: 1.25rem; font-weight: 700; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<h1>Workshop booking (fixture)</h1>
+<p>
+  A notice covers the page until it is dismissed. The booking form behind it is
+  inert while the notice is up: clicking through it changes nothing.
+</p>
+
+<form id="booking-form" autocomplete="off">
+  <label for="attendee">Attendee name</label>
+  <input id="attendee" name="attendee" type="text">
+  <button type="submit" id="reserve">Reserve a place</button>
+</form>
+
+<p id="booking">No reservation yet.</p>
+<p id="fixture-status"></p>
+
+<div id="scrim"></div>
+<div id="notice" role="dialog" aria-modal="true" aria-labelledby="notice-heading">
+  <h2 id="notice-heading">Before you continue</h2>
+  <p>
+    Bookings for this workshop close at the end of the month. Dismiss this
+    notice to use the form.
+  </p>
+  <button type="button" id="dismiss">Dismiss notice</button>
+</div>
+
+<script src="fixture.js"></script>
+<script>
+// Corpus fixture: a BLOCKING MODAL over the control the task needs. Served by
+// the runner-owned fixture server under this case attempt's token; the suites
+// address it with __EVAL_FIXTURE_URL__.
+//
+// The notice is a real blocker, not decoration: while it is up the booking form
+// refuses its own submit, so a run that reports a reservation without dismissing
+// the notice first recorded nothing and its `fixture_state` gate fails. The
+// order is what the case is about, and `event_keys` (the server's own ordered
+// list of reported keys) carries it.
+//
+// WHAT THE PAGE RECORDS (suites/SCHEMA.md `fixture_state`):
+//   modal.dismissed  — true, once the notice is dismissed
+//   booking.made     — {attendee, reference} once the form is submitted
+// Neither is reported before it happens, so an absent path means it never did.
+//
+// Nothing is stored and nothing is sent beyond those reports; the form never
+// submits to a server, so every load starts with the notice up again.
+(function () {
+  "use strict";
+
+  const scrim = document.getElementById('scrim');
+  const notice = document.getElementById('notice');
+  const form = document.getElementById('booking-form');
+  const attendee = document.getElementById('attendee');
+  const readout = document.getElementById('booking');
+  let dismissed = false;
+  let booking = null;
+
+  function reference(name) {
+    // Derived from the name, so a reservation made for the wrong attendee reads
+    // as a different number rather than as the same success.
+    let h = 23;
+    for (const ch of name.trim().toLowerCase()) {
+      h = (h * 29 + ch.codePointAt(0)) % 9000;
+    }
+    return h + 1000;
+  }
+
+  window.__fixture = {
+    page: 'modal',
+    get dismissed() { return dismissed; },
+    get booking() { return booking; },
+  };
+
+  document.getElementById('dismiss').addEventListener('click', function () {
+    dismissed = true;
+    scrim.hidden = true;
+    notice.hidden = true;
+    fixtureReport('modal.dismissed', true);
+  });
+
+  form.addEventListener('submit', function (event) {
+    event.preventDefault();
+    if (!dismissed) {
+      // Inert behind the notice. Silent on purpose: a page that explained the
+      // block would be teaching the model the step the case is measuring.
+      return;
+    }
+    const name = attendee.value.trim();
+    booking = { attendee: name.toLowerCase(), reference: reference(name) };
+    readout.textContent = 'Reserved for ' + name + '. Reference: ' + booking.reference;
+    fixtureReport('booking.made', booking);
+  });
+}());
+</script>
+</body>
+</html>

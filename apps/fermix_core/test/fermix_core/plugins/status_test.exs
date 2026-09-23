@@ -452,4 +452,381 @@ defmodule FermixCore.Plugins.StatusTest do
       assert Elixir.Registry.lookup(FermixCore.Auth.TokenRegistry, profile) == []
     end
   end
+
+  # --- M40 §3.2: the account region and per-tool setting gates -------------
+  #
+  # `region/1` reads the same stored grant `granted_scopes/1` reads, so it
+  # answers identically in a tree-less CLI VM. The value itself is recorded by
+  # the OAuth sign-in that learns the account's region.
+  describe "region/1" do
+    test "is nil for a plugin with no stored grant", %{checkout: checkout} do
+      write_plugin(checkout, "regiofix", oauth_manifest())
+      put_plugins_env(["regiofix"], %{})
+
+      assert Status.region(load_plugin(checkout, "regiofix")) == nil
+    end
+
+    test "is nil when the stored grant records no region", %{checkout: checkout} do
+      plugin = grant_without_region(checkout)
+
+      assert Status.region(plugin) == nil
+    end
+
+    test "is the region the sign-in recorded on the grant", %{checkout: checkout} do
+      plugin = grant_without_region(checkout)
+
+      :ok = Store.write(Config.auth_profile(plugin), stored_grant(region: "na"))
+      assert Status.region(plugin) == "na"
+
+      :ok = Store.write(Config.auth_profile(plugin), stored_grant(region: "eu"))
+      assert Status.region(plugin) == "eu"
+    end
+  end
+
+  # A regional provider's sign-in client is incomplete until the region is
+  # chosen: the audience the exchange must send comes from it, so a client
+  # without one cannot sign in at all. The ladder says so in the one word that
+  # leads with "Set up the sign-in client" rather than sending the owner to a
+  # sign-in the daemon refuses.
+  describe "a regional provider's sign-in client" do
+    setup %{checkout: checkout} do
+      write_plugin(checkout, "teslafix", tesla_manifest())
+      put_plugins_env(["teslafix"], %{})
+
+      %{plugin: load_plugin(checkout, "teslafix")}
+    end
+
+    test "with an identifier and a secret but no region is needs_client_config", %{plugin: plugin} do
+      put_tesla_client([])
+
+      assert Status.status(plugin) == :needs_client_config
+    end
+
+    test "with a blank region is needs_client_config", %{plugin: plugin} do
+      put_tesla_client(region: "  ")
+
+      assert Status.status(plugin) == :needs_client_config
+    end
+
+    test "with a region chosen falls through to the auth ladder", %{plugin: plugin} do
+      put_tesla_client(region: "eu")
+
+      assert Status.status(plugin) == :needs_auth
+    end
+
+    # A provider with one region has no region to choose, so the ladder must not
+    # hold a complete client back waiting for one.
+    test "a provider with one region is never held back by it", %{checkout: checkout} do
+      write_plugin(checkout, "regiofix", oauth_manifest())
+      put_plugins_env(["regiofix"], %{})
+
+      Application.put_env(:fermix_core, :oauth, %{
+        "google" => [client_id: "cid", client_secret: "sec"]
+      })
+
+      assert Status.status(load_plugin(checkout, "regiofix")) == :needs_auth
+    end
+  end
+
+  # Tesla answers every Fleet API call from the wrong region with 421, so a
+  # sign-in confirms the account's own region and records a mismatch on the
+  # grant. The ladder publishes it as its own word: the fix is the sign-in
+  # client, not a renewed sign-in.
+  describe "a grant minted for the wrong region" do
+    setup %{checkout: checkout} do
+      write_plugin(checkout, "teslafix", tesla_manifest())
+      put_plugins_env(["teslafix"], %{})
+      put_tesla_client(region: "na")
+
+      %{plugin: load_plugin(checkout, "teslafix")}
+    end
+
+    test "is wrong_region, not ready and not a renewal", %{plugin: plugin} do
+      :ok =
+        Store.write(
+          Config.auth_profile(plugin),
+          stored_grant(status: "wrong_region", region: "na", region_actual: "eu")
+        )
+
+      assert Status.status(plugin) == :wrong_region
+    end
+
+    test "names the account's own region beside the chosen one", %{plugin: plugin} do
+      :ok =
+        Store.write(
+          Config.auth_profile(plugin),
+          stored_grant(status: "wrong_region", region: "na", region_actual: "eu")
+        )
+
+      assert Status.region(plugin) == "na"
+      assert Status.region_actual(plugin) == "eu"
+    end
+
+    # Tesla's 421 does not always name a base URL this registry knows, so the
+    # mismatch is recorded with no account region rather than a guessed one.
+    test "records the mismatch even when the account's region is unknown", %{plugin: plugin} do
+      :ok =
+        Store.write(
+          Config.auth_profile(plugin),
+          stored_grant(status: "wrong_region", region: "na")
+        )
+
+      assert Status.status(plugin) == :wrong_region
+      assert Status.region_actual(plugin) == nil
+    end
+
+    test "a plugin with no stored grant has no account region", %{plugin: plugin} do
+      assert Status.region_actual(plugin) == nil
+    end
+  end
+
+  test "wrong_region sits directly after reauthorization_required in the ladder" do
+    statuses = Status.statuses()
+
+    assert Enum.find_index(statuses, &(&1 == :wrong_region)) ==
+             Enum.find_index(statuses, &(&1 == :reauthorization_required)) + 1
+  end
+
+  describe "tool_setting_satisfied?/2" do
+    test "an ungated tool is always satisfied", %{checkout: checkout} do
+      write_plugin(checkout, "gatefix", gated_manifest())
+      put_plugins_env(["gatefix"], %{})
+      plugin = load_plugin(checkout, "gatefix")
+
+      assert Status.tool_setting_satisfied?(plugin, tool(plugin, "gatefix_read"))
+    end
+
+    test "a gated tool is satisfied only by the exact value \"true\"", %{checkout: checkout} do
+      write_plugin(checkout, "gatefix", gated_manifest())
+
+      plugin_for = fn entries ->
+        put_plugins_env(["gatefix"], %{"gatefix" => entries})
+        load_plugin(checkout, "gatefix")
+      end
+
+      satisfied = plugin_for.([{"ALLOW_WAKE", "true"}])
+      assert Status.tool_setting_satisfied?(satisfied, tool(satisfied, "gatefix_wake"))
+
+      for entries <- [[], [{"ALLOW_WAKE", "false"}], [{"ALLOW_WAKE", "TRUE"}]] do
+        plugin = plugin_for.(entries)
+
+        refute Status.tool_setting_satisfied?(plugin, tool(plugin, "gatefix_wake")),
+               "#{inspect(entries)} satisfied the gate"
+      end
+    end
+
+    # The kind a setting declares is what the two doors RENDER; it does not
+    # change what the gate reads. A switch declared boolean and written "false"
+    # is off, and the text-kinded manifest above still gates, so the gate is
+    # not restricted to one kind.
+    test "a boolean setting written false leaves the gated tool off", %{checkout: checkout} do
+      write_plugin(checkout, "boolgate", boolean_gated_manifest())
+
+      plugin_for = fn entries ->
+        put_plugins_env(["boolgate"], %{"boolgate" => entries})
+        load_plugin(checkout, "boolgate")
+      end
+
+      off = plugin_for.([{"ALLOW_WAKE", "false"}])
+      assert [%{key: "ALLOW_WAKE", kind: :boolean}] = off.config
+      refute Status.tool_setting_satisfied?(off, tool(off, "boolgate_wake"))
+
+      unset = plugin_for.([])
+      refute Status.tool_setting_satisfied?(unset, tool(unset, "boolgate_wake"))
+
+      on = plugin_for.([{"ALLOW_WAKE", "true"}])
+      assert Status.tool_setting_satisfied?(on, tool(on, "boolgate_wake"))
+    end
+  end
+
+  describe "runtime_setting_satisfied?/1" do
+    test "a runtime with no gate is always satisfied", %{checkout: checkout} do
+      write_plugin(checkout, "obsidian", mcp_manifest())
+      put_plugins_env(["obsidian"], %{"obsidian" => [{"OBSIDIAN_VAULT_PATH", "/tmp/vault"}]})
+
+      assert Status.runtime_setting_satisfied?(load_plugin(checkout, "obsidian"))
+    end
+
+    test "a plugin with no runtime block at all is always satisfied", %{checkout: checkout} do
+      write_plugin(checkout, "gatefix", gated_manifest())
+      put_plugins_env(["gatefix"], %{})
+
+      assert Status.runtime_setting_satisfied?(load_plugin(checkout, "gatefix"))
+    end
+
+    # One resolver behind both gates, so a spelling can never mean "on" for the
+    # runtime and "off" for a tool.
+    test "a gated runtime is satisfied only by the exact value \"true\"", %{checkout: checkout} do
+      write_plugin(checkout, "rtgate", gated_runtime_manifest())
+
+      plugin_for = fn entries ->
+        put_plugins_env(["rtgate"], %{"rtgate" => entries})
+        load_plugin(checkout, "rtgate")
+      end
+
+      assert Status.runtime_setting_satisfied?(plugin_for.([{"ALLOW_CONTROL", "true"}]))
+
+      for entries <- [[], [{"ALLOW_CONTROL", "false"}], [{"ALLOW_CONTROL", "TRUE"}]] do
+        refute Status.runtime_setting_satisfied?(plugin_for.(entries)),
+               "#{inspect(entries)} satisfied the runtime gate"
+      end
+    end
+
+    test "setting_on?/2 is the one resolver both gates read", %{checkout: checkout} do
+      write_plugin(checkout, "rtgate", gated_runtime_manifest())
+      put_plugins_env(["rtgate"], %{"rtgate" => [{"ALLOW_CONTROL", "true"}]})
+      plugin = load_plugin(checkout, "rtgate")
+
+      assert Status.setting_on?(plugin, "ALLOW_CONTROL")
+      refute Status.setting_on?(plugin, "NEVER_SET")
+    end
+
+    # The gate decides whether a child process is spawned, not whether the
+    # plugin is installed, configured and signed in. Reporting it through the
+    # status ladder would make the row say the plugin needs attention when the
+    # operator has simply left an optional helper switched off.
+    test "a gated-off runtime leaves the plugin ready", %{checkout: checkout} do
+      write_plugin(checkout, "rtgate", gated_runtime_manifest())
+      put_plugins_env(["rtgate"], %{"rtgate" => [{"ALLOW_CONTROL", "false"}]})
+      plugin = load_plugin(checkout, "rtgate")
+
+      assert Status.status(plugin, probe: probe_ok()) == :ready
+      refute Status.runtime_setting_satisfied?(plugin)
+    end
+  end
+
+  defp gated_runtime_manifest do
+    %{
+      "runtime" => %{
+        "kind" => "node",
+        "command" => "node",
+        "args" => ["src/index.js"],
+        "vendored" => false,
+        "requires_setting" => "ALLOW_CONTROL"
+      },
+      "config" => [
+        %{
+          "key" => "ALLOW_CONTROL",
+          "prompt" => "Allow the helper to run",
+          "required" => false,
+          "kind" => "boolean"
+        }
+      ],
+      "tools" => [
+        %{
+          "name" => "rtgate_do",
+          "description" => "Do the thing",
+          "rail" => "mcp",
+          "read_only" => false
+        }
+      ]
+    }
+  end
+
+  defp grant_without_region(checkout) do
+    write_plugin(checkout, "regiofix", oauth_manifest())
+    put_plugins_env(["regiofix"], %{})
+    plugin = load_plugin(checkout, "regiofix")
+
+    :ok = Store.write(Config.auth_profile(plugin), stored_grant([]))
+    plugin
+  end
+
+  defp put_tesla_client(extra) do
+    Application.put_env(:fermix_core, :oauth, %{
+      "tesla" =>
+        Keyword.merge([client_id: "tesla-client-id", client_secret: "tesla-secret"], extra)
+    })
+  end
+
+  defp stored_grant(extra) do
+    Enum.into(extra, %{
+      auth_mode: "oauth2",
+      provider: "google",
+      granted_scopes: [],
+      tokens: %{access_token: "AT", refresh_token: "RT"},
+      expires_at: DateTime.add(DateTime.utc_now(), 3600, :second),
+      last_refresh: nil,
+      status: "ready"
+    })
+  end
+
+  defp tool(plugin, name), do: Enum.find(plugin.tools, &(&1["name"] == name))
+
+  defp oauth_manifest do
+    %{
+      "auth" => %{
+        "type" => "oauth2",
+        "provider" => "google",
+        "profile_key" => "regiofix",
+        "account_mode" => "single",
+        "scopes" => ["openid"]
+      },
+      "health_check" => %{"kind" => "local_readiness", "requires_auth" => true},
+      "tools" => []
+    }
+  end
+
+  defp tesla_manifest do
+    %{
+      "auth" => %{
+        "type" => "oauth2",
+        "provider" => "tesla",
+        "profile_key" => "teslafix",
+        "account_mode" => "single",
+        "scopes" => ["openid"]
+      },
+      "health_check" => %{"kind" => "local_readiness", "requires_auth" => true},
+      "tools" => []
+    }
+  end
+
+  defp boolean_gated_manifest do
+    %{
+      "config" => [
+        %{
+          "key" => "ALLOW_WAKE",
+          "prompt" => "Allow waking",
+          "required" => false,
+          "kind" => "boolean"
+        }
+      ],
+      "tools" => [
+        %{
+          "name" => "boolgate_wake",
+          "description" => "Wake it.",
+          "read_only" => false,
+          "requires_setting" => "ALLOW_WAKE",
+          "rail" => "http",
+          "parameters" => %{"type" => "object", "properties" => %{}},
+          "request" => %{"method" => "POST", "url" => "https://example.com/wake"}
+        }
+      ]
+    }
+  end
+
+  defp gated_manifest do
+    %{
+      "config" => [%{"key" => "ALLOW_WAKE", "prompt" => "Allow waking", "required" => false}],
+      "tools" => [
+        %{
+          "name" => "gatefix_read",
+          "description" => "Read state.",
+          "read_only" => true,
+          "rail" => "http",
+          "parameters" => %{"type" => "object", "properties" => %{}},
+          "request" => %{"method" => "GET", "url" => "https://example.com/read"}
+        },
+        %{
+          "name" => "gatefix_wake",
+          "description" => "Wake it.",
+          "read_only" => false,
+          "requires_setting" => "ALLOW_WAKE",
+          "rail" => "http",
+          "parameters" => %{"type" => "object", "properties" => %{}},
+          "request" => %{"method" => "POST", "url" => "https://example.com/wake"}
+        }
+      ]
+    }
+  end
 end

@@ -5,6 +5,7 @@ defmodule Fermix.CLI.DaemonTest do
   alias Fermix.CLI.Daemon.Client
   alias FermixCore.Capabilities.MCP.RuntimeStatus
   alias FermixCore.Management.Lifecycle
+  alias FermixCore.SocketPath
 
   defmodule TestPluginsRuntime do
     def apply_persisted do
@@ -564,6 +565,32 @@ defmodule Fermix.CLI.DaemonTest do
     assert {:ok, %{"engine" => _engine}} = hello(socket_path)
   end
 
+  # M38 §4.4.6: the address-length failure is named BEFORE bind, because the
+  # kernel's own answer is a bare `:einval` that reads as a Fermix bug, and the
+  # client that then cannot connect reports the daemon as not running.
+  test "an over-long control socket path refuses before bind and names the fix" do
+    path = Path.join([System.tmp_dir!(), String.duplicate("d", 160), "daemon.sock"])
+    limit = SocketPath.max_bytes()
+    # A refused `init/1` exits with its reason, and this process is its link.
+    Process.flag(:trap_exit, true)
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:error, {:socket_path_too_long, bytes, ^limit, ^path}} =
+                 Daemon.start_link(
+                   name: :"long_path_daemon_#{System.unique_integer([:positive, :monotonic])}",
+                   socket_path: path
+                 )
+
+        assert bytes == byte_size(path)
+      end)
+
+    assert log =~ "the daemon.sock path is #{byte_size(path)} bytes"
+    assert log =~ "set a shorter FERMIX_HOME and restart"
+    # The pre-flight touches no filesystem object, so a refused boot leaves none.
+    refute File.exists?(Path.dirname(path))
+  end
+
   test "no daemon listening returns :not_running" do
     socket_dir = mkdir!()
     socket_path = Path.join(socket_dir, "missing.sock")
@@ -864,10 +891,10 @@ defmodule Fermix.CLI.DaemonTest do
       )
 
     owner = spawn(fn -> Process.sleep(:infinity) end)
-    source_id = {:plugin, "eden"}
+    source_id = {:plugin, "acme"}
 
     {:ok, generation} =
-      RuntimeStatus.register_owner(status_server, source_id, owner, plugin: "eden")
+      RuntimeStatus.register_owner(status_server, source_id, owner, plugin: "acme")
 
     :ok =
       RuntimeStatus.put(
@@ -876,7 +903,7 @@ defmodule Fermix.CLI.DaemonTest do
         generation,
         :upstream_contract_mismatch,
         :missing_tool,
-        "eden_get_item_connections"
+        "acme_get_item_connections"
       )
 
     {:ok, daemon} =
@@ -898,13 +925,13 @@ defmodule Fermix.CLI.DaemonTest do
 
     assert reply["status"] == "ok"
     assert [row] = reply["runtime_status"]
-    assert row["source"] == "plugin:eden"
-    assert row["plugin"] == "eden"
+    assert row["source"] == "plugin:acme"
+    assert row["plugin"] == "acme"
     assert row["status"] == "upstream_contract_mismatch"
     assert row["detail"] == "missing_tool"
     # The capability the upstream withdrew: the fact a one-shot CLI has no other
     # way to learn, and the reason this row exists at all.
-    assert row["subject"] == "eden_get_item_connections"
+    assert row["subject"] == "acme_get_item_connections"
     assert is_integer(row["updated_at"])
     # The generation ref and owner pid are runtime bookkeeping, not operator
     # facts — §11.1 forbids exporting generation references at all.

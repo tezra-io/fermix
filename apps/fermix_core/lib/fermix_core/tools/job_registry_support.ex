@@ -81,7 +81,7 @@ defmodule FermixCore.Tools.JobRegistrySupport do
     * Both-or-neither: `RouteResolver.resolve!/1` defaults the model to a
       catalog/config value when only a provider is pinned, so a provider-only
       pin would silently resolve to a model the caller never chose. Requiring
-      the pair keeps the pin unambiguous (CLAUDE.md #12 — no fallbacks).
+      the pair keeps the pin unambiguous (AGENTS.md #12 — no fallbacks).
   """
   @spec validate_route_pin(map()) ::
           {:ok, {String.t() | nil, String.t() | nil}} | {:error, String.t()}
@@ -176,6 +176,7 @@ defmodule FermixCore.Tools.JobRegistrySupport do
       delivery_status: run.delivery_status,
       delivery_error: run.delivery_error,
       iterations: run.iterations,
+      tool_failures: run.tool_failures,
       created_at: timestamp(run.created_at)
     }
   end

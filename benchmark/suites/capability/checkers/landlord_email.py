@@ -22,13 +22,18 @@ scored 8/8, because it cleared MIN_SENTENCE_WORDS on token count.
 
   * Only the lines BETWEEN the greeting and the sign-off can satisfy 4-6. Content
     outside the letter body is not in the letter.
-  * A unit padded to length is not prose (`is_prose`): repeating one word, or reusing
-    so few distinct words that the unit is mostly repetition, disqualifies it. This
-    tests the shape of the padding rather than guessing which words a real letter uses
-    — a verb allowlist is the `reply_matches` trap the repo has already been bitten by
-    twice, and "filler filler filler" defeats an alphabetic-token ratio outright.
+  * A unit padded to length is not prose (`is_prose`): reusing so few distinct words
+    that the unit is mostly repetition disqualifies it. This tests the shape of the
+    padding rather than guessing which words a real letter uses — a verb allowlist is
+    the `reply_matches` trap the repo has already been bitten by twice, and "filler
+    filler filler" defeats an alphabetic-token ratio outright.
   * A formal email that satisfies seven substantive requirements in fewer than
     MIN_BODY_WORDS words is not one.
+
+The shape tests must not fail real prose either. Two correct emails scored 0.5 and
+0.875 on 2026-09-22: a period after a digit ended no sentence, so "…since November 3.
+With reference to clause 14.2 …" became one 51-word unit whose third "the" was read as
+padding; and "It has not worked since November 3." fell below an eight-word floor.
 """
 import os
 import re
@@ -39,10 +44,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import _checkerlib as lib  # noqa: E402
 
-MIN_SENTENCE_WORDS = 8
+# Words, not the numbers the requirements supply: "heating Nov 3 14.2 14 days please"
+# is four words and a payload; "It has not worked since November 3" is six words.
+MIN_SENTENCE_WORDS = 5
 MIN_BODY_WORDS = 25         # below this, seven requirements cannot have been written out
 MAX_BODY_WORDS = 150        # the task's own cap
-MAX_WORD_REPEATS = 2        # one word three times in a sentence is padding, not prose
 MIN_DISTINCT_RATIO = 0.6    # distinct / total content words in a prose unit
 GREETING = r"^dear\s+mr\.?\s+adeyemi\s*[,.:!]?$"
 # A closing STARTS the line; a name may follow it ("Sincerely, Sam"). Requiring the
@@ -59,9 +65,10 @@ DEADLINE = r"(?i)((14|fourteen)[\s-]+day|two[\s-]+weeks)"
 
 
 def sentences(body):
-    """Sentence-ish units, splitting on sentence enders and newlines while keeping
-    decimals (clause 14.2) intact."""
-    parts = re.split(r"(?<!\d)[.!?]+(?!\d)|\n", body)
+    """Sentence-ish units: a sentence ends at an ender followed by a space or the end,
+    and at a newline. A decimal (clause 14.2) has no space after its point, so it stays
+    whole while "since November 3." still ends its sentence."""
+    parts = re.split(r"[.!?]+(?=\s|$)|\n", body)
     return [p.strip() for p in parts if p.strip()]
 
 
@@ -78,20 +85,17 @@ def is_prose(unit):
     """A unit long enough AND varied enough to be a sentence rather than padding.
 
     Token COUNT alone was the whole gate, so "… filler filler filler filler filler"
-    cleared it. Two shape tests replace it, neither of which names a word a letter is
-    supposed to contain: no content word may repeat more than MAX_WORD_REPEATS times,
-    and the unit's distinct-to-total content-word ratio must clear MIN_DISTINCT_RATIO."""
-    if len(unit.split()) < MIN_SENTENCE_WORDS:
+    cleared it. The length floor counts words, not numbers, and the unit's
+    distinct-to-total content-word ratio must clear MIN_DISTINCT_RATIO; neither names a
+    word a letter is supposed to contain. There is no cap on one word's repeats: a long
+    sentence says "the" three times, and the ratio already rejects padding."""
+    words = [w for w in unit.split() if not re.search(r"\d", w)]
+    if len(words) < MIN_SENTENCE_WORDS:
         return False
-    content = [w for w in re.findall(r"[a-z']{3,}", unit.lower())]
+    content = re.findall(r"[a-z']{3,}", unit.lower())
     if not content:
         return False
-    counts = {}
-    for token in content:
-        counts[token] = counts.get(token, 0) + 1
-    if max(counts.values()) > MAX_WORD_REPEATS:
-        return False
-    return len(counts) / float(len(content)) >= MIN_DISTINCT_RATIO
+    return len(set(content)) / float(len(content)) >= MIN_DISTINCT_RATIO
 
 
 def sentence_with(units, *patterns):

@@ -108,7 +108,7 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
 
     @impl true
     def handle_call(:which_children, _from, child_pid) do
-      children = [{{:mcp_server_supervisor, {:plugin, "eden"}, 1}, child_pid, :supervisor, []}]
+      children = [{{:mcp_server_supervisor, {:plugin, "acme"}, 1}, child_pid, :supervisor, []}]
       {:reply, children, child_pid}
     end
 
@@ -163,7 +163,7 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
                runtime_status: Map.get(config, :runtime_status),
                transport: FermixCore.Capabilities.MCP.SupervisorTest.RemoteFixture.Transport,
                connect_opts: [agent: Map.fetch!(server, :agent)],
-               resolver: fn "eden" -> "eden_pat_canary_do_not_leak" end
+               resolver: fn "acme" -> "acme_pat_canary_do_not_leak" end
              ]},
             id: {:remote_owner, server.source_id},
             restart: :transient,
@@ -183,19 +183,19 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
 
     def spec(agent) do
       %{
-        source_id: {:plugin, "eden"},
-        name: "eden",
+        source_id: {:plugin, "acme"},
+        name: "acme",
         transport: :streamable_http,
         protocol_version: "2025-06-18",
-        base_url: "https://mcp.eden.so",
+        base_url: "https://mcp.acme.example",
         mcp_path: "/mcp",
-        auth_ref: %{type: :plugin_secret, plugin: "eden"},
+        auth_ref: %{type: :plugin_secret, plugin: "acme"},
         name_mode: :preserve,
         selected_profile: "retrieval",
         resource_scope: %{kind: :single_workspace, argument: "workspaceId", id: "ws_opaque"},
         allowed_tools: %{
-          "eden_search" => tool_facts("eden_search"),
-          "eden_get_note" => tool_facts("eden_get_note")
+          "acme_search" => tool_facts("acme_search"),
+          "acme_get_note" => tool_facts("acme_get_note")
         },
         budgets: %{"agent_turn_calls" => 20, "agent_turn_paginated_calls" => 5},
         result_contract: %{
@@ -205,7 +205,7 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
           "message_field" => "message"
         },
         tools_overrides: %{},
-        capability_metadata: %{plugin_owned?: true, plugin: "eden", category: :plugin},
+        capability_metadata: %{plugin_owned?: true, plugin: "acme", category: :plugin},
         agent: agent
       }
     end
@@ -241,8 +241,8 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
           "id" => 2,
           "result" => %{
             "tools" => [
-              %{"name" => "eden_search", "description" => "Search", "inputSchema" => %{}},
-              %{"name" => "eden_get_note", "description" => "Read", "inputSchema" => %{}}
+              %{"name" => "acme_search", "description" => "Search", "inputSchema" => %{}},
+              %{"name" => "acme_get_note", "description" => "Read", "inputSchema" => %{}}
             ]
           }
         })
@@ -754,10 +754,10 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
              mcp_registry: :"mcp_sup_source_reg_#{suffix}",
              capability_registry: cap_registry,
              servers: [
-               %{name: "eden", discoverer: HappyDiscoverer, caller: StubCaller},
+               %{name: "acme", discoverer: HappyDiscoverer, caller: StubCaller},
                %{
-                 source_id: {:plugin, "eden"},
-                 name: "eden",
+                 source_id: {:plugin, "acme"},
+                 name: "acme",
                  discoverer: HappyDiscoverer,
                  caller: StubCaller
                }
@@ -766,8 +766,8 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
           id: :mcp_supervisor_source_test
         )
 
-      operator = server_child_pid(sup, :operator, "eden")
-      plugin = server_child_pid(sup, :plugin, "eden")
+      operator = server_child_pid(sup, :operator, "acme")
+      plugin = server_child_pid(sup, :plugin, "acme")
 
       assert is_pid(operator)
       assert is_pid(plugin)
@@ -786,10 +786,10 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
              mcp_registry: :"mcp_sup_stop_reg_#{suffix}",
              capability_registry: cap_registry,
              servers: [
-               %{name: "eden", discoverer: HappyDiscoverer, caller: StubCaller},
+               %{name: "acme", discoverer: HappyDiscoverer, caller: StubCaller},
                %{
-                 source_id: {:plugin, "eden"},
-                 name: "eden",
+                 source_id: {:plugin, "acme"},
+                 name: "acme",
                  discoverer: HappyDiscoverer,
                  caller: StubCaller
                }
@@ -798,13 +798,13 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
           id: :mcp_supervisor_stop_test
         )
 
-      plugin = server_child_pid(sup, :plugin, "eden")
+      plugin = server_child_pid(sup, :plugin, "acme")
 
-      assert :ok = McpSupervisor.stop_server(sup, {:plugin, "eden"})
+      assert :ok = McpSupervisor.stop_server(sup, {:plugin, "acme"})
 
       refute Process.alive?(plugin)
-      assert server_child_pid(sup, :plugin, "eden") == nil
-      assert is_pid(server_child_pid(sup, :operator, "eden"))
+      assert server_child_pid(sup, :plugin, "acme") == nil
+      assert is_pid(server_child_pid(sup, :operator, "acme"))
     end
 
     test "stopping a source that is not running is already proven", %{
@@ -823,7 +823,7 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
           id: :mcp_supervisor_stop_absent_test
         )
 
-      assert :ok = McpSupervisor.stop_server(sup, {:plugin, "eden"})
+      assert :ok = McpSupervisor.stop_server(sup, {:plugin, "acme"})
     end
 
     test "restart_server proves the old child died before starting the new one", %{
@@ -831,7 +831,7 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
       suffix: suffix
     } do
       reg_name = :"mcp_sup_restart_reg_#{suffix}"
-      spec = %{source_id: {:plugin, "eden"}, name: "eden", discoverer: HappyDiscoverer}
+      spec = %{source_id: {:plugin, "acme"}, name: "acme", discoverer: HappyDiscoverer}
 
       sup =
         start_supervised!(
@@ -845,17 +845,17 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
           id: :mcp_supervisor_restart_test
         )
 
-      old = server_child_pid(sup, :plugin, "eden")
+      old = server_child_pid(sup, :plugin, "acme")
 
       assert {:ok, new} =
-               McpSupervisor.restart_server(sup, {:plugin, "eden"}, spec,
+               McpSupervisor.restart_server(sup, {:plugin, "acme"}, spec,
                  capability_registry: cap_registry,
                  mcp_registry: reg_name
                )
 
       refute Process.alive?(old)
       assert is_pid(new)
-      assert server_child_pid(sup, :plugin, "eden") == new
+      assert server_child_pid(sup, :plugin, "acme") == new
     end
 
     # The safety property credential rotation depends on: a stop that cannot
@@ -867,8 +867,8 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
 
       {:ok, fake} = WedgedSupervisor.start_link(wedged)
 
-      assert {:error, {:stop_not_proven, {:plugin, "eden"}}} =
-               McpSupervisor.stop_server(fake, {:plugin, "eden"})
+      assert {:error, {:stop_not_proven, {:plugin, "acme"}}} =
+               McpSupervisor.stop_server(fake, {:plugin, "acme"})
     end
   end
 
@@ -884,10 +884,10 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
           capability_registry: cap_registry,
           servers: [
             %{
-              source_id: {:plugin, "eden"},
-              name: "eden",
+              source_id: {:plugin, "acme"},
+              name: "acme",
               transport: :streamable_http,
-              env: %{"EDEN_TOKEN" => "leak"}
+              env: %{"ACME_TOKEN" => "leak"}
             }
           ]
         )
@@ -916,13 +916,13 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
         )
 
       assert eventually(fn ->
-               match?({:ok, %{status: :ready}}, RuntimeStatus.fetch(status, {:plugin, "eden"}))
+               match?({:ok, %{status: :ready}}, RuntimeStatus.fetch(status, {:plugin, "acme"}))
              end)
 
       # Two signed tools become two capabilities under their EXACT upstream
-      # names — `name_mode: :preserve` never produces `eden_eden_*` (§7.7).
-      assert Enum.sort(cap_names(cap_registry)) == ["eden_get_note", "eden_search"]
-      assert is_pid(server_child_pid(sup, :plugin, "eden"))
+      # names — `name_mode: :preserve` never produces `acme_acme_*` (§7.7).
+      assert Enum.sort(cap_names(cap_registry)) == ["acme_get_note", "acme_search"]
+      assert is_pid(server_child_pid(sup, :plugin, "acme"))
     end
 
     test "an owner that refuses leaves a visible terminal status", %{
@@ -948,7 +948,7 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
       assert eventually(fn ->
                match?(
                  {:ok, %{status: :reauthorization_required}},
-                 RuntimeStatus.fetch(status, {:plugin, "eden"})
+                 RuntimeStatus.fetch(status, {:plugin, "acme"})
                )
              end)
 

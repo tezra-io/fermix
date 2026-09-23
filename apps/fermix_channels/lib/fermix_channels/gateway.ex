@@ -72,7 +72,7 @@ defmodule FermixChannels.Gateway do
   # capability to plain data (the allowed emoji set) here and hands that to core.
   # `nil` ⇒ the `react` tool is not advertised; the model just sends a short text
   # ack. Never a runtime react-then-degrade branch — this is the one computed
-  # decision (CLAUDE.md #12).
+  # decision (AGENTS.md #12).
   defp build_reaction_spec(channel) do
     if function_exported?(channel, :reaction_capability, 0) do
       reaction_spec_for(channel.reaction_capability())
@@ -247,6 +247,11 @@ defmodule FermixChannels.Gateway do
   @model_not_installed_reply "I couldn't transcribe your voice note — on-device " <>
                                "transcription is selected but its speech model is not " <>
                                "installed. Install it from `fermix setup` → Transcription."
+  # Neither a retry nor an install fixes a machine this build has no on-device
+  # speech for; choosing another backend is the only remedy.
+  @no_on_device_build_reply "I couldn't transcribe your voice note — on-device " <>
+                              "transcription is selected, but it isn't available on this " <>
+                              "machine. Choose another transcription backend in settings."
   @download_failed_reply "I couldn't download your attachment to transcribe it. " <>
                            "Please try again."
 
@@ -418,6 +423,7 @@ defmodule FermixChannels.Gateway do
   defp transcription_failure_copy({:unsupported_auth_mode, _mode}), do: @not_configured_reply
   defp transcription_failure_copy(:sidecar_not_installed), do: @sidecar_not_installed_reply
   defp transcription_failure_copy(:model_not_installed), do: @model_not_installed_reply
+  defp transcription_failure_copy(:no_release_pinned), do: @no_on_device_build_reply
 
   defp transcription_failure_copy({:file_too_large, size_mb, cap_mb}) do
     "I couldn't transcribe your voice note — it's #{size_mb} MB, over the " <>

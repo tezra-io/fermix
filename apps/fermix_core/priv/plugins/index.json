@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-08-04T02:49:35Z",
+  "generated_at": "2026-09-22T01:48:43Z",
   "plugins": [
     {
       "name": "agentmail",
@@ -114,44 +114,6 @@
           ]
         }
       ]
-    },
-    {
-      "name": "eden",
-      "display_name": "Eden",
-      "category": "productivity",
-      "description": "Your Eden second brain: search, read, capture, and connect knowledge in an Eden workspace.",
-      "short_description": "Use your Eden second brain from Fermix",
-      "developer_name": "Fermix",
-      "brand_color": null,
-      "logo": {
-        "mime": "image/svg+xml",
-        "data_base64": "PHN2ZyB3aWR0aD0iNTAiIGhlaWdodD0iNTAiIHZpZXdCb3g9IjAgMCA1MCA1MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHJlY3QgeD0iMC4zNSIgeT0iMC4zNSIgd2lkdGg9IjQ5LjMiIGhlaWdodD0iNDkuMyIgcng9IjguNzI5NDgiIGZpbGw9InVybCgjcGFpbnQwX2xpbmVhcl81MDJfMTkwMikiIHN0cm9rZT0idXJsKCNwYWludDFfbGluZWFyXzUwMl8xOTAyKSIgc3Ryb2tlLXdpZHRoPSIwLjciLz4KPGcgZmlsdGVyPSJ1cmwoI2ZpbHRlcjBfaV81MDJfMTkwMikiPgo8cGF0aCBkPSJNMTAuMjgxNyAyMy4wMDY1QzIxLjAxOSAyMi45NjYgMjcuNTMxNiAyMS44MDY0IDMxLjUzNzMgMTAuODQ4MUMzMS42Nzk4IDEwLjQ1ODMgMzEuNDA2MiAxMC4wMzk3IDMwLjk5MjMgMTAuMDA5N0MyNC44ODcxIDkuNTY2MTYgMjAuMDgzOSA5LjEwNDYzIDE2LjI5MzQgMTAuNzc3N0MxMi40MzE2IDEyLjQ4MjMgOS44MjI2OSAxNi4yNzg4IDkuNjU0NTEgMjIuMzc0N0M5LjY0NDg3IDIyLjcyMzkgOS45MzIzNCAyMy4wMDc4IDEwLjI4MTcgMjMuMDA2NVoiIGZpbGw9IndoaXRlIi8+CjxwYXRoIGQ9Ik0xMC4yODE3IDI2LjcyOTlDMjEuMDE5IDI2Ljc3MDQgMjcuNTMxNiAyNy45Mjk5IDMxLjUzNzMgMzguODg4MkMzMS42Nzk4IDM5LjI3OCAzMS40MDYyIDM5LjY5NjYgMzAuOTkyMyAzOS43MjY3QzI0Ljg4NzEgNDAuMTcwMiAyMC4wODM5IDQwLjYzMTcgMTYuMjkzNCAzOC45NTg2QzEyLjQzMTYgMzcuMjU0IDkuODIyNjkgMzMuNDU3NSA5LjY1NDUxIDI3LjM2MTZDOS42NDQ4NyAyNy4wMTI0IDkuOTMyMzQgMjYuNzI4NSAxMC4yODE3IDI2LjcyOTlaIiBmaWxsPSJ3aGl0ZSIvPgo8cGF0aCBkPSJNMzMuMTUwOSAxNy43ODVDMzMuMzg0MSAxNy4zMTI3IDM0LjA1NjQgMTcuMzA5MyAzNC4yOTQzIDE3Ljc3OTJMMzUuODY4NCAyMC44ODhDMzYuMzA2NiAyMS43NTMzIDM3LjAxNDEgMjIuNDUyOSAzNy44ODQzIDIyLjg4MTJMNDAuNzYzOSAyNC4yOTg1QzQxLjI0NzEgMjQuNTM2NCA0MS4yMzc2IDI1LjIyODYgNDAuNzQ4IDI1LjQ1MzFMMzcuOTkzOCAyNi43MTU5QzM3LjA1NTkgMjcuMTQ2IDM2LjI5NTQgMjcuODg3IDM1Ljg0MTIgMjguODEzNEwzNC4yOTggMzEuOTYwOEMzNC4wNjI4IDMyLjQ0MDUgMzMuMzc3OCAzMi40MzcxIDMzLjE0NzQgMzEuOTU1MUwzMS42NjUyIDI4Ljg1NDJDMzEuMjEwNCAyNy45MDI3IDMwLjQzNCAyNy4xNDI0IDI5LjQ3MzIgMjYuNzA3NUwyNi43MDQzIDI1LjQ1NDNDMjYuMjEwOSAyNS4yMzEgMjYuMjAxNCAyNC41MzM3IDI2LjY4ODUgMjQuMjk3TDI5LjU4MjUgMjIuODkxQzMwLjQ3NiAyMi40NTY5IDMxLjE5OTYgMjEuNzM3OCAzMS42MzkzIDIwLjg0N0wzMy4xNTA5IDE3Ljc4NVoiIGZpbGw9IndoaXRlIi8+CjwvZz4KPGRlZnM+CjxmaWx0ZXIgaWQ9ImZpbHRlcjBfaV81MDJfMTkwMiIgeD0iOS42NTQzIiB5PSI5LjU5NTciIHdpZHRoPSIzMS40NjY4IiBoZWlnaHQ9IjMxLjU0NDkiIGZpbHRlclVuaXRzPSJ1c2VyU3BhY2VPblVzZSIgY29sb3ItaW50ZXJwb2xhdGlvbi1maWx0ZXJzPSJzUkdCIj4KPGZlRmxvb2QgZmxvb2Qtb3BhY2l0eT0iMCIgcmVzdWx0PSJCYWNrZ3JvdW5kSW1hZ2VGaXgiLz4KPGZlQmxlbmQgbW9kZT0ibm9ybWFsIiBpbj0iU291cmNlR3JhcGhpYyIgaW4yPSJCYWNrZ3JvdW5kSW1hZ2VGaXgiIHJlc3VsdD0ic2hhcGUiLz4KPGZlQ29sb3JNYXRyaXggaW49IlNvdXJjZUFscGhhIiB0eXBlPSJtYXRyaXgiIHZhbHVlcz0iMCAwIDAgMCAwIDAgMCAwIDAgMCAwIDAgMCAwIDAgMCAwIDAgMTI3IDAiIHJlc3VsdD0iaGFyZEFscGhhIi8+CjxmZU9mZnNldCBkeT0iMSIvPgo8ZmVHYXVzc2lhbkJsdXIgc3RkRGV2aWF0aW9uPSIxLjI1Ii8+CjxmZUNvbXBvc2l0ZSBpbjI9ImhhcmRBbHBoYSIgb3BlcmF0b3I9ImFyaXRobWV0aWMiIGsyPSItMSIgazM9IjEiLz4KPGZlQ29sb3JNYXRyaXggdHlwZT0ibWF0cml4IiB2YWx1ZXM9IjAgMCAwIDAgMCAwIDAgMCAwIDAgMCAwIDAgMCAwIDAgMCAwIDAuMTUgMCIvPgo8ZmVCbGVuZCBtb2RlPSJub3JtYWwiIGluMj0ic2hhcGUiIHJlc3VsdD0iZWZmZWN0MV9pbm5lclNoYWRvd181MDJfMTkwMiIvPgo8L2ZpbHRlcj4KPGxpbmVhckdyYWRpZW50IGlkPSJwYWludDBfbGluZWFyXzUwMl8xOTAyIiB4MT0iMTMiIHkxPSIyIiB4Mj0iMzMiIHkyPSI1MCIgZ3JhZGllbnRVbml0cz0idXNlclNwYWNlT25Vc2UiPgo8c3RvcCBzdG9wLWNvbG9yPSIjMkYyRjJGIi8+CjxzdG9wIG9mZnNldD0iMSIgc3RvcC1jb2xvcj0iIzExMTExMSIvPgo8L2xpbmVhckdyYWRpZW50Pgo8bGluZWFyR3JhZGllbnQgaWQ9InBhaW50MV9saW5lYXJfNTAyXzE5MDIiIHgxPSIzIiB5MT0iMi41IiB4Mj0iNDciIHkyPSI0OCIgZ3JhZGllbnRVbml0cz0idXNlclNwYWNlT25Vc2UiPgo8c3RvcCBzdG9wLWNvbG9yPSIjNjY2NjY2Ii8+CjxzdG9wIG9mZnNldD0iMC41IiBzdG9wLWNvbG9yPSIjMUMxQzFDIi8+CjxzdG9wIG9mZnNldD0iMSIgc3RvcC1jb2xvcj0iIzVDNUM1QyIvPgo8L2xpbmVhckdyYWRpZW50Pgo8L2RlZnM+Cjwvc3ZnPgo="
-      },
-      "auth_type": "api_key",
-      "auth_provider": null,
-      "rails": [
-        "mcp"
-      ],
-      "latest": "1.0.0",
-      "yanked": [],
-      "versions": [
-        {
-          "version": "1.0.0",
-          "published_at": "2026-08-04T02:46:04Z",
-          "min_core_version": "0.7.2",
-          "plugin_api": 3,
-          "artifacts": [
-            {
-              "target": "any",
-              "url": "https://github.com/tezra-io/fermix-plugins/releases/download/eden/v1.0.0/eden-1.0.0.tar.gz",
-              "sha256": "fc5a8e1367ae497fdc091a34d59aac68658fe8950f029f6055c9535aa9254b98",
-              "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/eden/v1.0.0/eden-1.0.0.tar.gz.sig",
-              "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/eden/v1.0.0/eden-1.0.0.tar.gz.pem"
-            }
-          ]
-        }
-      ],
-      "runtime_kind": "remote_mcp"
     },
     {
       "name": "github",
@@ -376,6 +338,178 @@
           ]
         }
       ]
+    },
+    {
+      "name": "tesla",
+      "display_name": "Tesla",
+      "category": "productivity",
+      "description": "Check your Tesla's charge, climate, location, alerts and history, and control charging, climate and locks.",
+      "short_description": "See your Tesla's state, and control it when you allow commands",
+      "developer_name": "Fermix",
+      "brand_color": "#E82127",
+      "logo": {
+        "mime": "image/png",
+        "data_base64": "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"
+      },
+      "auth_type": "oauth2",
+      "auth_provider": "tesla",
+      "rails": [
+        "http",
+        "mcp"
+      ],
+      "latest": "1.1.1",
+      "yanked": [
+        "1.0.0",
+        "1.0.1",
+        "1.1.0"
+      ],
+      "versions": [
+        {
+          "version": "1.1.1",
+          "published_at": "2026-09-22T01:31:55Z",
+          "min_core_version": "0.11.0",
+          "plugin_api": 2,
+          "artifacts": [
+            {
+              "target": "linux-aarch64",
+              "url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.1.1/tesla-1.1.1-linux-aarch64.tar.gz",
+              "sha256": "cbde297972eb823c68a44862b0f0a7f49a9454342922e5ef9e3a1afaa3e3cf02",
+              "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.1.1/tesla-1.1.1-linux-aarch64.tar.gz.sig",
+              "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.1.1/tesla-1.1.1-linux-aarch64.tar.gz.pem"
+            },
+            {
+              "target": "linux-x86_64",
+              "url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.1.1/tesla-1.1.1-linux-x86_64.tar.gz",
+              "sha256": "db5142f65a997881d3565d71c85df485688320c7467077505d2023ccd55f7d73",
+              "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.1.1/tesla-1.1.1-linux-x86_64.tar.gz.sig",
+              "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.1.1/tesla-1.1.1-linux-x86_64.tar.gz.pem"
+            },
+            {
+              "target": "macos-aarch64",
+              "url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.1.1/tesla-1.1.1-macos-aarch64.tar.gz",
+              "sha256": "45d5307ac37f7280a3c1eb6f5c96027bf0e141a9969f704c50eded70b6fb04fa",
+              "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.1.1/tesla-1.1.1-macos-aarch64.tar.gz.sig",
+              "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.1.1/tesla-1.1.1-macos-aarch64.tar.gz.pem"
+            },
+            {
+              "target": "macos-x86_64",
+              "url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.1.1/tesla-1.1.1-macos-x86_64.tar.gz",
+              "sha256": "1e171a3bcbd9f08465db64a15e4761f32254304376171a3a58f145c87acf84b7",
+              "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.1.1/tesla-1.1.1-macos-x86_64.tar.gz.sig",
+              "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.1.1/tesla-1.1.1-macos-x86_64.tar.gz.pem"
+            }
+          ]
+        },
+        {
+          "version": "1.1.0",
+          "published_at": "2026-09-19T15:15:51Z",
+          "min_core_version": "0.11.0",
+          "plugin_api": 2,
+          "artifacts": [
+            {
+              "target": "linux-aarch64",
+              "url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.1.0/tesla-1.1.0-linux-aarch64.tar.gz",
+              "sha256": "5fe0433cab5f028d0d2c8677899f13f426bd55f38874dcb0aa840d0e518c6ae9",
+              "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.1.0/tesla-1.1.0-linux-aarch64.tar.gz.sig",
+              "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.1.0/tesla-1.1.0-linux-aarch64.tar.gz.pem"
+            },
+            {
+              "target": "linux-x86_64",
+              "url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.1.0/tesla-1.1.0-linux-x86_64.tar.gz",
+              "sha256": "8ff191406aecdfd7b413c5b4741be0d04c53ee982462e37393de95e74e4a25b6",
+              "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.1.0/tesla-1.1.0-linux-x86_64.tar.gz.sig",
+              "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.1.0/tesla-1.1.0-linux-x86_64.tar.gz.pem"
+            },
+            {
+              "target": "macos-aarch64",
+              "url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.1.0/tesla-1.1.0-macos-aarch64.tar.gz",
+              "sha256": "30c8bd50d2534e9d4332e4fbacfb76d6abcb458e2b9c33602a9e48cb0a6c2fb5",
+              "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.1.0/tesla-1.1.0-macos-aarch64.tar.gz.sig",
+              "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.1.0/tesla-1.1.0-macos-aarch64.tar.gz.pem"
+            },
+            {
+              "target": "macos-x86_64",
+              "url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.1.0/tesla-1.1.0-macos-x86_64.tar.gz",
+              "sha256": "91e25085ca0eb322b05947814ca8a5386df17dd6c603504c071fc9947a27b40d",
+              "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.1.0/tesla-1.1.0-macos-x86_64.tar.gz.sig",
+              "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.1.0/tesla-1.1.0-macos-x86_64.tar.gz.pem"
+            }
+          ]
+        },
+        {
+          "version": "1.0.1",
+          "published_at": "2026-09-13T21:12:44Z",
+          "min_core_version": "0.11.0",
+          "plugin_api": 2,
+          "artifacts": [
+            {
+              "target": "linux-aarch64",
+              "url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.0.1/tesla-1.0.1-linux-aarch64.tar.gz",
+              "sha256": "54a8cf9bd2cef060d9ad6920e2f508be96770c93ce97ba9affc99bd8e7bee5e2",
+              "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.0.1/tesla-1.0.1-linux-aarch64.tar.gz.sig",
+              "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.0.1/tesla-1.0.1-linux-aarch64.tar.gz.pem"
+            },
+            {
+              "target": "linux-x86_64",
+              "url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.0.1/tesla-1.0.1-linux-x86_64.tar.gz",
+              "sha256": "5c497a183061a4f394d7ddfaf3c2b288268c205ebd56d6c5b5df17ec648be0ca",
+              "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.0.1/tesla-1.0.1-linux-x86_64.tar.gz.sig",
+              "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.0.1/tesla-1.0.1-linux-x86_64.tar.gz.pem"
+            },
+            {
+              "target": "macos-aarch64",
+              "url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.0.1/tesla-1.0.1-macos-aarch64.tar.gz",
+              "sha256": "a5f407115f1d72fa6c6b5852008452e60d41cf4ba0014ca4f7c14309509a0046",
+              "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.0.1/tesla-1.0.1-macos-aarch64.tar.gz.sig",
+              "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.0.1/tesla-1.0.1-macos-aarch64.tar.gz.pem"
+            },
+            {
+              "target": "macos-x86_64",
+              "url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.0.1/tesla-1.0.1-macos-x86_64.tar.gz",
+              "sha256": "c58be2e5a2aa6ff98f6aac69f3da71017525f48b6b78fba0bca4f0f76fb9f083",
+              "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.0.1/tesla-1.0.1-macos-x86_64.tar.gz.sig",
+              "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.0.1/tesla-1.0.1-macos-x86_64.tar.gz.pem"
+            }
+          ]
+        },
+        {
+          "version": "1.0.0",
+          "published_at": "2026-09-13T20:25:30Z",
+          "min_core_version": "0.11.0",
+          "plugin_api": 2,
+          "artifacts": [
+            {
+              "target": "linux-aarch64",
+              "url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.0.0/tesla-1.0.0-linux-aarch64.tar.gz",
+              "sha256": "0a195b7fc05f392c15e08c16eac9a9e1eee565643f88da37229ea93daddef514",
+              "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.0.0/tesla-1.0.0-linux-aarch64.tar.gz.sig",
+              "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.0.0/tesla-1.0.0-linux-aarch64.tar.gz.pem"
+            },
+            {
+              "target": "linux-x86_64",
+              "url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.0.0/tesla-1.0.0-linux-x86_64.tar.gz",
+              "sha256": "b179f0e75e02bdb646fe54fbeddb92b409bdf313be076d2eada21d4482fdf573",
+              "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.0.0/tesla-1.0.0-linux-x86_64.tar.gz.sig",
+              "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.0.0/tesla-1.0.0-linux-x86_64.tar.gz.pem"
+            },
+            {
+              "target": "macos-aarch64",
+              "url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.0.0/tesla-1.0.0-macos-aarch64.tar.gz",
+              "sha256": "6051151a99081d3a7428dd2c1711a0f1fa726538d1d31b3053e13d0d54188e0a",
+              "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.0.0/tesla-1.0.0-macos-aarch64.tar.gz.sig",
+              "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.0.0/tesla-1.0.0-macos-aarch64.tar.gz.pem"
+            },
+            {
+              "target": "macos-x86_64",
+              "url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.0.0/tesla-1.0.0-macos-x86_64.tar.gz",
+              "sha256": "1eecea01b4b08c57736e87eb822f7e53b96ed239e3a6cf62b7dd424d0b18d4d8",
+              "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.0.0/tesla-1.0.0-macos-x86_64.tar.gz.sig",
+              "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/tesla/v1.0.0/tesla-1.0.0-macos-x86_64.tar.gz.pem"
+            }
+          ]
+        }
+      ],
+      "runtime_kind": "local_stdio"
     },
     {
       "name": "x",

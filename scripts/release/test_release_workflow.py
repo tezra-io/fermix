@@ -8,6 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 RELEASE_WORKFLOW = ROOT / ".github/workflows/release.yml"
 CI_WORKFLOW = ROOT / ".github/workflows/ci.yml"
+LINUX_PACKAGES_WORKFLOW = ROOT / ".github/workflows/linux-packages.yml"
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 USES = re.compile(r"^\s*-?\s*uses:\s*([^\s#]+)", re.MULTILINE)
 
@@ -16,9 +17,14 @@ class ReleaseWorkflowTest(unittest.TestCase):
     def setUp(self):
         self.release = RELEASE_WORKFLOW.read_text(encoding="utf-8")
         self.ci = CI_WORKFLOW.read_text(encoding="utf-8")
+        self.linux_packages = LINUX_PACKAGES_WORKFLOW.read_text(encoding="utf-8")
 
     def test_external_actions_are_pinned_in_release_and_ci(self):
-        for path, contents in ((RELEASE_WORKFLOW, self.release), (CI_WORKFLOW, self.ci)):
+        for path, contents in (
+            (RELEASE_WORKFLOW, self.release),
+            (CI_WORKFLOW, self.ci),
+            (LINUX_PACKAGES_WORKFLOW, self.linux_packages),
+        ):
             for reference in USES.findall(contents):
                 if reference.startswith("./"):
                     continue
@@ -115,6 +121,103 @@ class ReleaseWorkflowTest(unittest.TestCase):
             "name: signed-release-candidate\n          overwrite: true",
             self.release,
         )
+
+    def test_builds_both_linux_packages_from_the_tag_the_engines_come_from(self):
+        self.assertRegex(
+            self.release,
+            r"\n  linux-packages:\n    name: Build Linux packages \(\$\{\{ matrix.target \}\}\)\n    needs: preflight\n",
+        )
+        self.assertIn("scripts/release/build_linux_packages.sh", self.release)
+        # One job per target: a second build in the same checkout refuses on
+        # the first build's leftovers, which is what a shared job did.
+        self.assertIn("target: [linux_x86_64, linux_aarch64]", self.release)
+        self.assertNotIn("for target in linux_x86_64 linux_aarch64; do", self.release)
+        self.assertIn("FERMIX_BUILD_ID: release-${{ github.run_id }}", self.release)
+        self.assertIn("name: linux-packages-${{ matrix.target }}\n", self.release)
+        self.assertIn("pattern: linux-packages-*\n          path: linux_packages\n          merge-multiple: true", self.release)
+        self.assertIn("packaging/linux/out/packages/*.deb", self.release)
+        self.assertIn("packaging/linux/out/packages/*.rpm", self.release)
+        # patchelf is what points the packaged interpreters at the loader the
+        # package materialises; without it the release step refuses.
+        self.assertIn("patchelf", self.release)
+
+    def test_every_package_is_signed_beside_the_binaries_of_the_same_tag(self):
+        self.assertIn("needs: [standalone, linux-packages, app-engine]", self.release)
+        self.assertIn("linux_packages/fermix_*.deb", self.release)
+        self.assertIn("linux_packages/fermix-*.rpm", self.release)
+        self.assertIn('[ "${#unsigned[@]}" -eq 10 ]', self.release)
+        self.assertIn("linux_packages/fermix*", self.release)
+
+    def test_the_release_feed_is_generated_where_both_halves_are_present(self):
+        self.assertIn("PACKAGES_DIR: linux_packages", self.release)
+        self.assertRegex(
+            self.release,
+            re.compile(
+                r"sign-candidate:.*?PACKAGES_DIR: linux_packages.*?verify-candidate:",
+                re.DOTALL,
+            ),
+            "releases.json must be built in the job that holds the packages",
+        )
+
+    def test_both_verification_jobs_install_every_package_on_a_real_host(self):
+        for row in (
+            "{ name: deb-linux-x64, os: ubuntu-24.04, kind: deb, target: linux_x86_64, package_arch: amd64, mode: native }",
+            "{ name: deb-linux-arm64, os: ubuntu-24.04-arm, kind: deb, target: linux_aarch64, package_arch: arm64, mode: native }",
+            "{ name: rpm-linux-x64, os: ubuntu-24.04, kind: rpm, target: linux_x86_64, package_arch: x86_64, mode: native }",
+            "{ name: rpm-linux-arm64, os: ubuntu-24.04-arm, kind: rpm, target: linux_aarch64, package_arch: aarch64, mode: native }",
+        ):
+            with self.subTest(row=row):
+                self.assertEqual(self.release.count(row), 2)
+
+        self.assertEqual(self.release.count("scripts/release/verify_linux_package.sh"), 2)
+
+    def test_the_staged_release_carries_the_packages(self):
+        self.assertRegex(
+            self.release,
+            re.compile(r"files: \|\n(?:\s+\S+\n)*\s+linux_packages/fermix\*", re.MULTILINE),
+        )
+
+    def test_a_branch_can_build_packages_without_signing_or_publishing(self):
+        self.assertIn("workflow_dispatch:", self.linux_packages)
+        self.assertIn("pull_request:", self.linux_packages)
+        for path in (
+            "packaging/linux/**",
+            "scripts/release/build_linux_packages.sh",
+            "scripts/release/linux_packages.py",
+            "mix.exs",
+        ):
+            with self.subTest(path=path):
+                self.assertIn(f"- {path}", self.linux_packages)
+
+        self.assertIn("FERMIX_BUILD_ID: pr-${{ github.run_id }}", self.linux_packages)
+        self.assertIn('\'["linux_x86_64","linux_aarch64"]\'', self.linux_packages)
+        self.assertNotIn("if: github.event_name", self.linux_packages)
+        self.assertIn("scripts/release/build_linux_packages.sh", self.linux_packages)
+        self.assertNotIn("cosign", self.linux_packages)
+        self.assertNotIn("softprops/action-gh-release", self.linux_packages)
+
+    def test_the_advertised_installer_is_run_against_the_published_release(self):
+        job = re.search(r"\n  installer:\n(.*?)\n  homebrew:\n", self.release, re.DOTALL)
+        self.assertIsNotNone(job, "release.yml has no installer job ahead of homebrew")
+        body = job.group(1)
+
+        # The installer reads the public `latest` feed, which a draft is not.
+        self.assertIn("needs: promote\n", body)
+        self.assertIn("if: ${{ !contains(github.ref_name, '-') }}", body)
+        for row in (
+            "{ name: deb-linux-x64, os: ubuntu-24.04, kind: deb }",
+            "{ name: deb-linux-arm64, os: ubuntu-24.04-arm, kind: deb }",
+            "{ name: rpm-linux-x64, os: ubuntu-24.04, kind: rpm }",
+            "{ name: rpm-linux-arm64, os: ubuntu-24.04-arm, kind: rpm }",
+        ):
+            with self.subTest(row=row):
+                self.assertIn(row, body)
+        # Without cosign the installer skips the signature check, loudly, and
+        # the verification requires that it ran.
+        self.assertIn("sigstore/cosign-installer@", body)
+        self.assertIn("scripts/release/verify_installer.sh", body)
+        # Nothing may wait on a job that can only run once the release is out.
+        self.assertNotRegex(self.release, r"needs:[^\n]*\binstaller\b")
 
     def test_homebrew_formula_is_installed_and_reports_the_release_version(self):
         self.assertIn("runs-on: macos-15", self.release)

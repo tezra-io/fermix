@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "foreign_unit",
+    "sentence": "Fermix did not write the service file at /home/operator/.config/systemd/user/fermix.service, so it was left alone. Remove or rename it if you want Fermix to manage this service."
+  },
+  "ok": false,
+  "schema_version": 1
+}

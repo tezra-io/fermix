@@ -25,6 +25,15 @@ defmodule FermixCore.Management.Secrets do
   also selects the route that reads it — a stored token the runtime never calls
   would report success and change nothing — and clearing one is the same
   operation as signing out, which is where that mechanism already lives.
+
+  `env:<NAME>` is the fifth family and the second different mechanism: a
+  skill's own credential, passed to every sandboxed command as the allowed
+  environment variable `NAME` (M45 §4.3). It is not a `SecretPaths` key and not
+  boot-bound, so it skips `SecretWriteLog` and provider promotion. The value is
+  stored under `{:external_env, NAME}`, read back and compared, and only then
+  referenced from `[sandbox.env.<NAME>]` by the writer's own lookup; that
+  reference is what "present" means. Every rule about which names and values
+  may be stored, and which entries count as stored, is `Sandbox.ExternalEnv`'s.
   """
 
   alias FermixCore.Auth.AnthropicLogin
@@ -32,10 +41,15 @@ defmodule FermixCore.Management.Secrets do
   alias FermixCore.Auth.TokenSupervisor
   alias FermixCore.Management.Auth
   alias FermixCore.Management.Settings
+  alias FermixCore.Sandbox.Config, as: SandboxConfig
+  alias FermixCore.Sandbox.ExternalEnv
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.SecretPaths
   alias FermixCore.Setup.SecretStore
+  alias FermixCore.Setup.SecretWriter
   alias FermixCore.Setup.Wizard
+
+  require Logger
 
   @max_value_bytes 8_192
   # The two prefixed families, spelled once. They are the ids the integrations
@@ -46,6 +60,15 @@ defmodule FermixCore.Management.Secrets do
   # The one id that is not a `SecretPaths` key. Spelled once.
   @setup_token_id "anthropic_setup_token"
   @setup_token_auth_mode "setup_token"
+  # The open family: any name `Sandbox.ExternalEnv` accepts, so it is never
+  # enumerated by `ids/0`.
+  @env_prefix "env:"
+  @env_name_sentence "A variable name is letters, digits and underscores, " <>
+                       "does not start with a digit, and is at most 128 characters."
+  @env_reserved_sentence "Fermix sets this variable itself, so it cannot be stored."
+  @env_line_sentence "A stored variable is one line with no null characters."
+  @env_elsewhere_sentence "This variable is read from a helper command or another variable. " <>
+                            "Change that in the settings file first."
 
   @type error ::
           {:invalid_params, String.t(), String.t()}
@@ -55,7 +78,8 @@ defmodule FermixCore.Management.Secrets do
 
   @doc """
   Every id this method accepts, as the wire spells them: the registry keys, then
-  the prefixed spelling of each one the two other families also reach.
+  the prefixed spelling of each one the two other families also reach. The
+  `env:<NAME>` family is open, one id per storable name, so it is not listed.
   """
   @spec ids() :: [String.t()]
   def ids do
@@ -70,6 +94,10 @@ defmodule FermixCore.Management.Secrets do
   @doc "The `secret.set` id prefix for one sign-in client's secret."
   @spec oauth_client_prefix() :: String.t()
   def oauth_client_prefix, do: @oauth_client_prefix
+
+  @doc "The `secret.set` id prefix for one sandbox environment variable."
+  @spec env_prefix() :: String.t()
+  def env_prefix, do: @env_prefix
 
   defp plugin_ids do
     SecretPaths.all()
@@ -97,6 +125,15 @@ defmodule FermixCore.Management.Secrets do
     end
   end
 
+  # M45 §4.3 step 1: every refusal that needs no storage call comes first.
+  def set(@env_prefix <> name = id, value) when is_binary(value) do
+    with :ok <- validate_env_name(name),
+         :ok <- validate_env_value(value),
+         {:ok, new_entry?} <- env_storable(name) do
+      store_env(id, name, value, new_entry?)
+    end
+  end
+
   def set(id, value) when is_binary(id) and is_binary(value) do
     with {:ok, key} <- fetch_key(id),
          :ok <- validate_value(value) do
@@ -107,6 +144,10 @@ defmodule FermixCore.Management.Secrets do
   @doc "Forgets one secret, keyring item first, then the reference that reads it."
   @spec clear(String.t()) :: {:ok, map()} | {:error, error()}
   def clear(@setup_token_id = id), do: forget_setup_token(id)
+
+  def clear(@env_prefix <> name = id) do
+    with :ok <- validate_env_name(name), do: forget_env(id, name)
+  end
 
   def clear(id) when is_binary(id) do
     with {:ok, key} <- fetch_key(id) do
@@ -153,6 +194,148 @@ defmodule FermixCore.Management.Secrets do
       _absent_or_other_mode -> false
     end
   end
+
+  # Steps 2 and 3: a store that exists, then the write. A write the store
+  # refused left nothing behind, so there is nothing to undo.
+  defp store_env(id, name, value, new_entry?) do
+    with :ok <- env_store_available(),
+         :ok <- SecretWriter.put(ExternalEnv.key(name), value) do
+      commit_env(id, name, value, new_entry?)
+    else
+      {:error, reason} -> {:error, env_error(id, name, reason)}
+    end
+  end
+
+  # Steps 3 to 6: the value is read back and compared before the settings file
+  # points at it, and one commit allows and references the name. A failure
+  # after the write deletes an item this call created, once; an item the file
+  # already pointed at stays, because the entry names it.
+  defp commit_env(id, name, value, new_entry?) do
+    with :ok <- verify_env(ExternalEnv.key(name), value),
+         {:ok, _report} <- Wizard.update_sandbox_env(&ExternalEnv.put_managed(&1, name)) do
+      {:ok, env_view(id, name)}
+    else
+      {:error, reason} ->
+        :ok = undo_new_env(name, new_entry?)
+        {:error, env_error(id, name, reason)}
+    end
+  end
+
+  # The store's verdict, not the tool's presence. A locked keyring is tried:
+  # the person saving from the app answers the desktop's unlock prompt, and a
+  # cancelled prompt is the write's own `locked` failure.
+  defp env_store_available do
+    verdict = SecretWriter.probe()
+    if SecretWriter.attemptable?(verdict), do: :ok, else: {:error, {:verdict, verdict}}
+  end
+
+  defp verify_env(key, value) do
+    case SecretWriter.get(key) do
+      {:ok, ^value} -> :ok
+      {:ok, _other} -> {:error, :verify_mismatch}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp undo_new_env(_name, false), do: :ok
+
+  defp undo_new_env(name, true) do
+    case SecretWriter.delete(ExternalEnv.key(name)) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("secret.set env:#{name} left a stored item behind: #{kind(reason)}")
+        :ok
+    end
+  end
+
+  # The item first, then the reference: a refused delete keeps the reference
+  # that names the item, never an item nothing names. A source that is not the
+  # writer's own lookup is never touched.
+  defp forget_env(id, name) do
+    with :ok <- SecretWriter.delete(ExternalEnv.key(name)),
+         {:ok, _report} <- drop_env_reference(name) do
+      {:ok, env_view(id, name)}
+    else
+      {:error, reason} -> {:error, env_error(id, name, reason)}
+    end
+  end
+
+  defp drop_env_reference(name) do
+    if ExternalEnv.source_kind(SandboxConfig.current().env, name) == :managed do
+      Wizard.update_sandbox_env(&ExternalEnv.drop_managed(&1, name))
+    else
+      {:ok, :untouched}
+    end
+  end
+
+  # Whether storing may go ahead, and whether it creates the entry: a name whose
+  # value comes from elsewhere is refused, because storing would silently move
+  # it, and a new entry past the ceiling is refused before anything is written.
+  defp env_storable(name) do
+    env = SandboxConfig.current().env
+
+    case ExternalEnv.source_kind(env, name) do
+      :managed -> {:ok, false}
+      :engine_env -> env_entry_allowed(env)
+      _helper_or_alias -> {:error, {:invalid_params, "id", @env_elsewhere_sentence}}
+    end
+  end
+
+  defp env_entry_allowed(env) do
+    if length(ExternalEnv.managed_names(env)) < ExternalEnv.max_managed() do
+      {:ok, true}
+    else
+      sentence = "At most #{ExternalEnv.max_managed()} variables can be stored. Remove one first."
+      {:error, {:invalid_params, "id", sentence}}
+    end
+  end
+
+  defp env_view(id, name) do
+    present = ExternalEnv.source_kind(SandboxConfig.current().env, name) == :managed
+    %{"id" => id, "present" => present, "restart" => Settings.restart()}
+  end
+
+  defp validate_env_name(name) do
+    case ExternalEnv.validate_name(name) do
+      :ok -> :ok
+      {:error, :invalid_name} -> {:error, {:invalid_params, "id", @env_name_sentence}}
+      {:error, :reserved_name} -> {:error, {:invalid_params, "id", @env_reserved_sentence}}
+    end
+  end
+
+  defp validate_env_value(value) do
+    case ExternalEnv.validate_value(value) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:invalid_params, "value", env_value_sentence(reason)}}
+    end
+  end
+
+  # The first two are the registry family's own sentences for the same refusal.
+  defp env_value_sentence(:empty_value), do: "A secret cannot be empty."
+
+  defp env_value_sentence(:value_too_large),
+    do: "A secret is at most #{ExternalEnv.max_value_bytes()} bytes."
+
+  defp env_value_sentence(:value_not_single_line), do: @env_line_sentence
+
+  # The closed reason set collapses what went wrong, so the kind is logged for
+  # whoever reads the daemon log. Never the value, never a helper's output.
+  defp env_error(id, name, reason) do
+    case error(id, reason) do
+      {:secret_store_failed, _id, published} = failure ->
+        Logger.warning("secret env:#{name} failed (#{published}): #{kind(reason)}")
+        failure
+
+      refusal ->
+        refusal
+    end
+  end
+
+  defp kind(reason) when is_atom(reason), do: reason
+  defp kind(reason) when is_tuple(reason), do: elem(reason, 0)
+  defp kind(_reason), do: :unexpected
 
   defp commit(id, key, write) do
     case write.() do
@@ -221,5 +404,6 @@ defmodule FermixCore.Management.Secrets do
   # unavailable collection.
   defp store_reason({:helper_timeout, _command, _timeout}), do: "timeout"
   defp store_reason({:helper_failed, _command, _code, _output}), do: "locked"
+  defp store_reason({:verdict, %{state: :locked}}), do: "locked"
   defp store_reason(_reason), do: "unavailable"
 end

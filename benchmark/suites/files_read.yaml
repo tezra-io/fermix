@@ -25,13 +25,13 @@ scenarios:
     tags: [files, read]
     cases:
       - id: claude_md_code_rules
-        query: "Read __EVAL_REPO_ROOT__/CLAUDE.md and summarize the non-negotiable code rules for me."
+        query: "Read __EVAL_REPO_ROOT__/AGENTS.md and summarize the non-negotiable code rules for me."
         expect:
           tools_any: [file_read, content_search, glob_search]
           reply_matches: "(?is)(?=.*linear flow)(?=.*small function)(?=.*surgical)(?=.*fallback)"
           max_cost_usd: 0.6
           max_duration_ms: 90000
-        rubric: "Summarizes the actual code rules from CLAUDE.md, including linear flow, small functions, surgical changes, and no fallbacks."
+        rubric: "Summarizes the actual code rules from AGENTS.md, including linear flow, small functions, surgical changes, and no fallbacks."
       - id: read_telemetry_doc
         query: "Open __EVAL_REPO_ROOT__/docs/TELEMETRY_CONTRACT.md and tell me in a couple of sentences what it's about."
         expect:

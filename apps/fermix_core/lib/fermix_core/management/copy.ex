@@ -31,7 +31,10 @@ defmodule FermixCore.Management.Copy do
   `:prose` runs every rule; `:name` runs the four that apply to a name. A
   proper noun the daemon interpolates rather than writes (a plugin's display
   name, an account label) is passed in as `names` at the call site, because the
-  rule set cannot know it and a list of every vendor on earth would rot.
+  rule set cannot know it and a list of every vendor on earth would rot. A
+  declared name is data, so no rule reads it: the sandbox row labelled with the
+  environment variable an operator allowed is `UPPER_SNAKE` by convention, and
+  it is the operator's word rather than one this daemon wrote.
   """
 
   alias FermixCore.Providers.Descriptor
@@ -100,14 +103,14 @@ defmodule FermixCore.Management.Copy do
   @doc """
   Every rule `text` breaks, as `{rule, the offending fragment}`.
 
-  `names` carries proper nouns this string interpolates rather than writes, so
-  a plugin's display name inside a daemon sentence is data rather than a
-  capitalisation defect.
+  `names` carries names this string interpolates rather than writes, so a
+  plugin's display name inside a daemon sentence, or the variable name a row is
+  labelled with, is data rather than a defect.
   """
   @spec violations(String.t(), kind(), [String.t()]) :: [violation()]
   def violations(text, kind, names \\ [])
       when is_binary(text) and kind in [:prose, :name] and is_list(names) do
-    literal = Regex.replace(@backticked, text, "``")
+    literal = @backticked |> Regex.replace(text, "``") |> strip_names(names)
 
     Enum.concat([
       dash_violations(text),

@@ -95,7 +95,40 @@ defmodule FermixOpik.TraceFile do
        :target_ref,
        :selector,
        :error_code,
-       :error_summary
+       :error_summary,
+       # The computer-use pair: the session the action drove, and what the action
+       # actually did. The lifecycle run is its own root trace, so these are the
+       # only link between a replayed action and its session.
+       :cu_session,
+       :outcome,
+       # Coexistence (V3 R0): what the courtesy arbiter did about a person at
+       # the machine — proceeded, waited for them, or stepped aside. A closed
+       # enum; without it a replayed row cannot say why nothing was dispatched.
+       :courtesy,
+       # Addressing (M42 slice 3): how stale the image an action aimed at was, and
+       # the code when it named no addressable one. A millisecond count and a
+       # closed enum — never an id, a size, or anything from the screen.
+       :observation_age_ms,
+       :geometry_refusal,
+       # References (M42 slice 4): by which mechanism the input went out, and what
+       # the helper observed of it. Two closed enums — never the value a
+       # `set_value` carried, which is content and rides the capture gate.
+       :input_method,
+       :effect,
+       # The check (M42 slice 6): which evidence the action came back with,
+       # whether the view changed since the one it acted on, and what each phase
+       # cost. A closed enum, a boolean and four millisecond counts.
+       :check_kind,
+       :check_changed,
+       :cu_input_ms,
+       :cu_settle_ms,
+       :cu_capture_ms,
+       :cu_encode_ms,
+       # Bound windows (M42 slice 5): what the action was pointed at, and how it
+       # reached the screen. Two closed words — never a window title and never an
+       # application name.
+       :target_kind,
+       :cu_mode
      ])}
   end
 
@@ -176,7 +209,8 @@ defmodule FermixOpik.TraceFile do
      %{
        duration_ms: int(row["duration_ms"]),
        iterations: int(row["iterations"]),
-       total_tokens: int(row["total_tokens"])
+       total_tokens: int(row["total_tokens"]),
+       tool_failures: int(row["tool_failures"])
      }, meta(row, [:agent, :job_id, :run_id, :session_id, :status, :output])}
   end
 
@@ -207,6 +241,39 @@ defmodule FermixOpik.TraceFile do
 
   defp normalize_agent_event("realtime_call_stop", row) do
     {[:fermix, :realtime, :call_stop], realtime_usage_measurements(row), realtime_meta(row)}
+  end
+
+  # A GPT-Live voice call (M41 §7). Every row replays through one allowlist that
+  # INCLUDES `parent_session`: a delegation's turn is linked to its call by that
+  # field alone, so dropping it would replay a call and its backend turns as
+  # unrelated roots.
+  defp normalize_agent_event("voice_live_call_start", row) do
+    {[:fermix, :voice_live, :call_start], voice_live_usage_measurements(row),
+     voice_live_meta(row)}
+  end
+
+  defp normalize_agent_event("voice_live_session_started", row) do
+    {[:fermix, :voice_live, :session_started], voice_live_usage_measurements(row),
+     voice_live_meta(row)}
+  end
+
+  defp normalize_agent_event("voice_live_delegation_start", row) do
+    {[:fermix, :voice_live, :delegation_start], voice_live_usage_measurements(row),
+     voice_live_meta(row)}
+  end
+
+  defp normalize_agent_event("voice_live_delegation_stop", row) do
+    {[:fermix, :voice_live, :delegation_stop], voice_live_usage_measurements(row),
+     voice_live_meta(row)}
+  end
+
+  defp normalize_agent_event("voice_live_provider_error", row) do
+    {[:fermix, :voice_live, :provider_error], voice_live_usage_measurements(row),
+     voice_live_meta(row)}
+  end
+
+  defp normalize_agent_event("voice_live_call_stop", row) do
+    {[:fermix, :voice_live, :call_stop], voice_live_usage_measurements(row), voice_live_meta(row)}
   end
 
   # A management Doctor run (M34 §5). Counts only — a check summary can name an
@@ -249,7 +316,47 @@ defmodule FermixOpik.TraceFile do
      meta(row, [:session_id, :agent, :kind, :budget_ms, :status, :failure_code, :error])}
   end
 
+  # A computer-use session (M42 slice 1 §3). Every row replays through one
+  # allowlist that INCLUDES `parent_session`: the run is its own root and that
+  # field is the only record of which turn opened the session.
+  defp normalize_agent_event("computer_use_session_start", row) do
+    {[:fermix, :computer_use, :session_start], %{}, computer_use_meta(row)}
+  end
+
+  defp normalize_agent_event("computer_use_session_complete", row) do
+    {[:fermix, :computer_use, :session_complete], computer_use_measurements(row),
+     computer_use_meta(row)}
+  end
+
+  defp normalize_agent_event("computer_use_session_error", row) do
+    {[:fermix, :computer_use, :session_error], %{},
+     meta(row, [:session_id, :parent_session, :agent, :mode, :origin, :reason])}
+  end
+
+  defp normalize_agent_event("computer_use_session_pause", row) do
+    {[:fermix, :computer_use, :session_pause], %{}, computer_use_meta(row)}
+  end
+
+  defp normalize_agent_event("computer_use_session_resume", row) do
+    {[:fermix, :computer_use, :session_resume], %{}, computer_use_meta(row)}
+  end
+
   defp normalize_agent_event(_other, _row), do: :skip
+
+  defp computer_use_meta(row) do
+    meta(row, [:session_id, :parent_session, :agent, :mode, :origin])
+  end
+
+  # Only the counts actually present are carried: a session row written before
+  # the measurements existed must replay with none rather than a fabricated zero.
+  defp computer_use_measurements(row) do
+    Enum.reduce([:actions, :duration_ms], %{}, fn key, acc ->
+      case Map.fetch(row, Atom.to_string(key)) do
+        {:ok, value} when is_number(value) -> Map.put(acc, key, value)
+        _other -> acc
+      end
+    end)
+  end
 
   defp management_job_meta(row), do: meta(row, [:session_id, :agent, :kind, :budget_ms])
 
@@ -259,6 +366,39 @@ defmodule FermixOpik.TraceFile do
 
   defp doctor_count_keys do
     [:passed, :warning, :failed, :unavailable, :skipped, :cancelled, :timed_out]
+  end
+
+  defp voice_live_meta(row) do
+    meta(row, [
+      :session_id,
+      :parent_session,
+      :agent,
+      :engine,
+      :device_id,
+      :model,
+      :voice,
+      :provider_session_id,
+      :delegation_id,
+      :revision,
+      :turn_session_id,
+      :status,
+      :reason,
+      :max_duration_ms
+    ])
+  end
+
+  # Rebuild a voice_live row's numeric measurements. Voice is duration-priced,
+  # so the ledger is seconds plus integer millicents — never tokens. Only keys
+  # actually present are carried: a call whose finalization never completed must
+  # replay with no cost rather than a fabricated zero.
+  defp voice_live_usage_measurements(row) do
+    [:voice_seconds, :voice_cost_millicents, :backend_turns, :accounting_complete, :duration_ms]
+    |> Enum.reduce(%{}, fn key, acc ->
+      case Map.fetch(row, Atom.to_string(key)) do
+        {:ok, value} when is_number(value) -> Map.put(acc, key, value)
+        _other -> acc
+      end
+    end)
   end
 
   defp realtime_meta(row) do

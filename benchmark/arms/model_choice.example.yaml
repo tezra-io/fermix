@@ -1,0 +1,50 @@
+# Configuration arms: the operator's model against one alternative.
+#
+# The comparison that needs no product change (M42 §11, "model selection"): the
+# same tasks, the same scoring, two daemons that differ only in which model they
+# serve. The FIRST arm is the control every other arm is compared with.
+#
+#   uv run bin/run_arms.py --arms arms/model_choice.example.yaml --dry-run
+#   uv run bin/run_arms.py --arms arms/model_choice.example.yaml
+#
+# Copy it before editing: the alternative below is a placeholder, and the run is
+# several full sweeps of real model calls.
+#
+# Each arm gets its own disposable home (~/.fermix-arm-<name>-eval) and its own
+# Opik project (fermix-arm-<name>-eval), is seeded, started, scored and torn down
+# before the next one begins — arms never run together, because they share the
+# machine and the provider's rate limit, and latency here is wall clock.
+#
+# `seed_args` are passed to bin/seed_capability_home.py through
+# FERMIX_CAP_SEED_ARGS, which is whitespace-split: every argument is one token.
+# With no `seed_args`, the seeder derives the scored model from
+# ~/.fermix-dev/config.toml, which is what makes the first arm the CONTROL — the
+# configuration you actually develop against.
+title: "Model choice — the dev primary against one alternative"
+
+# Any capability suite, the ones parked under suites/capability/candidates/
+# included: an arms run always names its suites, so run_arms.py loads that pool
+# (`--candidates`) and naming a parked suite is enough.
+#
+# cap_browser_corpus is the shared web corpus, scored on what the fixture pages
+# recorded, so the comparison is about the task rather than about two sets of
+# reply wordings. It is parked because promoting it into the RANKING sweep would
+# change the leaderboard's cohort — the owner's call; comparing two
+# configurations on it changes nothing for anyone else.
+suites:
+  - cap_browser_corpus
+
+trials: 5
+
+arms:
+  - name: control
+    description: "The model ~/.fermix-dev is configured with, seeded exactly as make capability-auto does."
+
+  - name: alternative
+    description: "One other model, explicit/CI mode: no keychain, no auth.json copy — the key comes from the provider's environment variable at daemon boot."
+    seed_args: ["--provider", "openai", "--model", "gpt-5.6-sol"]
+    # A TOML fragment is the other half of an arm: anything the seeder does not
+    # already write can be set here, and `--extra-config` REFUSES a fragment that
+    # redefines a table the seeder owns rather than letting the daemon fail at
+    # boot on a duplicate table.
+    # extra_config: model_choice.alternative.toml

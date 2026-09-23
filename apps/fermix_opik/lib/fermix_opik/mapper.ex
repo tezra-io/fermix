@@ -161,6 +161,10 @@ defmodule FermixOpik.Mapper do
             :target_ref,
             :selector,
             :policy_enforcement,
+            # Allowed sandbox variables the shell tool could not pass: names
+            # only, operator configuration rather than user content, so what a
+            # command ran without stays visible in a content-free export.
+            :env_unresolved,
             # `MCP.Capability.invoke/3` stamps the outbound server on every MCP
             # tool exec; without it here the server identity was dropped from
             # every Opik tool span (this map is the only allowlist there is).
@@ -182,7 +186,50 @@ defmodule FermixOpik.Mapper do
             :backend,
             :result_count,
             :has_media_count,
-            :location_mode
+            :location_mode,
+            # The computer-use pair (M42 slice 1 §3). The session lifecycle is
+            # its own root trace, so `cu_session` is the only link from a turn's
+            # action back to the run that performed it, and `outcome` is the only
+            # record of whether the input was refused, performed, unverified or
+            # of unknown fate. An opaque id and a closed enum — no page or screen
+            # text — so both ride outside the content-capture gate.
+            :cu_session,
+            :outcome,
+            # Coexistence (V3 R0): what the courtesy arbiter did about a person
+            # at the machine. A closed enum with nothing from the screen in it,
+            # so it rides outside the content-capture gate like the pair above.
+            :courtesy,
+            # Addressing (M42 slice 3): how stale the image an action aimed at was
+            # when it was sent, and the code when it named no addressable one. A
+            # millisecond count and a closed enum — no id (it does not outlive a
+            # session), no dimensions, nothing from the screen — so both ride
+            # outside the content-capture gate like the pair above.
+            :observation_age_ms,
+            :geometry_refusal,
+            # References (M42 slice 4): by which mechanism the input went out
+            # (`ax` or `foreground_hid`) and what the helper observed of it. Two
+            # closed enums; the VALUE a `set_value` carried is content and never
+            # appears here, whatever the capture posture.
+            :input_method,
+            :effect,
+            # The check (M42 slice 6): which evidence the action came back with,
+            # whether the view it acted in differs from the one it acted on, and
+            # what each phase of it cost. A closed enum, a boolean and four
+            # millisecond counts — nothing read off the screen, so they ride
+            # outside the content-capture gate like the rest of this family.
+            :check_kind,
+            :check_changed,
+            :cu_input_ms,
+            :cu_settle_ms,
+            :cu_capture_ms,
+            :cu_encode_ms,
+            # Bound windows (M42 slice 5): what this action was pointed at (one
+            # window, or the whole desktop) and how it reached the screen
+            # (through accessibility inside a bound window, or in front of the
+            # person). Two closed words — never a window title and never an
+            # application name, which are content and stay off the row.
+            :target_kind,
+            :cu_mode
           ])
         )
     }
@@ -255,6 +302,50 @@ defmodule FermixOpik.Mapper do
   end
 
   @doc """
+  Build a Live-voice phase span from a `[:fermix, :voice_live, <phase>]` event.
+
+  The backend turn a delegation triggers is an ordinary `llm`/`tool` span under
+  its own run; these mark the CALL's lifecycle — the provider session, each
+  delegation's start and terminal state, and a mid-call provider refusal.
+
+  The key list below is the whole contract (there is no global allowlist), and
+  it names correlation ids only: a Live call holds captions, transcript
+  fragments and the composed instructions, and none of them may reach a span.
+  `delegation_stop` carries `duration_ms`, so a delegation span has real extent
+  rather than collapsing the backend turn's elapsed time to a point.
+  """
+  @spec voice_live_span(map(), map(), keyword()) :: map()
+  def voice_live_span(metadata, measurements, opts) do
+    ended = Keyword.fetch!(opts, :ended)
+    duration_ms = Map.get(measurements, :duration_ms, 0)
+    started = start_of(ended, duration_ms)
+
+    %{
+      id: new_id(started),
+      trace_id: Keyword.fetch!(opts, :trace_id),
+      parent_span_id: Keyword.get(opts, :parent_span_id),
+      project_name: Keyword.fetch!(opts, :project_name),
+      name: "voice_live:#{Keyword.fetch!(opts, :phase)}",
+      type: "general",
+      start_time: iso(started),
+      end_time: iso(ended),
+      metadata:
+        drop_nil(%{
+          device_id: Map.get(metadata, :device_id),
+          model: Map.get(metadata, :model),
+          voice: Map.get(metadata, :voice),
+          provider_session_id: Map.get(metadata, :provider_session_id),
+          delegation_id: Map.get(metadata, :delegation_id),
+          revision: Map.get(metadata, :revision),
+          turn_session_id: Map.get(metadata, :turn_session_id),
+          status: stringify(Map.get(metadata, :status)),
+          reason: stringify(Map.get(metadata, :reason))
+        })
+    }
+    |> drop_nil()
+  end
+
+  @doc """
   Build a point span from a `[:fermix, :mcp_client, :lifecycle]` event — one
   outbound MCP client lifecycle phase that happened *inside* a turn
   (`security_block`/`drift`/`reconnect`); the boot-time phases become their own
@@ -321,6 +412,39 @@ defmodule FermixOpik.Mapper do
           from: stringify(Map.get(metadata, :from)),
           to: stringify(Map.get(metadata, :to)),
           reason: stringify(Map.get(metadata, :reason))
+        })
+    }
+    |> drop_nil()
+  end
+
+  @doc """
+  Build a point span from a `[:fermix, :computer_use, :session_pause |
+  :session_resume]` event — one in-run lifecycle marker, nested under the
+  computer-use run's own root trace (the meeting-phase shape).
+
+  The key list mirrors the emitter's allowlist exactly
+  (`FermixCore.ComputerUse.Telemetry`): `mode` and `origin` are fixed labels, and
+  nothing a session saw on screen reaches a span. The verb is the name, so a
+  trace shows why nothing was dispatched between two actions.
+  """
+  @spec computer_use_span(map(), map(), keyword()) :: map()
+  def computer_use_span(metadata, _measurements, opts) do
+    ended = Keyword.fetch!(opts, :ended)
+    started = start_of(ended, 0)
+
+    %{
+      id: new_id(started),
+      trace_id: Keyword.fetch!(opts, :trace_id),
+      parent_span_id: Keyword.get(opts, :parent_span_id),
+      project_name: Keyword.fetch!(opts, :project_name),
+      name: "computer_use:#{Keyword.fetch!(opts, :phase)}",
+      type: "general",
+      start_time: iso(started),
+      end_time: iso(ended),
+      metadata:
+        drop_nil(%{
+          mode: stringify(Map.get(metadata, :mode)),
+          origin: stringify(Map.get(metadata, :origin))
         })
     }
     |> drop_nil()
@@ -400,6 +524,7 @@ defmodule FermixOpik.Mapper do
   def provider_string(:openrouter), do: "openrouter"
   def provider_string(:ollama), do: "ollama"
   def provider_string(:mistral), do: "mistral"
+  def provider_string(:venice), do: "venice"
   # The transcription backends emit provider calls of their own (M21). Opik
   # prices neither, but the clause + test is the same documented contract as
   # above: `:local` in particular must read as the on-device backend rather than

@@ -1225,7 +1225,7 @@ defmodule FermixOpik.AggregationTest do
   @mcp_client_phases @mcp_client_boot_phases ++ @mcp_client_turn_phases
 
   defp mcp_meta(phase, extra \\ %{}) do
-    Map.merge(%{source_id: "plugin:eden", plugin: "eden", phase: phase, result: :ok}, extra)
+    Map.merge(%{source_id: "plugin:acme", plugin: "acme", phase: phase, result: :ok}, extra)
   end
 
   describe "outbound MCP client lifecycle" do
@@ -1276,8 +1276,8 @@ defmodule FermixOpik.AggregationTest do
         ])
 
       assert [%{trace: trace, spans: []}] = closed
-      assert trace.metadata.source_id == "plugin:eden"
-      assert trace.metadata.plugin == "eden"
+      assert trace.metadata.source_id == "plugin:acme"
+      assert trace.metadata.plugin == "acme"
       assert trace.metadata.phase == "initialize"
       assert trace.metadata.result == "error"
       assert trace.metadata.error_class == "remote_unreachable"
@@ -1811,6 +1811,377 @@ defmodule FermixOpik.AggregationTest do
       {_agg, closed} = Aggregation.sweep(agg, 61_000_001)
       assert [%{trace: trace}] = closed
       assert trace.name == "meeting:mtg_ab12cd"
+    end
+  end
+
+  @voice_live_start [:fermix, :voice_live, :call_start]
+  @voice_live_session_started [:fermix, :voice_live, :session_started]
+  @voice_live_delegation_start [:fermix, :voice_live, :delegation_start]
+  @voice_live_delegation_stop [:fermix, :voice_live, :delegation_stop]
+  @voice_live_provider_error [:fermix, :voice_live, :provider_error]
+  @voice_live_stop [:fermix, :voice_live, :call_stop]
+  @voice_live_call "voice_live:1"
+  @voice_delegation_session "voice_delegation_7"
+
+  # The emitter's own metadata shape (FermixCore.Realtime.LiveTelemetry).
+  # `fermix_opik` declares no dependency on `fermix_core`, so this mirrors it by
+  # hand, exactly like `meeting_meta/1` and `followup_meta/1` above.
+  defp voice_live_meta(extra) do
+    Map.merge(
+      %{
+        agent: "voice_live",
+        session_id: @voice_live_call,
+        device_id: "dev-1",
+        model: "gpt-live-1",
+        voice: "marin",
+        engine: "openai_live"
+      },
+      extra
+    )
+  end
+
+  describe "live voice runs" do
+    test "the reporter subscribes to every voice_live event" do
+      for event <- [
+            @voice_live_start,
+            @voice_live_session_started,
+            @voice_live_delegation_start,
+            @voice_live_delegation_stop,
+            @voice_live_provider_error,
+            @voice_live_stop
+          ] do
+        assert event in FermixOpik.Reporter.events(),
+               "#{inspect(event)} is not subscribed, so the run is invisible to Opik"
+      end
+    end
+
+    test "a live call becomes one trace whose delegation turn nests under the root via parent_session" do
+      {_state, closed} =
+        run([
+          {@voice_live_start, %{}, voice_live_meta(%{max_duration_ms: 900_000})},
+          {@voice_live_session_started, %{},
+           voice_live_meta(%{provider_session_id: "sess_live_abc"})},
+          # The backend turn is its own run: its session id is minted by the Live
+          # session and its parent_session is the CALL, which is the only link
+          # between the two — a delegation carries no other correlation.
+          {[:fermix, :provider, :call], %{duration_ms: 900},
+           %{
+             provider: :anthropic,
+             model: "claude-opus-4-8",
+             status: :ok,
+             agent: "main",
+             session_id: @voice_delegation_session,
+             parent_session: @voice_live_call,
+             tokens: %{prompt: 120, completion: 40}
+           }},
+          {@voice_live_delegation_start, %{},
+           voice_live_meta(%{
+             delegation_id: "dlg_1",
+             revision: 1,
+             turn_session_id: @voice_delegation_session
+           })},
+          {@voice_live_delegation_stop, %{duration_ms: 1_200},
+           voice_live_meta(%{
+             delegation_id: "dlg_1",
+             revision: 1,
+             turn_session_id: @voice_delegation_session,
+             status: "completed"
+           })},
+          {@voice_live_stop,
+           %{
+             voice_seconds: 62,
+             voice_cost_millicents: 5_167,
+             backend_turns: 1,
+             accounting_complete: 1
+           }, voice_live_meta(%{reason: "call_stop"})}
+        ])
+
+      assert [%{trace: trace, spans: spans}] = closed
+      assert trace.name == "voice_live:1"
+      assert trace.tags == ["voice_live"]
+      # A call that ended on its own terms is not flagged errored; `reason`
+      # below is what names the wall when one was hit.
+      refute Map.has_key?(trace, :error_info)
+
+      # The call's own wrapper IS the root: no parent span id survives export.
+      root = span_named(spans, "voice_live:1")
+      refute Map.has_key?(root, :parent_span_id)
+
+      # The delegation's own wrapper hangs off the root wrapper, and the model
+      # call hangs off the delegation — one trace, two runs, no orphan root.
+      delegation = span_named(spans, @voice_delegation_session)
+      assert delegation.parent_span_id == root.id
+
+      [llm] = spans_of_type(spans, "llm")
+      assert llm.parent_span_id == delegation.id
+      assert llm.usage == %{prompt_tokens: 120, completion_tokens: 40, total_tokens: 160}
+
+      started = span_named(spans, "voice_live:session_started")
+      assert started.parent_span_id == root.id
+      assert started.metadata.provider_session_id == "sess_live_abc"
+
+      stopped = span_named(spans, "voice_live:delegation_stop")
+      assert stopped.metadata.status == "completed"
+      assert stopped.metadata.turn_session_id == @voice_delegation_session
+
+      # Voice is duration-priced: the ledger rides the trace, never as tokens.
+      assert trace.metadata.voice_seconds == 62
+      assert trace.metadata.voice_cost_millicents == 5_167
+      assert trace.metadata.backend_turns == 1
+      assert trace.metadata.accounting_complete == 1
+      assert trace.metadata.reason == "call_stop"
+      assert trace.metadata.engine == "openai_live"
+      assert trace.metadata.model == "gpt-live-1"
+    end
+
+    test "a provider_error is a phase span, never a terminal event" do
+      {state, closed} =
+        run([
+          {@voice_live_start, %{}, voice_live_meta(%{max_duration_ms: 900_000})},
+          {@voice_live_provider_error, %{},
+           voice_live_meta(%{reason: "moderation cut the reply"})}
+        ])
+
+      assert closed == []
+      assert map_size(state.traces) == 1
+    end
+
+    # A Live call is silent between delegations for minutes at a time; the idle
+    # TTL would force-close it mid-call and mint a second root when call_stop
+    # finally arrived (the meeting/follow-up precedent).
+    test "a live call is swept by its max duration, not the idle TTL" do
+      agg = Aggregation.new(project: "fermix", ttl_ms: 1)
+
+      {agg, []} =
+        Aggregation.apply_event(
+          agg,
+          @voice_live_start,
+          %{},
+          voice_live_meta(%{max_duration_ms: 1_000}),
+          %{at: ~U[2026-06-02 12:00:00.000Z], mono: 0}
+        )
+
+      {agg, []} = Aggregation.sweep(agg, 500_000)
+
+      {_agg, closed} = Aggregation.sweep(agg, 61_000_001)
+      assert [%{trace: trace}] = closed
+      assert trace.name == "voice_live:1"
+    end
+
+    # Without the prefix clause a call_stop that arrived after a daemon restart
+    # would mint a root `infer_kind/1` reads as `:subagent` — the phantom-root
+    # shape the computer-history clause exists to prevent.
+    test "a call_stop with no opener still closes as a voice_live root" do
+      {_state, closed} =
+        run([
+          {@voice_live_stop, %{voice_seconds: 5, accounting_complete: 0},
+           voice_live_meta(%{reason: "provider_disconnected"})}
+        ])
+
+      assert [%{trace: trace}] = closed
+      assert trace.tags == ["voice_live"]
+      assert trace.name == "voice_live:1"
+    end
+  end
+
+  @cu_start [:fermix, :computer_use, :session_start]
+  @cu_complete [:fermix, :computer_use, :session_complete]
+  @cu_error [:fermix, :computer_use, :session_error]
+  @cu_pause [:fermix, :computer_use, :session_pause]
+  @cu_resume [:fermix, :computer_use, :session_resume]
+  @cu_session "cua_ab12"
+  @cu_turn "main-9"
+
+  # The emitter's own metadata shape (FermixCore.ComputerUse.Telemetry), mirrored
+  # by hand like `voice_live_meta/1` above — `fermix_opik` declares no dependency
+  # on `fermix_core`.
+  defp computer_use_meta(extra) do
+    Map.merge(
+      %{
+        agent: "main",
+        session_id: @cu_session,
+        parent_session: @cu_turn,
+        mode: :host,
+        origin: :interactive
+      },
+      extra
+    )
+  end
+
+  describe "computer-use sessions" do
+    test "the reporter subscribes to every computer_use event" do
+      for event <- [@cu_start, @cu_complete, @cu_error, @cu_pause, @cu_resume] do
+        assert event in FermixOpik.Reporter.events(),
+               "#{inspect(event)} is not subscribed, so the run is invisible to Opik"
+      end
+    end
+
+    # The session is keyed by conversation and reused across turns, so it opens
+    # its own root: `parent_session` rides as correlation metadata only. The tool
+    # exec that drove it stays under the TURN, joined by `cu_session` — that is
+    # the whole correlation, and both halves are asserted here together.
+    test "a session is its own root, its tool exec stays under the turn, and the two join by cu_session" do
+      {state, closed} =
+        run([
+          {@cu_start, %{}, computer_use_meta(%{})},
+          {[:fermix, :tool, :exec], %{duration_ms: 120},
+           %{
+             tool: "computer_use",
+             agent: "main",
+             success: true,
+             session_id: @cu_turn,
+             action: "click",
+             cu_session: @cu_session,
+             outcome: "performed"
+           }},
+          {@cu_pause, %{}, computer_use_meta(%{})},
+          {@cu_resume, %{}, computer_use_meta(%{})},
+          {@cu_complete, %{actions: 3, duration_ms: 4_200}, computer_use_meta(%{})},
+          {[:fermix, :agent, :message], %{iterations: 2, total_tokens: 90},
+           %{channel: :telegram, chat_id: "c1", sender: "u1", session_id: @cu_turn, agent: "main"}}
+        ])
+
+      assert state.traces == %{}
+      assert [%{trace: cu_trace, spans: cu_spans}, %{trace: turn, spans: turn_spans}] = closed
+
+      assert cu_trace.name == "computer_use:#{@cu_session}"
+      assert cu_trace.tags == ["computer_use"]
+      assert cu_trace.metadata.mode == "host"
+      assert cu_trace.metadata.origin == "interactive"
+      assert cu_trace.metadata.parent_session == @cu_turn
+      assert cu_trace.metadata.actions == 3
+      assert cu_trace.metadata.duration_ms == 4_200
+
+      # A root even though it names a parent: the session outlives the turn.
+      root = span_named(cu_spans, "computer_use:#{@cu_session}")
+      refute Map.has_key?(root, :parent_span_id)
+
+      paused = span_named(cu_spans, "computer_use:session_pause")
+      assert paused.parent_span_id == root.id
+      assert paused.metadata.mode == "host"
+      assert span_named(cu_spans, "computer_use:session_resume").parent_span_id == root.id
+
+      # The action is the TURN's tool call, where every trace reader looks for it.
+      assert spans_of_type(cu_spans, "tool") == []
+      assert turn.name == "agent:main"
+      [tool] = spans_of_type(turn_spans, "tool")
+      assert tool.name == "computer_use"
+      assert tool.metadata.cu_session == @cu_session
+      assert tool.metadata.outcome == "performed"
+    end
+
+    # The error fires mid-turn (a sidecar exit, a poison reset). Closing the
+    # turn's trace here would ship it early and tombstone the rest of the turn.
+    test "a session_error closes only the computer-use root, leaving the turn open" do
+      {state, closed} =
+        run([
+          {[:fermix, :provider, :call], %{duration_ms: 10},
+           %{provider: :openai, model: "gpt-5", status: :ok, session_id: @cu_turn}},
+          {@cu_start, %{}, computer_use_meta(%{})},
+          {@cu_error, %{}, computer_use_meta(%{reason: "{:sidecar_exited, 1}"})},
+          {[:fermix, :provider, :call], %{duration_ms: 12},
+           %{provider: :openai, model: "gpt-5", status: :ok, session_id: @cu_turn}},
+          {[:fermix, :agent, :message], %{iterations: 2, total_tokens: 20},
+           %{channel: :telegram, chat_id: "c1", sender: "u1", session_id: @cu_turn, agent: "main"}}
+        ])
+
+      assert state.traces == %{}
+      assert state.dropped_after_close == 0
+
+      assert [%{trace: cu_trace}, %{trace: turn, spans: turn_spans}] = closed
+      assert cu_trace.name == "computer_use:#{@cu_session}"
+      assert cu_trace.metadata.status == "error"
+      assert cu_trace.output == %{text: "{:sidecar_exited, 1}"}
+      assert cu_trace.error_info.exception_type == "ComputerUseError"
+
+      # The turn kept both of its model calls, including the one after the error.
+      assert turn.name == "agent:main"
+      assert length(spans_of_type(turn_spans, "llm")) == 2
+    end
+
+    # The marker clause is the one door into this family that does not force the
+    # parent away, so it is the one that can still nest the run under the turn —
+    # the exact shape the opener forbids. Reached when the run's root was swept
+    # and its tombstone has since expired while the opening turn is still open:
+    # `/pause` would create the run inside the turn's trace, and the following
+    # bookend would then ship that turn early.
+    test "a pause with no open run never attaches to the turn that opened the session" do
+      {state, closed} =
+        run([
+          {[:fermix, :provider, :call], %{duration_ms: 10},
+           %{provider: :openai, model: "gpt-5", status: :ok, session_id: @cu_turn}},
+          {@cu_pause, %{}, computer_use_meta(%{})},
+          {@cu_complete, %{actions: 2, duration_ms: 900}, computer_use_meta(%{})}
+        ])
+
+      # The bookend closed the computer-use run and nothing else.
+      assert [%{trace: cu_trace, spans: cu_spans}] = closed
+      assert cu_trace.name == "computer_use:#{@cu_session}"
+      assert cu_trace.metadata.actions == 2
+      assert span_named(cu_spans, "computer_use:session_pause")
+
+      # The turn is untouched: still open, still holding its own model call.
+      assert map_size(state.traces) == 1
+      [turn_acc] = Map.values(state.traces)
+      assert turn_acc.root_session == @cu_turn
+      assert turn_acc.open?
+    end
+
+    # The NORMAL case, not an edge. Between its opener and its bookend the root
+    # receives nothing (the actions ride the turn) and a session outlives the turn
+    # by design, so the idle TTL ships the root first and the bookend opens a
+    # CONTINUATION root under the same id, carrying the counts. Pinned here so the
+    # documented behaviour cannot drift silently.
+    test "an idle session ships its root, and its bookend opens a continuation root" do
+      agg = Aggregation.new(project: "fermix", ttl_ms: 1)
+
+      at = fn seconds ->
+        %{
+          at: DateTime.add(~U[2026-09-19 12:00:00.000Z], seconds, :second),
+          mono: seconds * 1_000_000
+        }
+      end
+
+      {agg, []} = Aggregation.apply_event(agg, @cu_start, %{}, computer_use_meta(%{}), at.(0))
+
+      {agg, [%{trace: first}]} = Aggregation.sweep(agg, 2_000_000)
+      assert first.name == "computer_use:#{@cu_session}"
+      assert first.metadata.mode == "host"
+      refute Map.has_key?(first.metadata, :actions)
+
+      # While the tombstone stands a marker is dropped from Opik; the JSONL
+      # stream still carries it.
+      {agg, []} = Aggregation.apply_event(agg, @cu_pause, %{}, computer_use_meta(%{}), at.(3))
+      assert agg.dropped_after_close == 1
+
+      {_agg, [%{trace: second}]} =
+        Aggregation.apply_event(
+          agg,
+          @cu_complete,
+          %{actions: 5, duration_ms: 90_000},
+          computer_use_meta(%{}),
+          at.(4)
+        )
+
+      # A second root under the same id: this is where the run's counts live.
+      assert second.name == "computer_use:#{@cu_session}"
+      assert second.id != first.id
+      assert second.metadata.actions == 5
+      assert second.metadata.duration_ms == 90_000
+    end
+
+    # Without the prefix clause a completion arriving after a daemon restart would
+    # mint a root `infer_kind/1` reads as `:subagent` — a stray computer-use run
+    # rendered as a sub-agent of nothing.
+    test "a session_complete with no opener still closes as a computer_use root" do
+      {_state, closed} =
+        run([
+          {@cu_complete, %{actions: 1, duration_ms: 500}, computer_use_meta(%{})}
+        ])
+
+      assert [%{trace: trace}] = closed
+      assert trace.tags == ["computer_use"]
+      assert trace.name == "computer_use:#{@cu_session}"
     end
   end
 end

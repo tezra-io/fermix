@@ -104,6 +104,47 @@ defmodule FermixCore.Auth.TokenSupervisorTest do
 
       assert {:ok, "old_at"} = TokenSupervisor.get_token("custom_oauth")
     end
+
+    # A grant a sign-in quarantined is unexpired and otherwise servable, so the
+    # refusal has to come off the stored entry. `Store.quarantine_reason/1` is
+    # the one reader, so this answer is the same in the tree-less world where
+    # `direct_read` resolves the token with no manager at all.
+    test "refuses a grant the sign-in recorded as wrong_region" do
+      profile = fresh_profile()
+
+      :ok =
+        Store.write(
+          profile,
+          %{short_lived_entry() | provider: "tesla"}
+          |> Map.put(:status, "wrong_region")
+          |> Map.put(:region, "na")
+          |> Map.put(:region_actual, "eu")
+        )
+
+      assert {:error, :wrong_region} = TokenSupervisor.get_token(profile)
+    end
+
+    test "serves a grant whose region matches" do
+      profile = fresh_profile()
+
+      :ok =
+        Store.write(
+          profile,
+          %{short_lived_entry() | provider: "tesla"}
+          |> Map.put(:status, "ready")
+          |> Map.put(:region, "eu")
+        )
+
+      assert {:ok, "old_at"} = TokenSupervisor.get_token(profile)
+    end
+  end
+
+  # A manager caches the entry it read at init, so a case that reuses a profile
+  # name another case already started reads that case's grant instead of its own.
+  defp fresh_profile do
+    profile = "tesla_#{System.unique_integer([:positive])}:primary"
+    on_exit(fn -> TokenSupervisor.stop_profile(profile) end)
+    profile
   end
 
   describe "refresh_entry/3 — plugin oauth providers (registry path)" do
@@ -130,6 +171,12 @@ defmodule FermixCore.Auth.TokenSupervisorTest do
           client_type: "desktop_public_pkce",
           client_id: "x-id",
           client_secret: "x-sec"
+        ],
+        "tesla" => [
+          client_type: "desktop_public_pkce",
+          client_id: "t-id",
+          client_secret: "t-sec",
+          region: "eu"
         ]
       })
 
@@ -201,6 +248,38 @@ defmodule FermixCore.Auth.TokenSupervisorTest do
       refute Map.has_key?(params, "client_secret")
       refute Map.has_key?(params, "client_id")
       assert {"authorization", expected} in headers
+    end
+
+    # The direct (process-less) dispatch is its own refresh owner with its own
+    # entry update, so the region has to survive here as well as through
+    # TokenManager — a rebuild rather than an update would strand the plugin
+    # without a Fleet API region, which nothing downstream can re-derive.
+    test "refreshes a tesla entry, keeps its region, and sends no exchange audience" do
+      entry_with_region = Map.put(plugin_oauth_entry("tesla"), :region, "eu")
+      :ok = Store.write("tesla:primary", entry_with_region)
+      {:ok, entry} = Store.read("tesla:primary")
+      assert entry.region == "eu"
+
+      parent = self()
+
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(parent, {:refresh_request, URI.decode_query(body), conn.req_headers})
+        refresh_plug(conn)
+      end
+
+      assert {:ok, refreshed} = TokenSupervisor.refresh_entry("tesla:primary", entry, plug: plug)
+      assert refreshed.region == "eu"
+      assert refreshed.tokens.access_token == "new_at"
+
+      assert {:ok, stored} = Store.read("tesla:primary")
+      assert stored.region == "eu"
+      assert stored.tokens.refresh_token == "new_rt"
+
+      assert_received {:refresh_request, params, _headers}
+      assert params["grant_type"] == "refresh_token"
+      assert params["client_id"] == "t-id"
+      refute Map.has_key?(params, "audience")
     end
 
     test "refreshes an x entry with HTTP Basic auth and persists the rotated pair" do

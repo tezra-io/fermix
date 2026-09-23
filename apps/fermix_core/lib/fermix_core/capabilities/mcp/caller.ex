@@ -2,8 +2,8 @@ defmodule FermixCore.Capabilities.MCP.Caller do
   @moduledoc """
   Behaviour for MCP tool call dispatchers.
 
-  Dispatch resolves the **source-qualified** identity (`{:plugin, "eden"}` /
-  `{:operator, "eden"}`), never a bare server name: two servers may share a
+  Dispatch resolves the **source-qualified** identity (`{:plugin, "acme"}` /
+  `{:operator, "acme"}`), never a bare server name: two servers may share a
   name, so a bare name can reach the wrong client.
 
   The fourth argument is the private invoke context `MCP.Capability` mints from

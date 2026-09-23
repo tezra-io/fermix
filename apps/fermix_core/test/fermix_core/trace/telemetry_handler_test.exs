@@ -3,7 +3,10 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
 
   alias FermixCore.Agents.LifecycleTelemetry
   alias FermixCore.Capabilities.MCP.Telemetry, as: MCPClientTelemetry
+  alias FermixCore.ComputerUse.Telemetry, as: ComputerUseTelemetry
   alias FermixCore.Plugins.Auth.Telemetry, as: PluginAuthTelemetry
+  alias FermixCore.Realtime.LiveTelemetry
+  alias FermixCore.Tools.Telemetry, as: ToolTelemetry
   alias FermixCore.Trace
   alias FermixCore.Trace.TelemetryHandler
 
@@ -187,7 +190,7 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
     assert entry["session_id"] == "mcp-session"
   end
 
-  # Registry-completeness invariant (CLAUDE.md "gate on the whole feature
+  # Registry-completeness invariant (AGENTS.md "gate on the whole feature
   # surface"): the assertion is "NO phase this emitter can emit is missing from
   # the JSONL stream", written as a loop over `phases/0` so a phase added later
   # either joins the invariant or fails here.
@@ -201,7 +204,7 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
     for phase <- phases do
       MCPClientTelemetry.emit_lifecycle(
         phase,
-        %{source_id: {:plugin, "eden"}, plugin: "eden"},
+        %{source_id: {:plugin, "acme"}, plugin: "acme"},
         :ok,
         7
       )
@@ -213,8 +216,8 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
     lifecycle = Enum.filter(entries, &(&1["event"] == "mcp_client_lifecycle"))
 
     assert Enum.map(lifecycle, & &1["phase"]) == Enum.map(phases, &to_string/1)
-    assert Enum.all?(lifecycle, &(&1["agent"] == "plugin:eden"))
-    assert Enum.all?(lifecycle, &(&1["source_id"] == "plugin:eden"))
+    assert Enum.all?(lifecycle, &(&1["agent"] == "plugin:acme"))
+    assert Enum.all?(lifecycle, &(&1["source_id"] == "plugin:acme"))
     assert Enum.all?(lifecycle, &(&1["duration_ms"] == 7))
   end
 
@@ -222,7 +225,7 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
     MCPClientTelemetry.emit_lifecycle(
       :security_block,
       %{source_id: {:operator, "fs"}},
-      {:error, {:tool_not_allowed, "eden_delete_note"}},
+      {:error, {:tool_not_allowed, "acme_delete_note"}},
       3,
       session_id: "main-9",
       attempt: 2
@@ -683,5 +686,140 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
     assert journal_entry["session_id"] == "skill-session-2"
     assert journal_entry["path"] == "/tmp/fake-journal.md"
     assert journal_entry["bytes"] == 512
+  end
+
+  # A Live voice call is a run kind whose phases are the ONLY record of what the
+  # provider session did — there is no per-turn row for the call itself. A phase
+  # missing from `event_definitions/0` is invisible in the JSONL with no error,
+  # so the invariant is written over every event the emitter can produce rather
+  # than over a hand-listed subset.
+  test "every voice_live phase reaches the JSONL trace stream", %{dir: dir, server: server} do
+    meta = %{
+      session_id: "voice_live:1",
+      parent_session: "main-4",
+      device_id: "dev-1",
+      model: "gpt-live-1",
+      voice: "marin",
+      provider_session_id: "sess_live_abc"
+    }
+
+    delegation = %{delegation_id: "dlg_1", revision: 1, turn_session_id: "voice_delegation_7"}
+
+    LiveTelemetry.call_start(meta, 900_000)
+    LiveTelemetry.session_started(meta)
+    LiveTelemetry.delegation_start(meta, delegation)
+    LiveTelemetry.delegation_stop(meta, delegation, "completed", 1_200)
+    LiveTelemetry.provider_error(meta, "moderation cut the reply")
+
+    LiveTelemetry.call_stop(
+      meta,
+      %{
+        voice_seconds: 62,
+        voice_cost_millicents: 5_167,
+        backend_turns: 2,
+        accounting_complete: 1
+      },
+      :call_stop
+    )
+
+    sync(server)
+
+    rows =
+      dir
+      |> read_entries(:agent_event)
+      |> Enum.filter(&String.starts_with?(&1["event"] || "", "voice_live_"))
+
+    expected =
+      Enum.map(LiveTelemetry.trace_event_definitions(), & &1.trace_event)
+
+    assert Enum.map(rows, & &1["event"]) == expected
+    assert Enum.all?(rows, &(&1["agent"] == "voice_live"))
+    assert Enum.all?(rows, &(&1["session_id"] == "voice_live:1"))
+    assert Enum.all?(rows, &(&1["parent_session"] == "main-4"))
+    assert Enum.all?(rows, &(&1["engine"] == "openai_live"))
+
+    start_row = find_entry!(rows, &(&1["event"] == "voice_live_call_start"))
+    assert start_row["max_duration_ms"] == 900_000
+
+    stop_row = find_entry!(rows, &(&1["event"] == "voice_live_delegation_stop"))
+    assert stop_row["turn_session_id"] == "voice_delegation_7"
+    assert stop_row["revision"] == 1
+    assert stop_row["status"] == "completed"
+    assert stop_row["duration_ms"] == 1_200
+
+    # The ledger is the call's whole cost record: flattened as numbers, never as
+    # a rendered string, so a reader can sum a day of calls out of the JSONL.
+    call_stop = find_entry!(rows, &(&1["event"] == "voice_live_call_stop"))
+    assert call_stop["voice_seconds"] == 62
+    assert call_stop["voice_cost_millicents"] == 5_167
+    assert call_stop["backend_turns"] == 2
+    assert call_stop["accounting_complete"] == 1
+    assert call_stop["reason"] == "call_stop"
+  end
+
+  # A computer-use session's only record is these five rows: nothing else says a
+  # session started, that the operator took the seat back, or that the sidecar
+  # died. A verb missing from `event_definitions/0` leaves no row and no error,
+  # so the invariant is written over every event the emitter can produce.
+  test "every computer_use lifecycle verb reaches the JSONL trace stream", %{
+    dir: dir,
+    server: server
+  } do
+    meta = %{
+      session_id: "cua_abc",
+      parent_session: "main-9",
+      agent: "main",
+      mode: :host,
+      origin: :interactive
+    }
+
+    ComputerUseTelemetry.session_start(meta)
+    ComputerUseTelemetry.session_pause(meta)
+    ComputerUseTelemetry.session_resume(meta)
+    ComputerUseTelemetry.session_complete(meta, %{actions: 7, duration_ms: 4_200})
+    ComputerUseTelemetry.session_error(meta, {:sidecar_exited, 1})
+
+    sync(server)
+
+    rows =
+      dir
+      |> read_entries(:agent_event)
+      |> Enum.filter(&String.starts_with?(&1["event"] || "", "computer_use_"))
+
+    expected = Enum.map(ComputerUseTelemetry.trace_event_definitions(), & &1.trace_event)
+
+    assert Enum.sort(Enum.map(rows, & &1["event"])) == Enum.sort(expected)
+    assert Enum.all?(rows, &(&1["agent"] == "main"))
+    assert Enum.all?(rows, &(&1["session_id"] == "cua_abc"))
+    assert Enum.all?(rows, &(&1["parent_session"] == "main-9"))
+    assert Enum.all?(rows, &(&1["mode"] == "host"))
+    assert Enum.all?(rows, &(&1["origin"] == "interactive"))
+
+    complete = find_entry!(rows, &(&1["event"] == "computer_use_session_complete"))
+    assert complete["actions"] == 7
+    assert complete["duration_ms"] == 4_200
+
+    errored = find_entry!(rows, &(&1["event"] == "computer_use_session_error"))
+    assert errored["reason"] =~ "sidecar_exited"
+  end
+
+  # The two correlation keys ride the ALWAYS-ON tool metadata (no content gate),
+  # and the JSONL row is the only place a reader can join a turn's tool call to
+  # the computer-use run it drove.
+  test "a computer_use tool exec keeps its session id and outcome", %{dir: dir, server: server} do
+    ToolTelemetry.exec(
+      "computer_use",
+      %{agent_name: "main", session_id: "main-9"},
+      true,
+      31,
+      metadata: %{action: "click", cu_session: "cua_abc", outcome: "performed_unverified"}
+    )
+
+    sync(server)
+
+    entry = find_entry!(read_entries(dir, :tool_exec), &(&1["tool"] == "computer_use"))
+    assert entry["session_id"] == "main-9"
+    assert entry["cu_session"] == "cua_abc"
+    assert entry["outcome"] == "performed_unverified"
   end
 end

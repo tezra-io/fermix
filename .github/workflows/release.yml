@@ -99,19 +99,72 @@ jobs:
       - name: Build all Burrito targets
         run: mix release fermix --overwrite
 
-      - name: Generate standalone releases.json
-        env:
-          VERSION: ${{ github.ref_name }}
-          REPO: ${{ github.repository }}
-        run: ./scripts/release/build_releases_json.sh > burrito_out/releases.json
-
       - name: Upload standalone candidates
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: standalone-candidate
+          path: burrito_out/fermix_*
+          if-no-files-found: error
+          retention-days: 1
+
+  linux-packages:
+    name: Build Linux packages (${{ matrix.target }})
+    needs: preflight
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    # One job per target, each in its own checkout: a build leaves outputs
+    # behind it, and the script refuses to snapshot a checkout that is not
+    # exactly the commit, so two targets in one job means the second refuses.
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [linux_x86_64, linux_aarch64]
+    env:
+      MIX_ENV: prod
+      ELIXIR_VERSION: "1.19.5"
+      OTP_VERSION: "28.4.1"
+      ZIG_VERSION: "0.15.2"
+      # One build identity for both package targets, the way the app engine
+      # already stamps one identity across its two slices.
+      FERMIX_BUILD_ID: release-${{ github.run_id }}
+      FERMIX_BUILD_SOURCE_COMMIT: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      # patchelf points every packaged ELF interpreter at the loader the
+      # package materialises; without it the release step refuses.
+      - name: Install release tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xz-utils jq patchelf
+
+      - name: Build the deb and the rpm for ${{ matrix.target }}
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          scripts/release/build_linux_packages.sh \
+            "${{ matrix.target }}" \
+            "${VERSION#v}" \
+            packaging/linux/out/packages
+
+      - name: Upload Linux packages
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: linux-packages-${{ matrix.target }}
           path: |
-            burrito_out/fermix_*
-            burrito_out/releases.json
+            packaging/linux/out/packages/*.deb
+            packaging/linux/out/packages/*.rpm
           if-no-files-found: error
           retention-days: 1
 
@@ -163,17 +216,26 @@ jobs:
 
   sign-candidate:
     name: Sign release candidate
-    needs: [standalone, app-engine]
+    needs: [standalone, linux-packages, app-engine]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
       id-token: write
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
       - name: Download standalone candidate
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: standalone-candidate
           path: burrito_out
+
+      - name: Download Linux packages
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: linux-packages-*
+          path: linux_packages
+          merge-multiple: true
 
       - name: Download app-engine candidates
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -181,6 +243,16 @@ jobs:
           pattern: app-engine-*
           path: app_engine_out
           merge-multiple: true
+
+      # The feed describes the standalone binaries and the packages of one
+      # release, so it is generated where both are present rather than in
+      # either builder.
+      - name: Generate releases.json
+        env:
+          VERSION: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+          PACKAGES_DIR: linux_packages
+        run: ./scripts/release/build_releases_json.sh > burrito_out/releases.json
 
       - name: Install cosign
         uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3.9.1
@@ -193,6 +265,8 @@ jobs:
           shopt -s nullglob
           artifacts=(
             burrito_out/fermix_*
+            linux_packages/fermix_*.deb
+            linux_packages/fermix-*.rpm
             app_engine_out/fermix_app_engine_*.tar.gz
           )
           unsigned=()
@@ -200,8 +274,8 @@ jobs:
             case "$artifact" in *.sig|*.pem|*.sha256) continue ;; esac
             unsigned+=("$artifact")
           done
-          [ "${#unsigned[@]}" -eq 6 ] || {
-            echo "::error::Expected four standalone and two app-engine artifacts, found ${#unsigned[@]}"
+          [ "${#unsigned[@]}" -eq 10 ] || {
+            echo "::error::Expected four standalone, four package and two app-engine artifacts, found ${#unsigned[@]}"
             exit 1
           }
           for artifact in "${unsigned[@]}"; do
@@ -227,6 +301,7 @@ jobs:
           path: |
             burrito_out/fermix_*
             burrito_out/releases.json
+            linux_packages/fermix*
             app_engine_out/fermix_app_engine_*
           if-no-files-found: error
           retention-days: 1
@@ -244,6 +319,13 @@ jobs:
           - { name: standalone-linux-arm64, os: ubuntu-24.04-arm, kind: standalone, target: linux_aarch64, mode: native }
           - { name: standalone-macos-arm64, os: macos-15, kind: standalone, target: macos_aarch64, mode: native }
           - { name: standalone-macos-x64, os: macos-15-intel, kind: standalone, target: macos_x86_64, mode: native }
+          # The deb rows install on the runner, which has a user service
+          # manager and allows linger, so the whole service transaction runs.
+          # The rpm rows install inside a Fedora container, which has neither.
+          - { name: deb-linux-x64, os: ubuntu-24.04, kind: deb, target: linux_x86_64, package_arch: amd64, mode: native }
+          - { name: deb-linux-arm64, os: ubuntu-24.04-arm, kind: deb, target: linux_aarch64, package_arch: arm64, mode: native }
+          - { name: rpm-linux-x64, os: ubuntu-24.04, kind: rpm, target: linux_x86_64, package_arch: x86_64, mode: native }
+          - { name: rpm-linux-arm64, os: ubuntu-24.04-arm, kind: rpm, target: linux_aarch64, package_arch: aarch64, mode: native }
           - { name: engine-macos-arm64, os: macos-15, kind: app_engine, target: macos_aarch64, mode: native }
           - { name: engine-macos-x64, os: macos-15-intel, kind: app_engine, target: macos_x86_64, mode: native }
           - { name: engine-macos-x64-rosetta, os: macos-15, kind: app_engine, target: macos_x86_64, mode: rosetta }
@@ -262,13 +344,19 @@ jobs:
       - name: Verify candidate signature and checksum
         env:
           CERTIFICATE_IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/release.yml@refs/tags/${{ github.ref_name }}
+          TAG_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          if [ "${{ matrix.kind }}" = standalone ]; then
-            artifact="burrito_out/fermix_${{ matrix.target }}"
-          else
-            artifact="app_engine_out/fermix_app_engine_${{ matrix.target }}.tar.gz"
-          fi
+          version="${TAG_NAME#v}"
+          case "${{ matrix.kind }}" in
+            standalone) artifact="burrito_out/fermix_${{ matrix.target }}" ;;
+            deb) artifact="linux_packages/fermix_${version}_${{ matrix.package_arch }}.deb" ;;
+            rpm) artifact="linux_packages/fermix-${version}-1.${{ matrix.package_arch }}.rpm" ;;
+            *) artifact="app_engine_out/fermix_app_engine_${{ matrix.target }}.tar.gz" ;;
+          esac
+          # The candidate path is resolved once and handed to the run step, so
+          # the package name with its rpm release component is spelled once.
+          echo "CANDIDATE_ARTIFACT=$artifact" >> "$GITHUB_ENV"
           directory="$(dirname "$artifact")"
           basename="$(basename "$artifact")"
           if command -v sha256sum >/dev/null 2>&1; then
@@ -305,6 +393,16 @@ jobs:
             "${TAG_NAME#v}" \
             "$SOURCE_COMMIT" \
             "${{ matrix.mode }}"
+
+      - name: Install and run the Linux package candidate
+        if: matrix.kind == 'deb' || matrix.kind == 'rpm'
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          scripts/release/verify_linux_package.sh \
+            "$CANDIDATE_ARTIFACT" \
+            "${{ matrix.kind }}" \
+            "${TAG_NAME#v}"
 
   stage-release:
     name: Stage draft release
@@ -347,6 +445,7 @@ jobs:
           files: |
             burrito_out/fermix_*
             burrito_out/releases.json
+            linux_packages/fermix*
             app_engine_out/fermix_app_engine_*
 
   verify-published:
@@ -364,6 +463,10 @@ jobs:
           - { name: standalone-linux-arm64, os: ubuntu-24.04-arm, kind: standalone, target: linux_aarch64, mode: native }
           - { name: standalone-macos-arm64, os: macos-15, kind: standalone, target: macos_aarch64, mode: native }
           - { name: standalone-macos-x64, os: macos-15-intel, kind: standalone, target: macos_x86_64, mode: native }
+          - { name: deb-linux-x64, os: ubuntu-24.04, kind: deb, target: linux_x86_64, package_arch: amd64, mode: native }
+          - { name: deb-linux-arm64, os: ubuntu-24.04-arm, kind: deb, target: linux_aarch64, package_arch: arm64, mode: native }
+          - { name: rpm-linux-x64, os: ubuntu-24.04, kind: rpm, target: linux_x86_64, package_arch: x86_64, mode: native }
+          - { name: rpm-linux-arm64, os: ubuntu-24.04-arm, kind: rpm, target: linux_aarch64, package_arch: aarch64, mode: native }
           - { name: engine-macos-arm64, os: macos-15, kind: app_engine, target: macos_aarch64, mode: native }
           - { name: engine-macos-x64, os: macos-15-intel, kind: app_engine, target: macos_x86_64, mode: native }
           - { name: engine-macos-x64-rosetta, os: macos-15, kind: app_engine, target: macos_x86_64, mode: rosetta }
@@ -385,11 +488,16 @@ jobs:
             echo "::error::The draft release did not expose its exact release ID."
             exit 1
           }
-          if [ "${{ matrix.kind }}" = standalone ]; then
-            artifact="fermix_${{ matrix.target }}"
-          else
-            artifact="fermix_app_engine_${{ matrix.target }}.tar.gz"
-          fi
+          version="${TAG_NAME#v}"
+          case "${{ matrix.kind }}" in
+            standalone) artifact="fermix_${{ matrix.target }}" ;;
+            deb) artifact="fermix_${version}_${{ matrix.package_arch }}.deb" ;;
+            rpm) artifact="fermix-${version}-1.${{ matrix.package_arch }}.rpm" ;;
+            *) artifact="fermix_app_engine_${{ matrix.target }}.tar.gz" ;;
+          esac
+          # Resolved once here and reused by the steps below, so the staged
+          # asset name is spelled in one place.
+          echo "STAGED_ARTIFACT=$artifact" >> "$GITHUB_ENV"
           release_json="$RUNNER_TEMP/staged-release.json"
           gh api "/repos/$REPO/releases/$RELEASE_ID" > "$release_json"
           [ "$(jq -r '.draft' "$release_json")" = true ] || {
@@ -417,11 +525,7 @@ jobs:
           CERTIFICATE_IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/release.yml@refs/tags/${{ github.ref_name }}
         run: |
           set -euo pipefail
-          if [ "${{ matrix.kind }}" = standalone ]; then
-            artifact="fermix_${{ matrix.target }}"
-          else
-            artifact="fermix_app_engine_${{ matrix.target }}.tar.gz"
-          fi
+          artifact="$STAGED_ARTIFACT"
           if command -v sha256sum >/dev/null 2>&1; then
             sha256sum -c "${artifact}.sha256"
           else
@@ -457,6 +561,16 @@ jobs:
             "$SOURCE_COMMIT" \
             "${{ matrix.mode }}"
 
+      - name: Install and run the staged Linux package
+        if: matrix.kind == 'deb' || matrix.kind == 'rpm'
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          scripts/release/verify_linux_package.sh \
+            "$STAGED_ARTIFACT" \
+            "${{ matrix.kind }}" \
+            "${TAG_NAME#v}"
+
   promote:
     name: Promote verified release
     needs: [stage-release, verify-published]
@@ -479,6 +593,40 @@ jobs:
             --method PATCH \
             "/repos/$REPO/releases/$RELEASE_ID" \
             --field draft=false >/dev/null
+
+  # The installer served at https://fermix.ai/install reads the public feed of
+  # the latest release, which a draft is not, so this is the first point at
+  # which it can be run for real. Nothing waits on it: a failure here says the
+  # advertised command is broken for a release that is already out.
+  installer:
+    name: Install the published release (${{ matrix.name }})
+    needs: promote
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: deb-linux-x64, os: ubuntu-24.04, kind: deb }
+          - { name: deb-linux-arm64, os: ubuntu-24.04-arm, kind: deb }
+          - { name: rpm-linux-x64, os: ubuntu-24.04, kind: rpm }
+          - { name: rpm-linux-arm64, os: ubuntu-24.04-arm, kind: rpm }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # With cosign present the installer checks the package signature instead
+      # of skipping the check, and the verification below requires that it did.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3.9.1
+
+      - name: Run the advertised installer against the published release
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          scripts/release/verify_installer.sh \
+            "${{ matrix.kind }}" \
+            "${TAG_NAME#v}"
 
   homebrew:
     name: Update and verify Homebrew formula

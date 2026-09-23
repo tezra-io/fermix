@@ -73,13 +73,29 @@ defmodule FermixCore.Jobs.TelemetryTest do
   end
 
   test "run_complete reports duration and status", %{job: job, run: run} do
-    JobTelemetry.run_complete(job, run, %{response: "done", iterations: 3, total_tokens: 250})
+    JobTelemetry.run_complete(job, run, %{
+      response: "done",
+      iterations: 3,
+      total_tokens: 250,
+      tool_failures: 2
+    })
 
     assert_receive {:job_event, [:fermix, :job, :run_complete], measurements, metadata}
     assert measurements.duration_ms == 5_000
     assert measurements.iterations == 3
     assert measurements.total_tokens == 250
+    assert measurements.tool_failures == 2
     assert metadata.status == "ok"
+  end
+
+  test "run_complete counts zero tool failures when the result carries none", %{
+    job: job,
+    run: run
+  } do
+    JobTelemetry.run_complete(job, run, %{response: "done"})
+
+    assert_receive {:job_event, [:fermix, :job, :run_complete], measurements, _metadata}
+    assert measurements.tool_failures == 0
   end
 
   test "run_error captures status and error", %{job: job, run: run} do

@@ -9,6 +9,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
   alias FermixCore.Agents.AgentDefinition
   alias FermixCore.Capabilities.Deferral
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.ComputerUse.Config, as: ComputerUseConfig
   alias FermixCore.Harness.Config, as: HarnessConfig
   alias FermixCore.Tools.SearchCredential
 
@@ -46,6 +47,24 @@ defmodule FermixCore.Prompt.RuntimeSections do
     channel: "Channel",
     system: "System"
   }
+
+  @doc """
+  Render order for capability categories: the order the built-in catalog
+  groups them in. Public so a second capability renderer (the Live voice
+  frontend's `Realtime.LivePrompt`) groups by the same vocabulary instead of
+  keeping a second copy of this list that drifts from it.
+  """
+  @spec category_order() :: [atom()]
+  def category_order, do: @category_order
+
+  @doc """
+  Display label for a capability category. Public for the same reason as
+  `category_order/0`; an unmapped category titleizes.
+  """
+  @spec category_label(atom()) :: String.t()
+  def category_label(category) when is_atom(category) do
+    Map.get(@category_labels, category, titleize(category))
+  end
 
   @spec build([skill()], keyword()) :: String.t()
   def build(available_skills, opts \\ []) when is_list(available_skills) and is_list(opts) do
@@ -88,11 +107,14 @@ defmodule FermixCore.Prompt.RuntimeSections do
     ## Runtime Contract
     #{deferred_tools_contract()}- Prefer direct Fermix built-ins over shell, curl, grep, computer-use, or external automation when a built-in owns the verb — but `computer_use` is the ONLY tool that acts on the user's OWN live screen; use it when the task is about a page/app/session they already have open (`browser`/`shell` run in their own context and won't touch their screen).
     - Even on the user's own screen, an intent the OS can NAME is a script, not a pixel hunt: launch apps from `shell` (`open -a` on macOS), drive app menus/settings/Finder through the OS scripting surface where it names the object (AppleScript via `osascript` on macOS), and spend `computer_use` clicks only on state that exists solely as pixels.
-    - Web routing — pick ONE and commit; switch only on a new reason, never rotate through tools for the same goal:
+    - When you do spend pixels: coordinates are pixels in the image you name. Every `computer_use` reply that hands back coordinates carries an `observation_id`, and every click, move, drag, scroll and inspect must carry the id of the image its x,y were read in — read and aim in the same image, and never re-send coordinates from an image that has been refused as unknown, expired or stale.
+    - Better still, don't aim at all — NAME the control. `computer_use`'s `elements` lists each control with a reference and says what that control itself supports: one that lists `press` is pressed by name (`press` with its `element_ref` and that listing's `observation_id`), which moves no pointer and cannot miss, and a `settable` field is filled with `set_value` instead of clicking it and typing. Spend pixels on what the accessibility tree does not expose.
+    - Every mutating `computer_use` action comes back with its own check: the view it acted in, captured once that view stopped changing, or — for a `press` or `set_value` — the control read again. A check that says nothing visible changed is a fact about the view, not a miss, and never a reason to send the same action again; when a run of actions leaves the view unchanged, take a fresh full `screenshot`, take `elements` and act on a control by name, or tell the user what is not working.
+    #{background_computer_use_rule()}- Web routing — pick ONE and commit; switch only on a new reason, never rotate through tools for the same goal:
       - If a connected plugin owns the surface (e.g. `github_*` for GitHub, `notion_*` for Notion, `obsidian_*` for the vault, `x_*` for X/Twitter, the Google tools for mail/calendar/drive) use its tools — they hit the real API directly; do NOT open the browser or `web_search` for that surface. Any such plugin is listed under Plugins below.
-      - `web_search` for static facts with no known URL (hours, prices, schedules, addresses, lookups).
+      - `web_search` for a fact with no known URL — anything current, changing, or possibly moved since training (prices, rates, versions, who holds a role, schedules, hours, addresses, news) as well as plain lookups; a confident memory of a mutable fact is still a reason to search.
       - `web_fetch` for the readable text of ONE known URL whose content is in the server HTML.
-    #{place_routing_rule()}  - `browser` for JavaScript/dynamic/interactive pages or live data (flight prices, seat maps, dashboards, login, forms) — in its OWN browser instance, not the page/app the user has open on screen (for that, `computer_use`).
+    #{place_routing_rule()}  - `browser` for JavaScript/dynamic/interactive pages or data only a rendered or driven page exposes (booking flows, seat maps, dashboards, login, forms) — in its OWN browser instance, not the page/app the user has open on screen (for that, `computer_use`).
       - Never shell-scrape a JS-rendered site (`curl`/`urllib`/`requests` return empty or partial markup — a dead end, not a retry). An empty `web_search`/`web_fetch` result on dynamic content is the signal to switch to `browser`, not to rerun the same tool.
     - Drive ONE surface per task: don't restart the same work in the other tool's separate session — wait for a change with the session you're already in (the browser's `act` wait for a page you drive, `computer_use`'s `wait_for_change` for the host screen). On a single shared page, structure goes through `browser` and pixels through `computer_use`: that split is one context, not a switch.
     - Research evidence — when a tool result (`web_search`, `web_fetch`, or any other tool that returns URLs) supplies a fact you state, keep that tool's exact URL in the answer:
@@ -152,6 +174,24 @@ defmodule FermixCore.Prompt.RuntimeSections do
 
       {:error, _reason} ->
         ""
+    end
+  end
+
+  # M42 slice 5 §1: rendered only where the operator switched the experimental
+  # bound-window surface on, exactly like the tool schema that offers it — the
+  # off-path prompt stays byte-identical to what shipped before it, so a daemon
+  # without the flag is never steered toward actions it does not advertise.
+  defp background_computer_use_rule do
+    if ComputerUseConfig.background?() do
+      "- `computer_use` can work INSIDE ONE WINDOW: `windows` to find it, `select_target` " <>
+        "with its `window_id` to bind it, and from then on every look and every action is " <>
+        "answered from that window's own picture, even when something covers it. Prefer it " <>
+        "for anything that lives in one application — the person keeps their own window in " <>
+        "front — and say " <>
+        ~s(`select_target` with `"window_id": "desktop"` when you really ) <>
+        "mean the whole screen, which moves the pointer where they can see it.\n"
+    else
+      ""
     end
   end
 
@@ -259,7 +299,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
   end
 
   defp format_category({category, capabilities}) do
-    "### #{Map.get(@category_labels, category, titleize(category))}\n#{capability_lines(capabilities)}"
+    "### #{category_label(category)}\n#{capability_lines(capabilities)}"
   end
 
   defp capability_lines(capabilities) do
@@ -284,7 +324,9 @@ defmodule FermixCore.Prompt.RuntimeSections do
         "Reserve your own direct tools for the genuinely incidental: running a quick " <>
         "calculation or one-off script via the shell, reading a file to answer a " <>
         "question, scratch work outside any project. For repository work the harness " <>
-        "is the default; your own hands are for the small, non-repo touches."
+        "is the default; your own hands are for the small, non-repo touches. An " <>
+        "explicit request outranks this default: when the user asks you to do the " <>
+        "work yourself, do it with your own hands."
 
     "#{base}#{vendor_preference(capabilities)}\n"
   end

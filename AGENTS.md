@@ -1,52 +1,34 @@
 # Fermix
 
-## Project
-Elixir-native multi-agent AI platform. Phoenix gateway, OTP-supervised agents, Rustler NIFs for crypto/tokenization only.
+Elixir-native multi-agent AI platform: Phoenix gateway, OTP-supervised agents, SQLite memory. Code map and invariants: `ARCHITECTURE.md`. This is the repo's only agent-instruction file; never add a `CLAUDE.md`, `.claude/CLAUDE.md` or `CLAUDE.local.md` (Claude Code would read that instead).
 
-**Stack:** Elixir, Phoenix, OTP, Rustler, SQLite
-**Predecessor:** RustyClaw — reference for channels, tools, providers
+## Architecture
+```
+apps/fermix_core/      # agents, providers, tools, memory, sandbox, harness, management protocol
+apps/fermix_channels/  # Telegram, Slack, Discord, Signal, WhatsApp, ACP, mobile, voice + gateway/queue
+apps/fermix_web/       # Phoenix: webhooks, health, LiveView, setup UI
+apps/fermix_opik/      # telemetry → Opik trace exporter
+apps/fermix_nif/       # C: kill_pgid/2 NIF (process-group kill) + macOS disclaim exec shim
+```
+Umbrella project; one BEAM VM, no HTTP bridge, everything OTP-supervised. Persistent Main Agent (GenServer, `:permanent`), single-flight per conversation; loop: LLM call → parse tool calls → execute → repeat until done. Providers over Req. Memory: SQLite (`FermixCore.Memory.Repo`, Exqlite) behind an ETS/GenServer hot path. Predecessor RustyClaw is the reference for channels, tools, providers.
 
-## Behavioral Guidance
-- The approved design is the plan. Implement against it, do not quietly re-design the task mid-flight.
-- Don't assume. State assumptions explicitly before coding. If multiple interpretations exist, surface them instead of picking silently.
-- If the request or design is unclear, stop and ask. If repo reality conflicts with the design, surface the mismatch before coding.
-- Prefer the simplest correct solution. No speculative abstractions, no extra flexibility, no "while I'm here" cleverness.
-- Make surgical changes. Touch only what the request requires. Mention unrelated issues, don't fix them unless asked.
-- For multi-step work, define success in `step -> verify` form and keep going until the checks pass.
-- If 200 lines could be 50, rewrite it.
+## Working Agreement
+- The approved design is the plan: implement against it, don't quietly re-design mid-flight.
+- Repo reality conflicts with the design, or the request has several readings → surface it before coding.
+- State assumptions explicitly; never pick silently.
 
 ## Execution Contract
-- If changing behavior, write or update a failing test first.
-- Implement the smallest change that satisfies the design.
-- Run the relevant repo commands below before calling the work done. Default expectation: typecheck or build, tests, and lint.
-- For docs, config, or scaffolding changes, run the relevant checks and say what is not applicable.
-- When a change adds, removes, or materially alters a feature, capability, tool, channel, provider, config surface, or CLI verb, update the `self_knowledge` skill (`apps/fermix_core/priv/skills/self_knowledge/SKILL.md`) in the same change. It is Fermix's runtime self-reference for explaining and fixing itself, and goes stale silently otherwise.
-- When adding/altering a **tool, provider, or run-type**, route its telemetry through the shared emitters so it stays correlatable (and Opik-traceable) — tool events via `FermixCore.Tools.Telemetry.exec/5`, provider calls via `FermixCore.Providers.Telemetry.emit_call/3`; **never** hand-roll `:telemetry.execute([:fermix, :tool|provider, ...])`. A new run-type needs a unique `session_id` (+ `parent_session` if spawned) and lifecycle bookend events; a genuinely new event name/run-kind also needs a `FermixOpik` update (the in-umbrella `apps/fermix_opik`). See `docs/TELEMETRY_CONTRACT.md`.
-- Never mark work done without proof.
+- Behavior change → write or update a failing test first.
+- Gates before done: build, tests, lint; say which don't apply. Never mark work done without proof.
+- A change that adds, removes or materially alters a feature, capability, tool, channel, provider, config surface or CLI verb must update the `self_knowledge` skill (`apps/fermix_core/priv/skills/self_knowledge/SKILL.md`) in the same change: it is Fermix's runtime self-reference and goes stale silently. No version numbers in it.
+- **Telemetry is not optional** (`docs/TELEMETRY_CONTRACT.md`): tools via `FermixCore.Tools.Telemetry.exec/5`, provider calls via `FermixCore.Providers.Telemetry.emit_call/3`, so events stay correlatable and Opik-traceable; **never** hand-roll `:telemetry.execute([:fermix, :tool|provider, ...])`. A new run-type needs a unique `session_id` (+ `parent_session` if spawned) and lifecycle bookends; a new event name or run-kind also needs a `fermix_opik` update. Trace errors before returning `{:error, reason}`.
+- **A user-facing capability ships with eval coverage in the same change, unasked.** ExUnit proves the unit; an eval proves the model *reaches it* through the real agent path, the half that silently rots.
+  - **Behavioral** (default): `benchmark/suites/<name>.yaml`, `make regression`. Real-user intent, the model picks the tool; route assertions only for safety plus one labelled sanity case. Vocabulary: `benchmark/suites/SCHEMA.md`.
+  - **Capability**: `benchmark/suites/capability/*.yaml`, `make capability-auto`. Ground-truth scoring, only `host_readonly`/`isolated_mutation`; the runner **refuses** `private_account_read`, `external_write`, `desktop_input`, `destructive`.
+  - **`risk:` is mandatory and its absence is silent**: no risk → `unclassified`, and `run_eval.select/3` silently skips any scenario whose risk is outside the active profile, so the suite validates, reports nothing and looks passed. (The capability runner refuses loudly; don't rely on that asymmetry.)
+  - Pre-grant every human-decision gate in `benchmark/bin/seed_capability_home.py` (see *Eval homes* below); a default-off consent gate turns a working feature into a suite of zeros.
+  - Finish with `--dry-run` (validates + plans, spends nothing) before any live run.
 
-## Code Rules (Non-Negotiable)
-
-1. **Linear flow.** Max 2 nesting levels. Top to bottom.
-2. **Bound loops.** Explicit max on retries, polls, recursion. Define cap behavior.
-3. **Small functions.** 40-60 lines max. One job per function.
-4. **Own resources.** Open → close on every path, including errors.
-5. **Narrow state.** No module globals. Pass deps explicitly.
-6. **Assert assumptions.** Guards and validation on every public function. Fail loud.
-7. **Never swallow errors.** No bare `rescue`. No `{:error, _} -> :ok`. Log, raise, or return.
-8. **Visible side effects.** I/O obvious at call site. Separate pure from effectful.
-9. **Minimal indirection.** Readable > elegant. One layer of abstraction max.
-10. **Surgical changes only.** Touch only what the request requires. Do not refactor adjacent code, comments, or formatting unless the task needs it. Remove only the dead code your change creates.
-11. **Warnings = errors.** Linters, typecheckers, analyzers are hard gates. Zero warnings.
-12. **No fallbacks.** One code path per behavior. Do not add a "fallback" branch that silently retries with a different mechanism, reads from a deprecated location, or degrades to a partially-working state when the primary path fails. Fallbacks double the surface area, hide which path actually ran, mask real failures behind "it kind of worked," and turn every bug into a five-branch investigation. The old flow is dead the moment the new flow ships — delete it; do not keep it as a safety net. If the primary path fails, fail loud at the boundary with a clear message and exit non-zero. Two valid configurations are fine (e.g., user-scope vs system-scope service); two paths to handle one configuration is not. If you think you need a fallback, you actually need (a) a clearer error message, (b) a single failure-recovery step for a destructive op (e.g., upgrade rollback — explicitly scoped, no user-facing chain), or (c) a different design that doesn't have the failure mode at all.
-
-## Conventions
-- `@callback` for all plugin interfaces (providers, channels, tools)
-- `{:ok, result} | {:error, reason}` tuples, not exceptions
-- GenServer callbacks thin — delegate to private functions
-- No business logic in Phoenix controllers
-- Typespecs on all public functions
-
-## Commands
 ```sh
 mix deps.get && mix compile
 mix test
@@ -54,72 +36,62 @@ mix credo --strict
 mix format --check-formatted
 ```
 
+## Code Rules (Non-Negotiable)
+1. **Linear flow.** Max 2 nesting levels. Top to bottom.
+2. **Bound loops.** Explicit max on retries, polls, recursion. Define cap behavior.
+3. **Small functions.** 40–60 lines max. One job per function.
+4. **Own resources.** Open → close on every path, including errors.
+5. **Narrow state.** No module globals. Pass deps explicitly.
+6. **Assert assumptions.** Guards and validation on every public function. Fail loud.
+7. **Never swallow errors.** No bare `rescue`. No `{:error, _} -> :ok`. Log, raise, or return.
+8. **Visible side effects.** I/O obvious at call site. Separate pure from effectful.
+9. **Minimal indirection.** Readable > elegant. One layer of abstraction max. If 200 lines could be 50, rewrite it.
+10. **Surgical changes only.** Touch only what the request requires; don't refactor adjacent code, comments, or formatting. Remove only the dead code your change creates. Mention unrelated issues; don't fix them unless asked.
+11. **Warnings = errors.** Linters, typecheckers, analyzers are hard gates. Zero warnings.
+12. **No fallbacks.** One code path per behavior: no branch that silently retries another mechanism, reads a deprecated location, or degrades to partially-working when the primary path fails. Fallbacks hide which path ran, mask failures behind "it kind of worked", and turn every bug into a five-branch investigation. When the new flow ships the old one is dead: delete it. If the primary path fails, fail loud at the boundary and exit non-zero. Two valid *configurations* are fine (user- vs system-scope service); two paths for one configuration are not. Think you need a fallback? You need (a) a clearer error, (b) one scoped recovery step for a destructive op (e.g. upgrade rollback), or (c) a design without the failure mode.
+    - **Corollary: no env overlays.** Never invent an env var to override a *setting* the config owns (a second code path that drifts and rots). Env overlays are only for secrets and feature flags; everything else lives in `config.toml`.
+
+## Conventions
+- `@callback` for all plugin interfaces (providers, channels, tools).
+- `{:ok, result} | {:error, reason}` tuples, not exceptions.
+- Thin GenServer callbacks that delegate to private functions.
+- No business logic in Phoenix controllers.
+- Typespecs on all public functions.
+
 ## Docs
-- `docs/TELEMETRY_CONTRACT.md` — Telemetry/observability contract — how new tools/providers/run-types stay correlatable + Opik-traceable (shared emitters, `session_id`/`parent_session`, content gating, the `fermix_opik` rule)
-- `docs/PROJECT_PLAN.md` — Full plan with phases
-- `docs/PHASE1_TASKS.md` — 16 tasks with implementation code
-- `docs/ROADMAP.md` — Post-MVP feature roadmap (M2-M9)
-- `docs/MILESTONE_2_MULTI_AGENT_ORCHESTRATION.md` — M2 design (partially implemented)
-- `docs/MILESTONE_3_ONBOARDING_CHANNEL_COVERAGE.md` — M3 design (shipped)
-- `docs/MILESTONE_4_ADVANCED_MEMORY.md` — M4 design (draft)
-- `docs/MILESTONE_4_5_PROMPT_BOOTSTRAP_ARCHITECTURE.md` — M4.5 design (draft)
-- `docs/MILESTONE_4_6_VERSIONED_PROMPT_RESOURCES.md` — M4.6 design (draft)
-- `docs/MILESTONE_4_8_DISTRIBUTION.md` — M4.8 design (draft) — Burrito single-binary, OS daemon, native Codex OAuth, `fermix upgrade`
-- `docs/MILESTONE_4_9_UNIFIED_CAPABILITIES.md` — M4.9 design (shipped) — `Capability`/`Adapter` behaviours, `CapabilityRegistry`, MCP outbound
-- `docs/MILESTONE_4_10_CODEX_PARITY.md` — M4.10 design (shipped) — Codex tool calls, provider/model/effort persistence, wizard step, doctor auth probe
-- `docs/MILESTONE_4_11_SCHEDULED_AGENTS.md` — M4.11 design (draft) — cron jobs, persistent memory sources, isolated runs
-- `docs/MILESTONE_4_12_INBOUND_MCP.md` — M4.12 design (draft) — Fermix as an MCP server (stdio + streamable HTTP), `[mcp.inbound]` config, policy-gated capability exposure, `fermix mcp serve`
-- `docs/MILESTONE_4_13_ANUBIS_MIGRATION.md` — M4.13 design (shipped) — MCP dependency migration from Hermes to Anubis for outbound and inbound MCP surfaces
-- `docs/MILESTONE_5_WORKSPACE_SANDBOX.md` — M5 design (shipped core) — workspace-rooted sandbox floor, modes (`strict`/`standard`/`open`), command profiles (`bare`/`assistant`/`extended`), hardline blocklist, `fermix grant` UX, env passthrough via `source = "command"` (no Fermix-owned keystore — defers to operator's OS helpers like `security`/`secret-tool`/`pass`/`op`), `SafeRm` test discipline
-- `docs/POST_M5_PLAN.md` — Post-M5 plan (draft) — finishes M5's unshipped halves (wizard secret writer, `auth.json` perms refusal, doctor trace scan, deny-message audit, rename migration error) and unifies MCP env routing through `Sandbox.Env`
-- `docs/MILESTONE_7_ADVANCED_TOOLS.md` — M7 design — keyless built-in tool catalog (file/git/web/delegate/skill_create), capability metadata + dynamic prompt summary, self-knowledge skill
-- `docs/MILESTONE_7_1_CONVERSATION_LIFECYCLE.md` — M7.1 design (draft) — threshold-driven auto-compaction, channel command surface (`/compact`, `/new`, `/clear`, `/help`), per-channel command authorization
-- `docs/MILESTONE_7_PLUS_PLUGGABLE_BACKENDS.md` — M7+ design (draft) — `Capability.Backend` behaviour, `[fermix_core.tools.<name>]` TOML, per-tool API-key wizard surface, `BuiltinSeeder.reseed/1`, `http_request` tool with `allowed_domains`
-- `docs/design/MILESTONE_8_PLUGIN_DISTRIBUTION.md` — M8 design (draft) — external plugin distribution: plugins move to the `fermix-plugins` repo, two rails (declarative HTTP templates in-VM + MCP process via Anubis), signed lazy per-plugin tarballs (sha256 + cosign + h1), static bundled catalog, versioned store under `FERMIX_HOME/plugins`, Google-plugin migration out of core — §6 superseded by M8.1
-- `docs/design/MILESTONE_8_1_STATIC_CATALOG_AND_FIRST_PLUGINS.md` — M8.1 design (draft) — static plugin catalog shipped in the fermix repo (no remote index/refresh), OAuth-first plugin auth, GitHub/Notion/Obsidian wave-1 plugins, fermix-plugins repo cleanup
-- `docs/MILESTONE_9_1_REALTIME_VOICE.md` — M9.1 design (shipped) — native macOS floating voice companion backed by OpenAI Realtime, daemon-owned tools/memory/traces, click-to-talk first, always-listening later
-- `docs/MILESTONE_9_2_FULL_DUPLEX_VOICE.md` — M9.2 design (draft reviewed) — full-duplex cleanup for macOS AEC, Realtime API shape, setup prompts, and removed legacy voice mode knobs
-- `docs/MILESTONE_9_3_PET_ANIMATION.md` — M9.3 design (draft) — pure-SwiftUI animation pass for FermixPet: `TimelineView` sine motion, PNG cache, expression cross-fade, audio-RMS speaking pulse, blink, one-shot event reactions
-- **FermixPet moved to `tezra-io/fermix-macos`** (extraction implemented per `docs/design/FERMIXPET_REPO_EXTRACTION_AND_NOTARIZED_DISTRIBUTION.md`) — SwiftPM source under `Apps/FermixPet/`, notarized universal2 DMG + Homebrew cask via `fermixpet-v*` tags, pet design docs tracked in its `docs/design/`. The daemon side of the realtime wire contract stays here: `apps/fermix_core/lib/fermix_core/realtime/` with the canonical machine-readable export in `apps/fermix_core/priv/realtime/` (vendored checksum-pinned by fermix-macos; a wire change is a paired cross-repo change — daemon ships first, N/N-1 window)
-- `docs/design/ANTHROPIC_XAI_PROVIDER_IMPLEMENTATION.md` — Anthropic + xAI provider design (draft) — API-key + OAuth auth modes (Claude Code / Grok subscription), Claude Code request emulation, provider touchpoint checklist
-- `docs/design/SUBAGENT_MODEL_SELECTION.md` — Sub-agent & cron model selection (implemented) — a smaller/cheaper model + thinking level for delegated `subagents` workers (config + wizard + web setup + on-the-fly `subagents` `model` arg) and unpinned cron jobs (`[fermix_core.routing]` `subagent_*`/`cron_*`, validated by `Providers.RoutingOverrides`); main agent never changes its own model. §15 = implementation log
-- `docs/design/MILESTONE_12_PROVIDER_EXPANSION.md` — M12 design (implemented) — OpenRouter + Ollama as first-class providers over the new `Providers.Descriptor` registry (replaces the ~25 hand-maintained provider lists), generic api-key/keyless resolver, `auth_mode :none`, ChatCompletions reuse + provider-attribution fix, fail-loud sweep for the silent unknown-provider traps; Gemini/Perplexity/Bedrock designed then descoped — §3.3 is the do-not-implement reference for a later wave. §16 = implementation log + deviations
-- `docs/design/SOUL_SELF_CURATION.md` — Soul self-curation design (implemented) — owner-only `/soul review` drafts versioned `SOUL.md` persona edits via one bounded provider call (`SoulCuration.propose/2`, no tools/no writes, mirrors `Memory.Reviewer`); `:review` (subtle, change-budget-bounded) vs `:suggest` (instruction-driven); `--with-context` folds bounded owner-authored evidence (guests filtered); propose→token→`/soul apply` confirmation; `revert`/`reset` over the resource registry; injection markers surfaced on the diff; `[:fermix, :soul_curation, :run_*]` telemetry + `fermix_opik` soul_curation run-kind
+Design docs live in `docs/design/`, one per milestone/feature, named for its subject. List the directory and read the relevant file; never infer a doc's status from its name (many are drafts, some gitignored). `docs/TELEMETRY_CONTRACT.md` is the one contract doc outside it.
+
+## Releasing across the four repos
+An engine fix reaches a Mac user only after all four repos move, in this order; skip one and it stays unshipped while every gate is green.
+1. **Engine (`tezra-io/fermix`).** Changes land by PR to `main`. A release is its own chore PR: version in `mix.exs` and the four release apps (`fermix_core`, `fermix_channels`, `fermix_web`, `fermix_nif`; `fermix_opik` keeps its own), plus a dated `CHANGELOG.md` entry naming every user-facing fix since the last tag. Tag `vX.Y.Z` on the merge commit only when the owner says so and that tree is proven green; `release.yml` then publishes the cosign-signed formula binaries and app-engine tarballs and bumps the tap formula. Walk `docs/RELEASING.md` before announcing.
+2. **App (`tezra-io/fermix-macos`).** The app runs the engine it *pins*, not the newest tag. One PR bumps: `engine/PIN.json` as a whole (tag, `source_commit`, `certificate_identity`, both `sha256` from the release's `.sha256` sidecars); `Resources/Contracts/SOURCE.json` provenance (re-vendor first if anything under `priv/management` or `priv/realtime` changed between the tags; `scripts/verify_protocol_contract.sh --source <engine checkout at the tag>` must say byte-identical); the version in `Product.json`, `project.yml` and the linked `Info.plist` (`scripts/render_info_plist.sh`). Prove it with `scripts/check_product_config.sh`, then `scripts/fetch_engine.sh` and `scripts/verify_engine.sh` against the published release. Tag `vX.Y.Z` on the merge; the rail pauses at the `release-macos` environment for owner approval, then publishes the DMG, the cumulative `appcast.xml` and the cask file, and opens the tap's cask PR.
+3. **Tap (`tezra-io/homebrew-tap`).** The formula bump comes from the engine rail; the cask bump is a PR the owner merges.
+4. **Site (`tezra-io/fermix-site`).** A PR to `dev` copies the app release's `appcast.xml` over `public/appcast.xml`; the download and verify pages derive DMG link, size, checksum and cosign identity from it at build time, so nothing else changes. The owner deploys. Installed apps find the update only once the served feed (`https://fermix.ai/appcast.xml`, five-minute cache) carries it. The site also serves the Linux installer: when `scripts/install.sh` changed since the last tag, the same PR copies it byte for byte over `src/installer/install.sh` (what `curl https://fermix.ai/install` receives; a browser at that address is sent to the install page) and re-pins its checksum and source commit in `src/config/installer.ts`. Never edit the served copy in the site repo, and deploy it only after the engine release it reads is published: an installer ahead of its release refuses every Linux package machine.
+
+Always: never push to `main` without a PR; never push a tag the owner hasn't asked for; no AI attribution in commits, PRs, or docs; the app shows the *pinned* engine's version, so say "pinned", not "latest".
 
 ## Known Pitfalls
-- Update this section every time the repo teaches you the same lesson twice.
-- **Test cleanup wiped the host (M5-shaped pass, 2026-04).** Codex generated a unit test whose `on_exit` hook called `File.rm_rf!(dir)` on a computed path; an empty interpolation collapsed `dir` to a root path and the host filesystem was wiped during `mix test`. **Rule:** never call `File.rm_rf` / `File.rm_rf!` / `File.rm` / `File.rm!` directly in `test/`. Route through `FermixCore.TestSupport.SafeRm.rm_rf!/1` (lands in M5 Stage 0), which hard-asserts the path is under a tmp prefix with ≥4 segments and no `..`. Sandbox tests must also never call `System.cmd` or `Port.open` — classify dangerous commands as strings via `Sandbox.classify/3`, never execute them. See `docs/MILESTONE_5_WORKSPACE_SANDBOX.md` §11.
-- **Tests overwrote real keychain secrets (secure-on-save, 2026-06).** When secure-on-save landed, tests that persisted config snapshots with fixture secrets ran against the real macOS `security` writer (`-U` updates in place) and clobbered the operator's actual keyring entries (`fermix:OPENAI_API_KEY`, `fermix:TELEGRAM_BOT_TOKEN`) — silently green locally, 24 failures on writer-less Linux CI. **Rule:** any test that can reach `SecretWriter` must run against `FermixTestSupport.SecretWriterStub` — `config/test.exs` now sets it as the test-env default; never delete that default, and tests exercising the writer-less path override with `UnavailableSecretWriter`, not by removing the stub. Same family as the SafeRm rule: tests must never mutate host state (filesystem, keychain, real `FERMIX_HOME`).
-- **Order-dependent test flake from leaked global app env (hermetic-config, 2026-06).** Two `async: false` tests asserted defaults that depend on global `Application` env they never established themselves, so an earlier module's leaked env flipped them — green locally, red on CI only under the right seed/`max_cases` (run 27104818459, seed 587472). `RouteResolverTest` "sane defaults" read `Config.provider/1` (global `:fermix_core, :providers`) and a leaked `anthropic: [auth_mode: "oauth"]` made the default resolve `:oauth` instead of `:api_key`; `Jobs.TelemetryTest` "run_start" `refute`d a captured `:input` but a leaked `:telemetry capture_content: true` attached it. **Rule:** a test asserting "the default when nothing is configured" or "X is NOT captured" must *establish* that precondition in its own `setup` (force `:providers`/`:agent`/`:telemetry` to the production baseline and restore on `on_exit`) — never assume the global env is clean. Reproduce these deterministically with a throwaway polluter module whose top-level `put_env` dirties app env before ExUnit runs. Same family as the SafeRm / keychain rules: tests must neither mutate nor silently depend on un-isolated host/global state.
-- **No unnecessary env overlays.** Don't invent an env var to override a *setting* the config already owns — that's a fallback: a second code path that drifts from the config and rots when the config model evolves. If clean config-driven design covers it, that *is* the design. An env overlay is justified only for a secret or to gate a new feature behind a flag; everything else is a setting and lives in `config.toml`. (Rule #12, applied to config.)
-- **Opik exported empty traces during `mix test` (env flag beat the env gate, 2026-06).** `FERMIX_OPIK_ENABLED=1` exported in the dev shell (needed for the daemon + eval skill) switched the exporter on inside `mix test`: the `only: [:dev, :prod]` dep gating in `fermix_core/mix.exs` only stops *fermix_core* from auto-starting opik, but `fermix_opik` is a **sibling umbrella app** whose `Application` still boots in `:test`, read the flag, attached the global telemetry `Reporter`, and POSTed every fixture's telemetry as near-empty traces. **Rule:** a feature flag is not an environment gate — an env-only switch can't tell `:dev`/`:prod` from `:test`. Gate "should this run at all" on the **compile-time env** (`@compiled_env Mix.env()`, release-safe), then let the flag decide within the allowed envs. Fixed in `8bc080f`: `FermixOpik.enabled?/0` is `@compiled_env != :test and enabled_by_flag?()`, so `mix test` never exports regardless of the flag. Same family as the host-state test rules: a test run must neither mutate nor export to live infra.
+Each rule below has its incident write-up under the same title in `docs/lessons.md`; read that entry before working in the area. When the repo teaches the same lesson twice, add the write-up there and a one-line rule here.
 
----
-_Every mistake is a rule waiting to be written._
-
-## Preserved Project-Specific Notes
-These notes came from the previous `CLAUDE.md`. Keep the template above as the primary operating guide, and use the preserved context below where it is still relevant.
-
-## Architecture
-```
-fermix/ (umbrella)
-├── apps/fermix_core/       # Agents, providers, tools, memory
-├── apps/fermix_channels/   # Telegram (only channel implemented so far)
-├── apps/fermix_web/        # Phoenix: webhooks, health, LiveView
-└── apps/fermix_nif/        # Rustler: HMAC-SHA256, tiktoken
-```
-
-- One BEAM VM, no HTTP bridge. Everything is OTP-supervised.
-- Persistent Main Agent (GenServer, `:permanent`) with single-flight per conversation
-- Agent loop: LLM call → parse tool calls → execute → loop until done
-- Providers via Req. Memory is in-memory (ConversationStore GenServer + ETS Store).
-
-## Observability (Every Task)
-Every component must emit structured traces. This is not optional.
-- LLM calls → `:telemetry.execute([:fermix, :provider, :call], measurements, metadata)`
-- Tool executions → `:telemetry.execute([:fermix, :tool, :exec], ...)`
-- Channel messages → `:telemetry.execute([:fermix, :channel, :message], ...)`
-- Agent lifecycle → `Trace.record(:agent_event, agent, data)`
-- Errors → always traced before returning `{:error, reason}`
-
-Traces write to `~/.fermix/traces/YYYY-MM-DD/` as JSONL. See `FermixCore.Trace`.
+- **Hermetic tests.** A test must never mutate or silently depend on host/global state; a computed-path delete once wiped a host. Never call `File.rm_rf`/`rm_rf!`/`rm`/`rm!` directly in `test/` (use `FermixTestSupport.SafeRm`); run anything that can reach `SecretWriter` against `FermixTestSupport.SecretWriterStub`; a test asserting a default must establish and restore its own app env, because umbrella `mix test` runs every app in ONE VM; a global handler's `assert_receive` must pin its own correlation id; a test that crosses a platform gate must inject the platform (`macos?: true`).
+- **Feature flag vs environment gate.** Gate "should this run at all" on the compile-time env (`@compiled_env Mix.env()`), then let the flag decide within it. A runtime-config default must let an already-set compile-time value win, `config/test.exs` must pin the posture the suite asserts, and the base `config/config.exs` must not pin that key at all.
+- **Gates and the world they inspect.** A gate must probe the world the work runs in (daemon tree, tree-less CLI, release boot, packaged standalone) and something guaranteed to exist at gate time. Pair every fail-closed branch with a first-run-on-a-fresh-machine test, keep failure kinds distinct, and give any CLI verb that inspects PATH, the process environment or the account's files a `scripts/release/verify_standalone.sh` step.
+- **Env sanitizers and credential context.** Test what a sanitizer includes, not only what it excludes; detection and execution must share one environment constructor; resolve identity through `Harness.Identity` instead of making `USER` fatal everywhere; inherit credential-store context such as `CLAUDE_CONFIG_DIR`.
+- **Plugin releases.** Releasing a plugin is a two-repo change and the catalog ships inside the binary: follow `fermix-plugins/plugins/README.md`, then regenerate `apps/fermix_core/priv/plugins/index.json` with `scripts/release/sync_plugin_catalog.py` — never hand-write pins. `runtime_kind` must be omitted, never `null`; a `remote_mcp` plugin cannot be developed through `dev_local`; `min_core_version` hides a plugin with no error.
+- **Trace files.** A trace file is not a run: bucket `~/.fermix-dev/traces/<date>/*.jsonl` by run window before counting error kinds, and check whether the run itself caused a vendor refusal.
+- **Long-lived state.** A defect in long-lived state is invisible to a fresh-process probe; reuse one process across the interval, because per-iteration setup re-establishes the very thing under test.
+- **Failures the trace can't show.** A terminal status word is not a diagnosis: the vendor's own words must reach the continuation notice, the delivered message and the persisted ledger row. One model tool call is exactly one `[:fermix, :tool, :exec]` event, via `Tools.Telemetry.exec/5`, under the name the model used.
+- **Whole feature surface.** Gate on the whole feature surface, not tool-by-tool: assert "**no** harness tool is advertised" over everything the seeder can register.
+- **Validity gates.** A validity gate keys on what was delivered (a positive signal such as non-empty output), never on a missing protocol marker. Before turning a degraded path into a hard error, name the layer that recovers it; mint only provider-error kinds that have their own sentence.
+- **Eval homes.** Eval homes are fresh `FERMIX_HOME`s, so every default-off consent gate blocks them silently: pre-grant every human-decision gate in `benchmark/bin/seed_capability_home.py`, and read the traces for a refusal or pending approval before believing an eval's 0.
+- **Behavioral gates.** A gate that encodes wording, a weekday or a truncated id fails clean product. A `reply_matches` vocabulary is a hand-maintained allowlist that rots on every model or prompt change (it has twice): use `reply_not_matches` plus a phrasing-independent floor, and a rubric that states requirements the judge cannot invert. Fixtures need absolute dates, and a bounded id keeps its suffix and hashes its middle.
+- **compux pairing.** compux and Fermix ship as a paired change, and the handshake refuses a `protocol_version` mismatch: move every ref and version string together, regenerate checksums through a PR, and match library and sidecar when testing an unreleased build.
+- **The macOS app.** This engine is half of `tezra-io/fermix-macos`. A change to what the app shows is a change to the management or realtime export in the same commit (goldens, `PROTOCOL.md`, `Management.CopyTest`); a wire-shape change ships daemon-first under a method minimum; bundle identity is fixed, keychain items are named by profile and never by home, and sidecar pins name released tags.
+- **macOS TCC identity.** Every process the daemon spawns inherits fermix as its macOS TCC "responsible process", and that identity churns every release: spawn through the `disclaim` exec shim, never an undisclaimed fallback, and keep the shim's strict build flags in lockstep between `apps/fermix_nif/Makefile` and ci.yml.
+- **Config round-trips.** A config section that normalizes strings→atoms MUST ship the inverse (`to_keyword/1`), and the persist path must use it; prove it with a save→load round-trip test seeded with the normalized app-env shapes.
+- **Default on.** A feature is not "default on" until it works after a fresh install AND a `brew upgrade` with zero new config: derive an operator value deterministically at acceptance time from config that already exists, visibly and snapshotted, with one resolver per concept.
+- **Passthrough lists.** A global passthrough list resolved all-or-nothing is one stale entry away from disabling every command, and a shell export never reaches a service: resolve per name, report the misses, and carry `tool_failures` beside a run's `status`.
+- **Replayed compile warnings.** Mix records a compile warning against its source and replays it forever ("the Inspect protocol has already been consolidated…"): read `_build/<env>/lib/<app>/.mix/compile.elixir` before theorising, clear it by changing one byte or with `mix compile --force`, and never loosen `warnings_as_errors`.
+- **API plugin architecture.** Start an OAuth REST integration from the existing GitHub, Notion and X HTTP plugins, not from a hosted MCP template, and keep provider-specific helpers such as Tesla command signing apart from ordinary REST methods.
+- **General-purpose prompt edits.** Keep task examples, sample replies and scripted jokes out of runtime prompts and use them only in evals; start prompt surgery with stale and duplicate instructions, and measure the net token change.
+- **App-managed production configuration.** Production Fermix is managed through the macOS app, so never prescribe the `fermix` CLI for its setup or recovery; a sandbox env allowlist neither stores credentials nor imports shell exports into the launchd engine.

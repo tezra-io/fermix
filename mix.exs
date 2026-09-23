@@ -4,7 +4,7 @@ defmodule Fermix.MixProject do
   def project do
     [
       apps_path: "apps",
-      version: "0.10.5",
+      version: "0.11.0",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       aliases: aliases(),
@@ -78,8 +78,46 @@ defmodule Fermix.MixProject do
           :assemble,
           &__MODULE__.write_app_engine_manifest/1
         ]
+      ],
+      # The Linux distribution package's engine (M38 §1.3, §2.2). Its own
+      # release name gives the packaged payload its own extraction namespace
+      # (`fermix_linux_package_erts-…`) and its own override variable
+      # (`FERMIX_LINUX_PACKAGE_INSTALL_DIR`, which the vendor unit sets), so a
+      # standalone install and a packaged one at the same version never touch
+      # each other's extracted tree. The two extra steps move the musl loader
+      # off `/tmp` and onto the root-owned address the package materialises.
+      fermix_linux_package: [
+        applications: applications,
+        include_executables_for: [:unix],
+        steps: [&__MODULE__.validate_linux_package/1, :assemble, &Burrito.wrap/1],
+        burrito: [
+          targets: [
+            linux_aarch64: [os: :linux, cpu: :aarch64],
+            linux_x86_64: [os: :linux, cpu: :x86_64]
+          ],
+          extra_steps: [
+            fetch: [post: [FermixCore.Release.PackagedMuslRuntime]],
+            patch: [post: [FermixCore.Release.PackagedInterpreter]]
+          ]
+        ]
       ]
     ]
+  end
+
+  @doc false
+  @spec validate_linux_package(Mix.Release.t()) :: Mix.Release.t()
+  def validate_linux_package(release) do
+    case FermixCore.BuildInfo.validate_linux_package(FermixCore.BuildInfo.identity()) do
+      :ok ->
+        release
+
+      {:error, {:invalid_build_info, field}} ->
+        Mix.raise(
+          "cannot assemble fermix_linux_package: invalid immutable build field #{field}; " <>
+            "recompile with FERMIX_BUILD_DISTRIBUTION=linux_package and the required " <>
+            "FERMIX_BUILD_* inputs"
+        )
+    end
   end
 
   @doc false

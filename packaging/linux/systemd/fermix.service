@@ -1,0 +1,20 @@
+[Unit]
+Description=Fermix multi-agent platform daemon (user-scope)
+StartLimitIntervalSec=infinity
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/fermix service run
+Environment=FERMIX_LINUX_PACKAGE_INSTALL_DIR=%h/.cache/fermix/runtime
+EnvironmentFile=-%h/.config/fermix/env
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+KillMode=mixed
+LimitNOFILE=65536
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

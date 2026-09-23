@@ -12,11 +12,13 @@ defmodule FermixCore.Trace.TelemetryHandler do
 
   alias FermixCore.Agents.LifecycleTelemetry
   alias FermixCore.Capabilities.MCP.Telemetry, as: MCPClientTelemetry
+  alias FermixCore.ComputerUse.Telemetry, as: ComputerUseTelemetry
   alias FermixCore.Harness.Telemetry, as: HarnessTelemetry
   alias FermixCore.Jobs.Telemetry, as: JobTelemetry
   alias FermixCore.Management.Telemetry, as: ManagementTelemetry
   alias FermixCore.Meetings.Telemetry, as: MeetingTelemetry
   alias FermixCore.Plugins.Auth.Telemetry, as: PluginAuthTelemetry
+  alias FermixCore.Realtime.LiveTelemetry
   alias FermixCore.SkillCuration.Telemetry, as: SkillCurationTelemetry
   alias FermixCore.SoulCuration.Telemetry, as: SoulTelemetry
   alias FermixCore.Temporal.FollowupTelemetry, as: TemporalFollowupTelemetry
@@ -264,7 +266,9 @@ defmodule FermixCore.Trace.TelemetryHandler do
       PluginAuthTelemetry.trace_event_definitions() ++
       ManagementTelemetry.trace_event_definitions() ++
       TemporalTelemetry.trace_event_definitions() ++
-      TemporalFollowupTelemetry.trace_event_definitions()
+      TemporalFollowupTelemetry.trace_event_definitions() ++
+      LiveTelemetry.trace_event_definitions() ++
+      ComputerUseTelemetry.trace_event_definitions()
   end
 
   defp build_trace_payload(%{agent_field: agent_field} = config, measurements, metadata) do

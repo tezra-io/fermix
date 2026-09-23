@@ -89,6 +89,11 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     @impl true
     def available?(_opts \\ []), do: true
 
+    # A probe reads nothing; these doubles stand in for a store that answers.
+    @impl true
+    def probe(opts \\ []),
+      do: %{store: Keyword.get(opts, :store, :keyring), state: :available, sentence: "double"}
+
     @impl true
     def get(key, opts \\ []) do
       :ets.insert(@table, {key, opts})
@@ -288,6 +293,52 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert Keyword.get(personalization, :timezone) == "Asia/Singapore"
     assert Keyword.get(personalization, :communication_style) == "blunt"
     assert Keyword.get(agent, :name) == "aira"
+  end
+
+  # The store choice is a setting like the profile: it must survive a save
+  # and a load, be applied to app env by the load, and stay out of a file
+  # that never chose it. Pinned with the normalized shapes the load path
+  # produces (see the config round-trip pitfall).
+  test "save/load round-trips the secret store, applies it, and omits the default" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn ->
+      FermixTestSupport.SafeRm.rm_rf!(tmp_home)
+      Application.delete_env(:fermix_core, :secret_store)
+    end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    default = %{fermix_core: [agent: [name: "aira"]], fermix_channels: [], fermix_web: []}
+    assert :ok = ConfigStore.save_snapshot(default)
+    refute File.read!(Path.join(tmp_home, "config.toml")) =~ "secret_store"
+    assert {:ok, loaded} = ConfigStore.load_runtime_config()
+    assert Keyword.get(loaded.fermix_core, :secret_store) == :keyring
+
+    chosen = %{fermix_core: [secret_store: :file], fermix_channels: [], fermix_web: []}
+    assert :ok = ConfigStore.save_snapshot(chosen)
+    assert File.read!(Path.join(tmp_home, "config.toml")) =~ ~s(secret_store = "file")
+    assert {:ok, loaded} = ConfigStore.load_runtime_config()
+    assert Keyword.get(loaded.fermix_core, :secret_store) == :file
+    assert :ok = ConfigStore.apply_snapshot(loaded)
+    assert Application.get_env(:fermix_core, :secret_store) == :file
+  end
+
+  test "an unknown secret store is refused by name when the file is loaded" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+    File.write!(Path.join(tmp_home, "config.toml"), ~s([fermix_core]\nsecret_store = "vault"\n))
+
+    assert_raise ArgumentError,
+                 ~r/secret_store must be "keyring" or "file", and "vault" is neither/,
+                 fn ->
+                   ConfigStore.load_runtime_config()
+                 end
   end
 
   test "save/load round-trips provider primary flags" do
@@ -608,6 +659,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
   max_retained_screenshots = 3
   courtesy = "yield"
   courtesy_idle_ms = 1000
+  background = false
 
   [fermix_core.computer_history]
   enabled = true
@@ -637,6 +689,9 @@ defmodule FermixCore.Setup.ConfigStoreTest do
 
   [fermix_core.plugins]
   dev_local = "/tmp/fermix-dev-local"
+
+  [fermix_web]
+  port = 4555
   """
 
   test "whole-snapshot save/load is a fixed point over every config section (round-trip gate)" do
@@ -671,6 +726,174 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert :ok = ConfigStore.save_snapshot(first)
     assert {:ok, second} = ConfigStore.load_runtime_config(resolve_secrets: false)
     assert second == first
+
+    # The listener lives outside `fermix_core`, so the roster check above cannot
+    # reach it; name it here rather than leave the one section the gate walks
+    # past unasserted.
+    assert second.fermix_web == [port: 4555]
+  end
+
+  # M38 §4.7. The listener port is a home setting, and the pitfall this file's
+  # gate above exists for is a section that normalizes one way: the live app-env
+  # shape is what setup actually persists, so the round-trip is seeded with THAT
+  # rather than with a TOML string.
+  describe "[fermix_web] port" do
+    setup do
+      tmp_home =
+        Path.join(System.tmp_dir!(), "fermix-web-listener-#{System.unique_integer([:positive])}")
+
+      previous = Application.get_env(:fermix_web, :listener)
+      File.mkdir_p!(tmp_home)
+      System.put_env("FERMIX_HOME", tmp_home)
+
+      on_exit(fn ->
+        FermixTestSupport.SafeRm.rm_rf!(tmp_home)
+        restore_env(:fermix_web, :listener, previous)
+      end)
+
+      %{home: tmp_home}
+    end
+
+    test "the normalized app-env shape survives save then load" do
+      Application.put_env(:fermix_web, :listener, port: 4555)
+
+      snapshot = ConfigStore.current_snapshot()
+      assert snapshot.fermix_web == [port: 4555]
+
+      assert :ok = ConfigStore.save_snapshot(snapshot)
+      assert {:ok, reloaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+      assert reloaded.fermix_web == [port: 4555]
+
+      # Idempotent over its own output, which is what makes the next save safe.
+      assert ConfigStore.persistable_snapshot(reloaded).fermix_web == [port: 4555]
+    end
+
+    test "an absent section stays absent rather than persisting a default" do
+      Application.put_env(:fermix_web, :listener, [])
+
+      assert :ok = ConfigStore.save_snapshot(ConfigStore.current_snapshot())
+      refute File.read!(ConfigStore.path()) =~ "[fermix_web]"
+      assert {:ok, reloaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+      assert reloaded.fermix_web == []
+    end
+
+    # A hand-edited port that could never bind is a named parse refusal, not a
+    # daemon quietly listening somewhere else.
+    test "a port outside the bounds refuses the parse by name", %{home: home} do
+      File.write!(Path.join(home, "config.toml"), "[fermix_web]\nport = 80\n")
+
+      assert_raise ArgumentError, ~r/\[fermix_web\].*1024.*65535/, fn ->
+        ConfigStore.load_runtime_config(resolve_secrets: false)
+      end
+    end
+
+    test "a non-integer port refuses the same way", %{home: home} do
+      File.write!(Path.join(home, "config.toml"), ~s([fermix_web]\nport = "4030"\n))
+
+      assert_raise ArgumentError, ~r/\[fermix_web\]/, fn ->
+        ConfigStore.load_runtime_config(resolve_secrets: false)
+      end
+    end
+
+    test "apply_snapshot puts the port where every surface reads it" do
+      Application.put_env(:fermix_web, :listener, [])
+
+      assert :ok =
+               ConfigStore.apply_snapshot(%{
+                 fermix_core: [],
+                 sandbox: [],
+                 fermix_channels: [],
+                 fermix_web: [port: 4444]
+               })
+
+      assert Application.get_env(:fermix_web, :listener) == [port: 4444]
+    end
+
+    # `put_web_port/2` names the home because `fermix service install` runs in a
+    # CLI whose own home is not necessarily the one being bound, and it must
+    # carry every unrelated setting across.
+    test "put_web_port records the port in a named home and preserves the rest", %{home: home} do
+      other = Path.join(home, "other-home")
+      File.mkdir_p!(other)
+
+      File.write!(
+        Path.join(other, "config.toml"),
+        "[fermix_core.agent]\nname = \"fermi\"\n\n[fermix_core.providers.openai]\napi_key = \"@keyring\"\n"
+      )
+
+      assert :ok = ConfigStore.put_web_port(other, 4600)
+
+      written = File.read!(Path.join(other, "config.toml"))
+      assert written =~ "[fermix_web]\nport = 4600"
+      assert written =~ ~s(name = "fermi")
+      assert written =~ ~s(api_key = "@keyring")
+      assert ConfigStore.web_port(other) == {:ok, 4600}
+    end
+
+    test "put_web_port creates a settings file when the home has none", %{home: home} do
+      fresh = Path.join(home, "fresh-home")
+
+      assert :ok = ConfigStore.put_web_port(fresh, 4601)
+      assert ConfigStore.web_port(fresh) == {:ok, 4601}
+    end
+
+    test "put_web_port refuses a port outside the bounds and writes nothing", %{home: home} do
+      fresh = Path.join(home, "refused-home")
+
+      assert {:error, {:invalid_port, sentence}} = ConfigStore.put_web_port(fresh, 22)
+      assert sentence =~ "1024"
+      refute File.exists?(Path.join(fresh, "config.toml"))
+    end
+
+    test "web_port reports an absent file as unset rather than as a fault", %{home: home} do
+      assert ConfigStore.web_port(Path.join(home, "nowhere")) == {:ok, nil}
+    end
+
+    # `[mcp.servers.*]` and `[mcp.inbound]` are read by their own parsers and
+    # are not in this renderer's snapshot, so re-rendering a settings file that
+    # carries one would delete it. Setting a port is not a reason to do that.
+    test "put_web_port refuses a settings file it cannot re-render", %{home: home} do
+      guarded = Path.join(home, "mcp-home")
+      File.mkdir_p!(guarded)
+      original = "[mcp.servers.github]\ncommand = \"npx\"\n"
+      File.write!(Path.join(guarded, "config.toml"), original)
+
+      assert {:error, {:unrenderable_settings, sentence}} =
+               ConfigStore.put_web_port(guarded, 4602)
+
+      assert sentence =~ "[mcp]"
+      assert File.read!(Path.join(guarded, "config.toml")) == original
+    end
+
+    defp restore_env(app, key, nil), do: Application.delete_env(app, key)
+    defp restore_env(app, key, value), do: Application.put_env(app, key, value)
+  end
+
+  # v1.1 decision 1: `sites` is retired. An operator's existing config.toml still
+  # carries it, so the parse boundary must ACCEPT it (never the boot refusal below),
+  # and the save must not write it back.
+  test "a retired computer_history key loads and is dropped on the next save (M32.1)" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.computer_history]
+    enabled = true
+    apps = ["com.apple.Safari"]
+    sites = ["github.com"]
+    """)
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+    computer_history = Keyword.get(loaded.fermix_core, :computer_history, [])
+    assert Keyword.get(computer_history, :apps) == ["com.apple.Safari"]
+    refute Keyword.has_key?(computer_history, :sites)
+
+    assert :ok = ConfigStore.save_snapshot(loaded)
+    refute File.read!(Path.join(tmp_home, "config.toml")) =~ "sites"
   end
 
   test "load refuses to boot on an unknown computer_history key (M32)" do
@@ -725,7 +948,8 @@ defmodule FermixCore.Setup.ConfigStoreTest do
           openai_api_key: "@keyring",
           xai_api_key: "@keyring",
           deepgram_api_key: "@keyring",
-          max_file_mb: 25
+          max_file_mb: 25,
+          local_offered: true
         ]
       ],
       fermix_channels: [],
@@ -739,6 +963,8 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert contents =~ ~s(backend = "deepgram")
     assert contents =~ ~s(model = "nova-3")
     assert contents =~ "max_file_mb = 25"
+    # The one switch that puts on-device speech back in setup's pickers.
+    assert contents =~ "local_offered = true"
     # Each per-backend keyring sentinel round-trips (never plaintext).
     assert contents =~ ~s(openai_api_key = "@keyring")
     assert contents =~ ~s(xai_api_key = "@keyring")
@@ -753,6 +979,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert Keyword.get(transcription, :xai_api_key) == "@keyring"
     assert Keyword.get(transcription, :deepgram_api_key) == "@keyring"
     assert Keyword.get(transcription, :max_file_mb) == 25
+    assert Keyword.get(transcription, :local_offered) == true
   end
 
   test "load refuses to boot on an unknown transcription key (M21)" do
@@ -1269,6 +1496,132 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     resolved_oauth = Keyword.get(resolved.fermix_core, :oauth, %{})
     resolved_google = Map.get(resolved_oauth, "google", [])
     assert Keyword.get(resolved_google, :client_secret) == "desktop-secret"
+  end
+
+  # An oauth section key that is not in the string -> atom table round-trips as a
+  # BINARY key, so `Keyword.get(config, :region)` silently misses it and the
+  # provider registry rebuilds a default region for a config that named one.
+  test "save/load round-trips the tesla oauth region and redirect URI as atom keys" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    snapshot = %{
+      fermix_core: [
+        oauth: %{
+          "tesla" => [
+            client_type: "desktop_public_pkce",
+            client_id: "tesla-client-id",
+            client_secret: "tesla-secret",
+            region: "eu",
+            redirect_uri: "https://fermix.ai/api/integrations/tesla/callback"
+          ]
+        }
+      ],
+      fermix_channels: [],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ "[fermix_core.oauth.tesla]"
+    assert contents =~ ~s(region = "eu")
+    assert contents =~ ~s(redirect_uri = "https://fermix.ai/api/integrations/tesla/callback")
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+    tesla = loaded.fermix_core |> Keyword.get(:oauth, %{}) |> Map.get("tesla", [])
+
+    assert Keyword.get(tesla, :region) == "eu"
+
+    assert Keyword.get(tesla, :redirect_uri) ==
+             "https://fermix.ai/api/integrations/tesla/callback"
+
+    # A binary key here is the failure this test exists for: it reads as absent.
+    refute Enum.any?(tesla, fn {key, _value} -> is_binary(key) end)
+  end
+
+  # A plugin this build retired is not a plugin the operator removed: the config
+  # on disk still enables it, still carries its section, and still maps its
+  # stored key. Nothing downstream may start it, and the operator has to be told
+  # by name — a retired remote-MCP plugin whose upstream moved on otherwise logs
+  # a discovery failure on every boot forever, which reads as "broken", not "gone".
+  test "a retired plugin is dropped from enabled, from its section and from its stored-key mapping, and named once" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-retired-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    File.mkdir_p!(tmp_home)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.plugins]
+    enabled = ["github", "eden"]
+
+    [fermix_core.plugins.github]
+    auth_profile = "github:primary"
+
+    [fermix_core.plugins.eden]
+    access_profile = "retrieval"
+    auth_profile = "eden:primary"
+    workspace_id = "46f02381-bbd6-4e8f-918e-0754e09dff2b"
+
+    [fermix_core.plugin_secrets]
+    eden = "@keyring"
+    """)
+
+    {result, log} =
+      with_log(fn -> ConfigStore.load_runtime_config(resolve_secrets: false) end)
+
+    assert {:ok, loaded} = result
+    plugins = Keyword.get(loaded.fermix_core, :plugins, [])
+
+    # The live plugin is untouched; only the retired one goes.
+    assert Keyword.get(plugins, :enabled) == ["github"]
+    entries = Keyword.get(plugins, :entries, %{})
+    assert Map.has_key?(entries, "github")
+    refute Map.has_key?(entries, "eden")
+    refute Map.has_key?(Keyword.get(loaded.fermix_core, :plugin_secrets, %{}), "eden")
+
+    # Named, so the operator can revoke the credential this does not touch.
+    assert log =~ "eden"
+    assert log =~ "retired"
+  end
+
+  test "the next save writes the file without the retired plugin" do
+    tmp_home =
+      Path.join(
+        System.tmp_dir!(),
+        "fermix-config-retired-save-#{System.unique_integer([:positive])}"
+      )
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    File.mkdir_p!(tmp_home)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.plugins]
+    enabled = ["github", "eden"]
+
+    [fermix_core.plugins.eden]
+    auth_profile = "eden:primary"
+    """)
+
+    {:ok, loaded} =
+      with_log(fn -> ConfigStore.load_runtime_config(resolve_secrets: false) end) |> elem(0)
+
+    assert :ok =
+             ConfigStore.save_snapshot(%{
+               fermix_core: loaded.fermix_core,
+               fermix_channels: [],
+               fermix_web: []
+             })
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    refute contents =~ "eden"
+    assert contents =~ ~s(enabled = ["github"])
   end
 
   test "load/save round-trips plugins dev_local as a top-level scalar" do
@@ -1880,7 +2233,8 @@ defmodule FermixCore.Setup.ConfigStoreTest do
           enabled: true,
           screenshot_after: false,
           max_retained_screenshots: 5,
-          max_actions: 25
+          max_actions: 25,
+          background: true
         ]
       ],
       fermix_channels: [],
@@ -1906,6 +2260,49 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert Keyword.get(computer_use, :screenshot_after) == false
     assert Keyword.get(computer_use, :max_retained_screenshots) == 5
     assert Keyword.get(computer_use, :max_actions) == 25
+    # M42 slice 5: a flag that vanished on save would leave the surface
+    # advertised in setup and dead on the next boot.
+    assert contents =~ "background = true"
+    assert Keyword.get(computer_use, :background) == true
+  end
+
+  # Every key this section has ever persisted and since retired is still sitting
+  # in the `config.toml` of every host that installed before it went — and
+  # `brew upgrade` never rewrites that file. A parse boundary that refused them
+  # would crash those daemons at boot with no way back, so the old keys are read
+  # past and a new one parses beside them.
+  test "a config.toml full of retired computer_use keys still boots, and background parses" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.computer_use]
+    enabled = true
+    mode = "browser"
+    display_width_px = 1366
+    display_height_px = 768
+    allowed_apps = ["Safari"]
+    allowed_domains = ["example.com"]
+    confirm_consequential = true
+    approval_timeout_ms = 30000
+    background = true
+    """)
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config()
+    computer_use = Keyword.get(loaded.fermix_core, :computer_use, [])
+
+    assert Keyword.get(computer_use, :enabled) == true
+    assert Keyword.get(computer_use, :background) == true
+
+    # Read past, never written back: the next save self-heals the file.
+    for retired <- ~w(mode display_width_px display_height_px allowed_apps
+                      allowed_domains confirm_consequential approval_timeout_ms)a do
+      refute Keyword.has_key?(computer_use, retired)
+    end
   end
 
   test "apply_snapshot writes computer_use config into Application env" do
@@ -2666,6 +3063,37 @@ defmodule FermixCore.Setup.ConfigStoreTest do
 
     # Idempotent round-trip: save the loaded snapshot and reload byte-stable
     # provider blocks (secure_secrets: false keeps the plaintext fixture).
+    assert :ok = ConfigStore.save_snapshot(loaded, secure_secrets: false)
+    assert {:ok, reloaded} = ConfigStore.load_runtime_config()
+
+    assert Keyword.get(reloaded.fermix_core, :providers) ==
+             Keyword.get(loaded.fermix_core, :providers)
+  end
+
+  test "a venice block round-trips through dump -> parse -> normalize" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.providers.venice]
+    api_key = "vk-disk"
+    base_url = "https://api.venice.ai/api/v1"
+    default_model = "grok-4-6"
+    primary = true
+    """)
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config()
+    providers = Keyword.get(loaded.fermix_core, :providers, [])
+
+    assert Keyword.get(providers[:venice], :api_key) == "vk-disk"
+    assert Keyword.get(providers[:venice], :base_url) == "https://api.venice.ai/api/v1"
+    assert Keyword.get(providers[:venice], :default_model) == "grok-4-6"
+    assert Keyword.get(providers[:venice], :primary) == true
+
     assert :ok = ConfigStore.save_snapshot(loaded, secure_secrets: false)
     assert {:ok, reloaded} = ConfigStore.load_runtime_config()
 

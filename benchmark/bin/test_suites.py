@@ -92,8 +92,14 @@ def test_sticky_gates_rejects_a_non_list(tmp_path):
     assert any("sticky_gates" in p for p in problems), problems
 
 
-def test_always_sticky_gates_are_the_prohibition_keys():
-    assert suites.ALWAYS_STICKY_GATES == ("tools_none", "tools_none_succeeded")
+def test_always_sticky_gates_are_the_prohibitions_and_recorded_state():
+    """The gates whose failure no retry can clear, none of which a scenario has to
+    declare. `fixture_state` is here on the same evidence as the two tool bans: a
+    violated `absent:` clause is the PAGE's own record that the action happened,
+    and its other failure kind grades inconclusive (grade.py), so a positive
+    clause stays as retryable as any other quality assertion."""
+    assert suites.ALWAYS_STICKY_GATES == (
+        "tools_none", "tools_none_succeeded", "fixture_state")
     assert set(suites.ALWAYS_STICKY_GATES) <= set(suites.STICKY_GATE_KEYS)
     assert set(suites.STICKY_GATE_KEYS) <= set(suites.EXPECT_SPEC)
 
@@ -226,23 +232,21 @@ def test_multi_turn_behavioral_case_is_allowed(tmp_path):
     assert len(scn.cases[0].turns) == 2
 
 
-RUN_TOOLS = ("codex_run", "claude_code_run", "codex_cloud_run")
-
-
-def test_the_hand_coding_cases_forbid_delegation_by_a_declared_gate():
-    # A case that asks the model to do the coding itself cannot enforce that in
-    # prose: a daemon whose own prompt routes repository work to a coding harness
-    # overrides it, and the trial then reads as a coding failure when what happened
-    # was a delegation. The constraint is declared so the verdict names it.
+def test_the_hand_coding_cases_grade_their_instruction_as_capability_not_safety():
+    # "Do this yourself" is a task instruction. Declared as `tools_none`, which is
+    # safety vocabulary, fifteen delegations were reported as fifteen safety violations
+    # and turned the release gate red for a reason that was not safety. A delegated
+    # trial fails the checker instead: the capability failure it is.
+    import run_capability
     doc = yaml.safe_load(open(os.path.join(CAP_DIR, "coding.yaml"), encoding="utf-8"))
     cases = [c for scn in doc["scenarios"] for c in scn["cases"]]
     hand = [c for c in cases
             if "do not delegate" in " ".join(c["query"].split()).lower()]
     assert hand, "the coding suite no longer asks for a case to be done by hand"
     for case in hand:
-        forbidden = set((case.get("expect") or {}).get("tools_none", []))
-        assert set(RUN_TOOLS) <= forbidden, (
-            f"{case['id']} tells the model not to delegate but does not grade it")
+        gates = set(case.get("expect") or {}) & set(run_capability.SAFETY_GATES)
+        assert not gates, f"{case['id']} grades a task instruction as safety: {gates}"
+        assert case.get("checker"), f"{case['id']} has no checker to grade the fix"
 
 
 def test_shipped_suites_still_load():

@@ -1,7 +1,10 @@
 defmodule FermixCore.Realtime.LocalVoiceSocketTest do
   use ExUnit.Case, async: false
 
+  alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.LocalVoiceSocket
+  alias FermixCore.Realtime.SessionServer
+  alias FermixCore.SocketPath
 
   defmodule FakeSession do
     def call_start(pid) do
@@ -16,6 +19,10 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
       do: Agent.update(pid, &Map.merge(&1, %{interrupted?: true, audio_end_ms: audio_end_ms}))
 
     def mute(pid, enabled?), do: Agent.update(pid, &Map.put(&1, :muted?, enabled?))
+
+    def cancel_task(pid, delegation_id),
+      do: Agent.update(pid, &Map.put(&1, :cancelled_task, delegation_id))
+
     def call_stop(pid), do: Agent.update(pid, &Map.put(&1, :stopped?, true))
   end
 
@@ -24,10 +31,73 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     def audio_chunk(_pid, _audio), do: :ok
     def interrupt(_pid, _audio_end_ms), do: :ok
     def mute(_pid, _enabled?), do: :ok
+    def cancel_task(_pid, _delegation_id), do: :ok
     def call_stop(pid), do: Agent.update(pid, &Map.put(&1, :stopped?, true))
   end
 
+  # A session whose provider refused the handshake: `call_start` answers with
+  # the typed refusal instead of opening a call.
+  defmodule RefusedSession do
+    def call_start(pid) do
+      Agent.update(pid, &Map.put(&1, :call_started?, true))
+      {:error, :provider_refused}
+    end
+
+    def audio_chunk(_pid, _audio), do: :ok
+    def interrupt(_pid, _audio_end_ms), do: :ok
+    def mute(_pid, _enabled?), do: :ok
+    def cancel_task(_pid, _delegation_id), do: :ok
+    def call_stop(pid), do: Agent.update(pid, &Map.put(&1, :stopped?, true))
+  end
+
+  # The live ordering of a refused handshake: the session pushes its own rich
+  # `error` to the companion — which IS the handler, blocked in `call_start` —
+  # and only then answers the refusal.
+  defmodule RichRefusedSession do
+    @refusal %{
+      type: "error",
+      reason: "provider_refused",
+      kind: "provider_refused",
+      detail: "401 Unauthorized"
+    }
+
+    def call_start(pid) do
+      send(Agent.get(pid, & &1.opts[:companion]), {:realtime, @refusal})
+      {:error, :provider_refused}
+    end
+
+    def audio_chunk(_pid, _audio), do: :ok
+    def interrupt(_pid, _audio_end_ms), do: :ok
+    def mute(_pid, _enabled?), do: :ok
+    def cancel_task(_pid, _delegation_id), do: :ok
+    def call_stop(pid), do: Agent.update(pid, &Map.put(&1, :stopped?, true))
+  end
+
+  # The same race with a non-terminal frame queued: it still has to reach the
+  # wire, and the refusal still has to be rendered after it.
+  defmodule StateThenRefusedSession do
+    def call_start(pid) do
+      send(
+        Agent.get(pid, & &1.opts[:companion]),
+        {:realtime, %{type: "state", state: "listening"}}
+      )
+
+      {:error, :provider_refused}
+    end
+
+    def audio_chunk(_pid, _audio), do: :ok
+    def interrupt(_pid, _audio_end_ms), do: :ok
+    def mute(_pid, _enabled?), do: :ok
+    def cancel_task(_pid, _delegation_id), do: :ok
+    def call_stop(pid), do: Agent.update(pid, &Map.put(&1, :stopped?, true))
+  end
+
+  # The handler snapshots `Config.current()` per connection, so the engine is
+  # global state: establish it for every test in this module and restore it,
+  # or a Live test leaks into the next module's "default engine" assertion.
   setup do
+    put_realtime_env(engine: "openai_realtime")
+
     socket_path =
       Path.join(System.tmp_dir!(), "fermix-realtime-#{System.unique_integer([:positive])}.sock")
 
@@ -59,6 +129,31 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     %{socket: socket, socket_path: socket_path}
   end
 
+  # M38 §4.4.6, the same pre-flight the control socket runs: an over-long address
+  # fails the bind with a bare `:einval`, which reads as a Fermix bug rather than
+  # as "your FERMIX_HOME is too long".
+  test "an over-long voice socket path refuses before bind and names the fix" do
+    path = Path.join([System.tmp_dir!(), String.duplicate("v", 160), "realtime.sock"])
+    limit = SocketPath.max_bytes()
+    # A refused `init/1` exits with its reason, and this process is its link.
+    Process.flag(:trap_exit, true)
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:error, {:socket_path_too_long, bytes, ^limit, ^path}} =
+                 LocalVoiceSocket.start_link(
+                   socket_path: path,
+                   name: :"rt_long_path_#{System.unique_integer([:positive])}"
+                 )
+
+        assert bytes == byte_size(path)
+      end)
+
+    assert log =~ "the realtime.sock path is #{byte_size(path)} bytes"
+    assert log =~ "set a shorter FERMIX_HOME and restart"
+    refute File.exists?(Path.dirname(path))
+  end
+
   test "binds the Unix socket with 0600 permissions", %{socket_path: socket_path} do
     stat = File.stat!(socket_path)
     assert Bitwise.band(stat.mode, 0o777) == 0o600
@@ -78,7 +173,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     assert Jason.decode!(String.trim(line)) == %{
              "type" => "server_hello",
              "min_version" => 1,
-             "max_version" => 1
+             "max_version" => 2
            }
 
     :gen_tcp.close(conn)
@@ -112,7 +207,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
              "direction" => "client_too_new",
              "client_version" => 99,
              "min_version" => 1,
-             "max_version" => 1
+             "max_version" => 2
            } = Jason.decode!(String.trim(line))
 
     assert {:error, :closed} = :gen_tcp.recv(conn, 0, 1_000)
@@ -212,6 +307,70 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     assert {:error, :timeout} = recv_line(conn, 50)
 
     :gen_tcp.close(conn)
+  end
+
+  # The companion has to be TOLD the provider refused; a connection that just
+  # closes looks like the daemon died and there is nothing to show the operator.
+  test "a session that refuses call_start puts the reason on the wire before closing" do
+    socket_path = start_socket_with(RefusedSession, "refused")
+
+    {:ok, conn} = connect(socket_path)
+    :ok = handshake(conn)
+    :ok = :gen_tcp.send(conn, ~s({"type":"call_start"}\n))
+
+    assert_receive {:session_started, _session, _opts}
+    assert {:ok, line} = recv_line(conn)
+
+    assert %{"type" => "error", "reason" => "provider_refused"} =
+             Jason.decode!(String.trim(line))
+
+    assert {:error, :closed} = :gen_tcp.recv(conn, 0, 1_000)
+  end
+
+  # The defect this pins: the session's rich error was queued in the handler's
+  # mailbox while the handler sat inside `call_start`, and the handler used to
+  # stop on the refusal without ever writing it — so the companion got a bare
+  # `provider_refused` with no kind and no vendor sentence, or nothing at all.
+  test "a queued error frame reaches the wire and suppresses the listener's bare one" do
+    socket_path = start_socket_with(RichRefusedSession, "rich")
+
+    {:ok, conn} = connect(socket_path)
+    :ok = handshake(conn)
+    :ok = :gen_tcp.send(conn, ~s({"type":"call_start"}\n))
+
+    assert_receive {:session_started, _session, _opts}
+    assert {:ok, line} = recv_line(conn)
+
+    assert Jason.decode!(String.trim(line)) == %{
+             "type" => "error",
+             "reason" => "provider_refused",
+             "kind" => "provider_refused",
+             "detail" => "401 Unauthorized"
+           }
+
+    # Exactly one error frame: the companion treats the first as terminal, so a
+    # second, poorer one would be the one it actually read.
+    assert {:error, :closed} = :gen_tcp.recv(conn, 0, 1_000)
+  end
+
+  test "a queued non-error frame is flushed before the listener's refusal" do
+    socket_path = start_socket_with(StateThenRefusedSession, "noisy")
+
+    {:ok, conn} = connect(socket_path)
+    :ok = handshake(conn)
+    :ok = :gen_tcp.send(conn, ~s({"type":"call_start"}\n))
+
+    assert_receive {:session_started, _session, _opts}
+
+    # Both frames leave the handler in one burst, so they can share one TCP
+    # read: take them as one two-line read rather than two single-line ones.
+    assert {:ok, [first, second]} = recv_lines(conn, 2)
+    assert %{"type" => "state", "state" => "listening"} = Jason.decode!(String.trim(first))
+
+    assert %{"type" => "error", "reason" => "provider_refused"} =
+             Jason.decode!(String.trim(second))
+
+    assert {:error, :closed} = :gen_tcp.recv(conn, 0, 1_000)
   end
 
   test "malformed event returns error and closes that client", %{socket_path: socket_path} do
@@ -571,6 +730,144 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     wait_until(fn -> Agent.get(session, &Map.get(&1, :stopped?)) == true end)
   end
 
+  test "a v1 companion on a Live-configured daemon is refused before any session starts", %{
+    socket_path: socket_path
+  } do
+    put_realtime_env(engine: "openai_live")
+
+    {:ok, conn} = connect(socket_path)
+    :ok = handshake(conn, 1)
+    :ok = :gen_tcp.send(conn, ~s({"type":"call_start"}\n))
+
+    assert {:ok, line} = recv_line(conn)
+
+    # The exact frame the pet decodes: `min_version` here is the version the
+    # ENGINE requires (2), not the handshake floor the daemon advertises (1).
+    assert Jason.decode!(String.trim(line)) == %{
+             "type" => "error",
+             "reason" => "unsupported_protocol_version",
+             "kind" => "update_required",
+             "direction" => "client_too_old",
+             "client_version" => 1,
+             "min_version" => 2,
+             "max_version" => 2,
+             "required_for" => "openai_live"
+           }
+
+    # Refused BEFORE the session starts — a Live call must never begin (and bill)
+    # for a companion that cannot render it.
+    refute_receive {:session_started, _session, _opts}, 100
+    assert {:error, :closed} = :gen_tcp.recv(conn, 0, 1_000)
+  end
+
+  test "a v2 companion runs a Live call", %{socket_path: socket_path} do
+    put_realtime_env(engine: "openai_live")
+
+    {:ok, conn} = connect(socket_path)
+    :ok = handshake(conn, 2)
+    :ok = :gen_tcp.send(conn, ~s({"type":"call_start"}\n))
+
+    assert_receive {:session_started, _session, _opts}
+    assert {:ok, line} = recv_line(conn)
+    assert %{"type" => "state", "state" => "listening"} = Jason.decode!(String.trim(line))
+
+    :gen_tcp.close(conn)
+  end
+
+  test "a v1 companion still runs the Realtime engine", %{socket_path: socket_path} do
+    put_realtime_env(engine: "openai_realtime")
+
+    {:ok, conn} = connect(socket_path)
+    :ok = handshake(conn, 1)
+    :ok = :gen_tcp.send(conn, ~s({"type":"call_start"}\n))
+
+    assert_receive {:session_started, _session, _opts}
+    assert {:ok, line} = recv_line(conn)
+    assert %{"type" => "state", "state" => "listening"} = Jason.decode!(String.trim(line))
+
+    :gen_tcp.close(conn)
+  end
+
+  test "a v2 companion runs the Realtime engine", %{socket_path: socket_path} do
+    put_realtime_env(engine: "openai_realtime")
+
+    {:ok, conn} = connect(socket_path)
+    :ok = handshake(conn, 2)
+    :ok = :gen_tcp.send(conn, ~s({"type":"call_start"}\n))
+
+    assert_receive {:session_started, _session, _opts}
+    assert {:ok, line} = recv_line(conn)
+    assert %{"type" => "state", "state" => "listening"} = Jason.decode!(String.trim(line))
+
+    :gen_tcp.close(conn)
+  end
+
+  test "task_cancel is refused under the Realtime engine", %{socket_path: socket_path} do
+    put_realtime_env(engine: "openai_realtime")
+
+    {:ok, conn} = connect(socket_path)
+    :ok = handshake(conn, 2)
+    :ok = :gen_tcp.send(conn, ~s({"type":"call_start"}\n))
+
+    assert_receive {:session_started, session, _opts}
+    assert {:ok, _line} = recv_line(conn)
+
+    :ok = :gen_tcp.send(conn, ~s({"type":"task_cancel","delegation_id":"dg_1"}\n))
+
+    assert {:ok, line} = recv_line(conn)
+
+    assert %{"type" => "error", "reason" => "unsupported_by_engine"} =
+             Jason.decode!(String.trim(line))
+
+    assert {:error, :closed} = :gen_tcp.recv(conn, 0, 1_000)
+    # The Realtime session never sees a cancel it has no vocabulary for.
+    assert Agent.get(session, &Map.get(&1, :cancelled_task)) == nil
+  end
+
+  test "task_cancel reaches the session under the live engine", %{socket_path: socket_path} do
+    put_realtime_env(engine: "openai_live")
+
+    {:ok, conn} = connect(socket_path)
+    :ok = handshake(conn, 2)
+    :ok = :gen_tcp.send(conn, ~s({"type":"call_start"}\n))
+
+    assert_receive {:session_started, session, _opts}
+    assert {:ok, _line} = recv_line(conn)
+
+    :ok = :gen_tcp.send(conn, ~s({"type":"task_cancel","delegation_id":"dg_1"}\n))
+    wait_until(fn -> Agent.get(session, &Map.get(&1, :cancelled_task)) == "dg_1" end)
+
+    # The connection stays open: cancelling a task does not end the call.
+    assert {:error, :timeout} = recv_line(conn, 50)
+
+    :gen_tcp.close(conn)
+  end
+
+  test "the default starter derives the engine module and session scope from the engine" do
+    put_openai_key()
+    put_realtime_env(engine: "openai_live")
+
+    assert {:ok, live_opts} = LocalVoiceSocket.session_opts([])
+    assert Keyword.fetch!(live_opts, :engine_module) == FermixCore.Realtime.LiveSessionServer
+    assert "voice_live:" <> _minted = Keyword.fetch!(live_opts, :session_scope)
+    assert Config.live?(Keyword.fetch!(live_opts, :config))
+
+    put_realtime_env(engine: "openai_realtime")
+
+    assert {:ok, realtime_opts} = LocalVoiceSocket.session_opts([])
+    assert Keyword.fetch!(realtime_opts, :engine_module) == SessionServer
+    assert "session:" <> _minted = Keyword.fetch!(realtime_opts, :session_scope)
+    refute Config.live?(Keyword.fetch!(realtime_opts, :config))
+  end
+
+  test "the default starter keeps a caller-supplied session scope" do
+    put_openai_key()
+    put_realtime_env(engine: "openai_live")
+
+    assert {:ok, opts} = LocalVoiceSocket.session_opts(session_scope: "voice_live:pinned")
+    assert Keyword.fetch!(opts, :session_scope) == "voice_live:pinned"
+  end
+
   # Starts a socket whose sessions are UNLINKED from their handler (Agent.start,
   # not start_link), matching production where the DynamicSupervisor owns the
   # session. A link would let a kill on one side cascade to the other and mask
@@ -610,6 +907,38 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     %{socket: socket, socket_path: socket_path}
   end
 
+  # A listener of its own, so a test can bind a session double other than the
+  # module-wide `FakeSession`. Returns the socket path; the session pid and its
+  # opts arrive as `{:session_started, pid, opts}`.
+  defp start_socket_with(session_module, label) do
+    unique = System.unique_integer([:positive])
+    socket_path = Path.join(System.tmp_dir!(), "fermix-realtime-#{label}-#{unique}.sock")
+    {:ok, task_sup} = Task.Supervisor.start_link(name: :"rt_socket_#{label}_tasks_#{unique}")
+    test_pid = self()
+
+    session_starter = fn opts ->
+      {:ok, pid} = Agent.start_link(fn -> %{opts: opts} end)
+      send(test_pid, {:session_started, pid, opts})
+      {:ok, pid}
+    end
+
+    {:ok, socket} =
+      LocalVoiceSocket.start_link(
+        socket_path: socket_path,
+        task_supervisor: task_sup,
+        session_starter: session_starter,
+        session_module: session_module,
+        name: :"rt_socket_#{label}_#{unique}"
+      )
+
+    on_exit(fn ->
+      stop_socket(socket)
+      FermixTestSupport.SafeRm.rm(socket_path)
+    end)
+
+    socket_path
+  end
+
   defp connect(socket_path) do
     :gen_tcp.connect(
       {:local, String.to_charlist(socket_path)},
@@ -621,14 +950,48 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
 
   # Completes the mandatory handshake and consumes the daemon's server_hello
   # reply so the following events dispatch instead of tripping the hello gate.
-  defp handshake(conn) do
-    :ok = :gen_tcp.send(conn, ~s({"type":"client_hello","protocol_version":1}\n))
+  defp handshake(conn, version \\ 1) do
+    :ok = :gen_tcp.send(conn, ~s({"type":"client_hello","protocol_version":#{version}}\n))
     assert {:ok, line} = recv_line(conn)
 
-    assert %{"type" => "server_hello", "min_version" => 1, "max_version" => 1} =
+    assert %{"type" => "server_hello", "min_version" => 1, "max_version" => 2} =
              Jason.decode!(String.trim(line))
 
     :ok
+  end
+
+  defp put_realtime_env(config) do
+    previous = Application.get_env(:fermix_core, :realtime, [])
+    Application.put_env(:fermix_core, :realtime, config)
+    on_exit(fn -> Application.put_env(:fermix_core, :realtime, previous) end)
+    :ok
+  end
+
+  defp put_openai_key do
+    previous = Application.get_env(:fermix_core, :providers, [])
+
+    Application.put_env(
+      :fermix_core,
+      :providers,
+      Keyword.put(previous, :openai, api_key: "sk-test-voice")
+    )
+
+    on_exit(fn -> Application.put_env(:fermix_core, :providers, previous) end)
+    :ok
+  end
+
+  # `count` newline-delimited frames, however the peer's writes were coalesced.
+  defp recv_lines(conn, count, timeout \\ 1_000, acc \\ "") do
+    lines = String.split(acc, "\n")
+
+    if length(lines) > count do
+      {:ok, Enum.take(lines, count)}
+    else
+      case :gen_tcp.recv(conn, 0, timeout) do
+        {:ok, bytes} -> recv_lines(conn, count, timeout, acc <> bytes)
+        {:error, reason} -> {:error, reason}
+      end
+    end
   end
 
   defp recv_line(conn, timeout \\ 1_000, acc \\ "") do

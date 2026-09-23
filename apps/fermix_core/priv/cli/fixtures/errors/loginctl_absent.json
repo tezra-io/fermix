@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "loginctl_absent",
+    "sentence": "This machine has no loginctl, so Fermix cannot keep the background service running after you log out. Run the daemon in the foreground with fermix run instead."
+  },
+  "ok": false,
+  "schema_version": 1
+}

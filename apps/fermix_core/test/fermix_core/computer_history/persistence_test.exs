@@ -278,8 +278,12 @@ defmodule FermixCore.ComputerHistory.PersistenceTest do
   end
 
   describe "migration 28" do
-    # A store written by the previous release: the four CH tables at migration 27
-    # with one memory row. Proves the upgrade path, not only a fresh file.
+    # A store written by the previous release: the base and job tables plus the
+    # four CH tables at migration 27, with one memory row. Proves the upgrade
+    # path, not only a fresh file. The base and job schemas are the real ones
+    # because a later migration may alter one of their tables (29 adds a
+    # `job_runs` column), and a store that claims 27 without the tables 27
+    # implies is not the previous release's store.
     defp seed_v27_database!(path) do
       {:ok, conn} = Sqlite3.open(path, mode: :readwrite)
 
@@ -291,6 +295,8 @@ defmodule FermixCore.ComputerHistory.PersistenceTest do
         );
         """)
 
+      :ok = Sqlite3.execute(conn, Repo.base_schema_sql())
+      :ok = Sqlite3.execute(conn, Repo.jobs_schema_sql())
       :ok = Sqlite3.execute(conn, ComputerHistorySql.events_schema_sql())
       :ok = Sqlite3.execute(conn, ComputerHistorySql.memories_schema_sql())
       :ok = Sqlite3.execute(conn, ComputerHistorySql.state_schema_sql())

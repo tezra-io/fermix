@@ -2,7 +2,7 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
   @moduledoc """
   MILESTONE_32 §8.4a / §6.4 — the capture rail against a fake compux sidecar
   (`fake_capture_sidecar.pl`). Proves the async event push end-to-end: handshake
-  (protocol v6 ack), buffered flush into `Ingest` → `Repo`, protocol-mismatch and
+  (the protocol ack), buffered flush into `Ingest` → `Repo`, protocol-mismatch and
   refused-start degradation, the machine-wide singleton stand-down, and that a
   malformed frame becomes a gap rather than a crash — all with an injected repo
   and an injected lock path so the suite never touches the real machine lock.
@@ -17,6 +17,12 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
   alias FermixCore.Memory.Repo
 
   @fake Path.expand("fake_capture_sidecar.pl", __DIR__)
+
+  # The rail requires exactly the wire the compiled-in library speaks. Pinned here
+  # rather than written as a number, because a hand-written integer in the test is
+  # how the two constants drift apart in the first place; the test below proves
+  # the capturer agrees.
+  @protocol Compux.Protocol.protocol_version()
 
   setup do
     unique = System.unique_integer([:positive])
@@ -59,7 +65,6 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
       binary_path: @fake,
       lock_path: ctx.lock_path,
       apps: ["com.apple.Safari"],
-      sites: [],
       flush_interval_ms: 25,
       batch_size: 50
     ]
@@ -107,10 +112,78 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
     )
   end
 
+  defp read_pid_file(path) do
+    with {:ok, contents} <- File.read(path),
+         {os_pid, _rest} <- Integer.parse(String.trim(contents)) do
+      {:ok, os_pid}
+    else
+      _not_yet -> :retry
+    end
+  end
+
+  defp os_process_alive?(os_pid) do
+    {_output, status} =
+      System.cmd("kill", ["-0", Integer.to_string(os_pid)], stderr_to_stdout: true)
+
+    status == 0
+  end
+
   # --- tests -------------------------------------------------------------
 
+  # Open → close on every path. A degrade is the one path that can run moments
+  # after the OS process was spawned, and the handle has to be in state ALREADY
+  # when it does, or the sidecar is dropped rather than reaped and the capturer
+  # sits `:degraded` holding an orphan — the leak `Compux.Port` exists to prevent.
+  # The fake records its own pid, so this asserts the process is GONE rather than
+  # merely forgotten.
+  describe "the spawned sidecar is reaped on every exit" do
+    test "a capturer that degrades before any ack leaves no live OS process", ctx do
+      pid_file =
+        Path.join(
+          System.tmp_dir!(),
+          "fermix-ch-pid-#{ctx.tmp}-#{System.unique_integer([:positive])}"
+        )
+
+      on_exit(fn -> FermixTestSupport.SafeRm.rm(pid_file) end)
+
+      # Never answers `observe_start`, so it stays ALIVE until something kills it:
+      # a capturer that merely forgot the handle would leave this process running.
+      pid =
+        start_capturer(ctx,
+          handshake_timeout_ms: 150,
+          sidecar_env: [
+            {~c"FAKE_SILENT", ~c"1"},
+            {~c"FAKE_PID_FILE", String.to_charlist(pid_file)}
+          ]
+        )
+
+      os_pid = eventually(fn -> read_pid_file(pid_file) end)
+
+      eventually(fn ->
+        if Capturer.status(pid).mode == :degraded, do: {:ok, :degraded}, else: :retry
+      end)
+
+      eventually(fn -> if os_process_alive?(os_pid), do: :retry, else: {:ok, :reaped} end)
+    end
+  end
+
   describe "handshake + event flow" do
-    test "acked v6 frames flow through Ingest into the repo", ctx do
+    # One constant, two halves: the capture rail's required version and the
+    # library's own. They live in different modules and are compared only here, so
+    # without this a protocol bump that misses one of them ships a capture rail
+    # that degrades on every healthy sidecar.
+    test "the required capture protocol equals the library's own", ctx do
+      pid = start_capturer(ctx, sidecar_env: [{~c"FAKE_PROTO", ~c"#{@protocol + 1}"}])
+
+      status =
+        eventually(fn ->
+          if Capturer.status(pid).mode == :degraded, do: {:ok, Capturer.status(pid)}, else: :retry
+        end)
+
+      assert {:protocol_mismatch, %{required: @protocol}} = status.reason
+    end
+
+    test "acked frames flow through Ingest into the repo", ctx do
       frames = [
         app_event(1),
         app_event(2, %{
@@ -133,6 +206,84 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
       assert seqs == [1, 2]
       assert Enum.all?(rows, &(&1.bundle_id == "com.apple.Safari"))
       assert Enum.any?(rows, &(&1.type == "field.value" and &1.text == "hello"))
+    end
+
+    # M32.1 §2.1/§2.2 end to end, through the real Port: the recorder's browser
+    # frames land under the app allowlist alone, the URL arrives stripped, a private
+    # navigation never lands, and a browser value the recorder could not classify
+    # keeps its row without its text. The unknown-state field frame is deliberately
+    # HOSTILE — the sidecar contract says it never sends text for a non-not_private
+    # window, and the store must prove that rather than trust it.
+    test "browser frames land stripped, gated and accounted for", ctx do
+      browser = fn seq, extra ->
+        app_event(
+          seq,
+          Map.merge(
+            %{"app" => %{"bundle_id" => "com.apple.Safari", "name" => "Safari", "pid" => 10}},
+            extra
+          )
+        )
+      end
+
+      frames = [
+        browser.(1, %{
+          "kind" => "browser.navigated",
+          "url" => "https://mail.example.com/u/0/inbox?token=abc#t9",
+          "host" => "mail.example.com",
+          "page_title" => "Inbox",
+          "window_ref" => "11",
+          "tab_ref" => "21",
+          "private_state" => "not_private"
+        }),
+        browser.(2, %{
+          "kind" => "browser.navigated",
+          "url" => "https://private.example/secret",
+          "host" => "private.example",
+          "window_ref" => "12",
+          "tab_ref" => "22",
+          "private_state" => "private"
+        }),
+        browser.(3, %{
+          "kind" => "field.value",
+          "browser_id" => "com.apple.Safari",
+          "window_ref" => "11",
+          "tab_ref" => "21",
+          "private_state" => "unknown",
+          "text" => "typed-into-an-unclassified-window",
+          "char_len" => 33
+        }),
+        browser.(4, %{
+          "kind" => "observer.gap",
+          "gap_reason" => "private_unknown",
+          "gap_from_ts" => 1_770_000_000_000,
+          "gap_to_ts" => 1_770_000_001_000
+        })
+      ]
+
+      events = events_file(ctx, frames)
+      start_capturer(ctx, sidecar_env: [{~c"FAKE_EVENTS_FILE", String.to_charlist(events)}])
+
+      rows =
+        eventually(fn ->
+          if length(stored(ctx.repo)) >= 3, do: {:ok, stored(ctx.repo)}, else: :retry
+        end)
+
+      by_seq = Map.new(rows, &{&1.source_seq, &1})
+      assert map_size(by_seq) == 3
+
+      assert by_seq[1].url == "https://mail.example.com/u/0/inbox"
+      assert by_seq[1].page_title == "Inbox"
+
+      # The private navigation is absent from the store, not filtered on read.
+      refute Map.has_key?(by_seq, 2)
+      refute Enum.any?(rows, &(&1.host == "private.example"))
+
+      assert by_seq[3].text == nil
+      assert by_seq[3].content_withheld == 1
+      assert by_seq[3].char_len == 33
+
+      assert by_seq[4].gap_reason == "private_unknown"
+      assert by_seq[4].bundle_id == "com.apple.Safari"
     end
 
     test "frames arriving before the ack are buffered, then flushed after the handshake", ctx do
@@ -158,7 +309,10 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
   # `collapsed` (and `dropped`) were computed and thrown away: a spool that quietly
   # loses 99% of its frames to the allowlist or the title collapse looked exactly
   # like a capture gap. Counts only — never a title, never any content (§15.1).
-  test "a flush that dropped or collapsed rows accounts for it, without content", ctx do
+  # An admission refusal prints BY KIND: "the recorder keeps sending private
+  # frames" and "the recorder keeps sending unusable addresses" are different
+  # problems, and one total would hide which.
+  test "a flush that dropped, collapsed or refused rows accounts for it, without content", ctx do
     previous_level = Logger.level()
     Logger.configure(level: :debug)
     on_exit(fn -> Logger.configure(level: previous_level) end)
@@ -169,6 +323,11 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
         "kind" => "window.title_changed",
         "app" => %{"bundle_id" => "com.evil.Keylogger", "name" => "K", "pid" => 11},
         "window_title" => "secret-window-title"
+      }),
+      app_event(3, %{
+        "kind" => "browser.navigated",
+        "url" => "https://private.example/secret-page",
+        "private_state" => "private"
       })
     ]
 
@@ -185,7 +344,9 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
 
     assert log =~ "computer_history ingest:"
     assert log =~ "dropped 1"
+    assert log =~ "refused private 1"
     refute log =~ "secret-window-title"
+    refute log =~ "secret-page"
   end
 
   describe "degradation (fail loud, no crash loop)" do
@@ -205,7 +366,7 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
           if Capturer.status(pid).mode == :degraded, do: {:ok, Capturer.status(pid)}, else: :retry
         end)
 
-      assert {:protocol_mismatch, %{required: 6, sidecar: 5}} = status.reason
+      assert {:protocol_mismatch, %{required: @protocol, sidecar: 5}} = status.reason
       assert stored(ctx.repo) == []
     end
 
@@ -214,7 +375,7 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
     # "type", which the decoder refuses. Filed as a gap, the capturer waited
     # forever for an ack that can never come — heartbeating the machine-wide lock
     # the whole time, so the other daemon on the Mac stood down for good.
-    test "a typeless reply to observe_start is a pre-v6 mismatch, not a gap", ctx do
+    test "a typeless reply to observe_start is an old-sidecar mismatch, not a gap", ctx do
       pid = start_capturer(ctx, sidecar_env: [{~c"FAKE_TYPELESS_ACK", ~c"1"}])
 
       status =
@@ -222,7 +383,7 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
           if Capturer.status(pid).mode == :degraded, do: {:ok, Capturer.status(pid)}, else: :retry
         end)
 
-      assert status.reason == {:protocol_mismatch, %{required: 6, sidecar: :pre_v6}}
+      assert status.reason == {:protocol_mismatch, %{required: @protocol, sidecar: :pre_v6}}
       # Released, so a healthy daemon on this Mac can take over.
       refute File.exists?(ctx.lock_path)
       # The wire was never verified, so there is no captured discontinuity to

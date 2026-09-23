@@ -1,13 +1,24 @@
 defmodule FermixCore.Setup.SecretMigration do
   @moduledoc """
-  Explicit migration from plaintext setup secrets to the OS secret store.
+  Explicit migration of setup secrets into the configured store.
+
+  Two kinds of secret are moved, and both are shown by name and confirmed one
+  by one: a plaintext value in `config.toml`, and a value the *other* store
+  holds (a `@keyring` secret when the file store is configured, a `@file` one
+  when the keyring is). Nothing else in Fermix moves a secret between stores,
+  which is what lets each sentinel be believed. A secret the other store cannot
+  currently give up — a locked keyring, say — stops the run by name rather
+  than being skipped as if it had moved.
   """
 
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Setup.ConfigStore
+  alias FermixCore.Setup.SecretPaths
   alias FermixCore.Setup.SecretStore
   alias FermixCore.Setup.SecretWriteLog
   alias FermixCore.Setup.SecretWriter
+
+  require Logger
 
   @type io_opts :: [puts: (String.t() -> any()), prompt: (String.t() -> String.t())]
 
@@ -17,9 +28,10 @@ defmodule FermixCore.Setup.SecretMigration do
     prompt = Keyword.get(io_opts, :prompt, &default_prompt/1)
 
     with {:ok, snapshot} <- ConfigStore.load_runtime_config(resolve_secrets: false),
-         secrets <- SecretStore.plaintext_secrets(snapshot),
-         :ok <- ensure_writer_available(secrets),
-         :ok <- maybe_migrate(snapshot, secrets, puts, prompt) do
+         store = SecretWriter.store(),
+         secrets = candidates(snapshot, store),
+         :ok <- ensure_store_usable(secrets, store),
+         :ok <- maybe_migrate(snapshot, secrets, store, puts, prompt) do
       :ok
     else
       {:error, reason} when is_binary(reason) -> {:error, reason}
@@ -31,42 +43,78 @@ defmodule FermixCore.Setup.SecretMigration do
   def plaintext_secrets(snapshot) when is_map(snapshot),
     do: SecretStore.plaintext_secrets(snapshot)
 
-  defp ensure_writer_available([]), do: :ok
+  # Every secret that is not where new secrets go: plaintext carries its value;
+  # one in the other store carries the store to read it from.
+  defp candidates(snapshot, store) do
+    plaintext = Enum.map(plaintext_secrets(snapshot), &Map.put(&1, :from, :plaintext))
 
-  defp ensure_writer_available(_secrets) do
-    if SecretWriter.available?() do
-      :ok
+    elsewhere =
+      SecretPaths.all()
+      |> Enum.flat_map(fn secret ->
+        case SecretWriter.store_of_sentinel(SecretStore.get_snapshot_value(snapshot, secret.path)) do
+          {:ok, ^store} -> []
+          {:ok, other} -> [Map.put(secret, :from, other)]
+          :error -> []
+        end
+      end)
+
+    plaintext ++ elsewhere
+  end
+
+  defp ensure_store_usable([], _store), do: :ok
+
+  # The operator is at the terminal, so a locked keyring may be tried on either
+  # side of a move: the desktop raises its unlock prompt once, and the reads and
+  # writes that follow wait for it. A store with nothing to answer is refused
+  # up front, by name.
+  defp ensure_store_usable(secrets, store) do
+    verdict = SecretWriter.probe(store: store)
+
+    if SecretWriter.attemptable?(verdict) do
+      ensure_sources_readable(secrets)
     else
-      {:error,
-       "No OS secret writer is available. Set secrets in shell rc, systemd unit, or launchd plist."}
+      {:error, "The #{store} store cannot take secrets right now: #{verdict.sentence}."}
     end
   end
 
-  defp maybe_migrate(_snapshot, [], puts, _prompt) do
-    puts.("No plaintext setup secrets found.")
+  defp ensure_sources_readable(secrets) do
+    secrets
+    |> Enum.map(& &1.from)
+    |> Enum.reject(&(&1 == :plaintext))
+    |> Enum.uniq()
+    |> Enum.find_value(:ok, fn from ->
+      verdict = SecretWriter.probe(store: from)
+
+      if SecretWriter.attemptable?(verdict),
+        do: nil,
+        else: {:error, "The #{from} store cannot be read right now: #{verdict.sentence}."}
+    end)
+  end
+
+  defp maybe_migrate(_snapshot, [], store, puts, _prompt) do
+    puts.("No setup secrets to move: every stored secret is already in the #{store} store.")
     :ok
   end
 
-  defp maybe_migrate(snapshot, secrets, puts, prompt) do
+  defp maybe_migrate(snapshot, secrets, store, puts, prompt) do
     with :ok <- backup_config() do
-      migrate_secrets(snapshot, secrets, puts, prompt)
+      migrate_secrets(snapshot, secrets, store, puts, prompt)
     end
   end
 
-  defp migrate_secrets(snapshot, secrets, puts, prompt) do
-    case Enum.reduce_while(secrets, {:ok, snapshot, []}, &migrate_one(&1, &2, puts, prompt)) do
-      {:ok, updated, migrated} ->
-        save_migrated_snapshot(updated, migrated, puts)
+  defp migrate_secrets(snapshot, secrets, store, puts, prompt) do
+    initial = {:ok, snapshot, []}
 
-      {:error, reason} ->
-        {:error, reason}
+    case Enum.reduce_while(secrets, initial, &migrate_one(&1, &2, store, puts, prompt)) do
+      {:ok, updated, migrated} -> save_migrated_snapshot(updated, migrated, store, puts)
+      {:error, reason} -> {:error, reason}
     end
   end
 
-  defp save_migrated_snapshot(snapshot, migrated, puts) do
+  defp save_migrated_snapshot(snapshot, migrated, store, puts) do
     case ConfigStore.save_snapshot(snapshot, secure_secrets: false) do
       :ok ->
-        puts.("Migrated #{length(migrated)} secret(s) to keyring.")
+        puts.("Moved #{length(migrated)} secret(s) to the #{store} store.")
         :ok
 
       {:error, reason} ->
@@ -74,27 +122,60 @@ defmodule FermixCore.Setup.SecretMigration do
     end
   end
 
-  defp migrate_one(secret, {:ok, snapshot, migrated}, puts, prompt) do
-    if confirm?(prompt, "Migrate #{secret.env} to the OS keyring? [y/N]: ") do
-      case SecretWriteLog.put(secret.key, secret.value) do
-        :ok ->
-          puts.("Migrated #{secret.env}.")
-
-          updated =
-            snapshot
-            |> SecretStore.put_snapshot_value(secret.path, SecretWriter.sentinel())
-            |> maybe_add_sandbox_env_source(secret)
-
-          {:cont, {:ok, updated, [secret.key | migrated]}}
-
-        {:error, reason} ->
-          {:halt, {:error, SecretWriter.format_error(secret.key, reason)}}
-      end
+  defp migrate_one(secret, {:ok, snapshot, migrated}, store, puts, prompt) do
+    if confirm?(
+         prompt,
+         "Move #{secret.env} (#{describe(secret.from)}) to the #{store} store? [y/N]: "
+       ) do
+      move(secret, snapshot, migrated, store, puts)
     else
       puts.("Skipped #{secret.env}.")
       {:cont, {:ok, snapshot, migrated}}
     end
   end
+
+  defp move(secret, snapshot, migrated, store, puts) do
+    with {:ok, value} <- read_source(secret),
+         :ok <- SecretWriteLog.put(secret.key, value, store: store) do
+      forget_source(secret)
+      puts.("Moved #{secret.env}.")
+
+      updated =
+        snapshot
+        |> SecretStore.put_snapshot_value(secret.path, SecretWriter.sentinel_for(store))
+        |> maybe_add_sandbox_env_source(secret)
+
+      {:cont, {:ok, updated, [secret.key | migrated]}}
+    else
+      {:error, reason} -> {:halt, {:error, SecretWriter.format_error(secret.key, reason)}}
+    end
+  end
+
+  defp read_source(%{from: :plaintext, value: value}), do: {:ok, value}
+
+  # A read that may have to wait for the unlock prompt the move just raised.
+  defp read_source(%{from: store, key: key}) do
+    SecretWriter.get(key, store: store, timeout_ms: SecretWriter.unlock_prompt_timeout_ms())
+  end
+
+  # The copy left behind in the store a secret came from is removed; when it
+  # cannot be, the move still happened and the log says what remains.
+  defp forget_source(%{from: :plaintext}), do: :ok
+
+  defp forget_source(%{from: store, key: key, env: env}) do
+    case SecretWriter.delete(key, store: store) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "#{env} moved, but its copy in the #{store} store could not be removed: #{inspect(reason)}"
+        )
+    end
+  end
+
+  defp describe(:plaintext), do: "plaintext in config.toml"
+  defp describe(store), do: "in the #{store} store"
 
   defp maybe_add_sandbox_env_source(snapshot, secret) do
     if Map.get(secret, :sandbox_env, false) do

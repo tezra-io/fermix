@@ -24,6 +24,8 @@ defmodule FermixCore.Setup.Doctor do
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Auth.TokenSupervisor
   alias FermixCore.ComputerUse
+  alias FermixCore.ComputerUse.Capabilities, as: ComputerUseCapabilities
+  alias FermixCore.ComputerUse.Config, as: ComputerUseConfig
   alias FermixCore.ComputerUse.Probe, as: ComputerUseProbe
   alias FermixCore.ComputerUse.SidecarInstaller
   alias FermixCore.Meetings
@@ -42,7 +44,14 @@ defmodule FermixCore.Setup.Doctor do
   alias FermixCore.Transcription.Local.SidecarInstaller, as: SttInstaller
 
   @type provider ::
-          :openai | :openai_codex | :anthropic | :xai | :openrouter | :ollama | :mistral
+          :openai
+          | :openai_codex
+          | :anthropic
+          | :xai
+          | :openrouter
+          | :ollama
+          | :mistral
+          | :venice
   @type probe_ok :: %{provider: provider(), model: String.t(), latency_ms: non_neg_integer()}
   @type channel_probe :: %{
           required(:channel) => atom(),
@@ -134,6 +143,7 @@ defmodule FermixCore.Setup.Doctor do
   @xai_default_base_url "https://api.x.ai/v1"
   @openrouter_default_base_url "https://openrouter.ai/api/v1"
   @mistral_default_base_url "https://api.mistral.ai/v1"
+  @venice_default_base_url "https://api.venice.ai/api/v1"
   @command_channels [:telegram, :whatsapp, :discord, :slack, :signal, :mobile]
   @web_search_probe_query "fermix web search health check"
   # A landmark, not a category: the place probe is never anchored (it must not
@@ -152,11 +162,11 @@ defmodule FermixCore.Setup.Doctor do
   ]
   @default_probe_timeout_ms 5_000
   # Operator-facing remedies for the on-device transcription backend. The
-  # "cannot be installed yet" sentences belong to the installer modules (they
+  # "cannot be installed here" sentences belong to the installer modules (they
   # own the reason) and are rendered verbatim; these two cover the ordinary
   # "nothing has been installed yet" case.
   @local_sidecar_remedy "The on-device speech sidecar is not installed. " <>
-                          "Install it from fermix setup → Transcription."
+                          "Install it from fermix setup → Voice notes (the on-device backend)."
   @local_model_remedy "The on-device speech model is not installed. " <>
                         "Install it from fermix setup → Voice notes (the on-device backend)."
   # The daemon never reads inside the profile; it knows only whether a sign-in
@@ -185,6 +195,7 @@ defmodule FermixCore.Setup.Doctor do
   def probe_provider(:openrouter, opts), do: probe_openrouter(opts)
   def probe_provider(:ollama, opts), do: probe_ollama(opts)
   def probe_provider(:mistral, opts), do: probe_mistral(opts)
+  def probe_provider(:venice, opts), do: probe_venice(opts)
 
   def probe_provider(other, _opts) do
     raise ArgumentError,
@@ -240,6 +251,36 @@ defmodule FermixCore.Setup.Doctor do
   defp probe_computer_use do
     case ComputerUseProbe.run() do
       {:ok, result} -> {:ok, Map.put(result, :state, :probed)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  The experimental bound-window surface (M42 slice 5 §4), as four states:
+
+    * `%{state: :disabled}`      — computer use itself is off.
+    * `%{state: :off}`           — computer use is on, the flag is not.
+    * `%{state: :not_installed}` — the flag is on, the native helper is not there.
+    * `%{state: :read, capabilities: …}` — what the installed helper advertises.
+
+  Read-only on every path: the last one reads the `hello` the helper answers at
+  its handshake, which takes no capture, posts no input and opens no consent
+  dialog. The first three spawn nothing at all, so on a machine with the flag off
+  — which is every machine by default — the row costs nothing.
+  """
+  @spec computer_use_background() :: {:ok, map()} | {:error, term()}
+  def computer_use_background do
+    cond do
+      not ComputerUse.enabled?() -> {:ok, %{state: :disabled}}
+      not ComputerUseConfig.background?() -> {:ok, %{state: :off}}
+      not SidecarInstaller.installed?() -> {:ok, %{state: :not_installed}}
+      true -> read_background_capabilities()
+    end
+  end
+
+  defp read_background_capabilities do
+    case ComputerUseCapabilities.read() do
+      {:ok, capabilities} -> {:ok, %{state: :read, capabilities: capabilities}}
       {:error, reason} -> {:error, reason}
     end
   end
@@ -548,8 +589,9 @@ defmodule FermixCore.Setup.Doctor do
 
   The on-device `local` backend has no credential at all — what it needs is an
   installed sidecar and an installed model — so it answers `:needs_install` with
-  the missing half named and the one sentence that fixes it. `release_pinned?:`
-  and `pins_pinned?:` are test seams for the far side of the pin gates.
+  the missing half named and the one sentence that fixes it. `opts` reach the
+  backend's own `configured?/1`, whose `releases:` seam stands for the machine's
+  pin, and `pins_pinned?:` is the test seam for the far side of the model pins.
   """
   @spec transcription_report(keyword()) :: transcription_report()
   def transcription_report(opts \\ []) do
@@ -569,18 +611,18 @@ defmodule FermixCore.Setup.Doctor do
   # problems with different fixes, so they stay distinct states rather than
   # collapsing into one "not configured" line.
   defp local_transcription_report(module, opts) do
-    case module.configured?([]) do
-      :ok -> %{status: :configured, backend: :local, credential_present?: true}
-      {:error, :sidecar_not_installed} -> local_sidecar_missing(opts)
-      {:error, :model_not_installed} -> local_model_missing(opts)
-    end
-  end
+    case module.configured?(opts) do
+      :ok ->
+        %{status: :configured, backend: :local, credential_present?: true}
 
-  defp local_sidecar_missing(opts) do
-    if Keyword.get(opts, :release_pinned?, SttInstaller.release_pinned?()) do
-      needs_install(:sidecar_not_installed, @local_sidecar_remedy)
-    else
-      needs_install(:no_release_pinned, SttInstaller.error_message(:no_release_pinned))
+      {:error, :sidecar_not_installed} ->
+        needs_install(:sidecar_not_installed, @local_sidecar_remedy)
+
+      {:error, :no_release_pinned} ->
+        needs_install(:no_release_pinned, SttInstaller.error_message(:no_release_pinned))
+
+      {:error, :model_not_installed} ->
+        local_model_missing(opts)
     end
   end
 
@@ -965,6 +1007,33 @@ defmodule FermixCore.Setup.Doctor do
     end
   end
 
+  # Unlike the chat probes above, this one asks a key-scoped endpoint rather
+  # than the runtime's own: Venice's `/models` is public and answers 200 with no
+  # key at all (M49 §2), so calling it would prove nothing about the credential.
+  # `/api_keys/rate_limits` needs the key and is unmetered — 200 proves it, 401
+  # rejects it, 402 means the account has no credit left. The trade is that this
+  # probe does not exercise the configured model id the way a chat probe does,
+  # so a wrong Venice model surfaces on the first turn instead of here.
+  defp probe_venice(opts) do
+    config = provider_config(:venice)
+
+    case chat_completions_bearer(config, :venice) do
+      {:error, _} = err ->
+        err
+
+      {:ok, bearer} ->
+        url = "#{base_url(config, :venice, @venice_default_base_url)}/api_keys/rate_limits"
+        model = effective_model(config, :venice)
+
+        headers = [
+          {"authorization", "Bearer #{bearer}"},
+          {"content-type", "application/json"}
+        ]
+
+        do_get(:venice, url, headers, model, "venice.ai API key", opts)
+    end
+  end
+
   # Keyless local provider: 1-token chat completion through the same /v1
   # path the adapter uses, then a native /api/show check that the SERVED
   # context window is not silently below the catalog window (Ollama
@@ -1220,6 +1289,15 @@ defmodule FermixCore.Setup.Doctor do
     |> classify(provider, model, surface, start)
   end
 
+  defp do_get(provider, url, headers, model, surface, opts) do
+    start = System.monotonic_time(:millisecond)
+
+    Req.new(url: url, method: :get, headers: headers, retry: false)
+    |> Req.merge(probe_req_options(opts))
+    |> Req.request()
+    |> classify(provider, model, surface, start)
+  end
+
   defp probe_req_options(opts) do
     opts
     |> Keyword.get(:req_options, [])
@@ -1278,6 +1356,7 @@ defmodule FermixCore.Setup.Doctor do
     {"api.x.ai", "SpaceXAI API key rejected — verify it in the SpaceXAI console"},
     {"openrouter.ai", "OpenRouter API key rejected — verify it at openrouter.ai/settings/keys"},
     {"mistral.ai", "Mistral API key rejected — verify it at console.mistral.ai/api-keys"},
+    {"venice.ai", "Venice API key rejected — verify it at venice.ai/settings/api"},
     {"Ollama", "the Ollama server rejected the request — check its auth/proxy configuration"}
   ]
 

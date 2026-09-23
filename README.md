@@ -21,7 +21,7 @@ Fermix is a personal, self-hosted AI agent: it runs as a background service on y
 
 - **One runtime.** Everything is a single Elixir/OTP application in one BEAM VM — no HTTP bridges, no external worker pool, no message broker. Persistent agents, concurrent conversations, and in-process sub-agents all fall out of that design.
 - **Reaches you anywhere.** Telegram, WhatsApp, Slack, Discord, Signal, and a local CLI all terminate in the same agent loop. The daemon side of a first-party iPhone companion — the `mobile` channel and its pairing ceremony — ships alongside them as groundwork: dormant behind a config flag, with no setup surface, until the app is released.
-- **Bring your own model.** Seven providers — OpenAI, OpenAI Codex, Anthropic, SpaceXAI, OpenRouter, Mistral, and a keyless local Ollama — chosen as one primary with an automatic fallback chain. Sub-agents and scheduled jobs can be pinned to their own cheaper model.
+- **Bring your own model.** Eight providers — OpenAI, OpenAI Codex, Anthropic, SpaceXAI, OpenRouter, Mistral, Venice, and a keyless local Ollama — chosen as one primary with an automatic fallback chain. Sub-agents and scheduled jobs can be pinned to their own cheaper model.
 - **Always on.** Scheduled jobs run digests, watchers, reminders, and checks — each isolated, bounded, stored durably, and delivered back through your channels. Work survives reboots.
 - **Self-contained.** Ships as one self-extracting binary per platform and installs an OS service unit on first run.
 
@@ -44,6 +44,14 @@ fermix: running (pid 12345, version 0.4.0, up 4s)
 ```
 
 ## Install
+
+### Linux package (Debian, Ubuntu, Fedora, RHEL, openSUSE)
+
+```bash
+curl -fsSL https://fermix.ai/install | sh
+```
+
+The installer picks the signed `.deb` or `.rpm` for this machine from the latest release, checks its sha256 (and its cosign signature when `cosign` is installed), installs it with `apt`, `dnf` or `zypper`, and runs `fermix setup` as your own account. The package owns the engine at `/usr/bin/fermix`, a systemd user unit and a bundled `cosign`. Run the same command again to update, then `fermix restart`. A Linux host with none of those package managers gets the standalone binary instead, and `--standalone` asks for it explicitly. The script is [`scripts/install.sh`](scripts/install.sh); the packages themselves are on every [release](https://github.com/tezra-io/fermix/releases).
 
 ### Homebrew (macOS, Linux)
 
@@ -140,6 +148,7 @@ Set it from the web setup **Transcription** card, or with `fermix setup --transc
 | `XAI_API_KEY` | Yes when provider is `xai` on api-key auth | SpaceXAI API key |
 | `OPENROUTER_API_KEY` | Yes when provider is `openrouter` | OpenRouter API key |
 | `MISTRAL_API_KEY` | Yes when provider is `mistral` | Mistral API key |
+| `VENICE_API_KEY` | Yes when provider is `venice` | Venice API key |
 | `FERMIX_ANTHROPIC_AUTH_MODE` | No | Override the Anthropic auth mode |
 | `FERMIX_XAI_AUTH_MODE` | No | Override the SpaceXAI auth mode |
 | `XAI_BASE_URL` | No | Override the SpaceXAI base URL |

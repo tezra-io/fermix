@@ -24,9 +24,12 @@ defmodule FermixCore.CommandRunner do
 
   alias FermixCore.ProcessGroup
 
+  @type env_mode :: :overlay | :replace
+
   @type opts :: [
           {:cwd, String.t() | nil}
           | {:env, [{String.t() | charlist(), String.t() | charlist()}]}
+          | {:env_mode, env_mode()}
           | {:timeout_ms, pos_integer()}
           | {:max_output_bytes, pos_integer()}
           | {:kill_grace_ms, pos_integer()}
@@ -37,6 +40,7 @@ defmodule FermixCore.CommandRunner do
   @type stream_opts :: [
           {:cwd, String.t() | nil}
           | {:env, [{String.t() | charlist(), String.t() | charlist()}]}
+          | {:env_mode, env_mode()}
           | {:timeout_ms, pos_integer()}
           | {:max_output_bytes, pos_integer()}
           | {:kill_grace_ms, pos_integer()}
@@ -78,11 +82,18 @@ defmodule FermixCore.CommandRunner do
     * `supervised: false` — the one-shot path (config-provider boot, tree-less
       CLI verbs). The call collects inline and sweeps at end of run; owner-death
       coverage is out of scope there.
+
+  `:env` is applied by `:env_mode`. `:overlay` (the default) adds the listed
+  variables to what the child inherits from the daemon. `:replace` makes the
+  list the child's whole environment: every inherited variable the list does
+  not name is unset, so a sandboxed command's variables never have to travel as
+  `env -i NAME=value` argv, where any process on the host can read them.
   """
   @spec run(String.t(), [String.t()], opts()) :: {:ok, result()} | {:error, reason()}
   def run(executable, args, opts \\ [])
       when is_binary(executable) and is_list(args) and is_list(opts) do
     limits = build_limits(opts)
+    _mode = env_mode!(opts)
 
     cond do
       not File.exists?(executable) ->
@@ -117,6 +128,8 @@ defmodule FermixCore.CommandRunner do
           {:ok, stream_result()} | {:error, reason()}
   def start_stream(executable, args, opts \\ [])
       when is_binary(executable) and is_list(args) and is_list(opts) do
+    _mode = env_mode!(opts)
+
     if File.exists?(executable) do
       start_stream_supervised(executable, args, opts)
     else
@@ -148,7 +161,7 @@ defmodule FermixCore.CommandRunner do
       args: args
     ]
     |> maybe_put_cwd(Keyword.get(opts, :cwd))
-    |> maybe_put_env(Keyword.get(opts, :env, []))
+    |> put_env(env_mode!(opts), Keyword.get(opts, :env, []))
   end
 
   # Streaming-mode port opts = the shared buffered opts plus `:in`. A default
@@ -363,23 +376,51 @@ defmodule FermixCore.CommandRunner do
     [{:cd, String.to_charlist(cwd)} | port_opts]
   end
 
-  defp maybe_put_env(port_opts, []), do: port_opts
+  defp put_env(port_opts, :overlay, []), do: port_opts
 
-  defp maybe_put_env(port_opts, env) when is_list(env) do
-    encoded =
-      Enum.map(env, fn
-        {k, v} when is_binary(k) and is_binary(v) ->
-          {String.to_charlist(k), String.to_charlist(v)}
+  defp put_env(port_opts, :overlay, env) when is_list(env),
+    do: [{:env, encode_env(env)} | port_opts]
 
-        {k, v} when is_list(k) and is_list(v) ->
-          {k, v}
+  # The port starts from the emulator's own environment and applies `:env` on
+  # top, and `{name, false}` is its one way to remove a variable. So the
+  # replacement is the supplied list plus an unset for every other variable the
+  # emulator holds now: read here, at spawn, by the process that opens the port.
+  defp put_env(port_opts, :replace, env) when is_list(env) do
+    supplied = encode_env(env)
+    kept = MapSet.new(supplied, &elem(&1, 0))
 
-        other ->
-          raise ArgumentError,
-                "CommandRunner env entry must be {String, String}: #{inspect(other)}"
-      end)
+    unset =
+      System.get_env()
+      |> Enum.map(fn {name, _value} -> String.to_charlist(name) end)
+      |> Enum.reject(&MapSet.member?(kept, &1))
+      |> Enum.map(&{&1, false})
 
-    [{:env, encoded} | port_opts]
+    [{:env, supplied ++ unset} | port_opts]
+  end
+
+  defp encode_env(env) do
+    Enum.map(env, fn
+      {k, v} when is_binary(k) and is_binary(v) ->
+        {String.to_charlist(k), String.to_charlist(v)}
+
+      {k, v} when is_list(k) and is_list(v) ->
+        {k, v}
+
+      other ->
+        raise ArgumentError,
+              "CommandRunner env entry must be {String, String}: #{inspect(other)}"
+    end)
+  end
+
+  defp env_mode!(opts) do
+    case Keyword.get(opts, :env_mode, :overlay) do
+      mode when mode in [:overlay, :replace] ->
+        mode
+
+      other ->
+        raise ArgumentError,
+              "CommandRunner option :env_mode must be :overlay or :replace, got: #{inspect(other)}"
+    end
   end
 
   defp positive_int_opt(opts, key, default) do

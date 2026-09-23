@@ -24,11 +24,29 @@ defmodule FermixCore.Tools.ReminderSnoozeTest do
     @moduledoc false
 
     def send_message(destination, text, opts) do
-      destination
-      |> String.to_existing_atom()
-      |> Agent.get_and_update(fn state ->
+      channel = String.to_existing_atom(destination)
+      await_release(channel)
+
+      Agent.get_and_update(channel, fn state ->
         {:ok, %{state | calls: state.calls ++ [%{text: text, opts: opts}]}}
       end)
+    end
+
+    # The worker's whole job is this one send, so it can already be gone when a
+    # monitor placed after start_delivery runs — and a monitor on a dead process
+    # answers :noproc, which a pinned :normal can never match. DynamicSupervisor
+    # gives the test no link to trap, so the barrier lives here: parking before
+    # the call is recorded holds the worker provably alive until the test says
+    # its monitor is in place. The test pid rides in the agent, so the real send
+    # path still carries no test-only option.
+    defp await_release(channel) do
+      send(Agent.get(channel, & &1.test_pid), {:adapter_entered, self()})
+
+      receive do
+        :release_adapter -> :ok
+      after
+        5_000 -> raise "the scripted delivery adapter was never released"
+      end
     end
   end
 
@@ -442,12 +460,13 @@ defmodule FermixCore.Tools.ReminderSnoozeTest do
     setup %{repo: repo, unique: unique} do
       supervisor = :"reminder_snooze_sup_#{unique}"
       channel = :"reminder_snooze_channel_#{unique}"
+      channel_state = %{calls: [], test_pid: self()}
 
       start_supervised!({DeliverySupervisor, name: supervisor})
 
       start_supervised!(%{
         id: {:channel, channel},
-        start: {Agent, :start_link, [fn -> %{calls: []} end, [name: channel]]},
+        start: {Agent, :start_link, [fn -> channel_state end, [name: channel]]},
         restart: :temporary
       })
 
@@ -489,7 +508,9 @@ defmodule FermixCore.Tools.ReminderSnoozeTest do
           delivery_opts: [adapter: ScriptedAdapter]
         })
 
+      assert_receive {:adapter_entered, sender}
       ref = Process.monitor(pid)
+      send(sender, :release_adapter)
       assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
 
       assert [%{text: text}] = Agent.get(ctx.channel, & &1.calls)

@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Search fixture — results appear, then a detail view</title>
+<!-- An empty data: icon, so the page requests nothing at all: a browser's
+     automatic /favicon.ico fetch would 404 and put a console error in front of
+     anyone debugging a failing case. -->
+<link rel="icon" href="data:,">
+<style>
+  body { font: 16px/1.5 system-ui, sans-serif; margin: 2rem auto; max-width: 40rem; }
+  input { font: inherit; padding: 0.3rem; width: 20rem; }
+  button { font: inherit; padding: 0.3rem 1rem; }
+  #results li { margin: 0.35rem 0; }
+  #part-code { font-size: 1.5rem; font-weight: 700; }
+</style>
+</head>
+<body>
+<h1>Parts catalogue (fixture)</h1>
+<p>
+  The catalogue is not listed. Search it, and the matches appear as links; open
+  one, and its detail view appears with the part code on it. A part code exists
+  nowhere on this page until its own entry is opened.
+</p>
+
+<form id="search" autocomplete="off">
+  <label for="query">Search the catalogue</label>
+  <input id="query" name="query" type="text">
+  <button type="submit" id="go">Search</button>
+</form>
+
+<div id="panel">
+  <p id="status">No search yet.</p>
+  <ul id="results"></ul>
+</div>
+<p id="fixture-status"></p>
+
+<script src="fixture.js"></script>
+<script>
+// Fixture for the `browser` tool's post-action page observation, and the
+// corpus's "search and open a result" intent. Served by the runner-owned fixture
+// server under this case attempt's token; the suites address it with
+// __EVAL_FIXTURE_URL__ (suites/browser.yaml, suites/capability/browser_forms.yaml,
+// suites/capability/browser_corpus.yaml).
+//
+// Two STRUCTURAL changes, one per action, so a run exercises "act returns what
+// changed": pressing Enter (or clicking Search) replaces the empty panel with a
+// list of result LINKS that were not in the tree before, and clicking one
+// replaces that list with a detail view. Both are page changes an action reports
+// back with a fresh snapshot, so neither needs a separate snapshot call.
+//
+// The part code is the outcome floor. It is held here in JavaScript, rendered
+// only into the detail view of the entry that was opened, and named in no
+// prompt — so a reply carrying one is proof that the search ran, the right
+// result was opened, and the detail view was read.
+//
+// Matching is a case-insensitive substring of the title, and `escapement`
+// deliberately matches two entries: a case that asks for one of them by name
+// has to open the right link rather than the only link.
+//
+// Nothing is stored and nothing is sent: no localStorage, no sessionStorage, no
+// cookies, no network, and neither the search nor a result link navigates. Every
+// page load starts from the same catalogue with no search run.
+(function () {
+  "use strict";
+
+  const CATALOGUE = [
+    { id: 'lantern-gear', title: 'Lantern gear', code: 3155 },
+    { id: 'brass-flywheel', title: 'Brass flywheel', code: 4092 },
+    { id: 'copper-bearing', title: 'Copper bearing', code: 7318 },
+    { id: 'iron-pinion', title: 'Iron pinion', code: 2864 },
+    { id: 'silver-escapement', title: 'Silver escapement', code: 6208 },
+    { id: 'escapement-spring', title: 'Escapement spring', code: 5731 },
+    { id: 'tin-ratchet', title: 'Tin ratchet', code: 9427 },
+    { id: 'steel-mainspring', title: 'Steel mainspring', code: 8043 },
+  ];
+
+  const form = document.getElementById('search');
+  const box = document.getElementById('query');
+  const panel = document.getElementById('panel');
+  let lastQuery = '';
+  let results = [];
+  let opened = null;
+
+  function matches(query) {
+    const needle = query.trim().toLowerCase();
+    if (!needle) {
+      return [];
+    }
+    return CATALOGUE.filter((part) => part.title.toLowerCase().indexOf(needle) >= 0);
+  }
+
+  function renderDetail(part) {
+    opened = part;
+    // Which entry was opened — reported only when one is, so a case asserting
+    // that the WRONG entry stayed closed reads an absent path.
+    fixtureReport('search.opened', { id: part.id, title: part.title, code: part.code });
+    panel.replaceChildren();
+    const heading = document.createElement('h2');
+    heading.textContent = part.title;
+    const line = document.createElement('p');
+    line.id = 'part-code';
+    line.textContent = 'Part code: ' + part.code;
+    const back = document.createElement('p');
+    back.textContent = 'Search again to leave this entry.';
+    panel.append(heading, line, back);
+  }
+
+  function renderResults(query) {
+    lastQuery = query;
+    results = matches(query);
+    opened = null;
+    fixtureReport('search.query', query.trim().toLowerCase());
+    panel.replaceChildren();
+    const status = document.createElement('p');
+    status.id = 'status';
+    status.textContent = results.length
+      ? results.length + ' matching parts. Open one to see its part code.'
+      : 'No parts match that search.';
+    const list = document.createElement('ul');
+    list.id = 'results';
+    results.forEach(function (part) {
+      const item = document.createElement('li');
+      const link = document.createElement('a');
+      link.href = '#' + part.id;
+      link.id = 'result-' + part.id;
+      link.textContent = part.title;
+      link.addEventListener('click', function (event) {
+        // Never navigate: the detail view is what the click is for, and a
+        // fragment jump would move the page under the action reporting it.
+        event.preventDefault();
+        renderDetail(part);
+      });
+      item.append(link);
+      list.append(item);
+    });
+    panel.append(status, list);
+  }
+
+  // The page's own state, readable without trusting what the tool reported. It
+  // mirrors what is rendered and never discloses an unopened part's code.
+  window.__fixture = {
+    page: 'search',
+    get query() { return lastQuery; },
+    get results() { return results.map((part) => part.id); },
+    get opened() { return opened ? { id: opened.id, code: opened.code } : null; },
+  };
+
+  form.addEventListener('submit', function (event) {
+    // Enter in the field and the Search button both land here; neither submits.
+    event.preventDefault();
+    renderResults(box.value);
+  });
+}());
+</script>
+</body>
+</html>

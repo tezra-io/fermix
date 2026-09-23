@@ -31,22 +31,13 @@ defmodule FermixChannels.Channels.Acp.Endpoint do
   alias FermixChannels.Channels.Acp
   alias FermixChannels.Channels.Acp.Peer
   alias FermixCore.Setup.ConfigStore
+  alias FermixCore.SocketPath
 
   # Two Buzz agents at max parallelism (32 slots each) fit inside this.
   @max_connections 64
   @accept_idle_ms 50
   @accept_retry_ms 1_000
   @socket_name "acp.sock"
-
-  # `struct sockaddr_un.sun_path` is a fixed char array and the address has to
-  # fit inside it with its NUL terminator: 104 bytes on macOS/BSD, 108 on Linux.
-  # A longer path fails the bind with a bare `:einval`, which reads as a Fermix
-  # bug rather than as "your FERMIX_HOME is too long" — hence the pre-flight
-  # below, which measures the path STRING and touches no filesystem object.
-  # Resolved at runtime, not compiled in: a release cross-built on one OS has to
-  # measure against the OS it actually runs on.
-  @sun_path_bytes_darwin 104
-  @sun_path_bytes_linux 108
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
@@ -147,26 +138,10 @@ defmodule FermixChannels.Channels.Acp.Endpoint do
 
   # Pre-flight on the path STRING — never on a filesystem object this listener
   # is about to create, which would fail closed on a clean first-run install.
-  defp check_path_length(path) do
-    limit = max_socket_path_bytes()
-
-    if byte_size(path) > limit do
-      {:error, {:path_too_long, byte_size(path), limit}}
-    else
-      :ok
-    end
-  end
-
-  # Linux gets its own four bytes; every other OS is measured against the smaller
-  # macOS/BSD array. Erring small can only over-refuse by four bytes with a
-  # message that still names the true fix; erring large hands back the `:einval`
-  # this check exists to translate.
-  defp max_socket_path_bytes do
-    case :os.type() do
-      {:unix, :linux} -> @sun_path_bytes_linux - 1
-      _other -> @sun_path_bytes_darwin - 1
-    end
-  end
+  # The shared pre-flight: it measures the path STRING against this OS's socket
+  # address size and touches no filesystem object, so an over-long path refuses
+  # here rather than failing the bind with a bare `:einval`.
+  defp check_path_length(path), do: SocketPath.check(path)
 
   defp listen(path) do
     :gen_tcp.listen(0, [
@@ -192,9 +167,8 @@ defmodule FermixChannels.Channels.Acp.Endpoint do
   end
 
   defp refusal({:path_too_long, bytes, limit}, path) do
-    "ACP is disabled for this boot: the ACP socket path is #{bytes} bytes, over the " <>
-      "#{limit}-byte limit this OS allows for a unix socket address — set a shorter " <>
-      "FERMIX_HOME and restart. Path: #{path}"
+    "ACP is disabled for this boot: " <>
+      SocketPath.refusal("ACP socket", bytes, limit) <> ". Path: #{path}"
   end
 
   defp refusal({:another_acp_socket_running, _path}, path) do

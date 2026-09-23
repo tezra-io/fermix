@@ -24,7 +24,7 @@ defmodule FermixChannels.Mobile.Supervisor do
 
   @default_max_media_bytes 20 * 1_024 * 1_024
   @default_max_store_bytes 2 * 1_024 * 1_024 * 1_024
-  @keyring_sentinel FermixCore.Setup.SecretWriter.sentinel()
+  @secret_sentinels FermixCore.Setup.SecretWriter.sentinels()
 
   @doc """
   Start the mobile subtree, or refuse it when its durable state is unusable.
@@ -229,10 +229,12 @@ defmodule FermixChannels.Mobile.Supervisor do
   # so loudly, and let `Management.status/1` report APNs credentials missing so
   # `fermix doctor` names it. Every other push-config fault still raises.
   defp enabled_push_child(push, name) do
-    if Keyword.get(push, :key) == @keyring_sentinel do
+    key = Keyword.get(push, :key)
+
+    if key in @secret_sentinels do
       Logger.error(
-        "mobile push is enabled but its APNs key is still the #{@keyring_sentinel} sentinel — " <>
-          "the OS keychain could not be read this boot. Mobile started WITHOUT push; " <>
+        "mobile push is enabled but its APNs key is still the #{key} sentinel — " <>
+          "its secret store could not be read this boot. Mobile started WITHOUT push; " <>
           "unlock the keychain and restart, or run `fermix doctor` to confirm."
       )
 

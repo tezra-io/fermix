@@ -7,9 +7,18 @@ defmodule FermixCore.Auth.ClientRejectionTest do
 
   @client [client_id: "client-id", client_secret: "stale-secret", scopes: []]
 
+  # A regional provider's client is incomplete without a region, so a sweep over
+  # every provider carries the first region each one offers.
   defp provider(id) do
-    {:ok, provider} = OAuthProviders.definition(id, @client)
+    {:ok, provider} = OAuthProviders.definition(id, @client ++ region_of(id))
     provider
+  end
+
+  defp region_of(id) do
+    case OAuthProviders.regions(id) do
+      [] -> []
+      [%{id: region} | _rest] -> [region: region]
+    end
   end
 
   defp refusal(error), do: %{"error" => error}
@@ -180,17 +189,24 @@ defmodule FermixCore.Auth.ClientRejectionTest do
   # the store carries must spell `client_rejected` too. A reader added later that
   # checks only `reauthorization_required` fails here instead of treating a
   # refused client as a ready one.
+  #
+  # Each file is read once and parsed only if its text spells a quarantine value
+  # at all: parsing all of `lib` twice over timed this test out on the slowest CI
+  # leg. Parsing with `unescape: false` keeps every string literal as its source
+  # spells it, so the text check can never drop a file the AST check would keep —
+  # a literal can equal a value only where the source spells that value verbatim.
   describe "no reader treats client_rejected as ready" do
     @apps Path.expand("../../../..", __DIR__)
     @quarantine_values ["reauthorization_required", "invalidated"]
 
     test "every module that reads or writes a stored quarantine value knows client_rejected" do
       spelling = quarantine_modules()
+      files = Enum.map(spelling, fn {file, _found} -> file end)
 
-      assert Enum.any?(spelling, &String.ends_with?(&1, "plugins/status.ex"))
-      assert Enum.any?(spelling, &String.ends_with?(&1, "providers/selection.ex"))
+      assert Enum.any?(files, &String.ends_with?(&1, "plugins/status.ex"))
+      assert Enum.any?(files, &String.ends_with?(&1, "providers/selection.ex"))
 
-      missing = Enum.reject(spelling, &("client_rejected" in literals(&1)))
+      missing = for {file, found} <- spelling, "client_rejected" not in found, do: file
 
       assert missing == [],
              "these modules spell a stored quarantine value but not client_rejected: " <>
@@ -201,11 +217,14 @@ defmodule FermixCore.Auth.ClientRejectionTest do
       @apps
       |> Path.join("*/lib/**/*.ex")
       |> Path.wildcard()
-      |> Enum.filter(fn file -> Enum.any?(@quarantine_values, &(&1 in literals(file))) end)
+      |> Stream.map(&{&1, File.read!(&1)})
+      |> Stream.filter(fn {_file, source} -> String.contains?(source, @quarantine_values) end)
+      |> Stream.map(fn {file, source} -> {file, literals(source)} end)
+      |> Enum.filter(fn {_file, found} -> Enum.any?(@quarantine_values, &(&1 in found)) end)
     end
 
-    defp literals(file) do
-      {:ok, ast} = file |> File.read!() |> Code.string_to_quoted()
+    defp literals(source) do
+      {:ok, ast} = Code.string_to_quoted(source, unescape: false)
 
       {_ast, found} =
         Macro.prewalk(ast, [], fn

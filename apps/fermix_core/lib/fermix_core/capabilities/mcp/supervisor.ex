@@ -26,8 +26,8 @@ defmodule FermixCore.Capabilities.MCP.Supervisor do
   — identified by the child id `{:mcp_server_supervisor, source_id, spec_hash}`
   — are left running untouched.
 
-  Child identity is **source-qualified** (M27 §7.3): `{:plugin, "eden"}` for a
-  plugin-owned server, `{:operator, "eden"}` for a `[mcp.servers.eden]` TOML
+  Child identity is **source-qualified** (M27 §7.3): `{:plugin, "acme"}` for a
+  plugin-owned server, `{:operator, "acme"}` for a `[mcp.servers.acme]` TOML
   one. Two servers may share a name; they can never share an identity, so
   stopping the plugin client can never stop the operator's.
 

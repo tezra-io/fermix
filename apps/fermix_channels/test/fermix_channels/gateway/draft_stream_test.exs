@@ -1232,18 +1232,47 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
       assert String.length("💭 …\n" <> kept) <= 40
     end
 
+    # Both events must be pending when the tick decides. The engine is held inside
+    # its first open until they are queued behind it, so the write that opens the
+    # 60 ms window already has them waiting, however late this process runs.
+    # Unheld, a stall here past the window let a tick pass with only the thought
+    # pending, and the bubble then rightly opened first.
     test "the status bubble never writes on a tick that flushed answer content" do
-      pid =
-        DraftStream.start_link(rotating_spec(self()), edit_interval_ms: 60, min_draft_chars: 1)
+      test_pid = self()
+      release = make_ref()
+      spec = rotating_spec(test_pid)
+
+      held_open = fn
+        "First snapshot of the answer." = text ->
+          send(test_pid, {:held_open, self()})
+
+          # Bounded, so an engine whose test died before releasing it still
+          # reaches its exit handling.
+          receive do
+            ^release -> spec.open.(text)
+          after
+            5_000 -> {:error, :never_released}
+          end
+
+        text ->
+          spec.open.(text)
+      end
+
+      held = %{spec | open: held_open}
+      pid = DraftStream.start_link(held, edit_interval_ms: 60, min_draft_chars: 1)
 
       DraftStream.push(pid, {:text_delta, "First snapshot of the answer."})
-      assert_receive {:open, {:bubble, 1}, "First snapshot of the answer."}
+      assert_receive {:held_open, ^pid}
       DraftStream.push(pid, {:reasoning_done, "**Deferred thought**\n\nbody"})
       DraftStream.push(pid, {:text_delta, "First snapshot of the answer. Second half."})
+      send(pid, release)
 
-      assert_receive {:edit, {:bubble, 1}, "First snapshot of the answer. Second half."}
-      # Answer beat the thought on that tick; the bubble only opens later.
-      refute_received {:open, _handle, "💭" <> _rest}
+      assert_receive {:open, {:bubble, 1}, "First snapshot of the answer."}
+      # One sender, so its writes queue here in the order it made them: the next
+      # one is the answer that beat the thought on that tick, and the bubble opens
+      # after it. Read by position, never by what has not arrived yet.
+      assert_receive next
+      assert {:edit, {:bubble, 1}, "First snapshot of the answer. Second half."} = next
       assert_receive {:open, {:bubble, 2}, "💭 Deferred thought"}
     end
 

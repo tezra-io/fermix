@@ -3,7 +3,17 @@ defmodule FermixCore.Setup.SecretStore do
   Snapshot helpers for setup-managed secrets.
 
   `SecretPaths` is the registry. Any value at a registered path is stored
-  through `SecretWriter` before the snapshot is written to disk.
+  through `SecretWriter` before the snapshot is written to disk, in the store
+  the snapshot's `[fermix_core] secret_store` names, and is persisted as that
+  store's sentinel. At boot each sentinel is resolved from the store it names,
+  so a home whose secrets are split between the keyring and the file store
+  reads every one of them from where it is.
+
+  Both directions probe a store before using it (`SecretWriter.probe/1`): a
+  save that cannot store a new secret says why instead of hanging on an
+  unlock dialog, and a boot on a locked keyring leaves those sentinels in
+  place with one line in the log rather than raising that dialog from the
+  daemon, once per secret.
   """
 
   alias FermixCore.Setup.ConfigStore
@@ -19,13 +29,41 @@ defmodule FermixCore.Setup.SecretStore do
   @spec secure_snapshot(snapshot(), keyword()) :: {:ok, snapshot()} | {:error, String.t()}
   def secure_snapshot(snapshot, opts \\ []) when is_map(snapshot) and is_list(opts) do
     previous = Keyword.get(opts, :previous)
-    write_opts = [profile: profile_of(snapshot)] ++ Keyword.take(opts, [:supervised])
+
+    write_opts =
+      [profile: profile_of(snapshot), store: store_of(snapshot)] ++
+        Keyword.take(opts, [:supervised])
+
+    verdicts = probe_stores_this_save_touches(snapshot, previous, write_opts)
 
     Enum.reduce_while(SecretPaths.all(), {:ok, snapshot}, fn secret, {:ok, acc} ->
-      case secure_secret(acc, previous, secret, write_opts) do
+      case secure_secret(acc, previous, secret, write_opts, verdicts) do
         {:ok, updated} -> {:cont, {:ok, updated}}
         {:error, reason} -> {:halt, {:error, reason}}
       end
+    end)
+  end
+
+  # One verdict per store this save may read or write, taken before any of it
+  # happens: the configured store whenever a plaintext value would be written
+  # to it, and the store a persisted sentinel names whenever that secret's
+  # value has to be compared against what is stored. A save that carries no
+  # plaintext asks nothing of any store.
+  defp probe_stores_this_save_touches(snapshot, previous, write_opts) do
+    stores =
+      Enum.flat_map(SecretPaths.all(), fn secret ->
+        value = get_snapshot_value(snapshot, secret.path)
+        old_value = previous_value(previous, secret.path)
+
+        case {plaintext_secret?(value), SecretWriter.store_of_sentinel(old_value)} do
+          {false, _} -> []
+          {true, {:ok, old_store}} -> [old_store, write_opts[:store]]
+          {true, :error} -> [write_opts[:store]]
+        end
+      end)
+
+    Map.new(Enum.uniq(stores), fn store ->
+      {store, SecretWriter.probe(Keyword.put(write_opts, :store, store))}
     end)
   end
 
@@ -46,26 +84,49 @@ defmodule FermixCore.Setup.SecretStore do
     warn_plaintext? = Keyword.fetch!(opts, :warn_plaintext)
     profile = profile_of(snapshot)
     read_opts = [profile: profile] ++ Keyword.take(opts, [:supervised])
-    sentinel = SecretWriter.sentinel()
 
-    {keyring, plain} =
-      Enum.split_with(SecretPaths.all(), &(get_snapshot_value(snapshot, &1.path) == sentinel))
+    by_store =
+      Enum.group_by(SecretPaths.all(), fn secret ->
+        case SecretWriter.store_of_sentinel(get_snapshot_value(snapshot, secret.path)) do
+          {:ok, store} -> store
+          :error -> :plain
+        end
+      end)
 
     if warn_plaintext? do
-      plain
+      by_store
+      |> Map.get(:plain, [])
       |> Enum.filter(&plaintext_secret?(get_snapshot_value(snapshot, &1.path)))
       |> Enum.each(&warn_plaintext_secret/1)
     end
 
-    resolve_keyring_secrets(snapshot, keyring, warn_plaintext?, read_opts)
+    snapshot
+    |> resolve_store(:keyring, Map.get(by_store, :keyring, []), warn_plaintext?, read_opts)
+    |> resolve_store(:file, Map.get(by_store, :file, []), warn_plaintext?, read_opts)
+  end
+
+  # A store is asked whether it can answer before any secret is asked of it:
+  # on a locked keyring the sentinels stay, the log says why once, and no
+  # `secret-tool` runs — which is what keeps the desktop's unlock dialog from
+  # being raised by a daemon nobody is looking at.
+  defp resolve_store(snapshot, _store, [], _warn?, _read_opts), do: snapshot
+
+  defp resolve_store(snapshot, store, secrets, warn?, read_opts) do
+    store_opts = Keyword.put(read_opts, :store, store)
+    verdict = SecretWriter.probe(store_opts)
+
+    if SecretWriter.usable?(verdict) do
+      resolve_from_store(snapshot, secrets, warn?, store_opts)
+    else
+      if warn?, do: warn_unusable_store(verdict, secrets)
+      snapshot
+    end
   end
 
   # Reads are independent, so fan out over a bounded task pool and merge
   # deterministically (ordered stream zipped back to its input). Failure
   # semantics stay in handle_keyring_resolution_error: warn, keep sentinel.
-  defp resolve_keyring_secrets(snapshot, [], _warn?, _read_opts), do: snapshot
-
-  defp resolve_keyring_secrets(snapshot, secrets, warn?, read_opts) do
+  defp resolve_from_store(snapshot, secrets, warn?, read_opts) do
     secrets
     |> Task.async_stream(
       fn secret -> SecretWriter.get(secret.key, read_opts) end,
@@ -99,14 +160,12 @@ defmodule FermixCore.Setup.SecretStore do
   @spec mask_resolved_secrets(snapshot(), snapshot()) :: snapshot()
   def mask_resolved_secrets(snapshot, persisted)
       when is_map(snapshot) and is_map(persisted) do
-    sentinel = SecretWriter.sentinel()
-
     Enum.reduce(SecretPaths.all(), snapshot, fn secret, acc ->
       persisted_value = get_snapshot_value(persisted, secret.path)
       current_value = get_snapshot_value(acc, secret.path)
 
-      if persisted_value == sentinel and not is_nil(current_value) do
-        put_snapshot_value(acc, secret.path, sentinel)
+      if SecretWriter.sentinel?(persisted_value) and not is_nil(current_value) do
+        put_snapshot_value(acc, secret.path, persisted_value)
       else
         acc
       end
@@ -189,29 +248,38 @@ defmodule FermixCore.Setup.SecretStore do
   # Shape mismatch: nothing at this path to delete.
   def delete_snapshot_value(value, _path), do: value
 
-  defp secure_secret(snapshot, previous, secret, write_opts) do
+  defp secure_secret(snapshot, previous, secret, write_opts, verdicts) do
     value = get_snapshot_value(snapshot, secret.path)
     old_value = previous_value(previous, secret.path)
+    verdict = Map.get(verdicts, write_opts[:store])
 
     cond do
       not plaintext_secret?(value) ->
         {:ok, snapshot}
 
-      old_value == SecretWriter.sentinel() ->
-        keep_or_rotate(snapshot, secret, value, write_opts)
+      SecretWriter.sentinel?(old_value) ->
+        keep_or_rotate(snapshot, secret, value, write_opts, old_value, verdicts)
 
-      SecretWriter.available?() ->
+      # A store that answers takes every plaintext value, changed or not: that
+      # is how a hand-edited key reaches the keyring on the next save.
+      SecretWriter.usable?(verdict) ->
         write_secret(snapshot, secret, value, write_opts)
 
-      # No OS secret writer, but this exact plaintext is already what's on
-      # disk: keep it rather than failing an unrelated save (the load-time
-      # plaintext warning keeps nagging). Only NEW/CHANGED secrets require a
-      # writer — those fail loud below.
+      # The store cannot be used without help, and this exact plaintext is
+      # already what's on disk: keep it rather than raising an unlock prompt
+      # from a save that was about something else (the load-time plaintext
+      # warning keeps nagging). Only a NEW or CHANGED value goes further.
       value == old_value ->
         {:ok, snapshot}
 
+      # A locked keyring and a new value: the write raises the desktop's unlock
+      # prompt and waits for the operator; a cancelled prompt is the write's
+      # own failure, reported as such.
+      SecretWriter.attemptable?(verdict) ->
+        write_secret(snapshot, secret, value, write_opts)
+
       true ->
-        {:error, SecretWriter.format_store_error(secret.key, :unavailable)}
+        {:error, SecretWriter.format_store_error(secret.key, {:verdict, verdict})}
     end
   end
 
@@ -228,27 +296,85 @@ defmodule FermixCore.Setup.SecretStore do
   #                   A real rotation is re-detected on the next save once the
   #                   keychain is reachable. Only a positively-confirmed different
   #                   stored value triggers a write.
-  defp keep_or_rotate(snapshot, secret, value, write_opts) do
-    case SecretWriter.get(secret.key, write_opts) do
-      {:ok, ^value} -> {:ok, keep_sentinel(snapshot, secret)}
-      {:ok, _other} -> write_secret(snapshot, secret, value, write_opts)
-      {:error, _reason} -> {:ok, keep_sentinel(snapshot, secret)}
+  # Disk already says a sentinel. Most saves arrive here with the RESOLVED
+  # runtime value (every loaded snapshot carries it), so compare it against
+  # what the store the sentinel names holds:
+  #
+  #   store unusable → keep the sentinel without asking: a locked keyring is
+  #                    not read (that read is what raises the unlock dialog),
+  #                    and a real rotation is re-detected on the next save once
+  #                    the store answers.
+  #   {:ok, ^value}  → unchanged; keep the sentinel, no write.
+  #   {:ok, _other}  → a genuine rotation; write the new value through to the
+  #                    configured store, or it would be dropped for the stale
+  #                    stored one. When that is the other store, the sentinel
+  #                    moves with the value and the stale item is removed from
+  #                    the store it left, or the log says it could not be.
+  #   {:error, _}    → unreadable right now; keep the sentinel rather than
+  #                    failing an otherwise unrelated save.
+  defp keep_or_rotate(snapshot, secret, value, write_opts, old_sentinel, verdicts) do
+    {:ok, old_store} = SecretWriter.store_of_sentinel(old_sentinel)
+    read_opts = Keyword.put(write_opts, :store, old_store)
+
+    if SecretWriter.usable?(Map.fetch!(verdicts, old_store)) do
+      case SecretWriter.get(secret.key, read_opts) do
+        {:ok, ^value} -> {:ok, keep_sentinel(snapshot, secret, old_sentinel)}
+        {:ok, _other} -> rotate(snapshot, secret, value, write_opts, read_opts, verdicts)
+        {:error, _reason} -> {:ok, keep_sentinel(snapshot, secret, old_sentinel)}
+      end
+    else
+      {:ok, keep_sentinel(snapshot, secret, old_sentinel)}
     end
   end
 
-  defp keep_sentinel(snapshot, secret) do
-    put_snapshot_value(snapshot, secret.path, SecretWriter.sentinel())
+  defp rotate(snapshot, secret, value, write_opts, read_opts, verdicts) do
+    verdict = Map.fetch!(verdicts, write_opts[:store])
+
+    cond do
+      not SecretWriter.attemptable?(verdict) ->
+        {:error, SecretWriter.format_store_error(secret.key, {:verdict, verdict})}
+
+      read_opts[:store] == write_opts[:store] ->
+        write_secret(snapshot, secret, value, write_opts)
+
+      true ->
+        with {:ok, updated} <- write_secret(snapshot, secret, value, write_opts) do
+          remove_stale_item(secret, read_opts)
+          {:ok, updated}
+        end
+    end
+  end
+
+  defp keep_sentinel(snapshot, secret, sentinel) do
+    put_snapshot_value(snapshot, secret.path, sentinel)
   end
 
   defp write_secret(snapshot, secret, value, write_opts) do
     case SecretWriteLog.put(secret.key, value, write_opts) do
       :ok ->
-        {:ok, put_snapshot_value(snapshot, secret.path, SecretWriter.sentinel())}
+        {:ok,
+         put_snapshot_value(snapshot, secret.path, SecretWriter.current_sentinel(write_opts))}
 
       {:error, reason} ->
         {:error, SecretWriter.format_store_error(secret.key, reason)}
     end
   end
+
+  defp remove_stale_item(secret, read_opts) do
+    case SecretWriter.delete(secret.key, read_opts) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "#{secret.env} moved to the #{read_opts[:store] |> other_store()} store, but the old " <>
+            "copy could not be removed from the #{read_opts[:store]} store: #{inspect(reason)}"
+        )
+    end
+  end
+
+  defp other_store(:keyring), do: :file
+  defp other_store(:file), do: :keyring
 
   defp previous_value(%{} = previous, path), do: get_snapshot_value(previous, path)
   defp previous_value(_previous, _path), do: nil
@@ -262,6 +388,25 @@ defmodule FermixCore.Setup.SecretStore do
       name when is_binary(name) and name != "" -> name
       _ -> SecretWriter.default_profile()
     end
+  end
+
+  # The snapshot's own store choice, for the same reason as the profile: a
+  # save carries the setting it is saving, and at boot app env is not yet
+  # populated. A value the loader let through is one `parse_store/1` accepts.
+  defp store_of(snapshot) do
+    case SecretWriter.parse_store(get_snapshot_value(snapshot, [:fermix_core, :secret_store])) do
+      {:ok, store} -> store
+      {:error, sentence} -> raise ArgumentError, sentence
+    end
+  end
+
+  defp warn_unusable_store(verdict, secrets) do
+    names = Enum.map_join(secrets, ", ", & &1.env)
+
+    Logger.warning(
+      "the #{verdict.store} secret store is not usable (#{verdict.sentence}), so " <>
+        "#{names} stay unresolved until it is. `fermix doctor` shows the store's state."
+    )
   end
 
   defp handle_keyring_resolution_error(snapshot, %{optional?: true} = secret, reason, warn?) do
@@ -306,7 +451,7 @@ defmodule FermixCore.Setup.SecretStore do
   end
 
   defp plaintext_secret?(value) when is_binary(value) do
-    value != SecretWriter.sentinel() and String.trim(value) != ""
+    not SecretWriter.sentinel?(value) and String.trim(value) != ""
   end
 
   defp plaintext_secret?(_value), do: false

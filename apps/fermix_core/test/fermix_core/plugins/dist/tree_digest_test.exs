@@ -8,24 +8,32 @@ defmodule FermixCore.Plugins.Dist.TreeDigestTest do
                  __DIR__
                )
 
-  defp fixture_files do
-    case File.ls(@fixture_dir) do
-      {:ok, files} -> files |> Enum.filter(&String.ends_with?(&1, ".json")) |> Enum.sort()
-      {:error, _reason} -> []
+  # The listing and the helpers that serve it share one condition. When the
+  # sibling checkout is absent the `for` below generates no test body, and a
+  # helper defined only for those bodies then warns as unused — which
+  # `mix test --warnings-as-errors` turns into a failure in exactly the
+  # environment that has no checkout, namely CI.
+  @fixture_files (case File.ls(@fixture_dir) do
+                    {:ok, files} ->
+                      files |> Enum.filter(&String.ends_with?(&1, ".json")) |> Enum.sort()
+
+                    {:error, _reason} ->
+                      []
+                  end)
+
+  if @fixture_files != [] do
+    defp load(file), do: @fixture_dir |> Path.join(file) |> File.read!() |> Jason.decode!()
+
+    defp to_map(fixture) do
+      Map.new(fixture["files"], fn %{"path" => path, "content_b64" => body} ->
+        {path, Base.decode64!(body)}
+      end)
     end
-  end
-
-  defp load(file), do: @fixture_dir |> Path.join(file) |> File.read!() |> Jason.decode!()
-
-  defp to_map(fixture) do
-    Map.new(fixture["files"], fn %{"path" => path, "content_b64" => body} ->
-      {path, Base.decode64!(body)}
-    end)
   end
 
   describe "cross-language golden fixtures" do
     test "the fixture directory is present" do
-      if fixture_files() == [] do
+      if @fixture_files == [] do
         IO.puts(
           :stderr,
           "\n  SKIPPED: #{@fixture_dir} not found — clone tezra-io/fermix-plugins " <>
@@ -36,15 +44,7 @@ defmodule FermixCore.Plugins.Dist.TreeDigestTest do
       assert true
     end
 
-    for file <-
-          File.ls(@fixture_dir)
-          |> (case do
-                {:ok, files} ->
-                  files |> Enum.filter(&String.ends_with?(&1, ".json")) |> Enum.sort()
-
-                {:error, _} ->
-                  []
-              end) do
+    for file <- @fixture_files do
       @file_name file
 
       test "#{file} digests exactly as pluginlib.py does" do

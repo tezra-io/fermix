@@ -43,13 +43,13 @@ defmodule FermixCore.Transcription.Local.SidecarInstallerTest do
     assert target in ~w(macos-aarch64 macos-x86_64 linux-x86_64 linux-aarch64)
   end
 
-  test "the shipped build pins the macos-aarch64 release, and only that target so far", %{
+  test "the shipped build pins Apple Silicon and both Linux targets, and no Intel Mac", %{
     target: target
   } do
-    # `release_pinned?/0` reads the baked table for this host without downloading;
-    # only macos-aarch64 is pinned in this build, so it is true there and false
-    # on every other target until their artifacts are cut.
-    assert SidecarInstaller.release_pinned?() == (target == "macos-aarch64")
+    # `release_pinned?/0` reads the baked table for this host without downloading.
+    # The release builds no macos-x86_64 artifact, so that target stays unpinned.
+    assert SidecarInstaller.release_pinned?() ==
+             target in ~w(macos-aarch64 linux-x86_64 linux-aarch64)
   end
 
   describe "install/1 with no pinned release" do
@@ -65,11 +65,27 @@ defmodule FermixCore.Transcription.Local.SidecarInstallerTest do
              ) == {:error, :no_release_pinned}
     end
 
+    # The sentence reaches operators on every surface that refuses on-device
+    # speech, so it names what they can do and never the sidecar-author loop.
     test "carries the operator copy doctor and setup render verbatim" do
       assert SidecarInstaller.error_message(:no_release_pinned) ==
-               "fermix-stt has no pinned release yet. Build it locally and point " <>
-                 "[fermix_core.plugins] dev_local at a checkout containing " <>
-                 "stt_sidecar/bin/<target>/fermix-stt."
+               "On-device speech isn't available on this machine. " <>
+                 "Choose another transcription backend."
+
+      refute SidecarInstaller.error_message(:no_release_pinned) =~ "dev_local"
+    end
+  end
+
+  describe "release_pinned?/1" do
+    test "answers from the injected table, the same seam install/1 takes" do
+      refute SidecarInstaller.release_pinned?(releases: %{})
+      assert SidecarInstaller.release_pinned?(releases: FermixTestSupport.SttPins.for_this_host())
+    end
+
+    test "a table pinning only other targets does not pin this one" do
+      refute SidecarInstaller.release_pinned?(
+               releases: %{"solaris-sparc" => %{url: "http://x/y", sha256: @artifact_sha256}}
+             )
     end
   end
 

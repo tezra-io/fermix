@@ -22,7 +22,10 @@ defmodule FermixCore.Management.CopyTest do
   alias FermixCore.Management.Settings
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Readiness
+  alias FermixCore.Sandbox.Config, as: SandboxConfig
+  alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.RestartState
+  alias FermixCore.Setup.SecretWriter
 
   # What the two renderers really answer for a reason the plugin installer
   # produces: a tuple, a map, and the operator's own home directory.
@@ -100,10 +103,19 @@ defmodule FermixCore.Management.CopyTest do
     end
 
     test "an interpolated name is data the call site declares" do
-      sentence = "Your prompt reaches Eden."
+      sentence = "Your prompt reaches Acme."
 
-      assert {:sentence_case, "Eden"} in Copy.violations(sentence, :prose)
-      assert Copy.violations(sentence, :prose, ["Eden"]) == []
+      assert {:sentence_case, "Acme"} in Copy.violations(sentence, :prose)
+      assert Copy.violations(sentence, :prose, ["Acme"]) == []
+    end
+
+    # A variable name an operator allowed is data under every rule, not only
+    # the capitalisation one: the label of its row IS the name, and a name is
+    # `UPPER_SNAKE` by convention. Undeclared, it is still a wire token.
+    test "a declared name is exempt from the wire-token rule too" do
+      assert {:wire_token, "ALPACA_API_KEY"} in Copy.violations("ALPACA_API_KEY", :prose)
+      assert Copy.violations("ALPACA_API_KEY", :prose, ["ALPACA_API_KEY"]) == []
+      assert Copy.violations("Set ALPACA_API_KEY.", :prose, ["OTHER_KEY"]) != []
     end
   end
 
@@ -120,18 +132,37 @@ defmodule FermixCore.Management.CopyTest do
       end
     end
 
-    test "every row label, footer, unit and option obeys the rules" do
+    test "every row label, footer, info, unit and option obeys the rules" do
       for section <- Settings.sections(), row <- rows(section.id) do
         where = "#{section.id}.#{row["key"]}"
 
-        assert_clean(row["label"], :prose, [], "row label #{where}")
+        assert_clean(row["label"], :prose, row_names(row), "row label #{where}")
         assert_clean(row["footer"], :prose, [], "row footer #{where}")
+        assert_clean(row["info"], :prose, [], "row info #{where}")
         assert_clean(row["unit"], :name, [], "row unit #{where}")
 
         for option <- row["options"] do
           assert_clean(option["label"], :name, [], "option label #{where}")
           assert_clean(option["hint"], :prose, [], "option hint #{where}")
         end
+      end
+    end
+
+    # The live snapshot of an async case allows whatever the suite configured,
+    # which is usually nothing, so the sandbox name rows are walked here from a
+    # snapshot that carries every shape M45 §4.4 publishes.
+    test "every sandbox name row obeys the rules, with the name declared as data" do
+      rows = sandbox_name_rows()
+
+      assert length(rows) == 6
+
+      for row <- rows do
+        where = "sandbox.#{row["key"]}"
+
+        assert_clean(row["label"], :prose, row_names(row), "row label #{where}")
+        assert_clean(row["footer"], :prose, [], "row footer #{where}")
+        assert_clean(row["info"], :prose, [], "row info #{where}")
+        assert internal_terms(row["footer"] || "") == []
       end
     end
 
@@ -182,6 +213,30 @@ defmodule FermixCore.Management.CopyTest do
       end
     end
 
+    # A wrong-region row names the account's own region, and a region label is a
+    # proper noun the daemon interpolates rather than writes: it is declared as
+    # data at the call site, exactly like a plugin's display name, rather than
+    # widening the hand-listed set with words no fixed sentence uses.
+    test "every region label a row can name obeys the rules as the data it is" do
+      labels =
+        Enum.flat_map(OAuthProviders.providers(), fn id ->
+          Enum.map(OAuthProviders.regions(id), & &1.label)
+        end)
+
+      assert labels != []
+
+      for label <- labels do
+        assert_clean(label, :name, [], "region label #{label}")
+
+        sentence =
+          "The account belongs to the #{label} region. " <>
+            "Choose it for the sign-in client and sign in again."
+
+        assert_clean(sentence, :prose, [label], "region sentence #{label}")
+        assert internal_terms(sentence) == []
+      end
+    end
+
     # The refused-client sentences are written once in `Auth.ClientRejection`
     # and rendered verbatim by the app, the browser door and the CLI. The case
     # set is every plugin provider and every refusal code it declares, read
@@ -189,7 +244,7 @@ defmodule FermixCore.Management.CopyTest do
     test "every refused sign-in client sentence obeys the rules" do
       refusals =
         Enum.flat_map(OAuthProviders.providers(), fn id ->
-          {:ok, provider} = OAuthProviders.definition(id, client_id: "id", client_secret: "s")
+          {:ok, provider} = OAuthProviders.definition(id, client_config(id))
           Enum.map(provider.client_rejection_errors, &refusal(provider, &1))
         end)
 
@@ -315,7 +370,7 @@ defmodule FermixCore.Management.CopyTest do
   defp section_copy do
     for section <- Settings.sections(),
         row <- rows(section.id),
-        text <- [row["label"], row["footer"], row["unit"]] ++ option_copy(row),
+        text <- [row["label"], row["footer"], row["info"], row["unit"]] ++ option_copy(row),
         is_binary(text) do
       text
     end
@@ -338,9 +393,47 @@ defmodule FermixCore.Management.CopyTest do
     view["rows"]
   end
 
+  # A sandbox name row is labelled with the variable name the operator allowed,
+  # which is data the row reflects rather than copy the daemon wrote.
+  defp row_names(%{"key" => "env:" <> name}), do: [name]
+  defp row_names(_row), do: []
+
+  defp sandbox_name_rows do
+    managed = &SecretWriter.command_source({:external_env, &1})
+
+    sandbox =
+      SandboxConfig.normalize(
+        env: [
+          allow: ~w(STORED_KEY UNSTORED_KEY HELPER_KEY ALIAS_KEY HOME),
+          sources: %{
+            "STORED_KEY" => managed.("STORED_KEY"),
+            "HELPER_KEY" => %{source: :command, command: "/usr/local/bin/op"},
+            "ALIAS_KEY" => %{source: :env, name: "OLD_NAME"},
+            "PARKED_KEY" => managed.("PARKED_KEY")
+          }
+        ]
+      )
+
+    snapshot = Map.put(ConfigStore.current_snapshot(), :sandbox, sandbox)
+    {:ok, view} = Settings.get("sandbox", snapshot: snapshot)
+    Enum.filter(view["rows"], &String.starts_with?(&1["key"], "env:"))
+  end
+
   defp plugin_rows do
     {:ok, %{"plugins" => rows}} = Plugins.list()
     rows
+  end
+
+  # A regional provider's client is incomplete without a region, so the sweep
+  # over every provider carries the first region each one offers.
+  defp client_config(id) do
+    region =
+      case OAuthProviders.regions(id) do
+        [] -> []
+        [%{id: region} | _rest] -> [region: region]
+      end
+
+    [client_id: "id", client_secret: "s"] ++ region
   end
 
   defp refusal(provider, error) do

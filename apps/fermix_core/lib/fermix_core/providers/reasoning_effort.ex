@@ -11,7 +11,7 @@ defmodule FermixCore.Providers.ReasoningEffort do
 
   This module stays provider-level. Per-*model* effort ceilings (e.g. `max`
   is a current-generation OpenAI capability, so the older OpenAI models top
-  out at `xhigh`; `xhigh` is a Grok 4.6 capability, so every older xAI model tops out
+  out at `xhigh`; `xhigh` arrived with Grok 4.6, so every older xAI model tops out
   at `high`) live in `ModelCatalog` as an `Entry` field and are applied via
   `cap/2` before the wire — see `ModelCatalog.clamp_effort/3`. Anthropic's
   per-model nuance (`xhigh` is Opus-only) is still left to the provider

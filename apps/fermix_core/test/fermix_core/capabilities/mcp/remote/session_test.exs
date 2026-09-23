@@ -5,7 +5,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.SessionTest do
   alias FermixCore.Capabilities.MCP.Remote.Endpoint
   alias FermixCore.Capabilities.MCP.Remote.Session
 
-  @credential "eden_pat_canary_do_not_leak"
+  @credential "acme_pat_canary_do_not_leak"
   @session_id "sess-abc123"
 
   # A module double at the transport boundary — the same seam pattern the MCP
@@ -83,15 +83,15 @@ defmodule FermixCore.Capabilities.MCP.Remote.SessionTest do
 
   defp handshake(extra_responses \\ []) do
     agent = start_agent([initialize_ok(), accepted()] ++ extra_responses)
-    {:ok, endpoint} = Endpoint.new("https://mcp.eden.so", "/mcp")
-    {:ok, auth_ref} = AuthRef.new("eden")
+    {:ok, endpoint} = Endpoint.new("https://mcp.acme.example", "/mcp")
+    {:ok, auth_ref} = AuthRef.new("acme")
 
     opts = [
       endpoint: endpoint,
       auth_ref: auth_ref,
       transport: FakeTransport,
       connect_opts: [agent: agent],
-      resolver: fn "eden" -> @credential end
+      resolver: fn "acme" -> @credential end
     ]
 
     {agent, opts}
@@ -178,9 +178,9 @@ defmodule FermixCore.Capabilities.MCP.Remote.SessionTest do
 
     test "refuses to start when the credential is absent" do
       {_agent, opts} = handshake()
-      opts = Keyword.put(opts, :resolver, fn "eden" -> nil end)
+      opts = Keyword.put(opts, :resolver, fn "acme" -> nil end)
 
-      assert {:error, {:needs_secret, "eden"}} =
+      assert {:error, {:needs_secret, "acme"}} =
                start_supervised({Session, opts}) |> unwrap_start_error()
     end
   end
@@ -305,7 +305,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.SessionTest do
     test "401 becomes reauthorization, never a retry with the rejected credential" do
       {_agent, session} = start_session([json(401, %{})])
 
-      assert {:error, {:reauthorization_required, "mcp.eden.so"}} =
+      assert {:error, {:reauthorization_required, "mcp.acme.example"}} =
                Session.request(session, "tools/list", %{}, 5_000)
     end
 
@@ -358,7 +358,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.SessionTest do
     test "a failed renewal surfaces the renewal's own error" do
       {_agent, session} = start_session([json(404, %{}), json(401, %{})])
 
-      assert {:error, {:reauthorization_required, "mcp.eden.so"}} =
+      assert {:error, {:reauthorization_required, "mcp.acme.example"}} =
                Session.request(session, "tools/list", %{}, 5_000)
     end
 

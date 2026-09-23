@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WebMCP counter fixture — shimmed</title>
+<!-- An empty data: icon, so the page requests nothing at all: a browser's
+     automatic /favicon.ico fetch would 404 and put a console error in front of
+     anyone debugging a failing case. -->
+<link rel="icon" href="data:,">
+<style>
+  body { font: 16px/1.5 system-ui, sans-serif; margin: 2rem auto; max-width: 40rem; }
+  #counter { font-size: 2rem; font-weight: 700; }
+</style>
+</head>
+<body>
+<h1>WebMCP counter fixture (shimmed)</h1>
+<p>
+  This page owns one counter and offers it to agents as two WebMCP tools. It has
+  no buttons and no form fields, so the counter can only be changed by calling
+  <code>counter_add</code> — a snapshot-and-click route cannot reach the answer.
+</p>
+<p>Counter: <span id="counter">41</span></p>
+<p id="status">Registering tools…</p>
+<p id="fixture-status"></p>
+
+<script src="fixture.js"></script>
+<script>
+// Fixture for the `browser` tool's `webmcp` action. Served by the runner-owned
+// fixture server under this case attempt's token; the suites address it with
+// __EVAL_FIXTURE_URL__ (suites/browser.yaml, suites/capability/browser_webmcp.yaml).
+//
+// This is the SHIMMED page: it installs the page-side shim, so its tools exist
+// in any browser whether or not Chrome exposes the native WebMCP API. Its twin,
+// native_only.html, registers nothing without the native API and is what notices
+// a renamed launch flag.
+//
+// The counter lives in a closure and in the DOM, and nowhere else: no
+// localStorage, no sessionStorage, no cookies, no network. Every page load
+// therefore starts from the same seed, so a trial cannot inherit the previous
+// trial's total.
+(function () {
+  "use strict";
+
+  // The shim, verbatim from fermix-site/docs/plans/chess-webmcp.md §7. Installed
+  // only when the native API is absent, so native always wins.
+  if (!document.modelContext) {
+    const tools = [];
+    Object.defineProperty(document, 'modelContext', { configurable: true, value: {
+      registerTool: (tool) => { tools.push(tool); return Promise.resolve(); },
+      unregisterTool: (name) => { const i = tools.findIndex((t) => t.name === name); if (i >= 0) tools.splice(i, 1); },
+      getTools: () => Promise.resolve(tools.map((t) => ({ ...t, window }))),
+      executeTool: (tool, input) => Promise.resolve(tool.execute(typeof input === 'string' ? JSON.parse(input || '{}') : input || {})).then((r) => JSON.stringify(r)),
+    }});
+  }
+
+  const START = 41;
+  let count = START;
+  const readout = document.getElementById('counter');
+  const status = document.getElementById('status');
+  const calls = [];
+
+  function render() {
+    readout.textContent = String(count);
+  }
+
+  // Structured errors, never a throw: a thrown error reaches an agent as opaque
+  // text ("the invocation failed"), which tells it nothing about what to fix.
+  function add(input) {
+    const amount = (input || {}).amount;
+    if (typeof amount !== 'number' || !Number.isInteger(amount)) {
+      calls.push({ tool: 'counter_add', ok: false });
+      return { ok: false, error: 'invalid_amount', message: 'amount must be a whole number' };
+    }
+    count += amount;
+    calls.push({ tool: 'counter_add', ok: true, amount: amount, value: count });
+    render();
+    // What the page RECORDED: the total it now holds, for a `fixture_state`
+    // assertion that does not have to trust the reply or the tool's return.
+    fixtureReport('counter.value', count);
+    return { ok: true, value: count };
+  }
+
+  function read() {
+    calls.push({ tool: 'counter_read', ok: true, value: count });
+    return { ok: true, value: count };
+  }
+
+  // The page's own state, readable without trusting a tool's return value.
+  window.__fixture = {
+    page: 'shimmed',
+    start: START,
+    get value() { return count; },
+    calls: calls,
+  };
+
+  // Registered synchronously while this script evaluates, so the tools are
+  // listable as soon as the document is ready.
+  document.modelContext.registerTool({
+    name: 'counter_add',
+    description: 'Add a whole number to the counter this page owns and return the new total.',
+    inputSchema: {
+      type: 'object',
+      properties: { amount: { type: 'integer', description: 'How much to add to the counter.' } },
+      required: ['amount'],
+    },
+    execute: (input) => add(input),
+  });
+
+  document.modelContext.registerTool({
+    name: 'counter_read',
+    description: 'Read the current value of the counter this page owns.',
+    inputSchema: { type: 'object', properties: {} },
+    execute: () => read(),
+  });
+
+  render();
+  status.textContent = 'This page offers two tools: counter_add and counter_read.';
+}());
+</script>
+</body>
+</html>

@@ -68,7 +68,8 @@ defmodule FermixCore.Jobs.Telemetry do
     measurements = %{
       duration_ms: run_duration_ms(run),
       iterations: Map.get(result, :iterations, 0),
-      total_tokens: Map.get(result, :total_tokens, 0)
+      total_tokens: Map.get(result, :total_tokens, 0),
+      tool_failures: Map.get(result, :tool_failures, 0)
     }
 
     execute(@run_complete_event, measurements, metadata)

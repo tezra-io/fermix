@@ -18,6 +18,7 @@ defmodule FermixCore.Management.Capabilities do
   alias FermixCore.Meetings.BrowserInstall
   alias FermixCore.Meetings.SidecarInstaller, as: MeetbotInstaller
   alias FermixCore.Transcription.Local, as: LocalTranscription
+  alias FermixCore.Transcription.Local.SidecarInstaller, as: LocalSttInstaller
 
   require Logger
 
@@ -81,11 +82,19 @@ defmodule FermixCore.Management.Capabilities do
     end
   end
 
+  # Setup does not offer on-device speech yet, and an install nobody can then
+  # select would spend a long download on a backend that cannot be chosen, so
+  # the job refuses in the same sentence the panes show.
   defp install_run("local_stt", opts) do
     install = Keyword.get(opts, :install, &LocalTranscription.ensure_installed/1)
+    offered? = Keyword.get(opts, :offered?, LocalTranscription.offered?())
 
     fn _job_id, report ->
-      done("local_stt", install.(progress: local_progress(report)))
+      if offered? do
+        done("local_stt", install.(progress: local_progress(report)))
+      else
+        {:error, {:unavailable, LocalTranscription.unoffered_message()}}
+      end
     end
   end
 
@@ -122,8 +131,10 @@ defmodule FermixCore.Management.Capabilities do
   defp sentence(:not_installed),
     do: "The helper this step needs is not installed yet."
 
+  # Only the on-device speech installer refuses this way, so it answers in the
+  # words every other surface uses for a machine with no build.
   defp sentence(:no_release_pinned),
-    do: "This build pins no release of that helper yet."
+    do: LocalSttInstaller.error_message(:no_release_pinned)
 
   defp sentence({:no_pinned_artifact, _tag, _target}),
     do: "The pinned release carries no build for this Mac."

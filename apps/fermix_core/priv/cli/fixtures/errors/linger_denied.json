@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "linger_denied",
+    "sentence": "The background service has to keep running after you log out, and this machine refused to allow that. Run sudo loginctl enable-linger operator, then try again. It said: Access denied"
+  },
+  "ok": false,
+  "schema_version": 1
+}

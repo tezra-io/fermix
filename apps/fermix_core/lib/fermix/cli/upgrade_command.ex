@@ -73,7 +73,7 @@ defmodule Fermix.CLI.UpgradeCommand do
       {:error, {:managed_install, name, hint}} ->
         IO.puts(
           :stderr,
-          "fermix upgrade: managed by #{name}; run: #{hint}, then " <>
+          "fermix upgrade: managed by #{manager(name)}; run: #{hint}, then " <>
             "`fermix restart`; the daemon keeps running the old version until restarted"
         )
 
@@ -93,7 +93,7 @@ defmodule Fermix.CLI.UpgradeCommand do
   end
 
   defp print_install_method({:managed, name, hint}) do
-    IO.puts("Managed by #{name}; upgrade with: #{hint}")
+    IO.puts("Managed by #{manager(name)}; upgrade with: #{hint}")
   end
 
   defp print_install_method({:unmanaged, path}) do
@@ -101,6 +101,12 @@ defmodule Fermix.CLI.UpgradeCommand do
   end
 
   defp print_install_method(_), do: :ok
+
+  # `linux_package` is this project's own identifier for "we built this as a
+  # package", which is not a thing an operator has a name for. Every other
+  # classifier name is the package manager spelled the way it is typed.
+  defp manager(:linux_package), do: "this machine's package manager"
+  defp manager(name) when is_atom(name), do: Atom.to_string(name)
 
   defp abort(message) do
     IO.puts(:stderr, "fermix upgrade: #{message}")

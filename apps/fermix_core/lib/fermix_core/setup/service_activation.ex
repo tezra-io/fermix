@@ -45,9 +45,13 @@ defmodule FermixCore.Setup.ServiceActivation do
     service(opts).drifted?.(scope, service_opts(opts))
   end
 
+  # Two success shapes, one callee: a standalone restart answers `:ok` and a
+  # packaged one answers with the published result, because it has a new
+  # generation to name. Activation only needs to know the transaction completed.
   defp restart(scope, opts) do
     case service(opts).restart.(scope, service_opts(opts)) do
       :ok -> {:ok, %{scope: scope, action: :restarted}}
+      {:ok, _status} -> {:ok, %{scope: scope, action: :restarted}}
       {:error, reason} -> start_after_restart_error(scope, opts, reason)
     end
   end
@@ -72,9 +76,12 @@ defmodule FermixCore.Setup.ServiceActivation do
     end
   end
 
+  # Same two success shapes as `restart/2`: a packaged install answers with the
+  # status it verified, which is more than this caller needs but is not a failure.
   defp install(scope, opts) do
     case service(opts).install.(scope, service_opts(opts)) do
       :ok -> :ok
+      {:ok, _status} -> :ok
       {:error, reason} -> {:error, {:install_failed, reason}}
     end
   end

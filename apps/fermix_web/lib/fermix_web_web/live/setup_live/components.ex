@@ -368,7 +368,9 @@ defmodule FermixWebWeb.SetupLive.Components do
           <section class="min-w-0 space-y-5">
             <div class="grid gap-4 lg:grid-cols-2">
               <label class="form-control w-full">
-                <span class="label pb-1 text-sm font-medium">Default model</span>
+                <span class="label pb-1 text-sm font-medium">
+                  Default model <.model_info provider={@provider_form.provider} />
+                </span>
                 <.default_model_input
                   provider_form={@provider_form}
                   provider_models={@provider_models}
@@ -555,6 +557,23 @@ defmodule FermixWebWeb.SetupLive.Components do
   # Hide the "Model behavior" panel when the provider has no behavior
   # knobs (no reasoning effort; the codex fast toggle rides effort? too).
   defp provider_behavior?(provider), do: Descriptor.fetch!(provider).effort?
+
+  attr :provider, :atom, required: true
+
+  # Info "i" beside "Default model": the longer explanation a provider declares
+  # about its own model list, kept behind the control rather than shown inline.
+  # The string is the descriptor's — the same one the management wire publishes
+  # as the model row's `info` — so a provider that declares none draws nothing.
+  defp model_info(assigns) do
+    assigns = assign(assigns, info: Descriptor.fetch!(assigns.provider).model_info)
+
+    ~H"""
+    <span :if={@info} class="tooltip tooltip-right z-10 text-base-content/45" data-tip={@info}>
+      <.icon name="hero-information-circle" class="size-4" />
+      <span class="sr-only">{@info}</span>
+    </span>
+    """
+  end
 
   attr :provider_form, :map, required: true
   attr :provider_models, :list, required: true
@@ -1089,7 +1108,7 @@ defmodule FermixWebWeb.SetupLive.Components do
         subtitle="Enable the local Realtime voice path when this host should run FermixPet."
       />
 
-      <form phx-submit="save_realtime" class="mt-6 space-y-5">
+      <form phx-change="change_realtime" phx-submit="save_realtime" class="mt-6 space-y-5">
         <.realtime_primary_fields form={@realtime_form} />
         <.realtime_secret_field form={@realtime_form} />
         <.realtime_limit_fields form={@realtime_form} />
@@ -1115,10 +1134,13 @@ defmodule FermixWebWeb.SetupLive.Components do
       <label class="form-control w-full">
         <span class="label pb-1 text-sm font-medium">Model</span>
         <select name="realtime_form[model]" class="select select-bordered w-full bg-base-100">
-          <option :for={model <- @form.models} value={model} selected={model == @form.model}>
-            {model}
+          <option :for={model <- @form.models} value={model.id} selected={model.id == @form.model}>
+            {model.label}
           </option>
         </select>
+        <span class="label pt-1 text-xs text-base-content/60">
+          Live delegates tools, memory and reasoning to your Fermix agent and bills by the minute.
+        </span>
       </label>
 
       <label class="form-control w-full">
@@ -1130,7 +1152,7 @@ defmodule FermixWebWeb.SetupLive.Components do
         </select>
       </label>
 
-      <label class="form-control w-full">
+      <label :if={!@form.live?} class="form-control w-full">
         <span class="label pb-1 text-sm font-medium">Reasoning effort</span>
         <select
           name="realtime_form[reasoning_effort]"
@@ -1259,12 +1281,10 @@ defmodule FermixWebWeb.SetupLive.Components do
         <div class="space-y-2">
           <.core_feature_card :for={card <- @plugin_summary.core_features} card={card} />
         </div>
-        <div
-          :if={transient_status?(@local_install) or transient_status?(@meetbot_install)}
-          class="mt-2 space-y-1"
-        >
-          <.install_banner :if={transient_status?(@local_install)} state={@local_install} />
-          <.install_banner :if={transient_status?(@meetbot_install)} state={@meetbot_install} />
+        <%!-- Only the cards on this page install from here. On-device speech
+             installs from the Voice notes tab and reports there. --%>
+        <div :if={transient_status?(@meetbot_install)} class="mt-2 space-y-1">
+          <.install_banner state={@meetbot_install} />
         </div>
         <hr class="my-6 border-base-300" />
       </div>
@@ -1752,10 +1772,12 @@ defmodule FermixWebWeb.SetupLive.Components do
               checked={@transcription_form.backend == :deepgram}
             />
             <.transcription_backend_option
+              :if={local_listed?(@transcription_form.local_offer)}
               value="local"
               label="On-device"
-              description="Parakeet on this machine · no key, no audio leaves the host"
+              description={local_backend_description(@transcription_form.local_offer)}
               checked={@transcription_form.backend == :local}
+              disabled={@transcription_form.local_offer != :offer}
             />
           </div>
         </fieldset>
@@ -1800,7 +1822,12 @@ defmodule FermixWebWeb.SetupLive.Components do
             </p>
           </div>
 
-          <div :if={@transcription_form.backend == :local} class="space-y-2">
+          <%!-- Where the choice cannot be made the option card above carries the
+               reason, and nothing below would be true there. --%>
+          <div
+            :if={@transcription_form.backend == :local and @transcription_form.local_offer == :offer}
+            class="space-y-2"
+          >
             <p class="text-sm text-base-content/70">
               No key needed. Selecting this backend installs the speech engine and its
               model into your Fermix home; nothing is downloaded until you pick it.
@@ -2004,8 +2031,9 @@ defmodule FermixWebWeb.SetupLive.Components do
                 :for={option <- @meetings_form.backend_options}
                 value={option}
                 selected={option == @meetings_form.transcription_backend}
+                disabled={option == "local" and @meetings_form.local_offer != :offer}
               >
-                {meetings_backend_label(option)}
+                {meetings_backend_label(option, @meetings_form.local_offer)}
               </option>
             </select>
             <span class="label pt-1 text-xs text-base-content/60">
@@ -2656,6 +2684,11 @@ defmodule FermixWebWeb.SetupLive.Components do
      "https://api.slack.com/apps"}
   end
 
+  defp oauth_help_content("tesla") do
+    {"Tesla developer site → create an application: set the allowed origin to a domain you control and the allowed redirect URI to https://fermix.ai/api/integrations/tesla/callback exactly, since Tesla accepts public https redirects only. Paste the Client ID and secret; the secret is stored in your keychain. Region is the one your Tesla account belongs to, chosen here before you connect, because Tesla refuses a mismatch.",
+     "https://developer.tesla.com/"}
+  end
+
   defp oauth_help_content(provider) do
     {"Create an OAuth client with #{provider}, then paste its Client ID and secret.", nil}
   end
@@ -3104,6 +3137,24 @@ defmodule FermixWebWeb.SetupLive.Components do
           name="oauth_client_form[client_secret]"
           set={@oauth.client_secret_set}
         />
+        <label :if={@oauth.regions != []} class="form-control w-full">
+          <span class="label pb-1 text-sm font-medium">Region</span>
+          <select
+            name="oauth_client_form[region]"
+            class="select select-bordered w-full bg-base-100"
+          >
+            <option value="" selected={@oauth.region in [nil, ""]}>
+              Choose the account's region
+            </option>
+            <option
+              :for={region <- @oauth.regions}
+              value={region.id}
+              selected={@oauth.region == region.id}
+            >
+              {region.label}
+            </option>
+          </select>
+        </label>
         <.number_field
           label="Redirect port"
           name="oauth_client_form[redirect_port]"
@@ -3194,17 +3245,17 @@ defmodule FermixWebWeb.SetupLive.Components do
           Version {@plugin.yanked_version} was yanked; run `fermix plugins upgrade {@plugin.name}`.
         </p>
         <form
-          :if={@plugin.status == :needs_config && @plugin.missing_config != []}
+          :if={@plugin.config_entries != []}
           id={"plugin-config-form-#{@plugin.name}"}
           phx-submit="save_plugin_config"
           class="mt-2 flex flex-wrap items-end gap-2"
         >
           <input type="hidden" name="name" value={@plugin.name} />
           <.text_input
-            :for={entry <- @plugin.missing_config}
+            :for={entry <- @plugin.config_entries}
             label={entry.prompt}
             name={"plugin_config_form[#{entry.key}]"}
-            value=""
+            value={entry.value}
           />
           <button type="submit" class="btn btn-outline btn-sm">Save</button>
         </form>
@@ -3232,6 +3283,11 @@ defmodule FermixWebWeb.SetupLive.Components do
       </div>
 
       <div class="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
+        <.plugin_config_switch
+          :for={switch <- @plugin.config_switches}
+          name={@plugin.name}
+          switch={switch}
+        />
         <button
           :if={@oauth_unset?}
           type="button"
@@ -3526,14 +3582,21 @@ defmodule FermixWebWeb.SetupLive.Components do
     """
   end
 
+  attr :value, :string, required: true
+  attr :label, :string, required: true
+  attr :description, :string, required: true
+  attr :checked, :boolean, required: true
+  attr :disabled, :boolean, default: false
+
   defp transcription_backend_option(assigns) do
     ~H"""
-    <label class={search_backend_option_class(@checked)}>
+    <label class={transcription_backend_option_class(@checked, @disabled)}>
       <input
         type="radio"
         name="transcription_form[backend]"
         value={@value}
         checked={@checked}
+        disabled={@disabled}
         class="radio radio-primary radio-sm mt-0.5"
       />
       <span class="min-w-0">
@@ -3595,6 +3658,29 @@ defmodule FermixWebWeb.SetupLive.Components do
       </label>
       <span class="label pt-0 text-xs text-base-content/60">{@hint}</span>
     </div>
+    """
+  end
+
+  # A `kind: :boolean` manifest config entry on a plugin card: an instant switch
+  # beside the card's other actions, labelled with the manifest prompt. The click
+  # carries the word it stores ("true" or "false"), so there is nothing to save.
+  attr :name, :string, required: true
+  attr :switch, :map, required: true
+
+  defp plugin_config_switch(assigns) do
+    ~H"""
+    <label class="flex cursor-pointer items-center gap-1.5">
+      <input
+        type="checkbox"
+        checked={@switch.checked}
+        class="toggle toggle-xs toggle-primary"
+        phx-click="set_plugin_switch"
+        phx-value-name={@name}
+        phx-value-key={@switch.key}
+        phx-value-value={@switch.next}
+      />
+      <span class="text-xs font-medium">{@switch.prompt}</span>
+    </label>
     """
   end
 
@@ -4039,8 +4125,10 @@ defmodule FermixWebWeb.SetupLive.Components do
   defp local_state_class(:ok), do: "text-sm text-success"
   defp local_state_class({:error, _reason}), do: "text-sm text-warning"
 
-  defp meetings_backend_label(""), do: "Global default"
-  defp meetings_backend_label(name), do: name
+  defp meetings_backend_label("", _local_offer), do: "Global default"
+  defp meetings_backend_label("local", :offer), do: "local"
+  defp meetings_backend_label("local", _local_offer), do: "local (cannot be chosen)"
+  defp meetings_backend_label(name, _local_offer), do: name
 
   # Shown under the disabled sign-in button when the sidecar is not installed.
   # If the notetaker is already enabled, opening this panel starts (or resumes)
@@ -4115,6 +4203,28 @@ defmodule FermixWebWeb.SetupLive.Components do
     "flex min-w-0 cursor-pointer gap-3 rounded-field border border-base-300 bg-base-100 p-3 text-sm hover:border-base-content/30"
   end
 
+  # A backend this machine cannot run stays in the list, dimmed and inert, so
+  # the operator sees it and why rather than wondering where it went.
+  defp transcription_backend_option_class(checked, false),
+    do: search_backend_option_class(checked)
+
+  defp transcription_backend_option_class(true, true) do
+    "flex min-w-0 cursor-not-allowed gap-3 rounded-field border border-primary bg-primary/10 p-3 text-sm opacity-60"
+  end
+
+  defp transcription_backend_option_class(false, true) do
+    "flex min-w-0 cursor-not-allowed gap-3 rounded-field border border-base-300 bg-base-100 p-3 text-sm opacity-60"
+  end
+
+  # A choice that cannot be made carries the reason where its description goes.
+  defp local_listed?({:hidden, _sentence}), do: false
+  defp local_listed?(_local_offer), do: true
+
+  defp local_backend_description(:offer),
+    do: "Parakeet on this machine · no key, no audio leaves the host"
+
+  defp local_backend_description({_listing, sentence}), do: sentence
+
   defp step_marker_class(tab, active_tab, report) do
     base = "grid size-6 shrink-0 place-items-center rounded-full text-xs font-semibold"
 
@@ -4142,6 +4252,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   def status_pill_class(:needs_config), do: "badge badge-warning badge-sm"
   def status_pill_class(:needs_secret), do: "badge badge-warning badge-sm"
   def status_pill_class(:reauthorization_required), do: "badge badge-error badge-sm"
+  def status_pill_class(:wrong_region), do: "badge badge-warning badge-sm"
   def status_pill_class(:error), do: "badge badge-error badge-sm"
   def status_pill_class(:not_configured), do: "badge badge-ghost badge-sm"
   def status_pill_class(:available), do: "badge badge-ghost badge-sm"
@@ -4176,6 +4287,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   def status_pill_label(:needs_config), do: "Needs config"
   def status_pill_label(:needs_secret), do: "Needs key"
   def status_pill_label(:reauthorization_required), do: "Reauthorize"
+  def status_pill_label(:wrong_region), do: "Wrong region"
   def status_pill_label(:error), do: "Error"
   def status_pill_label(:not_configured), do: "Not configured"
   def status_pill_label(:available), do: "Available"
@@ -4222,6 +4334,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   def plugin_action_label(:needs_client_config), do: "Configure"
   def plugin_action_label(:needs_auth), do: "Connect"
   def plugin_action_label(:reauthorization_required), do: "Reauthorize"
+  def plugin_action_label(:wrong_region), do: "Sign in again"
   def plugin_action_label(:ready), do: "Check"
   def plugin_action_label(:not_installed), do: "Install"
   def plugin_action_label(:missing_host_runtime), do: "Install runtime"

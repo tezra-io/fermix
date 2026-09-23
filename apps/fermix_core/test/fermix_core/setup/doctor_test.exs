@@ -5,6 +5,7 @@ defmodule FermixCore.Setup.DoctorTest do
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Setup.Doctor
   alias FermixCore.Transcription.Local.ModelStore
+  alias FermixCore.Transcription.Local.SidecarInstaller, as: SttInstaller
 
   defmodule HealthyChannel do
     def health_check(opts) do
@@ -449,6 +450,56 @@ defmodule FermixCore.Setup.DoctorTest do
 
       assert {:error, {:misconfigured, message}} = Doctor.probe_provider(:openrouter)
       assert message =~ "openrouter provider has no api_key"
+    end
+  end
+
+  # M49 §2: Venice's /models answers 200 with no key at all, so only an
+  # authenticated endpoint proves the credential. /api_keys/rate_limits is the
+  # cheapest one and costs nothing.
+  describe "probe_provider/2 — :venice" do
+    test "reads the key-scoped rate limits rather than the public model list" do
+      put_provider(:venice, api_key: "vk-key", default_model: "grok-4-6")
+
+      plug = fn conn ->
+        assert conn.method == "GET"
+        assert conn.request_path == "/api/v1/api_keys/rate_limits"
+        assert ["Bearer vk-key"] = Plug.Conn.get_req_header(conn, "authorization")
+        Plug.Conn.send_resp(conn, 200, ~s({"data":{"accessPermitted":true}}))
+      end
+
+      assert {:ok, %{provider: :venice, model: "grok-4-6"}} =
+               Doctor.probe_provider(:venice, req_options: [plug: plug])
+    end
+
+    test "classifies a 401 as auth_scope_mismatch with a Venice hint" do
+      put_provider(:venice, api_key: "vk-bad")
+
+      plug = fn conn -> Plug.Conn.send_resp(conn, 401, ~s({"error":"Authentication failed"})) end
+
+      assert {:error, {:auth_scope_mismatch, "venice.ai API key", hint}} =
+               Doctor.probe_provider(:venice, req_options: [plug: plug])
+
+      assert hint =~ "Venice API key rejected"
+    end
+
+    # An account with no credit left answers 402. It keeps the generic
+    # server_error kind every provider's non-auth status takes: the probe_error
+    # vocabulary is the management wire, and one provider's status code does not
+    # earn a kind of its own.
+    test "reports a 402 out-of-credit account as a server error carrying the status" do
+      put_provider(:venice, api_key: "vk-broke")
+
+      plug = fn conn -> Plug.Conn.send_resp(conn, 402, ~s({"error":"INSUFFICIENT_BALANCE"})) end
+
+      assert {:error, {:server_error, 402, _body}} =
+               Doctor.probe_provider(:venice, req_options: [plug: plug])
+    end
+
+    test "reports missing api_key as misconfigured" do
+      put_provider(:venice, [])
+
+      assert {:error, {:misconfigured, message}} = Doctor.probe_provider(:venice)
+      assert message =~ "venice provider has no api_key"
     end
   end
 
@@ -1263,14 +1314,15 @@ defmodule FermixCore.Setup.DoctorTest do
                missing: :no_release_pinned,
                remedy: remedy
              } =
-               Doctor.transcription_report(release_pinned?: false)
+               Doctor.transcription_report(releases: %{})
 
-      assert remedy =~ "dev_local"
+      assert remedy == SttInstaller.error_message(:no_release_pinned)
+      refute remedy =~ "dev_local"
     end
 
     test "with a release pinned, a missing sidecar is an ordinary install" do
       assert %{status: :needs_install, missing: :sidecar_not_installed, remedy: remedy} =
-               Doctor.transcription_report(release_pinned?: true)
+               Doctor.transcription_report(releases: FermixTestSupport.SttPins.for_this_host())
 
       assert remedy =~ "sidecar is not installed"
     end
@@ -1332,13 +1384,18 @@ defmodule FermixCore.Setup.DoctorTest do
     test "enabled with no usable lane names the one thing to do" do
       Application.put_env(:fermix_core, :meetings, enabled: true)
 
+      # Bind the pin from the installer instead of restating the tag: what this
+      # proves is that the report RENDERS the canonical pin, and a second literal
+      # here only goes stale (silently red) on the next meetbot bump.
+      pinned_tag = FermixCore.Meetings.SidecarInstaller.pinned_tag()
+
       assert %{
                status: :enabled,
                ready?: false,
                sidecar_installed?: false,
                browser_installed?: false,
                browser_note: nil,
-               pinned_tag: "v0.3.3",
+               pinned_tag: ^pinned_tag,
                profile: :absent,
                rtms_configured?: false,
                remedy: remedy

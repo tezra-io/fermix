@@ -5,8 +5,10 @@ defmodule FermixCore.Setup.WizardTest do
 
   alias FermixCore.Auth.Store, as: AuthStore
   alias FermixCore.Memory.Repo, as: MemoryRepo
+  alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Setup.ConfigStore
+  alias FermixCore.Setup.SecretWriter
   alias FermixCore.Setup.Wizard
 
   # Reports every keychain read to the pid in `:wizard_test_reporter`, so a test
@@ -16,6 +18,11 @@ defmodule FermixCore.Setup.WizardTest do
 
     @impl true
     def available?(_opts \\ []), do: true
+
+    # A probe reads nothing; these doubles stand in for a store that answers.
+    @impl true
+    def probe(opts \\ []),
+      do: %{store: Keyword.get(opts, :store, :keyring), state: :available, sentence: "double"}
 
     @impl true
     def get(key, _opts \\ []) do
@@ -37,6 +44,13 @@ defmodule FermixCore.Setup.WizardTest do
 
   setup do
     providers = Application.fetch_env(:fermix_core, :providers)
+    # Every save applies its sandbox to app env, and a provider key answer adds
+    # a keyring-backed `[sandbox.env]` allow entry under the stub writer.
+    sandbox = Application.fetch_env(:fermix_core, :sandbox)
+    # A tool key answer (the Gemini image key) lands in `:tools` resolved, and
+    # every save re-secures whatever plaintext the live snapshot carries, so a
+    # key one test saved is written again by the next test's save.
+    tools = Application.fetch_env(:fermix_core, :tools)
     telegram = Application.fetch_env(:fermix_channels, :telegram)
     whatsapp = Application.fetch_env(:fermix_channels, :whatsapp)
     discord = Application.fetch_env(:fermix_channels, :discord)
@@ -55,6 +69,7 @@ defmodule FermixCore.Setup.WizardTest do
     FermixTestSupport.SecretWriterStub.reset()
     Application.put_env(:fermix_core, :secret_writer, FermixTestSupport.SecretWriterStub)
     Application.put_env(:fermix_core, :providers, [])
+    Application.put_env(:fermix_core, :tools, [])
     Application.delete_env(:fermix_channels, :telegram)
     Application.put_env(:fermix_channels, :whatsapp, [])
     Application.put_env(:fermix_channels, :discord, [])
@@ -86,6 +101,8 @@ defmodule FermixCore.Setup.WizardTest do
 
     on_exit(fn ->
       restore_env(:fermix_core, :providers, providers)
+      restore_env(:fermix_core, :sandbox, sandbox)
+      restore_env(:fermix_core, :tools, tools)
       restore_env(:fermix_channels, :telegram, telegram)
       restore_env(:fermix_channels, :whatsapp, whatsapp)
       restore_env(:fermix_channels, :discord, discord)
@@ -1195,8 +1212,11 @@ defmodule FermixCore.Setup.WizardTest do
              Wizard.report().wizard
              |> Wizard.save_answers(openai_api_key: "sk-no-helper")
 
-    assert sentence ==
-             "This machine has no secret store, so the credential could not be saved."
+    # The refusal carries the store's own verdict, names the secret, and names
+    # the other declared store, since the keyring is what refused.
+    assert sentence =~ "OPENAI_API_KEY could not be saved: this machine has no keyring client"
+    assert sentence =~ "run: fermix setup --secret-store file"
+    refute sentence =~ ".."
 
     # Nothing at all is written: a save either stores every secret in it or
     # stores none of them, so a half-applied document cannot be left behind.
@@ -1257,6 +1277,257 @@ defmodule FermixCore.Setup.WizardTest do
     assert Keyword.get(realtime, :max_session_minutes) == 20
     assert Keyword.get(realtime, :max_estimated_cost_cents_per_session) == 35
     assert Keyword.get(realtime, :persist_transcripts) == true
+  end
+
+  # The engine is the first axis of the voice section, and it owns which model,
+  # which voices and which Realtime-only settings are legal. A switch that
+  # persisted the operator's word and left the old model behind would write a
+  # config.toml the very next boot refuses.
+  test "save_answers switching the voice engine to Live carries the model and drops the effort" do
+    tmp_home = realtime_engine_home!()
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(
+        realtime_enabled: "yes",
+        realtime_voice: "marin",
+        realtime_reasoning_effort: "high"
+      )
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(realtime_engine: "openai_live")
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    realtime = Keyword.get(persisted.fermix_core, :realtime, [])
+
+    assert Keyword.get(realtime, :engine) == "openai_live"
+    assert Keyword.get(realtime, :model) == "gpt-live-1"
+    assert Keyword.get(realtime, :voice) == "marin"
+    refute Keyword.has_key?(realtime, :reasoning_effort)
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ ~s(engine = "openai_live")
+    assert contents =~ ~s(model = "gpt-live-1")
+    refute contents =~ "reasoning_effort"
+
+    # The live application environment is the half that poisons a daemon: a
+    # merged apply would leave the dropped key behind and raise on the next read.
+    assert %{engine: "openai_live", model: "gpt-live-1", reasoning_effort: nil} =
+             RealtimeConfig.current()
+  end
+
+  test "save_answers switching the voice engine back to Realtime restores a model and effort" do
+    realtime_engine_home!()
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(realtime_enabled: "yes", realtime_engine: "openai_live")
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(realtime_engine: "openai_realtime")
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    realtime = Keyword.get(persisted.fermix_core, :realtime, [])
+
+    assert Keyword.get(realtime, :engine) == "openai_realtime"
+    assert Keyword.get(realtime, :model) == RealtimeConfig.default_model("openai_realtime")
+    assert Keyword.get(realtime, :reasoning_effort) == "low"
+  end
+
+  test "save_answers takes an explicit engine and model together" do
+    realtime_engine_home!()
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(
+        realtime_enabled: "yes",
+        realtime_engine: "openai_live",
+        realtime_model: "gpt-live-1"
+      )
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    realtime = Keyword.get(persisted.fermix_core, :realtime, [])
+
+    assert Keyword.get(realtime, :engine) == "openai_live"
+    assert Keyword.get(realtime, :model) == "gpt-live-1"
+  end
+
+  # The model selects the engine, so a pair that disagrees is not a preference to
+  # resolve: it is two answers that cannot both be honoured, and both are named.
+  test "save_answers refuses a model and an engine that disagree, naming both" do
+    realtime_engine_home!()
+
+    assert_raise ArgumentError,
+                 ~r/gpt-realtime-2 requires engine "openai_realtime", got "openai_live"/,
+                 fn ->
+                   Wizard.report().wizard
+                   |> Wizard.save_answers(
+                     realtime_enabled: "yes",
+                     realtime_engine: "openai_live",
+                     realtime_model: "gpt-realtime-2"
+                   )
+                 end
+  end
+
+  # The one answer the panes now send: the model, on its own. The engine it
+  # implies is what reaches config.toml and the live application environment,
+  # and the Realtime-only settings move with it.
+  test "save_answers derives the engine from the model alone" do
+    tmp_home = realtime_engine_home!()
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(
+        realtime_enabled: "yes",
+        realtime_voice: "marin",
+        realtime_reasoning_effort: "high"
+      )
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(realtime_model: "gpt-live-1")
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    realtime = Keyword.get(persisted.fermix_core, :realtime, [])
+
+    assert Keyword.get(realtime, :engine) == "openai_live"
+    assert Keyword.get(realtime, :model) == "gpt-live-1"
+    refute Keyword.has_key?(realtime, :reasoning_effort)
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ ~s(engine = "openai_live")
+    refute contents =~ "reasoning_effort"
+
+    assert %{engine: "openai_live", model: "gpt-live-1", reasoning_effort: nil} =
+             RealtimeConfig.current()
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(realtime_model: "gpt-realtime-2.1")
+
+    assert {:ok, back} = ConfigStore.load_runtime_config()
+    returned = Keyword.get(back.fermix_core, :realtime, [])
+
+    assert Keyword.get(returned, :engine) == "openai_realtime"
+    assert Keyword.get(returned, :model) == "gpt-realtime-2.1"
+    assert Keyword.get(returned, :reasoning_effort) == "low"
+  end
+
+  # An unknown slug derives no engine, so the engine is left alone and the model
+  # is refused by the one validator that owns the catalog.
+  test "save_answers refuses a model no engine ships with the configuration sentence" do
+    realtime_engine_home!()
+
+    assert_raise ArgumentError, ~r/realtime.model must be one of/, fn ->
+      Wizard.report().wizard
+      |> Wizard.save_answers(realtime_enabled: "yes", realtime_model: "gpt-realtime-9")
+    end
+  end
+
+  test "save_answers refuses an engine no release ships" do
+    realtime_engine_home!()
+
+    assert_raise ArgumentError, ~r/realtime.engine must be one of/, fn ->
+      Wizard.report().wizard
+      |> Wizard.save_answers(realtime_engine: "gpt_live")
+    end
+  end
+
+  # Live ships every Realtime voice plus twelve of its own, so the return journey
+  # is the one that can strand a voice. Snapping it at the same seam is what
+  # keeps an engine switch from answering with a validation error about a value
+  # the operator never chose on this pane.
+  test "save_answers switching to Realtime snaps a Live-only voice onto one both engines ship" do
+    realtime_engine_home!()
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(
+        realtime_enabled: "yes",
+        realtime_engine: "openai_live",
+        realtime_voice: "beacon"
+      )
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(realtime_engine: "openai_realtime")
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    realtime = Keyword.get(persisted.fermix_core, :realtime, [])
+
+    assert Keyword.get(realtime, :engine) == "openai_realtime"
+    assert Keyword.get(realtime, :voice) == "marin"
+    assert Keyword.get(realtime, :voice) in RealtimeConfig.valid_voices("openai_realtime")
+    assert Keyword.get(realtime, :voice) in RealtimeConfig.valid_voices("openai_live")
+  end
+
+  test "save_answers leaves a voice both engines ship untouched across a switch" do
+    realtime_engine_home!()
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(
+        realtime_enabled: "yes",
+        realtime_engine: "openai_realtime",
+        realtime_voice: "cedar"
+      )
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(realtime_engine: "openai_live")
+
+    assert {:ok, forward} = ConfigStore.load_runtime_config()
+    assert forward.fermix_core |> Keyword.get(:realtime, []) |> Keyword.get(:voice) == "cedar"
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(realtime_engine: "openai_realtime")
+
+    assert {:ok, back} = ConfigStore.load_runtime_config()
+    assert back.fermix_core |> Keyword.get(:realtime, []) |> Keyword.get(:voice) == "cedar"
+  end
+
+  # The snap only fills what the operator did not say. A voice named in the same
+  # save is merged on top of it, and is still held to the target engine catalog.
+  test "save_answers takes an explicit voice while switching the engine" do
+    realtime_engine_home!()
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(
+        realtime_enabled: "yes",
+        realtime_engine: "openai_live",
+        realtime_voice: "beacon"
+      )
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(realtime_engine: "openai_realtime", realtime_voice: "sage")
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    assert persisted.fermix_core |> Keyword.get(:realtime, []) |> Keyword.get(:voice) == "sage"
+
+    assert_raise ArgumentError, ~r/realtime.voice must be one of/, fn ->
+      Wizard.report().wizard
+      |> Wizard.save_answers(realtime_engine: "openai_realtime", realtime_voice: "beacon")
+    end
+  end
+
+  defp realtime_engine_home! do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-realtime-engine-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+    Application.put_env(:fermix_core, :providers, [])
+    Application.put_env(:fermix_core, :realtime, [])
+    Application.delete_env(:fermix_channels, :telegram)
+    start_memory_repo!()
+
+    tmp_home
   end
 
   test "save_answers persists the computer_use enable flag" do
@@ -1696,6 +1967,7 @@ defmodule FermixCore.Setup.WizardTest do
              :fermix,
              :soul,
              :realtime,
+             :live,
              :user,
              :memory
            ]
@@ -1706,6 +1978,7 @@ defmodule FermixCore.Setup.WizardTest do
     assert File.exists?(Path.join([bootstrap_dir, "main", "IDENTITY.md"]))
     assert File.exists?(Path.join([bootstrap_dir, "main", "FERMIX.md"]))
     assert File.exists?(Path.join([bootstrap_dir, "main", "SOUL.md"]))
+    assert File.exists?(Path.join([bootstrap_dir, "main", "LIVE.md"]))
   end
 
   test "save_answers skips seeding when prerequisites are still missing" do
@@ -2288,6 +2561,187 @@ defmodule FermixCore.Setup.WizardTest do
 
       assert {:ok, "sk-already-on-disk"} =
                FermixTestSupport.SecretWriterStub.get(:openai_api_key)
+    end
+  end
+
+  describe "the secret store answer (M38 §7, owner decision 8)" do
+    setup do
+      start_memory_repo!()
+      on_exit(fn -> Application.delete_env(:fermix_core, :secret_store) end)
+      %{home: System.fetch_env!("FERMIX_HOME")}
+    end
+
+    defp config_contents(home), do: File.read!(Path.join(home, "config.toml"))
+
+    test "choosing the file store is recorded on its own, with no secret in the save", %{
+      home: home
+    } do
+      assert {:ok, _report} = Wizard.report().wizard |> Wizard.save_answers(secret_store: "file")
+
+      assert config_contents(home) =~ ~s(secret_store = "file")
+      assert Application.get_env(:fermix_core, :secret_store) == :file
+    end
+
+    test "a secret saved together with the choice lands in the chosen store as @file", %{
+      home: home
+    } do
+      assert {:ok, _report} =
+               Wizard.report().wizard
+               |> Wizard.save_answers(secret_store: "file", openai_api_key: "sk-in-a-file")
+
+      contents = config_contents(home)
+      assert contents =~ ~s(secret_store = "file")
+      assert contents =~ ~s(api_key = "@file")
+      refute contents =~ "sk-in-a-file"
+
+      assert {:ok, "sk-in-a-file"} = SecretWriter.get(:openai_api_key, store: :file)
+      assert {:error, :missing_secret} = SecretWriter.get(:openai_api_key, store: :keyring)
+    end
+
+    test "choosing the keyring again writes new secrets there, and touches nothing stored", %{
+      home: home
+    } do
+      {:ok, _} =
+        Wizard.report().wizard
+        |> Wizard.save_answers(secret_store: "file", openai_api_key: "sk-file")
+
+      {:ok, _} =
+        Wizard.report().wizard
+        |> Wizard.save_answers(secret_store: "keyring", xai_api_key: "xai-ring")
+
+      contents = config_contents(home)
+      refute contents =~ "secret_store"
+      assert contents =~ ~s(api_key = "@file")
+      assert contents =~ ~s(api_key = "@keyring")
+      assert {:ok, "sk-file"} = SecretWriter.get(:openai_api_key, store: :file)
+      assert {:ok, "xai-ring"} = SecretWriter.get(:xai_api_key, store: :keyring)
+    end
+
+    test "a store nobody declared is refused before anything is written", %{home: home} do
+      assert {:error, sentence} =
+               Wizard.report().wizard
+               |> Wizard.save_answers(secret_store: "vault", openai_api_key: "sk-x")
+
+      assert sentence =~ ~s(secret_store must be "keyring" or "file")
+      refute File.exists?(Path.join(home, "config.toml")) and config_contents(home) =~ "sk-x"
+      assert {:error, :missing_secret} = SecretWriter.get(:openai_api_key, store: :keyring)
+    end
+
+    test "a locked keyring whose unlock prompt is cancelled refuses with the verdict and names the file store" do
+      FermixTestSupport.SecretWriterStub.set_verdict(%{
+        store: :keyring,
+        state: :locked,
+        sentence: "the login keyring is locked"
+      })
+
+      on_exit(fn -> FermixTestSupport.SecretWriterStub.clear_verdict(:keyring) end)
+
+      assert {:error, {:secret_store_failed, :telegram_bot_token, sentence}} =
+               Wizard.report().wizard |> Wizard.save_answers(telegram_bot_token: "123:abc")
+
+      assert sentence =~
+               "TELEGRAM_BOT_TOKEN could not be saved: the login keyring is locked, and the " <>
+                 "unlock prompt was cancelled or left unanswered."
+
+      assert sentence =~ "fermix setup --secret-store file"
+      FermixTestSupport.SecretWriterStub.clear_verdict(:keyring)
+      assert {:error, :missing_secret} = SecretWriter.get(:telegram_bot_token, store: :keyring)
+    end
+
+    test "a locked keyring whose unlock prompt is answered saves to the keyring, as before", %{
+      home: home
+    } do
+      FermixTestSupport.SecretWriterStub.set_verdict(
+        %{store: :keyring, state: :locked, sentence: "the login keyring is locked"},
+        unlock_on_prompt: true
+      )
+
+      on_exit(fn -> FermixTestSupport.SecretWriterStub.clear_verdict(:keyring) end)
+
+      assert {:ok, _report} =
+               Wizard.report().wizard |> Wizard.save_answers(telegram_bot_token: "123:abc")
+
+      assert config_contents(home) =~ ~s(bot_token = "@keyring")
+      assert {:ok, "123:abc"} = SecretWriter.get(:telegram_bot_token, store: :keyring)
+    end
+
+    test "a store with nothing to answer is refused before any write, with its verdict" do
+      FermixTestSupport.SecretWriterStub.set_verdict(%{
+        store: :keyring,
+        state: :service_absent,
+        sentence: "no keyring service (Secret Service) is running on this session bus"
+      })
+
+      on_exit(fn -> FermixTestSupport.SecretWriterStub.clear_verdict(:keyring) end)
+
+      assert {:error, {:secret_store_failed, :telegram_bot_token, sentence}} =
+               Wizard.report().wizard |> Wizard.save_answers(telegram_bot_token: "123:abc")
+
+      assert sentence =~ "TELEGRAM_BOT_TOKEN could not be saved: no keyring service"
+      assert sentence =~ "fermix setup --secret-store file"
+    end
+
+    test "with the keyring locked, the same save succeeds once the file store is chosen", %{
+      home: home
+    } do
+      FermixTestSupport.SecretWriterStub.set_verdict(%{
+        store: :keyring,
+        state: :locked,
+        sentence: "the login keyring is locked"
+      })
+
+      on_exit(fn -> FermixTestSupport.SecretWriterStub.clear_verdict(:keyring) end)
+
+      assert {:ok, _report} =
+               Wizard.report().wizard
+               |> Wizard.save_answers(secret_store: "file", telegram_bot_token: "123:abc")
+
+      assert config_contents(home) =~ ~s(bot_token = "@file")
+      assert {:ok, "123:abc"} = SecretWriter.get(:telegram_bot_token, store: :file)
+    end
+
+    test "the management door's put_secret asks the store first, and carries the verdict" do
+      FermixTestSupport.SecretWriterStub.set_verdict(%{
+        store: :keyring,
+        state: :locked,
+        sentence: "the login keyring is locked"
+      })
+
+      on_exit(fn -> FermixTestSupport.SecretWriterStub.clear_verdict(:keyring) end)
+
+      # Locked is tried (the prompt), and the cancelled prompt is the failure.
+      assert {:error, {:secret_store_failed, :telegram_bot_token, {:helper_failed, _, 1, _}}} =
+               Wizard.put_secret(:telegram_bot_token, "123:abc")
+
+      FermixTestSupport.SecretWriterStub.set_verdict(%{
+        store: :keyring,
+        state: :service_absent,
+        sentence: "no keyring service"
+      })
+
+      # Nothing to answer: refused with the verdict, no write tried.
+      assert {:error,
+              {:secret_store_failed, :telegram_bot_token, {:verdict, %{state: :service_absent}}}} =
+               Wizard.put_secret(:telegram_bot_token, "123:abc")
+
+      FermixTestSupport.SecretWriterStub.clear_verdict(:keyring)
+      assert {:error, :missing_secret} = SecretWriter.get(:telegram_bot_token, store: :keyring)
+    end
+
+    test "the file store's own refusal names no other store" do
+      FermixTestSupport.SecretWriterStub.set_verdict(%{
+        store: :file,
+        state: :unavailable,
+        sentence: "the Fermix home does not exist"
+      })
+
+      on_exit(fn -> FermixTestSupport.SecretWriterStub.clear_verdict(:file) end)
+      {:ok, _} = Wizard.report().wizard |> Wizard.save_answers(secret_store: "file")
+
+      assert {:error, {:secret_store_failed, :openai_api_key, sentence}} =
+               Wizard.report().wizard |> Wizard.save_answers(openai_api_key: "sk-x")
+
+      assert sentence == "OPENAI_API_KEY could not be saved: the Fermix home does not exist."
     end
   end
 

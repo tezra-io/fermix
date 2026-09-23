@@ -8,15 +8,52 @@ defmodule FermixCore.ComputerUse.Telemetry do
   request/response analog) lives here — each ACTION is a tool call emitted through
   the shared `FermixCore.Tools.Telemetry` so it reuses the existing JSONL/Opik
   aggregation. Every event carries the session's `session_id` (`cua_<id>`) and,
-  when spawned by a main turn, its `parent_session`, so a whole session reassembles
-  into one nested trace.
+  when spawned by a main turn, its `parent_session`, so a whole session
+  reassembles into one trace correlated to the turn that opened it.
 
-  The matching `fermix_opik` aggregation for these event names lands with the
-  registration/wiring increment (the run-type does not fire at runtime until the
-  tool is registered).
+  The family is wired end to end: `trace_event_definitions/0` below is what
+  `FermixCore.Trace.TelemetryHandler` appends to reach the JSONL stream, and
+  `FermixOpik` subscribes to the same five events — the run opens its OWN ROOT
+  trace on `session_start`, closes it on `session_complete`/`session_error`, and
+  records pause and resume as phase spans inside it. The run is never nested:
+  the session is keyed by conversation and outlives the turn, so `parent_session`
+  is correlation only (see docs/TELEMETRY_CONTRACT.md).
   """
 
   alias FermixCore.Telemetry
+
+  @trace_event_definitions [
+    %{
+      event: [:fermix, :computer_use, :session_start],
+      trace_event: "computer_use_session_start",
+      trace_type: :agent_event,
+      agent_field: :agent
+    },
+    %{
+      event: [:fermix, :computer_use, :session_complete],
+      trace_event: "computer_use_session_complete",
+      trace_type: :agent_event,
+      agent_field: :agent
+    },
+    %{
+      event: [:fermix, :computer_use, :session_error],
+      trace_event: "computer_use_session_error",
+      trace_type: :agent_event,
+      agent_field: :agent
+    },
+    %{
+      event: [:fermix, :computer_use, :session_pause],
+      trace_event: "computer_use_session_pause",
+      trace_type: :agent_event,
+      agent_field: :agent
+    },
+    %{
+      event: [:fermix, :computer_use, :session_resume],
+      trace_event: "computer_use_session_resume",
+      trace_type: :agent_event,
+      agent_field: :agent
+    }
+  ]
 
   @type meta :: %{
           required(:session_id) => String.t(),
@@ -25,6 +62,9 @@ defmodule FermixCore.ComputerUse.Telemetry do
           optional(:parent_session) => String.t() | nil,
           optional(:origin) => atom()
         }
+
+  @spec trace_event_definitions() :: [map()]
+  def trace_event_definitions, do: @trace_event_definitions
 
   @spec session_start(meta()) :: :ok
   def session_start(meta) when is_map(meta), do: emit(:session_start, %{}, base(meta))
@@ -39,6 +79,15 @@ defmodule FermixCore.ComputerUse.Telemetry do
   def session_error(meta, reason) when is_map(meta) do
     emit(:session_error, %{}, Map.put(base(meta), :reason, Telemetry.preview(reason)))
   end
+
+  # Pause and resume are part of the lifecycle, not actions: the operator took
+  # the seat back, or gave it up again, and a trace that shows only start and
+  # complete cannot say why nothing was dispatched in between.
+  @spec session_pause(meta()) :: :ok
+  def session_pause(meta) when is_map(meta), do: emit(:session_pause, %{}, base(meta))
+
+  @spec session_resume(meta()) :: :ok
+  def session_resume(meta) when is_map(meta), do: emit(:session_resume, %{}, base(meta))
 
   defp base(meta) do
     %{

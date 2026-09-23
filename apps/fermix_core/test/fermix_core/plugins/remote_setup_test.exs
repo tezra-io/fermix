@@ -21,7 +21,7 @@ defmodule FermixCore.Plugins.RemoteSetupTest do
   alias FermixTestSupport.DistFixtures
   alias FermixTestSupport.DistVerifierStub
 
-  @credential "eden_pat_canary_do_not_leak"
+  @credential "acme_pat_canary_do_not_leak"
   @session_id "sess-setup-1"
   @manifest_path "/tmp/workspacedemo/plugin.json"
 

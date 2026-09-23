@@ -3,6 +3,31 @@ defmodule FermixCore.ComputerUse.CourtesyTest do
 
   alias FermixCore.ComputerUse.Courtesy
 
+  describe "scope/2 and contends?/3 (M42 §5.3)" do
+    test "only a control pressed by name inside a bound window narrows the question" do
+      assert Courtesy.scope(true, :window) == :target_process
+      assert Courtesy.scope(true, :desktop) == :desktop
+      assert Courtesy.scope(true, nil) == :desktop
+      assert Courtesy.scope(false, :window) == :desktop
+    end
+
+    test "everything that takes the cursor or the keyboard yields to any activity" do
+      assert Courtesy.contends?(:desktop, true, false)
+      assert Courtesy.contends?(:desktop, true, nil)
+      refute Courtesy.contends?(:desktop, false, true)
+    end
+
+    test "work inside a bound window yields only to activity in that window" do
+      assert Courtesy.contends?(:target_process, true, true)
+      refute Courtesy.contends?(:target_process, true, false)
+      refute Courtesy.contends?(:target_process, false, true)
+    end
+
+    test "a helper that could not say which window is in front is not contention" do
+      refute Courtesy.contends?(:target_process, true, nil)
+    end
+  end
+
   describe "disturbing?/1" do
     test "cursor-moving and typing actions disturb the human" do
       for action <-

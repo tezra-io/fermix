@@ -353,6 +353,94 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletionsTest do
       assert_receive {:headers, [], []}
     end
 
+    # M49 §3.2: Venice prepends its own system prompt unless told not to, and
+    # returns reasoning inline in `content` unless told to strip it — and this
+    # adapter reads `content` only. Both are constants on every Venice request
+    # and must appear on no other provider's.
+    test "sends venice_parameters only for :venice" do
+      test_pid = self()
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        {:ok, raw, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:body, Jason.decode!(raw)})
+
+        Req.Test.json(conn, %{
+          "choices" => [%{"message" => %{"content" => "ok"}}],
+          "usage" => %{"prompt_tokens" => 1, "completion_tokens" => 1, "total_tokens" => 2}
+        })
+      end)
+
+      base_opts = [
+        model: "grok-4-6",
+        api_key: "vk-test",
+        base_url: "https://api.venice.test/api/v1",
+        req_options: [plug: {Req.Test, __MODULE__}]
+      ]
+
+      {:ok, _turn} =
+        ChatCompletions.chat(
+          [%{role: "user", content: "hi"}],
+          [],
+          Keyword.put(base_opts, :provider, :venice)
+        )
+
+      assert_receive {:body, venice_body}
+
+      assert venice_body["venice_parameters"] == %{
+               "include_venice_system_prompt" => false,
+               "strip_thinking_response" => true
+             }
+
+      for provider <- [:openai, :openrouter, :mistral, :ollama] do
+        {:ok, _turn} =
+          ChatCompletions.chat(
+            [%{role: "user", content: "hi"}],
+            [],
+            Keyword.put(base_opts, :provider, provider)
+          )
+
+        assert_receive {:body, other_body}
+        refute Map.has_key?(other_body, "venice_parameters"), "#{provider} sent venice_parameters"
+      end
+    end
+
+    # The continuation builds its own request, so a constant that rode only the
+    # first call would drop Fermix's prompt from every turn after the first.
+    test "continue/3 sends venice_parameters too" do
+      test_pid = self()
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        {:ok, raw, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:body, Jason.decode!(raw)})
+
+        Req.Test.json(conn, %{
+          "choices" => [%{"message" => %{"content" => "done"}}],
+          "usage" => %{"prompt_tokens" => 1, "completion_tokens" => 1, "total_tokens" => 2}
+        })
+      end)
+
+      state = %{
+        messages: [%{role: "user", content: "hi"}],
+        assistant: %{role: "assistant", content: ""},
+        capabilities: []
+      }
+
+      {:ok, _turn} =
+        ChatCompletions.continue(
+          state,
+          [%{call_id: "call-1", output: "42"}],
+          model: "grok-4-6",
+          api_key: "vk-test",
+          provider: :venice,
+          base_url: "https://api.venice.test/api/v1",
+          req_options: [plug: {Req.Test, __MODULE__}]
+        )
+
+      assert_receive {:body, body}
+      assert body["venice_parameters"]["include_venice_system_prompt"] == false
+      assert body["venice_parameters"]["strip_thinking_response"] == true
+    end
+
     # M12 §2.3-5: the adapter serves several providers; attribution must
     # come from the resolver, never default to :openai.
     test "raises when the :provider opt is missing" do
@@ -472,7 +560,7 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletionsTest do
 
   describe "continue/3 screenshot retention" do
     @screenshot_label "Image returned by the preceding tool call:"
-    @screenshot_elided "[earlier tool image omitted to bound context]"
+    @screenshot_elided "[the image the preceding tool result describes was dropped to bound context: it is a record of a past look, not a current view, and no coordinate or id in it can be used]"
 
     test "keeps only the most recent N screenshots; older image bytes are elided" do
       test_pid = self()

@@ -5,9 +5,12 @@ daemon wrote under `<FERMIX_HOME>/traces/YYYY-MM-DD/`, `rows_for_anchored_turn`
 narrows to one batch (anchored by the fixture URL its `open` row carries), and `classify_row` labels each row as a delivered click, another
 pointer action, a screenshot, or a typed refusal. `parse_cursor_echo`,
 `parse_not_delivered`, `parse_sent_dims` and `classify_refusal` read the exact
-strings the daemon renders (each anchor below carries its file:line), and
-`parse_elixir_input` decodes the `input` field — which Fermix writes as an Elixir
-`inspect` map, not JSON.
+strings the daemon renders. Each anchor below names the FUNCTION that renders it,
+not a line: line numbers rot silently and a rotted anchor here is a parser that
+quietly matches nothing (`parse_not_delivered` read a sentence M42 slice 3 had
+already reworded, so every unconfirmed aim scored as a clean delivery). Re-read
+the named function before trusting a pattern. `parse_elixir_input` decodes the
+`input` field — which Fermix writes as an Elixir `inspect` map, not JSON.
 
 Two trace preconditions are separate on purpose (they have different causes and
 different fixes): `check_trace_visibility` asks whether the run's rows are on disk
@@ -25,9 +28,10 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 
-# `session.ex:341-345` — the complete pointer-action set. Only the three that put a
-# button down count as a probe's click; the rest are recorded and never matched,
-# so a stray scroll can never masquerade as an off-page click (F6).
+# The complete pointer-action set (`Compux.Protocol` `@addressed`, minus the two
+# that name a control rather than a point). Only the three that put a button down
+# count as a probe's click; the rest are recorded and never matched, so a stray
+# scroll can never masquerade as an off-page click (F6).
 DELIVERED_ACTIONS = frozenset({"left_click", "right_click", "double_click"})
 OTHER_POINTER_ACTIONS = frozenset({"mouse_move", "left_click_drag", "scroll", "inspect"})
 CLICK_EVENTS_PER_ACTION = {"left_click": 1, "right_click": 0, "double_click": 2}
@@ -49,23 +53,34 @@ MAIN_AGENT = "main"
 
 MAX_ROWS = 500_000
 
-# Rendered by `computer_use/session.ex`: screenshot dims `:920` area, cursor echo
-# `:981`, full-screen equivalent `:993`, delivery marker `:965`.
-_DIMS_RE = re.compile(r"screenshot (\d+)x(\d+) \(display (\d+)\)")
+# Rendered by `computer_use/session.ex`, one function per pattern. Since M42 slice
+# 3 every image leads with its own identity (`image_lead/2`), so the dims ride that
+# sentence rather than a bare "screenshot WxH"; the cursor echo (`cursor_suffix/1`)
+# and the aim marker (`delivery_suffix/1`) follow it, and the badge table is
+# `marks_suffix/1`.
+_DIMS_RE = re.compile(r"Image [^,]+, (\d+)x(\d+) \(display (\d+)\)")
 _CURSOR_RE = re.compile(r"Cursor at \((-?\d+),(-?\d+)\)")
-_FULLSCREEN_RE = re.compile(r"= \((-?\d+),(-?\d+)\) on the full screen")
-_NOT_DELIVERED_RE = re.compile(r"NOT delivered at \((-?\d+),(-?\d+)\)")
+# `delivery_suffix/1`. The sentence hedges deliberately — a human moving the mouse
+# after a click that DID land leaves the same trace — so this reads "the cursor did
+# not end up where we aimed", which is exactly what an aim harness measures, and
+# never "the input was dropped". It said "NOT delivered at" until slice 3.
+_NOT_DELIVERED_RE = re.compile(r"Aim NOT confirmed at \((-?\d+),(-?\d+)\)")
 _MARKS_ZERO = "0 accessibility marks"
 _MARKS_RE = re.compile(r"(\d+) numbered mark\(s\) badged on the image")
 
-# Typed refusals, anchored on `tools/computer_use.ex`: ambiguous `:454`,
-# region mismatch `:410`, no marks `:428`, stale marks `:433`, unknown mark `:439`.
+# Typed refusals, anchored on `Tools.ComputerUse.refusal_message/1` (this side's
+# own gates) and `action_error_message/1` (the helper's codes). The region-mismatch
+# and stale-mark refusals are gone with the rectangle they were about: an action
+# names the image its coordinates were read in, so the questions left are "did it
+# name one" and "is that image still the helper's".
 _REFUSALS = (
     ("ambiguous_coordinates", "ambiguous coordinates: "),
-    ("region_mismatch", "your latest coordinate source uses region "),
-    ("no_marks", "no live marks — take a fresh "),
-    ("stale_marks", "the marks were taken on a view you have since left"),
-    ("unknown_mark", " does not exist — the latest marks screenshot has "),
+    ("observation_required", "it names no `observation_id`"),
+    ("unaddressable_observation", "no longer one the computer-use helper holds"),
+    ("point_outside_observation", "outside the image its `observation_id` names"),
+    ("capture_geometry_mismatch", "do not match the picture it captured"),
+    ("no_marks", "the image you named carries no marks"),
+    ("unknown_mark", " does not exist — the image you named has "),
 )
 
 
@@ -289,23 +304,19 @@ def parse_cursor_echo(output: str) -> tuple[int, int] | None:
     return (int(match.group(1)), int(match.group(2))) if match else None
 
 
-def parse_fullscreen_echo(output: str) -> tuple[int, int] | None:
-    """The `= (fx,fy) on the full screen` half, present only on a magnified crop."""
-    match = _FULLSCREEN_RE.search(output or "")
-    return (int(match.group(1)), int(match.group(2))) if match else None
-
-
 def full_sent_echo(output: str, had_region: bool) -> tuple[int, int] | None:
-    """The cursor position in the FULL-SENT grid, whichever half carries it: the
-    explicit full-screen equivalent on a crop, else the bare echo on a full
-    capture (which is already that grid). Never mixes the two spaces."""
-    explicit = parse_fullscreen_echo(output)
-    if explicit is not None:
-        return explicit
+    """The cursor position in the FULL-SENT grid, when the summary carries it: a
+    full capture's bare echo already IS that grid. A crop's is not, and since M42
+    slice 3 the summary no longer discloses a second grid beside the first — a
+    coordinate belongs to the image the text names and to no other — so a crop
+    answers None rather than a converted number. Never mixes the two spaces."""
     return None if had_region else parse_cursor_echo(output)
 
 
 def parse_not_delivered(output: str) -> tuple[int, int] | None:
+    """The point an action aimed at whose cursor was NOT confirmed there
+    (`session.ex` `delivery_suffix/1`). Present means the check's cursor was
+    elsewhere, which for this harness is a probe that did not reach its target."""
     match = _NOT_DELIVERED_RE.search(output or "")
     return (int(match.group(1)), int(match.group(2))) if match else None
 

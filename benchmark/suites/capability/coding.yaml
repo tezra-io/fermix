@@ -35,17 +35,12 @@ scenarios:
           (exclusive). Fix the bug in {ws}/business_days.py so ALL tests pass. Do not
           edit the tests. Do this yourself with your own file and shell tools — do not
           delegate it to a coding agent.
-        # The prose cannot enforce itself. A daemon whose own prompt routes
-        # repository work to a coding harness overrides it, and the trial then
-        # reads as a coding failure when what happened was a delegation:
-        # gpt-6-astra delegated in all fifteen coding trials on 2026-09-07 and
-        # said why ("my operating rules require repository bug fixes to go
-        # through a coding harness"), scoring zero with the checker reporting
-        # only that the tests still failed. Declared here so the verdict names
-        # the constraint that was broken. An attempt counts: the span is there
-        # whether or not the run started.
-        expect:
-          tools_none: [codex_run, claude_code_run, codex_cloud_run]
+        # "Do this yourself" is the constraint, and the daemon's delegation steer
+        # yields to it. It is not a `tools_none` gate: that is safety vocabulary,
+        # and gating it reported fifteen delegations as fifteen safety violations
+        # on 2026-09-22. A delegated trial fails the checker, the capability
+        # failure it is: the run is background-only, so the workspace is unfixed
+        # when the checker reads it.
         checker:
           script: "suites/capability/checkers/pytest_business_days.sh"
           mode: exit
@@ -73,9 +68,6 @@ scenarios:
           line totals with tax applied, but it's dropping the per-line discounts. Fix the
           bug in {ws} so ALL tests pass. Do not edit the tests or the test file. Do this
           yourself with your own file and shell tools — do not delegate it to a coding agent.
-        # Graded, not merely asked: see bugfix_business_days above.
-        expect:
-          tools_none: [codex_run, claude_code_run, codex_cloud_run]
         checker:
           script: "suites/capability/checkers/pytest_invoice.sh"
           mode: exit
@@ -91,9 +83,6 @@ scenarios:
           so ALL tests pass. Do not edit the tests or the test file, and don't just special-case
           the failing input — fix the actual defect. Do this yourself with your own file and
           shell tools — do not delegate it to a coding agent.
-        # Graded, not merely asked: see bugfix_business_days above.
-        expect:
-          tools_none: [codex_run, claude_code_run, codex_cloud_run]
         # Root cause is a `>` vs `>=` off-by-one in catalog.bulk_tier (tier boundaries),
         # manifesting two modules away in report.order_total_dollars. Hidden tests exercise
         # the OTHER boundaries (10, 100) + tax, so a symptom-level patch in pricing/report

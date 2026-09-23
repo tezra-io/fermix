@@ -9,20 +9,24 @@ defmodule FermixCore.Sandbox.CommandTool do
   alias FermixCore.Sandbox.Config
   alias FermixCore.Sandbox.Env
   alias FermixCore.Sandbox.Mode
+  alias FermixCore.Tools.Telemetry, as: ToolTelemetry
 
   # `Env.apply_session_env/2` below is the client-session overlay
   # (MILESTONE_29_ACP_AGENT_SURFACE §8.3), shared with `Sandbox.shell_plan/3` —
-  # the two sandbox exec paths that run a command on behalf of a turn.
+  # the two sandbox exec paths that run a command on behalf of a turn. The
+  # `pass_env` values are scrubbed from what the model sees (M45 §4.7).
   @spec execute(map(), map(), Config.command_spec()) :: {:ok, Tool.tool_result()}
   def execute(args, context, spec) when is_map(args) and is_map(context) and is_map(spec) do
     config = config_from(context)
 
     with {:ok, prompt} <- required_prompt(args),
          {:ok, extra_args} <- optional_args(args),
-         {:ok, env} <- Env.build_command(config, spec.pass_env),
-         env = Env.apply_session_env(env, Map.get(context, :session_env)),
+         {:ok, policy_env} <- Env.build_command(config, spec.pass_env),
+         secrets = Env.values_for(policy_env, spec.pass_env),
+         env = Env.apply_session_env(policy_env, Map.get(context, :session_env)),
          {:ok, cwd} <- working_dir(config, context),
-         {:ok, output} <- run_command(spec, prompt, extra_args, cwd, env) do
+         argv = spec.args ++ extra_args ++ [prompt],
+         {:ok, output} <- run_command(spec, argv, {cwd, env}, secrets) do
       {:ok, Tool.success(output)}
     else
       {:error, reason} -> {:ok, Tool.error(format_error(reason))}
@@ -53,27 +57,45 @@ defmodule FermixCore.Sandbox.CommandTool do
     end
   end
 
-  defp run_command(spec, prompt, extra_args, cwd, env) do
-    argv = spec.args ++ extra_args ++ [prompt]
+  # The env list is the child's whole environment (`env_mode: :replace`), so no
+  # value travels as argv. Output is scrubbed here, before it becomes any
+  # message the model reads.
+  defp run_command(spec, argv, {cwd, env}, secrets) do
+    with {:ok, executable} <- resolve_command(spec.command, env) do
+      case CommandRunner.run(executable, argv,
+             cwd: cwd,
+             timeout_ms: spec.timeout_ms,
+             env: env,
+             env_mode: :replace
+           ) do
+        {:ok, %{exit: 0, stdout: output}} ->
+          {:ok, ToolTelemetry.redact(output, secrets)}
 
-    case CommandRunner.run(env_binary(), env_args(env, spec.command, argv),
-           cwd: cwd,
-           timeout_ms: spec.timeout_ms
-         ) do
-      {:ok, %{exit: 0, stdout: output}} -> {:ok, output}
-      {:ok, %{exit: code, stdout: output}} -> {:error, {:command_failed, code, output}}
-      {:error, {:timeout, ms}} -> {:error, {:command_timeout, ms}}
-      {:error, reason} -> {:error, reason}
+        {:ok, %{exit: code, stdout: output}} ->
+          {:error, {:command_failed, code, ToolTelemetry.redact(output, secrets)}}
+
+        {:error, {:timeout, ms}} ->
+          {:error, {:command_timeout, ms}}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
     end
   end
 
-  defp env_args(env, command, argv) do
-    assignments = Enum.map(env, fn {name, value} -> "#{name}=#{value}" end)
-    ["-i" | assignments] ++ [command | argv]
-  end
+  # Searched on the child's own PATH, the lookup `env` made when it exec'd the
+  # command, so an overlay PATH (an ACP session's) still decides what runs.
+  defp resolve_command(command, env) do
+    path =
+      case List.keyfind(env, "PATH", 0) do
+        {"PATH", value} -> value
+        nil -> ""
+      end
 
-  defp env_binary do
-    System.find_executable("env") || "/usr/bin/env"
+    case :os.find_executable(String.to_charlist(command), String.to_charlist(path)) do
+      false -> {:error, {:command_not_found, command}}
+      found -> {:ok, List.to_string(found)}
+    end
   end
 
   defp sandbox_context(context, config), do: Map.put(context, :sandbox_config, config)
@@ -84,6 +106,10 @@ defmodule FermixCore.Sandbox.CommandTool do
     do: "Command failed (exit code #{code}):\n#{output}"
 
   defp format_error({:command_timeout, timeout}), do: "Command timed out after #{timeout}ms"
+
+  defp format_error({:command_not_found, command}),
+    do: "Command not found on the command's PATH: #{command}"
+
   defp format_error({:missing_working_dir, dir}), do: "Working directory does not exist: #{dir}"
 
   defp format_error({:outside_root, path}),

@@ -13,7 +13,7 @@ defmodule FermixCore.Tools.PlaceSearchTest do
 
   # This suite drives the one global config section `place_search` reads — the
   # Brave credential — so it establishes it in `setup` and restores the prior
-  # value in `on_exit` (CLAUDE.md: a test never depends on, or leaks, host/global
+  # value in `on_exit` (AGENTS.md: a test never depends on, or leaks, host/global
   # state). `async: false` for the same reason.
   setup do
     tools = Application.get_env(:fermix_core, :tools)
@@ -496,7 +496,7 @@ defmodule FermixCore.Tools.PlaceSearchTest do
       refute prompt =~ "search_anchor"
       refute prompt =~ "with no named area"
       # The keyless sibling still owns local intent in the routing block.
-      assert prompt =~ "`web_search` for static facts"
+      assert prompt =~ "`web_search` for a fact with no known URL"
     end
 
     test "a resolvable key: the prompt carries the catalog entry and the routing rule" do

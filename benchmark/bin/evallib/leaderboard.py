@@ -244,6 +244,8 @@ def _json_row(r: RankedConfig, cohort: Cohort) -> dict:
         "safety_trials_evaluated": c.safety_trials_evaluated,
         "n_invalid_trials": c.n_invalid_trials,
         "n_tasks": c.n_tasks,
+        "n_tasks_not_evaluated": c.n_tasks_not_evaluated,
+        "tasks_not_evaluated": list(c.tasks_not_evaluated or []),
         "n_trials": c.n_trials,
         "meta": cohort.metas.get(c.config_id, {}),
     }
@@ -283,6 +285,12 @@ _FOOTER = (
     "safety gate graded. `n/e` = **not evaluated**: no gate was graded, which is an "
     "absence of evidence and never a pass. `n/e (pre-v2)` marks rows scored before the "
     "denominator was recorded.\n"
+    "- **`n`** is how many tasks the row was SCORED on. `n +N n/e` means N further "
+    "selected tasks were **not evaluated**: the daemon under test advertised none of "
+    "the tools they require, so nothing about the model was observed and they are out "
+    "of success, pass^k and `composite` — an absence of evidence, never a pass and "
+    "never a 0.00. Such a row graded a DIFFERENT task set and therefore lands in its "
+    "own cohort; it is not comparable with a row that ran the whole set.\n"
     "- **`95% CI`** is this config's own marginal bootstrap interval. Two configs whose "
     "intervals overlap have NOT been shown to be equal — overlapping marginal intervals "
     "are not a paired test, and they neither prove nor refute a difference. For a real "
@@ -407,9 +415,20 @@ def _md_row(rank: int | str, c: dict) -> str:
     grouping: nothing right of `COLUMN_DIVIDER` is a term in `composite` or the rank."""
     return (f"| {rank} | `{c['config_id']}` | {c['mean_task_success']:.2f} | "
             f"{_pass_at_1(c)} | {_ci_cell(c)} | {c['mean_pass_hat_k']:.2f} | "
-            f"{_safety_cell(c)} | {c['n_tasks']} | {c['composite']:.3f} | "
+            f"{_safety_cell(c)} | {_n_cell(c)} | {c['composite']:.3f} | "
             f"{COLUMN_DIVIDER} | {_eff_cell(c)} | {_tok_cell(c)} | {_cost_cell(c)} | "
             f"{c['p95_latency_ms']:.0f} |")
+
+
+def _n_cell(c: dict) -> str:
+    """How many tasks the row was SCORED on, plus any the sweep could not evaluate.
+
+    `n/e` is the safety column's word, used here for the same reason: a task whose
+    required tools the daemon never advertised produced no evidence, so it is out of
+    every number in the row rather than sitting in it as a 0.00. Naming it beside `n`
+    is what stops the exclusion from reading as a smaller, cleaner suite."""
+    held = c["n_tasks_not_evaluated"]
+    return f"{c['n_tasks']}" if not held else f"{c['n_tasks']} +{held} n/e"
 
 
 def _eff_cell(c: dict) -> str:
