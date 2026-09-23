@@ -68,13 +68,22 @@ one means the advertised command is broken for a release that is already out:
 fix the installer and re-serve it, because the release itself cannot be
 replaced.
 
-**Serving it.** `fermix-site` vendors the script as `public/install`, byte for
-byte, and a test there pins its sha256 and the engine commit it came from; the
-served copy is never edited in the site repository. Check the copy before the
-site deploys:
+**Serving it.** `fermix-site` vendors the script as `src/installer/install.sh`,
+byte for byte, and `src/config/installer.ts` there pins its sha256 and the
+engine commit it came from (a test holds the two together); the served copy is
+never edited in the site repository. The site's `/install` route answers by
+what asks: `curl`, `wget` and `sh` receive the script, and a browser is sent to
+the install page, so check the copy with `curl` and never by opening the address.
+Before the site deploys:
 
 ```sh
-cmp scripts/install.sh ../fermix-site/public/install
+cmp scripts/install.sh ../fermix-site/src/installer/install.sh
+```
+
+and once it has:
+
+```sh
+curl -fsSL https://fermix.ai/install | cmp - scripts/install.sh
 ```
 
 **The order matters the first time a release changes what the installer needs.**
