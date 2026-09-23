@@ -407,7 +407,8 @@ def test_malformed_spans_raise_rather_than_being_skipped():
 # checked against first-party vendor pricing; the card carries the reason beside
 # the entry, and the assertion here is what makes the reason enforceable.
 
-_OPENAI_CACHE_WRITE_MODELS = ("gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")
+_OPENAI_CACHE_WRITE_MODELS = ("gpt-6-astra", "gpt-6-sol", "gpt-6-luna",
+                              "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")
 
 
 @pytest.mark.parametrize("model", _OPENAI_CACHE_WRITE_MODELS)
@@ -574,14 +575,41 @@ def test_gpt_4o_sits_on_the_older_50_percent_caching_tier():
     assert rate.cached_input_per_mtok == pytest.approx(0.5 * rate.input_per_mtok)
 
 
+def test_gpt_6_sol_and_luna_undercut_their_gpt_5_6_namesakes_on_every_leg():
+    # Read first-party 2026-09-22, standard tier. Each GPT-6 tier is cheaper than
+    # its GPT-5.6 namesake on all four legs, so pricing one by analogy to its
+    # predecessor overstates it.
+    assert pricing.CARD[("openai", "gpt-6-sol")] == pricing.Rate(2.00, 10.00, 0.20, 2.50)
+    assert pricing.CARD[("openai", "gpt-6-luna")] == pricing.Rate(0.10, 0.50, 0.01, 0.125)
+    for new, old in (("gpt-6-sol", "gpt-5.6-sol"), ("gpt-6-luna", "gpt-5.6-luna")):
+        newer, older = pricing.CARD[("openai", new)], pricing.CARD[("openai", old)]
+        for leg in ("input_per_mtok", "output_per_mtok", "cached_input_per_mtok",
+                    "cache_write_per_mtok"):
+            assert getattr(newer, leg) < getattr(older, leg), f"{new}.{leg}"
+
+
 def test_fable_5_1_caches_at_a_tenth_of_its_siblings_read_rate():
     # Verified first-party: the vendor's table footnotes Fable 5.1 and Mythos
-    # 5.1 as the only models at 0.025x input; everything else is 0.1x.
+    # 5.1 as the only models at 0.025x input; everything else but Opus 5.5
+    # (0.05x) is 0.1x.
     special = pricing.CARD[("anthropic", "claude-fable-5-1")]
     sibling = pricing.CARD[("anthropic", "claude-fable-5")]
     assert special.input_per_mtok == sibling.input_per_mtok
     assert special.cached_input_per_mtok == pytest.approx(0.025 * special.input_per_mtok)
     assert sibling.cached_input_per_mtok == pytest.approx(0.1 * sibling.input_per_mtok)
+
+
+def test_opus_5_5_caches_at_half_the_standard_read_rate():
+    # Read first-party 2026-09-22: the vendor's table footnotes Opus 5.5 alone at
+    # 0.05x input for cache hits; its write leg is the standard 1.25x. It also
+    # undercuts Opus 5, so pricing it by analogy to its predecessor overstates it.
+    new = pricing.CARD[("anthropic", "claude-opus-5-5")]
+    old = pricing.CARD[("anthropic", "claude-opus-5")]
+    assert (new.input_per_mtok, new.output_per_mtok) == (4.00, 20.00)
+    assert new.cached_input_per_mtok == pytest.approx(0.05 * new.input_per_mtok)
+    assert new.cache_write_per_mtok == pytest.approx(1.25 * new.input_per_mtok)
+    assert new.input_per_mtok < old.input_per_mtok
+    assert new.output_per_mtok < old.output_per_mtok
 
 
 def test_claude_sonnet_5_carries_the_vendors_standard_price_on_every_leg():
