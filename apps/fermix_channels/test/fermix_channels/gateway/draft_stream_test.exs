@@ -45,6 +45,19 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
     end
   end
 
+  # Every write in arrival order, up to and including the first that carries
+  # `text`.
+  defp writes_until(text, acc \\ []) do
+    receive do
+      {:open, ^text} -> Enum.reverse([{:open, text} | acc])
+      {:edit, _handle, ^text} -> Enum.reverse([{:edit, text} | acc])
+      {:open, other} -> writes_until(text, [{:open, other} | acc])
+      {:edit, _handle, other} -> writes_until(text, [{:edit, other} | acc])
+    after
+      2_000 -> flunk("no write carried #{inspect(text)}; saw #{inspect(Enum.reverse(acc))}")
+    end
+  end
+
   describe "coalescing and throttling" do
     test "(a) rapid pushes coalesce: few writes, newest snapshot wins" do
       pid = DraftStream.start_link(spec(self()), @fast)
@@ -53,13 +66,13 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
         DraftStream.push(pid, {:text_delta, "text#{i}"})
       end
 
-      # Let the trailing timer flush the final snapshot.
-      Process.sleep(150)
+      # Await the trailing timer's flush rather than sleep for it: a slow runner
+      # let the seal land first, and the seal rightly pre-empts the flush.
+      writes = writes_until("text100")
       assert {:ok, nil} = DraftStream.seal(pid, "sealed")
 
-      writes = drain_writes()
       assert length(writes) < 20
-      assert {_kind, "text100"} = List.last(writes)
+      assert drain_writes() == []
     end
 
     test "(e) identical text is never re-written" do

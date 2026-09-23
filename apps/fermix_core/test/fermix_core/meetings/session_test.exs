@@ -207,7 +207,7 @@ defmodule FermixCore.Meetings.SessionTest.HangingSummarizer do
   alias FermixCore.Meetings.SessionTest.Observer
 
   def run(_meeting, _transcript_md, _opts) do
-    Observer.notify(:summarize_called)
+    Observer.notify({:summarize_called, self()})
     Process.sleep(:infinity)
   end
 end
@@ -885,15 +885,29 @@ defmodule FermixCore.Meetings.SessionTest do
       assert %{status: "delivered", error: nil} = row(ctx, meeting.id)
     end
 
+    # A short real bound raced the summarizer's own start: on a contended runner
+    # the watchdog expired before the task ran its first line. So the bounds are
+    # long, the armed timer is proved to be the summarizer's (more remains than
+    # the drain bound allows), and its expiry is delivered once the summarizer
+    # is provably running.
     test "a summarizer that never returns is killed and the meeting fails", ctx do
       meeting =
-        capturing_with_segment!(ctx, summarizer: HangingSummarizer, timers: %{summarize_ms: 60})
+        capturing_with_segment!(ctx,
+          summarizer: HangingSummarizer,
+          timers: %{drain_ms: 30_000, summarize_ms: 60_000}
+        )
 
       assert_receive {:stt_opened, stream}
       send(meeting.pid, {:meeting_ended, :meeting_closed})
       send(meeting.pid, {:transcript_stream_closed, stream, %{segments: 1, dropped: 0}})
 
-      assert_receive :summarize_called, 2_000
+      assert_receive {:summarize_called, summarizer}, 2_000
+      summarizer_ref = Process.monitor(summarizer)
+      %{phase_timer: watchdog} = :sys.get_state(meeting.pid)
+      assert Process.read_timer(watchdog) > 30_000
+
+      send(meeting.pid, {:phase_timeout, :summarizing})
+      assert_receive {:DOWN, ^summarizer_ref, :process, ^summarizer, :shutdown}
       await_stop(meeting, 3_000)
       assert %{status: "failed", error: ":summarize_timeout"} = row(ctx, meeting.id)
     end
