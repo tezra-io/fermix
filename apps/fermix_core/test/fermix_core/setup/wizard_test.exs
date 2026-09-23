@@ -47,6 +47,10 @@ defmodule FermixCore.Setup.WizardTest do
     # Every save applies its sandbox to app env, and a provider key answer adds
     # a keyring-backed `[sandbox.env]` allow entry under the stub writer.
     sandbox = Application.fetch_env(:fermix_core, :sandbox)
+    # A tool key answer (the Gemini image key) lands in `:tools` resolved, and
+    # every save re-secures whatever plaintext the live snapshot carries, so a
+    # key one test saved is written again by the next test's save.
+    tools = Application.fetch_env(:fermix_core, :tools)
     telegram = Application.fetch_env(:fermix_channels, :telegram)
     whatsapp = Application.fetch_env(:fermix_channels, :whatsapp)
     discord = Application.fetch_env(:fermix_channels, :discord)
@@ -65,6 +69,7 @@ defmodule FermixCore.Setup.WizardTest do
     FermixTestSupport.SecretWriterStub.reset()
     Application.put_env(:fermix_core, :secret_writer, FermixTestSupport.SecretWriterStub)
     Application.put_env(:fermix_core, :providers, [])
+    Application.put_env(:fermix_core, :tools, [])
     Application.delete_env(:fermix_channels, :telegram)
     Application.put_env(:fermix_channels, :whatsapp, [])
     Application.put_env(:fermix_channels, :discord, [])
@@ -97,6 +102,7 @@ defmodule FermixCore.Setup.WizardTest do
     on_exit(fn ->
       restore_env(:fermix_core, :providers, providers)
       restore_env(:fermix_core, :sandbox, sandbox)
+      restore_env(:fermix_core, :tools, tools)
       restore_env(:fermix_channels, :telegram, telegram)
       restore_env(:fermix_channels, :whatsapp, whatsapp)
       restore_env(:fermix_channels, :discord, discord)
