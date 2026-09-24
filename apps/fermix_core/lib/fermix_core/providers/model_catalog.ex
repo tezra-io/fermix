@@ -38,7 +38,8 @@ defmodule FermixCore.Providers.ModelCatalog do
   # models_for/1). This field is the compaction denominator
   # (`context_tokens / context_window >= compaction.threshold`, default 0.85 —
   # see `TurnRunner`), NOT a declared capability, so neither column is a
-  # straight copy of a published number. astra = frontier (default);
+  # straight copy of a published number. astra = frontier (default); GPT-6
+  # sol/luna = the generation's cheaper frontier/fast pair; the gpt-5.6
   # sol/terra/luna = frontier/balanced/fast of the prior generation.
   #
   # Codex column: the cache's `max_context_window` — the ceiling that path
@@ -65,14 +66,15 @@ defmodule FermixCore.Providers.ModelCatalog do
   #
   # Direct-API column: the published window from
   # developers.openai.com/api/docs/models/<id> for gpt-5.5, gpt-5.4 and
-  # gpt-5.4-mini only. The other four are deliberate deviations, because every
+  # gpt-5.4-mini only. The other six are deliberate deviations, because every
   # current model reprices a request above 272k INPUT tokens at 2x input/cache
   # and 1.5x output "for the full request" — a cliff rather than a ramp, so one
   # token over doubles the bill for everything before it:
   #
-  #   * astra 320_000 is NOT its real 1,050,000 window. 0.85 * 320_000 =
-  #     272_000 puts compaction exactly on that boundary, so the
-  #     standard-priced tier is used in full. Do not "correct" it upward.
+  #   * astra, and GPT-6 sol/luna, 320_000 is NOT their real 1,050,000
+  #     window. 0.85 * 320_000 = 272_000 puts compaction exactly on that
+  #     boundary, so the standard-priced tier is used in full. Do not
+  #     "correct" it upward.
   #
   #   * sol/terra/luna 272_000 predate that calibration and are NOT their
   #     published windows, which are also 1,050,000. They sit below the cliff
@@ -88,8 +90,8 @@ defmodule FermixCore.Providers.ModelCatalog do
   # a large tool result can cross 272k and be billed at 2x once before the next
   # preflight compaction trims it. Zero margin means nothing absorbs that lag.
   #
-  # `max` reasoning effort is a current-generation capability (GPT-6 Astra and
-  # the GPT-5.6 models), so those leave `max_reasoning_effort` unset (provider
+  # `max` reasoning effort is a current-generation capability (the GPT-6 and
+  # GPT-5.6 models), so those leave `max_reasoning_effort` unset (provider
   # ceiling = `:max`) while gpt-5.5/gpt-5.4/gpt-5.4-mini cap at `:xhigh`. An
   # over-reaching config self-heals down to the model's ceiling at route
   # resolution (see `clamp_effort/3`), it does not 400 at the provider. Astra's
@@ -98,6 +100,8 @@ defmodule FermixCore.Providers.ModelCatalog do
   # is deliberately absent from `ReasoningEffort`.
   @openai_codex [
     %Entry{id: "gpt-6-astra", label: "GPT-6 Astra (default, latest)", context_window: 872_000},
+    %Entry{id: "gpt-6-sol", label: "GPT-6 Sol", context_window: 872_000},
+    %Entry{id: "gpt-6-luna", label: "GPT-6 Luna (fast, cheaper)", context_window: 872_000},
     %Entry{id: "gpt-5.6-sol", label: "GPT-5.6 Sol", context_window: 872_000},
     %Entry{id: "gpt-5.6-terra", label: "GPT-5.6 Terra (balanced)", context_window: 872_000},
     %Entry{id: "gpt-5.6-luna", label: "GPT-5.6 Luna (fast, cheaper)", context_window: 872_000},
@@ -127,6 +131,8 @@ defmodule FermixCore.Providers.ModelCatalog do
       label: "GPT-6 Astra (default, recommended)",
       context_window: 320_000
     },
+    %Entry{id: "gpt-6-sol", label: "GPT-6 Sol", context_window: 320_000},
+    %Entry{id: "gpt-6-luna", label: "GPT-6 Luna (fast, cheaper)", context_window: 320_000},
     %Entry{id: "gpt-5.6-sol", label: "GPT-5.6 Sol", context_window: 272_000},
     %Entry{id: "gpt-5.6-terra", label: "GPT-5.6 Terra (balanced)", context_window: 272_000},
     %Entry{id: "gpt-5.6-luna", label: "GPT-5.6 Luna (fast, cheaper)", context_window: 272_000},
@@ -152,7 +158,7 @@ defmodule FermixCore.Providers.ModelCatalog do
 
   # Context windows are the API defaults the adapter actually gets (it does not
   # send the `context-1m` beta header, design doc §8) — compaction thresholds key
-  # off these. The 4.6+ generation (Opus 5, Fable 5.1, Fable 5, Opus 4.8,
+  # off these. The 4.6+ generation (Opus 5.5, Opus 5, Fable 5.1, Fable 5, Opus 4.8,
   # Sonnet 4.6) ships the full 1M window by default at standard pricing; only
   # Haiku 4.5 is 200k. (Older Sonnet 4/4.5 still need the beta for 1M, but they
   # are not in this catalog.)
@@ -162,7 +168,9 @@ defmodule FermixCore.Providers.ModelCatalog do
   # docs before the SSE follow-up raises the adapter's non-streaming cap above
   # them). Fable 5.1 is a Covered Model: an organization on zero data retention
   # gets a 400 on every request until Anthropic authorizes it, which is an
-  # account setting rather than a request-shape defect.
+  # account setting rather than a request-shape defect. Opus 5.5 shares Fable
+  # 5.1's request rules (thinking always on, no forced tool_choice); the
+  # adapter's "opus-5" substring already sends that shape.
   @anthropic [
     %Entry{
       id: "claude-sonnet-4-6",
@@ -183,8 +191,14 @@ defmodule FermixCore.Providers.ModelCatalog do
       max_output_tokens: 64_000
     },
     %Entry{
+      id: "claude-opus-5-5",
+      label: "Claude Opus 5.5 (best quality)",
+      context_window: 1_000_000,
+      max_output_tokens: 128_000
+    },
+    %Entry{
       id: "claude-opus-5",
-      label: "Claude Opus 5 (best quality)",
+      label: "Claude Opus 5",
       context_window: 1_000_000,
       max_output_tokens: 128_000
     },
@@ -211,19 +225,21 @@ defmodule FermixCore.Providers.ModelCatalog do
   # Grok 4.6 = 500k, Grok 4.5 = 500k, Grok 4.3 = 1M, Grok 4.20 = 1M,
   # code-fast = 256k. The 4.5 and 4.20 figures corrected long-stale values here
   # (they read 1M and 256k respectively) — a window that overstates the real one
-  # defers compaction past the provider's limit.
+  # defers compaction past the provider's limit. Grok 4.7 = 500k
+  # (docs.x.ai/developers/grok-4-7, 2026-09-22).
   #
   # `reasoning_effort?: false` marks the models that reject `reasoning.effort`
   # (design doc §6.2) — re-verify against current xAI docs when adding models.
   #
-  # `xhigh` is a Grok 4.6 capability, so 4.6 leaves `max_reasoning_effort` unset
+  # `xhigh` arrived with Grok 4.6, so 4.6+ leaves `max_reasoning_effort` unset
   # (provider ceiling = `:xhigh`) while every older Grok caps at `:high` — the
   # same shape as the gpt-5.6-vs-gpt-5.5 split above. xAI itself treats an
   # `xhigh` request to an older model as `high` rather than rejecting it, so the
   # cap is about not *offering* a level that would silently do nothing, not
   # about avoiding a 400.
   @xai [
-    %Entry{id: "grok-4.6", label: "Grok 4.6 (recommended, latest)", context_window: 500_000},
+    %Entry{id: "grok-4.7", label: "Grok 4.7 (recommended, latest)", context_window: 500_000},
+    %Entry{id: "grok-4.6", label: "Grok 4.6", context_window: 500_000},
     %Entry{
       id: "grok-4.5",
       label: "Grok 4.5",

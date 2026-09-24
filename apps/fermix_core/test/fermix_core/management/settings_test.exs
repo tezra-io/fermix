@@ -10,9 +10,12 @@ defmodule FermixCore.Management.SettingsTest do
 
   use ExUnit.Case, async: false
 
+  alias FermixCore.Management.Copy
   alias FermixCore.Management.Secrets
   alias FermixCore.Management.Settings
+  alias FermixCore.Management.Settings.AnswerMap
   alias FermixCore.Management.Settings.Row
+  alias FermixCore.Management.Settings.Voice
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Readiness
   alias FermixCore.Realtime.Config, as: RealtimeConfig
@@ -20,6 +23,8 @@ defmodule FermixCore.Management.SettingsTest do
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.RestartState
   alias FermixCore.Setup.SecretWriter
+  alias FermixCore.Transcription.Local, as: LocalTranscription
+  alias FermixCore.Transcription.Local.SidecarInstaller, as: SttInstaller
   alias FermixTestSupport.SafeRm
   alias FermixTestSupport.SecretWriterStub
 
@@ -157,6 +162,17 @@ defmodule FermixCore.Management.SettingsTest do
         Row.new("k", :text, "Label", restart: false, info: :venice)
       end
     end
+
+    # A choice greyed out with no reason is one the operator cannot act on.
+    test "a disabled option must say why" do
+      assert Row.option("v", "Label", disabled: true, hint: "Not here.")["hint"] == "Not here."
+
+      for hint <- [nil, ""] do
+        assert_raise ArgumentError, ~r/option v is disabled without a hint/, fn ->
+          Row.option("v", "Label", disabled: true, hint: hint)
+        end
+      end
+    end
   end
 
   describe "one section's rows" do
@@ -266,6 +282,21 @@ defmodule FermixCore.Management.SettingsTest do
       assert %{"value" => "oauth", "kind" => "choice"} = row("providers.anthropic", "auth_mode")
     end
 
+    # The macOS app draws its model picker from these options, so a catalog
+    # model reaches the app only if it is published here.
+    test "a model row offers the newest catalog models to the app" do
+      published = fn section ->
+        section |> row("default_model") |> Map.fetch!("options") |> Enum.map(& &1["value"])
+      end
+
+      assert "claude-opus-5-5" in published.("providers.anthropic")
+      assert "grok-4.7" in published.("providers.xai")
+
+      for section <- ["providers.openai", "providers.openai_codex"] do
+        assert ["gpt-6-sol", "gpt-6-luna"] -- published.(section) == []
+      end
+    end
+
     # The explanation behind the model row's info control is the descriptor's,
     # so the one provider that declares it publishes it and every other one
     # publishes null. A branch on the provider id here would be a second place
@@ -303,6 +334,89 @@ defmodule FermixCore.Management.SettingsTest do
   # which voices exist, whether reasoning effort is a setting at all, and whether
   # the backend that answers is worth naming. A client renders whichever list it
   # is handed, so the engine-scoped half is pinned here rather than trusted.
+  # On-device speech runs only where this build pins a sidecar for the machine.
+  # It is offered and disabled rather than hidden, so a pane says why, and the
+  # write refuses the disabled choice instead of trusting every client to grey
+  # it out.
+  describe "the on-device transcription option" do
+    @backend_rows [
+      {"transcription", "transcription_backend"},
+      {"meetings", "meetings_transcription_backend"}
+    ]
+
+    # The shipped posture: picking on-device downloads a speech model on the
+    # spot, a flow that has not been proven, so no pane lists the choice.
+    test "is not published at all while this build does not offer it" do
+      put_transcription(backend: "openai")
+
+      for {section, key} <- @backend_rows do
+        refute local_option(section, key, pinned()),
+               "#{section}/#{key} publishes a choice setup does not offer"
+      end
+    end
+
+    # A configuration that already names it keeps transcribing on-device, so the
+    # pane shows what is in force rather than a picker with nothing selected.
+    test "is shown, disabled, where a configuration already names it" do
+      put_transcription(backend: "local")
+      put_meetings(transcription_backend: "local")
+
+      for {section, key} <- @backend_rows do
+        option = local_option(section, key, pinned())
+
+        assert option["label"] == "On this device"
+        assert option["disabled"] == true
+        assert option["hint"] == LocalTranscription.unoffered_message()
+        assert Copy.violations(option["hint"], :prose) == []
+      end
+    end
+
+    test "is offered by name once the build offers it, on a machine with a sidecar" do
+      put_transcription(backend: "openai", local_offered: true)
+
+      for {section, key} <- @backend_rows do
+        option = local_option(section, key, pinned())
+
+        assert option["label"] == "On this device"
+        assert option["disabled"] == false
+        assert option["hint"] == nil
+      end
+    end
+
+    test "is disabled, with the machine's own reason, where it is offered but has no sidecar" do
+      put_transcription(backend: "openai", local_offered: true)
+
+      for {section, key} <- @backend_rows do
+        option = local_option(section, key, releases: %{})
+
+        assert option["disabled"] == true
+        assert option["hint"] == SttInstaller.error_message(:no_release_pinned)
+        assert Copy.violations(option["hint"], :prose) == []
+      end
+    end
+
+    test "the write refuses a disabled option in the reason's own words" do
+      put_transcription(backend: "local")
+      row = backend_row("transcription", "transcription_backend", pinned())
+
+      assert AnswerMap.answer("transcription", row, "local") ==
+               {:error, LocalTranscription.unoffered_message()}
+
+      assert AnswerMap.answer("transcription", row, "deepgram") ==
+               {:ok, {:transcription_backend, "deepgram"}}
+    end
+
+    # Nothing published, nothing writable: the generic refusal is what a client
+    # asking for an unlisted value gets.
+    test "the write refuses it outright where it is not published" do
+      put_transcription(backend: "openai")
+      row = backend_row("transcription", "transcription_backend", pinned())
+
+      assert AnswerMap.answer("transcription", row, "local") ==
+               {:error, "This setting takes one of its published values."}
+    end
+  end
+
   describe "the voice section under each engine" do
     test "the default engine publishes the effort row and no engine row" do
       Application.put_env(:fermix_core, :realtime, enabled: true)
@@ -1004,6 +1118,26 @@ defmodule FermixCore.Management.SettingsTest do
     {:ok, %{"rows" => rows}} = Settings.get(id)
     rows
   end
+
+  defp backend_row(section, key, opts) do
+    section
+    |> Voice.rows(ConfigStore.current_snapshot(), opts)
+    |> Enum.find(&(&1["key"] == key))
+  end
+
+  defp local_option(section, key, opts) do
+    section
+    |> backend_row(key, opts)
+    |> Map.fetch!("options")
+    |> Enum.find(&(&1["value"] == "local"))
+  end
+
+  # A machine this build pins a sidecar for, whichever one the suite runs on.
+  defp pinned, do: [releases: FermixTestSupport.SttPins.for_this_host()]
+
+  defp put_transcription(config), do: Application.put_env(:fermix_core, :transcription, config)
+
+  defp put_meetings(config), do: Application.put_env(:fermix_core, :meetings, config)
 
   # Every §4.4 name state at once: stored and allowed, allowed with no source,
   # allowed through a helper, allowed through an alias, and two stored names no

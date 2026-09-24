@@ -221,8 +221,12 @@ defmodule FermixCore.Management.Secrets do
     end
   end
 
+  # The store's verdict, not the tool's presence. A locked keyring is tried:
+  # the person saving from the app answers the desktop's unlock prompt, and a
+  # cancelled prompt is the write's own `locked` failure.
   defp env_store_available do
-    if SecretWriter.available?(), do: :ok, else: {:error, :unavailable}
+    verdict = SecretWriter.probe()
+    if SecretWriter.attemptable?(verdict), do: :ok, else: {:error, {:verdict, verdict}}
   end
 
   defp verify_env(key, value) do
@@ -400,5 +404,6 @@ defmodule FermixCore.Management.Secrets do
   # unavailable collection.
   defp store_reason({:helper_timeout, _command, _timeout}), do: "timeout"
   defp store_reason({:helper_failed, _command, _code, _output}), do: "locked"
+  defp store_reason({:verdict, %{state: :locked}}), do: "locked"
   defp store_reason(_reason), do: "unavailable"
 end

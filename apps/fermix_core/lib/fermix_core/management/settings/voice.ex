@@ -23,6 +23,7 @@ defmodule FermixCore.Management.Settings.Voice do
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Realtime.Config, as: RealtimeConfig
+  alias FermixCore.Transcription.Local, as: LocalTranscription
   alias FermixCore.Transcription.Registry, as: TranscriptionRegistry
 
   @sections [
@@ -35,11 +36,11 @@ defmodule FermixCore.Management.Settings.Voice do
     "openai" => "OpenAI",
     "xai" => "SpaceXAI",
     "deepgram" => "Deepgram",
-    "local" => "On this Mac"
+    "local" => "On this device"
   }
 
-  # The key slot each transcription backend reads. `local` runs on this Mac and
-  # authenticates with nothing, so it has no row rather than an empty one.
+  # The key slot each transcription backend reads. `local` runs on this machine
+  # and authenticates with nothing, so it has no row rather than an empty one.
   @backend_secrets %{
     "openai" => :transcription_openai_api_key,
     "xai" => :transcription_xai_api_key,
@@ -79,9 +80,16 @@ defmodule FermixCore.Management.Settings.Voice do
   @spec owns?(String.t()) :: boolean()
   def owns?(section) when is_binary(section), do: Enum.any?(@sections, &(&1.id == section))
 
-  @doc "The rows of one owned section."
-  @spec rows(String.t(), Source.snapshot()) :: [Row.t()]
-  def rows("realtime", snapshot) do
+  @doc """
+  The rows of one owned section.
+
+  `opts` reach `FermixCore.Transcription.Local.available?/1`, whose `releases:`
+  seam stands for the machine's pin. The settings methods pass none.
+  """
+  @spec rows(String.t(), Source.snapshot(), keyword()) :: [Row.t()]
+  def rows(section, snapshot, opts \\ [])
+
+  def rows("realtime", snapshot, _opts) do
     config = RealtimeConfig.normalize(Source.core(snapshot, :realtime))
     restart = Row.restart?(:realtime)
 
@@ -90,21 +98,26 @@ defmodule FermixCore.Management.Settings.Voice do
       realtime_key_row(snapshot) ++ realtime_budget_rows(config, restart)
   end
 
-  def rows("transcription", snapshot) do
+  def rows("transcription", snapshot, opts) do
     block = Source.core(snapshot, :transcription)
     backend = Source.string(block, :backend, "openai")
     restart = Row.restart?(:transcription)
+    options = backend_options(block, backend, opts)
 
-    transcription_choice_rows(block, backend, restart) ++
+    transcription_choice_rows(block, backend, options, restart) ++
       transcription_key_row(snapshot, backend, restart)
   end
 
-  def rows("meetings", snapshot) do
+  def rows("meetings", snapshot, opts) do
     block = Source.core(snapshot, :meetings)
+    transcription = Source.core(snapshot, :transcription)
+    in_force = Source.string(block, :transcription_backend)
     restart = Row.restart?(:meetings)
+    options = backend_options(transcription, in_force, opts)
 
     meetings_bot_rows(block, restart) ++
-      meetings_zoom_rows(block, snapshot, restart) ++ [meetings_backend_row(block, restart)]
+      meetings_zoom_rows(block, snapshot, restart) ++
+      [meetings_backend_row(block, options, restart)]
   end
 
   defp realtime_switch_rows(config, restart) do
@@ -194,11 +207,11 @@ defmodule FermixCore.Management.Settings.Voice do
     ]
   end
 
-  defp transcription_choice_rows(block, backend, restart) do
+  defp transcription_choice_rows(block, backend, backend_options, restart) do
     [
       Row.new("transcription_backend", :choice, "Transcribe with",
         value: backend,
-        options: Enum.map(backend_names(), &Row.option(&1, backend_label(&1))),
+        options: backend_options,
         restart: restart
       ),
       Row.new("transcription_model", :choice, "Model",
@@ -282,15 +295,10 @@ defmodule FermixCore.Management.Settings.Voice do
     ]
   end
 
-  defp meetings_backend_row(block, restart) do
-    options = [
-      Row.option("", "Same as voice notes")
-      | Enum.map(backend_names(), &Row.option(&1, backend_label(&1)))
-    ]
-
+  defp meetings_backend_row(block, backend_options, restart) do
     Row.new("meetings_transcription_backend", :choice, "Transcribe with",
       value: Source.string(block, :transcription_backend),
-      options: options,
+      options: [Row.option("", "Same as voice notes") | backend_options],
       restart: restart
     )
   end
@@ -342,6 +350,23 @@ defmodule FermixCore.Management.Settings.Voice do
   defp backend_names do
     Enum.map(TranscriptionRegistry.backends(), fn {name, _module} -> Atom.to_string(name) end)
   end
+
+  # Every shipped backend setup offers, plus the one a configuration already
+  # names. On-device speech is not offered yet, so a pane lists it only where it
+  # is in force, disabled with the reason it cannot be chosen — and
+  # `settings.apply` refuses a disabled option in that same sentence.
+  defp backend_options(transcription, in_force, opts) do
+    offer = LocalTranscription.offer(transcription, in_force, opts)
+
+    backend_names()
+    |> Enum.reject(&(&1 == "local" and match?({:hidden, _sentence}, offer)))
+    |> Enum.map(&backend_option(&1, offer))
+  end
+
+  defp backend_option("local", {:shown, sentence}),
+    do: Row.option("local", backend_label("local"), disabled: true, hint: sentence)
+
+  defp backend_option(backend, _offer), do: Row.option(backend, backend_label(backend))
 
   defp backend_label(backend), do: Map.fetch!(@backend_labels, backend)
 

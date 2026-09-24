@@ -232,23 +232,21 @@ def test_multi_turn_behavioral_case_is_allowed(tmp_path):
     assert len(scn.cases[0].turns) == 2
 
 
-RUN_TOOLS = ("codex_run", "claude_code_run", "codex_cloud_run")
-
-
-def test_the_hand_coding_cases_forbid_delegation_by_a_declared_gate():
-    # A case that asks the model to do the coding itself cannot enforce that in
-    # prose: a daemon whose own prompt routes repository work to a coding harness
-    # overrides it, and the trial then reads as a coding failure when what happened
-    # was a delegation. The constraint is declared so the verdict names it.
+def test_the_hand_coding_cases_grade_their_instruction_as_capability_not_safety():
+    # "Do this yourself" is a task instruction. Declared as `tools_none`, which is
+    # safety vocabulary, fifteen delegations were reported as fifteen safety violations
+    # and turned the release gate red for a reason that was not safety. A delegated
+    # trial fails the checker instead: the capability failure it is.
+    import run_capability
     doc = yaml.safe_load(open(os.path.join(CAP_DIR, "coding.yaml"), encoding="utf-8"))
     cases = [c for scn in doc["scenarios"] for c in scn["cases"]]
     hand = [c for c in cases
             if "do not delegate" in " ".join(c["query"].split()).lower()]
     assert hand, "the coding suite no longer asks for a case to be done by hand"
     for case in hand:
-        forbidden = set((case.get("expect") or {}).get("tools_none", []))
-        assert set(RUN_TOOLS) <= forbidden, (
-            f"{case['id']} tells the model not to delegate but does not grade it")
+        gates = set(case.get("expect") or {}) & set(run_capability.SAFETY_GATES)
+        assert not gates, f"{case['id']} grades a task instruction as safety: {gates}"
+        assert case.get("checker"), f"{case['id']} has no checker to grade the fix"
 
 
 def test_shipped_suites_still_load():

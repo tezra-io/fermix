@@ -20,7 +20,7 @@ Three properties of this number, all deliberate:
   * It is a NEAR-CEILING while `basis == "ceiling"`. Cached input is billed at
     the full input rate until the adapters emit cache counts, which OVERSTATES
     true billed cost by ~1.01x-2.18x in aggregate (up to ~9.8x on a single
-    call), scaling with cache-hit rate. One leg now runs the other way: the four
+    call), scaling with cache-hit rate. One leg now runs the other way: the six
     OpenAI models that bill cache WRITES at 1.25x input are charged here at
     1.00x while write counts are invisible, so those tokens are UNDER-stated by
     20%. In aggregate the figure still sits well above true spend — cached reads
@@ -64,14 +64,17 @@ so effort is not part of the key.
 All figures are published list prices in US dollars per MILLION tokens, standard
 (non-batch, non-priority) processing. Every block but Venice's was read
 2026-09-05 and re-checked against first-party vendor pricing the same day;
-Venice's was read 2026-09-19 and carries its own line below:
+Venice's was read 2026-09-19 and carries its own line below. The four models
+released 2026-09-22 (gpt-6-sol, gpt-6-luna, claude-opus-5-5, grok-4.7) were
+read from the same first-party pages that day:
 
   OpenAI      https://developers.openai.com/api/docs/pricing (first-party;
               input / cached input / output for every slug). Cache WRITES are
               billed at 1.25x uncached input from GPT-5.6 onward — gpt-6-astra,
-              gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna. Every older slug carded
-              here predates that line and bills a written token as ordinary
-              input; that is a read fact (`BILLS_AT_INPUT_RATE`), not a gap.
+              gpt-6-sol, gpt-6-luna, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna.
+              Every older slug carded here predates that line and bills a
+              written token as ordinary input; that is a read fact
+              (`BILLS_AT_INPUT_RATE`), not a gap.
               An earlier note here claimed OpenAI bills no cache-write premium
               at all — false since GPT-5.6, and a latent crash, because a write
               count against an unestablished rate raises.
@@ -142,7 +145,7 @@ from typing import Protocol
 # onto a stored row. It is not an ordered sequence and the values in between
 # need not exist: `.1` never did, and renaming `.2` now would make a token that
 # is already on disk mean two different tables.
-CARD_VERSION = "2026-09-19"
+CARD_VERSION = "2026-09-22"
 
 
 class LlmSpanUsage(Protocol):
@@ -248,6 +251,10 @@ NOT_TOKEN_BILLED: frozenset[str] = frozenset({"ollama", "local"})
 # `BILLS_AT_INPUT_RATE` — a read fact, not an unresearched leg.
 _OPENAI_RATES: dict[str, Rate] = {
     "gpt-6-astra": Rate(10.00, 50.00, 1.00, 12.50),
+    # Standard rates, and CHEAPER than their GPT-5.6 namesakes below on every
+    # leg; do not price a GPT-6 tier by analogy to its predecessor.
+    "gpt-6-sol": Rate(2.00, 10.00, 0.20, 2.50),
+    "gpt-6-luna": Rate(0.10, 0.50, 0.01, 0.125),
     # 4.00 input is promotional through at least 2026-11-21; the write leg is
     # 1.25x whatever input is, so it becomes 6.25 if input reverts to 5.00.
     "gpt-5.6-sol": Rate(4.00, 20.00, 0.40, 5.00),
@@ -303,11 +310,15 @@ _ANTHROPIC_RATES: dict[str, Rate] = {
     # the cheaper one — so pricing a Sonnet by analogy to its predecessor
     # overstates it by 50%, the same wrong number the cancelled rise would give.
     "claude-sonnet-5": Rate(2.00, 10.00, 0.20, 2.50),
+    # 0.20 cache read is 0.05x input, half the standard 0.1x, and it is correct:
+    # the vendor's pricing table footnotes Opus 5.5 alone on that tier. It also
+    # UNDERCUTS Opus 5 below on every leg. Do not "fix" the read to 0.40.
+    "claude-opus-5-5": Rate(4.00, 20.00, 0.20, 5.00),
     "claude-opus-5": Rate(5.00, 25.00, 0.50, 6.25),
     # 0.25 cache read is 0.025x input, a tenth of what the sibling below pays,
     # and it is correct: the vendor's pricing table footnotes Fable 5.1 and
-    # Mythos 5.1 as the only models on the 0.025x read tier, everything else at
-    # the standard 0.1x. Do not "fix" it to 1.00.
+    # Mythos 5.1 as the only models on the 0.025x read tier, and everything else
+    # but Opus 5.5 (0.05x, above) at the standard 0.1x. Do not "fix" it to 1.00.
     "claude-fable-5-1": Rate(10.00, 50.00, 0.25, 12.50),
     "claude-fable-5": Rate(10.00, 50.00, 1.00, 12.50),
     "claude-haiku-4-5": Rate(1.00, 5.00, 0.10, 1.25),
@@ -316,6 +327,9 @@ _ANTHROPIC_RATES: dict[str, Rate] = {
 # xAI prices the reasoning and non-reasoning surfaces of Grok 4.20 identically;
 # the two ids are one rate, not a copy-paste slip.
 _XAI_RATES: dict[str, Rate] = {
+    # Listed at exactly grok-4.6's figures, long-context tier included: one
+    # rate twice, not a copy-paste slip.
+    "grok-4.7": Rate(2.00, 6.00, 0.50),
     "grok-4.6": Rate(2.00, 6.00, 0.50),
     "grok-4.5": Rate(2.00, 6.00, 0.30),
     "grok-4.3": Rate(1.25, 2.50, 0.20),

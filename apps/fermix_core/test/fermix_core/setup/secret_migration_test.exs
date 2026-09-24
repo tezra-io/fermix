@@ -4,6 +4,7 @@ defmodule FermixCore.Setup.SecretMigrationTest do
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.SecretMigration
   alias FermixCore.Setup.SecretPaths
+  alias FermixCore.Setup.SecretWriter
 
   setup do
     previous_home = System.get_env("FERMIX_HOME")
@@ -54,13 +55,13 @@ defmodule FermixCore.Setup.SecretMigrationTest do
     end)
 
     Enum.each(SecretPaths.all(), fn secret ->
-      label = "Migrate #{secret.env} to the OS keyring? [y/N]: "
+      label = "Move #{secret.env} (plaintext in config.toml) to the keyring store? [y/N]: "
       assert_received {:prompt, ^label}
       assert {:ok, value} = FermixTestSupport.SecretWriterStub.get(secret.key)
       assert value == Map.fetch!(secret_values(), secret.key)
     end)
 
-    assert_received {:puts, "Migrated 34 secret(s) to keyring."}
+    assert_received {:puts, "Moved 34 secret(s) to the keyring store."}
   end
 
   test "run writes a sandbox.env source for migrated AI-provider secrets", %{home: home} do
@@ -89,6 +90,108 @@ defmodule FermixCore.Setup.SecretMigrationTest do
     refute contents =~ ~s([sandbox.env.SLACK_BOT_TOKEN])
   end
 
+  test "run moves a keyring secret into the file store when the file store is configured", %{
+    home: home
+  } do
+    File.write!(Path.join(home, "config.toml"), """
+    [fermix_core]
+    secret_store = "file"
+
+    [fermix_channels.telegram]
+    bot_token = "@keyring"
+    """)
+
+    :ok = SecretWriter.put(:telegram_bot_token, "123:abc", store: :keyring)
+    Application.put_env(:fermix_core, :secret_store, :file)
+    on_exit(fn -> Application.delete_env(:fermix_core, :secret_store) end)
+    test_pid = self()
+
+    assert :ok =
+             SecretMigration.run([],
+               puts: fn line -> send(test_pid, {:puts, line}) end,
+               prompt: fn label ->
+                 send(test_pid, {:prompt, label})
+                 "y"
+               end
+             )
+
+    assert_received {:prompt,
+                     "Move TELEGRAM_BOT_TOKEN (in the keyring store) to the file store? [y/N]: "}
+
+    assert_received {:puts, "Moved 1 secret(s) to the file store."}
+    assert File.read!(ConfigStore.path()) =~ ~s(bot_token = "@file")
+    assert {:ok, "123:abc"} = SecretWriter.get(:telegram_bot_token, store: :file)
+    assert {:error, :missing_secret} = SecretWriter.get(:telegram_bot_token, store: :keyring)
+  end
+
+  test "run refuses up front when the store a secret must leave has nothing to answer", %{
+    home: home
+  } do
+    File.write!(Path.join(home, "config.toml"), """
+    [fermix_core]
+    secret_store = "file"
+
+    [fermix_channels.telegram]
+    bot_token = "@keyring"
+    """)
+
+    Application.put_env(:fermix_core, :secret_store, :file)
+
+    FermixTestSupport.SecretWriterStub.set_verdict(%{
+      store: :keyring,
+      state: :service_absent,
+      sentence: "no keyring service (Secret Service) is running on this session bus"
+    })
+
+    on_exit(fn ->
+      Application.delete_env(:fermix_core, :secret_store)
+      FermixTestSupport.SecretWriterStub.clear_verdict(:keyring)
+    end)
+
+    assert {:error, sentence} =
+             SecretMigration.run([],
+               puts: fn _ -> :ok end,
+               prompt: fn _label -> raise "nothing should be asked" end
+             )
+
+    assert sentence ==
+             "The keyring store cannot be read right now: no keyring service (Secret Service) " <>
+               "is running on this session bus."
+
+    assert File.read!(ConfigStore.path()) =~ ~s(bot_token = "@keyring")
+  end
+
+  test "a locked keyring is tried (the unlock prompt), and a cancelled prompt stops the move by name",
+       %{home: home} do
+    File.write!(Path.join(home, "config.toml"), """
+    [fermix_core]
+    secret_store = "file"
+
+    [fermix_channels.telegram]
+    bot_token = "@keyring"
+    """)
+
+    Application.put_env(:fermix_core, :secret_store, :file)
+
+    FermixTestSupport.SecretWriterStub.set_verdict(%{
+      store: :keyring,
+      state: :locked,
+      sentence: "the login keyring is locked"
+    })
+
+    on_exit(fn ->
+      Application.delete_env(:fermix_core, :secret_store)
+      FermixTestSupport.SecretWriterStub.clear_verdict(:keyring)
+    end)
+
+    assert {:error, sentence} =
+             SecretMigration.run([], puts: fn _ -> :ok end, prompt: fn _label -> "y" end)
+
+    assert sentence =~ "TELEGRAM_BOT_TOKEN could not be resolved"
+    assert sentence =~ "the keyring is locked"
+    assert File.read!(ConfigStore.path()) =~ ~s(bot_token = "@keyring")
+  end
+
   test "run reports when no plaintext setup secrets exist" do
     :ok = ConfigStore.save_snapshot(%{fermix_core: [], fermix_channels: [], fermix_web: []})
     test_pid = self()
@@ -99,7 +202,8 @@ defmodule FermixCore.Setup.SecretMigrationTest do
                prompt: fn _label -> raise "unexpected prompt" end
              )
 
-    assert_received {:puts, "No plaintext setup secrets found."}
+    assert_received {:puts,
+                     "No setup secrets to move: every stored secret is already in the keyring store."}
   end
 
   test "run does not require a secret writer when there is nothing to migrate" do
@@ -113,7 +217,8 @@ defmodule FermixCore.Setup.SecretMigrationTest do
                prompt: fn _label -> raise "unexpected prompt" end
              )
 
-    assert_received {:puts, "No plaintext setup secrets found."}
+    assert_received {:puts,
+                     "No setup secrets to move: every stored secret is already in the keyring store."}
   end
 
   defp write_plaintext_config(home) do

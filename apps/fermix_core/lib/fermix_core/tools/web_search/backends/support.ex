@@ -50,7 +50,7 @@ defmodule FermixCore.Tools.WebSearch.Backends.Support do
   @spec credential(keyword(), atom(), String.t()) :: {:ok, String.t()} | {:error, String.t()}
   def credential(opts, key, label) when is_list(opts) and is_atom(key) and is_binary(label) do
     case Keyword.get(opts, key) do
-      value when is_binary(value) and value not in ["", "@keyring"] -> {:ok, value}
+      value when is_binary(value) and value not in ["", "@keyring", "@file"] -> {:ok, value}
       _value -> {:error, "auth_failed: missing #{label}"}
     end
   end

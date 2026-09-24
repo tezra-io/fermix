@@ -196,6 +196,29 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertNotIn("cosign", self.linux_packages)
         self.assertNotIn("softprops/action-gh-release", self.linux_packages)
 
+    def test_the_advertised_installer_is_run_against_the_published_release(self):
+        job = re.search(r"\n  installer:\n(.*?)\n  homebrew:\n", self.release, re.DOTALL)
+        self.assertIsNotNone(job, "release.yml has no installer job ahead of homebrew")
+        body = job.group(1)
+
+        # The installer reads the public `latest` feed, which a draft is not.
+        self.assertIn("needs: promote\n", body)
+        self.assertIn("if: ${{ !contains(github.ref_name, '-') }}", body)
+        for row in (
+            "{ name: deb-linux-x64, os: ubuntu-24.04, kind: deb }",
+            "{ name: deb-linux-arm64, os: ubuntu-24.04-arm, kind: deb }",
+            "{ name: rpm-linux-x64, os: ubuntu-24.04, kind: rpm }",
+            "{ name: rpm-linux-arm64, os: ubuntu-24.04-arm, kind: rpm }",
+        ):
+            with self.subTest(row=row):
+                self.assertIn(row, body)
+        # Without cosign the installer skips the signature check, loudly, and
+        # the verification requires that it ran.
+        self.assertIn("sigstore/cosign-installer@", body)
+        self.assertIn("scripts/release/verify_installer.sh", body)
+        # Nothing may wait on a job that can only run once the release is out.
+        self.assertNotRegex(self.release, r"needs:[^\n]*\binstaller\b")
+
     def test_homebrew_formula_is_installed_and_reports_the_release_version(self):
         self.assertIn("runs-on: macos-15", self.release)
         self.assertIn("brew install tezra-io/tap/fermix", self.release)

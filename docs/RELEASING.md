@@ -11,7 +11,7 @@ and its packaged shims answer. It cannot prove an *install path* — which world
 binary lands in, what is already on the machine, and which files it then reads.
 Every `migrate-to-app` defect that reached an operator was an install path nobody
 walked: the verb refused an already-installed application, then refused its own
-launcher on PATH, both green in every unit test. Walk these five before announcing.
+launcher on PATH, both green in every unit test. Walk these before announcing.
 
 | Install path | What to run | What proves it |
 | --- | --- | --- |
@@ -21,6 +21,8 @@ launcher on PATH, both green in every unit test. Walk these five before announci
 | App beside nothing | Install the application on a machine with no formula and no Fermix home, and open it | It onboards with no handoff journal to read and registers its own background service |
 | Cask upgrade over a running service | `brew upgrade --cask fermix` on a Mac where the app's background service is registered and its engine is running | The old engine stops, the new app's service starts from the new bundle with no manual toggle, `launchctl print gui/<uid>/io.tezra.FermixPet.agent` shows the job running without a pending requirement refresh, and the app reports the pinned engine of the new version. The 0.1.3 upgrade left the job registered against the old bundle and every spawn of the launcher without a `PATH`; a bundle replaced under a registered agent is its own install path |
 | Linux formula | `brew install tezra-io/tap/fermix` on Linux, then `fermix setup` and `fermix migrate-to-app` | The Linux install works unchanged and the macOS-only verb refuses with a sentence (`not_macos`), not a crash |
+| Linux package, by the installer | `curl -fsSL https://fermix.ai/install \| sh` on a Debian or Ubuntu machine and on a Fedora one, each logged in as an ordinary account with a terminal | The installer names the package and the package manager it chose, asks for the account's password through `sudo`, and `fermix setup` then runs as that account with the terminal as its input. `fermix service status` reports `aligned` with the unit marked `(package)`. Run a second time it says the latest release is already installed and downloads nothing |
+| Standalone → Linux package | The same command on a machine whose account still has an earlier standalone `fermix` first on `PATH` | The package installs, the installer names the earlier binary and the page that moves it, and starts no setup |
 
 A CLI verb that inspects PATH, the process environment, or the account's files also
 needs a step in `scripts/release/verify_standalone.sh` that runs it from the staged
@@ -45,6 +47,51 @@ path contains a space and a percent character, and the rpms inside a `fedora:41`
 container, where there is no user service manager and `service status --json`
 must answer the structured `user_manager_unreachable` error. `stage-release`
 attaches the packages to the draft.
+
+**The installer, and the one job that runs after publishing.** `scripts/install.sh`
+is what `https://fermix.ai/install` serves. On Linux with apt, dnf or zypper it
+installs the package; everywhere else, and with `--standalone`, it installs the
+standalone binary. It reads a package as `packages -> <target> -> <deb|rpm>` in
+`releases.json`, where each entry carries `url`, `sha256`, `sig_url` and
+`cert_url`, with a line-scanning awk rather than jq, so the feed stays
+pretty-printed, one key per line; `test_install_sh.py` runs the installer over
+the feed `build_releases_json.sh` really writes, which is what holds the two
+together. The installer reads the public `latest` feed and the public download
+URLs, and a draft has neither, so `release.yml`'s `installer` job runs after
+`promote`: `scripts/release/verify_installer.sh` waits (twelve checks, ten
+seconds apart) for `latest` to name the tag, runs the installer with `cosign`
+present, and requires that it chose the package, verified the signature against
+the tag, left the package database and `fermix --version` naming the release,
+and changed nothing on a second run — the debs on the two Ubuntu runners through
+`sudo`, the rpms as root inside `fedora:41`. Nothing waits on that job. A red
+one means the advertised command is broken for a release that is already out:
+fix the installer and re-serve it, because the release itself cannot be
+replaced.
+
+**Serving it.** `fermix-site` vendors the script as `src/installer/install.sh`,
+byte for byte, and `src/config/installer.ts` there pins its sha256 and the
+engine commit it came from (a test holds the two together); the served copy is
+never edited in the site repository. The site's `/install` route answers by
+what asks: `curl`, `wget` and `sh` receive the script, and a browser is sent to
+the install page, so check the copy with `curl` and never by opening the address.
+Before the site deploys:
+
+```sh
+cmp scripts/install.sh ../fermix-site/src/installer/install.sh
+```
+
+and once it has:
+
+```sh
+curl -fsSL https://fermix.ai/install | cmp - scripts/install.sh
+```
+
+**The order matters the first time a release changes what the installer needs.**
+An installer that installs packages, served against a `latest` release that
+carries none, refuses every apt, dnf and zypper machine with `lists no deb
+package`. So the site deploys the new script only after the release that
+publishes packages is out, which is where the site already sits in the release
+order.
 
 **The version rule, and what it costs.** Neither package may carry a Debian
 revision or an rpm epoch, because `fermix-desktop` pins `Depends: fermix (= <v>)`

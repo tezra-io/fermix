@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 _sleep = time.sleep   # injection seam so tests exercise the backoff without real waits
+_run = subprocess.run  # injection seam so tests exercise `advertised_tools` without a daemon
 
 
 # A rate-limit / quota turn "succeeds" (status ok) but Fermix hands back a canned
@@ -248,6 +249,62 @@ def _log_and_wait(label: str, n: int, total: int, wait_s: int, res: DriveResult)
     print(f"    ⏳ usage limit at {label}{hint_txt} — waiting {wait_s // 60} min "
           f"(retry {n}/{total}, ~{resume}) before retrying…", file=sys.stderr)
     _sleep(wait_s)
+
+
+class AdvertisedToolsUnavailable(Exception):
+    """The daemon under test could not say which capabilities it carries.
+
+    Neither answer may then be assumed. Assuming "advertised" scores a task the box
+    cannot run as a model failure; assuming "not advertised" excuses a model that
+    simply never reached for a tool it had. The capability runner refuses the sweep on
+    its precondition exit instead of guessing."""
+
+
+def advertised_tools(cfg) -> set[str]:
+    """Every capability name the daemon's own registry holds right now.
+
+    POSITIVE evidence about the daemon under test, read from the registry projection
+    `fermix capabilities --json` serves — never inferred from what a trial did or did
+    not call. Registration is a boot snapshot: a vendor CLI absent from PATH when the
+    daemon started leaves its tool out of this set however well the model reasons,
+    which is precisely the state a scored 0 would misreport as a model failure.
+
+    Deliberately every REGISTERED name, including a row the registry marks hidden from
+    the agent: that is the widest set, so it excuses the fewest tasks. Narrowing it to
+    what the model is shown this turn would start excusing cases the daemon can in fact
+    run, which is the one direction this signal must never fail in.
+
+    Raises `AdvertisedToolsUnavailable` when the daemon cannot answer, answers
+    unreadably, or answers with no capabilities at all — an empty set would silently
+    excuse every provenance requirement in the suite.
+    """
+    cmd = [cfg.daemon.fermix_bin, "capabilities", "--json", "--kind", "all"]
+    try:
+        proc = _run(cmd, env=cfg.env, capture_output=True, text=True, timeout=30)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        raise AdvertisedToolsUnavailable(f"`{' '.join(cmd)}` could not run: {exc}") from exc
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()[:200]
+        raise AdvertisedToolsUnavailable(
+            f"`{' '.join(cmd)}` exited {proc.returncode}: {detail or 'no output'}")
+    names = _capability_names(proc.stdout)
+    if not names:
+        raise AdvertisedToolsUnavailable(
+            f"`{' '.join(cmd)}` reported no capabilities at all; a daemon that "
+            "advertises nothing is not a daemon under test")
+    return names
+
+
+def _capability_names(stdout: str) -> set[str]:
+    """The `name` of every row in a `fermix capabilities --json` payload."""
+    payload = _parse_envelope(stdout) or {}
+    rows = payload.get("capabilities")
+    if not isinstance(rows, list):
+        raise AdvertisedToolsUnavailable(
+            "could not read the capability registry out of "
+            f"{stdout.strip()[:200]!r} (expected a `capabilities` list)")
+    return {row["name"] for row in rows
+            if isinstance(row, dict) and isinstance(row.get("name"), str) and row["name"]}
 
 
 def daemon_reachable(cfg) -> tuple[bool, str]:

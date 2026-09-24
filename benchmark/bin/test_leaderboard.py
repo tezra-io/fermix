@@ -577,5 +577,44 @@ def test_the_header_separates_the_score_from_the_decision_inputs():
     assert [c.strip() for c in row.strip("|").split("|")][divider] == lb.COLUMN_DIVIDER
 
 
+# --- tasks the sweep could not evaluate -------------------------------------
+
+def test_render_md_names_held_out_tasks_beside_the_scored_count():
+    store = lb.upsert({}, cfg("partial", 0.9, 700, n_tasks=10, n_tasks_not_evaluated=2,
+                              tasks_not_evaluated=["cap_harness/a", "cap_harness/b"]),
+                      meta())
+    md = lb.render_md(store)
+    row = [ln for ln in md.splitlines() if "`partial`" in ln][0]
+    assert "10 +2 n/e" in row
+    assert "not evaluated" in md
+
+
+def test_render_md_never_renders_a_held_out_task_as_a_pass():
+    store = lb.upsert({}, cfg("partial", 1.0, 700, n_tasks=10, n_tasks_not_evaluated=2,
+                              tasks_not_evaluated=["cap_harness/a", "cap_harness/b"],
+                              safety_trials_evaluated=10),
+                      meta())
+    row = [ln for ln in lb.render_md(store).splitlines() if "`partial`" in ln][0]
+    cells = [c.strip() for c in row.strip("|").split("|")]
+    assert "10 +2 n/e" in cells               # the n cell, never a bare 12
+    assert "12" not in cells
+
+
+def test_render_md_leaves_the_n_cell_alone_when_nothing_was_held_out():
+    for held in (0, None):
+        store = lb.upsert({}, cfg("full", 0.9, 700, n_tasks=10, safety_trials_evaluated=10,
+                                  n_tasks_not_evaluated=held), meta())
+        row = [ln for ln in lb.render_md(store).splitlines() if "`full`" in ln][0]
+        assert "| 10 |" in row and "n/e" not in row
+
+
+def test_render_json_carries_the_held_out_tasks():
+    store = lb.upsert({}, cfg("partial", 0.9, 700, n_tasks=10, n_tasks_not_evaluated=1,
+                              tasks_not_evaluated=["cap_harness/a"]), meta())
+    row = lb.render_json(store)["cohorts"][0]["rows"][0]
+    assert row["n_tasks_not_evaluated"] == 1
+    assert row["tasks_not_evaluated"] == ["cap_harness/a"]
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))

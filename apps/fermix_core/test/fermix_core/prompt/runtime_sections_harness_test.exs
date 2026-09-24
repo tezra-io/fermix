@@ -5,8 +5,11 @@ defmodule FermixCore.Prompt.RuntimeSectionsHarnessTest do
   # establishes the whole keyword list itself, never inheriting global state.
   use ExUnit.Case, async: false
 
+  alias FermixCore.Capabilities.Builtin
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Prompt.RuntimeSections
+  alias FermixCore.Tools.ClaudeCodeRun
+  alias FermixCore.Tools.CodexRun
 
   setup do
     previous = Application.get_env(:fermix_core, :harness)
@@ -31,6 +34,31 @@ defmodule FermixCore.Prompt.RuntimeSectionsHarnessTest do
     assert content =~ "your own hands are for the small, non-repo touches."
     assert content =~ "`codex_run`"
     assert content =~ "`claude_code_run`"
+  end
+
+  # Delegation is the default, and the user can override it. On 2026-09-22
+  # gpt-6-astra delegated all fifteen hand-coding eval trials, each of which said
+  # "do this yourself", because "my operating instructions require it for
+  # repository bug fixes, despite your request not to delegate".
+  test "an explicit request to do the work directly outranks the delegation default" do
+    content = RuntimeSections.build([], capabilities: [codex_run(), claude_code_run()])
+
+    assert content =~
+             "An explicit request outranks this default: when the user asks you to do " <>
+               "the work yourself, do it with your own hands."
+  end
+
+  # §7.4: the routing principle lives in the section preamble, not in tool lines.
+  # The run tools restated it without the preamble's exception, so the section
+  # said "instead of editing files yourself" three times.
+  test "the run tools' own lines name the tool without restating the steer" do
+    tools = [Builtin.from_tool_module(CodexRun), Builtin.from_tool_module(ClaudeCodeRun)]
+    content = RuntimeSections.build([], capabilities: tools)
+
+    for name <- ["codex_run", "claude_code_run"] do
+      assert [line] = Regex.run(~r/^- `#{name}` — .*$/m, content)
+      refute line =~ "yourself"
+    end
   end
 
   test "omits the coding-harness section when no harness tools are registered" do

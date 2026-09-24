@@ -36,6 +36,22 @@ because both it and `scripts/vultr-box.sh` run the tier through
 `benchmark/bin/tier.sh`, which `exec`s the runner — `make` reports every runner
 outcome as `2`, so a tier invoked through it carries no classification.
 
+When a tier runs more than one step — the capability tier's two axes —
+`benchmark/bin/tier_exit_code.sh` chooses which of their codes that output
+carries: the code of the **first step that failed**, and `0` only when every
+step that ran exited `0`. A `||` expression used to make this choice, and `||`
+yields the first *truthy* operand — `"0"` is truthy, so a capability run's green
+deterministic axis hid the judged axis's `5` and the weekly alert filed *"the
+capability tier is failing"* instead of *"release gate is red"*, losing the
+paragraph above.
+
+Two outcomes publish **no** code at all, and neither is reported as `0`: no tier
+step ran, and the deciding step failed before its runner published (it died in
+`make check`, or the box was killed). The publishing step then fails and the
+output stays empty, which the callers read as a tier that failed without a code
+— the honest answer, because the later axis's `5` would otherwise report *"valid
+and recorded"* about a sweep that never happened.
+
 ## Box anatomy (what eval-box does)
 
 1. Comet-hosted Opik over its API (operator decision 2026-07-18; the earlier

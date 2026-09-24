@@ -14,6 +14,7 @@ defmodule FermixCore.Setup.ConfigStore do
   alias FermixCore.Harness.Config, as: HarnessConfig
   alias FermixCore.MCP.Inbound.Config, as: InboundMcpConfig
   alias FermixCore.Memory.CompactionConfig
+  alias FermixCore.Plugins.Retired
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.ReasoningEffort
   alias FermixCore.Realtime.Config, as: RealtimeConfig
@@ -21,6 +22,7 @@ defmodule FermixCore.Setup.ConfigStore do
   alias FermixCore.Sandbox.EnvHealth
   alias FermixCore.Setup.RestartState
   alias FermixCore.Setup.SecretStore
+  alias FermixCore.Setup.SecretWriter
   alias FermixCore.Setup.WebListener
   alias FermixCore.SkillCuration.Config, as: SkillCurationConfig
   alias FermixCore.Transcription.Registry, as: TranscriptionRegistry
@@ -131,7 +133,8 @@ defmodule FermixCore.Setup.ConfigStore do
         plugins: Application.get_env(:fermix_core, :plugins, []),
         oauth: Application.get_env(:fermix_core, :oauth, %{}),
         plugin_secrets: Application.get_env(:fermix_core, :plugin_secrets, %{}),
-        profile: Application.get_env(:fermix_core, :profile, "general")
+        profile: Application.get_env(:fermix_core, :profile, "general"),
+        secret_store: Application.get_env(:fermix_core, :secret_store, :keyring)
       ],
       sandbox: Application.get_env(:fermix_core, :sandbox, SandboxConfig.default()),
       fermix_channels: [
@@ -226,6 +229,7 @@ defmodule FermixCore.Setup.ConfigStore do
     apply_oauth_config(Keyword.get(persisted.fermix_core, :oauth, %{}))
     apply_plugin_secrets_config(Keyword.get(persisted.fermix_core, :plugin_secrets, %{}))
     apply_profile_config(Keyword.get(persisted.fermix_core, :profile, "general"))
+    apply_secret_store_config(Keyword.get(persisted.fermix_core, :secret_store, :keyring))
     apply_sandbox_config(Map.get(persisted, :sandbox, SandboxConfig.default()))
 
     apply_channel_config(:telegram, Keyword.get(persisted.fermix_channels, :telegram, []))
@@ -457,7 +461,12 @@ defmodule FermixCore.Setup.ConfigStore do
           snapshot
           |> Map.get(:fermix_core, [])
           |> Keyword.get(:profile, "general")
-          |> normalize_profile()
+          |> normalize_profile(),
+        secret_store:
+          snapshot
+          |> Map.get(:fermix_core, [])
+          |> Keyword.get(:secret_store, :keyring)
+          |> normalize_secret_store()
       ],
       sandbox:
         snapshot
@@ -573,7 +582,8 @@ defmodule FermixCore.Setup.ConfigStore do
         plugins: [],
         oauth: %{},
         plugin_secrets: %{},
-        profile: "general"
+        profile: "general",
+        secret_store: :keyring
       ],
       sandbox: SandboxConfig.default(),
       fermix_channels: [
@@ -771,6 +781,25 @@ defmodule FermixCore.Setup.ConfigStore do
 
   defp profile_render(profile) when profile in [nil, "", "general"], do: []
   defp profile_render(profile) when is_binary(profile), do: [profile: profile]
+
+  defp apply_secret_store_config(store) do
+    Application.put_env(:fermix_core, :secret_store, normalize_secret_store(store))
+    :ok
+  end
+
+  # Where new secrets are written: the OS keyring (the default and the
+  # unconfigured case) or the file store under the Fermix home. An unknown
+  # value is refused by name rather than read as the keyring, because a
+  # secret written to a store nobody chose is a secret nobody will find.
+  defp normalize_secret_store(value) do
+    case SecretWriter.parse_store(value) do
+      {:ok, store} -> store
+      {:error, sentence} -> raise ArgumentError, sentence
+    end
+  end
+
+  defp secret_store_render(:keyring), do: []
+  defp secret_store_render(:file), do: [secret_store: "file"]
 
   defp apply_agent_config(agent_config) do
     merged =
@@ -974,6 +1003,7 @@ defmodule FermixCore.Setup.ConfigStore do
     oauth = Keyword.get(fermix_core, :oauth, %{})
     plugin_secrets = Keyword.get(fermix_core, :plugin_secrets, %{})
     profile = Keyword.get(fermix_core, :profile, "general")
+    secret_store = fermix_core |> Keyword.get(:secret_store, :keyring) |> normalize_secret_store()
     sandbox = Map.get(snapshot, :sandbox, [])
     channels = Map.get(snapshot, :fermix_channels, [])
     web = snapshot |> Map.get(:fermix_web, []) |> normalize_web() |> web_to_keyword()
@@ -982,7 +1012,10 @@ defmodule FermixCore.Setup.ConfigStore do
       "# Managed by mix fermix.setup",
       "# Built-in tools ship inside Fermix and are always available when registered.",
       "# Skills are separate SKILL.md directories under ~/.fermix/skills and plugin roots.",
-      render_section(["fermix_core"], profile_render(profile)),
+      render_section(
+        ["fermix_core"],
+        profile_render(profile) ++ secret_store_render(secret_store)
+      ),
       render_section(["fermix_core", "agent"], agent),
       Enum.map(Descriptor.ids(), fn id ->
         render_section(
@@ -1241,7 +1274,8 @@ defmodule FermixCore.Setup.ConfigStore do
         oauth: normalize_oauth(get_in(document, ["fermix_core", "oauth"])),
         plugin_secrets:
           normalize_plugin_secrets(get_in(document, ["fermix_core", "plugin_secrets"])),
-        profile: normalize_profile(get_in(document, ["fermix_core", "profile"]))
+        profile: normalize_profile(get_in(document, ["fermix_core", "profile"])),
+        secret_store: normalize_secret_store(get_in(document, ["fermix_core", "secret_store"]))
       ],
       sandbox: SandboxConfig.normalize(Map.get(document, "sandbox")),
       fermix_channels: [
@@ -1446,7 +1480,11 @@ defmodule FermixCore.Setup.ConfigStore do
   # Each backend has its own optional API-key slot (secure-on-save): openai/xai
   # keys OVERRIDE the reused chat-provider key; deepgram has no chat provider to
   # reuse, so its key is the only source.
-  @transcription_keys ~w(backend model openai_api_key xai_api_key deepgram_api_key max_file_mb)
+  # `local_offered` is the one switch that puts the on-device backend back in
+  # setup's pickers while its download-on-select flow is proven; it is absent
+  # from a shipped configuration and defaults to false.
+  @transcription_keys ~w(backend model openai_api_key xai_api_key deepgram_api_key max_file_mb
+                         local_offered)
 
   defp normalize_transcription(nil), do: []
 
@@ -1474,6 +1512,10 @@ defmodule FermixCore.Setup.ConfigStore do
     |> put_if_present(
       :max_file_mb,
       normalize_transcription_max_file_mb(lookup(config, "max_file_mb", :max_file_mb))
+    )
+    |> put_if_present(
+      :local_offered,
+      normalize_boolean(lookup(config, "local_offered", :local_offered))
     )
   end
 
@@ -1689,13 +1731,38 @@ defmodule FermixCore.Setup.ConfigStore do
         ])
       )
 
+    # `enabled` is nil when the key is absent, which is not the same as an empty
+    # list — `put_if_present` has to keep seeing nil — so the two are dropped apart.
+    retired =
+      Enum.filter(Enum.uniq(List.wrap(enabled) ++ Map.keys(entries)), &Retired.retired?/1)
+
+    warn_retired_plugins(retired)
+
     []
-    |> put_if_present(:enabled, enabled)
+    |> put_if_present(:enabled, drop_retired_names(enabled))
     |> put_if_present(:dev_local, dev_local)
-    |> put_if_present(:entries, entries)
+    |> put_if_present(:entries, Map.drop(entries, retired))
   end
 
   defp normalize_plugins(_config), do: []
+
+  # Named at the read boundary, so the one message reaches every caller that
+  # loads config, and the operator learns the plugin is gone rather than broken.
+  defp drop_retired_names(nil), do: nil
+
+  defp drop_retired_names(names) when is_list(names),
+    do: Enum.reject(names, &Retired.retired?/1)
+
+  defp warn_retired_plugins([]), do: :ok
+
+  defp warn_retired_plugins(names) do
+    Logger.warning(
+      "retired plugin(s) #{inspect(Enum.sort(names))} dropped from [fermix_core.plugins]: " <>
+        "this build no longer offers them, so they are not started and the next config save " <>
+        "writes the file without them. Any credential you stored for them is left exactly as " <>
+        "it is — revoke it at the source if you have not already."
+    )
+  end
 
   defp normalize_oauth(nil), do: %{}
 
@@ -1710,9 +1777,28 @@ defmodule FermixCore.Setup.ConfigStore do
     secrets
     |> Enum.sort_by(fn {key, _value} -> to_string(key) end)
     |> Enum.into(%{}, fn {key, value} -> {to_string(key), to_string(value)} end)
+    |> drop_retired_secrets()
   end
 
   defp normalize_plugin_secrets(_secrets), do: %{}
+
+  # The mapping goes with the plugin; the secret it points at does not. Deleting
+  # a stored credential is the operator's call, so this names the plugin and
+  # leaves the value where it is.
+  defp drop_retired_secrets(secrets) do
+    case Enum.filter(Map.keys(secrets), &Retired.retired?/1) do
+      [] ->
+        secrets
+
+      names ->
+        Logger.warning(
+          "retired plugin(s) #{inspect(Enum.sort(names))} dropped from " <>
+            "[fermix_core.plugin_secrets]: the stored value itself is untouched."
+        )
+
+        Map.drop(secrets, names)
+    end
+  end
 
   defp normalize_named_sections(nil, _ignored_keys), do: %{}
 

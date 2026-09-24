@@ -118,15 +118,6 @@ defmodule FermixCore.Tools.CodexRun do
   end
 
   @impl true
-  def when_to_use do
-    "For repository work — reviewing a PR or recent changes, diagnosing and fixing " <>
-      "a bug at its root cause, implementing or refactoring a feature, working " <>
-      "through a repository — delegate to a Codex run instead of editing files " <>
-      "yourself. Reserve your own tools for the genuinely incidental (a quick " <>
-      "calculation, reading one file, scratch work outside any project)."
-  end
-
-  @impl true
   def examples do
     [
       %{

@@ -302,6 +302,75 @@ def capability_cases(suites, want_suites, want_tags, max_tasks, want_judge):
     return (out[:max_tasks] if max_tasks else out), skipped
 
 
+def _unmet_tool_preconditions(cases, advertised: set[str]) -> list[tuple[str, str, str]]:
+    """The selected tasks whose declared mechanism this daemon does not carry, as
+    (suite, case, reason).
+
+    POSITIVE evidence only: a task is unmet because the daemon's own registry has no
+    such capability, NEVER because a trial failed to call one. Conflating the two would
+    excuse a model that had the tool and never reached for it — strictly worse than the
+    zero it replaces, because a real candidate failure would then read as an
+    environment gap. A tool that IS advertised and went unused stays with the
+    provenance gate, which zeroes it (`_provenance_gate`)."""
+    unmet = [(suite.name, case.id, _missing_tools_reason(case, advertised))
+             for suite, _scn, case in cases]
+    return [row for row in unmet if row[2]]
+
+
+def _missing_tools_reason(case, advertised: set[str]) -> str | None:
+    """Why this daemon cannot be measured on this case, in the case's own vocabulary.
+    `requires_tools` is any-of, so it is unmet only when NONE is advertised;
+    `requires_tools_all` is all-of, so one missing name already makes it unreachable."""
+    any_of = sorted(set(case.requires_tools))
+    if any_of and not set(any_of) & advertised:
+        return (f"needs any of {', '.join(any_of)}; this daemon advertises "
+                "none of them")
+    all_of = sorted(set(case.requires_tools_all))
+    missing = [name for name in all_of if name not in advertised]
+    if missing:
+        return (f"needs all of {', '.join(all_of)}; this daemon does not advertise "
+                f"{', '.join(missing)}")
+    return None
+
+
+def _hold_out_unmet_preconditions(cfg, cases) -> tuple[list, list, int | None]:
+    """Split the selection into what this daemon can be measured on and what it cannot.
+
+    Returns (cases to drive, not-evaluated rows, refusal exit code). A held-out task is
+    NOT EVALUATED: never driven, never scored, kept out of every denominator and out of
+    the composite — and named loudly, here and in every artifact, so the exclusion can
+    never read as a smaller suite. The daemon is queried only when the selection
+    actually declares a required tool, so an unrelated sweep does not depend on it."""
+    if not any(case.requires_tools or case.requires_tools_all for _s, _scn, case in cases):
+        return cases, [], None
+    try:
+        advertised = driver.advertised_tools(cfg)
+    except driver.AdvertisedToolsUnavailable as exc:
+        print("preconditions:\n  - could not read the daemon's advertised capabilities, "
+              "so an unmet precondition cannot be told apart from a candidate failure "
+              f"(guessing either way corrupts the score): {exc}", file=sys.stderr)
+        return [], [], 3
+    unmet = _unmet_tool_preconditions(cases, advertised)
+    if not unmet:
+        return cases, [], None
+    _print_not_evaluated(unmet)
+    held = {(suite, case_id) for suite, case_id, _reason in unmet}
+    kept = [row for row in cases if (row[0].name, row[2].id) not in held]
+    if not kept:
+        print("no capability task is measurable on this daemon: every selected task "
+              "requires a capability it does not advertise", file=sys.stderr)
+        return [], unmet, 3
+    return kept, unmet, None
+
+
+def _print_not_evaluated(unmet: list[tuple[str, str, str]]) -> None:
+    print(f"note: NOT EVALUATED — {len(unmet)} task(s) this daemon cannot be measured "
+          "on, held out of success, pass^k and the composite (an unmet precondition is "
+          "not a candidate failure and must never be scored 0.00):")
+    for suite_name, case_id, reason in unmet:
+        print(f"  - {suite_name}/{case_id} — {reason}")
+
+
 def _undriven_case_error(cases) -> str | None:
     """Cases this runner cannot DRIVE. `_standard_trial` sends `case.turns[-1].query`
     alone and `_cross_session_trial` drives exactly two; anything else would be scored
@@ -1093,6 +1162,7 @@ def render_report(run_id, config_id, meta, score, gate, problems) -> str:
             f"{meta['repo']['dirty_digest']})",
             f"- judge: {meta['judge']}",
             f"- routes: {', '.join(meta['routes']) or 'none'}", ""]
+    head += _not_evaluated_lines(meta)
     if problems:
         return "\n".join(head + [
             "## MEASUREMENT INVALID", "",
@@ -1115,6 +1185,21 @@ def render_report(run_id, config_id, meta, score, gate, problems) -> str:
         "## release gate", "",
         ("PASS — every predeclared target met." if gate.passed
          else "RED — " + "; ".join(gate.reasons)), ""])
+
+
+def _not_evaluated_lines(meta) -> list[str]:
+    """Tasks the sweep could not measure, in the run's own record — rendered for an
+    invalid run too, because "which tasks never ran" is part of the diagnosis."""
+    rows = meta.get("not_evaluated") or []
+    if not rows:
+        return []
+    return ["## NOT EVALUATED", "",
+            f"{len(rows)} selected task(s) were held out: this daemon advertises none "
+            "of the tools they require, so nothing about the model was observed. They "
+            "are out of every denominator and out of the composite — an absence of "
+            "evidence, never a 0.00 and never a pass. The scored task set is therefore "
+            "smaller than the selection, which puts this run in its own cohort.", "",
+            *(f"- `{row['task']}` — {row['reason']}" for row in rows), ""]
 
 
 def _cost_warning(score) -> list[str]:
@@ -1595,7 +1680,10 @@ def main(argv=None) -> int:
     refusal = _execution_gate(cfg, args, cases)
     if refusal is not None:
         return refusal
-    return _sweep(cfg, args, lb_path, cases, want_judge)
+    cases, not_evaluated, refusal = _hold_out_unmet_preconditions(cfg, cases)
+    if refusal is not None:
+        return refusal
+    return _sweep(cfg, args, lb_path, cases, want_judge, not_evaluated)
 
 
 def _check(cfg, args) -> int:
@@ -1713,9 +1801,14 @@ class _Run:
     outcomes: list = field(default_factory=list)
     all_models: list = field(default_factory=list)
     task_stats: list = field(default_factory=list)
+    # Selected tasks this daemon could not be measured on, as (suite, case, reason).
+    # They were never driven, so they are absent from `cases` and from every number
+    # above; they are carried here because an exclusion nobody can see is a smaller
+    # suite pretending to be the same one.
+    not_evaluated: list = field(default_factory=list)
 
 
-def _sweep(cfg, args, lb_path, cases, want_judge) -> int:
+def _sweep(cfg, args, lb_path, cases, want_judge, not_evaluated=()) -> int:
     """Drive every selected task, then report. Driving CONTINUES after an invalid
     trial — the remaining tasks are the diagnosis — but an invalid trial anywhere
     still costs the run its leaderboard row (see _report)."""
@@ -1726,7 +1819,8 @@ def _sweep(cfg, args, lb_path, cases, want_judge) -> int:
                # and raises on an unreadable one.
                revision=_repo_revision(), tasks_hash=tasks_hash(cases, cfg),
                cases=cases, trials=args.trials,
-               k=args.k or args.trials, want_judge=want_judge)
+               k=args.k or args.trials, want_judge=want_judge,
+               not_evaluated=list(not_evaluated))
     opik = OpikClient(cfg.opik.base_url, cfg.opik.project,
                       api_key=cfg.opik.api_key, workspace=cfg.opik.workspace)
     print(f"capability eval · {len(cases)} task(s) × {run.trials} trial(s) · "
@@ -1786,7 +1880,8 @@ def _report(cfg, args, lb_path, run: _Run) -> int:
         print(route_error, file=sys.stderr)
         return 3
     config_id = _config_id(args, run)
-    score = aggregate.aggregate_config(config_id, run.task_stats)
+    score = aggregate.aggregate_config(config_id, run.task_stats,
+                                       not_evaluated=_not_evaluated_names(run))
     for line in _cost_warning(score):
         print(line, file=sys.stderr)
     routes = sorted(set(run.all_models))
@@ -1833,6 +1928,10 @@ def _report(cfg, args, lb_path, run: _Run) -> int:
     return 5
 
 
+def _not_evaluated_names(run: _Run) -> list[str]:
+    return [f"{suite}/{case_id}" for suite, case_id, _reason in run.not_evaluated]
+
+
 def _config_id(args, run: _Run) -> str:
     config_id = _detect_config_id(args.config_id, run.all_models)
     # The provider/model key separates most configs, but the Opik exporter maps
@@ -1855,6 +1954,8 @@ def _meta(cfg, args, run: _Run, routes: list) -> dict:
     and which route answered. A number without this cannot be reproduced or compared."""
     return {"run_id": run.run_id, "trials": run.trials, "k": run.k,
             "tasks": len(run.cases), "threshold": args.threshold,
+            "not_evaluated": [{"task": f"{suite}/{case_id}", "reason": reason}
+                              for suite, case_id, reason in run.not_evaluated],
             "tasks_hash": run.tasks_hash, "hash_version": HASH_VERSION,
             "private": args.private, "selection": _selection_label(args),
             "opik_ui": cfg.opik.ui_base, "repo": run.revision, "routes": routes,

@@ -361,6 +361,61 @@ def test_filtered_turn_still_requires_unique_exact_local_match(monkeypatch, rows
     assert (found["id"] if found else None) == expected
 
 
+def test_turn_polled_before_the_first_trace_creates_the_project_is_not_found_yet(monkeypatch):
+    """Opik creates a project with its first trace and 404s the project until then.
+
+    A fresh eval project polled the moment its first turn ends is still missing, and
+    that is "no trace yet", not a failed read that loses the trial.
+    """
+    calls, sleeps = _get_sequence(
+        monkeypatch, _http_error(404, "Not Found"), _Resp(b'{"content": []}'),
+        _Resp(json.dumps({"content": [_trace()]}).encode()))
+
+    client = OpikClient("http://opik", "eval")
+    found = client.poll_for_turn("session", "question", None, set(),
+                                 timeout_s=10, interval_s=1)
+    assert found["id"] == "t1"
+    assert len(calls) == 3 and sleeps == [1]
+
+
+def test_a_trace_404_on_a_project_that_exists_is_not_read_as_no_trace(monkeypatch):
+    project = json.dumps({"content": [{"name": "eval"}]}).encode()
+    calls, _sleeps = _get_sequence(
+        monkeypatch, _http_error(404, "Not Found"), _Resp(project),
+        _http_error(404, "Not Found"))
+
+    with pytest.raises(OpikError, match="HTTP 404"):
+        OpikClient("http://opik", "eval").find_turn_trace("session", "question", None, set())
+    assert len(calls) == 3
+
+
+def test_a_project_created_between_the_404_and_the_check_is_read_again(monkeypatch):
+    project = json.dumps({"content": [{"name": "eval"}]}).encode()
+    _get_sequence(monkeypatch, _http_error(404, "Not Found"), _Resp(project),
+                  _Resp(json.dumps({"content": [_trace()]}).encode()))
+
+    found = OpikClient("http://opik", "eval").find_turn_trace("session", "question",
+                                                              None, set())
+    assert found["id"] == "t1"
+
+
+def test_only_a_404_asks_whether_the_project_exists(monkeypatch):
+    calls, _sleeps = _get_sequence(monkeypatch, _http_error(400, "Bad Request"))
+
+    with pytest.raises(OpikError, match="HTTP 400"):
+        OpikClient("http://opik", "eval").find_turn_trace("session", "question", None, set())
+    assert len(calls) == 1
+
+
+def test_project_exists_searches_by_name_and_requires_the_exact_name(monkeypatch):
+    calls = []
+    client = OpikClient("http://opik", "eval")
+    monkeypatch.setattr(client, "_get", lambda path, params: calls.append((path, params))
+                        or {"content": [{"name": "eval-old"}, {"name": "old-eval"}]})
+    assert client.project_exists() is False
+    assert calls[0][0] == "/projects" and calls[0][1]["name"] == "eval"
+
+
 def test_marker_lookup_scopes_thread_and_time_on_server(monkeypatch):
     calls = []
     client = OpikClient("http://opik", "eval")

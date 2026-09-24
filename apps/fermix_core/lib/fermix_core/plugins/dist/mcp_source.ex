@@ -103,7 +103,7 @@ defmodule FermixCore.Plugins.Dist.McpSource do
   # outright rather than half-honoured (§7.2 rule 1).
   @local_only_runtime_fields ~w(command args env pass_env cwd vendored min_version requires_setting)
 
-  @sentinel SecretWriter.sentinel()
+  @sentinels SecretWriter.sentinels()
 
   # Core's non-secret plugin config keys for the operator's Connect selection
   # (§7.5). The *values* are not hard-coded anywhere: the profile must name a
@@ -409,7 +409,7 @@ defmodule FermixCore.Plugins.Dist.McpSource do
   # returned nothing is `:needs_secret`, not a client that starts and 401s.
   defp require_secret(%Plugin{name: name}) do
     case Config.plugin_secret(name) do
-      @sentinel -> {:error, {:needs_secret, name}}
+      sentinel when sentinel in @sentinels -> {:error, {:needs_secret, name}}
       secret when is_binary(secret) and secret != "" -> :ok
       _missing -> {:error, {:needs_secret, name}}
     end

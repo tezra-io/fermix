@@ -29,8 +29,14 @@
 #         ],
 #         "packages": {
 #           "linux-x86_64": {
-#             "deb": { "name": "fermix_0.1.0_amd64.deb", "url": "...", "sha256": "<hex>" },
-#             "rpm": { "name": "fermix-0.1.0-1.x86_64.rpm", "url": "...", "sha256": "<hex>" }
+#             "deb": {
+#               "name": "fermix_0.1.0_amd64.deb",
+#               "url": "...",
+#               "sha256": "<hex>",
+#               "sig_url": "<url>.sig",
+#               "cert_url": "<url>.pem"
+#             },
+#             "rpm": { "name": "fermix-0.1.0-1.x86_64.rpm", ... }
 #           }
 #         }
 #       }
@@ -39,7 +45,9 @@
 #
 # The "packages" object sits after "artifacts" and carries no "target" key,
 # because scripts/install.sh reads this document with a line-scanning awk that
-# keys on "target" and takes the next "url"/"sha256" it sees.
+# keys on "target" and takes the next "url"/"sha256" it sees. The same script
+# reads a package as packages -> <target> -> <deb|rpm> -> <field>, one key per
+# line, so this document stays pretty-printed.
 
 set -euo pipefail
 
@@ -121,7 +129,15 @@ for package in "$PACKAGES_DIR"/*.deb "$PACKAGES_DIR"/*.rpm; do
     --arg name "$filename" \
     --arg url "$base_url/$filename" \
     --arg sha256 "$sha256" \
-    '.[$target] += {($format): {name: $name, url: $url, sha256: $sha256}}' <<< "$packages")"
+    --arg sig_url "$base_url/$filename.sig" \
+    --arg cert_url "$base_url/$filename.pem" \
+    '.[$target] += {($format): {
+      name: $name,
+      url: $url,
+      sha256: $sha256,
+      sig_url: $sig_url,
+      cert_url: $cert_url
+    }}' <<< "$packages")"
 done
 
 # Both families for both architectures, or this release is not describable: an

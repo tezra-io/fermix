@@ -4,10 +4,20 @@ All notable changes to Fermix are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.11.0] - 2026-09-23
 
 ### Added
 
+- **Grok 4.7, Claude Opus 5.5, and GPT-6 Sol and Luna are in the model
+  pickers.** They appear in the browser setup and in the macOS app. Grok 4.7
+  goes to the head of the SpaceXAI list and becomes its default, so an
+  install that never picked a Grok model moves to it on upgrade. To stay on
+  Grok 4.6, pick it in setup. Claude Opus 5.5 joins the Anthropic list, and
+  the Anthropic default stays Claude Sonnet 4.6. GPT-6 Sol and GPT-6 Luna join
+  both the OpenAI API list and the ChatGPT-subscription (Codex) list, after
+  GPT-6 Astra, which stays the default on both. Opus 5.5 always thinks and
+  refuses forced tool use, and Fermix already sends it requests that follow
+  both rules.
 - **Venice is a provider, and every model says how private it is.** Save a
   Venice API key under Providers and Venice joins the fallback chain after
   Mistral, ahead of the local Ollama hop. The model picker lists every
@@ -198,6 +208,71 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   after verifying its digest, and removing the package leaves it there, because
   a Fermix that is still running opens that exact file whenever it starts a
   helper.
+- **One command installs the Linux package.**
+  `curl -fsSL https://fermix.ai/install | sh` installs the `.deb` through apt on
+  Debian and Ubuntu and the `.rpm` through dnf or zypper on Fedora, RHEL and
+  openSUSE, where it used to drop the standalone binary on every machine. It
+  picks the package for the machine's architecture out of `releases.json`,
+  checks its sha256, checks its cosign signature against the release tag when a
+  `cosign` is there to ask — on a machine that already has the package, the one
+  the package bundles — and hands the file to the package manager, which is
+  told to remove nothing else to make room. Run again it
+  is the updater: it installs the newer package, starts no setup and says to run
+  `fermix restart`, and on the latest version it downloads nothing. An earlier
+  standalone `fermix` that still comes first on `PATH` is named, with the page
+  that moves it, instead of being set up by mistake. macOS, a Linux host with
+  none of the three package managers, and `--standalone` get the standalone
+  binary as before, and a package install that fails is never retried as a
+  standalone one. Every package in `releases.json` now names its signature and
+  its certificate the way the binaries do, and after publishing the release rail
+  runs the advertised installer against the release it just published, on all
+  four package targets.
+- **The on-device speech engine is built for Linux, and setup does not offer it
+  yet.** The `local` transcription backend now has a pinned, checksum-verified
+  engine for Linux (x86_64 and arm64) as well as Apple Silicon Macs, all three
+  from fermix-stt 0.1.1. Choosing it downloads a speech model on the spot, and
+  that flow has not been proven end to end, so no picker lists it: not the
+  browser setup's Voice notes tab, not either app, not the meeting notetaker's
+  own backend choice, and the macOS app's install for it refuses. A
+  configuration that already names it keeps transcribing on-device and is shown
+  the choice, disabled, saying it cannot be chosen. `local_offered = true` under
+  `[fermix_core.transcription]` puts it back, which is how the flow is walked
+  before it ships.
+- **A keyring that cannot be used is a verdict, not a hang, and the file store
+  is the other choice.** On Linux the login keyring stays locked after a
+  fingerprint or automatic login (it is encrypted with the password), and
+  Fermix used to treat an installed `secret-tool` as a usable keyring: every
+  save pushed the secret at the lock, GNOME raised its unlock dialog, the
+  three-second timeout fired, and the save failed with macOS wording. Before
+  a write, and before the daemon reads a secret at boot, Fermix now asks the
+  Secret Service three read-only questions over `busctl --user` — is a keyring
+  running, which collection is the default, is it locked — and never a secret
+  read, so a background daemon never raises that dialog. A save you make
+  yourself still gets the prompt, and now gets time to answer it: the write
+  used to be killed after three seconds, before anyone could type, so the
+  dialog was never answerable. Only a store with nothing to answer (no keyring
+  service, no session bus, no `secret-tool`) is refused before the write, with
+  its own sentence; a locked keyring is tried, and a cancelled or unanswered
+  prompt is refused with `the login keyring is locked, and the unlock prompt
+  was cancelled or left unanswered. Unlock it when the prompt appears, or in
+  Passwords and Keys; fingerprint and automatic login leave it locked`. An
+  unchanged value is kept rather than pushed at the lock; at boot the secrets
+  in an unusable store stay unresolved with one log line naming them. `fermix
+  doctor` gains a `secret store` row that names the configured store, its
+  verdict and how many secrets each store holds.
+  The second store is declared, never slid into: `[fermix_core] secret_store =
+  "file"` keeps each secret as one `0600` file under `<FERMIX_HOME>/secrets/`
+  (the directory `0700`; readable only by that account and not encrypted at
+  rest, the posture `auth.json` already has). `fermix setup --secret-store
+  file|keyring` chooses it, and when the keyring refuses a save the terminal
+  wizard asks once — a no leaves the refusal exactly as it was. It is the way
+  in for a machine whose keyring cannot be unlocked at all. New secrets go
+  to the configured store and are persisted as its sentinel, `@file` beside
+  `@keyring`; each is read back from the store it names, so a home can hold
+  both. `fermix setup --migrate-secrets` now moves every secret that is not in
+  the configured store into it — plaintext and the other store's alike, one
+  confirmation each — and refuses up front when the store a secret must leave
+  cannot be read.
 - **`fermix upgrade` tells a Linux operator the right command.** An engine this
   project built as a package refuses to update itself before it looks at a
   single file and names the command for the family — `sudo apt update && sudo
@@ -286,6 +361,22 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   daemon.
 - **Behavioral eval suite** `tesla` (reads, command safety, explicit wake
   and command cases).
+- **A call can be spoken by GPT-Live.** The voice companion has a second
+  engine. `openai_realtime` stays the default and keeps the `screen_share`
+  tool; `openai_live` hands the speaking to GPT-Live while Fermix does the
+  work behind it, and has no screen sharing of its own. The engine is chosen
+  per call, the setup and doctor surfaces report which one a host can run, and
+  every trace and Opik export names the engine the call ran on.
+- **Computer history records every site visited in the browsers you allow.** A
+  settled navigation in an allowed browser is stored as its address reduced to
+  scheme, host and path, with the page and window titles beside it; the
+  per-site allowlist is retired, and an existing configuration boots, warns
+  once, and drops the key on its next save. Typed text is sent only from a
+  window that can be positively judged not private — the Chrome family carries
+  a marker that makes that judgement possible, while Safari, Edge and Firefox
+  answer "unknown", so their addresses are recorded, their typed text is
+  withheld, and `/history status` names them. The scrubber also learned
+  Luhn-checked card numbers and registry-checked IBANs.
 
 ### Changed
 
@@ -433,6 +524,50 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Asking the assistant to make a code change itself is no longer overridden.**
+  With a coding agent set up, repository work such as a bug fix goes to a Codex
+  or Claude Code run by default, and that default outranked the request: told
+  "do this yourself, don't delegate", the assistant delegated anyway and said its
+  instructions required it. An explicit request to do the work directly now
+  wins.
+- **The browser acts on an element named the way its page snapshot shows it.** A
+  snapshot lists each control as `@link_3 [link] "Search"`, but an action naming
+  `@link_3` was refused as out of date ("the page has changed since"), and the
+  fresh snapshot it asked for showed `@link_3` again, so the assistant could loop
+  on a page it had just opened until it gave up. A ref is now accepted as the
+  snapshot shows it, with or without the `@`, in every action that takes one.
+- **On-device speech says plainly where it can't run, and no longer shows up as
+  a notetaker failure.** On a machine this build has no on-device speech engine
+  for, choosing On-device for voice notes printed a developer instruction about
+  building the engine from source, and the Integrations page repeated it under
+  the Meeting Notetaker card, where it read as the notetaker's own error. The
+  Integrations page no longer shows that result at all, and wherever the choice
+  is still shown it carries the reason it cannot be chosen — beside it in the
+  browser setup, on hover in the macOS app — and asking for it anyway is refused
+  in that sentence. `fermix doctor` says on-device speech isn't available on this
+  machine instead of naming an install, and a voice note sent while it is
+  selected gets a reply saying to choose another backend rather than to try
+  again. The choice is labelled "On this device", not "On this Mac".
+- **The meeting notetaker's Google sign-in works on a fresh desktop again.**
+  The pinned `meetbot` sidecar moves to a release whose sign-in window no
+  longer announces itself as automated. Google Accounts refuses a browser that
+  does ("Couldn't sign you in. This browser or app may not be secure"), and
+  the sign-in window, unlike the join, launched with Playwright's
+  `--enable-automation` on, so on a fresh Linux profile Google blocked the bot
+  account's sign-in outright. The window is otherwise what it was: the
+  sidecar's own pinned Chromium on the persistent profile the join reopens,
+  never the default browser, because the signed-in state has to live where
+  the join runs, and a human still types the password. Enabling the notetaker
+  installs the new sidecar; an existing install picks it up the next time the
+  card's install runs.
+- **The installer's setup wizard reads the terminal, not the installer.** Under
+  `curl … | sh` standard input is the script itself, so on a host with no
+  display the terminal wizard `fermix setup` starts would have taken the rest of
+  the script as its answers. Setup is now handed the terminal; with no terminal
+  at all, as in a CI job, the installer prints `fermix setup` as the next command
+  rather than starting a wizard nobody can answer. The installer's usage also
+  named `fermix.sh`, a host that never served it; it is served at
+  `https://fermix.ai/install`.
 - **The browser's `console` action now faces the same read policy as every other
   page read.** Console entries are page text, and a page that redirected or was
   clicked onto a host the browser policy refuses logs there too — so `console`
@@ -570,6 +705,63 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   as a dumped response struct rather than the child's text.
 - **A configured OAuth `region` was silently dropped** on the way through
   the config store, so an explicit setting could never take effect.
+- **A spoken request finished a few seconds early is no longer refused.** A
+  Live delegation decided whether it had anything to read from a two-second
+  window around its own timeline offset, so a sentence finished slightly
+  before the voice model raised the delegation came back as "did not catch
+  that". It now reads the same thirty-second window the request itself is
+  built from.
+- **A long, dated page address is no longer redacted down to its host.** The
+  high-entropy detectors that hunt secrets in free text treated a whole URL
+  path as one opaque token and redacted any long path containing a digit —
+  which removed precisely the article, results and dated pages the feature
+  exists to recall. A normalised address, whose query string is already gone,
+  is now scrubbed with the named-secret patterns instead, while typed text,
+  window and page titles keep both detectors at full strength.
+- **A weekly capability run that stops at the release gate now says so.** The
+  eval box publishes one exit code for the tier it ran, and the expression that
+  chose it took the first *truthy* value — where the string `0` is truthy. A
+  capability run whose deterministic sweep passed and whose judged axis stopped
+  at a red release gate published the `0`, so the alert filed a generic "the
+  tier is failing" and dropped the paragraph explaining that the gate is
+  fail-closed by design. The choice now lives in a script with its own tests:
+  the first step that failed decides, a step that died before publishing
+  anything stops the job publishing a code at all rather than letting a later
+  step speak for its run, and `0` is published only when every step that ran
+  passed.
+- **A capability sweep no longer scores a task the machine could not run.** The
+  coding-harness tasks need a vendor coding CLI on the daemon's path when it
+  boots; a hosted CI box has none, so the tools were never offered, the model
+  could not delegate however well it reasoned, and the sweep recorded two zeros
+  that read as the model failing. A task whose required tools the daemon does
+  not advertise is now held out before anything is spent and reported as NOT
+  EVALUATED — named in the run, in the report, on the leaderboard and in the
+  release gate, and never rendered as a pass. Holding tasks out changes the
+  measured task set, so those rows sit in their own cohort and are not ranked
+  against runs that scored the full set.
+- **An instruction hidden in relayed content is named, not adopted.** Asked to
+  summarize something someone else wrote — a pasted note, a forwarded message —
+  and say what needs doing, Fermix could hand the instruction the note addressed
+  to it straight back as an assigned task. The operating rules said to ignore
+  embedded commands but left the summarize-and-triage path undecided, and that
+  is the one place an instruction has to be described without being taken on.
+  An instruction addressed to Fermix inside content that came from somewhere
+  else is now named as what it is — an attempt to direct it from outside your
+  conversation — never carried out, and never handed back as anyone's task,
+  however trusted its source looks. A request someone makes of *you* in the same
+  content is still triaged into your own to-dos as before.
+- **A plugin this build no longer offers is not left running.** Retiring a
+  plugin used to be a catalog decision only: a fresh install stopped being
+  offered it, and an install that already had it kept it enabled, kept its
+  stored key mapping, and kept starting it — so a retired hosted plugin whose
+  provider had moved on logged a connection failure on every start, forever,
+  and that error read as "this plugin is broken" when it meant "this plugin is
+  gone". Fermix now knows the retired names as it reads your configuration: the
+  plugin is dropped from the enabled list, its own section and its stored-key
+  entry go with it, and it is named once in the log, so nothing starts it and
+  the next save writes the file without it. The stored credential is left
+  exactly as it is — forgetting it locally and revoking it with the provider
+  stay two separate, deliberate acts.
 
 ## [0.10.5] - 2026-09-17
 

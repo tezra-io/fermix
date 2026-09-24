@@ -1,6 +1,6 @@
 defmodule FermixCore.Setup.SecretWriter do
   @moduledoc """
-  Facade for setup-managed OS secret storage.
+  Facade for setup-managed secret storage.
 
   A key is one of two shapes. A registry atom names a `SecretPaths` entry and
   is stored under that entry's environment name. `{:external_env, name}` is a
@@ -8,18 +8,54 @@ defmodule FermixCore.Setup.SecretWriter do
   can never share an item with a provider key of the same variable name. The
   name never becomes an atom, and it is validated by `Sandbox.ExternalEnv`
   before it becomes an address.
+
+  There are two stores, and `config.toml` says which one a home writes to
+  (`[fermix_core] secret_store`, default `keyring`) and which one each secret
+  is in: a secret stored in the OS keyring is persisted as `@keyring`, one in
+  the file store under the Fermix home as `@file`. Writes go to the configured
+  store; reads go to the store the sentinel names. Nothing ever moves a secret
+  between them on its own — `fermix setup --migrate-secrets` is the one mover.
+
+  `probe/1` says whether the configured store can be used right now, before a
+  write or a boot-time read tries it (M38 §7.2): a locked login keyring is a
+  verdict, not a hung `secret-tool` and an unlock dialog nobody asked for.
   """
 
   alias FermixCore.Sandbox.ExternalEnv
   alias FermixCore.Setup.SecretPaths
 
   @sentinel "@keyring"
+  @file_sentinel "@file"
+  @sentinels [@sentinel, @file_sentinel]
+  @stores [:keyring, :file]
   @default_profile "general"
   @compiled_env Mix.env()
   @external_prefix "external_env:"
   @type external_key :: {:external_env, String.t()}
   @type secret_key :: atom() | external_key()
   @type writer_error :: {:error, term()}
+  @type store :: :keyring | :file
+
+  @typedoc """
+  What a store can do right now. `:available` and `:unknown` let an operation
+  proceed (the operation reports its own result); every other state refuses it
+  with `sentence`, which is written for the operator and names the fix.
+  """
+  @type verdict_state ::
+          :available
+          | :tool_absent
+          | :no_session_bus
+          | :service_absent
+          | :collection_unavailable
+          | :locked
+          | :unavailable
+          | :unknown
+  @type verdict :: %{
+          required(:store) => store(),
+          required(:state) => verdict_state(),
+          required(:sentence) => String.t(),
+          optional(:evidence) => String.t()
+        }
 
   @doc "Whether `key` is one of the two key shapes every writer accepts."
   defguard is_secret_key(key)
@@ -31,10 +67,69 @@ defmodule FermixCore.Setup.SecretWriter do
   @callback get(secret_key(), keyword()) :: {:ok, String.t()} | writer_error()
   @callback delete(secret_key(), keyword()) :: :ok | writer_error()
   @callback available?(keyword()) :: boolean()
+  @callback probe(keyword()) :: verdict()
   @callback command_source(secret_key(), keyword()) :: map()
 
+  @doc "The value `config.toml` holds for a secret that is in the OS keyring."
   @spec sentinel() :: String.t()
   def sentinel, do: @sentinel
+
+  @doc "The value `config.toml` holds for a secret that is in the file store."
+  @spec file_sentinel() :: String.t()
+  def file_sentinel, do: @file_sentinel
+
+  @doc "Every value that marks a secret as stored elsewhere than `config.toml`."
+  @spec sentinels() :: [String.t()]
+  def sentinels, do: @sentinels
+
+  @spec sentinel?(term()) :: boolean()
+  def sentinel?(value), do: value in @sentinels
+
+  @spec sentinel_for(store()) :: String.t()
+  def sentinel_for(:keyring), do: @sentinel
+  def sentinel_for(:file), do: @file_sentinel
+
+  @spec store_of_sentinel(term()) :: {:ok, store()} | :error
+  def store_of_sentinel(@sentinel), do: {:ok, :keyring}
+  def store_of_sentinel(@file_sentinel), do: {:ok, :file}
+  def store_of_sentinel(_value), do: :error
+
+  @doc "The sentinel a write made now would leave behind: the configured store's."
+  @spec current_sentinel(keyword()) :: String.t()
+  def current_sentinel(opts \\ []) when is_list(opts), do: sentinel_for(store(opts))
+
+  @spec stores() :: [store()]
+  def stores, do: @stores
+
+  @doc """
+  The store writes go to. `opts[:store]` wins (a snapshot being saved names
+  its own), then the `:fermix_core, :secret_store` app-env setting that
+  `config.toml` populates at load, then the keyring. Any other value is a
+  programming error and raises: a secret must never land in a store nobody
+  chose.
+  """
+  @spec store(keyword()) :: store()
+  def store(opts \\ []) when is_list(opts) do
+    case Keyword.get(opts, :store) || Application.get_env(:fermix_core, :secret_store, :keyring) do
+      store when store in @stores ->
+        store
+
+      other ->
+        raise ArgumentError, "secret store must be :keyring or :file, got: #{inspect(other)}"
+    end
+  end
+
+  @doc "Parses the `[fermix_core] secret_store` value; anything unknown is refused by name."
+  @spec parse_store(term()) :: {:ok, store()} | {:error, String.t()}
+  def parse_store(value) when value in [nil, ""], do: {:ok, :keyring}
+  def parse_store(store) when store in @stores, do: {:ok, store}
+  def parse_store("keyring"), do: {:ok, :keyring}
+  def parse_store("file"), do: {:ok, :file}
+
+  def parse_store(other) do
+    {:error,
+     "[fermix_core] secret_store must be \"keyring\" or \"file\", and #{inspect(other)} is neither"}
+  end
 
   @spec default_profile() :: String.t()
   def default_profile, do: @default_profile
@@ -92,6 +187,36 @@ defmodule FermixCore.Setup.SecretWriter do
   @spec available?(keyword()) :: boolean()
   def available?(opts \\ []), do: impl(opts).available?(opts)
 
+  @doc """
+  Whether the store `opts` selects can be used right now. Read-only and
+  bounded: it never writes, never reads a secret and never raises an unlock
+  prompt, so a daemon may run it at boot.
+  """
+  @spec probe(keyword()) :: verdict()
+  def probe(opts \\ []) when is_list(opts), do: impl(opts).probe(opts)
+
+  @doc "Whether an operation may go ahead on this verdict without anyone's help."
+  @spec usable?(verdict()) :: boolean()
+  def usable?(%{state: state}), do: state in [:available, :unknown]
+
+  @doc """
+  Whether a write someone is present for may be tried on this verdict. A
+  locked keyring is the one state a person can change at the moment of the
+  write: the desktop raises its unlock prompt, and the write succeeds once
+  they answer it. Every other refused state has nothing to answer.
+  """
+  @spec attemptable?(verdict()) :: boolean()
+  def attemptable?(%{state: state} = verdict), do: usable?(verdict) or state == :locked
+
+  # A write gives the operator time to answer the desktop's unlock prompt; a
+  # read never waits for one, because the reads that happen with nobody
+  # present (boot) are refused by the probe before they are tried.
+  @unlock_prompt_timeout_ms 120_000
+
+  @doc "How long a write waits for the operator to answer an unlock prompt."
+  @spec unlock_prompt_timeout_ms() :: pos_integer()
+  def unlock_prompt_timeout_ms, do: @unlock_prompt_timeout_ms
+
   @spec command_source(secret_key()) :: map()
   def command_source(key) when is_secret_key(key), do: impl([]).command_source(key, [])
 
@@ -138,14 +263,27 @@ defmodule FermixCore.Setup.SecretWriter do
         raise "no :secret_writer configured under test — config/test.exs must keep the " <>
                 "SecretWriterStub default so tests can never reach the OS keychain"
 
+      store(opts) == :file ->
+        __MODULE__.File
+
       true ->
         __MODULE__.Auto
     end
   end
 
   defp format_reason({:helper_timeout, command, timeout}) do
-    "#{command} timed out after #{timeout}ms. Unlock your login Keychain or reconfigure the secret."
+    "#{command} timed out after #{timeout}ms. Unlock your login keychain or keyring, " <>
+      "or reconfigure the secret."
   end
+
+  defp format_reason({:verdict, %{sentence: sentence}}), do: sentence
+
+  defp format_reason({:file_store, {:readable_by_others, path}}) do
+    "#{path} is readable by other accounts, so it was not read; run: chmod 600 #{path}"
+  end
+
+  defp format_reason({:file_store, reason}),
+    do: "the secrets directory refused: #{inspect(reason)}"
 
   defp format_reason({:helper_failed, command, code, output}) do
     "#{command} exited #{code}: #{String.trim_trailing(output)}"
@@ -171,6 +309,9 @@ defmodule FermixCore.Setup.SecretWriter.Auto do
 
   @impl true
   def available?(opts \\ []), do: selected(opts).available?(opts)
+
+  @impl true
+  def probe(opts \\ []), do: selected(opts).probe(opts)
 
   @impl true
   def put(key, value, opts \\ []) when is_secret_key(key) and is_binary(value) do
@@ -212,6 +353,17 @@ defmodule FermixCore.Setup.SecretWriter.None do
   def available?(_opts \\ []), do: false
 
   @impl true
+  def probe(_opts \\ []) do
+    %{
+      store: :keyring,
+      state: :tool_absent,
+      sentence:
+        "this machine has no keyring client: on Debian and Ubuntu install libsecret-tools, " <>
+          "on Fedora libsecret, on macOS the security command is missing"
+    }
+  end
+
+  @impl true
   def put(_key, _value, _opts \\ []), do: {:error, :unavailable}
 
   @impl true
@@ -232,6 +384,7 @@ defmodule FermixCore.Setup.SecretWriter.SecretTool do
   import FermixCore.Setup.SecretWriter, only: [is_secret_key: 1]
 
   alias FermixCore.CommandRunner
+  alias FermixCore.Setup.SecretService
   alias FermixCore.Setup.SecretWriter
 
   @account "fermix"
@@ -241,12 +394,25 @@ defmodule FermixCore.Setup.SecretWriter.SecretTool do
   @impl true
   def available?(_opts \\ []), do: not is_nil(secret_tool_binary()) and not is_nil(shell_binary())
 
+  # The tool being installed says nothing about the keyring behind it; the
+  # Secret Service probe asks the bus, without touching a secret.
+  @impl true
+  def probe(opts \\ []) do
+    if available?(opts) do
+      SecretService.Probe.run(Keyword.take(opts, [:supervised, :runner, :find_executable]))
+    else
+      SecretWriter.None.probe(opts)
+    end
+  end
+
   @impl true
   def put(key, value, opts \\ []) when is_secret_key(key) and is_binary(value) do
+    write_opts = Keyword.put_new(opts, :timeout_ms, SecretWriter.unlock_prompt_timeout_ms())
+
     with {:ok, binary} <- fetch_secret_tool_binary(),
          {:ok, shell} <- fetch_shell_binary() do
       with_temp_secret(value, fn secret_file ->
-        run_with_stdin(shell, secret_file, binary, put_args(key, opts), opts)
+        run_with_stdin(shell, secret_file, binary, put_args(key, opts), write_opts)
       end)
     end
   end
@@ -413,8 +579,22 @@ defmodule FermixCore.Setup.SecretWriter.MacOS do
   @impl true
   def available?(_opts \\ []), do: not is_nil(security_binary())
 
+  # The login Keychain unlocks with the login password on every macOS session,
+  # so its usability is the tool's presence; a locked or slow Keychain still
+  # reports itself through the operation's own timeout.
+  @impl true
+  def probe(opts \\ []) do
+    if available?(opts) do
+      %{store: :keyring, state: :available, sentence: "the login Keychain answers"}
+    else
+      SecretWriter.None.probe(opts)
+    end
+  end
+
   @impl true
   def put(key, value, opts \\ []) when is_secret_key(key) and is_binary(value) do
+    write_opts = Keyword.put_new(opts, :timeout_ms, SecretWriter.unlock_prompt_timeout_ms())
+
     with {:ok, binary} <- fetch_security_binary() do
       [delete, add] = put_commands(key, value, opts)
       # Best-effort delete FIRST so the add re-creates the item fresh with `-A`'s
@@ -422,7 +602,7 @@ defmodule FermixCore.Setup.SecretWriter.MacOS do
       # through; the add still stores the value.
       _ = run(binary, delete, opts)
 
-      case run(binary, add, opts) do
+      case run(binary, add, write_opts) do
         {:ok, _output} -> :ok
         error -> error
       end

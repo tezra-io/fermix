@@ -162,11 +162,11 @@ defmodule FermixCore.Setup.Doctor do
   ]
   @default_probe_timeout_ms 5_000
   # Operator-facing remedies for the on-device transcription backend. The
-  # "cannot be installed yet" sentences belong to the installer modules (they
+  # "cannot be installed here" sentences belong to the installer modules (they
   # own the reason) and are rendered verbatim; these two cover the ordinary
   # "nothing has been installed yet" case.
   @local_sidecar_remedy "The on-device speech sidecar is not installed. " <>
-                          "Install it from fermix setup → Transcription."
+                          "Install it from fermix setup → Voice notes (the on-device backend)."
   @local_model_remedy "The on-device speech model is not installed. " <>
                         "Install it from fermix setup → Voice notes (the on-device backend)."
   # The daemon never reads inside the profile; it knows only whether a sign-in
@@ -589,8 +589,9 @@ defmodule FermixCore.Setup.Doctor do
 
   The on-device `local` backend has no credential at all — what it needs is an
   installed sidecar and an installed model — so it answers `:needs_install` with
-  the missing half named and the one sentence that fixes it. `release_pinned?:`
-  and `pins_pinned?:` are test seams for the far side of the pin gates.
+  the missing half named and the one sentence that fixes it. `opts` reach the
+  backend's own `configured?/1`, whose `releases:` seam stands for the machine's
+  pin, and `pins_pinned?:` is the test seam for the far side of the model pins.
   """
   @spec transcription_report(keyword()) :: transcription_report()
   def transcription_report(opts \\ []) do
@@ -610,18 +611,18 @@ defmodule FermixCore.Setup.Doctor do
   # problems with different fixes, so they stay distinct states rather than
   # collapsing into one "not configured" line.
   defp local_transcription_report(module, opts) do
-    case module.configured?([]) do
-      :ok -> %{status: :configured, backend: :local, credential_present?: true}
-      {:error, :sidecar_not_installed} -> local_sidecar_missing(opts)
-      {:error, :model_not_installed} -> local_model_missing(opts)
-    end
-  end
+    case module.configured?(opts) do
+      :ok ->
+        %{status: :configured, backend: :local, credential_present?: true}
 
-  defp local_sidecar_missing(opts) do
-    if Keyword.get(opts, :release_pinned?, SttInstaller.release_pinned?()) do
-      needs_install(:sidecar_not_installed, @local_sidecar_remedy)
-    else
-      needs_install(:no_release_pinned, SttInstaller.error_message(:no_release_pinned))
+      {:error, :sidecar_not_installed} ->
+        needs_install(:sidecar_not_installed, @local_sidecar_remedy)
+
+      {:error, :no_release_pinned} ->
+        needs_install(:no_release_pinned, SttInstaller.error_message(:no_release_pinned))
+
+      {:error, :model_not_installed} ->
+        local_model_missing(opts)
     end
   end
 

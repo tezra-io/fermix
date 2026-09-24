@@ -8,6 +8,7 @@ of the Homebrew binary, which may be behind on protocol changes.
 
 Supports: fermix status [--json]
           fermix ask --json --session ID --timeout MS <query>
+          fermix capabilities --json [--kind KIND]
 """
 import base64
 import json
@@ -124,6 +125,39 @@ def cmd_ask(args):
         sys.exit(3)
 
 
+def cmd_capabilities(args):
+    """`fermix capabilities --json` — the daemon's registered-capability snapshot.
+
+    The eval runner reads it to tell an unmet precondition (this daemon carries no
+    such tool) apart from a candidate failure (it does, and the model never used it).
+    Prints the same payload and uses the same exit codes as the real command, so
+    either binary can drive a sweep.
+    """
+    kind, i = "all", 0
+    while i < len(args):
+        if args[i] == "--kind" and i + 1 < len(args):
+            kind = args[i + 1]
+            i += 2
+        elif args[i] == "--json":
+            i += 1
+        else:
+            print(f"fermix-shim: unknown capabilities option {args[i]!r}", file=sys.stderr)
+            sys.exit(2)
+    try:
+        resp = call_daemon("capabilities", params={"kind": kind}, timeout_s=15.0)
+    except TimeoutError:
+        print("fermix capabilities: timeout", file=sys.stderr)
+        sys.exit(1)
+    except OSError:
+        print("fermix: not running", file=sys.stderr)
+        sys.exit(3)
+    if resp.get("status") != "ok":
+        print(f"fermix capabilities: {resp.get('reason') or resp}", file=sys.stderr)
+        sys.exit(1)
+    print(json.dumps(resp.get("capabilities", {})))
+    sys.exit(0)
+
+
 if __name__ == "__main__":
     subcmd = sys.argv[1] if len(sys.argv) > 1 else ""
     rest = sys.argv[2:]
@@ -131,6 +165,8 @@ if __name__ == "__main__":
         cmd_status(rest)
     elif subcmd == "ask":
         cmd_ask(rest)
+    elif subcmd == "capabilities":
+        cmd_capabilities(rest)
     else:
         print(f"fermix-shim: unknown command {subcmd!r}", file=sys.stderr)
         sys.exit(1)

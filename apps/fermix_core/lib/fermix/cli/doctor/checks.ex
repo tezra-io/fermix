@@ -53,6 +53,9 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias FermixCore.Setup.Doctor, as: ProviderProbe
   alias FermixCore.Setup.RestartState
   alias FermixCore.Setup.SecretMigration
+  alias FermixCore.Setup.SecretPaths
+  alias FermixCore.Setup.SecretStore
+  alias FermixCore.Setup.SecretWriter
   alias FermixCore.SkillCuration.Config, as: SkillCurationConfig
   alias FermixCore.SkillCuration.Delivery, as: SkillCurationDelivery
 
@@ -1277,14 +1280,22 @@ defmodule Fermix.CLI.Doctor.Checks do
     warn("acp surface", "unexpected reply: #{inspect(other)}")
   end
 
-  @spec transcription() :: result()
-  def transcription do
-    ProviderProbe.transcription_report()
+  @doc "`opts` reach `Doctor.transcription_report/1`, whose seams stand for the host."
+  @spec transcription(keyword()) :: result()
+  def transcription(opts \\ []) when is_list(opts) do
+    opts
+    |> ProviderProbe.transcription_report()
     |> format_transcription()
   end
 
   defp format_transcription(%{status: :error, error: error}) do
     warn("transcription", error)
+  end
+
+  # A machine with no build is missing no half: nothing to install fixes it, so
+  # the row carries the refusal sentence alone rather than naming an install.
+  defp format_transcription(%{status: :needs_install, missing: :no_release_pinned} = report) do
+    warn("transcription", "backend local — #{report.remedy}")
   end
 
   # The on-device backend fails on installation state, not on a key, so the row
@@ -1306,8 +1317,7 @@ defmodule Fermix.CLI.Doctor.Checks do
     ok("transcription", "backend #{backend} configured")
   end
 
-  defp missing_half(missing) when missing in [:sidecar_not_installed, :no_release_pinned],
-    do: "needs its sidecar"
+  defp missing_half(:sidecar_not_installed), do: "needs its sidecar"
 
   defp missing_half(missing) when missing in [:model_not_installed, :model_pins_missing],
     do: "needs its speech model"
@@ -2463,6 +2473,75 @@ defmodule Fermix.CLI.Doctor.Checks do
         "Install it from https://github.com/sigstore/cosign (`brew install cosign` on macOS)."
     end
   end
+
+  @doc """
+  Which store new secrets go to, whether it can be used right now, and where
+  the secrets this home already has are kept (M38 §7.2). A store that cannot
+  answer is a failure when secrets are waiting in it, because those channels
+  and providers are down until it does; a warning when nothing is.
+  """
+  @spec secret_store() :: result()
+  @spec secret_store(keyword()) :: result()
+  def secret_store(opts \\ []) do
+    case runtime_config_snapshot() do
+      {:ok, snapshot} -> secret_store_result(snapshot, opts)
+      {:error, detail} -> fail("secret store", "could not inspect config.toml: #{detail}")
+    end
+  end
+
+  defp secret_store_result(snapshot, opts) do
+    store = Keyword.get(opts, :store) || SecretWriter.store()
+    verdict = Keyword.get(opts, :verdict) || SecretWriter.probe(store: store)
+    counts = sentinel_counts(snapshot)
+    waiting = Map.get(counts, verdict.store, 0)
+    where = secret_store_summary(store, counts)
+
+    cond do
+      verdict.state == :available ->
+        ok("secret store", "#{where}; #{verdict.sentence}")
+
+      verdict.state == :unknown ->
+        warn("secret store", "#{where}; #{verdict.sentence}#{evidence_suffix(verdict)}")
+
+      waiting > 0 ->
+        fail(
+          "secret store",
+          "#{where}; #{verdict.sentence}; #{waiting} secret(s) stay unreadable until then"
+        )
+
+      true ->
+        warn("secret store", "#{where}; #{verdict.sentence}")
+    end
+  end
+
+  # How many persisted secrets each store holds, by sentinel.
+  defp sentinel_counts(snapshot) do
+    SecretPaths.all()
+    |> Enum.map(&SecretStore.get_snapshot_value(snapshot, &1.path))
+    |> Enum.flat_map(fn value ->
+      case SecretWriter.store_of_sentinel(value) do
+        {:ok, store} -> [store]
+        :error -> []
+      end
+    end)
+    |> Enum.frequencies()
+  end
+
+  defp secret_store_summary(store, counts) do
+    keyring = Map.get(counts, :keyring, 0)
+    file = Map.get(counts, :file, 0)
+
+    location =
+      case store do
+        :keyring -> "new secrets go to the OS keyring"
+        :file -> "new secrets go to files under #{SecretWriter.File.directory()}"
+      end
+
+    "#{location}; stored: #{keyring} in the keyring, #{file} in files"
+  end
+
+  defp evidence_suffix(%{evidence: evidence}) when is_binary(evidence), do: " (#{evidence})"
+  defp evidence_suffix(_verdict), do: ""
 
   @spec plaintext_secrets() :: result()
   def plaintext_secrets do

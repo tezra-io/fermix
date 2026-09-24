@@ -5,6 +5,7 @@ defmodule FermixCore.Setup.DoctorTest do
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Setup.Doctor
   alias FermixCore.Transcription.Local.ModelStore
+  alias FermixCore.Transcription.Local.SidecarInstaller, as: SttInstaller
 
   defmodule HealthyChannel do
     def health_check(opts) do
@@ -1313,14 +1314,15 @@ defmodule FermixCore.Setup.DoctorTest do
                missing: :no_release_pinned,
                remedy: remedy
              } =
-               Doctor.transcription_report(release_pinned?: false)
+               Doctor.transcription_report(releases: %{})
 
-      assert remedy =~ "dev_local"
+      assert remedy == SttInstaller.error_message(:no_release_pinned)
+      refute remedy =~ "dev_local"
     end
 
     test "with a release pinned, a missing sidecar is an ordinary install" do
       assert %{status: :needs_install, missing: :sidecar_not_installed, remedy: remedy} =
-               Doctor.transcription_report(release_pinned?: true)
+               Doctor.transcription_report(releases: FermixTestSupport.SttPins.for_this_host())
 
       assert remedy =~ "sidecar is not installed"
     end

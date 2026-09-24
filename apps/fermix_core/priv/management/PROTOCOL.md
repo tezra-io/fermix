@@ -313,6 +313,11 @@ Notes that the shapes alone do not carry:
   off-list value is accepted wherever the key's own validator takes it, and a
   native picker may send any zone the database knows or any model the vendor
   ships. `suggestions` is `false` on every non-choice kind.
+- **A `disabled` option is shown and cannot be chosen.** Its `hint` is never
+  null and says why: show the option unselectable, with its hint inline or on
+  hover, rather than hiding it. `settings.apply` refuses a disabled value with
+  that same sentence. Today the two transcription backend rows publish one:
+  `local`, on a machine this build has no on-device speech engine for.
 - **`restart` on a row is derived, never declared.** A row is flagged exactly
   when its own configuration section is one the daemon compares against the
   values it read at boot, so a row can never deny a restart the next

@@ -103,6 +103,7 @@ defmodule Fermix.CLI do
     Usage:
       fermix setup [--web|--cli|--terminal] [--no-browser] [--no-service] [--user|--system] [--rotate-token]
                    [--print-state] [--reconfigure] [--migrate-secrets] [--import-codex]
+                   [--secret-store keyring|file]
                    [--openai-api-key VALUE] [--anthropic-api-key VALUE] [--xai-api-key VALUE]
                    [--provider #{Enum.map_join(ModelCatalog.providers(), "|", &Atom.to_string/1)}]
                    [--default-model VALUE] [--reasoning-effort none|low|medium|high|xhigh|max]

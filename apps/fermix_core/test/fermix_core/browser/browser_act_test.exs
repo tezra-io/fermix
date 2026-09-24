@@ -237,6 +237,51 @@ defmodule FermixCore.Browser.BrowserActTest do
              req(pid, "act", %{"kind" => "click", "ref" => "textbox_1"})
   end
 
+  # The snapshot prints each ref behind an `@`, and a model sends the ref back as
+  # printed. The lookup wanted the bare name, so `@link_3` was refused as stale,
+  # and the fresh snapshot the refusal prescribed printed `@link_3` again: four of
+  # five trials of a live Wikipedia lookup ended in that loop on 2026-09-22.
+  test "a ref sent back as the snapshot prints it acts on that element", %{pid: pid} do
+    assert {:ok, _} = req(pid, "start")
+    assert {:ok, %{"snapshot" => text}} = req(pid, "snapshot")
+    [printed] = Regex.run(~r/@textbox_1\b/, text)
+
+    assert {:ok, %{"action" => "fill", "value" => "Amsterdam"}} =
+             req(pid, "act", %{"kind" => "fill", "ref" => printed, "text" => "Amsterdam"})
+
+    assert {:ok, %{"action" => "click"}} = req(pid, "act", %{"kind" => "click", "ref" => printed})
+  end
+
+  test "fill_form takes its refs as the snapshot prints them", %{pid: pid} do
+    ready(pid)
+
+    assert {:ok, %{"action" => "fill_form"}} =
+             req(pid, "act", %{
+               "kind" => "fill_form",
+               "fields" => [
+                 %{"ref" => "@textbox_1", "text" => "Paris"},
+                 %{"ref" => "@textbox_2", "text" => "Rome"}
+               ]
+             })
+
+    assert_receive {:cdp, _, "Input.insertText", %{text: "Paris"}}
+    assert_receive {:cdp, _, "Input.insertText", %{text: "Rome"}}
+  end
+
+  # The facade refuses a ref that is not a string, but the server is also called
+  # directly. A bad ref is an error for that call, never a crash of the profile.
+  test "a ref that is not a string is refused and the profile keeps serving", %{pid: pid} do
+    ready(pid)
+
+    assert {:error, %{code: "invalid_arg"}} =
+             req(pid, "act", %{"kind" => "click", "ref" => nil})
+
+    assert Process.alive?(pid)
+
+    assert {:ok, %{"action" => "click"}} =
+             req(pid, "act", %{"kind" => "click", "ref" => "textbox_1"})
+  end
+
   # A ref below the fold clicked at its box-model center dispatches into nothing
   # and reports success. Scroll it into view first (a no-op when already visible).
   test "a ref click scrolls the element into view before reading its box", %{pid: pid} do

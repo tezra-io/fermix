@@ -89,6 +89,11 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     @impl true
     def available?(_opts \\ []), do: true
 
+    # A probe reads nothing; these doubles stand in for a store that answers.
+    @impl true
+    def probe(opts \\ []),
+      do: %{store: Keyword.get(opts, :store, :keyring), state: :available, sentence: "double"}
+
     @impl true
     def get(key, opts \\ []) do
       :ets.insert(@table, {key, opts})
@@ -288,6 +293,52 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert Keyword.get(personalization, :timezone) == "Asia/Singapore"
     assert Keyword.get(personalization, :communication_style) == "blunt"
     assert Keyword.get(agent, :name) == "aira"
+  end
+
+  # The store choice is a setting like the profile: it must survive a save
+  # and a load, be applied to app env by the load, and stay out of a file
+  # that never chose it. Pinned with the normalized shapes the load path
+  # produces (see the config round-trip pitfall).
+  test "save/load round-trips the secret store, applies it, and omits the default" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn ->
+      FermixTestSupport.SafeRm.rm_rf!(tmp_home)
+      Application.delete_env(:fermix_core, :secret_store)
+    end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    default = %{fermix_core: [agent: [name: "aira"]], fermix_channels: [], fermix_web: []}
+    assert :ok = ConfigStore.save_snapshot(default)
+    refute File.read!(Path.join(tmp_home, "config.toml")) =~ "secret_store"
+    assert {:ok, loaded} = ConfigStore.load_runtime_config()
+    assert Keyword.get(loaded.fermix_core, :secret_store) == :keyring
+
+    chosen = %{fermix_core: [secret_store: :file], fermix_channels: [], fermix_web: []}
+    assert :ok = ConfigStore.save_snapshot(chosen)
+    assert File.read!(Path.join(tmp_home, "config.toml")) =~ ~s(secret_store = "file")
+    assert {:ok, loaded} = ConfigStore.load_runtime_config()
+    assert Keyword.get(loaded.fermix_core, :secret_store) == :file
+    assert :ok = ConfigStore.apply_snapshot(loaded)
+    assert Application.get_env(:fermix_core, :secret_store) == :file
+  end
+
+  test "an unknown secret store is refused by name when the file is loaded" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+    File.write!(Path.join(tmp_home, "config.toml"), ~s([fermix_core]\nsecret_store = "vault"\n))
+
+    assert_raise ArgumentError,
+                 ~r/secret_store must be "keyring" or "file", and "vault" is neither/,
+                 fn ->
+                   ConfigStore.load_runtime_config()
+                 end
   end
 
   test "save/load round-trips provider primary flags" do
@@ -897,7 +948,8 @@ defmodule FermixCore.Setup.ConfigStoreTest do
           openai_api_key: "@keyring",
           xai_api_key: "@keyring",
           deepgram_api_key: "@keyring",
-          max_file_mb: 25
+          max_file_mb: 25,
+          local_offered: true
         ]
       ],
       fermix_channels: [],
@@ -911,6 +963,8 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert contents =~ ~s(backend = "deepgram")
     assert contents =~ ~s(model = "nova-3")
     assert contents =~ "max_file_mb = 25"
+    # The one switch that puts on-device speech back in setup's pickers.
+    assert contents =~ "local_offered = true"
     # Each per-backend keyring sentinel round-trips (never plaintext).
     assert contents =~ ~s(openai_api_key = "@keyring")
     assert contents =~ ~s(xai_api_key = "@keyring")
@@ -925,6 +979,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert Keyword.get(transcription, :xai_api_key) == "@keyring"
     assert Keyword.get(transcription, :deepgram_api_key) == "@keyring"
     assert Keyword.get(transcription, :max_file_mb) == 25
+    assert Keyword.get(transcription, :local_offered) == true
   end
 
   test "load refuses to boot on an unknown transcription key (M21)" do
@@ -1486,6 +1541,87 @@ defmodule FermixCore.Setup.ConfigStoreTest do
 
     # A binary key here is the failure this test exists for: it reads as absent.
     refute Enum.any?(tesla, fn {key, _value} -> is_binary(key) end)
+  end
+
+  # A plugin this build retired is not a plugin the operator removed: the config
+  # on disk still enables it, still carries its section, and still maps its
+  # stored key. Nothing downstream may start it, and the operator has to be told
+  # by name — a retired remote-MCP plugin whose upstream moved on otherwise logs
+  # a discovery failure on every boot forever, which reads as "broken", not "gone".
+  test "a retired plugin is dropped from enabled, from its section and from its stored-key mapping, and named once" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-retired-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    File.mkdir_p!(tmp_home)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.plugins]
+    enabled = ["github", "eden"]
+
+    [fermix_core.plugins.github]
+    auth_profile = "github:primary"
+
+    [fermix_core.plugins.eden]
+    access_profile = "retrieval"
+    auth_profile = "eden:primary"
+    workspace_id = "46f02381-bbd6-4e8f-918e-0754e09dff2b"
+
+    [fermix_core.plugin_secrets]
+    eden = "@keyring"
+    """)
+
+    {result, log} =
+      with_log(fn -> ConfigStore.load_runtime_config(resolve_secrets: false) end)
+
+    assert {:ok, loaded} = result
+    plugins = Keyword.get(loaded.fermix_core, :plugins, [])
+
+    # The live plugin is untouched; only the retired one goes.
+    assert Keyword.get(plugins, :enabled) == ["github"]
+    entries = Keyword.get(plugins, :entries, %{})
+    assert Map.has_key?(entries, "github")
+    refute Map.has_key?(entries, "eden")
+    refute Map.has_key?(Keyword.get(loaded.fermix_core, :plugin_secrets, %{}), "eden")
+
+    # Named, so the operator can revoke the credential this does not touch.
+    assert log =~ "eden"
+    assert log =~ "retired"
+  end
+
+  test "the next save writes the file without the retired plugin" do
+    tmp_home =
+      Path.join(
+        System.tmp_dir!(),
+        "fermix-config-retired-save-#{System.unique_integer([:positive])}"
+      )
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    File.mkdir_p!(tmp_home)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.plugins]
+    enabled = ["github", "eden"]
+
+    [fermix_core.plugins.eden]
+    auth_profile = "eden:primary"
+    """)
+
+    {:ok, loaded} =
+      with_log(fn -> ConfigStore.load_runtime_config(resolve_secrets: false) end) |> elem(0)
+
+    assert :ok =
+             ConfigStore.save_snapshot(%{
+               fermix_core: loaded.fermix_core,
+               fermix_channels: [],
+               fermix_web: []
+             })
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    refute contents =~ "eden"
+    assert contents =~ ~s(enabled = ["github"])
   end
 
   test "load/save round-trips plugins dev_local as a top-level scalar" do

@@ -6,6 +6,7 @@ defmodule FermixCore.Setup.RuntimeTest do
   alias FermixCore.Memory.Repo, as: MemoryRepo
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.Runtime
+  alias FermixCore.Setup.SecretWriter
 
   setup do
     providers = Application.fetch_env(:fermix_core, :providers)
@@ -864,6 +865,125 @@ defmodule FermixCore.Setup.RuntimeTest do
 
       assert message =~ "codex import failed"
       refute File.exists?(fermix_auth)
+    end
+  end
+
+  describe "the file store, offered in the terminal when the keyring cannot be used" do
+    setup do
+      FermixTestSupport.SecretWriterStub.reset()
+
+      on_exit(fn ->
+        FermixTestSupport.SecretWriterStub.clear_verdict(:keyring)
+        FermixTestSupport.SecretWriterStub.reset()
+        Application.delete_env(:fermix_core, :secret_store)
+      end)
+
+      :ok
+    end
+
+    # The keyring locks after the home is prepared: `prepare/1` itself saves a
+    # baseline with a plaintext token, which a locked keyring would refuse.
+    defp lock_keyring! do
+      FermixTestSupport.SecretWriterStub.set_verdict(%{
+        store: :keyring,
+        state: :locked,
+        sentence: "the login keyring is locked"
+      })
+    end
+
+    defp locked_run(home, prompt) do
+      lock_keyring!()
+      {puts, collector} = puts_collector()
+
+      result =
+        Runtime.run(
+          [
+            telegram_bot_token: "123:abc",
+            telegram_owner_user_id: "42",
+            openai_api_key: "sk-x",
+            codex_auth_path: Path.join(home, "missing_codex_auth.json"),
+            skip_probe: true
+          ],
+          puts: puts,
+          prompt: prompt
+        )
+
+      {result, collector}
+    end
+
+    test "a yes records the file store and saves the same answers into it" do
+      home = tmp_home()
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
+      prepare(home)
+      test_pid = self()
+
+      # The wizard's other questions take a blank answer; only the consent
+      # question is answered yes.
+      {result, collector} =
+        locked_run(home, fn label ->
+          send(test_pid, {:prompt, label})
+          if label =~ "Store secrets in that folder", do: "y", else: ""
+        end)
+
+      assert :ok = result
+      assert_received {:prompt, "Store secrets in that folder from now on? [y/N]: "}
+
+      printed = Enum.join(puts_lines(collector), "\n")
+      assert printed =~ "could not be saved: the login keyring is locked"
+      assert printed =~ Path.join(home, "secrets")
+
+      contents = File.read!(Path.join(home, "config.toml"))
+      assert contents =~ ~s(secret_store = "file")
+      assert contents =~ ~s(bot_token = "@file")
+      assert contents =~ ~s(api_key = "@file")
+      assert {:ok, "123:abc"} = SecretWriter.get(:telegram_bot_token, store: :file)
+    end
+
+    test "a no leaves the refusal exactly as the save gave it, and nothing is stored" do
+      home = tmp_home()
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
+      prepare(home)
+
+      {result, _collector} =
+        locked_run(home, fn label ->
+          if label =~ "Store secrets in that folder", do: "n", else: ""
+        end)
+
+      assert {:error, sentence} = result
+      assert sentence =~ "could not be saved: the login keyring is locked"
+      assert sentence =~ "fermix setup --secret-store file"
+
+      refute File.exists?(Path.join(home, "config.toml")) and
+               File.read!(Path.join(home, "config.toml")) =~ "secret_store"
+
+      assert {:error, :missing_secret} = SecretWriter.get(:telegram_bot_token, store: :file)
+    end
+
+    test "--secret-store file asks nothing and saves straight into the file store" do
+      home = tmp_home()
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
+      prepare(home)
+      lock_keyring!()
+      {puts, _collector} = puts_collector()
+
+      assert :ok =
+               Runtime.run(
+                 [
+                   secret_store: "file",
+                   telegram_bot_token: "123:abc",
+                   telegram_owner_user_id: "42",
+                   openai_api_key: "sk-x",
+                   codex_auth_path: Path.join(home, "missing_codex_auth.json"),
+                   skip_probe: true
+                 ],
+                 puts: puts,
+                 prompt: fn label ->
+                   refute label =~ "Store secrets in that folder", "the choice was already made"
+                   ""
+                 end
+               )
+
+      assert File.read!(Path.join(home, "config.toml")) =~ ~s(bot_token = "@file")
     end
   end
 

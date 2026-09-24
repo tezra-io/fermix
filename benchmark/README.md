@@ -307,6 +307,23 @@ through `bin/evallib/safe_rm.py`; a traversal or a home that is not a disposable
 eval/e2e home raises rather than deleting, and a declared entry that is a symlink
 has the LINK removed rather than its target.
 
+**A required tool the daemon never advertised is NOT EVALUATED, never a zero.**
+Before any spend the runner reads the daemon's own capability registry (`fermix
+capabilities --json`) and holds out every selected task whose `requires_tools` /
+`requires_tools_all` that daemon does not carry. Registration is a boot snapshot, so a
+vendor CLI missing from `PATH` when the daemon started — a GitHub-hosted runner has
+neither `codex` nor `claude` — puts `cap_harness` out of reach however well the model
+reasons, and scoring it 0.00 reports an environment gap as a candidate failure. A
+held-out task is never driven and never scored: it is named in the run's `note: NOT
+EVALUATED` line, in its `report.md`, in the leaderboard's `n` column as `+N n/e`, and
+in the release gate, which goes RED — an absence of evidence, never a pass. The signal
+is POSITIVE evidence only (what the registry holds, never an empty succeeded-set), so a
+tool the daemon does advertise and the model simply did not reach for still scores 0 at
+the provenance gate. Two consequences worth stating: the graded task set is then smaller
+than the selection, so the run's `tasks_hash` differs and it lands in its **own cohort**,
+never ranked against a full-set row; and if the registry cannot be read at all the sweep
+refuses on exit 3 rather than guessing either way.
+
 The leaderboard lives at `reports/capability/leaderboard.json` and is rendered by
 `make rank`. The served config is **auto-detected** from the trace, so each row is
 labeled `provider/model/effort` (e.g. `openai/gpt-5.5/xhigh`,

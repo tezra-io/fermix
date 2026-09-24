@@ -46,7 +46,7 @@ defmodule FermixCore.Plugins.Status do
   alias FermixCore.Plugins.Registry
   alias FermixCore.Setup.ConfigStore
 
-  @sentinel FermixCore.Setup.SecretWriter.sentinel()
+  @sentinels FermixCore.Setup.SecretWriter.sentinels()
 
   # The one spelling a `requires_setting` gate accepts. A second accepted
   # spelling would be a second code path for one decision.
@@ -309,7 +309,7 @@ defmodule FermixCore.Plugins.Status do
   # otherwise they need it set (`fermix plugins auth set <name>`).
   defp api_key_status(%Plugin{name: name}) do
     case Config.plugin_secret(name) do
-      @sentinel -> :needs_secret
+      sentinel when sentinel in @sentinels -> :needs_secret
       secret when is_binary(secret) and secret != "" -> :ready
       _missing -> :needs_secret
     end

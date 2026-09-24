@@ -40,24 +40,105 @@ defmodule FermixTestSupport.SecretWriterStub do
   alias FermixCore.Setup.SecretWriter
 
   @table __MODULE__
+  @verdict_row :__probe_verdict__
+  @unlock_row :__unlock_on_prompt__
 
   @impl true
   def available?(_opts \\ []), do: true
 
+  # The verdict a test pinned with `set_verdict/1` for that store, else
+  # available: the stub stands in for a keyring that answers, until a test
+  # says it is locked.
+  @impl true
+  def probe(opts \\ []) do
+    ensure_table()
+    store = SecretWriter.store(opts)
+
+    case :ets.lookup(@table, {@verdict_row, store}) do
+      [{_row, verdict}] -> verdict
+      [] -> %{store: store, state: :available, sentence: "stub store answers"}
+    end
+  end
+
+  @doc """
+  Pins the verdict `probe/1` answers for `verdict.store` until `clear_verdict/1`.
+
+  A pinned store that is not usable behaves like the real thing behind it: a
+  write or a read fails the way a cancelled unlock prompt fails. With
+  `unlock_on_prompt: true` the first write instead succeeds and clears the
+  verdict, the way a keyring the operator just unlocked answers from then on.
+  """
+  @spec set_verdict(SecretWriter.verdict(), keyword()) :: :ok
+  def set_verdict(%{store: store} = verdict, opts \\ []) do
+    ensure_table()
+    :ets.insert(@table, {{@verdict_row, store}, verdict})
+    :ets.insert(@table, {{@unlock_row, store}, Keyword.get(opts, :unlock_on_prompt, false)})
+    :ok
+  end
+
+  @spec clear_verdict(SecretWriter.store()) :: :ok
+  def clear_verdict(store) do
+    ensure_table()
+    :ets.delete(@table, {@verdict_row, store})
+    :ets.delete(@table, {@unlock_row, store})
+    :ok
+  end
+
+  # Items are namespaced by store as well as profile, the way the real stores
+  # are two places: a secret written to the file store is not found by a read
+  # of the keyring, so a test observes that reads follow each sentinel.
   @impl true
   def put(key, value, opts \\ []) when is_secret_key(key) and is_binary(value) do
     ensure_table()
-    :ets.insert(@table, {{profile(opts), key}, value})
-    :ok
+    store = SecretWriter.store(opts)
+
+    case prompt_outcome(store) do
+      :cancelled ->
+        {:error, {:helper_failed, "stub-keyring store", 1, "the unlock prompt was cancelled"}}
+
+      outcome ->
+        if outcome == :unlocked, do: clear_verdict(store)
+        :ets.insert(@table, {{profile(opts), store, key}, value})
+        :ok
+    end
   end
 
   @impl true
   def get(key, opts \\ []) when is_secret_key(key) do
     ensure_table()
+    store = SecretWriter.store(opts)
 
-    case :ets.lookup(@table, {profile(opts), key}) do
-      [{_entry, value}] -> {:ok, value}
-      [] -> {:error, :missing_secret}
+    case prompt_outcome(store) do
+      :cancelled ->
+        {:error, {:helper_failed, "stub-keyring lookup", 1, "the keyring is locked"}}
+
+      _answers ->
+        case :ets.lookup(@table, {profile(opts), store, key}) do
+          [{_entry, value}] -> {:ok, value}
+          [] -> {:error, :missing_secret}
+        end
+    end
+  end
+
+  # :answers when the store needs no prompt, :unlocked when a pinned prompt is
+  # answered, :cancelled when it is not.
+  defp prompt_outcome(store) do
+    usable? =
+      case :ets.lookup(@table, {@verdict_row, store}) do
+        [{_row, verdict}] -> SecretWriter.usable?(verdict)
+        [] -> true
+      end
+
+    unlock? =
+      case :ets.lookup(@table, {@unlock_row, store}) do
+        [{_row, flag}] -> flag
+        [] -> false
+      end
+
+    cond do
+      usable? -> :answers
+      unlock? -> :unlocked
+      true -> :cancelled
     end
   end
 
@@ -66,7 +147,7 @@ defmodule FermixTestSupport.SecretWriterStub do
   @impl true
   def delete(key, opts \\ []) when is_secret_key(key) do
     ensure_table()
-    :ets.delete(@table, {profile(opts), key})
+    :ets.delete(@table, {profile(opts), SecretWriter.store(opts), key})
     :ok
   end
 
@@ -116,8 +197,13 @@ defmodule FermixTestSupport.UnavailableSecretWriter do
 
   @behaviour FermixCore.Setup.SecretWriter
 
+  alias FermixCore.Setup.SecretWriter
+
   @impl true
   def available?(_opts \\ []), do: false
+
+  @impl true
+  def probe(_opts \\ []), do: SecretWriter.None.probe()
 
   @impl true
   def put(_key, _value, _opts \\ []), do: {:error, :unavailable}
@@ -167,6 +253,11 @@ defmodule FermixTestSupport.CountingSecretWriter do
 
   @impl true
   def available?(_opts \\ []), do: true
+
+  # A probe reads no secret, so it is not reported as a read.
+  @impl true
+  def probe(opts \\ []),
+    do: %{store: SecretWriter.store(opts), state: :available, sentence: "counting"}
 
   @impl true
   def put(key, _value, _opts \\ []) when is_secret_key(key), do: :ok
@@ -245,6 +336,9 @@ defmodule FermixTestSupport.TreeLessSecretWriter do
 
   @impl true
   def available?(opts \\ []), do: SecretWriterStub.available?(opts)
+
+  @impl true
+  def probe(opts \\ []), do: SecretWriterStub.probe(opts)
 
   @impl true
   def put(key, value, opts \\ []) when is_secret_key(key) and is_binary(value) do

@@ -11,6 +11,10 @@ defmodule FermixCore.Setup.SecretWriterTest do
     def available?(_opts \\ []), do: false
 
     @impl true
+    def probe(opts \\ []),
+      do: %{store: Keyword.get(opts, :store, :keyring), state: :unavailable, sentence: "double"}
+
+    @impl true
     def put(_key, _value, _opts \\ []), do: {:error, :unavailable}
 
     @impl true
@@ -29,6 +33,10 @@ defmodule FermixCore.Setup.SecretWriterTest do
 
     @impl true
     def available?(_opts \\ []), do: true
+
+    @impl true
+    def probe(opts \\ []),
+      do: %{store: Keyword.get(opts, :store, :keyring), state: :available, sentence: "double"}
 
     @impl true
     def put(_key, _value, _opts \\ []), do: :ok
@@ -137,6 +145,7 @@ defmodule FermixCore.Setup.SecretWriterTest do
     ])
 
     assert SecretWriter.available?()
+    assert %{state: :available} = SecretWriter.probe()
     assert :ok = SecretWriter.put(:openai_api_key, "sk-test")
     assert {:ok, "from-auto"} = SecretWriter.get(:openai_api_key)
 

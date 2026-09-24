@@ -131,7 +131,17 @@ defmodule FermixCore.Setup.Wizard do
 
   # The one sentence a save refuses with when this host has nowhere to put a
   # credential. Published to both doors, so neither composes its own.
-  @no_secret_store_sentence "This machine has no secret store, so the credential could not be saved."
+  # Appended to a keyring refusal so the operator learns the other declared
+  # store exists; the choice itself is theirs, made with the flag or the
+  # terminal wizard's question, never by this save.
+  @file_store_hint "To keep secrets in a file under your Fermix home instead " <>
+                     "(readable only by your account), run: fermix setup --secret-store file"
+
+  # What a locked keyring's refusal says once the write was tried: the
+  # desktop asked, and nobody unlocked it.
+  @locked_after_prompt "the login keyring is locked, and the unlock prompt was cancelled or " <>
+                         "left unanswered. Unlock it when the prompt appears, or in Passwords " <>
+                         "and Keys; fingerprint and automatic login leave it locked"
 
   # Derived from `Channels.Inventory` — the one channel table — rather than a
   # third list of the same five channels.
@@ -630,27 +640,100 @@ defmodule FermixCore.Setup.Wizard do
 
   @spec save_answers(WizardState.t(), [answer()]) :: {:ok, report()} | {:error, term()}
   def save_answers(%WizardState{} = state, answers) when is_list(answers) do
-    with :ok <- refuse_unstorable_secrets(answers) do
-      commit_answers(state, answers)
+    {store_answer, answers} = Keyword.pop(answers, :secret_store)
+
+    with {:ok, state, store_report} <- apply_secret_store_answer(state, store_answer),
+         {:ok, verdict} <- refuse_unstorable_secrets(answers) do
+      case {answers, store_report} do
+        {[], %{} = report} -> {:ok, report}
+        _ -> commit_answers_or_refuse(state, answers, verdict)
+      end
+    end
+  end
+
+  # A secret write inside the commit pipeline that fails (an unlock prompt
+  # cancelled, a helper that errored) unwinds here as the same typed refusal
+  # the pre-check gives, with the verdict's own words when the store was
+  # locked: the pipeline is a snapshot builder, so a failed write leaves the
+  # file exactly as it was.
+  defp commit_answers_or_refuse(state, answers, verdict) do
+    commit_answers(state, answers)
+  catch
+    :throw, {:secret_store_failed, key, reason} ->
+      {:error, {:secret_store_failed, key, write_failure_sentence(key, reason, verdict)}}
+  end
+
+  defp write_failure_sentence(key, _reason, %{store: :keyring, state: :locked} = verdict) do
+    refusal_sentence(key, %{verdict | sentence: @locked_after_prompt})
+  end
+
+  defp write_failure_sentence(key, reason, _verdict), do: SecretWriter.format_error(key, reason)
+
+  # The store choice lands first, as its own commit, so every secret in the
+  # same save is written to the store the operator just chose: the writes
+  # below read the configured store from the loaded config, and a save that
+  # carries no secret still records the choice.
+  defp apply_secret_store_answer(state, nil), do: {:ok, state, nil}
+
+  defp apply_secret_store_answer(%WizardState{} = state, answer) do
+    with {:ok, store} <- SecretWriter.parse_store(answer) do
+      if store == SecretWriter.store() do
+        {:ok, state, nil}
+      else
+        commit_secret_store(state, store)
+      end
+    end
+  end
+
+  defp commit_secret_store(%WizardState{} = state, store) do
+    snapshot =
+      SecretStore.put_snapshot_value(state.config_snapshot, [:fermix_core, :secret_store], store)
+
+    with {:ok, report} <- commit_snapshot(snapshot) do
+      {:ok, %WizardState{state | config_snapshot: ConfigStore.current_snapshot()}, report}
     end
   end
 
   # Design §7.4: a save that cannot store a secret says so. Every secret answer
-  # is persisted as the `@keyring` sentinel, which is only meaningful once the
-  # value is actually in the OS keyring; with no writer on this host the value
-  # used to be dropped with a log line while the save reported success, so the
-  # operator saw a stored key and the runtime had none. The refusal is here,
-  # before the snapshot is built, so a save either stores every secret in it or
-  # stores nothing.
+  # is persisted as a store's sentinel, which is only meaningful once the value
+  # is actually in that store; with no writer on this host the value used to be
+  # dropped with a log line while the save reported success, so the operator
+  # saw a stored key and the runtime had none. The refusal is here, before the
+  # snapshot is built, so a save either stores every secret in it or stores
+  # nothing — and it carries the store's own verdict (M38 §7.2), so a locked
+  # keyring is named as one rather than timed out on.
+  # A locked keyring is not refused here: someone is saving, so the write may
+  # raise the desktop's unlock prompt and wait for them (`SecretWriter.put/3`
+  # gives it the time). Every other unusable state has nothing to answer and is
+  # refused before the snapshot is built.
   defp refuse_unstorable_secrets(answers) do
-    case unstorable_secret_key(answers) do
-      nil -> :ok
-      key -> {:error, {:secret_store_failed, key, @no_secret_store_sentence}}
+    case first_secret_answer(answers) do
+      nil -> {:ok, nil}
+      key -> refuse_unless_attemptable(key, SecretWriter.probe())
     end
   end
 
-  defp unstorable_secret_key(answers) do
-    if SecretWriter.available?(), do: nil, else: first_secret_answer(answers)
+  defp refuse_unless_attemptable(key, verdict) do
+    if SecretWriter.attemptable?(verdict) do
+      {:ok, verdict}
+    else
+      {:error, {:secret_store_failed, key, refusal_sentence(key, verdict)}}
+    end
+  end
+
+  @doc """
+  The sentence a save refused by the secret store's verdict carries: what the
+  store said, and, for the keyring, that the file store is the other choice.
+  """
+  @spec refusal_sentence(atom(), SecretWriter.verdict()) :: String.t()
+  def refusal_sentence(key, %{store: store, sentence: sentence}) when is_atom(key) do
+    env = SecretPaths.fetch!(key).env
+    lead = "#{env} could not be saved: #{String.trim_trailing(sentence, ".")}."
+
+    case store do
+      :keyring -> lead <> " " <> @file_store_hint
+      :file -> lead
+    end
   end
 
   defp first_secret_answer(answers) do
@@ -843,11 +926,24 @@ defmodule FermixCore.Setup.Wizard do
           {:ok, report()} | {:error, {:secret_store_failed, atom(), term()} | term()}
   def put_secret(key, value) when is_atom(key) and is_binary(value) and value != "" do
     secret = SecretPaths.fetch!(key)
+    verdict = SecretWriter.probe()
 
-    case SecretWriteLog.put(key, value) do
-      :ok -> commit_secret_reference(secret, SecretWriter.sentinel())
+    # The store is asked first, as every other writer asks it: a store with
+    # nothing to answer is refused with its verdict, and a locked keyring gets
+    # the write, which raises the unlock prompt for the person saving.
+    with :ok <- attemptable_or_verdict(key, verdict),
+         :ok <- SecretWriteLog.put(key, value) do
+      commit_secret_reference(secret, SecretWriter.current_sentinel())
+    else
+      {:error, {:secret_store_failed, _key, _reason} = failure} -> {:error, failure}
       {:error, reason} -> {:error, {:secret_store_failed, key, reason}}
     end
+  end
+
+  defp attemptable_or_verdict(key, verdict) do
+    if SecretWriter.attemptable?(verdict),
+      do: :ok,
+      else: {:error, {:secret_store_failed, key, {:verdict, verdict}}}
   end
 
   @doc """
@@ -2403,8 +2499,10 @@ defmodule FermixCore.Setup.Wizard do
     Map.put(snapshot, :fermix_channels, Keyword.put(existing_channels, channel, config))
   end
 
-  # A writer-less host is refused by `refuse_unstorable_secrets/1` before this
-  # pipeline runs, so there is one path here and it stores the value.
+  # A store with nothing to answer is refused by `refuse_unstorable_secrets/1`
+  # before this pipeline runs, so a write here either stores the value or is
+  # the operator's own doing (a cancelled unlock prompt); a failure unwinds to
+  # `commit_answers_or_refuse/3`, which turns it into the typed refusal.
   defp secret_snapshot_value(_key, value) when value in [nil, ""], do: nil
 
   defp secret_snapshot_value(key, value) when is_atom(key) and is_binary(value),
@@ -2412,8 +2510,8 @@ defmodule FermixCore.Setup.Wizard do
 
   defp write_secret_sentinel!(key, value) do
     case SecretWriteLog.put(key, value) do
-      :ok -> SecretWriter.sentinel()
-      {:error, reason} -> raise ArgumentError, SecretWriter.format_error(key, reason)
+      :ok -> SecretWriter.current_sentinel()
+      {:error, reason} -> throw({:secret_store_failed, key, reason})
     end
   end
 

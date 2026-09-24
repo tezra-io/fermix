@@ -8,7 +8,14 @@ defmodule FermixCore.Transcription.Local do
   Both halves are explicit. `configured?/1` reports which one is missing as its
   own error (`:sidecar_not_installed` / `:model_not_installed`) so doctor and the
   setup card can each print the one sentence that fixes it, and `transcribe/2`
-  fails loud with the same reason rather than degrading to a hosted backend.
+  fails loud with the same reason rather than degrading to a hosted backend. A
+  machine this build pins no sidecar for answers `:no_release_pinned` instead,
+  because no install fixes it; `available?/1` is the same question asked before
+  anything is chosen, so every surface offering the backend can say so up front.
+
+  **Setup does not offer this backend yet** (`offered?/1`): the engine is built,
+  pinned and runnable, but the flow that downloads a speech model the moment an
+  operator picks it has never been walked end to end, so no door lists it.
 
   Installing is a deliberate act: `ensure_installed/1` is called by the setup
   surface on enable, and by nothing else. Setting `backend = "local"` in
@@ -33,6 +40,10 @@ defmodule FermixCore.Transcription.Local do
   @model "parakeet-tdt-0.6b-v3-int8"
   @provider :local
 
+  # Shown wherever a surface has to explain why the choice cannot be made: it
+  # is not the machine's fault and no install changes it.
+  @unoffered_message "On-device speech isn't offered in this release."
+
   @impl true
   @spec name() :: atom()
   def name, do: @provider
@@ -42,11 +53,71 @@ defmodule FermixCore.Transcription.Local do
   def capabilities, do: %{streaming?: true, local?: true}
 
   @impl true
-  @spec configured?(keyword()) :: :ok | {:error, :sidecar_not_installed | :model_not_installed}
+  @spec configured?(keyword()) ::
+          :ok | {:error, :sidecar_not_installed | :no_release_pinned | :model_not_installed}
   def configured?(opts) when is_list(opts) do
-    with :ok <- sidecar_present(),
+    with :ok <- sidecar_present(opts),
          :ok <- model_present() do
       :ok
+    end
+  end
+
+  @doc """
+  Whether this machine can run the backend at all: a sidecar is already here
+  (installed, or a `dev_local` build), or this build pins one for the machine.
+  Asked by every surface that offers the backend, before anything downloads.
+
+  `opts[:releases]` is the pin-table test seam `SidecarInstaller.install/1` takes.
+  """
+  @spec available?(keyword()) :: boolean()
+  def available?(opts \\ []) when is_list(opts) do
+    SidecarInstaller.installed?() or SidecarInstaller.release_pinned?(opts)
+  end
+
+  @doc """
+  Whether setup offers this backend as a choice.
+
+  False unless `[fermix_core.transcription] local_offered` says otherwise:
+  picking on-device speech downloads a speech model on the spot, and that flow
+  has not been proven, so no setup surface lists the choice. A configuration
+  that already names `local` keeps transcribing on-device, and the setting is
+  how the whole flow is walked before it ships.
+  """
+  @spec offered?(keyword()) :: boolean()
+  def offered?(config \\ Application.get_env(:fermix_core, :transcription, []))
+      when is_list(config) do
+    Keyword.get(config, :local_offered, false) == true
+  end
+
+  @doc "Operator-facing copy for a choice this build does not offer yet."
+  @spec unoffered_message() :: String.t()
+  def unoffered_message, do: @unoffered_message
+
+  @doc """
+  What a setup surface does with the on-device choice, given the transcription
+  configuration and the backend in force.
+
+  `:offer` lists it as a choice. `{:shown, sentence}` lists it disabled with the
+  sentence saying why it cannot be chosen — a configuration already names it, or
+  this machine has no build. `{:hidden, sentence}` leaves it out, and the
+  sentence is what a door answers a request that asks for it anyway.
+  """
+  @spec offer(keyword(), String.t(), keyword()) ::
+          :offer | {:shown, String.t()} | {:hidden, String.t()}
+  def offer(config, in_force, opts \\ [])
+      when is_list(config) and is_binary(in_force) and is_list(opts) do
+    cond do
+      not offered?(config) and in_force != Atom.to_string(@provider) ->
+        {:hidden, @unoffered_message}
+
+      not offered?(config) ->
+        {:shown, @unoffered_message}
+
+      available?(opts) ->
+        :offer
+
+      true ->
+        {:shown, SidecarInstaller.error_message(:no_release_pinned)}
     end
   end
 
@@ -114,8 +185,14 @@ defmodule FermixCore.Transcription.Local do
     end
   end
 
-  defp sidecar_present do
-    if SidecarInstaller.installed?(), do: :ok, else: {:error, :sidecar_not_installed}
+  # An absent sidecar is one of two answers: installable here, or not built for
+  # this machine at all. Only the first is fixed by an install.
+  defp sidecar_present(opts) do
+    cond do
+      SidecarInstaller.installed?() -> :ok
+      SidecarInstaller.release_pinned?(opts) -> {:error, :sidecar_not_installed}
+      true -> {:error, :no_release_pinned}
+    end
   end
 
   defp model_present do

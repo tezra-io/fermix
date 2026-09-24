@@ -34,6 +34,28 @@ defmodule FermixCore.Browser.SnapshotTest do
     assert [%{ref: "button_1", backend_node_id: 42}] = result.refs
   end
 
+  # A model reads a ref off the text and sends it back as printed; the server
+  # finds it in the ref map. The printed spelling and the map key must meet.
+  test "every ref the text prints resolves to its entry in the ref map" do
+    nodes =
+      [%{"nodeId" => "0", "role" => %{"value" => "RootWebArea"}, "childIds" => ~w(1 2)}] ++
+        for {id, role} <- [{1, "link"}, {2, "textbox"}] do
+          %{
+            "nodeId" => "#{id}",
+            "backendDOMNodeId" => id,
+            "role" => %{"value" => role},
+            "name" => %{"value" => "Control #{id}"}
+          }
+        end
+
+    assert {:ok, result} = Snapshot.render(nodes, opts())
+    printed = ~r/@\w+/ |> Regex.scan(result.text) |> List.flatten()
+
+    assert printed == ~w(@link_1 @textbox_1)
+    assert Enum.map(printed, &Snapshot.ref_key/1) == Enum.map(result.refs, & &1.ref)
+    assert Snapshot.ref_key("link_1") == "link_1"
+  end
+
   test "truncates on character boundaries and keeps the closing marker (valid UTF-8)" do
     # A multibyte name longer than the cap forces truncation mid-content.
     long_name = String.duplicate("é", 50)

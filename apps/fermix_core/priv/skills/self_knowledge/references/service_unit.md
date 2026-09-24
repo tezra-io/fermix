@@ -73,6 +73,21 @@ against, drives the engine only through the typed CLI operations below, and
 never writes a unit or calls `systemctl` itself. The engine is complete without
 it — a headless server installs the engine package alone.
 
+**One command installs it.** `curl -fsSL https://fermix.ai/install | sh` picks
+the package for the machine from the latest release, checks its sha256, checks
+its cosign signature against the release tag when a `cosign` is present (on a
+machine that already has the package, the bundled one), and installs it with
+`apt`, `dnf` or `zypper` through `sudo`. It then runs `fermix setup` as the
+invoking account, with the terminal as the wizard's input; under `sudo`, or with
+no terminal, it names `fermix setup` as the next command instead. The packages
+are release assets, not a repository: no `apt` or `dnf` source is configured,
+and installing by hand from the release page (`sudo apt install ./<file>.deb`,
+`sudo dnf install ./<file>.rpm`) is the same result. A Linux host with none of
+the three package managers, macOS, and `--standalone` get the standalone binary
+from the same script. An earlier standalone `fermix` that still comes first on
+`PATH` is named by the installer and no setup is started, because that binary's
+service is the one still running — see the ownership conflict below.
+
 **The package owns the unit.** It installs a systemd *user* unit at
 `/usr/lib/systemd/user/fermix.service` that starts `fermix service run`. Nothing
 in Fermix writes, rewrites or removes it, and it carries no install-time values
@@ -163,6 +178,16 @@ with its own family's line, and the community AUR rebuild is named as
 `fermix-bin` with the operator's own helper rather than a command that would
 not work. After any of them the daemon keeps running the old engine until it is
 restarted.
+
+**Until a repository is published, those lines find nothing.** `apt upgrade`
+and `dnf upgrade` only see packages a configured repository offers, and the
+package was installed from a file. What updates a package install today is the
+installer run again — `curl -fsSL https://fermix.ai/install | sh` installs the
+newer package over the old one, starts no setup, and downloads nothing when the
+latest release is already installed — or the newer file from the release page
+installed by hand. Either way the next step is `fermix restart`, once per
+account that runs a service. Say this when an operator asks how to update a
+packaged Fermix; do not send them to `apt upgrade` alone.
 
 **The package brings its own signature verifier.** `cosign` is installed at
 `/usr/lib/fermix/cosign` and found through the shared `PATH` baseline, which

@@ -38,6 +38,9 @@ defmodule FermixCore.Management.SecretsEnvTest do
     def available?(opts \\ []), do: SecretWriterStub.available?(opts)
 
     @impl true
+    def probe(opts \\ []), do: SecretWriterStub.probe(opts)
+
+    @impl true
     def put(key, value, opts \\ []) do
       send(self(), {:writer, :put, key})
       SecretWriterStub.put(key, value, opts)
@@ -80,6 +83,8 @@ defmodule FermixCore.Management.SecretsEnvTest do
     @impl true
     defdelegate available?(opts \\ []), to: RecordingWriter
     @impl true
+    defdelegate probe(opts \\ []), to: RecordingWriter
+    @impl true
     defdelegate put(key, value, opts \\ []), to: RecordingWriter
     @impl true
     defdelegate delete(key, opts \\ []), to: RecordingWriter
@@ -106,6 +111,8 @@ defmodule FermixCore.Management.SecretsEnvTest do
 
     @impl true
     defdelegate available?(opts \\ []), to: RecordingWriter
+    @impl true
+    defdelegate probe(opts \\ []), to: RecordingWriter
     @impl true
     defdelegate put(key, value, opts \\ []), to: RecordingWriter
     @impl true
@@ -134,6 +141,8 @@ defmodule FermixCore.Management.SecretsEnvTest do
     @impl true
     defdelegate available?(opts \\ []), to: RecordingWriter
     @impl true
+    defdelegate probe(opts \\ []), to: RecordingWriter
+    @impl true
     defdelegate put(key, value, opts \\ []), to: RecordingWriter
     @impl true
     defdelegate get(key, opts \\ []), to: RecordingWriter
@@ -152,6 +161,11 @@ defmodule FermixCore.Management.SecretsEnvTest do
 
     @impl true
     def available?(_opts \\ []), do: true
+
+    # A probe reads nothing; this double stands in for a store that answers.
+    @impl true
+    def probe(opts \\ []),
+      do: %{store: Keyword.get(opts, :store, :keyring), state: :available, sentence: "double"}
 
     @impl true
     def put(key, value, opts \\ []) do
@@ -376,6 +390,38 @@ defmodule FermixCore.Management.SecretsEnvTest do
 
       assert SandboxConfig.current().env.allow == []
       refute File.exists?(Path.join(home, "config.toml"))
+    end
+  end
+
+  describe "a locked keyring (M38 §7.2)" do
+    test "a cancelled unlock prompt answers locked, and nothing was written", %{home: home} do
+      SecretWriterStub.set_verdict(%{
+        store: :keyring,
+        state: :locked,
+        sentence: "the login keyring is locked"
+      })
+
+      on_exit(fn -> SecretWriterStub.clear_verdict(:keyring) end)
+
+      assert {:error, {:secret_store_failed, "env:ALPACA_API_KEY", "locked"}} =
+               Secrets.set("env:ALPACA_API_KEY", @value)
+
+      SecretWriterStub.clear_verdict(:keyring)
+      assert SecretWriterStub.get({:external_env, "ALPACA_API_KEY"}) == {:error, :missing_secret}
+      assert SandboxConfig.current().env.allow == []
+      refute File.exists?(Path.join(home, "config.toml"))
+    end
+
+    test "an answered unlock prompt stores the key, as it always did" do
+      SecretWriterStub.set_verdict(
+        %{store: :keyring, state: :locked, sentence: "the login keyring is locked"},
+        unlock_on_prompt: true
+      )
+
+      on_exit(fn -> SecretWriterStub.clear_verdict(:keyring) end)
+
+      assert {:ok, _view} = Secrets.set("env:ALPACA_API_KEY", @value)
+      assert {:ok, @value} = SecretWriterStub.get({:external_env, "ALPACA_API_KEY"})
     end
   end
 

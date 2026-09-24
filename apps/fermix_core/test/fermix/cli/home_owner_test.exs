@@ -8,7 +8,11 @@ defmodule Fermix.CLI.HomeOwnerTest do
   when none answers, the marker decides.
   """
 
-  use ExUnit.Case, async: true
+  # Synchronous: `capture_io(:stderr, ...)` captures the one global
+  # :standard_error device, so any concurrent async test's writes land in these
+  # captures too, and "a home with no app" asserts an ABSENCE there, of the same
+  # app-managed refusal AppManagedCommandTest prints on purpose.
+  use ExUnit.Case, async: false
 
   alias Fermix.CLI.HomeOwner
   alias Fermix.CLI.ServiceCommand

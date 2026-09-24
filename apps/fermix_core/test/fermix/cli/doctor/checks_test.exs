@@ -997,15 +997,23 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     # The row must not say "set a key": the on-device backend has none, and an
     # operator sent looking for one never finds it.
     test "names the missing sidecar and carries the installer's own fix line" do
-      result = Checks.transcription()
+      result = Checks.transcription(releases: FermixTestSupport.SttPins.for_this_host())
 
       assert result.status == :warn
       assert result.detail =~ "backend local needs its sidecar"
-      # The remedy wording is host-dependent (a pinned target — macos-aarch64 —
-      # names the setup card; an unpinned one names dev_local), and both remedy
-      # sentences are covered host-independently by the doctor/installer seam
-      # tests. Here the row must only carry a fix and never say "set a key".
       refute result.detail =~ "set a key"
+    end
+
+    # Nothing to install fixes a machine with no build, so the row must not send
+    # the operator to an install, and never to the sidecar-author loop.
+    test "a machine with no build says so instead of naming an install" do
+      result = Checks.transcription(releases: %{})
+
+      assert result.status == :warn
+      assert result.detail =~ "isn't available on this machine"
+      assert result.detail =~ "Choose another transcription backend"
+      refute result.detail =~ "needs its sidecar"
+      refute result.detail =~ "dev_local"
     end
 
     test "names the missing model once the sidecar is present", ctx do
@@ -1909,6 +1917,113 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.status == :fail
       assert result.detail =~ "0o600"
       assert result.detail =~ "chmod 600"
+    end
+  end
+
+  describe "secret_store/1" do
+    setup do
+      previous_home = System.get_env("FERMIX_HOME")
+      home = FermixTestSupport.SafeRm.make_tmp_dir!("doctor-secret-store")
+      System.put_env("FERMIX_HOME", home)
+
+      on_exit(fn ->
+        case previous_home do
+          nil -> System.delete_env("FERMIX_HOME")
+          value -> System.put_env("FERMIX_HOME", value)
+        end
+
+        FermixTestSupport.SafeRm.rm_rf!(home)
+      end)
+
+      %{home: home}
+    end
+
+    defp verdict(store, state, sentence), do: %{store: store, state: state, sentence: sentence}
+
+    test "an unlocked keyring passes and says where the secrets are", %{home: home} do
+      File.write!(Path.join(home, "config.toml"), """
+      [fermix_core.providers.openai]
+      api_key = "@keyring"
+      """)
+
+      result =
+        Checks.secret_store(
+          store: :keyring,
+          verdict: verdict(:keyring, :available, "the keyring answers")
+        )
+
+      assert result.name == "secret store"
+      assert result.status == :ok
+      assert result.detail =~ "new secrets go to the OS keyring"
+      assert result.detail =~ "1 in the keyring, 0 in files"
+    end
+
+    test "a locked keyring with secrets waiting in it fails, with the count", %{home: home} do
+      File.write!(Path.join(home, "config.toml"), """
+      [fermix_core.providers.openai]
+      api_key = "@keyring"
+
+      [fermix_channels.telegram]
+      bot_token = "@keyring"
+      """)
+
+      result =
+        Checks.secret_store(
+          store: :keyring,
+          verdict: verdict(:keyring, :locked, "the login keyring is locked")
+        )
+
+      assert result.status == :fail
+      assert result.detail =~ "the login keyring is locked"
+      assert result.detail =~ "2 secret(s) stay unreadable"
+    end
+
+    test "a locked keyring holding nothing only warns", %{home: home} do
+      File.write!(Path.join(home, "config.toml"), "[fermix_core.agent]\nname = \"fermix\"\n")
+
+      result =
+        Checks.secret_store(
+          store: :keyring,
+          verdict: verdict(:keyring, :locked, "the login keyring is locked")
+        )
+
+      assert result.status == :warn
+    end
+
+    test "an unchecked keyring warns and carries the evidence", %{home: home} do
+      File.write!(Path.join(home, "config.toml"), "[fermix_core.agent]\nname = \"fermix\"\n")
+
+      unknown =
+        Map.put(
+          verdict(:keyring, :unknown, "the keyring's state could not be checked (Locked)"),
+          :evidence,
+          "exit 1: boom"
+        )
+
+      result = Checks.secret_store(store: :keyring, verdict: unknown)
+
+      assert result.status == :warn
+      assert result.detail =~ "(exit 1: boom)"
+    end
+
+    test "the file store names its directory and counts what each store holds", %{home: home} do
+      File.write!(Path.join(home, "config.toml"), """
+      [fermix_core]
+      secret_store = "file"
+
+      [fermix_core.providers.openai]
+      api_key = "@keyring"
+
+      [fermix_channels.telegram]
+      bot_token = "@file"
+      """)
+
+      result =
+        Checks.secret_store(store: :file, verdict: verdict(:file, :available, "files answer"))
+
+      assert result.status == :ok
+      assert result.detail =~ "new secrets go to files under #{Path.join(home, "secrets")}"
+      assert result.detail =~ "1 in the keyring, 1 in files"
     end
   end
 
