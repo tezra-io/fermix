@@ -1,0 +1,8 @@
+# TLC output written by bin/check.py (counterexamples, regenerated every run) is
+# never committed. uv runs the scripts from its own cache (no project venv).
+out/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+states/
